@@ -1,0 +1,58 @@
+"""Configuration loading utilities."""
+import json
+from pathlib import Path
+from typing import Any
+
+from shacs_bot.config.schema import Config
+
+
+def get_config_path() -> Path:
+    """Get the default configuration file path."""
+    return Path.home() / ".shacs-bot" / "config.json"
+
+def get_data_dir() -> Path:
+    """Get the shacs-bot data directory."""
+    from shacs_bot.utils.helpers import get_data_path
+    return get_data_path()
+
+def camel_to_snake(string: str) -> str:
+    """Convert camelCase to snake_case"""
+    result = []
+    for i, char in enumerate(string):
+        if char.isupper() and i > 0:
+            result.append("_")
+        result.append(char.lower())
+    return "".join(result)
+
+def convert_keys(data: Any) -> Any:
+    """Convert camelCase keys to snake_case for Pydantic."""
+    if isinstance(data, dict):
+        return {camel_to_snake(k): convert_keys(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [convert_keys(item) for item in data]
+    return data
+
+def load_config(config_path: Path | None) -> Config:
+    """
+    Load configuration from file or create default.
+
+    Args:
+         config_path: Optional path to config file. Uses default if not provided.
+
+    Returns:
+        Loaded configuration object.
+    """
+    config_file: Path = config_path or get_config_path()
+
+    if config_file.exists():
+        try:
+            with open(config_file) as f:
+                data = json.load(f)
+            return Config.model_validate(convert_keys(data))
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"Warning: Failed to load config from {config_file}: {e}")
+            print("Using default configuration.")
+
+    return Config()
+
+
