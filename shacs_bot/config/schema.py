@@ -37,6 +37,7 @@ class ProviderConfig(BaseModel):
     """LLM Provider configuration."""
     api_key: str = "",
     base_url: str | None = None,
+    extra_headers: dict[str, str] | None = None # Custom headers (e.g. APP-Code for AiHubMix)
 
 class ProvidersConfig(BaseModel):
     """Configuration for LLM providers."""
@@ -46,9 +47,11 @@ class ProvidersConfig(BaseModel):
     deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
     groq: ProviderConfig = Field(default_factory=ProviderConfig)
     zhipu: ProviderConfig = Field(default_factory=ProviderConfig)
+    dashscope: ProviderConfig = Field(default_factory=ProviderConfig)  # 阿里云通义千问
     vllm: ProviderConfig = Field(default_factory=ProviderConfig)
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
+    aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
 
 class GatewayConfig(BaseModel):
     """Gateway/server configuration."""
@@ -67,12 +70,12 @@ class WebToolConfig(BaseModel):
 class ExecToolConfig(BaseModel):
     """Exec tool configuration."""
     timeout: int = 60,
-    restrict_to_workspace: bool = False # If true, block commands accessing path outside workspace
 
 class ToolsConfig(BaseModel):
     """Configuration for tools."""
     web: WebToolConfig = Field(default_factory=WebToolConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig),
+    restrict_to_workspace: bool = False # If true, block commands accessing path outside workspace
 
 class Config(BaseSettings):
     """Root configuration for shacs-bot."""
@@ -92,56 +95,42 @@ class Config(BaseSettings):
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
 
-    def _match_provider(self, model: str | None = None) -> ProviderConfig | None:
-        """Match a provider based on model name."""
+    # Default base URLs for API gateways
+    _GATEWAY_DEFAULTS = {"openrouter": "https://openrouter.ai/api/v1", "aihubmix": "https://aihubmix.com/v1"}
+
+    def get_provider(self, model: str | None = None) -> ProviderConfig | None:
+        """Get matched provider config (api_key, base_url, extra_headers). Falls back to first available."""
         model: str = (model or self.agents.defaults.model).lower()
-        # Map of keywords to provider configs
-        providers: dict[str, ProviderConfig] = {
-            "openrouter": self.providers.openrouter,
-            "deepseek": self.providers.deepseek,
-            "anthropic": self.providers.anthropic,
-            "claude": self.providers.anthropic,
-            "openai": self.providers.openai,
-            "gpt": self.providers.openai,
-            "gemini": self.providers.gemini,
-            "zhipu": self.providers.zhipu,
-            "glm": self.providers.zhipu,
-            "zai": self.providers.zhipu,
-            "groq": self.providers.groq,
-            "moonshot": self.providers.moonshot,
-            "kimi": self.providers.moonshot,
-            "vllm": self.providers.vllm,
+        p: ProvidersConfig = self.providers
+        # Keyword -> provider mapping (order matters: gateway first)
+        keyword_map: dict[str, ProviderConfig] = {
+            "aihubmix": p.aihubmix, "openrouter": p.openrouter,
+            "deepseek": p.deepseek, "anthropic": p.anthropic, "claude": p.anthropic,
+            "openai": p.openai, "gpt": p.openai, "gemini": p.gemini,
+            "zhipu": p.zhipu, "glm": p.zhipu, "zai": p.zhipu,
+            "dashscope": p.dashscope, "qwen": p.dashscope,
+            "groq": p.groq, "moonshot": p.moonshot, "kimi": p.moonshot, "vllm": p.vllm,
         }
-        for keyword, provider in providers.items():
+        for keyword, provider in keyword_map.items():
             if keyword in model and provider.api_key:
                 return provider
-        return None
+        # Fallback: gateways first (can serve any model), then specific providers
+        all_providers: list[ProviderConfig] = [p.openrouter, p.aihubmix, p.anthropic, p.openai, p.deepseek,
+                                               p.gemini, p.zhipu, p.dashscope, p.moonshot, p.vllm, p.groq]
+        return next((provider for provider in all_providers if provider.api_key), None)
 
     def get_api_key(self, model: str | None = None) -> str | None:
-        """Get API key for the given model (or default model). Falls back to first available key."""
-        # Try matching by model name first
-        matched: ProviderConfig | None = self._match_provider(model)
-        if matched:
-            return matched.api_key
-        # Fallback: return first available key
-        for provider in [
-            self.providers.openrouter, self.providers.deepseek,
-            self.providers.anthropic, self.providers.openai,
-            self.providers.gemini, self.providers.zhipu,
-            self.providers.moonshot, self.providers.vllm,
-            self.providers.groq,
-        ]:
-            if provider.api_key:
-                return provider.api_key
-        return None
+        """Get API key for the given model Falls back to first available key."""
+        provider: ProviderConfig = self.get_provider(model)
+        return provider.api_key if provider else None
 
     def get_base_url(self, model: str | None = None) -> str | None:
-        """Get API base URL based on model name."""
-        model: str  = (model or self.agents.defaults.model).lower()
-        if "openrouter" in model:
-            return self.providers.openrouter.base_url or "https://openrouter.ai/api/v1"
-        if any(k in model for k in ("zhipu", "glm", "zai")):
-            return self.providers.zhipu.base_url
-        if "vllm" in model:
-            return self.providers.vllm.base_url
+        """Get API base URL for the given model. Applies default URLs for known gateways."""
+        provider: ProviderConfig = self.get_provider(model)
+        if provider and provider.api_key:
+            return provider.base_url
+        # Default URLs for known gateways (openrouter, aihubmix)
+        for name, url in self._GATEWAY_DEFAULTS.items():
+            if provider == getattr(self.providers, name):
+                return url
         return None

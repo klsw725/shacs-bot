@@ -24,12 +24,21 @@ def camel_to_snake(string: str) -> str:
         result.append(char.lower())
     return "".join(result)
 
-def convert_keys(data: Any) -> Any:
+def convert_to_camel(data: Any) -> Any:
     """Convert camelCase keys to snake_case for Pydantic."""
     if isinstance(data, dict):
-        return {camel_to_snake(k): convert_keys(v) for k, v in data.items()}
+        return {camel_to_snake(k): convert_to_camel(v) for k, v in data.items()}
     if isinstance(data, list):
-        return [convert_keys(item) for item in data]
+        return [convert_to_camel(item) for item in data]
+    return data
+
+def _migration_config(data):
+    """Migrate old config formats to current."""
+    # Move tools.exec.restrictToWorkspace -> tools.restrictToWorkspace
+    tools: dict[str, dict] = data.get("tools", {})
+    exec_cfg = tools.get("exec", {})
+    if ("restrictToWorkspace" in exec_cfg) and ("restrictToWorkspace" not in tools):
+        tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
     return data
 
 def load_config(config_path: Path | None) -> Config:
@@ -48,11 +57,28 @@ def load_config(config_path: Path | None) -> Config:
         try:
             with open(config_file) as f:
                 data = json.load(f)
-            return Config.model_validate(convert_keys(data))
+            data = _migration_config(data)
+            return Config.model_validate(convert_to_camel(data))
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {config_file}: {e}")
             print("Using default configuration.")
 
     return Config()
 
+def save_config(config: Config, config_path: Path | None = None) -> None:
+    """
+    Save Configuration to file.
 
+    Args:
+        config: Configuration to save.
+        config_path: Optional path to save to. Uses default if not provided.
+    """
+    path = config_path or get_config_path()
+    path.parent.mkdir(parents=True,  exist_ok=True)
+
+    # Convert to camelCase format
+    data = config.model_dump()
+    data = convert_to_camel(data)
+
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
