@@ -85,39 +85,33 @@ class Config(BaseSettings):
     )
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
-    providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
-    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
-    tools: ToolsConfig = Field(default_factory=ToolsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
 
     @property
     def workspace_path(self) -> Path:
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
 
-    # Default base URLs for API gateways
-    _GATEWAY_DEFAULTS = {"openrouter": "https://openrouter.ai/api/v1", "aihubmix": "https://aihubmix.com/v1"}
-
     def get_provider(self, model: str | None = None) -> ProviderConfig | None:
         """Get matched provider config (api_key, base_url, extra_headers). Falls back to first available."""
+        from shacs_bot.providers.registry import PROVIDERS
         model: str = (model or self.agents.defaults.model).lower()
-        p: ProvidersConfig = self.providers
-        # Keyword -> provider mapping (order matters: gateway first)
-        keyword_map: dict[str, ProviderConfig] = {
-            "aihubmix": p.aihubmix, "openrouter": p.openrouter,
-            "deepseek": p.deepseek, "anthropic": p.anthropic, "claude": p.anthropic,
-            "openai": p.openai, "gpt": p.openai, "gemini": p.gemini,
-            "zhipu": p.zhipu, "glm": p.zhipu, "zai": p.zhipu,
-            "dashscope": p.dashscope, "qwen": p.dashscope,
-            "groq": p.groq, "moonshot": p.moonshot, "kimi": p.moonshot, "vllm": p.vllm,
-        }
-        for keyword, provider in keyword_map.items():
-            if keyword in model and provider.api_key:
+
+        # Match by keyword (order follows PROVIDERS registry)
+        for spec in PROVIDERS:
+            provider = getattr(self.providers, spec.name, None)
+            if provider and (keyword in model for keyword in spec.keywords) and provider.api_key:
                 return provider
-        # Fallback: gateways first (can serve any model), then specific providers
-        all_providers: list[ProviderConfig] = [p.openrouter, p.aihubmix, p.anthropic, p.openai, p.deepseek,
-                                               p.gemini, p.zhipu, p.dashscope, p.moonshot, p.vllm, p.groq]
-        return next((provider for provider in all_providers if provider.api_key), None)
+
+        # Fallback: gateways first, then others (follows registry order)
+        for spec in PROVIDERS:
+            provider = getattr(self.providers, spec.name, None)
+            if provider and provider.api_key:
+                return provider
+        return None
 
     def get_api_key(self, model: str | None = None) -> str | None:
         """Get API key for the given model Falls back to first available key."""
@@ -129,8 +123,11 @@ class Config(BaseSettings):
         provider: ProviderConfig = self.get_provider(model)
         if provider and provider.api_key:
             return provider.base_url
-        # Default URLs for known gateways (openrouter, aihubmix)
-        for name, url in self._GATEWAY_DEFAULTS.items():
-            if provider == getattr(self.providers, name):
-                return url
+        # Only gateways get a default URL here. Standard providers (like Moonshot)
+        # handle their base URL via env vars in _setup_env, NOT via api_base -
+        # otherwise find_gateway() would misdetect them as local/vLLM.
+        from shacs_bot.providers.registry import PROVIDERS
+        for spec in PROVIDERS:
+            if spec.is_gateway and spec.default_base_url and (provider == getattr(self.providers, spec.name, None)):
+                return spec.default_base_url
         return None
