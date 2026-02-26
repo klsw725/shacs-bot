@@ -73,7 +73,7 @@ class LiteLLMProvider(LLMProvider):
         litellm.suppress_debug_info = True
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-                   model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7) -> LLMResponse:
+                   model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7, max_retries: int = 3) -> LLMResponse:
         pass
 
     def get_default_model(self) -> str:

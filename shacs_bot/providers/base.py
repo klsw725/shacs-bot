@@ -37,6 +37,11 @@ class LLMProvider(ABC):
         self.base_url = base_url
 
     @abstractmethod
+    def get_default_model(self) -> str:
+        """Get the default model identifier for this provider."""
+        pass
+
+    @abstractmethod
     async def chat(
             self,
             messages: list[dict[str, Any]],
@@ -44,6 +49,7 @@ class LLMProvider(ABC):
             model: str | None = None,
             max_tokens: int = 4096,
             temperature: float = 0.7,
+            max_retries: int = 3
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -58,9 +64,4 @@ class LLMProvider(ABC):
         Returns:
             LLMResponse with content and/or tool calls.
         """
-        pass
-
-    @abstractmethod
-    def get_default_model(self) -> str:
-        """Get the default model identifier for this provider."""
         pass
