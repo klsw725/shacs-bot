@@ -14,11 +14,12 @@ class InboundMessage:
     timestamp: datetime = field(default_factory=datetime.now)
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    session_key_override: str | None = None # 스레드 범위 세션을 위한 선택적 오버라이드
 
     @property
     def session_key(self) -> str:
         """Unique key for session identification."""
-        return f"{self.channel}:{self.chat_id}"
+        return self.session_key_override or f"{self.channel}:{self.chat_id}"
 
 
 @dataclass
