@@ -55,3 +55,28 @@ def truncate_string(s: str, max_len: int = 100, suffix: str = "...") -> str:
     if len(s) <= max_len:
         return s
     return s[:(max_len - len(suffix))] + suffix
+
+def safe_filename(name: str) -> str:
+    """문자열을 safe filename으로 바꿉니다."""
+    # 대체해야 할 안전하지 않은 문자열
+    unsafe: str = '<>:"/\\|?*'
+    for char in unsafe:
+        name = name.replace(char, "_")
+
+    return name.strip()
+
+def parse_session_key(key: str) -> tuple[str, str]:
+    """
+    세션 키를 channel과 chat_id로 분리합니다.
+
+    Args:
+        key: "channel:chat_id" 형식의 세션 키
+
+    Returns:
+        Tuple of (channel, chat_id)
+    """
+    parts: list[str] = key.split(":", 1)
+    if len(parts) != 2:
+        raise ValueError(f"유효하지 않은 세션 키: {key}")
+
+    return parts[0], parts[1]
