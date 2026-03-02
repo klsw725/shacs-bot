@@ -7,16 +7,15 @@ from pathlib import Path
 from typing import Any
 
 
-# 기본 내장 스킬 디렉터리 (이 파일을 기준으로 한 상대 경로)#
-BUILTIN_SKILLS_DIR: Path = Path(__file__).parent.parent / "skills"
-
-
 class SkillsLoader:
     """
     에이전트 스킬을 로드하는 로더입니다.
 
     스킬은 특정 도구를 사용하는 방법이나 특정 작업을 수행하는 방법을 에이전트에게 가르치는 마크다운 파일(SKILL.md)입니다.
     """
+    # 기본 내장 스킬 디렉터리 (이 파일을 기준으로 한 상대 경로)#
+    BUILTIN_SKILLS_DIR: Path = Path(__file__).parent.parent / "skills"
+
     def __init__(
             self,
             workspace: Path,

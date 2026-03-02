@@ -9,32 +9,33 @@ from shacs_bot.agent.session.manager import Session
 from shacs_bot.providers.base import LLMProvider, LLMResponse
 from shacs_bot.utils import ensure_dir
 
-_SAVE_MEMORY_TOOL = [
-    {
-        "type": "function",
-        "function": {
-            "name": "save_memory",
-            "description": "메모리 통합 결과를 영구 저장소에 저장합니다.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "history_entry": {
-                        "type": "string",
-                        "description": "주요 사건/결정/주제를 요약한 하나의 문단(2~5문장). [YYYY-MM-DD HH:MM] 형식으로 시작하세요. grep 검색에 유용한 세부 정보를 포함하세요."
-                    },
-                    "memory_update": {
-                        "type": "string",
-                        "description": "마크다운 형식의 전체 업데이트된 장기 메모리입니다. 기존의 모든 사실에 새로운 사실을 추가해 포함하세요. 새로 추가할 내용이 없다면 변경 없이 그대로 반환하세요.",
-                    }
-                },
-                "required": ["history_entry", "memory_update"]
-            }
-        }
-    }
-]
 
 class MemoryStore:
     """이중 계층 메모리: MEMORY.md(장기 사실) + HISTORY.md(grep 검색 가능한 로그)."""
+    _SAVE_MEMORY_TOOL = [
+        {
+            "type": "function",
+            "function": {
+                "name": "save_memory",
+                "description": "메모리 통합 결과를 영구 저장소에 저장합니다.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "history_entry": {
+                            "type": "string",
+                            "description": "주요 사건/결정/주제를 요약한 하나의 문단(2~5문장). [YYYY-MM-DD HH:MM] 형식으로 시작하세요. grep 검색에 유용한 세부 정보를 포함하세요."
+                        },
+                        "memory_update": {
+                            "type": "string",
+                            "description": "마크다운 형식의 전체 업데이트된 장기 메모리입니다. 기존의 모든 사실에 새로운 사실을 추가해 포함하세요. 새로 추가할 내용이 없다면 변경 없이 그대로 반환하세요.",
+                        }
+                    },
+                    "required": ["history_entry", "memory_update"]
+                }
+            }
+        }
+    ]
+
     def __init__(self, workspace: Path):
         self._memory_dir: Path = ensure_dir(workspace / "memory")
         self._memory_file: Path = self._memory_dir / "MEMORY.md"
