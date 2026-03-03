@@ -190,8 +190,9 @@ class AgentDefaults(Base):
     provider: str = "auto"  # Provider 이름 (e.g. "anthropic", "openai", "deepseek", "groq", "zhipu", "dashscope", "gemini", "moonshot", "aihubmix") or "auto" for auto-detection
     max_tokens: int = 8192
     temperature: float = 0.1
-    max_tool_iterations: int = 20
+    max_tool_iterations: int = 40
     memory_window: int = 100
+    reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
 
 class AgentsConfig(Base):
     """Agent configuration."""
@@ -241,6 +242,7 @@ class WebSearchConfig(Base):
 
 class WebToolConfig(Base):
     """Web tools configuration."""
+    proxy: str | None = None    # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
     search: WebSearchConfig = Field(default_factory=WebSearchConfig),
 
 class ExecToolConfig(Base):

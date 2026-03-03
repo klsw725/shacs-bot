@@ -1,5 +1,7 @@
 """알림과 작업 스케줄링을 위한 Cron 도구"""
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from shacs_bot.agent.tools.base import Tool
 from shacs_bot.agent.tools.cron.service import CronService
@@ -55,28 +57,60 @@ class CronTool(Tool):
             message: str = "",
             every_seconds: int | None = None,
             cron_expr: str | None = None,
+            tz: str | None = None,
+            at: str | None = None,
             job_id: str | None = None,
             **kwargs: Any
     ) -> str:
         if action == "add":
-            return self._add_job(message, every_seconds, cron_expr)
+            return self._add_job(message=message, every_seconds=every_seconds, cron_expr=cron_expr, tz=tz, at=at)
+
         elif action == "list":
             self._list_jobs()
+
         elif action == "remove":
             return self._remove_job(job_id)
+
         return f"알 수 없는 작업: {action}"
 
-    def _add_job(self, message: str, every_seconds: int | None, cron_expr: str | None) -> str:
+    def _add_job(
+            self,
+            message: str,
+            every_seconds: int | None,
+            cron_expr: str | None,
+            tz: str | None = None,
+            at: str | None = None,
+    ) -> str:
         if not message:
             return "에러: 추가를 위해 메시지가 필요합니다."
+
         if not self._channel or not self._chat_id:
             return "에러: 세션 컨텍스트가 설정되지 않았습니다 (channel/chat_id)."
 
+        if tz and not cron_expr:
+            return "에러: tz는 cron_expr와 함께 사용할 때만 가능합니다."
+
+        if tz:
+            try:
+                ZoneInfo(tz)
+            except (KeyError, Exception):
+                return f"에러: 알 수 없는 시간대 '{tz}'"
+
         # 스케줄 추가
+        delete_after = False
         if every_seconds:
             schedule: CronSchedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
+
         elif cron_expr:
             schedule = CronSchedule(kind="cron", expr=cron_expr)
+
+        elif at:
+            dt: datetime = datetime.fromisoformat(at)
+            at_ms: int = int(dt.timestamp() * 1000)
+            schedule: CronSchedule = CronSchedule(kind="at", at_ms=at_ms)
+
+            delete_after = True
+
         else:
             return "에러: every_seconds 또는 cron_expr 중 하나는 필요합니다."
 
@@ -87,6 +121,7 @@ class CronTool(Tool):
             deliver=True,
             channel=self._channel,
             to=self._chat_id,
+            delete_after_run=delete_after,
         )
 
         return f"작업이 추가되었습니다: '{job.name}' (id: {job.id}"
@@ -105,4 +140,5 @@ class CronTool(Tool):
 
         if self._cron.remove_job(job_id):
             return f"작업이 제거되었습니다: {job_id}"
+
         return f"작업을 찾을 수 없습니다: {job_id}"

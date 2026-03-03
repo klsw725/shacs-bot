@@ -58,6 +58,7 @@ class MCPToolWrapper(Tool):
         for block in result.content:
             if isinstance(block, types.TextContent):
                 parts.append(block.text)
+
             else:
                 parts.append(str(block))
 

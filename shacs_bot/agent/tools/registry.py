@@ -48,15 +48,22 @@ class ToolRegistry:
         Raises:
             KeyError: 도구를 찾을 수 없는 경우입니다.
         """
+        _HINT = "\n\n[Analyze the error above and try a different approach.]"
+
         tool: Tool | None = self.get(name)
         if not tool:
-            return f"에러: 도구 '{name}'을(를) 찾을 수 없습니다."
+            return f"에러: 도구 '{name}'을(를) 찾을 수 없습니다. 가능한 도구: {', '.join(self.tool_names)}"
 
         try:
             errors: list[str] = tool.validate_params(params)
             if errors:
                 return f"에러: 도구 '{name}'의 매개변수가 유효하지 않습니다: " + "; ".join(errors)
-            return await tool.execute(**params)
+
+            result: str = await tool.execute(**params)
+            if isinstance(result, str) and result.startswith("Error"):
+                return result + _HINT
+
+            return result
         except Exception as e:
             return f"{name} 실행 중 에러 발생: {str(e)}"
 

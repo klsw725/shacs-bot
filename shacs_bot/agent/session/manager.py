@@ -71,6 +71,7 @@ class Session:
         self.last_consolidated = 0
         self.updated_at = datetime.now()
 
+
 class SessionManager:
     """
     대화 세션을 관리합니다.
@@ -110,7 +111,55 @@ class SessionManager:
             session = Session(key=key)
 
         self._cache[key] = session
+
         return session
+
+    def _load(self, key: str) -> Session | None:
+        """디스크로 부터 세션을 가져옵니다."""
+        path: Path = self._get_session_path(key)
+        if not path.exists():
+            legacy_path: Path = self._get_legacy_session_path(key)
+            if legacy_path.exists():
+                try:
+                    shutil.move(str(legacy_path), str(path))
+                    logger.info(f"레거시 경로에서 세션 {key}을(를) 마이그레이션했습니다.")
+                except Exception:
+                    logger.exception("세션 마이그레이션 실패 {}", key)
+
+        if not path.exists():
+            return None
+
+        try:
+            messages: list[dict[str, Any]] = []
+            metadata: dict[str, Any] = {}
+            created_at: str | None = None
+            last_consolidated: int = 0
+
+            with open(file=path, encoding="utf-8") as f:
+                for line in f:
+                    line: str = line.strip()
+                    if not line:
+                        continue
+
+                    data: dict[str, Any] = json.loads(line)
+                    if data.get("_type") == "metadata":
+                        metadata = data.get("metadata", {})
+                        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
+                        last_consolidated = data.get("last_consolidated", 0)
+
+                    else:
+                        messages.append(data)
+
+            return Session(
+                key=key,
+                messages=messages,
+                created_at=created_at or datetime.now(),
+                metadata=metadata,
+                last_consolidated=last_consolidated,
+            )
+        except Exception as e:
+            logger.warning("세션 읽어오기 실패 {}: {}", key, e)
+            return None
 
     def save(self, session: Session) -> None:
         """디스크에 세션 저장"""
@@ -130,52 +179,6 @@ class SessionManager:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
         self._cache[session.key] = session
-
-    def _load(self, key: str) -> Session | None:
-        """디스크로 부터 세션을 가져옵니다."""
-        path: Path = self._get_session_path(key)
-        if not path.exists():
-            legacy_path: Path = self._get_legacy_session_path(key)
-            if legacy_path.exists():
-                try:
-                    shutil.move(str(legacy_path), str(path))
-                except Exception:
-                    logger.exception("세션 마이그레이션 실패 {}", key)
-
-        if not path.exists():
-            return None
-
-        try:
-            messages: list[dict[str, Any]] = []
-            metadata: dict[str, Any] = {}
-            created_at: str | None = None
-            last_consolidated: int = 0
-
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line: str = line.strip()
-                    if not line:
-                        continue
-
-                    data: dict[str, Any] = json.loads(line)
-                    if data.get("_type") == "metadata":
-                        metadata = data.get("metadata", {})
-                        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
-                        last_consolidated = data.get("last_consolidated", 0)
-                    else:
-                        messages.append(data)
-
-            return Session(
-                key=key,
-                messages=messages,
-                created_at=created_at or datetime.now(),
-                metadata=metadata,
-                last_consolidated=last_consolidated,
-            )
-
-        except Exception as e:
-            logger.warning("세션 읽어오기 실패 {}: {}", key, e)
-            return None
 
     def invalidate(self, key: str) -> None:
         """인-메모레 캐시에서 세션 삭제"""
@@ -205,7 +208,6 @@ class SessionManager:
                                 "updated_at": data.get("updated_at"),
                                 "path": str(path),
                             })
-
             except Exception:
                 continue
 

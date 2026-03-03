@@ -100,13 +100,16 @@ class MemoryStore:
             lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}")
 
         current_memory: str = self.read_long_term()
-        prompt: str = f"""이 대화를 처리하고, 통합 결과를 담아 save_memory 도구를 호출하세요.
-
+        prompt: str = f"""
+            이 대화를 처리하고, 통합 결과를 담아 save_memory 도구를 호출하세요.
+    
             ## 현재 장기 기억(Long-term Memory)
             {current_memory or "(비어 있음)"}
             
             ## 처리할 대화
-            {chr(10).join(lines)}"""
+            {chr(10).join(lines)}
+        """
+
         try:
             response: LLMResponse = await provider.chat(
                 messages=[
@@ -119,7 +122,7 @@ class MemoryStore:
                         "content": prompt
                     }
                 ],
-                tools=_SAVE_MEMORY_TOOL,
+                tools=self._SAVE_MEMORY_TOOL,
                 model=model,
             )
             if not response.has_tool_calls:
@@ -155,27 +158,3 @@ class MemoryStore:
         except Exception:
             logger.exception("메모리 통합 실패")
             return False
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

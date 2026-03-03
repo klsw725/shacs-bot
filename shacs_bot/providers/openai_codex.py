@@ -15,8 +15,7 @@ from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
-DEFAULT_ORIGINATOR = "nanobot"
-
+DEFAULT_ORIGINATOR = "shacs-bot"
 
 class OpenAICodexProvider(LLMProvider):
     """Responses API 사용을 위해 Codex OAuth를 사용합니다."""
@@ -335,13 +334,10 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
 
     return content, tool_calls, finish_reason
 
-
 _FINISH_REASON_MAP = {"completed": "stop", "incomplete": "length", "failed": "error", "cancelled": "error"}
-
 
 def _map_finish_reason(status: str | None) -> str:
     return _FINISH_REASON_MAP.get(status or "completed", "stop")
-
 
 def _friendly_error(status_code: int, raw: str) -> str:
     if status_code == 429:

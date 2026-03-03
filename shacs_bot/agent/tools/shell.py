@@ -1,10 +1,9 @@
 """쉘 실행 도구"""
 import asyncio
 import os
+import re
 from pathlib import Path
 from typing import Any
-
-from litellm.llms.huggingface.common_utils import output_parser
 
 from shacs_bot.agent.tools.base import Tool
 
@@ -19,21 +18,24 @@ class ExecTool(Tool):
             deny_patterns: list[str] | None = None,
             allow_patterns: list[str] | None = None,
             restrict_to_workspace: bool = False,
+            path_append: str = "",
     ):
-        self.timeout = timeout
-        self.working_dir = working_dir
-        self.deny_patterns = deny_patterns or [
+        self._timeout: int = timeout
+        self._working_dir: str | None = working_dir
+        self._deny_patterns: list[str] = deny_patterns or [
             r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
             r"\bdel\s+/[fq]\b",              # del /f, del /q
             r"\brmdir\s+/s\b",               # rmdir /s
-            r"\b(format|mkfs|diskpart)\b",   # disk operations
+            r"(?:^|[;&|]\s*)format\b",       # format (as standalone command only)
+            r"\b(mkfs|diskpart)\b",          # disk operations
             r"\bdd\s+if=",                   # dd
             r">\s*/dev/sd",                  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
             r":\(\)\s*\{.*\};\s*:",          # fork bomb
         ]
-        self.allow_patterns = allow_patterns or []
-        self.restrict_to_workspace = restrict_to_workspace
+        self._allow_patterns: list[str] = allow_patterns or []
+        self._restrict_to_workspace: bool = restrict_to_workspace
+        self._path_append: str = path_append
 
     @property
     def name(self) -> str:
@@ -52,7 +54,7 @@ class ExecTool(Tool):
                     "type": "string",
                     "description": "실행할 쉘 명령어"
                 },
-                "working_dir": {
+                "_working_dir": {
                     "type": "string",
                     "description": "명령어 실행을 위한 선택적 작업 디렉토리"
                 }
@@ -61,27 +63,39 @@ class ExecTool(Tool):
         }
 
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
-        cwd = working_dir or self.working_dir or os.getcwd()
+        cwd = working_dir or self._working_dir or os.getcwd()
         guard_error = self._guard_command(command,cwd)
         if guard_error:
             return guard_error
+
+        env: dict = os.environ.copy()
+        if self._path_append:
+            env["PATH"] = env.get("PATH", "") + os.pathsep + self._path_append
 
         try:
             process = await asyncio.create_subprocess_shell(
                 cmd=command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
+                cwd=cwd,
+                env=env,
             )
 
             try:
                 stdout, stderr = await asyncio.wait_for(
                     fut=process.communicate(),
-                    timeout=self.timeout
+                    timeout=self._timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()
-                return f"에러: 명령이 {self.timeout}초 내에 완료되지 않았습니다."
+                # 프로세스가 완전히 종료될 때까지 대기하여
+                # 파이프가 비워지고 파일 디스크립터가 해제되도록 합니다.
+                try:
+                    await asyncio.wait_for(fut=process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+
+                return f"에러: 명령이 {self._timeout}초 내에 완료되지 않았습니다."
 
             output_parts = []
 
@@ -110,34 +124,38 @@ class ExecTool(Tool):
 
     def _guard_command(self, command: str, working_dir: str) -> str | None:
         """명령어를 검사하여 허용되지 않는 패턴이 있는지 확인합니다."""
-        cmd = command.strip()
-        cmd_lower = cmd.lower()
+        cmd: str = command.strip()
+        cmd_lower: str = cmd.lower()
 
-        import re
-        for pattern in self.deny_patterns:
+        for pattern in self._deny_patterns:
             if re.search(pattern, cmd_lower):
                 return "에러: 명령어가 safety guard에 의해 차단되었습니다 (안전하지 않은 패턴 감지됨)"
 
-        if self.allow_patterns:
-            if not any(re.search(p, cmd_lower) for p in self.allow_patterns):
+        if self._allow_patterns:
+            if not any(re.search(pattern, cmd_lower) for pattern in self._allow_patterns):
                 return "에러: 명령어가 safety guard에 의해 차단되었습니다 (허용 목록에 없음)"
 
-        if self.restrict_to_workspace:
+        if self._restrict_to_workspace:
             if "..\\" in cmd or "../" in cmd:
                 return "에러: 명령어가 safety guard에 의해 차단되었습니다 (디렉토리 탐색 감지됨)"
 
             cwd_path = Path(working_dir).resolve()
 
-            win_paths: list[Any] = re.findall(r"[A-Za-z]:\\[^\\\"']+", cmd)
-            posix_paths: list[Any] = re.findall(r"/[^\s\"']+", cmd)
-
-            for raw in win_paths + posix_paths:
+            for raw in self._extract_absolute_paths(cmd):
                 try:
-                    p: Path = Path(raw).resolve()
+                    p: Path = Path(raw.strip()).resolve()
                 except Exception:
                     continue
-                if cwd_path not in p.parent and p != cwd_path:
+
+                if p.is_absolute() and (cwd_path not in p.parent) and (p != cwd_path):
                     return "에러: 명령어가 safety guard에 의해 차단되었습니다 (작업 디렉토리 외부 경로 감지됨)"
 
         return None
 
+    def _extract_absolute_paths(self, command: str) -> list[str]:
+        win_paths: list[Any] = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)
+        # 절대 경로만 매칭합니다 — ".venv/bin/python"과 같은 상대 경로에서
+        # 기존 패턴이 "/bin/python"을 잘못 추출하던
+        # 오탐(false positive)을 방지하기 위함입니다.
+        posix_paths: list[Any] = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", command)
+        return win_paths + posix_paths

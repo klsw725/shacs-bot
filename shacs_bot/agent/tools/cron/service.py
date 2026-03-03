@@ -3,9 +3,10 @@ import asyncio
 import json
 import time
 import uuid
-from os import remove
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Coroutine, Any
+from zoneinfo import ZoneInfo
 
 from croniter import croniter
 from loguru import logger
@@ -29,13 +30,28 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
 
     elif schedule.kind == "cron" and schedule.expr:
         try:
-            cron: croniter = croniter(schedule.expr, time.time())
-            next_time = cron.get_next()
-            return int(next_time * 1000)
+            base_time: float = now_ms / 1000
+            tz: ZoneInfo = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
+            base_dt: datetime = datetime.fromtimestamp(timestamp=base_time, tz=tz)
+            cron: croniter = croniter(schedule.expr, base_dt)
+            next_dt: datetime = cron.get_next(datetime)
+            return int(next_dt.timestamp() * 1000)
         except Exception:
             return None
 
     return None
+
+def _validate_schedule_for_add(schedule: CronSchedule) -> None:
+    """실행 불가능한 작업이 생성되는 것을 방지하기 위해 스케줄 필드를 검증합니다."""
+    if schedule.tz and schedule.kind != "cron":
+        raise ValueError("tz는 cron 스케줄에서만 사용할 수 있습니다.")
+
+    if schedule.kind == "cron" and schedule.tz:
+        try:
+            ZoneInfo(schedule.tz)
+        except Exception:
+            raise ValueError(f"알 수 없는 타임존 '{schedule.tz}'") from None
+
 
 class CronService:
     """스케줄링 된 작업의 실행과 관리를 위한 서비스입니다."""
@@ -44,21 +60,39 @@ class CronService:
             self,
             store_path: Path,
             on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None
-    ) -> None:
-        self.store_path: Path = store_path
-        self.on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = on_job
+    ):
+        self._store_path: Path = store_path
+        self._on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = on_job
         self._store: CronStore | None = None
+        self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
         self._running: bool = False
 
+    async def start(self) -> None:
+        """cron 서비스를 시작합니다."""
+        self._running: bool = True
+
+        self._load_store()
+        self._recompute_next_runs()
+        self._save_store()
+        self._arm_timer()
+
+        logger.info(f"Cron 서비스가 시작되었습니다. {len(self._store.jobs if self._store else [])}개의 작업이 로드되었습니다.")
+
     def _load_store(self) -> CronStore:
-        """저장소에서 작업을 로드합니다."""
+        """디스크에서 작업을 로드합니다. 파일이 외부에서 수정된 경우 자동으로 다시 불러옵니다."""
+        if self._store and self._store_path.exists():
+            mtime: float = self._store_path.stat().st_mtime
+            if mtime != self._last_mtime:
+                logger.info("Cron: jobs.json 파일이 외부에서 수정되어 다시 불러옵니다.")
+                self._store = None
+
         if self._store:
             return self._store
 
-        if self.store_path.exists():
+        if self._store_path.exists():
             try:
-                data: dict[str, list[dict[str, Any]]] = json.loads(self.store_path.read_text())
+                data: dict[str, list[dict[str, Any]]] = json.loads(self._store_path.read_text(encoding="utf-8"))
                 jobs: list[CronJob] = []
 
                 for job in data.get("jobs", []):
@@ -95,17 +129,28 @@ class CronService:
             except Exception as e:
                 logger.warning(f"cron store를 로드하는 중 오류가 발생했습니다: {e}")
                 self._store = CronStore()
+
         else:
             self._store = CronStore()
 
         return self._store
+
+    def _recompute_next_runs(self) -> None:
+        """모든 작업에 대해 다음 실행 시간을 재계산합니다."""
+        if not self._store:
+            return
+
+        now: int = _now_ms()
+        for job in self._store.jobs:
+            if job.enabled:
+                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
 
     def _save_store(self) -> None:
         """현재 작업을 저장소에 저장합니다."""
         if not self._store:
             return
 
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
+        self._store_path.parent.mkdir(parents=True, exist_ok=True)
 
         data = {
             "version": self._store.version,
@@ -142,76 +187,8 @@ class CronService:
             ]
         }
 
-        self.store_path.write_text(json.dumps(data, indent=2))
-
-    def _recompute_next_runs(self) -> None:
-        """모든 작업에 대해 다음 실행 시간을 재계산합니다."""
-        if not self._store:
-            return
-
-        now: int = _now_ms()
-        for job in self._store.jobs:
-            if job.enabled:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
-
-    def _get_next_wake_ms(self) -> int | None:
-        """전체 작업 중 가장 빠른 다음 실행 시간을 조회합니다."""
-        if not self._store:
-            return None
-
-        times: list[int] = [job.state.next_run_at_ms for job in self._store.jobs
-                            if job.enabled and job.state.next_run_at_ms]
-        return min(times) if times else None
-
-    async def _execute_job(self, job: CronJob) -> None:
-        """하나의 작업을 실행합니다."""
-        start_ms: int = _now_ms()
-        logger.info(f"Cron: 작업 실행 시작 '{job.name}' ({job.id})")
-
-        try:
-            response: Coroutine[Any, Any, str | None] | None \
-                = await self.on_job(job) if self.on_job else None
-
-            job.state.last_status = "ok"
-            job.state.last_error = None
-            logger.info(f"Cron: 작업 '{job.name}' 성공")
-
-        except Exception as e:
-            job.state.last_status = "error"
-            job.state.last_error = str(e)
-            logger.error(f"Cron: 작업 '{job.name}' 실패: {e}")
-
-        job.state.last_run_at_ms = start_ms
-        job.updated_at_ms = _now_ms()
-
-        # 일회성 작업을 처리합니다.
-        if job.schedule.kind == "at":
-            if job.delete_after_run:
-                self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
-            else:
-                job.enabled = False
-                job.state.next_run_at_ms = None
-        else:
-            # 다음 작업을 계산합니다
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
-
-
-    async def _on_timer(self) -> None:
-        """타이머 틱을 처리합니다. - 실행 시간이 된 작업을 실행합니다."""
-        if not self._store:
-            return
-
-        now: int = _now_ms()
-        due_jobs: list[CronJob] = [
-            job for job in self._store.jobs
-            if job.enabled and job.state.next_run_at_ms and (now >= job.state.next_run_at_ms)
-        ]
-
-        for job in due_jobs:
-            await self._execute_job(job)
-
-        self._save_store()
-        self._arm_timer()
+        self._store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._last_mtime = self._store_path.stat().st_mtime
 
     def _arm_timer(self) -> None:
         """다음 타이머 실행을 예약합니다."""
@@ -229,18 +206,17 @@ class CronService:
             await asyncio.sleep(delay_s)
             if self._running:
                 await self._on_timer()
+
         self._timer_task = asyncio.create_task(tick())
 
-    async def start(self) -> None:
-        """cron 서비스를 시작합니다."""
-        self._running: bool = True
+    def _get_next_wake_ms(self) -> int | None:
+        """전체 작업 중 가장 빠른 다음 실행 시간을 조회합니다."""
+        if not self._store:
+            return None
 
-        self._load_store()
-        self._recompute_next_runs()
-        self._save_store()
-        self._arm_timer()
-
-        logger.info(f"Cron 서비스가 시작되었습니다. {len(self._store.jobs if self._store else [])}개의 작업이 로드되었습니다.")
+        times: list[int] = [job.state.next_run_at_ms for job in self._store.jobs
+                            if job.enabled and job.state.next_run_at_ms]
+        return min(times) if times else None
 
     def stop(self) -> None:
         """Cron 서비스를 중지합니다."""
@@ -248,6 +224,59 @@ class CronService:
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+
+    async def _execute_job(self, job: CronJob) -> None:
+        """하나의 작업을 실행합니다."""
+        start_ms: int = _now_ms()
+        logger.info(f"Cron: 작업 실행 시작 '{job.name}' ({job.id})")
+
+        try:
+            response: Coroutine[Any, Any, str | None] | None = None
+            if self._on_job:
+                response = await self._on_job(job)
+
+            job.state.last_status = "ok"
+            job.state.last_error = None
+            logger.info(f"Cron: 작업 '{job.name}' 성공")
+
+        except Exception as e:
+            job.state.last_status = "error"
+            job.state.last_error = str(e)
+            logger.error(f"Cron: 작업 '{job.name}' 실패: {e}")
+
+        job.state.last_run_at_ms = start_ms
+        job.updated_at_ms = _now_ms()
+
+        # 일회성 작업을 처리합니다.
+        if job.schedule.kind == "at":
+            if job.delete_after_run:
+                self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
+
+            else:
+                job.enabled = False
+                job.state.next_run_at_ms = None
+
+        else:
+            # 다음 작업을 계산합니다
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+
+    async def _on_timer(self) -> None:
+        """타이머 틱을 처리합니다. - 실행 시간이 된 작업을 실행합니다."""
+        self._load_store()
+        if not self._store:
+            return
+
+        now: int = _now_ms()
+        due_jobs: list[CronJob] = [
+            job for job in self._store.jobs
+            if job.enabled and job.state.next_run_at_ms and (now >= job.state.next_run_at_ms)
+        ]
+
+        for job in due_jobs:
+            await self._execute_job(job)
+
+        self._save_store()
+        self._arm_timer()
 
     # Cron 작업 관리 메서드 (추가, 제거, 조회 등)을 여기에 추가할 수 있습니다.
 
@@ -269,9 +298,10 @@ class CronService:
     ) -> CronJob:
         """새로운 작업을 추가합니다."""
         store: CronStore = self._load_store()
+        _validate_schedule_for_add(schedule=schedule)
         now: int = _now_ms()
 
-        job: CronJob = CronJob(
+        job: CronJob= CronJob(
             id=str(uuid.uuid4())[:8],
             name=name,
             enabled=True,
@@ -281,16 +311,15 @@ class CronService:
                 message=message,
                 deliver=deliver,
                 channel=channel,
-                to=to
+                to=to,
             ),
-            state=CronJobState(
-                next_run_at_ms=_compute_next_run(schedule=schedule, now_ms=now),
-            ),
+            state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
             created_at_ms=now,
             updated_at_ms=now,
-            delete_after_run=delete_after_run
+            delete_after_run=delete_after_run,
         )
         store.jobs.append(job)
+
         self._save_store()
         self._arm_timer()
 
@@ -323,11 +352,13 @@ class CronService:
 
                 if enabled:
                     job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+
                 else:
                     job.state.next_run_at_ms = None
 
                 self._save_store()
                 self._arm_timer()
+
                 return job
 
         return None
@@ -341,8 +372,10 @@ class CronService:
                     return False
 
                 await self._execute_job(job)
+
                 self._save_store()
                 self._arm_timer()
+
                 return True
 
         return False

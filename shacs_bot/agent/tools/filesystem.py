@@ -62,9 +62,10 @@ class ReadFileTool(Tool):
 
     async def execute(self, path: str, hashlines: bool = False, hash_len: int = 8, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._allowed_dir)
+            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if not file_path.exists():
                 return f"오류: 파일을 찾을 수 없습니다: {path}"
+
             if not file_path.is_file():
                 return f"오류: 파일이 아닙니다: {path}"
 
@@ -110,7 +111,7 @@ class WriteFileTool(Tool):
 
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._allowed_dir)
+            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"{len(content)} bytes를 {path}에 성공적으로 썼습니다"
@@ -250,9 +251,10 @@ class EditFileTool(Tool):
             **kwargs: Any
     ) -> str:
         try:
-            file_path = _resolve_path(path, self._allowed_dir)
+            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if not file_path.exists():
                 return f"오류: 파일을 찾을 수 없습니다: {path}"
+
             if not file_path.is_file():
                 return f"오류: 파일이 아닙니다: {path}"
 
@@ -391,9 +393,10 @@ class ListDirTool(Tool):
 
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
-            dir_path = _resolve_path(path, self._allowed_dir)
+            dir_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if not dir_path.exists():
                 return f"오류: 디렉터리를 찾을 수 없습니다: {path}"
+
             if not dir_path.is_dir():
                 return f"오류: 디렉터리가 아닙니다: {path}"
 

@@ -1,6 +1,11 @@
 """Utility functions for shacs-bot."""
+import re
 from datetime import datetime
+from importlib.resources import files as pkg_files
+from importlib.resources.abc import Traversable
 from pathlib import Path
+
+from rich import Console
 
 
 def ensure_dir(path: Path) -> Path:
@@ -28,55 +33,47 @@ def get_workspace_path(workspace: str | None = None) -> Path:
         path: Path = Path.home() / ".shacs-bot" / "workspace"
     return ensure_dir(path)
 
-def get_sessions_path() -> Path:
-    """Get the sessions storage directory."""
-    return ensure_dir(get_data_path() / "sessions")
-
-def get_memory_path(workspace: Path | None = None) -> Path:
-    """Get the memory directory within the workspace."""
-    ws: Path = workspace or get_workspace_path()
-    return ensure_dir(ws / "memory")
-
-def get_skills_path(workspace: Path | None = None) -> Path:
-    """Get the skills directory within the workspace."""
-    ws: Path = workspace or get_workspace_path()
-    return ensure_dir(ws / "skills")
-
-def today_date() -> str:
-    """get today's date in YYYY-MM-DD format."""
-    return datetime.now().strftime("%Y-%m-%d")
-
 def timestamp() -> str:
     """Get current timestamp in ISO format."""
     return datetime.now().isoformat()
 
-def truncate_string(s: str, max_len: int = 100, suffix: str = "...") -> str:
-    """Truncate a string to max length, adding suffix if truncated."""
-    if len(s) <= max_len:
-        return s
-    return s[:(max_len - len(suffix))] + suffix
+_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 
 def safe_filename(name: str) -> str:
-    """문자열을 safe filename으로 바꿉니다."""
-    # 대체해야 할 안전하지 않은 문자열
-    unsafe: str = '<>:"/\\|?*'
-    for char in unsafe:
-        name = name.replace(char, "_")
+    """안전하지 않은 경로 문자를 밑줄(_)로 대체합니다."""
+    return _UNSAFE_CHARS.sub("_", name).strip()
 
-    return name.strip()
+def sync_workspace_template(workspace: Path, silent: bool = False) -> list[str]:
+    """번들된 템플릿을 워크스페이스에 동기화합니다. 존재하지 않는 파일만 생성합니다."""
+    try:
+        tpl: Traversable = pkg_files("shacs-bot") / "templates"
+    except Exception:
+        return []
 
-def parse_session_key(key: str) -> tuple[str, str]:
-    """
-    세션 키를 channel과 chat_id로 분리합니다.
+    if not tpl.is_dir():
+        return []
 
-    Args:
-        key: "channel:chat_id" 형식의 세션 키
+    added: list[str] = []
 
-    Returns:
-        Tuple of (channel, chat_id)
-    """
-    parts: list[str] = key.split(":", 1)
-    if len(parts) != 2:
-        raise ValueError(f"유효하지 않은 세션 키: {key}")
+    def _write(src: Traversable | None, dst: Path) -> None:
+        if dst.exists():
+            return
 
-    return parts[0], parts[1]
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(src.read_text(encoding="utf-8") if src else "", encoding="utf-8")
+        added.append(str(dst.relative_to(workspace)))
+
+    for item in tpl.iterdir():
+        if item.name.endswith(".md"):
+            _write(item, workspace / item.name)
+
+    _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
+    _write(None, workspace / "memory" / "HISTORY.md")
+
+    (workspace / "skills").mkdir(exist_ok=True)
+
+    if added and not silent:
+        for name in added:
+            Console().print(f"  [dim]Created {name}[/dim]")
+
+    return added

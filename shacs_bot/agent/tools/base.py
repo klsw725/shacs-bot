@@ -56,6 +56,7 @@ class Tool(ABC):
         schema: dict[str, Any] = self.parameters or {}
         if schema.get("type", "object") != "object":
             raise ValueError(f"스키마는 객체 유형이어야 합니다. {schema.get('type')!r}이(가) 제공되었습니다.")
+
         return self._validate(param, {**schema, "type": "object"}, "")
 
     def _validate(self, val: Any, schema: dict[str, Any], path: str) -> list[str]:
@@ -66,29 +67,37 @@ class Tool(ABC):
         errors = []
         if "enum" in schema and val not in schema["enum"]:
             errors.append(f"{label}은 {t} 중 하나여야 합니다.")
+
         if t in ("integer", "number"):
             if "minimum" in schema and val < schema["minimum"]:
                 errors.append(f"{label}은(는) {schema['minimum']} 이상이어야 합니다.")
+
             if "maximum" in schema and val > schema["maximum"]:
                 errors.append(f"{label}은(는) {schema['maximum']} 이하이어야 합니다.")
+
         elif t == "string":
             if "minLength" in schema and len(val) < schema["minLength"]:
                 errors.append(f"{label}의 길이는 최소 {schema['minLength']}이어야 합니다.")
+
             if "maxLength" in schema and len(val) > schema["maxLength"]:
                 errors.append(f"{label}의 길이는 최대 {schema['maxLength']}이어야 합니다.")
+
         elif t == "object":
             for key in schema.get("required", []):
                 if key not in val:
                     errors.append(f"{path + '.' + key if path else key}가 없습니다.")
+
             props: Any | dict = schema.get("properties", {})
             for key, value in val.items():
                 if key in props:
                     errors.extend(self._validate(value, props[key], path + "." + key if path else key))
+
         elif t == "array" and "items" in schema:
             for i, item in enumerate(val):
                 errors.extend(
                     self._validate(item, schema["items"], f"{path}[{i}]" if path else f"[{i}]")
                 )
+
         return errors
 
     def to_schema(self) -> dict[str, Any]:

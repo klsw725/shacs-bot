@@ -1,13 +1,13 @@
 """
-Provider Registry - single source of truth for LLM provider metadata.
+Provider Registry — LLM 제공자 메타데이터의 단일 진실 소스(single source of truth)입니다.
 
-Adding a new provider:
-    1. Add a ProviderSpec to PROVIDERS below.
-    2. Add a field to ProvidersConfig in config/schema.py.
-    Done. Env vars, prefixing, config matching, status display all derive from here.
+새로운 제공자를 추가하려면:
+	1.	아래 PROVIDERS에 ProviderSpec을 추가합니다.
+	2.	config/schema.py의 ProvidersConfig에 필드를 추가합니다.
+완료. 환경 변수, prefix 처리, 설정 매칭, 상태 표시 등은 모두 여기에서 파생됩니다.
 
-Order matters - it controls match priority and fallback. Gateways first.
-Every entry writes out all fields so you can copy-paste as a template.
+순서는 중요합니다 — 매칭 우선순위와 fallback에 영향을 줍니다. 게이트웨이를 먼저 배치하세요.
+각 항목은 모든 필드를 명시적으로 작성하므로 템플릿으로 복사해 사용할 수 있습니다.
 """
 from dataclasses import dataclass
 from typing import Any
@@ -15,11 +15,12 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ProviderSpec:
-    """One LLM provider's metadata. See PROVIDERS below for real examples.
+    """
+    하나의 LLM 제공자에 대한 메타데이터입니다. 실제 예시는 아래 PROVIDERS를 참고하세요.
 
-    Placeholders in env_extras values:
-        {api_key} - the user's API key
-        {base_url} - base_url from config, or this spec's default_base_url
+    env_extras 값에서 사용할 수 있는 플레이스홀더:
+        {api_key} - 사용자의 API 키
+        {base_url} - 설정(config)에 지정된 base_url 또는 이 스펙의 default_base_url
     """
 
     # identity
@@ -397,8 +398,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 # ---------------------------------------------------------------------------
 
 def find_by_model(model: str) -> ProviderSpec | None:
-    """Match a standard provider by model-name keyword (case-insensitive).
-    Skips gateway/local - those are matched by api_key/base_url instead."""
+    """모델 이름의 키워드(대소문자 구분 없음)를 기준으로 표준 프로바이더를 매칭합니다.
+    게이트웨이/로컬 프로바이더는 제외합니다 — 이들은 api_key/base_url을 통해 별도로 매칭됩니다."""
     model_lower: str = model.lower()
 
     model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""

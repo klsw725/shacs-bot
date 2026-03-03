@@ -37,6 +37,12 @@ class SpawnTool(Tool):
         self._original_chat_id = "direct"
         self._session_key = "cli:direct"
 
+    def set_context(self, channel: str, chat_id: str) -> None:
+        """서브에이전트 알림을 위한 원본 컨텍스트를 설정합니다."""
+        self._original_channel = channel
+        self._original_chat_id = chat_id
+        self._session_key = f"{channel}:{chat_id}"
+
     async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
         """주어진 작업을 실행하기 위해 서브에이전트를 생성합니다."""
         return await self._manager.spawn(

@@ -47,6 +47,20 @@ class MessageTool(Tool):
         self._default_message_id = default_message_id
         self._sent_in_turn: bool = False
 
+    def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+        """현재 메시지 컨텍스트 설정"""
+        self._default_channel = channel
+        self._default_chat_id = chat_id
+        self._default_message_id = message_id
+
+    def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
+        """보내는 메시지에 callback 설정"""
+        self._send_callback = callback
+
+    def start_turn(self) -> None:
+        """턴마다 메시지 전송 추적 상태를 초기화합니다."""
+        self._sent_in_turn = True
+
     async def execute(
             self,
             content: str,
@@ -79,7 +93,9 @@ class MessageTool(Tool):
         try:
             await self._send_callback(msg)
 
-            self._sent_in_turn = True
+            if channel == self._default_channel and chat_id == self._default_chat_id:
+                self._sent_in_turn = True
+
             media_info: str = f" with {len(media)} attachments" if media else ""
             return f"{channel} 메시지 전송: {chat_id}{media_info}"
         except Exception as e:

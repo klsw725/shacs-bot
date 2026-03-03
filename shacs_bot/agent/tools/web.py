@@ -8,9 +8,11 @@ from urllib.parse import urlparse
 
 import httpx
 from httpx import Response
+from loguru import logger
 from readability import Document
 
 from shacs_bot.agent.tools.base import Tool
+
 
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
@@ -65,6 +67,7 @@ def _to_markdown(html: str) -> str:
                   flags=re.I)
     return _normalize(_strip_tags(text))
 
+
 class WebSearchTool(Tool):
     """웹 검색 도구. Brave Search API를 사용하여 웹을 검색합니다."""
 
@@ -79,17 +82,28 @@ class WebSearchTool(Tool):
         "required": ["query"]
     }
 
-    def __init__(self, api_key: str | None = None, max_results: int = 5):
-        self.api_key: str = api_key or os.environ.get("BRAVE_API_KEY", "")
-        self.max_results: int = max_results
+    def __init__(self, api_key: str | None = None, max_results: int = 5, proxy: str | None = None):
+        self._init_api_key: str = api_key
+        self._max_results: int = max_results
+        self._proxy = proxy
+
+    @property
+    def api_key(self) -> str:
+        """환경 변수나 설정 변경 사항이 반영되도록, 호출 시점에 API 키를 결정(조회)한다."""
+        return self._init_api_key or os.environ.get("BRAVE_API_KEY", "")
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         if not self.api_key:
-            return "에러: BRAVE_API_KEY가 설정되어 있지 않습니다."
+            return """ 
+                에러: BRAVE_API_KEY가 설정되어 있지 않습니다.,
+                ~/.shacs-bot/config.json 파일의 tools.web.search.apiKey에 설정하거나
+                (또는 BRAVE_API_KEY 환경 변수를 export한 후) 게이트웨이를 다시 시작하세요.
+            """
 
         try:
-            n: int = min(max(count or self.max_results, 1), 10)
-            async with httpx.AsyncClient() as client:
+            n: int = min(max(count or self._max_results, 1), 10)
+            logger.debug("WebSearch: {}", "proxy enabled" if self._proxy else "direct connection")
+            async with httpx.AsyncClient(proxy=self._proxy) as client:
                 r: Response = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     params={"q": query, "count": n},
@@ -108,7 +122,11 @@ class WebSearchTool(Tool):
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
             return "\n".join(lines)
+        except httpx.ProxyError as e:
+            logger.error("WebSearch 프록시 에러: {}", e)
+            return f"프록시 error: {e}"
         except Exception as e:
+            logger.error("WebSearch 에러: {}", e)
             return f"에러: {e}"
 
 
@@ -137,12 +155,11 @@ class WebFetchTool(Tool):
         "required": ["url"]
     }
 
-    def __init__(self, max_chars: int = 50000):
-        self.max_chars = max_chars
+    def __init__(self, max_chars: int = 50000, proxy: str | None = None):
+        self._max_chars = max_chars
+        self._proxy: str = proxy
 
     async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
-        max_chars: int = maxChars or self.max_chars
-
         # 가져오기 전에 URL 검증
         is_valid, error_msg = _validate_url(url)
         if not is_valid:
@@ -152,10 +169,12 @@ class WebFetchTool(Tool):
             })
 
         try:
+            logger.debug("WebFetch: {}", "proxy enabled" if self._proxy else "direct connection")
             async with httpx.AsyncClient(
                 follow_redirects=True,
                 max_redirects=MAX_REDIRECTS,
-                timeout=30.0
+                timeout=30.0,
+                proxy=self._proxy
             ) as client:
                 r: Response = await client.get(url, headers={"User-Agent": USER_AGENT})
                 r.raise_for_status()
@@ -174,6 +193,7 @@ class WebFetchTool(Tool):
             else:
                 text, extractor = r.text, "raw"
 
+            max_chars: int = maxChars or self._max_chars
             truncated: bool = len(text) > max_chars
             if truncated:
                 text = text[:max_chars]
@@ -188,8 +208,15 @@ class WebFetchTool(Tool):
                 "text": text
             })
 
+        except httpx.ProxyError as e:
+            logger.error("WebFetch 프록시 에러 for {}: {}", url, e)
+            return json.dumps({
+                "error": f"Proxy error: {e}",
+                "url": url
+            }, ensure_ascii=False)
         except Exception as e:
+            logger.error("WebFetch 에러 for {}: {}", url, e)
             return json.dumps({
                 "error": str(e),
                 "url": url
-            })
+            }, ensure_ascii=False)

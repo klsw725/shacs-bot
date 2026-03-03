@@ -21,6 +21,32 @@ class ContextBuilder:
         self._memory = MemoryStore(self._workspace)
         self._skills = SkillsLoader(self._workspace)
 
+    def build_messages(
+            self,
+            history: list[dict[str, Any]],
+            current_messages: str,
+            skill_names: list[str] | None = None,
+            media: list[str] | None = None,
+            channel: str | None = None,
+            chat_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """LLM 호출을 위한 전체 메시지 목록을 생성합니다."""
+        return [
+            {
+                "role": "system",
+                "content": self.build_system_prompt(skill_names=skill_names)
+            },
+            *history,
+            {
+                "role": "user",
+                "content": self._build_runtime_context(channel=channel, char_id=chat_id)
+            },
+            {
+                "role": "user",
+                "content": self._build_user_content(text=current_messages, media=media)
+            }
+        ]
+
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """아이덴티티, 부트스트랩 파일, 메모리, 그리고 스킬을 기반으로 시스템 프롬프트를 구성합니다."""
         parts: list[str] = [self._get_identity()]
@@ -41,7 +67,8 @@ class ContextBuilder:
 
         skills_summary: str = self._skills.build_skills_summary()
         if skills_summary:
-            parts.append(f"""# 스킬
+            parts.append(f"""
+                # 스킬
 
                 다음 스킬들은 당신의 기능을 확장합니다. 스킬을 사용하려면 read_file 도구를 사용해 해당 SKILL.md 파일을 읽으세요.
                 available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/brew로 설치를 시도할 수 있습니다.
@@ -56,7 +83,8 @@ class ContextBuilder:
         workspace_path: str = str(self._workspace.expanduser().resolve())
         system: str = platform.system()
         runtime: str = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-        return f"""# shacs-bot 🦈
+        return f"""
+            # shacs-bot 🦈
      
             당신은 shacs-bot, 도움이 되는 AI 어시스턴트입니다.
     
@@ -90,32 +118,6 @@ class ContextBuilder:
                 parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
-
-    def build_messages(
-            self,
-            history: list[dict[str, Any]],
-            current_messages: str,
-            skill_names: list[str] | None = None,
-            media: list[str] | None = None,
-            channel: str | None = None,
-            chat_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """LLM 호출을 위한 전체 메시지 목록을 생성합니다."""
-        return [
-            {
-                "role": "system",
-                "content": self.build_system_prompt(skill_names=skill_names)
-            },
-            *history,
-            {
-                "role": "user",
-                "content": self._build_runtime_context(channel=channel, char_id=chat_id)
-            },
-            {
-                "role": "user",
-                "content": self._build_user_content(text=current_messages, media=media)
-            }
-        ]
 
     def _build_runtime_context(self, channel: str | None, chat_id: str | None) -> str:
         """사용자 메시지 앞에 삽입하기 위한 신뢰되지 않은 런타임 메타데이터 블록을 생성합니다."""
