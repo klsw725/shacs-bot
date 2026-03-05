@@ -401,7 +401,6 @@ def find_by_model(model: str) -> ProviderSpec | None:
     """모델 이름의 키워드(대소문자 구분 없음)를 기준으로 표준 프로바이더를 매칭합니다.
     게이트웨이/로컬 프로바이더는 제외합니다 — 이들은 api_key/base_url을 통해 별도로 매칭됩니다."""
     model_lower: str = model.lower()
-
     model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""
     normalized_prefix = model_prefix.replace("-", "_")
 

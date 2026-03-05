@@ -58,8 +58,7 @@ class LLMProvider(ABC):
                 clean["content"] = None if (msg.get("role") == "assistant" and msg.get("tool_calls")) else "(empty)"
                 result.append(clean)
                 continue
-
-            if isinstance(content, list):
+            elif isinstance(content, list):
                 filtered: list[dict[str, Any]] = [
                     item for item in content
                         if not (
@@ -73,22 +72,20 @@ class LLMProvider(ABC):
 
                     if filtered:
                         clean["content"] = filtered
-
                     elif msg.get("role") == "assistant" and msg.get("tool_calls"):
                         clean["content"] = None
-
                     else:
                         clean["content"] = "(empty)"
 
                     result.append(clean)
                     continue
-
-            if isinstance(content, dict):
+            elif isinstance(content, dict):
                 clean: dict = dict(msg)
                 clean["content"] = [content]
                 result.append(clean)
                 continue
 
+            result.append(msg)
         return result
 
     @abstractmethod
@@ -105,8 +102,6 @@ class LLMProvider(ABC):
             max_tokens: int = 4096,
             temperature: float = 0.7,
             reasoning_effort: str | None = None,
-
-            max_retries: int = 3,
     ) -> LLMResponse:
         """
            채팅 완료 요청을 전송합니다.

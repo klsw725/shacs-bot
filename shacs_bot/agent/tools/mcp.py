@@ -55,10 +55,10 @@ class MCPToolWrapper(Tool):
             return f"(MCP 도구 호출이 {self._tool_timeout}초 후 타임아웃되었습니다.)"
 
         parts = []
+
         for block in result.content:
             if isinstance(block, types.TextContent):
                 parts.append(block.text)
-
             else:
                 parts.append(str(block))
 
@@ -79,7 +79,6 @@ async def connect_mcp_servers(
                     env=cfg.env or None
                 )
                 read, write = await stack.enter_async_context(stdio_client(params))
-
             elif cfg.url:
                 # MCP HTTP 전송이 httpx의 기본 5초 타임아웃을 상속받아
                 # 상위 레벨의 tool 타임아웃보다 먼저 종료되지 않도록,
@@ -94,7 +93,6 @@ async def connect_mcp_servers(
                 read, write, _ = await stack.enter_async_context(
                     streamable_http_client(url=cfg.url, http_client=http_client)
                 )
-
             else:
                 logger.warning("MCP 서버 '{}'에 대한 유효한 연결 정보가 없습니다 (command 또는 url 필요).", name)
                 continue

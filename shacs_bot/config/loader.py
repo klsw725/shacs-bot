@@ -32,15 +32,6 @@ def convert_to_camel(data: Any) -> Any:
         return [convert_to_camel(item) for item in data]
     return data
 
-def _migration_config(data):
-    """Migrate old config formats to current."""
-    # Move tools.exec.restrictToWorkspace -> tools.restrictToWorkspace
-    tools: dict[str, dict] = data.get("tools", {})
-    exec_cfg = tools.get("exec", {})
-    if ("restrictToWorkspace" in exec_cfg) and ("restrictToWorkspace" not in tools):
-        tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
-    return data
-
 def load_config(config_path: Path | None) -> Config:
     """
     Load configuration from file or create default.
@@ -55,15 +46,26 @@ def load_config(config_path: Path | None) -> Config:
 
     if config_file.exists():
         try:
-            with open(config_file) as f:
+            with open(config_file, encoding="utf-8") as f:
                 data = json.load(f)
+
             data = _migration_config(data)
-            return Config.model_validate(convert_to_camel(data))
+            return Config.model_validate(data)
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {config_file}: {e}")
             print("Using default configuration.")
 
     return Config()
+
+def _migration_config(data):
+    """Migrate old config formats to current."""
+    # Move tools.exec.restrictToWorkspace -> tools.restrictToWorkspace
+    tools: dict[str, dict] = data.get("tools", {})
+    exec_cfg = tools.get("exec", {})
+    if ("restrictToWorkspace" in exec_cfg) and ("restrictToWorkspace" not in tools):
+        tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
+
+    return data
 
 def save_config(config: Config, config_path: Path | None = None) -> None:
     """
@@ -77,8 +79,7 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     path.parent.mkdir(parents=True,  exist_ok=True)
 
     # Convert to camelCase format
-    data = config.model_dump()
-    data = convert_to_camel(data)
+    data = config.model_dump(by_alias=True)
 
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)

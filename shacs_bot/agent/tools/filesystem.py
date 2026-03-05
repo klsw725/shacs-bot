@@ -13,6 +13,7 @@ def _resolve_path(path: str, workspace: Path | None, allowed_dir: Path | None) -
         path = workspace / path
 
     resolve: Path = path.resolve()
+
     if allowed_dir:
         try:
             resolve.relative_to(allowed_dir.resolve())
@@ -21,15 +22,15 @@ def _resolve_path(path: str, workspace: Path | None, allowed_dir: Path | None) -
 
     return resolve
 
-def _short_hash(text: str, *, salt: str = "", len: int = 8) -> str:
+def _short_hash(text: str, *, salt: str = "", length: int = 8) -> str:
     """긴 텍스트를 간결하게 표현하기 위해 텍스트의 짧은 해시를 생성합니다."""
     import hashlib
-    return hashlib.sha256((salt + "\n" + text).encode("utf-8")).hexdigest()[:len]
+    return hashlib.sha256((salt + "\n" + text).encode("utf-8")).hexdigest()[:length]
 
 def _make_tag(lineno: int, line_text: str, *, salt: str = "", hash_len: int = 8) -> str:
     """텍스트 라인에 대한 태그를 생성하여 긴 텍스트를 간결하게 표현합니다."""
     stripped: str = line_text.rstrip("\n")
-    return f"L{lineno}#{_short_hash(stripped, salt=salt, len=hash_len)}"
+    return f"L{lineno}#{_short_hash(stripped, salt=salt, length=hash_len)}"
 
 class ReadFileTool(Tool):
     """파일의 콘텐츠를 읽는 도구입니다."""
@@ -70,6 +71,7 @@ class ReadFileTool(Tool):
                 return f"오류: 파일이 아닙니다: {path}"
 
             content: str = file_path.read_text(encoding="utf-8")
+
             if not hashlines:
                 return content
 
@@ -300,33 +302,28 @@ class EditFileTool(Tool):
 
                 lines[ln - 1] = replacement
                 changed = True
-
             elif op == "insert_before":
                 assert line_tag is not None and text is not None
                 ln: int = verify_tag(line_tag)
                 inserts: str = _normalize_block(text, keep_trailing_newline=True)
                 lines[ln - 1:ln - 1] = inserts.splitlines(keepends=True)
                 changed = True
-
             elif op == "insert_after":
                 assert line_tag is not None and text is not None
                 ln: int = verify_tag(line_tag)
                 inserts: str = _normalize_block(text, keep_trailing_newline=True)
                 lines[ln:ln] = inserts.splitlines(keepends=True)
                 changed = True
-
             elif op == "delete_line":
                 assert line_tag is not None
                 ln: int = verify_tag(line_tag)
                 del lines[ln - 1]
                 changed = True
-
             elif op == "delete_range":
                 assert start_tag is not None and end_tag is not None
                 start, end = verify_range(start_tag, end_tag)
                 del lines[start - 1:end]
                 changed = True
-
             elif op == "replace_range":
                 assert start_tag is not None and end_tag is not None and text is not None
                 start, end = verify_range(start_tag, end_tag)
@@ -334,7 +331,6 @@ class EditFileTool(Tool):
                 inserts: str = _normalize_block(text, keep_trailing_newline=True)
                 lines[start - 1:end] = inserts.splitlines(keepends=True)
                 changed = True
-
             else:
                 return f"오류: 지원하지 않는 op입니다: {op}"
 
@@ -396,11 +392,11 @@ class ListDirTool(Tool):
             dir_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if not dir_path.exists():
                 return f"오류: 디렉터리를 찾을 수 없습니다: {path}"
-
             if not dir_path.is_dir():
                 return f"오류: 디렉터리가 아닙니다: {path}"
 
             items: list[str] = []
+
             for item in sorted(dir_path.iterdir()):
                 prefix = "📁 " if item.is_dir() else "📄 "
                 items.append(f"{prefix}{item.name}")

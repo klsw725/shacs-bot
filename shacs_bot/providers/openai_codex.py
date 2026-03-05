@@ -34,7 +34,7 @@ class OpenAICodexProvider(LLMProvider):
             model: str | None = None,
             max_tokens: int = 4096,
             temperature: float = 0.7,
-            max_retries: int = 3
+            reasoning_effort: str | None = None,
     ) -> LLMResponse:
         model: str = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
@@ -59,37 +59,31 @@ class OpenAICodexProvider(LLMProvider):
             body["tools"] = _convert_tools(tools)
 
         url: str = DEFAULT_CODEX_URL
-        last_err: Exception | None = None
 
-        for attempt in range(max_retries):
+        try:
             try:
                 content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=True)
-                return LLMResponse(
-                    content=content,
-                    tool_calls=tool_calls,
-                    finish_reason=finish_reason,
-                )
             except Exception as e:
                 if "CERTIFICATE_VERIFY_FAILED" in str(e):
-                    logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
-                    content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=False)
-                    return LLMResponse(
-                        content=content,
-                        tool_calls=tool_calls,
-                        finish_reason=finish_reason,
-                    )
-
-                last_err = e
-
-        return LLMResponse(
-            content=f"Error calling Codex: {str(last_err)}",
-            finish_reason="error",
-        )
+                    raise
+                logger.warning("Codex API에 대한 SSL 인증서 검증에 실패했습니다. verify=False로 재시도합니다.")
+                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=False)
+            return LLMResponse(
+                content=content,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+            )
+        except Exception as e:
+            return LLMResponse(
+                content=f"코덱스 호출에서 에러 발생: {str(e)}",
+                finish_reason="error",
+            )
 
 
 def _strip_model_prefix(model: str) -> str:
     if model.startswith("openai-codex/") or model.startswith("openai_codex/"):
         return model.split("/", 1)[1]
+
     return model
 
 
@@ -99,7 +93,7 @@ def _build_headers(account_id: str, token: str) -> dict[str, str]:
         "chatgpt-account-id": account_id,
         "OpenAI-Beta": "responses=experimental",
         "originator": DEFAULT_ORIGINATOR,
-        "User-Agent": "nanobot (python)",
+        "User-Agent": "shacs-bot (python)",
         "accept": "text/event-stream",
         "content-type": "application/json",
     }
@@ -125,7 +119,6 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
     for tool in tools:
         fn: dict[str, Any] = (tool.get("function") or {}) if tool.get("type") == "function" else tool
-
         name:str  = fn.get("name")
         if not name:
             continue
@@ -146,18 +139,15 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
     input_items: list[dict[str, Any]] = []
 
     for idx, msg in enumerate(messages):
-        role: str = msg.get("role")
         content: Any = msg.get("content")
-
+        role: str = msg.get("role")
         if role == "system":
             system_prompt = content if isinstance(content, str) else ""
             continue
-
-        if role == "user":
+        elif role == "user":
             input_items.append(_convert_user_message(content))
             continue
-
-        if role == "assistant":
+        elif role == "assistant":
             # Handle text first.
             if isinstance(content, str) and content:
                 input_items.append(
@@ -189,8 +179,7 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
                 )
 
             continue
-
-        if role == "tool":
+        elif role == "tool":
             call_id, _ = _split_tool_call_id(msg.get("tool_call_id"))
             output_text: str = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
             input_items.append(
@@ -208,16 +197,13 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
 def _convert_user_message(content: Any) -> dict[str, Any]:
     if isinstance(content, str):
         return {"role": "user", "content": [{"type": "input_text", "text": content}]}
-
-    if isinstance(content, list):
+    elif isinstance(content, list):
         converted: list[dict[str, Any]] = []
         for item in content:
             if not isinstance(item, dict):
                 continue
-
-            if item.get("type") == "text":
+            elif item.get("type") == "text":
                 converted.append({"type": "input_text", "text": item.get("text", "")})
-
             elif item.get("type") == "image_url":
                 url: str | None = (item.get("image_url") or {}).get("url")
                 if url:
@@ -292,17 +278,14 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
 
         elif event_type == "response.output_text.delta":
             content += event.get("delta") or ""
-
         elif event_type == "response.function_call_arguments.delta":
             call_id: str = event.get("call_id")
             if call_id and call_id in tool_call_buffers:
                 tool_call_buffers[call_id]["arguments"] += event.get("delta") or ""
-
         elif event_type == "response.function_call_arguments.done":
             call_id: str = event.get("call_id")
             if call_id and call_id in tool_call_buffers:
                 tool_call_buffers[call_id]["arguments"] = event.get("arguments") or ""
-
         elif event_type == "response.output_item.done":
             item: dict[str, Any] = event.get("item") or {}
             if item.get("type") == "function_call":
@@ -324,20 +307,21 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
                         arguments=args,
                     )
                 )
-
         elif event_type == "response.completed":
             status: str | None = (event.get("response") or {}).get("status")
             finish_reason = _map_finish_reason(status)
-
         elif event_type in {"error", "response.failed"}:
             raise RuntimeError("Codex response failed")
 
     return content, tool_calls, finish_reason
 
+
 _FINISH_REASON_MAP = {"completed": "stop", "incomplete": "length", "failed": "error", "cancelled": "error"}
+
 
 def _map_finish_reason(status: str | None) -> str:
     return _FINISH_REASON_MAP.get(status or "completed", "stop")
+
 
 def _friendly_error(status_code: int, raw: str) -> str:
     if status_code == 429:

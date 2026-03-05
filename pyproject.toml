@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "croniter>=6.0.0",
+    "json-repair>=0.58.4",
     "litellm>=1.81.8",
     "loguru>=0.7.3",
     "mcp>=1.26.0",

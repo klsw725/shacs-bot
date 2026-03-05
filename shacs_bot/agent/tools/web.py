@@ -117,10 +117,12 @@ class WebSearchTool(Tool):
                 return f"'{query}'에 대한 검색 결과가 없습니다."
 
             lines: list[str] = [f"검색 결과: '{query}' (최대 {n}개)"]
-            for i, item in enumerate(result[:n], 1):
+
+            for i, item in enumerate(result, 1):
                 lines.append(f"{i}. {item.get("title", "")}\n   {item.get("url", "")}")
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
+
             return "\n".join(lines)
         except httpx.ProxyError as e:
             logger.error("WebSearch 프록시 에러: {}", e)
@@ -183,7 +185,7 @@ class WebFetchTool(Tool):
 
             # JSON
             if "application/json" in ctype:
-                text, extractor = json.dumps(r.json(), indent=2), "json"
+                text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
             # HTML
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
                 doc: Document = Document(r.text)
@@ -207,7 +209,6 @@ class WebFetchTool(Tool):
                 "length": len(text),
                 "text": text
             })
-
         except httpx.ProxyError as e:
             logger.error("WebFetch 프록시 에러 for {}: {}", url, e)
             return json.dumps({

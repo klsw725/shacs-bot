@@ -10,7 +10,6 @@ class ToolRegistry:
 
     동적 도구 등록 및 실행을 허용합니다.
     """
-
     def __init__(self):
         self._tools: dict[str, Tool] = {}
 
@@ -28,7 +27,7 @@ class ToolRegistry:
 
     def has(self, name: str) -> bool:
         """도구가 등록되어 있는지 확인합니다."""
-        return self.__contains__(name)
+        return name in self._tools
 
     def get_definitions(self) -> list[dict[str, Any]]:
         """OpenAI 형식의 모든 도구 정의를 가져옵니다."""
@@ -48,9 +47,9 @@ class ToolRegistry:
         Raises:
             KeyError: 도구를 찾을 수 없는 경우입니다.
         """
-        _HINT = "\n\n[Analyze the error above and try a different approach.]"
+        _HINT = "\n\n[위의 오류를 분석하고 다른 접근 방식을 시도해 보세요.]"
 
-        tool: Tool | None = self.get(name)
+        tool: Tool | None = self._tools.get(name)
         if not tool:
             return f"에러: 도구 '{name}'을(를) 찾을 수 없습니다. 가능한 도구: {', '.join(self.tool_names)}"
 
@@ -65,7 +64,7 @@ class ToolRegistry:
 
             return result
         except Exception as e:
-            return f"{name} 실행 중 에러 발생: {str(e)}"
+            return f"{name} 실행 중 에러 발생: {str(e)}" + _HINT
 
     @property
     def tool_names(self) -> list[str]:

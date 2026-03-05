@@ -11,6 +11,7 @@ class Base(BaseModel):
     """camelCase와 snake_case 키를 모두 받아들이는 기본(Base) 모델."""
     model_config: ClassVar[ConfigDict] = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
+
 class WhatsAppConfig(Base):
     """WhatsApp channel configuration."""
     enabled: bool = False
@@ -183,6 +184,7 @@ class ChannelsConfig(Base):
     qq: QQConfig = Field(default_factory=QQConfig)
     matrix: MatrixConfig = Field(default_factory=MatrixConfig)
 
+
 class AgentDefaults(Base):
     """Default agent configuration."""
     workspace: str = "~/.shacs-bot/workspace"""
@@ -194,15 +196,18 @@ class AgentDefaults(Base):
     memory_window: int = 100
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
 
+
 class AgentsConfig(Base):
     """Agent configuration."""
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+
 
 class ProviderConfig(Base):
     """LLM Provider configuration."""
     api_key: str = ""
     base_url: str | None = None
     extra_headers: dict[str, str] | None = None # Custom headers (e.g. APP-Code for AiHubMix)
+
 
 class ProvidersConfig(BaseModel):
     """Configuration for LLM providers."""
@@ -224,10 +229,12 @@ class ProvidersConfig(BaseModel):
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
+
 class HeartbeatConfig(Base):
     """Heartbeat service configuration."""
     enabled: bool = True
     interval_s: int = 30 * 60   # 30분
+
 
 class GatewayConfig(Base):
     """Gateway/server configuration."""
@@ -235,20 +242,24 @@ class GatewayConfig(Base):
     port: int = 18790,
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
+
 class WebSearchConfig(Base):
     """Web search Configuration."""
     api_key: str = "",  # Brave Search API key
     max_results: int = 5,
+
 
 class WebToolConfig(Base):
     """Web tools configuration."""
     proxy: str | None = None    # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
     search: WebSearchConfig = Field(default_factory=WebSearchConfig),
 
+
 class ExecToolConfig(Base):
     """Exec tool configuration."""
     timeout: int = 60,
     path_append: str = ""
+
 
 class MCPServerConfig(Base):
     """MCP 서버 연결 설정 (stdio or HTTP)."""
@@ -266,6 +277,7 @@ class ToolsConfig(Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig),
     restrict_to_workspace: bool = False # If true, block commands accessing path outside workspace
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)  # MCP 서버별 설정 (키는 서버 식별자)
+
 
 class Config(BaseSettings):
     """Root configuration for shacs-bot."""
@@ -285,7 +297,7 @@ class Config(BaseSettings):
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
 
-    def _match_provider(self, model: str | None = None) -> tuple["ProviderConfig | None", str | None]:
+    def _match_provider(self, model: str | None = None) -> tuple[ProviderConfig | None, str | None]:
         """프로바이더 설정과 해당 레지스트리 이름을 매칭합니다. (config, spec_name)을 반환합니다."""
         forced: str = self.agents.defaults.provider
         if forced != "auto":

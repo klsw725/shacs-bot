@@ -70,13 +70,12 @@ class MessageTool(Tool):
             media: list[str] | None = None,
             **kwargs: Any
     ) -> str:
-        channel = channel or self._default_channel
-        chat_id = chat_id or self._default_chat_id
-        message_id = message_id or self._default_message_id
+        channel: str = channel or self._default_channel
+        chat_id: str = chat_id or self._default_chat_id
+        message_id: str = message_id or self._default_message_id
 
         if not channel or not chat_id:
             return "에러: 메시지를 보낼 채널과 chat_id가 필요합니다."
-
         if not self._send_callback:
             return "에러: 메시지 전송 콜백이 설정되지 않았습니다."
 
@@ -89,7 +88,6 @@ class MessageTool(Tool):
                 "message_id": message_id
             }
         )
-
         try:
             await self._send_callback(msg)
 
@@ -97,7 +95,7 @@ class MessageTool(Tool):
                 self._sent_in_turn = True
 
             media_info: str = f" with {len(media)} attachments" if media else ""
-            return f"{channel} 메시지 전송: {chat_id}{media_info}"
+            return f"메시지 전송 {channel}:{chat_id}{media_info}"
         except Exception as e:
             return f"메시지 전송 중 에러 발생: {str(e)}"
 

@@ -2,6 +2,7 @@
 import asyncio
 import os
 import re
+from asyncio.subprocess import Process
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,22 @@ from shacs_bot.agent.tools.base import Tool
 
 class ExecTool(Tool):
     """쉘 명령을 실행하는 도구"""
+    name: str = "exec"
+    description: str = "쉘 명령을 실행합니다. 명령 출력 결과를 반환합니다. 주의해서 사용하세요."
+    parameters: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "실행할 쉘 명령어"
+            },
+            "_working_dir": {
+                "type": "string",
+                "description": "명령어 실행을 위한 선택적 작업 디렉토리"
+            }
+        },
+        "required": ["command"]
+    }
 
     def __init__(
             self,
@@ -37,50 +54,25 @@ class ExecTool(Tool):
         self._restrict_to_workspace: bool = restrict_to_workspace
         self._path_append: str = path_append
 
-    @property
-    def name(self) -> str:
-        return "exec"
-
-    @property
-    def description(self) -> str:
-        return "쉘 명령을 실행합니다. 명령 출력 결과를 반환합니다. 주의해서 사용하세요."
-
-    @property
-    def parameters(self) -> dict[str, object]:
-        return {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "실행할 쉘 명령어"
-                },
-                "_working_dir": {
-                    "type": "string",
-                    "description": "명령어 실행을 위한 선택적 작업 디렉토리"
-                }
-            },
-            "required": ["command"]
-        }
-
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
-        cwd = working_dir or self._working_dir or os.getcwd()
-        guard_error = self._guard_command(command,cwd)
+        cwd: str = working_dir or self._working_dir or os.getcwd()
+        guard_error: str | None = self._guard_command(command,cwd)
         if guard_error:
             return guard_error
 
         env: dict = os.environ.copy()
+
         if self._path_append:
             env["PATH"] = env.get("PATH", "") + os.pathsep + self._path_append
 
         try:
-            process = await asyncio.create_subprocess_shell(
+            process: Process = await asyncio.create_subprocess_shell(
                 cmd=command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=env,
             )
-
             try:
                 stdout, stderr = await asyncio.wait_for(
                     fut=process.communicate(),
@@ -101,12 +93,10 @@ class ExecTool(Tool):
 
             if stdout:
                 output_parts.append(stdout.decode(encoding="utf-8", errors="replace"))
-
             if stderr:
                 stderr_text = stderr.decode(encoding="utf-8", errors="replace")
                 if stderr_text.strip():
                     output_parts.append(f"STDERR:\n{stderr_text}")
-
             if process.returncode != 0:
                 output_parts.append(f"\n종료 코드: {process.returncode}")
 
@@ -118,7 +108,6 @@ class ExecTool(Tool):
                 result = result[:max_len] + f"\n... (생략됨, {len(result) - max_len}자 더 있음)"
 
             return result
-
         except Exception as e:
             return f"명령 실행 중 오류 발생: {str(e)}"
 
@@ -134,7 +123,6 @@ class ExecTool(Tool):
         if self._allow_patterns:
             if not any(re.search(pattern, cmd_lower) for pattern in self._allow_patterns):
                 return "에러: 명령어가 safety guard에 의해 차단되었습니다 (허용 목록에 없음)"
-
         if self._restrict_to_workspace:
             if "..\\" in cmd or "../" in cmd:
                 return "에러: 명령어가 safety guard에 의해 차단되었습니다 (디렉토리 탐색 감지됨)"

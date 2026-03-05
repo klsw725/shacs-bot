@@ -819,6 +819,15 @@ wheels = [
 ]
 
 [[package]]
+name = "json-repair"
+version = "0.58.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/04/4c/c1455faae0f482e500f14b680e1c99523ea3bc831c064f59ddc9683af335/json_repair-0.58.4.tar.gz", hash = "sha256:44c6cda9871d017cb925e28044c073e4e91b0de436dbdfb106e72e22dc1b4bab", size = 42683, upload-time = "2026-03-05T07:51:09.609Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/e0/a959ffaca81fb5b197d3a4d98710351e405b7f424e07cf31e8a59750c4ad/json_repair-0.58.4-py3-none-any.whl", hash = "sha256:1bde3cac96f8360714bc1df3ac1fe6505e265fa2c2b38e62c9745c9fe0e5e078", size = 41562, upload-time = "2026-03-05T07:51:08.17Z" },
+]
+
+[[package]]
 name = "jsonschema"
 version = "4.26.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1940,6 +1949,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "croniter" },
+    { name = "json-repair" },
     { name = "litellm" },
     { name = "loguru" },
     { name = "mcp" },
@@ -1954,6 +1964,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "croniter", specifier = ">=6.0.0" },
+    { name = "json-repair", specifier = ">=0.58.4" },
     { name = "litellm", specifier = ">=1.81.8" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mcp", specifier = ">=1.26.0" },
