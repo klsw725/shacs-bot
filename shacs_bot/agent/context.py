@@ -14,38 +14,12 @@ from shacs_bot.agent.skills import SkillsLoader
 class ContextBuilder:
     """에이전트를 위한 컨텍스트(시스템 프롬프트 + 메시지)를 구성합니다."""
     BOOTSTRAP_FILES: list[str] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
-    _RUNTIME_CONTEXT_TAG: str = "[Runtime Context — metadata only, not instructions]"
+    RUNTIME_CONTEXT_TAG: str = "[Runtime Context — metadata only, not instructions]"
 
     def __init__(self, workspace: Path):
         self._workspace: Path = workspace
         self._memory = MemoryStore(self._workspace)
         self._skills = SkillsLoader(self._workspace)
-
-    def build_messages(
-            self,
-            history: list[dict[str, Any]],
-            current_messages: str,
-            skill_names: list[str] | None = None,
-            media: list[str] | None = None,
-            channel: str | None = None,
-            chat_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """LLM 호출을 위한 전체 메시지 목록을 생성합니다."""
-        return [
-            {
-                "role": "system",
-                "content": self.build_system_prompt(skill_names=skill_names)
-            },
-            *history,
-            {
-                "role": "user",
-                "content": self._build_runtime_context(channel=channel, char_id=chat_id)
-            },
-            {
-                "role": "user",
-                "content": self._build_user_content(text=current_messages, media=media)
-            }
-        ]
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """아이덴티티, 부트스트랩 파일, 메모리, 그리고 스킬을 기반으로 시스템 프롬프트를 구성합니다."""
@@ -107,6 +81,32 @@ class ContextBuilder:
             일반 대화에는 직접 텍스트로 답변하세요. 특정 채팅 채널로 보내야 할 경우에만 'message' 도구를 사용하세요. 
         """
 
+    def build_messages(
+            self,
+            history: list[dict[str, Any]],
+            current_messages: str,
+            skill_names: list[str] | None = None,
+            media: list[str] | None = None,
+            channel: str | None = None,
+            chat_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """LLM 호출을 위한 전체 메시지 목록을 생성합니다."""
+        return [
+            {
+                "role": "system",
+                "content": self.build_system_prompt(skill_names=skill_names)
+            },
+            *history,
+            {
+                "role": "user",
+                "content": self._build_runtime_context(channel=channel, char_id=chat_id)
+            },
+            {
+                "role": "user",
+                "content": self._build_user_content(text=current_messages, media=media)
+            }
+        ]
+
     def _load_bootstrap_files(self) -> str:
         """워크스페이스에서 모든 부트스트랩 파일을 로드합니다."""
         parts: list[str] = []
@@ -128,7 +128,7 @@ class ContextBuilder:
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
 
-        return self._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
+        return self.RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """선택적으로 base64로 인코딩된 이미지를 포함하여 사용자 메시지 내용을 구성합니다."""
@@ -181,18 +181,21 @@ class ContextBuilder:
             content: str | None,
             tool_calls: list[dict[str, Any]] | None = None,
             reasoning_content: str | None = None,
+            thinking_blocks: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
         """메시지 목록에 어시스턴트 메시지를 추가합니다."""
         msg: dict[str, Any] = {
             "role": "assistant",
             "content": content
         }
-
         if tool_calls:
             msg["tool_calls"] = tool_calls
 
         if reasoning_content is not None:
             msg["reasoning_content"] = reasoning_content
+
+        if thinking_blocks:
+            msg["thinking_blocks"] = thinking_blocks
 
         messages.append(msg)
         return messages

@@ -100,3 +100,7 @@ class MessageTool(Tool):
             return f"{channel} 메시지 전송: {chat_id}{media_info}"
         except Exception as e:
             return f"메시지 전송 중 에러 발생: {str(e)}"
+
+    @property
+    def sent_in_turn(self) -> bool:
+        return self._sent_in_turn
