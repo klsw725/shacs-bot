@@ -41,7 +41,7 @@ class SkillsLoader:
             for skill_dir in self._workspace_skills.iterdir():
                 if skill_dir.is_dir():
                     skill_file: Path = skill_dir / "SKILL.md"
-                    if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
+                    if skill_file.exists():
                         skills.append({
                             "name": skill_dir.name,
                             "path": str(skill_file),

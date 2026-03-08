@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+import weakref
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
@@ -43,7 +44,7 @@ class AgentLoop:
 
     def __init__(
             self,
-            network: MessageBus,
+            bus: MessageBus,
             provider: LLMProvider,
             workspace: Path,
 
@@ -64,7 +65,7 @@ class AgentLoop:
             mcp_servers: dict | None = None,
             channels_config: ChannelsConfig | None = None
     ):
-        self._network: MessageBus = network
+        self._bus: MessageBus = bus
         self._channels_config: ChannelsConfig = channels_config
         self._workspace: Path = workspace
 
@@ -89,7 +90,7 @@ class AgentLoop:
         self._subagent = SubagentManager(
             provider=self._provider,
             workspace=self._workspace,
-            network=self._network,
+            bus=self._bus,
             model=self._model,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
@@ -108,7 +109,7 @@ class AgentLoop:
 
         self._consolidating: set[str] = set()   # 현재 통합(정리) 작업이 진행 중인 세션 키들
         self._consolidating_tasks: set[asyncio.Task] = set()    # 진행 중인 작업들에 대한 강한 참조
-        self._consolidating_locks: dict[str, asyncio.Lock] = {}
+        self._consolidating_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}      # session_key -> tasks
         self._processing_lock: asyncio.Lock = asyncio.Lock()
 
@@ -127,11 +128,12 @@ class AgentLoop:
             path_append=self._exec_config.path_append
         ))
         self._tools.register(WebSearchTool(
-            api_key=self._brave_api_key
+            api_key=self._brave_api_key,
+            proxy=self._web_proxy,
         ))
-        self._tools.register(WebFetchTool())
+        self._tools.register(WebFetchTool(proxy=self._web_proxy))
         self._tools.register(MessageTool(
-            send_callback=self._network.publish_outbound
+            send_callback=self._bus.publish_outbound
         ))
         self._tools.register(SpawnTool(
             manager=self._subagent
@@ -149,7 +151,7 @@ class AgentLoop:
 
         while self._running:
             try:
-                msg: InboundMessage = await asyncio.wait_for(fut=self._network.consume_inbound(), timeout=1.0)
+                msg: InboundMessage = await asyncio.wait_for(fut=self._bus.consume_inbound(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
 
@@ -200,7 +202,7 @@ class AgentLoop:
         sub_cancelled: int = await self._subagent.cancel_by_session(msg.session_key)
         total: int = cancelled + sub_cancelled
         content: str = f"⏹ {total}개의 작업을 중지했습니다." if total else "중지할 활성 작업이 없습니다."
-        await self._network.publish_outbound(OutboundMessage(
+        await self._bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=content
         ))
 
@@ -210,9 +212,9 @@ class AgentLoop:
             try:
                 response: OutboundMessage | None = await self._process_message(msg)
                 if response is not None:
-                    await self._network.publish_outbound(response)
+                    await self._bus.publish_outbound(response)
                 elif msg.channel == "cli":
-                    await self._network.publish_outbound(OutboundMessage(
+                    await self._bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content="",
@@ -223,7 +225,7 @@ class AgentLoop:
                 raise
             except Exception:
                 logger.exception("세션 {}의 메시지를 처리하는 중 오류가 발생했습니다.", msg.session_key)
-                await self._network.publish_outbound(OutboundMessage(
+                await self._bus.publish_outbound(OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content="죄송합니다, 오류가 발생했습니다."
@@ -262,7 +264,7 @@ class AgentLoop:
                 chat_id=chat_id,
             )
             final_content, _, all_msg = await self._run_agent_loop(messages)
-            self._save_turn(session=session, messages=all_msg, skip=1 + len(history))
+            self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
 
             self._sessions.save(session)
 
@@ -328,7 +330,7 @@ class AgentLoop:
                 """
             )
 
-        unconsolidated: int = len(session.messages) - session.last_consolidated
+        unconsolidated: int = (len(session.messages) - session.last_consolidated)
         if (unconsolidated >= self._memory_window) and (session.key not in self._consolidating):
             self._consolidating.add(session.key)
             lock: asyncio.Lock = self._consolidating_locks.setdefault(session.key, asyncio.Lock())
@@ -340,9 +342,9 @@ class AgentLoop:
                 finally:
                     self._consolidating.discard(session.key)
 
-                    _task: asyncio.Task = asyncio.current_task()
-                    if _task is not None:
-                        self._consolidating_tasks.discard(_task)
+                    _t: asyncio.Task = asyncio.current_task()
+                    if _t is not None:
+                        self._consolidating_tasks.discard(_t)
 
             _task = asyncio.create_task(_consolidate_and_unlock())
             self._consolidating_tasks.add(_task)
@@ -366,7 +368,7 @@ class AgentLoop:
             meta: dict[str, Any] = dict(msg.metadata or {})
             meta["_progress"] = True
             meta["_tool_hint"] = tool_hint
-            await self._network.publish_outbound(OutboundMessage(
+            await self._bus.publish_outbound(OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=content,
@@ -380,7 +382,7 @@ class AgentLoop:
         if final_content is None:
             final_content = "처리는 완료했지만 제공할 응답이 없습니다."
 
-        self._save_turn(session=session, messages=all_msg, skip=1 + len(history))
+        self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
         self._sessions.save(session)
 
         mt: Any = self._tools.get("message")
@@ -406,7 +408,7 @@ class AgentLoop:
         final_content: str | None = None
         tools_used: list[str] = []
 
-        for idx in range(self._max_iterations):
+        for _ in range(self._max_iterations):
             response: LLMResponse = await self._provider.chat(
                 messages=messages,
                 tools=self._tools.get_definitions(),
@@ -417,9 +419,18 @@ class AgentLoop:
             )
             if response.has_tool_calls:
                 if on_progress:
-                    clean: str | None = self._strip_think(response.content)
-                    if clean:
-                        await on_progress(clean)
+                    thoughts:list[str] = [
+                        self._strip_think(response.content),
+                        response.reasoning_content,
+                        *(
+                            f"Thinking [{b.get('signature', '...')}]:\n{b.get('thought', '...')}"
+                            for b in (response.thinking_blocks or [])
+                                if isinstance(b, dict) and "signature" in b
+                        )
+                    ]
+                    combined_thoughts: str = "\n\n".join(filter(None, thoughts))
+                    if combined_thoughts:
+                        await on_progress(combined_thoughts)
 
                     await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
@@ -474,10 +485,11 @@ class AgentLoop:
                 final_content = clean
                 break
         else:
-            logger.warning("최대 반복횟수 ({}) 도달", self._max_iterations)
-            final_content = f"""
-               도구 호출 최대 반복 횟수({self._max_iterations})에 도달했지만 작업을 완료하지 못했습니다. 작업을 더 작은 단계로 나누어 다시 시도해 보세요. 
-            """
+            if final_content is None:
+                logger.warning("최대 반복횟수 ({}) 도달", self._max_iterations)
+                final_content = f"""
+                   도구 호출 최대 반복 횟수({self._max_iterations})에 도달했지만 작업을 완료하지 못했습니다. 작업을 더 작은 단계로 나누어 다시 시도해 보세요. 
+                """
 
         return final_content, tools_used, messages
 
@@ -486,23 +498,36 @@ class AgentLoop:
         for message in messages[skip:]:
             entry: dict = dict(message)
             role: str = entry.get("role")
-            content: str = entry.get("content")
+            content: Any = entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
                 continue    # 내용이 없는 assistant 메시지는 저장하지 않고 건너뛴다 — 세션 컨텍스트를 망가뜨릴 수 있기 때문이다.
             elif role == "tool" and isinstance(content, str) and (len(content) > self._TOOL_RESULT_MAX_CHARS):
                 entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (중략)"
             elif role == "user":
                 if isinstance(content, str) and content.startswith(ContextBuilder.RUNTIME_CONTEXT_TAG):
-                    continue
+                    # 런타임 컨텍스트 접두사는 제거하고, 사용자 텍스트만 유지한다.
+                    parts: list[str] = content.split("\n\n", 1)
+                    if len(parts) > 1 and parts[1].strip():
+                        entry["content"] = parts[1]
+                    else:
+                        continue
                 elif isinstance(content, list):
-                    entry["content"] = [
-                        {
-                            "type": "text",
-                            "text": "[image]"
-                        } if (c.get("type") == "image_url") and c.get("image_url", {}).get("url", "").startswith("data:image/")
-                        else c
-                        for c in content
-                    ]
+                    filtered: list[dict[str, Any]] = []
+
+                    for c in content:
+                        if c.get("type") == "text" and isinstance(c.get("text"), str) and c["text"].startswith(ContextBuilder.RUNTIME_CONTEXT_TAG):
+                            continue    # 멀티모달 메시지에서 런타임 컨텍스트를 제거
+                        elif c.get("type") == "image_url" and c.get("image_url", {}).get("url", "").startswith("data:image/"):
+                            filtered.append({
+                                "type": "text",
+                                "text": "[image]"
+                            })
+                        else:
+                            filtered.append(c)
+
+                    if not filtered:
+                        continue
+                    entry["content"] = filtered
 
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)

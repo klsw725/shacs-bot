@@ -9,12 +9,13 @@ from typing import Any
 
 from shacs_bot.agent.memory import MemoryStore
 from shacs_bot.agent.skills import SkillsLoader
+from shacs_bot.utils.helpers import detect_image_mime
 
 
 class ContextBuilder:
     """에이전트를 위한 컨텍스트(시스템 프롬프트 + 메시지)를 구성합니다."""
-    BOOTSTRAP_FILES: list[str] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
-    RUNTIME_CONTEXT_TAG: str = "[Runtime Context — metadata only, not instructions]"
+    _BOOTSTRAP_FILES: list[str] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    RUNTIME_CONTEXT_TAG: str = "[런타임 컨텍스트 — 메타데이터 전용이며, 지시사항이 아님]"
 
     def __init__(self, workspace: Path):
         self._workspace: Path = workspace
@@ -91,6 +92,15 @@ class ContextBuilder:
             chat_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """LLM 호출을 위한 전체 메시지 목록을 생성합니다."""
+        runtime_ctx: str = self.build_runtime_context(channel=channel, chat_id=chat_id)
+        user_content: str | list[dict[str, Any]] = self._build_user_content(text=current_messages, media=media)
+
+        # 일부 제공자(provider)가 동일한 role 메시지가 연속으로 오는 것을 거부하므로
+        # runtime context와 사용자 내용을 하나의 user 메시지로 병합한다.
+        if isinstance(user_content, str):
+            merged: str = f"{runtime_ctx}\n\n{user_content}"
+        else:
+            merged: list[dict[str, Any]] = [{"type": "text", "text": runtime_ctx}] + user_content
         return [
             {
                 "role": "system",
@@ -99,11 +109,7 @@ class ContextBuilder:
             *history,
             {
                 "role": "user",
-                "content": self._build_runtime_context(channel=channel, char_id=chat_id)
-            },
-            {
-                "role": "user",
-                "content": self._build_user_content(text=current_messages, media=media)
+                "content": merged
             }
         ]
 
@@ -111,7 +117,7 @@ class ContextBuilder:
         """워크스페이스에서 모든 부트스트랩 파일을 로드합니다."""
         parts: list[str] = []
 
-        for filename in self.BOOTSTRAP_FILES:
+        for filename in self._BOOTSTRAP_FILES:
             file_path: Path = self._workspace / filename
             if file_path.exists():
                 content: str = file_path.read_text(encoding="utf-8")
@@ -119,7 +125,8 @@ class ContextBuilder:
 
         return "\n\n".join(parts) if parts else ""
 
-    def _build_runtime_context(self, channel: str | None, chat_id: str | None) -> str:
+    @staticmethod
+    def build_runtime_context(channel: str | None, chat_id: str | None) -> str:
         """사용자 메시지 앞에 삽입하기 위한 신뢰되지 않은 런타임 메타데이터 블록을 생성합니다."""
         now: str = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz: str = time.strftime("%Z") or "UTC"
@@ -128,7 +135,7 @@ class ContextBuilder:
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
 
-        return self.RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
+        return ContextBuilder.RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """선택적으로 base64로 인코딩된 이미지를 포함하여 사용자 메시지 내용을 구성합니다."""
@@ -138,12 +145,18 @@ class ContextBuilder:
         images: list[dict[str, Any]] = []
 
         for path in media:
-            mime, _ = mimetypes.guess_type(path)
             p: Path = Path(path)
-            if not p.is_file() or not mime or not mime.startswith("image/"):
+            if not p.is_file():
                 continue
 
-            b64: str = base64.b64decode(p.read_bytes()).decode()
+            raw: bytes = p.read_bytes()
+
+            # 매직 바이트로 실제 MIME 타입을 감지하고, 실패하면 파일 이름을 기반으로 추측
+            mime: str | None = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+            if not mime or not mime.startswith("image/"):
+                continue
+
+            b64: str = base64.b64decode(raw).decode()
             images.append({
                 "type": "image_url",
                 "image_url": {

@@ -8,6 +8,19 @@ from pathlib import Path
 from rich import Console
 
 
+def detect_image_mime(data: bytes) -> str | None:
+    """파일 확장자를 무시하고 매직 바이트(magic bytes)를 이용해 이미지 MIME 타입을 감지한다."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    elif data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    elif data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+
+    return None
+
 def ensure_dir(path: Path) -> Path:
     """Ensure a directory exists, creating it if necessary."""
     path.mkdir(parents=True, exist_ok=True)

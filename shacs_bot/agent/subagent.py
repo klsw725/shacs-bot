@@ -16,17 +16,16 @@ from shacs_bot.agent.tools.web import WebSearchTool, WebFetchTool
 from shacs_bot.bus.events import InboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import ExecToolConfig
-from shacs_bot.providers.base import LLMProvider
+from shacs_bot.providers.base import LLMProvider, LLMResponse
 
 
 class SubagentManager:
     """백그라운드 subagent 관리를 담당하는 클래스입니다."""
-
     def __init__(
             self,
             provider: LLMProvider,
             workspace: Path,
-            network: MessageBus,
+            bus: MessageBus,
             model: str | None = None,
             temperature: float = 0.7,
             max_tokens: int = 4096,
@@ -38,7 +37,7 @@ class SubagentManager:
     ):
         self._provider = provider
         self._workspace = workspace
-        self._network = network
+        self._bus = bus
         self._model = model or provider.get_default_model()
         self._temperature = temperature
         self._max_tokens = max_tokens
@@ -64,7 +63,7 @@ class SubagentManager:
         display_label: str = label or task[:30] + ("..." if len(task) > 30 else "")
         origin: dict[str, str] = {"channel": origin_channel, "chat_id": origin_chat_id}
 
-        bg_task = asyncio.create_task(
+        bg_task: asyncio.Task[None] = asyncio.create_task(
             self._run_subagent(task_id, task, display_label, origin)
         )
         self._running_tasks[task_id] = bg_task
@@ -139,8 +138,8 @@ class SubagentManager:
             max_iterations: int = 15
             final_result: str | None = None
 
-            for iter in range(max_iterations):
-                response = await self._provider.chat(
+            for iteration in range(max_iterations):
+                response: LLMResponse = await self._provider.chat(
                     messages=messages,
                     tools=tools.get_definitions(),
                     model=self._model,
@@ -170,7 +169,6 @@ class SubagentManager:
                     # Execute tools
                     for tool_call in response.tool_calls:
                         args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
-
                         logger.debug("서브에이전트 [{}] 실행: {} 인자: {}", task_id, tool_call.name, args_str)
                         result: str = await tools.execute(tool_call.name, tool_call.arguments)
                         messages.append({
@@ -179,16 +177,15 @@ class SubagentManager:
                             "name": tool_call.name,
                             "content": result
                         })
-
                 else:
                     final_result = response.content
                     break
 
-                if final_result is None:
-                    final_result = "작업은 완료되었지만 최종 응답이 생성되지 않았습니다."
+            if final_result is None:
+                final_result = "작업은 완료되었지만 최종 응답이 생성되지 않았습니다."
 
-                logger.info("서브에이전트 [{}]가 성공적으로 완료되었습니다", task_id)
-                await self._announce_result(task_id=task_id, label=label, task=task, result=final_result, origin=origin, status="ok")
+            logger.info("서브에이전트 [{}]가 성공적으로 완료되었습니다", task_id)
+            await self._announce_result(task_id=task_id, label=label, task=task, result=final_result, origin=origin, status="ok")
         except Exception as e:
             error_msg: str = f"Error: {str(e)}"
             logger.error("서브에이전트 [{}] 실패: {}", task_id, e)
@@ -196,7 +193,7 @@ class SubagentManager:
 
     def _build_subagent_prompt(self) -> str:
         """하위 에이전트를 위한 목적에 맞는 시스템 프롬프트를 작성"""
-        time_ctx:str = ContextBuilder._build_runtime_context(None, None)
+        time_ctx:str = ContextBuilder.build_runtime_context(None, None)
         parts: list[str] = [f"""
             # Subagent
             
@@ -237,7 +234,7 @@ class SubagentManager:
         """
 
         # 메인 에이전트를 트리거하기 위해 시스템 메시지로 주입
-        await self._network.publish_inbound(InboundMessage(
+        await self._bus.publish_inbound(InboundMessage(
             channel="system",
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",

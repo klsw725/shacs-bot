@@ -52,6 +52,7 @@ class Session:
                 break
 
         out: list[dict[str, Any]] = []
+
         for m in sliced:
             entry: dict[str, Any] = {
                 "role": m["role"],
@@ -84,16 +85,6 @@ class SessionManager:
         self._legacy_sessions_dir: Path = Path.home() / ".shacs-bot" / "sessions"
         self._cache: dict[str, Session] = {}
 
-    def _get_session_path(self, key: str) -> Path:
-        """세션의 파일 경로를 가져옵니다."""
-        safe_key: str = safe_filename(key.replace(":", "_"))
-        return self._session_dir / f"{safe_key}.jsonl"
-
-    def _get_legacy_session_path(self, key: str) -> Path:
-        """기존 전역 세션 경로 (~/.shacs-bot/sessions/)."""
-        safe_key: str = safe_filename(key.replace(":", "_"))
-        return self._legacy_sessions_dir / f"{safe_key}.jsonl"
-
     def get_or_create(self, key: str) -> Session:
         """
         존재하는 세션을 가져오거나 새롭게 하나 생성합니다.
@@ -125,7 +116,6 @@ class SessionManager:
                     logger.info(f"레거시 경로에서 세션 {key}을(를) 마이그레이션했습니다.")
                 except Exception:
                     logger.exception("세션 마이그레이션 실패 {}", key)
-
         if not path.exists():
             return None
 
@@ -146,7 +136,6 @@ class SessionManager:
                         metadata = data.get("metadata", {})
                         created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
                         last_consolidated = data.get("last_consolidated", 0)
-
                     else:
                         messages.append(data)
 
@@ -160,6 +149,16 @@ class SessionManager:
         except Exception as e:
             logger.warning("세션 읽어오기 실패 {}: {}", key, e)
             return None
+
+    def _get_session_path(self, key: str) -> Path:
+        """세션의 파일 경로를 가져옵니다."""
+        safe_key: str = safe_filename(key.replace(":", "_"))
+        return self._session_dir / f"{safe_key}.jsonl"
+
+    def _get_legacy_session_path(self, key: str) -> Path:
+        """기존 전역 세션 경로 (~/.shacs-bot/sessions/)."""
+        safe_key: str = safe_filename(key.replace(":", "_"))
+        return self._legacy_sessions_dir / f"{safe_key}.jsonl"
 
     def save(self, session: Session) -> None:
         """디스크에 세션 저장"""

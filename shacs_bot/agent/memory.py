@@ -91,7 +91,8 @@ class MemoryStore:
 
             logger.info("메모리 통합: {}개 통합 대상, {}개 유지", len(old_messages), keep_count)
 
-        lines: list[dict[str, Any]] = []
+        lines: list[str] = []
+
         for m in old_messages:
             if not m.get("content"):
                 continue
@@ -129,10 +130,17 @@ class MemoryStore:
                 logger.warning("메모리 통합: LLM이 save_memory를 호출하지 않아 건너뜁니다.")
                 return False
 
-            args: dict[str, Any] = response.tool_calls[0].arguments
+            args: dict[str, Any] | str = response.tool_calls[0].arguments
             # 몇몇 제공자들은 인자를 dict 대신 JSON 문자열로 제공합니다.
             if isinstance(args, str):
                 args = json.loads(args)
+            # 몇몇 제공자들은 인자를 LIST로 제공합니다.
+            if isinstance(args, list):
+                if args and isinstance(args[0], dict):
+                    args = args[0]
+                else:
+                    logger.warning("메모리 통합: 예상지 않은 인자 타입. 비어있거나 list, dict 형태가 아닙니다e")
+                    return False
             if not isinstance(args, dict):
                 logger.warning("메모리 통합: 예상치 않은 인자 타입 {}", type(args).__name__)
                 return False

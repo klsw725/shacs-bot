@@ -1,4 +1,5 @@
 """알림과 작업 스케줄링을 위한 Cron 도구"""
+from _contextvars import ContextVar, Token
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -45,11 +46,20 @@ class CronTool(Tool):
         self._cron: CronService = cron_service
         self._channel: str = ""
         self._chat_id: str = ""
+        self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
 
     def set_context(self, channel: str, chat_id: str) -> None:
         """전달을 위한 현재 세션 컨텍스트를 설정합니다."""
         self._channel: str = channel
         self._chat_id: str = chat_id
+
+    def set_cron_context(self, active: bool) -> Token[bool]:
+        """도구가 cron 작업 콜백 내부에서 실행 중인지 여부를 표시한다."""
+        return self._in_cron_context.set(active)
+
+    def reset_cron_context(self, token: Token[bool]) -> None:
+        """이전 cron 컨텍스트 복구"""
+        self._in_cron_context.reset(token)
 
     async def execute(
             self,
@@ -63,11 +73,12 @@ class CronTool(Tool):
             **kwargs: Any
     ) -> str:
         if action == "add":
-            return self._add_job(message=message, every_seconds=every_seconds, cron_expr=cron_expr, tz=tz, at=at)
+            if self._in_cron_context.get():
+                return "에러: cron 작업 실행 중에는 새로운 작업을 예약할 수 없습니다."
 
+            return self._add_job(message=message, every_seconds=every_seconds, cron_expr=cron_expr, tz=tz, at=at)
         elif action == "list":
             self._list_jobs()
-
         elif action == "remove":
             return self._remove_job(job_id)
 
@@ -100,17 +111,18 @@ class CronTool(Tool):
         delete_after = False
         if every_seconds:
             schedule: CronSchedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
-
         elif cron_expr:
             schedule = CronSchedule(kind="cron", expr=cron_expr)
-
         elif at:
-            dt: datetime = datetime.fromisoformat(at)
+            try:
+                dt: datetime = datetime.fromisoformat(at)
+            except ValueError:
+                return f"에러: 잘못된 ISO datetime 형식입니다 '{at}'. 예상 형식: YYYY-MM-DDTHH:MM:SS"
+
             at_ms: int = int(dt.timestamp() * 1000)
             schedule: CronSchedule = CronSchedule(kind="at", at_ms=at_ms)
 
             delete_after = True
-
         else:
             return "에러: every_seconds 또는 cron_expr 중 하나는 필요합니다."
 

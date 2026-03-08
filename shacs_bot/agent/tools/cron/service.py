@@ -129,7 +129,6 @@ class CronService:
             except Exception as e:
                 logger.warning(f"cron store를 로드하는 중 오류가 발생했습니다: {e}")
                 self._store = CronStore()
-
         else:
             self._store = CronStore()
 
@@ -215,7 +214,7 @@ class CronService:
             return None
 
         times: list[int] = [job.state.next_run_at_ms for job in self._store.jobs
-                            if job.enabled and job.state.next_run_at_ms]
+                                if job.enabled and job.state.next_run_at_ms]
         return min(times) if times else None
 
     def stop(self) -> None:
@@ -238,7 +237,6 @@ class CronService:
             job.state.last_status = "ok"
             job.state.last_error = None
             logger.info(f"Cron: 작업 '{job.name}' 성공")
-
         except Exception as e:
             job.state.last_status = "error"
             job.state.last_error = str(e)
@@ -251,11 +249,9 @@ class CronService:
         if job.schedule.kind == "at":
             if job.delete_after_run:
                 self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
-
             else:
                 job.enabled = False
                 job.state.next_run_at_ms = None
-
         else:
             # 다음 작업을 계산합니다
             job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
@@ -269,7 +265,7 @@ class CronService:
         now: int = _now_ms()
         due_jobs: list[CronJob] = [
             job for job in self._store.jobs
-            if job.enabled and job.state.next_run_at_ms and (now >= job.state.next_run_at_ms)
+                if job.enabled and job.state.next_run_at_ms and (now >= job.state.next_run_at_ms)
         ]
 
         for job in due_jobs:
@@ -352,7 +348,6 @@ class CronService:
 
                 if enabled:
                     job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
-
                 else:
                     job.state.next_run_at_ms = None
 
