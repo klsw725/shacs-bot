@@ -6,6 +6,7 @@ from loguru import logger
 
 from shacs_bot.bus.events import OutboundMessage, InboundMessage
 from shacs_bot.bus.networks import MessageBus
+from shacs_bot.config.schema import Base
 
 
 class BaseChannel(ABC):
@@ -16,7 +17,7 @@ class BaseChannel(ABC):
     """
     name: str = "base"
 
-    def __init__(self, config: Any, bus: MessageBus):
+    def __init__(self, config: Base, bus: MessageBus):
         """
         채널 초기화.
 
@@ -24,9 +25,13 @@ class BaseChannel(ABC):
             config: 채널 스팩 설정.
             bus: 통신을 위한 메시지 버스
         """
-        self._config: Any = config
+        self._config: Base = config
         self._bus: MessageBus = bus
         self._running: bool = False
+
+    @property
+    def config(self) -> Any:
+        return self._config
 
     @abstractmethod
     async def start(self) -> None:
