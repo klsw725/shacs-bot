@@ -115,6 +115,14 @@ class AgentLoop:
 
         self._register_default_tools()
 
+    @property
+    def tools(self) -> ToolRegistry:
+        return self._tools
+
+    @property
+    def model(self) -> str:
+        return self._model
+
     def _register_default_tools(self) -> None:
         """기본 도구 세트를 등록합니다."""
         allowed_dir: Path | None = self._workspace if self._restrict_to_workspace else None

@@ -68,6 +68,9 @@ class CronService:
         self._timer_task: asyncio.Task | None = None
         self._running: bool = False
 
+    def set_job(self, on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]]) -> None:
+        self._on_job = on_job
+
     async def start(self) -> None:
         """cron 서비스를 시작합니다."""
         self._running: bool = True

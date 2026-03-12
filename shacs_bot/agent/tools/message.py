@@ -47,6 +47,10 @@ class MessageTool(Tool):
         self._default_message_id = default_message_id
         self._sent_in_turn: bool = False
 
+    @property
+    def sent_in_turn(self) -> bool:
+        return self._sent_in_turn
+
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """현재 메시지 컨텍스트 설정"""
         self._default_channel = channel
