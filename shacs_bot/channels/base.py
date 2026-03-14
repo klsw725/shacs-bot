@@ -13,7 +13,7 @@ class BaseChannel(ABC):
     """
     채팅 채널 구현을 위한 추상 기본 클래스.
 
-    각 채널(Telegram, Discord 등)은 nanobot 메시지 버스와 통합하기 위해 이 인터페이스를 구현해야 한다.
+    각 채널(Telegram, Discord 등)은 shacs-bot 메시지 버스와 통합하기 위해 이 인터페이스를 구현해야 한다.
     """
     name: str = "base"
 

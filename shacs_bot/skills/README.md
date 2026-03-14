@@ -1,6 +1,6 @@
-# nanobot Skills
+# shacs-bot Skills
 
-This directory contains built-in skills that extend nanobot's capabilities.
+This directory contains built-in skills that extend shacs-bot's capabilities.
 
 ## Skill Format
 
