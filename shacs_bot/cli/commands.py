@@ -1,4 +1,5 @@
 """shacs-bot CLI 커멘드"""
+
 import asyncio
 import os
 import select
@@ -21,9 +22,28 @@ from shacs_bot.agent.loop import AgentLoop
 from shacs_bot.agent.tools.cron.service import CronService
 from shacs_bot.bus.events import OutboundMessage, InboundMessage
 from shacs_bot.bus.networks import MessageBus
-from shacs_bot.config.loader import load_config, get_data_dir, get_config_path
-from shacs_bot.config.schema import Config, ProviderConfig, HeartbeatConfig, ChannelsConfig, WhatsAppConfig, \
-    DiscordConfig, FeishuConfig, MochatConfig, TelegramConfig, SlackConfig, DingTalkConfig, QQConfig, EmailConfig
+from shacs_bot.config.loader import load_config, get_config_path
+from shacs_bot.config.paths import (
+    get_cli_history_path,
+    get_cron_dir,
+    get_data_dir,
+    get_bridge_install_dir,
+)
+from shacs_bot.config.schema import (
+    Config,
+    ProviderConfig,
+    HeartbeatConfig,
+    ChannelsConfig,
+    WhatsAppConfig,
+    DiscordConfig,
+    FeishuConfig,
+    MochatConfig,
+    TelegramConfig,
+    SlackConfig,
+    DingTalkConfig,
+    QQConfig,
+    EmailConfig,
+)
 from shacs_bot.providers.base import LLMProvider
 from shacs_bot.providers.registry import ProviderSpec, PROVIDERS
 from shacs_bot.utils.helpers import sync_workspace_template
@@ -31,6 +51,7 @@ from shacs_bot.utils.helpers import sync_workspace_template
 # 윈도우 콘솔을 위한 강제 UTF-8 인코딩
 if sys.platform == "win32":
     import locale
+
     if sys.stdout.encoding != "utf-8":
         os.environ["PYTHONIOENCODING"] = "utf-8"
         # utf-8 인코딩으로 stdout/stderr 재 오픈
@@ -55,7 +76,7 @@ EXIT_COMMANDS: set[str] = {"exit", "quit", "/exit", "quit", ":q"}
 # ---------------------------------------------------------------------------
 
 _PROMPT_SESSION: PromptSession | None = None
-_SAVED_TERM_ATTRS: list | None = None    # 종료 시 복원되는 원래의 termios 설정
+_SAVED_TERM_ATTRS: list | None = None  # 종료 시 복원되는 원래의 termios 설정
 
 
 def _flush_pending_tty_input() -> None:
@@ -69,6 +90,7 @@ def _flush_pending_tty_input() -> None:
 
     try:
         import termios
+
         termios.tcflush(fd, termios.TCIFLUSH)
     except Exception:
         pass
@@ -84,6 +106,7 @@ def _flush_pending_tty_input() -> None:
     except Exception:
         return
 
+
 def _restore_terminal() -> None:
     """터미널을 원래 상태(에코, 줄 단위 버퍼링 등)로 복원한다."""
     if _SAVED_TERM_ATTRS is None:
@@ -91,9 +114,11 @@ def _restore_terminal() -> None:
 
     try:
         import termios
+
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERM_ATTRS)
     except Exception:
         pass
+
 
 def _init_prompt_session() -> None:
     """지속적인 파일 히스토리를 사용하는 prompt_toolkit 세션을 생성한다."""
@@ -102,18 +127,20 @@ def _init_prompt_session() -> None:
     # 종료 시 복원할 수 있도록 터미널 상태를 저장한다.
     try:
         import termios
+
         _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
     except Exception:
         pass
 
-    history_file: Path = Path.home() / ".shacs-bot" / "history" / "cli.history"
+    history_file: Path = get_cli_history_path()
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     _PROMPT_SESSION = PromptSession(
         history=FileHistory(str(history_file)),
         enable_open_in_editor=False,
-        multiline=False,    # 엔터 전송 (싱글 라인 모드)
+        multiline=False,  # 엔터 전송 (싱글 라인 모드)
     )
+
 
 def _print_agent_response(response: str, render_markdown: bool) -> None:
     """일관된 터미널 스타일로 어시스턴트 응답을 렌더링한다."""
@@ -121,22 +148,24 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
     body: Markdown | Text = Markdown(content) if render_markdown else Text(content)
 
     console.print()
-    console.print(f"[cyan]{__logo__} nanobot[/cyan]")
+    console.print(f"[cyan]{__logo__} shacs-bot[/cyan]")
     console.print(body)
     console.print()
+
 
 def _is_exit_command(command: str) -> bool:
     """입력이 인터랙티브 채팅을 종료해야 하는 경우 True를 반환한다."""
     return command.lower() in EXIT_COMMANDS
+
 
 async def _read_interactive_input_async() -> str:
     """
     prompt_toolkit을 사용하여 사용자 입력을 읽는다 (붙여넣기, 히스토리, 화면 표시 처리).
 
     prompt_toolkit은 기본적으로 다음을 처리한다:
-	•	멀티라인 붙여넣기 (bracketed paste mode)
-	•	히스토리 탐색 (위/아래 화살표)
-	•	깨끗한 화면 표시 (고스트 문자나 화면 깨짐 없음)
+        •	멀티라인 붙여넣기 (bracketed paste mode)
+        •	히스토리 탐색 (위/아래 화살표)
+        •	깨끗한 화면 표시 (고스트 문자나 화면 깨짐 없음)
     """
     if _PROMPT_SESSION is None:
         raise RuntimeError("_init_prompt_session()을 먼저 호출하세요.")
@@ -149,9 +178,10 @@ async def _read_interactive_input_async() -> str:
     except EOFError as exc:
         raise KeyboardInterrupt from exc
 
+
 def version_callback(value: bool) -> None:
     if value:
-        console.print(f"{__logo__} nanobot v{__version__}")
+        console.print(f"{__logo__} shacs-bot v{__version__}")
         raise typer.Exit()
 
 
@@ -162,18 +192,23 @@ def version_callback(value: bool) -> None:
 
 @app.callback()
 def main(
-        version: bool = typer.Option(
-            None, "--version", "-v", callback=version_callback, is_eager=True,
-        ),
+    version: bool = typer.Option(
+        None,
+        "--version",
+        "-v",
+        callback=version_callback,
+        is_eager=True,
+    ),
 ):
     """shacs-bot - Personal AI Assistant."""
     pass
 
+
 @app.command()
 def onboard():
-    """shacs-bot 워크스페이스와 설정 초기화 """
+    """shacs-bot 워크스페이스와 설정 초기화"""
     from shacs_bot.config.loader import get_config_path, load_config, save_config
-    from shacs_bot.utils import get_workspace_path
+    from shacs_bot.config.paths import get_workspace_path
     from shacs_bot.utils.helpers import sync_workspace_template
 
     config_path: Path = get_config_path()
@@ -191,7 +226,9 @@ def onboard():
             config: Config = load_config(config_path)
             save_config(config)
 
-            console.print(f"[green]✓[/green] {config_path}의 설정이 갱신되었습니다. (기존 값은 유지됨)")
+            console.print(
+                f"[green]✓[/green] {config_path}의 설정이 갱신되었습니다. (기존 값은 유지됨)"
+            )
     else:
         save_config(Config())
 
@@ -208,10 +245,13 @@ def onboard():
 
     console.print(f"\n{__logo__} shacs-bot이 준비되었습니다!")
     console.print("\n다음 단계:")
-    console.print("  1. [cyan]~/.nanobot/config.json[/cyan] 파일에 API 키를 추가하세요")
+    console.print("  1. [cyan]~/.shacs-bot/config.json[/cyan] 파일에 API 키를 추가하세요")
     console.print("     발급: https://openrouter.ai/keys")
-    console.print("  2. 채팅 시작: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
-    console.print("\n[dim]Telegram / WhatsApp 연동이 필요하신가요? https://github.com/HKUDS/nanobot#-chat-apps 참고[/dim]")
+    console.print('  2. 채팅 시작: [cyan]shacs-bot agent -m "Hello!"[/cyan]')
+    console.print(
+        "\n[dim]Telegram / WhatsApp 연동이 필요하신가요? https://github.com/HKUDS/shacs-bot#-chat-apps 참고[/dim]"
+    )
+
 
 def _make_provider(config: Config) -> LLMProvider:
     """config 설정을 기반으로 적절한 LLM 제공자를 생성합니다.."""
@@ -238,7 +278,11 @@ def _make_provider(config: Config) -> LLMProvider:
     from shacs_bot.providers.registry import find_by_name
 
     spec: ProviderSpec = find_by_name(provider_name)
-    if not model.startswith("bedrock/") and not (provider and provider.api_key) and not (spec and spec.is_oauth):
+    if (
+        not model.startswith("bedrock/")
+        and not (provider and provider.api_key)
+        and not (spec and spec.is_oauth)
+    ):
         console.print("[red]에러: API 키가 설정되지 않았습니다.[/red]")
         console.print("~/.shacs-bot/config.json 파일의 providers 섹션에 API 키를 설정하세요.")
         raise typer.Exit(1)
@@ -259,10 +303,10 @@ def _make_provider(config: Config) -> LLMProvider:
 
 @app.command()
 def gateway(
-        port: int = typer.Option(18790, "--port", "-p", help="게이트웨이 포트"),
-        workspace: str | None = typer.Option(None, "--workspace", "-w", help="workspace 디렉토리"),
-        config: str | None = typer.Option(None, "--config", "-c", help="Config 파일 경로"),
-        verbose: bool = typer.Option(False, "--verbose", "-v", help="자세한 출력")
+    port: int = typer.Option(18790, "--port", "-p", help="게이트웨이 포트"),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="workspace 디렉토리"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Config 파일 경로"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="자세한 출력"),
 ) -> None:
     """shacs-bot 게이트웨이 시작"""
     import logging
@@ -295,17 +339,17 @@ def gateway(
     cron_store_path: Path = config.workspace_path / "cron" / "jobs.json"
     cron: CronService = CronService(cron_store_path)
 
-    # 크론 서비스와 함께 에이전트 생성
+    provider.generation.temperature = config.agents.defaults.temperature
+    provider.generation.max_tokens = config.agents.defaults.max_tokens
+    provider.generation.reasoning_effort = config.agents.defaults.reasoning_effort
+
     agent_loop: AgentLoop = AgentLoop(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
         memory_window=config.agents.defaults.memory_window,
-        reasoning_effort=config.agents.defaults.reasoning_effort,
         brave_api_key=config.tools.web.search.api_key or None,
         web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
@@ -315,7 +359,6 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
     )
-
 
     # 크론 callback 설정 (에이전트 필요)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -354,11 +397,13 @@ def gateway(
             return response
 
         if job.payload.deliver and job.payload.to and response:
-            await bus.publish_outbound(OutboundMessage(
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to,
-                content=response,
-            ))
+            await bus.publish_outbound(
+                OutboundMessage(
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to,
+                    content=response,
+                )
+            )
 
         return response
 
@@ -378,15 +423,17 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: {hb_cfg.interval_s}s 마다 실행")
 
-
     async def on_heartbeat_notify(response: str) -> None:
         """heartbeat 응답 유저 채널의 전달"""
         from shacs_bot.bus.events import OutboundMessage
+
         channel, chat_id = _pick_heartbeat_target()
         if channel == "cli":
             return  # 전달 가능한 외부 채널 존재하지 않음.
 
-        await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
+        await bus.publish_outbound(
+            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+        )
 
     async def _pick_heartbeat_target() -> tuple[str, str]:
         """heartbeat에 의해 트리거된 메시지를 전달할 수 있는 채널/채팅 대상(routable target)을 선택한다."""
@@ -422,7 +469,6 @@ def gateway(
             on_progress=_silent,
         )
 
-
     heartbeat: HeartbeatService = HeartbeatService(
         workspace=config.workspace_path,
         provider=provider,
@@ -433,15 +479,11 @@ def gateway(
         enabled=hb_cfg.enabled,
     )
 
-
     async def run() -> None:
         try:
             await cron.start()
             await heartbeat.start()
-            await asyncio.gather(
-                agent_loop.run(),
-                channels.start_all()
-            )
+            await asyncio.gather(agent_loop.run(), channels.start_all())
         except KeyboardInterrupt:
             console.print("\n종료 중...")
         finally:
@@ -461,10 +503,14 @@ def gateway(
 
 @app.command()
 def agent(
-        message: str = typer.Option(None, "--message", "-m", help="에이전트에게 보낼 메시지"),
-        session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
-        markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="어시스턴트 출력을 Markdown 형식으로 렌더링합니다."),
-        logs: bool = typer.Option(False, "--logs/--no-logs", help="채팅 중 shacs-bot 런타임 로그를 표시합니다."),
+    message: str = typer.Option(None, "--message", "-m", help="에이전트에게 보낼 메시지"),
+    session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
+    markdown: bool = typer.Option(
+        True, "--markdown/--no-markdown", help="어시스턴트 출력을 Markdown 형식으로 렌더링합니다."
+    ),
+    logs: bool = typer.Option(
+        False, "--logs/--no-logs", help="채팅 중 shacs-bot 런타임 로그를 표시합니다."
+    ),
 ):
     """에이전트와 직접 상호작용합니다."""
 
@@ -475,7 +521,7 @@ def agent(
     provider = _make_provider(config)
 
     # 도구 사용을 위한 cron 서비스를 생성합니다 (CLI에서는 실행 중이 아닌 한 콜백이 필요하지 않습니다).
-    cron_store_path: Path = get_data_dir() / "cron" / "jobs.json"
+    cron_store_path: Path = get_cron_dir() / "jobs.json"
     cron: CronService = CronService(cron_store_path)
 
     if logs:
@@ -483,16 +529,17 @@ def agent(
     else:
         logger.disable("shacs-bot")
 
+    provider.generation.temperature = config.agents.defaults.temperature
+    provider.generation.max_tokens = config.agents.defaults.max_tokens
+    provider.generation.reasoning_effort = config.agents.defaults.reasoning_effort
+
     agent_loop: AgentLoop = AgentLoop(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
         memory_window=config.agents.defaults.memory_window,
-        reasoning_effort=config.agents.defaults.reasoning_effort,
         brave_api_key=config.tools.web.search.api_key or None,
         web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
@@ -505,14 +552,15 @@ def agent(
     if message:
         # 싱글 메시지 모드 - 직접 call, 버스는 필요하지 않음
 
-        # 로그가 꺼져 있을 때는 스피너를 표시하고(놓칠 출력이 없음), 로그가 켜져 있을 때는 스피너를 표시하지 않습니다.
         def _thinking_ctx():
-            if logs:
-                from contextlib import nullcontext
-                return nullcontext()
+            from contextlib import contextmanager
 
-            # prompt_toolkit 입력 처리와 함께 애니메이션 스피너를 안전하게 사용할 수 있음
-            return console.status("[dim]shacs-bot 생각 중...[/dim]", spinner="dots")
+            @contextmanager
+            def _thinking():
+                console.print("[dim]shacs-bot 생각 중...[/dim]")
+                yield
+
+            return _thinking()
 
         async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
             ch: ChannelsConfig = agent_loop.channels_config
@@ -526,24 +574,26 @@ def agent(
 
         async def run_once():
             with _thinking_ctx():
-                response: str = await agent_loop.process_direct(content=message, session_key=session_id, on_progress=_cli_progress)
+                response: str = await agent_loop.process_direct(
+                    content=message, session_key=session_id, on_progress=_cli_progress
+                )
 
             _print_agent_response(response=response, render_markdown=markdown)
             await agent_loop.close_mcp()
-
 
         asyncio.run(run_once())
     else:
         # 인터렉티브 모드 - 버스를 통해서 다른 채널들로 라우팅합니다.
         _init_prompt_session()
 
-        console.print(f"{__logo__} 인터랙티브 모드 (종료하려면 [bold]exit[/bold] 또는 [bold]Ctrl+C[/bold] 입력)\n")
+        console.print(
+            f"{__logo__} 인터랙티브 모드 (종료하려면 [bold]exit[/bold] 또는 [bold]Ctrl+C[/bold] 입력)\n"
+        )
 
         if ":" in session_id:
             cli_channel, cli_chat_id = session_id.split(":", 1)
         else:
             cli_channel, cli_chat_id = "cli", session_id
-
 
         def _handle_signal(signum: int, frame):
             sig_name: str = signal.Signals(signum).name
@@ -552,19 +602,17 @@ def agent(
 
             sys.exit(0)
 
-
         signal.signal(signal.SIGINT, _handle_signal)
         signal.signal(signal.SIGTERM, _handle_signal)
 
         # SIGHUP은 Windows에서 사용할 수 없습니다.
-        if hasattr(signal, 'SIGHUP'):
+        if hasattr(signal, "SIGHUP"):
             signal.signal(signal.SIGHUP, _handle_signal)
 
         # 닫힌 파이프에 쓰기 작업을 할 때 프로세스가 조용히 종료되는 것을 방지하기 위해 SIGPIPE를 무시합니다.
         # SIGPIPE Windows에서 사용할 수 없습니다.
-        if hasattr(signal, 'SIGPIPE'):
+        if hasattr(signal, "SIGPIPE"):
             signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-
 
         async def run_interactive():
             bus_task: asyncio.Task = asyncio.create_task(agent_loop.run())
@@ -577,7 +625,9 @@ def agent(
             async def _consume_outbound():
                 while True:
                     try:
-                        msg: OutboundMessage = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                        msg: OutboundMessage = await asyncio.wait_for(
+                            bus.consume_outbound(), timeout=1.0
+                        )
                         if msg.metadata.get("_progress"):
                             is_tool_hint: bool = msg.metadata.get("_tool_hint", False)
                             ch: ChannelsConfig = agent_loop.channels_config
@@ -620,12 +670,14 @@ def agent(
                         turn_done.clear()
                         turn_response.clear()
 
-                        await bus.publish_inbound(InboundMessage(
-                            channel=cli_channel,
-                            sender_id="user",
-                            chat_id=cli_chat_id,
-                            content=user_input,
-                        ))
+                        await bus.publish_inbound(
+                            InboundMessage(
+                                channel=cli_channel,
+                                sender_id="user",
+                                chat_id=cli_chat_id,
+                                content=user_input,
+                            )
+                        )
 
                         with _thinking_ctx():
                             await turn_done.wait()
@@ -645,7 +697,6 @@ def agent(
                 outbound_task.cancel()
                 await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
                 await agent_loop.close_mcp()
-
 
         asyncio.run(run_interactive())
 
@@ -672,81 +723,49 @@ def channels_status():
 
     # WhatsApp
     wa: WhatsAppConfig = config.channels.whatsapp
-    table.add_row(
-        "WhatsApp",
-        "✓" if wa.enabled else "✗",
-        wa.bridge_url
-    )
+    table.add_row("WhatsApp", "✓" if wa.enabled else "✗", wa.bridge_url)
 
     dc: DiscordConfig = config.channels.discord
-    table.add_row(
-        "Discord",
-        "✓" if dc.enabled else "✗",
-        dc.gateway_url
-    )
+    table.add_row("Discord", "✓" if dc.enabled else "✗", dc.gateway_url)
 
     # Feishu
     fs: FeishuConfig = config.channels.feishu
     fs_config: str = f"app_id: {fs.app_id[:10]}..." if fs.app_id else "[dim]not configured[/dim]"
-    table.add_row(
-        "Feishu",
-        "✓" if fs.enabled else "✗",
-        fs_config
-    )
+    table.add_row("Feishu", "✓" if fs.enabled else "✗", fs_config)
 
     # Mochat
     mc: MochatConfig = config.channels.mochat
     mc_base: str = mc.base_url or "[dim]not configured[/dim]"
-    table.add_row(
-        "Mochat",
-        "✓" if mc.enabled else "✗",
-        mc_base
-    )
+    table.add_row("Mochat", "✓" if mc.enabled else "✗", mc_base)
 
     # Telegram
     tg: TelegramConfig = config.channels.telegram
     tg_config: str = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
-    table.add_row(
-        "Telegram",
-        "✓" if tg.enabled else "✗",
-        tg_config
-    )
+    table.add_row("Telegram", "✓" if tg.enabled else "✗", tg_config)
 
     # Slack
     slack: SlackConfig = config.channels.slack
-    slack_config: str = "socket" if slack.app_token and slack.bot_token else "[dim]not configured[/dim]"
-    table.add_row(
-        "Slack",
-        "✓" if slack.enabled else "✗",
-        slack_config
+    slack_config: str = (
+        "socket" if slack.app_token and slack.bot_token else "[dim]not configured[/dim]"
     )
+    table.add_row("Slack", "✓" if slack.enabled else "✗", slack_config)
 
     # DingTalk
     dt: DingTalkConfig = config.channels.dingtalk
-    dt_config: str = f"client_id: {dt.client_id[:10]}..." if dt.client_id else "[dim]not configured[/dim]"
-    table.add_row(
-        "DingTalk",
-        "✓" if dt.enabled else "✗",
-        dt_config
+    dt_config: str = (
+        f"client_id: {dt.client_id[:10]}..." if dt.client_id else "[dim]not configured[/dim]"
     )
+    table.add_row("DingTalk", "✓" if dt.enabled else "✗", dt_config)
 
     # QQ
     qq: QQConfig = config.channels.qq
     qq_config: str = f"app_id: {qq.app_id[:10]}..." if qq.app_id else "[dim]not configured[/dim]"
-    table.add_row(
-        "QQ",
-        "✓" if qq.enabled else "✗",
-        qq_config
-    )
+    table.add_row("QQ", "✓" if qq.enabled else "✗", qq_config)
 
     # Email
     em: EmailConfig = config.channels.email
     em_config: str = em.imap_host if em.imap_host else "[dim]not configured[/dim]"
-    table.add_row(
-        "Email",
-        "✓" if em.enabled else "✗",
-        em_config
-    )
+    table.add_row("Email", "✓" if em.enabled else "✗", em_config)
 
     console.print(table)
 
@@ -756,9 +775,8 @@ def _get_bridge_dir() -> Path:
     import shutil
     import subprocess
 
-
     # 사용자의 bridge 위치
-    user_bridge: Path = Path.home() / ".shacs-bot" / "bridge"
+    user_bridge: Path = get_bridge_install_dir()
 
     # 이미 존재하는 지 확인
     if (user_bridge / "dist" / "index.js").exists():
@@ -818,7 +836,6 @@ def channels_login():
     """Link device via QR code."""
     import subprocess
 
-
     config: Config = load_config()
     bridge_dir: Path = _get_bridge_dir()
 
@@ -853,8 +870,12 @@ def status():
 
     console.print(f"{__logo__} shacs-bot 상태\n")
 
-    console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
-    console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
+    console.print(
+        f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}"
+    )
+    console.print(
+        f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}"
+    )
 
     if config_path.exists():
         console.print(f"Model: {config.agents.defaults.model}")
@@ -875,7 +896,9 @@ def status():
                     console.print(f"{spec.label}: [dim]설정 되지 않음[/dim]")
             else:
                 has_key = bool(p.api_key)
-                console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]설정 되지 않음[/dim]'}")
+                console.print(
+                    f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]설정 되지 않음[/dim]'}"
+                )
 
 
 # ============================================================================
@@ -899,7 +922,7 @@ def _register_login(name: str):
 
 @provider_app.command("login")
 def provider_login(
-        provider: str = typer.Argument(..., help="OAuth 제공자 (예: ‘openai-codex’, ‘github-copilot’)"),
+    provider: str = typer.Argument(..., help="OAuth 제공자 (예: ‘openai-codex’, ‘github-copilot’)"),
 ):
     """OAuth provider로 인증"""
 
@@ -923,6 +946,7 @@ def provider_login(
 def _login_openai_codex() -> None:
     try:
         from oauth_cli_kit import get_token, login_oauth_interactive, OAuthToken
+
         token: OAuthToken | None = None
         try:
             token = get_token()
@@ -933,11 +957,14 @@ def _login_openai_codex() -> None:
             token = login_oauth_interactive(
                 print_fn=lambda s: console.print(s),
                 prompt_fn=lambda s: typer.prompt(s),
+                originator="shacs-bot",
             )
         if not (token and token.access):
             console.print("[red]✗ Authentication failed[/red]")
             raise typer.Exit(1)
-        console.print(f"[green]✓ Authenticated with OpenAI Codex[/green]  [dim]{token.account_id}[/dim]")
+        console.print(
+            f"[green]✓ Authenticated with OpenAI Codex[/green]  [dim]{token.account_id}[/dim]"
+        )
     except ImportError:
         console.print("[red]oauth_cli_kit not installed. Run: pip install oauth-cli-kit[/red]")
         raise typer.Exit(1)
@@ -951,7 +978,12 @@ def _login_github_copilot() -> None:
 
     async def _trigger():
         from litellm import acompletion
-        await acompletion(model="github_copilot/gpt-4o", messages=[{"role": "user", "content": "hi"}], max_tokens=1)
+
+        await acompletion(
+            model="github_copilot/gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1,
+        )
 
     try:
         asyncio.run(_trigger())
@@ -963,20 +995,3 @@ def _login_github_copilot() -> None:
 
 if __name__ == "__main__":
     app()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
