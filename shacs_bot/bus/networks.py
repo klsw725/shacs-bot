@@ -17,7 +17,7 @@ class MessageBus:
 
     def __init__(self):
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
-        self.outbound = asyncio.Queue[OutboundMessage] = asyncio.Queue()
+        self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish a message from a channel to the agent."""
