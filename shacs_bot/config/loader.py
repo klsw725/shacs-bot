@@ -1,4 +1,5 @@
 """Configuration loading utilities."""
+
 import json
 from pathlib import Path
 from typing import Any
@@ -10,10 +11,6 @@ def get_config_path() -> Path:
     """Get the default configuration file path."""
     return Path.home() / ".shacs-bot" / "config.json"
 
-def get_data_dir() -> Path:
-    """Get the shacs-bot data directory."""
-    from shacs_bot.utils.helpers import get_data_path
-    return get_data_path()
 
 def camel_to_snake(string: str) -> str:
     """Convert camelCase to snake_case"""
@@ -24,6 +21,7 @@ def camel_to_snake(string: str) -> str:
         result.append(char.lower())
     return "".join(result)
 
+
 def convert_to_camel(data: Any) -> Any:
     """Convert camelCase keys to snake_case for Pydantic."""
     if isinstance(data, dict):
@@ -32,7 +30,8 @@ def convert_to_camel(data: Any) -> Any:
         return [convert_to_camel(item) for item in data]
     return data
 
-def load_config(config_path: Path | None) -> Config:
+
+def load_config(config_path: Path | None = None) -> Config:
     """
     Load configuration from file or create default.
 
@@ -57,6 +56,7 @@ def load_config(config_path: Path | None) -> Config:
 
     return Config()
 
+
 def _migration_config(data):
     """Migrate old config formats to current."""
     # Move tools.exec.restrictToWorkspace -> tools.restrictToWorkspace
@@ -67,6 +67,7 @@ def _migration_config(data):
 
     return data
 
+
 def save_config(config: Config, config_path: Path | None = None) -> None:
     """
     Save Configuration to file.
@@ -76,7 +77,7 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         config_path: Optional path to save to. Uses default if not provided.
     """
     path = config_path or get_config_path()
-    path.parent.mkdir(parents=True,  exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     # Convert to camelCase format
     data = config.model_dump(by_alias=True)

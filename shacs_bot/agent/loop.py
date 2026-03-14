@@ -1,4 +1,5 @@
 """에이전트 루프: 핵심 처리 엔진."""
+
 import asyncio
 import json
 import os
@@ -42,27 +43,26 @@ class AgentLoop:
     4. 도구 호출을 실행합니다.
     5. 응답을 다시 전송합니다.
     """
+
     _TOOL_RESULT_MAX_CHARS = 500
 
     def __init__(
-            self,
-            bus: MessageBus,
-            provider: LLMProvider,
-            workspace: Path,
-
-            model: str | None = None,
-            max_iterations: int = 40,
-            context_window_tokens: int = 65_536,
-
-            brave_api_key: str | None = None,
-            web_proxy: str | None = None,
-            exec_config: ExecToolConfig | None = None,
-            cron_service: CronService | None = None,
-
-            restrict_to_workspace: bool = False,
-            session_manager: SessionManager | None = None,
-            mcp_servers: dict | None = None,
-            channels_config: ChannelsConfig | None = None
+        self,
+        bus: MessageBus,
+        provider: LLMProvider,
+        workspace: Path,
+        model: str | None = None,
+        max_iterations: int = 40,
+        memory_window: int = 100,
+        context_window_tokens: int = 65_536,
+        brave_api_key: str | None = None,
+        web_proxy: str | None = None,
+        exec_config: ExecToolConfig | None = None,
+        cron_service: CronService | None = None,
+        restrict_to_workspace: bool = False,
+        session_manager: SessionManager | None = None,
+        mcp_servers: dict | None = None,
+        channels_config: ChannelsConfig | None = None,
     ):
         self._bus: MessageBus = bus
         self._channels_config: ChannelsConfig = channels_config
@@ -72,6 +72,7 @@ class AgentLoop:
         self._model: str = model or self._provider.get_default_model()
 
         self._max_iterations: int = max_iterations
+        self._memory_window: int = memory_window
         self._context_window_tokens: int = context_window_tokens
 
         self._brave_api_key: str | None = brave_api_key
@@ -91,7 +92,7 @@ class AgentLoop:
             brave_api_key=self._brave_api_key,
             web_proxy=self._web_proxy,
             exec_config=self._exec_config,
-            restrict_to_workspace=self._restrict_to_workspace
+            restrict_to_workspace=self._restrict_to_workspace,
         )
 
         self._running = False
@@ -100,7 +101,7 @@ class AgentLoop:
         self._mcp_connected = False
         self._mcp_connecting = False
 
-        self._active_tasks: dict[str, list[asyncio.Task]] = {}      # session_key -> tasks
+        self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock: asyncio.Lock = asyncio.Lock()
         self._memory_consolidator: MemoryConsolidator = MemoryConsolidator(
             workspace=self._workspace,
@@ -131,23 +132,23 @@ class AgentLoop:
         for clazz in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
             self._tools.register(clazz(workspace=self._workspace, allowed_dir=allowed_dir))
 
-        self._tools.register(ExecTool(
-            working_dir=str(self._workspace),
-            timeout=self._exec_config.timeout,
-            restrict_to_workspace=self._restrict_to_workspace,
-            path_append=self._exec_config.path_append
-        ))
-        self._tools.register(WebSearchTool(
-            api_key=self._brave_api_key,
-            proxy=self._web_proxy,
-        ))
+        self._tools.register(
+            ExecTool(
+                working_dir=str(self._workspace),
+                timeout=self._exec_config.timeout,
+                restrict_to_workspace=self._restrict_to_workspace,
+                path_append=self._exec_config.path_append,
+            )
+        )
+        self._tools.register(
+            WebSearchTool(
+                api_key=self._brave_api_key,
+                proxy=self._web_proxy,
+            )
+        )
         self._tools.register(WebFetchTool(proxy=self._web_proxy))
-        self._tools.register(MessageTool(
-            send_callback=self._bus.publish_outbound
-        ))
-        self._tools.register(SpawnTool(
-            manager=self._subagent
-        ))
+        self._tools.register(MessageTool(send_callback=self._bus.publish_outbound))
+        self._tools.register(SpawnTool(manager=self._subagent))
 
         if self._cron_service:
             self._tools.register(CronTool(self._cron_service))
@@ -161,7 +162,9 @@ class AgentLoop:
 
         while self._running:
             try:
-                msg: InboundMessage = await asyncio.wait_for(fut=self._bus.consume_inbound(), timeout=1.0)
+                msg: InboundMessage = await asyncio.wait_for(
+                    fut=self._bus.consume_inbound(), timeout=1.0
+                )
             except asyncio.TimeoutError:
                 continue
 
@@ -173,8 +176,13 @@ class AgentLoop:
             else:
                 task: asyncio.Task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
-                task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, [])
-                                                                    and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
+                task.add_done_callback(
+                    lambda t, k=msg.session_key: (
+                        self._active_tasks.get(k, []) and self._active_tasks[k].remove(t)
+                        if t in self._active_tasks.get(k, [])
+                        else None
+                    )
+                )
 
     async def _connect_mcp(self) -> None:
         """설정된 MCP 서버에 연결합니다 (한 번만, 지연 방식으로)."""
@@ -214,18 +222,18 @@ class AgentLoop:
 
         sub_cancelled: int = await self._subagent.cancel_by_session(msg.session_key)
         total: int = cancelled + sub_cancelled
-        content: str = f"⏹ {total}개의 작업을 중지했습니다." if total else "중지할 활성 작업이 없습니다."
-        await self._bus.publish_outbound(OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id, content=content
-        ))
+        content: str = (
+            f"⏹ {total}개의 작업을 중지했습니다." if total else "중지할 활성 작업이 없습니다."
+        )
+        await self._bus.publish_outbound(
+            OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+        )
 
     async def _handle_restart(self, msg):
         """os.execv를 통해 프로세스 재시작합니다."""
-        await self._bus.publish_outbound(OutboundMessage(
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            content="재시작 중..."
-        ))
+        await self._bus.publish_outbound(
+            OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="재시작 중...")
+        )
 
         async def _do_restart():
             await asyncio.sleep(1)
@@ -241,45 +249,53 @@ class AgentLoop:
                 if response is not None:
                     await self._bus.publish_outbound(response)
                 elif msg.channel == "cli":
-                    await self._bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content="",
-                        metadata=msg.metadata or {},
-                    ))
+                    await self._bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content="",
+                            metadata=msg.metadata or {},
+                        )
+                    )
             except asyncio.CancelledError:
                 logger.info("세션 {}에 대한 작업이 취소되었습니다.", msg.session_key)
                 raise
             except Exception:
-                logger.exception("세션 {}의 메시지를 처리하는 중 오류가 발생했습니다.", msg.session_key)
-                await self._bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content="죄송합니다, 오류가 발생했습니다."
-                ))
+                logger.exception(
+                    "세션 {}의 메시지를 처리하는 중 오류가 발생했습니다.", msg.session_key
+                )
+                await self._bus.publish_outbound(
+                    OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="죄송합니다, 오류가 발생했습니다.",
+                    )
+                )
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """라우팅 정보가 필요한 모든 도구의 컨텍스트를 업데이트합니다."""
         for name in ("message", "spawn", "cron"):
             if tool := self._tools.get(name):
                 if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id if name == "message" else []]))
+                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
 
     async def _process_message(
-            self,
-            msg: InboundMessage,
-            session_key: str = None,
-            on_progress: Callable[[str], Awaitable[None]] | None = None,
+        self,
+        msg: InboundMessage,
+        session_key: str = None,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """단일 인바운드 메시지를 처리하고 응답을 반환합니다."""
         # 시스템 메시지: chat_id에서 파싱 ("channel:chat_id")
         if msg.channel == "system":
-            channel, chat_id = (msg.chat_id.split(":", 1)
-                                    if ":" in msg.chat_id
-                                    else ("cli", msg.chat_id))
+            channel, chat_id = (
+                msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
+            )
 
             logger.info("{}로부터의 시스템 메시지를 처리 중입니다.", msg.sender_id)
-            self._set_tool_context(channel=channel, chat_id=chat_id, message_id=msg.metadata.get("message_id"))
+            self._set_tool_context(
+                channel=channel, chat_id=chat_id, message_id=msg.metadata.get("message_id")
+            )
 
             key: str = f"{channel}:{chat_id}"
             session: Session = self._sessions.get_or_create(key=key)
@@ -315,14 +331,14 @@ class AgentLoop:
                     return OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content="메모리 아카이브에 실패했습니다. 세션이 초기화되지 않았습니다. 다시 시도해 주세요."
+                        content="메모리 아카이브에 실패했습니다. 세션이 초기화되지 않았습니다. 다시 시도해 주세요.",
                     )
             except Exception:
                 logger.exception("{} /new 아카이브 실패", session.key)
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content="메모리 아카이브에 실패했습니다. 세션이 초기화되지 않았습니다. 다시 시도해 주세요."
+                    content="메모리 아카이브에 실패했습니다. 세션이 초기화되지 않았습니다. 다시 시도해 주세요.",
                 )
 
             session.clear()
@@ -330,9 +346,7 @@ class AgentLoop:
             self._sessions.invalidate(session.key)
 
             return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content="새로운 세션이 시작되었습니다."
+                channel=msg.channel, chat_id=msg.chat_id, content="새로운 세션이 시작되었습니다."
             )
         elif cmd == "/help":
             return OutboundMessage(
@@ -344,12 +358,14 @@ class AgentLoop:
                     /stop — 현재 작업을 중지합니다
                     /restart - 봇을 재시작합니다
                     /help — 사용 가능한 명령어를 표시합니다 
-                """
+                """,
             )
 
         await self._memory_consolidator.maybe_consolidate_by_tokens(session=session)
 
-        self._set_tool_context(channel=msg.channel, chat_id=msg.chat_id, message_id=msg.metadata.get('message_id'))
+        self._set_tool_context(
+            channel=msg.channel, chat_id=msg.chat_id, message_id=msg.metadata.get("message_id")
+        )
 
         if message_tool := self._tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -364,22 +380,21 @@ class AgentLoop:
             chat_id=msg.chat_id,
         )
 
-
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta: dict[str, Any] = dict(msg.metadata or {})
             meta["_progress"] = True
             meta["_tool_hint"] = tool_hint
-            await self._bus.publish_outbound(OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=content,
-                metadata=meta,
-            ))
-
+            await self._bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=content,
+                    metadata=meta,
+                )
+            )
 
         final_content, _, all_msg = await self._run_agent_loop(
-            init_messages=initial_messages,
-            on_progress=on_progress or _bus_progress
+            init_messages=initial_messages, on_progress=on_progress or _bus_progress
         )
         if final_content is None:
             final_content = "처리는 완료했지만 제공할 응답이 없습니다."
@@ -403,9 +418,9 @@ class AgentLoop:
         )
 
     async def _run_agent_loop(
-            self,
-            init_messages: list[dict[str, Any]],
-            on_progress: Callable[..., Awaitable[None]] | None = None,
+        self,
+        init_messages: list[dict[str, Any]],
+        on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict[str, Any]]]:
         """에이전트 반복 루프를 실행합니다. (final_content, tools_used, messages)를 반환합니다."""
         messages: list[dict[str, Any]] = init_messages
@@ -427,8 +442,7 @@ class AgentLoop:
                     await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
                 tool_call_dicts: list[dict[str, Any]] = [
-                    tool_call.to_openai_tool_call()
-                    for tool_call in response.tool_calls
+                    tool_call.to_openai_tool_call() for tool_call in response.tool_calls
                 ]
                 messages: list[dict[str, Any]] = self._context.add_assistant_message(
                     messages=messages,
@@ -455,7 +469,9 @@ class AgentLoop:
                 # 이렇게 하면 컨텍스트가 오염되어 영구적인 400 에러 루프(#1303)가 발생할 수 있다.
                 if response.finish_reason == "error":
                     logger.error("LLM이 오류를 반환했습니다: {}", (clean or "")[:200])
-                    final_content = clean or "죄송합니다. AI 모델을 호출하는 중 오류가 발생했습니다."
+                    final_content = (
+                        clean or "죄송합니다. AI 모델을 호출하는 중 오류가 발생했습니다."
+                    )
                     break
 
                 messages: list[dict[str, Any]] = self._context.add_assistant_message(
@@ -483,11 +499,17 @@ class AgentLoop:
             role: str = entry.get("role")
             content: Any = entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
-                continue    # 내용이 없는 assistant 메시지는 저장하지 않고 건너뛴다 — 세션 컨텍스트를 망가뜨릴 수 있기 때문이다.
-            elif role == "tool" and isinstance(content, str) and (len(content) > self._TOOL_RESULT_MAX_CHARS):
-                entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (중략)"
+                continue  # 내용이 없는 assistant 메시지는 저장하지 않고 건너뛴다 — 세션 컨텍스트를 망가뜨릴 수 있기 때문이다.
+            elif (
+                role == "tool"
+                and isinstance(content, str)
+                and (len(content) > self._TOOL_RESULT_MAX_CHARS)
+            ):
+                entry["content"] = content[: self._TOOL_RESULT_MAX_CHARS] + "\n... (중략)"
             elif role == "user":
-                if isinstance(content, str) and content.startswith(ContextBuilder.RUNTIME_CONTEXT_TAG):
+                if isinstance(content, str) and content.startswith(
+                    ContextBuilder.RUNTIME_CONTEXT_TAG
+                ):
                     # 런타임 컨텍스트 접두사는 제거하고, 사용자 텍스트만 유지한다.
                     parts: list[str] = content.split("\n\n", 1)
                     if len(parts) > 1 and parts[1].strip():
@@ -498,13 +520,16 @@ class AgentLoop:
                     filtered: list[dict[str, Any]] = []
 
                     for c in content:
-                        if c.get("type") == "text" and isinstance(c.get("text"), str) and c["text"].startswith(ContextBuilder.RUNTIME_CONTEXT_TAG):
-                            continue    # 멀티모달 메시지에서 런타임 컨텍스트를 제거
-                        elif c.get("type") == "image_url" and c.get("image_url", {}).get("url", "").startswith("data:image/"):
-                            filtered.append({
-                                "type": "text",
-                                "text": "[image]"
-                            })
+                        if (
+                            c.get("type") == "text"
+                            and isinstance(c.get("text"), str)
+                            and c["text"].startswith(ContextBuilder.RUNTIME_CONTEXT_TAG)
+                        ):
+                            continue  # 멀티모달 메시지에서 런타임 컨텍스트를 제거
+                        elif c.get("type") == "image_url" and c.get("image_url", {}).get(
+                            "url", ""
+                        ).startswith("data:image/"):
+                            filtered.append({"type": "text", "text": "[image]"})
                         else:
                             filtered.append(c)
 
@@ -518,18 +543,22 @@ class AgentLoop:
         session.updated_at = datetime.now()
 
     async def process_direct(
-            self,
-            content: str,
-            session_key: str = "cli:direct",
-            channel: str = "cli",
-            chat_id: str = "direct",
-            on_progress: Callable[[str], Awaitable[None]] | None = None,
+        self,
+        content: str,
+        session_key: str = "cli:direct",
+        channel: str = "cli",
+        chat_id: str = "direct",
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         """메시지를 직접 처리합니다(CLI 또는 cron 용도)."""
         await self._connect_mcp()
 
-        msg: InboundMessage = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
-        response: OutboundMessage= await self._process_message(msg=msg, session_key=session_key, on_progress=on_progress)
+        msg: InboundMessage = InboundMessage(
+            channel=channel, sender_id="user", chat_id=chat_id, content=content
+        )
+        response: OutboundMessage = await self._process_message(
+            msg=msg, session_key=session_key, on_progress=on_progress
+        )
         return response.content if response else ""
 
     def _strip_think(self, content: str | None) -> str | None:
@@ -541,6 +570,7 @@ class AgentLoop:
 
     def _tool_hint(self, tool_calls: list[ToolCallRequest]):
         """툴 호출을 간단한 힌트 형태로 포맷합니다. 예: web_search("query")."""
+
         def _fmt(tc: ToolCallRequest):
             args = tc.arguments or {}
             val: dict = next(iter(args.values()), None) if isinstance(args, dict) else None
@@ -552,12 +582,12 @@ class AgentLoop:
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
     async def close_mcp(self) -> None:
-        """"MCP 연결 종료"""
+        """ "MCP 연결 종료"""
         if self._mcp_stack:
             try:
                 await self._mcp_stack.aclose()
             except (RuntimeError, BaseExceptionGroup):
-                pass    # MCP SDK cancel scope cleanup 로그는 시끄럽지만 무해함.
+                pass  # MCP SDK cancel scope cleanup 로그는 시끄럽지만 무해함.
 
             self._mcp_stack = None
 

@@ -25,34 +25,10 @@ def detect_image_mime(data: bytes) -> str | None:
 
     return None
 
-
 def ensure_dir(path: Path) -> Path:
     """Ensure a directory exists, creating it if necessary."""
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def get_data_path() -> Path:
-    """Get the shacs-bot data directory (~/.shacs-bot)."""
-    return ensure_dir(Path.home() / ".shacs-bot")
-
-
-def get_workspace_path(workspace: str | None = None) -> Path:
-    """
-    Get the workspace path.
-
-    Args:
-        workspace: Optional workspace path. Defaults to ~/.shacs-bot/workspace.
-
-    Returns:
-        Expanded and ensured workspace path.
-    """
-    if workspace:
-        path: Path = Path(workspace).expanduser()
-    else:
-        path: Path = Path.home() / ".shacs-bot" / "workspace"
-    return ensure_dir(path)
-
 
 def timestamp() -> str:
     """Get current timestamp in ISO format."""
@@ -60,7 +36,6 @@ def timestamp() -> str:
 
 
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
-
 
 def safe_filename(name: str) -> str:
     """안전하지 않은 경로 문자를 밑줄(_)로 대체합니다."""

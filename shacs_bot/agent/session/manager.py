@@ -1,4 +1,5 @@
 """대화 기록을 위한 세션 관리"""
+
 import json
 import shutil
 from dataclasses import dataclass, field
@@ -8,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from shacs_bot.config.paths import get_legacy_sessions_dir
 from shacs_bot.utils.helpers import ensure_dir, safe_filename
 
 
@@ -22,12 +24,13 @@ class Session:
     통합(consolidation) 과정은 MEMORY.md/HISTORY.md에 요약을 작성하지만,
     messages 리스트나 get_history()의 출력은 수정하지 않습니다.
     """
+
     key: str
     messages: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
-    last_consolidated: int = 0 # 파일로 이미 통합된 메시지 수
+    last_consolidated: int = 0  # 파일로 이미 통합된 메시지 수
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """세션에 메시지 추가"""
@@ -35,14 +38,14 @@ class Session:
             "role": role,
             "content": content,
             "timestamp": datetime.now().isoformat(),
-            **kwargs
+            **kwargs,
         }
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """LLM 입력용으로, 사용자 턴에 맞춰 정렬된 미통합 메시지를 반환합니다."""
-        unconsolidated: list[dict[str, Any]] = self.messages[self.last_consolidated:]
+        unconsolidated: list[dict[str, Any]] = self.messages[self.last_consolidated :]
         sliced: list[dict[str, Any]] = unconsolidated[-max_messages:]
 
         # 선행하는 user가 아닌 메시지를 제거하여 고아(orphaned) tool_result 블록이 생기지 않도록 합니다.
@@ -79,10 +82,11 @@ class SessionManager:
 
     세션은 sessions 디렉터리에 JSONL 파일 형식으로 저장됩니다.
     """
+
     def __init__(self, workspace: Path):
         self._workspace: Path = workspace
         self._session_dir: Path = ensure_dir(self._workspace / "sessions")
-        self._legacy_sessions_dir: Path = Path.home() / ".shacs-bot" / "sessions"
+        self._legacy_sessions_dir: Path = get_legacy_sessions_dir()
         self._cache: dict[str, Session] = {}
 
     def get_or_create(self, key: str) -> Session:
@@ -135,7 +139,11 @@ class SessionManager:
                     data: dict[str, Any] = json.loads(line)
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
-                        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
+                        created_at = (
+                            datetime.fromisoformat(data["created_at"])
+                            if data.get("created_at")
+                            else None
+                        )
                         last_consolidated = data.get("last_consolidated", 0)
                     else:
                         messages.append(data)
@@ -171,7 +179,7 @@ class SessionManager:
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
                 "metadata": session.metadata,
-                "last_consolidated": session.last_consolidated
+                "last_consolidated": session.last_consolidated,
             }
             f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
 
@@ -202,12 +210,14 @@ class SessionManager:
                         data: dict[str, Any] = json.loads(first_line)
                         if data.get("_type") == "metadata":
                             key: str = data.get("key") or path.stem.replace("_", ":", 1)
-                            sessions.append({
-                                "key": key,
-                                "created_at": data.get("created_at"),
-                                "updated_at": data.get("updated_at"),
-                                "path": str(path),
-                            })
+                            sessions.append(
+                                {
+                                    "key": key,
+                                    "created_at": data.get("created_at"),
+                                    "updated_at": data.get("updated_at"),
+                                    "path": str(path),
+                                }
+                            )
             except Exception:
                 continue
 

@@ -1,4 +1,5 @@
 """영구 agent 메모리를 위한 메모리 시스템"""
+
 import asyncio
 import json
 import weakref
@@ -15,6 +16,7 @@ from shacs_bot.utils.helpers import estimate_message_tokens, estimate_prompt_tok
 
 class MemoryStore:
     """이중 계층 메모리: MEMORY.md(장기 사실) + HISTORY.md(grep 검색 가능한 로그)."""
+
     _SAVE_MEMORY_TOOL = [
         {
             "type": "function",
@@ -26,16 +28,16 @@ class MemoryStore:
                     "properties": {
                         "history_entry": {
                             "type": "string",
-                            "description": "주요 사건/결정/주제를 요약한 하나의 문단(2~5문장). [YYYY-MM-DD HH:MM] 형식으로 시작하세요. grep 검색에 유용한 세부 정보를 포함하세요."
+                            "description": "주요 사건/결정/주제를 요약한 하나의 문단(2~5문장). [YYYY-MM-DD HH:MM] 형식으로 시작하세요. grep 검색에 유용한 세부 정보를 포함하세요.",
                         },
                         "memory_update": {
                             "type": "string",
                             "description": "마크다운 형식의 전체 업데이트된 장기 메모리입니다. 기존의 모든 사실에 새로운 사실을 추가해 포함하세요. 새로 추가할 내용이 없다면 변경 없이 그대로 반환하세요.",
-                        }
+                        },
                     },
-                    "required": ["history_entry", "memory_update"]
-                }
-            }
+                    "required": ["history_entry", "memory_update"],
+                },
+            },
         }
     ]
 
@@ -62,10 +64,10 @@ class MemoryStore:
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
     async def consolidate(
-            self,
-            messages: list[dict],
-            provider: LLMProvider,
-            model: str,
+        self,
+        messages: list[dict],
+        provider: LLMProvider,
+        model: str,
     ) -> bool:
         """LLM 툴 호출을 통해 오래된 메시지를 MEMORY.md와 HISTORY.md로 통합합니다."""
         if not messages:
@@ -82,13 +84,6 @@ class MemoryStore:
             {self._format_messages(messages)}
         """
 
-
-
-
-
-
-
-
         # 성공 시(아무 작업도 하지 않은 경우 포함) True를 반환하고, 실패 시 False를 반환합니다.
         if archive_all:
             old_messages: list[dict[str, Any]] = session.messages
@@ -102,7 +97,9 @@ class MemoryStore:
             if (len(session.messages) - session.last_consolidated) <= 0:
                 return True
 
-            old_messages: list[dict[str, Any]] = session.messages[session.last_consolidated:-keep_count]
+            old_messages: list[dict[str, Any]] = session.messages[
+                session.last_consolidated : -keep_count
+            ]
 
             if not old_messages:
                 return True
@@ -116,7 +113,9 @@ class MemoryStore:
                 continue
 
             tools: str = f" [tools: {', '.join(m['tools_used'])}" if m.get("tools_used") else ""
-            lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}")
+            lines.append(
+                f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}"
+            )
 
         current_memory: str = self.read_long_term()
         prompt: str = f"""
@@ -134,12 +133,9 @@ class MemoryStore:
                 messages=[
                     {
                         "role": "system",
-                        "content":"You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation.",
+                        "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation.",
                     },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
+                    {"role": "user", "content": prompt},
                 ],
                 tools=self._SAVE_MEMORY_TOOL,
                 model=model,
@@ -149,9 +145,13 @@ class MemoryStore:
                 logger.warning("메모리 통합: LLM이 save_memory를 호출하지 않아 건너뜁니다.")
                 return False
 
-            args: dict[str, Any] | str = self._normalize_save_memory_args(response.tool_calls[0].arguments)
+            args: dict[str, Any] | str = self._normalize_save_memory_args(
+                response.tool_calls[0].arguments
+            )
             if args is None:
-                logger.warning("메모리 통합: 예상지 않은 인자 타입. 비어있거나 list, dict 형태가 아닙니다e")
+                logger.warning(
+                    "메모리 통합: 예상지 않은 인자 타입. 비어있거나 list, dict 형태가 아닙니다e"
+                )
                 return False
 
             entry: Any = args.get("history_entry")
@@ -177,7 +177,9 @@ class MemoryStore:
             if not message.get("content"):
                 continue
 
-            tools: str = f" [tools: {', '.join(message['tools_used'])}]" if message.get("tools_used") else ""
+            tools: str = (
+                f" [tools: {', '.join(message['tools_used'])}]" if message.get("tools_used") else ""
+            )
             lines.append(
                 f"[{message.get('timestamp', '?')[:16]}] {message['role'].upper()}{tools}: {message['content']}"
             )
@@ -200,17 +202,18 @@ class MemoryStore:
 
 class MemoryConsolidator:
     """통합(consolidation) 정책, 락(lock) 관리, 그리고 세션 오프셋 업데이트를 담당한다."""
+
     _MAX_CONSOLIDATION_ROUNDS: int = 5
 
     def __init__(
-            self,
-            workspace: Path,
-            provider: LLMProvider,
-            model: str,
-            sessions: SessionManager,
-            context_window_tokens: int,
-            build_messages: Callable[..., list[dict[str, Any]]],
-            get_tool_definitions: Callable[[], list[dict[str, Any]]],
+        self,
+        workspace: Path,
+        provider: LLMProvider,
+        model: str,
+        sessions: SessionManager,
+        context_window_tokens: int,
+        build_messages: Callable[..., list[dict[str, Any]]],
+        get_tool_definitions: Callable[[], list[dict[str, Any]]],
     ):
         self._store: MemoryStore = MemoryStore(workspace)
 
@@ -232,9 +235,9 @@ class MemoryConsolidator:
         return await self._store.consolidate(messages, self._provider, self._model)
 
     def pick_consolidation_boundary(
-            self,
-            session: Session,
-            tokens_to_remove: int,
+        self,
+        session: Session,
+        tokens_to_remove: int,
     ) -> tuple[int, int] | None:
         """충분한 오래된 프롬프트 토큰을 제거할 수 있는 사용자 턴(user-turn) 경계를 선택한다."""
         start: int = session.last_consolidated
@@ -258,10 +261,10 @@ class MemoryConsolidator:
     def estimate_session_prompt_tokens(self, session: Session) -> tuple[int, str]:
         """일반 세션 히스토리 뷰에서 현재 프롬프트 크기를 추정한다."""
         history: list[dict[str, Any]] = session.get_history(max_messages=0)
-        channel, chat_id = (session.key.split(":", 1) if ":" in session.key else (None, None))
+        channel, chat_id = session.key.split(":", 1) if ":" in session.key else (None, None)
         probe_messages: list[dict[str, Any]] = self._build_messages(
             history=history,
-            current_message="[token-probe]",
+            current_messages="[token-probe]",
             channel=channel,
             chat_id=chat_id,
         )
@@ -276,7 +279,7 @@ class MemoryConsolidator:
         """/new 스타일 세션 롤오버를 위해 아직 통합되지 않은 전체 tail(마지막 구간)을 아카이브한다."""
         lock: asyncio.Lock = self.get_lock(session.key)
         async with lock:
-            snapshot: list[dict[str, Any]] = session.messages[session.last_consolidated:]
+            snapshot: list[dict[str, Any]] = session.messages[session.last_consolidated :]
             if not snapshot:
                 return True
 
@@ -307,7 +310,9 @@ class MemoryConsolidator:
                 if estimated <= target:
                     return
 
-                boundary: tuple[int, int] = self.pick_consolidation_boundary(session, max(1, estimated - target))
+                boundary: tuple[int, int] = self.pick_consolidation_boundary(
+                    session, max(1, estimated - target)
+                )
                 if boundary is None:
                     logger.debug(
                         "Token consolidation: no safe boundary for {} (round {})",
@@ -317,7 +322,7 @@ class MemoryConsolidator:
                     return
 
                 end_idx: int = boundary[0]
-                chunk: list[dict[str, Any]] = session.messages[session.last_consolidated:end_idx]
+                chunk: list[dict[str, Any]] = session.messages[session.last_consolidated : end_idx]
                 if not chunk:
                     return
 

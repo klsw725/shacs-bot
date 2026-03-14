@@ -1,4 +1,5 @@
 """파일 시스템 도구: 파일 읽기, 쓰기, 수정"""
+
 import difflib
 from pathlib import Path
 from typing import Any, Literal
@@ -22,27 +23,29 @@ def _resolve_path(path: str, workspace: Path | None, allowed_dir: Path | None) -
 
     return resolve
 
+
 def _short_hash(text: str, *, salt: str = "", length: int = 8) -> str:
     """긴 텍스트를 간결하게 표현하기 위해 텍스트의 짧은 해시를 생성합니다."""
     import hashlib
+
     return hashlib.sha256((salt + "\n" + text).encode("utf-8")).hexdigest()[:length]
+
 
 def _make_tag(lineno: int, line_text: str, *, salt: str = "", hash_len: int = 8) -> str:
     """텍스트 라인에 대한 태그를 생성하여 긴 텍스트를 간결하게 표현합니다."""
     stripped: str = line_text.rstrip("\n")
     return f"L{lineno}#{_short_hash(stripped, salt=salt, length=hash_len)}"
 
+
 class ReadFileTool(Tool):
     """파일의 콘텐츠를 읽는 도구입니다."""
+
     name = "read_file"
     description = "주어진 경로의 파일 콘텐츠를 읽습니다. (옵션: hashlines로 반환 가능)"
-    parameters =  {
+    parameters = {
         "type": "object",
         "properties": {
-            "path": {
-                "type": "string",
-                "description": "읽을 파일의 경로"
-            },
+            "path": {"type": "string", "description": "읽을 파일의 경로"},
             "hashlines": {
                 "type": "boolean",
                 "description": "true면 각 라인에 hashline 태그(Ln#hash| ...)를 붙여 반환",
@@ -54,14 +57,16 @@ class ReadFileTool(Tool):
                 "default": 8,
             },
         },
-        "required": ["path"]
+        "required": ["path"],
     }
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
 
-    async def execute(self, path: str, hashlines: bool = False, hash_len: int = 8, **kwargs: Any) -> str:
+    async def execute(
+        self, path: str, hashlines: bool = False, hash_len: int = 8, **kwargs: Any
+    ) -> str:
         try:
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if not file_path.exists():
@@ -88,23 +93,21 @@ class ReadFileTool(Tool):
         except Exception as e:
             return f"파일 읽기 오류: {str(e)}"
 
+
 class WriteFileTool(Tool):
     """파일에 콘텐츠를 쓰는 도구입니다."""
+
     name = "write_file"
-    description =  "주어진 경로의 파일에 콘텐츠를 씁니다. 만일 부모 디렉터리가 존재하지 않으면 생성합니다."
+    description = (
+        "주어진 경로의 파일에 콘텐츠를 씁니다. 만일 부모 디렉터리가 존재하지 않으면 생성합니다."
+    )
     parameters = {
         "type": "object",
         "properties": {
-            "path": {
-                "type": "string",
-                "description": "쓰기할 파일의 경로"
-            },
-            "content": {
-                "type": "string",
-                "description": "쓰기할 콘텐츠"
-            }
+            "path": {"type": "string", "description": "쓰기할 파일의 경로"},
+            "content": {"type": "string", "description": "쓰기할 콘텐츠"},
         },
-        "required": ["path", "content"]
+        "required": ["path", "content"],
     }
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
@@ -122,6 +125,7 @@ class WriteFileTool(Tool):
         except Exception as e:
             return f"파일 쓰기 오류: {str(e)}"
 
+
 def _parse_tag(tag: str) -> tuple[int, str]:
     """hashline 태그에서 라인 번호와 해시를 추출합니다."""
     # 태그 형식은 "L{lineno}#{hash}"입니다. 예: "L42#abc123ef| some text"
@@ -132,9 +136,11 @@ def _parse_tag(tag: str) -> tuple[int, str]:
     lineno: int = int(left[1:])
     return lineno, height
 
+
 def _ensure_line_ends_with_nl(text: str) -> str:
     """텍스트가 개행으로 끝나도록 보장합니다."""
     return text if text.endswith("\n") else text + "\n"
+
 
 def _normalize_block(block: str, *, keep_trailing_newline: bool) -> str:
     """
@@ -147,8 +153,10 @@ def _normalize_block(block: str, *, keep_trailing_newline: bool) -> str:
         return _ensure_line_ends_with_nl(block)
     return block
 
+
 class EditFileTool(Tool):
     """파일의 콘텐츠를 수정하는 도구입니다."""
+
     name = "edit_file"
     description = (
         "Hashline 태그 기반으로 파일을 수정합니다. "
@@ -160,10 +168,7 @@ class EditFileTool(Tool):
     parameters = {
         "type": "object",
         "properties": {
-            "path": {
-                "type": "string",
-                "description": "수정할 파일의 경로"
-            },
+            "path": {"type": "string", "description": "수정할 파일의 경로"},
             "op": {
                 "type": "string",
                 "enum": [
@@ -202,32 +207,6 @@ class EditFileTool(Tool):
             },
         },
         "required": ["path", "op"],
-        "allOf": [
-            {
-                "if": {"properties": {"op": {"const": "replace_line"}}},
-                "then": {"required": ["line_tag", "text"]},
-            },
-            {
-                "if": {"properties": {"op": {"const": "insert_before"}}},
-                "then": {"required": ["line_tag", "text"]},
-            },
-            {
-                "if": {"properties": {"op": {"const": "insert_after"}}},
-                "then": {"required": ["line_tag", "text"]},
-            },
-            {
-                "if": {"properties": {"op": {"const": "delete_line"}}},
-                "then": {"required": ["line_tag"]},
-            },
-            {
-                "if": {"properties": {"op": {"const": "delete_range"}}},
-                "then": {"required": ["start_tag", "end_tag"]},
-            },
-            {
-                "if": {"properties": {"op": {"const": "replace_range"}}},
-                "then": {"required": ["start_tag", "end_tag", "text"]},
-            },
-        ],
     }
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
@@ -235,22 +214,22 @@ class EditFileTool(Tool):
         self._allowed_dir = allowed_dir
 
     async def execute(
-            self,
-            path: str,
-            op: Literal[
-                "replace_line",
-                "insert_before",
-                "insert_after",
-                "delete_line",
-                "delete_range",
-                "replace_range",
-            ],
-            hash_len: int = 8,
-            line_tag: str | None = None,
-            start_tag: str | None = None,
-            end_tag: str | None = None,
-            text: str | None = None,
-            **kwargs: Any
+        self,
+        path: str,
+        op: Literal[
+            "replace_line",
+            "insert_before",
+            "insert_after",
+            "delete_line",
+            "delete_range",
+            "replace_range",
+        ],
+        hash_len: int = 8,
+        line_tag: str | None = None,
+        start_tag: str | None = None,
+        end_tag: str | None = None,
+        text: str | None = None,
+        **kwargs: Any,
     ) -> str:
         try:
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
@@ -285,7 +264,9 @@ class EditFileTool(Tool):
                 start: int = verify_tag(start_tag)
                 end: int = verify_tag(end_tag)
                 if start > end:
-                    raise ValueError(f"범위 오류: start_tag가 end_tag보다 뒤에 있습니다. ({start} > {end})")
+                    raise ValueError(
+                        f"범위 오류: start_tag가 end_tag보다 뒤에 있습니다. ({start} > {end})"
+                    )
 
                 return start, end
 
@@ -306,7 +287,7 @@ class EditFileTool(Tool):
                 assert line_tag is not None and text is not None
                 ln: int = verify_tag(line_tag)
                 inserts: str = _normalize_block(text, keep_trailing_newline=True)
-                lines[ln - 1:ln - 1] = inserts.splitlines(keepends=True)
+                lines[ln - 1 : ln - 1] = inserts.splitlines(keepends=True)
                 changed = True
             elif op == "insert_after":
                 assert line_tag is not None and text is not None
@@ -322,14 +303,14 @@ class EditFileTool(Tool):
             elif op == "delete_range":
                 assert start_tag is not None and end_tag is not None
                 start, end = verify_range(start_tag, end_tag)
-                del lines[start - 1:end]
+                del lines[start - 1 : end]
                 changed = True
             elif op == "replace_range":
                 assert start_tag is not None and end_tag is not None and text is not None
                 start, end = verify_range(start_tag, end_tag)
                 # 범위 교체 블록은 "중간 삽입" 가능성이 높으니 끝 개행 보장
                 inserts: str = _normalize_block(text, keep_trailing_newline=True)
-                lines[start - 1:end] = inserts.splitlines(keepends=True)
+                lines[start - 1 : end] = inserts.splitlines(keepends=True)
                 changed = True
             else:
                 return f"오류: 지원하지 않는 op입니다: {op}"
@@ -352,35 +333,38 @@ class EditFileTool(Tool):
 
         best_ratio, best_start = 0.0, 0
         for idx in range(max(1, len(lines) - window + 1)):
-            ratio: float = difflib.SequenceMatcher(None, old_lines, lines[idx : idx + window]).ratio()
+            ratio: float = difflib.SequenceMatcher(
+                None, old_lines, lines[idx : idx + window]
+            ).ratio()
             if ratio > best_ratio:
                 best_ratio, best_start = ratio, idx
 
         if best_ratio > 0.5:
             diff: str = "\n".join(
                 difflib.unified_diff(
-                    old_lines, lines[best_start : best_start + window],
-                    fromfile="old_text (provided)", tofile=f"{path} (actual, line {best_start + 1})",
+                    old_lines,
+                    lines[best_start : best_start + window],
+                    fromfile="old_text (provided)",
+                    tofile=f"{path} (actual, line {best_start + 1})",
                     lineterm="",
-                ))
+                )
+            )
             return f"Error: old_text not found in {path}.\nBest match ({best_ratio:.0%} similar) at line {best_start + 1}:\n{diff}"
 
-        return f"Error: old_text not found in {path}. No similar text found. Verify the file content."
+        return (
+            f"Error: old_text not found in {path}. No similar text found. Verify the file content."
+        )
 
 
 class ListDirTool(Tool):
     """디렉터리의 파일 및 하위 디렉터리를 나열하는 도구입니다."""
+
     name = "list_dir"
     description = "주어진 경로의 디렉터리에 있는 파일과 하위 디렉터리를 나열합니다."
     parameters = {
         "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": "나열할 디렉터리의 경로"
-            }
-        },
-        "required": ["path"]
+        "properties": {"path": {"type": "string", "description": "나열할 디렉터리의 경로"}},
+        "required": ["path"],
     }
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
@@ -409,5 +393,3 @@ class ListDirTool(Tool):
             return f"오류: {e}"
         except Exception as e:
             return f"디렉터리 나열 오류: {str(e)}"
-
-
