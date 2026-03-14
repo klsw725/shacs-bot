@@ -1,4 +1,5 @@
-"""유저에게 메시지 보내는 메세지 도구입니다. """
+"""유저에게 메시지 보내는 메세지 도구입니다."""
+
 from typing import Any, Callable, Awaitable
 
 from shacs_bot.agent.tools.base import Tool
@@ -13,33 +14,27 @@ class MessageTool(Tool):
     parameters = {
         "type": "object",
         "properties": {
-            "content": {
-                "type": "string",
-                "description": "보낼 메시지 내용"
-            },
+            "content": {"type": "string", "description": "보낼 메시지 내용"},
             "channel": {
                 "type": "string",
-                "description": "Optional: 대상 채널 (telegram, discord 등)"
+                "description": "Optional: 대상 채널 (telegram, discord 등)",
             },
-            "chat_id": {
-                "type": "string",
-                "description": "Optional: 대상 채팅/유저 ID"
-            },
+            "chat_id": {"type": "string", "description": "Optional: 대상 채팅/유저 ID"},
             "media": {
                 "type": "array",
-                "items": {"type", "string"},
-                "description": "Optional: 메시지에 첨부할 미디어 경로 (images, audio, documents)"
-            }
+                "items": {"type": "string"},
+                "description": "Optional: 메시지에 첨부할 미디어 경로 (images, audio, documents)",
+            },
         },
-        "required": ["content"]
+        "required": ["content"],
     }
 
     def __init__(
-            self,
-            send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
-            default_channel: str = "",
-            default_chat_id: str = "",
-            default_message_id: str | None = None,
+        self,
+        send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
+        default_channel: str = "",
+        default_chat_id: str = "",
+        default_message_id: str | None = None,
     ):
         self._send_callback = send_callback
         self._default_channel = default_channel
@@ -63,16 +58,16 @@ class MessageTool(Tool):
 
     def start_turn(self) -> None:
         """턴마다 메시지 전송 추적 상태를 초기화합니다."""
-        self._sent_in_turn = True
+        self._sent_in_turn = False
 
     async def execute(
-            self,
-            content: str,
-            channel: str | None = None,
-            chat_id: str | None = None,
-            message_id: str | None = None,
-            media: list[str] | None = None,
-            **kwargs: Any
+        self,
+        content: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        message_id: str | None = None,
+        media: list[str] | None = None,
+        **kwargs: Any,
     ) -> str:
         channel: str = channel or self._default_channel
         chat_id: str = chat_id or self._default_chat_id
@@ -88,9 +83,7 @@ class MessageTool(Tool):
             chat_id=chat_id,
             content=content,
             media=media or [],
-            metadata={
-                "message_id": message_id
-            }
+            metadata={"message_id": message_id},
         )
         try:
             await self._send_callback(msg)
