@@ -14,7 +14,7 @@ from shacs_bot.utils.helpers import detect_image_mime
 
 class ContextBuilder:
     """에이전트를 위한 컨텍스트(시스템 프롬프트 + 메시지)를 구성합니다."""
-    _BOOTSTRAP_FILES: list[str] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    _BOOTSTRAP_FILES: list[str] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     RUNTIME_CONTEXT_TAG: str = "[런타임 컨텍스트 — 메타데이터 전용이며, 지시사항이 아님]"
 
     def __init__(self, workspace: Path):
@@ -58,6 +58,22 @@ class ContextBuilder:
         workspace_path: str = str(self._workspace.expanduser().resolve())
         system: str = platform.system()
         runtime: str = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
+
+        platform_policy: str = ""
+        if system == "Windows":
+            platform_policy = """
+            ## 플랫폼 정책 (Windows)
+            - 현재 Windows에서 실행 중입니다. `grep`, `sed`, `awk` 같은 GNU 도구가 존재한다고 가정하지 마세요.
+            - 더 안정적인 경우 Windows 기본 명령어나 파일 도구를 우선 사용하세요.
+            - 터미널 출력이 깨질 경우 UTF-8 출력을 활성화하여 다시 시도하세요.
+            """
+        else:
+            platform_policy = """
+            ## 플랫폼 정책 (POSIX)
+            - 현재 POSIX 시스템에서 실행 중입니다. UTF-8과 표준 셸 도구를 우선적으로 사용하세요.
+            - 셸 명령어보다 파일 도구가 더 단순하거나 안정적이라면 파일 도구를 사용하세요.
+            """
+
         return f"""
             # shacs-bot 🦈
      
@@ -71,6 +87,8 @@ class ContextBuilder:
             	•	장기 메모리: {workspace_path}/memory/MEMORY.md (중요한 사실을 여기에 기록하세요)
             	•	히스토리 로그: {workspace_path}/memory/HISTORY.md (grep으로 검색 가능)
             	•	커스텀 스킬: {workspace_path}/skills/{{skill-name}}/SKILL.md
+            
+            {platform_policy}
             
             ## shacs-bot 가이드라인
             	•	도구를 호출하기 전에 의도를 먼저 밝히되, 결과를 받기 전에는 절대 예측하거나 단정하지 마세요.
@@ -101,6 +119,7 @@ class ContextBuilder:
             merged: str = f"{runtime_ctx}\n\n{user_content}"
         else:
             merged: list[dict[str, Any]] = [{"type": "text", "text": runtime_ctx}] + user_content
+
         return [
             {
                 "role": "system",

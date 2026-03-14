@@ -116,6 +116,7 @@ class SessionManager:
                     logger.info(f"레거시 경로에서 세션 {key}을(를) 마이그레이션했습니다.")
                 except Exception:
                     logger.exception("세션 마이그레이션 실패 {}", key)
+
         if not path.exists():
             return None
 

@@ -1,4 +1,5 @@
 """LiteLLM provider implementation for multi-provider support."""
+import hashlib
 import os
 import secrets
 import string
@@ -8,7 +9,8 @@ import json_repair
 import litellm
 from litellm import acompletion
 from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
-from litellm.types.utils import ModelResponse, Choices, StreamingChoices, Message
+from litellm.types.utils import ModelResponse, Choices, StreamingChoices, Message, ChatCompletionMessageToolCall
+from loguru import logger
 
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from shacs_bot.providers.registry import find_gateway, ProviderSpec, find_by_model
@@ -85,6 +87,7 @@ class LiteLLMProvider(LLMProvider):
             max_tokens: int = 4096,
             temperature: float = 0.7,
             reasoning_effort: str | None = None,
+            tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -229,21 +232,43 @@ class LiteLLMProvider(LLMProvider):
         """Parse LiteLLM response into our standard format."""
         choice: Union[Choices, StreamingChoices] = response.choices[0]
         message: Message = choice.message
+        content: str = message.content
+        finish_reason: str = choice.finish_reason
 
-        tool_calls = []
+        raw_tool_calls: list[ChatCompletionMessageToolCall] = []
 
-        if hasattr(message, "tool_calls") and message.tool_calls:
-            for tc in message.tool_calls:
-                # Parse arguments from JSON string if needed
-                args: Any = tc.function.arguments
-                if isinstance(args, str):
-                    args: dict = json_repair.loads(args)
+        for ch in response.choices:
+            msg: Message = ch.message
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                raw_tool_calls.extend(msg.tool_calls)
+                if ch.finish_reason in ("tool_calls", "stop"):
+                    finish_reason = ch.finish_reason
 
-                tool_calls.append(ToolCallRequest(
-                    id=self._short_tool_id(),
-                    name=tc.function.name,
-                    arguments=args,
-                ))
+            if not content and msg.content:
+                content = msg.content
+
+        if len(response.choices) > 1:
+            logger.debug("LiteLLM 응답에 {}개의 선택(choice)이 있었고, 그중에서 {}개의 tool_call을 병합했습니다.", len(response.choices), len(raw_tool_calls))
+
+        tool_calls: list = []
+        for tc in raw_tool_calls:
+            # 필요한 경우 JSON 문자열에서 arguments를 파싱합니다.
+            args: Any = tc.function.arguments
+            if isinstance(args, str):
+                args = json_repair.loads(args)
+
+            provider_specific_fields = getattr(tc, "provider_specific_fields", None) or None
+            function_provider_specific_fields = (
+                    getattr(tc.function, "provider_specific_fields", None) or None
+            )
+
+            tool_calls.append(ToolCallRequest(
+                id=self._short_tool_id(),
+                name=tc.function.name,
+                arguments=args,
+                provider_specific_fields=provider_specific_fields,
+                function_provider_specific_fields=function_provider_specific_fields,
+            ))
 
         usage = {}
         if hasattr(response, "usage") and response.usage:
@@ -276,18 +301,48 @@ class LiteLLMProvider(LLMProvider):
 
         return f"{canonical_prefix}/{remainder}"
 
+    def _normalize_tool_call_id(self, tool_call_id: Any) -> Any:
+        """tool_call_id를 제공자(provider)에서 안전하게 사용할 수 있는 9자리 영숫자 형식으로 정규화합니다."""
+        if not isinstance(tool_call_id, str):
+            return tool_call_id
+
+        if len(tool_call_id) == 9 and tool_call_id.isalnum():
+            return tool_call_id
+
+        return hashlib.sha1(tool_call_id.encode()).hexdigest()[:9]
+
     def _sanitize_messages(self, messages: list[dict[str, Any]], extra_keys: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
         """Strip non-standard keys and ensure assistant messages have a content key."""
         allowed: frozenset[str] = self._ALLOWED_MSG_KEYS | extra_keys
-        sanitized = []
+        sanitized: list[Any] = LLMProvider._sanitize_request_message(messages, allowed)
+        id_map: dict[str, str] = {}
 
-        for msg in messages:
-            clean: dict[str, Any] = {k: v for k, v in msg.items() if k in allowed}
-            # Strict providers require "content" even when assistant only has tool_calls
-            if clean.get("role") == "assistant" and "content" not in clean:
-                clean["content"] = None
 
-            sanitized.append(clean)
+        def map_id(value: Any) -> Any:
+            if not isinstance(value, str):
+                return value
+
+            return id_map.setdefault(value, LiteLLMProvider._normalize_tool_call_id(value))
+
+
+        for clean in sanitized:
+            # assistant의 tool_calls[].id와 tool의 tool_call_id가 축약(shortening)된 이후에도 서로 일치하도록 유지합니다.
+            # 그렇지 않으면 엄격한(provider) 구현에서는 이 연결(linkage)이 깨진 것으로 판단해 요청을 거부합니다.
+            if isinstance(clean.get("tool_calls"), list):
+                normalized_tool_calls: list[Any] = []
+                for tool_call in clean["tool_calls"]:
+                    if not isinstance(tool_call, dict):
+                        normalized_tool_calls.append(tool_call)
+                        continue
+
+                    tc_clean: dict = dict(tool_call)
+                    tc_clean["id"] = map_id(tool_call.get("id"))
+                    normalized_tool_calls.append(tc_clean)
+
+                clean["tool_calls"] = normalized_tool_calls
+
+            if "tool_call_id" in clean and clean["tool_call_id"]:
+                clean["tool_call_id"] = map_id(clean["tool_call_id"])
 
         return sanitized
 

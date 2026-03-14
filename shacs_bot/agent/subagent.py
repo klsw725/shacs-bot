@@ -17,6 +17,7 @@ from shacs_bot.bus.events import InboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import ExecToolConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse
+from shacs_bot.utils.helpers import build_assistant_message
 
 
 class SubagentManager:
@@ -27,25 +28,19 @@ class SubagentManager:
             workspace: Path,
             bus: MessageBus,
             model: str | None = None,
-            temperature: float = 0.7,
-            max_tokens: int = 4096,
-            reasoning_effort: str | None = None,
             brave_api_key: str | None = None,
             web_proxy: str | None = None,
             exec_config: ExecToolConfig | None = None,
             restrict_to_workspace: bool = False,
     ):
-        self._provider = provider
-        self._workspace = workspace
-        self._bus = bus
-        self._model = model or provider.get_default_model()
-        self._temperature = temperature
-        self._max_tokens = max_tokens
-        self._reasoning_effort = reasoning_effort
-        self._brave_api_key = brave_api_key
-        self._web_proxy = web_proxy
-        self._exec_config = exec_config or ExecToolConfig()
-        self._restrict_to_workspace = restrict_to_workspace
+        self._provider: LLMProvider = provider
+        self._workspace: Path = workspace
+        self._bus: MessageBus = bus
+        self._model: str = model or provider.get_default_model()
+        self._brave_api_key: str | None = brave_api_key
+        self._web_proxy: str | None = web_proxy
+        self._exec_config: ExecToolConfig = exec_config or ExecToolConfig()
+        self._restrict_to_workspace: bool = restrict_to_workspace
 
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}   # session_key -> {task_id, ...}
@@ -139,32 +134,23 @@ class SubagentManager:
             final_result: str | None = None
 
             for iteration in range(max_iterations):
-                response: LLMResponse = await self._provider.chat(
+                response: LLMResponse = await self._provider.chat_with_retry(
                     messages=messages,
                     tools=tools.get_definitions(),
                     model=self._model,
-                    temperature=self._temperature,
-                    max_tokens=self._max_tokens,
-                    reasoning_effort = self._reasoning_effort
                 )
                 if response.has_tool_calls:
                     # 도구 호출 어시스턴트 메시지 추가
                     tool_call_dicts: list[dict[str, Any]] = [
-                        {
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {
-                                "name": tool_call.name,
-                                "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
-                            },
-                        }
+                        tool_call.to_openai_tool_call()
                         for tool_call in response.tool_calls
                     ]
-                    messages.append({
-                        "role": "assistant",
-                        "content": response.content or "",
-                        "tool_calls": tool_call_dicts
-                    })
+                    messages.append(build_assistant_message(
+                        content=response.content or "",
+                        tool_calls=tool_call_dicts,
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    ))
 
                     # Execute tools
                     for tool_call in response.tool_calls:

@@ -1,7 +1,9 @@
 """에이전트 루프: 핵심 처리 엔진."""
 import asyncio
 import json
+import os
 import re
+import sys
 import weakref
 from contextlib import AsyncExitStack
 from datetime import datetime
@@ -11,7 +13,7 @@ from typing import Callable, Awaitable, Any
 from loguru import logger
 
 from shacs_bot.agent.context import ContextBuilder
-from shacs_bot.agent.memory import MemoryStore
+from shacs_bot.agent.memory import MemoryStore, MemoryConsolidator
 from shacs_bot.agent.session.manager import SessionManager, Session
 from shacs_bot.agent.subagent import SubagentManager
 from shacs_bot.agent.tools.cron.cron import CronTool
@@ -50,10 +52,7 @@ class AgentLoop:
 
             model: str | None = None,
             max_iterations: int = 40,
-            temperature: float = 0.1,
-            max_tokens: int = 4096,
-            memory_window: int = 100,
-            reasoning_effort: str | None = None,
+            context_window_tokens: int = 65_536,
 
             brave_api_key: str | None = None,
             web_proxy: str | None = None,
@@ -73,10 +72,7 @@ class AgentLoop:
         self._model: str = model or self._provider.get_default_model()
 
         self._max_iterations: int = max_iterations
-        self._temperature: float = temperature
-        self._max_tokens: int = max_tokens
-        self._memory_window: int = memory_window
-        self._reasoning_effort: str | None = reasoning_effort
+        self._context_window_tokens: int = context_window_tokens
 
         self._brave_api_key: str | None = brave_api_key
         self._web_proxy: str | None = web_proxy
@@ -92,9 +88,6 @@ class AgentLoop:
             workspace=self._workspace,
             bus=self._bus,
             model=self._model,
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
-            reasoning_effort=self._reasoning_effort,
             brave_api_key=self._brave_api_key,
             web_proxy=self._web_proxy,
             exec_config=self._exec_config,
@@ -107,12 +100,17 @@ class AgentLoop:
         self._mcp_connected = False
         self._mcp_connecting = False
 
-        self._consolidating: set[str] = set()   # 현재 통합(정리) 작업이 진행 중인 세션 키들
-        self._consolidating_tasks: set[asyncio.Task] = set()    # 진행 중인 작업들에 대한 강한 참조
-        self._consolidating_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}      # session_key -> tasks
         self._processing_lock: asyncio.Lock = asyncio.Lock()
-
+        self._memory_consolidator: MemoryConsolidator = MemoryConsolidator(
+            workspace=self._workspace,
+            provider=self._provider,
+            model=self._model,
+            sessions=self._sessions,
+            context_window_tokens=self._context_window_tokens,
+            build_messages=self._context.build_messages,
+            get_tool_definitions=self._tools.get_definitions,
+        )
         self._register_default_tools()
 
     @property
@@ -122,6 +120,10 @@ class AgentLoop:
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def channels_config(self) -> ChannelsConfig:
+        return self._channels_config
 
     def _register_default_tools(self) -> None:
         """기본 도구 세트를 등록합니다."""
@@ -163,8 +165,11 @@ class AgentLoop:
             except asyncio.TimeoutError:
                 continue
 
-            if msg.content.strip().lower() == "/stop":
+            cmd: str = msg.content.strip().lower()
+            if cmd == "/stop":
                 await self._handle_stop(msg)
+            elif cmd == "/restart":
+                await self._handle_restart(msg)
             else:
                 task: asyncio.Task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
@@ -213,6 +218,20 @@ class AgentLoop:
         await self._bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=content
         ))
+
+    async def _handle_restart(self, msg):
+        """os.execv를 통해 프로세스 재시작합니다."""
+        await self._bus.publish_outbound(OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="재시작 중..."
+        ))
+
+        async def _do_restart():
+            await asyncio.sleep(1)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+        asyncio.create_task(_do_restart())
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """전역 락(global lock) 하에서 메시지를 처리합니다."""
@@ -264,7 +283,7 @@ class AgentLoop:
 
             key: str = f"{channel}:{chat_id}"
             session: Session = self._sessions.get_or_create(key=key)
-            history: list[dict[str, Any]] = session.get_history(max_messages=self._memory_window)
+            history: list[dict[str, Any]] = session.get_history(max_messages=0)
             messages: list[dict[str, Any]] = self._context.build_messages(
                 history=history,
                 current_messages=msg.content,
@@ -291,22 +310,13 @@ class AgentLoop:
         # Slash 명령어
         cmd: str = msg.content.strip().lower()
         if cmd == "/new":
-            lock: asyncio.Lock = self._consolidating_locks.setdefault(session.key, asyncio.Lock())
-            self._consolidating.add(session.key)
-
             try:
-                async with lock:
-                    snapshot: list[dict[str, Any]] = session.messages[session.last_consolidated:]
-                    if snapshot:
-                        temp: Session = Session(key=session.key)
-                        temp.messages = list(snapshot)
-
-                        if not await self._consolidate_memory(session=temp, archive_all=True):
-                            return OutboundMessage(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                content="메모리 아카이브에 실패했습니다. 세션이 초기화되지 않았습니다. 다시 시도해 주세요."
-                            )
+                if not await self._memory_consolidator.archive_unconsolidated(session=session):
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="메모리 아카이브에 실패했습니다. 세션이 초기화되지 않았습니다. 다시 시도해 주세요."
+                    )
             except Exception:
                 logger.exception("{} /new 아카이브 실패", session.key)
                 return OutboundMessage(
@@ -314,8 +324,6 @@ class AgentLoop:
                     chat_id=msg.chat_id,
                     content="메모리 아카이브에 실패했습니다. 세션이 초기화되지 않았습니다. 다시 시도해 주세요."
                 )
-            finally:
-                self._consolidating.discard(session.key)
 
             session.clear()
             self._sessions.save(session)
@@ -334,28 +342,12 @@ class AgentLoop:
                     🦈 shacs-bot 명령어:
                     /new — 새 대화를 시작합니다
                     /stop — 현재 작업을 중지합니다
+                    /restart - 봇을 재시작합니다
                     /help — 사용 가능한 명령어를 표시합니다 
                 """
             )
 
-        unconsolidated: int = (len(session.messages) - session.last_consolidated)
-        if (unconsolidated >= self._memory_window) and (session.key not in self._consolidating):
-            self._consolidating.add(session.key)
-            lock: asyncio.Lock = self._consolidating_locks.setdefault(session.key, asyncio.Lock())
-
-            async def _consolidate_and_unlock():
-                try:
-                    async with lock:
-                        await self._consolidate_memory(session=session)
-                finally:
-                    self._consolidating.discard(session.key)
-
-                    _t: asyncio.Task = asyncio.current_task()
-                    if _t is not None:
-                        self._consolidating_tasks.discard(_t)
-
-            _task = asyncio.create_task(_consolidate_and_unlock())
-            self._consolidating_tasks.add(_task)
+        await self._memory_consolidator.maybe_consolidate_by_tokens(session=session)
 
         self._set_tool_context(channel=msg.channel, chat_id=msg.chat_id, message_id=msg.metadata.get('message_id'))
 
@@ -372,6 +364,7 @@ class AgentLoop:
             chat_id=msg.chat_id,
         )
 
+
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta: dict[str, Any] = dict(msg.metadata or {})
             meta["_progress"] = True
@@ -383,6 +376,7 @@ class AgentLoop:
                 metadata=meta,
             ))
 
+
         final_content, _, all_msg = await self._run_agent_loop(
             init_messages=initial_messages,
             on_progress=on_progress or _bus_progress
@@ -392,6 +386,8 @@ class AgentLoop:
 
         self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
         self._sessions.save(session)
+
+        await self._memory_consolidator.maybe_consolidate_by_tokens(session=session)
 
         mt: Any = self._tools.get("message")
         if mt and isinstance(mt, MessageTool) and mt.sent_in_turn:
@@ -417,40 +413,21 @@ class AgentLoop:
         tools_used: list[str] = []
 
         for _ in range(self._max_iterations):
-            response: LLMResponse = await self._provider.chat(
+            response: LLMResponse = await self._provider.chat_with_retry(
                 messages=messages,
                 tools=self._tools.get_definitions(),
                 model=self._model,
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-                reasoning_effort=self._reasoning_effort,
             )
             if response.has_tool_calls:
                 if on_progress:
-                    thoughts:list[str] = [
-                        self._strip_think(response.content),
-                        response.reasoning_content,
-                        *(
-                            f"Thinking [{b.get('signature', '...')}]:\n{b.get('thought', '...')}"
-                            for b in (response.thinking_blocks or [])
-                                if isinstance(b, dict) and "signature" in b
-                        )
-                    ]
-                    combined_thoughts: str = "\n\n".join(filter(None, thoughts))
-                    if combined_thoughts:
-                        await on_progress(combined_thoughts)
+                    thought = self._strip_think(response.content)
+                    if thought:
+                        await on_progress(thought)
 
                     await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
                 tool_call_dicts: list[dict[str, Any]] = [
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.name,
-                            "arguments": json.dumps(tool_call.arguments, ensure_ascii=False)
-                        }
-                    }
+                    tool_call.to_openai_tool_call()
                     for tool_call in response.tool_calls
                 ]
                 messages: list[dict[str, Any]] = self._context.add_assistant_message(
@@ -463,10 +440,8 @@ class AgentLoop:
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
-
                     args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-
                     result: str = await self._tools.execute(tool_call.name, tool_call.arguments)
                     messages: list[dict[str, Any]] = self._context.add_tool_result(
                         messages=messages,
@@ -541,16 +516,6 @@ class AgentLoop:
             session.messages.append(entry)
 
         session.updated_at = datetime.now()
-
-    async def _consolidate_memory(self, session: Session, archive_all: bool = False) -> bool:
-        """MemoryStore.consolidate()에 처리를 위임합니다. 성공하면 True를 반환합니다."""
-        return await MemoryStore(self._workspace).consolidate(
-            session=session,
-            provider=self._provider,
-            model=self._model,
-            archive_all=archive_all,
-           memory_window=self._memory_window
-        )
 
     async def process_direct(
             self,

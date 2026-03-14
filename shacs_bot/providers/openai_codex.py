@@ -35,6 +35,7 @@ class OpenAICodexProvider(LLMProvider):
             max_tokens: int = 4096,
             temperature: float = 0.7,
             reasoning_effort: str | None = None,
+            tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         model: str = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
@@ -54,6 +55,9 @@ class OpenAICodexProvider(LLMProvider):
             "tool_choice": "auto",
             "parallel_tool_calls": True,
         }
+
+        if reasoning_effort:
+            body["reasoning"] = {"effort": reasoning_effort}
 
         if tools:
             body["tools"] = _convert_tools(tools)
@@ -78,7 +82,6 @@ class OpenAICodexProvider(LLMProvider):
                 content=f"코덱스 호출에서 에러 발생: {str(e)}",
                 finish_reason="error",
             )
-
 
 def _strip_model_prefix(model: str) -> str:
     if model.startswith("openai-codex/") or model.startswith("openai_codex/"):
