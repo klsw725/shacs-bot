@@ -11,11 +11,40 @@ import httpx
 from loguru import logger
 
 from oauth_cli_kit import get_token as get_codex_token, OAuthToken
+from oauth_cli_kit.providers import OPENAI_CODEX_PROVIDER
+from oauth_cli_kit.storage import FileTokenStorage
+from shacs_bot.config.paths import get_data_dir
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_ORIGINATOR = "shacs-bot"
+
+_CODEX_TOKEN_FILENAME = OPENAI_CODEX_PROVIDER.token_filename
+
+
+def codex_token_storage() -> FileTokenStorage:
+    """~/.shacs-bot/auth/codex.json 에 OAuth 토큰을 저장하는 스토리지를 반환한다."""
+    new_storage = FileTokenStorage(
+        token_filename=_CODEX_TOKEN_FILENAME,
+        data_dir=get_data_dir(),
+    )
+    if not new_storage.get_token_path().exists():
+        _migrate_legacy_token(new_storage)
+    return new_storage
+
+
+def _migrate_legacy_token(new_storage: FileTokenStorage) -> None:
+    """기존 platformdirs 경로의 토큰을 새 경로로 이전한다."""
+    legacy = FileTokenStorage(token_filename=_CODEX_TOKEN_FILENAME)  # platformdirs 기본 경로
+    token = legacy.load()
+    if token:
+        new_storage.save(token)
+        logger.info(
+            "OAuth 토큰을 새 경로로 마이그레이션했습니다: {}",
+            new_storage.get_token_path(),
+        )
+
 
 class OpenAICodexProvider(LLMProvider):
     """Responses API 사용을 위해 Codex OAuth를 사용합니다."""
@@ -28,19 +57,19 @@ class OpenAICodexProvider(LLMProvider):
         return self.default_model
 
     async def chat(
-            self,
-            messages: list[dict[str, Any]],
-            tools: list[dict[str, Any]] | None = None,
-            model: str | None = None,
-            max_tokens: int = 4096,
-            temperature: float = 0.7,
-            reasoning_effort: str | None = None,
-            tool_choice: str | dict[str, Any] | None = None,
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         model: str = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
 
-        token: OAuthToken = await asyncio.to_thread(get_codex_token)
+        token: OAuthToken = await asyncio.to_thread(get_codex_token, storage=codex_token_storage())
         headers: dict[str, str] = _build_headers(token.account_id, token.access)
 
         body: dict[str, Any] = {
@@ -66,12 +95,18 @@ class OpenAICodexProvider(LLMProvider):
 
         try:
             try:
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=True)
+                content, tool_calls, finish_reason = await _request_codex(
+                    url, headers, body, verify=True
+                )
             except Exception as e:
                 if "CERTIFICATE_VERIFY_FAILED" in str(e):
                     raise
-                logger.warning("Codex API에 대한 SSL 인증서 검증에 실패했습니다. verify=False로 재시도합니다.")
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=False)
+                logger.warning(
+                    "Codex API에 대한 SSL 인증서 검증에 실패했습니다. verify=False로 재시도합니다."
+                )
+                content, tool_calls, finish_reason = await _request_codex(
+                    url, headers, body, verify=False
+                )
             return LLMResponse(
                 content=content,
                 tool_calls=tool_calls,
@@ -82,6 +117,7 @@ class OpenAICodexProvider(LLMProvider):
                 content=f"코덱스 호출에서 에러 발생: {str(e)}",
                 finish_reason="error",
             )
+
 
 def _strip_model_prefix(model: str) -> str:
     if model.startswith("openai-codex/") or model.startswith("openai_codex/"):
@@ -103,16 +139,18 @@ def _build_headers(account_id: str, token: str) -> dict[str, str]:
 
 
 async def _request_codex(
-        url: str,
-        headers: dict[str, str],
-        body: dict[str, Any],
-        verify: bool,
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    verify: bool,
 ) -> tuple[str, list[ToolCallRequest], str]:
     async with httpx.AsyncClient(timeout=60.0, verify=verify) as client:
         async with client.stream("POST", url, headers=headers, json=body) as response:
             if response.status_code != 200:
                 text: bytes = await response.aread()
-                raise RuntimeError(_friendly_error(response.status_code, text.decode("utf-8", "ignore")))
+                raise RuntimeError(
+                    _friendly_error(response.status_code, text.decode("utf-8", "ignore"))
+                )
 
             return await _consume_sse(response)
 
@@ -121,18 +159,22 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert OpenAI function-calling schema to Codex flat format."""
     converted: list[dict[str, Any]] = []
     for tool in tools:
-        fn: dict[str, Any] = (tool.get("function") or {}) if tool.get("type") == "function" else tool
-        name:str  = fn.get("name")
+        fn: dict[str, Any] = (
+            (tool.get("function") or {}) if tool.get("type") == "function" else tool
+        )
+        name: str = fn.get("name")
         if not name:
             continue
 
         params: dict[str, Any] = fn.get("parameters") or {}
-        converted.append({
-            "type": "function",
-            "name": name,
-            "description": fn.get("description") or "",
-            "parameters": params if isinstance(params, dict) else {},
-        })
+        converted.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": fn.get("description") or "",
+                "parameters": params if isinstance(params, dict) else {},
+            }
+        )
 
     return converted
 
@@ -184,7 +226,9 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
             continue
         elif role == "tool":
             call_id, _ = _split_tool_call_id(msg.get("tool_call_id"))
-            output_text: str = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            output_text: str = (
+                content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            )
             input_items.append(
                 {
                     "type": "function_call_output",
@@ -319,7 +363,12 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
     return content, tool_calls, finish_reason
 
 
-_FINISH_REASON_MAP = {"completed": "stop", "incomplete": "length", "failed": "error", "cancelled": "error"}
+_FINISH_REASON_MAP = {
+    "completed": "stop",
+    "incomplete": "length",
+    "failed": "error",
+    "cancelled": "error",
+}
 
 
 def _map_finish_reason(status: str | None) -> str:
