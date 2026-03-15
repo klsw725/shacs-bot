@@ -1,4 +1,5 @@
 """Utility functions for shacs-bot."""
+
 import json
 import re
 from datetime import datetime
@@ -25,10 +26,12 @@ def detect_image_mime(data: bytes) -> str | None:
 
     return None
 
+
 def ensure_dir(path: Path) -> Path:
     """Ensure a directory exists, creating it if necessary."""
     path.mkdir(parents=True, exist_ok=True)
     return path
+
 
 def timestamp() -> str:
     """Get current timestamp in ISO format."""
@@ -37,9 +40,11 @@ def timestamp() -> str:
 
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 
+
 def safe_filename(name: str) -> str:
     """안전하지 않은 경로 문자를 밑줄(_)로 대체합니다."""
     return _UNSAFE_CHARS.sub("_", name).strip()
+
 
 def split_message(content: str, max_len: int = 2000) -> list[str]:
     """
@@ -62,9 +67,9 @@ def split_message(content: str, max_len: int = 2000) -> list[str]:
         cut: str = content[:max_len]
 
         # 먼저 줄바꿈(\n) 위치에서 끊어보고, 없으면 공백에서 끊고, 그래도 없으면 강제로 자른다
-        pos: int = cut.rfind('\n')
+        pos: int = cut.rfind("\n")
         if pos <= 0:
-            pos = cut.rfind(' ')
+            pos = cut.rfind(" ")
         if pos <= 0:
             pos = max_len
 
@@ -85,17 +90,15 @@ def split_message(content: str, max_len: int = 2000) -> list[str]:
     chunks.append(content)
     return chunks
 
+
 def build_assistant_message(
-        content: str | None,
-        tool_calls: list[dict[str, Any]] | None = None,
-        reasoning_content: str | None = None,
-        thinking_blocks: list[dict] | None = None,
+    content: str | None,
+    tool_calls: list[dict[str, Any]] | None = None,
+    reasoning_content: str | None = None,
+    thinking_blocks: list[dict] | None = None,
 ) -> dict[str, Any]:
     """선택적인 추론(reasoning) 필드를 포함할 수 있는, 제공자(provider) 호환 안전한 assistant 메시지를 생성합니다."""
-    msg: dict[str, Any] = {
-        "role": "assistant",
-        "content": content
-    }
+    msg: dict[str, Any] = {"role": "assistant", "content": content}
     if tool_calls:
         msg["tool_calls"] = tool_calls
     if reasoning_content is not None:
@@ -105,9 +108,10 @@ def build_assistant_message(
 
     return msg
 
+
 def estimate_prompt_tokens(
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
 ) -> int:
     """tiktoken으로 프롬프트 토큰 추정"""
     try:
@@ -131,6 +135,7 @@ def estimate_prompt_tokens(
         return len(enc.encode("\n".join(parts)))
     except Exception:
         return 0
+
 
 def estimate_message_tokens(message: dict[str, Any]) -> int:
     """하나의 저장된(persisted) 메시지가 프롬프트에 기여하는 토큰 수를 추정합니다."""
@@ -170,10 +175,10 @@ def estimate_message_tokens(message: dict[str, Any]) -> int:
 
 
 def estimate_prompt_tokens_chain(
-        provider: Any,
-        model: str | None,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
+    provider: Any,
+    model: str | None,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
 ) -> tuple[int, str]:
     """먼저 provider의 토큰 카운터로 프롬프트 토큰을 추정하고, 실패하면 tiktoken을 대체 수단으로 사용합니다."""
     provider_counter = getattr(provider, "estimate_prompt_tokens", None)
@@ -191,10 +196,11 @@ def estimate_prompt_tokens_chain(
 
     return 0, "none"
 
+
 def sync_workspace_template(workspace: Path, silent: bool = False) -> list[str]:
     """번들된 템플릿을 워크스페이스에 동기화합니다. 존재하지 않는 파일만 생성합니다."""
     try:
-        tpl: Traversable = pkg_files("shacs-bot") / "templates"
+        tpl: Traversable = pkg_files("shacs_bot") / "templates"
     except Exception:
         return []
 
