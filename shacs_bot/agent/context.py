@@ -1,4 +1,5 @@
 """에이전트 프롬프트 구성을 위한 컨텍스트 빌더"""
+
 import base64
 import mimetypes
 import platform
@@ -14,6 +15,7 @@ from shacs_bot.utils.helpers import detect_image_mime
 
 class ContextBuilder:
     """에이전트를 위한 컨텍스트(시스템 프롬프트 + 메시지)를 구성합니다."""
+
     _BOOTSTRAP_FILES: list[str] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     RUNTIME_CONTEXT_TAG: str = "[런타임 컨텍스트 — 메타데이터 전용이며, 지시사항이 아님]"
 
@@ -101,17 +103,19 @@ class ContextBuilder:
         """
 
     def build_messages(
-            self,
-            history: list[dict[str, Any]],
-            current_messages: str,
-            skill_names: list[str] | None = None,
-            media: list[str] | None = None,
-            channel: str | None = None,
-            chat_id: str | None = None,
+        self,
+        history: list[dict[str, Any]],
+        current_messages: str,
+        skill_names: list[str] | None = None,
+        media: list[str] | None = None,
+        channel: str | None = None,
+        chat_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """LLM 호출을 위한 전체 메시지 목록을 생성합니다."""
         runtime_ctx: str = self.build_runtime_context(channel=channel, chat_id=chat_id)
-        user_content: str | list[dict[str, Any]] = self._build_user_content(text=current_messages, media=media)
+        user_content: str | list[dict[str, Any]] = self._build_user_content(
+            text=current_messages, media=media
+        )
 
         # 일부 제공자(provider)가 동일한 role 메시지가 연속으로 오는 것을 거부하므로
         # runtime context와 사용자 내용을 하나의 user 메시지로 병합한다.
@@ -121,15 +125,9 @@ class ContextBuilder:
             merged: list[dict[str, Any]] = [{"type": "text", "text": runtime_ctx}] + user_content
 
         return [
-            {
-                "role": "system",
-                "content": self.build_system_prompt(skill_names=skill_names)
-            },
+            {"role": "system", "content": self.build_system_prompt(skill_names=skill_names)},
             *history,
-            {
-                "role": "user",
-                "content": merged
-            }
+            {"role": "user", "content": merged},
         ]
 
     def _load_bootstrap_files(self) -> str:
@@ -175,51 +173,37 @@ class ContextBuilder:
             if not mime or not mime.startswith("image/"):
                 continue
 
-            b64: str = base64.b64decode(raw).decode()
-            images.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{mime};base64,{b64}"
-                }
-            })
+            b64: str = base64.b64encode(raw).decode()
+            images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
 
         if not images:
             return text
 
-        return images + [{
-            "type": "text",
-            "text": text
-        }]
+        return images + [{"type": "text", "text": text}]
 
     def add_tool_result(
-            self,
-            messages: list[dict[str, Any]],
-            tool_call_id: str,
-            tool_name: str,
-            result: str,
+        self,
+        messages: list[dict[str, Any]],
+        tool_call_id: str,
+        tool_name: str,
+        result: str,
     ) -> list[dict[str, Any]]:
         """메시지 목록에 도구 실행 결과를 추가합니다."""
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "name": tool_name,
-            "content": result
-        })
+        messages.append(
+            {"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result}
+        )
         return messages
 
     def add_assistant_message(
-            self,
-            messages: list[dict[str, Any]],
-            content: str | None,
-            tool_calls: list[dict[str, Any]] | None = None,
-            reasoning_content: str | None = None,
-            thinking_blocks: list[dict] | None = None,
+        self,
+        messages: list[dict[str, Any]],
+        content: str | None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        reasoning_content: str | None = None,
+        thinking_blocks: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
         """메시지 목록에 어시스턴트 메시지를 추가합니다."""
-        msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": content
-        }
+        msg: dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             msg["tool_calls"] = tool_calls
 
