@@ -1,4 +1,5 @@
 """알림과 작업 스케줄링을 위한 Cron 도구"""
+
 from _contextvars import ContextVar, Token
 from datetime import datetime
 from typing import Any
@@ -20,26 +21,21 @@ class CronTool(Tool):
             "action": {
                 "type": "string",
                 "enum": ["add", "list", "remove"],
-                "description": "수행할 작업"
+                "description": "수행할 작업",
             },
-            "message": {
-                "type": "string",
-                "description": "알림 메시지 (추가 시)"
-            },
-            "every_seconds": {
-                "type": "integer",
-                "description": "반복 작업의 간격(초 단위)"
-            },
+            "message": {"type": "string", "description": "알림 메시지 (추가 시)"},
+            "every_seconds": {"type": "integer", "description": "반복 작업의 간격(초 단위)"},
             "cron_expr": {
                 "type": "string",
-                "description": "'0 9 * * *'와 같은 크론 표현식(예약된 작업 시)"
+                "description": "'0 9 * * *'와 같은 크론 표현식(예약된 작업 시)",
             },
-            "job_id": {
+            "at": {
                 "type": "string",
-                "description": "작업 ID(제거 시)"
-            }
+                "description": "일회성 알림의 실행 시각 (ISO 형식: YYYY-MM-DDTHH:MM:SS). 지정 시간에 한 번 실행 후 자동 삭제됩니다.",
+            },
+            "job_id": {"type": "string", "description": "작업 ID(제거 시)"},
         },
-        "required": ["action"]
+        "required": ["action"],
     }
 
     def __init__(self, cron_service: CronService):
@@ -62,21 +58,23 @@ class CronTool(Tool):
         self._in_cron_context.reset(token)
 
     async def execute(
-            self,
-            action: str,
-            message: str = "",
-            every_seconds: int | None = None,
-            cron_expr: str | None = None,
-            tz: str | None = None,
-            at: str | None = None,
-            job_id: str | None = None,
-            **kwargs: Any
+        self,
+        action: str,
+        message: str = "",
+        every_seconds: int | None = None,
+        cron_expr: str | None = None,
+        tz: str | None = None,
+        at: str | None = None,
+        job_id: str | None = None,
+        **kwargs: Any,
     ) -> str:
         if action == "add":
             if self._in_cron_context.get():
                 return "에러: cron 작업 실행 중에는 새로운 작업을 예약할 수 없습니다."
 
-            return self._add_job(message=message, every_seconds=every_seconds, cron_expr=cron_expr, tz=tz, at=at)
+            return self._add_job(
+                message=message, every_seconds=every_seconds, cron_expr=cron_expr, tz=tz, at=at
+            )
         elif action == "list":
             self._list_jobs()
         elif action == "remove":
@@ -85,12 +83,12 @@ class CronTool(Tool):
         return f"알 수 없는 작업: {action}"
 
     def _add_job(
-            self,
-            message: str,
-            every_seconds: int | None,
-            cron_expr: str | None,
-            tz: str | None = None,
-            at: str | None = None,
+        self,
+        message: str,
+        every_seconds: int | None,
+        cron_expr: str | None,
+        tz: str | None = None,
+        at: str | None = None,
     ) -> str:
         if not message:
             return "에러: 추가를 위해 메시지가 필요합니다."
@@ -117,14 +115,16 @@ class CronTool(Tool):
             try:
                 dt: datetime = datetime.fromisoformat(at)
             except ValueError:
-                return f"에러: 잘못된 ISO datetime 형식입니다 '{at}'. 예상 형식: YYYY-MM-DDTHH:MM:SS"
+                return (
+                    f"에러: 잘못된 ISO datetime 형식입니다 '{at}'. 예상 형식: YYYY-MM-DDTHH:MM:SS"
+                )
 
             at_ms: int = int(dt.timestamp() * 1000)
             schedule: CronSchedule = CronSchedule(kind="at", at_ms=at_ms)
 
             delete_after = True
         else:
-            return "에러: every_seconds 또는 cron_expr 중 하나는 필요합니다."
+            return "에러: every_seconds, cron_expr, at 중 하나는 필요합니다."
 
         job: CronJob = self._cron.add_job(
             name=message[:30],
