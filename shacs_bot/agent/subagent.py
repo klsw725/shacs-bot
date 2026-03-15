@@ -1,7 +1,9 @@
 """백그라운드 테스크 실행을 위한 Subagent 관리자"""
+
 import asyncio
 import json
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,18 +22,111 @@ from shacs_bot.providers.base import LLMProvider, LLMResponse
 from shacs_bot.utils.helpers import build_assistant_message
 
 
+@dataclass(frozen=True)
+class SubagentRole:
+    system_prompt: str
+    allowed_tools: list[str]  # 비어있으면 전체 허용
+    max_iterations: int = 15
+
+
+RESEARCHER_PROMPT = """\
+당신은 정보 수집 전문 에이전트입니다.
+
+## 임무
+웹 검색과 URL 크롤링을 통해 정보를 수집하고 정리합니다.
+
+## 행동 규칙
+- 여러 소스를 교차 확인하여 정확성을 높이세요
+- 출처를 명시하세요 (URL, 날짜)
+- 사실과 의견을 구분하세요
+- 검색 결과가 부족하면 다른 키워드로 재시도하세요
+
+## 결과 보고
+- 핵심 발견사항을 구조적으로 정리
+- 출처 목록 포함
+- 불확실한 부분은 명시
+
+## 제약
+- 읽기 전용: 파일을 생성, 수정, 삭제할 수 없습니다
+- 조사 결과만 보고하세요. 임의로 행동하지 마세요.\
+"""
+
+ANALYST_PROMPT = """\
+당신은 분석/요약 전문 에이전트입니다.
+
+## 임무
+문서, 파일, 데이터를 읽고 분석하여 인사이트를 제공합니다.
+
+## 행동 규칙
+- 원본 내용을 정확히 파악한 후 분석하세요
+- 핵심 포인트를 추출하고 구조화하세요
+- 비교 요청 시 기준을 명확히 하세요
+- 분석 근거를 항상 제시하세요
+
+## 결과 보고
+- 요약 → 상세 분석 → 결론 순서
+- 표나 목록을 활용하여 가독성 확보
+- 원문 인용 시 해당 위치 명시
+
+## 제약
+- 읽기 전용: 파일을 생성, 수정, 삭제할 수 없습니다
+- 분석 결과만 보고하세요. 임의로 행동하지 마세요.\
+"""
+
+EXECUTOR_PROMPT = """\
+당신은 작업 실행 전문 에이전트입니다.
+
+## 임무
+파일 작업, 명령 실행, 스킬 기반 작업을 수행합니다.
+
+## 행동 규칙
+- 파일을 수정하기 전에 반드시 먼저 읽으세요
+- 작업 전후로 결과를 확인하세요
+- 한 번에 하나의 변경에 집중하세요
+- 요청 범위를 벗어나는 변경을 하지 마세요
+
+## 결과 보고
+- 무엇을 했는지 간결하게
+- 변경된 파일 목록
+- 확인 결과 (성공/실패)
+
+## 제약
+- 위험한 명령은 실행하지 마세요 (rm -rf, format 등)
+- 할당된 작업에만 집중하세요\
+"""
+
+SUBAGENT_ROLES: dict[str, SubagentRole] = {
+    "researcher": SubagentRole(
+        system_prompt=RESEARCHER_PROMPT,
+        allowed_tools=["read_file", "list_dir", "exec", "web_search", "web_fetch"],
+        max_iterations=10,
+    ),
+    "analyst": SubagentRole(
+        system_prompt=ANALYST_PROMPT,
+        allowed_tools=["read_file", "list_dir", "exec", "web_search", "web_fetch"],
+        max_iterations=10,
+    ),
+    "executor": SubagentRole(
+        system_prompt=EXECUTOR_PROMPT,
+        allowed_tools=[],  # 전체 허용
+        max_iterations=15,
+    ),
+}
+
+
 class SubagentManager:
     """백그라운드 subagent 관리를 담당하는 클래스입니다."""
+
     def __init__(
-            self,
-            provider: LLMProvider,
-            workspace: Path,
-            bus: MessageBus,
-            model: str | None = None,
-            brave_api_key: str | None = None,
-            web_proxy: str | None = None,
-            exec_config: ExecToolConfig | None = None,
-            restrict_to_workspace: bool = False,
+        self,
+        provider: LLMProvider,
+        workspace: Path,
+        bus: MessageBus,
+        model: str | None = None,
+        brave_api_key: str | None = None,
+        web_proxy: str | None = None,
+        exec_config: ExecToolConfig | None = None,
+        restrict_to_workspace: bool = False,
     ):
         self._provider: LLMProvider = provider
         self._workspace: Path = workspace
@@ -43,15 +138,16 @@ class SubagentManager:
         self._restrict_to_workspace: bool = restrict_to_workspace
 
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
-        self._session_tasks: dict[str, set[str]] = {}   # session_key -> {task_id, ...}
+        self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
     async def spawn(
-            self,
-            task: str,
-            label: str | None = None,
-            origin_channel: str = "cli",
-            origin_chat_id: str = "direct",
-            session_key: str | None = None,
+        self,
+        task: str,
+        label: str | None = None,
+        role: str = "executor",
+        origin_channel: str = "cli",
+        origin_chat_id: str = "direct",
+        session_key: str | None = None,
     ) -> str:
         """새로운 서브에이전트를 생성하여 주어진 작업을 실행합니다."""
         task_id: str = str(uuid.uuid4())[:8]
@@ -59,7 +155,7 @@ class SubagentManager:
         origin: dict[str, str] = {"channel": origin_channel, "chat_id": origin_chat_id}
 
         bg_task: asyncio.Task[None] = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, role=role)
         )
         self._running_tasks[task_id] = bg_task
 
@@ -79,58 +175,47 @@ class SubagentManager:
         return f"서브에이전트 [{display_label}]이(가) 시작되었습니다 (id: {task_id}). 완료되면 알려드리겠습니다."
 
     async def _run_subagent(
-            self,
-            task_id: str,
-            task: str,
-            label: str,
-            origin: dict[str, str],
+        self,
+        task_id: str,
+        task: str,
+        label: str,
+        origin: dict[str, str],
+        role: str = "executor",
     ) -> None:
         """서브에이전트를 실행합니다. 그리고 완료되면 결과를 보고합니다."""
-        logger.info(f"서브에이전트 [{task_id}] 실행 시작: {label}")
+        role_config: SubagentRole = SUBAGENT_ROLES.get(role, SUBAGENT_ROLES["executor"])
+        logger.info(f"서브에이전트 [{task_id}] 실행 시작: {label} (역할: {role})")
 
         try:
-            # 서브에이전트 도구를 설정합니다. (no message tool, no spawn tool)
             allowed_dir: Path | None = self._workspace if self._restrict_to_workspace else None
 
-            tools: ToolRegistry = ToolRegistry()
-            tools.register(
-                ReadFileTool(workspace=self._workspace, allowed_dir=allowed_dir)
-            )
-            tools.register(
-                WriteFileTool(workspace=self._workspace, allowed_dir=allowed_dir)
-            )
-            tools.register(
-                EditFileTool(workspace=self._workspace, allowed_dir=allowed_dir)
-            )
-            tools.register(
-                ListDirTool(workspace=self._workspace, allowed_dir=allowed_dir)
-            )
-            tools.register(ExecTool(
-                working_dir=str(self._workspace),
-                timeout=self._exec_config.timeout,
-                restrict_to_workspace=self._restrict_to_workspace,
-                path_append=self._exec_config.path_append
-            ))
-            tools.register(WebSearchTool(
-                api_key=self._brave_api_key,
-                proxy=self._web_proxy
-            ))
-            tools.register(WebFetchTool(proxy=self._web_proxy))
-
-            system_prompt: str = self._build_subagent_prompt()
-            messages: list[dict[str, Any]] = [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": task
-                }
+            all_tools = [
+                ReadFileTool(workspace=self._workspace, allowed_dir=allowed_dir),
+                WriteFileTool(workspace=self._workspace, allowed_dir=allowed_dir),
+                EditFileTool(workspace=self._workspace, allowed_dir=allowed_dir),
+                ListDirTool(workspace=self._workspace, allowed_dir=allowed_dir),
+                ExecTool(
+                    working_dir=str(self._workspace),
+                    timeout=self._exec_config.timeout,
+                    restrict_to_workspace=self._restrict_to_workspace,
+                    path_append=self._exec_config.path_append,
+                ),
+                WebSearchTool(api_key=self._brave_api_key, proxy=self._web_proxy),
+                WebFetchTool(proxy=self._web_proxy),
             ]
 
-            # 에이전트 루프 동작 (반복 최대 횟수)
-            max_iterations: int = 15
+            tools: ToolRegistry = ToolRegistry()
+            for tool in all_tools:
+                if not role_config.allowed_tools or tool.name in role_config.allowed_tools:
+                    tools.register(tool)
+
+            system_prompt: str = self._build_subagent_prompt(role_config)
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": task},
+            ]
+
+            max_iterations: int = role_config.max_iterations
             final_result: str | None = None
 
             for iteration in range(max_iterations):
@@ -142,27 +227,32 @@ class SubagentManager:
                 if response.has_tool_calls:
                     # 도구 호출 어시스턴트 메시지 추가
                     tool_call_dicts: list[dict[str, Any]] = [
-                        tool_call.to_openai_tool_call()
-                        for tool_call in response.tool_calls
+                        tool_call.to_openai_tool_call() for tool_call in response.tool_calls
                     ]
-                    messages.append(build_assistant_message(
-                        content=response.content or "",
-                        tool_calls=tool_call_dicts,
-                        reasoning_content=response.reasoning_content,
-                        thinking_blocks=response.thinking_blocks,
-                    ))
+                    messages.append(
+                        build_assistant_message(
+                            content=response.content or "",
+                            tool_calls=tool_call_dicts,
+                            reasoning_content=response.reasoning_content,
+                            thinking_blocks=response.thinking_blocks,
+                        )
+                    )
 
                     # Execute tools
                     for tool_call in response.tool_calls:
                         args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                        logger.debug("서브에이전트 [{}] 실행: {} 인자: {}", task_id, tool_call.name, args_str)
+                        logger.debug(
+                            "서브에이전트 [{}] 실행: {} 인자: {}", task_id, tool_call.name, args_str
+                        )
                         result: str = await tools.execute(tool_call.name, tool_call.arguments)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": result
-                        })
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": result,
+                            }
+                        )
                 else:
                     final_result = response.content
                     break
@@ -171,40 +261,44 @@ class SubagentManager:
                 final_result = "작업은 완료되었지만 최종 응답이 생성되지 않았습니다."
 
             logger.info("서브에이전트 [{}]가 성공적으로 완료되었습니다", task_id)
-            await self._announce_result(task_id=task_id, label=label, task=task, result=final_result, origin=origin, status="ok")
+            await self._announce_result(
+                task_id=task_id,
+                label=label,
+                task=task,
+                result=final_result,
+                origin=origin,
+                status="ok",
+            )
         except Exception as e:
             error_msg: str = f"Error: {str(e)}"
             logger.error("서브에이전트 [{}] 실패: {}", task_id, e)
-            await self._announce_result(task_id=task_id, label=label, task=task, result=error_msg, origin=origin, status="error")
+            await self._announce_result(
+                task_id=task_id,
+                label=label,
+                task=task,
+                result=error_msg,
+                origin=origin,
+                status="error",
+            )
 
-    def _build_subagent_prompt(self) -> str:
-        """하위 에이전트를 위한 목적에 맞는 시스템 프롬프트를 작성"""
-        time_ctx:str = ContextBuilder.build_runtime_context(None, None)
-        parts: list[str] = [f"""
-            # Subagent
-            
-            {time_ctx}
-            
-            당신은 메인 에이전트에 의해 특정 작업을 수행하기 위해 생성된 서브에이전트입니다.
-            할당된 작업에 집중하세요. 당신의 최종 응답은 메인 에이전트에게 보고됩니다.
-            ## Workspace
-            {self._workspace}
-        """]
+    def _build_subagent_prompt(self, role_config: SubagentRole) -> str:
+        """역할 기반 시스템 프롬프트를 작성"""
+        time_ctx: str = ContextBuilder.build_runtime_context(None, None)
+        parts: list[str] = [
+            role_config.system_prompt,
+            f"\n## 환경\n{time_ctx}\n\n## Workspace\n{self._workspace}",
+        ]
 
         skills_summary: str = SkillsLoader(self._workspace).build_skills_summary()
         if skills_summary:
-           parts.append(f"## 스킬을 사용하려면 read_file로 SKILL.md를 읽으세요.\n\n{skills_summary}")
+            parts.append(
+                f"## 스킬을 사용하려면 read_file로 SKILL.md를 읽으세요.\n\n{skills_summary}"
+            )
 
         return "\n\n".join(parts)
 
     async def _announce_result(
-            self,
-            task_id: str,
-            label: str,
-            task: str,
-            result: str,
-            origin: dict[str, str],
-            status: str
+        self, task_id: str, label: str, task: str, result: str, origin: dict[str, str], status: str
     ) -> None:
         """내부 네트워크를 통해 서브에이전트의 결과를 메인 에이전트에 알립니다."""
         status_text: str = "성공적으로 완료되었습니다." if status == "ok" else "failed"
@@ -220,18 +314,28 @@ class SubagentManager:
         """
 
         # 메인 에이전트를 트리거하기 위해 시스템 메시지로 주입
-        await self._bus.publish_inbound(InboundMessage(
-            channel="system",
-            sender_id="subagent",
-            chat_id=f"{origin['channel']}:{origin['chat_id']}",
-            content=announce_content
-        ))
-        logger.debug("Subagent [{}]가 {}:{}에 결과를 알렸습니다.", task_id, origin['channel'], origin['chat_id'])
+        await self._bus.publish_inbound(
+            InboundMessage(
+                channel="system",
+                sender_id="subagent",
+                chat_id=f"{origin['channel']}:{origin['chat_id']}",
+                content=announce_content,
+            )
+        )
+        logger.debug(
+            "Subagent [{}]가 {}:{}에 결과를 알렸습니다.",
+            task_id,
+            origin["channel"],
+            origin["chat_id"],
+        )
 
     async def cancel_by_session(self, session_key: str) -> int:
         """주어진 세션에 속한 모든 서브에이전트를 취소하고, 취소된 개수를 반환합니다."""
-        tasks: list[asyncio.Task[None]] = [self._running_tasks[tid] for tid in self._session_tasks.get(session_key, [])
-                                        if (tid in self._running_tasks) and not self._running_tasks[tid].done()]
+        tasks: list[asyncio.Task[None]] = [
+            self._running_tasks[tid]
+            for tid in self._session_tasks.get(session_key, [])
+            if (tid in self._running_tasks) and not self._running_tasks[tid].done()
+        ]
         for task in tasks:
             task.cancel()
 
