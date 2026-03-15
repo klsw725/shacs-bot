@@ -22,7 +22,7 @@ class SpawnTool(Tool):
             "label": {"type": "string", "description": "작업에 대한 선택적 짧은 레이블(표시용)"},
             "role": {
                 "type": "string",
-                "description": "서브에이전트 역할. researcher: 웹 검색/정보 수집 (읽기 전용), analyst: 문서 분석/요약 (읽기 전용), executor: 파일 작업/명령 실행 (기본값)",
+                "description": "작업 목적에 맞는 역할을 반드시 지정하세요. analyst: 파일/데이터를 분석하거나 요약할 때 (읽기 전용). researcher: 웹에서 정보를 찾거나 조사할 때 (읽기 전용). executor: 파일을 생성/수정하거나 명령을 실행할 때.",
                 "enum": ["researcher", "analyst", "executor"],
             },
         },

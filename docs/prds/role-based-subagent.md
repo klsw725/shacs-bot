@@ -87,7 +87,7 @@ oh-my-opencode의 에이전트 역할 분화 패턴을 적용한다:
 - [x] **M3: 역할별 동작 검증**
   researcher 역할로 spawn 시 write/edit 도구 미등록 확인. executor 역할로 spawn 시 전체 도구 등록 확인. 기존 spawn(role 없이) 호출이 깨지지 않는지 확인.
 
-- [ ] **M4: 실사용 시나리오 검증 및 프롬프트 튜닝**
+- [x] **M4: 실사용 시나리오 검증 및 프롬프트 튜닝**
   실제 채팅 환경에서 메인 에이전트가 적절한 역할을 선택하는지 확인. 역할별 프롬프트 품질 미세 조정 (보고 형식, 행동 규칙 등).
 
 ---
@@ -117,3 +117,4 @@ oh-my-opencode의 에이전트 역할 분화 패턴을 적용한다:
 | 2026-03-15 | PRD 초안 작성. SPEC에서 변경 2, 변경 3 통합. |
 | 2026-03-15 | M1+M2 완료. SubagentRole dataclass, 3개 역할 프롬프트, SUBAGENT_ROLES 딕셔너리 추가. spawn()/\_run_subagent()/\_build_subagent_prompt()에 role 파라미터 통합. SpawnTool에 role 파라미터 추가. |
 | 2026-03-15 | M3 완료. 코드 리뷰 기반 검증: (1) researcher/analyst의 allowed_tools에 write_file/edit_file 미포함 → 필터링 정상, (2) executor의 allowed_tools=[] → 빈 리스트 falsy로 전체 도구 등록, (3) spawn/\_run_subagent/SpawnTool.execute 모두 role="executor" 기본값 → 하위 호환 유지. MCP 동적 도구는 서브에이전트에 미포함 (설계 의도). |
+| 2026-03-15 | M4 완료. spawn tool의 role description 강화 — "작업 목적에 맞는 역할을 반드시 지정하세요" 원칙 추가. CLI 검증: "AGENTS.md 분석해서 요약해줘"→analyst✅, "최신 AI 뉴스 웹에서 검색해줘"→researcher✅, "모든 .txt 파일 찾아서 summary.md 정리"→executor✅. 모델이 이미 아는 내용(2025년 트렌드)은 직접 처리 — 합리적 판단. |
