@@ -317,6 +317,9 @@ class MCPServerConfig(Base):
     url: str = ""  # HTTP: streamable HTTP endpoint URL
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP: Custom HTTP 헤더들
     tool_timeout: int = 30  # 도구 호출이 취소되기 전까지의 시간(초)
+    enabled_tools: list[str] = Field(
+        default_factory=list
+    )  # 활성화할 도구 목록 (비어있으면 전체 활성화)
 
 
 class ToolsConfig(Base):

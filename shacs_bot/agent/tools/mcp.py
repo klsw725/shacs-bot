@@ -1,4 +1,5 @@
 """MCP 클라이언트: MCP 서버에 연결하고, 해당 서버의 도구들을 shacs-bot 네이티브 도구로 감싸서(wrap) 제공합니다."""
+
 import asyncio
 from contextlib import AsyncExitStack
 from typing import Any
@@ -18,11 +19,7 @@ class MCPToolWrapper(Tool):
     """MCP 서버의 단일 도구를 shacs-bot Tool로 감싸는 래퍼입니다."""
 
     def __init__(
-            self,
-            session: ClientSession,
-            server_name: str,
-            tool_def: MCPTool,
-            tool_timeout: int = 30
+        self, session: ClientSession, server_name: str, tool_def: MCPTool, tool_timeout: int = 30
     ):
         self._session = session
         self._original_name = tool_def.name
@@ -45,13 +42,16 @@ class MCPToolWrapper(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         from mcp import types
+
         try:
             result: types.CallToolResult = await asyncio.wait_for(
                 fut=self._session.call_tool(name=self._original_name, arguments=kwargs),
                 timeout=self._tool_timeout,
             )
         except asyncio.TimeoutError:
-            logger.warning(f"MCP 도구 '{self._name}'가 {self._tool_timeout}초 후 타임아웃되었습니다.")
+            logger.warning(
+                f"MCP 도구 '{self._name}'가 {self._tool_timeout}초 후 타임아웃되었습니다."
+            )
             return f"(MCP 도구 호출이 {self._tool_timeout}초 후 타임아웃되었습니다.)"
 
         parts = []
@@ -64,19 +64,16 @@ class MCPToolWrapper(Tool):
 
         return "\n".join(parts) or "(출력 없음)"
 
+
 async def connect_mcp_servers(
-        mcp_servers: dict[str, MCPServerConfig],
-        registry: ToolRegistry,
-        stack: AsyncExitStack
+    mcp_servers: dict[str, MCPServerConfig], registry: ToolRegistry, stack: AsyncExitStack
 ) -> None:
     """구성된 MCP 서버에 연결하고 해당 서버의 도구들을 등록합니다."""
     for name, cfg in mcp_servers.items():
         try:
             if cfg.command:
                 params: StdioServerParameters = StdioServerParameters(
-                    command=cfg.command,
-                    args=cfg.args,
-                    env=cfg.env or None
+                    command=cfg.command, args=cfg.args, env=cfg.env or None
                 )
                 read, write = await stack.enter_async_context(stdio_client(params))
             elif cfg.url:
@@ -94,19 +91,48 @@ async def connect_mcp_servers(
                     streamable_http_client(url=cfg.url, http_client=http_client)
                 )
             else:
-                logger.warning("MCP 서버 '{}'에 대한 유효한 연결 정보가 없습니다 (command 또는 url 필요).", name)
+                logger.warning(
+                    "MCP 서버 '{}'에 대한 유효한 연결 정보가 없습니다 (command 또는 url 필요).",
+                    name,
+                )
                 continue
 
             session: ClientSession = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
 
             from mcp import types
+
             tools: types.ListToolsResult = await session.list_tools()
+            enabled: set[str] = set(cfg.enabled_tools) if cfg.enabled_tools else set()
+            registered_count: int = 0
+
             for tool_def in tools.tools:
+                if enabled and tool_def.name not in enabled:
+                    logger.debug(
+                        "MCP 서버 '{}'의 도구 '{}' 필터링됨 (enabledTools에 미포함).",
+                        name,
+                        tool_def.name,
+                    )
+                    continue
                 wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout)
                 registry.register(wrapper)
+                registered_count += 1
                 logger.debug("MCP 서버 '{}'의 도구 '{}'이(가) 등록되었습니다.", name, wrapper.name)
 
-            logger.info("MCP 서버 '{}'에 성공적으로 연결되고 도구가 등록되었습니다 ({} 도구).", name, len(tools.tools))
+            if enabled:
+                missing: set[str] = enabled - {t.name for t in tools.tools}
+                for tool_name in missing:
+                    logger.warning(
+                        "MCP 서버 '{}'에 enabledTools에 지정된 도구 '{}'이(가) 존재하지 않습니다.",
+                        name,
+                        tool_name,
+                    )
+
+            logger.info(
+                "MCP 서버 '{}'에 성공적으로 연결되고 도구가 등록되었습니다 ({}/{} 도구).",
+                name,
+                registered_count,
+                len(tools.tools),
+            )
         except Exception as e:
             logger.error("MCP 서버 '{}'에 연결하는 동안 오류 발생: {}", name, str(e))
