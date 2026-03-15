@@ -32,9 +32,9 @@ def _split_message(content: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
             chunks.append(content)
             break
         cut = content[:max_len]
-        pos = cut.rfind('\n')
+        pos = cut.rfind("\n")
         if pos <= 0:
-            pos = cut.rfind(' ')
+            pos = cut.rfind(" ")
         if pos <= 0:
             pos = max_len
         chunks.append(content[:pos])
@@ -120,7 +120,8 @@ class DiscordChannel(BaseChannel):
                 if not await self._send_payload(url, headers, payload):
                     break  # Abort remaining chunks on failure
         finally:
-            await self._stop_typing(msg.chat_id)
+            if not msg.metadata.get("_progress", False):
+                await self._stop_typing(msg.chat_id)
 
     async def _send_payload(
         self, url: str, headers: dict[str, str], payload: dict[str, Any]
@@ -259,7 +260,9 @@ class DiscordChannel(BaseChannel):
                 continue
             try:
                 media_dir.mkdir(parents=True, exist_ok=True)
-                file_path = media_dir / f"{attachment.get('id', 'file')}_{filename.replace('/', '_')}"
+                file_path = (
+                    media_dir / f"{attachment.get('id', 'file')}_{filename.replace('/', '_')}"
+                )
                 resp = await self._http.get(url)
                 resp.raise_for_status()
                 file_path.write_bytes(resp.content)
@@ -301,7 +304,9 @@ class DiscordChannel(BaseChannel):
                 # Also check content for mention format <@USER_ID>
                 if f"<@{self._bot_user_id}>" in content or f"<@!{self._bot_user_id}>" in content:
                     return True
-            logger.debug("Discord message in {} ignored (bot not mentioned)", payload.get("channel_id"))
+            logger.debug(
+                "Discord message in {} ignored (bot not mentioned)", payload.get("channel_id")
+            )
             return False
 
         return True
