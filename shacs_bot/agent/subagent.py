@@ -12,6 +12,7 @@ from loguru import logger
 from shacs_bot.agent.context import ContextBuilder
 from shacs_bot.agent.skills import SkillsLoader
 from shacs_bot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
+from shacs_bot.agent.tools.history import SearchHistoryTool
 from shacs_bot.agent.tools.registry import ToolRegistry
 from shacs_bot.agent.tools.shell import ExecTool
 from shacs_bot.agent.tools.web import WebSearchTool, WebFetchTool
@@ -98,12 +99,26 @@ EXECUTOR_PROMPT = """\
 SUBAGENT_ROLES: dict[str, SubagentRole] = {
     "researcher": SubagentRole(
         system_prompt=RESEARCHER_PROMPT,
-        allowed_tools=["read_file", "list_dir", "exec", "web_search", "web_fetch"],
+        allowed_tools=[
+            "read_file",
+            "list_dir",
+            "exec",
+            "web_search",
+            "web_fetch",
+            "search_history",
+        ],
         max_iterations=10,
     ),
     "analyst": SubagentRole(
         system_prompt=ANALYST_PROMPT,
-        allowed_tools=["read_file", "list_dir", "exec", "web_search", "web_fetch"],
+        allowed_tools=[
+            "read_file",
+            "list_dir",
+            "exec",
+            "web_search",
+            "web_fetch",
+            "search_history",
+        ],
         max_iterations=10,
     ),
     "executor": SubagentRole(
@@ -202,6 +217,7 @@ class SubagentManager:
                 ),
                 WebSearchTool(api_key=self._brave_api_key, proxy=self._web_proxy),
                 WebFetchTool(proxy=self._web_proxy),
+                SearchHistoryTool(workspace=self._workspace),
             ]
 
             tools: ToolRegistry = ToolRegistry()

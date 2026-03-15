@@ -24,6 +24,7 @@ from shacs_bot.agent.tools.mcp import connect_mcp_servers
 from shacs_bot.agent.tools.message import MessageTool
 from shacs_bot.agent.tools.registry import ToolRegistry
 from shacs_bot.agent.tools.shell import ExecTool
+from shacs_bot.agent.tools.history import SearchHistoryTool
 from shacs_bot.agent.tools.spawn import SpawnTool
 from shacs_bot.agent.tools.web import WebSearchTool, WebFetchTool
 from shacs_bot.bus.events import InboundMessage, OutboundMessage
@@ -149,6 +150,7 @@ class AgentLoop:
         self._tools.register(WebFetchTool(proxy=self._web_proxy))
         self._tools.register(MessageTool(send_callback=self._bus.publish_outbound))
         self._tools.register(SpawnTool(manager=self._subagent))
+        self._tools.register(SearchHistoryTool(workspace=self._workspace))
 
         if self._cron_service:
             self._tools.register(CronTool(self._cron_service))
