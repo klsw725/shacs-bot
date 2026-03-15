@@ -76,7 +76,7 @@ class CronTool(Tool):
                 message=message, every_seconds=every_seconds, cron_expr=cron_expr, tz=tz, at=at
             )
         elif action == "list":
-            self._list_jobs()
+            return self._list_jobs()
         elif action == "remove":
             return self._remove_job(job_id)
 
