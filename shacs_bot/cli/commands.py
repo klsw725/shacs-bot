@@ -562,14 +562,15 @@ def agent(
 
             return _thinking()
 
-        async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
+        async def _cli_progress(
+            content: str, *, tool_hint: bool = False, skill_hint: bool = False
+        ) -> None:
             ch: ChannelsConfig = agent_loop.channels_config
-            if ch and tool_hint and not ch.send_tool_hints:
-                return
-
-            if ch and not tool_hint and not ch.send_progress:
-                return
-
+            if not skill_hint:
+                if ch and tool_hint and not ch.send_tool_hints:
+                    return
+                if ch and not tool_hint and not ch.send_progress:
+                    return
             console.print(f"  [dim]↳ {content}[/dim]")
 
         async def run_once():
@@ -629,9 +630,12 @@ def agent(
                             bus.consume_outbound(), timeout=1.0
                         )
                         if msg.metadata.get("_progress"):
+                            is_skill_hint: bool = msg.metadata.get("_skill_hint", False)
                             is_tool_hint: bool = msg.metadata.get("_tool_hint", False)
                             ch: ChannelsConfig = agent_loop.channels_config
-                            if ch and is_tool_hint and not ch.send_tool_hints:
+                            if is_skill_hint:
+                                console.print(f"  [dim]↳ {msg.content}[/dim]")
+                            elif ch and is_tool_hint and not ch.send_tool_hints:
                                 pass
                             elif ch and not is_tool_hint and not ch.send_progress:
                                 pass
@@ -946,10 +950,12 @@ def provider_login(
 def _login_openai_codex() -> None:
     try:
         from oauth_cli_kit import get_token, login_oauth_interactive, OAuthToken
+        from shacs_bot.providers.openai_codex import codex_token_storage
 
+        storage = codex_token_storage()
         token: OAuthToken | None = None
         try:
-            token = get_token()
+            token = get_token(storage=storage)
         except Exception:
             pass
         if not (token and token.access):
@@ -958,6 +964,7 @@ def _login_openai_codex() -> None:
                 print_fn=lambda s: console.print(s),
                 prompt_fn=lambda s: typer.prompt(s),
                 originator="shacs-bot",
+                storage=storage,
             )
         if not (token and token.access):
             console.print("[red]✗ Authentication failed[/red]")

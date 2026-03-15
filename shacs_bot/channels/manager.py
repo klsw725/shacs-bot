@@ -1,4 +1,5 @@
 """채팅 채널을 조정(관리)하기 위한 채널 매니저."""
+
 import asyncio
 from typing import Any
 
@@ -19,6 +20,7 @@ class ChannelManager:
     - 채널 시작 및 중지
     - 발신(outbound) 메시지 라우팅
     """
+
     def __init__(self, config: Config, bus: MessageBus):
         self._config = config
         self._bus = bus
@@ -39,6 +41,7 @@ class ChannelManager:
         if self._config.channels.telegram.enabled:
             try:
                 from shacs_bot.channels.telegram import TelegramChannel
+
                 self._channels["telegram"] = TelegramChannel(
                     self._config.channels.telegram,
                     self._bus,
@@ -52,6 +55,7 @@ class ChannelManager:
         if self._config.channels.whatsapp.enabled:
             try:
                 from shacs_bot.channels.whatsapp import WhatsAppChannel
+
                 self._channels["whatsapp"] = WhatsAppChannel(
                     self._config.channels.whatsapp, self._bus
                 )
@@ -63,9 +67,8 @@ class ChannelManager:
         if self._config.channels.discord.enabled:
             try:
                 from shacs_bot.channels.discord import DiscordChannel
-                self._channels["discord"] = DiscordChannel(
-                    self._config.channels.discord, self._bus
-                )
+
+                self._channels["discord"] = DiscordChannel(self._config.channels.discord, self._bus)
                 logger.info("Discord channel enabled")
             except ImportError as e:
                 logger.warning("Discord channel not available: {}", e)
@@ -74,9 +77,8 @@ class ChannelManager:
         if self._config.channels.feishu.enabled:
             try:
                 from shacs_bot.channels.feishu import FeishuChannel
-                self._channels["feishu"] = FeishuChannel(
-                    self._config.channels.feishu, self._bus
-                )
+
+                self._channels["feishu"] = FeishuChannel(self._config.channels.feishu, self._bus)
                 logger.info("Feishu channel enabled")
             except ImportError as e:
                 logger.warning("Feishu channel not available: {}", e)
@@ -86,9 +88,7 @@ class ChannelManager:
             try:
                 from shacs_bot.channels.mochat import MochatChannel
 
-                self._channels["mochat"] = MochatChannel(
-                    self._config.channels.mochat, self._bus
-                )
+                self._channels["mochat"] = MochatChannel(self._config.channels.mochat, self._bus)
                 logger.info("Mochat channel enabled")
             except ImportError as e:
                 logger.warning("Mochat channel not available: {}", e)
@@ -97,6 +97,7 @@ class ChannelManager:
         if self._config.channels.dingtalk.enabled:
             try:
                 from shacs_bot.channels.dingtalk import DingTalkChannel
+
                 self._channels["dingtalk"] = DingTalkChannel(
                     self._config.channels.dingtalk, self._bus
                 )
@@ -108,9 +109,8 @@ class ChannelManager:
         if self._config.channels.email.enabled:
             try:
                 from shacs_bot.channels.email import EmailChannel
-                self._channels["email"] = EmailChannel(
-                    self._config.channels.email, self._bus
-                )
+
+                self._channels["email"] = EmailChannel(self._config.channels.email, self._bus)
                 logger.info("Email channel enabled")
             except ImportError as e:
                 logger.warning("Email channel not available: {}", e)
@@ -119,9 +119,8 @@ class ChannelManager:
         if self._config.channels.slack.enabled:
             try:
                 from shacs_bot.channels.slack import SlackChannel
-                self._channels["slack"] = SlackChannel(
-                    self._config.channels.slack, self._bus
-                )
+
+                self._channels["slack"] = SlackChannel(self._config.channels.slack, self._bus)
                 logger.info("Slack channel enabled")
             except ImportError as e:
                 logger.warning("Slack channel not available: {}", e)
@@ -130,6 +129,7 @@ class ChannelManager:
         if self._config.channels.qq.enabled:
             try:
                 from shacs_bot.channels.qq import QQChannel
+
                 self._channels["qq"] = QQChannel(
                     self._config.channels.qq,
                     self._bus,
@@ -142,6 +142,7 @@ class ChannelManager:
         if self._config.channels.matrix.enabled:
             try:
                 from shacs_bot.channels.matrix import MatrixChannel
+
                 self._channels["matrix"] = MatrixChannel(
                     self._config.channels.matrix,
                     self._bus,
@@ -186,13 +187,19 @@ class ChannelManager:
         while True:
             try:
                 msg: OutboundMessage = await asyncio.wait_for(
-                    fut=self._bus.consume_outbound(),
-                    timeout=1.0
+                    fut=self._bus.consume_outbound(), timeout=1.0
                 )
                 if msg.metadata.get("_progress"):
-                    if msg.metadata.get("_tool_hint") and not self._config.channels.send_tool_hints:
+                    if msg.metadata.get("_skill_hint"):
+                        pass
+                    elif (
+                        msg.metadata.get("_tool_hint") and not self._config.channels.send_tool_hints
+                    ):
                         continue
-                    elif not msg.metadata.get("_tool_hint") and not self._config.channels.send_progress:
+                    elif (
+                        not msg.metadata.get("_tool_hint")
+                        and not self._config.channels.send_progress
+                    ):
                         continue
 
                 channel: BaseChannel | None = self._channels.get(msg.channel)
@@ -242,9 +249,6 @@ class ChannelManager:
     def get_status(self) -> dict[str, Any]:
         """모든 채널의 상태 가져오기"""
         return {
-            name: {
-                "enabled": True,
-                "running": channel.is_running
-            }
+            name: {"enabled": True, "running": channel.is_running}
             for name, channel in self._channels.items()
         }

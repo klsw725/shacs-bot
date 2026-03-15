@@ -382,10 +382,13 @@ class AgentLoop:
             chat_id=msg.chat_id,
         )
 
-        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+        async def _bus_progress(
+            content: str, *, tool_hint: bool = False, skill_hint: bool = False
+        ) -> None:
             meta: dict[str, Any] = dict(msg.metadata or {})
             meta["_progress"] = True
             meta["_tool_hint"] = tool_hint
+            meta["_skill_hint"] = skill_hint
             await self._bus.publish_outbound(
                 OutboundMessage(
                     channel=msg.channel,
@@ -442,6 +445,10 @@ class AgentLoop:
                         await on_progress(thought)
 
                     await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
+
+                    skill_msg: str | None = self._detect_skill_hint(response.tool_calls)
+                    if skill_msg:
+                        await on_progress(skill_msg, skill_hint=True)
 
                 tool_call_dicts: list[dict[str, Any]] = [
                     tool_call.to_openai_tool_call() for tool_call in response.tool_calls
@@ -582,6 +589,17 @@ class AgentLoop:
             return f"{tc.name}('{val[:40]}...')" if len(val) > 40 else f"{tc.name}('{val}')"
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    @staticmethod
+    def _detect_skill_hint(tool_calls: list[ToolCallRequest]) -> str | None:
+        """도구 호출에서 스킬 사용을 감지하여 친화적 힌트를 반환합니다."""
+        for tc in tool_calls:
+            if tc.name == "read_file":
+                path: str = (tc.arguments or {}).get("path", "")
+                if "/skills/" in path and path.endswith("/SKILL.md"):
+                    skill_name: str = path.split("/skills/")[-1].split("/")[0]
+                    return f"\U0001f527 {skill_name} 스킬 사용 중"
+        return None
 
     async def close_mcp(self) -> None:
         """ "MCP 연결 종료"""
