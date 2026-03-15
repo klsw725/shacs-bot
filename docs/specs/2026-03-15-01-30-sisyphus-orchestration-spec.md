@@ -8,8 +8,8 @@
 
 | PRD | 대응 변경 | 설명 |
 |---|---|---|
-| [`prds/orchestration-prompt.md`](../../prds/orchestration-prompt.md) | 변경 1 | SOUL.md 재작성 — 의도 분류, 위임 판단, 커뮤니케이션 규칙 |
-| [`prds/role-based-subagent.md`](../../prds/role-based-subagent.md) | 변경 2, 3 | 서브에이전트 역할 시스템 — SubagentRole + spawn role 파라미터 |
+| [`docs/prds/orchestration-prompt.md`](../prds/orchestration-prompt.md) | 변경 1 | SOUL.md 재작성 — 의도 분류, 위임 판단, 커뮤니케이션 규칙 |
+| [`docs/prds/role-based-subagent.md`](../prds/role-based-subagent.md) | 변경 2, 3 | 서브에이전트 역할 시스템 — SubagentRole + spawn role 파라미터 |
 
 ---
 

@@ -1,6 +1,6 @@
 # PRD: 오케스트레이션 시스템 프롬프트
 
-> **SPEC**: [`docs/specs/2026-03-15-01-30-sisyphus-orchestration-spec.md`](../docs/specs/2026-03-15-01-30-sisyphus-orchestration-spec.md) — 변경 1
+> **SPEC**: [`docs/specs/2026-03-15-01-30-sisyphus-orchestration-spec.md`](../specs/2026-03-15-01-30-sisyphus-orchestration-spec.md) — 변경 1
 > **관련 PRD**: [`prds/role-based-subagent.md`](./role-based-subagent.md) — 이 PRD가 먼저 완료되어야 역할 가이드 부분이 실제로 동작함
 
 ---

@@ -1,6 +1,6 @@
 # PRD: 역할 기반 서브에이전트 시스템
 
-> **SPEC**: [`docs/specs/2026-03-15-01-30-sisyphus-orchestration-spec.md`](../docs/specs/2026-03-15-01-30-sisyphus-orchestration-spec.md) — 변경 2, 변경 3
+> **SPEC**: [`docs/specs/2026-03-15-01-30-sisyphus-orchestration-spec.md`](../specs/2026-03-15-01-30-sisyphus-orchestration-spec.md) — 변경 2, 변경 3
 > **관련 PRD**: [`prds/orchestration-prompt.md`](./orchestration-prompt.md) — 시스템 프롬프트에서 서브에이전트 역할을 안내하므로 함께 적용 시 효과 극대화
 
 ---
@@ -84,7 +84,7 @@ oh-my-opencode의 에이전트 역할 분화 패턴을 적용한다:
 - [x] **M2: spawn/run 메서드에 역할 시스템 통합**
   `spawn()` 에 `role` 파라미터 추가, `_run_subagent()` 에서 역할 기반 도구 필터링 및 프롬프트 선택 적용, `spawn.py`에 `role` 파라미터 추가. 기본값 `"executor"` 로 하위 호환성 유지.
 
-- [ ] **M3: 역할별 동작 검증**
+- [x] **M3: 역할별 동작 검증**
   researcher 역할로 spawn 시 write/edit 도구 미등록 확인. executor 역할로 spawn 시 전체 도구 등록 확인. 기존 spawn(role 없이) 호출이 깨지지 않는지 확인.
 
 - [ ] **M4: 실사용 시나리오 검증 및 프롬프트 튜닝**
@@ -116,3 +116,4 @@ oh-my-opencode의 에이전트 역할 분화 패턴을 적용한다:
 |---|---|
 | 2026-03-15 | PRD 초안 작성. SPEC에서 변경 2, 변경 3 통합. |
 | 2026-03-15 | M1+M2 완료. SubagentRole dataclass, 3개 역할 프롬프트, SUBAGENT_ROLES 딕셔너리 추가. spawn()/\_run_subagent()/\_build_subagent_prompt()에 role 파라미터 통합. SpawnTool에 role 파라미터 추가. |
+| 2026-03-15 | M3 완료. 코드 리뷰 기반 검증: (1) researcher/analyst의 allowed_tools에 write_file/edit_file 미포함 → 필터링 정상, (2) executor의 allowed_tools=[] → 빈 리스트 falsy로 전체 도구 등록, (3) spawn/\_run_subagent/SpawnTool.execute 모두 role="executor" 기본값 → 하위 호환 유지. MCP 동적 도구는 서브에이전트에 미포함 (설계 의도). |
