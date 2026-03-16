@@ -1,4 +1,5 @@
 """LiteLLM provider implementation for multi-provider support."""
+
 import hashlib
 import os
 import secrets
@@ -9,7 +10,13 @@ import json_repair
 import litellm
 from litellm import acompletion
 from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
-from litellm.types.utils import ModelResponse, Choices, StreamingChoices, Message, ChatCompletionMessageToolCall
+from litellm.types.utils import (
+    ModelResponse,
+    Choices,
+    StreamingChoices,
+    Message,
+    ChatCompletionMessageToolCall,
+)
 from loguru import logger
 
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -22,18 +29,22 @@ class LiteLLMProvider(LLMProvider):
 
     Supports OpenRouter, Anthropic, OpenAI, Gemini, and many other providers through a unifed interface.
     """
+
     # Standard chat-completion message keys.
-    _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"})
+    _ALLOWED_MSG_KEYS = frozenset(
+        {"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"}
+    )
     _ANTHROPIC_EXTRA_KEYS = frozenset({"thinking_blocks"})
     _ALNUM = string.ascii_letters + string.digits
+    _CACHE_MIN_CHARS: int = 4000  # cache breakpoint를 삽입할 tool result의 최소 길이
 
     def __init__(
-            self,
-            api_key: str | None = None,
-            base_url: str | None = None,
-            default_model: str = "anthropic/claude-opus-4-5",
-            extra_headers: dict[str, str] | None = None,
-            provider_name: str | None = None,
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        default_model: str = "anthropic/claude-opus-4-5",
+        extra_headers: dict[str, str] | None = None,
+        provider_name: str | None = None,
     ):
         super().__init__(api_key, base_url)
         self._model: str = default_model
@@ -42,7 +53,9 @@ class LiteLLMProvider(LLMProvider):
         # 게이트웨이 / 로컬 배포 여부를 감지한다.
         # provider_name(설정 키에서 전달됨)이 주요 판단 기준이며,
         # api_key / api_base는 자동 감지를 위한 보조 기준으로 사용된다.
-        self._gateway: ProviderSpec | None = find_gateway(provider_name=provider_name, api_key=api_key, base_url=base_url)
+        self._gateway: ProviderSpec | None = find_gateway(
+            provider_name=provider_name, api_key=api_key, base_url=base_url
+        )
 
         if api_key:
             self._setup_env(api_key=api_key, base_url=base_url, model=default_model)
@@ -80,14 +93,14 @@ class LiteLLMProvider(LLMProvider):
             os.environ.setdefault(env_name, resolved)
 
     async def chat(
-            self,
-            messages: list[dict[str, Any]],
-            tools: list[dict[str, Any]] | None = None,
-            model: str | None = None,
-            max_tokens: int = 4096,
-            temperature: float = 0.7,
-            reasoning_effort: str | None = None,
-            tool_choice: str | dict[str, Any] | None = None,
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -114,7 +127,9 @@ class LiteLLMProvider(LLMProvider):
         max_tokens = max(1, max_tokens)
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
+            "messages": self._sanitize_messages(
+                self._sanitize_empty_content(messages), extra_keys=extra_msg_keys
+            ),
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
@@ -177,7 +192,11 @@ class LiteLLMProvider(LLMProvider):
     def _extra_msg_keys(self, original_model: str, resolved_model: str) -> frozenset[str]:
         """Return provider-specific extra keys to preserve in request messages."""
         spec: ProviderSpec | None = find_by_model(original_model) or find_by_model(resolved_model)
-        if (spec and spec.name == "anthropic") or ("claude" in original_model.lower()) or resolved_model.startswith("anthropic/"):
+        if (
+            (spec and spec.name == "anthropic")
+            or ("claude" in original_model.lower())
+            or resolved_model.startswith("anthropic/")
+        ):
             return self._ANTHROPIC_EXTRA_KEYS
 
         return frozenset()
@@ -191,22 +210,55 @@ class LiteLLMProvider(LLMProvider):
         return spec is not None and spec.supports_prompt_caching
 
     def _apply_cache_control(
-            self,
-            messages: list[dict[str, Any]],
-            tools: list[dict[str, Any]] | None,
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
-        """Return copies of messages and tools with cache_control injected."""
-        new_messages: list[dict[str, Any]] = []
+        """Return copies of messages and tools with cache_control injected.
 
-        for msg in messages:
+        Anthropic allows up to 4 cache breakpoints:
+        1. system message
+        2. last tool definition
+        3. last user turn (conversation history prefix caching)
+        4. last large tool result >= _CACHE_MIN_CHARS
+        """
+        last_user_idx: int | None = None
+        last_large_tool_idx: int | None = None
+
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                last_user_idx = i
+            elif msg.get("role") == "tool":
+                raw: Any = msg.get("content", "")
+                if isinstance(raw, str) and len(raw) >= self._CACHE_MIN_CHARS:
+                    last_large_tool_idx = i
+
+        new_messages: list[dict[str, Any]] = []
+        _cache_marker: dict[str, str] = {"type": "ephemeral"}
+
+        for i, msg in enumerate(messages):
             if msg.get("role") == "system":
                 content: Any = msg["content"]
                 if isinstance(content, str):
-                    new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+                    new_content = [
+                        {"type": "text", "text": content, "cache_control": _cache_marker}
+                    ]
                 else:
                     new_content = list(content)
-                    new_content[-1] = {**new_content[-1], "cache_control": {"type": "ephemeral"}}
-
+                    new_content[-1] = {**new_content[-1], "cache_control": _cache_marker}
+                new_messages.append({**msg, "content": new_content})
+            elif i == last_user_idx or i == last_large_tool_idx:
+                content = msg["content"]
+                if isinstance(content, str):
+                    new_content = [
+                        {"type": "text", "text": content, "cache_control": _cache_marker}
+                    ]
+                elif isinstance(content, list):
+                    new_content = list(content)
+                    new_content[-1] = {**new_content[-1], "cache_control": _cache_marker}
+                else:
+                    new_messages.append(msg)
+                    continue
                 new_messages.append({**msg, "content": new_content})
             else:
                 new_messages.append(msg)
@@ -214,7 +266,7 @@ class LiteLLMProvider(LLMProvider):
         new_tools: list[dict[str, Any]] = tools
         if tools:
             new_tools = list(tools)
-            new_tools[-1] = {**new_tools[-1], "cache_control": {"type": "ephemeral"}}
+            new_tools[-1] = {**new_tools[-1], "cache_control": _cache_marker}
 
         return new_messages, new_tools
 
@@ -248,7 +300,11 @@ class LiteLLMProvider(LLMProvider):
                 content = msg.content
 
         if len(response.choices) > 1:
-            logger.debug("LiteLLM 응답에 {}개의 선택(choice)이 있었고, 그중에서 {}개의 tool_call을 병합했습니다.", len(response.choices), len(raw_tool_calls))
+            logger.debug(
+                "LiteLLM 응답에 {}개의 선택(choice)이 있었고, 그중에서 {}개의 tool_call을 병합했습니다.",
+                len(response.choices),
+                len(raw_tool_calls),
+            )
 
         tool_calls: list = []
         for tc in raw_tool_calls:
@@ -259,24 +315,38 @@ class LiteLLMProvider(LLMProvider):
 
             provider_specific_fields = getattr(tc, "provider_specific_fields", None) or None
             function_provider_specific_fields = (
-                    getattr(tc.function, "provider_specific_fields", None) or None
+                getattr(tc.function, "provider_specific_fields", None) or None
             )
 
-            tool_calls.append(ToolCallRequest(
-                id=self._short_tool_id(),
-                name=tc.function.name,
-                arguments=args,
-                provider_specific_fields=provider_specific_fields,
-                function_provider_specific_fields=function_provider_specific_fields,
-            ))
+            tool_calls.append(
+                ToolCallRequest(
+                    id=self._short_tool_id(),
+                    name=tc.function.name,
+                    arguments=args,
+                    provider_specific_fields=provider_specific_fields,
+                    function_provider_specific_fields=function_provider_specific_fields,
+                )
+            )
 
         usage = {}
         if hasattr(response, "usage") and response.usage:
+            cache_read: int = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+            cache_creation: int = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+
             usage = {
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_creation,
             }
+
+            if cache_read:
+                logger.debug(
+                    "Prompt cache hit: {} tokens cached, {} tokens created",
+                    cache_read,
+                    cache_creation,
+                )
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
         thinking_blocks = getattr(message, "thinking_blocks", None) or None
@@ -290,7 +360,9 @@ class LiteLLMProvider(LLMProvider):
             thinking_blocks=thinking_blocks,
         )
 
-    def _canonicalize_explicit_prefix(self, model: str, spec_name: str, canonical_prefix: str) -> str:
+    def _canonicalize_explicit_prefix(
+        self, model: str, spec_name: str, canonical_prefix: str
+    ) -> str:
         """Normalize explicit provider prefixes like `github-copilot/...`."""
         if "/" not in model:
             return model
@@ -311,19 +383,19 @@ class LiteLLMProvider(LLMProvider):
 
         return hashlib.sha1(tool_call_id.encode()).hexdigest()[:9]
 
-    def _sanitize_messages(self, messages: list[dict[str, Any]], extra_keys: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    def _sanitize_messages(
+        self, messages: list[dict[str, Any]], extra_keys: frozenset[str] = frozenset()
+    ) -> list[dict[str, Any]]:
         """Strip non-standard keys and ensure assistant messages have a content key."""
         allowed: frozenset[str] = self._ALLOWED_MSG_KEYS | extra_keys
         sanitized: list[Any] = LLMProvider._sanitize_request_message(messages, allowed)
         id_map: dict[str, str] = {}
-
 
         def map_id(value: Any) -> Any:
             if not isinstance(value, str):
                 return value
 
             return id_map.setdefault(value, LiteLLMProvider._normalize_tool_call_id(value))
-
 
         for clean in sanitized:
             # assistant의 tool_calls[].id와 tool의 tool_call_id가 축약(shortening)된 이후에도 서로 일치하도록 유지합니다.
