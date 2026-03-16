@@ -192,6 +192,9 @@ class ChannelManager:
                 if msg.metadata.get("_progress"):
                     if msg.metadata.get("_skill_hint"):
                         pass
+                    elif msg.metadata.get("_memory_hint"):
+                        if not self._config.channels.send_memory_hints:
+                            continue
                     elif (
                         msg.metadata.get("_tool_hint") and not self._config.channels.send_tool_hints
                     ):

@@ -368,7 +368,18 @@ class AgentLoop:
                 """,
             )
 
-        await self._memory_consolidator.maybe_consolidate_by_tokens(session=session)
+        consolidated: bool = await self._memory_consolidator.maybe_consolidate_by_tokens(
+            session=session
+        )
+        if consolidated and self._channels_config and self._channels_config.send_memory_hints:
+            await self._bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="\U0001f4be 기억을 정리했어요",
+                    metadata={"_progress": True, "_memory_hint": True},
+                )
+            )
 
         self._set_tool_context(
             channel=msg.channel, chat_id=msg.chat_id, message_id=msg.metadata.get("message_id")
@@ -412,7 +423,18 @@ class AgentLoop:
         self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
         self._sessions.save(session)
 
-        await self._memory_consolidator.maybe_consolidate_by_tokens(session=session)
+        consolidated: bool = await self._memory_consolidator.maybe_consolidate_by_tokens(
+            session=session
+        )
+        if consolidated and self._channels_config and self._channels_config.send_memory_hints:
+            await self._bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="\U0001f4be 기억을 정리했어요",
+                    metadata={"_progress": True, "_memory_hint": True},
+                )
+            )
 
         mt: Any = self._tools.get("message")
         if mt and isinstance(mt, MessageTool) and mt.sent_in_turn:
@@ -468,6 +490,10 @@ class AgentLoop:
                     skill_msg: str | None = self._detect_skill_hint(response.tool_calls)
                     if skill_msg:
                         await on_progress(skill_msg, skill_hint=True)
+
+                    spawn_msg: str | None = self._detect_spawn_hint(response.tool_calls)
+                    if spawn_msg:
+                        await on_progress(spawn_msg, skill_hint=True)
 
                 tool_call_dicts: list[dict[str, Any]] = [
                     tool_call.to_openai_tool_call() for tool_call in response.tool_calls
@@ -618,6 +644,15 @@ class AgentLoop:
                 if "/skills/" in path and path.endswith("/SKILL.md"):
                     skill_name: str = path.split("/skills/")[-1].split("/")[0]
                     return f"\U0001f527 {skill_name} 스킬 사용 중"
+        return None
+
+    @staticmethod
+    def _detect_spawn_hint(tool_calls: list[ToolCallRequest]) -> str | None:
+        for tc in tool_calls:
+            if tc.name == "spawn":
+                args: dict = tc.arguments or {}
+                label: str = args.get("label") or args.get("task", "")[:30]
+                return f"\U0001f680 백그라운드 작업 시작: {label}"
         return None
 
     async def close_mcp(self) -> None:

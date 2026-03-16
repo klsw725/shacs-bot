@@ -656,10 +656,14 @@ def agent(
                         )
                         if msg.metadata.get("_progress"):
                             is_skill_hint: bool = msg.metadata.get("_skill_hint", False)
+                            is_memory_hint: bool = msg.metadata.get("_memory_hint", False)
                             is_tool_hint: bool = msg.metadata.get("_tool_hint", False)
                             ch: ChannelsConfig = agent_loop.channels_config
                             if is_skill_hint:
                                 console.print(f"  [dim]↳ {msg.content}[/dim]")
+                            elif is_memory_hint:
+                                if not ch or ch.send_memory_hints:
+                                    console.print(f"  [dim]↳ {msg.content}[/dim]")
                             elif ch and is_tool_hint and not ch.send_tool_hints:
                                 pass
                             elif ch and not is_tool_hint and not ch.send_progress:
