@@ -1,4 +1,5 @@
 """동적 도구 관리를 위한 도구 레지스트리"""
+
 from typing import Any
 
 from shacs_bot.agent.tools.base import Tool
@@ -10,6 +11,7 @@ class ToolRegistry:
 
     동적 도구 등록 및 실행을 허용합니다.
     """
+
     def __init__(self):
         self._tools: dict[str, Tool] = {}
 
@@ -53,18 +55,31 @@ class ToolRegistry:
         if not tool:
             return f"에러: 도구 '{name}'을(를) 찾을 수 없습니다. 가능한 도구: {', '.join(self.tool_names)}"
 
-        try:
-            errors: list[str] = tool.validate_params(params)
-            if errors:
-                return f"에러: 도구 '{name}'의 매개변수가 유효하지 않습니다: " + "; ".join(errors)
+        from shacs_bot.observability.tracing import span as otel_span
 
-            result: str = await tool.execute(**params)
-            if isinstance(result, str) and result.startswith("Error"):
-                return result + _HINT
+        with otel_span("tool_execution", {"tool.name": name}) as s:
+            try:
+                errors: list[str] = tool.validate_params(params)
+                if errors:
+                    return f"에러: 도구 '{name}'의 매개변수가 유효하지 않습니다: " + "; ".join(
+                        errors
+                    )
 
-            return result
-        except Exception as e:
-            return f"{name} 실행 중 에러 발생: {str(e)}" + _HINT
+                result: str = await tool.execute(**params)
+                if s:
+                    s.set_attribute(
+                        "tool.success",
+                        not isinstance(result, str) or not result.startswith("Error"),
+                    )
+                    s.set_attribute(
+                        "tool.result_length", len(result) if isinstance(result, str) else 0
+                    )
+                if isinstance(result, str) and result.startswith("Error"):
+                    return result + _HINT
+
+                return result
+            except Exception as e:
+                return f"{name} 실행 중 에러 발생: {str(e)}" + _HINT
 
     @property
     def tool_names(self) -> list[str]:
@@ -76,4 +91,3 @@ class ToolRegistry:
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools
-

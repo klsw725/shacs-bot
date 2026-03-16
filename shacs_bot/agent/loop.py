@@ -433,18 +433,30 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict[str, Any]]]:
         """에이전트 반복 루프를 실행합니다. (final_content, tools_used, messages)를 반환합니다."""
+        from shacs_bot.observability.tracing import span as otel_span
+
         messages: list[dict[str, Any]] = init_messages
         final_content: str | None = None
         tools_used: list[str] = []
 
         for _ in range(self._max_iterations):
-            response: LLMResponse = await self._provider.chat_with_retry(
-                messages=messages,
-                tools=self._tools.get_definitions(),
-                model=self._model,
-                failover_manager=self._failover,
-                provider_name=self._provider_name,
-            )
+            with otel_span("llm_call", {"model": self._model}) as llm_span:
+                response: LLMResponse = await self._provider.chat_with_retry(
+                    messages=messages,
+                    tools=self._tools.get_definitions(),
+                    model=self._model,
+                    failover_manager=self._failover,
+                    provider_name=self._provider_name,
+                )
+                if llm_span and response.finish_reason != "error":
+                    llm_span.set_attribute("tokens.prompt", response.usage.get("prompt_tokens", 0))
+                    llm_span.set_attribute(
+                        "tokens.completion", response.usage.get("completion_tokens", 0)
+                    )
+                    llm_span.set_attribute("finish_reason", response.finish_reason)
+                    llm_span.set_attribute(
+                        "cache.read_tokens", response.usage.get("cache_read_input_tokens", 0)
+                    )
             if response.has_tool_calls:
                 if on_progress:
                     thought = self._strip_think(response.content)

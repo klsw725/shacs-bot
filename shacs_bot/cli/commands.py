@@ -330,6 +330,11 @@ def gateway(
 
     console.print(f"{__logo__} shacs-bot 게이트웨이 포트 번오 {port}에서 시작 중...")
     sync_workspace_template(config.workspace_path)
+
+    from shacs_bot.observability.tracing import init_tracing
+
+    init_tracing(config)
+
     bus: MessageBus = MessageBus()
     provider = _make_provider(config)
     session_manager: SessionManager = SessionManager(config.workspace_path)
@@ -345,6 +350,7 @@ def gateway(
 
     from shacs_bot.providers.failover import FailoverManager
 
+    gw_provider_name: str | None = config.get_provider_name()
     failover: FailoverManager | None = FailoverManager(config) if config.failover.enabled else None
 
     agent_loop: AgentLoop = AgentLoop(
@@ -363,7 +369,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         failover_manager=failover,
-        provider_name=provider_name,
+        provider_name=gw_provider_name,
     )
 
     # 크론 callback 설정 (에이전트 필요)
@@ -522,6 +528,10 @@ def agent(
 
     config: Config = load_config()
     sync_workspace_template(workspace=config.workspace_path)
+
+    from shacs_bot.observability.tracing import init_tracing
+
+    init_tracing(config)
 
     bus: MessageBus = MessageBus()
     provider = _make_provider(config)

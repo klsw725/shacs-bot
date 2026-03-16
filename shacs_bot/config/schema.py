@@ -287,6 +287,13 @@ class FailoverConfig(Base):
     rules: list[FailoverRule] = Field(default_factory=list)
 
 
+class ObservabilityConfig(Base):
+    enabled: bool = False
+    otlp_endpoint: str = "http://localhost:4317"
+    service_name: str = "shacs-bot"
+    sample_rate: float = 1.0
+
+
 class GatewayConfig(Base):
     """Gateway/server configuration."""
 
@@ -359,6 +366,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     failover: FailoverConfig = Field(default_factory=FailoverConfig)
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
     @property
     def workspace_path(self) -> Path:
