@@ -31,6 +31,7 @@ from shacs_bot.bus.events import InboundMessage, OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from shacs_bot.providers.failover import FailoverManager
 
 
 class AgentLoop:
@@ -64,6 +65,8 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        failover_manager: FailoverManager | None = None,
+        provider_name: str | None = None,
     ):
         self._bus: MessageBus = bus
         self._channels_config: ChannelsConfig = channels_config
@@ -81,6 +84,8 @@ class AgentLoop:
         self._exec_config: ExecToolConfig = exec_config or ExecToolConfig()
         self._cron_service: CronService | None = cron_service
         self._restrict_to_workspace: bool = restrict_to_workspace
+        self._failover: FailoverManager | None = failover_manager
+        self._provider_name: str | None = provider_name
 
         self._context = ContextBuilder(self._workspace)
         self._sessions: SessionManager = session_manager or SessionManager(self._workspace)
@@ -437,6 +442,8 @@ class AgentLoop:
                 messages=messages,
                 tools=self._tools.get_definitions(),
                 model=self._model,
+                failover_manager=self._failover,
+                provider_name=self._provider_name,
             )
             if response.has_tool_calls:
                 if on_progress:

@@ -275,6 +275,18 @@ class HeartbeatConfig(Base):
     interval_s: int = 30 * 60  # 30분
 
 
+class FailoverRule(Base):
+    from_provider: str = ""
+    to_provider: str = ""
+    model_map: dict[str, str] = Field(default_factory=dict)
+
+
+class FailoverConfig(Base):
+    enabled: bool = False
+    cooldown_seconds: int = 300
+    rules: list[FailoverRule] = Field(default_factory=list)
+
+
 class GatewayConfig(Base):
     """Gateway/server configuration."""
 
@@ -346,6 +358,7 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    failover: FailoverConfig = Field(default_factory=FailoverConfig)
 
     @property
     def workspace_path(self) -> Path:

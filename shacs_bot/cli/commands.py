@@ -343,6 +343,10 @@ def gateway(
     provider.generation.max_tokens = config.agents.defaults.max_tokens
     provider.generation.reasoning_effort = config.agents.defaults.reasoning_effort
 
+    from shacs_bot.providers.failover import FailoverManager
+
+    failover: FailoverManager | None = FailoverManager(config) if config.failover.enabled else None
+
     agent_loop: AgentLoop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -358,6 +362,8 @@ def gateway(
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        failover_manager=failover,
+        provider_name=provider_name,
     )
 
     # 크론 callback 설정 (에이전트 필요)
@@ -533,6 +539,13 @@ def agent(
     provider.generation.max_tokens = config.agents.defaults.max_tokens
     provider.generation.reasoning_effort = config.agents.defaults.reasoning_effort
 
+    from shacs_bot.providers.failover import FailoverManager
+
+    cli_provider_name: str | None = config.get_provider_name()
+    cli_failover: FailoverManager | None = (
+        FailoverManager(config) if config.failover.enabled else None
+    )
+
     agent_loop: AgentLoop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -547,6 +560,8 @@ def agent(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        failover_manager=cli_failover,
+        provider_name=cli_provider_name,
     )
 
     if message:

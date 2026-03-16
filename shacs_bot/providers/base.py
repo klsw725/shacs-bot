@@ -1,4 +1,5 @@
 """Base LLM provider interface."""
+
 import asyncio
 import json
 from abc import ABC, abstractmethod
@@ -11,6 +12,7 @@ from loguru import logger
 @dataclass
 class ToolCallRequest:
     """A tool call request from the LLM."""
+
     id: str
     name: str
     arguments: dict[str, Any]
@@ -24,14 +26,16 @@ class ToolCallRequest:
             "type": "function",
             "function": {
                 "name": self.name,
-                "arguments": json.dumps(self.arguments, ensure_ascii=False)
-            }
+                "arguments": json.dumps(self.arguments, ensure_ascii=False),
+            },
         }
 
         if self.provider_specific_fields:
             tool_call["provider_specific_fields"] = self.provider_specific_fields
         if self.function_provider_specific_fields:
-            tool_call["function"]["provider_specific_fields"] = self.function_provider_specific_fields
+            tool_call["function"]["provider_specific_fields"] = (
+                self.function_provider_specific_fields
+            )
 
         return tool_call
 
@@ -39,6 +43,7 @@ class ToolCallRequest:
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""
+
     content: str | None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
@@ -50,6 +55,7 @@ class LLMResponse:
     def has_tool_calls(self) -> bool:
         """Check if response contains tool calls."""
         return len(self.tool_calls) > 0
+
 
 @dataclass
 class GenerationSettings:
@@ -63,9 +69,11 @@ class GenerationSettings:
     개별 호출 지점에서는 chat() 또는 chat_with_retry()에 명시적으로
     키워드 인자를 전달하여 여전히 값을 재정의(override)할 수 있다.
     """
+
     temperature: float = 0.7
     max_tokens: int = 4096
     reasoning_effort: str | None = None
+
 
 class LLMProvider(ABC):
     """
@@ -74,6 +82,7 @@ class LLMProvider(ABC):
     Implementations should handle the specifics of each provider's API
     while maintaining a consistent interface.
     """
+
     _CHAT_RETRY_DELAYS = (1, 2, 4)
     _TRANSIENT_ERROR_MARKERS = (
         "429",
@@ -111,17 +120,22 @@ class LLMProvider(ABC):
             content: Any = msg.get("content")
             if isinstance(content, str) and not content:
                 clean: dict = dict(msg)
-                clean["content"] = None if (msg.get("role") == "assistant" and msg.get("tool_calls")) else "(empty)"
+                clean["content"] = (
+                    None
+                    if (msg.get("role") == "assistant" and msg.get("tool_calls"))
+                    else "(empty)"
+                )
                 result.append(clean)
                 continue
             elif isinstance(content, list):
                 filtered: list[dict[str, Any]] = [
-                    item for item in content
-                        if not (
-                            isinstance(item, dict)
-                            and (item.get("type") in ("text", "input_text", "output_text"))
-                            and not item.get("text")
-                        )
+                    item
+                    for item in content
+                    if not (
+                        isinstance(item, dict)
+                        and (item.get("type") in ("text", "input_text", "output_text"))
+                        and not item.get("text")
+                    )
                 ]
                 if len(filtered) != len(content):
                     clean: dict = dict(msg)
@@ -146,8 +160,8 @@ class LLMProvider(ABC):
 
     @staticmethod
     def _sanitize_request_message(
-            messages: list[dict[str, Any]],
-            allowed_keys: frozenset[str],
+        messages: list[dict[str, Any]],
+        allowed_keys: frozenset[str],
     ) -> list[dict[str, Any]]:
         """provider에서 안전하게 사용할 수 있는 메시지 키만 유지하고, assistant의 content 형식을 정규화한다."""
         sanitized: list[Any] = []
@@ -166,17 +180,16 @@ class LLMProvider(ABC):
         err: str = (content or "").lower()
         return any(maker in err for maker in cls._TRANSIENT_ERROR_MARKERS)
 
-
     @abstractmethod
     async def chat(
-            self,
-            messages: list[dict[str, Any]],
-            tools: list[dict[str, Any]] | None = None,
-            model: str | None = None,
-            max_tokens: int = 4096,
-            temperature: float = 0.7,
-            reasoning_effort: str | None = None,
-            tool_choice: str | dict[str, Any] | None = None,
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
            채팅 완료 요청을 전송합니다.
@@ -198,16 +211,17 @@ class LLMProvider(ABC):
         """Get the default model for this provider."""
         pass
 
-
     async def chat_with_retry(
-            self,
-            messages: list[dict[str, Any]],
-            tools: list[dict[str, Any]] | None = None,
-            model: str | None = None,
-            max_tokens: object = _SENTINEL,
-            temperature: object = _SENTINEL,
-            reasoning_effort: object = _SENTINEL,
-            tool_choice: str | dict[str, Any] | None = None,
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: object = _SENTINEL,
+        temperature: object = _SENTINEL,
+        reasoning_effort: object = _SENTINEL,
+        tool_choice: str | dict[str, Any] | None = None,
+        failover_manager: Any = None,
+        provider_name: str | None = None,
     ) -> LLMResponse:
         """
         일시적인(provider) 오류가 발생했을 때 재시도하면서 chat()을 호출합니다.
@@ -239,8 +253,7 @@ class LLMProvider(ABC):
                 raise
             except Exception as e:
                 response: LLMResponse = LLMResponse(
-                    content=f"LLM 호출 에러: {e}",
-                    finish_reason="error"
+                    content=f"LLM 호출 에러: {e}", finish_reason="error"
                 )
 
             if response.finish_reason != "error":
@@ -260,6 +273,19 @@ class LLMProvider(ABC):
 
             await asyncio.sleep(delay)
 
+        if failover_manager and provider_name:
+            failover_response = await failover_manager.try_failover(
+                messages=messages,
+                tools=tools,
+                model=model or self.get_default_model(),
+                original_provider=provider_name,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            if failover_response:
+                return failover_response
+            failover_manager.mark_failed(provider_name)
+
         try:
             return await self.chat(
                 messages=messages,
@@ -273,7 +299,8 @@ class LLMProvider(ABC):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            return LLMResponse(
-                content=f"LLM 에러 호출: {e}",
-                finish_reason="error"
-            )
+            return LLMResponse(content=f"LLM 에러 호출: {e}", finish_reason="error")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return LLMResponse(content=f"LLM 에러 호출: {e}", finish_reason="error")
