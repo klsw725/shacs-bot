@@ -285,16 +285,19 @@ class MemoryConsolidator:
 
             return await self.consolidate_messages(snapshot)
 
-    async def maybe_consolidate_by_tokens(self, session: Session) -> None:
-        """루프: 프롬프트가 컨텍스트 윈도우의 절반 이내에 들어올 때까지 오래된 메시지를 아카이브한다."""
+    async def maybe_consolidate_by_tokens(self, session: Session) -> bool:
+        """루프: 프롬프트가 컨텍스트 윈도우의 절반 이내에 들어올 때까지 오래된 메시지를 아카이브한다.
+
+        통합이 실제로 수행되고 성공하면 True를 반환한다.
+        """
         if not session.messages or self._context_window_tokens <= 0:
-            return
+            return False
 
         lock: asyncio.Lock = self.get_lock(session.key)
         async with lock:
             estimated, source = self.estimate_session_prompt_tokens(session)
             if estimated <= 0:
-                return
+                return False
             if estimated < self._context_window_tokens:
                 logger.debug(
                     "토큰 통합 대기 {}: {}/{} (경로: {})",
@@ -303,12 +306,13 @@ class MemoryConsolidator:
                     self._context_window_tokens,
                     source,
                 )
-                return
+                return False
 
+            consolidated: bool = False
             target: int = self._context_window_tokens // 2
             for round_num in range(self._MAX_CONSOLIDATION_ROUNDS):
                 if estimated <= target:
-                    return
+                    return consolidated
 
                 boundary: tuple[int, int] = self.pick_consolidation_boundary(
                     session, max(1, estimated - target)
@@ -319,12 +323,12 @@ class MemoryConsolidator:
                         session.key,
                         round_num,
                     )
-                    return
+                    return consolidated
 
                 end_idx: int = boundary[0]
                 chunk: list[dict[str, Any]] = session.messages[session.last_consolidated : end_idx]
                 if not chunk:
-                    return
+                    return consolidated
 
                 logger.info(
                     "토큰 통합 라운드 {} - {}: {}/{} (경로: {}), 청크={}개 메시지",
@@ -337,11 +341,16 @@ class MemoryConsolidator:
                 )
 
                 if not await self.consolidate_messages(chunk):
-                    return
+                    return consolidated
 
+                consolidated = True
                 session.last_consolidated = end_idx
                 self._sessions.save(session)
 
                 estimated, source = self.estimate_session_prompt_tokens(session)
                 if estimated <= 0:
-                    return
+                    return consolidated
+
+            return consolidated
+
+        return False
