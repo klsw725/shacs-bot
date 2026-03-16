@@ -1,6 +1,7 @@
 """Configuration loading utilities."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -49,12 +50,20 @@ def load_config(config_path: Path | None = None) -> Config:
                 data = json.load(f)
 
             data = _migration_config(data)
-            return Config.model_validate(data)
+            config = Config.model_validate(data)
+            _apply_env(config)
+            return config
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {config_file}: {e}")
             print("Using default configuration.")
 
     return Config()
+
+
+def _apply_env(config: Config) -> None:
+    for key, value in config.env.items():
+        if value:
+            os.environ.setdefault(key, value)
 
 
 def _migration_config(data):

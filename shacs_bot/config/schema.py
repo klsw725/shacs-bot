@@ -361,6 +361,7 @@ class Config(BaseSettings):
         env_nested_delimiter="__",
     )
 
+    env: dict[str, str] = Field(default_factory=dict)  # Global env vars injected into os.environ
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
