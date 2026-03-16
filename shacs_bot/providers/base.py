@@ -241,37 +241,37 @@ class LLMProvider(ABC):
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             try:
                 response: LLMResponse = await self.chat(
-                        messages=messages,
-                        tools=tools,
-                        model=model,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        reasoning_effort=reasoning_effort,
-                        tool_choice=tool_choice,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    response: LLMResponse = LLMResponse(
-                        content=f"LLM 호출 에러: {e}", finish_reason="error"
-                    )
-
-                if response.finish_reason != "error":
-                    return response
-
-                if not self._is_transient_error(response.content):
-                    return response
-
-                err: str = (response.content or "").lower()
-                logger.warning(
-                    "LLM 전송 에러 (시도 {}/{}), 재시도 {}초: {}",
-                    attempt,
-                    len(self._CHAT_RETRY_DELAYS),
-                    delay,
-                    err[:120],
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    tool_choice=tool_choice,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                response: LLMResponse = LLMResponse(
+                    content=f"LLM 호출 에러: {e}", finish_reason="error"
                 )
 
-                await asyncio.sleep(delay)
+            if response.finish_reason != "error":
+                return response
+
+            if not self._is_transient_error(response.content):
+                return response
+
+            err: str = (response.content or "").lower()
+            logger.warning(
+                "LLM 전송 에러 (시도 {}/{}), 재시도 {}초: {}",
+                attempt,
+                len(self._CHAT_RETRY_DELAYS),
+                delay,
+                err[:120],
+            )
+
+            await asyncio.sleep(delay)
 
         if failover_manager and provider_name:
             failover_response = await failover_manager.try_failover(
