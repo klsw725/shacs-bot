@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from shacs_bot.config.schema import Config
 
 
@@ -54,8 +56,8 @@ def load_config(config_path: Path | None = None) -> Config:
             _apply_env(config)
             return config
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"Warning: Failed to load config from {config_file}: {e}")
-            print("Using default configuration.")
+            logger.warning("Failed to load config from {}: {}", config_file, e)
+            logger.warning("Using default configuration.")
 
     return Config()
 
