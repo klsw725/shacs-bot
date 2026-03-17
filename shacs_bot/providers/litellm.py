@@ -4,7 +4,7 @@ import hashlib
 import os
 import secrets
 import string
-from typing import Any, Union
+from typing import Any
 
 import json_repair
 import litellm
@@ -158,7 +158,7 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tool_choice"] = "auto"
 
         try:
-            response: Union[ModelResponse, CustomStreamWrapper] = await acompletion(**kwargs)
+            response: ModelResponse | CustomStreamWrapper = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:
             # Return error as content for graceful handling
@@ -280,9 +280,9 @@ class LiteLLMProvider(LLMProvider):
                     kwargs.update(overrides)
                     return
 
-    def _parse_response(self, response: Union[ModelResponse, CustomStreamWrapper]) -> LLMResponse:
+    def _parse_response(self, response: ModelResponse | CustomStreamWrapper) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
-        choice: Union[Choices, StreamingChoices] = response.choices[0]
+        choice: Choices | StreamingChoices = response.choices[0]
         message: Message = choice.message
         content: str = message.content
         finish_reason: str = choice.finish_reason
