@@ -5,7 +5,7 @@
 shacs-bot에서 보안 취약점을 발견한 경우, 다음 방법으로 신고해 주세요:
 
 1. 공개 GitHub 이슈를 **열지 마세요**
-2. GitHub에서 비공개 보안 권고를 생성하거나 저장소 관리자에게 연락하세요 (xubinrencs@gmail.com)
+2. GitHub에서 비공개 보안 권고(Security Advisory)를 생성해 주세요
 3. 다음 내용을 포함해 주세요:
    - 취약점 설명
    - 재현 단계
@@ -55,7 +55,7 @@ chmod 600 ~/.shacs-bot/config.json
 ```
 
 **보안 참고사항:**
-- `v0.1.4.post3` 이전 버전에서는 빈 `allowFrom`이 모든 사용자를 허용했습니다. `v0.1.4.post4`부터 빈 `allowFrom`은 기본적으로 모든 접근을 차단합니다 — 모든 사용자를 명시적으로 허용하려면 `["*"]`를 설정하세요.
+- `allowFrom`이 비어있으면 **모든 접근이 거부**됩니다 — 모든 사용자를 명시적으로 허용하려면 `["*"]`를 설정하세요
 - Telegram 사용자 ID는 `@userinfobot`에서 확인하세요
 - WhatsApp의 경우 국가 코드가 포함된 전체 전화번호를 사용하세요
 - 비인가 접근 시도에 대한 접근 로그를 정기적으로 검토하세요
@@ -72,17 +72,21 @@ chmod 600 ~/.shacs-bot/config.json
 - ❌ 민감한 데이터가 있는 시스템에서 신중한 검토 없이 실행하지 않기
 
 **차단되는 패턴:**
-- `rm -rf /` - 루트 파일 시스템 삭제
-- 포크 폭탄
-- 파일 시스템 포맷 (`mkfs.*`)
-- 원시 디스크 쓰기
-- 기타 파괴적인 작업
+- `rm -rf`, `rm -r` - 재귀적 삭제
+- `del /f`, `del /q`, `rmdir /s` - Windows 파일 삭제
+- `mkfs`, `diskpart` - 디스크 작업
+- `dd if=` - 원시 디스크 쓰기
+- `> /dev/sd*` - 디스크 직접 쓰기
+- `shutdown`, `reboot`, `poweroff` - 시스템 전원
+- 포크 폭탄 (`:(){ ... };:`)
+- `format` - 파일 시스템 포맷
 
 ### 4. 파일 시스템 접근
 
-파일 작업에는 경로 순회 방지가 적용되어 있지만, 다음 사항을 준수하세요:
+`restrict_to_workspace` 옵션을 활성화하면 경로 순회(`../`) 및 워크스페이스 외부 절대 경로 접근이 차단됩니다.
 
 - ✅ 전용 사용자 계정으로 shacs-bot 실행
+- ✅ `config.json`에서 `"restrictToWorkspace": true` 설정 권장
 - ✅ 파일 시스템 권한으로 민감한 디렉토리 보호
 - ✅ 로그에서 파일 작업을 정기적으로 감사
 - ❌ 민감한 파일에 대한 무제한 접근 권한 부여 금지
@@ -95,7 +99,7 @@ chmod 600 ~/.shacs-bot/config.json
 - 필요 시 방화벽을 사용하여 아웃바운드 연결 제한 고려
 
 **WhatsApp 브리지:**
-- 브리지는 `127.0.0.1:3001`에 바인딩 (로컬호스트 전용, 외부 네트워크에서 접근 불가)
+- 브리지는 `ws://localhost:3001`에 바인딩 (로컬호스트 전용, 외부 네트워크에서 접근 불가)
 - 설정에서 `bridgeToken`을 설정하여 Python과 Node.js 간 공유 비밀 인증 활성화
 - `~/.shacs-bot/whatsapp-auth`의 인증 데이터를 안전하게 보관 (모드 0700)
 
@@ -104,12 +108,11 @@ chmod 600 ~/.shacs-bot/config.json
 **중요**: 의존성을 최신 상태로 유지하세요!
 
 ```bash
-# 취약한 의존성 확인
-pip install pip-audit
-pip-audit
+# Python 의존성 업데이트
+uv sync --upgrade
 
-# 최신 보안 버전으로 업데이트
-pip install --upgrade shacs-bot-ai
+# 취약한 의존성 확인
+uv run pip-audit
 ```
 
 Node.js 의존성 (WhatsApp 브리지):
@@ -121,9 +124,7 @@ npm audit fix
 
 **중요 참고사항:**
 - 보안 수정을 위해 `litellm`을 최신 버전으로 유지하세요
-- DoS 취약점 수정을 위해 `ws`를 `>=8.17.1`로 업데이트했습니다
 - `pip-audit` 또는 `npm audit`를 정기적으로 실행하세요
-- shacs-bot 및 의존성에 대한 보안 권고를 구독하세요
 
 ### 7. 프로덕션 배포
 
@@ -131,9 +132,8 @@ npm audit fix
 
 1. **환경 격리**
    ```bash
-   # 컨테이너 또는 VM에서 실행
-   docker run --rm -it python:3.11
-   pip install shacs-bot-ai
+   # Docker로 실행
+   docker compose up -d shacs-bot-gateway
    ```
 
 2. **전용 사용자 사용**
@@ -159,12 +159,6 @@ npm audit fix
    - API 제공업체에서 속도 제한 설정
    - 이상 징후에 대한 사용량 모니터링
    - LLM API에 지출 한도 설정
-
-6. **정기 업데이트**
-   ```bash
-   # 매주 업데이트 확인
-   pip install --upgrade shacs-bot-ai
-   ```
 
 ### 8. 개발 환경 vs 프로덕션 환경
 
@@ -207,18 +201,18 @@ npm audit fix
 ### 내장 보안 제어
 
 ✅ **입력 검증**
-- 파일 작업에 대한 경로 순회 방지
-- 위험한 명령어 패턴 탐지
-- HTTP 요청에 대한 입력 길이 제한
+- 파일 작업에 대한 경로 순회 방지 (`restrict_to_workspace` 옵션)
+- 위험한 명령어 패턴 탐지 (정규식 기반 deny 패턴)
+- 명령어 출력 길이 제한 (10,000자)
 
 ✅ **인증**
-- 허용 목록 기반 접근 제어 — `v0.1.4.post3` 이전에는 빈 `allowFrom`이 모든 접근을 허용했으나, `v0.1.4.post4`부터 모든 접근을 차단합니다 (`["*"]`로 명시적으로 모든 접근 허용)
+- 허용 목록 기반 접근 제어 — 빈 `allowFrom`은 모든 접근을 차단 (`["*"]`로 명시적으로 모든 접근 허용)
 - 인증 실패 시도 로깅
 
 ✅ **리소스 보호**
-- 명령어 실행 타임아웃 (기본 60초)
-- 출력 자르기 (10KB 제한)
-- HTTP 요청 타임아웃 (10-30초)
+- 명령어 실행 타임아웃 (기본 60초, 설정 가능)
+- 출력 자르기 (10,000자 제한)
+- MCP 도구 호출 타임아웃 (기본 30초)
 
 ✅ **안전한 통신**
 - 모든 외부 API 호출에 HTTPS 사용
@@ -249,14 +243,6 @@ shacs-bot을 배포하기 전에:
 - [ ] API 제공업체에 속도 제한 설정
 - [ ] 백업 및 재해 복구 계획 수립
 - [ ] 커스텀 스킬/도구에 대한 보안 검토
-
-## 업데이트
-
-**최종 업데이트**: 2026-02-03
-
-최신 보안 업데이트 및 공지사항은 다음을 확인하세요:
-- GitHub 보안 권고: https://github.com/HKUDS/shacs-bot/security/advisories
-- 릴리스 노트: https://github.com/HKUDS/shacs-bot/releases
 
 ## 라이선스
 

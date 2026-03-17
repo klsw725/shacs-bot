@@ -71,6 +71,9 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# 작업 이력 (로컬 참고용, YYYY-MM-DD-*.md 패턴)
+docs/[0-9][0-9][0-9][0-9]-*.md
+
 # PyBuilder
 .pybuilder/
 target/
