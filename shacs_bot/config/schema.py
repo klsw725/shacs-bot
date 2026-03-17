@@ -267,6 +267,15 @@ class ProvidersConfig(BaseModel):
     volcengine: ProviderConfig = Field(
         default_factory=ProviderConfig
     )  # VolcEngine (火山引擎) API gateway
+    azure_openai: ProviderConfig = Field(default_factory=ProviderConfig)  # Azure OpenAI
+    volcengine_coding_plan: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # VolcEngine Coding Plan
+    byteplus: ProviderConfig = Field(default_factory=ProviderConfig)  # BytePlus
+    byteplus_coding_plan: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # BytePlus Coding Plan
+    ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama (local)
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
