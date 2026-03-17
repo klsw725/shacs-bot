@@ -439,7 +439,7 @@ def gateway(
         """heartbeat 응답 유저 채널의 전달"""
         from shacs_bot.bus.events import OutboundMessage
 
-        channel, chat_id = _pick_heartbeat_target()
+        channel, chat_id = await _pick_heartbeat_target()
         if channel == "cli":
             return  # 전달 가능한 외부 채널 존재하지 않음.
 
@@ -468,7 +468,7 @@ def gateway(
 
     async def on_heartbeat_execute(tasks: str) -> str:
         """Phase 2: full 에이전트 로프를 통해 heartbeat 태스크 실행"""
-        channel, chat_id = _pick_heartbeat_target()
+        channel, chat_id = await _pick_heartbeat_target()
 
         async def _silent(*_args, **_kwargs):
             pass
