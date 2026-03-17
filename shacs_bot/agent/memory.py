@@ -84,50 +84,6 @@ class MemoryStore:
             {self._format_messages(messages)}
         """
 
-        # 성공 시(아무 작업도 하지 않은 경우 포함) True를 반환하고, 실패 시 False를 반환합니다.
-        if archive_all:
-            old_messages: list[dict[str, Any]] = session.messages
-            keep_count: int = 0
-            logger.info(f"메모리 통합(archive_all): {len(session.messages)}개의 메시지 ")
-        else:
-            keep_count: int = memory_window // 2
-            if len(session.messages) <= keep_count:
-                return True
-
-            if (len(session.messages) - session.last_consolidated) <= 0:
-                return True
-
-            old_messages: list[dict[str, Any]] = session.messages[
-                session.last_consolidated : -keep_count
-            ]
-
-            if not old_messages:
-                return True
-
-            logger.info("메모리 통합: {}개 통합 대상, {}개 유지", len(old_messages), keep_count)
-
-        lines: list[str] = []
-
-        for m in old_messages:
-            if not m.get("content"):
-                continue
-
-            tools: str = f" [tools: {', '.join(m['tools_used'])}" if m.get("tools_used") else ""
-            lines.append(
-                f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}"
-            )
-
-        current_memory: str = self.read_long_term()
-        prompt: str = f"""
-            이 대화를 처리하고, 통합 결과를 담아 save_memory 도구를 호출하세요.
-    
-            ## 현재 장기 기억(Long-term Memory)
-            {current_memory or "(비어 있음)"}
-            
-            ## 처리할 대화
-            {chr(10).join(lines)}
-        """
-
         try:
             response: LLMResponse = await provider.chat_with_retry(
                 messages=[
