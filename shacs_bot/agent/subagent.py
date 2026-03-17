@@ -11,11 +11,7 @@ from loguru import logger
 
 from shacs_bot.agent.context import ContextBuilder
 from shacs_bot.agent.skills import SkillsLoader
-from shacs_bot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
-from shacs_bot.agent.tools.history import SearchHistoryTool
-from shacs_bot.agent.tools.registry import ToolRegistry
-from shacs_bot.agent.tools.shell import ExecTool
-from shacs_bot.agent.tools.web import WebSearchTool, WebFetchTool
+from shacs_bot.agent.tools.registry import ToolRegistry, create_default_tools
 from shacs_bot.bus.events import InboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import ExecToolConfig
@@ -202,23 +198,13 @@ class SubagentManager:
         logger.info(f"서브에이전트 [{task_id}] 실행 시작: {label} (역할: {role})")
 
         try:
-            allowed_dir: Path | None = self._workspace if self._restrict_to_workspace else None
-
-            all_tools = [
-                ReadFileTool(workspace=self._workspace, allowed_dir=allowed_dir),
-                WriteFileTool(workspace=self._workspace, allowed_dir=allowed_dir),
-                EditFileTool(workspace=self._workspace, allowed_dir=allowed_dir),
-                ListDirTool(workspace=self._workspace, allowed_dir=allowed_dir),
-                ExecTool(
-                    working_dir=str(self._workspace),
-                    timeout=self._exec_config.timeout,
-                    restrict_to_workspace=self._restrict_to_workspace,
-                    path_append=self._exec_config.path_append,
-                ),
-                WebSearchTool(api_key=self._brave_api_key, proxy=self._web_proxy),
-                WebFetchTool(proxy=self._web_proxy),
-                SearchHistoryTool(workspace=self._workspace),
-            ]
+            all_tools = create_default_tools(
+                workspace=self._workspace,
+                restrict_to_workspace=self._restrict_to_workspace,
+                exec_config=self._exec_config,
+                brave_api_key=self._brave_api_key,
+                web_proxy=self._web_proxy,
+            )
 
             tools: ToolRegistry = ToolRegistry()
             for tool in all_tools:

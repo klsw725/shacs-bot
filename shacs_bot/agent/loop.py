@@ -19,14 +19,10 @@ from shacs_bot.agent.session.manager import SessionManager, Session
 from shacs_bot.agent.subagent import SubagentManager
 from shacs_bot.agent.tools.cron.cron import CronTool
 from shacs_bot.agent.tools.cron.service import CronService
-from shacs_bot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from shacs_bot.agent.tools.mcp import connect_mcp_servers
 from shacs_bot.agent.tools.message import MessageTool
-from shacs_bot.agent.tools.registry import ToolRegistry
-from shacs_bot.agent.tools.shell import ExecTool
-from shacs_bot.agent.tools.history import SearchHistoryTool
+from shacs_bot.agent.tools.registry import ToolRegistry, create_default_tools
 from shacs_bot.agent.tools.spawn import SpawnTool
-from shacs_bot.agent.tools.web import WebSearchTool, WebFetchTool
 from shacs_bot.bus.events import InboundMessage, OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig
@@ -134,28 +130,17 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """기본 도구 세트를 등록합니다."""
-        allowed_dir: Path | None = self._workspace if self._restrict_to_workspace else None
-        for clazz in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
-            self._tools.register(clazz(workspace=self._workspace, allowed_dir=allowed_dir))
+        for tool in create_default_tools(
+            workspace=self._workspace,
+            restrict_to_workspace=self._restrict_to_workspace,
+            exec_config=self._exec_config,
+            brave_api_key=self._brave_api_key,
+            web_proxy=self._web_proxy,
+        ):
+            self._tools.register(tool)
 
-        self._tools.register(
-            ExecTool(
-                working_dir=str(self._workspace),
-                timeout=self._exec_config.timeout,
-                restrict_to_workspace=self._restrict_to_workspace,
-                path_append=self._exec_config.path_append,
-            )
-        )
-        self._tools.register(
-            WebSearchTool(
-                api_key=self._brave_api_key,
-                proxy=self._web_proxy,
-            )
-        )
-        self._tools.register(WebFetchTool(proxy=self._web_proxy))
         self._tools.register(MessageTool(send_callback=self._bus.publish_outbound))
         self._tools.register(SpawnTool(manager=self._subagent))
-        self._tools.register(SearchHistoryTool(workspace=self._workspace))
 
         if self._cron_service:
             self._tools.register(CronTool(self._cron_service))
@@ -210,7 +195,7 @@ class AgentLoop:
             if self._mcp_stack:
                 try:
                     await self._mcp_stack.aclose()
-                except Exception:
+                except (RuntimeError, BaseExceptionGroup):
                     pass
 
                 self._mcp_stack = None

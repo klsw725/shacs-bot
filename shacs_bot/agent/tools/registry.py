@@ -1,8 +1,10 @@
 """동적 도구 관리를 위한 도구 레지스트리"""
 
+from pathlib import Path
 from typing import Any
 
 from shacs_bot.agent.tools.base import Tool
+from shacs_bot.config.schema import ExecToolConfig
 
 
 class ToolRegistry:
@@ -91,3 +93,41 @@ class ToolRegistry:
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools
+
+
+def create_default_tools(
+    workspace: Path,
+    restrict_to_workspace: bool = False,
+    exec_config: ExecToolConfig | None = None,
+    brave_api_key: str | None = None,
+    web_proxy: str | None = None,
+) -> list[Tool]:
+    """AgentLoop과 SubagentManager가 공유하는 기본 도구 세트를 생성합니다."""
+    from shacs_bot.agent.tools.filesystem import (
+        ReadFileTool,
+        WriteFileTool,
+        EditFileTool,
+        ListDirTool,
+    )
+    from shacs_bot.agent.tools.history import SearchHistoryTool
+    from shacs_bot.agent.tools.shell import ExecTool
+    from shacs_bot.agent.tools.web import WebSearchTool, WebFetchTool
+
+    allowed_dir: Path | None = workspace if restrict_to_workspace else None
+    cfg: ExecToolConfig = exec_config or ExecToolConfig()
+
+    return [
+        ReadFileTool(workspace=workspace, allowed_dir=allowed_dir),
+        WriteFileTool(workspace=workspace, allowed_dir=allowed_dir),
+        EditFileTool(workspace=workspace, allowed_dir=allowed_dir),
+        ListDirTool(workspace=workspace, allowed_dir=allowed_dir),
+        ExecTool(
+            working_dir=str(workspace),
+            timeout=cfg.timeout,
+            restrict_to_workspace=restrict_to_workspace,
+            path_append=cfg.path_append,
+        ),
+        WebSearchTool(api_key=brave_api_key, proxy=web_proxy),
+        WebFetchTool(proxy=web_proxy),
+        SearchHistoryTool(workspace=workspace),
+    ]
