@@ -1,6 +1,7 @@
 """채팅 채널을 조정(관리)하기 위한 채널 매니저."""
 
 import asyncio
+import importlib
 from typing import Any
 
 from loguru import logger
@@ -9,6 +10,26 @@ from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.channels.base import BaseChannel
 from shacs_bot.config.schema import Config
+
+
+# (config_attr, module_path, class_name, extra_kwargs: {constructor_kwarg: "dotted.config.path"})
+_CHANNEL_DEFS: tuple[tuple[str, str, str, dict[str, str]], ...] = (
+    (
+        "telegram",
+        "shacs_bot.channels.telegram",
+        "TelegramChannel",
+        {"groq_api_key": "providers.groq.api_key"},
+    ),
+    ("whatsapp", "shacs_bot.channels.whatsapp", "WhatsAppChannel", {}),
+    ("discord", "shacs_bot.channels.discord", "DiscordChannel", {}),
+    ("feishu", "shacs_bot.channels.feishu", "FeishuChannel", {}),
+    ("mochat", "shacs_bot.channels.mochat", "MochatChannel", {}),
+    ("dingtalk", "shacs_bot.channels.dingtalk", "DingTalkChannel", {}),
+    ("email", "shacs_bot.channels.email", "EmailChannel", {}),
+    ("slack", "shacs_bot.channels.slack", "SlackChannel", {}),
+    ("qq", "shacs_bot.channels.qq", "QQChannel", {}),
+    ("matrix", "shacs_bot.channels.matrix", "MatrixChannel", {}),
+)
 
 
 class ChannelManager:
@@ -36,122 +57,32 @@ class ChannelManager:
 
     def _init_channels(self) -> None:
         """설정(_config)을 기반으로 채널을 초기화합니다."""
-
-        # Telegram channel
-        if self._config.channels.telegram.enabled:
+        for attr, module_path, cls_name, extra_src in _CHANNEL_DEFS:
+            cfg = getattr(self._config.channels, attr, None)
+            if not cfg or not cfg.enabled:
+                continue
             try:
-                from shacs_bot.channels.telegram import TelegramChannel
-
-                self._channels["telegram"] = TelegramChannel(
-                    self._config.channels.telegram,
-                    self._bus,
-                    groq_api_key=self._config.providers.groq.api_key,
-                )
-                logger.info("Telegram channel enabled")
+                mod = importlib.import_module(module_path)
+                cls = getattr(mod, cls_name)
+                extra = self._resolve_extra_kwargs(extra_src)
+                self._channels[attr] = cls(cfg, self._bus, **extra)
+                logger.info("{} channel enabled", attr)
             except ImportError as e:
-                logger.warning("Telegram channel not available: {}", e)
-
-        # WhatsApp channel
-        if self._config.channels.whatsapp.enabled:
-            try:
-                from shacs_bot.channels.whatsapp import WhatsAppChannel
-
-                self._channels["whatsapp"] = WhatsAppChannel(
-                    self._config.channels.whatsapp, self._bus
-                )
-                logger.info("WhatsApp channel enabled")
-            except ImportError as e:
-                logger.warning("WhatsApp channel not available: {}", e)
-
-        # Discord channel
-        if self._config.channels.discord.enabled:
-            try:
-                from shacs_bot.channels.discord import DiscordChannel
-
-                self._channels["discord"] = DiscordChannel(self._config.channels.discord, self._bus)
-                logger.info("Discord channel enabled")
-            except ImportError as e:
-                logger.warning("Discord channel not available: {}", e)
-
-        # Feishu channel
-        if self._config.channels.feishu.enabled:
-            try:
-                from shacs_bot.channels.feishu import FeishuChannel
-
-                self._channels["feishu"] = FeishuChannel(self._config.channels.feishu, self._bus)
-                logger.info("Feishu channel enabled")
-            except ImportError as e:
-                logger.warning("Feishu channel not available: {}", e)
-
-        # Mochat channel
-        if self._config.channels.mochat.enabled:
-            try:
-                from shacs_bot.channels.mochat import MochatChannel
-
-                self._channels["mochat"] = MochatChannel(self._config.channels.mochat, self._bus)
-                logger.info("Mochat channel enabled")
-            except ImportError as e:
-                logger.warning("Mochat channel not available: {}", e)
-
-        # DingTalk channel
-        if self._config.channels.dingtalk.enabled:
-            try:
-                from shacs_bot.channels.dingtalk import DingTalkChannel
-
-                self._channels["dingtalk"] = DingTalkChannel(
-                    self._config.channels.dingtalk, self._bus
-                )
-                logger.info("DingTalk channel enabled")
-            except ImportError as e:
-                logger.warning("DingTalk channel not available: {}", e)
-
-        # Email channel
-        if self._config.channels.email.enabled:
-            try:
-                from shacs_bot.channels.email import EmailChannel
-
-                self._channels["email"] = EmailChannel(self._config.channels.email, self._bus)
-                logger.info("Email channel enabled")
-            except ImportError as e:
-                logger.warning("Email channel not available: {}", e)
-
-        # Slack channel
-        if self._config.channels.slack.enabled:
-            try:
-                from shacs_bot.channels.slack import SlackChannel
-
-                self._channels["slack"] = SlackChannel(self._config.channels.slack, self._bus)
-                logger.info("Slack channel enabled")
-            except ImportError as e:
-                logger.warning("Slack channel not available: {}", e)
-
-        # QQ channel
-        if self._config.channels.qq.enabled:
-            try:
-                from shacs_bot.channels.qq import QQChannel
-
-                self._channels["qq"] = QQChannel(
-                    self._config.channels.qq,
-                    self._bus,
-                )
-                logger.info("QQ channel enabled")
-            except ImportError as e:
-                logger.warning("QQ channel not available: {}", e)
-
-        # Matrix channel
-        if self._config.channels.matrix.enabled:
-            try:
-                from shacs_bot.channels.matrix import MatrixChannel
-
-                self._channels["matrix"] = MatrixChannel(
-                    self._config.channels.matrix,
-                    self._bus,
-                )
-                logger.info("Matrix channel enabled")
-            except ImportError as e:
-                logger.warning("Matrix channel not available: {}", e)
+                logger.warning("{} channel not available: {}", attr, e)
 
         self._validate_allow_from()
+
+    def _resolve_extra_kwargs(self, mapping: dict[str, str]) -> dict[str, Any]:
+        """dotted path (예: "providers.groq.api_key")를 self._config에서 resolve합니다."""
+        result: dict[str, Any] = {}
+        for kwarg_name, dotted_path in mapping.items():
+            obj: Any = self._config
+            for part in dotted_path.split("."):
+                obj = getattr(obj, part, None)
+                if obj is None:
+                    break
+            result[kwarg_name] = obj or ""
+        return result
 
     def _validate_allow_from(self) -> None:
         for name, ch in self._channels.items():
