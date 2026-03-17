@@ -67,6 +67,8 @@ class DiscordConfig(Base):
     gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
     intents: int = 37377  # GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
     group_policy: Literal["mention", "open"] = "mention"
+    reply_in_thread: bool = False  # If true, bot replies in a new thread (guild channels only)
+    thread_auto_archive_minutes: int = 1440  # 60 / 1440 / 4320 / 10080
 
 
 class MatrixConfig(Base):

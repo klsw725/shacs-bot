@@ -101,7 +101,8 @@ class DiscordChannel(BaseChannel):
             logger.warning("Discord HTTP client not initialized")
             return
 
-        url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
+        target_id = msg.metadata.get("thread_id") or msg.chat_id
+        url = f"{DISCORD_API_BASE}/channels/{target_id}/messages"
         headers = {"Authorization": f"Bot {self.config.token}"}
 
         try:
@@ -112,16 +113,15 @@ class DiscordChannel(BaseChannel):
             for i, chunk in enumerate(chunks):
                 payload: dict[str, Any] = {"content": chunk}
 
-                # Only set reply reference on the first chunk
-                if i == 0 and msg.reply_to:
+                if i == 0 and msg.reply_to and not msg.metadata.get("thread_id"):
                     payload["message_reference"] = {"message_id": msg.reply_to}
                     payload["allowed_mentions"] = {"replied_user": False}
 
                 if not await self._send_payload(url, headers, payload):
-                    break  # Abort remaining chunks on failure
+                    break
         finally:
             if not msg.metadata.get("_progress", False):
-                await self._stop_typing(msg.chat_id)
+                await self._stop_typing(target_id)
 
     async def _send_payload(
         self, url: str, headers: dict[str, str], payload: dict[str, Any]
@@ -240,8 +240,11 @@ class DiscordChannel(BaseChannel):
         if not self.is_allowed(sender_id):
             return
 
-        # Check group channel policy (DMs always respond if is_allowed passes)
-        if guild_id is not None:
+        # PUBLIC_THREAD=11, PRIVATE_THREAD=12
+        channel_type = payload.get("channel_type")
+        is_thread = channel_type in (11, 12)
+
+        if guild_id is not None and not is_thread:
             if not self._should_respond_in_group(payload, content):
                 return
 
@@ -273,8 +276,22 @@ class DiscordChannel(BaseChannel):
                 content_parts.append(f"[attachment: {filename} - download failed]")
 
         reply_to = (payload.get("referenced_message") or {}).get("id")
+        message_id = str(payload.get("id", ""))
 
-        await self._start_typing(channel_id)
+        thread_id: str | None = None
+        session_key: str | None = None
+        typing_channel = channel_id
+
+        if guild_id is not None and self.config.reply_in_thread:
+            if is_thread:
+                session_key = f"discord:{channel_id}"
+            else:
+                thread_id = await self._create_thread(channel_id, message_id, content)
+                if thread_id:
+                    session_key = f"discord:{thread_id}"
+                    typing_channel = thread_id
+
+        await self._start_typing(typing_channel)
 
         await self._handle_message(
             sender_id=sender_id,
@@ -282,10 +299,12 @@ class DiscordChannel(BaseChannel):
             content="\n".join(p for p in content_parts if p) or "[empty message]",
             media=media_paths,
             metadata={
-                "message_id": str(payload.get("id", "")),
+                "message_id": message_id,
                 "guild_id": guild_id,
                 "reply_to": reply_to,
+                "thread_id": thread_id,
             },
+            session_key=session_key,
         )
 
     def _should_respond_in_group(self, payload: dict[str, Any], content: str) -> bool:
@@ -310,6 +329,35 @@ class DiscordChannel(BaseChannel):
             return False
 
         return True
+
+    async def _create_thread(self, channel_id: str, message_id: str, content: str) -> str | None:
+        if not self._http:
+            return None
+
+        url = f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}/threads"
+        headers = {"Authorization": f"Bot {self.config.token}", "Content-Type": "application/json"}
+
+        name = (content[:97] + "...") if len(content) > 100 else (content or "\ub300\ud654")
+        body = {
+            "name": name,
+            "auto_archive_duration": self.config.thread_auto_archive_minutes,
+        }
+
+        try:
+            response = await self._http.post(url, headers=headers, json=body)
+            if response.status_code == 429:
+                retry_after = float(response.json().get("retry_after", 1.0))
+                logger.warning("Discord thread creation rate limited, retrying in {}s", retry_after)
+                await asyncio.sleep(retry_after)
+                response = await self._http.post(url, headers=headers, json=body)
+
+            response.raise_for_status()
+            thread_id = str(response.json().get("id", ""))
+            logger.debug("Created Discord thread {} in channel {}", thread_id, channel_id)
+            return thread_id
+        except Exception as e:
+            logger.warning("Failed to create Discord thread in {}: {}", channel_id, e)
+            return None
 
     async def _start_typing(self, channel_id: str) -> None:
         """Start periodic typing indicator for a channel."""
