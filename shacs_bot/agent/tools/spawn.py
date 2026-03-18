@@ -61,3 +61,57 @@ class SpawnTool(Tool):
             session_key=self._session_key,
             origin_metadata=self._original_metadata,
         )
+
+
+class ListTasksTool(Tool):
+    name = "list_tasks"
+    description = "현재 백그라운드에서 실행 중인 작업 목록을 조회합니다."
+    parameters = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+
+    def __init__(self, manager: SubagentManager):
+        self._manager = manager
+        self._session_key = "cli:direct"
+
+    def set_context(
+        self,
+        channel: str,
+        chat_id: str,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
+    ) -> None:
+        self._session_key = session_key or f"{channel}:{chat_id}"
+
+    async def execute(self, **kwargs: Any) -> str:
+        tasks = self._manager.list_running_tasks(session_key=self._session_key)
+        if not tasks:
+            return "현재 실행 중인 백그라운드 작업이 없습니다."
+
+        lines: list[str] = []
+        for t in tasks:
+            lines.append(f"- [{t['task_id']}] {t['label']} ({t['role']}) - {t['elapsed']} 경과")
+        return f"실행 중인 백그라운드 작업 {len(tasks)}개:\n" + "\n".join(lines)
+
+
+class CancelTaskTool(Tool):
+    name = "cancel_task"
+    description = "특정 백그라운드 작업을 중지합니다. task_id는 list_tasks로 확인할 수 있습니다."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "중지할 작업의 ID"},
+        },
+        "required": ["task_id"],
+    }
+
+    def __init__(self, manager: SubagentManager):
+        self._manager = manager
+
+    async def execute(self, task_id: str, **kwargs: Any) -> str:
+        success, label = await self._manager.cancel_task(task_id)
+        if success:
+            return f"작업 '{label}'이(가) 중지되었습니다."
+        return "해당 작업을 찾을 수 없거나 이미 완료되었습니다."

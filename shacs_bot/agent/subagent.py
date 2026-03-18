@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +93,17 @@ EXECUTOR_PROMPT = """\
 - 할당된 작업에만 집중하세요\
 """
 
+
+@dataclass
+class SubagentTask:
+    task_id: str
+    label: str
+    role: str
+    original_task: str
+    started_at: datetime
+    asyncio_task: asyncio.Task[None]
+
+
 SUBAGENT_ROLES: dict[str, SubagentRole] = {
     "researcher": SubagentRole(
         system_prompt=RESEARCHER_PROMPT,
@@ -148,7 +160,7 @@ class SubagentManager:
         self._exec_config: ExecToolConfig = exec_config or ExecToolConfig()
         self._restrict_to_workspace: bool = restrict_to_workspace
 
-        self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._running_tasks: dict[str, SubagentTask] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
     async def spawn(
@@ -174,12 +186,19 @@ class SubagentManager:
         bg_task: asyncio.Task[None] = asyncio.create_task(
             self._run_subagent(task_id, task, display_label, origin, role=role)
         )
-        self._running_tasks[task_id] = bg_task
+        self._running_tasks[task_id] = SubagentTask(
+            task_id=task_id,
+            label=display_label,
+            role=role,
+            original_task=task[:100],
+            started_at=datetime.now(),
+            asyncio_task=bg_task,
+        )
 
         if session_key:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
 
-        def _cleanup(t: asyncio.Task) -> None:
+        def _cleanup(t: asyncio.Task[None]) -> None:
             self._running_tasks.pop(task_id, None)
             if session_key and (ids := self._session_tasks.get(session_key)):
                 ids.discard(task_id)
@@ -342,9 +361,9 @@ class SubagentManager:
     async def cancel_by_session(self, session_key: str) -> int:
         """주어진 세션에 속한 모든 서브에이전트를 취소하고, 취소된 개수를 반환합니다."""
         tasks: list[asyncio.Task[None]] = [
-            self._running_tasks[tid]
+            self._running_tasks[tid].asyncio_task
             for tid in self._session_tasks.get(session_key, [])
-            if (tid in self._running_tasks) and not self._running_tasks[tid].done()
+            if (tid in self._running_tasks) and not self._running_tasks[tid].asyncio_task.done()
         ]
         for task in tasks:
             task.cancel()
@@ -354,6 +373,39 @@ class SubagentManager:
 
         return len(tasks)
 
+    def list_running_tasks(self, session_key: str | None = None) -> list[dict[str, str]]:
+        now: datetime = datetime.now()
+        task_ids = (
+            self._session_tasks.get(session_key, set())
+            if session_key
+            else self._running_tasks.keys()
+        )
+        result: list[dict[str, str]] = []
+        for tid in task_ids:
+            st: SubagentTask | None = self._running_tasks.get(tid)
+            if st and not st.asyncio_task.done():
+                elapsed = now - st.started_at
+                result.append(
+                    {
+                        "task_id": st.task_id,
+                        "label": st.label,
+                        "role": st.role,
+                        "elapsed": str(elapsed).split(".")[0],
+                    }
+                )
+        return result
+
+    async def cancel_task(self, task_id: str) -> tuple[bool, str]:
+        st: SubagentTask | None = self._running_tasks.get(task_id)
+        if not st or st.asyncio_task.done():
+            return False, ""
+        label: str = st.label
+        st.asyncio_task.cancel()
+        try:
+            await st.asyncio_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        return True, label
+
     def get_running_count(self) -> int:
-        """현재 실행 중인 서브에이전트의 수를 반환하라."""
         return len(self._running_tasks)

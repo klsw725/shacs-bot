@@ -22,7 +22,7 @@ from shacs_bot.agent.tools.cron.service import CronService
 from shacs_bot.agent.tools.mcp import connect_mcp_servers
 from shacs_bot.agent.tools.message import MessageTool
 from shacs_bot.agent.tools.registry import ToolRegistry, create_default_tools
-from shacs_bot.agent.tools.spawn import SpawnTool
+from shacs_bot.agent.tools.spawn import SpawnTool, ListTasksTool, CancelTaskTool
 from shacs_bot.bus.events import InboundMessage, OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig
@@ -141,6 +141,8 @@ class AgentLoop:
 
         self._tools.register(MessageTool(send_callback=self._bus.publish_outbound))
         self._tools.register(SpawnTool(manager=self._subagent))
+        self._tools.register(ListTasksTool(manager=self._subagent))
+        self._tools.register(CancelTaskTool(manager=self._subagent))
 
         if self._cron_service:
             self._tools.register(CronTool(self._cron_service))
@@ -273,7 +275,7 @@ class AgentLoop:
         session_key: str | None = None,
     ) -> None:
         """라우팅 정보가 필요한 모든 도구의 컨텍스트를 업데이트합니다."""
-        for name in ("message", "spawn", "cron"):
+        for name in ("message", "spawn", "list_tasks", "cron"):
             if tool := self._tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(
