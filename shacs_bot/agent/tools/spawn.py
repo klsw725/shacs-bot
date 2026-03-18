@@ -34,12 +34,20 @@ class SpawnTool(Tool):
         self._original_channel = "cli"
         self._original_chat_id = "direct"
         self._session_key = "cli:direct"
+        self._original_metadata: dict[str, Any] = {}
 
-    def set_context(self, channel: str, chat_id: str) -> None:
+    def set_context(
+        self,
+        channel: str,
+        chat_id: str,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
+    ) -> None:
         """서브에이전트 알림을 위한 원본 컨텍스트를 설정합니다."""
         self._original_channel = channel
         self._original_chat_id = chat_id
-        self._session_key = f"{channel}:{chat_id}"
+        self._session_key = session_key or f"{channel}:{chat_id}"
+        self._original_metadata = metadata or {}
 
     async def execute(
         self, task: str, label: str | None = None, role: str = "executor", **kwargs: Any
@@ -51,4 +59,5 @@ class SpawnTool(Tool):
             origin_channel=self._original_channel,
             origin_chat_id=self._original_chat_id,
             session_key=self._session_key,
+            origin_metadata=self._original_metadata,
         )

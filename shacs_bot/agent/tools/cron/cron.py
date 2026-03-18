@@ -42,12 +42,20 @@ class CronTool(Tool):
         self._cron: CronService = cron_service
         self._channel: str = ""
         self._chat_id: str = ""
+        self._metadata: dict[str, Any] = {}
         self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
 
-    def set_context(self, channel: str, chat_id: str) -> None:
+    def set_context(
+        self,
+        channel: str,
+        chat_id: str,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
+    ) -> None:
         """전달을 위한 현재 세션 컨텍스트를 설정합니다."""
         self._channel: str = channel
         self._chat_id: str = chat_id
+        self._metadata = metadata or {}
 
     def set_cron_context(self, active: bool) -> Token[bool]:
         """도구가 cron 작업 콜백 내부에서 실행 중인지 여부를 표시한다."""
@@ -134,6 +142,7 @@ class CronTool(Tool):
             channel=self._channel,
             to=self._chat_id,
             delete_after_run=delete_after,
+            metadata=self._metadata,
         )
 
         return f"작업이 추가되었습니다: '{job.name}' (id: {job.id}"

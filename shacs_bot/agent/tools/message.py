@@ -40,17 +40,25 @@ class MessageTool(Tool):
         self._default_channel = default_channel
         self._default_chat_id = default_chat_id
         self._default_message_id = default_message_id
+        self._default_metadata: dict[str, Any] = {}
         self._sent_in_turn: bool = False
 
     @property
     def sent_in_turn(self) -> bool:
         return self._sent_in_turn
 
-    def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def set_context(
+        self,
+        channel: str,
+        chat_id: str,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
+    ) -> None:
         """현재 메시지 컨텍스트 설정"""
         self._default_channel = channel
         self._default_chat_id = chat_id
-        self._default_message_id = message_id
+        self._default_message_id = (metadata or {}).get("message_id")
+        self._default_metadata = metadata or {}
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
         """보내는 메시지에 callback 설정"""
@@ -78,12 +86,14 @@ class MessageTool(Tool):
         if not self._send_callback:
             return "에러: 메시지 전송 콜백이 설정되지 않았습니다."
 
+        out_metadata: dict[str, Any] = dict(self._default_metadata)
+        out_metadata["message_id"] = message_id
         msg: OutboundMessage = OutboundMessage(
             channel=channel,
             chat_id=chat_id,
             content=content,
             media=media or [],
-            metadata={"message_id": message_id},
+            metadata=out_metadata,
         )
         try:
             await self._send_callback(msg)

@@ -414,6 +414,7 @@ def gateway(
                     channel=job.payload.channel or "cli",
                     chat_id=job.payload.to,
                     content=response,
+                    metadata=job.payload.metadata or {},
                 )
             )
 

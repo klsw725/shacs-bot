@@ -159,11 +159,17 @@ class SubagentManager:
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         session_key: str | None = None,
+        origin_metadata: dict[str, Any] | None = None,
     ) -> str:
         """새로운 서브에이전트를 생성하여 주어진 작업을 실행합니다."""
         task_id: str = str(uuid.uuid4())[:8]
         display_label: str = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin: dict[str, str] = {"channel": origin_channel, "chat_id": origin_chat_id}
+        origin: dict[str, Any] = {
+            "channel": origin_channel,
+            "chat_id": origin_chat_id,
+            "metadata": origin_metadata or {},
+            "session_key": session_key,
+        }
 
         bg_task: asyncio.Task[None] = asyncio.create_task(
             self._run_subagent(task_id, task, display_label, origin, role=role)
@@ -300,7 +306,7 @@ class SubagentManager:
         return "\n\n".join(parts)
 
     async def _announce_result(
-        self, task_id: str, label: str, task: str, result: str, origin: dict[str, str], status: str
+        self, task_id: str, label: str, task: str, result: str, origin: dict[str, Any], status: str
     ) -> None:
         """내부 네트워크를 통해 서브에이전트의 결과를 메인 에이전트에 알립니다."""
         status_text: str = "성공적으로 완료되었습니다." if status == "ok" else "failed"
@@ -312,7 +318,7 @@ class SubagentManager:
             Result:
             {result}
             
-            이 내용을 사용자에게 자연스럽게 요약하세요. 간단하게 1~2문장으로 작성하고, “subagent”나 작업 ID 같은 기술적인 세부 사항은 언급하지 마세요. 
+            이 내용을 사용자에게 자연스럽게 요약하세요. 간단하게 1~2문장으로 작성하고, "subagent"나 작업 ID 같은 기술적인 세부 사항은 언급하지 마세요. 
         """
 
         # 메인 에이전트를 트리거하기 위해 시스템 메시지로 주입
@@ -322,6 +328,8 @@ class SubagentManager:
                 sender_id="subagent",
                 chat_id=f"{origin['channel']}:{origin['chat_id']}",
                 content=announce_content,
+                metadata=origin.get("metadata", {}),
+                session_key_override=origin.get("session_key"),
             )
         )
         logger.debug(

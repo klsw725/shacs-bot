@@ -1,4 +1,5 @@
 """agent 작업 스케줄링을 위한 Cron 서비스입니다."""
+
 import asyncio
 import json
 import time
@@ -11,11 +12,18 @@ from zoneinfo import ZoneInfo
 from croniter import croniter
 from loguru import logger
 
-from shacs_bot.agent.tools.cron.types import CronSchedule, CronJob, CronStore, CronPayload, CronJobState
+from shacs_bot.agent.tools.cron.types import (
+    CronSchedule,
+    CronJob,
+    CronStore,
+    CronPayload,
+    CronJobState,
+)
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
 
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
     """다음 실행 시간을 ms로 계산합니다."""
@@ -31,7 +39,9 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
     elif schedule.kind == "cron" and schedule.expr:
         try:
             base_time: float = now_ms / 1000
-            tz: ZoneInfo = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
+            tz: ZoneInfo = (
+                ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
+            )
             base_dt: datetime = datetime.fromtimestamp(timestamp=base_time, tz=tz)
             cron: croniter = croniter(schedule.expr, base_dt)
             next_dt: datetime = cron.get_next(datetime)
@@ -40,6 +50,7 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
             return None
 
     return None
+
 
 def _validate_schedule_for_add(schedule: CronSchedule) -> None:
     """실행 불가능한 작업이 생성되는 것을 방지하기 위해 스케줄 필드를 검증합니다."""
@@ -57,9 +68,9 @@ class CronService:
     """스케줄링 된 작업의 실행과 관리를 위한 서비스입니다."""
 
     def __init__(
-            self,
-            store_path: Path,
-            on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None
+        self,
+        store_path: Path,
+        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
     ):
         self._store_path: Path = store_path
         self._on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = on_job
@@ -80,7 +91,9 @@ class CronService:
         self._save_store()
         self._arm_timer()
 
-        logger.info(f"Cron 서비스가 시작되었습니다. {len(self._store.jobs if self._store else [])}개의 작업이 로드되었습니다.")
+        logger.info(
+            f"Cron 서비스가 시작되었습니다. {len(self._store.jobs if self._store else [])}개의 작업이 로드되었습니다."
+        )
 
     def _load_store(self) -> CronStore:
         """디스크에서 작업을 로드합니다. 파일이 외부에서 수정된 경우 자동으로 다시 불러옵니다."""
@@ -95,38 +108,43 @@ class CronService:
 
         if self._store_path.exists():
             try:
-                data: dict[str, list[dict[str, Any]]] = json.loads(self._store_path.read_text(encoding="utf-8"))
+                data: dict[str, list[dict[str, Any]]] = json.loads(
+                    self._store_path.read_text(encoding="utf-8")
+                )
                 jobs: list[CronJob] = []
 
                 for job in data.get("jobs", []):
-                    jobs.append(CronJob(
-                        id=job["id"],
-                        name=job["name"],
-                        enabled=job.get("enabled", True),
-                        schedule=CronSchedule(
-                            kind=job["schedule"]["kind"],
-                            at_ms=job["schedule"].get("atMs"),
-                            every_ms=job["schedule"].get("everyMs"),
-                            expr=job["schedule"].get("expr"),
-                            tz=job["schedule"].get("tz")
-                        ),
-                        payload=CronPayload(
-                            kind=job["payload"].get("kind", "agent_turn"),
-                            message=job["payload"].get("message", ""),
-                            deliver=job["payload"].get("deliver", False),
-                            channel=job["payload"].get("channel"),
-                            to=job["payload"].get("to")
-                        ),
-                        state=CronJobState(
-                            next_run_at_ms=job.get("state", {}).get("nextRunAtMs"),
-                            last_run_at_ms=job.get("state", {}).get("lastRunAtMs"),
-                            last_status=job.get("state", {}).get("lastStatus"),
-                            last_error=job.get("state", {}).get("lastError")
-                        ),
-                        created_at_ms=job.get("createdAtMs", 0),
-                        updated_at_ms=job.get("updatedAtMs", 0),
-                        delete_after_run=job.get("deleteAfterRun", False)
-                    ))
+                    jobs.append(
+                        CronJob(
+                            id=job["id"],
+                            name=job["name"],
+                            enabled=job.get("enabled", True),
+                            schedule=CronSchedule(
+                                kind=job["schedule"]["kind"],
+                                at_ms=job["schedule"].get("atMs"),
+                                every_ms=job["schedule"].get("everyMs"),
+                                expr=job["schedule"].get("expr"),
+                                tz=job["schedule"].get("tz"),
+                            ),
+                            payload=CronPayload(
+                                kind=job["payload"].get("kind", "agent_turn"),
+                                message=job["payload"].get("message", ""),
+                                deliver=job["payload"].get("deliver", False),
+                                channel=job["payload"].get("channel"),
+                                to=job["payload"].get("to"),
+                                metadata=job["payload"].get("metadata", {}),
+                            ),
+                            state=CronJobState(
+                                next_run_at_ms=job.get("state", {}).get("nextRunAtMs"),
+                                last_run_at_ms=job.get("state", {}).get("lastRunAtMs"),
+                                last_status=job.get("state", {}).get("lastStatus"),
+                                last_error=job.get("state", {}).get("lastError"),
+                            ),
+                            created_at_ms=job.get("createdAtMs", 0),
+                            updated_at_ms=job.get("updatedAtMs", 0),
+                            delete_after_run=job.get("deleteAfterRun", False),
+                        )
+                    )
 
                 self._store = CronStore(jobs=jobs)
             except Exception as e:
@@ -166,30 +184,33 @@ class CronService:
                         "atMs": j.schedule.at_ms,
                         "everyMs": j.schedule.every_ms,
                         "expr": j.schedule.expr,
-                        "tz": j.schedule.tz
+                        "tz": j.schedule.tz,
                     },
                     "payload": {
                         "kind": j.payload.kind,
                         "message": j.payload.message,
                         "deliver": j.payload.deliver,
                         "channel": j.payload.channel,
-                        "to": j.payload.to
+                        "to": j.payload.to,
+                        "metadata": j.payload.metadata,
                     },
                     "state": {
                         "nextRunAtMs": j.state.next_run_at_ms,
                         "lastRunAtMs": j.state.last_run_at_ms,
                         "lastStatus": j.state.last_status,
-                        "lastError": j.state.last_error
+                        "lastError": j.state.last_error,
                     },
                     "createdAtMs": j.created_at_ms,
                     "updatedAtMs": j.updated_at_ms,
-                    "deleteAfterRun": j.delete_after_run
+                    "deleteAfterRun": j.delete_after_run,
                 }
                 for j in self._store.jobs
-            ]
+            ],
         }
 
-        self._store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._store_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
         self._last_mtime = self._store_path.stat().st_mtime
 
     def _arm_timer(self) -> None:
@@ -216,8 +237,11 @@ class CronService:
         if not self._store:
             return None
 
-        times: list[int] = [job.state.next_run_at_ms for job in self._store.jobs
-                                if job.enabled and job.state.next_run_at_ms]
+        times: list[int] = [
+            job.state.next_run_at_ms
+            for job in self._store.jobs
+            if job.enabled and job.state.next_run_at_ms
+        ]
         return min(times) if times else None
 
     def stop(self) -> None:
@@ -267,8 +291,9 @@ class CronService:
 
         now: int = _now_ms()
         due_jobs: list[CronJob] = [
-            job for job in self._store.jobs
-                if job.enabled and job.state.next_run_at_ms and (now >= job.state.next_run_at_ms)
+            job
+            for job in self._store.jobs
+            if job.enabled and job.state.next_run_at_ms and (now >= job.state.next_run_at_ms)
         ]
 
         for job in due_jobs:
@@ -282,25 +307,28 @@ class CronService:
     def list_jobs(self, include_disabled: bool = False) -> list[CronJob]:
         """등록된 작업 목록을 반환합니다."""
         store: CronStore = self._load_store()
-        jobs: list[CronJob]  = store.jobs if include_disabled else [job for job in store.jobs if job.enabled]
-        return sorted(jobs, key=lambda job: job.state.next_run_at_ms or float('inf'))
+        jobs: list[CronJob] = (
+            store.jobs if include_disabled else [job for job in store.jobs if job.enabled]
+        )
+        return sorted(jobs, key=lambda job: job.state.next_run_at_ms or float("inf"))
 
     def add_job(
-            self,
-            name: str,
-            schedule: CronSchedule,
-            message: str,
-            deliver: bool = False,
-            channel: str | None = None,
-            to: str | None = None,
-            delete_after_run: bool = False,
+        self,
+        name: str,
+        schedule: CronSchedule,
+        message: str,
+        deliver: bool = False,
+        channel: str | None = None,
+        to: str | None = None,
+        delete_after_run: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> CronJob:
         """새로운 작업을 추가합니다."""
         store: CronStore = self._load_store()
         _validate_schedule_for_add(schedule=schedule)
         now: int = _now_ms()
 
-        job: CronJob= CronJob(
+        job: CronJob = CronJob(
             id=str(uuid.uuid4())[:8],
             name=name,
             enabled=True,
@@ -311,6 +339,7 @@ class CronService:
                 deliver=deliver,
                 channel=channel,
                 to=to,
+                metadata=metadata or {},
             ),
             state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
             created_at_ms=now,
@@ -384,5 +413,5 @@ class CronService:
         return {
             "enabled": self._running,
             "jobs": len(store.jobs) if store else 0,
-            "next_wake_at_ms": self._get_next_wake_ms()
+            "next_wake_at_ms": self._get_next_wake_ms(),
         }

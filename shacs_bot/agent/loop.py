@@ -264,12 +264,21 @@ class AgentLoop:
                     )
                 )
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
+    ) -> None:
         """라우팅 정보가 필요한 모든 도구의 컨텍스트를 업데이트합니다."""
         for name in ("message", "spawn", "cron"):
             if tool := self._tools.get(name):
                 if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                    tool.set_context(
+                        channel, chat_id, metadata=metadata or {}, session_key=session_key
+                    )
 
     async def _process_message(
         self,
@@ -286,10 +295,14 @@ class AgentLoop:
 
             logger.info("{}로부터의 시스템 메시지를 처리 중입니다.", msg.sender_id)
             self._set_tool_context(
-                channel=channel, chat_id=chat_id, message_id=msg.metadata.get("message_id")
+                channel=channel,
+                chat_id=chat_id,
+                message_id=msg.metadata.get("message_id"),
+                metadata=msg.metadata,
+                session_key=msg.session_key_override,
             )
 
-            key: str = f"{channel}:{chat_id}"
+            key: str = msg.session_key_override or f"{channel}:{chat_id}"
             session: Session = self._sessions.get_or_create(key=key)
             history: list[dict[str, Any]] = session.get_history(max_messages=0)
             messages: list[dict[str, Any]] = self._context.build_messages(
@@ -306,7 +319,8 @@ class AgentLoop:
             return OutboundMessage(
                 channel=channel,
                 chat_id=chat_id,
-                content=final_content or "백그라운 태스크 완료.",
+                content=final_content or "백그라운드 태스크 완료.",
+                metadata=msg.metadata or {},
             )
 
         preview: str = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
@@ -367,7 +381,11 @@ class AgentLoop:
             )
 
         self._set_tool_context(
-            channel=msg.channel, chat_id=msg.chat_id, message_id=msg.metadata.get("message_id")
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            message_id=msg.metadata.get("message_id"),
+            metadata=msg.metadata,
+            session_key=key,
         )
 
         if message_tool := self._tools.get("message"):
