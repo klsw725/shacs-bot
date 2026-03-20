@@ -160,13 +160,13 @@ volumes:
 
 ## 마일스톤
 
-- [ ] **M1: storage 경로 통합**
+- [x] **M1: storage 경로 통합**
   `_codex_token_storage()` 헬퍼 생성. `openai_codex.py`와 `commands.py`에서 `storage` 파라미터 전달.
 
-- [ ] **M2: 레거시 마이그레이션**
+- [x] **M2: 레거시 마이그레이션**
   기존 `platformdirs` 경로 → `~/.shacs-bot/auth/` 자동 이전 로직 추가.
 
-- [ ] **M3: 검증**
+- [x] **M3: 검증**
   로그인 → 토큰 저장 경로 확인 → 모델 호출 → 토큰 로드 확인.
 
 ---
@@ -187,3 +187,4 @@ volumes:
 | 날짜 | 내용 |
 |---|---|
 | 2026-03-16 | PRD 초안 작성. `oauth-cli-kit` 소스 분석 완료 (`storage.py`, `flow.py`, `providers/openai_codex.py`). `FileTokenStorage(data_dir=...)` 파라미터 확인. |
+| 2026-03-16 | M1+M2+M3 구현 완료. `providers/openai_codex.py`에 `codex_token_storage()` 헬퍼 추가 — `FileTokenStorage(data_dir=get_data_dir())` 사용. `_migrate_legacy_token()` 함수로 기존 platformdirs 경로 자동 이전. `cli/commands.py`에서 `codex_token_storage()` import하여 `get_token()`, `login_oauth_interactive()` 호출 시 전달. |

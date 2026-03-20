@@ -14,6 +14,7 @@ from typing import Callable, Awaitable, Any
 from loguru import logger
 
 from shacs_bot.agent.context import ContextBuilder
+from shacs_bot.agent.execution_health import ExecutionHealthMonitor
 from shacs_bot.agent.memory import MemoryStore, MemoryConsolidator
 from shacs_bot.agent.session.manager import SessionManager, Session
 from shacs_bot.agent.subagent import SubagentManager
@@ -465,6 +466,7 @@ class AgentLoop:
         messages: list[dict[str, Any]] = init_messages
         final_content: str | None = None
         tools_used: list[str] = []
+        health: ExecutionHealthMonitor = ExecutionHealthMonitor()
 
         for _ in range(self._max_iterations):
             with otel_span("llm_call", {"model": self._model}) as llm_span:
@@ -516,6 +518,7 @@ class AgentLoop:
                     args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     result: str = await self._tools.execute(tool_call.name, tool_call.arguments)
+                    health.check(tool_call.name, tool_call.arguments, result)
                     messages: list[dict[str, Any]] = self._context.add_tool_result(
                         messages=messages,
                         tool_call_id=tool_call.id,
@@ -588,7 +591,9 @@ class AgentLoop:
                         elif c.get("type") == "image_url" and c.get("image_url", {}).get(
                             "url", ""
                         ).startswith("data:image/"):
-                            filtered.append({"type": "text", "text": "[image]"})
+                            source: str = c.get("_meta", {}).get("source_path", "")
+                            label: str = f"[image: {source}]" if source else "[image]"
+                            filtered.append({"type": "text", "text": label})
                         else:
                             filtered.append(c)
 

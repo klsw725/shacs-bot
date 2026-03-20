@@ -129,14 +129,21 @@ class SessionManager:
             metadata: dict[str, Any] = {}
             created_at: str | None = None
             last_consolidated: int = 0
+            corrupt_count: int = 0
 
             with open(file=path, encoding="utf-8") as f:
-                for line in f:
+                for line_num, line in enumerate(f, 1):
                     line: str = line.strip()
                     if not line:
                         continue
 
-                    data: dict[str, Any] = json.loads(line)
+                    try:
+                        data: dict[str, Any] = json.loads(line)
+                    except json.JSONDecodeError:
+                        corrupt_count += 1
+                        logger.warning("세션 {} line {} 손상됨, 건너뜀", key, line_num)
+                        continue
+
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
                         created_at = (
@@ -147,6 +154,16 @@ class SessionManager:
                         last_consolidated = data.get("last_consolidated", 0)
                     else:
                         messages.append(data)
+
+            if corrupt_count:
+                backup: Path = path.with_suffix(".jsonl.corrupt")
+                shutil.copy2(str(path), str(backup))
+                logger.warning(
+                    "세션 {} 에서 {}개 손상 레코드 발견, 원본을 {}에 백업",
+                    key,
+                    corrupt_count,
+                    backup,
+                )
 
             return Session(
                 key=key,
@@ -172,19 +189,29 @@ class SessionManager:
     def save(self, session: Session) -> None:
         """디스크에 세션 저장"""
         path: Path = self._get_session_path(session.key)
-        with open(path, "w", encoding="utf-8") as f:
-            metadata_line: dict[str, Any] = {
-                "_type": "metadata",
-                "key": session.key,
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata,
-                "last_consolidated": session.last_consolidated,
-            }
-            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
+        tmp_path: Path = path.with_suffix(".jsonl.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                metadata_line: dict[str, Any] = {
+                    "_type": "metadata",
+                    "key": session.key,
+                    "created_at": session.created_at.isoformat(),
+                    "updated_at": session.updated_at.isoformat(),
+                    "metadata": session.metadata,
+                    "last_consolidated": session.last_consolidated,
+                }
+                f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
 
-            for msg in session.messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                for msg in session.messages:
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+
+                f.flush()
+
+            tmp_path.replace(path)
+        except Exception:
+            logger.exception("세션 저장 실패 {}", session.key)
+            tmp_path.unlink(missing_ok=True)
+            return
 
         self._cache[session.key] = session
 

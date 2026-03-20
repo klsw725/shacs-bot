@@ -346,13 +346,13 @@ _process_message()
 
 ## 마일스톤
 
-- [ ] **M1: 설정 + 통합 반환값 변경**
+- [x] **M1: 설정 + 통합 반환값 변경**
   `config/schema.py`에 `send_memory_hints` 추가. `memory.py`의 `maybe_consolidate_by_tokens` 반환 타입을 `bool`로 변경.
 
-- [ ] **M2: 알림 전송 구현**
+- [x] **M2: 알림 전송 구현**
   `loop.py`에서 통합 결과 확인 후 `_memory_hint` progress 메시지 전송. `manager.py`와 `cli/commands.py`에서 필터링 로직 추가.
 
-- [ ] **M3: 검증**
+- [x] **M3: 검증**
   메모리 통합 발생 시 알림 확인. `sendMemoryHints: false` 시 알림 미전송 확인.
 
 ---
@@ -372,3 +372,4 @@ _process_message()
 | 날짜 | 내용 |
 |---|---|
 | 2026-03-16 | PRD 초안 작성 |
+| 2026-03-16 | M1+M2+M3 구현 완료. `schema.py`에 `send_memory_hints: bool = True` 추가 (line 208). `memory.py`의 `maybe_consolidate_by_tokens` 반환 타입을 `bool`로 변경 (line 244). `loop.py`에서 통합 성공 시 `_memory_hint` 메타데이터와 함께 "💾 기억을 정리했어요" progress 전송 (lines 375-383, 434-440). `manager.py`에서 `_memory_hint` 필터링 (line 126-127). `commands.py` 인터랙티브 모드에서 메모리 힌트 표시 (lines 660-666). |

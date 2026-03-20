@@ -12,8 +12,12 @@ from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
 class CustomProvider(LLMProvider):
-
-    def __init__(self, api_key: str = "no-key", base_url: str = "http://localhost:8000/v1", default_model: str = "default"):
+    def __init__(
+        self,
+        api_key: str = "no-key",
+        base_url: str = "http://localhost:8000/v1",
+        default_model: str = "default",
+    ):
         super().__init__(api_key, base_url)
         self.default_model = default_model
         # Keep affinity stable for this provider instance to improve backend cache locality.
@@ -24,18 +28,18 @@ class CustomProvider(LLMProvider):
         )
 
     async def chat(
-            self,
-            messages: list[dict[str, Any]],
-            tools: list[dict[str, Any]] | None = None,
-            model: str | None = None,
-            max_tokens: int = 4096,
-            temperature: float = 0.7,
-            reasoning_effort: str | None = None,
-            tool_choice: str | dict[str, Any] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
-            "messages": self._sanitize_empty_content(messages),
+            "messages": self._strip_content_meta(self._sanitize_empty_content(messages)),
             "max_tokens": max(1, max_tokens),
             "temperature": temperature,
         }
@@ -52,8 +56,13 @@ class CustomProvider(LLMProvider):
         choice = response.choices[0]
         msg = choice.message
         tool_calls = [
-            ToolCallRequest(id=tc.id, name=tc.function.name,
-                            arguments=json_repair.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments)
+            ToolCallRequest(
+                id=tc.id,
+                name=tc.function.name,
+                arguments=json_repair.loads(tc.function.arguments)
+                if isinstance(tc.function.arguments, str)
+                else tc.function.arguments,
+            )
             for tc in (msg.tool_calls or [])
         ]
         u = response.usage
@@ -64,11 +73,12 @@ class CustomProvider(LLMProvider):
             usage={
                 "prompt_tokens": u.prompt_tokens,
                 "completion_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens
-            } if u else {},
+                "total_tokens": u.total_tokens,
+            }
+            if u
+            else {},
             reasoning_content=getattr(msg, "reasoning_content", None) or None,
         )
 
     def get_default_model(self) -> str:
         return self.default_model
-

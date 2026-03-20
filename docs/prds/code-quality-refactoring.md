@@ -253,3 +253,16 @@ Phase 5 (에러 처리)       → 변경 10
 ```
 
 각 Phase는 독립적으로 적용/롤백 가능.
+
+---
+
+## 진행 로그
+
+| 날짜 | 내용 |
+|---|---|
+| 2026-03-17 | PRD 초안 작성 |
+| 2026-03-17 | Phase 1 완료. 변경 1: `memory.py` 데드 코드 제거. 변경 2: `commands.py` `_pick_heartbeat_target()` await 추가. |
+| 2026-03-17 | Phase 2 완료. 변경 3: `litellm.py` Union 제거 → PEP 604. 변경 4: `quick_validate.py` Optional 제거. 변경 5: `loader.py` print → loguru. |
+| 2026-03-17 | Phase 3 완료. 변경 6: `split_message` 중복 제거 → `utils/helpers.py`로 통합. 변경 7: `create_default_tools` 팩토리 추출 → `tools/registry.py`. 변경 8: `channels/manager.py` `_CHANNEL_DEFS` 선언적 레지스트리 전환. |
+| 2026-03-17 | Phase 4 완료. 변경 9: `ProvidersConfig`에 azure_openai, volcengine_coding_plan, byteplus, byteplus_coding_plan, ollama 필드 추가. |
+| 2026-03-17 | Phase 5 완료. 변경 10: `loop.py` `except Exception: pass` → `except (RuntimeError, BaseExceptionGroup): pass` 구체화. |

@@ -174,7 +174,13 @@ class ContextBuilder:
                 continue
 
             b64: str = base64.b64encode(raw).decode()
-            images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            images.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    "_meta": {"source_path": str(p)},
+                }
+            )
 
         if not images:
             return text

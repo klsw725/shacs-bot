@@ -285,7 +285,7 @@ class SubagentManager:
                     break
 
             if final_result is None:
-                final_result = "작업은 완료되었지만 최종 응답이 생성되지 않았습니다."
+                final_result = self._extract_partial_progress(messages, max_iterations)
 
             logger.info("서브에이전트 [{}]가 성공적으로 완료되었습니다", task_id)
             await self._announce_result(
@@ -406,6 +406,50 @@ class SubagentManager:
         except (asyncio.CancelledError, Exception):
             pass
         return True, label
+
+    @staticmethod
+    def _extract_partial_progress(messages: list[dict[str, Any]], max_iterations: int) -> str:
+        tool_calls: list[str] = []
+        last_assistant_text: str = ""
+
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                if msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        name: str = tc.get("function", {}).get("name", "unknown")
+                        if name not in tool_calls:
+                            tool_calls.append(name)
+                if msg.get("content"):
+                    last_assistant_text = msg["content"]
+
+        parts: list[str] = [f"(최대 반복 {max_iterations}회 도달, 부분 진행 상황)"]
+        if tool_calls:
+            parts.append(f"사용한 도구: {', '.join(tool_calls)}")
+        if last_assistant_text:
+            trimmed: str = last_assistant_text[:500]
+            if len(last_assistant_text) > 500:
+                trimmed += "..."
+            parts.append(f"마지막 진행:\n{trimmed}")
+
+        return "\n".join(parts) if len(parts) > 1 else parts[0]
+
+    async def shutdown(self) -> None:
+        running: list[SubagentTask] = [
+            st for st in self._running_tasks.values() if not st.asyncio_task.done()
+        ]
+        if not running:
+            return
+        logger.warning(
+            "종료 시 {}개 서브에이전트가 아직 실행 중: {}",
+            len(running),
+            ", ".join(f"[{st.task_id}] {st.label}" for st in running),
+        )
+        for st in running:
+            st.asyncio_task.cancel()
+        await asyncio.gather(
+            *(st.asyncio_task for st in running),
+            return_exceptions=True,
+        )
 
     def get_running_count(self) -> int:
         return len(self._running_tasks)

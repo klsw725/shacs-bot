@@ -128,7 +128,8 @@ class LiteLLMProvider(LLMProvider):
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": self._sanitize_messages(
-                self._sanitize_empty_content(messages), extra_keys=extra_msg_keys
+                self._strip_content_meta(self._sanitize_empty_content(messages)),
+                extra_keys=extra_msg_keys,
             ),
             "max_tokens": max_tokens,
             "temperature": temperature,
@@ -282,6 +283,13 @@ class LiteLLMProvider(LLMProvider):
 
     def _parse_response(self, response: ModelResponse | CustomStreamWrapper) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
+        if not response.choices:
+            logger.warning("Provider returned empty choices — treating as error")
+            return LLMResponse(
+                content="Provider가 빈 응답을 반환했습니다 (choices=[]). 모델이 요청을 처리하지 못했을 수 있습니다.",
+                finish_reason="error",
+            )
+
         choice: Choices | StreamingChoices = response.choices[0]
         message: Message = choice.message
         content: str = message.content

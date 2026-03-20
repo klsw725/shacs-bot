@@ -175,6 +175,25 @@ class LLMProvider(ABC):
 
         return sanitized
 
+    @staticmethod
+    def _strip_content_meta(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for msg in messages:
+            content: Any = msg.get("content")
+            if not isinstance(content, list):
+                result.append(msg)
+                continue
+            cleaned: list[dict[str, Any]] = [
+                {k: v for k, v in item.items() if k != "_meta"}
+                if isinstance(item, dict) and "_meta" in item
+                else item
+                for item in content
+            ]
+            clean_msg: dict[str, Any] = dict(msg)
+            clean_msg["content"] = cleaned
+            result.append(clean_msg)
+        return result
+
     @classmethod
     def _is_transient_error(cls, content: str | None) -> bool:
         err: str = (content or "").lower()

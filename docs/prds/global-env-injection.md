@@ -120,10 +120,10 @@ provider `_setup_env`보다 **먼저** 실행되므로, `env`에 넣은 값이 p
 
 ## 마일스톤
 
-- [ ] **M1: env 필드 추가 및 주입 구현**
+- [x] **M1: env 필드 추가 및 주입 구현**
   `Config`에 `env: dict[str, str]` 필드 추가, `load_config()` 내에서 `os.environ.setdefault` 주입.
 
-- [ ] **M2: 실행 검증**
+- [x] **M2: 실행 검증**
   `env`에 지정한 값이 프로세스 내에서 `os.environ`으로 접근 가능한지 확인. 시스템 환경변수 우선순위 확인. 미지정 시 기존 동작 확인.
 
 ---
@@ -144,3 +144,4 @@ provider `_setup_env`보다 **먼저** 실행되므로, `env`에 넣은 값이 p
 | 날짜 | 내용 |
 |---|---|
 | 2026-03-17 | PRD 초안 작성. 기존 env 주입 경로 분석 완료 (provider `_setup_env`, MCP `env`). 글로벌 `env` 필드 설계. |
+| 2026-03-17 | M1+M2 구현 완료. `schema.py`에 `env: dict[str, str]` 필드 추가 (line 375). `loader.py`에 `_apply_env()` 함수 추가 — `os.environ.setdefault(key, value)` 주입. 빈 값 스킵 처리. |

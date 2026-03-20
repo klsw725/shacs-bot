@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import ClassVar, Literal
 
+from loguru import logger
 from pydantic import BaseModel, Field, ConfigDict
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
@@ -417,6 +418,15 @@ class Config(BaseSettings):
             if p and any(_kw_matches(kw) for kw in spec.keywords):
                 if spec.is_oauth or p.api_key:
                     return p, spec.name
+                env_hint: str = f" (env: {spec.env_key})" if spec.env_key else ""
+                logger.warning(
+                    "모델 '{}'이 provider '{}'와 매칭되었으나 API 키가 없습니다. "
+                    "config.json의 providers.{}.apiKey를 설정하세요{}",
+                    model_lower,
+                    spec.name,
+                    spec.name,
+                    env_hint,
+                )
 
         # 폴백: 먼저 게이트웨이(provider)들을 시도하고, 그 다음 나머지를 시도함 (순서는 PROVIDERS 레지스트리를 따름)
         # OAuth 기반 provider는 폴백 대상이 아님 — 반드시 명시적으로 모델을 지정해야 함

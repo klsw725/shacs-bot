@@ -283,8 +283,15 @@ def _make_provider(config: Config) -> LLMProvider:
         and not (provider and provider.api_key)
         and not (spec and spec.is_oauth)
     ):
-        console.print("[red]에러: API 키가 설정되지 않았습니다.[/red]")
-        console.print("~/.shacs-bot/config.json 파일의 providers 섹션에 API 키를 설정하세요.")
+        if provider_name and spec:
+            env_hint: str = f" 또는 환경변수 {spec.env_key}" if spec.env_key else ""
+            console.print(f"[red]에러: provider '{spec.label}'의 API 키가 없습니다.[/red]")
+            console.print(
+                f"  설정: ~/.shacs-bot/config.json → providers.{provider_name}.apiKey{env_hint}"
+            )
+        else:
+            console.print(f"[red]에러: 모델 '{model}'에 맞는 provider를 찾을 수 없습니다.[/red]")
+            console.print("  ~/.shacs-bot/config.json의 providers 섹션에 API 키를 설정하세요.")
         raise typer.Exit(1)
 
     return LiteLLMProvider(
