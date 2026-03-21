@@ -100,6 +100,12 @@ class QQChannel(BaseChannel):
         if not self._client:
             logger.warning("QQ client not initialized")
             return
+
+        if msg.media:
+            logger.warning(
+                "QQ channel does not support media attachments, {} file(s) skipped", len(msg.media)
+            )
+
         try:
             msg_id = msg.metadata.get("message_id")
             self._msg_seq += 1  # 递增序列号
@@ -122,7 +128,7 @@ class QQChannel(BaseChannel):
             self._processed_ids.append(data.id)
 
             author = data.author
-            user_id = str(getattr(author, 'id', None) or getattr(author, 'user_openid', 'unknown'))
+            user_id = str(getattr(author, "id", None) or getattr(author, "user_openid", "unknown"))
             content = (data.content or "").strip()
             if not content:
                 return
@@ -135,4 +141,3 @@ class QQChannel(BaseChannel):
             )
         except Exception:
             logger.exception("Error handling QQ message")
-

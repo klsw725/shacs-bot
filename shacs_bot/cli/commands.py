@@ -48,6 +48,15 @@ from shacs_bot.providers.base import LLMProvider
 from shacs_bot.providers.registry import ProviderSpec, PROVIDERS
 from shacs_bot.utils.helpers import sync_workspace_template
 
+
+def _resolve_media_key(config: Config) -> str | None:
+    return config.providers.image_gen.api_key or None
+
+
+def _resolve_media_base_url(config: Config) -> str | None:
+    return config.providers.image_gen.base_url or None
+
+
 # 윈도우 콘솔을 위한 강제 UTF-8 인코딩
 if sys.platform == "win32":
     import locale
@@ -378,6 +387,9 @@ def gateway(
         failover_manager=failover,
         provider_name=gw_provider_name,
         usage_config=config.usage,
+        media_config=config.tools.media,
+        media_api_key=_resolve_media_key(config),
+        media_base_url=_resolve_media_base_url(config),
     )
 
     # 크론 callback 설정 (에이전트 필요)
@@ -582,6 +594,9 @@ def agent(
         failover_manager=cli_failover,
         provider_name=cli_provider_name,
         usage_config=config.usage,
+        media_config=config.tools.media,
+        media_api_key=_resolve_media_key(config),
+        media_base_url=_resolve_media_base_url(config),
     )
 
     if message:

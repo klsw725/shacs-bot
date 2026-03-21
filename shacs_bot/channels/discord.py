@@ -85,6 +85,9 @@ class DiscordChannel(BaseChannel):
         headers = {"Authorization": f"Bot {self.config.token}"}
 
         try:
+            for media_path in msg.media or []:
+                await self._send_media(url, headers, media_path)
+
             chunks = split_message(msg.content or "", max_len=MAX_MESSAGE_LEN)
             if not chunks:
                 return
@@ -101,6 +104,28 @@ class DiscordChannel(BaseChannel):
         finally:
             if not msg.metadata.get("_progress", False):
                 await self._stop_typing(target_id)
+
+    async def _send_media(self, url: str, headers: dict[str, str], file_path: str) -> bool:
+        from pathlib import Path
+
+        path = Path(file_path)
+        if not path.is_file():
+            logger.warning("Media file not found: {}", file_path)
+            return False
+
+        try:
+            files = {"files[0]": (path.name, path.read_bytes())}
+            for attempt in range(3):
+                response = await self._http.post(url, headers=headers, files=files)
+                if response.status_code == 429:
+                    retry_after = float(response.json().get("retry_after", 1.0))
+                    await asyncio.sleep(retry_after)
+                    continue
+                response.raise_for_status()
+                return True
+        except Exception as e:
+            logger.error("Error sending Discord media {}: {}", file_path, e)
+        return False
 
     async def _send_payload(
         self, url: str, headers: dict[str, str], payload: dict[str, Any]

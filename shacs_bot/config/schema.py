@@ -279,6 +279,7 @@ class ProvidersConfig(BaseModel):
     ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama (local)
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
+    image_gen: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
 class HeartbeatConfig(Base):
@@ -345,6 +346,16 @@ class ExecToolConfig(Base):
     path_append: str = ""
 
 
+class MediaConfig(Base):
+    """미디어 생성 도구 설정."""
+
+    enabled: bool = False
+    backend: str = "openai-compatible"  # "gemini" | "openai-compatible"
+    model: str = ""  # 이미지 생성 모델명 (빈 문자열이면 프로바이더 기본값)
+    save_dir: str = "~/.shacs-bot/workspace/media"
+    video_duration_seconds: int = 8
+
+
 class MCPServerConfig(Base):
     """MCP 서버 연결 설정 (stdio or HTTP)."""
 
@@ -366,6 +377,7 @@ class ToolsConfig(Base):
 
     web: WebToolConfig = Field(default_factory=WebToolConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    media: MediaConfig = Field(default_factory=MediaConfig)
     restrict_to_workspace: bool = False  # If true, block commands accessing path outside workspace
     mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict

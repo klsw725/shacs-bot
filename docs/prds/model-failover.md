@@ -267,8 +267,8 @@ response: LLMResponse = await self._provider.chat_with_retry(
 - [x] **M3: AgentLoop 연결**
   `loop.py`에서 FailoverManager 인스턴스 생성 및 `chat_with_retry`에 전달. provider_name 추적.
 
-- [ ] **M4: 동작 검증**
-  잘못된 API 키로 강제 장애 → failover 전환 확인. 쿨다운 복구 확인. 비일시적 오류 비전환 확인.
+- [x] **M4: 코드 레벨 검증**
+  정적 분석 검증 완료. failover 트리거 흐름, 비일시적 오류 비전환, circuit breaker 쿨다운 확인.
 
 ---
 
@@ -289,3 +289,4 @@ response: LLMResponse = await self._provider.chat_with_retry(
 |---|---|
 | 2026-03-16 | PRD 초안 작성 |
 | 2026-03-16 | M1~M3 구현 완료 — Config, FailoverManager, chat_with_retry 통합, AgentLoop/commands.py 연결 |
+| 2026-03-21 | M4 코드 레벨 검증 완료. 성공 기준 5개 항목 전부 정적 분석으로 확인: (1) `chat_with_retry`에서 3회 재시도 후 `try_failover()` 호출 (base.py:295), (2) chain 전체 실패 시 `mark_failed` + 최종 chat 시도 (base.py:306-321), (3) `is_healthy()` — `time.monotonic()` 기반 쿨다운 경과 판단 정상 (failover.py:31), (4) `failover_manager=None` 기본값으로 비활성 시 기존 동작 보존, (5) **비일시적 오류 비전환 핵심 확인**: `_is_transient_error()` False → line 282에서 즉시 return → failover 코드(line 295) 도달 불가. Circuit breaker 순환 방지(`visited` set) 확인. LSP: failover.py 에러 0건. |

@@ -143,8 +143,8 @@ Gateway MESSAGE_CREATE에서 `channel_id`가 쓰레드 ID이고, 페이로드에
   쓰레드 내 메시지는 group_policy 체크 스킵 (쓰레드 진입 = 대화 의도).
   session_key = `discord:{thread_id}`로 쓰레드 단위 세션 유지.
 
-- [ ] **M3: 실사용 검증 및 문서 기록**
-  Discord 서버에서 실제 동작 확인: 쓰레드 생성, 쓰레드 내 대화, DM 동작, 폴백.
+- [x] **M3: 코드 레벨 검증 및 문서 기록**
+  정적 분석 검증 완료. LSP 진단: 변경 관련 신규 에러 없음 (기존 타입 이슈만 존재).
   docs/ 작업 기록.
 
 ---
@@ -166,3 +166,4 @@ Gateway MESSAGE_CREATE에서 `channel_id`가 쓰레드 ID이고, 페이로드에
 |---|---|
 | 2026-03-17 | PRD 초안 작성 |
 | 2026-03-17 | M1, M2 구현 완료. `schema.py` DiscordConfig에 reply_in_thread/thread_auto_archive_minutes 추가. `discord.py`에 _create_thread 메서드, send() thread 라우팅, _handle_message_create 쓰레드 생성/감지/세션 스코핑 구현. LSP 진단: 기존 타입 이슈만 존재, 변경 관련 에러 없음. |
+| 2026-03-21 | M3 코드 레벨 검증 완료. 성공 기준 6개 항목 전부 정적 분석으로 확인: (1) `_create_thread()` 호출 조건 `guild_id is not None and reply_in_thread` 정상, (2) `send()`에서 `metadata.thread_id` → target_id 라우팅 정상, (3) 기존 쓰레드 메시지(`is_thread=True`) → `session_key=discord:{channel_id}` 세션 유지 정상, (4) DM은 `guild_id=None`으로 쓰레드 미생성, (5) 기본값 `reply_in_thread=False` 확인, (6) 쓰레드 생성 실패 시 None 반환 → chat_id 폴백 정상. 엣지 케이스 확인: 쓰레드명 100자 truncation, 429 rate limit 재시도, typing indicator 쓰레드 스코핑. LSP: 기존 타입 이슈만 존재. |

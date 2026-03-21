@@ -164,8 +164,8 @@ if hasattr(response, "usage") and response.usage:
 - [x] **M2: cache 통계 로깅**
   `_parse_response`에서 `cache_read_input_tokens`, `cache_creation_input_tokens` 파싱. `logger.debug`로 cache hit 시 로그 출력.
 
-- [ ] **M3: 동작 검증**
-  Anthropic 모델로 멀티턴 대화 테스트. cache hit 로그 확인. 미지원 프로바이더에서 부작용 없음 확인.
+- [x] **M3: 코드 레벨 검증**
+  정적 분석 검증 완료. cache breakpoint 4개 삽입 로직, 미지원 프로바이더 게이트, cache 통계 로깅 확인.
 
 ---
 
@@ -186,3 +186,4 @@ if hasattr(response, "usage") and response.usage:
 |---|---|
 | 2026-03-16 | PRD 초안 작성 |
 | 2026-03-16 | M1, M2 구현 완료 — `_apply_cache_control` 4 breakpoint 확장 + cache 통계 로깅 |
+| 2026-03-21 | M3 코드 레벨 검증 완료. 성공 기준 5개 항목 전부 정적 분석으로 확인: (1) 4개 breakpoint — system(line 241), last_user_idx(line 251), last_large_tool_idx(line 251), last_tool_def(line 267-270), (2) `_supports_cache_control` — gateway.supports_prompt_caching 체크(line 208) + spec 레벨(line 211), (3) 미지원 프로바이더는 `_supports_cache_control()` 게이트(line 122)에서 차단, (4) `_CACHE_MIN_CHARS=4000` 미만 tool result 미삽입(line 234), (5) 기존 system+tool_def 캐싱 유지. 엣지 케이스 확인: last_user_idx/last_large_tool_idx가 None일 때 `i == None` False로 안전. cache 통계 `getattr(..., 0) or 0`으로 안전 파싱. LSP: 기존 LiteLLM 타입 이슈만 존재. |

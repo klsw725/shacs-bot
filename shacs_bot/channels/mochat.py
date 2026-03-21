@@ -319,7 +319,10 @@ class MochatChannel(BaseChannel):
 
         parts = [msg.content.strip()] if msg.content and msg.content.strip() else []
         if msg.media:
-            parts.extend(m for m in msg.media if isinstance(m, str) and m.strip())
+            logger.warning(
+                "Mochat channel does not support media attachments, {} file(s) skipped",
+                len(msg.media),
+            )
         content = "\n".join(parts).strip()
         if not content:
             return

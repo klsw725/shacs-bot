@@ -230,6 +230,32 @@ export class WhatsAppClient {
     await this.sock.sendMessage(to, { text });
   }
 
+  async sendMedia(to: string, filePath: string): Promise<void> {
+    if (!this.sock) {
+      throw new Error('Not connected');
+    }
+
+    const { readFile } = await import('fs/promises');
+    const { basename, extname } = await import('path');
+    const buffer = await readFile(filePath);
+    const ext = extname(filePath).toLowerCase();
+    const fileName = basename(filePath);
+
+    const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+    const videoExts = ['.mp4', '.avi', '.mov', '.mkv'];
+    const audioExts = ['.mp3', '.ogg', '.m4a', '.wav', '.aac'];
+
+    if (imageExts.includes(ext)) {
+      await this.sock.sendMessage(to, { image: buffer });
+    } else if (videoExts.includes(ext)) {
+      await this.sock.sendMessage(to, { video: buffer });
+    } else if (audioExts.includes(ext)) {
+      await this.sock.sendMessage(to, { audio: buffer, mimetype: 'audio/mpeg' });
+    } else {
+      await this.sock.sendMessage(to, { document: buffer, fileName });
+    }
+  }
+
   async disconnect(): Promise<void> {
     if (this.sock) {
       this.sock.end(undefined);

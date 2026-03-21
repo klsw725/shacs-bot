@@ -27,7 +27,7 @@ from shacs_bot.agent.tools.spawn import SpawnTool, ListTasksTool, CancelTaskTool
 from shacs_bot.bus.events import InboundMessage, OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.agent.usage import TurnUsage, UsageTracker
-from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig, UsageConfig
+from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig, MediaConfig, UsageConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from shacs_bot.providers.failover import FailoverManager
 
@@ -66,6 +66,9 @@ class AgentLoop:
         failover_manager: FailoverManager | None = None,
         provider_name: str | None = None,
         usage_config: UsageConfig | None = None,
+        media_config: MediaConfig | None = None,
+        media_api_key: str | None = None,
+        media_base_url: str | None = None,
     ):
         self._bus: MessageBus = bus
         self._channels_config: ChannelsConfig = channels_config
@@ -86,6 +89,9 @@ class AgentLoop:
         self._failover: FailoverManager | None = failover_manager
         self._provider_name: str | None = provider_name
         self._usage_config: UsageConfig | None = usage_config
+        self._media_config: MediaConfig | None = media_config
+        self._media_api_key: str | None = media_api_key
+        self._media_base_url: str | None = media_base_url
         self._usage_tracker: UsageTracker | None = None
         if usage_config and usage_config.enabled:
             from shacs_bot.config.paths import get_usage_dir
@@ -155,6 +161,17 @@ class AgentLoop:
 
         if self._cron_service:
             self._tools.register(CronTool(self._cron_service))
+
+        if self._media_config and self._media_config.enabled:
+            from shacs_bot.agent.tools.media import MediaGenerateTool
+
+            self._tools.register(
+                MediaGenerateTool(
+                    config=self._media_config,
+                    api_key=self._media_api_key or "",
+                    base_url=self._media_base_url or "",
+                )
+            )
 
     async def run(self) -> None:
         """stop 명령에 계속 반응할 수 있도록, 메시지를 작업(task)으로 디스패치하면서 에이전트 루프를 실행합니다."""
