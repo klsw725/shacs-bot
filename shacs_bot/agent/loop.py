@@ -26,7 +26,8 @@ from shacs_bot.agent.tools.registry import ToolRegistry, create_default_tools
 from shacs_bot.agent.tools.spawn import SpawnTool, ListTasksTool, CancelTaskTool
 from shacs_bot.bus.events import InboundMessage, OutboundMessage
 from shacs_bot.bus.networks import MessageBus
-from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig
+from shacs_bot.agent.usage import TurnUsage, UsageTracker
+from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig, UsageConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from shacs_bot.providers.failover import FailoverManager
 
@@ -64,6 +65,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         failover_manager: FailoverManager | None = None,
         provider_name: str | None = None,
+        usage_config: UsageConfig | None = None,
     ):
         self._bus: MessageBus = bus
         self._channels_config: ChannelsConfig = channels_config
@@ -83,6 +85,12 @@ class AgentLoop:
         self._restrict_to_workspace: bool = restrict_to_workspace
         self._failover: FailoverManager | None = failover_manager
         self._provider_name: str | None = provider_name
+        self._usage_config: UsageConfig | None = usage_config
+        self._usage_tracker: UsageTracker | None = None
+        if usage_config and usage_config.enabled:
+            from shacs_bot.config.paths import get_usage_dir
+
+            self._usage_tracker = UsageTracker(get_usage_dir())
 
         self._context = ContextBuilder(self._workspace)
         self._sessions: SessionManager = session_manager or SessionManager(self._workspace)
@@ -314,7 +322,7 @@ class AgentLoop:
                 channel=channel,
                 chat_id=chat_id,
             )
-            final_content, _, all_msg = await self._run_agent_loop(messages)
+            final_content, _, all_msg, _ = await self._run_agent_loop(messages)
             self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
 
             self._sessions.save(session)
@@ -357,17 +365,66 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="새로운 세션이 시작되었습니다."
             )
+        elif cmd == "/usage":
+            if not self._usage_tracker:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="사용량 추적이 비활성화되어 있습니다.",
+                )
+
+            session_summary = self._usage_tracker.get_session_summary(key)
+            daily_summary = self._usage_tracker.get_daily_summary()
+
+            cost_session = (
+                f"${session_summary['cost']:.4f}" if session_summary["cost"] else "해당 없음"
+            )
+            cost_daily = f"${daily_summary['cost']:.4f}" if daily_summary["cost"] else "해당 없음"
+
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"\U0001f4ca 사용량 요약\n\n"
+                    f"**현재 세션** ({key})\n"
+                    f"\u2022 토큰: {session_summary['prompt']:,} prompt + {session_summary['completion']:,} completion\n"
+                    f"\u2022 비용: {cost_session}\n"
+                    f"\u2022 LLM 호출: {session_summary['calls']}회\n\n"
+                    f"**오늘 전체**\n"
+                    f"\u2022 토큰: {daily_summary['total']:,}\n"
+                    f"\u2022 비용: {cost_daily}\n"
+                    f"\u2022 세션 수: {daily_summary['sessions']}"
+                ),
+            )
+        elif cmd == "/status":
+            msg_count = len(session.messages) - session.last_consolidated
+            total_count = len(session.messages)
+
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"\U0001f916 상태\n\n"
+                    f"\u2022 모델: {self._model}\n"
+                    f"\u2022 프로바이더: {self._provider_name or 'auto'}\n"
+                    f"\u2022 세션: {key}\n"
+                    f"\u2022 메시지: {msg_count}개 (미통합) / {total_count}개 (전체)\n"
+                    f"\u2022 메모리 윈도우: {self._memory_window}"
+                ),
+            )
         elif cmd == "/help":
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="""
-                    🦈 shacs-bot 명령어:
-                    /new — 새 대화를 시작합니다
-                    /stop — 현재 작업을 중지합니다
-                    /restart - 봇을 재시작합니다
-                    /help — 사용 가능한 명령어를 표시합니다 
-                """,
+                content=(
+                    "\U0001f988 shacs-bot 명령어:\n"
+                    "/new \u2014 새 대화를 시작합니다\n"
+                    "/stop \u2014 현재 작업을 중지합니다\n"
+                    "/restart \u2014 봇을 재시작합니다\n"
+                    "/usage \u2014 토큰 사용량과 비용을 확인합니다\n"
+                    "/status \u2014 현재 모델, 세션 상태를 확인합니다\n"
+                    "/help \u2014 사용 가능한 명령어를 표시합니다"
+                ),
             )
 
         consolidated: bool = await self._memory_consolidator.maybe_consolidate_by_tokens(
@@ -420,11 +477,19 @@ class AgentLoop:
                 )
             )
 
-        final_content, _, all_msg = await self._run_agent_loop(
+        final_content, _, all_msg, turn_usage = await self._run_agent_loop(
             init_messages=initial_messages, on_progress=on_progress or _bus_progress
         )
         if final_content is None:
             final_content = "처리는 완료했지만 제공할 응답이 없습니다."
+
+        if self._usage_tracker:
+            self._usage_tracker.record(session_key=key, turn=turn_usage)
+
+        if self._usage_config and self._usage_config.footer != "off":
+            footer = turn_usage.format_footer(mode=self._usage_config.footer)
+            if footer:
+                final_content = f"{final_content}\n\n{footer}"
 
         self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
         self._sessions.save(session)
@@ -459,14 +524,14 @@ class AgentLoop:
         self,
         init_messages: list[dict[str, Any]],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict[str, Any]]]:
-        """에이전트 반복 루프를 실행합니다. (final_content, tools_used, messages)를 반환합니다."""
+    ) -> tuple[str | None, list[str], list[dict[str, Any]], TurnUsage]:
         from shacs_bot.observability.tracing import span as otel_span
 
         messages: list[dict[str, Any]] = init_messages
         final_content: str | None = None
         tools_used: list[str] = []
         health: ExecutionHealthMonitor = ExecutionHealthMonitor()
+        turn_usage: TurnUsage = TurnUsage(model=self._model, provider=self._provider_name or "")
 
         for _ in range(self._max_iterations):
             with otel_span("llm_call", {"model": self._model}) as llm_span:
@@ -486,6 +551,7 @@ class AgentLoop:
                     llm_span.set_attribute(
                         "cache.read_tokens", response.usage.get("cache_read_input_tokens", 0)
                     )
+                turn_usage.accumulate(response.usage, self._model, self._provider_name or "")
             if response.has_tool_calls:
                 if on_progress:
                     thought = self._strip_think(response.content)
@@ -552,7 +618,7 @@ class AgentLoop:
                    도구 호출 최대 반복 횟수({self._max_iterations})에 도달했지만 작업을 완료하지 못했습니다. 작업을 더 작은 단계로 나누어 다시 시도해 보세요. 
                 """
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, turn_usage
 
     def _save_turn(self, session: Session, messages: list[dict[str, Any]], skip: int) -> None:
         """새로운 대화 턴의 메시지를 세션에 저장하고, 크기가 큰 도구 실행 결과는 잘라서 저장합니다."""

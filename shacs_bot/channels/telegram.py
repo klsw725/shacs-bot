@@ -313,10 +313,12 @@ class TelegramChannel(BaseChannel):
         if not update.message:
             return
         await update.message.reply_text(
-            "🐈 shacs-bot commands:\n"
-            "/new — Start a new conversation\n"
-            "/stop — Stop the current task\n"
-            "/help — Show available commands"
+            "\U0001f988 shacs-bot commands:\n"
+            "/new \u2014 Start a new conversation\n"
+            "/stop \u2014 Stop the current task\n"
+            "/usage \u2014 Show token usage and costs\n"
+            "/status \u2014 Show model and session info\n"
+            "/help \u2014 Show available commands"
         )
 
     @staticmethod

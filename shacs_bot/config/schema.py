@@ -300,6 +300,13 @@ class FailoverConfig(Base):
     rules: list[FailoverRule] = Field(default_factory=list)
 
 
+class UsageConfig(Base):
+    """Usage tracking configuration."""
+
+    enabled: bool = True  # 사용량 추적 활성화
+    footer: str = "off"  # 응답 footer 모드: "off" | "tokens" | "full"
+
+
 class ObservabilityConfig(Base):
     enabled: bool = False
     otlp_endpoint: str = "http://localhost:4317"
@@ -379,6 +386,7 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    usage: UsageConfig = Field(default_factory=UsageConfig)
     failover: FailoverConfig = Field(default_factory=FailoverConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 

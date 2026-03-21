@@ -24,6 +24,10 @@ def get_media_dir(channel: str | None = None) -> Path:
     return ensure_dir(base / channel) if channel else base
 
 
+def get_usage_dir() -> Path:
+    return get_runtime_subdir("usage")
+
+
 def get_cron_dir() -> Path:
     """cron 저장 디렉터리를 반환한다."""
     return get_runtime_subdir("cron")

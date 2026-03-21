@@ -377,6 +377,7 @@ def gateway(
         channels_config=config.channels,
         failover_manager=failover,
         provider_name=gw_provider_name,
+        usage_config=config.usage,
     )
 
     # 크론 callback 설정 (에이전트 필요)
@@ -580,6 +581,7 @@ def agent(
         channels_config=config.channels,
         failover_manager=cli_failover,
         provider_name=cli_provider_name,
+        usage_config=config.usage,
     )
 
     if message:
