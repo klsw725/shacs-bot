@@ -258,7 +258,7 @@ def onboard():
     console.print("     발급: https://openrouter.ai/keys")
     console.print('  2. 채팅 시작: [cyan]shacs-bot agent -m "Hello!"[/cyan]')
     console.print(
-        "\n[dim]Telegram / WhatsApp 연동이 필요하신가요? https://github.com/HKUDS/shacs-bot#-chat-apps 참고[/dim]"
+        "\n[dim]Telegram / WhatsApp 연동이 필요하신가요? https://github.com/klsw725/shacs-bot?tab=readme-ov-file#%EC%B1%84%EB%84%90 참고[/dim]"
     )
 
 
