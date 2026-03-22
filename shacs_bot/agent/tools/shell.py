@@ -1,4 +1,5 @@
 """쉘 실행 도구"""
+
 import asyncio
 import os
 import re
@@ -11,44 +12,42 @@ from shacs_bot.agent.tools.base import Tool
 
 class ExecTool(Tool):
     """쉘 명령을 실행하는 도구"""
+
     name: str = "exec"
     description: str = "쉘 명령을 실행합니다. 명령 출력 결과를 반환합니다. 주의해서 사용하세요."
     parameters: dict[str, object] = {
         "type": "object",
         "properties": {
-            "command": {
-                "type": "string",
-                "description": "실행할 쉘 명령어"
-            },
+            "command": {"type": "string", "description": "실행할 쉘 명령어"},
             "_working_dir": {
                 "type": "string",
-                "description": "명령어 실행을 위한 선택적 작업 디렉토리"
-            }
+                "description": "명령어 실행을 위한 선택적 작업 디렉토리",
+            },
         },
-        "required": ["command"]
+        "required": ["command"],
     }
 
     def __init__(
-            self,
-            timeout: int = 60,
-            working_dir: str | None = None,
-            deny_patterns: list[str] | None = None,
-            allow_patterns: list[str] | None = None,
-            restrict_to_workspace: bool = False,
-            path_append: str = "",
+        self,
+        timeout: int = 60,
+        working_dir: str | None = None,
+        deny_patterns: list[str] | None = None,
+        allow_patterns: list[str] | None = None,
+        restrict_to_workspace: bool = False,
+        path_append: str = "",
     ):
         self._timeout: int = timeout
         self._working_dir: str | None = working_dir
         self._deny_patterns: list[str] = deny_patterns or [
-            r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
-            r"\bdel\s+/[fq]\b",              # del /f, del /q
-            r"\brmdir\s+/s\b",               # rmdir /s
-            r"(?:^|[;&|]\s*)format\b",       # format (as standalone command only)
-            r"\b(mkfs|diskpart)\b",          # disk operations
-            r"\bdd\s+if=",                   # dd
-            r">\s*/dev/sd",                  # write to disk
+            r"\brm\s+-[rf]{1,2}\b",  # rm -r, rm -rf, rm -fr
+            r"\bdel\s+/[fq]\b",  # del /f, del /q
+            r"\brmdir\s+/s\b",  # rmdir /s
+            r"(?:^|[;&|]\s*)format\b",  # format (as standalone command only)
+            r"\b(mkfs|diskpart)\b",  # disk operations
+            r"\bdd\s+if=",  # dd
+            r">\s*/dev/sd",  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
-            r":\(\)\s*\{.*\};\s*:",          # fork bomb
+            r":\(\)\s*\{.*\};\s*:",  # fork bomb
         ]
         self._allow_patterns: list[str] = allow_patterns or []
         self._restrict_to_workspace: bool = restrict_to_workspace
@@ -56,7 +55,7 @@ class ExecTool(Tool):
 
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         cwd: str = working_dir or self._working_dir or os.getcwd()
-        guard_error: str | None = self._guard_command(command,cwd)
+        guard_error: str | None = self._guard_command(command, cwd)
         if guard_error:
             return guard_error
 
@@ -75,8 +74,7 @@ class ExecTool(Tool):
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    fut=process.communicate(),
-                    timeout=self._timeout
+                    fut=process.communicate(), timeout=self._timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()
@@ -101,8 +99,8 @@ class ExecTool(Tool):
                 output_parts.append(f"\n종료 코드: {process.returncode}")
 
             result = "\n".join(output_parts) if output_parts else "(출력 없음)"
+            result = self._mask_env_secrets(result)
 
-            # 출력이 너무 길면 요약
             max_len = 10_000
             if len(result) > max_len:
                 result = result[:max_len] + f"\n... (생략됨, {len(result) - max_len}자 더 있음)"
@@ -118,7 +116,9 @@ class ExecTool(Tool):
 
         for pattern in self._deny_patterns:
             if re.search(pattern, cmd_lower):
-                return "에러: 명령어가 safety guard에 의해 차단되었습니다 (안전하지 않은 패턴 감지됨)"
+                return (
+                    "에러: 명령어가 safety guard에 의해 차단되었습니다 (안전하지 않은 패턴 감지됨)"
+                )
 
         if self._allow_patterns:
             if not any(re.search(pattern, cmd_lower) for pattern in self._allow_patterns):
@@ -139,6 +139,30 @@ class ExecTool(Tool):
                     return "에러: 명령어가 safety guard에 의해 차단되었습니다 (작업 디렉토리 외부 경로 감지됨)"
 
         return None
+
+    _SENSITIVE_KEY_PATTERNS: tuple[str, ...] = (
+        "KEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "CREDENTIAL",
+        "AUTH",
+        "PRIVATE",
+    )
+
+    def _mask_env_secrets(self, text: str) -> str:
+        """출력 텍스트에서 민감한 환경변수 값을 ***로 치환합니다."""
+        values: set[str] = set()
+        for name, value in os.environ.items():
+            if len(value) <= 3:
+                continue
+            name_upper: str = name.upper()
+            if any(p in name_upper for p in self._SENSITIVE_KEY_PATTERNS):
+                values.add(value)
+
+        for value in sorted(values, key=len, reverse=True):
+            text = text.replace(value, "***")
+        return text
 
     def _extract_absolute_paths(self, command: str) -> list[str]:
         win_paths: list[Any] = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)
