@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -47,6 +48,8 @@ class ChannelManager:
         self._bus = bus
         self._channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
+
+        self._media_save_dir: Path = Path(config.tools.media.save_dir).expanduser().resolve()
 
         self._init_channels()
 
@@ -140,6 +143,8 @@ class ChannelManager:
                 if channel:
                     try:
                         await channel.send(msg)
+                        if msg.media:
+                            self._cleanup_generated_media(msg.media)
                     except Exception as e:
                         logger.error("{}에게 에러 전송: {}", msg.channel, e)
                 else:
@@ -175,6 +180,17 @@ class ChannelManager:
                 logger.info("{} 채널이 정지되었습니다.", name)
             except Exception as e:
                 logger.error("{} 채널을 정지하는데 에러 발생: {}", name, e)
+
+    def _cleanup_generated_media(self, media: list[str]) -> None:
+        """전송 완료된 생성 미디어 파일을 삭제합니다 (save_dir 하위만)."""
+        for media_path in media:
+            p = Path(media_path).resolve()
+            try:
+                if p.is_relative_to(self._media_save_dir) and p.exists():
+                    p.unlink()
+                    logger.debug("Generated media cleaned up: {}", media_path)
+            except Exception as e:
+                logger.warning("Failed to clean up media {}: {}", media_path, e)
 
     def get_channel(self, name: str) -> BaseChannel | None:
         """name으로 채널 가져오기"""

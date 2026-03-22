@@ -13,6 +13,7 @@ from websockets.sync.client import ClientConnection
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.channels.base import BaseChannel
+from shacs_bot.config.paths import get_media_dir
 from shacs_bot.config.schema import DiscordConfig
 from shacs_bot.utils.helpers import split_message
 
@@ -254,7 +255,7 @@ class DiscordChannel(BaseChannel):
 
         content_parts = [content] if content else []
         media_paths: list[str] = []
-        media_dir = Path.home() / ".shacs_bot" / "media"
+        media_dir = get_media_dir()
 
         for attachment in payload.get("attachments") or []:
             url = attachment.get("url")
@@ -266,7 +267,6 @@ class DiscordChannel(BaseChannel):
                 content_parts.append(f"[attachment: {filename} - too large]")
                 continue
             try:
-                media_dir.mkdir(parents=True, exist_ok=True)
                 file_path = (
                     media_dir / f"{attachment.get('id', 'file')}_{filename.replace('/', '_')}"
                 )

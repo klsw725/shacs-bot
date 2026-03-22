@@ -511,6 +511,9 @@ class AgentLoop:
         self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
         self._sessions.save(session)
 
+        if msg.media:
+            self._cleanup_inbound_media(msg.media)
+
         consolidated: bool = await self._memory_consolidator.maybe_consolidate_by_tokens(
             session=session
         )
@@ -688,6 +691,18 @@ class AgentLoop:
             session.messages.append(entry)
 
         session.updated_at = datetime.now()
+
+    @staticmethod
+    def _cleanup_inbound_media(media: list[str]) -> None:
+        """턴 처리 완료 후 수신 미디어 파일을 삭제합니다."""
+        for media_path in media:
+            try:
+                p = Path(media_path)
+                if p.exists():
+                    p.unlink()
+                    logger.debug("Inbound media cleaned up: {}", media_path)
+            except Exception as e:
+                logger.warning("Failed to clean up inbound media {}: {}", media_path, e)
 
     async def process_direct(
         self,
