@@ -1,6 +1,6 @@
 # PRD: Workspace 디렉토리 재구성
 
-> **Status**: Ready for Implementation
+> **Status**: Done
 > **Spec**: [docs/specs/2026-03-24-workspace-reorganization.md](../docs/specs/2026-03-24-workspace-reorganization.md)
 > **Estimated Effort**: Medium (1일)
 > **Created**: 2026-03-24
@@ -64,7 +64,7 @@ LLM 접근 가능한 데이터는 workspace 하위에 유지한다. `restrict_to
 
 ### M5: 문서 업데이트
 - [x] 작업 기록 문서 작성 (`docs/` 하위)
-- [ ] 변경 사항 커밋
+- [x] 변경 사항 커밋
 
 **검증**: 문서에 변경 내역, 마이그레이션 동작, 새 디렉토리 구조 설명 포함
 
