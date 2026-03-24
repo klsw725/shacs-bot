@@ -9,7 +9,7 @@ from typing import Any
 
 from loguru import logger
 
-from shacs_bot.config.paths import get_legacy_sessions_dir
+from shacs_bot.config.paths import get_legacy_sessions_dir, get_sessions_dir
 from shacs_bot.utils.helpers import ensure_dir, safe_filename
 
 
@@ -85,7 +85,7 @@ class SessionManager:
 
     def __init__(self, workspace: Path):
         self._workspace: Path = workspace
-        self._session_dir: Path = ensure_dir(self._workspace / "sessions")
+        self._session_dir: Path = get_sessions_dir()
         self._legacy_sessions_dir: Path = get_legacy_sessions_dir()
         self._cache: dict[str, Session] = {}
 

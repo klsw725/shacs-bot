@@ -40,7 +40,7 @@ except ImportError as e:
 
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.channels.base import BaseChannel
-from shacs_bot.config.paths import get_data_dir, get_media_dir, get_runtime_subdir
+from shacs_bot.config.paths import get_data_dir, get_media_downloads_dir, get_runtime_subdir
 from shacs_bot.utils.helpers import safe_filename
 
 TYPING_NOTICE_TIMEOUT_MS = 30_000
@@ -563,7 +563,7 @@ class MatrixChannel(BaseChannel):
         return False
 
     def _media_dir(self) -> Path:
-        d = get_media_dir("matrix")
+        d = get_media_downloads_dir("matrix")
         d.mkdir(parents=True, exist_ok=True)
         return d
 

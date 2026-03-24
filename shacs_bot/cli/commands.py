@@ -356,8 +356,7 @@ def gateway(
     session_manager: SessionManager = SessionManager(config.workspace_path)
 
     # 먼저, 크론 서비스 생성 (에이전트 생성 이후에 callback 설정)
-    # 각 크론 저장 인스턴스당 workspace 경로 사용
-    cron_store_path: Path = config.workspace_path / "cron" / "jobs.json"
+    cron_store_path: Path = get_cron_dir() / "jobs.json"
     cron: CronService = CronService(cron_store_path)
 
     provider.generation.temperature = config.agents.defaults.temperature

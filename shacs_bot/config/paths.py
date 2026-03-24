@@ -18,19 +18,52 @@ def get_runtime_subdir(name: str) -> Path:
     return ensure_dir(get_data_dir() / name)
 
 
-def get_media_dir(channel: str | None = None) -> Path:
-    """미디어 디렉터리를 반환하며, 필요에 따라 채널별로 분리된 경로를 사용한다.."""
-    base: Path = get_runtime_subdir("media")
-    return ensure_dir(base / channel) if channel else base
+def get_data_subdir(name: str) -> Path:
+    """data/ 하위 디렉터리를 반환한다. 시스템 전용 런타임 데이터."""
+    return ensure_dir(get_data_dir() / "data" / name)
 
 
-def get_usage_dir() -> Path:
-    return get_runtime_subdir("usage")
+def get_sessions_dir() -> Path:
+    """세션 히스토리 디렉터리를 반환한다."""
+    return get_data_subdir("sessions")
 
 
 def get_cron_dir() -> Path:
     """cron 저장 디렉터리를 반환한다."""
-    return get_runtime_subdir("cron")
+    return get_data_subdir("cron")
+
+
+def get_usage_dir() -> Path:
+    """사용량 추적 데이터 디렉터리를 반환한다."""
+    return get_data_subdir("usage")
+
+
+def get_clawhub_dir() -> Path:
+    """ClaWHub 락 디렉터리를 반환한다."""
+    return get_data_subdir("clawhub")
+
+
+def get_media_dir(channel: str | None = None) -> Path:
+    """미디어 디렉터리를 반환하며, 필요에 따라 채널별로 분리된 경로를 사용한다."""
+    base: Path = get_runtime_subdir("media")
+    return ensure_dir(base / channel) if channel else base
+
+
+def get_media_downloads_dir(channel: str | None = None) -> Path:
+    """채널 다운로드 미디어 디렉터리를 반환한다. 채널별 하위 폴더 지원."""
+    base = ensure_dir(get_data_dir() / "media")
+    return ensure_dir(base / channel) if channel else base
+
+
+def get_sandbox_dir(source: str | None = None) -> Path:
+    """스킬/에이전트 출력 디렉터리를 반환한다. workspace/sandbox/ 하위."""
+    base = ensure_dir(get_workspace_path() / "sandbox")
+    return ensure_dir(base / source) if source else base
+
+
+def get_agents_dir() -> Path:
+    """설치된 에이전트 디렉터리를 반환한다."""
+    return ensure_dir(get_data_dir() / "agents")
 
 
 def get_logs_dir() -> Path:

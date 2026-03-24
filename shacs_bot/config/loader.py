@@ -54,6 +54,7 @@ def load_config(config_path: Path | None = None) -> Config:
             data = _migration_config(data)
             config = Config.model_validate(data)
             _apply_env(config)
+            _migrate_workspace_layout(config_file.parent)
             return config
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning("Failed to load config from {}: {}", config_file, e)
@@ -77,6 +78,28 @@ def _migration_config(data):
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
 
     return data
+
+
+def _migrate_workspace_layout(data_dir: Path) -> None:
+    """기존 워크스페이스 레이아웃을 새 구조로 마이그레이션한다. 멱등."""
+    workspace = data_dir / "workspace"
+    if not workspace.exists():
+        return
+
+    moves = [
+        (workspace / "sessions", data_dir / "data" / "sessions"),
+        (workspace / ".clawhub", data_dir / "data" / "clawhub"),
+        (workspace / "cron", data_dir / "data" / "cron"),
+        (data_dir / "cron", data_dir / "data" / "cron"),
+        (data_dir / "usage", data_dir / "data" / "usage"),
+        (data_dir / "sessions", data_dir / "data" / "sessions"),
+    ]
+
+    for src, dst in moves:
+        if src.exists() and not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+            logger.info("마이그레이션: {} → {}", src, dst)
 
 
 def save_config(config: Config, config_path: Path | None = None) -> None:

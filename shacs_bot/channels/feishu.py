@@ -14,7 +14,7 @@ from loguru import logger
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.channels.base import BaseChannel
-from shacs_bot.config.paths import get_media_dir
+from shacs_bot.config.paths import get_media_downloads_dir
 from shacs_bot.config.schema import FeishuConfig
 
 import importlib.util
@@ -772,7 +772,7 @@ class FeishuChannel(BaseChannel):
             (file_path, content_text) - file_path is None if download failed
         """
         loop = asyncio.get_running_loop()
-        media_dir = get_media_dir()
+        media_dir = get_media_downloads_dir("feishu")
 
         data, filename = None, None
 

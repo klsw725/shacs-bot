@@ -13,7 +13,7 @@ from websockets.sync.client import ClientConnection
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.channels.base import BaseChannel
-from shacs_bot.config.paths import get_media_dir
+from shacs_bot.config.paths import get_media_downloads_dir
 from shacs_bot.config.schema import DiscordConfig
 from shacs_bot.utils.helpers import split_message
 
@@ -255,7 +255,7 @@ class DiscordChannel(BaseChannel):
 
         content_parts = [content] if content else []
         media_paths: list[str] = []
-        media_dir = get_media_dir()
+        media_dir = get_media_downloads_dir("discord")
 
         for attachment in payload.get("attachments") or []:
             url = attachment.get("url")
