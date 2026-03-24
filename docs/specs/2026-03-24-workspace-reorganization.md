@@ -77,40 +77,53 @@
 
 ## 설계
 
+### 설계 원칙
+
+**LLM 접근 가능한 데이터는 workspace 하위에 유지한다.**
+
+`workspace/`는 LLM의 세계다. file tool의 기본 cwd이자, `restrict_to_workspace=True`일 때의 경계이며, system prompt가 참조하는 모든 경로의 루트다. LLM이 직접·간접적으로 접근하는 데이터는 여기에 둔다.
+
+시스템만 관리하는 런타임 데이터 (세션, 크론, 사용량 등)는 `data/`로 분리하여 workspace를 깨끗하게 유지한다.
+
+| 분류 | 기준 | 위치 | 예시 |
+|---|---|---|---|
+| **LLM 접근** | system prompt에 노출, file tool로 읽기/쓰기 가능 | `workspace/` | 메모리, 생성 미디어, 스킬, 템플릿, sandbox 출력 |
+| **시스템 전용** | 내부 모듈이 독점 관리, LLM 직접 접근 불필요 | `data/` | 세션, 크론, 사용량, ClaWHub |
+
 ### 새 디렉토리 구조
 
 ```
 ~/.shacs-bot/
 ├── config.json                         # 설정 (변경 없음)
 │
-├── workspace/                          # 에이전트 작업 공간 (write_file 도구의 기본 cwd)
+├── workspace/                          # LLM의 세계 (file tool의 기본 cwd)
 │   ├── SOUL.md                         # 템플릿 (변경 없음)
 │   ├── AGENTS.md
 │   ├── HEARTBEAT.md
 │   ├── TOOLS.md
 │   ├── USER.md
 │   ├── skills/                         # 워크스페이스 스킬 (변경 없음)
-│   └── sandbox/                        # 스킬/에이전트 출력물 (스킬별 하위 폴더)
+│   ├── memory/                         # 장기 메모리 (변경 없음 — LLM 접근)
+│   │   ├── MEMORY.md
+│   │   └── HISTORY.md
+│   ├── media/                          # 에이전트 생성 미디어 (변경 없음 — LLM 접근)
+│   │   └── image_*.png, video_*.mp4
+│   └── sandbox/                        # 스킬/에이전트 출력물 (신규, 스킬별 하위 폴더)
 │       └── youtube/                    # 예: youtube 스킬 출력
 │           └── transcript_*.txt
 │
-├── data/                               # 런타임 데이터 (시스템이 관리)
-│   ├── memory/                         # 장기 메모리
-│   │   ├── MEMORY.md
-│   │   └── HISTORY.md
+├── data/                               # 시스템 전용 런타임 데이터
 │   ├── sessions/                       # 세션 히스토리
 │   │   └── {key}.jsonl
-│   ├── cron/                           # 크론 작업
+│   ├── cron/                           # 크론 작업 (통합)
 │   │   └── jobs.json
 │   ├── usage/                          # 사용량 추적
 │   │   └── {date}.jsonl
 │   └── clawhub/                        # ClaWHub 락
 │       └── lock.json
 │
-├── media/                              # 모든 미디어 (다운로드 + 생성)
-│   ├── downloads/                      # 채널에서 받은 미디어
-│   │   └── {channel}/                  # 채널별 하위 폴더
-│   └── generated/                      # 에이전트가 생성한 미디어
+├── media/                              # 채널 다운로드 미디어 (시스템 관리)
+│   └── {channel}/                      # 채널별 하위 폴더
 │
 ├── agents/                             # 설치된 에이전트 (Agent Store)
 │   ├── registry.json
@@ -126,14 +139,15 @@
 
 | # | 변경 | 이전 | 이후 | 영향 |
 |---|---|---|---|---|
-| 1 | **메모리 분리** | `workspace/memory/` | `data/memory/` | memory.py |
-| 2 | **세션 분리** | `workspace/sessions/` | `data/sessions/` | session/manager.py |
-| 3 | **크론 통합** | `cron/` 또는 `workspace/cron/` | `data/cron/` | commands.py, cron/service.py |
-| 4 | **사용량 이동** | `usage/` | `data/usage/` | paths.py |
-| 5 | **ClaWHub 이동** | `workspace/.clawhub/` | `data/clawhub/` | clawhub 스킬 |
-| 6 | **미디어 통합** | `media/` + `workspace/media/` | `media/downloads/` + `media/generated/` | 채널 어댑터, media.py |
-| 7 | **출력 디렉토리** | workspace 루트에 산재 | `workspace/sandbox/{source}/` | 스킬, 에이전트 도구 |
-| 8 | **workspace 정리** | 템플릿 + 런타임 + 출력 혼재 | 템플릿 + 스킬 정의 + sandbox 출력 | write_file 도구의 기본 cwd 유지 |
+| 1 | **세션 분리** | `workspace/sessions/` | `data/sessions/` | session/manager.py |
+| 2 | **크론 통합** | `cron/` 또는 `workspace/cron/` | `data/cron/` | commands.py, cron/service.py |
+| 3 | **사용량 이동** | `usage/` | `data/usage/` | paths.py |
+| 4 | **ClaWHub 이동** | `workspace/.clawhub/` | `data/clawhub/` | clawhub 스킬 |
+| 5 | **다운로드 미디어 정리** | `media/` (flat) | `media/{channel}/` | 채널 어댑터 |
+| 6 | **출력 디렉토리** | workspace 루트에 산재 | `workspace/sandbox/{source}/` | 스킬, 에이전트 도구 |
+| 7 | **workspace 정리** | 템플릿 + 런타임 + 출력 혼재 | 템플릿 + 메모리 + 미디어 + 스킬 + sandbox | write_file 도구의 기본 cwd 유지 |
+
+> **변경하지 않는 것**: memory (`workspace/memory/`), 생성 미디어 (`workspace/media/`), 템플릿, 스킬. LLM이 접근하는 데이터는 workspace에 그대로 둔다.
 
 ### paths.py 변경
 
@@ -144,14 +158,11 @@ def get_data_dir() -> Path:
     """인스턴스 수준의 런타임 데이터 디렉터리를 반환한다."""
     return ensure_dir(get_config_path().parent)      # ~/.shacs-bot/ (변경 없음)
 
-# --- 신규 ---
+# --- 신규 (시스템 전용 런타임) ---
 
 def get_data_subdir(name: str) -> Path:
-    """data/ 하위 디렉토리를 반환한다."""
+    """data/ 하위 디렉토리를 반환한다. 시스템 전용 런타임 데이터."""
     return ensure_dir(get_data_dir() / "data" / name)
-
-def get_memory_dir() -> Path:
-    return get_data_subdir("memory")
 
 def get_sessions_dir() -> Path:
     return get_data_subdir("sessions")
@@ -165,14 +176,11 @@ def get_usage_dir() -> Path:
 def get_clawhub_dir() -> Path:
     return get_data_subdir("clawhub")
 
-# --- 미디어 ---
+# --- 미디어 (채널 다운로드) ---
 
 def get_media_downloads_dir(channel: str | None = None) -> Path:
-    base = ensure_dir(get_data_dir() / "media" / "downloads")
+    base = ensure_dir(get_data_dir() / "media")
     return ensure_dir(base / channel) if channel else base
-
-def get_media_generated_dir() -> Path:
-    return ensure_dir(get_data_dir() / "media" / "generated")
 
 # --- 샌드박스 (스킬/에이전트 출력) ---
 
@@ -202,6 +210,8 @@ def get_logs_dir() -> Path:
     return ensure_dir(get_data_dir() / "logs")
 ```
 
+> **삭제된 헬퍼**: `get_memory_dir()`, `get_media_generated_dir()` — 불필요. memory와 생성 미디어는 workspace 상대경로로 접근하며, 경로가 변경되지 않는다.
+
 ### 마이그레이션
 
 기존 사용자의 데이터를 새 구조로 자동 이전해야 한다. `loader.py`의 기존 `_migration_config()` 패턴을 따른다.
@@ -217,15 +227,12 @@ def _migrate_workspace_layout(data_dir: Path) -> None:
 
     moves = [
         # (이전 경로, 새 경로)
-        (workspace / "memory",     data_dir / "data" / "memory"),
         (workspace / "sessions",   data_dir / "data" / "sessions"),
         (workspace / ".clawhub",   data_dir / "data" / "clawhub"),
         (workspace / "cron",       data_dir / "data" / "cron"),
         (data_dir / "cron",        data_dir / "data" / "cron"),      # 상위 cron도 통합
         (data_dir / "usage",       data_dir / "data" / "usage"),
         (data_dir / "sessions",    data_dir / "data" / "sessions"),  # 레거시 세션
-        (workspace / "media",      data_dir / "media" / "generated"),
-        (data_dir / "media",       data_dir / "media" / "downloads"),# 기존 media → downloads
     ]
 
     for src, dst in moves:
@@ -237,44 +244,21 @@ def _migrate_workspace_layout(data_dir: Path) -> None:
 
 **호출 시점**: `load_config()` 직후, 앱 시작 시 한 번.
 
-### sync_workspace_template 변경
-
-```python
-# utils/helpers.py — 변경사항
-
-def sync_workspace_template(workspace: Path, data_dir: Path | None = None, silent: bool = False):
-    """번들된 템플릿을 동기화합니다."""
-    tpl = pkg_files("shacs_bot") / "templates"
-
-    # workspace에는 템플릿 .md 파일만
-    for item in tpl.iterdir():
-        if item.name.endswith(".md"):
-            _write(item, workspace / item.name)
-
-    (workspace / "skills").mkdir(exist_ok=True)
-
-    # 메모리는 data/memory/로 분리
-    if data_dir:
-        memory_dir = data_dir / "data" / "memory"
-    else:
-        memory_dir = workspace / "memory"    # 폴백 (하위 호환)
-
-    _write(tpl / "memory" / "MEMORY.md", memory_dir / "MEMORY.md")
-    _write(None, memory_dir / "HISTORY.md")
-```
+> **마이그레이션하지 않는 것**: `workspace/memory/`, `workspace/media/` — 위치가 변경되지 않으므로 마이그레이션 불필요.
 
 ### 모듈별 경로 변경
 
 | 모듈 | 현재 | 변경 |
 |---|---|---|
-| `memory.py:44-47` | `workspace / "memory"` | `get_memory_dir()` |
+| `memory.py:44-47` | `workspace / "memory"` | (변경 없음 — workspace에 유지) |
 | `session/manager.py` | `workspace / "sessions"` | `get_sessions_dir()` |
 | `commands.py:360` | `config.workspace_path / "cron" / "jobs.json"` | `get_cron_dir() / "jobs.json"` |
 | `commands.py:561` | `get_cron_dir() / "jobs.json"` | (변경 없음 — 이미 올바름) |
-| `media.py:57` | `config.save_dir` (기본: `workspace/media`) | `get_media_generated_dir()` |
+| `media.py:57` | `config.save_dir` (기본: `workspace/media`) | (변경 없음 — workspace에 유지) |
 | `channels/*.py` | `get_media_dir(channel)` | `get_media_downloads_dir(channel)` |
 | `usage.py` | `get_usage_dir()` | (내부 구현만 변경) |
-| `context.py` | `workspace / "memory"` 참조 | `get_memory_dir()` |
+| `context.py` | `workspace / "memory"` 참조 | (변경 없음 — workspace에 유지) |
+| `utils/helpers.py` | `sync_workspace_template()` | (변경 없음 — memory는 이미 workspace/memory/) |
 
 ### 스킬 출력 디렉토리 가이드라인
 
@@ -301,13 +285,12 @@ def sync_workspace_template(workspace: Path, data_dir: Path | None = None, silen
 |---|---|---|---|
 | 1 | paths.py 경로 헬퍼 재구성 | `config/paths.py` | 낮음 |
 | 2 | 마이그레이션 로직 작성 | `config/loader.py` | 중간 |
-| 3 | MemoryStore 경로 변경 | `agent/memory.py` | 낮음 |
-| 4 | SessionManager 경로 변경 | `agent/session/manager.py` | 낮음 |
-| 5 | 크론 경로 통합 (gateway 비일관 수정) | `cli/commands.py` | 낮음 |
-| 6 | 미디어 경로 분리 | `agent/tools/media.py`, `channels/*.py` | 중간 |
-| 7 | sync_workspace_template 변경 | `utils/helpers.py` | 낮음 |
-| 8 | ContextBuilder 메모리 경로 변경 | `agent/context.py` | 낮음 |
-| 9 | 시스템 프롬프트에 sandbox 가이드라인 추가 | `templates/TOOLS.md` 또는 `context.py` | 낮음 |
+| 3 | SessionManager 경로 변경 | `agent/session/manager.py` | 낮음 |
+| 4 | 크론 경로 통합 (gateway 비일관 수정) | `cli/commands.py` | 낮음 |
+| 5 | 다운로드 미디어 경로 변경 | `channels/*.py` | 낮음 |
+| 6 | 시스템 프롬프트에 sandbox 가이드라인 추가 | `templates/TOOLS.md` 또는 `context.py` | 낮음 |
+
+> 원본 대비 3단계 축소 — memory, 생성 미디어, context.py, sync_workspace_template은 변경 불필요.
 
 ## 하위 호환성
 
@@ -317,15 +300,19 @@ def sync_workspace_template(workspace: Path, data_dir: Path | None = None, silen
 | 커스텀 workspace 경로 | `workspace` 설정값은 그대로 유지. data/는 항상 `~/.shacs-bot/data/` 고정 |
 | write_file 도구 | workspace가 여전히 기본 cwd. 기존 동작 변경 없음 |
 | 기존 스킬 | 파일 경로를 하드코딩한 스킬은 동작 유지 (마이그레이션이 처리) |
+| 메모리/생성 미디어 | 경로 변경 없음. 마이그레이션 불필요, 기존 코드 완전 호환 |
 
 ## 비변경 사항
 
 다음은 이 스펙 범위에서 **의도적으로 변경하지 않는** 항목이다:
 
 - `config.json` 위치 (`~/.shacs-bot/config.json`)
+- `workspace/memory/` 위치 (LLM 접근 — workspace에 유지)
+- `workspace/media/` 위치 (LLM 접근 — workspace에 유지)
 - `auth/` 위치
 - `bridge/` 위치
 - `logs/` 위치
 - `history/` 위치
 - `write_file` / `edit_file` 도구의 workspace 기반 경로 해석 로직
+- `sync_workspace_template()` 로직
 - 스킬 SKILL.md 포맷
