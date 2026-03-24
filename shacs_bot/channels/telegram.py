@@ -13,7 +13,7 @@ from telegram.request import HTTPXRequest
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.channels.base import BaseChannel
-from shacs_bot.config.paths import get_media_dir
+from shacs_bot.config.paths import get_media_downloads_dir
 from shacs_bot.config.schema import TelegramConfig
 from shacs_bot.utils.helpers import split_message
 
@@ -384,7 +384,7 @@ class TelegramChannel(BaseChannel):
                 ext = self._get_extension(media_type, getattr(media_file, "mime_type", None))
 
                 # Save to workspace/media/
-                media_dir = get_media_dir()
+                media_dir = get_media_downloads_dir("telegram")
 
                 file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
                 await file.download_to_drive(str(file_path))

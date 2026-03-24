@@ -34,36 +34,36 @@ LLM 접근 가능한 데이터는 workspace 하위에 유지한다. `restrict_to
 ## 마일스톤
 
 ### M1: 경로 인프라 구축
-- [ ] `config/paths.py`에 신규 경로 헬퍼 추가 (`get_data_subdir`, `get_sessions_dir`, `get_cron_dir`, `get_usage_dir`, `get_clawhub_dir`, `get_media_downloads_dir`, `get_sandbox_dir`, `get_agents_dir`)
-- [ ] 기존 `get_runtime_subdir("cron")`, `get_runtime_subdir("usage")` 등의 내부 구현이 `data/` 하위를 가리키도록 변경
+- [x] `config/paths.py`에 신규 경로 헬퍼 추가 (`get_data_subdir`, `get_sessions_dir`, `get_cron_dir`, `get_usage_dir`, `get_clawhub_dir`, `get_media_downloads_dir`, `get_sandbox_dir`, `get_agents_dir`)
+- [x] 기존 `get_runtime_subdir("cron")`, `get_runtime_subdir("usage")` 등의 내부 구현이 `data/` 하위를 가리키도록 변경
 
 **검증**: `get_sessions_dir()` 호출 시 `~/.shacs-bot/data/sessions/` 반환 확인
 
 ### M2: 마이그레이션 로직 및 모듈 경로 업데이트
-- [ ] `config/loader.py`에 `_migrate_workspace_layout()` 추가 — sessions, clawhub, cron 통합, usage, 레거시 sessions 이전
-- [ ] `session/manager.py`가 `get_sessions_dir()` 사용하도록 변경
-- [ ] `cli/commands.py` 크론 경로를 `get_cron_dir()` 통합
-- [ ] `channels/*.py` 다운로드 미디어 경로를 `get_media_downloads_dir(channel)` 사용하도록 변경
-- [ ] `load_config()` 직후 마이그레이션 함수 호출
+- [x] `config/loader.py`에 `_migrate_workspace_layout()` 추가 — sessions, clawhub, cron 통합, usage, 레거시 sessions 이전
+- [x] `session/manager.py`가 `get_sessions_dir()` 사용하도록 변경
+- [x] `cli/commands.py` 크론 경로를 `get_cron_dir()` 통합
+- [x] `channels/*.py` 다운로드 미디어 경로를 `get_media_downloads_dir(channel)` 사용하도록 변경
+- [x] `load_config()` 직후 마이그레이션 함수 호출
 
 **검증**: 기존 레이아웃 → 새 레이아웃 마이그레이션 후 세션 조회, 크론 실행, 사용량 조회 정상 동작
 
 ### M3: Sandbox 도입 및 시스템 프롬프트 가이드라인
-- [ ] `templates/TOOLS.md` 또는 `context.py`에 sandbox 출력 가이드라인 추가
-- [ ] 기존 스킬 SKILL.md에 `sandbox/{스킬이름}/` 파일 출력 규칙 안내
+- [x] `templates/TOOLS.md` 또는 `context.py`에 sandbox 출력 가이드라인 추가
+- [x] 기존 스킬 SKILL.md에 `sandbox/{스킬이름}/` 파일 출력 규칙 안내
 
 **검증**: LLM이 스킬 실행 시 `workspace/sandbox/{source}/` 하위에 파일 생성
 
 ### M4: 통합 검증 및 엣지 케이스
-- [ ] 신규 설치 (빈 상태에서 시작) 정상 동작
-- [ ] 기존 설치 마이그레이션 정상 동작 (멱등성 — 두 번 실행해도 안전)
-- [ ] 커스텀 workspace 경로 사용 시 정상 동작
-- [ ] CLI 모드 + Gateway 모드 모두 정상 동작
+- [x] 신규 설치 (빈 상태에서 시작) 정상 동작
+- [x] 기존 설치 마이그레이션 정상 동작 (멱등성 — 두 번 실행해도 안전)
+- [x] 커스텀 workspace 경로 사용 시 정상 동작
+- [x] CLI 모드 + Gateway 모드 모두 정상 동작
 
 **검증**: 위 4개 시나리오 모두 에러 없이 완료
 
 ### M5: 문서 업데이트
-- [ ] 작업 기록 문서 작성 (`docs/` 하위)
+- [x] 작업 기록 문서 작성 (`docs/` 하위)
 - [ ] 변경 사항 커밋
 
 **검증**: 문서에 변경 내역, 마이그레이션 동작, 새 디렉토리 구조 설명 포함
@@ -101,3 +101,4 @@ LLM 접근 가능한 데이터는 workspace 하위에 유지한다. `restrict_to
 |---|---|---|
 | 2026-03-24 | 스펙 작성 완료 | 초기 스펙 → LLM 접근 원칙 반영하여 수정 |
 | 2026-03-24 | PRD 생성 | 구현 준비 완료 |
+| 2026-03-24 | M1~M5 구현 완료 | 경로 인프라, 마이그레이션, 모듈 업데이트, sandbox 가이드라인, 통합 검증 |

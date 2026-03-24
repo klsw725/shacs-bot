@@ -45,6 +45,11 @@ Set the API key for your chosen provider:
 
 Default model is `google/gemini-3-flash-preview` if none is set.
 
+## File output
+
+When saving transcripts or summaries to disk, use `sandbox/summarize/` directory.
+Example: `sandbox/summarize/transcript_abc.txt`
+
 ## Useful flags
 
 - `--length short|medium|long|xl|xxl|<chars>`
