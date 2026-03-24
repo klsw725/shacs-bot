@@ -19,7 +19,7 @@ class ExecTool(Tool):
         "type": "object",
         "properties": {
             "command": {"type": "string", "description": "실행할 쉘 명령어"},
-            "_working_dir": {
+            "working_dir": {
                 "type": "string",
                 "description": "명령어 실행을 위한 선택적 작업 디렉토리",
             },
@@ -135,7 +135,7 @@ class ExecTool(Tool):
                 except Exception:
                     continue
 
-                if p.is_absolute() and (cwd_path not in p.parent) and (p != cwd_path):
+                if p.is_absolute() and (cwd_path not in p.parents) and (p != cwd_path):
                     return "에러: 명령어가 safety guard에 의해 차단되었습니다 (작업 디렉토리 외부 경로 감지됨)"
 
         return None
