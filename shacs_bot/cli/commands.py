@@ -214,14 +214,24 @@ def main(
 
 
 @app.command()
-def onboard():
+def onboard(
+    wizard: bool = typer.Option(False, "--wizard", "-w", help="대화형 설정 마법사"),
+):
     """shacs-bot 워크스페이스와 설정 초기화"""
     from shacs_bot.config.loader import get_config_path, load_config, save_config
     from shacs_bot.config.paths import get_workspace_path
     from shacs_bot.utils.helpers import sync_workspace_template
 
     config_path: Path = get_config_path()
-    if config_path.exists():
+
+    if wizard:
+        from shacs_bot.cli.onboard import run_onboard
+
+        existing = load_config(config_path) if config_path.exists() else None
+        result = run_onboard(initial_config=existing)
+        save_config(result, config_path)
+        console.print(f"[green]✓[/green] {config_path}에 설정을 저장했습니다.")
+    elif config_path.exists():
         console.print(f"[yellow]{config_path} 위치에 이미 설정 파일이 존재합니다.[/yellow]")
         console.print("  [bold]y[/bold] = 기본값으로 덮어쓰기 (기존 값은 모두 삭제됩니다)")
         console.print("  [bold]N[/bold] = 기존 값을 유지하면서 새 필드만 추가하여 설정을 갱신")
@@ -251,14 +261,15 @@ def onboard():
 
     sync_workspace_template(workspace)
 
-    console.print(f"\n{__logo__} shacs-bot이 준비되었습니다!")
-    console.print("\n다음 단계:")
-    console.print("  1. [cyan]~/.shacs-bot/config.json[/cyan] 파일에 API 키를 추가하세요")
-    console.print("     발급: https://openrouter.ai/keys")
-    console.print('  2. 채팅 시작: [cyan]shacs-bot agent -m "Hello!"[/cyan]')
-    console.print(
-        "\n[dim]Telegram / WhatsApp 연동이 필요하신가요? https://github.com/klsw725/shacs-bot?tab=readme-ov-file#%EC%B1%84%EB%84%90 참고[/dim]"
-    )
+    if not wizard:
+        console.print(f"\n{__logo__} shacs-bot이 준비되었습니다!")
+        console.print("\n다음 단계:")
+        console.print("  1. [cyan]~/.shacs-bot/config.json[/cyan] 파일에 API 키를 추가하세요")
+        console.print("     발급: https://openrouter.ai/keys")
+        console.print('  2. 채팅 시작: [cyan]shacs-bot agent -m "Hello!"[/cyan]')
+        console.print(
+            "\n[dim]Telegram / WhatsApp 연동이 필요하신가요? https://github.com/klsw725/shacs-bot?tab=readme-ov-file#%EC%B1%84%EB%84%90 참고[/dim]"
+        )
 
 
 def _make_provider(config: Config) -> LLMProvider:
