@@ -229,6 +229,10 @@ def onboard(
 
         existing = load_config(config_path) if config_path.exists() else None
         result = run_onboard(initial_config=existing)
+        if result is None:
+            console.print("[yellow]설정 변경을 저장하지 않았습니다.[/yellow]")
+            return
+
         save_config(result, config_path)
         console.print(f"[green]✓[/green] {config_path}에 설정을 저장했습니다.")
     elif config_path.exists():

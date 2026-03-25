@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from typing import Any
 
 from rich.console import Console
@@ -10,11 +11,10 @@ from shacs_bot.config.schema import (
     Config,
     ProviderConfig,
     AgentDefaults,
-    ChannelsConfig,
     GatewayConfig,
     ToolsConfig,
 )
-from shacs_bot.providers.registry import PROVIDERS, ProviderSpec
+from shacs_bot.providers.registry import PROVIDERS
 
 console = Console()
 
@@ -40,16 +40,14 @@ def _mask_value(value: str, visible: int = 4) -> str:
 
 def _questionary():
     try:
-        import questionary
-
-        return questionary
+        return importlib.import_module("questionary")
     except ImportError:
         console.print("[red]questionary 패키지가 필요합니다.[/red]")
         console.print("  [cyan]uv sync --extra wizard[/cyan] 로 설치하세요.")
         raise SystemExit(1)
 
 
-def run_onboard(initial_config: Config | None = None) -> Config:
+def run_onboard(initial_config: Config | None = None) -> Config | None:
     q = _questionary()
     config = initial_config or Config()
 
@@ -61,6 +59,7 @@ def run_onboard(initial_config: Config | None = None) -> Config:
                 q.Choice("[C] Chat Channel", value="channel"),
                 q.Choice("[A] Agent Settings", value="agent"),
                 q.Choice("[G] Gateway", value="gateway"),
+                q.Choice("[T] Tools", value="tools"),
                 q.Choice("[V] View Summary", value="summary"),
                 q.Choice("[S] Save and Exit", value="save"),
                 q.Choice("[X] Exit Without Saving", value="exit"),
@@ -68,7 +67,7 @@ def run_onboard(initial_config: Config | None = None) -> Config:
         ).ask()
 
         if action is None or action == "exit":
-            return config
+            return None
         if action == "save":
             return config
         if action == "provider":
@@ -79,13 +78,14 @@ def run_onboard(initial_config: Config | None = None) -> Config:
             config = _configure_agent(q, config)
         elif action == "gateway":
             config = _configure_gateway(q, config)
+        elif action == "tools":
+            config = _configure_tools(q, config)
         elif action == "summary":
             _show_summary(config)
 
 
 def _configure_provider(q: Any, config: Config) -> Config:
     configurable = [s for s in PROVIDERS if not s.is_direct and s.env_key]
-    names = [s.name for s in configurable]
     display = [f"{s.label} ({s.name})" for s in configurable]
     display.append("← Back")
 
@@ -145,7 +145,7 @@ def _configure_channel(q: Any, config: Config) -> Config:
     fields = ch_config.model_fields
     skip_fields = {"enabled", "model_config"}
 
-    for field_name, field_info in fields.items():
+    for field_name in fields:
         if field_name in skip_fields:
             continue
         current = getattr(ch_config, field_name)
@@ -202,6 +202,7 @@ def _configure_agent(q: Any, config: Config) -> Config:
     if provider:
         defaults.provider = provider
 
+    recommended_max = defaults.max_tokens
     ctx_limit = get_model_context_limit(defaults.model)
     if ctx_limit:
         recommended_max = min(ctx_limit // 4, 16384)
@@ -211,7 +212,7 @@ def _configure_agent(q: Any, config: Config) -> Config:
 
     max_tokens = q.text(
         f"max_tokens (현재: {defaults.max_tokens}):",
-        default=str(defaults.max_tokens),
+        default=str(recommended_max if ctx_limit else defaults.max_tokens),
     ).ask()
     if max_tokens and max_tokens.isdigit():
         defaults.max_tokens = int(max_tokens)
@@ -254,6 +255,90 @@ def _configure_gateway(q: Any, config: Config) -> Config:
     return config
 
 
+def _configure_tools(q: Any, config: Config) -> Config:
+    tools: ToolsConfig = config.tools
+
+    tools.restrict_to_workspace = q.confirm(
+        "workspace 밖 경로 접근 차단?",
+        default=tools.restrict_to_workspace,
+    ).ask()
+
+    current_proxy = tools.web.proxy or ""
+    proxy = q.text(
+        "Web proxy (비워두면 사용 안 함):",
+        default=current_proxy,
+    ).ask()
+    tools.web.proxy = proxy or None
+
+    current_search_key = tools.web.search.api_key
+    prompt_text = "Web search API key"
+    if current_search_key:
+        prompt_text += f" (현재: {_mask_value(current_search_key)})"
+    search_api_key = q.password(prompt_text + ":").ask()
+    if search_api_key:
+        tools.web.search.api_key = search_api_key
+
+    max_results = q.text(
+        f"Web search max_results (현재: {tools.web.search.max_results}):",
+        default=str(tools.web.search.max_results),
+    ).ask()
+    if max_results and max_results.isdigit():
+        tools.web.search.max_results = int(max_results)
+
+    timeout = q.text(
+        f"Exec timeout 초 (현재: {tools.exec.timeout}):",
+        default=str(tools.exec.timeout),
+    ).ask()
+    if timeout and timeout.isdigit():
+        tools.exec.timeout = int(timeout)
+
+    path_append = q.text(
+        "Exec PATH 추가값 (비워두면 유지):",
+        default=tools.exec.path_append,
+    ).ask()
+    if path_append is not None:
+        tools.exec.path_append = path_append
+
+    tools.media.enabled = q.confirm(
+        "미디어 생성 도구 활성화?",
+        default=tools.media.enabled,
+    ).ask()
+
+    if tools.media.enabled:
+        backend = q.select(
+            "Media backend:",
+            choices=["openai-compatible", "gemini"],
+            default=tools.media.backend,
+        ).ask()
+        if backend:
+            tools.media.backend = backend
+
+        media_model = q.text(
+            "Media model (비워두면 provider 기본값):",
+            default=tools.media.model,
+        ).ask()
+        if media_model is not None:
+            tools.media.model = media_model
+
+        save_dir = q.text(
+            "Media save_dir:",
+            default=tools.media.save_dir,
+        ).ask()
+        if save_dir:
+            tools.media.save_dir = save_dir
+
+        duration = q.text(
+            f"Video duration 초 (현재: {tools.media.video_duration_seconds}):",
+            default=str(tools.media.video_duration_seconds),
+        ).ask()
+        if duration and duration.isdigit():
+            tools.media.video_duration_seconds = int(duration)
+
+    config.tools = tools
+    console.print("[green]✓[/green] Tools 설정 완료")
+    return config
+
+
 def _show_summary(config: Config) -> None:
     table = Table(title="설정 요약", show_header=True, header_style="bold cyan")
     table.add_column("항목", style="bold")
@@ -280,6 +365,9 @@ def _show_summary(config: Config) -> None:
         if ch and getattr(ch, "enabled", False):
             enabled_channels.append(ch_name)
     table.add_row("Channels", ", ".join(enabled_channels) if enabled_channels else "(없음)")
+    table.add_row("Restrict Workspace", "on" if config.tools.restrict_to_workspace else "off")
+    table.add_row("Web Search", "configured" if config.tools.web.search.api_key else "(없음)")
+    table.add_row("Media", "enabled" if config.tools.media.enabled else "off")
 
     console.print()
     console.print(Panel(table))
