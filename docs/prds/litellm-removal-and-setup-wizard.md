@@ -31,7 +31,7 @@ nanobot upstream이 2026-03-24에 litellm을 **완전 제거**했다 (`3dfdab70`
 사용자가 JSON 구조와 키 이름을 알아야 하며, 오타 하나로 전체 설정이 깨질 수 있다.
 
 nanobot은 2026-03-17에 `questionary` 기반 interactive wizard를 도입하여:
-- Provider 선택 → API 키 입력 → 모델 autocomplete → context window 자동 추천
+- Provider 선택 → API 키 입력 → 모델 autocomplete → 모델 context 기반 `max_tokens` 추천
 - Channel 선택 → 토큰/설정 입력
 - 변경 사항 Summary → Save/Discard 선택
 
@@ -250,9 +250,9 @@ nanobot `cli/onboard.py`를 기반으로 포팅하되 다음을 조정한다:
 ```
 [P] LLM Provider     — provider 선택 → API 키 → 모델 → endpoint
 [C] Chat Channel     — 채널 선택 → 토큰/설정
-[A] Agent Settings   — model, temperature, context_window 등
+[A] Agent Settings   — model, temperature, max_tokens 등
 [G] Gateway          — port, heartbeat 등
-[T] Tools            — web search, exec, MCP 등
+[T] Tools            — web search, exec, media 등
 [V] View Summary     — 전체 설정 요약
 [S] Save and Exit
 [X] Exit Without Saving
@@ -262,7 +262,7 @@ nanobot `cli/onboard.py`를 기반으로 포팅하되 다음을 조정한다:
 - `_configure_pydantic_model()`: Pydantic 모델 필드를 자동으로 입력 폼으로 변환
 - `_select_with_back()`: Escape/← 키로 뒤로 가기
 - `_input_model_with_autocomplete()`: 모델명 자동완성
-- `_input_context_window_with_recommendation()`: context window 추천
+- `_input_max_tokens_with_recommendation()`: 모델 context 기반 `max_tokens` 추천
 - `_show_summary()`: Rich 기반 설정 요약 패널
 - `_mask_value()`: API 키 마스킹 (마지막 4자만 표시)
 
@@ -301,10 +301,10 @@ wizard = [
 
 ### Track A: LiteLLM 제거
 
-- [ ] **A-M1: Registry 스키마 전환**
+- [x] **A-M1: Registry 스키마 전환**
   `ProviderSpec`에 `backend` 필드 도입, `litellm_prefix`/`skip_prefixes` 제거, provider별 `default_base_url` 매핑.
 
-- [ ] **A-M2: AnthropicProvider 구현**
+- [x] **A-M2: AnthropicProvider 구현**
   네이티브 Anthropic SDK 기반 provider. chat, streaming, tool call, prompt caching, extended thinking 지원.
 
 - [x] **A-M3: OpenAICompatProvider 구현**
@@ -315,10 +315,10 @@ wizard = [
 
 ### Track B: Interactive Setup Wizard
 
-- [ ] **B-M1: Wizard 모듈 포팅**
+- [x] **B-M1: Wizard 모듈 포팅**
   nanobot onboard.py 기반으로 `shacs_bot/cli/onboard.py` 구현. Provider/Channel/Settings 메뉴.
 
-- [ ] **B-M2: CLI 통합**
+- [x] **B-M2: CLI 통합**
   `--wizard` 플래그, loader crash fix, questionary optional dependency 추가.
 
 ## 우선순위
@@ -375,3 +375,4 @@ Track A 내부는 순차 의존성이 있다 (Phase 1 → 2 → 3).
 |---|---|
 | 2026-03-25 | nanobot 최신 커밋 조사. `3dfdab70` (litellm 제거, 18파일 변경, -1034줄), `b2a55017` (interactive onboard wizard) 확인. shacs-bot 코드베이스 대비 영향도 분석 완료. PRD 초안 작성. |
 | 2026-03-25 | Track A 완료. registry.py backend 필드 도입(23 providers), anthropic_provider.py/openai_compat_provider.py 신규 생성, litellm.py/custom.py 삭제, commands.py/failover.py/usage.py/schema.py 수정, pyproject.toml litellm→anthropic 교체. `uv sync` 후 litellm 완전 제거 확인. Track B 미착수. |
+| 2026-03-25 | Track B 완료. `onboard --wizard`에 Tools 메뉴(web/exec/media), 실제 discard 동작, summary 표시를 추가. Agent Settings 설명을 shipped behavior에 맞춰 `context_window` 대신 모델 context 기반 `max_tokens` 추천으로 정리. |
