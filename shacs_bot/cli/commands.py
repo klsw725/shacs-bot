@@ -243,7 +243,6 @@ def onboard():
 
         console.print(f"[green]✓[/green] {config_path}에 설정 파일을 생성했습니다.")
 
-    # 워크스페이스 생성
     workspace: Path = get_workspace_path()
     if not workspace.exists():
         workspace.mkdir(parents=True, exist_ok=True)
@@ -263,34 +262,18 @@ def onboard():
 
 
 def _make_provider(config: Config) -> LLMProvider:
-    """config 설정을 기반으로 적절한 LLM 제공자를 생성합니다.."""
-    from shacs_bot.providers.custom import CustomProvider
-    from shacs_bot.providers.litellm import LiteLLMProvider
-    from shacs_bot.providers.openai_codex import OpenAICodexProvider
+    from shacs_bot.providers.registry import find_by_name
 
     model: str = config.agents.defaults.model
     provider_name: str = config.get_provider_name(model)
     provider: ProviderConfig = config.get_provider(model)
-
-    # OpenAI Codex (OAuth)
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        return OpenAICodexProvider(default_model=model)
-
-    # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
-    if provider_name == "custom":
-        return CustomProvider(
-            api_key=provider.api_key if provider else "no-key",
-            base_url=config.get_base_url(model) or "http://localhost:8000/v1",
-            default_model=model,
-        )
-
-    from shacs_bot.providers.registry import find_by_name
-
     spec: ProviderSpec = find_by_name(provider_name)
+
     if (
         not model.startswith("bedrock/")
         and not (provider and provider.api_key)
         and not (spec and spec.is_oauth)
+        and not (spec and spec.is_local)
     ):
         if provider_name and spec:
             env_hint: str = f" 또는 환경변수 {spec.env_key}" if spec.env_key else ""
@@ -303,12 +286,34 @@ def _make_provider(config: Config) -> LLMProvider:
             console.print("  ~/.shacs-bot/config.json의 providers 섹션에 API 키를 설정하세요.")
         raise typer.Exit(1)
 
-    return LiteLLMProvider(
-        api_key=provider.api_key if provider else None,
-        base_url=config.get_base_url(model),
+    backend = spec.backend if spec else "openai_compat"
+    api_key = provider.api_key if provider else None
+    base_url = config.get_base_url(model)
+    extra_headers = provider.extra_headers if provider else None
+
+    if backend == "openai_codex" or model.startswith("openai-codex/"):
+        from shacs_bot.providers.openai_codex import OpenAICodexProvider
+
+        return OpenAICodexProvider(default_model=model)
+
+    if backend == "anthropic":
+        from shacs_bot.providers.anthropic_provider import AnthropicProvider
+
+        return AnthropicProvider(
+            api_key=api_key,
+            base_url=base_url,
+            default_model=model,
+            extra_headers=extra_headers,
+        )
+
+    from shacs_bot.providers.openai_compat_provider import OpenAICompatProvider
+
+    return OpenAICompatProvider(
+        api_key=api_key,
+        base_url=base_url,
         default_model=model,
-        extra_headers=provider.extra_headers if provider else None,
-        provider_name=provider_name,
+        extra_headers=extra_headers,
+        spec=spec,
     )
 
 
@@ -1037,10 +1042,14 @@ def _login_github_copilot() -> None:
     console.print("[cyan]Starting GitHub Copilot device flow...[/cyan]\n")
 
     async def _trigger():
-        from litellm import acompletion
+        from openai import AsyncOpenAI
 
-        await acompletion(
-            model="github_copilot/gpt-4o",
+        client = AsyncOpenAI(
+            api_key="copilot-token",
+            base_url="https://api.githubcopilot.com",
+        )
+        await client.chat.completions.create(
+            model="gpt-4o",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=1,
         )

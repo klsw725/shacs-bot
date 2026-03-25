@@ -60,17 +60,30 @@ class FailoverManager:
         return chain
 
     def _create_provider(self, provider_name: str) -> LLMProvider:
-        from shacs_bot.providers.litellm import LiteLLMProvider
+        from shacs_bot.providers.registry import find_by_name
 
         pc: ProviderConfig | None = getattr(self._config.providers, provider_name, None)
         if not pc or not pc.api_key:
             raise ValueError(f"Failover: {provider_name}에 API 키가 설정되지 않음")
 
-        return LiteLLMProvider(
+        spec = find_by_name(provider_name)
+
+        if spec and spec.backend == "anthropic":
+            from shacs_bot.providers.anthropic_provider import AnthropicProvider
+
+            return AnthropicProvider(
+                api_key=pc.api_key,
+                base_url=pc.base_url,
+                extra_headers=pc.extra_headers,
+            )
+
+        from shacs_bot.providers.openai_compat_provider import OpenAICompatProvider
+
+        return OpenAICompatProvider(
             api_key=pc.api_key,
             base_url=pc.base_url,
             extra_headers=pc.extra_headers,
-            provider_name=provider_name,
+            spec=spec,
         )
 
     async def try_failover(

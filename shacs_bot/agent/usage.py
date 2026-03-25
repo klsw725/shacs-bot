@@ -146,22 +146,36 @@ class UsageTracker:
         return result
 
 
+_PRICE_PER_MILLION: dict[str, tuple[float, float]] = {
+    "claude-sonnet-4-20250514": (3.0, 15.0),
+    "claude-opus-4-20250514": (15.0, 75.0),
+    "claude-3-5-haiku-20241022": (0.8, 4.0),
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4.1": (2.0, 8.0),
+    "gpt-4.1-mini": (0.4, 1.6),
+    "gpt-4.1-nano": (0.1, 0.4),
+    "o3": (2.0, 8.0),
+    "o3-mini": (1.1, 4.4),
+    "o4-mini": (1.1, 4.4),
+    "deepseek-chat": (0.27, 1.10),
+    "deepseek-reasoner": (0.55, 2.19),
+    "gemini-2.5-flash": (0.15, 0.60),
+    "gemini-2.5-pro": (1.25, 10.0),
+}
+
+
 def _compute_cost(
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
     cache_read_tokens: int = 0,
 ) -> float:
-    try:
-        from litellm import completion_cost
-
-        return completion_cost(
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
-    except Exception:
-        return 0.0
+    model_key = model.split("/")[-1].lower()
+    for key, (input_price, output_price) in _PRICE_PER_MILLION.items():
+        if key in model_key or model_key in key:
+            return (prompt_tokens * input_price + completion_tokens * output_price) / 1_000_000
+    return 0.0
 
 
 def _format_tokens(count: int) -> str:

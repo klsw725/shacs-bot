@@ -481,16 +481,12 @@ class Config(BaseSettings):
         if provider and provider.base_url:
             return provider.base_url
 
-        # 여기서는 게이트웨이(provider)만 기본 URL을 가집니다.
-        # 일반 provider(예: Moonshot)는 base URL을 api_base로 처리하지 않고,
-        # _setup_env에서 환경 변수로 처리합니다.
-        # 그렇지 않으면 find_gateway()가 이를 local/vLLM으로 잘못 감지할 수 있습니다.
         if name:
             from shacs_bot.providers.registry import ProviderSpec
             from shacs_bot.providers.registry import find_by_name
 
             spec: ProviderSpec = find_by_name(name)
-            if spec and spec.is_gateway and spec.default_base_url:
+            if spec and spec.default_base_url:
                 return spec.default_base_url
 
         return None
