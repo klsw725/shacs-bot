@@ -123,7 +123,7 @@ npm audit fix
 ```
 
 **중요 참고사항:**
-- 보안 수정을 위해 `litellm`을 최신 버전으로 유지하세요
+- 보안 수정을 위해 `anthropic`, `openai` SDK를 최신 버전으로 유지하세요
 - `pip-audit` 또는 `npm audit`를 정기적으로 실행하세요
 
 ### 7. 프로덕션 배포

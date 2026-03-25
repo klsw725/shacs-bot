@@ -17,7 +17,7 @@
 ## 프로바이더 지뢰
 
 - **OAuth 프로바이더(openai_codex, github_copilot)는 자동 매칭 안 됨**. 모델명에 명시적 prefix가 있거나 provider를 강제 지정해야만 매칭됨. keyword 기반 자동 라우팅에 의존하지 말 것.
-- **LiteLLM 프로바이더가 런타임에 `os.environ`으로 API 키를 주입함**. `providers/litellm.py`의 사이드이펙트. 테스트 시 환경변수 오염 주의.
+- **OpenAICompatProvider가 `_setup_env()`에서 `os.environ`으로 API 키를 주입함**. `providers/openai_compat_provider.py`의 사이드이펙트. 테스트 시 환경변수 오염 주의.
 - **레지스트리 순서 = 매칭 우선순위**. `providers/registry.py`의 `PROVIDERS` 튜플 순서가 폴백 동작을 결정함.
 
 ## 도구 등록 지뢰
