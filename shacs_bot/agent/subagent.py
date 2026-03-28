@@ -283,9 +283,16 @@ class SubagentManager:
             # 1. 스킬 내용 로드
             skill_content: str = Path(skill_path).expanduser().read_text(encoding="utf-8")
 
-            # 2. 출처 확인 → 승인 게이트 필요 여부
+            # 2. 출처 확인 → 승인 모드 결정
             source: str | None = SkillsLoader(self._workspace).get_skill_source(skill_name)
-            needs_approval: bool = (source != "builtin") and (self._skill_approval != "off")
+            effective_mode: str = self._skill_approval
+
+            # 비대화형 채널(cron, system)에서 manual → auto 폴백
+            if effective_mode == "manual" and origin.get("channel") in ("cron", "system"):
+                effective_mode = "auto"
+                logger.info("비대화형 채널에서 manual → auto 폴백 (스킬: {})", skill_name)
+
+            needs_approval: bool = (source != "builtin") and (effective_mode != "off")
 
             # 3. 도구 생성 — spawn 도구 제외 (재귀 방지)
             all_tools = create_default_tools(
@@ -312,7 +319,7 @@ class SubagentManager:
                     session_history = session.get_history(max_messages=20)
 
                 approval_gate = ApprovalGate(
-                    mode=self._skill_approval,
+                    mode=effective_mode,
                     provider=self._provider,
                     model=self._model,
                     session_history=session_history,
