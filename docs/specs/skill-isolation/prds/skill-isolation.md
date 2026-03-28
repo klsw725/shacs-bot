@@ -430,9 +430,8 @@ class ApprovalGate:
 - [x] **M2: 스킬 서브에이전트 실행**
   SpawnTool `skill_path`. `spawn_skill()` + `_run_skill()`. builtin 무승인, workspace 모드 분기. 재귀 방지. **검증**: builtin 실행, workspace + off 실행.
 
-- [~] **M3: ApprovalGate (auto 3단계 + manual)**
+- [x] **M3: ApprovalGate (auto 3단계 + manual)**
   `approval.py`. Tier 1 규칙 (ALWAYS_ALLOW + ALWAYS_DENY). Tier 2 workspace 쓰기. Tier 3 reasoning-blind LLM. manual 사용자 승인. fail-closed. **검증**: 전체 승인 흐름 동작.
-  **부분 완료**: auto 모드 3단계 분류기 완전 구현. manual 모드는 알림만 전송 (사용자 응답 대기는 MessageBus 인프라 필요 — 별도 이슈).
 
 ---
 
@@ -480,4 +479,4 @@ class ApprovalGate:
 | 2026-03-26 | PRD v1 초안 |
 | 2026-03-27 | PRD v2: 코드베이스 반영, 파서 교체, MCP |
 | 2026-03-28 | PRD v3: 전체 스킬 서브에이전트. 3단계 분류기 (Claude Code auto mode 참고). auto(규칙→workspace 쓰기→reasoning-blind LLM) + manual(사용자) + off. `/skill trust`. |
-| 2026-03-28 | M1~M3 구현 완료. manual 모드 사용자 응답 대기는 별도 이슈로 분리. |
+| 2026-03-28 | M1~M3 구현 완료. manual 모드 사용자 응답 대기 포함. |
