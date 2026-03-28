@@ -379,6 +379,7 @@ class ToolsConfig(Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
     restrict_to_workspace: bool = False  # If true, block commands accessing path outside workspace
+    skill_approval: Literal["auto", "manual", "off"] = "auto"  # 스킬 도구 호출 승인 모드
     mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict
     )  # MCP 서버별 설정 (키는 서버 식별자)

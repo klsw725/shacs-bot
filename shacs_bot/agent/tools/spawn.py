@@ -1,5 +1,6 @@
 """백그라운드 서브에이전트를 생성하기 위한 Spawn 도구."""
 
+from pathlib import Path
 from typing import Any
 
 from shacs_bot.agent.subagent import SubagentManager
@@ -24,6 +25,10 @@ class SpawnTool(Tool):
                 "type": "string",
                 "description": "작업 목적에 맞는 역할을 반드시 지정하세요. analyst: 파일/데이터를 분석하거나 요약할 때 (읽기 전용). researcher: 웹에서 정보를 찾거나 조사할 때 (읽기 전용). executor: 파일을 생성/수정하거나 명령을 실행할 때.",
                 "enum": ["researcher", "analyst", "executor"],
+            },
+            "skill_path": {
+                "type": "string",
+                "description": "실행할 스킬의 SKILL.md 경로. 스킬 사용 시 반드시 지정.",
             },
         },
         "required": ["task"],
@@ -50,8 +55,25 @@ class SpawnTool(Tool):
         self._original_metadata = metadata or {}
 
     async def execute(
-        self, task: str, label: str | None = None, role: str = "executor", **kwargs: Any
+        self,
+        task: str,
+        label: str | None = None,
+        role: str = "executor",
+        skill_path: str | None = None,
+        **kwargs: Any,
     ) -> str:
+        if skill_path:
+            skill_name: str = Path(skill_path).parent.name
+            return await self._manager.spawn_skill(
+                task=task,
+                label=label or skill_name,
+                skill_name=skill_name,
+                skill_path=skill_path,
+                origin_channel=self._original_channel,
+                origin_chat_id=self._original_chat_id,
+                session_key=self._session_key,
+                origin_metadata=self._original_metadata,
+            )
         return await self._manager.spawn(
             task=task,
             label=label,

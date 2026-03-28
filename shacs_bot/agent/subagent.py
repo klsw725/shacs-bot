@@ -10,6 +10,7 @@ from typing import Any
 
 from loguru import logger
 
+from shacs_bot.agent.approval import ALWAYS_ALLOW, ApprovalGate
 from shacs_bot.agent.context import ContextBuilder
 from shacs_bot.agent.skills import SkillsLoader
 from shacs_bot.agent.tools.registry import ToolRegistry, create_default_tools
@@ -160,8 +161,17 @@ class SubagentManager:
         self._exec_config: ExecToolConfig = exec_config or ExecToolConfig()
         self._restrict_to_workspace: bool = restrict_to_workspace
 
+        self._skill_approval: str = "auto"
         self._running_tasks: dict[str, SubagentTask] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+
+    @property
+    def skill_approval(self) -> str:
+        return self._skill_approval
+
+    @skill_approval.setter
+    def skill_approval(self, value: str) -> None:
+        self._skill_approval = value
 
     async def spawn(
         self,
@@ -209,6 +219,214 @@ class SubagentManager:
 
         logger.info(f"서브에이전트 [{task_id}] 생성됨: {display_label}")
         return f"서브에이전트 [{display_label}]이(가) 시작되었습니다 (id: {task_id}). 완료되면 알려드리겠습니다."
+
+    async def spawn_skill(
+        self,
+        task: str,
+        label: str,
+        skill_name: str,
+        skill_path: str,
+        origin_channel: str = "cli",
+        origin_chat_id: str = "direct",
+        session_key: str | None = None,
+        origin_metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """스킬을 서브에이전트로 실행한다."""
+        task_id: str = str(uuid.uuid4())[:8]
+        origin: dict[str, Any] = {
+            "channel": origin_channel,
+            "chat_id": origin_chat_id,
+            "metadata": origin_metadata or {},
+            "session_key": session_key,
+        }
+
+        bg_task: asyncio.Task[None] = asyncio.create_task(
+            self._run_skill(task_id, task, label, origin, skill_name, skill_path)
+        )
+        self._running_tasks[task_id] = SubagentTask(
+            task_id=task_id,
+            label=label,
+            role="skill",
+            original_task=task[:100],
+            started_at=datetime.now(),
+            asyncio_task=bg_task,
+        )
+
+        if session_key:
+            self._session_tasks.setdefault(session_key, set()).add(task_id)
+
+        def _cleanup(t: asyncio.Task[None]) -> None:
+            self._running_tasks.pop(task_id, None)
+            if session_key and (ids := self._session_tasks.get(session_key)):
+                ids.discard(task_id)
+                if not ids:
+                    del self._session_tasks[session_key]
+
+        bg_task.add_done_callback(_cleanup)
+
+        logger.info("스킬 서브에이전트 [{}] 생성됨: {} ({})", task_id, label, skill_name)
+        return f"스킬 [{label}]을(를) 실행합니다 (id: {task_id}). 완료되면 알려드리겠습니다."
+
+    async def _run_skill(
+        self,
+        task_id: str,
+        task: str,
+        label: str,
+        origin: dict[str, Any],
+        skill_name: str,
+        skill_path: str,
+    ) -> None:
+        """서브에이전트로 스킬을 실행한다. workspace 스킬은 승인 게이트 적용."""
+        logger.info("스킬 서브에이전트 [{}] 실행 시작: {} ({})", task_id, label, skill_name)
+
+        try:
+            # 1. 스킬 내용 로드
+            skill_content: str = Path(skill_path).expanduser().read_text(encoding="utf-8")
+
+            # 2. 출처 확인 → 승인 모드 결정
+            source: str | None = SkillsLoader(self._workspace).get_skill_source(skill_name)
+            effective_mode: str = self._skill_approval
+
+            # 비대화형 채널(cron, system)에서 manual → auto 폴백
+            if effective_mode == "manual" and origin.get("channel") in ("cron", "system"):
+                effective_mode = "auto"
+                logger.info("비대화형 채널에서 manual → auto 폴백 (스킬: {})", skill_name)
+
+            needs_approval: bool = (source != "builtin") and (effective_mode != "off")
+
+            # 3. 도구 생성 — spawn 도구 제외 (재귀 방지)
+            all_tools = create_default_tools(
+                workspace=self._workspace,
+                restrict_to_workspace=self._restrict_to_workspace,
+                exec_config=self._exec_config,
+                brave_api_key=self._brave_api_key,
+                web_proxy=self._web_proxy,
+            )
+            tools: ToolRegistry = ToolRegistry()
+            for tool in all_tools:
+                tools.register(tool)
+
+            # 4. 승인 게이트 (workspace 스킬 + auto/manual)
+            approval_gate: ApprovalGate | None = None
+            if needs_approval:
+                # 세션 히스토리를 가져와서 reasoning-blind 분류기에 전달
+                from shacs_bot.agent.session.manager import SessionManager
+                sessions = SessionManager(self._workspace)
+                session_key: str | None = origin.get("session_key")
+                session_history: list[dict[str, Any]] = []
+                if session_key:
+                    session = sessions.get_or_create(key=session_key)
+                    session_history = session.get_history(max_messages=20)
+
+                approval_gate = ApprovalGate(
+                    mode=effective_mode,
+                    provider=self._provider,
+                    model=self._model,
+                    session_history=session_history,
+                    bus=self._bus,
+                    origin=origin,
+                    skill_name=skill_name,
+                    workspace=self._workspace,
+                )
+
+            # 5. 시스템 프롬프트 구성
+            system_prompt: str = self._build_skill_prompt(skill_content, skill_name)
+
+            # 6. chat loop
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": task},
+            ]
+            final_result: str | None = None
+            max_iterations: int = 15
+
+            for _ in range(max_iterations):
+                response: LLMResponse = await self._provider.chat_with_retry(
+                    messages=messages,
+                    tools=tools.get_definitions(),
+                    model=self._model,
+                )
+                if response.has_tool_calls:
+                    tool_call_dicts: list[dict[str, Any]] = [
+                        tc.to_openai_tool_call() for tc in response.tool_calls
+                    ]
+                    messages.append(
+                        build_assistant_message(
+                            content=response.content or "",
+                            tool_calls=tool_call_dicts,
+                            reasoning_content=response.reasoning_content,
+                            thinking_blocks=response.thinking_blocks,
+                        )
+                    )
+
+                    for tool_call in response.tool_calls:
+                        # 승인 게이트 검사 (workspace 스킬 + auto/manual)
+                        if approval_gate and tool_call.name not in ALWAYS_ALLOW:
+                            decision = await approval_gate.check(
+                                tool_call.name, tool_call.arguments,
+                            )
+                            if decision.denied:
+                                logger.info(
+                                    "스킬 서브에이전트 [{}] 도구 거부: {} ({})",
+                                    task_id, tool_call.name, decision.reason,
+                                )
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "name": tool_call.name,
+                                        "content": f"[DENIED] {decision.reason}",
+                                    }
+                                )
+                                continue
+
+                        args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        logger.debug(
+                            "스킬 서브에이전트 [{}] 실행: {} 인자: {}",
+                            task_id, tool_call.name, args_str,
+                        )
+                        result: str = await tools.execute(tool_call.name, tool_call.arguments)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": result,
+                            }
+                        )
+                else:
+                    final_result = response.content
+                    break
+
+            if final_result is None:
+                final_result = self._extract_partial_progress(messages, max_iterations)
+
+            logger.info("스킬 서브에이전트 [{}] 완료", task_id)
+            await self._announce_result(
+                task_id=task_id, label=label, task=task,
+                result=final_result, origin=origin, status="ok",
+            )
+        except Exception as e:
+            logger.error("스킬 서브에이전트 [{}] 실패: {}", task_id, e)
+            await self._announce_result(
+                task_id=task_id, label=label, task=task,
+                result=f"Error: {e}", origin=origin, status="error",
+            )
+
+    def _build_skill_prompt(self, skill_content: str, skill_name: str) -> str:
+        """스킬 서브에이전트의 시스템 프롬프트를 구성한다."""
+        time_ctx: str = ContextBuilder.build_runtime_context(None, None)
+        return (
+            f"당신은 '{skill_name}' 스킬을 실행하는 에이전트입니다.\n\n"
+            f"## 환경\n{time_ctx}\n\n"
+            f"## Workspace\n{self._workspace}\n\n"
+            f"## 스킬 내용\n아래 스킬의 지시사항에 따라 작업을 수행하세요.\n\n"
+            f"---\n{skill_content}\n---\n\n"
+            f"## 제약\n"
+            f"- 할당된 작업에만 집중하세요.\n"
+            f"- 위험한 명령(rm -rf, format 등)은 실행하지 마세요.\n"
+            f"- 작업 완료 후 결과를 명확히 보고하세요."
+        )
 
     async def _run_subagent(
         self,
