@@ -359,6 +359,22 @@ class AgentLoop:
         key: str = session_key or msg.session_key
         session: Session = self._sessions.get_or_create(key=key)
 
+        # Pending approval 응답 감지
+        user_text: str = msg.content.strip().lower()
+        if user_text in ("y", "n", "yes", "no"):
+            from shacs_bot.agent.approval import get_pending_approval_for_session, resolve_approval
+
+            req_id: str | None = get_pending_approval_for_session(key)
+            if req_id:
+                approved: bool = user_text in ("y", "yes")
+                resolve_approval(req_id, approved)
+                label: str = "승인" if approved else "거부"
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"\U0001f6e1 {label}되었습니다.",
+                )
+
         # Slash 명령어
         cmd: str = msg.content.strip().lower()
         if cmd == "/new":
