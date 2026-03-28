@@ -44,14 +44,20 @@ class ContextBuilder:
 
         skills_summary: str = self._skills.build_skills_summary()
         if skills_summary:
-            parts.append(f"""
-                # 스킬
+            parts.append(f"""# 스킬
 
-                다음 스킬들은 당신의 기능을 확장합니다. 스킬을 사용하려면 read_file 도구를 사용해 해당 SKILL.md 파일을 읽으세요.
-                available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/brew로 설치를 시도할 수 있습니다.
-                
-                {skills_summary}
-            """)
+다음 스킬들은 당신의 기능을 확장합니다.
+available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/brew로 설치를 시도할 수 있습니다.
+
+{skills_summary}
+
+## 스킬 실행 정책
+
+모든 스킬은 보안과 격리를 위해 서브에이전트에서 실행됩니다.
+스킬의 SKILL.md를 read_file로 직접 읽지 마세요.
+반드시 spawn 도구의 skill_path 파라미터로 위임하세요.
+
+예: spawn(task="사용자 요청", skill_path="/path/to/SKILL.md")""")
 
         return "\n\n---\n\n".join(parts)
 

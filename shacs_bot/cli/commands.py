@@ -409,6 +409,7 @@ def gateway(
         media_config=config.tools.media,
         media_api_key=_resolve_media_key(config),
         media_base_url=_resolve_media_base_url(config),
+        skill_approval=config.tools.skill_approval,
     )
 
     # 크론 callback 설정 (에이전트 필요)
@@ -616,6 +617,7 @@ def agent(
         media_config=config.tools.media,
         media_api_key=_resolve_media_key(config),
         media_base_url=_resolve_media_base_url(config),
+        skill_approval=config.tools.skill_approval,
     )
 
     if message:

@@ -198,7 +198,8 @@ class SkillsLoader:
             skill_meta: dict[str, Any] = self._get_skill_meta(s["name"])
             available: bool = self._check_requirements(skill_meta)
 
-            lines.append(f"  <skill available=\"{str(available).lower()}\">")
+            source: str = s.get("source", "builtin")
+            lines.append(f"  <skill available=\"{str(available).lower()}\" source=\"{source}\">")
             lines.append(f"    <name>{name}</name>")
             lines.append(f"    <description>{desc}</description>")
             lines.append(f"    <location>{path}</location>")
@@ -236,6 +237,13 @@ class SkillsLoader:
                 missing.append(f"ENV: {env}")
 
         return ", ".join(missing)
+
+    def get_skill_source(self, name: str) -> str | None:
+        """스킬의 출처를 반환. 'builtin' 또는 'workspace'. 없으면 None."""
+        for s in self.list_skills(filter_unavailable=False):
+            if s["name"] == name:
+                return s.get("source", "builtin")
+        return None
 
     def get_always_skills(self) -> list[str]:
         """요구 사항을 충족하는, always=true로 표시된 스킬들을 가져옵니다."""

@@ -69,6 +69,7 @@ class AgentLoop:
         media_config: MediaConfig | None = None,
         media_api_key: str | None = None,
         media_base_url: str | None = None,
+        skill_approval: str = "auto",
     ):
         self._bus: MessageBus = bus
         self._channels_config: ChannelsConfig = channels_config
@@ -111,6 +112,7 @@ class AgentLoop:
             exec_config=self._exec_config,
             restrict_to_workspace=self._restrict_to_workspace,
         )
+        self._subagent.skill_approval = skill_approval
 
         self._running = False
         self._mcp_servers: dict = mcp_servers or {}
@@ -429,6 +431,8 @@ class AgentLoop:
                     f"\u2022 메모리 윈도우: {self._memory_window}"
                 ),
             )
+        elif cmd.startswith("/skill trust"):
+            return self._handle_skill_trust(msg)
         elif cmd == "/help":
             return OutboundMessage(
                 channel=msg.channel,
@@ -440,6 +444,7 @@ class AgentLoop:
                     "/restart \u2014 봇을 재시작합니다\n"
                     "/usage \u2014 토큰 사용량과 비용을 확인합니다\n"
                     "/status \u2014 현재 모델, 세션 상태를 확인합니다\n"
+                    "/skill trust \u2014 스킬 승인 모드를 확인하거나 변경합니다\n"
                     "/help \u2014 사용 가능한 명령어를 표시합니다"
                 ),
             )
@@ -753,6 +758,38 @@ class AgentLoop:
                     skill_name: str = path.split("/skills/")[-1].split("/")[0]
                     return f"\U0001f527 {skill_name} 스킬 사용 중"
         return None
+
+    def _handle_skill_trust(self, msg: InboundMessage) -> OutboundMessage:
+        """'/skill trust [auto|manual|off]' 슬래시 명령어를 처리합니다."""
+        from shacs_bot.config.loader import load_config, save_config
+
+        parts: list[str] = msg.content.strip().split()
+        valid_modes = ("auto", "manual", "off")
+
+        if len(parts) == 3 and parts[2].lower() in valid_modes:
+            mode: str = parts[2].lower()
+            config = load_config()
+            config.tools.skill_approval = mode
+            save_config(config)
+            self._subagent.skill_approval = mode
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"\U0001f6e1 스킬 승인 모드: **{mode}**",
+            )
+
+        current: str = self._subagent.skill_approval
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                f"\U0001f6e1 스킬 승인 모드: **{current}**\n\n"
+                f"사용법: `/skill trust auto|manual|off`\n"
+                f"• auto — 3단계 분류기가 자동 판단\n"
+                f"• manual — 사용자에게 직접 승인 요청\n"
+                f"• off — 승인 없이 실행"
+            ),
+        )
 
     @staticmethod
     def _detect_spawn_hint(tool_calls: list[ToolCallRequest]) -> str | None:
