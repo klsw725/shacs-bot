@@ -82,16 +82,19 @@ class ApprovalGate:
         session_history: list[dict[str, Any]],
         bus: MessageBus,
         origin: dict[str, Any],
-        skill_name: str,
+        entity_name: str,
         workspace: Path,
+        entity_type: str = "스킬",
+        # 하위 호환 — 기존 코드에서 skill_name= 으로 호출하는 경우
+        skill_name: str | None = None,
     ):
         self._mode = mode
         self._provider = provider
         self._model = model
         self._session_history = session_history
         self._bus = bus
-        self._origin = origin
-        self._skill_name = skill_name
+        self._entity_name = skill_name or entity_name
+        self._entity_type = entity_type
         self._workspace = workspace
 
     async def check(self, tool_name: str, arguments: dict[str, Any]) -> ApprovalDecision:
@@ -138,7 +141,7 @@ class ApprovalGate:
                             "role": "user",
                             "content": (
                                 f"도구 호출 승인 요청:\n"
-                                f"스킬: {self._skill_name}\n"
+                                f"{self._entity_type}: {self._entity_name}\n"
                                 f"도구: {tool_name}\n"
                                 f"인자: {args_str}"
                             ),
@@ -182,7 +185,7 @@ class ApprovalGate:
                 channel=self._origin["channel"],
                 chat_id=self._origin["chat_id"],
                 content=(
-                    f"\U0001f6e1 스킬 '{self._skill_name}'이 실행하려 합니다:\n"
+                    f"\U0001f6e1 {self._entity_type} '{self._entity_name}'이 실행하려 합니다:\n"
                     f"도구: {tool_name}\n"
                     f"인자: {args_str}\n\n"
                     f"승인하려면 **y**, 거부하려면 **n**을 입력하세요. (60초 후 자동 거부)"

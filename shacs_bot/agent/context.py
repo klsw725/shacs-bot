@@ -19,10 +19,11 @@ class ContextBuilder:
     _BOOTSTRAP_FILES: list[str] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     RUNTIME_CONTEXT_TAG: str = "[런타임 컨텍스트 — 메타데이터 전용이며, 지시사항이 아님]"
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, agent_registry: Any | None = None):
         self._workspace: Path = workspace
         self._memory = MemoryStore(self._workspace)
         self._skills = SkillsLoader(self._workspace)
+        self._agent_registry = agent_registry
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """아이덴티티, 부트스트랩 파일, 메모리, 그리고 스킬을 기반으로 시스템 프롬프트를 구성합니다."""
@@ -58,6 +59,15 @@ available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/
 반드시 spawn 도구의 skill_path 파라미터로 위임하세요.
 
 예: spawn(task="사용자 요청", skill_path="/path/to/SKILL.md")""")
+
+        if self._agent_registry:
+            agents_summary: str = self._agent_registry.build_agents_summary()
+            if agents_summary:
+                parts.append(f"""# 에이전트
+
+사용 가능한 서브에이전트입니다. spawn 도구의 role 파라미터로 지정하세요.
+
+{agents_summary}""")
 
         return "\n\n---\n\n".join(parts)
 

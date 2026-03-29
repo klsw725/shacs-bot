@@ -10,6 +10,7 @@ from typing import Any
 
 from loguru import logger
 
+from shacs_bot.agent.agents import BUILTIN_AGENTS, AgentDefinition, AgentRegistry
 from shacs_bot.agent.approval import ALWAYS_ALLOW, ApprovalGate
 from shacs_bot.agent.context import ContextBuilder
 from shacs_bot.agent.skills import SkillsLoader
@@ -21,80 +22,6 @@ from shacs_bot.providers.base import LLMProvider, LLMResponse
 from shacs_bot.utils.helpers import build_assistant_message
 
 
-@dataclass(frozen=True)
-class SubagentRole:
-    system_prompt: str
-    allowed_tools: list[str]  # 비어있으면 전체 허용
-    max_iterations: int = 15
-
-
-RESEARCHER_PROMPT = """\
-당신은 정보 수집 전문 에이전트입니다.
-
-## 임무
-웹 검색과 URL 크롤링을 통해 정보를 수집하고 정리합니다.
-
-## 행동 규칙
-- 여러 소스를 교차 확인하여 정확성을 높이세요
-- 출처를 명시하세요 (URL, 날짜)
-- 사실과 의견을 구분하세요
-- 검색 결과가 부족하면 다른 키워드로 재시도하세요
-
-## 결과 보고
-- 핵심 발견사항을 구조적으로 정리
-- 출처 목록 포함
-- 불확실한 부분은 명시
-
-## 제약
-- 읽기 전용: 파일을 생성, 수정, 삭제할 수 없습니다
-- 조사 결과만 보고하세요. 임의로 행동하지 마세요.\
-"""
-
-ANALYST_PROMPT = """\
-당신은 분석/요약 전문 에이전트입니다.
-
-## 임무
-문서, 파일, 데이터를 읽고 분석하여 인사이트를 제공합니다.
-
-## 행동 규칙
-- 원본 내용을 정확히 파악한 후 분석하세요
-- 핵심 포인트를 추출하고 구조화하세요
-- 비교 요청 시 기준을 명확히 하세요
-- 분석 근거를 항상 제시하세요
-
-## 결과 보고
-- 요약 → 상세 분석 → 결론 순서
-- 표나 목록을 활용하여 가독성 확보
-- 원문 인용 시 해당 위치 명시
-
-## 제약
-- 읽기 전용: 파일을 생성, 수정, 삭제할 수 없습니다
-- 분석 결과만 보고하세요. 임의로 행동하지 마세요.\
-"""
-
-EXECUTOR_PROMPT = """\
-당신은 작업 실행 전문 에이전트입니다.
-
-## 임무
-파일 작업, 명령 실행, 스킬 기반 작업을 수행합니다.
-
-## 행동 규칙
-- 파일을 수정하기 전에 반드시 먼저 읽으세요
-- 작업 전후로 결과를 확인하세요
-- 한 번에 하나의 변경에 집중하세요
-- 요청 범위를 벗어나는 변경을 하지 마세요
-
-## 결과 보고
-- 무엇을 했는지 간결하게
-- 변경된 파일 목록
-- 확인 결과 (성공/실패)
-
-## 제약
-- 위험한 명령은 실행하지 마세요 (rm -rf, format 등)
-- 할당된 작업에만 집중하세요\
-"""
-
-
 @dataclass
 class SubagentTask:
     task_id: str
@@ -103,39 +30,6 @@ class SubagentTask:
     original_task: str
     started_at: datetime
     asyncio_task: asyncio.Task[None]
-
-
-SUBAGENT_ROLES: dict[str, SubagentRole] = {
-    "researcher": SubagentRole(
-        system_prompt=RESEARCHER_PROMPT,
-        allowed_tools=[
-            "read_file",
-            "list_dir",
-            "exec",
-            "web_search",
-            "web_fetch",
-            "search_history",
-        ],
-        max_iterations=10,
-    ),
-    "analyst": SubagentRole(
-        system_prompt=ANALYST_PROMPT,
-        allowed_tools=[
-            "read_file",
-            "list_dir",
-            "exec",
-            "web_search",
-            "web_fetch",
-            "search_history",
-        ],
-        max_iterations=10,
-    ),
-    "executor": SubagentRole(
-        system_prompt=EXECUTOR_PROMPT,
-        allowed_tools=[],  # 전체 허용
-        max_iterations=15,
-    ),
-}
 
 
 class SubagentManager:
@@ -151,6 +45,8 @@ class SubagentManager:
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
+        max_threads: int = 6,
+        agent_registry: AgentRegistry | None = None,
     ):
         self._provider: LLMProvider = provider
         self._workspace: Path = workspace
@@ -160,6 +56,8 @@ class SubagentManager:
         self._web_proxy: str | None = web_proxy
         self._exec_config: ExecToolConfig = exec_config or ExecToolConfig()
         self._restrict_to_workspace: bool = restrict_to_workspace
+        self._max_threads: int = max_threads
+        self._registry: AgentRegistry | None = agent_registry
 
         self._skill_approval: str = "auto"
         self._running_tasks: dict[str, SubagentTask] = {}
@@ -173,6 +71,22 @@ class SubagentManager:
     def skill_approval(self, value: str) -> None:
         self._skill_approval = value
 
+    def _check_threads(self) -> str | None:
+        """동시 실행 제한 체크. 초과 시 에러 메시지 반환, 여유 있으면 None."""
+        running = sum(1 for t in self._running_tasks.values() if not t.asyncio_task.done())
+        if running >= self._max_threads:
+            return f"동시 실행 제한 초과 (현재 {running}/{self._max_threads}개). 기존 작업이 완료된 후 다시 시도하세요."
+        return None
+
+    def _resolve_agent(self, role: str) -> AgentDefinition:
+        """role 이름으로 에이전트 정의를 조회한다. 없으면 executor 폴백."""
+        if self._registry:
+            agent_def = self._registry.get(role)
+            if agent_def:
+                return agent_def
+        # 레지스트리 없거나 못 찾으면 built-in 폴백
+        return BUILTIN_AGENTS.get(role, BUILTIN_AGENTS["executor"])
+
     async def spawn(
         self,
         task: str,
@@ -184,6 +98,10 @@ class SubagentManager:
         origin_metadata: dict[str, Any] | None = None,
     ) -> str:
         """새로운 서브에이전트를 생성하여 주어진 작업을 실행합니다."""
+        # 동시성 제한
+        if err := self._check_threads():
+            return err
+
         task_id: str = str(uuid.uuid4())[:8]
         display_label: str = label or task[:30] + ("..." if len(task) > 30 else "")
         origin: dict[str, Any] = {
@@ -193,8 +111,10 @@ class SubagentManager:
             "session_key": session_key,
         }
 
+        agent_def: AgentDefinition = self._resolve_agent(role)
+
         bg_task: asyncio.Task[None] = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin, role=role)
+            self._run_subagent(task_id, task, display_label, origin, agent_def=agent_def)
         )
         self._running_tasks[task_id] = SubagentTask(
             task_id=task_id,
@@ -217,7 +137,7 @@ class SubagentManager:
 
         bg_task.add_done_callback(_cleanup)
 
-        logger.info(f"서브에이전트 [{task_id}] 생성됨: {display_label}")
+        logger.info("서브에이전트 [{}] 생성됨: {} (역할: {}, 모델: {})", task_id, display_label, role, agent_def.model or "기본")
         return f"서브에이전트 [{display_label}]이(가) 시작되었습니다 (id: {task_id}). 완료되면 알려드리겠습니다."
 
     async def spawn_skill(
@@ -232,6 +152,10 @@ class SubagentManager:
         origin_metadata: dict[str, Any] | None = None,
     ) -> str:
         """스킬을 서브에이전트로 실행한다."""
+        # 동시성 제한
+        if err := self._check_threads():
+            return err
+
         task_id: str = str(uuid.uuid4())[:8]
         origin: dict[str, Any] = {
             "channel": origin_channel,
@@ -433,12 +357,15 @@ class SubagentManager:
         task_id: str,
         task: str,
         label: str,
-        origin: dict[str, str],
-        role: str = "executor",
+        origin: dict[str, Any],
+        agent_def: AgentDefinition | None = None,
     ) -> None:
-        """서브에이전트를 실행합니다. 그리고 완료되면 결과를 보고합니다."""
-        role_config: SubagentRole = SUBAGENT_ROLES.get(role, SUBAGENT_ROLES["executor"])
-        logger.info(f"서브에이전트 [{task_id}] 실행 시작: {label} (역할: {role})")
+        """서브에이전트를 실행합니다. AgentDefinition 기반 모델/도구 사용."""
+        if agent_def is None:
+            agent_def = BUILTIN_AGENTS["executor"]
+
+        model: str = agent_def.model or self._model
+        logger.info("서브에이전트 [{}] 실행 시작: {} (에이전트: {}, 모델: {})", task_id, label, agent_def.name, model)
 
         try:
             all_tools = create_default_tools(
@@ -449,58 +376,122 @@ class SubagentManager:
                 web_proxy=self._web_proxy,
             )
 
+            # 도구 필터링: allowed_tools 또는 sandbox_mode 기반
+            effective_tools: list[str] = agent_def.get_effective_tools()
             tools: ToolRegistry = ToolRegistry()
             for tool in all_tools:
-                if not role_config.allowed_tools or tool.name in role_config.allowed_tools:
+                if not effective_tools or tool.name in effective_tools:
                     tools.register(tool)
 
-            system_prompt: str = self._build_subagent_prompt(role_config)
+            # 에이전트별 MCP 연결 (M4)
+            from contextlib import AsyncExitStack
+            mcp_stack: AsyncExitStack | None = None
+            if agent_def.mcp_servers:
+                from shacs_bot.agent.tools.mcp import connect_mcp_servers
+                mcp_stack = AsyncExitStack()
+                await mcp_stack.__aenter__()
+                try:
+                    await connect_mcp_servers(agent_def.mcp_servers, tools, mcp_stack)
+                except Exception as e:
+                    logger.warning("에이전트 [{}] MCP 연결 실패, MCP 없이 계속: {}", agent_def.name, e)
+
+            # workspace 에이전트 ApprovalGate (M3)
+            approval_gate: ApprovalGate | None = None
+            if agent_def.source == "workspace" and self._skill_approval != "off":
+                effective_mode: str = self._skill_approval
+                if effective_mode == "manual" and origin.get("channel") in ("cron", "system"):
+                    effective_mode = "auto"
+
+                from shacs_bot.agent.session.manager import SessionManager
+                sessions = SessionManager(self._workspace)
+                session_key: str | None = origin.get("session_key")
+                session_history: list[dict[str, Any]] = []
+                if session_key:
+                    session = sessions.get_or_create(key=session_key)
+                    session_history = session.get_history(max_messages=20)
+
+                approval_gate = ApprovalGate(
+                    mode=effective_mode,
+                    provider=self._provider,
+                    model=self._model,
+                    session_history=session_history,
+                    bus=self._bus,
+                    origin=origin,
+                    entity_name=agent_def.name,
+                    entity_type="에이전트",
+                    workspace=self._workspace,
+                )
+
+            system_prompt: str = self._build_subagent_prompt(agent_def)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
             ]
 
-            max_iterations: int = role_config.max_iterations
+            max_iterations: int = agent_def.max_iterations
             final_result: str | None = None
 
-            for iteration in range(max_iterations):
-                response: LLMResponse = await self._provider.chat_with_retry(
-                    messages=messages,
-                    tools=tools.get_definitions(),
-                    model=self._model,
-                )
-                if response.has_tool_calls:
-                    # 도구 호출 어시스턴트 메시지 추가
-                    tool_call_dicts: list[dict[str, Any]] = [
-                        tool_call.to_openai_tool_call() for tool_call in response.tool_calls
-                    ]
-                    messages.append(
-                        build_assistant_message(
-                            content=response.content or "",
-                            tool_calls=tool_call_dicts,
-                            reasoning_content=response.reasoning_content,
-                            thinking_blocks=response.thinking_blocks,
-                        )
+            try:
+                for iteration in range(max_iterations):
+                    response: LLMResponse = await self._provider.chat_with_retry(
+                        messages=messages,
+                        tools=tools.get_definitions(),
+                        model=model,
                     )
-
-                    # Execute tools
-                    for tool_call in response.tool_calls:
-                        args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                        logger.debug(
-                            "서브에이전트 [{}] 실행: {} 인자: {}", task_id, tool_call.name, args_str
-                        )
-                        result: str = await tools.execute(tool_call.name, tool_call.arguments)
+                    if response.has_tool_calls:
+                        tool_call_dicts: list[dict[str, Any]] = [
+                            tool_call.to_openai_tool_call() for tool_call in response.tool_calls
+                        ]
                         messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "name": tool_call.name,
-                                "content": result,
-                            }
+                            build_assistant_message(
+                                content=response.content or "",
+                                tool_calls=tool_call_dicts,
+                                reasoning_content=response.reasoning_content,
+                                thinking_blocks=response.thinking_blocks,
+                            )
                         )
-                else:
-                    final_result = response.content
-                    break
+
+                        for tool_call in response.tool_calls:
+                            # workspace 에이전트 ApprovalGate 검사
+                            if approval_gate and tool_call.name not in ALWAYS_ALLOW:
+                                decision = await approval_gate.check(
+                                    tool_call.name, tool_call.arguments,
+                                )
+                                if decision.denied:
+                                    logger.info(
+                                        "서브에이전트 [{}] 도구 거부: {} ({})",
+                                        task_id, tool_call.name, decision.reason,
+                                    )
+                                    messages.append(
+                                        {
+                                            "role": "tool",
+                                            "tool_call_id": tool_call.id,
+                                            "name": tool_call.name,
+                                            "content": f"[DENIED] {decision.reason}",
+                                        }
+                                    )
+                                    continue
+
+                            args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                            logger.debug(
+                                "서브에이전트 [{}] 실행: {} 인자: {}", task_id, tool_call.name, args_str
+                            )
+                            result: str = await tools.execute(tool_call.name, tool_call.arguments)
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": tool_call.name,
+                                    "content": result,
+                                }
+                            )
+                    else:
+                        final_result = response.content
+                        break
+            finally:
+                # MCP 연결 정리
+                if mcp_stack:
+                    await mcp_stack.aclose()
 
             if final_result is None:
                 final_result = self._extract_partial_progress(messages, max_iterations)
@@ -526,11 +517,11 @@ class SubagentManager:
                 status="error",
             )
 
-    def _build_subagent_prompt(self, role_config: SubagentRole) -> str:
-        """역할 기반 시스템 프롬프트를 작성"""
+    def _build_subagent_prompt(self, agent_def: AgentDefinition) -> str:
+        """AgentDefinition 기반 시스템 프롬프트를 작성"""
         time_ctx: str = ContextBuilder.build_runtime_context(None, None)
         parts: list[str] = [
-            role_config.system_prompt,
+            agent_def.developer_instructions,
             f"\n## 환경\n{time_ctx}\n\n## Workspace\n{self._workspace}",
         ]
 
@@ -558,7 +549,6 @@ class SubagentManager:
             이 내용을 사용자에게 자연스럽게 요약하세요. 간단하게 1~2문장으로 작성하고, "subagent"나 작업 ID 같은 기술적인 세부 사항은 언급하지 마세요. 
         """
 
-        # 메인 에이전트를 트리거하기 위해 시스템 메시지로 주입
         await self._bus.publish_inbound(
             InboundMessage(
                 channel="system",

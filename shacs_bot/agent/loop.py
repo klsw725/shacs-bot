@@ -70,8 +70,10 @@ class AgentLoop:
         media_api_key: str | None = None,
         media_base_url: str | None = None,
         skill_approval: str = "auto",
+        max_threads: int = 6,
     ):
         self._bus: MessageBus = bus
+        self._max_threads: int = max_threads
         self._channels_config: ChannelsConfig = channels_config
         self._workspace: Path = workspace
 
@@ -99,7 +101,10 @@ class AgentLoop:
 
             self._usage_tracker = UsageTracker(get_usage_dir())
 
-        self._context = ContextBuilder(self._workspace)
+        from shacs_bot.agent.agents import AgentRegistry
+
+        self._agent_registry = AgentRegistry(workspace=self._workspace)
+        self._context = ContextBuilder(self._workspace, agent_registry=self._agent_registry)
         self._sessions: SessionManager = session_manager or SessionManager(self._workspace)
         self._tools: ToolRegistry = ToolRegistry()
         self._subagent = SubagentManager(
@@ -111,6 +116,8 @@ class AgentLoop:
             web_proxy=self._web_proxy,
             exec_config=self._exec_config,
             restrict_to_workspace=self._restrict_to_workspace,
+            max_threads=self._max_threads,
+            agent_registry=self._agent_registry,
         )
         self._subagent.skill_approval = skill_approval
 
