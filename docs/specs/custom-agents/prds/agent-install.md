@@ -207,13 +207,13 @@ workspace에서 에이전트 (+ 연관 스킬)를 삭제.
 
 ## 마일스톤
 
-- [ ] **M1: AgentInstaller 코어 — clone + 감지 + 설치**
+- [x] **M1: AgentInstaller 코어 — clone + 감지 + 설치**
   `agent_installer.py` — `git clone --depth 1`, 저장소 구조 감지 (단일/컬렉션), TOML 검증, workspace에 복사, 매니페스트 기록. **검증**: 단일 에이전트 repo clone → workspace에 TOML + 스킬 설치.
 
-- [ ] **M2: 슬래시 명령어 — install + list + remove**
+- [x] **M2: 슬래시 명령어 — install + list + remove**
   `loop.py` — `/agent install`, `/agent list`, `/agent remove` 핸들러. 설치 후 `AgentRegistry.reload()`. **검증**: 슬래시 명령어로 설치/조회/삭제 동작.
 
-- [ ] **M3: update + 에러 처리 + 통합 검증**
+- [x] **M3: update + 에러 처리 + 통합 검증**
   `/agent update` 구현. git 미설치, 네트워크 오류, 잘못된 TOML 등 에러 처리. **검증**: 전체 흐름 (install → list → spawn → remove) 동작.
 
 ---
@@ -243,3 +243,4 @@ workspace에서 에이전트 (+ 연관 스킬)를 삭제.
 | 날짜 | 내용 |
 |---|---|
 | 2026-03-29 | PRD 작성 |
+| 2026-03-29 | M1~M3 구현 완료. |
