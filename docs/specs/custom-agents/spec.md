@@ -9,6 +9,7 @@
 | PRD | 설명 |
 |---|---|
 | [`custom-agents.md`](prds/custom-agents.md) | TOML 기반 선언적 에이전트 + 모델 라우팅 + MCP + 동시성 + ApprovalGate 확장 |
+| [`agent-install.md`](prds/agent-install.md) | Git 기반 에이전트 + 스킬 번들 설치 (`/agent install\|list\|remove\|update`) |
 
 ---
 
