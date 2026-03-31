@@ -6,19 +6,60 @@
 
 | PRD | 설명 |
 |---|---|
-| [`background-workflows.md`](./prds/background-workflows.md) | file-backed workflow state + retry/resume + notify integration |
+| [`background-workflows.md`](./prds/background-workflows.md) | workflow 상태 저장, retry/resume, cron/heartbeat/subagent 연결을 구현 태스크로 분해 |
 
 ## TL;DR
 
-> **목적**: shacs-bot을 "지금 답하는 assistant"에서 "작업을 이어서 수행하는 assistant"로 확장하되, Redis/Celery 없이 현재 앱 내부에서 운영 가능한 workflow 상태 레이어를 만든다.
+> **목적**: shacs-bot을 "지금 답하는 assistant"에서 "작업을 이어서 수행하는 assistant"로 확장하되, 현재 앱 내부에서 운영 가능한 workflow 상태 레이어를 제공한다.
 >
 > **Deliverables**:
-> - `workflow/store.py` — JSONL/file-backed workflow state store
-> - `workflow/runtime.py` — queued/running/waiting/retry/completed 상태기계
-> - `agent/tools/cron/*`, `heartbeat/service.py`, `agent/subagent.py` 연동
-> - `bus/events.py` — workflow completion/notification metadata
+> - `shacs_bot/workflow/store.py` — workflow 상태 저장
+> - `shacs_bot/workflow/runtime.py` — queued/running/waiting/retry/completed 상태기계
+> - `shacs_bot/heartbeat/service.py`, `shacs_bot/agent/subagent.py`, `shacs_bot/agent/tools/cron/service.py` — workflow 연계
+> - `docs/specs/background-workflows/checklists/requirements.md` — 스펙 품질 체크리스트
 >
 > **Estimated Effort**: Medium (5-7시간)
+
+## User Scenarios & Testing
+
+### Scenario 1 - assistant가 나중에 끝나는 일을 이어서 처리한다
+
+사용자는 즉시 끝나지 않는 요청을 맡기고, 완료되면 같은 채널에서 결과를 받아야 한다.
+
+**테스트**: background 실행이 완료된 뒤 지정된 채널/세션으로 결과가 전달되는지 확인한다.
+
+### Scenario 2 - 프로세스가 재시작되어도 미완료 작업 상태를 잃지 않는다
+
+운영자는 게이트웨이 재시작 후에도 진행 중이던 assistant 작업을 추적할 수 있어야 한다.
+
+**테스트**: 재시작 후 incomplete workflow가 복구되고 재개 가능한지 확인한다.
+
+## Functional Requirements
+
+- **FR-001**: 시스템은 assistant background 작업의 상태를 queued, running, waiting, retry, completed, failed 중 하나로 저장해야 한다.
+- **FR-002**: background workflow는 프로세스 재시작 후에도 미완료 상태를 복구할 수 있어야 한다.
+- **FR-003**: workflow는 cron, heartbeat, subagent 결과와 연결될 수 있어야 한다.
+- **FR-004**: retry가 필요한 작업은 다음 실행 시점과 시도 횟수를 저장해야 한다.
+- **FR-005**: workflow 완료 시 기존 outbound 경로로 결과를 전달할 수 있어야 한다.
+
+## Key Entities
+
+- **Workflow Record**: goal, state, retries, notify target을 보관하는 상태 객체
+- **Workflow Runtime**: 상태 전이와 resume/retry를 담당하는 실행기
+- **Notify Target**: channel, chat_id, session_key 등 완료 통지 대상 정보
+
+## Success Criteria
+
+- 미완료 background 작업이 재시작 후에도 조회 가능하다.
+- cron/heartbeat/subagent에서 발생한 작업이 공통 workflow 상태로 관리된다.
+- 완료된 workflow는 사용자가 지정한 채널에서 결과를 받을 수 있다.
+- 별도 큐 인프라 없이도 기본 retry/resume 동작이 가능하다.
+
+## Assumptions
+
+- 1단계는 단일 프로세스/파일 기반 저장만 다룬다.
+- 분산 worker, exactly-once 보장은 범위 밖이다.
+- planner는 workflow를 생성할 수 있지만 상태기는 planner와 별도 책임을 가진다.
 
 ## 현재 상태 분석
 
@@ -26,8 +67,6 @@
 - cron은 예약 실행에 강하지만 다단계 상태 추적은 없다.
 - subagent/background task는 실행 중/완료 상태를 제공하지만, 장기 assistant workflow 관점의 공통 상태 모델은 없다.
 - `MessageBus`는 in-memory queue라 프로세스 재시작 시 작업 상태를 보존하지 않는다.
-
-즉, 지금은 background capability는 있으나, "실행 중인 assistant 일"을 공통 구조로 다루는 계층이 없다.
 
 ## 설계
 
@@ -40,25 +79,12 @@ running → completed
 running → failed
 ```
 
-### 경량 범위
+### 범위
 
-- file-backed store (`workspace/workflows/*.json`)
+- file-backed store
 - runtime 재시작 시 incomplete workflow 복구
-- retry policy는 단순 attempt + next_run_at
-- notification target은 기존 channel/chat_id/session_key 재사용
-
-### 포함 시나리오
-
-1. heartbeat가 찾은 할 일 실행
-2. planner가 만든 후속 작업 예약/재개
-3. 승인 대기 후 이어서 실행
-4. subagent 결과를 나중에 사용자 채널로 전달
-
-### 비목표
-
-- Temporal/Airflow/n8n 급 DAG 엔진
-- 분산 worker
-- 정확히 한 번(exactly-once) 보장
+- retry 시도 횟수와 next_run_at 저장
+- notify target 재사용
 
 ## 파일 변경 목록
 
