@@ -1,6 +1,8 @@
 # SPEC: Vector Memory (LanceDB)
 
 > **Prompt**: HKUDS/nanobot, OpenClaw 분석 후 shacs-bot에 추가할 기능 — Vector Memory
+>
+> **Position**: assistant core 7 중 **memory retrieval axis**
 
 ## PRDs
 
