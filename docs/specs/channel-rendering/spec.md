@@ -6,19 +6,61 @@
 
 | PRD | 설명 |
 |---|---|
-| [`channel-rendering.md`](./prds/channel-rendering.md) | canonical outbound model + per-channel renderer + fallback 규칙 |
+| [`channel-rendering.md`](./prds/channel-rendering.md) | canonical response, renderer 계층, 채널별 적용 순서를 구현 태스크로 분해 |
 
 ## TL;DR
 
-> **목적**: 멀티채널 assistant의 품질을 높이기 위해 "normalize early, render late" 구조를 도입한다.
+> **목적**: 멀티채널 assistant가 같은 의미의 응답을 채널별로 자연스럽게 표현하도록 한다.
 >
 > **Deliverables**:
-> - `bus/events.py` — canonical assistant response metadata 확장
-> - `channels/rendering.py` — Renderer 인터페이스 + 공통 fallback
-> - `channels/*.py` — 채널별 renderer 적용
-> - `channels/manager.py` — dispatch 직전 render 호출
+> - `shacs_bot/bus/events.py` — canonical render metadata 확장
+> - `shacs_bot/channels/rendering.py` — renderer 인터페이스와 fallback 규칙
+> - `shacs_bot/channels/manager.py` — dispatch 직전 renderer 적용
+> - `shacs_bot/channels/slack.py`, `discord.py`, `telegram.py`, `email.py` — 우선 적용 채널 개선
+> - `docs/specs/channel-rendering/checklists/requirements.md` — 스펙 품질 체크리스트
 >
 > **Estimated Effort**: Medium (4-6시간)
+
+## User Scenarios & Testing
+
+### Scenario 1 - 같은 응답 의도를 채널별로 다르게 표현한다
+
+사용자는 같은 assistant 응답이라도 Slack, Discord, Telegram, Email에서 각 채널에 맞는 형식으로 받아야 한다.
+
+**테스트**: 동일한 canonical response를 여러 채널에 보냈을 때 thread/footer/길이 제한이 각 채널 규칙에 맞게 반영되는지 확인한다.
+
+### Scenario 2 - 채널이 추가되어도 core 로직은 유지된다
+
+운영자는 새로운 채널을 붙일 때 AgentLoop를 수정하지 않고 renderer만 추가해야 한다.
+
+**테스트**: renderer가 없는 채널도 plain-text fallback으로 동작하는지 확인한다.
+
+## Functional Requirements
+
+- **FR-001**: 시스템은 assistant 응답의 의미 구조와 채널별 표현 방식을 분리해야 한다.
+- **FR-002**: renderer는 최소 Slack, Discord, Telegram, Email에 대해 채널별 표현 차이를 적용해야 한다.
+- **FR-003**: renderer가 정의되지 않은 채널은 기본 표현으로 안전하게 fallback 해야 한다.
+- **FR-004**: 진행 메시지, tool 힌트, memory 힌트, usage footer는 채널별 규칙에 맞게 표현되어야 한다.
+- **FR-005**: 채널 표현 차이 때문에 AgentLoop가 채널별 분기로 오염되면 안 된다.
+
+## Key Entities
+
+- **Canonical Response**: 채널에 독립적인 assistant 응답 의미 구조
+- **Render Hints**: thread, sections, priority, footer 같은 표현 힌트
+- **Channel Renderer**: canonical response를 채널 표현으로 변환하는 단위
+
+## Success Criteria
+
+- 우선 적용 채널 4종에서 같은 응답 의도가 채널 규칙에 맞게 자연스럽게 보인다.
+- renderer가 없는 채널에서도 전송 실패 없이 fallback 응답이 전달된다.
+- 채널별 형식 차이를 위해 AgentLoop에 새로운 채널 분기가 추가되지 않는다.
+- 긴 응답과 힌트 메시지가 채널 길이 제한을 넘기지 않는다.
+
+## Assumptions
+
+- 1단계는 rich UI를 전면 도입하지 않고 기존 문자열 전송 경로를 유지한다.
+- 채널별 persona 분화는 범위 밖이다.
+- 사용량 footer와 진행 힌트는 renderer가 표현만 다루고 생성 책임은 기존 로직을 유지한다.
 
 ## 현재 상태 분석
 
@@ -26,72 +68,22 @@
 - `channels/manager.py`는 대상 채널을 찾아 `channel.send()`를 호출한다.
 - 채널별 config에는 `reply_in_thread`, `group_policy`, `send_progress`, `send_memory_hints` 같은 flag만 있고, 응답 의미 구조는 없다.
 
-문제는 assistant 응답이 채널에 따라 요구 형식이 다르다는 점이다.
-
-- Slack: thread, block-like section, 긴 후속 액션 메시지
-- Discord: thread/reply, 제한된 포맷, 길이 분할
-- Telegram: markdown/html 제약
-- Email: 제목/본문 분리, 긴 형식 허용
-
-현재 구조에서는 각 채널이 문자열을 자기 방식으로 해석할 뿐이어서, 멀티채널 품질이 채널 구현 내부에 흩어진다.
+현재 구조에서는 각 채널이 문자열을 자기 방식으로 해석할 뿐이라 멀티채널 품질 규칙이 구현 내부에 분산된다.
 
 ## 설계
 
 ### 설계 원칙
 
-1. **입력 의미는 하나** — assistant는 먼저 canonical response를 만든다.
-2. **출력 표현은 채널이 결정** — 최종 포맷은 renderer가 담당한다.
-3. **점진적 도입** — 기존 `content: str` 경로를 유지하면서 metadata를 확장한다.
+1. **normalize early, render late**
+2. **점진적 도입** — 기존 `content: str` 경로 유지
+3. **채널별 표현만 분리** — 응답 의미 생성은 기존 흐름 유지
 
-### Canonical response
+### 범위
 
-```python
-class OutboundMessage:
-    channel: str
-    chat_id: str
-    content: str
-    media: list[str]
-    metadata: dict[str, Any]
-    render: dict[str, Any] | None = None
-```
-
-`render` 예시:
-
-```json
-{
-  "tone": "default",
-  "sections": ["요약", "다음 액션"],
-  "thread_preferred": true,
-  "priority": "normal",
-  "suppress_footer": false
-}
-```
-
-### Renderer 구조
-
-```python
-class ChannelRenderer(Protocol):
-    def render(self, msg: OutboundMessage) -> OutboundMessage: ...
-```
-
-- `SlackRenderer`
-- `DiscordRenderer`
-- `TelegramRenderer`
-- `EmailRenderer`
-- 기본 `PlainTextRenderer`
-
-### 적용 범위
-
-1. thread / reply 정책 반영
-2. 긴 메시지 분할 기준 표준화
-3. progress/tool/memory hint 표현 통일
-4. footer/usage를 채널별로 자연스럽게 배치
-
-### 비목표
-
-- rich UI 전용 block builder 전면 도입
-- 채널별 완전 다른 assistant persona
-- 템플릿 엔진 대형화
+- canonical render metadata 추가
+- renderer 인터페이스 추가
+- 우선 채널 4종 적용
+- plain-text fallback 제공
 
 ## 파일 변경 목록
 
@@ -108,7 +100,7 @@ class ChannelRenderer(Protocol):
 ## 검증 기준
 
 - [ ] 기존 plain text 응답이 regression 없이 전송됨
-- [ ] 동일한 canonical response가 Slack/Discord/Telegram에서 각기 자연스럽게 표현됨
+- [ ] 동일한 canonical response가 Slack/Discord/Telegram/Email에서 각기 자연스럽게 표현됨
 - [ ] progress/tool/memory hint 표시 규칙이 채널별로 일관됨
 - [ ] 길이 초과 메시지가 채널 규칙에 맞게 분할됨
 
