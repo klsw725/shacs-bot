@@ -22,6 +22,47 @@
 >
 > **Estimated Effort**: Medium (4-6시간)
 
+## User Scenarios & Testing
+
+### Scenario 1 - 사용자는 의미 기반으로 과거 대화를 찾는다
+
+사용자는 정확한 키워드를 기억하지 못해도 "지난주에 이야기한 프로젝트"처럼 자연어로 과거 맥락을 회수할 수 있어야 한다.
+
+**테스트**: 동의어/유사 표현 질의가 기존 grep보다 더 관련성 높은 결과를 반환하는지 확인한다.
+
+### Scenario 2 - 설치하지 않은 환경도 기존 검색이 유지된다
+
+운영자는 optional dependency를 설치하지 않아도 기존 history 검색을 계속 사용할 수 있어야 한다.
+
+**테스트**: vector-memory 미설치 환경에서 grep 기반 검색이 그대로 동작하는지 확인한다.
+
+## Functional Requirements
+
+- **FR-001**: 시스템은 기존 키워드 검색 외에 의미 기반 검색을 지원해야 한다.
+- **FR-002**: 의미 기반 검색은 optional dependency가 없을 때 자동으로 fallback 되어야 한다.
+- **FR-003**: 사용자는 grep, semantic, hybrid 모드를 선택할 수 있어야 한다.
+- **FR-004**: 새로운 메모리 레이어는 기존 MEMORY.md/HISTORY.md 구조를 깨뜨리지 않아야 한다.
+- **FR-005**: 검색 결과는 관련도와 출처를 함께 제공해야 한다.
+
+## Key Entities
+
+- **Memory Entry**: HISTORY 또는 MEMORY에서 축적된 검색 대상 텍스트 단위
+- **Vector Index Record**: 텍스트와 임베딩, 출처, 시각을 함께 보관하는 시맨틱 검색 단위
+- **Search Mode**: grep, semantic, hybrid 중 하나의 검색 방식
+
+## Success Criteria
+
+- 자연어 기반 질의에서 키워드 일치만 사용하는 현재 방식보다 더 관련성 높은 결과를 제공한다.
+- vector-memory 미설치 환경에서 기존 검색 동작이 회귀하지 않는다.
+- hybrid 검색이 grep 단독보다 더 많은 유효 맥락을 반환한다.
+- assistant가 긴 대화 이력을 더 적은 재질문으로 회수할 수 있다.
+
+## Assumptions
+
+- 로컬 임베딩 모델이 기본값이며 외부 embedding provider는 선택 사항이다.
+- 1단계는 사용자별 메모리 분리보다 검색 품질 향상에 집중한다.
+- 기존 파일 기반 메모리 구조는 유지하고 벡터 인덱스는 보조 레이어로 추가한다.
+
 ## 현재 상태 분석
 
 ### 현재 메모리 아키텍처 (`agent/memory.py`)
