@@ -1,6 +1,7 @@
 """shacs-bot CLI 커멘드"""
 
 import asyncio
+from datetime import datetime
 import os
 import select
 import signal
@@ -788,6 +789,160 @@ def agent(
                 await agent_loop.close_mcp()
 
         asyncio.run(run_interactive())
+
+
+eval_app = typer.Typer(help="Evaluation harness commands")
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.command("run")
+def eval_run(
+    cases: Path | None = typer.Argument(None, help="평가 케이스 JSON 파일 경로"),
+    variant: list[str] | None = typer.Option(None, "--variant", help="평가 variant preset 이름"),
+    case_id: str | None = typer.Option(None, "--case", help="특정 caseId만 실행"),
+    output: Path | None = typer.Option(None, "--output", help="결과 출력 디렉터리"),
+) -> None:
+    from shacs_bot.evals import (
+        EvaluationRunner,
+        EvaluationStorage,
+        get_default_cases_path,
+        load_cases_file,
+        resolve_variant,
+    )
+    from shacs_bot.agent.session.manager import SessionManager
+    from shacs_bot.providers.failover import FailoverManager
+
+    config: Config = load_config()
+    sync_workspace_template(workspace=config.workspace_path)
+    cases_path: Path = cases or get_default_cases_path(config.workspace_path)
+
+    from shacs_bot.observability.tracing import init_tracing
+
+    init_tracing(config)
+
+    hooks: HookRegistry = HookRegistry() if config.hooks.enabled else NoOpHookRegistry()
+    if config.hooks.enabled:
+        register_example_hooks(hooks, redact_payloads=config.hooks.redact_payloads)
+
+    bus: MessageBus = MessageBus()
+    provider = _make_provider(config)
+    session_manager: SessionManager = SessionManager(config.workspace_path)
+    cron_store_path: Path = get_cron_dir() / "jobs.json"
+    cron: CronService = CronService(cron_store_path)
+
+    provider.generation.temperature = config.agents.defaults.temperature
+    provider.generation.max_tokens = config.agents.defaults.max_tokens
+    provider.generation.reasoning_effort = config.agents.defaults.reasoning_effort
+
+    cli_provider_name: str | None = config.get_provider_name()
+    cli_failover: FailoverManager | None = (
+        FailoverManager(config) if config.failover.enabled else None
+    )
+
+    agent_loop: AgentLoop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=config.workspace_path,
+        model=config.agents.defaults.model,
+        max_iterations=config.agents.defaults.max_tool_iterations,
+        memory_window=config.agents.defaults.memory_window,
+        brave_api_key=config.tools.web.search.api_key or None,
+        web_proxy=config.tools.web.proxy or None,
+        exec_config=config.tools.exec,
+        cron_service=cron,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
+        mcp_servers=config.tools.mcp_servers,
+        channels_config=config.channels,
+        failover_manager=cli_failover,
+        provider_name=cli_provider_name,
+        usage_config=config.usage,
+        media_config=config.tools.media,
+        media_api_key=_resolve_media_key(config),
+        media_base_url=_resolve_media_base_url(config),
+        skill_approval=config.tools.skill_approval,
+        hooks=hooks,
+    )
+
+    try:
+        try:
+            loaded_cases = load_cases_file(cases_path)
+        except ValueError as exc:
+            console.print(f"[red]에러:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
+        selected_cases = loaded_cases
+        if case_id is not None:
+            selected_cases = [case for case in loaded_cases if case.case_id == case_id]
+            if not selected_cases:
+                console.print(f"[red]에러:[/red] caseId '{case_id}'를 찾을 수 없습니다.")
+                raise typer.Exit(1)
+
+        if not selected_cases:
+            console.print("[red]에러:[/red] 실행할 평가 케이스가 없습니다.")
+            raise typer.Exit(1)
+
+        variant_names: list[str] = variant or ["default"]
+        try:
+            variants = [resolve_variant(name) for name in variant_names]
+        except ValueError as exc:
+            console.print(f"[red]에러:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
+        base_run_id: str = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        run_id: str = base_run_id
+
+        runner = EvaluationRunner(
+            agent_loop=agent_loop,
+            storage=EvaluationStorage(config.workspace_path),
+            session_manager=session_manager,
+        )
+
+        async def _run_eval() -> None:
+            summary = await runner.run_cases(
+                cases=selected_cases,
+                variants=variants,
+                output_dir=output,
+                cases_file=cases_path,
+                run_id=run_id,
+            )
+            run_dir: Path | None = runner.last_run_dir
+            summary_path: Path = (run_dir / "summary.json") if run_dir else Path("summary.json")
+
+            console.print(
+                f"[green]✓[/green] 평가 완료: {len(selected_cases)}개 case, {len(variants)}개 variant"
+            )
+            console.print(f"[cyan]cases[/cyan]: {cases_path}")
+            console.print(f"[cyan]run[/cyan]: {run_dir if run_dir else '-'}")
+            console.print(f"[cyan]summary[/cyan]: {summary_path}")
+
+            table: Table = Table(title="Evaluation Summary")
+            table.add_column("Variant", style="cyan")
+            table.add_column("Total", justify="right")
+            table.add_column("Success", justify="right", style="green")
+            table.add_column("Task Fail", justify="right", style="yellow")
+            table.add_column("Infra Err", justify="right", style="red")
+            table.add_column("Avg Tools", justify="right")
+            table.add_column("Prompt", justify="right")
+            table.add_column("Completion", justify="right")
+
+            for item in summary.variants:
+                table.add_row(
+                    item.variant,
+                    str(item.total),
+                    str(item.success),
+                    str(item.task_failure),
+                    str(item.infra_error),
+                    f"{item.avg_tool_calls:.2f}",
+                    str(item.prompt_tokens),
+                    str(item.completion_tokens),
+                )
+
+            console.print(table)
+
+        asyncio.run(_run_eval())
+    finally:
+        asyncio.run(agent_loop.close_mcp())
 
 
 # ============================================================================

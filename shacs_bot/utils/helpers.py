@@ -223,6 +223,7 @@ def sync_workspace_template(workspace: Path, silent: bool = False) -> list[str]:
 
     _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "HISTORY.md")
+    _write(tpl / "evals" / "cases" / "default.json", workspace / "evals" / "cases" / "default.json")
 
     (workspace / "skills").mkdir(exist_ok=True)
 

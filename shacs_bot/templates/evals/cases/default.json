@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "caseId": "workspace-summary-001",
+      "input": "현재 워크스페이스의 핵심 파일과 디렉터리를 파악해서 간단히 요약해줘.",
+      "expectedMode": "response",
+      "tags": ["workspace", "summary"],
+      "timeoutSeconds": 120,
+      "notes": "환경 부트스트랩과 기본 컨텍스트 품질을 확인하는 기본 응답형 케이스"
+    },
+    {
+      "caseId": "agents-read-001",
+      "input": "AGENTS.md를 읽고, 작업 시 반드시 지켜야 하는 규칙을 요약해줘.",
+      "expectedMode": "tool_use",
+      "tags": ["bootstrap", "docs", "tool"],
+      "timeoutSeconds": 120,
+      "notes": "문서 읽기 도구 사용이 필요한 기본 tool-use 케이스"
+    },
+    {
+      "caseId": "docs-log-001",
+      "input": "docs/specs/evaluation-harness 아래의 문서를 확인하고 evaluation harness의 목적을 한 문단으로 설명해줘.",
+      "expectedMode": "tool_use",
+      "tags": ["docs", "evals", "tool"],
+      "timeoutSeconds": 120,
+      "notes": "evaluation harness 관련 문서를 실제로 탐색하는 케이스"
+    }
+  ]
+}

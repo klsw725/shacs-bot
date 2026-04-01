@@ -79,7 +79,6 @@ packages = ["shacs_bot"]
 [tool.hatch.build]
 include = [
     "shacs_bot/**/*.py",
-    "shacs_bot/templates/**/*.md",
     "shacs_bot/skills/**/*.md",
     "shacs_bot/skills/**/*.sh",
 ]
@@ -91,6 +90,9 @@ include = [
     "README.md",
     "LICENSE",
 ]
+
+[tool.hatch.build.targets.sdist.force-include]
+"shacs_bot/templates" = "shacs_bot/templates"
 
 [tool.hatch.build.targets.wheel.force-include]
 "bridge" = "shacs_bot/bridge"
@@ -106,4 +108,3 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-

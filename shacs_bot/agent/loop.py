@@ -9,11 +9,11 @@ import weakref
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Awaitable, Any
+from typing import Callable, Awaitable, Any, Mapping, Protocol
 
 from loguru import logger
 
-from shacs_bot.agent.context import ContextBuilder
+from shacs_bot.agent.context import ContextBuilder, ContextVariant
 from shacs_bot.agent.execution_health import ExecutionHealthMonitor
 from shacs_bot.agent.hooks import (
     AFTER_LLM_CALL,
@@ -39,6 +39,16 @@ from shacs_bot.agent.usage import TurnUsage, UsageTracker
 from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig, MediaConfig, UsageConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from shacs_bot.providers.failover import FailoverManager
+
+
+class AgentLoopObserver(Protocol):
+    def on_llm_response(self, response: LLMResponse) -> None: ...
+
+    def on_tool_result(
+        self, tool_name: str, arguments: Mapping[str, object], result: str
+    ) -> None: ...
+
+    def on_final(self, final_content: str | None, finish_reason: str) -> None: ...
 
 
 class AgentLoop:
@@ -327,6 +337,8 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        observer: AgentLoopObserver | None = None,
+        variant: ContextVariant | None = None,
     ) -> OutboundMessage | None:
         """단일 인바운드 메시지를 처리하고 응답을 반환합니다."""
         # 시스템 메시지: chat_id에서 파싱 ("channel:chat_id")
@@ -346,25 +358,30 @@ class AgentLoop:
 
             key: str = msg.session_key_override or f"{channel}:{chat_id}"
             session: Session = self._sessions.get_or_create(key=key)
-            await self._hooks.emit(HookContext(
-                event=SESSION_LOADED,
-                session_key=key,
-                channel=channel,
-            ))
+            await self._hooks.emit(
+                HookContext(
+                    event=SESSION_LOADED,
+                    session_key=key,
+                    channel=channel,
+                )
+            )
             history: list[dict[str, Any]] = session.get_history(max_messages=0)
-            await self._hooks.emit(HookContext(
-                event=BEFORE_CONTEXT_BUILD,
-                session_key=key,
-                channel=channel,
-            ))
+            await self._hooks.emit(
+                HookContext(
+                    event=BEFORE_CONTEXT_BUILD,
+                    session_key=key,
+                    channel=channel,
+                )
+            )
             messages: list[dict[str, Any]] = self._context.build_messages(
                 history=history,
                 current_messages=msg.content,
                 channel=channel,
                 chat_id=chat_id,
+                variant=variant,
             )
             final_content, _, all_msg, _ = await self._run_agent_loop(
-                messages, _session_key=key, _channel=channel
+                messages, _session_key=key, _channel=channel, observer=observer
             )
             self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
 
@@ -382,11 +399,13 @@ class AgentLoop:
 
         key: str = session_key or msg.session_key
         session: Session = self._sessions.get_or_create(key=key)
-        await self._hooks.emit(HookContext(
-            event=SESSION_LOADED,
-            session_key=key,
-            channel=msg.channel,
-        ))
+        await self._hooks.emit(
+            HookContext(
+                event=SESSION_LOADED,
+                session_key=key,
+                channel=msg.channel,
+            )
+        )
 
         # Pending approval 응답 감지
         user_text: str = msg.content.strip().lower()
@@ -520,17 +539,20 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history: list[dict[str, Any]] = session.get_history(max_messages=self._memory_window)
-        await self._hooks.emit(HookContext(
-            event=BEFORE_CONTEXT_BUILD,
-            session_key=key,
-            channel=msg.channel,
-        ))
+        await self._hooks.emit(
+            HookContext(
+                event=BEFORE_CONTEXT_BUILD,
+                session_key=key,
+                channel=msg.channel,
+            )
+        )
         initial_messages: list[dict[str, Any]] = self._context.build_messages(
             history=history,
             current_messages=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
+            variant=variant,
         )
 
         async def _bus_progress(
@@ -554,6 +576,7 @@ class AgentLoop:
             on_progress=on_progress or _bus_progress,
             _session_key=key,
             _channel=msg.channel,
+            observer=observer,
         )
         if final_content is None:
             final_content = "처리는 완료했지만 제공할 응답이 없습니다."
@@ -604,6 +627,7 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
         _session_key: str | None = None,
         _channel: str | None = None,
+        observer: AgentLoopObserver | None = None,
     ) -> tuple[str | None, list[str], list[dict[str, Any]], TurnUsage]:
         from shacs_bot.observability.tracing import span as otel_span
 
@@ -612,14 +636,17 @@ class AgentLoop:
         tools_used: list[str] = []
         health: ExecutionHealthMonitor = ExecutionHealthMonitor()
         turn_usage: TurnUsage = TurnUsage(model=self._model, provider=self._provider_name or "")
+        final_finish_reason: str = ""
 
         for _ in range(self._max_iterations):
-            await self._hooks.emit(HookContext(
-                event=BEFORE_LLM_CALL,
-                session_key=_session_key,
-                channel=_channel,
-                payload={"model": self._model, "messages_count": len(messages)},
-            ))
+            await self._hooks.emit(
+                HookContext(
+                    event=BEFORE_LLM_CALL,
+                    session_key=_session_key,
+                    channel=_channel,
+                    payload={"model": self._model, "messages_count": len(messages)},
+                )
+            )
             with otel_span("llm_call", {"model": self._model}) as llm_span:
                 response: LLMResponse = await self._provider.chat_with_retry(
                     messages=messages,
@@ -638,20 +665,28 @@ class AgentLoop:
                         "cache.read_tokens", response.usage.get("cache_read_input_tokens", 0)
                     )
                 turn_usage.accumulate(response.usage, self._model, self._provider_name or "")
-            await self._hooks.emit(HookContext(
-                event=AFTER_LLM_CALL,
-                session_key=_session_key,
-                channel=_channel,
-                payload={
-                    "model": self._model,
-                    "finish_reason": response.finish_reason,
-                    "has_tool_calls": response.has_tool_calls,
-                    "usage": {
-                        "prompt_tokens": response.usage.get("prompt_tokens", 0),
-                        "completion_tokens": response.usage.get("completion_tokens", 0),
+            final_finish_reason = response.finish_reason
+            if observer:
+                try:
+                    observer.on_llm_response(response)
+                except Exception as e:
+                    logger.warning("AgentLoop observer on_llm_response 실패: {}", e)
+            await self._hooks.emit(
+                HookContext(
+                    event=AFTER_LLM_CALL,
+                    session_key=_session_key,
+                    channel=_channel,
+                    payload={
+                        "model": self._model,
+                        "finish_reason": response.finish_reason,
+                        "has_tool_calls": response.has_tool_calls,
+                        "usage": {
+                            "prompt_tokens": response.usage.get("prompt_tokens", 0),
+                            "completion_tokens": response.usage.get("completion_tokens", 0),
+                        },
                     },
-                },
-            ))
+                )
+            )
             if response.has_tool_calls:
                 if on_progress:
                     thought = self._strip_think(response.content)
@@ -689,6 +724,11 @@ class AgentLoop:
                         session_key=_session_key,
                         channel=_channel,
                     )
+                    if observer:
+                        try:
+                            observer.on_tool_result(tool_call.name, tool_call.arguments, result)
+                        except Exception as e:
+                            logger.warning("AgentLoop observer on_tool_result 실패: {}", e)
                     health.check(tool_call.name, tool_call.arguments, result)
                     messages: list[dict[str, Any]] = self._context.add_tool_result(
                         messages=messages,
@@ -722,6 +762,13 @@ class AgentLoop:
                 final_content = f"""
                    도구 호출 최대 반복 횟수({self._max_iterations})에 도달했지만 작업을 완료하지 못했습니다. 작업을 더 작은 단계로 나누어 다시 시도해 보세요. 
                 """
+                final_finish_reason = "max_iterations"
+
+        if observer:
+            try:
+                observer.on_final(final_content, final_finish_reason)
+            except Exception as e:
+                logger.warning("AgentLoop observer on_final 실패: {}", e)
 
         return final_content, tools_used, messages, turn_usage
 
@@ -796,6 +843,8 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        observer: AgentLoopObserver | None = None,
+        variant: ContextVariant | None = None,
     ) -> str:
         """메시지를 직접 처리합니다(CLI 또는 cron 용도)."""
         await self._connect_mcp()
@@ -804,7 +853,11 @@ class AgentLoop:
             channel=channel, sender_id="user", chat_id=chat_id, content=content
         )
         response: OutboundMessage = await self._process_message(
-            msg=msg, session_key=session_key, on_progress=on_progress
+            msg=msg,
+            session_key=session_key,
+            on_progress=on_progress,
+            observer=observer,
+            variant=variant,
         )
         return response.content if response else ""
 
