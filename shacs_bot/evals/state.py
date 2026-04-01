@@ -35,11 +35,11 @@ class AutoEvalState(EvalBaseModel):
     trigger_schedule_cron_expr: str = ""
     trigger_schedule_tz: str = ""
     last_scheduled_job_id: str = ""
-    trigger_turn_threshold: int = 5
-    trigger_min_interval_minutes: int = 30
-    trigger_session_limit: int = 10
-    trigger_case_limit: int = 20
-    trigger_variants: list[str] = Field(default_factory=lambda: ["default"])
+    trigger_turn_threshold: int = 12
+    trigger_min_interval_minutes: int = 90
+    trigger_session_limit: int = 6
+    trigger_case_limit: int = 12
+    trigger_variants: list[str] = Field(default_factory=lambda: ["default", "strict-completion"])
     completed_turns_since_trigger: int = 0
     last_triggered_at: str = ""
     last_triggered_session_key: str = ""
