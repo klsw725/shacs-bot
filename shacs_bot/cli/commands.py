@@ -18,6 +18,7 @@ from rich.markdown import Markdown
 from rich.table import Table
 
 from shacs_bot import __logo__, __version__
+from shacs_bot.agent.hooks import HookRegistry, NoOpHookRegistry, register_example_hooks
 from shacs_bot.agent.loop import AgentLoop
 from shacs_bot.agent.tools.cron.service import CronService
 from shacs_bot.bus.events import OutboundMessage, InboundMessage
@@ -371,6 +372,9 @@ def gateway(
 
     init_tracing(config)
 
+    hooks: HookRegistry = HookRegistry() if config.hooks.enabled else NoOpHookRegistry()
+    if config.hooks.enabled:
+        register_example_hooks(hooks, redact_payloads=config.hooks.redact_payloads)
     bus: MessageBus = MessageBus()
     provider = _make_provider(config)
     session_manager: SessionManager = SessionManager(config.workspace_path)
@@ -410,7 +414,7 @@ def gateway(
         media_api_key=_resolve_media_key(config),
         media_base_url=_resolve_media_base_url(config),
         skill_approval=config.tools.skill_approval,
-        max_threads=config.agents.max_threads,
+        hooks=hooks,
     )
 
     # 크론 callback 설정 (에이전트 필요)
@@ -465,7 +469,7 @@ def gateway(
 
     hb_cfg: HeartbeatConfig = config.gateway.heartbeat
     # 채널 관리자 생성
-    channels: ChannelManager = ChannelManager(config, bus)
+    channels: ChannelManager = ChannelManager(config, bus, hooks=hooks)
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] 활성화된 채널: {', '.join(channels.enabled_channels)}")
     else:
@@ -531,6 +535,7 @@ def gateway(
         on_notify=on_heartbeat_notify,
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
+        hooks=hooks,
     )
 
     async def run() -> None:
@@ -575,6 +580,9 @@ def agent(
 
     init_tracing(config)
 
+    hooks: HookRegistry = HookRegistry() if config.hooks.enabled else NoOpHookRegistry()
+    if config.hooks.enabled:
+        register_example_hooks(hooks, redact_payloads=config.hooks.redact_payloads)
     bus: MessageBus = MessageBus()
     provider = _make_provider(config)
 
@@ -619,7 +627,7 @@ def agent(
         media_api_key=_resolve_media_key(config),
         media_base_url=_resolve_media_base_url(config),
         skill_approval=config.tools.skill_approval,
-        max_threads=config.agents.max_threads,
+        hooks=hooks,
     )
 
     if message:

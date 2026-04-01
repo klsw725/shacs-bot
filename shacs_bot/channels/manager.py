@@ -2,11 +2,19 @@
 
 import asyncio
 import importlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
+from shacs_bot.agent.hooks import (
+    AFTER_OUTBOUND_SEND,
+    BEFORE_OUTBOUND_SEND,
+    HookContext,
+    HookRegistry,
+    NoOpHookRegistry,
+)
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.channels.base import BaseChannel
@@ -43,9 +51,10 @@ class ChannelManager:
     - 발신(outbound) 메시지 라우팅
     """
 
-    def __init__(self, config: Config, bus: MessageBus):
+    def __init__(self, config: Config, bus: MessageBus, hooks: HookRegistry | None = None):
         self._config = config
         self._bus = bus
+        self._hooks: HookRegistry = hooks or NoOpHookRegistry()
         self._channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
 
@@ -68,7 +77,9 @@ class ChannelManager:
                 mod = importlib.import_module(module_path)
                 cls = getattr(mod, cls_name)
                 extra = self._resolve_extra_kwargs(extra_src)
-                self._channels[attr] = cls(cfg, self._bus, **extra)
+                ch: BaseChannel = cls(cfg, self._bus, **extra)
+                ch.set_hooks(self._hooks)
+                self._channels[attr] = ch
                 logger.info("{} channel enabled", attr)
             except ImportError as e:
                 logger.warning("{} channel not available: {}", attr, e)
@@ -142,9 +153,31 @@ class ChannelManager:
                 channel: BaseChannel | None = self._channels.get(msg.channel)
                 if channel:
                     try:
+                        ctx = HookContext(
+                            event=BEFORE_OUTBOUND_SEND,
+                            channel=msg.channel,
+                            payload={
+                                "content": msg.content,
+                                "media": list(msg.media),
+                                "chat_id": msg.chat_id,
+                            },
+                        )
+                        await self._hooks.emit(ctx)
+                        if self._config.hooks.outbound_mutation_enabled:
+                            new_content: str = ctx.payload.get("content", msg.content)
+                            new_media: list[str] = ctx.payload.get("media", msg.media)
+                            if new_content != msg.content or new_media != msg.media:
+                                msg = replace(msg, content=new_content, media=new_media)
                         await channel.send(msg)
                         if msg.media:
                             self._cleanup_generated_media(msg.media)
+                        await self._hooks.emit(
+                            HookContext(
+                                event=AFTER_OUTBOUND_SEND,
+                                channel=msg.channel,
+                                payload={"chat_id": msg.chat_id},
+                            )
+                        )
                     except Exception as e:
                         logger.error("{}에게 에러 전송: {}", msg.channel, e)
                 else:

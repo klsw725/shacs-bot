@@ -236,7 +236,6 @@ class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
-    max_threads: int = 6  # 동시 실행 서브에이전트 최대 수 (일반 + 스킬 합산)
 
 
 class ProviderConfig(Base):
@@ -386,6 +385,14 @@ class ToolsConfig(Base):
     )  # MCP 서버별 설정 (키는 서버 식별자)
 
 
+class HooksConfig(Base):
+    """Lifecycle hooks configuration."""
+
+    enabled: bool = False
+    outbound_mutation_enabled: bool = False
+    redact_payloads: bool = True
+
+
 class Config(BaseSettings):
     """Root configuration for shacs-bot."""
 
@@ -403,6 +410,7 @@ class Config(BaseSettings):
     usage: UsageConfig = Field(default_factory=UsageConfig)
     failover: FailoverConfig = Field(default_factory=FailoverConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
 
     @property
     def workspace_path(self) -> Path:

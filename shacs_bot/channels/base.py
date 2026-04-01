@@ -1,9 +1,11 @@
 """채팅 인터페이스를 위한 기본 채널 인터페이스"""
+
 from abc import ABC, abstractmethod
 from typing import Any
 
 from loguru import logger
 
+from shacs_bot.agent.hooks import HookContext, HookRegistry, MESSAGE_RECEIVED, NoOpHookRegistry
 from shacs_bot.bus.events import OutboundMessage, InboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import Base
@@ -15,6 +17,7 @@ class BaseChannel(ABC):
 
     각 채널(Telegram, Discord 등)은 shacs-bot 메시지 버스와 통합하기 위해 이 인터페이스를 구현해야 한다.
     """
+
     name: str = "base"
 
     def __init__(self, config: Base, bus: MessageBus):
@@ -28,6 +31,8 @@ class BaseChannel(ABC):
         self._config: Base = config
         self._bus: MessageBus = bus
         self._running: bool = False
+        # ChannelManager may replace this with the live HookRegistry after construction.
+        self._hooks: HookRegistry = NoOpHookRegistry()
 
     @property
     def config(self) -> Any:
@@ -76,16 +81,21 @@ class BaseChannel(ABC):
             return True
 
         sender_str: str = str(sender_id)
-        return (sender_str in allow_list) or any((p in allow_list) for p in sender_str.split("|") if p)
+        return (sender_str in allow_list) or any(
+            (p in allow_list) for p in sender_str.split("|") if p
+        )
+
+    def set_hooks(self, hooks: HookRegistry) -> None:
+        self._hooks = hooks
 
     async def _handle_message(
-            self,
-            sender_id: str,
-            chat_id: str,
-            content: str,
-            media: list[str] | None = None,
-            metadata: dict[str, Any] | None = None,
-            session_key: str | None = None,
+        self,
+        sender_id: str,
+        chat_id: str,
+        content: str,
+        media: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
     ) -> None:
         """
         채팅 플랫폼에서 들어온 메시지를 처리합니다.
@@ -109,6 +119,21 @@ class BaseChannel(ABC):
             )
             return
 
+        resolved_key: str = session_key or f"{self.name}:{chat_id}"
+        await self._hooks.emit(
+            HookContext(
+                event=MESSAGE_RECEIVED,
+                session_key=resolved_key,
+                channel=self.name,
+                payload={
+                    "sender_id": str(sender_id),
+                    "chat_id": str(chat_id),
+                    "content_preview": content[:120] if len(content) > 120 else content,
+                    "has_media": bool(media),
+                },
+            )
+        )
+
         msg: InboundMessage = InboundMessage(
             channel=self.name,
             sender_id=str(sender_id),
@@ -119,6 +144,3 @@ class BaseChannel(ABC):
             session_key_override=session_key,
         )
         await self._bus.publish_inbound(msg)
-
-
-

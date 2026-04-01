@@ -10,6 +10,13 @@ from typing import Any
 
 from loguru import logger
 
+from shacs_bot.agent.hooks import (
+    APPROVAL_REQUESTED,
+    APPROVAL_RESOLVED,
+    HookContext,
+    HookRegistry,
+    NoOpHookRegistry,
+)
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.providers.base import LLMProvider
@@ -36,10 +43,17 @@ def get_pending_approval_for_session(session_key: str) -> str | None:
             return req_id
     return None
 
+
 # Tier 1: 읽기 전용 도구 — LLM 호출 없이 즉시 승인
-ALWAYS_ALLOW: frozenset[str] = frozenset({
-    "read_file", "list_dir", "web_search", "web_fetch", "search_history",
-})
+ALWAYS_ALLOW: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "list_dir",
+        "web_search",
+        "web_fetch",
+        "search_history",
+    }
+)
 
 # Tier 1: 명백히 위험한 exec 패턴 — LLM 호출 없이 즉시 차단
 ALWAYS_DENY_PATTERNS: list[re.Pattern[str]] = [
@@ -82,20 +96,19 @@ class ApprovalGate:
         session_history: list[dict[str, Any]],
         bus: MessageBus,
         origin: dict[str, Any],
-        entity_name: str,
+        skill_name: str,
         workspace: Path,
-        entity_type: str = "스킬",
-        # 하위 호환 — 기존 코드에서 skill_name= 으로 호출하는 경우
-        skill_name: str | None = None,
+        hooks: HookRegistry | None = None,
     ):
         self._mode = mode
         self._provider = provider
         self._model = model
         self._session_history = session_history
         self._bus = bus
-        self._entity_name = skill_name or entity_name
-        self._entity_type = entity_type
+        self._origin = origin
+        self._skill_name = skill_name
         self._workspace = workspace
+        self._hooks: HookRegistry = hooks or NoOpHookRegistry()
 
     async def check(self, tool_name: str, arguments: dict[str, Any]) -> ApprovalDecision:
         if self._mode == "auto":
@@ -110,16 +123,57 @@ class ApprovalGate:
         # Tier 1: 규칙 기반 즉시 판정
         tier1 = self._check_rules(tool_name, arguments)
         if tier1 is not None:
+            await self._hooks.emit(
+                HookContext(
+                    event=APPROVAL_RESOLVED,
+                    session_key=self._origin.get("session_key"),
+                    channel=self._origin.get("channel"),
+                    payload={
+                        "tool": tool_name,
+                        "tier": 1,
+                        "denied": tier1.denied,
+                        "reason": tier1.reason,
+                    },
+                )
+            )
             return tier1
 
         # Tier 2: workspace 내 파일 쓰기
         if tool_name in ("write_file", "edit_file"):
             path = Path(arguments.get("path", "")).expanduser().resolve()
             if str(path).startswith(str(self._workspace)):
-                return ApprovalDecision(denied=False, reason="workspace 내 파일")
+                decision = ApprovalDecision(denied=False, reason="workspace 내 파일")
+                await self._hooks.emit(
+                    HookContext(
+                        event=APPROVAL_RESOLVED,
+                        session_key=self._origin.get("session_key"),
+                        channel=self._origin.get("channel"),
+                        payload={
+                            "tool": tool_name,
+                            "tier": 2,
+                            "denied": False,
+                            "reason": decision.reason,
+                        },
+                    )
+                )
+                return decision
 
         # Tier 3: reasoning-blind LLM 분류기
-        return await self._check_llm(tool_name, arguments)
+        result = await self._check_llm(tool_name, arguments)
+        await self._hooks.emit(
+            HookContext(
+                event=APPROVAL_RESOLVED,
+                session_key=self._origin.get("session_key"),
+                channel=self._origin.get("channel"),
+                payload={
+                    "tool": tool_name,
+                    "tier": 3,
+                    "denied": result.denied,
+                    "reason": result.reason,
+                },
+            )
+        )
+        return result
 
     async def _check_llm(self, tool_name: str, arguments: dict[str, Any]) -> ApprovalDecision:
         """reasoning-blind LLM 분류기. 사용자 메시지 + 도구 호출만 전달."""
@@ -128,7 +182,9 @@ class ApprovalGate:
             if msg.get("role") == "user":
                 filtered.append(msg)
             elif msg.get("role") == "assistant" and msg.get("tool_calls"):
-                filtered.append({"role": "assistant", "content": "", "tool_calls": msg["tool_calls"]})
+                filtered.append(
+                    {"role": "assistant", "content": "", "tool_calls": msg["tool_calls"]}
+                )
 
         args_str: str = json.dumps(arguments, ensure_ascii=False, indent=2)
         try:
@@ -141,7 +197,7 @@ class ApprovalGate:
                             "role": "user",
                             "content": (
                                 f"도구 호출 승인 요청:\n"
-                                f"{self._entity_type}: {self._entity_name}\n"
+                                f"스킬: {self._skill_name}\n"
                                 f"도구: {tool_name}\n"
                                 f"인자: {args_str}"
                             ),
@@ -179,13 +235,26 @@ class ApprovalGate:
         future: asyncio.Future[bool] = loop.create_future()
         _pending_approvals[request_id] = future
 
+        await self._hooks.emit(
+            HookContext(
+                event=APPROVAL_REQUESTED,
+                session_key=session_key,
+                channel=self._origin.get("channel"),
+                payload={
+                    "tool_name": tool_name,
+                    "skill_name": self._skill_name,
+                    "request_id": request_id,
+                },
+            )
+        )
+
         args_str: str = json.dumps(arguments, ensure_ascii=False, indent=2)
         await self._bus.publish_outbound(
             OutboundMessage(
                 channel=self._origin["channel"],
                 chat_id=self._origin["chat_id"],
                 content=(
-                    f"\U0001f6e1 {self._entity_type} '{self._entity_name}'이 실행하려 합니다:\n"
+                    f"\U0001f6e1 스킬 '{self._skill_name}'이 실행하려 합니다:\n"
                     f"도구: {tool_name}\n"
                     f"인자: {args_str}\n\n"
                     f"승인하려면 **y**, 거부하려면 **n**을 입력하세요. (60초 후 자동 거부)"
@@ -198,10 +267,26 @@ class ApprovalGate:
             approved: bool = await asyncio.wait_for(future, timeout=60)
             reason: str = "사용자 승인" if approved else "사용자 거부"
             logger.info("ApprovalGate(manual): {} → {} ({})", tool_name, reason, request_id)
+            await self._hooks.emit(
+                HookContext(
+                    event=APPROVAL_RESOLVED,
+                    session_key=session_key,
+                    channel=self._origin.get("channel"),
+                    payload={"approved": approved, "reason": reason, "request_id": request_id},
+                )
+            )
             return ApprovalDecision(denied=not approved, reason=reason)
         except asyncio.TimeoutError:
             _pending_approvals.pop(request_id, None)
             logger.warning("ApprovalGate(manual): {} 타임아웃, 기본 거부", tool_name)
+            await self._hooks.emit(
+                HookContext(
+                    event=APPROVAL_RESOLVED,
+                    session_key=session_key,
+                    channel=self._origin.get("channel"),
+                    payload={"approved": False, "reason": "timeout", "request_id": request_id},
+                )
+            )
             return ApprovalDecision(denied=True, reason="승인 타임아웃 (60초)")
 
     # ── 공통: Tier 1 규칙 ───────────────────────────────────────────

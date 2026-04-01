@@ -15,6 +15,15 @@ from loguru import logger
 
 from shacs_bot.agent.context import ContextBuilder
 from shacs_bot.agent.execution_health import ExecutionHealthMonitor
+from shacs_bot.agent.hooks import (
+    AFTER_LLM_CALL,
+    BEFORE_CONTEXT_BUILD,
+    BEFORE_LLM_CALL,
+    SESSION_LOADED,
+    HookContext,
+    HookRegistry,
+    NoOpHookRegistry,
+)
 from shacs_bot.agent.memory import MemoryStore, MemoryConsolidator
 from shacs_bot.agent.session.manager import SessionManager, Session
 from shacs_bot.agent.subagent import SubagentManager
@@ -70,10 +79,10 @@ class AgentLoop:
         media_api_key: str | None = None,
         media_base_url: str | None = None,
         skill_approval: str = "auto",
-        max_threads: int = 6,
+        hooks: HookRegistry | None = None,
     ):
         self._bus: MessageBus = bus
-        self._max_threads: int = max_threads
+        self._hooks: HookRegistry = hooks or NoOpHookRegistry()
         self._channels_config: ChannelsConfig = channels_config
         self._workspace: Path = workspace
 
@@ -101,12 +110,9 @@ class AgentLoop:
 
             self._usage_tracker = UsageTracker(get_usage_dir())
 
-        from shacs_bot.agent.agents import AgentRegistry
-
-        self._agent_registry = AgentRegistry(workspace=self._workspace)
-        self._context = ContextBuilder(self._workspace, agent_registry=self._agent_registry)
+        self._context = ContextBuilder(self._workspace)
         self._sessions: SessionManager = session_manager or SessionManager(self._workspace)
-        self._tools: ToolRegistry = ToolRegistry()
+        self._tools: ToolRegistry = ToolRegistry(hooks=self._hooks)
         self._subagent = SubagentManager(
             provider=self._provider,
             workspace=self._workspace,
@@ -116,8 +122,7 @@ class AgentLoop:
             web_proxy=self._web_proxy,
             exec_config=self._exec_config,
             restrict_to_workspace=self._restrict_to_workspace,
-            max_threads=self._max_threads,
-            agent_registry=self._agent_registry,
+            hooks=self._hooks,
         )
         self._subagent.skill_approval = skill_approval
 
@@ -341,14 +346,26 @@ class AgentLoop:
 
             key: str = msg.session_key_override or f"{channel}:{chat_id}"
             session: Session = self._sessions.get_or_create(key=key)
+            await self._hooks.emit(HookContext(
+                event=SESSION_LOADED,
+                session_key=key,
+                channel=channel,
+            ))
             history: list[dict[str, Any]] = session.get_history(max_messages=0)
+            await self._hooks.emit(HookContext(
+                event=BEFORE_CONTEXT_BUILD,
+                session_key=key,
+                channel=channel,
+            ))
             messages: list[dict[str, Any]] = self._context.build_messages(
                 history=history,
                 current_messages=msg.content,
                 channel=channel,
                 chat_id=chat_id,
             )
-            final_content, _, all_msg, _ = await self._run_agent_loop(messages)
+            final_content, _, all_msg, _ = await self._run_agent_loop(
+                messages, _session_key=key, _channel=channel
+            )
             self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
 
             self._sessions.save(session)
@@ -365,6 +382,11 @@ class AgentLoop:
 
         key: str = session_key or msg.session_key
         session: Session = self._sessions.get_or_create(key=key)
+        await self._hooks.emit(HookContext(
+            event=SESSION_LOADED,
+            session_key=key,
+            channel=msg.channel,
+        ))
 
         # Pending approval 응답 감지
         user_text: str = msg.content.strip().lower()
@@ -456,8 +478,6 @@ class AgentLoop:
             )
         elif cmd.startswith("/skill trust"):
             return self._handle_skill_trust(msg)
-        elif cmd.startswith("/agent"):
-            return await self._handle_agent_command(msg)
         elif cmd == "/help":
             return OutboundMessage(
                 channel=msg.channel,
@@ -470,7 +490,6 @@ class AgentLoop:
                     "/usage \u2014 토큰 사용량과 비용을 확인합니다\n"
                     "/status \u2014 현재 모델, 세션 상태를 확인합니다\n"
                     "/skill trust \u2014 스킬 승인 모드를 확인하거나 변경합니다\n"
-                    "/agent install|list|remove|update \u2014 에이전트를 관리합니다\n"
                     "/help \u2014 사용 가능한 명령어를 표시합니다"
                 ),
             )
@@ -501,6 +520,11 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history: list[dict[str, Any]] = session.get_history(max_messages=self._memory_window)
+        await self._hooks.emit(HookContext(
+            event=BEFORE_CONTEXT_BUILD,
+            session_key=key,
+            channel=msg.channel,
+        ))
         initial_messages: list[dict[str, Any]] = self._context.build_messages(
             history=history,
             current_messages=msg.content,
@@ -526,7 +550,10 @@ class AgentLoop:
             )
 
         final_content, _, all_msg, turn_usage = await self._run_agent_loop(
-            init_messages=initial_messages, on_progress=on_progress or _bus_progress
+            init_messages=initial_messages,
+            on_progress=on_progress or _bus_progress,
+            _session_key=key,
+            _channel=msg.channel,
         )
         if final_content is None:
             final_content = "처리는 완료했지만 제공할 응답이 없습니다."
@@ -575,6 +602,8 @@ class AgentLoop:
         self,
         init_messages: list[dict[str, Any]],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        _session_key: str | None = None,
+        _channel: str | None = None,
     ) -> tuple[str | None, list[str], list[dict[str, Any]], TurnUsage]:
         from shacs_bot.observability.tracing import span as otel_span
 
@@ -585,6 +614,12 @@ class AgentLoop:
         turn_usage: TurnUsage = TurnUsage(model=self._model, provider=self._provider_name or "")
 
         for _ in range(self._max_iterations):
+            await self._hooks.emit(HookContext(
+                event=BEFORE_LLM_CALL,
+                session_key=_session_key,
+                channel=_channel,
+                payload={"model": self._model, "messages_count": len(messages)},
+            ))
             with otel_span("llm_call", {"model": self._model}) as llm_span:
                 response: LLMResponse = await self._provider.chat_with_retry(
                     messages=messages,
@@ -603,6 +638,20 @@ class AgentLoop:
                         "cache.read_tokens", response.usage.get("cache_read_input_tokens", 0)
                     )
                 turn_usage.accumulate(response.usage, self._model, self._provider_name or "")
+            await self._hooks.emit(HookContext(
+                event=AFTER_LLM_CALL,
+                session_key=_session_key,
+                channel=_channel,
+                payload={
+                    "model": self._model,
+                    "finish_reason": response.finish_reason,
+                    "has_tool_calls": response.has_tool_calls,
+                    "usage": {
+                        "prompt_tokens": response.usage.get("prompt_tokens", 0),
+                        "completion_tokens": response.usage.get("completion_tokens", 0),
+                    },
+                },
+            ))
             if response.has_tool_calls:
                 if on_progress:
                     thought = self._strip_think(response.content)
@@ -634,7 +683,12 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    result: str = await self._tools.execute(tool_call.name, tool_call.arguments)
+                    result: str = await self._tools.execute(
+                        tool_call.name,
+                        tool_call.arguments,
+                        session_key=_session_key,
+                        channel=_channel,
+                    )
                     health.check(tool_call.name, tool_call.arguments, result)
                     messages: list[dict[str, Any]] = self._context.add_tool_result(
                         messages=messages,
@@ -784,78 +838,6 @@ class AgentLoop:
                     skill_name: str = path.split("/skills/")[-1].split("/")[0]
                     return f"\U0001f527 {skill_name} 스킬 사용 중"
         return None
-
-    async def _handle_agent_command(self, msg: InboundMessage) -> OutboundMessage:
-        """'/agent install|list|remove|update' 슬래시 명령어를 처리합니다."""
-        from shacs_bot.agent.agent_installer import AgentInstaller
-
-        parts: list[str] = msg.content.strip().split()
-        sub = parts[1] if len(parts) > 1 else ""
-        installer = AgentInstaller(self._workspace)
-
-        if sub == "install" and len(parts) >= 3:
-            git_url: str = parts[2]
-            result = await installer.install(git_url)
-            if result.success and self._agent_registry:
-                self._agent_registry.reload()
-            return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=result.message,
-            )
-
-        if sub == "list":
-            installed = installer.list_installed()
-            # built-in 에이전트
-            lines: list[str] = ["\U0001f916 에이전트 목록\n"]
-            if self._agent_registry:
-                lines.append("**Built-in:**")
-                for a in self._agent_registry.list_agents():
-                    if a.source == "builtin":
-                        lines.append(f"  • {a.name} — {a.description}")
-                ws_agents = [a for a in self._agent_registry.list_agents() if a.source == "workspace"]
-                if ws_agents:
-                    lines.append("\n**Workspace (ApprovalGate 적용):**")
-                    for a in ws_agents:
-                        record = next((r for r in installed if r.name == a.name), None)
-                        src = f" ({record.git_url})" if record else ""
-                        lines.append(f"  • {a.name} — {a.description}{src}")
-                user_agents = [a for a in self._agent_registry.list_agents() if a.source == "user"]
-                if user_agents:
-                    lines.append("\n**User:**")
-                    for a in user_agents:
-                        lines.append(f"  • {a.name} — {a.description}")
-            return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
-            )
-
-        if sub == "remove" and len(parts) >= 3:
-            name: str = parts[2]
-            result_msg: str = installer.remove(name)
-            if self._agent_registry:
-                self._agent_registry.reload()
-            return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=result_msg,
-            )
-
-        if sub == "update":
-            name = parts[2] if len(parts) >= 3 else None
-            result_msg = await installer.update(name)
-            if self._agent_registry:
-                self._agent_registry.reload()
-            return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=result_msg,
-            )
-
-        return OutboundMessage(
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            content=(
-                "\U0001f916 에이전트 관리 명령어:\n\n"
-                "`/agent install <git-url>` — Git 저장소에서 에이전트 설치\n"
-                "`/agent list` — 설치된 에이전트 목록\n"
-                "`/agent remove <name>` — 에이전트 삭제\n"
-                "`/agent update [name]` — 에이전트 업데이트"
-            ),
-        )
 
     def _handle_skill_trust(self, msg: InboundMessage) -> OutboundMessage:
         """'/skill trust [auto|manual|off]' 슬래시 명령어를 처리합니다."""
