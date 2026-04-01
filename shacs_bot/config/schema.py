@@ -236,6 +236,7 @@ class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    max_threads: int = 6  # 동시 실행 서브에이전트 최대 수 (일반 + 스킬 합산)
 
 
 class ProviderConfig(Base):

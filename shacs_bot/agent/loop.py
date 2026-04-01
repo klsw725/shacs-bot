@@ -70,8 +70,10 @@ class AgentLoop:
         media_api_key: str | None = None,
         media_base_url: str | None = None,
         skill_approval: str = "auto",
+        max_threads: int = 6,
     ):
         self._bus: MessageBus = bus
+        self._max_threads: int = max_threads
         self._channels_config: ChannelsConfig = channels_config
         self._workspace: Path = workspace
 
@@ -99,7 +101,10 @@ class AgentLoop:
 
             self._usage_tracker = UsageTracker(get_usage_dir())
 
-        self._context = ContextBuilder(self._workspace)
+        from shacs_bot.agent.agents import AgentRegistry
+
+        self._agent_registry = AgentRegistry(workspace=self._workspace)
+        self._context = ContextBuilder(self._workspace, agent_registry=self._agent_registry)
         self._sessions: SessionManager = session_manager or SessionManager(self._workspace)
         self._tools: ToolRegistry = ToolRegistry()
         self._subagent = SubagentManager(
@@ -111,6 +116,8 @@ class AgentLoop:
             web_proxy=self._web_proxy,
             exec_config=self._exec_config,
             restrict_to_workspace=self._restrict_to_workspace,
+            max_threads=self._max_threads,
+            agent_registry=self._agent_registry,
         )
         self._subagent.skill_approval = skill_approval
 
@@ -449,6 +456,8 @@ class AgentLoop:
             )
         elif cmd.startswith("/skill trust"):
             return self._handle_skill_trust(msg)
+        elif cmd.startswith("/agent"):
+            return await self._handle_agent_command(msg)
         elif cmd == "/help":
             return OutboundMessage(
                 channel=msg.channel,
@@ -461,6 +470,7 @@ class AgentLoop:
                     "/usage \u2014 토큰 사용량과 비용을 확인합니다\n"
                     "/status \u2014 현재 모델, 세션 상태를 확인합니다\n"
                     "/skill trust \u2014 스킬 승인 모드를 확인하거나 변경합니다\n"
+                    "/agent install|list|remove|update \u2014 에이전트를 관리합니다\n"
                     "/help \u2014 사용 가능한 명령어를 표시합니다"
                 ),
             )
@@ -774,6 +784,78 @@ class AgentLoop:
                     skill_name: str = path.split("/skills/")[-1].split("/")[0]
                     return f"\U0001f527 {skill_name} 스킬 사용 중"
         return None
+
+    async def _handle_agent_command(self, msg: InboundMessage) -> OutboundMessage:
+        """'/agent install|list|remove|update' 슬래시 명령어를 처리합니다."""
+        from shacs_bot.agent.agent_installer import AgentInstaller
+
+        parts: list[str] = msg.content.strip().split()
+        sub = parts[1] if len(parts) > 1 else ""
+        installer = AgentInstaller(self._workspace)
+
+        if sub == "install" and len(parts) >= 3:
+            git_url: str = parts[2]
+            result = await installer.install(git_url)
+            if result.success and self._agent_registry:
+                self._agent_registry.reload()
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=result.message,
+            )
+
+        if sub == "list":
+            installed = installer.list_installed()
+            # built-in 에이전트
+            lines: list[str] = ["\U0001f916 에이전트 목록\n"]
+            if self._agent_registry:
+                lines.append("**Built-in:**")
+                for a in self._agent_registry.list_agents():
+                    if a.source == "builtin":
+                        lines.append(f"  • {a.name} — {a.description}")
+                ws_agents = [a for a in self._agent_registry.list_agents() if a.source == "workspace"]
+                if ws_agents:
+                    lines.append("\n**Workspace (ApprovalGate 적용):**")
+                    for a in ws_agents:
+                        record = next((r for r in installed if r.name == a.name), None)
+                        src = f" ({record.git_url})" if record else ""
+                        lines.append(f"  • {a.name} — {a.description}{src}")
+                user_agents = [a for a in self._agent_registry.list_agents() if a.source == "user"]
+                if user_agents:
+                    lines.append("\n**User:**")
+                    for a in user_agents:
+                        lines.append(f"  • {a.name} — {a.description}")
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
+            )
+
+        if sub == "remove" and len(parts) >= 3:
+            name: str = parts[2]
+            result_msg: str = installer.remove(name)
+            if self._agent_registry:
+                self._agent_registry.reload()
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=result_msg,
+            )
+
+        if sub == "update":
+            name = parts[2] if len(parts) >= 3 else None
+            result_msg = await installer.update(name)
+            if self._agent_registry:
+                self._agent_registry.reload()
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=result_msg,
+            )
+
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                "\U0001f916 에이전트 관리 명령어:\n\n"
+                "`/agent install <git-url>` — Git 저장소에서 에이전트 설치\n"
+                "`/agent list` — 설치된 에이전트 목록\n"
+                "`/agent remove <name>` — 에이전트 삭제\n"
+                "`/agent update [name]` — 에이전트 업데이트"
+            ),
+        )
 
     def _handle_skill_trust(self, msg: InboundMessage) -> OutboundMessage:
         """'/skill trust [auto|manual|off]' 슬래시 명령어를 처리합니다."""
