@@ -125,10 +125,10 @@ background_job_completed
 
 ## 검증 기준
 
-- [ ] hooks 비활성화 시 기존 gateway/chat 동작 무변경
-- [ ] inbound → llm → tool → outbound 이벤트가 중복 없이 발생
-- [ ] 훅 핸들러 예외가 메인 응답을 중단시키지 않음
-- [ ] approval / heartbeat 관련 이벤트가 관측 가능
+- [x] hooks 비활성화 시 기존 gateway/chat 동작 무변경
+- [x] inbound → llm → tool → outbound 이벤트가 중복 없이 발생
+- [x] 훅 핸들러 예외가 메인 응답을 중단시키지 않음
+- [x] approval / heartbeat 관련 이벤트가 관측 가능
 
 ## Must NOT
 

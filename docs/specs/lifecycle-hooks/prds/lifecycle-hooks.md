@@ -80,16 +80,16 @@ HookRegistry + HookContext를 도입해, assistant lifecycle 경계마다 명시
 
 ## 마일스톤
 
-- [ ] **M1: HookRegistry와 context 모델 추가**
+- [x] **M1: HookRegistry와 context 모델 추가**
   `agent/hooks.py`에 registry, context, safe emit 구현.
 
-- [ ] **M2: AgentLoop/채널 emit 포인트 연결**
+- [x] **M2: AgentLoop/채널 emit 포인트 연결**
   `agent/loop.py`, `channels/base.py`, `channels/manager.py`에 핵심 이벤트 연결.
 
-- [ ] **M3: approval/heartbeat 통합 및 설정 추가**
+- [x] **M3: approval/heartbeat 통합 및 설정 추가**
   `agent/approval.py`, `heartbeat/service.py`, `config/schema.py` 반영.
 
-- [ ] **M4: 회귀 및 예외 격리 검증**
+- [x] **M4: 회귀 및 예외 격리 검증**
   hooks 비활성화, handler 예외, outbound 수정 시나리오 확인.
 
 ---
@@ -104,7 +104,7 @@ HookRegistry + HookContext를 도입해, assistant lifecycle 경계마다 명시
 
 ## Acceptance Criteria
 
-- [ ] inbound, llm, tool, outbound, approval, heartbeat 이벤트가 정의되고 emit 된다.
-- [ ] hook 미등록 상태에서 기존 기능이 동일하게 동작한다.
-- [ ] 실패하는 hook handler가 있어도 사용자 응답이 전송된다.
-- [ ] approval/heartbeat 이벤트를 기반으로 운영 로그를 남길 수 있다.
+- [x] inbound, llm, tool, outbound, approval, heartbeat 이벤트가 정의되고 emit 된다.
+- [x] hook 미등록 상태에서 기존 기능이 동일하게 동작한다.
+- [x] 실패하는 hook handler가 있어도 사용자 응답이 전송된다.
+- [x] approval/heartbeat 이벤트를 기반으로 운영 로그를 남길 수 있다.

@@ -13,6 +13,7 @@ from loguru import logger
 from shacs_bot.agent.agents import BUILTIN_AGENTS, AgentDefinition, AgentRegistry
 from shacs_bot.agent.approval import ALWAYS_ALLOW, ApprovalGate
 from shacs_bot.agent.context import ContextBuilder
+from shacs_bot.agent.hooks import HookRegistry, NoOpHookRegistry
 from shacs_bot.agent.skills import SkillsLoader
 from shacs_bot.agent.tools.registry import ToolRegistry, create_default_tools
 from shacs_bot.bus.events import InboundMessage
@@ -47,6 +48,7 @@ class SubagentManager:
         restrict_to_workspace: bool = False,
         max_threads: int = 6,
         agent_registry: AgentRegistry | None = None,
+        hooks: HookRegistry | None = None,
     ):
         self._provider: LLMProvider = provider
         self._workspace: Path = workspace
@@ -58,6 +60,7 @@ class SubagentManager:
         self._restrict_to_workspace: bool = restrict_to_workspace
         self._max_threads: int = max_threads
         self._registry: AgentRegistry | None = agent_registry
+        self._hooks: HookRegistry = hooks or NoOpHookRegistry()
 
         self._skill_approval: str = "auto"
         self._running_tasks: dict[str, SubagentTask] = {}
@@ -137,7 +140,13 @@ class SubagentManager:
 
         bg_task.add_done_callback(_cleanup)
 
-        logger.info("서브에이전트 [{}] 생성됨: {} (역할: {}, 모델: {})", task_id, display_label, role, agent_def.model or "기본")
+        logger.info(
+            "서브에이전트 [{}] 생성됨: {} (역할: {}, 모델: {})",
+            task_id,
+            display_label,
+            role,
+            agent_def.model or "기본",
+        )
         return f"서브에이전트 [{display_label}]이(가) 시작되었습니다 (id: {task_id}). 완료되면 알려드리겠습니다."
 
     async def spawn_skill(
@@ -226,7 +235,7 @@ class SubagentManager:
                 brave_api_key=self._brave_api_key,
                 web_proxy=self._web_proxy,
             )
-            tools: ToolRegistry = ToolRegistry()
+            tools: ToolRegistry = ToolRegistry(hooks=self._hooks)
             for tool in all_tools:
                 tools.register(tool)
 
@@ -235,6 +244,7 @@ class SubagentManager:
             if needs_approval:
                 # 세션 히스토리를 가져와서 reasoning-blind 분류기에 전달
                 from shacs_bot.agent.session.manager import SessionManager
+
                 sessions = SessionManager(self._workspace)
                 session_key: str | None = origin.get("session_key")
                 session_history: list[dict[str, Any]] = []
@@ -251,6 +261,7 @@ class SubagentManager:
                     origin=origin,
                     skill_name=skill_name,
                     workspace=self._workspace,
+                    hooks=self._hooks,
                 )
 
             # 5. 시스템 프롬프트 구성
@@ -287,12 +298,15 @@ class SubagentManager:
                         # 승인 게이트 검사 (workspace 스킬 + auto/manual)
                         if approval_gate and tool_call.name not in ALWAYS_ALLOW:
                             decision = await approval_gate.check(
-                                tool_call.name, tool_call.arguments,
+                                tool_call.name,
+                                tool_call.arguments,
                             )
                             if decision.denied:
                                 logger.info(
                                     "스킬 서브에이전트 [{}] 도구 거부: {} ({})",
-                                    task_id, tool_call.name, decision.reason,
+                                    task_id,
+                                    tool_call.name,
+                                    decision.reason,
                                 )
                                 messages.append(
                                     {
@@ -307,7 +321,9 @@ class SubagentManager:
                         args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug(
                             "스킬 서브에이전트 [{}] 실행: {} 인자: {}",
-                            task_id, tool_call.name, args_str,
+                            task_id,
+                            tool_call.name,
+                            args_str,
                         )
                         result: str = await tools.execute(tool_call.name, tool_call.arguments)
                         messages.append(
@@ -327,14 +343,22 @@ class SubagentManager:
 
             logger.info("스킬 서브에이전트 [{}] 완료", task_id)
             await self._announce_result(
-                task_id=task_id, label=label, task=task,
-                result=final_result, origin=origin, status="ok",
+                task_id=task_id,
+                label=label,
+                task=task,
+                result=final_result,
+                origin=origin,
+                status="ok",
             )
         except Exception as e:
             logger.error("스킬 서브에이전트 [{}] 실패: {}", task_id, e)
             await self._announce_result(
-                task_id=task_id, label=label, task=task,
-                result=f"Error: {e}", origin=origin, status="error",
+                task_id=task_id,
+                label=label,
+                task=task,
+                result=f"Error: {e}",
+                origin=origin,
+                status="error",
             )
 
     def _build_skill_prompt(self, skill_content: str, skill_name: str) -> str:
@@ -365,7 +389,13 @@ class SubagentManager:
             agent_def = BUILTIN_AGENTS["executor"]
 
         model: str = agent_def.model or self._model
-        logger.info("서브에이전트 [{}] 실행 시작: {} (에이전트: {}, 모델: {})", task_id, label, agent_def.name, model)
+        logger.info(
+            "서브에이전트 [{}] 실행 시작: {} (에이전트: {}, 모델: {})",
+            task_id,
+            label,
+            agent_def.name,
+            model,
+        )
 
         try:
             all_tools = create_default_tools(
@@ -378,22 +408,26 @@ class SubagentManager:
 
             # 도구 필터링: allowed_tools 또는 sandbox_mode 기반
             effective_tools: list[str] = agent_def.get_effective_tools()
-            tools: ToolRegistry = ToolRegistry()
+            tools: ToolRegistry = ToolRegistry(hooks=self._hooks)
             for tool in all_tools:
                 if not effective_tools or tool.name in effective_tools:
                     tools.register(tool)
 
             # 에이전트별 MCP 연결 (M4)
             from contextlib import AsyncExitStack
+
             mcp_stack: AsyncExitStack | None = None
             if agent_def.mcp_servers:
                 from shacs_bot.agent.tools.mcp import connect_mcp_servers
+
                 mcp_stack = AsyncExitStack()
                 await mcp_stack.__aenter__()
                 try:
                     await connect_mcp_servers(agent_def.mcp_servers, tools, mcp_stack)
                 except Exception as e:
-                    logger.warning("에이전트 [{}] MCP 연결 실패, MCP 없이 계속: {}", agent_def.name, e)
+                    logger.warning(
+                        "에이전트 [{}] MCP 연결 실패, MCP 없이 계속: {}", agent_def.name, e
+                    )
 
             # workspace 에이전트 ApprovalGate (M3)
             approval_gate: ApprovalGate | None = None
@@ -403,6 +437,7 @@ class SubagentManager:
                     effective_mode = "auto"
 
                 from shacs_bot.agent.session.manager import SessionManager
+
                 sessions = SessionManager(self._workspace)
                 session_key: str | None = origin.get("session_key")
                 session_history: list[dict[str, Any]] = []
@@ -417,9 +452,9 @@ class SubagentManager:
                     session_history=session_history,
                     bus=self._bus,
                     origin=origin,
-                    entity_name=agent_def.name,
-                    entity_type="에이전트",
+                    skill_name=agent_def.name,
                     workspace=self._workspace,
+                    hooks=self._hooks,
                 )
 
             system_prompt: str = self._build_subagent_prompt(agent_def)
@@ -455,12 +490,15 @@ class SubagentManager:
                             # workspace 에이전트 ApprovalGate 검사
                             if approval_gate and tool_call.name not in ALWAYS_ALLOW:
                                 decision = await approval_gate.check(
-                                    tool_call.name, tool_call.arguments,
+                                    tool_call.name,
+                                    tool_call.arguments,
                                 )
                                 if decision.denied:
                                     logger.info(
                                         "서브에이전트 [{}] 도구 거부: {} ({})",
-                                        task_id, tool_call.name, decision.reason,
+                                        task_id,
+                                        tool_call.name,
+                                        decision.reason,
                                     )
                                     messages.append(
                                         {
@@ -474,7 +512,10 @@ class SubagentManager:
 
                             args_str: str = json.dumps(tool_call.arguments, ensure_ascii=False)
                             logger.debug(
-                                "서브에이전트 [{}] 실행: {} 인자: {}", task_id, tool_call.name, args_str
+                                "서브에이전트 [{}] 실행: {} 인자: {}",
+                                task_id,
+                                tool_call.name,
+                                args_str,
                             )
                             result: str = await tools.execute(tool_call.name, tool_call.arguments)
                             messages.append(

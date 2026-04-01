@@ -1,10 +1,18 @@
 """Heartbeat 서비스 - 작업을 확인하기 위해 에이전트를 주기적으로 깨우는 기능"""
+
 import asyncio
 from pathlib import Path
 from typing import Callable, Any, Coroutine
 
 from loguru import logger
 
+from shacs_bot.agent.hooks import (
+    BACKGROUND_JOB_COMPLETED,
+    HEARTBEAT_DECIDED,
+    HookContext,
+    HookRegistry,
+    NoOpHookRegistry,
+)
 from shacs_bot.providers.base import LLMProvider, LLMResponse
 
 
@@ -20,6 +28,7 @@ class HeartbeatService:
     `on_execute` 콜백이 전체 에이전트 루프를 통해 작업을 실행하고,
     전달할 결과를 반환한다.
     """
+
     _HEARTBEAT_TOOL = [
         {
             "type": "function",
@@ -46,14 +55,15 @@ class HeartbeatService:
     ]
 
     def __init__(
-            self,
-            workspace: Path,
-            provider: LLMProvider,
-            model: str,
-            on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
-            on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
-            interval_s: int = 30 * 60,
-            enabled: bool = True,
+        self,
+        workspace: Path,
+        provider: LLMProvider,
+        model: str,
+        on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
+        on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
+        interval_s: int = 30 * 60,
+        enabled: bool = True,
+        hooks: HookRegistry | None = None,
     ):
         self._workspace: Path = workspace
         self._provider: LLMProvider = provider
@@ -62,6 +72,7 @@ class HeartbeatService:
         self._on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = on_notify
         self._interval_s: int = interval_s
         self._enabled: bool = enabled
+        self._hooks: HookRegistry = hooks or NoOpHookRegistry()
 
         self._running: bool = False
         self._task: asyncio.Task | None = None
@@ -107,7 +118,13 @@ class HeartbeatService:
         logger.info("Heartbeat: 태스크 확인 중...")
 
         try:
-            action, tasks = await self._decide(content)
+            action, tasks = await self._decide(content or "")
+            await self._hooks.emit(
+                HookContext(
+                    event=HEARTBEAT_DECIDED,
+                    payload={"action": action, "tasks_preview": tasks[:100] if tasks else ""},
+                )
+            )
             if action != "run":
                 logger.info("Heartbeat: OK (보고할께 없습니다)")
                 return
@@ -115,6 +132,12 @@ class HeartbeatService:
             logger.info("Heartbeat: 태스크를 찾았습니다. 실행 중...")
             if self._on_execute:
                 response: str = await self._on_execute(tasks)
+                await self._hooks.emit(
+                    HookContext(
+                        event=BACKGROUND_JOB_COMPLETED,
+                        payload={"result_preview": response[:120] if response else ""},
+                    )
+                )
                 if response and self._on_notify:
                     logger.info("Heartbeat: 완료됨, 응답을 전달합니다.")
                     await self._on_notify(response)
@@ -140,15 +163,16 @@ class HeartbeatService:
             messages=[
                 {
                     "role": "system",
-                    "content": "당신은 하트비트 에이전트입니다. 결정을 보고하기 위해 heartbeat 도구를 호출하세요."
+                    "content": "당신은 하트비트 에이전트입니다. 결정을 보고하기 위해 heartbeat 도구를 호출하세요.",
                 },
                 {
-                   "role": "user",
+                    "role": "user",
                     "content": (
                         "다음 HEARTBEAT.md 내용을 검토하고 활성 작업이 있는지 판단하세요.\n\n"
                         f"{content}"
-                    )
-                }],
+                    ),
+                },
+            ],
             tools=self._HEARTBEAT_TOOL,
             model=self._model,
         )

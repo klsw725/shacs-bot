@@ -3,6 +3,13 @@
 from pathlib import Path
 from typing import Any
 
+from shacs_bot.agent.hooks import (
+    AFTER_TOOL_EXECUTE,
+    BEFORE_TOOL_EXECUTE,
+    HookContext,
+    HookRegistry,
+    NoOpHookRegistry,
+)
 from shacs_bot.agent.tools.base import Tool
 from shacs_bot.config.schema import ExecToolConfig
 
@@ -14,8 +21,9 @@ class ToolRegistry:
     동적 도구 등록 및 실행을 허용합니다.
     """
 
-    def __init__(self):
+    def __init__(self, hooks: HookRegistry | None = None):
         self._tools: dict[str, Tool] = {}
+        self._hooks: HookRegistry = hooks or NoOpHookRegistry()
 
     def register(self, tool: Tool) -> None:
         """도구를 등록합니다."""
@@ -37,7 +45,13 @@ class ToolRegistry:
         """OpenAI 형식의 모든 도구 정의를 가져옵니다."""
         return [tool.to_schema() for tool in self._tools.values()]
 
-    async def execute(self, name: str, params: dict[str, Any]) -> str:
+    async def execute(
+        self,
+        name: str,
+        params: dict[str, Any],
+        session_key: str | None = None,
+        channel: str | None = None,
+    ) -> str:
         """
         이름과 주어진 매개변수로 도구를 실행합니다.
 
@@ -59,29 +73,52 @@ class ToolRegistry:
 
         from shacs_bot.observability.tracing import span as otel_span
 
+        await self._hooks.emit(
+            HookContext(
+                event=BEFORE_TOOL_EXECUTE,
+                session_key=session_key,
+                channel=channel,
+                payload={"tool": name, "params_keys": list(params.keys())},
+            )
+        )
+
+        result: str
         with otel_span("tool_execution", {"tool.name": name}) as s:
             try:
                 errors: list[str] = tool.validate_params(params)
                 if errors:
-                    return f"에러: 도구 '{name}'의 매개변수가 유효하지 않습니다: " + "; ".join(
+                    result = f"에러: 도구 '{name}'의 매개변수가 유효하지 않습니다: " + "; ".join(
                         errors
                     )
-
-                result: str = await tool.execute(**params)
-                if s:
-                    s.set_attribute(
-                        "tool.success",
-                        not isinstance(result, str) or not result.startswith("Error"),
-                    )
-                    s.set_attribute(
-                        "tool.result_length", len(result) if isinstance(result, str) else 0
-                    )
-                if isinstance(result, str) and result.startswith("Error"):
-                    return result + _HINT
-
-                return result
+                else:
+                    result = await tool.execute(**params)
+                    if s:
+                        s.set_attribute(
+                            "tool.success",
+                            not isinstance(result, str) or not result.startswith("Error"),
+                        )
+                        s.set_attribute(
+                            "tool.result_length", len(result) if isinstance(result, str) else 0
+                        )
+                    if isinstance(result, str) and result.startswith("Error"):
+                        result = result + _HINT
             except Exception as e:
-                return f"{name} 실행 중 에러 발생: {str(e)}" + _HINT
+                result = f"{name} 실행 중 에러 발생: {str(e)}" + _HINT
+
+        await self._hooks.emit(
+            HookContext(
+                event=AFTER_TOOL_EXECUTE,
+                session_key=session_key,
+                channel=channel,
+                payload={
+                    "tool": name,
+                    "result_length": len(result) if isinstance(result, str) else 0,
+                    "is_error": isinstance(result, str)
+                    and (result.startswith("에러") or result.startswith("Error")),
+                },
+            )
+        )
+        return result
 
     @property
     def tool_names(self) -> list[str]:
