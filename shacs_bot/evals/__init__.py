@@ -6,8 +6,15 @@ from shacs_bot.evals.models import (
     RunSummary,
     ToolEvent,
     TraceArtifact,
+    VariantHealth,
     VariantSummary,
 )
+from shacs_bot.evals.extractor import (
+    SessionCaseExtractor,
+    build_auto_cases_path,
+    get_auto_cases_dir,
+)
+from shacs_bot.evals.autoloop import AutoEvalRunResult, AutoEvalService
 from shacs_bot.evals.runner import (
     EvaluationRunner,
     TraceCollector,
@@ -16,9 +23,28 @@ from shacs_bot.evals.runner import (
     load_cases_file,
     resolve_variant,
 )
+from shacs_bot.evals.state import (
+    AutoEvalState,
+    append_variant_history,
+    calculate_success_rate,
+    compare_to_baseline,
+    compute_recommended_runtime_variant,
+    compute_trigger_variants,
+    get_variant_status_history,
+    has_recent_regression,
+    is_stably_healthy,
+    get_eval_state_path,
+    read_auto_eval_state,
+    read_run_summary,
+    update_auto_eval_state,
+    write_auto_eval_state,
+)
 from shacs_bot.evals.storage import EvaluationStorage
 
 __all__ = [
+    "AutoEvalState",
+    "AutoEvalRunResult",
+    "AutoEvalService",
     "EvaluationCase",
     "EvaluationResult",
     "EvaluationRunner",
@@ -26,12 +52,29 @@ __all__ = [
     "HarnessVariant",
     "RunManifest",
     "RunSummary",
+    "SessionCaseExtractor",
     "TraceCollector",
     "ToolEvent",
     "TraceArtifact",
+    "VariantHealth",
     "VariantSummary",
+    "build_auto_cases_path",
     "build_variant_summary",
+    "append_variant_history",
+    "calculate_success_rate",
+    "compare_to_baseline",
+    "compute_recommended_runtime_variant",
+    "compute_trigger_variants",
+    "get_variant_status_history",
+    "get_auto_cases_dir",
     "get_default_cases_path",
+    "get_eval_state_path",
+    "has_recent_regression",
+    "is_stably_healthy",
     "load_cases_file",
+    "read_auto_eval_state",
+    "read_run_summary",
     "resolve_variant",
+    "update_auto_eval_state",
+    "write_auto_eval_state",
 ]

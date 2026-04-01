@@ -114,6 +114,7 @@ class AgentLoop:
         self._media_config: MediaConfig | None = media_config
         self._media_api_key: str | None = media_api_key
         self._media_base_url: str | None = media_base_url
+        self._auto_eval_task: asyncio.Task[None] | None = None
         self._usage_tracker: UsageTracker | None = None
         if usage_config and usage_config.enabled:
             from shacs_bot.config.paths import get_usage_dir
@@ -399,6 +400,7 @@ class AgentLoop:
 
         key: str = session_key or msg.session_key
         session: Session = self._sessions.get_or_create(key=key)
+        effective_variant: ContextVariant | None = variant or self._runtime_policy_variant(key)
         await self._hooks.emit(
             HookContext(
                 event=SESSION_LOADED,
@@ -552,7 +554,7 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
-            variant=variant,
+            variant=effective_variant,
         )
 
         async def _bus_progress(
@@ -591,6 +593,7 @@ class AgentLoop:
 
         self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
         self._sessions.save(session)
+        self._maybe_schedule_auto_eval(session_key=key)
 
         if msg.media:
             self._cleanup_inbound_media(msg.media)
@@ -620,6 +623,23 @@ class AgentLoop:
             content=final_content,
             metadata=msg.metadata or {},
         )
+
+    def _runtime_policy_variant(self, session_key: str) -> ContextVariant | None:
+        if session_key.startswith("eval:") or session_key.startswith("scheduled:"):
+            return None
+
+        try:
+            from shacs_bot.evals.state import read_auto_eval_state
+
+            state = read_auto_eval_state(self._workspace)
+            if not state:
+                return None
+            if state.recommended_runtime_variant == "strict-completion":
+                return ContextVariant(completion_policy="strict")
+        except Exception as exc:
+            logger.warning("Runtime eval policy 로드 실패: {}", exc)
+
+        return None
 
     async def _run_agent_loop(
         self,
@@ -823,6 +843,37 @@ class AgentLoop:
             session.messages.append(entry)
 
         session.updated_at = datetime.now()
+
+    def _maybe_schedule_auto_eval(self, session_key: str) -> None:
+        if session_key.startswith("eval:") or session_key.startswith("scheduled:"):
+            return
+        if self._auto_eval_task and not self._auto_eval_task.done():
+            return
+
+        try:
+            from shacs_bot.evals.autoloop import AutoEvalService
+
+            service = AutoEvalService(self._workspace, self, self._sessions)
+            if not service.prepare_trigger(session_key):
+                return
+
+            async def _run_auto_eval() -> None:
+                try:
+                    _ = await service.run_auto_eval(
+                        session_filter="",
+                        include_eval_sessions=False,
+                        triggered=True,
+                        trigger_session_key=session_key,
+                    )
+                except Exception as exc:
+                    _ = service.mark_trigger_failure(
+                        session_key, str(exc) or exc.__class__.__name__
+                    )
+                    logger.warning("Self-eval auto-run 실패: {}", exc)
+
+            self._auto_eval_task = asyncio.create_task(_run_auto_eval())
+        except Exception as exc:
+            logger.warning("Self-eval trigger 준비 실패: {}", exc)
 
     @staticmethod
     def _cleanup_inbound_media(media: list[str]) -> None:

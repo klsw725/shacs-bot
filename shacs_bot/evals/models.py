@@ -21,6 +21,10 @@ class EvaluationCase(EvalBaseModel):
     tags: list[str] = Field(default_factory=list)
     timeout_seconds: int = 120
     notes: str = ""
+    source_session_key: str = ""
+    source_message_index: int = 0
+    source_timestamp: str = ""
+    source_channel: str = ""
 
 
 class HarnessVariant(EvalBaseModel):
@@ -70,6 +74,19 @@ class VariantSummary(EvalBaseModel):
     avg_tool_calls: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+
+
+class VariantHealth(EvalBaseModel):
+    variant: str
+    last_success_rate: float = 0.0
+    baseline_success_rate: float = 0.0
+    success_delta: float = 0.0
+    status: str = "unknown"
+    disabled: bool = False
+    recommended: bool = False
+    last_run_id: str = ""
+    baseline_run_id: str = ""
+    last_updated: str = ""
 
 
 class RunSummary(EvalBaseModel):
