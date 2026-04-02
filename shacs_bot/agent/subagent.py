@@ -21,11 +21,13 @@ from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import ExecToolConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse
 from shacs_bot.utils.helpers import build_assistant_message
+from shacs_bot.workflow.runtime import WorkflowRuntime
 
 
 @dataclass
 class SubagentTask:
     task_id: str
+    workflow_id: str
     label: str
     role: str
     original_task: str
@@ -49,6 +51,7 @@ class SubagentManager:
         max_threads: int = 6,
         agent_registry: AgentRegistry | None = None,
         hooks: HookRegistry | None = None,
+        workflow_runtime: WorkflowRuntime | None = None,
     ):
         self._provider: LLMProvider = provider
         self._workspace: Path = workspace
@@ -61,6 +64,7 @@ class SubagentManager:
         self._max_threads: int = max_threads
         self._registry: AgentRegistry | None = agent_registry
         self._hooks: HookRegistry = hooks or NoOpHookRegistry()
+        self._workflow_runtime: WorkflowRuntime | None = workflow_runtime
 
         self._skill_approval: str = "auto"
         self._running_tasks: dict[str, SubagentTask] = {}
@@ -115,12 +119,27 @@ class SubagentManager:
         }
 
         agent_def: AgentDefinition = self._resolve_agent(role)
+        workflow_id: str = self._create_workflow(
+            task_id=task_id,
+            role=role,
+            task=task,
+            origin=origin,
+            label=display_label,
+        )
 
         bg_task: asyncio.Task[None] = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin, agent_def=agent_def)
+            self._run_subagent(
+                task_id,
+                workflow_id,
+                task,
+                display_label,
+                origin,
+                agent_def=agent_def,
+            )
         )
         self._running_tasks[task_id] = SubagentTask(
             task_id=task_id,
+            workflow_id=workflow_id,
             label=display_label,
             role=role,
             original_task=task[:100],
@@ -172,12 +191,20 @@ class SubagentManager:
             "metadata": origin_metadata or {},
             "session_key": session_key,
         }
+        workflow_id: str = self._create_workflow(
+            task_id=task_id,
+            role="skill",
+            task=task,
+            origin=origin,
+            label=label,
+        )
 
         bg_task: asyncio.Task[None] = asyncio.create_task(
-            self._run_skill(task_id, task, label, origin, skill_name, skill_path)
+            self._run_skill(task_id, workflow_id, task, label, origin, skill_name, skill_path)
         )
         self._running_tasks[task_id] = SubagentTask(
             task_id=task_id,
+            workflow_id=workflow_id,
             label=label,
             role="skill",
             original_task=task[:100],
@@ -203,6 +230,7 @@ class SubagentManager:
     async def _run_skill(
         self,
         task_id: str,
+        workflow_id: str,
         task: str,
         label: str,
         origin: dict[str, Any],
@@ -213,6 +241,7 @@ class SubagentManager:
         logger.info("스킬 서브에이전트 [{}] 실행 시작: {} ({})", task_id, label, skill_name)
 
         try:
+            self._start_workflow(workflow_id)
             # 1. 스킬 내용 로드
             skill_content: str = Path(skill_path).expanduser().read_text(encoding="utf-8")
 
@@ -342,7 +371,10 @@ class SubagentManager:
                 final_result = self._extract_partial_progress(messages, max_iterations)
 
             logger.info("스킬 서브에이전트 [{}] 완료", task_id)
+            self._annotate_result(workflow_id, final_result)
+            self._complete_workflow(workflow_id)
             await self._announce_result(
+                workflow_id=workflow_id,
                 task_id=task_id,
                 label=label,
                 task=task,
@@ -350,9 +382,14 @@ class SubagentManager:
                 origin=origin,
                 status="ok",
             )
+        except asyncio.CancelledError:
+            self._fail_workflow(workflow_id, "cancelled")
+            raise
         except Exception as e:
+            self._fail_workflow(workflow_id, str(e))
             logger.error("스킬 서브에이전트 [{}] 실패: {}", task_id, e)
             await self._announce_result(
+                workflow_id=workflow_id,
                 task_id=task_id,
                 label=label,
                 task=task,
@@ -379,6 +416,7 @@ class SubagentManager:
     async def _run_subagent(
         self,
         task_id: str,
+        workflow_id: str,
         task: str,
         label: str,
         origin: dict[str, Any],
@@ -398,6 +436,7 @@ class SubagentManager:
         )
 
         try:
+            self._start_workflow(workflow_id)
             all_tools = create_default_tools(
                 workspace=self._workspace,
                 restrict_to_workspace=self._restrict_to_workspace,
@@ -538,7 +577,10 @@ class SubagentManager:
                 final_result = self._extract_partial_progress(messages, max_iterations)
 
             logger.info("서브에이전트 [{}]가 성공적으로 완료되었습니다", task_id)
+            self._annotate_result(workflow_id, final_result)
+            self._complete_workflow(workflow_id)
             await self._announce_result(
+                workflow_id=workflow_id,
                 task_id=task_id,
                 label=label,
                 task=task,
@@ -546,10 +588,15 @@ class SubagentManager:
                 origin=origin,
                 status="ok",
             )
+        except asyncio.CancelledError:
+            self._fail_workflow(workflow_id, "cancelled")
+            raise
         except Exception as e:
             error_msg: str = f"Error: {str(e)}"
+            self._fail_workflow(workflow_id, str(e))
             logger.error("서브에이전트 [{}] 실패: {}", task_id, e)
             await self._announce_result(
+                workflow_id=workflow_id,
                 task_id=task_id,
                 label=label,
                 task=task,
@@ -575,7 +622,14 @@ class SubagentManager:
         return "\n\n".join(parts)
 
     async def _announce_result(
-        self, task_id: str, label: str, task: str, result: str, origin: dict[str, Any], status: str
+        self,
+        workflow_id: str,
+        task_id: str,
+        label: str,
+        task: str,
+        result: str,
+        origin: dict[str, Any],
+        status: str,
     ) -> None:
         """내부 네트워크를 통해 서브에이전트의 결과를 메인 에이전트에 알립니다."""
         status_text: str = "성공적으로 완료되었습니다." if status == "ok" else "failed"
@@ -600,6 +654,7 @@ class SubagentManager:
                 session_key_override=origin.get("session_key"),
             )
         )
+        self._mark_notified(workflow_id)
         logger.debug(
             "Subagent [{}]가 {}:{}에 결과를 알렸습니다.",
             task_id,
@@ -655,6 +710,55 @@ class SubagentManager:
         except (asyncio.CancelledError, Exception):
             pass
         return True, label
+
+    def _create_workflow(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        task: str,
+        origin: dict[str, Any],
+        label: str,
+    ) -> str:
+        if self._workflow_runtime is None:
+            return ""
+        record = self._workflow_runtime.store.create(
+            source_kind="subagent",
+            goal=task,
+            notify_target={
+                "channel": origin.get("channel", "cli"),
+                "chat_id": origin.get("chat_id", "direct"),
+                "session_key": origin.get("session_key") or "",
+            },
+            metadata={"subagentTaskId": task_id, "label": label, "role": role},
+        )
+        self._workflow_runtime.store.upsert(record)
+        return record.workflow_id
+
+    def _start_workflow(self, workflow_id: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.start(workflow_id)
+
+    def _complete_workflow(self, workflow_id: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.complete(workflow_id)
+
+    def _annotate_result(self, workflow_id: str, result: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.annotate_result(workflow_id, result)
+
+    def _mark_notified(self, workflow_id: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.mark_notify_delegated(workflow_id)
+
+    def _fail_workflow(self, workflow_id: str, error: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.fail(workflow_id, last_error=error)
 
     @staticmethod
     def _extract_partial_progress(messages: list[dict[str, Any]], max_iterations: int) -> str:

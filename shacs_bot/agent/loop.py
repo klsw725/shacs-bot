@@ -39,6 +39,7 @@ from shacs_bot.agent.usage import TurnUsage, UsageTracker
 from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig, MediaConfig, UsageConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from shacs_bot.providers.failover import FailoverManager
+from shacs_bot.workflow.runtime import WorkflowRuntime
 
 
 class AgentLoopObserver(Protocol):
@@ -90,11 +91,15 @@ class AgentLoop:
         media_base_url: str | None = None,
         skill_approval: str = "auto",
         hooks: HookRegistry | None = None,
+        workflow_runtime: WorkflowRuntime | None = None,
     ):
         self._bus: MessageBus = bus
         self._hooks: HookRegistry = hooks or NoOpHookRegistry()
         self._channels_config: ChannelsConfig = channels_config
         self._workspace: Path = workspace
+        self._workflow_runtime: WorkflowRuntime = workflow_runtime or WorkflowRuntime(
+            self._workspace
+        )
 
         self._provider: LLMProvider = provider
         self._model: str = model or self._provider.get_default_model()
@@ -134,6 +139,7 @@ class AgentLoop:
             exec_config=self._exec_config,
             restrict_to_workspace=self._restrict_to_workspace,
             hooks=self._hooks,
+            workflow_runtime=self._workflow_runtime,
         )
         self._subagent.skill_approval = skill_approval
 
@@ -163,6 +169,10 @@ class AgentLoop:
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def workflow_runtime(self) -> WorkflowRuntime:
+        return self._workflow_runtime
 
     @property
     def channels_config(self) -> ChannelsConfig:
