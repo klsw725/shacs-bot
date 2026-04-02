@@ -7,7 +7,7 @@ import select
 import signal
 import sys
 from pathlib import Path
-from typing import Text
+from typing import Text, TYPE_CHECKING
 
 import typer
 from loguru import logger
@@ -49,6 +49,9 @@ from shacs_bot.config.schema import (
 from shacs_bot.providers.base import LLMProvider
 from shacs_bot.providers.registry import ProviderSpec, PROVIDERS
 from shacs_bot.utils.helpers import sync_workspace_template
+
+if TYPE_CHECKING:
+    from shacs_bot.workflow import WorkflowRecord
 
 
 def _resolve_media_key(config: Config) -> str | None:
@@ -1309,6 +1312,92 @@ def eval_policy(
     console.print(f"[cyan]min interval[/cyan]: {state.trigger_min_interval_minutes}")
     console.print(f"[cyan]schedule[/cyan]: {state.trigger_schedule_kind}")
     console.print(f"[cyan]trigger variants[/cyan]: {', '.join(state.trigger_variants)}")
+
+
+workflows_app = typer.Typer(help="Workflow 상태 및 복구")
+app.add_typer(workflows_app, name="workflows")
+
+
+def _format_workflow_time(raw: str) -> str:
+    if not raw:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw
+    return parsed.strftime("%Y-%m-%d %H:%M")
+
+
+def _render_workflow_table(records: list["WorkflowRecord"], *, title: str) -> None:
+    table: Table = Table(title=title)
+    table.add_column("ID", style="cyan")
+    table.add_column("Source")
+    table.add_column("State")
+    table.add_column("Retries", justify="right")
+    table.add_column("Updated")
+    table.add_column("Next Run")
+    table.add_column("Goal", style="yellow")
+
+    for record in records:
+        goal: str = record.goal if len(record.goal) <= 60 else f"{record.goal[:57]}..."
+        table.add_row(
+            record.workflow_id,
+            record.source_kind,
+            record.state,
+            str(record.retries),
+            _format_workflow_time(record.updated_at),
+            _format_workflow_time(record.next_run_at),
+            goal,
+        )
+
+    console.print(table)
+
+
+@workflows_app.command("status")
+def workflows_status(
+    all_records: bool = typer.Option(False, "--all", help="완료된 workflow도 포함합니다."),
+    state: str | None = typer.Option(None, "--state", help="특정 상태만 표시합니다."),
+    source: str | None = typer.Option(None, "--source", help="특정 source_kind만 표시합니다."),
+    limit: int = typer.Option(20, "--limit", min=1, help="최대 표시 개수"),
+) -> None:
+    from shacs_bot.workflow import WorkflowRecord, WorkflowRuntime
+
+    config: Config = load_config()
+    runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
+    records: list[WorkflowRecord] = (
+        runtime.store.list_all() if all_records else runtime.store.list_incomplete()
+    )
+
+    if state:
+        records = [record for record in records if record.state == state]
+    if source:
+        records = [record for record in records if record.source_kind == source]
+
+    records.sort(key=lambda record: record.updated_at, reverse=True)
+    records = records[:limit]
+
+    if not records:
+        console.print("[yellow]표시할 workflow가 없습니다.[/yellow]")
+        return
+
+    title: str = "Workflow Status (all)" if all_records else "Workflow Status (incomplete)"
+    _render_workflow_table(records, title=title)
+
+
+@workflows_app.command("recover")
+def workflows_recover() -> None:
+    from shacs_bot.workflow import WorkflowRecord, WorkflowRuntime
+
+    config: Config = load_config()
+    runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
+    recovered: list[WorkflowRecord] = runtime.recover_restart()
+
+    if not recovered:
+        console.print("[yellow]복구할 workflow가 없습니다.[/yellow]")
+        return
+
+    console.print(f"[green]✓[/green] {len(recovered)}개 workflow를 복구했습니다.")
+    _render_workflow_table(recovered, title="Recovered Workflows")
 
 
 # ============================================================================
