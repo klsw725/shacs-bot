@@ -390,6 +390,7 @@ def gateway(
     from shacs_bot.agent.tools.cron.types import CronJob
     from shacs_bot.heartbeat.service import HeartbeatService
     from shacs_bot.agent.session.manager import SessionManager
+    from shacs_bot.workflow.runtime import WorkflowRuntime
 
     if verbose:
         logging.basicConfig(level=logging.DEBUG)
@@ -413,10 +414,12 @@ def gateway(
     bus: MessageBus = MessageBus()
     provider = _make_provider(config)
     session_manager: SessionManager = SessionManager(config.workspace_path)
+    workflow_runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
+    recovered_workflows = workflow_runtime.recover_restart()
 
     # 먼저, 크론 서비스 생성 (에이전트 생성 이후에 callback 설정)
     cron_store_path: Path = get_cron_dir() / "jobs.json"
-    cron: CronService = CronService(cron_store_path)
+    cron: CronService = CronService(cron_store_path, workflow_runtime=workflow_runtime)
 
     provider.generation.temperature = config.agents.defaults.temperature
     provider.generation.max_tokens = config.agents.defaults.max_tokens
@@ -450,6 +453,7 @@ def gateway(
         media_base_url=_resolve_media_base_url(config),
         skill_approval=config.tools.skill_approval,
         hooks=hooks,
+        workflow_runtime=workflow_runtime,
     )
 
     # 크론 callback 설정 (에이전트 필요)
@@ -469,6 +473,13 @@ def gateway(
                 trigger_session_key=f"scheduled:{job.id}",
                 include_eval_sessions=False,
             )
+            workflow_id_obj = job.payload.metadata.get("workflowId")
+            workflow_id = workflow_id_obj if isinstance(workflow_id_obj, str) else ""
+            if workflow_id:
+                _ = workflow_runtime.annotate_result(
+                    workflow_id,
+                    f"self-eval completed: {result.state.last_auto_run_id}",
+                )
             return f"self-eval completed: {result.state.last_auto_run_id}"
 
         reminder_note: str = (
@@ -496,6 +507,10 @@ def gateway(
 
         message_tool: Tool = agent_loop.tools.get("message")
         if isinstance(message_tool, MessageTool) and message_tool.sent_in_turn:
+            workflow_id_obj = job.payload.metadata.get("workflowId")
+            workflow_id = workflow_id_obj if isinstance(workflow_id_obj, str) else ""
+            if workflow_id:
+                _ = workflow_runtime.mark_notify_delegated(workflow_id)
             return response
 
         if job.payload.deliver and job.payload.to and response:
@@ -507,6 +522,14 @@ def gateway(
                     metadata=job.payload.metadata or {},
                 )
             )
+            workflow_id_obj = job.payload.metadata.get("workflowId")
+            workflow_id = workflow_id_obj if isinstance(workflow_id_obj, str) else ""
+            if workflow_id:
+                _ = workflow_runtime.mark_notified(
+                    workflow_id,
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to,
+                )
 
         return response
 
@@ -526,6 +549,8 @@ def gateway(
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: 예약된 작업 {cron_status['jobs']}개")
+    if recovered_workflows:
+        console.print(f"[green]✓[/green] Workflow recovery: {len(recovered_workflows)}개 복구")
 
     console.print(f"[green]✓[/green] Heartbeat: {hb_cfg.interval_s}s 마다 실행")
 
@@ -584,6 +609,7 @@ def gateway(
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
         hooks=hooks,
+        workflow_runtime=workflow_runtime,
     )
 
     async def run() -> None:
@@ -633,10 +659,12 @@ def agent(
         register_example_hooks(hooks, redact_payloads=config.hooks.redact_payloads)
     bus: MessageBus = MessageBus()
     provider = _make_provider(config)
+    from shacs_bot.workflow.runtime import WorkflowRuntime
 
     # 도구 사용을 위한 cron 서비스를 생성합니다 (CLI에서는 실행 중이 아닌 한 콜백이 필요하지 않습니다).
     cron_store_path: Path = get_cron_dir() / "jobs.json"
-    cron: CronService = CronService(cron_store_path)
+    workflow_runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
+    cron: CronService = CronService(cron_store_path, workflow_runtime=workflow_runtime)
 
     if logs:
         logger.enable("shacs-bot")
@@ -676,6 +704,7 @@ def agent(
         media_base_url=_resolve_media_base_url(config),
         skill_approval=config.tools.skill_approval,
         hooks=hooks,
+        workflow_runtime=workflow_runtime,
     )
 
     if message:
@@ -851,6 +880,7 @@ def create_eval_runtime(
 ) -> tuple[AgentLoop, "SessionManager"]:
     from shacs_bot.agent.session.manager import SessionManager
     from shacs_bot.providers.failover import FailoverManager
+    from shacs_bot.workflow.runtime import WorkflowRuntime
 
     sync_workspace_template(workspace=config.workspace_path)
 
@@ -875,8 +905,9 @@ def create_eval_runtime(
         use_state_recommendation=use_state_recommendation,
     )
     session_manager: SessionManager = SessionManager(config.workspace_path)
+    workflow_runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
     cron_store_path: Path = get_cron_dir() / "jobs.json"
-    cron: CronService = CronService(cron_store_path)
+    cron: CronService = CronService(cron_store_path, workflow_runtime=workflow_runtime)
 
     provider.generation.temperature = config.agents.defaults.temperature
     provider.generation.max_tokens = config.agents.defaults.max_tokens
@@ -912,6 +943,7 @@ def create_eval_runtime(
         media_base_url=_resolve_media_base_url(config),
         skill_approval=config.tools.skill_approval,
         hooks=hooks,
+        workflow_runtime=workflow_runtime,
     )
     return agent_loop, session_manager
 
