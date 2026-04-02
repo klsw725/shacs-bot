@@ -1125,6 +1125,8 @@ def eval_auto_run(
         table.add_column("Health", justify="right")
         table.add_column("Δ Success", justify="right")
         table.add_column("Score", justify="right")
+        table.add_column("Avg Tools", justify="right")
+        table.add_column("Avg Tokens", justify="right")
         table.add_column("Disabled", justify="right")
         table.add_column("Recommended", justify="right")
 
@@ -1135,6 +1137,8 @@ def eval_auto_run(
                 health.status,
                 f"{health.success_delta:+.1%}",
                 f"{health.weighted_score:.2f}",
+                f"{health.avg_tool_calls:.2f}",
+                f"{health.avg_total_tokens:.0f}",
                 "yes" if health.disabled else "no",
                 "yes" if health.recommended else "no",
             )
@@ -1180,6 +1184,8 @@ def eval_status() -> None:
     health_table.add_column("Health")
     health_table.add_column("Δ Success")
     health_table.add_column("Score")
+    health_table.add_column("Avg Tools")
+    health_table.add_column("Avg Tokens")
     health_table.add_column("Disabled")
     health_table.add_column("Recommended")
     for variant_name, health in state.variant_health.items():
@@ -1188,6 +1194,8 @@ def eval_status() -> None:
             health.status,
             f"{health.success_delta:+.1%}",
             f"{health.weighted_score:.2f}",
+            f"{health.avg_tool_calls:.2f}",
+            f"{health.avg_total_tokens:.0f}",
             "yes" if health.disabled else "no",
             "yes" if health.recommended else "no",
         )

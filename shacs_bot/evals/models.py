@@ -87,6 +87,8 @@ class VariantHealth(EvalBaseModel):
     baseline_success_rate: float = 0.0
     success_delta: float = 0.0
     weighted_score: float = 0.0
+    avg_tool_calls: float = 0.0
+    avg_total_tokens: float = 0.0
     status: str = "unknown"
     disabled: bool = False
     recommended: bool = False

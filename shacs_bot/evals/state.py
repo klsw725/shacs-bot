@@ -132,6 +132,8 @@ def compare_to_baseline(
             baseline_success_rate=baseline_rate,
             success_delta=delta,
             status=status,
+            avg_tool_calls=current_item.avg_tool_calls,
+            avg_total_tokens=current_item.prompt_tokens + current_item.completion_tokens,
             disabled=status == "regression" and current_item.variant != "default",
             recommended=status == "healthy",
             last_run_id="",
@@ -147,6 +149,8 @@ def calculate_weighted_score(
     current_success_rate: float,
     success_delta: float,
     recent_statuses: list[str],
+    avg_tool_calls: float = 0.0,
+    avg_total_tokens: float = 0.0,
 ) -> float:
     score: float = current_success_rate
     score += success_delta * 0.5
@@ -154,6 +158,8 @@ def calculate_weighted_score(
     for index, status in enumerate(reversed(recent_statuses[-3:]), start=1):
         decay: float = 1.0 / index
         score -= penalties.get(status, 0.0) * decay
+    score -= min(avg_tool_calls * 0.03, 0.15)
+    score -= min(avg_total_tokens / 10000.0, 0.15)
     return max(0.0, min(1.0, score))
 
 
@@ -315,6 +321,8 @@ def apply_weighted_scores(
             current_success_rate=health.last_success_rate,
             success_delta=health.success_delta,
             recent_statuses=recent_statuses,
+            avg_tool_calls=health.avg_tool_calls,
+            avg_total_tokens=health.avg_total_tokens,
         )
         if variant != "default" and health.weighted_score < 0.5:
             health.disabled = True
