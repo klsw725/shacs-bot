@@ -1,6 +1,7 @@
 """shacs-bot CLI 커멘드"""
 
 import asyncio
+from datetime import datetime
 import os
 import select
 import signal
@@ -56,6 +57,26 @@ def _resolve_media_key(config: Config) -> str | None:
 
 def _resolve_media_base_url(config: Config) -> str | None:
     return config.providers.image_gen.base_url or None
+
+
+def _resolve_runtime_model(
+    config: Config,
+    *,
+    model_override: str | None = None,
+    use_state_recommendation: bool = True,
+) -> str:
+    from shacs_bot.evals import read_auto_eval_state
+
+    model: str = model_override or config.agents.defaults.model
+    if (
+        use_state_recommendation
+        and config.agents.defaults.provider == "auto"
+        and model_override is None
+    ):
+        state = read_auto_eval_state(config.workspace_path)
+        if state and state.recommended_provider_name and state.recommended_model:
+            model = state.recommended_model
+    return model
 
 
 # 윈도우 콘솔을 위한 강제 UTF-8 인코딩
@@ -277,13 +298,27 @@ def onboard(
         )
 
 
-def _make_provider(config: Config) -> LLMProvider:
+def _make_provider(
+    config: Config,
+    *,
+    model_override: str | None = None,
+    provider_name_override: str | None = None,
+    use_state_recommendation: bool = True,
+) -> LLMProvider:
     from shacs_bot.providers.registry import find_by_name
 
-    model: str = config.agents.defaults.model
-    provider_name: str = config.get_provider_name(model)
-    provider: ProviderConfig = config.get_provider(model)
-    spec: ProviderSpec = find_by_name(provider_name)
+    model: str = _resolve_runtime_model(
+        config,
+        model_override=model_override,
+        use_state_recommendation=use_state_recommendation,
+    )
+    provider_name: str | None = provider_name_override or config.get_provider_name(model)
+    provider: ProviderConfig | None = (
+        getattr(config.providers, provider_name_override, None)
+        if provider_name_override
+        else config.get_provider(model)
+    )
+    spec: ProviderSpec | None = find_by_name(provider_name) if provider_name else None
 
     if (
         not model.startswith("bedrock/")
@@ -425,6 +460,16 @@ def gateway(
         from shacs_bot.agent.tools.cron.cron import CronTool
         from shacs_bot.agent.tools.message import MessageTool
         from shacs_bot.bus.events import OutboundMessage
+        from shacs_bot.evals import AutoEvalService
+
+        if job.payload.metadata.get("eval_trigger"):
+            service = AutoEvalService(config.workspace_path, agent_loop, session_manager)
+            result = await service.run_auto_eval(
+                triggered=True,
+                trigger_session_key=f"scheduled:{job.id}",
+                include_eval_sessions=False,
+            )
+            return f"self-eval completed: {result.state.last_auto_run_id}"
 
         reminder_note: str = (
             "[예약된 작업] 타이머가 완료되었습니다.\n\n"
@@ -466,6 +511,9 @@ def gateway(
         return response
 
     cron.set_job(on_cron_job)
+    from shacs_bot.evals import AutoEvalService
+
+    _ = AutoEvalService(config.workspace_path, agent_loop, session_manager).sync_schedule(cron)
 
     hb_cfg: HeartbeatConfig = config.gateway.heartbeat
     # 채널 관리자 생성
@@ -788,6 +836,447 @@ def agent(
                 await agent_loop.close_mcp()
 
         asyncio.run(run_interactive())
+
+
+eval_app = typer.Typer(help="Evaluation harness commands")
+app.add_typer(eval_app, name="eval")
+
+
+def create_eval_runtime(
+    config: Config,
+    *,
+    model_override: str | None = None,
+    provider_name_override: str | None = None,
+    use_state_recommendation: bool = True,
+) -> tuple[AgentLoop, "SessionManager"]:
+    from shacs_bot.agent.session.manager import SessionManager
+    from shacs_bot.providers.failover import FailoverManager
+
+    sync_workspace_template(workspace=config.workspace_path)
+
+    from shacs_bot.observability.tracing import init_tracing
+
+    init_tracing(config)
+
+    hooks: HookRegistry = HookRegistry() if config.hooks.enabled else NoOpHookRegistry()
+    if config.hooks.enabled:
+        register_example_hooks(hooks, redact_payloads=config.hooks.redact_payloads)
+
+    bus: MessageBus = MessageBus()
+    effective_model: str = _resolve_runtime_model(
+        config,
+        model_override=model_override,
+        use_state_recommendation=use_state_recommendation,
+    )
+    provider = _make_provider(
+        config,
+        model_override=model_override,
+        provider_name_override=provider_name_override,
+        use_state_recommendation=use_state_recommendation,
+    )
+    session_manager: SessionManager = SessionManager(config.workspace_path)
+    cron_store_path: Path = get_cron_dir() / "jobs.json"
+    cron: CronService = CronService(cron_store_path)
+
+    provider.generation.temperature = config.agents.defaults.temperature
+    provider.generation.max_tokens = config.agents.defaults.max_tokens
+    provider.generation.reasoning_effort = config.agents.defaults.reasoning_effort
+
+    cli_provider_name: str | None = provider_name_override or config.get_provider_name(
+        effective_model
+    )
+    cli_failover: FailoverManager | None = (
+        FailoverManager(config) if config.failover.enabled else None
+    )
+
+    agent_loop: AgentLoop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=config.workspace_path,
+        model=effective_model,
+        max_iterations=config.agents.defaults.max_tool_iterations,
+        memory_window=config.agents.defaults.memory_window,
+        brave_api_key=config.tools.web.search.api_key or None,
+        web_proxy=config.tools.web.proxy or None,
+        exec_config=config.tools.exec,
+        cron_service=cron,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
+        mcp_servers=config.tools.mcp_servers,
+        channels_config=config.channels,
+        failover_manager=cli_failover,
+        provider_name=cli_provider_name,
+        usage_config=config.usage,
+        media_config=config.tools.media,
+        media_api_key=_resolve_media_key(config),
+        media_base_url=_resolve_media_base_url(config),
+        skill_approval=config.tools.skill_approval,
+        hooks=hooks,
+    )
+    return agent_loop, session_manager
+
+
+@eval_app.command("run")
+def eval_run(
+    cases: Path | None = typer.Argument(None, help="평가 케이스 JSON 파일 경로"),
+    variant: list[str] | None = typer.Option(None, "--variant", help="평가 variant preset 이름"),
+    case_id: str | None = typer.Option(None, "--case", help="특정 caseId만 실행"),
+    output: Path | None = typer.Option(None, "--output", help="결과 출력 디렉터리"),
+) -> None:
+    from shacs_bot.evals import (
+        EvaluationRunner,
+        EvaluationStorage,
+        get_default_cases_path,
+        load_cases_file,
+        resolve_variant,
+    )
+
+    config: Config = load_config()
+    cases_path: Path = cases or get_default_cases_path(config.workspace_path)
+    agent_loop, session_manager = create_eval_runtime(config)
+
+    try:
+        try:
+            loaded_cases = load_cases_file(cases_path)
+        except ValueError as exc:
+            console.print(f"[red]에러:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
+        selected_cases = loaded_cases
+        if case_id is not None:
+            selected_cases = [case for case in loaded_cases if case.case_id == case_id]
+            if not selected_cases:
+                console.print(f"[red]에러:[/red] caseId '{case_id}'를 찾을 수 없습니다.")
+                raise typer.Exit(1)
+
+        if not selected_cases:
+            console.print("[red]에러:[/red] 실행할 평가 케이스가 없습니다.")
+            raise typer.Exit(1)
+
+        variant_names: list[str] = variant or ["default"]
+        try:
+            variants = [resolve_variant(name) for name in variant_names]
+        except ValueError as exc:
+            console.print(f"[red]에러:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
+        base_run_id: str = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        run_id: str = base_run_id
+
+        runner = EvaluationRunner(
+            agent_loop=agent_loop,
+            storage=EvaluationStorage(config.workspace_path),
+            session_manager=session_manager,
+        )
+
+        async def _run_eval() -> None:
+            summary = await runner.run_cases(
+                cases=selected_cases,
+                variants=variants,
+                output_dir=output,
+                cases_file=cases_path,
+                run_id=run_id,
+            )
+            run_dir: Path | None = runner.last_run_dir
+            summary_path: Path = (run_dir / "summary.json") if run_dir else Path("summary.json")
+
+            console.print(
+                f"[green]✓[/green] 평가 완료: {len(selected_cases)}개 case, {len(variants)}개 variant"
+            )
+            console.print(f"[cyan]cases[/cyan]: {cases_path}")
+            console.print(f"[cyan]run[/cyan]: {run_dir if run_dir else '-'}")
+            console.print(f"[cyan]summary[/cyan]: {summary_path}")
+
+            table: Table = Table(title="Evaluation Summary")
+            table.add_column("Variant", style="cyan")
+            table.add_column("Total", justify="right")
+            table.add_column("Success", justify="right", style="green")
+            table.add_column("Task Fail", justify="right", style="yellow")
+            table.add_column("Infra Err", justify="right", style="red")
+            table.add_column("Avg Tools", justify="right")
+            table.add_column("Prompt", justify="right")
+            table.add_column("Completion", justify="right")
+
+            for item in summary.variants:
+                table.add_row(
+                    item.variant,
+                    str(item.total),
+                    str(item.success),
+                    str(item.task_failure),
+                    str(item.infra_error),
+                    f"{item.avg_tool_calls:.2f}",
+                    str(item.prompt_tokens),
+                    str(item.completion_tokens),
+                )
+
+            console.print(table)
+
+        asyncio.run(_run_eval())
+    finally:
+        asyncio.run(agent_loop.close_mcp())
+
+
+@eval_app.command("extract")
+def eval_extract(
+    session_filter: str | None = typer.Option(None, "--session", help="세션 키 부분 문자열 필터"),
+    session_limit: int = typer.Option(10, "--session-limit", help="읽을 세션 수 상한"),
+    case_limit: int = typer.Option(20, "--case-limit", help="추출할 case 수 상한"),
+    output: Path | None = typer.Option(None, "--output", help="출력 JSON 파일 경로"),
+    include_eval_sessions: bool = typer.Option(
+        False, "--include-eval-sessions", help="eval: 세션도 포함"
+    ),
+) -> None:
+    from shacs_bot.agent.session.manager import SessionManager
+    from shacs_bot.evals import SessionCaseExtractor, build_auto_cases_path
+
+    config: Config = load_config()
+    sync_workspace_template(workspace=config.workspace_path)
+
+    session_manager: SessionManager = SessionManager(config.workspace_path)
+    extractor = SessionCaseExtractor(config.workspace_path, session_manager)
+    extracted = extractor.extract_cases(
+        session_filter=session_filter,
+        session_limit=session_limit,
+        case_limit=case_limit,
+        include_eval_sessions=include_eval_sessions,
+    )
+
+    if not extracted:
+        console.print("[yellow]추출할 세션 케이스가 없습니다.[/yellow]")
+        raise typer.Exit(0)
+
+    output_path: Path = output or build_auto_cases_path(config.workspace_path)
+    extractor.write_cases_file(output_path, extracted)
+
+    console.print(f"[green]✓[/green] {len(extracted)}개 case 추출 완료")
+    console.print(f"[cyan]output[/cyan]: {output_path}")
+
+
+@eval_app.command("auto-run")
+def eval_auto_run(
+    session_filter: str | None = typer.Option(None, "--session", help="세션 키 부분 문자열 필터"),
+    session_limit: int = typer.Option(10, "--session-limit", help="읽을 세션 수 상한"),
+    case_limit: int = typer.Option(20, "--case-limit", help="추출할 case 수 상한"),
+    variant: list[str] | None = typer.Option(None, "--variant", help="평가 variant preset 이름"),
+    candidate: list[str] | None = typer.Option(
+        None, "--candidate", help="provider:model 형식의 비교 후보"
+    ),
+    baseline: bool = typer.Option(False, "--baseline", help="현재 run을 새 baseline으로 저장"),
+    compare: bool = typer.Option(True, "--compare/--no-compare", help="baseline과 비교"),
+    output: Path | None = typer.Option(None, "--output", help="결과 출력 디렉터리"),
+    cases_output: Path | None = typer.Option(
+        None, "--cases-output", help="auto-run용 case bundle 경로"
+    ),
+    include_eval_sessions: bool = typer.Option(
+        False, "--include-eval-sessions", help="eval: 세션도 포함"
+    ),
+) -> None:
+    from shacs_bot.evals import AutoEvalService
+
+    config: Config = load_config()
+    agent_loop, session_manager = create_eval_runtime(config)
+    service = AutoEvalService(config.workspace_path, agent_loop, session_manager)
+
+    try:
+        try:
+            if candidate is not None:
+                for raw in candidate:
+                    if ":" not in raw:
+                        raise ValueError(f"invalid candidate format: {raw}")
+                from shacs_bot.evals import update_auto_eval_state
+
+                _ = update_auto_eval_state(config.workspace_path, autonomous_candidates=candidate)
+
+            result = asyncio.run(
+                service.run_auto_eval(
+                    session_filter=session_filter,
+                    session_limit=session_limit,
+                    case_limit=case_limit,
+                    variant_names=variant,
+                    baseline=baseline,
+                    compare=compare,
+                    output=output,
+                    cases_output=cases_output,
+                    include_eval_sessions=include_eval_sessions,
+                )
+            )
+        except ValueError as exc:
+            console.print(f"[red]에러:[/red] {exc}")
+            raise typer.Exit(1) from exc
+
+        console.print(
+            f"[green]✓[/green] auto eval 완료: 기본 {result.state.default_case_count}개 + 추출 {result.state.extracted_case_count}개"
+        )
+        console.print(f"[cyan]cases[/cyan]: {result.cases_path}")
+        console.print(f"[cyan]run[/cyan]: {result.run_dir if result.run_dir else '-'}")
+        console.print(f"[cyan]summary[/cyan]: {result.summary_path}")
+        console.print(f"[cyan]state[/cyan]: {result.state_path}")
+        console.print(f"[cyan]baseline[/cyan]: {result.state.baseline_run_id or '-'}")
+        if result.state.candidate_best:
+            console.print(f"[cyan]best candidate[/cyan]: {result.state.candidate_best}")
+        console.print(
+            f"[cyan]next trigger variants[/cyan]: {', '.join(result.state.trigger_variants)}"
+        )
+        if result.state.regressions:
+            console.print(f"[red]regressions[/red]: {', '.join(result.state.regressions)}")
+
+        table: Table = Table(title="Auto Evaluation Summary")
+        table.add_column("Variant", style="cyan")
+        table.add_column("Health", justify="right")
+        table.add_column("Δ Success", justify="right")
+        table.add_column("Score", justify="right")
+        table.add_column("Avg Tools", justify="right")
+        table.add_column("Avg Tokens", justify="right")
+        table.add_column("Disabled", justify="right")
+        table.add_column("Recommended", justify="right")
+
+        for variant_name in result.state.variants:
+            health = result.state.variant_health[variant_name]
+            table.add_row(
+                variant_name,
+                health.status,
+                f"{health.success_delta:+.1%}",
+                f"{health.weighted_score:.2f}",
+                f"{health.avg_tool_calls:.2f}",
+                f"{health.avg_total_tokens:.0f}",
+                "yes" if health.disabled else "no",
+                "yes" if health.recommended else "no",
+            )
+
+        console.print(table)
+    finally:
+        asyncio.run(agent_loop.close_mcp())
+
+
+@eval_app.command("status")
+def eval_status() -> None:
+    from shacs_bot.evals import read_auto_eval_state
+
+    config: Config = load_config()
+    state = read_auto_eval_state(config.workspace_path) or None
+    if state is None:
+        console.print("[yellow]self-eval 상태 파일이 없습니다.[/yellow]")
+        raise typer.Exit(0)
+
+    summary = Table(title="Self-Eval Status")
+    summary.add_column("Field", style="cyan")
+    summary.add_column("Value")
+    summary.add_row("Last Run", state.last_auto_run_id or "-")
+    summary.add_row("Baseline", state.baseline_run_id or "-")
+    summary.add_row("Recommended Runtime", state.recommended_runtime_variant)
+    summary.add_row("Recommended Provider", state.recommended_provider_name or "-")
+    summary.add_row("Recommended Model", state.recommended_model or "-")
+    summary.add_row("Best Candidate", state.candidate_best or "-")
+    summary.add_row("Trigger Enabled", "yes" if state.trigger_enabled else "no")
+    summary.add_row("Turn Threshold", str(state.trigger_turn_threshold))
+    summary.add_row("Min Interval (min)", str(state.trigger_min_interval_minutes))
+    summary.add_row("Schedule", state.trigger_schedule_kind)
+    summary.add_row("Schedule Every (min)", str(state.trigger_schedule_every_minutes))
+    summary.add_row("Schedule Cron", state.trigger_schedule_cron_expr or "-")
+    summary.add_row("Autonomous Candidates", ", ".join(state.autonomous_candidates) or "-")
+    summary.add_row("Next Trigger Variants", ", ".join(state.trigger_variants))
+    summary.add_row("Last Trigger Status", state.last_trigger_status)
+    summary.add_row("Last Trigger Session", state.last_triggered_session_key or "-")
+    console.print(summary)
+
+    health_table = Table(title="Variant Health")
+    health_table.add_column("Variant", style="cyan")
+    health_table.add_column("Health")
+    health_table.add_column("Δ Success")
+    health_table.add_column("Score")
+    health_table.add_column("Avg Tools")
+    health_table.add_column("Avg Tokens")
+    health_table.add_column("Disabled")
+    health_table.add_column("Recommended")
+    for variant_name, health in state.variant_health.items():
+        health_table.add_row(
+            variant_name,
+            health.status,
+            f"{health.success_delta:+.1%}",
+            f"{health.weighted_score:.2f}",
+            f"{health.avg_tool_calls:.2f}",
+            f"{health.avg_total_tokens:.0f}",
+            "yes" if health.disabled else "no",
+            "yes" if health.recommended else "no",
+        )
+    if state.variant_health:
+        console.print(health_table)
+
+    if state.candidate_scores:
+        candidate_table = Table(title="Candidate Scores")
+        candidate_table.add_column("Candidate", style="cyan")
+        candidate_table.add_column("Score", justify="right")
+        for candidate_key, score in state.candidate_scores.items():
+            candidate_table.add_row(candidate_key, f"{score:.2f}")
+        console.print(candidate_table)
+
+
+@eval_app.command("policy")
+def eval_policy(
+    trigger_enabled: bool | None = typer.Option(None, "--trigger-enabled/--no-trigger-enabled"),
+    trigger_turn_threshold: int | None = typer.Option(None, "--turn-threshold"),
+    trigger_min_interval_minutes: int | None = typer.Option(None, "--min-interval-minutes"),
+    trigger_session_limit: int | None = typer.Option(None, "--session-limit"),
+    trigger_case_limit: int | None = typer.Option(None, "--case-limit"),
+    trigger_variants: list[str] | None = typer.Option(None, "--trigger-variant"),
+    autonomous_candidates: list[str] | None = typer.Option(None, "--candidate"),
+    schedule_kind: str | None = typer.Option(None, "--schedule-kind"),
+    schedule_every_minutes: int | None = typer.Option(None, "--schedule-every-minutes"),
+    schedule_cron_expr: str | None = typer.Option(None, "--schedule-cron"),
+    schedule_tz: str | None = typer.Option(None, "--schedule-tz"),
+) -> None:
+    from shacs_bot.evals import read_auto_eval_state, update_auto_eval_state
+
+    config: Config = load_config()
+    current = read_auto_eval_state(config.workspace_path) or None
+
+    updates: dict[str, object] = {}
+    if trigger_enabled is not None:
+        updates["trigger_enabled"] = trigger_enabled
+    if trigger_turn_threshold is not None:
+        updates["trigger_turn_threshold"] = trigger_turn_threshold
+    if trigger_min_interval_minutes is not None:
+        updates["trigger_min_interval_minutes"] = trigger_min_interval_minutes
+    if trigger_session_limit is not None:
+        updates["trigger_session_limit"] = trigger_session_limit
+    if trigger_case_limit is not None:
+        updates["trigger_case_limit"] = trigger_case_limit
+    if trigger_variants is not None:
+        updates["trigger_variants"] = trigger_variants or ["default"]
+    if autonomous_candidates is not None:
+        for raw in autonomous_candidates:
+            if ":" not in raw:
+                console.print(f"[red]에러:[/red] invalid candidate format: {raw}")
+                raise typer.Exit(1)
+        updates["autonomous_candidates"] = autonomous_candidates
+    if schedule_kind is not None:
+        if schedule_kind not in {"off", "every", "cron"}:
+            console.print("[red]에러:[/red] --schedule-kind는 off/every/cron 중 하나여야 합니다.")
+            raise typer.Exit(1)
+        updates["trigger_schedule_kind"] = schedule_kind
+    if schedule_every_minutes is not None:
+        updates["trigger_schedule_every_minutes"] = schedule_every_minutes
+    if schedule_cron_expr is not None:
+        updates["trigger_schedule_cron_expr"] = schedule_cron_expr
+    if schedule_tz is not None:
+        updates["trigger_schedule_tz"] = schedule_tz
+
+    if not updates:
+        if current is None:
+            console.print("[yellow]설정된 self-eval policy가 없습니다.[/yellow]")
+            raise typer.Exit(0)
+        console.print("[yellow]변경할 옵션이 없습니다. 현재 상태를 표시합니다.[/yellow]")
+        eval_status()
+        raise typer.Exit(0)
+
+    state, path = update_auto_eval_state(config.workspace_path, **updates)
+    console.print(f"[green]✓[/green] self-eval policy 업데이트 완료")
+    console.print(f"[cyan]state[/cyan]: {path}")
+    console.print(f"[cyan]trigger enabled[/cyan]: {'yes' if state.trigger_enabled else 'no'}")
+    console.print(f"[cyan]turn threshold[/cyan]: {state.trigger_turn_threshold}")
+    console.print(f"[cyan]min interval[/cyan]: {state.trigger_min_interval_minutes}")
+    console.print(f"[cyan]schedule[/cyan]: {state.trigger_schedule_kind}")
+    console.print(f"[cyan]trigger variants[/cyan]: {', '.join(state.trigger_variants)}")
 
 
 # ============================================================================

@@ -4,6 +4,7 @@ import base64
 import mimetypes
 import platform
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,13 @@ from typing import Any
 from shacs_bot.agent.memory import MemoryStore
 from shacs_bot.agent.skills import SkillsLoader
 from shacs_bot.utils.helpers import detect_image_mime
+
+
+@dataclass(frozen=True)
+class ContextVariant:
+    environment_bootstrap: bool = True
+    context_profile: str = "default"
+    completion_policy: str = "default"
 
 
 class ContextBuilder:
@@ -25,16 +33,21 @@ class ContextBuilder:
         self._skills = SkillsLoader(self._workspace)
         self._agent_registry = agent_registry
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        variant: ContextVariant | None = None,
+    ) -> str:
         """아이덴티티, 부트스트랩 파일, 메모리, 그리고 스킬을 기반으로 시스템 프롬프트를 구성합니다."""
-        parts: list[str] = [self._get_identity()]
+        active_variant: ContextVariant = variant or ContextVariant()
+        parts: list[str] = [self._get_identity(active_variant)]
 
         bootstrap: str = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
 
         memory: str = self._memory.get_memory_context()
-        if memory:
+        if memory and active_variant.context_profile != "minimal":
             parts.append(f"# Memory\n\n{memory}")
 
         always_skills: list[str] = self._skills.get_always_skills()
@@ -44,7 +57,7 @@ class ContextBuilder:
                 parts.append(f"# Active Skills\n\n{always_content}")
 
         skills_summary: str = self._skills.build_skills_summary()
-        if skills_summary:
+        if skills_summary and active_variant.context_profile != "minimal":
             parts.append(f"""# 스킬
 
 다음 스킬들은 당신의 기능을 확장합니다.
@@ -58,9 +71,9 @@ available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/
 스킬의 SKILL.md를 read_file로 직접 읽지 마세요.
 반드시 spawn 도구의 skill_path 파라미터로 위임하세요.
 
-예: spawn(task="사용자 요청", skill_path="/path/to/SKILL.md")""")
+            예: spawn(task="사용자 요청", skill_path="/path/to/SKILL.md")""")
 
-        if self._agent_registry:
+        if self._agent_registry and active_variant.context_profile != "minimal":
             agents_summary: str = self._agent_registry.build_agents_summary()
             if agents_summary:
                 parts.append(f"""# 에이전트
@@ -69,10 +82,19 @@ available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/
 
 {agents_summary}""")
 
+        if active_variant.completion_policy == "strict":
+            parts.append("""# 완료 정책
+
+작업을 완료했다고 답변하기 전에 다음을 확인하세요.
+- 요청한 작업이 실제로 끝났는지 검증하세요.
+- 확실하지 않은 부분은 추측하지 말고 불확실하다고 명시하세요.
+- 검증하지 못한 결과나 남은 위험이 있으면 사용자에게 분명히 알리세요.""")
+
         return "\n\n---\n\n".join(parts)
 
-    def _get_identity(self) -> str:
+    def _get_identity(self, variant: ContextVariant | None = None) -> str:
         """핵심 아이덴티티 섹션을 가져옵니다."""
+        active_variant: ContextVariant = variant or ContextVariant()
         workspace_path: str = str(self._workspace.expanduser().resolve())
         system: str = platform.system()
         runtime: str = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
@@ -92,6 +114,21 @@ available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/
             - 셸 명령어보다 파일 도구가 더 단순하거나 안정적이라면 파일 도구를 사용하세요.
             """
 
+        workspace_section: str
+        if active_variant.environment_bootstrap:
+            workspace_section = f"""
+            ## 워크스페이스
+            당신의 워크스페이스 경로는 다음과 같습니다: {workspace_path}
+            	•	장기 메모리: {workspace_path}/memory/MEMORY.md (중요한 사실을 여기에 기록하세요)
+            	•	히스토리 로그: {workspace_path}/memory/HISTORY.md (grep으로 검색 가능)
+            	•	커스텀 스킬: {workspace_path}/skills/{{skill-name}}/SKILL.md
+            """
+        else:
+            workspace_section = f"""
+            ## 워크스페이스
+            당신의 워크스페이스 경로는 다음과 같습니다: {workspace_path}
+            """
+
         return f"""
             # shacs-bot 🦈
      
@@ -99,13 +136,8 @@ available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/
     
             ## 런타임
             {runtime}
-            
-            ## 워크스페이스
-            당신의 워크스페이스 경로는 다음과 같습니다: {workspace_path}
-            	•	장기 메모리: {workspace_path}/memory/MEMORY.md (중요한 사실을 여기에 기록하세요)
-            	•	히스토리 로그: {workspace_path}/memory/HISTORY.md (grep으로 검색 가능)
-            	•	커스텀 스킬: {workspace_path}/skills/{{skill-name}}/SKILL.md
-            
+            {workspace_section}
+             
             {platform_policy}
             
             ## shacs-bot 가이드라인
@@ -126,9 +158,12 @@ available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        variant: ContextVariant | None = None,
     ) -> list[dict[str, Any]]:
         """LLM 호출을 위한 전체 메시지 목록을 생성합니다."""
-        runtime_ctx: str = self.build_runtime_context(channel=channel, chat_id=chat_id)
+        runtime_ctx: str = self.build_runtime_context(
+            channel=channel, chat_id=chat_id, variant=variant
+        )
         user_content: str | list[dict[str, Any]] = self._build_user_content(
             text=current_messages, media=media
         )
@@ -136,14 +171,17 @@ available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/
         # 일부 제공자(provider)가 동일한 role 메시지가 연속으로 오는 것을 거부하므로
         # runtime context와 사용자 내용을 하나의 user 메시지로 병합한다.
         if isinstance(user_content, str):
-            merged: str = f"{runtime_ctx}\n\n{user_content}"
+            merged_content: str | list[dict[str, Any]] = f"{runtime_ctx}\n\n{user_content}"
         else:
-            merged: list[dict[str, Any]] = [{"type": "text", "text": runtime_ctx}] + user_content
+            merged_content = [{"type": "text", "text": runtime_ctx}] + user_content
 
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names=skill_names)},
+            {
+                "role": "system",
+                "content": self.build_system_prompt(skill_names=skill_names, variant=variant),
+            },
             *history,
-            {"role": "user", "content": merged},
+            {"role": "user", "content": merged_content},
         ]
 
     def _load_bootstrap_files(self) -> str:
@@ -159,13 +197,18 @@ available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/
         return "\n\n".join(parts) if parts else ""
 
     @staticmethod
-    def build_runtime_context(channel: str | None, chat_id: str | None) -> str:
+    def build_runtime_context(
+        channel: str | None,
+        chat_id: str | None,
+        variant: ContextVariant | None = None,
+    ) -> str:
         """사용자 메시지 앞에 삽입하기 위한 신뢰되지 않은 런타임 메타데이터 블록을 생성합니다."""
+        active_variant: ContextVariant = variant or ContextVariant()
         now: str = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz: str = time.strftime("%Z") or "UTC"
         lines: list[str] = [f"Current Time: {now} ({tz})"]
 
-        if channel and chat_id:
+        if channel and chat_id and active_variant.environment_bootstrap:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
 
         return ContextBuilder.RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
@@ -222,7 +265,7 @@ available="false"인 스킬은 먼저 의존성을 설치해야 합니다 - apt/
         content: str | None,
         tool_calls: list[dict[str, Any]] | None = None,
         reasoning_content: str | None = None,
-        thinking_blocks: list[dict] | None = None,
+        thinking_blocks: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """메시지 목록에 어시스턴트 메시지를 추가합니다."""
         msg: dict[str, Any] = {"role": "assistant", "content": content}
