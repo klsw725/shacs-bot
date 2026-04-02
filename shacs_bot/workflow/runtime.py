@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from shacs_bot.workflow.models import WorkflowRecord, WorkflowState
 from shacs_bot.workflow.store import WorkflowStore
 
 TERMINAL_STATES: frozenset[str] = frozenset({"completed", "failed"})
 RESUMABLE_STATES: frozenset[str] = frozenset({"running", "waiting_input", "retry_wait"})
+MANUAL_RECOVER_COOLDOWN_SECONDS = 60
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"running"}),
     "running": frozenset({"waiting_input", "retry_wait", "completed", "failed"}),
@@ -16,6 +19,21 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "completed": frozenset(),
     "failed": frozenset(),
 }
+
+ManualRecoverStatus = Literal[
+    "missing",
+    "already_queued",
+    "recovered",
+    "cooldown",
+    "terminal",
+]
+
+
+@dataclass(frozen=True)
+class ManualRecoverResult:
+    status: ManualRecoverStatus
+    record: WorkflowRecord | None = None
+    previous_state: WorkflowState | None = None
 
 
 class WorkflowRuntime:
@@ -136,6 +154,56 @@ class WorkflowRuntime:
             notifiedAt=datetime.now().astimezone().isoformat(),
         )
 
+    def manual_recover(
+        self,
+        workflow_id: str,
+        *,
+        channel: str,
+        chat_id: str,
+        sender_id: str,
+    ) -> ManualRecoverResult:
+        record: WorkflowRecord | None = self._store.get(workflow_id)
+        if record is None:
+            return ManualRecoverResult(status="missing")
+        if record.state in TERMINAL_STATES:
+            return ManualRecoverResult(
+                status="terminal", record=record, previous_state=record.state
+            )
+        if record.state == "queued":
+            return ManualRecoverResult(
+                status="already_queued",
+                record=record,
+                previous_state=record.state,
+            )
+        if self._is_manual_recover_in_cooldown(record):
+            return ManualRecoverResult(
+                status="cooldown", record=record, previous_state=record.state
+            )
+
+        recovered: WorkflowRecord = self._store.upsert_and_get(
+            record.model_copy(update={"state": "queued", "next_run_at": ""})
+        )
+
+        recover_count = record.metadata.get("recoverCount", 0)
+        if not isinstance(recover_count, int):
+            recover_count = 0
+        recovered_with_metadata = self._update_metadata(
+            workflow_id,
+            lastManualRecoverAt=datetime.now().astimezone().isoformat(),
+            lastManualRecoverByChannel=channel,
+            lastManualRecoverByChatId=chat_id,
+            lastManualRecoverBySenderId=sender_id,
+            recoverCount=recover_count + 1,
+            recoverSource="manual-channel",
+        )
+        if recovered_with_metadata is not None:
+            recovered = recovered_with_metadata
+        return ManualRecoverResult(
+            status="recovered",
+            record=recovered,
+            previous_state=record.state,
+        )
+
     def _transition(
         self,
         workflow_id: str,
@@ -179,3 +247,14 @@ class WorkflowRuntime:
             return None
         metadata: dict[str, object] = {**record.metadata, **entries}
         return self._store.upsert_and_get(record.model_copy(update={"metadata": metadata}))
+
+    def _is_manual_recover_in_cooldown(self, record: WorkflowRecord) -> bool:
+        raw = record.metadata.get("lastManualRecoverAt")
+        if not isinstance(raw, str) or not raw:
+            return False
+        try:
+            recovered_at = datetime.fromisoformat(raw)
+        except ValueError:
+            return False
+        delta = datetime.now().astimezone() - recovered_at
+        return delta.total_seconds() < MANUAL_RECOVER_COOLDOWN_SECONDS
