@@ -27,6 +27,11 @@ class EvaluationCase(EvalBaseModel):
     source_channel: str = ""
 
 
+class EvalCandidate(EvalBaseModel):
+    provider_name: str
+    model: str
+
+
 class HarnessVariant(EvalBaseModel):
     name: str
     environment_bootstrap: bool = True
@@ -81,6 +86,7 @@ class VariantHealth(EvalBaseModel):
     last_success_rate: float = 0.0
     baseline_success_rate: float = 0.0
     success_delta: float = 0.0
+    weighted_score: float = 0.0
     status: str = "unknown"
     disabled: bool = False
     recommended: bool = False

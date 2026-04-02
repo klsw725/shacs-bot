@@ -29,6 +29,11 @@ class AutoEvalState(EvalBaseModel):
     session_filter: str = ""
     include_eval_sessions: bool = False
     recommended_runtime_variant: str = "default"
+    recommended_provider_name: str = ""
+    recommended_model: str = ""
+    autonomous_candidates: list[str] = Field(default_factory=list)
+    candidate_scores: dict[str, float] = Field(default_factory=dict)
+    candidate_best: str = ""
     trigger_enabled: bool = True
     trigger_schedule_kind: str = "off"
     trigger_schedule_every_minutes: int = 0
@@ -137,6 +142,21 @@ def compare_to_baseline(
     return health, regressions
 
 
+def calculate_weighted_score(
+    *,
+    current_success_rate: float,
+    success_delta: float,
+    recent_statuses: list[str],
+) -> float:
+    score: float = current_success_rate
+    score += success_delta * 0.5
+    penalties: dict[str, float] = {"regression": 0.25, "warning": 0.1, "healthy": 0.0}
+    for index, status in enumerate(reversed(recent_statuses[-3:]), start=1):
+        decay: float = 1.0 / index
+        score -= penalties.get(status, 0.0) * decay
+    return max(0.0, min(1.0, score))
+
+
 def get_variant_status_history(
     history: list[dict[str, object]],
     variant: str,
@@ -196,6 +216,8 @@ def compute_trigger_variants(
         health = variant_health.get(variant)
         if health and health.disabled:
             continue
+        if health and health.weighted_score < 0.6:
+            continue
         if (
             health
             and has_recent_regression(variant_history, variant)
@@ -244,7 +266,57 @@ def compute_recommended_runtime_variant(
             health
             and health.recommended
             and not health.disabled
+            and health.weighted_score >= 0.75
             and is_stably_healthy(variant_history, "strict-completion", health.status)
         ):
             return "strict-completion"
     return "default"
+
+
+def compute_recommended_provider_model(
+    *,
+    current_model: str,
+    current_provider_name: str,
+    recommended_runtime_variant: str,
+    regressions: list[str],
+) -> tuple[str, str]:
+    if recommended_runtime_variant != "strict-completion":
+        return "", ""
+    if regressions:
+        return "", ""
+    if not current_model or not current_provider_name:
+        return "", ""
+    return current_provider_name, current_model
+
+
+def build_candidate_key(provider_name: str, model: str) -> str:
+    return f"{provider_name}:{model}"
+
+
+def calculate_candidate_score(variant_health: dict[str, VariantHealth]) -> float:
+    if not variant_health:
+        return 0.0
+    return sum(item.weighted_score for item in variant_health.values()) / len(variant_health)
+
+
+def select_best_candidate(candidate_scores: dict[str, float]) -> str:
+    if not candidate_scores:
+        return ""
+    return max(candidate_scores.items(), key=lambda item: item[1])[0]
+
+
+def apply_weighted_scores(
+    variant_health: dict[str, VariantHealth],
+    variant_history: list[dict[str, object]],
+) -> dict[str, VariantHealth]:
+    for variant, health in variant_health.items():
+        recent_statuses = get_variant_status_history(variant_history, variant, limit=3)
+        health.weighted_score = calculate_weighted_score(
+            current_success_rate=health.last_success_rate,
+            success_delta=health.success_delta,
+            recent_statuses=recent_statuses,
+        )
+        if variant != "default" and health.weighted_score < 0.5:
+            health.disabled = True
+            health.recommended = False
+    return variant_health
