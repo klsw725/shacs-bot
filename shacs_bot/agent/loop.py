@@ -25,6 +25,7 @@ from shacs_bot.agent.hooks import (
     NoOpHookRegistry,
 )
 from shacs_bot.agent.memory import MemoryStore, MemoryConsolidator
+from shacs_bot.agent.planner import AssistantPlan, PlanStep
 from shacs_bot.agent.session.manager import SessionManager, Session
 from shacs_bot.agent.subagent import SubagentManager
 from shacs_bot.agent.tools.cron.cron import CronTool
@@ -600,6 +601,23 @@ class AgentLoop:
                 )
             )
 
+        if not msg.media:
+            _plan = self._classify_request(msg.content)
+            if _plan.kind == "clarification":
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=_plan.clarification_question
+                    or "요청을 좀 더 구체적으로 알려주시겠어요?",
+                    metadata=msg.metadata or {},
+                )
+            if _plan.kind == "planned_workflow":
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self._format_plan(_plan),
+                    metadata=msg.metadata or {},
+                )
         final_content, _, all_msg, turn_usage = await self._run_agent_loop(
             init_messages=initial_messages,
             on_progress=on_progress or _bus_progress,
@@ -1177,6 +1195,101 @@ class AgentLoop:
                 label: str = args.get("label") or args.get("task", "")[:30]
                 return f"\U0001f680 백그라운드 작업 시작: {label}"
         return None
+
+    @staticmethod
+    def _classify_request(user_text: str) -> AssistantPlan:
+        """메시지를 분석하여 처리 경로를 결정합니다 (규칙 기반, M2).
+
+        Returns:
+            AssistantPlan: kind이 direct_answer / clarification / planned_workflow 중 하나.
+        """
+        text = user_text.strip()
+
+        if not text or text.startswith("/"):
+            return AssistantPlan(kind="direct_answer")
+
+        _VAGUE_RE = re.compile(
+            (
+                r"^(그거|그것|이거|이것|저거|저것)\s*"
+                r"(해(줘|주세요|주십시오)|처리|진행|실행)\s*[.!]?$"
+                r"|^(do|fix|handle)\s+(it|that|this)\s*[.!]?$"
+            ),
+            re.IGNORECASE,
+        )
+        if _VAGUE_RE.match(text):
+            return AssistantPlan(
+                kind="clarification",
+                clarification_question="요청이 무엇인지 좀 더 구체적으로 알려주시겠어요?",
+                summary="요청이 너무 모호합니다.",
+            )
+
+        lower = text.lower()
+
+        if len(text) < 15:
+            return AssistantPlan(kind="direct_answer")
+
+        _SEQ_EN = re.compile(
+            (
+                r"\bfirst\b.{1,80}\bthen\b"
+                r"|\bstep\s+\d\b"
+                r"|\bafter\s+(?:that|which|this)\b"
+                r"|\bfollowed\s+by\b"
+                r"|\bonce\s+.{1,40}\bthen\b"
+            ),
+            re.IGNORECASE,
+        )
+        _SEQ_KO = re.compile(
+            (
+                r"먼저.{1,60}(?:그\s*다음|이후|그리고\s*나서)"
+                r"|그\s*다음\s*에?\s"
+                r"|이\s*후\s*에?\s"
+                r"|단계\s*별"
+                r"|첫\s*번째.{1,40}두\s*번째"
+            ),
+        )
+        _SCHEDULE_RE = re.compile(
+            (
+                r"\bevery\s+(?:day|week|hour|minute)\b"
+                r"|\b(?:schedule|remind)\b.{0,30}\b(?:me|every|daily|weekly)\b"
+                r"|매일|매주|매시간|주기적으로|정기적으로"
+            ),
+            re.IGNORECASE,
+        )
+        _NUMBERED_RE = re.compile(r"(?:^|\n)\s*\d+[.)]\s+\S", re.MULTILINE)
+
+        is_compound = bool(
+            _SEQ_EN.search(lower)
+            or _SEQ_KO.search(text)
+            or _SCHEDULE_RE.search(text)
+            or len(_NUMBERED_RE.findall(text)) >= 2
+        )
+
+        if is_compound:
+            steps = [
+                PlanStep(kind="research", description="요청 내용 분석 및 필요한 정보 수집"),
+                PlanStep(kind="summarize", description="수집한 내용 정리", depends_on=[0]),
+                PlanStep(kind="send_result", description="최종 결과 전달", depends_on=[1]),
+            ]
+            return AssistantPlan(
+                kind="planned_workflow",
+                steps=steps,
+                summary="복합 요청으로 단계별 처리를 계획합니다.",
+            )
+
+        return AssistantPlan(kind="direct_answer")
+
+    @staticmethod
+    def _format_plan(plan: AssistantPlan) -> str:
+        """AssistantPlan을 사용자 표시용 텍스트로 변환합니다."""
+        lines = ["📋 **처리 계획**"]
+        if plan.summary:
+            lines.append(plan.summary)
+        lines.append("")
+        for i, step in enumerate(plan.steps):
+            dep_str = f" (선행: {step.depends_on})" if step.depends_on else ""
+            notify_str = " 🔔" if step.notify else ""
+            lines.append(f"{i + 1}. [{step.kind}] {step.description}{dep_str}{notify_str}")
+        return "\n".join(lines)
 
     async def close_mcp(self) -> None:
         """ "MCP 연결 종료"""
