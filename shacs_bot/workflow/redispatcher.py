@@ -8,6 +8,7 @@ from loguru import logger
 from shacs_bot.workflow.runtime import WorkflowRuntime
 
 if TYPE_CHECKING:
+    from shacs_bot.agent.loop import AgentLoop
     from shacs_bot.agent.tools.cron.service import CronService
     from shacs_bot.agent.subagent import SubagentManager
 
@@ -19,11 +20,13 @@ class WorkflowRedispatcher:
         workflow_runtime: WorkflowRuntime,
         cron_service: "CronService",
         subagent_manager: "SubagentManager | None" = None,
+        agent_loop: "AgentLoop | None" = None,
         poll_interval_s: int = 5,
     ) -> None:
         self._workflow_runtime: WorkflowRuntime = workflow_runtime
         self._cron_service: CronService = cron_service
         self._subagent_manager: SubagentManager | None = subagent_manager
+        self._agent_loop: AgentLoop | None = agent_loop
         self._poll_interval_s: int = poll_interval_s
         self._running: bool = False
         self._task: asyncio.Task[None] | None = None
@@ -70,6 +73,20 @@ class WorkflowRedispatcher:
                 if not success:
                     logger.warning(
                         "WorkflowRedispatcher: subagent redispatch skipped for {}",
+                        record.workflow_id,
+                    )
+                continue
+            if record.source_kind == "manual":
+                if self._agent_loop is None:
+                    logger.warning(
+                        "WorkflowRedispatcher: agent loop unavailable for manual workflow {}",
+                        record.workflow_id,
+                    )
+                    continue
+                success = await self._agent_loop.execute_existing_workflow(record.workflow_id)
+                if not success:
+                    logger.warning(
+                        "WorkflowRedispatcher: manual workflow redispatch skipped for {}",
                         record.workflow_id,
                     )
                 continue

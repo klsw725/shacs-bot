@@ -1306,6 +1306,69 @@ class AgentLoop:
             lines.append(f"{i + 1}. [{step.kind}] {step.description}{dep_str}{notify_str}")
         return "\n".join(lines)
 
+    async def execute_existing_workflow(self, workflow_id: str) -> bool:
+        """queued 상태의 manual 워크플로우를 비동기 태스크로 실행합니다.
+
+        WorkflowRedispatcher가 호출하는 진입점.  성공 시 True, 실패(record 없음,
+        source_kind 불일치 등) 시 False를 반환합니다.
+        """
+        record = self._workflow_runtime.store.get(workflow_id)
+        if record is None or record.source_kind != "manual":
+            return False
+
+        started = self._workflow_runtime.start(workflow_id)
+        if started is None:
+            return False
+
+        channel: str = record.notify_target.channel or "cli"
+        chat_id: str = record.notify_target.chat_id or "direct"
+        session_key: str | None = record.notify_target.session_key or None
+
+        async def _run() -> None:
+            try:
+                key: str = session_key or f"{channel}:{chat_id}"
+                self._set_tool_context(channel=channel, chat_id=chat_id, session_key=key)
+                session: Session = self._sessions.get_or_create(key=key)
+                history: list[dict[str, Any]] = session.get_history(
+                    max_messages=self._memory_window
+                )
+                messages: list[dict[str, Any]] = self._context.build_messages(
+                    history=history,
+                    current_messages=record.goal,
+                    channel=channel,
+                    chat_id=chat_id,
+                )
+                final_content, _, all_msg, _ = await self._run_agent_loop(
+                    messages, _session_key=key, _channel=channel
+                )
+                self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
+                self._sessions.save(session)
+
+                result_text: str = final_content or "워크플로우가 완료되었습니다."
+                _ = self._workflow_runtime.annotate_result(workflow_id, result_text)
+                _ = self._workflow_runtime.complete(workflow_id)
+
+                await self._bus.publish_outbound(
+                    OutboundMessage(
+                        channel=channel,
+                        chat_id=chat_id,
+                        content=f"✅ 워크플로우 완료 (`{workflow_id}`)\n\n{result_text}",
+                    )
+                )
+            except Exception as exc:
+                logger.error("manual 워크플로우 {} 실행 실패: {}", workflow_id, exc)
+                _ = self._workflow_runtime.fail(workflow_id, last_error=str(exc))
+                await self._bus.publish_outbound(
+                    OutboundMessage(
+                        channel=channel,
+                        chat_id=chat_id,
+                        content=f"❌ 워크플로우 실패 (`{workflow_id}`): {exc}",
+                    )
+                )
+
+        _ = asyncio.create_task(_run())
+        return True
+
     async def close_mcp(self) -> None:
         """ "MCP 연결 종료"""
         if self._mcp_stack:

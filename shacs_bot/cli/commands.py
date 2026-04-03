@@ -463,6 +463,7 @@ def gateway(
         workflow_runtime=workflow_runtime,
         cron_service=cron,
         subagent_manager=agent_loop.subagent_manager,
+        agent_loop=agent_loop,
     )
 
     # 크론 callback 설정 (에이전트 필요)
