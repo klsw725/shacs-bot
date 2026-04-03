@@ -156,6 +156,30 @@ class WorkflowRuntime:
         preview: str = result[:500]
         return self._update_metadata(workflow_id, resultPreview=preview)
 
+    def update_step_cursor(
+        self,
+        workflow_id: str,
+        *,
+        step_index: int,
+        step_kind: str,
+    ) -> WorkflowRecord | None:
+        return self._update_metadata(
+            workflow_id,
+            currentStepIndex=step_index,
+            currentStepKind=step_kind,
+        )
+
+    def annotate_step_result(self, workflow_id: str, result: str) -> WorkflowRecord | None:
+        preview: str = result[:500]
+        return self._update_metadata(workflow_id, lastStepResultSummary=preview)
+
+    def clear_step_cursor(self, workflow_id: str) -> WorkflowRecord | None:
+        return self._update_metadata(
+            workflow_id,
+            currentStepIndex=None,
+            currentStepKind=None,
+        )
+
     def mark_notified(
         self,
         workflow_id: str,

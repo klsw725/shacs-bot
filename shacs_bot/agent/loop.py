@@ -7,7 +7,7 @@ import re
 import sys
 import weakref
 from contextlib import AsyncExitStack
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Awaitable, Any, Mapping, Protocol
 
@@ -1324,50 +1324,273 @@ class AgentLoop:
         chat_id: str = record.notify_target.chat_id or "direct"
         session_key: str | None = record.notify_target.session_key or None
 
-        async def _run() -> None:
-            try:
-                key: str = session_key or f"{channel}:{chat_id}"
-                self._set_tool_context(channel=channel, chat_id=chat_id, session_key=key)
-                session: Session = self._sessions.get_or_create(key=key)
-                history: list[dict[str, Any]] = session.get_history(
-                    max_messages=self._memory_window
-                )
-                messages: list[dict[str, Any]] = self._context.build_messages(
-                    history=history,
-                    current_messages=record.goal,
+        parsed_plan: AssistantPlan | None = self._parse_workflow_plan(record)
+
+        if parsed_plan is not None and parsed_plan.kind == "planned_workflow" and parsed_plan.steps:
+            _ = asyncio.create_task(
+                self._run_planned_workflow_steps(
+                    workflow_id=workflow_id,
+                    plan=parsed_plan,
                     channel=channel,
                     chat_id=chat_id,
+                    session_key=session_key,
                 )
-                final_content, _, all_msg, _ = await self._run_agent_loop(
-                    messages, _session_key=key, _channel=channel
-                )
-                self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
-                self._sessions.save(session)
+            )
+            return True
 
+        async def _run() -> None:
+            try:
+                final_content: str = await self._run_workflow_prompt(
+                    prompt=record.goal,
+                    channel=channel,
+                    chat_id=chat_id,
+                    session_key=session_key,
+                )
                 result_text: str = final_content or "워크플로우가 완료되었습니다."
                 _ = self._workflow_runtime.annotate_result(workflow_id, result_text)
+                _ = self._workflow_runtime.clear_step_cursor(workflow_id)
                 _ = self._workflow_runtime.complete(workflow_id)
 
-                await self._bus.publish_outbound(
-                    OutboundMessage(
-                        channel=channel,
-                        chat_id=chat_id,
-                        content=f"✅ 워크플로우 완료 (`{workflow_id}`)\n\n{result_text}",
-                    )
+                await self._publish_workflow_outbound(
+                    workflow_id=workflow_id,
+                    channel=channel,
+                    chat_id=chat_id,
+                    content=f"✅ 워크플로우 완료 (`{workflow_id}`)\n\n{result_text}",
                 )
             except Exception as exc:
                 logger.error("manual 워크플로우 {} 실행 실패: {}", workflow_id, exc)
                 _ = self._workflow_runtime.fail(workflow_id, last_error=str(exc))
-                await self._bus.publish_outbound(
-                    OutboundMessage(
-                        channel=channel,
-                        chat_id=chat_id,
-                        content=f"❌ 워크플로우 실패 (`{workflow_id}`): {exc}",
-                    )
+                await self._publish_workflow_outbound(
+                    workflow_id=workflow_id,
+                    channel=channel,
+                    chat_id=chat_id,
+                    content=f"❌ 워크플로우 실패 (`{workflow_id}`): {exc}",
                 )
 
         _ = asyncio.create_task(_run())
         return True
+
+    def _parse_workflow_plan(self, record: WorkflowRecord) -> AssistantPlan | None:
+        raw_plan: object = record.metadata.get("plan")
+        if not isinstance(raw_plan, dict):
+            return None
+        try:
+            return AssistantPlan.model_validate(raw_plan)
+        except Exception as exc:
+            logger.warning("workflow {} plan 파싱 실패: {}", record.workflow_id, exc)
+            return None
+
+    async def _run_workflow_prompt(
+        self,
+        *,
+        prompt: str,
+        channel: str,
+        chat_id: str,
+        session_key: str | None,
+    ) -> str:
+        key: str = session_key or f"{channel}:{chat_id}"
+        self._set_tool_context(channel=channel, chat_id=chat_id, session_key=key)
+        session: Session = self._sessions.get_or_create(key=key)
+        history: list[dict[str, Any]] = session.get_history(max_messages=self._memory_window)
+        messages: list[dict[str, Any]] = self._context.build_messages(
+            history=history,
+            current_messages=prompt,
+            channel=channel,
+            chat_id=chat_id,
+        )
+        final_content, _, all_msg, _ = await self._run_agent_loop(
+            messages,
+            _session_key=key,
+            _channel=channel,
+        )
+        self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
+        self._sessions.save(session)
+        return final_content or ""
+
+    async def _publish_workflow_outbound(
+        self,
+        *,
+        workflow_id: str,
+        channel: str,
+        chat_id: str,
+        content: str,
+    ) -> None:
+        await self._bus.publish_outbound(
+            OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=content,
+            )
+        )
+        _ = self._workflow_runtime.mark_notified(
+            workflow_id,
+            channel=channel,
+            chat_id=chat_id,
+        )
+
+    async def _run_planned_workflow_steps(
+        self,
+        *,
+        workflow_id: str,
+        plan: AssistantPlan,
+        channel: str,
+        chat_id: str,
+        session_key: str | None,
+    ) -> None:
+        record: WorkflowRecord | None = self._workflow_runtime.store.get(workflow_id)
+        if record is None:
+            return
+
+        current_step_index = record.metadata.get("currentStepIndex", 0)
+        if not isinstance(current_step_index, int) or current_step_index < 0:
+            current_step_index = 0
+
+        last_result = record.metadata.get("lastStepResultSummary", "")
+        current_result: str = last_result if isinstance(last_result, str) else ""
+
+        try:
+            while current_step_index < len(plan.steps):
+                step = plan.steps[current_step_index]
+                _ = self._workflow_runtime.update_step_cursor(
+                    workflow_id,
+                    step_index=current_step_index,
+                    step_kind=step.kind,
+                )
+
+                outcome, current_result = await self._execute_plan_step(
+                    workflow_id=workflow_id,
+                    record_goal=record.goal,
+                    step=step,
+                    previous_result=current_result,
+                    channel=channel,
+                    chat_id=chat_id,
+                    session_key=session_key,
+                )
+
+                if outcome != "continue":
+                    return
+
+                _ = self._workflow_runtime.annotate_step_result(workflow_id, current_result)
+                _ = self._workflow_runtime.annotate_result(workflow_id, current_result)
+                current_step_index += 1
+
+            _ = self._workflow_runtime.clear_step_cursor(workflow_id)
+            _ = self._workflow_runtime.complete(workflow_id)
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=f"✅ 워크플로우 완료 (`{workflow_id}`)\n\n{current_result or '워크플로우가 완료되었습니다.'}",
+            )
+        except Exception as exc:
+            logger.error("planned workflow {} step 실행 실패: {}", workflow_id, exc)
+            _ = self._workflow_runtime.fail(workflow_id, last_error=str(exc))
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=f"❌ 워크플로우 실패 (`{workflow_id}`): {exc}",
+            )
+
+    async def _execute_plan_step(
+        self,
+        *,
+        workflow_id: str,
+        record_goal: str,
+        step: PlanStep,
+        previous_result: str,
+        channel: str,
+        chat_id: str,
+        session_key: str | None,
+    ) -> tuple[str, str]:
+        if step.kind == "research":
+            prompt = (
+                f"다음 workflow 목표를 수행하기 위한 조사 단계를 실행하세요.\n\n"
+                f"목표: {record_goal}\n"
+                f"현재 step: {step.description}\n\n"
+                "아직 최종 전달은 하지 말고, 핵심 조사 결과만 간결하게 정리하세요."
+            )
+            result = await self._run_workflow_prompt(
+                prompt=prompt,
+                channel=channel,
+                chat_id=chat_id,
+                session_key=session_key,
+            )
+            return "continue", result or previous_result
+
+        if step.kind == "summarize":
+            source_text = previous_result or record_goal
+            prompt = (
+                "다음 조사 결과를 사용자가 바로 이해할 수 있게 간결하게 요약하세요.\n\n"
+                f"조사 결과:\n{source_text}\n\n"
+                f"요약 지시: {step.description}"
+            )
+            result = await self._run_workflow_prompt(
+                prompt=prompt,
+                channel=channel,
+                chat_id=chat_id,
+                session_key=session_key,
+            )
+            return "continue", result or source_text
+
+        if step.kind == "send_result":
+            result_text = previous_result or "전달할 결과가 없습니다."
+            _ = self._workflow_runtime.clear_step_cursor(workflow_id)
+            _ = self._workflow_runtime.annotate_result(workflow_id, result_text)
+            _ = self._workflow_runtime.complete(workflow_id)
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=f"✅ 워크플로우 완료 (`{workflow_id}`)\n\n{result_text}",
+            )
+            return "completed", result_text
+
+        if step.kind in {"ask_user", "request_approval"}:
+            message = (
+                f"워크플로우 `{workflow_id}`는 `{step.kind}` 단계에서 사용자 입력을 기다립니다.\n"
+                f"- step: {step.description}"
+            )
+            _ = self._workflow_runtime.wait_for_input(workflow_id)
+            _ = self._workflow_runtime.annotate_step_result(workflow_id, message)
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=message,
+            )
+            return "waiting", previous_result
+
+        if step.kind == "wait_until":
+            next_run_at = (datetime.now().astimezone() + timedelta(minutes=5)).isoformat()
+            message = (
+                f"워크플로우 `{workflow_id}`의 `wait_until` 단계는 아직 조건 해석이 없어 5분 후 재시도합니다.\n"
+                f"- step: {step.description}"
+            )
+            _ = self._workflow_runtime.schedule_retry(
+                workflow_id,
+                next_run_at=next_run_at,
+                last_error=message,
+                increment_retries=False,
+            )
+            _ = self._workflow_runtime.annotate_step_result(workflow_id, message)
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=message,
+            )
+            return "waiting", previous_result
+
+        message = f"지원하지 않는 step kind: {step.kind}"
+        _ = self._workflow_runtime.fail(workflow_id, last_error=message)
+        await self._publish_workflow_outbound(
+            workflow_id=workflow_id,
+            channel=channel,
+            chat_id=chat_id,
+            content=f"❌ 워크플로우 실패 (`{workflow_id}`): {message}",
+        )
+        return "failed", previous_result
 
     async def close_mcp(self) -> None:
         """ "MCP 연결 종료"""
