@@ -51,6 +51,16 @@ class PlanStep(_PlannerBase):
     """이 step 시작 전 완료되어야 하는 선행 step의 인덱스 목록 (0-based)."""
     notify: bool = False
     """이 step 완료 시 사용자에게 알릴지 여부."""
+    step_meta: dict[str, object] = Field(default_factory=dict)
+    """executor가 description 파싱 대신 우선적으로 소비하는 구조화 메타데이터.
+
+    ``wait_until`` 전용 키:
+    - ``iso_time``        (str)   — 절대 재시도 시각 (ISO 8601)
+    - ``duration_minutes`` (int | float) — 현재 시각 기준 대기 시간(분)
+
+    ``ask_user`` / ``request_approval`` 전용 키:
+    - ``prompt``          (str)   — 사용자에게 노출할 메시지 (미설정 시 description 사용)
+    """
 
 
 class AssistantPlan(_PlannerBase):
