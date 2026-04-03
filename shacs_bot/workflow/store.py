@@ -12,6 +12,7 @@ from shacs_bot.utils.helpers import ensure_dir, safe_filename
 from shacs_bot.workflow.models import NotifyTarget, WorkflowRecord, WorkflowSourceKind
 
 INCOMPLETE_STATES: frozenset[str] = frozenset({"queued", "running", "waiting_input", "retry_wait"})
+WORKFLOW_ID_HEX_LENGTH = 16
 
 
 def _now_iso() -> str:
@@ -19,7 +20,7 @@ def _now_iso() -> str:
 
 
 def build_workflow_id() -> str:
-    return f"wf_{uuid.uuid4().hex[:8]}"
+    return f"wf_{uuid.uuid4().hex[:WORKFLOW_ID_HEX_LENGTH]}"
 
 
 class WorkflowStore:
