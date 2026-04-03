@@ -45,6 +45,11 @@ class WorkflowRuntime:
         return self._store
 
     def start(self, workflow_id: str) -> WorkflowRecord | None:
+        record: WorkflowRecord | None = self._store.get(workflow_id)
+        if record is None:
+            return None
+        if record.state == "running":
+            return record
         return self._transition(workflow_id, "running", next_run_at="", last_error="")
 
     def wait_for_input(self, workflow_id: str) -> WorkflowRecord | None:
@@ -152,6 +157,29 @@ class WorkflowRuntime:
             workflow_id,
             notifyDelegated=True,
             notifiedAt=datetime.now().astimezone().isoformat(),
+        )
+
+    def update_notify_target(
+        self,
+        workflow_id: str,
+        *,
+        channel: str,
+        chat_id: str,
+        session_key: str,
+    ) -> WorkflowRecord | None:
+        record: WorkflowRecord | None = self._store.get(workflow_id)
+        if record is None:
+            return None
+        return self._store.upsert_and_get(
+            record.model_copy(
+                update={
+                    "notify_target": {
+                        "channel": channel,
+                        "chat_id": chat_id,
+                        "session_key": session_key,
+                    }
+                }
+            )
         )
 
     def manual_recover(

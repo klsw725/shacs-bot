@@ -61,8 +61,17 @@ class WorkflowRedispatcher:
         for record in queued:
             if record.source_kind == "subagent":
                 if self._subagent_manager is None:
+                    logger.warning(
+                        "WorkflowRedispatcher: subagent manager unavailable for {}",
+                        record.workflow_id,
+                    )
                     continue
-                _ = await self._subagent_manager.execute_existing_workflow(record.workflow_id)
+                success = await self._subagent_manager.execute_existing_workflow(record.workflow_id)
+                if not success:
+                    logger.warning(
+                        "WorkflowRedispatcher: subagent redispatch skipped for {}",
+                        record.workflow_id,
+                    )
                 continue
             if record.source_kind != "cron":
                 continue
@@ -73,4 +82,11 @@ class WorkflowRedispatcher:
                     last_error="missing cronJobId for redispatch",
                 )
                 continue
-            _ = await self._cron_service.execute_existing_workflow(record.workflow_id, cron_job_id)
+            success = await self._cron_service.execute_existing_workflow(
+                record.workflow_id, cron_job_id
+            )
+            if not success:
+                logger.warning(
+                    "WorkflowRedispatcher: cron redispatch skipped for {}",
+                    record.workflow_id,
+                )

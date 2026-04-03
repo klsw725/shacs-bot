@@ -720,11 +720,14 @@ class SubagentManager:
     async def execute_existing_workflow(self, workflow_id: str) -> bool:
         if self._workflow_runtime is None:
             return False
+        if self._check_threads() is not None:
+            return False
         record = self._workflow_runtime.store.get(workflow_id)
         if record is None:
             return False
         if record.source_kind != "subagent":
             return False
+        _ = self._workflow_runtime.start(workflow_id)
 
         metadata = record.metadata
         label_obj = metadata.get("label")
