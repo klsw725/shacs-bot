@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections import defaultdict
 from collections.abc import Mapping
 from datetime import datetime
@@ -264,6 +265,9 @@ class EvaluationRunner:
     ) -> EvalStatus:
         if error_message or collector.finish_reason == "error":
             return "infra_error"
+        if case.expected_response_pattern:
+            matched = bool(re.search(case.expected_response_pattern, final_response, re.DOTALL))
+            return "success" if matched else "task_failure"
         if case.expected_mode == "response":
             return "success" if final_response.strip() else "task_failure"
         if case.expected_mode == "tool_use":

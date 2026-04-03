@@ -28,7 +28,7 @@ assistant 전용 planner를 추가해 요청을 direct answer / clarification / 
 
 ## 기술적 범위
 
-- **변경 파일**: 3개 수정 + 1개 신규
+- **변경 파일**: planner / loop / workflow runtime / eval harness / eval case
 - **변경 유형**: planning 계층 추가
 - **의존성**: 없음
 - **하위 호환성**: direct answer 경로 유지
@@ -44,15 +44,20 @@ assistant 전용 planner를 추가해 요청을 direct answer / clarification / 
 - 복합 요청 planning 경로
 - workflow runtime handoff 조건 정의
 
-### 변경 3: 세션 메타데이터 저장 (`shacs_bot/agent/session/manager.py`)
+### 변경 3: 세션 메타데이터 저장 (`shacs_bot/agent/loop.py`)
 
-- current plan 저장
+- 기존 `Session.metadata`에 current plan 저장
 - 마지막 planning 결과 추적
 
 ### 변경 4: workflow 연결 (`shacs_bot/workflow/runtime.py`)
 
 - planner 산출물 consume
 - notify target / wait step 연계
+
+### 변경 5: 시나리오 검증 (`shacs_bot/evals/models.py`, `shacs_bot/evals/runner.py`, `shacs_bot/templates/evals/cases/planner-scenarios.json`)
+
+- direct / clarification / planned_workflow 분기별 검증 시나리오 추가
+- eval harness에 response pattern 기반 판정 추가
 
 ## 성공 기준
 
@@ -65,16 +70,16 @@ assistant 전용 planner를 추가해 요청을 direct answer / clarification / 
 
 ## 마일스톤
 
-- [ ] **M1: assistant plan 모델 정의**
+- [x] **M1: assistant plan 모델 정의**
   planner 데이터 모델과 step taxonomy 구현.
 
-- [ ] **M2: direct answer vs planning 분기 추가**
+- [x] **M2: direct answer vs planning 분기 추가**
   AgentLoop에서 planning 진입 규칙 구현.
 
-- [ ] **M3: session metadata / workflow handoff 연결**
+- [x] **M3: session metadata / workflow handoff 연결**
   계획 상태 저장과 runtime handoff 구현.
 
-- [ ] **M4: direct/clarification/planned 시나리오 검증**
+- [x] **M4: direct/clarification/planned 시나리오 검증**
   세 가지 분기 모두 검증.
 
 ---
@@ -89,7 +94,16 @@ assistant 전용 planner를 추가해 요청을 direct answer / clarification / 
 
 ## Acceptance Criteria
 
-- [ ] direct answer 경로가 유지된다.
-- [ ] 복합 요청은 step 기반 계획을 남긴다.
-- [ ] clarification은 필요한 경우에만 발생한다.
-- [ ] background 실행 계획이 workflow runtime으로 전달된다.
+- [x] direct answer 경로가 유지된다.
+- [x] 복합 요청은 step 기반 계획을 남긴다.
+- [x] clarification은 필요한 경우에만 발생한다.
+- [x] background 실행 계획이 workflow runtime으로 전달된다.
+
+## 진행 로그
+
+| 날짜 | 상태 | 메모 |
+|---|---|---|
+| 2026-04-03 | M1 완료 | `shacs_bot/agent/planner.py`에 `AssistantPlan`, `PlanStep`, step taxonomy 추가 |
+| 2026-04-03 | M2 완료 | `shacs_bot/agent/loop.py`에 direct_answer / clarification / planned_workflow 분기 추가 |
+| 2026-04-03 | M3 완료 | `loop.py`에서 `Session.metadata`에 planning 상태 저장, `workflow/runtime.py`에 planned workflow handoff 추가 |
+| 2026-04-03 | M4 완료 | eval harness pattern 판정과 `planner-scenarios.json` 시나리오 7개 추가 |
