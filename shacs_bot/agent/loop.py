@@ -543,6 +543,28 @@ class AgentLoop:
                 ),
             )
 
+        # waiting_input 상태 워크플로우가 있으면 이 메시지를 답변으로 소비합니다.
+        _waiting_wf_id: str | None = session.metadata.get("waiting_workflow_id")
+        if isinstance(_waiting_wf_id, str) and _waiting_wf_id:
+            _wf = self._workflow_runtime.store.get(_waiting_wf_id)
+            if _wf is not None and _wf.state == "waiting_input":
+                _resumed = self._workflow_runtime.resume_with_user_answer(
+                    _waiting_wf_id, answer=msg.content
+                )
+                if _resumed is not None:
+                    session.metadata.pop("waiting_workflow_id", None)
+                    self._sessions.save(session)
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"✅ 답변을 받았습니다. 워크플로우를 계속 진행합니다. (`{_waiting_wf_id}`)",
+                        metadata=msg.metadata or {},
+                    )
+            else:
+                # 워크플로우가 더 이상 waiting_input 상태가 아니면 세션 메타 정리
+                session.metadata.pop("waiting_workflow_id", None)
+                self._sessions.save(session)
+
         consolidated: bool = await self._memory_consolidator.maybe_consolidate_by_tokens(
             session=session
         )
@@ -1472,7 +1494,14 @@ class AgentLoop:
 
                 _ = self._workflow_runtime.annotate_step_result(workflow_id, current_result)
                 _ = self._workflow_runtime.annotate_result(workflow_id, current_result)
-                current_step_index += 1
+                next_idx = current_step_index + 1
+                next_kind = plan.steps[next_idx].kind if next_idx < len(plan.steps) else ""
+                _ = self._workflow_runtime.update_step_cursor(
+                    workflow_id,
+                    step_index=next_idx,
+                    step_kind=next_kind,
+                )
+                current_step_index = next_idx
 
             _ = self._workflow_runtime.clear_step_cursor(workflow_id)
             _ = self._workflow_runtime.complete(workflow_id)
@@ -1553,6 +1582,10 @@ class AgentLoop:
             )
             _ = self._workflow_runtime.wait_for_input(workflow_id)
             _ = self._workflow_runtime.annotate_step_result(workflow_id, message)
+            _wf_sess_key: str = session_key or f"{channel}:{chat_id}"
+            _wf_sess = self._sessions.get_or_create(key=_wf_sess_key)
+            _wf_sess.metadata["waiting_workflow_id"] = workflow_id
+            self._sessions.save(_wf_sess)
             await self._publish_workflow_outbound(
                 workflow_id=workflow_id,
                 channel=channel,
