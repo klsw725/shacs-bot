@@ -73,9 +73,11 @@
 
 ## 현재 상태 분석
 
-- assistant workflow planner는 이미 `PlanStep` taxonomy를 생성할 수 있다.
-- manual planned workflow는 현재 redispatch로 실제 실행되지만, 여전히 `goal` 텍스트를 기존 agent loop에 다시 태우는 방식이다.
-- 따라서 step 목록은 사용자 표시/metadata 용도로는 존재하지만, 실행 계약으로는 아직 충분히 소비되지 않는다.
+- assistant workflow planner는 `PlanStep` taxonomy와 `step_meta`를 생성한다.
+- manual planned workflow는 `WorkflowRedispatcher`를 통해 `AgentLoop.execute_existing_workflow()`로 진입한다.
+- planned workflow executor는 `research`, `summarize`, `send_result`를 선형 실행하고, `ask_user`, `request_approval`, `wait_until`은 runtime 상태(`waiting_input`, `retry_wait`)와 연결된다.
+- workflow metadata에는 `currentStepIndex`, `currentStepKind`, `lastStepResultSummary`가 저장되며, `ask_user` / `request_approval` / `wait_until` 재개 경로가 현재 step cursor 기준으로 이어진다.
+- plan 파싱 실패 또는 step 부재 시에는 기존 goal 재실행 fallback이 유지된다.
 
 ## 설계
 
@@ -111,10 +113,10 @@
 
 ## 검증 기준
 
-- [ ] `research -> summarize -> send_result` step 경로가 end-to-end로 동작한다
-- [ ] workflow metadata에 current step 정보가 저장된다
-- [ ] queued redispatch 후 현재 step 기준으로 재개된다
-- [ ] 대기형 step이 명시적 상태(`waiting_input`, 실패 등)로 반영된다
+- [x] `research -> summarize -> send_result` step 경로가 end-to-end로 동작한다
+- [x] workflow metadata에 current step 정보가 저장된다
+- [x] queued redispatch 후 현재 step 기준으로 재개된다
+- [x] 대기형 step이 명시적 상태(`waiting_input`, 실패 등)로 반영된다
 
 ## Must NOT
 

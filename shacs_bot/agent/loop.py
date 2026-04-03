@@ -1767,6 +1767,14 @@ class AgentLoop:
                 )
 
                 if outcome != "continue":
+                    if step.kind == "wait_until":
+                        next_idx = current_step_index + 1
+                        next_kind = plan.steps[next_idx].kind if next_idx < len(plan.steps) else ""
+                        _ = self._workflow_runtime.update_step_cursor(
+                            workflow_id,
+                            step_index=next_idx,
+                            step_kind=next_kind,
+                        )
                     return
 
                 _ = self._workflow_runtime.annotate_step_result(workflow_id, current_result)

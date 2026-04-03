@@ -1,4 +1,5 @@
 """wait_until 시간 파싱 및 retry_wait 스케줄링 테스트."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -96,7 +97,7 @@ def _register_workflow(runtime: WorkflowRuntime) -> str:
 def test_schedule_retry_sets_retry_wait_state(tmp_path: Path) -> None:
     runtime = WorkflowRuntime(workspace=tmp_path)
     wf_id = _register_workflow(runtime)
-    runtime.start(wf_id)
+    _ = runtime.start(wf_id)
 
     parsed_dt = parse_wait_until_time("30분 후 재시도")
     scheduled = runtime.schedule_retry(
@@ -106,9 +107,7 @@ def test_schedule_retry_sets_retry_wait_state(tmp_path: Path) -> None:
         increment_retries=False,
     )
     assert scheduled is not None
-    assert scheduled.state == "retry_wait", (
-        f"상태가 retry_wait이어야 함. 실제: {scheduled.state}"
-    )
+    assert scheduled.state == "retry_wait", f"상태가 retry_wait이어야 함. 실제: {scheduled.state}"
     stored_dt = datetime.fromisoformat(scheduled.next_run_at)
     assert abs((stored_dt - parsed_dt).total_seconds()) < 1, (
         f"next_run_at 불일치. expected {parsed_dt.isoformat()}, got {scheduled.next_run_at}"
@@ -118,7 +117,7 @@ def test_schedule_retry_sets_retry_wait_state(tmp_path: Path) -> None:
 def test_is_retry_due_future_is_false(tmp_path: Path) -> None:
     runtime = WorkflowRuntime(workspace=tmp_path)
     wf_id = _register_workflow(runtime)
-    runtime.start(wf_id)
+    _ = runtime.start(wf_id)
 
     future_dt = parse_wait_until_time("30분 후 재시도")
     scheduled = runtime.schedule_retry(
@@ -196,9 +195,7 @@ def test_recover_restart_requeues_expired_retry_wait(tmp_path: Path) -> None:
     )
     final = runtime2.store.get(wf_id)
     assert final is not None
-    assert final.state == "queued", (
-        f"복구 후 상태가 queued이어야 함. 실제: {final.state}"
-    )
+    assert final.state == "queued", f"복구 후 상태가 queued이어야 함. 실제: {final.state}"
 
 
 # ──────────────────────────────────────────────
@@ -222,34 +219,34 @@ def test_plan_step_step_meta_default_is_empty_dict() -> None:
     old_step = PlanStep.model_validate(
         {"kind": "wait_until", "description": "30분 후 재시도", "depends_on": []}
     )
-    assert old_step.step_meta == {}, (
-        f"step_meta 기본값이 {{}}이어야 함. got {old_step.step_meta!r}"
-    )
+    assert old_step.step_meta == {}, f"step_meta 기본값이 {{}}이어야 함. got {old_step.step_meta!r}"
 
 
 def test_assistant_plan_step_meta_parsing() -> None:
-    plan = AssistantPlan.model_validate({
-        "kind": "planned_workflow",
-        "steps": [
-            {
-                "kind": "wait_until",
-                "description": "fallback",
-                "step_meta": {"duration_minutes": 90},
-            },
-            {
-                "kind": "ask_user",
-                "description": "fallback question",
-                "step_meta": {"prompt": "진행할까요?"},
-                "depends_on": [0],
-            },
-            {
-                "kind": "request_approval",
-                "description": "fallback approval",
-                "step_meta": {"prompt": "이 작업을 승인하시겠습니까?"},
-                "depends_on": [1],
-            },
-        ],
-    })
+    plan = AssistantPlan.model_validate(
+        {
+            "kind": "planned_workflow",
+            "steps": [
+                {
+                    "kind": "wait_until",
+                    "description": "fallback",
+                    "step_meta": {"duration_minutes": 90},
+                },
+                {
+                    "kind": "ask_user",
+                    "description": "fallback question",
+                    "step_meta": {"prompt": "진행할까요?"},
+                    "depends_on": [0],
+                },
+                {
+                    "kind": "request_approval",
+                    "description": "fallback approval",
+                    "step_meta": {"prompt": "이 작업을 승인하시겠습니까?"},
+                    "depends_on": [1],
+                },
+            ],
+        }
+    )
     assert plan.steps[0].step_meta.get("duration_minutes") == 90
     assert plan.steps[1].step_meta.get("prompt") == "진행할까요?"
     assert plan.steps[2].step_meta.get("prompt") == "이 작업을 승인하시겠습니까?"
@@ -310,4 +307,75 @@ def test_executor_description_fallback_when_no_step_meta() -> None:
     delta = result - before
     assert timedelta(hours=1, minutes=59, seconds=58) <= delta <= timedelta(hours=2, seconds=2), (
         f"description fallback 실패. delta={delta}"
+    )
+
+
+# ──────────────────────────────────────────────
+# wait_until resume 버그 수정: 만료 후 다음 스텝에서 재개
+# ──────────────────────────────────────────────
+
+
+def test_wait_until_cursor_advances_before_retry_schedule(tmp_path: Path) -> None:
+    """wait_until 처리 후 커서가 다음 스텝으로 전진한 채 retry_wait가 되어야 한다.
+
+    수정 전: schedule_retry 시 currentStepIndex가 wait_until 인덱스(0) 그대로 남아,
+    만료 후 재실행 시 wait_until을 다시 실행하는 버그.
+    수정 후: schedule_retry 전에 커서가 1로 전진해야 한다.
+    """
+    runtime = WorkflowRuntime(workspace=tmp_path)
+    record = runtime.register_planned_workflow(
+        goal="wait_until cursor advance 테스트",
+        plan={
+            "kind": "planned_workflow",
+            "steps": [
+                {"kind": "wait_until", "description": "30분 후 재시도", "depends_on": []},
+                {"kind": "research", "description": "조사 수행", "depends_on": [0]},
+                {"kind": "send_result", "description": "결과 전달", "depends_on": [1]},
+            ],
+        },
+        channel="test",
+        chat_id="test-chat",
+        session_key="test-session",
+    )
+    wf_id = record.workflow_id
+    runtime.start(wf_id)
+
+    # 실행기가 wait_until 스텝을 처리하는 것을 시뮬레이션:
+    # 1) 커서를 wait_until(0)에 설정
+    _ = runtime.update_step_cursor(wf_id, step_index=0, step_kind="wait_until")
+    # 2) 수정된 실행기는 schedule_retry 전에 커서를 다음 스텝(1)으로 전진시킨다
+    _ = runtime.update_step_cursor(wf_id, step_index=1, step_kind="research")
+    # 3) retry_wait 상태로 전환
+    future_dt = datetime.now().astimezone() + timedelta(minutes=30)
+    _ = runtime.schedule_retry(
+        wf_id,
+        next_run_at=future_dt.isoformat(),
+        last_error="wait_until 대기 중",
+        increment_retries=False,
+    )
+
+    # retry_wait 상태에서 커서가 1이어야 한다
+    stored = runtime.store.get(wf_id)
+    assert stored is not None
+    assert stored.state == "retry_wait"
+    assert stored.metadata.get("currentStepIndex") == 1, (
+        f"retry_wait 진입 시 currentStepIndex가 1이어야 함. "
+        f"실제: {stored.metadata.get('currentStepIndex')}"
+    )
+
+    # next_run_at를 과거로 조작해 만료 시뮬레이션
+    past_dt = (datetime.now().astimezone() - timedelta(seconds=10)).isoformat()
+    _ = runtime.store.upsert_and_get(stored.model_copy(update={"next_run_at": past_dt}))
+
+    # recover_restart → queued 전환
+    recovered = runtime.recover_restart()
+    assert wf_id in {r.workflow_id for r in recovered}, "만료 항목이 재큐되지 않음"
+
+    # 재큐 후 커서가 여전히 1이어야 한다 (wait_until 재실행 방지)
+    final = runtime.store.get(wf_id)
+    assert final is not None
+    assert final.state == "queued"
+    resume_idx = final.metadata.get("currentStepIndex")
+    assert resume_idx == 1, (
+        f"재큐 후 재개 인덱스가 1이어야 함 (wait_until 건너뜀). 실제: {resume_idx}"
     )

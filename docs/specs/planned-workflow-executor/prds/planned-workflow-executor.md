@@ -79,17 +79,17 @@ planned workflow 전용 executor를 추가해 `AssistantPlan.steps`를 순서대
 
 ## 마일스톤
 
-- [ ] **M1: planned workflow executor 뼈대 추가**
+- [x] **M1: planned workflow executor 뼈대 추가**
   executor 진입점, current step metadata, 최소 3-step 계약 정의.
 
-- [ ] **M2: 핵심 3-step 실행 경로 구현**
+- [x] **M2: 핵심 3-step 실행 경로 구현**
   `research`, `summarize`, `send_result` 실행.
 
-- [ ] **M3: 대기형 step 상태 연계**
+- [x] **M3: 대기형 step 상태 연계**
   `ask_user`, `wait_until`, `request_approval` 상태기 연동.
 
-- [ ] **M4: recovery / redispatch / eval 검증**
-  step resume, queued redispatch, smoke/eval 시나리오 검증.
+- [x] **M4: recovery / redispatch / eval 검증**
+  step resume, queued redispatch, pytest/eval 자산 기준 검증 완료.
 
 ---
 
@@ -103,13 +103,18 @@ planned workflow 전용 executor를 추가해 `AssistantPlan.steps`를 순서대
 
 ## Acceptance Criteria
 
-- [ ] `planned_workflow`가 step executor를 통해 실행된다.
-- [ ] `research -> summarize -> send_result` 경로가 동작한다.
-- [ ] workflow metadata에 current step 정보가 저장된다.
-- [ ] 실패/대기/재개가 step 기준으로 동작한다.
+- [x] `planned_workflow`가 step executor를 통해 실행된다.
+- [x] `research -> summarize -> send_result` 경로가 동작한다.
+- [x] workflow metadata에 current step 정보가 저장된다.
+- [x] 실패/대기/재개가 step 기준으로 동작한다.
 
 ## 진행 로그
 
 | 날짜 | 상태 | 메모 |
 |---|---|---|
 | 2026-04-03 | 초안 | planned workflow를 goal 재실행이 아닌 step executor 기반으로 전환하는 후속 PRD 추가 |
+| 2026-04-03 | 구현 | `AgentLoop.execute_existing_workflow()` / `_run_planned_workflow_steps()`를 추가해 manual planned workflow를 step executor 경로로 실행하도록 연결. `research`, `summarize`, `send_result` 선형 경로와 step cursor metadata(`currentStepIndex`, `currentStepKind`, `lastStepResultSummary`) 반영 완료. |
+| 2026-04-03 | 구현 | `ask_user`, `request_approval`, `wait_until`를 각각 `waiting_input`, 승인 대기, `retry_wait` 경로로 연결. `resume_with_user_answer()`, `approve_workflow()`, `parse_wait_until_time()`로 재개 계약과 대기 시간 계산을 보강. |
+| 2026-04-03 | 검증 | planner → workflow → redispatch → executor E2E smoke를 추가하고 queued manual workflow dispatch, wait/approval/input resume 시나리오를 검증. |
+| 2026-04-04 | 동기화 | pytest 전환 후 `tests/test_step_cursor.py`, `tests/test_ask_user_resume.py`, `tests/test_request_approval.py`, `tests/test_wait_until.py`, `tests/test_planner_metadata.py`, `tests/test_e2e_planner_to_workflow.py` 기준으로 문서를 재점검하고 milestone/acceptance/log를 현재 구현 상태에 맞게 정리. |
+| 2026-04-04 | 수정 | `wait_until`이 `retry_wait`로 빠질 때 executor 외부 루프에서 cursor를 다음 step으로 전진시키도록 보정했다. `tests/test_wait_until.py`에 만료 후 queued redispatch가 다음 step index를 유지하는 회귀 테스트를 추가해 M4/재개 acceptance를 완료로 복구했다. |

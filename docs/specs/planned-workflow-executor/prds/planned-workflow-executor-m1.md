@@ -61,16 +61,16 @@ M1에서는 `research -> summarize -> send_result`만 지원하는 linear execut
 
 ## 마일스톤
 
-- [ ] **M1-1: step metadata 구조 추가**
+- [x] **M1-1: step metadata 구조 추가**
   current step / last result metadata 정의.
 
-- [ ] **M1-2: executor 진입점 연결**
+- [x] **M1-2: executor 진입점 연결**
   manual workflow redispatch를 executor로 연결.
 
-- [ ] **M1-3: 3-step happy path 구현**
+- [x] **M1-3: 3-step happy path 구현**
   `research -> summarize -> send_result` 실행.
 
-- [ ] **M1-4: smoke 검증**
+- [x] **M1-4: smoke 검증**
   happy path / failure path / resume path 확인.
 
 ---
@@ -84,12 +84,16 @@ M1에서는 `research -> summarize -> send_result`만 지원하는 linear execut
 
 ## Acceptance Criteria
 
-- [ ] `research -> summarize -> send_result` 3-step path가 실행된다.
-- [ ] current step metadata가 기록된다.
-- [ ] 실패 시 failed, 성공 시 completed로 끝난다.
+- [x] `research -> summarize -> send_result` 3-step path가 실행된다.
+- [x] current step metadata가 기록된다.
+- [x] 실패 시 failed, 성공 시 completed로 끝난다.
 
 ## 진행 로그
 
 | 날짜 | 상태 | 메모 |
 |---|---|---|
 | 2026-04-03 | 초안 | executor 전체 범위 중 M1 최소 구현 범위를 별도 PRD로 분리 |
+| 2026-04-03 | 구현 | `WorkflowRuntime`에 `update_step_cursor()`, `annotate_step_result()`, `clear_step_cursor()`를 추가하고 `AgentLoop.execute_existing_workflow()`가 stored plan을 읽어 executor 경로로 진입하도록 연결. |
+| 2026-04-03 | 구현 | `research`, `summarize`, `send_result` 3-step happy path를 구현하고, plan parse 실패 또는 step 부재 시 기존 goal 재실행 fallback을 유지. |
+| 2026-04-03 | 검증 | initial smoke 경로에서 happy path, waiting step 전이, retry_wait 전이를 점검. 이후 executor 범위가 확장되었지만 M1 최소 경로는 그대로 shipped 상태로 유지. |
+| 2026-04-04 | 동기화 | pytest 전환 후 `tests/test_step_cursor.py`와 `tests/test_e2e_planner_to_workflow.py`를 기준으로 M1-1~M1-4 완료 상태를 문서에 반영. |
