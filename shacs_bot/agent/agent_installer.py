@@ -9,6 +9,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 from loguru import logger
 
@@ -37,18 +38,28 @@ class InstallResult:
 class AgentInstaller:
     """Git 저장소에서 에이전트를 workspace에 설치/관리한다."""
 
-    MANIFEST_FILE = ".installed.json"
+    MANIFEST_FILE: str = ".installed.json"
 
     def __init__(self, workspace: Path):
-        self._workspace = workspace
-        self._agents_dir = workspace / "agents"
-        self._skills_dir = workspace / "skills"
-        self._manifest_path = self._agents_dir / self.MANIFEST_FILE
+        self._workspace: Path = workspace
+        self._agents_dir: Path = workspace / "agents"
+        self._skills_dir: Path = workspace / "skills"
+        self._manifest_path: Path = self._agents_dir / self.MANIFEST_FILE
 
     # ── install ─────────────────────────────────────────────────
 
     async def install(self, git_url: str) -> InstallResult:
         """Git URL에서 에이전트를 설치한다."""
+        local_source = Path(git_url).expanduser()
+        if local_source.exists():
+            if not local_source.is_dir():
+                return InstallResult(
+                    success=False, message=f"로컬 경로가 디렉터리가 아닙니다: {git_url}"
+                )
+            return self._install_from_dir(
+                local_source.resolve(), git_url, self._get_commit(local_source.resolve())
+            )
+
         # git 확인
         if not shutil.which("git"):
             return InstallResult(success=False, message="git이 설치되어 있지 않습니다.")
@@ -59,100 +70,21 @@ class AgentInstaller:
 
             # 1. shallow clone
             try:
-                subprocess.run(
+                _ = subprocess.run(
                     ["git", "clone", "--depth", "1", git_url, str(clone_dir)],
-                    capture_output=True, text=True, check=True, timeout=60,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=60,
                 )
             except subprocess.CalledProcessError as e:
-                return InstallResult(success=False, message=f"git clone 실패: {e.stderr.strip()}")
+                raw_stderr = cast(object, e.stderr)
+                stderr = raw_stderr.strip() if isinstance(raw_stderr, str) else str(raw_stderr)
+                return InstallResult(success=False, message=f"git clone 실패: {stderr}")
             except subprocess.TimeoutExpired:
                 return InstallResult(success=False, message="git clone 타임아웃 (60초)")
 
-            # 커밋 해시
-            commit = self._get_commit(clone_dir)
-
-            # 2. 구조 감지
-            agents_found, skills_found = self._detect_structure(clone_dir)
-
-            if not agents_found:
-                return InstallResult(
-                    success=False,
-                    message="설치 가능한 에이전트를 찾을 수 없습니다. agent.toml 또는 agents/*.toml이 필요합니다.",
-                )
-
-            # 3. TOML 검증
-            import tomllib
-            validated_agents: list[tuple[Path, str]] = []  # (src_path, name)
-            for toml_path in agents_found:
-                try:
-                    with open(toml_path, "rb") as f:
-                        data = tomllib.load(f)
-                    name = data.get("name")
-                    desc = data.get("description")
-                    instructions = data.get("developer_instructions")
-                    if not all([name, desc, instructions]):
-                        return InstallResult(
-                            success=False,
-                            message=f"TOML 필수 필드 누락: {toml_path.name} (name, description, developer_instructions 필요)",
-                        )
-                    validated_agents.append((toml_path, name))
-                except Exception as e:
-                    return InstallResult(success=False, message=f"TOML 파싱 실패: {toml_path.name} — {e}")
-
-            # 4. 이름 충돌 체크
-            manifest = self._load_manifest()
-            existing_names = {r.name for r in manifest}
-            for _, name in validated_agents:
-                if name in existing_names:
-                    return InstallResult(
-                        success=False,
-                        message=f"에이전트 '{name}'이 이미 설치되어 있습니다. 먼저 `/agent remove {name}` 후 다시 시도하세요.",
-                    )
-
-            # 5. 복사
-            self._agents_dir.mkdir(parents=True, exist_ok=True)
-            installed_agents: list[str] = []
-            for src_path, name in validated_agents:
-                dst = self._agents_dir / src_path.name
-                shutil.copy2(src_path, dst)
-                installed_agents.append(name)
-
-            installed_skills: list[str] = []
-            for skill_dir in skills_found:
-                skill_name = skill_dir.name
-                dst = self._skills_dir / skill_name
-                if dst.exists():
-                    shutil.rmtree(dst)
-                shutil.copytree(skill_dir, dst)
-                installed_skills.append(skill_name)
-
-            # 6. 매니페스트 기록
-            now = datetime.now(timezone.utc).isoformat()
-            for name in installed_agents:
-                manifest.append(InstallRecord(
-                    name=name,
-                    git_url=git_url,
-                    installed_at=now,
-                    commit=commit,
-                    skills=installed_skills,
-                ))
-            self._save_manifest(manifest)
-
-            # 결과
-            parts: list[str] = ["✅ 에이전트 설치 완료"]
-            for name in installed_agents:
-                parts.append(f"  에이전트: {name}")
-            for skill in installed_skills:
-                parts.append(f"  스킬: {skill}")
-            parts.append(f"  출처: {git_url}")
-            parts.append("  위치: workspace (ApprovalGate 적용)")
-
-            return InstallResult(
-                success=True,
-                message="\n".join(parts),
-                agents=installed_agents,
-                skills=installed_skills,
-            )
+            return self._install_from_dir(clone_dir, git_url, self._get_commit(clone_dir))
 
     # ── list ────────────────────────────────────────────────────
 
@@ -173,6 +105,7 @@ class AgentInstaller:
         for toml_file in self._agents_dir.glob("*.toml"):
             try:
                 import tomllib
+
                 with open(toml_file, "rb") as f:
                     data = tomllib.load(f)
                 if data.get("name") == name:
@@ -221,7 +154,7 @@ class AgentInstaller:
             # 삭제 후 재설치
             same_url_agents = [r for r in manifest if r.git_url == record.git_url]
             for r in same_url_agents:
-                self.remove(r.name)
+                _ = self.remove(r.name)
 
             result = await self.install(record.git_url)
             results.append(result.message)
@@ -254,13 +187,103 @@ class AgentInstaller:
 
         return agents, skills
 
+    def _install_from_dir(self, source_dir: Path, source_ref: str, commit: str) -> InstallResult:
+        agents_found, skills_found = self._detect_structure(source_dir)
+
+        if not agents_found:
+            return InstallResult(
+                success=False,
+                message="설치 가능한 에이전트를 찾을 수 없습니다. agent.toml 또는 agents/*.toml이 필요합니다.",
+            )
+
+        import tomllib
+
+        validated_agents: list[tuple[Path, str]] = []
+        for toml_path in agents_found:
+            try:
+                with open(toml_path, "rb") as f:
+                    data = tomllib.load(f)
+                name = data.get("name")
+                desc = data.get("description")
+                instructions = data.get("developer_instructions")
+                if (
+                    not isinstance(name, str)
+                    or not isinstance(desc, str)
+                    or not isinstance(instructions, str)
+                ):
+                    return InstallResult(
+                        success=False,
+                        message=f"TOML 필수 필드 누락: {toml_path.name} (name, description, developer_instructions 필요)",
+                    )
+                validated_agents.append((toml_path, name))
+            except Exception as e:
+                return InstallResult(
+                    success=False, message=f"TOML 파싱 실패: {toml_path.name} — {e}"
+                )
+
+        manifest = self._load_manifest()
+        existing_names = {r.name for r in manifest}
+        for _, name in validated_agents:
+            if name in existing_names:
+                return InstallResult(
+                    success=False,
+                    message=f"에이전트 '{name}'이 이미 설치되어 있습니다. 먼저 `/agent remove {name}` 후 다시 시도하세요.",
+                )
+
+        self._agents_dir.mkdir(parents=True, exist_ok=True)
+        installed_agents: list[str] = []
+        for src_path, name in validated_agents:
+            dst = self._agents_dir / src_path.name
+            _ = shutil.copy2(src_path, dst)
+            installed_agents.append(name)
+
+        installed_skills: list[str] = []
+        for skill_dir in skills_found:
+            skill_name = skill_dir.name
+            dst = self._skills_dir / skill_name
+            if dst.exists():
+                shutil.rmtree(dst)
+            _ = shutil.copytree(skill_dir, dst)
+            installed_skills.append(skill_name)
+
+        now = datetime.now(timezone.utc).isoformat()
+        for name in installed_agents:
+            manifest.append(
+                InstallRecord(
+                    name=name,
+                    git_url=source_ref,
+                    installed_at=now,
+                    commit=commit,
+                    skills=installed_skills,
+                )
+            )
+        self._save_manifest(manifest)
+
+        parts: list[str] = ["✅ 에이전트 설치 완료"]
+        for name in installed_agents:
+            parts.append(f"  에이전트: {name}")
+        for skill in installed_skills:
+            parts.append(f"  스킬: {skill}")
+        parts.append(f"  출처: {source_ref}")
+        parts.append("  위치: workspace (ApprovalGate 적용)")
+
+        return InstallResult(
+            success=True,
+            message="\n".join(parts),
+            agents=installed_agents,
+            skills=installed_skills,
+        )
+
     @staticmethod
     def _get_commit(clone_dir: Path) -> str:
         """현재 커밋 해시를 가져온다."""
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--short", "HEAD"],
-                cwd=clone_dir, capture_output=True, text=True, check=True,
+                cwd=clone_dir,
+                capture_output=True,
+                text=True,
+                check=True,
             )
             return result.stdout.strip()
         except Exception:
@@ -271,8 +294,52 @@ class AgentInstaller:
         if not self._manifest_path.exists():
             return []
         try:
-            data = json.loads(self._manifest_path.read_text(encoding="utf-8"))
-            return [InstallRecord(**r) for r in data.get("installed", [])]
+            raw_data = cast(object, json.loads(self._manifest_path.read_text(encoding="utf-8")))
+            if not isinstance(raw_data, dict):
+                return []
+            data_dict = cast(dict[str, object], raw_data)
+
+            installed_raw = data_dict.get("installed", [])
+            if not isinstance(installed_raw, list):
+                return []
+            installed_items = cast(list[object], installed_raw)
+
+            records: list[InstallRecord] = []
+            for item in installed_items:
+                if not isinstance(item, dict):
+                    continue
+                item_dict = cast(dict[str, object], item)
+
+                name = item_dict.get("name")
+                git_url = item_dict.get("git_url")
+                installed_at = item_dict.get("installed_at")
+                commit = item_dict.get("commit", "")
+                skills_raw = item_dict.get("skills", [])
+
+                if (
+                    not isinstance(name, str)
+                    or not isinstance(git_url, str)
+                    or not isinstance(installed_at, str)
+                ):
+                    continue
+                if not isinstance(commit, str):
+                    commit = ""
+                if not isinstance(skills_raw, list):
+                    skills_raw = []
+                skill_items = cast(list[object], skills_raw)
+
+                skills = [skill for skill in skill_items if isinstance(skill, str)]
+                records.append(
+                    InstallRecord(
+                        name=name,
+                        git_url=git_url,
+                        installed_at=installed_at,
+                        commit=commit,
+                        skills=skills,
+                    )
+                )
+
+            return records
         except Exception as e:
             logger.warning("매니페스트 로드 실패: {}", e)
             return []
@@ -280,17 +347,19 @@ class AgentInstaller:
     def _save_manifest(self, records: list[InstallRecord]) -> None:
         """매니페스트 파일을 저장한다."""
         self._agents_dir.mkdir(parents=True, exist_ok=True)
-        data = {"installed": [
-            {
-                "name": r.name,
-                "git_url": r.git_url,
-                "installed_at": r.installed_at,
-                "commit": r.commit,
-                "skills": r.skills,
-            }
-            for r in records
-        ]}
-        self._manifest_path.write_text(
+        data = {
+            "installed": [
+                {
+                    "name": r.name,
+                    "git_url": r.git_url,
+                    "installed_at": r.installed_at,
+                    "commit": r.commit,
+                    "skills": r.skills,
+                }
+                for r in records
+            ]
+        }
+        _ = self._manifest_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
