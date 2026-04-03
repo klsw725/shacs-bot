@@ -94,6 +94,8 @@ class TraceCollector(AgentLoopObserver):
         self._response: str = ""
         self._tool_events: list[ToolEvent] = []
         self._usage: dict[str, int] = {}
+        self._planner_kind: str = ""
+        self._fallback_engaged: bool = False
 
     @override
     def on_llm_response(self, response: LLMResponse) -> None:
@@ -122,6 +124,11 @@ class TraceCollector(AgentLoopObserver):
         if final_content is not None:
             self._response = final_content
 
+    @override
+    def on_planner_decision(self, kind: str, fallback_engaged: bool) -> None:
+        self._planner_kind = kind
+        self._fallback_engaged = fallback_engaged
+
     @property
     def finish_reason(self) -> str:
         return self._finish_reason
@@ -138,6 +145,14 @@ class TraceCollector(AgentLoopObserver):
     def usage(self) -> dict[str, int]:
         return dict(self._usage)
 
+    @property
+    def planner_kind(self) -> str:
+        return self._planner_kind
+
+    @property
+    def fallback_engaged(self) -> bool:
+        return self._fallback_engaged
+
     def build_trace(self, started_at: str, completed_at: str) -> TraceArtifact:
         return TraceArtifact(
             model=self._model,
@@ -148,6 +163,8 @@ class TraceCollector(AgentLoopObserver):
             usage=self.usage,
             started_at=started_at,
             completed_at=completed_at,
+            planner_kind=self._planner_kind,
+            fallback_engaged=self._fallback_engaged,
         )
 
 
@@ -252,6 +269,7 @@ class EvaluationRunner:
             usage=collector.usage,
             trace_path=str(trace_path.relative_to(run_dir)),
             error_message=error_message,
+            planner_kind=collector.planner_kind,
         )
         _ = self._storage.write_result(run_dir, variant.name, result)
         return result
@@ -265,6 +283,8 @@ class EvaluationRunner:
     ) -> EvalStatus:
         if error_message or collector.finish_reason == "error":
             return "infra_error"
+        if case.expected_planner_kind and collector.planner_kind != case.expected_planner_kind:
+            return "task_failure"
         if case.expected_response_pattern:
             matched = bool(re.search(case.expected_response_pattern, final_response, re.DOTALL))
             return "success" if matched else "task_failure"

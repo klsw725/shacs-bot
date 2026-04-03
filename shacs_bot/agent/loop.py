@@ -7,7 +7,7 @@ import re
 import sys
 import weakref
 from contextlib import AsyncExitStack
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Awaitable, Any, Mapping, Protocol
 
@@ -43,6 +43,7 @@ from shacs_bot.providers.failover import FailoverManager
 from shacs_bot.workflow.models import WorkflowRecord
 from shacs_bot.workflow.runtime import ManualRecoverResult, WorkflowRuntime
 from shacs_bot.workflow.store import INCOMPLETE_STATES
+from shacs_bot.workflow.wait_until import parse_wait_until_time
 
 
 class AgentLoopObserver(Protocol):
@@ -53,6 +54,8 @@ class AgentLoopObserver(Protocol):
     ) -> None: ...
 
     def on_final(self, final_content: str | None, finish_reason: str) -> None: ...
+
+    def on_planner_decision(self, kind: str, fallback_engaged: bool) -> None: ...
 
 
 class AgentLoop:
@@ -543,6 +546,75 @@ class AgentLoop:
                 ),
             )
 
+        # request_approval 승인 게이트: y/yes/승인 또는 n/no/거절만 소비, 그 외는 알림 반환
+        _APPROVAL_YES: frozenset[str] = frozenset({"y", "yes", "승인"})
+        _APPROVAL_NO: frozenset[str] = frozenset({"n", "no", "거절"})
+        _waiting_approval_id: str | None = session.metadata.get("waiting_workflow_approval_id")
+        if isinstance(_waiting_approval_id, str) and _waiting_approval_id:
+            _ap_wf = self._workflow_runtime.store.get(_waiting_approval_id)
+            if _ap_wf is not None and _ap_wf.state == "waiting_input":
+                _reply: str = msg.content.strip().lower()
+                if _reply in _APPROVAL_YES:
+                    _approved_rec = self._workflow_runtime.approve_workflow(_waiting_approval_id)
+                    if _approved_rec is not None:
+                        session.metadata.pop("waiting_workflow_approval_id", None)
+                        self._sessions.save(session)
+                        return OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=f"✅ 승인되었습니다. 워크플로우를 계속 진행합니다. (`{_waiting_approval_id}`)",
+                            metadata=msg.metadata or {},
+                        )
+                elif _reply in _APPROVAL_NO:
+                    _ = self._workflow_runtime.fail(
+                        _waiting_approval_id, last_error="사용자 거절"
+                    )
+                    session.metadata.pop("waiting_workflow_approval_id", None)
+                    self._sessions.save(session)
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"❌ 거절되었습니다. 워크플로우가 종료됩니다. (`{_waiting_approval_id}`)",
+                        metadata=msg.metadata or {},
+                    )
+                else:
+                    # 승인/거절 외 텍스트는 워크플로우를 건드리지 않고 알림만 반환
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=(
+                            f"⏳ 워크플로우 `{_waiting_approval_id}`가 승인을 기다리고 있습니다.\n"
+                            f"승인하려면 **y** 또는 **승인**, 거절하려면 **n** 또는 **거절**을 입력하세요."
+                        ),
+                        metadata=msg.metadata or {},
+                    )
+            else:
+                # 워크플로우가 더 이상 waiting_input 상태가 아니면 세션 메타 정리
+                session.metadata.pop("waiting_workflow_approval_id", None)
+                self._sessions.save(session)
+
+        # waiting_input 상태 워크플로우가 있으면 이 메시지를 답변으로 소비합니다.
+        _waiting_wf_id: str | None = session.metadata.get("waiting_workflow_id")
+        if isinstance(_waiting_wf_id, str) and _waiting_wf_id:
+            _wf = self._workflow_runtime.store.get(_waiting_wf_id)
+            if _wf is not None and _wf.state == "waiting_input":
+                _resumed = self._workflow_runtime.resume_with_user_answer(
+                    _waiting_wf_id, answer=msg.content
+                )
+                if _resumed is not None:
+                    session.metadata.pop("waiting_workflow_id", None)
+                    self._sessions.save(session)
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"✅ 답변을 받았습니다. 워크플로우를 계속 진행합니다. (`{_waiting_wf_id}`)",
+                        metadata=msg.metadata or {},
+                    )
+            else:
+                # 워크플로우가 더 이상 waiting_input 상태가 아니면 세션 메타 정리
+                session.metadata.pop("waiting_workflow_id", None)
+                self._sessions.save(session)
+
         consolidated: bool = await self._memory_consolidator.maybe_consolidate_by_tokens(
             session=session
         )
@@ -602,7 +674,7 @@ class AgentLoop:
             )
 
         if not msg.media:
-            _plan = self._classify_request(msg.content)
+            _plan = await self._classify_request_with_llm_fallback(msg.content, observer=observer)
             session.metadata["last_planning_result"] = _plan.model_dump()
             if _plan.kind == "direct_answer":
                 session.metadata.pop("current_plan", None)
@@ -1243,6 +1315,78 @@ class AgentLoop:
         if len(text) < 15:
             return AssistantPlan(kind="direct_answer")
 
+        # --- 특수 step kind 감지 (우선순위: wait_until > request_approval > ask_user) ---
+
+        _WAIT_UNTIL_RE = re.compile(
+            r"\d+\s*(?:분|시간|일)\s*(?:후|뒤|있다가|지나서|지나고|지나면|지난\s*후)"
+            r"|(?:tomorrow|내일)\s+\d{1,2}:\d{2}"
+            r"|\bwait\s+(?:for\s+)?\d+\s*(?:min(?:utes?)?|hours?|days?)\b"
+            r"|\bin\s+\d+\s*(?:min(?:utes?)?|hours?)\b"
+            r"|\bafter\s+\d+\s*(?:min(?:utes?)?|hours?|days?)\b"
+            r"|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}",
+            re.IGNORECASE,
+        )
+        if _WAIT_UNTIL_RE.search(text):
+            wait_dt = parse_wait_until_time(text)
+            return AssistantPlan(
+                kind="planned_workflow",
+                steps=[
+                    PlanStep(
+                        kind="wait_until",
+                        description=text[:120],
+                        step_meta={"iso_time": wait_dt.isoformat()},
+                    ),
+                    PlanStep(kind="research", description="대기 후 요청 수행", depends_on=[0]),
+                    PlanStep(kind="send_result", description="결과 전달", depends_on=[1]),
+                ],
+                summary="대기 후 요청을 처리합니다.",
+            )
+
+        _APPROVAL_DETECT_RE = re.compile(
+            r"확인\s*(?:후에?|받고|하고)"
+            r"|승인\s*(?:후에?|받고)"
+            r"|\bconfirm\s+before\b"
+            r"|\bget\s+(?:my\s+)?approval\b"
+            r"|진행해도\s*될까",
+            re.IGNORECASE,
+        )
+        if _APPROVAL_DETECT_RE.search(text):
+            return AssistantPlan(
+                kind="planned_workflow",
+                steps=[
+                    PlanStep(kind="research", description="작업 내용 분석"),
+                    PlanStep(
+                        kind="request_approval",
+                        description="작업 승인 요청",
+                        step_meta={"prompt": f"다음 작업을 계속 진행할까요?\n\n{text[:120]}"},
+                        depends_on=[0],
+                    ),
+                    PlanStep(kind="send_result", description="승인 후 결과 전달", depends_on=[1]),
+                ],
+                summary="승인 후 작업을 진행합니다.",
+            )
+
+        _ASK_USER_DETECT_RE = re.compile(
+            r"물어보고|묻고\s+(?:나서|이후|그에?\s*맞게|조사|처리|진행|실행|알려|확인)|입력\s*받고"
+            r"|\bask\s+me\b"
+            r"|\bget\s+(?:my\s+)?input\b",
+            re.IGNORECASE,
+        )
+        if _ASK_USER_DETECT_RE.search(text):
+            return AssistantPlan(
+                kind="planned_workflow",
+                steps=[
+                    PlanStep(
+                        kind="ask_user",
+                        description="사용자 입력 요청",
+                        step_meta={"prompt": "계속 진행하기 위한 정보를 입력해 주세요."},
+                    ),
+                    PlanStep(kind="research", description="입력 기반 작업 수행", depends_on=[0]),
+                    PlanStep(kind="send_result", description="결과 전달", depends_on=[1]),
+                ],
+                summary="사용자 입력 후 작업을 처리합니다.",
+            )
+
         _SEQ_EN = re.compile(
             (
                 r"\bfirst\b.{1,80}\bthen\b"
@@ -1264,9 +1408,11 @@ class AgentLoop:
         )
         _SCHEDULE_RE = re.compile(
             (
-                r"\bevery\s+(?:day|week|hour|minute)\b"
-                r"|\b(?:schedule|remind)\b.{0,30}\b(?:me|every|daily|weekly)\b"
-                r"|매일|매주|매시간|주기적으로|정기적으로"
+                r"\bevery\s+(?:day|week|month|hour|minute|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b"
+                r"|\b(?:schedule|remind)\b.{0,30}\b(?:me|every|daily|weekly|monthly)\b"
+                r"|\bweekly\b|\bmonthly\b"
+                r"|매일|매주|매월|매달|매시간|주기적으로|정기적으로"
+                r"|매주\s*(?:월요일|화요일|수요일|목요일|금요일|토요일|일요일)"
             ),
             re.IGNORECASE,
         )
@@ -1293,6 +1439,159 @@ class AgentLoop:
 
         return AssistantPlan(kind="direct_answer")
 
+    # ------------------------------------------------------------------
+    # LLM 플래너 폴백
+    # ------------------------------------------------------------------
+
+    _LLM_PLANNER_SYSTEM: str = (
+        "You are a request router. Analyse the user message and classify it.\n\n"
+        "Return ONLY a JSON object — no markdown, no explanation:\n"
+        '{"kind": "direct_answer" | "planned_workflow", "summary": "<one-line>", '
+        '"steps": [{"kind": "<step_kind>", "description": "<what to do>", '
+        '"depends_on": [<0-based>], "step_meta": {}}]}\n\n'
+        "Step kinds: research, summarize, ask_user, request_approval, wait_until, send_result\n\n"
+        "step_meta rules — include when the step kind requires it:\n"
+        '- wait_until: set "iso_time" (ISO 8601 absolute datetime) OR "duration_minutes" (integer).\n'
+        '  Prefer "iso_time" when a specific time is mentioned; prefer "duration_minutes" for relative delays.\n'
+        '  Example: {"iso_time": "2026-04-03T15:00:00+09:00"} or {"duration_minutes": 30}\n'
+        '- ask_user: set "prompt" to the exact question string shown to the user.\n'
+        '  Example: {"prompt": "어떤 형식으로 결과를 받으시겠습니까?"}\n'
+        '- request_approval: set "prompt" to the approval confirmation message.\n'
+        '  Example: {"prompt": "다음 작업을 진행할까요?\\n\\n<task summary>"}\n'
+        "- Other step kinds: omit step_meta or leave it as {}.\n\n"
+        "Routing rules:\n"
+        '- "direct_answer": simple questions, greetings, single-topic queries, factual lookups\n'
+        '- "planned_workflow": requires multiple distinct phases, complex multi-part tasks with '
+        "sequential dependencies\n\n"
+        "For planned_workflow, always end steps with send_result.\n"
+        "Return ONLY the JSON object."
+    )
+
+    @staticmethod
+    def _normalize_llm_plan_metadata(plan: AssistantPlan) -> AssistantPlan:
+        """LLM 폴백 플랜의 step_meta를 보충합니다.
+
+        LLM이 step_meta를 생략했을 때 description에서 도출 가능한 메타데이터를 채웁니다.
+        - ``wait_until``: ``iso_time``/``duration_minutes`` 모두 없으면 description 파싱
+        - ``ask_user`` / ``request_approval``: ``prompt`` 없으면 description 사용
+
+        기존 step_meta가 이미 올바른 키를 가지면 변경하지 않습니다.
+        """
+        if plan.kind != "planned_workflow":
+            return plan
+
+        updated = False
+        normalized: list[PlanStep] = []
+        for step in plan.steps:
+            if step.kind == "wait_until" and "iso_time" not in step.step_meta and "duration_minutes" not in step.step_meta:
+                dt = parse_wait_until_time(step.description)
+                normalized.append(step.model_copy(update={"step_meta": {**step.step_meta, "iso_time": dt.isoformat()}}))
+                updated = True
+            elif step.kind in ("ask_user", "request_approval") and "prompt" not in step.step_meta:
+                normalized.append(step.model_copy(update={"step_meta": {**step.step_meta, "prompt": step.description}}))
+                updated = True
+            else:
+                normalized.append(step)
+
+        if not updated:
+            return plan
+        return plan.model_copy(update={"steps": normalized})
+
+    @staticmethod
+    def _is_nontrivial_for_llm_fallback(text: str) -> bool:
+        """LLM 폴백을 호출할 가치가 있는 비자명 요청인지 판단합니다.
+
+        규칙 기반이 이미 짧은 텍스트(<15자)를 필터링하므로, 여기서는
+        보다 넉넉한 임계값(30자)을 기준으로 한다.
+        """
+        return len(text.strip()) >= 30
+
+    async def _llm_classify_fallback(self, user_text: str) -> AssistantPlan | None:
+        """LLM에 구조화된 AssistantPlan JSON을 요청합니다.
+
+        파싱 실패, 네트워크 오류, 빈 응답 등 모든 예외 상황에서 None을 반환하며
+        호출자가 안전하게 원래 ``direct_answer``로 폴백할 수 있도록 한다.
+        """
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._LLM_PLANNER_SYSTEM},
+            {"role": "user", "content": user_text},
+        ]
+        try:
+            response: LLMResponse = await self._provider.chat_with_retry(
+                messages=messages,
+                tools=None,
+                model=self._model,
+                max_tokens=512,
+                temperature=0.0,
+                failover_manager=self._failover,
+                provider_name=self._provider_name,
+            )
+        except Exception as exc:
+            logger.warning("LLM 플래너 폴백 호출 실패: {}", exc)
+            return None
+
+        if response.finish_reason == "error" or not response.content:
+            return None
+
+        raw: str = response.content.strip()
+        md_match = re.search(r"```(?:json)?\s*([\s\S]+?)```", raw)
+        if md_match:
+            raw = md_match.group(1).strip()
+
+        try:
+            data: dict = json.loads(raw)
+            plan: AssistantPlan = AssistantPlan.model_validate(data)
+        except Exception as exc:
+            logger.warning(
+                "LLM 플래너 폴백 JSON 파싱 실패: {} — raw={!r}", exc, raw[:200]
+            )
+            return None
+
+        if plan.kind == "planned_workflow" and not plan.steps:
+            return None
+
+        return self._normalize_llm_plan_metadata(plan)
+
+    async def _classify_request_with_llm_fallback(
+        self,
+        user_text: str,
+        *,
+        observer: AgentLoopObserver | None = None,
+    ) -> AssistantPlan:
+        """규칙 기반 플래너로 분류하고, 결과가 ``direct_answer`` + 비자명 요청이면 LLM 폴백을 시도합니다.
+
+        빠른 경로(규칙 기반)에서 이미 ``planned_workflow`` 또는 ``clarification``이 결정되면
+        LLM을 호출하지 않는다. LLM 폴백이 ``direct_answer``를 반환하면 원래 결과를 유지한다.
+
+        observer가 있으면 최종 결정 후 ``on_planner_decision``을 호출한다.
+        """
+        plan: AssistantPlan = self._classify_request(user_text)
+        if plan.kind != "direct_answer":
+            self._emit_planner_decision(observer, plan.kind, fallback_engaged=False)
+            return plan
+        if not self._is_nontrivial_for_llm_fallback(user_text):
+            self._emit_planner_decision(observer, plan.kind, fallback_engaged=False)
+            return plan
+
+        fallback: AssistantPlan | None = await self._llm_classify_fallback(user_text)
+        if fallback is not None and fallback.kind != "direct_answer":
+            logger.debug("LLM 플래너 폴백 적용: kind={}", fallback.kind)
+            self._emit_planner_decision(observer, fallback.kind, fallback_engaged=True)
+            return fallback
+        self._emit_planner_decision(observer, plan.kind, fallback_engaged=True)
+        return plan
+
+    @staticmethod
+    def _emit_planner_decision(
+        observer: AgentLoopObserver | None, kind: str, *, fallback_engaged: bool
+    ) -> None:
+        if observer is None:
+            return
+        try:
+            observer.on_planner_decision(kind, fallback_engaged)
+        except Exception as e:
+            logger.warning("AgentLoop observer on_planner_decision 실패: {}", e)
+
     @staticmethod
     def _format_plan(plan: AssistantPlan) -> str:
         """AssistantPlan을 사용자 표시용 텍스트로 변환합니다."""
@@ -1305,6 +1604,337 @@ class AgentLoop:
             notify_str = " 🔔" if step.notify else ""
             lines.append(f"{i + 1}. [{step.kind}] {step.description}{dep_str}{notify_str}")
         return "\n".join(lines)
+
+    async def execute_existing_workflow(self, workflow_id: str) -> bool:
+        """queued 상태의 manual 워크플로우를 비동기 태스크로 실행합니다.
+
+        WorkflowRedispatcher가 호출하는 진입점.  성공 시 True, 실패(record 없음,
+        source_kind 불일치 등) 시 False를 반환합니다.
+        """
+        record = self._workflow_runtime.store.get(workflow_id)
+        if record is None or record.source_kind != "manual":
+            return False
+
+        started = self._workflow_runtime.start(workflow_id)
+        if started is None:
+            return False
+
+        channel: str = record.notify_target.channel or "cli"
+        chat_id: str = record.notify_target.chat_id or "direct"
+        session_key: str | None = record.notify_target.session_key or None
+
+        parsed_plan: AssistantPlan | None = self._parse_workflow_plan(record)
+
+        if parsed_plan is not None and parsed_plan.kind == "planned_workflow" and parsed_plan.steps:
+            _ = asyncio.create_task(
+                self._run_planned_workflow_steps(
+                    workflow_id=workflow_id,
+                    plan=parsed_plan,
+                    channel=channel,
+                    chat_id=chat_id,
+                    session_key=session_key,
+                )
+            )
+            return True
+
+        async def _run() -> None:
+            try:
+                final_content: str = await self._run_workflow_prompt(
+                    prompt=record.goal,
+                    channel=channel,
+                    chat_id=chat_id,
+                    session_key=session_key,
+                )
+                result_text: str = final_content or "워크플로우가 완료되었습니다."
+                _ = self._workflow_runtime.annotate_result(workflow_id, result_text)
+                _ = self._workflow_runtime.clear_step_cursor(workflow_id)
+                _ = self._workflow_runtime.complete(workflow_id)
+
+                await self._publish_workflow_outbound(
+                    workflow_id=workflow_id,
+                    channel=channel,
+                    chat_id=chat_id,
+                    content=f"✅ 워크플로우 완료 (`{workflow_id}`)\n\n{result_text}",
+                )
+            except Exception as exc:
+                logger.error("manual 워크플로우 {} 실행 실패: {}", workflow_id, exc)
+                _ = self._workflow_runtime.fail(workflow_id, last_error=str(exc))
+                await self._publish_workflow_outbound(
+                    workflow_id=workflow_id,
+                    channel=channel,
+                    chat_id=chat_id,
+                    content=f"❌ 워크플로우 실패 (`{workflow_id}`): {exc}",
+                )
+
+        _ = asyncio.create_task(_run())
+        return True
+
+    def _parse_workflow_plan(self, record: WorkflowRecord) -> AssistantPlan | None:
+        raw_plan: object = record.metadata.get("plan")
+        if not isinstance(raw_plan, dict):
+            return None
+        try:
+            return AssistantPlan.model_validate(raw_plan)
+        except Exception as exc:
+            logger.warning("workflow {} plan 파싱 실패: {}", record.workflow_id, exc)
+            return None
+
+    async def _run_workflow_prompt(
+        self,
+        *,
+        prompt: str,
+        channel: str,
+        chat_id: str,
+        session_key: str | None,
+    ) -> str:
+        key: str = session_key or f"{channel}:{chat_id}"
+        self._set_tool_context(channel=channel, chat_id=chat_id, session_key=key)
+        session: Session = self._sessions.get_or_create(key=key)
+        history: list[dict[str, Any]] = session.get_history(max_messages=self._memory_window)
+        messages: list[dict[str, Any]] = self._context.build_messages(
+            history=history,
+            current_messages=prompt,
+            channel=channel,
+            chat_id=chat_id,
+        )
+        final_content, _, all_msg, _ = await self._run_agent_loop(
+            messages,
+            _session_key=key,
+            _channel=channel,
+        )
+        self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
+        self._sessions.save(session)
+        return final_content or ""
+
+    async def _publish_workflow_outbound(
+        self,
+        *,
+        workflow_id: str,
+        channel: str,
+        chat_id: str,
+        content: str,
+    ) -> None:
+        await self._bus.publish_outbound(
+            OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=content,
+            )
+        )
+        _ = self._workflow_runtime.mark_notified(
+            workflow_id,
+            channel=channel,
+            chat_id=chat_id,
+        )
+
+    async def _run_planned_workflow_steps(
+        self,
+        *,
+        workflow_id: str,
+        plan: AssistantPlan,
+        channel: str,
+        chat_id: str,
+        session_key: str | None,
+    ) -> None:
+        record: WorkflowRecord | None = self._workflow_runtime.store.get(workflow_id)
+        if record is None:
+            return
+
+        current_step_index = record.metadata.get("currentStepIndex", 0)
+        if not isinstance(current_step_index, int) or current_step_index < 0:
+            current_step_index = 0
+
+        last_result = record.metadata.get("lastStepResultSummary", "")
+        current_result: str = last_result if isinstance(last_result, str) else ""
+
+        try:
+            while current_step_index < len(plan.steps):
+                step = plan.steps[current_step_index]
+                _ = self._workflow_runtime.update_step_cursor(
+                    workflow_id,
+                    step_index=current_step_index,
+                    step_kind=step.kind,
+                )
+
+                outcome, current_result = await self._execute_plan_step(
+                    workflow_id=workflow_id,
+                    record_goal=record.goal,
+                    step=step,
+                    previous_result=current_result,
+                    channel=channel,
+                    chat_id=chat_id,
+                    session_key=session_key,
+                )
+
+                if outcome != "continue":
+                    return
+
+                _ = self._workflow_runtime.annotate_step_result(workflow_id, current_result)
+                _ = self._workflow_runtime.annotate_result(workflow_id, current_result)
+                next_idx = current_step_index + 1
+                next_kind = plan.steps[next_idx].kind if next_idx < len(plan.steps) else ""
+                _ = self._workflow_runtime.update_step_cursor(
+                    workflow_id,
+                    step_index=next_idx,
+                    step_kind=next_kind,
+                )
+                current_step_index = next_idx
+
+            _ = self._workflow_runtime.clear_step_cursor(workflow_id)
+            _ = self._workflow_runtime.complete(workflow_id)
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=f"✅ 워크플로우 완료 (`{workflow_id}`)\n\n{current_result or '워크플로우가 완료되었습니다.'}",
+            )
+        except Exception as exc:
+            logger.error("planned workflow {} step 실행 실패: {}", workflow_id, exc)
+            _ = self._workflow_runtime.fail(workflow_id, last_error=str(exc))
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=f"❌ 워크플로우 실패 (`{workflow_id}`): {exc}",
+            )
+
+    async def _execute_plan_step(
+        self,
+        *,
+        workflow_id: str,
+        record_goal: str,
+        step: PlanStep,
+        previous_result: str,
+        channel: str,
+        chat_id: str,
+        session_key: str | None,
+    ) -> tuple[str, str]:
+        if step.kind == "research":
+            prompt = (
+                f"다음 workflow 목표를 수행하기 위한 조사 단계를 실행하세요.\n\n"
+                f"목표: {record_goal}\n"
+                f"현재 step: {step.description}\n\n"
+                "아직 최종 전달은 하지 말고, 핵심 조사 결과만 간결하게 정리하세요."
+            )
+            result = await self._run_workflow_prompt(
+                prompt=prompt,
+                channel=channel,
+                chat_id=chat_id,
+                session_key=session_key,
+            )
+            return "continue", result or previous_result
+
+        if step.kind == "summarize":
+            source_text = previous_result or record_goal
+            prompt = (
+                "다음 조사 결과를 사용자가 바로 이해할 수 있게 간결하게 요약하세요.\n\n"
+                f"조사 결과:\n{source_text}\n\n"
+                f"요약 지시: {step.description}"
+            )
+            result = await self._run_workflow_prompt(
+                prompt=prompt,
+                channel=channel,
+                chat_id=chat_id,
+                session_key=session_key,
+            )
+            return "continue", result or source_text
+
+        if step.kind == "send_result":
+            result_text = previous_result or "전달할 결과가 없습니다."
+            _ = self._workflow_runtime.clear_step_cursor(workflow_id)
+            _ = self._workflow_runtime.annotate_result(workflow_id, result_text)
+            _ = self._workflow_runtime.complete(workflow_id)
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=f"✅ 워크플로우 완료 (`{workflow_id}`)\n\n{result_text}",
+            )
+            return "completed", result_text
+
+        if step.kind == "ask_user":
+            meta_prompt = step.step_meta.get("prompt")
+            prompt_text = meta_prompt if isinstance(meta_prompt, str) and meta_prompt else step.description
+            message = (
+                f"워크플로우 `{workflow_id}`는 `ask_user` 단계에서 사용자 입력을 기다립니다.\n"
+                f"- {prompt_text}"
+            )
+            _ = self._workflow_runtime.wait_for_input(workflow_id)
+            _ = self._workflow_runtime.annotate_step_result(workflow_id, message)
+            _wf_sess_key: str = session_key or f"{channel}:{chat_id}"
+            _wf_sess = self._sessions.get_or_create(key=_wf_sess_key)
+            _wf_sess.metadata["waiting_workflow_id"] = workflow_id
+            self._sessions.save(_wf_sess)
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=message,
+            )
+            return "waiting", previous_result
+
+        if step.kind == "request_approval":
+            meta_prompt = step.step_meta.get("prompt")
+            prompt_text = meta_prompt if isinstance(meta_prompt, str) and meta_prompt else step.description
+            message = (
+                f"워크플로우 `{workflow_id}`는 `request_approval` 단계에서 승인을 기다립니다.\n"
+                f"- {prompt_text}\n\n"
+                f"승인하려면 **y** 또는 **승인**, 거절하려면 **n** 또는 **거절**을 입력하세요."
+            )
+            _ = self._workflow_runtime.wait_for_input(workflow_id)
+            _ = self._workflow_runtime.annotate_step_result(workflow_id, message)
+            _ap_sess_key: str = session_key or f"{channel}:{chat_id}"
+            _ap_sess = self._sessions.get_or_create(key=_ap_sess_key)
+            _ap_sess.metadata["waiting_workflow_approval_id"] = workflow_id
+            self._sessions.save(_ap_sess)
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=message,
+            )
+            return "waiting", previous_result
+
+        if step.kind == "wait_until":
+            iso_time = step.step_meta.get("iso_time")
+            duration_minutes = step.step_meta.get("duration_minutes")
+            if isinstance(iso_time, str) and iso_time:
+                next_run_dt = datetime.fromisoformat(iso_time)
+                if next_run_dt.tzinfo is None:
+                    next_run_dt = next_run_dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            elif isinstance(duration_minutes, (int, float)) and duration_minutes > 0:
+                next_run_dt = datetime.now().astimezone() + timedelta(minutes=duration_minutes)
+            else:
+                next_run_dt = parse_wait_until_time(step.description)
+            next_run_at = next_run_dt.isoformat()
+            message = (
+                f"워크플로우 `{workflow_id}`의 `wait_until` 단계: {next_run_dt.strftime('%Y-%m-%d %H:%M %Z')} 에 재시도합니다.\n"
+                f"- step: {step.description}"
+            )
+            _ = self._workflow_runtime.schedule_retry(
+                workflow_id,
+                next_run_at=next_run_at,
+                last_error=message,
+                increment_retries=False,
+            )
+            _ = self._workflow_runtime.annotate_step_result(workflow_id, message)
+            await self._publish_workflow_outbound(
+                workflow_id=workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                content=message,
+            )
+            return "waiting", previous_result
+
+        message = f"지원하지 않는 step kind: {step.kind}"
+        _ = self._workflow_runtime.fail(workflow_id, last_error=message)
+        await self._publish_workflow_outbound(
+            workflow_id=workflow_id,
+            channel=channel,
+            chat_id=chat_id,
+            content=f"❌ 워크플로우 실패 (`{workflow_id}`): {message}",
+        )
+        return "failed", previous_result
 
     async def close_mcp(self) -> None:
         """ "MCP 연결 종료"""

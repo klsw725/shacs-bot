@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from shacs_bot.workflow.models import NotifyTarget, WorkflowRecord, WorkflowState
 from shacs_bot.workflow.store import WorkflowStore
@@ -101,6 +101,84 @@ class WorkflowRuntime:
             last_error=last_error,
         )
 
+    def approve_workflow(self, workflow_id: str) -> WorkflowRecord | None:
+        """request_approval 대기 상태에서 사용자가 승인 후 queued 로 재전환합니다.
+
+        currentStepIndex 를 한 칸 앞으로 이동시켜 request_approval 스텝을 건너뛰고
+        approvalDecision 을 기록한 뒤 queued 상태로 전환합니다.
+        """
+        record: WorkflowRecord | None = self._store.get(workflow_id)
+        if record is None or record.state != "waiting_input":
+            return None
+        current_step: object = record.metadata.get("currentStepIndex", 0)
+        if not isinstance(current_step, int) or current_step < 0:
+            current_step = 0
+        next_step_kind = ""
+        raw_plan: object = record.metadata.get("plan")
+        if isinstance(raw_plan, dict):
+            plan_dict = cast(dict[str, object], raw_plan)
+            raw_steps: object = plan_dict.get("steps")
+            next_index = current_step + 1
+            if isinstance(raw_steps, list):
+                step_list = cast(list[object], raw_steps)
+                if next_index < len(step_list):
+                    raw_step: object = step_list[next_index]
+                    if isinstance(raw_step, dict):
+                        step_dict = cast(dict[str, object], raw_step)
+                        raw_kind: object = step_dict.get("kind")
+                        if isinstance(raw_kind, str):
+                            next_step_kind = raw_kind
+        updated: WorkflowRecord | None = self._update_metadata(
+            workflow_id,
+            approvalDecision="approved",
+            currentStepIndex=current_step + 1,
+            currentStepKind=next_step_kind,
+        )
+        if updated is None:
+            return None
+        return self._transition(workflow_id, "queued", next_run_at="")
+
+    def resume_with_user_answer(self, workflow_id: str, *, answer: str) -> WorkflowRecord | None:
+        """ask_user waiting 상태에서 사용자 답변을 저장하고 queued 로 재전환합니다.
+
+        currentStepIndex 를 한 칸 앞으로 이동시켜 ask_user 스텝을 건너뛰고,
+        답변을 userAnswer 와 lastStepResultSummary 에 기록한 뒤 queued 상태로
+        전환합니다. WorkflowRedispatcher 가 다음 폴링 때 재실행합니다.
+        """
+        record: WorkflowRecord | None = self._store.get(workflow_id)
+        if record is None or record.state != "waiting_input":
+            return None
+        current_step: object = record.metadata.get("currentStepIndex", 0)
+        if not isinstance(current_step, int) or current_step < 0:
+            current_step = 0
+        next_step_kind = ""
+        raw_plan: object = record.metadata.get("plan")
+        if isinstance(raw_plan, dict):
+            plan_dict = cast(dict[str, object], raw_plan)
+            raw_steps: object = plan_dict.get("steps")
+            next_index = current_step + 1
+            if isinstance(raw_steps, list):
+                step_list = cast(list[object], raw_steps)
+                if next_index >= len(step_list):
+                    step_list = []
+                if next_index < len(step_list):
+                    raw_step: object = step_list[next_index]
+                    if isinstance(raw_step, dict):
+                        step_dict = cast(dict[str, object], raw_step)
+                        raw_kind: object = step_dict.get("kind")
+                        if isinstance(raw_kind, str):
+                            next_step_kind = raw_kind
+        updated: WorkflowRecord | None = self._update_metadata(
+            workflow_id,
+            userAnswer=answer,
+            lastStepResultSummary=answer,
+            currentStepIndex=current_step + 1,
+            currentStepKind=next_step_kind,
+        )
+        if updated is None:
+            return None
+        return self._transition(workflow_id, "queued", next_run_at="")
+
     def resume(self, workflow_id: str) -> WorkflowRecord | None:
         record: WorkflowRecord | None = self._store.get(workflow_id)
         if record is None or record.state in TERMINAL_STATES:
@@ -155,6 +233,30 @@ class WorkflowRuntime:
     def annotate_result(self, workflow_id: str, result: str) -> WorkflowRecord | None:
         preview: str = result[:500]
         return self._update_metadata(workflow_id, resultPreview=preview)
+
+    def update_step_cursor(
+        self,
+        workflow_id: str,
+        *,
+        step_index: int,
+        step_kind: str,
+    ) -> WorkflowRecord | None:
+        return self._update_metadata(
+            workflow_id,
+            currentStepIndex=step_index,
+            currentStepKind=step_kind,
+        )
+
+    def annotate_step_result(self, workflow_id: str, result: str) -> WorkflowRecord | None:
+        preview: str = result[:500]
+        return self._update_metadata(workflow_id, lastStepResultSummary=preview)
+
+    def clear_step_cursor(self, workflow_id: str) -> WorkflowRecord | None:
+        return self._update_metadata(
+            workflow_id,
+            currentStepIndex=None,
+            currentStepKind=None,
+        )
 
     def mark_notified(
         self,

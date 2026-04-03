@@ -2496,6 +2496,12 @@ wizard = [
     { name = "questionary" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.45.0,<1.0.0" },
@@ -2543,6 +2549,12 @@ requires-dist = [
     { name = "wecom-aibot-sdk-python", marker = "extra == 'wecom'", specifier = ">=0.1.2" },
 ]
 provides-extras = ["wecom", "matrix", "observability", "wizard", "dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0" },
+]
 
 [[package]]
 name = "shellingham"
