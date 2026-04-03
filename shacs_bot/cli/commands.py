@@ -424,11 +424,6 @@ def gateway(
     # 먼저, 크론 서비스 생성 (에이전트 생성 이후에 callback 설정)
     cron_store_path: Path = get_cron_dir() / "jobs.json"
     cron: CronService = CronService(cron_store_path, workflow_runtime=workflow_runtime)
-    redispatcher: WorkflowRedispatcher = WorkflowRedispatcher(
-        workflow_runtime=workflow_runtime,
-        cron_service=cron,
-        subagent_manager=agent_loop.subagent_manager,
-    )
 
     provider.generation.temperature = config.agents.defaults.temperature
     provider.generation.max_tokens = config.agents.defaults.max_tokens
@@ -463,6 +458,11 @@ def gateway(
         skill_approval=config.tools.skill_approval,
         hooks=hooks,
         workflow_runtime=workflow_runtime,
+    )
+    redispatcher: WorkflowRedispatcher = WorkflowRedispatcher(
+        workflow_runtime=workflow_runtime,
+        cron_service=cron,
+        subagent_manager=agent_loop.subagent_manager,
     )
 
     # 크론 callback 설정 (에이전트 필요)
@@ -594,16 +594,24 @@ def gateway(
         # Fallback은 기존 동작을 유지하면서도 명시적으로 처리한다
         return "cli", "direct"
 
-    async def on_heartbeat_execute(tasks: str) -> str:
+    async def on_heartbeat_execute(tasks: str, workflow_id: str) -> str:
         """Phase 2: full 에이전트 로프를 통해 heartbeat 태스크 실행"""
         channel, chat_id = await _pick_heartbeat_target()
+        session_key = f"{channel}:{chat_id}"
+        if workflow_id:
+            _ = workflow_runtime.update_notify_target(
+                workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                session_key=session_key,
+            )
 
         async def _silent(*_args, **_kwargs):
             pass
 
         return await agent_loop.process_direct(
             content=tasks,
-            session_key="heartbeat",
+            session_key=session_key,
             channel=channel,
             chat_id=chat_id,
             on_progress=_silent,

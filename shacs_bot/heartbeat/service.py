@@ -60,7 +60,7 @@ class HeartbeatService:
         workspace: Path,
         provider: LLMProvider,
         model: str,
-        on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
+        on_execute: Callable[[str, str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         interval_s: int = 30 * 60,
         enabled: bool = True,
@@ -70,7 +70,7 @@ class HeartbeatService:
         self._workspace: Path = workspace
         self._provider: LLMProvider = provider
         self._model: str = model
-        self._on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = on_execute
+        self._on_execute: Callable[[str, str], Coroutine[Any, Any, str]] | None = on_execute
         self._on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = on_notify
         self._interval_s: int = interval_s
         self._enabled: bool = enabled
@@ -78,7 +78,7 @@ class HeartbeatService:
         self._workflow_runtime: WorkflowRuntime | None = workflow_runtime
 
         self._running: bool = False
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
 
     @property
     def heartbeat_file(self) -> Path:
@@ -137,7 +137,7 @@ class HeartbeatService:
             if self._on_execute:
                 workflow_id = self._create_workflow(tasks)
                 self._start_workflow(workflow_id)
-                response: str = await self._on_execute(tasks)
+                response: str = await self._on_execute(tasks, workflow_id)
                 self._annotate_result(workflow_id, response)
                 await self._hooks.emit(
                     HookContext(
@@ -245,4 +245,5 @@ class HeartbeatService:
         if action != "run" or not self._on_execute:
             return None
 
-        return await self._on_execute(tasks)
+        workflow_id = self._create_workflow(tasks)
+        return await self._on_execute(tasks, workflow_id)
