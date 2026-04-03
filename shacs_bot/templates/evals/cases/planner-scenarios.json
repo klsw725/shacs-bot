@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "caseId": "planner-direct-001",
+      "input": "안녕!",
+      "expectedMode": "response",
+      "tags": ["planner", "direct_answer"],
+      "timeoutSeconds": 60,
+      "notes": "길이 15자 미만 단순 인사. _classify_request가 direct_answer를 반환해 _run_agent_loop로 직행한다. 비어 있지 않은 응답이면 성공."
+    },
+    {
+      "caseId": "planner-direct-002",
+      "input": "오늘 날씨 어때?",
+      "expectedMode": "response",
+      "tags": ["planner", "direct_answer"],
+      "timeoutSeconds": 60,
+      "notes": "순차 패턴·일정 키워드 없는 단문 질의. direct_answer 경로로 LLM 직답."
+    },
+    {
+      "caseId": "planner-clarification-001",
+      "input": "그거 해줘",
+      "expectedResponsePattern": "구체적|무엇인지|알려주",
+      "tags": ["planner", "clarification"],
+      "timeoutSeconds": 30,
+      "notes": "_VAGUE_RE에 매칭되어 clarification 분기 진입. 응답에 '구체적' 또는 '무엇인지' 또는 '알려주'가 포함돼야 성공."
+    },
+    {
+      "caseId": "planner-clarification-002",
+      "input": "이거 해줘",
+      "expectedResponsePattern": "구체적|무엇인지|알려주",
+      "tags": ["planner", "clarification"],
+      "timeoutSeconds": 30,
+      "notes": "대명사+동사 패턴 (이거 해줘). _VAGUE_RE에 매칭되어 clarification 질문이 응답에 포함돼야 성공."
+    },
+    {
+      "caseId": "planner-workflow-001",
+      "input": "먼저 docs 폴더를 확인하고, 그 다음에 README.md를 요약해줘.",
+      "expectedResponsePattern": "📋|처리 계획|\\[research\\]|\\[summarize\\]",
+      "tags": ["planner", "planned_workflow"],
+      "timeoutSeconds": 30,
+      "notes": "_SEQ_KO 패턴 ('먼저…그 다음에')으로 planned_workflow 분기 진입. _format_plan 출력에 계획 마커가 포함돼야 성공."
+    },
+    {
+      "caseId": "planner-workflow-002",
+      "input": "매일 아침 9시에 오늘의 뉴스를 요약해서 보내줘.",
+      "expectedResponsePattern": "📋|처리 계획|\\[research\\]|\\[summarize\\]",
+      "tags": ["planner", "planned_workflow", "schedule"],
+      "timeoutSeconds": 30,
+      "notes": "_SCHEDULE_RE 패턴 ('매일')으로 planned_workflow 분기 진입. 계획 마커 포함 여부로 성공 판정."
+    },
+    {
+      "caseId": "planner-workflow-003",
+      "input": "1. 현재 브랜치를 확인해\n2. 최근 커밋 5개를 요약해\n3. 변경 사항을 docs에 기록해",
+      "expectedResponsePattern": "📋|처리 계획|\\[research\\]|\\[summarize\\]",
+      "tags": ["planner", "planned_workflow", "numbered_list"],
+      "timeoutSeconds": 30,
+      "notes": "번호 목록 2줄 이상으로 planned_workflow 분기 진입. step 기반 계획 출력 확인."
+    }
+  ]
+}

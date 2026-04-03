@@ -18,6 +18,7 @@ class EvaluationCase(EvalBaseModel):
     case_id: str
     input: str
     expected_mode: ExpectedMode = "response"
+    expected_response_pattern: str = ""
     tags: list[str] = Field(default_factory=list)
     timeout_seconds: int = 120
     notes: str = ""
