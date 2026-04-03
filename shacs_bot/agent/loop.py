@@ -177,6 +177,10 @@ class AgentLoop:
         return self._workflow_runtime
 
     @property
+    def subagent_manager(self) -> SubagentManager:
+        return self._subagent
+
+    @property
     def channels_config(self) -> ChannelsConfig:
         return self._channels_config
 

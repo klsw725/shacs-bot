@@ -103,6 +103,7 @@ class SubagentManager:
         origin_chat_id: str = "direct",
         session_key: str | None = None,
         origin_metadata: dict[str, Any] | None = None,
+        workflow_id: str | None = None,
     ) -> str:
         """새로운 서브에이전트를 생성하여 주어진 작업을 실행합니다."""
         # 동시성 제한
@@ -119,18 +120,19 @@ class SubagentManager:
         }
 
         agent_def: AgentDefinition = self._resolve_agent(role)
-        workflow_id: str = self._create_workflow(
+        active_workflow_id: str = workflow_id or self._create_workflow(
             task_id=task_id,
             role=role,
             task=task,
             origin=origin,
             label=display_label,
+            extra_metadata={},
         )
 
         bg_task: asyncio.Task[None] = asyncio.create_task(
             self._run_subagent(
                 task_id,
-                workflow_id,
+                active_workflow_id,
                 task,
                 display_label,
                 origin,
@@ -139,7 +141,7 @@ class SubagentManager:
         )
         self._running_tasks[task_id] = SubagentTask(
             task_id=task_id,
-            workflow_id=workflow_id,
+            workflow_id=active_workflow_id,
             label=display_label,
             role=role,
             original_task=task[:100],
@@ -178,6 +180,7 @@ class SubagentManager:
         origin_chat_id: str = "direct",
         session_key: str | None = None,
         origin_metadata: dict[str, Any] | None = None,
+        workflow_id: str | None = None,
     ) -> str:
         """스킬을 서브에이전트로 실행한다."""
         # 동시성 제한
@@ -191,20 +194,23 @@ class SubagentManager:
             "metadata": origin_metadata or {},
             "session_key": session_key,
         }
-        workflow_id: str = self._create_workflow(
+        active_workflow_id: str = workflow_id or self._create_workflow(
             task_id=task_id,
             role="skill",
             task=task,
             origin=origin,
             label=label,
+            extra_metadata={"skillName": skill_name, "skillPath": skill_path},
         )
 
         bg_task: asyncio.Task[None] = asyncio.create_task(
-            self._run_skill(task_id, workflow_id, task, label, origin, skill_name, skill_path)
+            self._run_skill(
+                task_id, active_workflow_id, task, label, origin, skill_name, skill_path
+            )
         )
         self._running_tasks[task_id] = SubagentTask(
             task_id=task_id,
-            workflow_id=workflow_id,
+            workflow_id=active_workflow_id,
             label=label,
             role="skill",
             original_task=task[:100],
@@ -711,6 +717,65 @@ class SubagentManager:
             pass
         return True, label
 
+    async def execute_existing_workflow(self, workflow_id: str) -> bool:
+        if self._workflow_runtime is None:
+            return False
+        record = self._workflow_runtime.store.get(workflow_id)
+        if record is None:
+            return False
+        if record.source_kind != "subagent":
+            return False
+
+        metadata = record.metadata
+        label_obj = metadata.get("label")
+        role_obj = metadata.get("role")
+        skill_name_obj = metadata.get("skillName")
+        skill_path_obj = metadata.get("skillPath")
+        origin_channel_obj = metadata.get("originChannel")
+        origin_chat_id_obj = metadata.get("originChatId")
+        origin_metadata_obj = metadata.get("originMetadata")
+        session_key_obj = metadata.get("sessionKey")
+
+        label: str = label_obj if isinstance(label_obj, str) else record.goal[:30]
+        role: str = role_obj if isinstance(role_obj, str) else "executor"
+        origin_channel: str = origin_channel_obj if isinstance(origin_channel_obj, str) else "cli"
+        origin_chat_id: str = (
+            origin_chat_id_obj if isinstance(origin_chat_id_obj, str) else "direct"
+        )
+        session_key: str | None = session_key_obj if isinstance(session_key_obj, str) else None
+        origin_metadata: dict[str, Any] | None = (
+            origin_metadata_obj if isinstance(origin_metadata_obj, dict) else None
+        )
+
+        if role == "skill":
+            if not isinstance(skill_name_obj, str) or not isinstance(skill_path_obj, str):
+                self._fail_workflow(workflow_id, "missing skill replay metadata")
+                return False
+            _ = await self.spawn_skill(
+                task=record.goal,
+                label=label,
+                skill_name=skill_name_obj,
+                skill_path=skill_path_obj,
+                origin_channel=origin_channel,
+                origin_chat_id=origin_chat_id,
+                session_key=session_key,
+                origin_metadata=origin_metadata,
+                workflow_id=workflow_id,
+            )
+            return True
+
+        _ = await self.spawn(
+            task=record.goal,
+            label=label,
+            role=role,
+            origin_channel=origin_channel,
+            origin_chat_id=origin_chat_id,
+            session_key=session_key,
+            origin_metadata=origin_metadata,
+            workflow_id=workflow_id,
+        )
+        return True
+
     def _create_workflow(
         self,
         *,
@@ -719,6 +784,7 @@ class SubagentManager:
         task: str,
         origin: dict[str, Any],
         label: str,
+        extra_metadata: dict[str, object],
     ) -> str:
         if self._workflow_runtime is None:
             return ""
@@ -730,7 +796,16 @@ class SubagentManager:
                 "chat_id": origin.get("chat_id", "direct"),
                 "session_key": origin.get("session_key") or "",
             },
-            metadata={"subagentTaskId": task_id, "label": label, "role": role},
+            metadata={
+                "subagentTaskId": task_id,
+                "label": label,
+                "role": role,
+                "originChannel": origin.get("channel", "cli"),
+                "originChatId": origin.get("chat_id", "direct"),
+                "originMetadata": origin.get("metadata") or {},
+                "sessionKey": origin.get("session_key") or "",
+                **extra_metadata,
+            },
         )
         self._workflow_runtime.store.upsert(record)
         return record.workflow_id

@@ -393,7 +393,8 @@ def gateway(
     from shacs_bot.agent.tools.cron.types import CronJob
     from shacs_bot.heartbeat.service import HeartbeatService
     from shacs_bot.agent.session.manager import SessionManager
-    from shacs_bot.workflow.runtime import WorkflowRuntime
+    from shacs_bot.workflow import WorkflowRuntime
+    from shacs_bot.workflow.redispatcher import WorkflowRedispatcher
 
     if verbose:
         logging.basicConfig(level=logging.DEBUG)
@@ -423,6 +424,11 @@ def gateway(
     # 먼저, 크론 서비스 생성 (에이전트 생성 이후에 callback 설정)
     cron_store_path: Path = get_cron_dir() / "jobs.json"
     cron: CronService = CronService(cron_store_path, workflow_runtime=workflow_runtime)
+    redispatcher: WorkflowRedispatcher = WorkflowRedispatcher(
+        workflow_runtime=workflow_runtime,
+        cron_service=cron,
+        subagent_manager=agent_loop.subagent_manager,
+    )
 
     provider.generation.temperature = config.agents.defaults.temperature
     provider.generation.max_tokens = config.agents.defaults.max_tokens
@@ -618,6 +624,7 @@ def gateway(
     async def run() -> None:
         try:
             await cron.start()
+            await redispatcher.start()
             await heartbeat.start()
             await asyncio.gather(agent_loop.run(), channels.start_all())
         except KeyboardInterrupt:
@@ -626,6 +633,7 @@ def gateway(
             await agent_loop.close_mcp()
             heartbeat.stop()
             cron.stop()
+            redispatcher.stop()
             agent_loop.stop()
             await channels.stop_all()
 
@@ -1385,19 +1393,55 @@ def workflows_status(
 
 
 @workflows_app.command("recover")
-def workflows_recover() -> None:
-    from shacs_bot.workflow import WorkflowRecord, WorkflowRuntime
+def workflows_recover(workflow_id: str = typer.Argument(..., help="복구할 workflow ID")) -> None:
+    from shacs_bot.workflow import ManualRecoverResult, WorkflowRuntime
 
     config: Config = load_config()
     runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
-    recovered: list[WorkflowRecord] = runtime.recover_restart()
+    if workflow_id == "all":
+        console.print(
+            "[red]에러:[/red] `all` recover는 지원하지 않습니다. `workflows recover <id>`를 사용하세요."
+        )
+        raise typer.Exit(1)
+    result: ManualRecoverResult = runtime.manual_recover(
+        workflow_id,
+        channel="cli",
+        chat_id="direct",
+        sender_id="cli",
+    )
 
-    if not recovered:
-        console.print("[yellow]복구할 workflow가 없습니다.[/yellow]")
+    if result.status == "missing":
+        console.print(f"[red]에러:[/red] workflow `{workflow_id}`를 찾을 수 없습니다.")
+        raise typer.Exit(1)
+
+    record = result.record
+    if record is None:
+        console.print(f"[red]에러:[/red] workflow `{workflow_id}`를 찾을 수 없습니다.")
+        raise typer.Exit(1)
+
+    if result.status == "terminal":
+        console.print(
+            f"[yellow]복구 불가[/yellow] workflow `{workflow_id}` 는 terminal 상태입니다: {record.state}"
+        )
+        raise typer.Exit(0)
+
+    if result.status == "already_queued":
+        console.print(
+            f"[yellow]대기 중[/yellow] workflow `{workflow_id}` 는 이미 queued 상태입니다."
+        )
         return
 
-    console.print(f"[green]✓[/green] {len(recovered)}개 workflow를 복구했습니다.")
-    _render_workflow_table(recovered, title="Recovered Workflows")
+    if result.status == "cooldown":
+        console.print(
+            f"[yellow]잠시 후 재시도[/yellow] workflow `{workflow_id}` 는 최근 recover 되었습니다."
+        )
+        return
+
+    previous_state: str = result.previous_state or "unknown"
+    console.print(f"[green]✓[/green] workflow `{workflow_id}` 를 queued 상태로 복구했습니다.")
+    console.print(f"[cyan]previous state[/cyan]: {previous_state}")
+    console.print(f"[cyan]current state[/cyan]: {record.state}")
+    console.print("[cyan]execution[/cyan]: 큐 시스템이 처리 가능한 시점에 다시 실행됩니다.")
 
 
 # ============================================================================
