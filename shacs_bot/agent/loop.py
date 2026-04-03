@@ -603,7 +603,12 @@ class AgentLoop:
 
         if not msg.media:
             _plan = self._classify_request(msg.content)
+            session.metadata["last_planning_result"] = _plan.model_dump()
+            if _plan.kind == "direct_answer":
+                session.metadata.pop("current_plan", None)
             if _plan.kind == "clarification":
+                session.metadata["current_plan"] = _plan.model_dump()
+                self._sessions.save(session)
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
@@ -612,10 +617,20 @@ class AgentLoop:
                     metadata=msg.metadata or {},
                 )
             if _plan.kind == "planned_workflow":
+                session.metadata["current_plan"] = _plan.model_dump()
+                _wf_record = self._workflow_runtime.register_planned_workflow(
+                    goal=_plan.summary or msg.content[:200],
+                    plan=_plan.model_dump(),
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    session_key=key,
+                )
+                self._sessions.save(session)
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content=self._format_plan(_plan),
+                    content=self._format_plan(_plan)
+                    + f"\n\n🆔 워크플로우 ID: `{_wf_record.workflow_id}`",
                     metadata=msg.metadata or {},
                 )
         final_content, _, all_msg, turn_usage = await self._run_agent_loop(

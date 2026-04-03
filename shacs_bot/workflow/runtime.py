@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from shacs_bot.workflow.models import WorkflowRecord, WorkflowState
+from shacs_bot.workflow.models import NotifyTarget, WorkflowRecord, WorkflowState
 from shacs_bot.workflow.store import WorkflowStore
 
 TERMINAL_STATES: frozenset[str] = frozenset({"completed", "failed"})
@@ -43,6 +43,25 @@ class WorkflowRuntime:
     @property
     def store(self) -> WorkflowStore:
         return self._store
+
+    def register_planned_workflow(
+        self,
+        *,
+        goal: str,
+        plan: dict[str, object],
+        channel: str,
+        chat_id: str,
+        session_key: str,
+    ) -> WorkflowRecord:
+        """플래너 산출물로부터 워크플로우 레코드를 생성하고 저장합니다."""
+        notify_target = NotifyTarget(channel=channel, chat_id=chat_id, session_key=session_key)
+        record = self._store.create(
+            source_kind="manual",
+            goal=goal,
+            notify_target=notify_target,
+            metadata={"plan": plan},
+        )
+        return self._store.upsert_and_get(record)
 
     def start(self, workflow_id: str) -> WorkflowRecord | None:
         record: WorkflowRecord | None = self._store.get(workflow_id)
