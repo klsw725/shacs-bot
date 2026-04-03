@@ -19,6 +19,7 @@ from shacs_bot.agent.tools.cron.types import (
     CronPayload,
     CronJobState,
 )
+from shacs_bot.workflow.runtime import WorkflowRuntime
 
 
 def _now_ms() -> int:
@@ -71,6 +72,7 @@ class CronService:
         self,
         store_path: Path,
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
+        workflow_runtime: WorkflowRuntime | None = None,
     ):
         self._store_path: Path = store_path
         self._on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = on_job
@@ -78,6 +80,7 @@ class CronService:
         self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
         self._running: bool = False
+        self._workflow_runtime: WorkflowRuntime | None = workflow_runtime
 
     def set_job(self, on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]]) -> None:
         self._on_job = on_job
@@ -251,22 +254,29 @@ class CronService:
             self._timer_task.cancel()
             self._timer_task = None
 
-    async def _execute_job(self, job: CronJob) -> None:
+    async def _execute_job(self, job: CronJob, workflow_id: str | None = None) -> None:
         """하나의 작업을 실행합니다."""
         start_ms: int = _now_ms()
+        active_workflow_id: str = workflow_id or self._create_workflow(job)
+        self._start_workflow(active_workflow_id)
         logger.info(f"Cron: 작업 실행 시작 '{job.name}' ({job.id})")
 
         try:
-            response: Coroutine[Any, Any, str | None] | None = None
+            response: str | None = None
             if self._on_job:
                 response = await self._on_job(job)
+            if response:
+                self._annotate_result(active_workflow_id, response)
 
             job.state.last_status = "ok"
             job.state.last_error = None
+            self._complete_workflow(active_workflow_id)
             logger.info(f"Cron: 작업 '{job.name}' 성공")
         except Exception as e:
             job.state.last_status = "error"
             job.state.last_error = str(e)
+            self._annotate_result(active_workflow_id, str(e))
+            self._fail_workflow(active_workflow_id, str(e))
             logger.error(f"Cron: 작업 '{job.name}' 실패: {e}")
 
         job.state.last_run_at_ms = start_ms
@@ -282,6 +292,54 @@ class CronService:
         else:
             # 다음 작업을 계산합니다
             job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+
+    def _create_workflow(self, job: CronJob) -> str:
+        if self._workflow_runtime is None:
+            return ""
+        record = self._workflow_runtime.store.create(
+            source_kind="cron",
+            goal=job.payload.message,
+            notify_target={
+                "channel": job.payload.channel or "cli",
+                "chat_id": job.payload.to or "direct",
+                "session_key": f"cron:{job.id}",
+            },
+            metadata={"cronJobId": job.id, "jobName": job.name},
+        )
+        self._workflow_runtime.store.upsert(record)
+        job.payload.metadata["workflowId"] = record.workflow_id
+        return record.workflow_id
+
+    async def execute_existing_workflow(self, workflow_id: str, cron_job_id: str) -> bool:
+        store = self._load_store()
+        job = next((item for item in store.jobs if item.id == cron_job_id), None)
+        if job is None:
+            self._fail_workflow(workflow_id, f"cron job not found: {cron_job_id}")
+            return False
+        job.payload.metadata["workflowId"] = workflow_id
+        await self._execute_job(job, workflow_id=workflow_id)
+        self._save_store()
+        return True
+
+    def _start_workflow(self, workflow_id: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.start(workflow_id)
+
+    def _complete_workflow(self, workflow_id: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.complete(workflow_id)
+
+    def _annotate_result(self, workflow_id: str, result: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.annotate_result(workflow_id, result)
+
+    def _fail_workflow(self, workflow_id: str, error: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.fail(workflow_id, last_error=error)
 
     async def _on_timer(self) -> None:
         """타이머 틱을 처리합니다. - 실행 시간이 된 작업을 실행합니다."""

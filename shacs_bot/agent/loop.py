@@ -39,6 +39,9 @@ from shacs_bot.agent.usage import TurnUsage, UsageTracker
 from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig, MediaConfig, UsageConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from shacs_bot.providers.failover import FailoverManager
+from shacs_bot.workflow.models import WorkflowRecord
+from shacs_bot.workflow.runtime import ManualRecoverResult, WorkflowRuntime
+from shacs_bot.workflow.store import INCOMPLETE_STATES
 
 
 class AgentLoopObserver(Protocol):
@@ -90,11 +93,15 @@ class AgentLoop:
         media_base_url: str | None = None,
         skill_approval: str = "auto",
         hooks: HookRegistry | None = None,
+        workflow_runtime: WorkflowRuntime | None = None,
     ):
         self._bus: MessageBus = bus
         self._hooks: HookRegistry = hooks or NoOpHookRegistry()
         self._channels_config: ChannelsConfig = channels_config
         self._workspace: Path = workspace
+        self._workflow_runtime: WorkflowRuntime = workflow_runtime or WorkflowRuntime(
+            self._workspace
+        )
 
         self._provider: LLMProvider = provider
         self._model: str = model or self._provider.get_default_model()
@@ -134,6 +141,7 @@ class AgentLoop:
             exec_config=self._exec_config,
             restrict_to_workspace=self._restrict_to_workspace,
             hooks=self._hooks,
+            workflow_runtime=self._workflow_runtime,
         )
         self._subagent.skill_approval = skill_approval
 
@@ -163,6 +171,14 @@ class AgentLoop:
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def workflow_runtime(self) -> WorkflowRuntime:
+        return self._workflow_runtime
+
+    @property
+    def subagent_manager(self) -> SubagentManager:
+        return self._subagent
 
     @property
     def channels_config(self) -> ChannelsConfig:
@@ -497,6 +513,14 @@ class AgentLoop:
                     f"\u2022 메모리 윈도우: {self._memory_window}"
                 ),
             )
+        elif cmd == "/workflows" or cmd == "/workflows all":
+            return self._handle_workflows_command(
+                msg=msg, session_key=key, include_completed=cmd.endswith(" all")
+            )
+        elif cmd.startswith("/workflow recover"):
+            return self._handle_workflow_recover(msg)
+        elif cmd.startswith("/workflow "):
+            return self._handle_workflow_show(msg=msg, session_key=key)
         elif cmd.startswith("/skill trust"):
             return self._handle_skill_trust(msg)
         elif cmd == "/help":
@@ -510,6 +534,9 @@ class AgentLoop:
                     "/restart \u2014 봇을 재시작합니다\n"
                     "/usage \u2014 토큰 사용량과 비용을 확인합니다\n"
                     "/status \u2014 현재 모델, 세션 상태를 확인합니다\n"
+                    "/workflows [all] \u2014 현재 채널에서 보이는 workflow 목록을 표시합니다\n"
+                    "/workflow <id> \u2014 특정 workflow 상세를 표시합니다\n"
+                    "/workflow recover <id> \u2014 workflow를 queued 상태로 복원합니다\n"
                     "/skill trust \u2014 스킬 승인 모드를 확인하거나 변경합니다\n"
                     "/help \u2014 사용 가능한 명령어를 표시합니다"
                 ),
@@ -974,6 +1001,173 @@ class AgentLoop:
                 f"• off — 승인 없이 실행"
             ),
         )
+
+    def _handle_workflows_command(
+        self,
+        *,
+        msg: InboundMessage,
+        session_key: str,
+        include_completed: bool,
+    ) -> OutboundMessage:
+        records = self._workflow_runtime.store.list_all()
+        visible = [
+            record
+            for record in records
+            if self._workflow_visible_to_session(record, session_key=session_key, msg=msg)
+        ]
+        if not include_completed:
+            visible = [record for record in visible if record.state in INCOMPLETE_STATES]
+
+        visible.sort(key=lambda record: record.updated_at, reverse=True)
+        visible = visible[:10]
+
+        if not visible:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="표시할 workflow가 없습니다.",
+            )
+
+        lines = ["📋 workflow 목록", ""]
+        for record in visible:
+            goal = record.goal if len(record.goal) <= 60 else f"{record.goal[:57]}..."
+            lines.append(
+                f"• `{record.workflow_id}` [{record.state}] {record.source_kind} · retries={record.retries}\n"
+                f"  {goal}"
+            )
+        if not include_completed:
+            lines.append("\n완료된 항목까지 보려면 `/workflows all`을 사용하세요.")
+        lines.append("상세 조회: `/workflow <id>`")
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
+
+    def _handle_workflow_show(self, msg: InboundMessage, session_key: str) -> OutboundMessage:
+        parts = msg.content.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="사용법: `/workflow <id>`",
+            )
+
+        workflow_id = parts[1].strip()
+        record = self._workflow_runtime.store.get(workflow_id)
+        if record is None or not self._workflow_visible_to_session(
+            record, session_key=session_key, msg=msg
+        ):
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"workflow `{workflow_id}`를 찾을 수 없습니다.",
+            )
+
+        details = [
+            f"🧭 workflow `{record.workflow_id}`",
+            f"• source: {record.source_kind}",
+            f"• state: {record.state}",
+            f"• retries: {record.retries}",
+            f"• updated: {record.updated_at}",
+            f"• next run: {record.next_run_at or '-'}",
+            f"• goal: {record.goal}",
+        ]
+        if record.last_error:
+            details.append(f"• last error: {record.last_error}")
+        if record.metadata:
+            metadata_preview = ", ".join(
+                f"{key}={value}" for key, value in sorted(record.metadata.items())
+            )
+            details.append(f"• metadata: {metadata_preview}")
+
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(details))
+
+    def _handle_workflow_recover(self, msg: InboundMessage) -> OutboundMessage:
+        parts = msg.content.strip().split(maxsplit=2)
+        if len(parts) < 3 or not parts[2].strip():
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="사용법: `/workflow recover <id>`",
+            )
+
+        workflow_id = parts[2].strip()
+        if workflow_id == "all":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="`all` recover는 지원하지 않습니다. `/workflow recover <id>`만 사용할 수 있습니다.",
+            )
+
+        result: ManualRecoverResult = self._workflow_runtime.manual_recover(
+            workflow_id,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+        )
+        if result.status == "missing":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"workflow `{workflow_id}`를 찾을 수 없습니다.",
+            )
+
+        record = result.record
+        if record is None:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"workflow `{workflow_id}`를 찾을 수 없습니다.",
+            )
+
+        if result.status == "already_queued":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"ℹ️ workflow `{workflow_id}`는 이미 대기열에 있습니다.",
+            )
+        if result.status == "cooldown":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"⏳ workflow `{workflow_id}`는 방금 recover 요청되었습니다. "
+                    f"현재 상태: {record.state}"
+                ),
+            )
+        if result.status == "terminal":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"✗ workflow `{workflow_id}`는 recover할 수 없습니다. 현재 상태: {record.state}"
+                ),
+            )
+
+        previous_state = result.previous_state or "unknown"
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                f"✓ workflow `{workflow_id}`를 재개 대기열에 넣었습니다.\n"
+                f"• 이전 상태: {previous_state}\n"
+                f"• 현재 상태: {record.state}\n"
+                "• 실제 실행은 처리 가능한 큐 시스템이 담당합니다."
+            ),
+        )
+
+    def _workflow_visible_to_session(
+        self,
+        record: WorkflowRecord,
+        *,
+        session_key: str,
+        msg: InboundMessage,
+    ) -> bool:
+        if record.notify_target.session_key and record.notify_target.session_key == session_key:
+            return True
+        if record.notify_target.channel and record.notify_target.chat_id:
+            return (
+                record.notify_target.channel == msg.channel
+                and record.notify_target.chat_id == msg.chat_id
+            )
+        return False
 
     @staticmethod
     def _detect_spawn_hint(tool_calls: list[ToolCallRequest]) -> str | None:

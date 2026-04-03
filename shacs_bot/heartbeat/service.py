@@ -14,6 +14,7 @@ from shacs_bot.agent.hooks import (
     NoOpHookRegistry,
 )
 from shacs_bot.providers.base import LLMProvider, LLMResponse
+from shacs_bot.workflow.runtime import WorkflowRuntime
 
 
 class HeartbeatService:
@@ -59,23 +60,25 @@ class HeartbeatService:
         workspace: Path,
         provider: LLMProvider,
         model: str,
-        on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
+        on_execute: Callable[[str, str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         interval_s: int = 30 * 60,
         enabled: bool = True,
         hooks: HookRegistry | None = None,
+        workflow_runtime: WorkflowRuntime | None = None,
     ):
         self._workspace: Path = workspace
         self._provider: LLMProvider = provider
         self._model: str = model
-        self._on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = on_execute
+        self._on_execute: Callable[[str, str], Coroutine[Any, Any, str]] | None = on_execute
         self._on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = on_notify
         self._interval_s: int = interval_s
         self._enabled: bool = enabled
         self._hooks: HookRegistry = hooks or NoOpHookRegistry()
+        self._workflow_runtime: WorkflowRuntime | None = workflow_runtime
 
         self._running: bool = False
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
 
     @property
     def heartbeat_file(self) -> Path:
@@ -112,6 +115,7 @@ class HeartbeatService:
     async def _tick(self):
         """싱글 heartbeat 틱 실행"""
         content: str | None = self._read_heartbeat_file()
+        workflow_id: str = ""
         if not content:
             logger.debug("Heartbeat: Heartbeat.md가 없거나 비어있습니다.")
 
@@ -131,18 +135,60 @@ class HeartbeatService:
 
             logger.info("Heartbeat: 태스크를 찾았습니다. 실행 중...")
             if self._on_execute:
-                response: str = await self._on_execute(tasks)
+                workflow_id = self._create_workflow(tasks)
+                self._start_workflow(workflow_id)
+                response: str = await self._on_execute(tasks, workflow_id)
+                self._annotate_result(workflow_id, response)
                 await self._hooks.emit(
                     HookContext(
                         event=BACKGROUND_JOB_COMPLETED,
                         payload={"result_preview": response[:120] if response else ""},
                     )
                 )
+                self._complete_workflow(workflow_id)
                 if response and self._on_notify:
                     logger.info("Heartbeat: 완료됨, 응답을 전달합니다.")
                     await self._on_notify(response)
-        except Exception:
+                    self._mark_notified(workflow_id)
+        except Exception as exc:
+            self._fail_workflow(workflow_id, str(exc))
             logger.exception("Heartbeat 실행 실패")
+
+    def _create_workflow(self, tasks: str) -> str:
+        if self._workflow_runtime is None:
+            return ""
+        record = self._workflow_runtime.store.create(
+            source_kind="heartbeat",
+            goal=tasks,
+            metadata={"heartbeatFile": str(self.heartbeat_file)},
+        )
+        self._workflow_runtime.store.upsert(record)
+        return record.workflow_id
+
+    def _start_workflow(self, workflow_id: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.start(workflow_id)
+
+    def _complete_workflow(self, workflow_id: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.complete(workflow_id)
+
+    def _annotate_result(self, workflow_id: str, result: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.annotate_result(workflow_id, result)
+
+    def _mark_notified(self, workflow_id: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.mark_notify_delegated(workflow_id)
+
+    def _fail_workflow(self, workflow_id: str, error: str) -> None:
+        if self._workflow_runtime is None or not workflow_id:
+            return
+        _ = self._workflow_runtime.fail(workflow_id, last_error=error)
 
     def _read_heartbeat_file(self) -> str | None:
         if self.heartbeat_file.exists():
@@ -199,4 +245,5 @@ class HeartbeatService:
         if action != "run" or not self._on_execute:
             return None
 
-        return await self._on_execute(tasks)
+        workflow_id = self._create_workflow(tasks)
+        return await self._on_execute(tasks, workflow_id)

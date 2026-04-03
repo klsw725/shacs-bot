@@ -7,7 +7,7 @@ import select
 import signal
 import sys
 from pathlib import Path
-from typing import Text
+from typing import Text, TYPE_CHECKING
 
 import typer
 from loguru import logger
@@ -49,6 +49,9 @@ from shacs_bot.config.schema import (
 from shacs_bot.providers.base import LLMProvider
 from shacs_bot.providers.registry import ProviderSpec, PROVIDERS
 from shacs_bot.utils.helpers import sync_workspace_template
+
+if TYPE_CHECKING:
+    from shacs_bot.workflow import WorkflowRecord
 
 
 def _resolve_media_key(config: Config) -> str | None:
@@ -390,6 +393,8 @@ def gateway(
     from shacs_bot.agent.tools.cron.types import CronJob
     from shacs_bot.heartbeat.service import HeartbeatService
     from shacs_bot.agent.session.manager import SessionManager
+    from shacs_bot.workflow import WorkflowRuntime
+    from shacs_bot.workflow.redispatcher import WorkflowRedispatcher
 
     if verbose:
         logging.basicConfig(level=logging.DEBUG)
@@ -413,10 +418,12 @@ def gateway(
     bus: MessageBus = MessageBus()
     provider = _make_provider(config)
     session_manager: SessionManager = SessionManager(config.workspace_path)
+    workflow_runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
+    recovered_workflows = workflow_runtime.recover_restart()
 
     # 먼저, 크론 서비스 생성 (에이전트 생성 이후에 callback 설정)
     cron_store_path: Path = get_cron_dir() / "jobs.json"
-    cron: CronService = CronService(cron_store_path)
+    cron: CronService = CronService(cron_store_path, workflow_runtime=workflow_runtime)
 
     provider.generation.temperature = config.agents.defaults.temperature
     provider.generation.max_tokens = config.agents.defaults.max_tokens
@@ -450,6 +457,12 @@ def gateway(
         media_base_url=_resolve_media_base_url(config),
         skill_approval=config.tools.skill_approval,
         hooks=hooks,
+        workflow_runtime=workflow_runtime,
+    )
+    redispatcher: WorkflowRedispatcher = WorkflowRedispatcher(
+        workflow_runtime=workflow_runtime,
+        cron_service=cron,
+        subagent_manager=agent_loop.subagent_manager,
     )
 
     # 크론 callback 설정 (에이전트 필요)
@@ -469,6 +482,13 @@ def gateway(
                 trigger_session_key=f"scheduled:{job.id}",
                 include_eval_sessions=False,
             )
+            workflow_id_obj = job.payload.metadata.get("workflowId")
+            workflow_id = workflow_id_obj if isinstance(workflow_id_obj, str) else ""
+            if workflow_id:
+                _ = workflow_runtime.annotate_result(
+                    workflow_id,
+                    f"self-eval completed: {result.state.last_auto_run_id}",
+                )
             return f"self-eval completed: {result.state.last_auto_run_id}"
 
         reminder_note: str = (
@@ -496,6 +516,10 @@ def gateway(
 
         message_tool: Tool = agent_loop.tools.get("message")
         if isinstance(message_tool, MessageTool) and message_tool.sent_in_turn:
+            workflow_id_obj = job.payload.metadata.get("workflowId")
+            workflow_id = workflow_id_obj if isinstance(workflow_id_obj, str) else ""
+            if workflow_id:
+                _ = workflow_runtime.mark_notify_delegated(workflow_id)
             return response
 
         if job.payload.deliver and job.payload.to and response:
@@ -507,6 +531,14 @@ def gateway(
                     metadata=job.payload.metadata or {},
                 )
             )
+            workflow_id_obj = job.payload.metadata.get("workflowId")
+            workflow_id = workflow_id_obj if isinstance(workflow_id_obj, str) else ""
+            if workflow_id:
+                _ = workflow_runtime.mark_notified(
+                    workflow_id,
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to,
+                )
 
         return response
 
@@ -526,6 +558,8 @@ def gateway(
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: 예약된 작업 {cron_status['jobs']}개")
+    if recovered_workflows:
+        console.print(f"[green]✓[/green] Workflow recovery: {len(recovered_workflows)}개 복구")
 
     console.print(f"[green]✓[/green] Heartbeat: {hb_cfg.interval_s}s 마다 실행")
 
@@ -560,16 +594,24 @@ def gateway(
         # Fallback은 기존 동작을 유지하면서도 명시적으로 처리한다
         return "cli", "direct"
 
-    async def on_heartbeat_execute(tasks: str) -> str:
+    async def on_heartbeat_execute(tasks: str, workflow_id: str) -> str:
         """Phase 2: full 에이전트 로프를 통해 heartbeat 태스크 실행"""
         channel, chat_id = await _pick_heartbeat_target()
+        session_key = f"{channel}:{chat_id}"
+        if workflow_id:
+            _ = workflow_runtime.update_notify_target(
+                workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+                session_key=session_key,
+            )
 
         async def _silent(*_args, **_kwargs):
             pass
 
         return await agent_loop.process_direct(
             content=tasks,
-            session_key="heartbeat",
+            session_key=session_key,
             channel=channel,
             chat_id=chat_id,
             on_progress=_silent,
@@ -584,11 +626,13 @@ def gateway(
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
         hooks=hooks,
+        workflow_runtime=workflow_runtime,
     )
 
     async def run() -> None:
         try:
             await cron.start()
+            await redispatcher.start()
             await heartbeat.start()
             await asyncio.gather(agent_loop.run(), channels.start_all())
         except KeyboardInterrupt:
@@ -597,6 +641,7 @@ def gateway(
             await agent_loop.close_mcp()
             heartbeat.stop()
             cron.stop()
+            redispatcher.stop()
             agent_loop.stop()
             await channels.stop_all()
 
@@ -633,10 +678,12 @@ def agent(
         register_example_hooks(hooks, redact_payloads=config.hooks.redact_payloads)
     bus: MessageBus = MessageBus()
     provider = _make_provider(config)
+    from shacs_bot.workflow.runtime import WorkflowRuntime
 
     # 도구 사용을 위한 cron 서비스를 생성합니다 (CLI에서는 실행 중이 아닌 한 콜백이 필요하지 않습니다).
     cron_store_path: Path = get_cron_dir() / "jobs.json"
-    cron: CronService = CronService(cron_store_path)
+    workflow_runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
+    cron: CronService = CronService(cron_store_path, workflow_runtime=workflow_runtime)
 
     if logs:
         logger.enable("shacs-bot")
@@ -676,6 +723,7 @@ def agent(
         media_base_url=_resolve_media_base_url(config),
         skill_approval=config.tools.skill_approval,
         hooks=hooks,
+        workflow_runtime=workflow_runtime,
     )
 
     if message:
@@ -851,6 +899,7 @@ def create_eval_runtime(
 ) -> tuple[AgentLoop, "SessionManager"]:
     from shacs_bot.agent.session.manager import SessionManager
     from shacs_bot.providers.failover import FailoverManager
+    from shacs_bot.workflow.runtime import WorkflowRuntime
 
     sync_workspace_template(workspace=config.workspace_path)
 
@@ -875,8 +924,9 @@ def create_eval_runtime(
         use_state_recommendation=use_state_recommendation,
     )
     session_manager: SessionManager = SessionManager(config.workspace_path)
+    workflow_runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
     cron_store_path: Path = get_cron_dir() / "jobs.json"
-    cron: CronService = CronService(cron_store_path)
+    cron: CronService = CronService(cron_store_path, workflow_runtime=workflow_runtime)
 
     provider.generation.temperature = config.agents.defaults.temperature
     provider.generation.max_tokens = config.agents.defaults.max_tokens
@@ -912,6 +962,7 @@ def create_eval_runtime(
         media_base_url=_resolve_media_base_url(config),
         skill_approval=config.tools.skill_approval,
         hooks=hooks,
+        workflow_runtime=workflow_runtime,
     )
     return agent_loop, session_manager
 
@@ -1277,6 +1328,128 @@ def eval_policy(
     console.print(f"[cyan]min interval[/cyan]: {state.trigger_min_interval_minutes}")
     console.print(f"[cyan]schedule[/cyan]: {state.trigger_schedule_kind}")
     console.print(f"[cyan]trigger variants[/cyan]: {', '.join(state.trigger_variants)}")
+
+
+workflows_app = typer.Typer(help="Workflow 상태 및 복구")
+app.add_typer(workflows_app, name="workflows")
+
+
+def _format_workflow_time(raw: str) -> str:
+    if not raw:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw
+    return parsed.strftime("%Y-%m-%d %H:%M")
+
+
+def _render_workflow_table(records: list["WorkflowRecord"], *, title: str) -> None:
+    table: Table = Table(title=title)
+    table.add_column("ID", style="cyan")
+    table.add_column("Source")
+    table.add_column("State")
+    table.add_column("Retries", justify="right")
+    table.add_column("Updated")
+    table.add_column("Next Run")
+    table.add_column("Goal", style="yellow")
+
+    for record in records:
+        goal: str = record.goal if len(record.goal) <= 60 else f"{record.goal[:57]}..."
+        table.add_row(
+            record.workflow_id,
+            record.source_kind,
+            record.state,
+            str(record.retries),
+            _format_workflow_time(record.updated_at),
+            _format_workflow_time(record.next_run_at),
+            goal,
+        )
+
+    console.print(table)
+
+
+@workflows_app.command("status")
+def workflows_status(
+    all_records: bool = typer.Option(False, "--all", help="완료된 workflow도 포함합니다."),
+    state: str | None = typer.Option(None, "--state", help="특정 상태만 표시합니다."),
+    source: str | None = typer.Option(None, "--source", help="특정 source_kind만 표시합니다."),
+    limit: int = typer.Option(20, "--limit", min=1, help="최대 표시 개수"),
+) -> None:
+    from shacs_bot.workflow import WorkflowRecord, WorkflowRuntime
+
+    config: Config = load_config()
+    runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
+    records: list[WorkflowRecord] = (
+        runtime.store.list_all() if all_records else runtime.store.list_incomplete()
+    )
+
+    if state:
+        records = [record for record in records if record.state == state]
+    if source:
+        records = [record for record in records if record.source_kind == source]
+
+    records.sort(key=lambda record: record.updated_at, reverse=True)
+    records = records[:limit]
+
+    if not records:
+        console.print("[yellow]표시할 workflow가 없습니다.[/yellow]")
+        return
+
+    title: str = "Workflow Status (all)" if all_records else "Workflow Status (incomplete)"
+    _render_workflow_table(records, title=title)
+
+
+@workflows_app.command("recover")
+def workflows_recover(workflow_id: str = typer.Argument(..., help="복구할 workflow ID")) -> None:
+    from shacs_bot.workflow import ManualRecoverResult, WorkflowRuntime
+
+    config: Config = load_config()
+    runtime: WorkflowRuntime = WorkflowRuntime(config.workspace_path)
+    if workflow_id == "all":
+        console.print(
+            "[red]에러:[/red] `all` recover는 지원하지 않습니다. `workflows recover <id>`를 사용하세요."
+        )
+        raise typer.Exit(1)
+    result: ManualRecoverResult = runtime.manual_recover(
+        workflow_id,
+        channel="cli",
+        chat_id="direct",
+        sender_id="cli",
+    )
+
+    if result.status == "missing":
+        console.print(f"[red]에러:[/red] workflow `{workflow_id}`를 찾을 수 없습니다.")
+        raise typer.Exit(1)
+
+    record = result.record
+    if record is None:
+        console.print(f"[red]에러:[/red] workflow `{workflow_id}`를 찾을 수 없습니다.")
+        raise typer.Exit(1)
+
+    if result.status == "terminal":
+        console.print(
+            f"[yellow]복구 불가[/yellow] workflow `{workflow_id}` 는 terminal 상태입니다: {record.state}"
+        )
+        raise typer.Exit(0)
+
+    if result.status == "already_queued":
+        console.print(
+            f"[yellow]대기 중[/yellow] workflow `{workflow_id}` 는 이미 queued 상태입니다."
+        )
+        return
+
+    if result.status == "cooldown":
+        console.print(
+            f"[yellow]잠시 후 재시도[/yellow] workflow `{workflow_id}` 는 최근 recover 되었습니다."
+        )
+        return
+
+    previous_state: str = result.previous_state or "unknown"
+    console.print(f"[green]✓[/green] workflow `{workflow_id}` 를 queued 상태로 복구했습니다.")
+    console.print(f"[cyan]previous state[/cyan]: {previous_state}")
+    console.print(f"[cyan]current state[/cyan]: {record.state}")
+    console.print("[cyan]execution[/cyan]: 큐 시스템이 처리 가능한 시점에 다시 실행됩니다.")
 
 
 # ============================================================================
