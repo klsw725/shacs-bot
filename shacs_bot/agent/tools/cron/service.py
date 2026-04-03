@@ -254,11 +254,11 @@ class CronService:
             self._timer_task.cancel()
             self._timer_task = None
 
-    async def _execute_job(self, job: CronJob) -> None:
+    async def _execute_job(self, job: CronJob, workflow_id: str | None = None) -> None:
         """하나의 작업을 실행합니다."""
         start_ms: int = _now_ms()
-        workflow_id: str = self._create_workflow(job)
-        self._start_workflow(workflow_id)
+        active_workflow_id: str = workflow_id or self._create_workflow(job)
+        self._start_workflow(active_workflow_id)
         logger.info(f"Cron: 작업 실행 시작 '{job.name}' ({job.id})")
 
         try:
@@ -266,17 +266,17 @@ class CronService:
             if self._on_job:
                 response = await self._on_job(job)
             if response:
-                self._annotate_result(workflow_id, response)
+                self._annotate_result(active_workflow_id, response)
 
             job.state.last_status = "ok"
             job.state.last_error = None
-            self._complete_workflow(workflow_id)
+            self._complete_workflow(active_workflow_id)
             logger.info(f"Cron: 작업 '{job.name}' 성공")
         except Exception as e:
             job.state.last_status = "error"
             job.state.last_error = str(e)
-            self._annotate_result(workflow_id, str(e))
-            self._fail_workflow(workflow_id, str(e))
+            self._annotate_result(active_workflow_id, str(e))
+            self._fail_workflow(active_workflow_id, str(e))
             logger.error(f"Cron: 작업 '{job.name}' 실패: {e}")
 
         job.state.last_run_at_ms = start_ms
@@ -309,6 +309,17 @@ class CronService:
         self._workflow_runtime.store.upsert(record)
         job.payload.metadata["workflowId"] = record.workflow_id
         return record.workflow_id
+
+    async def execute_existing_workflow(self, workflow_id: str, cron_job_id: str) -> bool:
+        store = self._load_store()
+        job = next((item for item in store.jobs if item.id == cron_job_id), None)
+        if job is None:
+            self._fail_workflow(workflow_id, f"cron job not found: {cron_job_id}")
+            return False
+        job.payload.metadata["workflowId"] = workflow_id
+        await self._execute_job(job, workflow_id=workflow_id)
+        self._save_store()
+        return True
 
     def _start_workflow(self, workflow_id: str) -> None:
         if self._workflow_runtime is None or not workflow_id:
