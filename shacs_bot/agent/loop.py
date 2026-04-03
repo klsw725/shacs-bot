@@ -55,6 +55,8 @@ class AgentLoopObserver(Protocol):
 
     def on_final(self, final_content: str | None, finish_reason: str) -> None: ...
 
+    def on_planner_decision(self, kind: str, fallback_engaged: bool) -> None: ...
+
 
 class AgentLoop:
     """
@@ -672,7 +674,7 @@ class AgentLoop:
             )
 
         if not msg.media:
-            _plan = await self._classify_request_with_llm_fallback(msg.content)
+            _plan = await self._classify_request_with_llm_fallback(msg.content, observer=observer)
             session.metadata["last_planning_result"] = _plan.model_dump()
             if _plan.kind == "direct_answer":
                 session.metadata.pop("current_plan", None)
@@ -1445,8 +1447,18 @@ class AgentLoop:
         "You are a request router. Analyse the user message and classify it.\n\n"
         "Return ONLY a JSON object — no markdown, no explanation:\n"
         '{"kind": "direct_answer" | "planned_workflow", "summary": "<one-line>", '
-        '"steps": [{"kind": "<step_kind>", "description": "<what to do>", "depends_on": [<0-based>]}]}\n\n'
+        '"steps": [{"kind": "<step_kind>", "description": "<what to do>", '
+        '"depends_on": [<0-based>], "step_meta": {}}]}\n\n'
         "Step kinds: research, summarize, ask_user, request_approval, wait_until, send_result\n\n"
+        "step_meta rules — include when the step kind requires it:\n"
+        '- wait_until: set "iso_time" (ISO 8601 absolute datetime) OR "duration_minutes" (integer).\n'
+        '  Prefer "iso_time" when a specific time is mentioned; prefer "duration_minutes" for relative delays.\n'
+        '  Example: {"iso_time": "2026-04-03T15:00:00+09:00"} or {"duration_minutes": 30}\n'
+        '- ask_user: set "prompt" to the exact question string shown to the user.\n'
+        '  Example: {"prompt": "어떤 형식으로 결과를 받으시겠습니까?"}\n'
+        '- request_approval: set "prompt" to the approval confirmation message.\n'
+        '  Example: {"prompt": "다음 작업을 진행할까요?\\n\\n<task summary>"}\n'
+        "- Other step kinds: omit step_meta or leave it as {}.\n\n"
         "Routing rules:\n"
         '- "direct_answer": simple questions, greetings, single-topic queries, factual lookups\n'
         '- "planned_workflow": requires multiple distinct phases, complex multi-part tasks with '
@@ -1454,6 +1466,36 @@ class AgentLoop:
         "For planned_workflow, always end steps with send_result.\n"
         "Return ONLY the JSON object."
     )
+
+    @staticmethod
+    def _normalize_llm_plan_metadata(plan: AssistantPlan) -> AssistantPlan:
+        """LLM 폴백 플랜의 step_meta를 보충합니다.
+
+        LLM이 step_meta를 생략했을 때 description에서 도출 가능한 메타데이터를 채웁니다.
+        - ``wait_until``: ``iso_time``/``duration_minutes`` 모두 없으면 description 파싱
+        - ``ask_user`` / ``request_approval``: ``prompt`` 없으면 description 사용
+
+        기존 step_meta가 이미 올바른 키를 가지면 변경하지 않습니다.
+        """
+        if plan.kind != "planned_workflow":
+            return plan
+
+        updated = False
+        normalized: list[PlanStep] = []
+        for step in plan.steps:
+            if step.kind == "wait_until" and "iso_time" not in step.step_meta and "duration_minutes" not in step.step_meta:
+                dt = parse_wait_until_time(step.description)
+                normalized.append(step.model_copy(update={"step_meta": {**step.step_meta, "iso_time": dt.isoformat()}}))
+                updated = True
+            elif step.kind in ("ask_user", "request_approval") and "prompt" not in step.step_meta:
+                normalized.append(step.model_copy(update={"step_meta": {**step.step_meta, "prompt": step.description}}))
+                updated = True
+            else:
+                normalized.append(step)
+
+        if not updated:
+            return plan
+        return plan.model_copy(update={"steps": normalized})
 
     @staticmethod
     def _is_nontrivial_for_llm_fallback(text: str) -> bool:
@@ -1508,25 +1550,47 @@ class AgentLoop:
         if plan.kind == "planned_workflow" and not plan.steps:
             return None
 
-        return plan
+        return self._normalize_llm_plan_metadata(plan)
 
-    async def _classify_request_with_llm_fallback(self, user_text: str) -> AssistantPlan:
+    async def _classify_request_with_llm_fallback(
+        self,
+        user_text: str,
+        *,
+        observer: AgentLoopObserver | None = None,
+    ) -> AssistantPlan:
         """규칙 기반 플래너로 분류하고, 결과가 ``direct_answer`` + 비자명 요청이면 LLM 폴백을 시도합니다.
 
         빠른 경로(규칙 기반)에서 이미 ``planned_workflow`` 또는 ``clarification``이 결정되면
         LLM을 호출하지 않는다. LLM 폴백이 ``direct_answer``를 반환하면 원래 결과를 유지한다.
+
+        observer가 있으면 최종 결정 후 ``on_planner_decision``을 호출한다.
         """
         plan: AssistantPlan = self._classify_request(user_text)
         if plan.kind != "direct_answer":
+            self._emit_planner_decision(observer, plan.kind, fallback_engaged=False)
             return plan
         if not self._is_nontrivial_for_llm_fallback(user_text):
+            self._emit_planner_decision(observer, plan.kind, fallback_engaged=False)
             return plan
 
         fallback: AssistantPlan | None = await self._llm_classify_fallback(user_text)
         if fallback is not None and fallback.kind != "direct_answer":
             logger.debug("LLM 플래너 폴백 적용: kind={}", fallback.kind)
+            self._emit_planner_decision(observer, fallback.kind, fallback_engaged=True)
             return fallback
+        self._emit_planner_decision(observer, plan.kind, fallback_engaged=True)
         return plan
+
+    @staticmethod
+    def _emit_planner_decision(
+        observer: AgentLoopObserver | None, kind: str, *, fallback_engaged: bool
+    ) -> None:
+        if observer is None:
+            return
+        try:
+            observer.on_planner_decision(kind, fallback_engaged)
+        except Exception as e:
+            logger.warning("AgentLoop observer on_planner_decision 실패: {}", e)
 
     @staticmethod
     def _format_plan(plan: AssistantPlan) -> str:

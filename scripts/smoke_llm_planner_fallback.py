@@ -240,6 +240,118 @@ async def run_smoke() -> None:
     assert stub12.call_log == [], "[FAIL] 규칙 기반 planned_workflow에서 LLM 호출됨"
     print("PASS [검증 12] 규칙 기반(sequential) planned_workflow → LLM 미호출")
 
+    # ------------------------------------------------------------------
+    # 검증 13: LLM이 wait_until + iso_time step_meta 반환 → 보존
+    # ------------------------------------------------------------------
+    wait_with_meta = json.dumps({
+        "kind": "planned_workflow",
+        "summary": "30분 후 실행",
+        "steps": [
+            {"kind": "wait_until", "description": "30분 대기", "depends_on": [],
+             "step_meta": {"iso_time": "2026-04-03T15:00:00+09:00"}},
+            {"kind": "send_result", "description": "결과 전달", "depends_on": [0], "step_meta": {}},
+        ],
+    }, ensure_ascii=False)
+    stub13 = _StubProvider(wait_with_meta)
+    loop13 = _make_loop(stub13)
+
+    plan13 = await loop13._classify_request_with_llm_fallback(long_text)
+    assert plan13.kind == "planned_workflow", f"[FAIL] kind={plan13.kind!r}"
+    wu13 = next(s for s in plan13.steps if s.kind == "wait_until")
+    assert wu13.step_meta.get("iso_time") == "2026-04-03T15:00:00+09:00", (
+        f"[FAIL] iso_time 보존 실패: {wu13.step_meta!r}"
+    )
+    print("PASS [검증 13] LLM wait_until + iso_time → step_meta 보존")
+
+    # ------------------------------------------------------------------
+    # 검증 14: LLM이 wait_until step_meta 없이 반환 → description에서 정규화
+    # ------------------------------------------------------------------
+    wait_no_meta = json.dumps({
+        "kind": "planned_workflow",
+        "summary": "30분 후 실행",
+        "steps": [
+            {"kind": "wait_until", "description": "30분 후에 실행", "depends_on": []},
+            {"kind": "send_result", "description": "결과 전달", "depends_on": [0]},
+        ],
+    }, ensure_ascii=False)
+    stub14 = _StubProvider(wait_no_meta)
+    loop14 = _make_loop(stub14)
+
+    plan14 = await loop14._classify_request_with_llm_fallback(long_text)
+    assert plan14.kind == "planned_workflow", f"[FAIL] kind={plan14.kind!r}"
+    wu14 = next(s for s in plan14.steps if s.kind == "wait_until")
+    iso14 = wu14.step_meta.get("iso_time")
+    assert isinstance(iso14, str) and iso14, (
+        f"[FAIL] wait_until 정규화 실패: step_meta={wu14.step_meta!r}"
+    )
+    print("PASS [검증 14] LLM wait_until step_meta 없음 → description에서 iso_time 정규화")
+
+    # ------------------------------------------------------------------
+    # 검증 15: LLM이 ask_user + prompt step_meta 반환 → 보존
+    # ------------------------------------------------------------------
+    ask_with_meta = json.dumps({
+        "kind": "planned_workflow",
+        "summary": "사용자 입력 후 처리",
+        "steps": [
+            {"kind": "ask_user", "description": "입력 요청", "depends_on": [],
+             "step_meta": {"prompt": "어떤 형식을 원하십니까?"}},
+            {"kind": "send_result", "description": "결과 전달", "depends_on": [0], "step_meta": {}},
+        ],
+    }, ensure_ascii=False)
+    stub15 = _StubProvider(ask_with_meta)
+    loop15 = _make_loop(stub15)
+
+    plan15 = await loop15._classify_request_with_llm_fallback(long_text)
+    au15 = next(s for s in plan15.steps if s.kind == "ask_user")
+    assert au15.step_meta.get("prompt") == "어떤 형식을 원하십니까?", (
+        f"[FAIL] ask_user prompt 보존 실패: {au15.step_meta!r}"
+    )
+    print("PASS [검증 15] LLM ask_user + prompt → step_meta 보존")
+
+    # ------------------------------------------------------------------
+    # 검증 16: LLM이 ask_user step_meta 없이 반환 → description으로 정규화
+    # ------------------------------------------------------------------
+    ask_no_meta = json.dumps({
+        "kind": "planned_workflow",
+        "summary": "사용자 입력 후 처리",
+        "steps": [
+            {"kind": "ask_user", "description": "원하는 형식을 알려주세요", "depends_on": []},
+            {"kind": "send_result", "description": "결과 전달", "depends_on": [0]},
+        ],
+    }, ensure_ascii=False)
+    stub16 = _StubProvider(ask_no_meta)
+    loop16 = _make_loop(stub16)
+
+    plan16 = await loop16._classify_request_with_llm_fallback(long_text)
+    au16 = next(s for s in plan16.steps if s.kind == "ask_user")
+    prompt16 = au16.step_meta.get("prompt")
+    assert prompt16 == "원하는 형식을 알려주세요", (
+        f"[FAIL] ask_user prompt 정규화 실패: {au16.step_meta!r}"
+    )
+    print("PASS [검증 16] LLM ask_user step_meta 없음 → description을 prompt로 정규화")
+
+    # ------------------------------------------------------------------
+    # 검증 17: LLM이 request_approval step_meta 없이 반환 → description으로 정규화
+    # ------------------------------------------------------------------
+    approval_no_meta = json.dumps({
+        "kind": "planned_workflow",
+        "summary": "승인 후 처리",
+        "steps": [
+            {"kind": "request_approval", "description": "파일을 삭제해도 될까요?", "depends_on": []},
+            {"kind": "send_result", "description": "결과 전달", "depends_on": [0]},
+        ],
+    }, ensure_ascii=False)
+    stub17 = _StubProvider(approval_no_meta)
+    loop17 = _make_loop(stub17)
+
+    plan17 = await loop17._classify_request_with_llm_fallback(long_text)
+    ra17 = next(s for s in plan17.steps if s.kind == "request_approval")
+    prompt17 = ra17.step_meta.get("prompt")
+    assert prompt17 == "파일을 삭제해도 될까요?", (
+        f"[FAIL] request_approval prompt 정규화 실패: {ra17.step_meta!r}"
+    )
+    print("PASS [검증 17] LLM request_approval step_meta 없음 → description을 prompt로 정규화")
+
     print("\n모든 검증 통과 ✓")
 
 

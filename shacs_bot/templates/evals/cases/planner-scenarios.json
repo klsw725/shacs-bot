@@ -55,6 +55,33 @@
       "tags": ["planner", "planned_workflow", "numbered_list"],
       "timeoutSeconds": 30,
       "notes": "번호 목록 2줄 이상으로 planned_workflow 분기 진입. step 기반 계획 출력 확인."
+    },
+    {
+      "caseId": "planner-fallback-no-engage-001",
+      "input": "먼저 프로젝트 루트를 탐색하고 그 다음에 README.md를 요약해줘.",
+      "expectedPlannerKind": "planned_workflow",
+      "expectedResponsePattern": "📋|처리 계획",
+      "tags": ["planner", "planned_workflow", "fallback_off"],
+      "timeoutSeconds": 30,
+      "notes": "_SEQ_KO 규칙('먼저…그 다음에')에 의해 규칙 기반 planned_workflow 결정. LLM 폴백 개입 없이 plannedKind=planned_workflow여야 한다."
+    },
+    {
+      "caseId": "planner-fallback-engage-001",
+      "input": "파이썬과 타입스크립트의 생태계와 장단점을 심층 분석해서 비교 보고서를 작성해줘.",
+      "expectedPlannerKind": "planned_workflow",
+      "expectedResponsePattern": "📋|처리 계획",
+      "tags": ["planner", "planned_workflow", "fallback_on"],
+      "timeoutSeconds": 60,
+      "notes": "규칙 기반으로는 direct_answer이지만 30자 초과 비자명 요청이므로 LLM 폴백이 호출된다. LLM이 planned_workflow를 반환해야 plannedKind=planned_workflow로 성공."
+    },
+    {
+      "caseId": "planner-fallback-safe-direct-001",
+      "input": "파이썬에서 리스트와 튜플의 가장 핵심적인 차이점 하나를 알려줘.",
+      "expectedPlannerKind": "direct_answer",
+      "expectedMode": "response",
+      "tags": ["planner", "direct_answer", "fallback_on"],
+      "timeoutSeconds": 60,
+      "notes": "30자 이상이므로 LLM 폴백이 호출되지만, 단순 사실 질의이므로 LLM도 direct_answer를 반환해야 한다. 안전 폴백 동작 검증."
     }
   ]
 }

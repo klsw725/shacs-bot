@@ -19,6 +19,7 @@ class EvaluationCase(EvalBaseModel):
     input: str
     expected_mode: ExpectedMode = "response"
     expected_response_pattern: str = ""
+    expected_planner_kind: str = ""
     tags: list[str] = Field(default_factory=list)
     timeout_seconds: int = 120
     notes: str = ""
@@ -56,6 +57,8 @@ class TraceArtifact(EvalBaseModel):
     usage: dict[str, int] = Field(default_factory=dict)
     started_at: str = ""
     completed_at: str = ""
+    planner_kind: str = ""
+    fallback_engaged: bool = False
 
 
 class EvaluationResult(EvalBaseModel):
@@ -69,6 +72,7 @@ class EvaluationResult(EvalBaseModel):
     usage: dict[str, int] = Field(default_factory=dict)
     trace_path: str = ""
     error_message: str = ""
+    planner_kind: str = ""
 
 
 class VariantSummary(EvalBaseModel):
