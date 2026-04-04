@@ -62,6 +62,19 @@ def test_slack_renderer_marks_rendered_format() -> None:
     assert rendered.content
 
 
+def test_discord_renderer_marks_rendered_format_and_converts_tables() -> None:
+    rendered = render_outbound_message(
+        OutboundMessage(
+            channel="discord",
+            chat_id="room",
+            content="| Name | Value |\n| --- | --- |\n| Foo | Bar |",
+        )
+    )
+
+    assert rendered.metadata["_rendered_format"] == "discord_markdown"
+    assert "**Name**: Foo" in rendered.content
+
+
 def test_split_rendered_content_uses_helper() -> None:
     message = OutboundMessage(
         channel="cli",
@@ -108,3 +121,36 @@ def test_slack_outbound_text_uses_prerendered_content_without_reconversion() -> 
         )
         == "**already-rendered**"
     )
+
+
+def test_discord_outbound_text_uses_prerendered_content_without_reconversion() -> None:
+    discord_module = importlib.import_module("shacs_bot.channels.discord")
+    discord_outbound_text = cast(
+        Callable[[OutboundMessage], str], getattr(discord_module, "discord_outbound_text")
+    )
+
+    assert (
+        discord_outbound_text(
+            OutboundMessage(
+                channel="discord",
+                chat_id="room",
+                content="**already-rendered**",
+                metadata={"_rendered_format": "discord_markdown"},
+            )
+        )
+        == "**already-rendered**"
+    )
+
+
+def test_prepare_outbound_message_applies_discord_renderer() -> None:
+    rendered = prepare_outbound_message(
+        OutboundMessage(
+            channel="discord",
+            chat_id="room",
+            content="# Heading\n\n| Name | Value |\n| --- | --- |\n| Foo | Bar |",
+        )
+    )
+
+    assert rendered.metadata["_rendered_format"] == "discord_markdown"
+    assert "**Heading**" in rendered.content
+    assert "**Name**: Foo" in rendered.content
