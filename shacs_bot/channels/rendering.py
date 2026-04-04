@@ -44,6 +44,20 @@ class DiscordRenderer:
             return replace(msg, content=msg.content or "")
 
 
+class TelegramRenderer:
+    def render(self, msg: OutboundMessage) -> OutboundMessage:
+        try:
+            from shacs_bot.channels.telegram import TelegramChannel
+
+            metadata = dict(msg.metadata or {})
+            metadata["_rendered_format"] = "telegram_html"
+            return replace(
+                msg, content=TelegramChannel.render_text(msg.content or ""), metadata=metadata
+            )
+        except Exception:
+            return replace(msg, content=msg.content or "")
+
+
 _PLAIN_TEXT_RENDERER = PlainTextRenderer()
 _CHANNEL_RENDERERS: dict[str, ChannelRenderer] = {}
 
@@ -72,3 +86,4 @@ def split_rendered_content(msg: OutboundMessage, *, max_len: int) -> list[str]:
 
 register_channel_renderer("slack", SlackRenderer())
 register_channel_renderer("discord", DiscordRenderer())
+register_channel_renderer("telegram", TelegramRenderer())

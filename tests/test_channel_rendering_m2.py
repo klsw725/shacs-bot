@@ -75,6 +75,20 @@ def test_discord_renderer_marks_rendered_format_and_converts_tables() -> None:
     assert "**Name**: Foo" in rendered.content
 
 
+def test_telegram_renderer_marks_rendered_format_and_converts_markdown() -> None:
+    rendered = render_outbound_message(
+        OutboundMessage(
+            channel="telegram",
+            chat_id="room",
+            content="**Bold** [link](https://example.com)",
+        )
+    )
+
+    assert rendered.metadata["_rendered_format"] == "telegram_html"
+    assert "<b>Bold</b>" in rendered.content
+    assert '<a href="https://example.com">link</a>' in rendered.content
+
+
 def test_split_rendered_content_uses_helper() -> None:
     message = OutboundMessage(
         channel="cli",
@@ -142,6 +156,25 @@ def test_discord_outbound_text_uses_prerendered_content_without_reconversion() -
     )
 
 
+def test_telegram_outbound_text_uses_prerendered_content_without_reconversion() -> None:
+    telegram_module = importlib.import_module("shacs_bot.channels.telegram")
+    telegram_outbound_text = cast(
+        Callable[[OutboundMessage], str], getattr(telegram_module, "telegram_outbound_text")
+    )
+
+    assert (
+        telegram_outbound_text(
+            OutboundMessage(
+                channel="telegram",
+                chat_id="room",
+                content="<b>already-rendered</b>",
+                metadata={"_rendered_format": "telegram_html"},
+            )
+        )
+        == "<b>already-rendered</b>"
+    )
+
+
 def test_prepare_outbound_message_applies_discord_renderer() -> None:
     rendered = prepare_outbound_message(
         OutboundMessage(
@@ -154,3 +187,17 @@ def test_prepare_outbound_message_applies_discord_renderer() -> None:
     assert rendered.metadata["_rendered_format"] == "discord_markdown"
     assert "**Heading**" in rendered.content
     assert "**Name**: Foo" in rendered.content
+
+
+def test_prepare_outbound_message_applies_telegram_renderer() -> None:
+    rendered = prepare_outbound_message(
+        OutboundMessage(
+            channel="telegram",
+            chat_id="room",
+            content="**Bold**\n\n- item",
+        )
+    )
+
+    assert rendered.metadata["_rendered_format"] == "telegram_html"
+    assert "<b>Bold</b>" in rendered.content
+    assert "• item" in rendered.content
