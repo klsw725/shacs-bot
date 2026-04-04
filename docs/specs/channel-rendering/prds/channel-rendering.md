@@ -71,16 +71,16 @@ canonical response와 channel renderer를 분리한다.
 
 ## 마일스톤
 
-- [ ] **M1: canonical response 메타데이터 정의**
+- [x] **M1: canonical response 메타데이터 정의**
   `bus/events.py`에 render hints 필드 추가.
 
-- [ ] **M2: renderer 인터페이스 및 fallback 구현**
+- [x] **M2: renderer 인터페이스 및 fallback 구현**
   `channels/rendering.py`에 기본 renderer와 helper 추가.
 
-- [ ] **M3: manager 통합 및 우선 채널 적용**
+- [x] **M3: manager 통합 및 우선 채널 적용**
   `channels/manager.py`에 renderer 선택을 넣고 Slack/Discord/Telegram/Email 순으로 적용.
 
-- [ ] **M4: 힌트/분할 회귀 검증**
+- [x] **M4: 힌트/분할 회귀 검증**
   progress/tool/memory hint와 길이 제한 시나리오 검증.
 
 ---
@@ -95,7 +95,17 @@ canonical response와 channel renderer를 분리한다.
 
 ## Acceptance Criteria
 
-- [ ] Slack/Discord/Telegram/Email의 표현 차이가 renderer로 분리된다.
-- [ ] renderer 미존재 채널에서도 기존 응답이 그대로 전송된다.
-- [ ] hint/footer/thread 규칙이 채널별로 자연스럽게 적용된다.
-- [ ] 길이 초과 응답이 각 채널 규칙에 맞게 분할된다.
+- [x] Slack/Discord/Telegram/Email의 표현 차이가 renderer로 분리된다.
+- [x] renderer 미존재 채널에서도 기존 응답이 그대로 전송된다.
+- [x] hint/footer/thread 규칙이 채널별로 자연스럽게 적용된다.
+- [x] 길이 초과 응답이 각 채널 규칙에 맞게 분할된다.
+
+## 진행 로그
+
+| 날짜 | 상태 | 메모 |
+|---|---|---|
+| 2026-04-04 | 구현 | `shacs_bot/bus/events.py`에 `RenderHints`와 `OutboundMessage.render_hints`를 추가해 canonical render metadata를 도입했다. |
+| 2026-04-04 | 구현 | `shacs_bot/channels/rendering.py`에 renderer registry, plain-text fallback, Slack/Discord/Telegram/Email renderer를 추가했다. |
+| 2026-04-04 | 구현 | `shacs_bot/channels/manager.py`에서 dispatch 직전 renderer를 적용하고, Slack/Discord/Telegram/Email 채널별 prerender 소비 경로를 연결했다. |
+| 2026-04-04 | 구현 | Email renderer에서 heading 기반 subject/body 분리, Telegram HTML prerender, Discord markdown normalization, Slack mrkdwn prerender를 연결했다. |
+| 2026-04-04 | 검증 | `tests/test_channel_rendering_m1.py`, `tests/test_channel_rendering_m2.py`, `tests/test_channel_rendering_m4.py`와 planner/workflow 회귀 테스트까지 포함해 `62 passed`를 확인했다. |

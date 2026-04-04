@@ -14,6 +14,10 @@ from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.channels.base import BaseChannel
 from shacs_bot.config.schema import SlackConfig
+from shacs_bot.utils.helpers import split_message
+
+
+MAX_MESSAGE_LEN = 40000
 
 
 def slack_outbound_text(msg: OutboundMessage) -> str:
@@ -91,11 +95,12 @@ class SlackChannel(BaseChannel):
             thread_ts_param = thread_ts if use_thread else None
 
             if msg.content:
-                await self._web_client.chat_postMessage(
-                    channel=msg.chat_id,
-                    text=slack_outbound_text(msg),
-                    thread_ts=thread_ts_param,
-                )
+                for chunk in split_message(slack_outbound_text(msg), max_len=MAX_MESSAGE_LEN):
+                    await self._web_client.chat_postMessage(
+                        channel=msg.chat_id,
+                        text=chunk,
+                        thread_ts=thread_ts_param,
+                    )
 
             for media_path in msg.media or []:
                 try:

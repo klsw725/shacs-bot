@@ -58,6 +58,34 @@ class TelegramRenderer:
             return replace(msg, content=msg.content or "")
 
 
+class EmailRenderer:
+    def render(self, msg: OutboundMessage) -> OutboundMessage:
+        try:
+            from shacs_bot.channels.email import EmailChannel
+
+            metadata = dict(msg.metadata or {})
+            subject_override = metadata.get("subject")
+            has_subject_override = isinstance(subject_override, str) and bool(
+                subject_override.strip()
+            )
+
+            if not has_subject_override:
+                subject = EmailChannel.render_subject(msg.content or "")
+                if subject:
+                    metadata["subject"] = subject
+
+            metadata["_rendered_format"] = "email_plain"
+            return replace(
+                msg,
+                content=EmailChannel.render_text(
+                    msg.content or "", strip_first_heading=not has_subject_override
+                ),
+                metadata=metadata,
+            )
+        except Exception:
+            return replace(msg, content=msg.content or "")
+
+
 _PLAIN_TEXT_RENDERER = PlainTextRenderer()
 _CHANNEL_RENDERERS: dict[str, ChannelRenderer] = {}
 
@@ -87,3 +115,4 @@ def split_rendered_content(msg: OutboundMessage, *, max_len: int) -> list[str]:
 register_channel_renderer("slack", SlackRenderer())
 register_channel_renderer("discord", DiscordRenderer())
 register_channel_renderer("telegram", TelegramRenderer())
+register_channel_renderer("email", EmailRenderer())

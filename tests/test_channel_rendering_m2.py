@@ -89,6 +89,47 @@ def test_telegram_renderer_marks_rendered_format_and_converts_markdown() -> None
     assert '<a href="https://example.com">link</a>' in rendered.content
 
 
+def test_email_renderer_sets_subject_and_plain_body() -> None:
+    rendered = render_outbound_message(
+        OutboundMessage(
+            channel="email",
+            chat_id="user@example.com",
+            content="# Weekly Update\n\n| Name | Value |\n| --- | --- |\n| Foo | Bar |",
+        )
+    )
+
+    assert rendered.metadata["_rendered_format"] == "email_plain"
+    assert rendered.metadata["subject"] == "Weekly Update"
+    assert "Name: Foo" in rendered.content
+    assert "Weekly Update" not in rendered.content
+
+
+def test_email_renderer_sanitizes_markdown_subject() -> None:
+    rendered = render_outbound_message(
+        OutboundMessage(
+            channel="email",
+            chat_id="user@example.com",
+            content="# **Weekly** [Update](https://example.com)\n\nBody",
+        )
+    )
+
+    assert rendered.metadata["subject"] == "Weekly Update"
+
+
+def test_email_renderer_without_heading_keeps_default_subject_flow() -> None:
+    rendered = render_outbound_message(
+        OutboundMessage(
+            channel="email",
+            chat_id="user@example.com",
+            content="Plain body only",
+        )
+    )
+
+    assert rendered.metadata["_rendered_format"] == "email_plain"
+    assert "subject" not in rendered.metadata
+    assert rendered.content == "Plain body only"
+
+
 def test_split_rendered_content_uses_helper() -> None:
     message = OutboundMessage(
         channel="cli",
@@ -175,6 +216,20 @@ def test_telegram_outbound_text_uses_prerendered_content_without_reconversion() 
     )
 
 
+def test_email_renderer_preserves_existing_subject_override() -> None:
+    rendered = render_outbound_message(
+        OutboundMessage(
+            channel="email",
+            chat_id="user@example.com",
+            content="# Derived Subject\n\nBody",
+            metadata={"subject": "Keep Me"},
+        )
+    )
+
+    assert rendered.metadata["subject"] == "Keep Me"
+    assert "Derived Subject" in rendered.content
+
+
 def test_prepare_outbound_message_applies_discord_renderer() -> None:
     rendered = prepare_outbound_message(
         OutboundMessage(
@@ -201,3 +256,17 @@ def test_prepare_outbound_message_applies_telegram_renderer() -> None:
     assert rendered.metadata["_rendered_format"] == "telegram_html"
     assert "<b>Bold</b>" in rendered.content
     assert "• item" in rendered.content
+
+
+def test_prepare_outbound_message_applies_email_renderer() -> None:
+    rendered = prepare_outbound_message(
+        OutboundMessage(
+            channel="email",
+            chat_id="user@example.com",
+            content="# Weekly Update\n\nParagraph",
+        )
+    )
+
+    assert rendered.metadata["_rendered_format"] == "email_plain"
+    assert rendered.metadata["subject"] == "Weekly Update"
+    assert rendered.content == "Paragraph"
