@@ -34,7 +34,13 @@ from shacs_bot.agent.tools.mcp import connect_mcp_servers
 from shacs_bot.agent.tools.message import MessageTool
 from shacs_bot.agent.tools.registry import ToolRegistry, create_default_tools
 from shacs_bot.agent.tools.spawn import SpawnTool, ListTasksTool, CancelTaskTool
-from shacs_bot.bus.events import InboundMessage, OutboundMessage
+from shacs_bot.bus.events import (
+    FooterMode,
+    InboundMessage,
+    OutboundMessage,
+    RenderHints,
+    RenderKind,
+)
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.agent.usage import TurnUsage, UsageTracker
 from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig, MediaConfig, UsageConfig
@@ -71,6 +77,12 @@ class AgentLoop:
     """
 
     _TOOL_RESULT_MAX_CHARS = 500
+
+    @staticmethod
+    def _render_hints(
+        *, kind: RenderKind = "default", footer_mode: FooterMode = "off"
+    ) -> RenderHints:
+        return RenderHints(kind=kind, footer_mode=footer_mode)
 
     def __init__(
         self,
@@ -566,9 +578,7 @@ class AgentLoop:
                             metadata=msg.metadata or {},
                         )
                 elif _reply in _APPROVAL_NO:
-                    _ = self._workflow_runtime.fail(
-                        _waiting_approval_id, last_error="사용자 거절"
-                    )
+                    _ = self._workflow_runtime.fail(_waiting_approval_id, last_error="사용자 거절")
                     session.metadata.pop("waiting_workflow_approval_id", None)
                     self._sessions.save(session)
                     return OutboundMessage(
@@ -609,6 +619,7 @@ class AgentLoop:
                         chat_id=msg.chat_id,
                         content=f"✅ 답변을 받았습니다. 워크플로우를 계속 진행합니다. (`{_waiting_wf_id}`)",
                         metadata=msg.metadata or {},
+                        render_hints=self._render_hints(),
                     )
             else:
                 # 워크플로우가 더 이상 waiting_input 상태가 아니면 세션 메타 정리
@@ -625,6 +636,7 @@ class AgentLoop:
                     chat_id=msg.chat_id,
                     content="\U0001f4be 기억을 정리했어요",
                     metadata={"_progress": True, "_memory_hint": True},
+                    render_hints=self._render_hints(kind="memory_hint"),
                 )
             )
 
@@ -664,12 +676,14 @@ class AgentLoop:
             meta["_progress"] = True
             meta["_tool_hint"] = tool_hint
             meta["_skill_hint"] = skill_hint
+            render_kind: RenderKind = "tool_hint" if tool_hint else "progress"
             await self._bus.publish_outbound(
                 OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=content,
                     metadata=meta,
+                    render_hints=self._render_hints(kind=render_kind),
                 )
             )
 
@@ -687,6 +701,7 @@ class AgentLoop:
                     content=_plan.clarification_question
                     or "요청을 좀 더 구체적으로 알려주시겠어요?",
                     metadata=msg.metadata or {},
+                    render_hints=self._render_hints(),
                 )
             if _plan.kind == "planned_workflow":
                 session.metadata["current_plan"] = _plan.model_dump()
@@ -704,6 +719,7 @@ class AgentLoop:
                     content=self._format_plan(_plan)
                     + f"\n\n🆔 워크플로우 ID: `{_wf_record.workflow_id}`",
                     metadata=msg.metadata or {},
+                    render_hints=self._render_hints(),
                 )
         final_content, _, all_msg, turn_usage = await self._run_agent_loop(
             init_messages=initial_messages,
@@ -723,6 +739,13 @@ class AgentLoop:
             if footer:
                 final_content = f"{final_content}\n\n{footer}"
 
+        footer_mode: FooterMode = "off"
+        if self._usage_config:
+            if self._usage_config.footer == "tokens":
+                footer_mode = "tokens"
+            elif self._usage_config.footer == "full":
+                footer_mode = "full"
+
         self._save_turn(session=session, messages=all_msg, skip=(1 + len(history)))
         self._sessions.save(session)
         self._maybe_schedule_auto_eval(session_key=key)
@@ -740,6 +763,7 @@ class AgentLoop:
                     chat_id=msg.chat_id,
                     content="\U0001f4be 기억을 정리했어요",
                     metadata={"_progress": True, "_memory_hint": True},
+                    render_hints=self._render_hints(kind="memory_hint"),
                 )
             )
 
@@ -754,6 +778,7 @@ class AgentLoop:
             chat_id=msg.chat_id,
             content=final_content,
             metadata=msg.metadata or {},
+            render_hints=self._render_hints(footer_mode=footer_mode),
         )
 
     def _runtime_policy_variant(self, session_key: str) -> ContextVariant | None:
@@ -1483,12 +1508,24 @@ class AgentLoop:
         updated = False
         normalized: list[PlanStep] = []
         for step in plan.steps:
-            if step.kind == "wait_until" and "iso_time" not in step.step_meta and "duration_minutes" not in step.step_meta:
+            if (
+                step.kind == "wait_until"
+                and "iso_time" not in step.step_meta
+                and "duration_minutes" not in step.step_meta
+            ):
                 dt = parse_wait_until_time(step.description)
-                normalized.append(step.model_copy(update={"step_meta": {**step.step_meta, "iso_time": dt.isoformat()}}))
+                normalized.append(
+                    step.model_copy(
+                        update={"step_meta": {**step.step_meta, "iso_time": dt.isoformat()}}
+                    )
+                )
                 updated = True
             elif step.kind in ("ask_user", "request_approval") and "prompt" not in step.step_meta:
-                normalized.append(step.model_copy(update={"step_meta": {**step.step_meta, "prompt": step.description}}))
+                normalized.append(
+                    step.model_copy(
+                        update={"step_meta": {**step.step_meta, "prompt": step.description}}
+                    )
+                )
                 updated = True
             else:
                 normalized.append(step)
@@ -1542,9 +1579,7 @@ class AgentLoop:
             data: dict = json.loads(raw)
             plan: AssistantPlan = AssistantPlan.model_validate(data)
         except Exception as exc:
-            logger.warning(
-                "LLM 플래너 폴백 JSON 파싱 실패: {} — raw={!r}", exc, raw[:200]
-            )
+            logger.warning("LLM 플래너 폴백 JSON 파싱 실패: {} — raw={!r}", exc, raw[:200])
             return None
 
         if plan.kind == "planned_workflow" and not plan.steps:
@@ -1862,7 +1897,9 @@ class AgentLoop:
 
         if step.kind == "ask_user":
             meta_prompt = step.step_meta.get("prompt")
-            prompt_text = meta_prompt if isinstance(meta_prompt, str) and meta_prompt else step.description
+            prompt_text = (
+                meta_prompt if isinstance(meta_prompt, str) and meta_prompt else step.description
+            )
             message = (
                 f"워크플로우 `{workflow_id}`는 `ask_user` 단계에서 사용자 입력을 기다립니다.\n"
                 f"- {prompt_text}"
@@ -1883,7 +1920,9 @@ class AgentLoop:
 
         if step.kind == "request_approval":
             meta_prompt = step.step_meta.get("prompt")
-            prompt_text = meta_prompt if isinstance(meta_prompt, str) and meta_prompt else step.description
+            prompt_text = (
+                meta_prompt if isinstance(meta_prompt, str) and meta_prompt else step.description
+            )
             message = (
                 f"워크플로우 `{workflow_id}`는 `request_approval` 단계에서 승인을 기다립니다.\n"
                 f"- {prompt_text}\n\n"

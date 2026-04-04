@@ -70,16 +70,16 @@
 
 ## 마일스톤
 
-- [ ] **M1: inspect command skeleton 추가**
+- [x] **M1: inspect command skeleton 추가**
   CLI 진입점과 빈 상태 출력 정의.
 
-- [ ] **M2: sessions/workflows/usage helper 연결**
+- [x] **M2: sessions/workflows/usage helper 연결**
   조회용 helper와 table 출력 연결.
 
-- [ ] **M3: approvals local-only 명시 + 필터 옵션 및 empty-state 검증**
+- [x] **M3: approvals local-only 명시 + 필터 옵션 및 empty-state 검증**
   approvals 조회 한계와 limit/date/session/state 옵션 검증.
 
-- [ ] **M4: read-only inspect UX 검증**
+- [x] **M4: read-only inspect UX 검증**
   gateway 미실행/데이터 없음/부분 데이터 환경에서 확인.
 
 ---
@@ -95,9 +95,19 @@
 
 ## Acceptance Criteria
 
-- [ ] inspect sessions/approvals/workflows/usage 명령이 동작한다.
-- [ ] session/workflow/usage는 gateway 미실행 상태에서도 조회 가능하다.
-- [ ] approvals는 현재 프로세스 기준 pending 상태를 조회할 수 있다.
-- [ ] 빈 상태에서도 오류 없이 결과를 출력한다.
-- [ ] read-only 범위를 유지한다.
-- [ ] 관리자 전용 콘솔이 아니라 self-hosted 사용자용 inspect UX로 설명된다.
+- [x] inspect sessions/approvals/workflows/usage 명령이 동작한다.
+- [x] session/workflow/usage는 gateway 미실행 상태에서도 조회 가능하다.
+- [x] approvals는 현재 프로세스 기준 pending 상태를 조회할 수 있다.
+- [x] 빈 상태에서도 오류 없이 결과를 출력한다.
+- [x] read-only 범위를 유지한다.
+- [x] 관리자 전용 콘솔이 아니라 self-hosted 사용자용 inspect UX로 설명된다.
+
+## 진행 로그
+
+| 날짜 | 상태 | 메모 |
+|---|---|---|
+| 2026-04-04 | 구현 | `shacs_bot/cli/commands.py`에 `inspect sessions`, `inspect workflows`, `inspect usage`, `inspect approvals`를 추가하고 기존 `workflows status` 테이블 렌더링을 재사용했다. |
+| 2026-04-04 | 구현 | `SessionManager.list_sessions()`, `list_pending_approvals()`, `WorkflowStore.list_incomplete()/list_all()`, `UsageTracker.get_session_summary()/get_daily_summary()`를 inspect 경로에 연결했다. |
+| 2026-04-04 | 검증 | `tests/test_inspect_cli.py`로 sessions/workflows/usage/approvals/status empty-state와 필터 시나리오를 검증했다. |
+| 2026-04-04 | polish | `inspect workflows --source`, `inspect usage --session` cross-day 집계, `status` personal inspect summary를 추가해 UX를 정리했다. |
+| 2026-04-04 | 동기화 | 구현과 테스트가 완료된 상태에 맞춰 milestone 및 acceptance 체크박스를 최신화했다. |

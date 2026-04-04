@@ -66,9 +66,9 @@
 
 ## 현재 상태 분석
 
-- 현재 CLI에는 `status`, `channels status`, `workflows status`, provider login, gateway 실행 등이 있다.
-- approval은 내부 `_pending_approvals` 레지스트리에만 존재한다.
-- session/usage/workflow 상태를 사용자가 한곳에서 상세 조회할 inspect 표면은 없다.
+- 현재 CLI에는 `status`, `channels status`, `workflows status`, provider login, gateway 실행과 함께 `inspect sessions`, `inspect workflows`, `inspect usage`, `inspect approvals`가 추가되어 있다.
+- approval은 여전히 내부 `_pending_approvals` 레지스트리에 존재하지만, inspect 경로에서 process-local 한계를 명시한 read-only 조회가 가능하다.
+- session/usage/workflow 상태는 inspect 표면과 `status` personal inspect summary로 점검할 수 있고, `tests/test_inspect_cli.py`에서 empty-state/필터 시나리오가 검증된다.
 
 ## 설계
 
@@ -100,11 +100,11 @@ shacs-bot inspect usage [--date YYYY-MM-DD] [--session KEY]
 
 ## 검증 기준
 
-- [ ] session/workflow/usage 정보를 CLI에서 읽을 수 있음
-- [ ] approval 정보를 현재 프로세스 기준으로 CLI에서 읽을 수 있음
-- [ ] destructive mutation 없이 read-only inspect로 시작함
-- [ ] rich 출력이 비어 있는 상태에서도 오류 없이 동작함
-- [ ] 별도 운영자 개념 없이 self-hosted 사용자 관점의 명명과 설명을 유지함
+- [x] session/workflow/usage 정보를 CLI에서 읽을 수 있음
+- [x] approval 정보를 현재 프로세스 기준으로 CLI에서 읽을 수 있음
+- [x] destructive mutation 없이 read-only inspect로 시작함
+- [x] rich 출력이 비어 있는 상태에서도 오류 없이 동작함
+- [x] 별도 운영자 개념 없이 self-hosted 사용자 관점의 명명과 설명을 유지함
 
 ## Must NOT
 
