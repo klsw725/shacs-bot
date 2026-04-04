@@ -25,11 +25,13 @@ from shacs_bot.providers.base import LLMProvider
 # request_id → asyncio.Future[bool]
 # manual 모드에서 서브에이전트가 사용자 응답을 기다리는 데 사용
 _pending_approvals: dict[str, asyncio.Future[bool]] = {}
+_pending_approval_meta: dict[str, dict[str, str]] = {}
 
 
 def resolve_approval(request_id: str, approved: bool) -> bool:
     """pending approval을 해결한다. 존재하면 True, 없으면 False."""
     future = _pending_approvals.pop(request_id, None)
+    _ = _pending_approval_meta.pop(request_id, None)
     if future and not future.done():
         future.set_result(approved)
         return True
@@ -42,6 +44,46 @@ def get_pending_approval_for_session(session_key: str) -> str | None:
         if not future.done() and req_id.startswith(session_key + ":"):
             return req_id
     return None
+
+
+def list_pending_approvals() -> list[dict[str, str | bool]]:
+    items: list[dict[str, str | bool]] = []
+    for request_id, future in _pending_approvals.items():
+        meta: dict[str, str] = _pending_approval_meta.get(request_id, {})
+        items.append(
+            {
+                "request_id": request_id,
+                "session_key": meta.get("session_key", ""),
+                "channel": meta.get("channel", ""),
+                "tool_name": meta.get("tool_name", ""),
+                "skill_name": meta.get("skill_name", ""),
+                "done": future.done(),
+            }
+        )
+    return sorted(items, key=lambda item: str(item.get("request_id", "")))
+
+
+def register_pending_approval_for_test(
+    request_id: str,
+    future: asyncio.Future[bool],
+    *,
+    session_key: str = "",
+    channel: str = "",
+    tool_name: str = "",
+    skill_name: str = "",
+) -> None:
+    _pending_approvals[request_id] = future
+    _pending_approval_meta[request_id] = {
+        "session_key": session_key,
+        "channel": channel,
+        "tool_name": tool_name,
+        "skill_name": skill_name,
+    }
+
+
+def clear_pending_approvals_for_test() -> None:
+    _pending_approvals.clear()
+    _pending_approval_meta.clear()
 
 
 # Tier 1: 읽기 전용 도구 — LLM 호출 없이 즉시 승인
@@ -234,6 +276,12 @@ class ApprovalGate:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
         _pending_approvals[request_id] = future
+        _pending_approval_meta[request_id] = {
+            "session_key": session_key,
+            "channel": str(self._origin.get("channel", "")),
+            "tool_name": tool_name,
+            "skill_name": self._skill_name,
+        }
 
         await self._hooks.emit(
             HookContext(
@@ -277,7 +325,8 @@ class ApprovalGate:
             )
             return ApprovalDecision(denied=not approved, reason=reason)
         except asyncio.TimeoutError:
-            _pending_approvals.pop(request_id, None)
+            _ = _pending_approvals.pop(request_id, None)
+            _ = _pending_approval_meta.pop(request_id, None)
             logger.warning("ApprovalGate(manual): {} 타임아웃, 기본 거부", tool_name)
             await self._hooks.emit(
                 HookContext(

@@ -230,18 +230,23 @@ class SessionManager:
 
         for path in self._session_dir.glob("*.jsonl"):
             try:
-                # 메타데이터 line만 읽기
+                message_count: int = 0
                 with open(path, encoding="utf-8") as f:
                     first_line: str = f.readline().strip()
                     if first_line:
                         data: dict[str, Any] = json.loads(first_line)
                         if data.get("_type") == "metadata":
                             key: str = data.get("key") or path.stem.replace("_", ":", 1)
+                            for line in f:
+                                if line.strip():
+                                    message_count += 1
                             sessions.append(
                                 {
                                     "key": key,
                                     "created_at": data.get("created_at"),
                                     "updated_at": data.get("updated_at"),
+                                    "message_count": message_count,
+                                    "metadata": data.get("metadata", {}),
                                     "path": str(path),
                                 }
                             )

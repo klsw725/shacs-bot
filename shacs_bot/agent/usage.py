@@ -91,8 +91,36 @@ class UsageTracker:
         except OSError:
             logger.warning("사용량 기록 실패: {}", path)
 
-    def get_session_summary(self, session_key: str) -> dict[str, int | float]:
-        return self._aggregate(session_filter=session_key)
+    def get_session_summary(
+        self,
+        session_key: str,
+        target_date: str | None = None,
+    ) -> dict[str, int | float]:
+        return self._aggregate(
+            target_date=target_date,
+            session_filter=session_key,
+            all_dates=target_date is None,
+        )
+
+    def get_recent_session(self, target_date: str | None = None) -> str | None:
+        """오늘(또는 지정 날짜)에 가장 마지막으로 기록된 세션 키를 반환합니다."""
+        last_session: str | None = None
+        for path in self._iter_usage_paths(target_date=target_date):
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            if "session" in entry:
+                                last_session = entry["session"]
+                        except json.JSONDecodeError:
+                            continue
+            except OSError:
+                pass
+        return last_session
 
     def get_daily_summary(self, target_date: str | None = None) -> dict[str, int | float]:
         return self._aggregate(target_date=target_date)
@@ -101,10 +129,8 @@ class UsageTracker:
         self,
         target_date: str | None = None,
         session_filter: str | None = None,
+        all_dates: bool = False,
     ) -> dict[str, int | float]:
-        today = target_date or date.today().isoformat()
-        path = self._data_dir / f"{today}.jsonl"
-
         result: dict[str, int | float] = {
             "prompt": 0,
             "completion": 0,
@@ -114,36 +140,44 @@ class UsageTracker:
             "sessions": 0,
         }
 
-        if not path.exists():
-            return result
-
         seen_sessions: set[str] = set()
 
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+        for path in self._iter_usage_paths(target_date=target_date, all_dates=all_dates):
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
 
-                    if session_filter and entry.get("session") != session_filter:
-                        continue
+                        if session_filter and entry.get("session") != session_filter:
+                            continue
 
-                    result["prompt"] += entry.get("prompt", 0)
-                    result["completion"] += entry.get("completion", 0)
-                    result["total"] += entry.get("prompt", 0) + entry.get("completion", 0)
-                    result["cost"] += entry.get("cost", 0.0)
-                    result["calls"] += entry.get("calls", 0)
-                    seen_sessions.add(entry.get("session", ""))
-        except OSError:
-            logger.warning("사용량 파일 읽기 실패: {}", path)
+                        result["prompt"] += entry.get("prompt", 0)
+                        result["completion"] += entry.get("completion", 0)
+                        result["total"] += entry.get("prompt", 0) + entry.get("completion", 0)
+                        result["cost"] += entry.get("cost", 0.0)
+                        result["calls"] += entry.get("calls", 0)
+                        seen_sessions.add(entry.get("session", ""))
+            except OSError:
+                logger.warning("사용량 파일 읽기 실패: {}", path)
 
         result["sessions"] = len(seen_sessions)
         return result
+
+    def _iter_usage_paths(
+        self, target_date: str | None = None, all_dates: bool = False
+    ) -> list[Path]:
+        if all_dates:
+            return sorted(self._data_dir.glob("*.jsonl"))
+
+        target = target_date or date.today().isoformat()
+        path = self._data_dir / f"{target}.jsonl"
+        return [path] if path.exists() else []
 
 
 _PRICE_PER_MILLION: dict[str, tuple[float, float]] = {

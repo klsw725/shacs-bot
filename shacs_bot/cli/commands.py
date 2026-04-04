@@ -1614,6 +1614,11 @@ def channels_login():
 @app.command()
 def status():
     """Show shacs-bot status."""
+    from shacs_bot.agent.approval import list_pending_approvals
+    from shacs_bot.agent.session.manager import SessionManager
+    from shacs_bot.agent.usage import UsageTracker
+    from shacs_bot.config.paths import get_usage_dir
+    from shacs_bot.workflow.store import WorkflowStore
 
     config_path: Path = get_config_path()
 
@@ -1627,6 +1632,51 @@ def status():
     )
     console.print(
         f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}"
+    )
+
+    sessions = SessionManager(workspace).list_sessions()
+    incomplete_workflows = WorkflowStore(workspace).list_incomplete()
+    incomplete_workflows.sort(key=lambda record: record.updated_at, reverse=True)
+    _tracker = UsageTracker(get_usage_dir())
+    usage_summary = _tracker.get_daily_summary()
+    recent_usage_session = _tracker.get_recent_session()
+    pending_approvals = list_pending_approvals()
+    latest_session = sessions[0] if sessions else None
+    latest_workflow = incomplete_workflows[0] if incomplete_workflows else None
+
+    summary: Table = Table(title="Personal Inspect Summary")
+    summary.add_column("Area", style="cyan")
+    summary.add_column("Value")
+    summary.add_row("Sessions", str(len(sessions)))
+    summary.add_row(
+        "Recent session",
+        (
+            f"{latest_session['key']} · {latest_session.get('updated_at') or '-'}"
+            if latest_session
+            else "-"
+        ),
+    )
+    summary.add_row("Incomplete workflows", str(len(incomplete_workflows)))
+    summary.add_row(
+        "Recent workflow",
+        (
+            f"{latest_workflow.state} · {latest_workflow.source_kind} · {latest_workflow.updated_at}"
+            if latest_workflow
+            else "-"
+        ),
+    )
+    summary.add_row(
+        "Today's usage",
+        (
+            f"{int(usage_summary['calls'])} calls · {int(usage_summary['total']):,} tokens · "
+            f"${float(usage_summary['cost']):.4f}"
+        ),
+    )
+    summary.add_row("Recent usage session", recent_usage_session or "-")
+    summary.add_row("Pending approvals", f"{len(pending_approvals)} (process-local)")
+    console.print(summary)
+    console.print(
+        "[dim]상세 조회: inspect sessions | inspect workflows | inspect usage | inspect approvals[/dim]"
     )
 
     if config_path.exists():
@@ -1750,6 +1800,195 @@ def _login_github_copilot() -> None:
     except Exception as e:
         console.print(f"[red]Authentication error: {e}[/red]")
         raise typer.Exit(1)
+
+
+# ============================================================================
+# Inspect Commands (Personal Inspect CLI)
+# ============================================================================
+
+inspect_app = typer.Typer(help="세션, 워크플로우, 사용량, 승인 상태를 읽기 전용으로 조회합니다.")
+app.add_typer(inspect_app, name="inspect")
+
+
+@inspect_app.command("sessions")
+def inspect_sessions(
+    limit: int = typer.Option(20, "--limit", min=1, help="최대 표시 개수"),
+    prefix: str | None = typer.Option(None, "--key-prefix", "--prefix", help="세션 키 prefix 필터"),
+    show_meta: bool = typer.Option(False, "--show-meta", "--meta", help="메타데이터 열도 표시"),
+) -> None:
+    """저장된 세션 목록을 표시합니다."""
+    from shacs_bot.agent.session.manager import SessionManager
+
+    config: Config = load_config()
+    manager: SessionManager = SessionManager(config.workspace_path)
+    sessions = manager.list_sessions()
+
+    if prefix:
+        sessions = [s for s in sessions if s["key"].startswith(prefix)]
+
+    total_count = len(sessions)
+    sessions = sessions[:limit]
+
+    if not sessions:
+        empty_msg = (
+            f"[yellow]'{prefix}' 에 일치하는 세션이 없습니다.[/yellow]"
+            if prefix
+            else "[yellow]저장된 세션이 없습니다.[/yellow]"
+        )
+        console.print(empty_msg)
+        return
+
+    table: Table = Table(title=f"Sessions ({total_count}개)")
+    table.add_column("Key", style="cyan")
+    table.add_column("Messages", justify="right")
+    table.add_column("Created")
+    table.add_column("Updated")
+    if show_meta:
+        table.add_column("Metadata", style="dim")
+
+    for s in sessions:
+        created = s.get("created_at") or "-"
+        updated = s.get("updated_at") or "-"
+        try:
+            created = datetime.fromisoformat(created).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+        try:
+            updated = datetime.fromisoformat(updated).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+        message_count: int = int(s.get("message_count", 0))
+        row = [s["key"], str(message_count), created, updated]
+        if show_meta:
+            metadata = s.get("metadata") or {}
+            meta_str = str(metadata)
+            if len(meta_str) > 80:
+                meta_str = f"{meta_str[:77]}..."
+            row.append(meta_str)
+        table.add_row(*row)
+
+    console.print(table)
+    if total_count > limit:
+        console.print(f"[dim]최신순 · 전체 {total_count}개 중 {limit}개 표시[/dim]")
+    else:
+        console.print(f"[dim]최신순 · {total_count}개 세션[/dim]")
+
+
+@inspect_app.command("workflows")
+def inspect_workflows(
+    all_records: bool = typer.Option(False, "--all", help="완료된 workflow도 포함합니다."),
+    state: str | None = typer.Option(None, "--state", help="특정 상태만 표시합니다."),
+    source: str | None = typer.Option(None, "--source", help="특정 source_kind만 표시합니다."),
+    limit: int = typer.Option(20, "--limit", min=1, help="최대 표시 개수"),
+) -> None:
+    """저장된 워크플로우 목록을 읽기 전용으로 표시합니다."""
+    from shacs_bot.workflow.store import WorkflowStore
+
+    config: Config = load_config()
+    store: WorkflowStore = WorkflowStore(config.workspace_path)
+    records: list[WorkflowRecord] = store.list_all() if all_records else store.list_incomplete()
+
+    if state:
+        records = [r for r in records if r.state == state]
+    if source:
+        records = [r for r in records if r.source_kind == source]
+
+    records.sort(key=lambda r: r.updated_at, reverse=True)
+    records = records[:limit]
+
+    if not records:
+        console.print("[yellow]표시할 workflow가 없습니다.[/yellow]")
+        return
+
+    title: str = "Workflows (all)" if all_records else "Workflows (incomplete)"
+    _render_workflow_table(records, title=title)
+
+
+@inspect_app.command("usage")
+def inspect_usage(
+    date: str | None = typer.Option(None, "--date", help="조회할 날짜 (YYYY-MM-DD). 기본값: 오늘"),
+    session: str | None = typer.Option(None, "--session", help="특정 세션 키만 집계"),
+) -> None:
+    """토큰 사용량과 비용 요약을 표시합니다."""
+    from shacs_bot.agent.usage import UsageTracker
+    from shacs_bot.config.paths import get_usage_dir
+
+    tracker: UsageTracker = UsageTracker(get_usage_dir())
+
+    if session:
+        summary = tracker.get_session_summary(session, target_date=date)
+        title = (
+            f"Usage — session: {session} ({date})"
+            if date
+            else f"Usage — session: {session} (all days)"
+        )
+    else:
+        summary = tracker.get_daily_summary(date)
+        target = date or "오늘"
+        title = f"Usage — {target}"
+
+    table: Table = Table(title=title)
+    table.add_column("항목", style="cyan")
+    table.add_column("값", justify="right")
+
+    prompt: int = int(summary.get("prompt", 0))
+    completion: int = int(summary.get("completion", 0))
+    total: int = int(summary.get("total", 0))
+    cost: float = float(summary.get("cost", 0.0))
+    calls: int = int(summary.get("calls", 0))
+    sessions: int = int(summary.get("sessions", 0))
+
+    if total == 0:
+        console.print("[yellow]기록된 사용량이 없습니다.[/yellow]")
+        return
+
+    table.add_row("Prompt tokens", f"{prompt:,}")
+    table.add_row("Completion tokens", f"{completion:,}")
+    table.add_row("Total tokens", f"{total:,}")
+    table.add_row("Cost (USD)", f"${cost:.4f}")
+    table.add_row("LLM calls", str(calls))
+    if not session:
+        table.add_row("Sessions", str(sessions))
+
+    console.print(table)
+
+
+@inspect_app.command("approvals")
+def inspect_approvals() -> None:
+    """현재 프로세스에서 대기 중인 승인 요청을 표시합니다 (프로세스 로컬).
+
+    참고: 승인 상태는 프로세스 메모리에만 존재합니다.
+    이 명령을 실행하는 프로세스와 게이트웨이 프로세스가 다르면 항상 빈 목록이 표시됩니다.
+    """
+    from shacs_bot.agent.approval import list_pending_approvals
+
+    approvals = list_pending_approvals()
+
+    if not approvals:
+        console.print("[yellow]대기 중인 승인 요청이 없습니다. (프로세스 로컬)[/yellow]")
+        return
+
+    table: Table = Table(title="Pending Approvals (process-local)")
+    table.add_column("Request ID", style="cyan")
+    table.add_column("Session")
+    table.add_column("Channel")
+    table.add_column("Tool")
+    table.add_column("Skill")
+    table.add_column("Done")
+
+    for item in approvals:
+        table.add_row(
+            str(item.get("request_id", "")),
+            str(item.get("session_key", "") or "-"),
+            str(item.get("channel", "") or "-"),
+            str(item.get("tool_name", "") or "-"),
+            str(item.get("skill_name", "") or "-"),
+            "yes" if bool(item.get("done", False)) else "no",
+        )
+
+    console.print(table)
+    console.print("[dim]참고: 이 목록은 현재 프로세스 메모리의 상태만 반영합니다.[/dim]")
 
 
 if __name__ == "__main__":
