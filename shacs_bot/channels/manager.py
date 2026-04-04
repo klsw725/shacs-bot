@@ -18,6 +18,7 @@ from shacs_bot.agent.hooks import (
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.channels.base import BaseChannel
+from shacs_bot.channels.rendering import render_outbound_message
 from shacs_bot.config.schema import Config
 
 
@@ -59,6 +60,10 @@ def should_skip_outbound_progress(
         return not send_tool_hints
 
     return not send_progress
+
+
+def prepare_outbound_message(msg: OutboundMessage) -> OutboundMessage:
+    return render_outbound_message(msg)
 
 
 # (config_attr, module_path, class_name, extra_kwargs: {constructor_kwarg: "dotted.config.path"})
@@ -200,9 +205,10 @@ class ChannelManager:
                             new_media: list[str] = ctx.payload.get("media", msg.media)
                             if new_content != msg.content or new_media != msg.media:
                                 msg = replace(msg, content=new_content, media=new_media)
-                        await channel.send(msg)
-                        if msg.media:
-                            self._cleanup_generated_media(msg.media)
+                        rendered_msg = prepare_outbound_message(msg)
+                        await channel.send(rendered_msg)
+                        if rendered_msg.media:
+                            self._cleanup_generated_media(rendered_msg.media)
                         await self._hooks.emit(
                             HookContext(
                                 event=AFTER_OUTBOUND_SEND,

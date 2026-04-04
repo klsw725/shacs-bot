@@ -16,6 +16,13 @@ from shacs_bot.channels.base import BaseChannel
 from shacs_bot.config.schema import SlackConfig
 
 
+def slack_outbound_text(msg: OutboundMessage) -> str:
+    rendered_format = msg.metadata.get("_rendered_format") if msg.metadata else None
+    if rendered_format == "slack_mrkdwn":
+        return msg.content
+    return SlackChannel.render_text(msg.content)
+
+
 class SlackChannel(BaseChannel):
     """Slack channel using Socket Mode."""
 
@@ -86,7 +93,7 @@ class SlackChannel(BaseChannel):
             if msg.content:
                 await self._web_client.chat_postMessage(
                     channel=msg.chat_id,
-                    text=self._to_mrkdwn(msg.content),
+                    text=slack_outbound_text(msg),
                     thread_ts=thread_ts_param,
                 )
 
@@ -112,9 +119,7 @@ class SlackChannel(BaseChannel):
             return
 
         # Acknowledge right away
-        await client.send_socket_mode_response(
-            SocketModeResponse(envelope_id=req.envelope_id)
-        )
+        await client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
 
         payload = req.payload or {}
         event = payload.get("event") or {}
@@ -233,6 +238,10 @@ class SlackChannel(BaseChannel):
     _BARE_URL_RE = re.compile(r"(?<![|<])(https?://\S+)")
 
     @classmethod
+    def render_text(cls, text: str) -> str:
+        return cls._to_mrkdwn(text)
+
+    @classmethod
     def _to_mrkdwn(cls, text: str) -> str:
         """Convert Markdown to Slack mrkdwn, including tables."""
         if not text:
@@ -275,4 +284,3 @@ class SlackChannel(BaseChannel):
             if parts:
                 rows.append(" · ".join(parts))
         return "\n".join(rows)
-
