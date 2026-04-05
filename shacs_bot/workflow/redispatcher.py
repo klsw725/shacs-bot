@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from shacs_bot.agent.loop import AgentLoop
     from shacs_bot.agent.tools.cron.service import CronService
     from shacs_bot.agent.subagent import SubagentManager
+    from shacs_bot.heartbeat.service import HeartbeatService
 
 
 class WorkflowRedispatcher:
@@ -21,12 +22,14 @@ class WorkflowRedispatcher:
         cron_service: "CronService",
         subagent_manager: "SubagentManager | None" = None,
         agent_loop: "AgentLoop | None" = None,
+        heartbeat_service: "HeartbeatService | None" = None,
         poll_interval_s: int = 5,
     ) -> None:
         self._workflow_runtime: WorkflowRuntime = workflow_runtime
         self._cron_service: CronService = cron_service
         self._subagent_manager: SubagentManager | None = subagent_manager
         self._agent_loop: AgentLoop | None = agent_loop
+        self._heartbeat_service: HeartbeatService | None = heartbeat_service
         self._poll_interval_s: int = poll_interval_s
         self._running: bool = False
         self._task: asyncio.Task[None] | None = None
@@ -87,6 +90,22 @@ class WorkflowRedispatcher:
                 if not success:
                     logger.warning(
                         "WorkflowRedispatcher: manual workflow redispatch skipped for {}",
+                        record.workflow_id,
+                    )
+                continue
+            if record.source_kind == "heartbeat":
+                if self._heartbeat_service is None:
+                    logger.warning(
+                        "WorkflowRedispatcher: heartbeat service unavailable for {}",
+                        record.workflow_id,
+                    )
+                    continue
+                success = await self._heartbeat_service.execute_existing_workflow(
+                    record.workflow_id
+                )
+                if not success:
+                    logger.warning(
+                        "WorkflowRedispatcher: heartbeat redispatch skipped for {}",
                         record.workflow_id,
                     )
                 continue

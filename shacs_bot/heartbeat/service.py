@@ -61,7 +61,7 @@ class HeartbeatService:
         provider: LLMProvider,
         model: str,
         on_execute: Callable[[str, str], Coroutine[Any, Any, str]] | None = None,
-        on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
+        on_notify: Callable[[str, str], Coroutine[Any, Any, tuple[str, str] | None]] | None = None,
         interval_s: int = 30 * 60,
         enabled: bool = True,
         hooks: HookRegistry | None = None,
@@ -71,7 +71,9 @@ class HeartbeatService:
         self._provider: LLMProvider = provider
         self._model: str = model
         self._on_execute: Callable[[str, str], Coroutine[Any, Any, str]] | None = on_execute
-        self._on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = on_notify
+        self._on_notify: (
+            Callable[[str, str], Coroutine[Any, Any, tuple[str, str] | None]] | None
+        ) = on_notify
         self._interval_s: int = interval_s
         self._enabled: bool = enabled
         self._hooks: HookRegistry = hooks or NoOpHookRegistry()
@@ -115,7 +117,6 @@ class HeartbeatService:
     async def _tick(self):
         """싱글 heartbeat 틱 실행"""
         content: str | None = self._read_heartbeat_file()
-        workflow_id: str = ""
         if not content:
             logger.debug("Heartbeat: Heartbeat.md가 없거나 비어있습니다.")
 
@@ -136,23 +137,49 @@ class HeartbeatService:
             logger.info("Heartbeat: 태스크를 찾았습니다. 실행 중...")
             if self._on_execute:
                 workflow_id = self._create_workflow(tasks)
-                self._start_workflow(workflow_id)
-                response: str = await self._on_execute(tasks, workflow_id)
-                self._annotate_result(workflow_id, response)
-                await self._hooks.emit(
-                    HookContext(
-                        event=BACKGROUND_JOB_COMPLETED,
-                        payload={"result_preview": response[:120] if response else ""},
-                    )
+                await self._execute_heartbeat(workflow_id, tasks)
+        except Exception:
+            logger.exception("Heartbeat 실행 실패")
+
+    async def execute_existing_workflow(self, workflow_id: str) -> bool:
+        """queued 상태의 heartbeat 워크플로우를 재실행합니다.
+
+        WorkflowRedispatcher가 호출하는 진입점.
+        """
+        if self._workflow_runtime is None or self._on_execute is None:
+            return False
+        record = self._workflow_runtime.store.get(workflow_id)
+        if record is None or record.source_kind != "heartbeat" or record.state != "queued":
+            return False
+        await self._execute_heartbeat(workflow_id, record.goal)
+        return True
+
+    async def _execute_heartbeat(self, workflow_id: str, tasks: str) -> None:
+        """heartbeat 워크플로우의 공유 실행 경로.
+
+        _tick()과 execute_existing_workflow() 모두 이 경로를 통해 실행됩니다.
+        """
+        execute = self._on_execute
+        if execute is None:
+            return
+        try:
+            self._start_workflow(workflow_id)
+            response: str = await execute(tasks, workflow_id)
+            self._annotate_result(workflow_id, response)
+            await self._hooks.emit(
+                HookContext(
+                    event=BACKGROUND_JOB_COMPLETED,
+                    payload={"result_preview": response[:120] if response else ""},
                 )
-                self._complete_workflow(workflow_id)
-                if response and self._on_notify:
-                    logger.info("Heartbeat: 완료됨, 응답을 전달합니다.")
-                    await self._on_notify(response)
-                    self._mark_notified(workflow_id)
+            )
+            self._complete_workflow(workflow_id)
+            if response and self._on_notify:
+                logger.info("Heartbeat: 완료됨, 응답을 전달합니다.")
+                delivered_target = await self._on_notify(response, workflow_id)
+                self._record_notification(workflow_id, delivered_target)
         except Exception as exc:
             self._fail_workflow(workflow_id, str(exc))
-            logger.exception("Heartbeat 실행 실패")
+            logger.exception("Heartbeat 워크플로우 {} 실행 실패", workflow_id)
 
     def _create_workflow(self, tasks: str) -> str:
         if self._workflow_runtime is None:
@@ -162,7 +189,7 @@ class HeartbeatService:
             goal=tasks,
             metadata={"heartbeatFile": str(self.heartbeat_file)},
         )
-        self._workflow_runtime.store.upsert(record)
+        _ = self._workflow_runtime.store.upsert(record)
         return record.workflow_id
 
     def _start_workflow(self, workflow_id: str) -> None:
@@ -180,10 +207,22 @@ class HeartbeatService:
             return
         _ = self._workflow_runtime.annotate_result(workflow_id, result)
 
-    def _mark_notified(self, workflow_id: str) -> None:
+    def _record_notification(
+        self,
+        workflow_id: str,
+        enqueued_target: tuple[str, str] | None,
+    ) -> None:
         if self._workflow_runtime is None or not workflow_id:
             return
-        _ = self._workflow_runtime.mark_notify_delegated(workflow_id)
+        if enqueued_target is not None:
+            channel, chat_id = enqueued_target
+            _ = self._workflow_runtime.mark_notify_enqueued(
+                workflow_id,
+                channel=channel,
+                chat_id=chat_id,
+            )
+        else:
+            _ = self._workflow_runtime.mark_notify_delegated(workflow_id)
 
     def _fail_workflow(self, workflow_id: str, error: str) -> None:
         if self._workflow_runtime is None or not workflow_id:
@@ -232,7 +271,7 @@ class HeartbeatService:
         """heartbeat 서비스 정지"""
         self._running = False
         if self._task:
-            self._task.cancel()
+            _ = self._task.cancel()
             self._task = None
 
     async def trigger_now(self) -> str | None:
@@ -246,4 +285,10 @@ class HeartbeatService:
             return None
 
         workflow_id = self._create_workflow(tasks)
-        return await self._on_execute(tasks, workflow_id)
+        await self._execute_heartbeat(workflow_id, tasks)
+        if self._workflow_runtime and workflow_id:
+            record = self._workflow_runtime.store.get(workflow_id)
+            if record and record.metadata.get("resultPreview"):
+                preview = record.metadata["resultPreview"]
+                return preview if isinstance(preview, str) else None
+        return None
