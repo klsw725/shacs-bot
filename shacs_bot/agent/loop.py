@@ -50,6 +50,7 @@ from shacs_bot.config.schema import (
     MediaConfig,
     PolicyConfig,
     UsageConfig,
+    VectorMemoryConfig,
 )
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from shacs_bot.providers.failover import FailoverManager
@@ -113,6 +114,7 @@ class AgentLoop:
         usage_config: UsageConfig | None = None,
         policy_config: PolicyConfig | None = None,
         media_config: MediaConfig | None = None,
+        vector_memory_config: VectorMemoryConfig | None = None,
         media_api_key: str | None = None,
         media_base_url: str | None = None,
         skill_approval: str = "auto",
@@ -145,6 +147,7 @@ class AgentLoop:
         self._policy_config: PolicyConfig = policy_config or PolicyConfig()
         self._policy_evaluator: PolicyEvaluator = PolicyEvaluator(self._policy_config)
         self._media_config: MediaConfig | None = media_config
+        self._vector_memory_config: VectorMemoryConfig | None = vector_memory_config
         self._media_api_key: str | None = media_api_key
         self._media_base_url: str | None = media_base_url
         self._auto_eval_task: asyncio.Task[None] | None = None
@@ -170,6 +173,7 @@ class AgentLoop:
             workflow_runtime=self._workflow_runtime,
             policy_config=self._policy_config,
             usage_tracker=self._usage_tracker,
+            vector_memory_config=self._vector_memory_config,
         )
         self._subagent.skill_approval = skill_approval
 
@@ -189,6 +193,7 @@ class AgentLoop:
             context_window_tokens=self._context_window_tokens,
             build_messages=self._context.build_messages,
             get_tool_definitions=self._tools.get_definitions,
+            vector_config=self._vector_memory_config,
         )
         self._register_default_tools()
 
@@ -220,6 +225,7 @@ class AgentLoop:
             exec_config=self._exec_config,
             brave_api_key=self._brave_api_key,
             web_proxy=self._web_proxy,
+            vector_memory_config=self._vector_memory_config,
         ):
             self._tools.register(tool)
 

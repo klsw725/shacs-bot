@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any
 
+from shacs_bot.agent.memory import MemoryStore
 from shacs_bot.agent.hooks import (
     AFTER_TOOL_EXECUTE,
     BEFORE_TOOL_EXECUTE,
@@ -11,7 +12,7 @@ from shacs_bot.agent.hooks import (
     NoOpHookRegistry,
 )
 from shacs_bot.agent.tools.base import Tool
-from shacs_bot.config.schema import ExecToolConfig
+from shacs_bot.config.schema import ExecToolConfig, VectorMemoryConfig
 
 
 class ToolRegistry:
@@ -138,6 +139,7 @@ def create_default_tools(
     exec_config: ExecToolConfig | None = None,
     brave_api_key: str | None = None,
     web_proxy: str | None = None,
+    vector_memory_config: VectorMemoryConfig | None = None,
 ) -> list[Tool]:
     """AgentLoop과 SubagentManager가 공유하는 기본 도구 세트를 생성합니다."""
     from shacs_bot.agent.tools.filesystem import (
@@ -152,6 +154,7 @@ def create_default_tools(
 
     allowed_dir: Path | None = workspace if restrict_to_workspace else None
     cfg: ExecToolConfig = exec_config or ExecToolConfig()
+    memory_store = MemoryStore(workspace, vector_config=vector_memory_config)
 
     return [
         ReadFileTool(workspace=workspace, allowed_dir=allowed_dir),
@@ -166,5 +169,5 @@ def create_default_tools(
         ),
         WebSearchTool(api_key=brave_api_key, proxy=web_proxy),
         WebFetchTool(proxy=web_proxy),
-        SearchHistoryTool(workspace=workspace),
+        SearchHistoryTool(workspace=workspace, memory_store=memory_store),
     ]

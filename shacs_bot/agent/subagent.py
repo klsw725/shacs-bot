@@ -21,6 +21,7 @@ from shacs_bot.bus.events import InboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import ExecToolConfig
 from shacs_bot.config.schema import PolicyConfig
+from shacs_bot.config.schema import VectorMemoryConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse
 from shacs_bot.utils.helpers import build_assistant_message
 from shacs_bot.workflow.runtime import WorkflowRuntime
@@ -56,6 +57,7 @@ class SubagentManager:
         workflow_runtime: WorkflowRuntime | None = None,
         policy_config: PolicyConfig | None = None,
         usage_tracker: UsageTracker | None = None,
+        vector_memory_config: VectorMemoryConfig | None = None,
     ):
         self._provider: LLMProvider = provider
         self._workspace: Path = workspace
@@ -71,6 +73,7 @@ class SubagentManager:
         self._workflow_runtime: WorkflowRuntime | None = workflow_runtime
         self._policy_config: PolicyConfig = policy_config or PolicyConfig()
         self._usage_tracker: UsageTracker | None = usage_tracker
+        self._vector_memory_config: VectorMemoryConfig | None = vector_memory_config
 
         self._skill_approval: str = "auto"
         self._running_tasks: dict[str, SubagentTask] = {}
@@ -275,6 +278,7 @@ class SubagentManager:
                 exec_config=self._exec_config,
                 brave_api_key=self._brave_api_key,
                 web_proxy=self._web_proxy,
+                vector_memory_config=self._vector_memory_config,
             )
             tools: ToolRegistry = ToolRegistry(hooks=self._hooks)
             for tool in all_tools:
@@ -457,6 +461,7 @@ class SubagentManager:
                 exec_config=self._exec_config,
                 brave_api_key=self._brave_api_key,
                 web_proxy=self._web_proxy,
+                vector_memory_config=self._vector_memory_config,
             )
 
             # 도구 필터링: allowed_tools 또는 sandbox_mode 기반
