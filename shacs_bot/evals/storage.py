@@ -62,7 +62,7 @@ class EvaluationStorage:
     ) -> None:
         serializable: dict[str, object]
         if isinstance(payload, BaseModel):
-            serializable = payload.model_dump(mode="json", by_alias=True)
+            serializable = payload.model_dump(mode="json")
         else:
             serializable = payload
 
