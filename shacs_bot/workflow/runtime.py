@@ -52,6 +52,7 @@ class WorkflowRuntime:
         channel: str,
         chat_id: str,
         session_key: str,
+        actor_metadata: dict[str, object] | None = None,
     ) -> WorkflowRecord:
         """플래너 산출물로부터 워크플로우 레코드를 생성하고 저장합니다."""
         notify_target = NotifyTarget(channel=channel, chat_id=chat_id, session_key=session_key)
@@ -59,7 +60,7 @@ class WorkflowRuntime:
             source_kind="manual",
             goal=goal,
             notify_target=notify_target,
-            metadata={"plan": plan},
+            metadata={"plan": plan, "actor": actor_metadata or {}},
         )
         return self._store.upsert_and_get(record)
 

@@ -25,6 +25,7 @@ from shacs_bot.agent.hooks import (
     NoOpHookRegistry,
 )
 from shacs_bot.agent.memory import MemoryStore, MemoryConsolidator
+from shacs_bot.agent.policy import ActionContext, PolicyDecision, PolicyEvaluator
 from shacs_bot.agent.planner import AssistantPlan, PlanStep
 from shacs_bot.agent.session.manager import SessionManager, Session
 from shacs_bot.agent.subagent import SubagentManager
@@ -43,7 +44,13 @@ from shacs_bot.bus.events import (
 )
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.agent.usage import TurnUsage, UsageTracker
-from shacs_bot.config.schema import ExecToolConfig, ChannelsConfig, MediaConfig, UsageConfig
+from shacs_bot.config.schema import (
+    ChannelsConfig,
+    ExecToolConfig,
+    MediaConfig,
+    PolicyConfig,
+    UsageConfig,
+)
 from shacs_bot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from shacs_bot.providers.failover import FailoverManager
 from shacs_bot.workflow.models import WorkflowRecord
@@ -104,6 +111,7 @@ class AgentLoop:
         failover_manager: FailoverManager | None = None,
         provider_name: str | None = None,
         usage_config: UsageConfig | None = None,
+        policy_config: PolicyConfig | None = None,
         media_config: MediaConfig | None = None,
         media_api_key: str | None = None,
         media_base_url: str | None = None,
@@ -134,6 +142,8 @@ class AgentLoop:
         self._failover: FailoverManager | None = failover_manager
         self._provider_name: str | None = provider_name
         self._usage_config: UsageConfig | None = usage_config
+        self._policy_config: PolicyConfig = policy_config or PolicyConfig()
+        self._policy_evaluator: PolicyEvaluator = PolicyEvaluator(self._policy_config)
         self._media_config: MediaConfig | None = media_config
         self._media_api_key: str | None = media_api_key
         self._media_base_url: str | None = media_base_url
@@ -158,6 +168,8 @@ class AgentLoop:
             restrict_to_workspace=self._restrict_to_workspace,
             hooks=self._hooks,
             workflow_runtime=self._workflow_runtime,
+            policy_config=self._policy_config,
+            usage_tracker=self._usage_tracker,
         )
         self._subagent.skill_approval = skill_approval
 
@@ -704,6 +716,23 @@ class AgentLoop:
                     render_hints=self._render_hints(),
                 )
             if _plan.kind == "planned_workflow":
+                _plan, _policy_block_reason = self._enforce_policy_on_plan(
+                    _plan,
+                    channel=msg.channel,
+                    sender_id=msg.sender_id,
+                    chat_id=msg.chat_id,
+                    metadata=msg.metadata,
+                )
+                if _plan is None:
+                    self._sessions.save(session)
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=_policy_block_reason
+                        or "정책에 의해 워크플로우 생성이 제한되었습니다.",
+                        metadata=msg.metadata or {},
+                        render_hints=self._render_hints(),
+                    )
                 session.metadata["current_plan"] = _plan.model_dump()
                 _wf_record = self._workflow_runtime.register_planned_workflow(
                     goal=_plan.summary or msg.content[:200],
@@ -711,6 +740,11 @@ class AgentLoop:
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     session_key=key,
+                    actor_metadata={
+                        "senderId": msg.sender_id,
+                        "userId": str(msg.metadata.get("user_id") or msg.sender_id),
+                        "isDm": bool(msg.metadata.get("is_dm", False)),
+                    },
                 )
                 self._sessions.save(session)
                 return OutboundMessage(
@@ -796,6 +830,82 @@ class AgentLoop:
         except Exception as exc:
             logger.warning("Runtime eval policy 로드 실패: {}", exc)
 
+        return None
+
+    def _build_policy_decision(
+        self,
+        *,
+        action: ActionContext,
+        channel: str,
+        sender_id: str,
+        chat_id: str,
+        metadata: dict[str, Any] | None,
+        daily_cost_override: float | None = None,
+    ) -> PolicyDecision:
+        metadata_dict: dict[str, Any] = metadata or {}
+        actor = self._policy_evaluator.build_actor_context(
+            user_id=str(metadata_dict.get("user_id") or sender_id or chat_id) or None,
+            channel=channel,
+            is_dm=bool(metadata_dict.get("is_dm", False)),
+        )
+        daily_cost = (
+            daily_cost_override
+            if daily_cost_override is not None
+            else self._usage_tracker.get_daily_cost()
+            if self._usage_tracker
+            else 0.0
+        )
+        quota = self._policy_evaluator.build_quota_context(daily_cost=daily_cost)
+        return self._policy_evaluator.evaluate(actor=actor, action=action, quota=quota)
+
+    def _enforce_policy_on_plan(
+        self,
+        plan: AssistantPlan,
+        *,
+        channel: str,
+        sender_id: str,
+        chat_id: str,
+        metadata: dict[str, Any] | None,
+        daily_cost_override: float | None = None,
+    ) -> tuple[AssistantPlan | None, str | None]:
+        if plan.kind != "planned_workflow":
+            return plan, None
+
+        decision = self._build_policy_decision(
+            action=ActionContext(kind="planner", name=plan.kind),
+            channel=channel,
+            sender_id=sender_id,
+            chat_id=chat_id,
+            metadata=metadata,
+            daily_cost_override=daily_cost_override,
+        )
+        if decision.result in {"deny", "degrade"}:
+            return None, f"정책에 의해 워크플로우 생성이 제한되었습니다: {decision.reason}"
+        return plan, None
+
+    def _enforce_policy_on_workflow_step(
+        self,
+        step: PlanStep,
+        *,
+        channel: str,
+        chat_id: str,
+        actor_metadata: dict[str, Any] | None,
+        daily_cost_override: float | None = None,
+    ) -> str | None:
+        actor_dict: dict[str, Any] = actor_metadata or {}
+        decision = self._build_policy_decision(
+            action=ActionContext(kind="workflow", name=step.kind),
+            channel=channel,
+            sender_id=str(actor_dict.get("senderId") or chat_id),
+            chat_id=chat_id,
+            metadata={
+                "user_id": actor_dict.get("userId"),
+                "is_dm": actor_dict.get("isDm", False),
+            },
+            daily_cost_override=daily_cost_override,
+        )
+        if decision.result in {"deny", "degrade"}:
+            return f"정책에 의해 워크플로우 step 실행이 제한되었습니다: {decision.reason}"
         return None
 
     async def _run_agent_loop(
@@ -1779,12 +1889,32 @@ class AgentLoop:
         if not isinstance(current_step_index, int) or current_step_index < 0:
             current_step_index = 0
 
+        actor_metadata_obj = record.metadata.get("actor", {})
+        actor_metadata: dict[str, Any] = (
+            actor_metadata_obj if isinstance(actor_metadata_obj, dict) else {}
+        )
+
         last_result = record.metadata.get("lastStepResultSummary", "")
         current_result: str = last_result if isinstance(last_result, str) else ""
 
         try:
             while current_step_index < len(plan.steps):
                 step = plan.steps[current_step_index]
+                blocked_reason = self._enforce_policy_on_workflow_step(
+                    step,
+                    channel=channel,
+                    chat_id=chat_id,
+                    actor_metadata=actor_metadata,
+                )
+                if blocked_reason is not None:
+                    _ = self._workflow_runtime.fail(workflow_id, last_error=blocked_reason)
+                    await self._publish_workflow_outbound(
+                        workflow_id=workflow_id,
+                        channel=channel,
+                        chat_id=chat_id,
+                        content=f"❌ 워크플로우 실패 (`{workflow_id}`): {blocked_reason}",
+                    )
+                    return
                 _ = self._workflow_runtime.update_step_cursor(
                     workflow_id,
                     step_index=current_step_index,
