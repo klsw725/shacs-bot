@@ -598,13 +598,15 @@ def build_variant_summary(variant: str, results: list[EvaluationResult]) -> Vari
 
 ## 검증 기준
 
-- [ ] `uv run shacs-bot eval run cases.json` 으로 default variant 단일 실행이 된다.
-- [ ] `--variant default --variant bootstrap-off` 로 두 variant 결과가 분리 저장된다.
-- [ ] result 파일에 `status`, `final_response`, `finish_reason`, `tool_call_count`, `usage`, `trace_path`가 존재한다.
-- [ ] trace 파일에 `tool_events`, `assistant_response`, `finish_reason`, `provider`, `model`이 존재한다.
-- [ ] `expected_mode=tool_use` 케이스에서 tool call이 없으면 `task_failure`가 된다.
-- [ ] provider 오류/timeout은 `infra_error`로 기록된다.
-- [ ] evaluation mode를 사용하지 않을 때 기존 `agent`/`gateway`/`process_direct()` 동작이 변하지 않는다.
+- [x] `uv run shacs-bot eval run cases.json` 으로 default variant 단일 실행이 된다.
+- [x] `--variant default --variant bootstrap-off` 로 두 variant 결과가 분리 저장된다.
+- [x] result 파일에 `status`, `final_response`, `finish_reason`, `tool_call_count`, `usage`, `trace_path`가 존재한다.
+- [x] trace 파일에 `tool_events`, `assistant_response`, `finish_reason`, `provider`, `model`이 존재한다.
+- [x] `expected_mode=tool_use` 케이스에서 tool call이 없으면 `task_failure`가 된다.
+- [x] provider 오류/timeout은 `infra_error`로 기록된다.
+- [x] evaluation mode를 사용하지 않을 때 기존 `agent`/`gateway`/`process_direct()` 동작이 변하지 않는다.
+
+검증 메모 (2026-04-05): `uv run shacs-bot eval run`, `uv run shacs-bot eval run --variant default --variant bootstrap-off`, `uv run pytest tests/test_evaluation_harness.py`, `uv run shacs-bot agent -m "안녕하세요"`로 실행/회귀를 확인했다. eval artifact는 PRD 기준에 맞게 snake_case 키로 저장되도록 정렬했다.
 
 ---
 
