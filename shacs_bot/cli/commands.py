@@ -49,9 +49,39 @@ from shacs_bot.config.schema import (
 from shacs_bot.providers.base import LLMProvider
 from shacs_bot.providers.registry import ProviderSpec, PROVIDERS
 from shacs_bot.utils.helpers import sync_workspace_template
+from shacs_bot.workflow.models import NotifyTarget, WorkflowRecord
 
 if TYPE_CHECKING:
-    from shacs_bot.workflow import WorkflowRecord
+    pass
+
+
+def is_deliverable_notify_target(target: NotifyTarget) -> bool:
+    return bool(target.channel and target.chat_id and target.channel not in {"cli", "system"})
+
+
+def resolve_heartbeat_execution_target(
+    record: WorkflowRecord | None,
+    session_items: list[dict[str, object]],
+    enabled_channels: list[str],
+) -> tuple[NotifyTarget, NotifyTarget | None]:
+    enabled: set[str] = set(enabled_channels)
+    if record is not None and is_deliverable_notify_target(record.notify_target):
+        return record.notify_target, None
+
+    for item in session_items:
+        key_obj: object = item.get("key")
+        if not isinstance(key_obj, str) or ":" not in key_obj:
+            continue
+        channel, chat_id = key_obj.split(":", 1)
+        if channel in {"cli", "system"}:
+            continue
+        if channel not in enabled or not chat_id:
+            continue
+        target = NotifyTarget(channel=channel, chat_id=chat_id, session_key=key_obj)
+        return target, target
+
+    fallback = NotifyTarget(channel="cli", chat_id="direct", session_key="cli:direct")
+    return fallback, None
 
 
 def _resolve_media_key(config: Config) -> str | None:
@@ -460,12 +490,6 @@ def gateway(
         hooks=hooks,
         workflow_runtime=workflow_runtime,
     )
-    redispatcher: WorkflowRedispatcher = WorkflowRedispatcher(
-        workflow_runtime=workflow_runtime,
-        cron_service=cron,
-        subagent_manager=agent_loop.subagent_manager,
-        agent_loop=agent_loop,
-    )
 
     # 크론 callback 설정 (에이전트 필요)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -536,7 +560,7 @@ def gateway(
             workflow_id_obj = job.payload.metadata.get("workflowId")
             workflow_id = workflow_id_obj if isinstance(workflow_id_obj, str) else ""
             if workflow_id:
-                _ = workflow_runtime.mark_notified(
+                _ = workflow_runtime.mark_notify_enqueued(
                     workflow_id,
                     channel=job.payload.channel or "cli",
                     chat_id=job.payload.to,
@@ -565,57 +589,50 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: {hb_cfg.interval_s}s 마다 실행")
 
-    async def on_heartbeat_notify(response: str) -> None:
+    async def on_heartbeat_notify(response: str, workflow_id: str) -> tuple[str, str] | None:
         """heartbeat 응답 유저 채널의 전달"""
         from shacs_bot.bus.events import OutboundMessage
 
-        channel, chat_id = await _pick_heartbeat_target()
-        if channel == "cli":
-            return  # 전달 가능한 외부 채널 존재하지 않음.
+        if not workflow_id:
+            return None
+
+        record = workflow_runtime.store.get(workflow_id)
+        if record is None or not is_deliverable_notify_target(record.notify_target):
+            return None
+
+        target = record.notify_target
+        if target.channel not in channels.enabled_channels:
+            return None
 
         await bus.publish_outbound(
-            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+            OutboundMessage(channel=target.channel, chat_id=target.chat_id, content=response)
         )
-
-    async def _pick_heartbeat_target() -> tuple[str, str]:
-        """heartbeat에 의해 트리거된 메시지를 전달할 수 있는 채널/채팅 대상(routable target)을 선택한다."""
-        enabled: set[str] = set(channels.enabled_channels)
-
-        # 활성화된 채널에서 내부용이 아닌 세션 중 가장 최근에 업데이트된 세션을 우선 선택한다.
-        for item in session_manager.list_sessions():
-            key: str = item.get("key") or ""
-            if ":" not in key:
-                continue
-
-            channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
-                return channel, chat_id
-
-        # Fallback은 기존 동작을 유지하면서도 명시적으로 처리한다
-        return "cli", "direct"
+        return target.channel, target.chat_id
 
     async def on_heartbeat_execute(tasks: str, workflow_id: str) -> str:
         """Phase 2: full 에이전트 로프를 통해 heartbeat 태스크 실행"""
-        channel, chat_id = await _pick_heartbeat_target()
-        session_key = f"{channel}:{chat_id}"
-        if workflow_id:
+        record = workflow_runtime.store.get(workflow_id) if workflow_id else None
+        target, persist_target = resolve_heartbeat_execution_target(
+            record,
+            session_manager.list_sessions(),
+            channels.enabled_channels,
+        )
+        if workflow_id and persist_target is not None:
             _ = workflow_runtime.update_notify_target(
                 workflow_id,
-                channel=channel,
-                chat_id=chat_id,
-                session_key=session_key,
+                channel=persist_target.channel,
+                chat_id=persist_target.chat_id,
+                session_key=persist_target.session_key,
             )
 
-        async def _silent(*_args, **_kwargs):
+        async def _silent(*_args: object, **_kwargs: object) -> None:
             pass
 
         return await agent_loop.process_direct(
             content=tasks,
-            session_key=session_key,
-            channel=channel,
-            chat_id=chat_id,
+            session_key=target.session_key,
+            channel=target.channel,
+            chat_id=target.chat_id,
             on_progress=_silent,
         )
 
@@ -629,6 +646,13 @@ def gateway(
         enabled=hb_cfg.enabled,
         hooks=hooks,
         workflow_runtime=workflow_runtime,
+    )
+    redispatcher: WorkflowRedispatcher = WorkflowRedispatcher(
+        workflow_runtime=workflow_runtime,
+        cron_service=cron,
+        subagent_manager=agent_loop.subagent_manager,
+        agent_loop=agent_loop,
+        heartbeat_service=heartbeat,
     )
 
     async def run() -> None:
@@ -1424,6 +1448,10 @@ def workflows_recover(workflow_id: str = typer.Argument(..., help="복구할 wor
 
     if result.status == "missing":
         console.print(f"[red]에러:[/red] workflow `{workflow_id}`를 찾을 수 없습니다.")
+        raise typer.Exit(1)
+
+    if result.status == "unauthorized":
+        console.print("[red]에러:[/red] 해당 workflow를 recover할 권한이 없습니다.")
         raise typer.Exit(1)
 
     record = result.record

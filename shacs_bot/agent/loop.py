@@ -1348,6 +1348,12 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=f"workflow `{workflow_id}`를 찾을 수 없습니다.",
             )
+        if result.status == "unauthorized":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="해당 workflow를 recover할 권한이 없습니다.",
+            )
 
         record = result.record
         if record is None:
@@ -1866,7 +1872,7 @@ class AgentLoop:
                 content=content,
             )
         )
-        _ = self._workflow_runtime.mark_notified(
+        _ = self._workflow_runtime.mark_notify_enqueued(
             workflow_id,
             channel=channel,
             chat_id=chat_id,

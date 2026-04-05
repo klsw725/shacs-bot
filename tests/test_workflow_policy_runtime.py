@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from shacs_bot.agent.loop import AgentLoop
+from shacs_bot.workflow.models import NotifyTarget
 from shacs_bot.workflow.runtime import WorkflowRuntime
 
 
@@ -24,3 +25,51 @@ def test_register_planned_workflow_persists_actor_metadata(tmp_path: Path) -> No
         "userId": "user-1",
         "isDm": False,
     }
+
+
+def test_manual_recover_rejects_other_chat_owner(tmp_path: Path) -> None:
+    runtime = WorkflowRuntime(workspace=tmp_path)
+    record = runtime.store.create(
+        source_kind="manual",
+        goal="recover auth test",
+        notify_target=NotifyTarget(
+            channel="telegram",
+            chat_id="chat-a",
+            session_key="telegram:chat-a",
+        ),
+        metadata={},
+    )
+    _ = runtime.store.upsert(record.model_copy(update={"state": "running"}))
+
+    result = runtime.manual_recover(
+        record.workflow_id,
+        channel="telegram",
+        chat_id="chat-b",
+        sender_id="user-b",
+    )
+
+    assert result.status == "unauthorized"
+
+
+def test_manual_recover_allows_cli_bypass(tmp_path: Path) -> None:
+    runtime = WorkflowRuntime(workspace=tmp_path)
+    record = runtime.store.create(
+        source_kind="manual",
+        goal="recover cli test",
+        notify_target=NotifyTarget(
+            channel="telegram",
+            chat_id="chat-a",
+            session_key="telegram:chat-a",
+        ),
+        metadata={},
+    )
+    _ = runtime.store.upsert(record.model_copy(update={"state": "running"}))
+
+    result = runtime.manual_recover(
+        record.workflow_id,
+        channel="cli",
+        chat_id="direct",
+        sender_id="cli",
+    )
+
+    assert result.status == "recovered"

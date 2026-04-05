@@ -22,6 +22,7 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 
 ManualRecoverStatus = Literal[
     "missing",
+    "unauthorized",
     "already_queued",
     "recovered",
     "cooldown",
@@ -274,6 +275,21 @@ class WorkflowRuntime:
             notifiedAt=datetime.now().astimezone().isoformat(),
         )
 
+    def mark_notify_enqueued(
+        self,
+        workflow_id: str,
+        *,
+        channel: str,
+        chat_id: str,
+    ) -> WorkflowRecord | None:
+        return self._update_metadata(
+            workflow_id,
+            notifyEnqueued=True,
+            notifyChannel=channel,
+            notifyChatId=chat_id,
+            notifyEnqueuedAt=datetime.now().astimezone().isoformat(),
+        )
+
     def mark_notify_delegated(self, workflow_id: str) -> WorkflowRecord | None:
         return self._update_metadata(
             workflow_id,
@@ -295,11 +311,11 @@ class WorkflowRuntime:
         return self._store.upsert_and_get(
             record.model_copy(
                 update={
-                    "notify_target": {
-                        "channel": channel,
-                        "chat_id": chat_id,
-                        "session_key": session_key,
-                    }
+                    "notify_target": NotifyTarget(
+                        channel=channel,
+                        chat_id=chat_id,
+                        session_key=session_key,
+                    )
                 }
             )
         )
@@ -315,6 +331,8 @@ class WorkflowRuntime:
         record: WorkflowRecord | None = self._store.get(workflow_id)
         if record is None:
             return ManualRecoverResult(status="missing")
+        if not self._is_manual_recover_authorized(record, channel=channel, chat_id=chat_id):
+            return ManualRecoverResult(status="unauthorized")
         if record.state in TERMINAL_STATES:
             return ManualRecoverResult(
                 status="terminal", record=record, previous_state=record.state
@@ -408,3 +426,17 @@ class WorkflowRuntime:
             return False
         delta = datetime.now().astimezone() - recovered_at
         return delta.total_seconds() < MANUAL_RECOVER_COOLDOWN_SECONDS
+
+    def _is_manual_recover_authorized(
+        self,
+        record: WorkflowRecord,
+        *,
+        channel: str,
+        chat_id: str,
+    ) -> bool:
+        if channel == "cli":
+            return True
+        target = record.notify_target
+        if not target.channel or not target.chat_id:
+            return False
+        return target.channel == channel and target.chat_id == chat_id
