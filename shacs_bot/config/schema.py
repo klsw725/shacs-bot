@@ -308,6 +308,14 @@ class UsageConfig(Base):
     footer: str = "off"  # 응답 footer 모드: "off" | "tokens" | "full"
 
 
+class PolicyConfig(Base):
+    enabled: bool = False
+    trusted_users: list[str] = Field(default_factory=list)
+    trusted_channels: list[str] = Field(default_factory=list)
+    daily_cost_limit: float = 0.0
+    high_risk_tools: list[str] = Field(default_factory=list)
+
+
 class ObservabilityConfig(Base):
     enabled: bool = False
     otlp_endpoint: str = "http://localhost:4317"
@@ -408,6 +416,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     usage: UsageConfig = Field(default_factory=UsageConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
     failover: FailoverConfig = Field(default_factory=FailoverConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)

@@ -125,6 +125,10 @@ class UsageTracker:
     def get_daily_summary(self, target_date: str | None = None) -> dict[str, int | float]:
         return self._aggregate(target_date=target_date)
 
+    def get_daily_cost(self, target_date: str | None = None) -> float:
+        summary = self.get_daily_summary(target_date=target_date)
+        return float(summary.get("cost", 0.0))
+
     def _aggregate(
         self,
         target_date: str | None = None,
