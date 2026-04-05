@@ -306,16 +306,16 @@ self._tools.register(SearchHistoryTool(
 
 ## 마일스톤
 
-- [ ] **M1: VectorMemory 모듈 구현**
+- [x] **M1: VectorMemory 모듈 구현**
   `memory/vector.py` — LanceDB 연결, sentence-transformers 임베딩, add/search API. `pyproject.toml` optional dep.
 
-- [ ] **M2: MemoryStore 통합**
+- [x] **M2: MemoryStore 통합**
   `agent/memory.py` — `MemoryStore.__init__`에 벡터 초기화, `append_history`에 벡터 추가, `semantic_search` 메서드.
 
-- [ ] **M3: search_history 도구 확장**
+- [x] **M3: search_history 도구 확장**
   `agent/tools/history.py` — `mode` 파라미터 추가, grep/semantic/hybrid 분기, 중복 제거. `loop.py`에서 `memory_store` 전달.
 
-- [ ] **M4: Config + 검증**
+- [x] **M4: Config + 검증**
   `VectorMemoryConfig` 스키마 추가. 멀티턴 대화 후 시맨틱 검색 동작 확인. optional dep 미설치 시 fallback 확인.
 
 ---
@@ -337,3 +337,4 @@ self._tools.register(SearchHistoryTool(
 | 날짜 | 내용 |
 |---|---|
 | 2026-03-16 | PRD 초안 작성 |
+| 2026-04-05 | M4 검증 테스트 추가 및 fallback/semantic/hybrid smoke 확인 |
