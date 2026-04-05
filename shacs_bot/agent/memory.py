@@ -9,6 +9,7 @@ from typing import Any, Callable
 from loguru import logger
 
 from shacs_bot.agent.session.manager import Session, SessionManager
+from shacs_bot.config.schema import VectorMemoryConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse
 from shacs_bot.utils import ensure_dir
 from shacs_bot.utils.helpers import estimate_message_tokens, estimate_prompt_tokens_chain
@@ -41,10 +42,20 @@ class MemoryStore:
         }
     ]
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, vector_config: VectorMemoryConfig | None = None):
         self._memory_dir: Path = ensure_dir(workspace / "memory")
         self._memory_file: Path = self._memory_dir / "MEMORY.md"
         self._history_file: Path = self._memory_dir / "HISTORY.md"
+        self._vector = None
+
+        if vector_config and vector_config.enabled:
+            from shacs_bot.memory.vector import VectorMemory, is_available as vector_available
+
+            if vector_available():
+                vector_memory = VectorMemory(workspace, vector_config.embedding_model)
+                self._vector = vector_memory if vector_memory.initialize() else None
+            else:
+                logger.info("Vector memory 의존성이 없어 grep-only 모드로 동작합니다.")
 
     def read_long_term(self) -> str:
         if self._memory_file.exists():
@@ -58,6 +69,16 @@ class MemoryStore:
     def append_history(self, entry: str) -> None:
         with open(self._history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
+        if self._vector:
+            timestamp: str = entry[1:17] if len(entry) > 18 and entry.startswith("[") else ""
+            self._vector.add(text=entry, timestamp=timestamp, source="history")
+
+    def semantic_search(
+        self, query: str, top_k: int = 5, min_score: float = 0.5
+    ) -> list[dict[str, Any]]:
+        if not self._vector:
+            return []
+        return self._vector.search(query, top_k=top_k, min_score=min_score)
 
     def get_memory_context(self) -> str:
         long_term: str = self.read_long_term()
@@ -170,8 +191,9 @@ class MemoryConsolidator:
         context_window_tokens: int,
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
+        vector_config: VectorMemoryConfig | None = None,
     ):
-        self._store: MemoryStore = MemoryStore(workspace)
+        self._store: MemoryStore = MemoryStore(workspace, vector_config=vector_config)
 
         self._provider: LLMProvider = provider
         self._model: str = model
