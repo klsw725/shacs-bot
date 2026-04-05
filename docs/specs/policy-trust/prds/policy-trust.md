@@ -64,16 +64,16 @@ actor/channel/action-aware policy evaluator를 추가해 approval, usage, planne
 
 ## 마일스톤
 
-- [ ] **M1: policy evaluator와 config 모델 추가**
+- [x] **M1: policy evaluator와 config 모델 추가**
   `agent/policy.py`, `config/schema.py`에 정책 입력/설정 정의.
 
-- [ ] **M2: ApprovalGate와 usage 통합**
+- [x] **M2: ApprovalGate와 usage 통합**
   `agent/approval.py`, `agent/usage.py` 연동.
 
-- [ ] **M3: planner/workflow 경로 확장**
+- [x] **M3: planner/workflow 경로 확장**
   `agent/loop.py`에서 tool 외 실행 경로에 정책 재사용.
 
-- [ ] **M4: actor/channel/quota 시나리오 검증**
+- [x] **M4: actor/channel/quota 시나리오 검증**
   trusted/low-trust/quota-exceeded 흐름 검증.
 
 ---
@@ -88,7 +88,7 @@ actor/channel/action-aware policy evaluator를 추가해 approval, usage, planne
 
 ## Acceptance Criteria
 
-- [ ] trusted user/channel 규칙이 승인 결정에 반영된다.
-- [ ] quota 초과 상태에서 일관된 강등/차단이 동작한다.
-- [ ] 기존 auto/manual/off 모드가 유지된다.
-- [ ] planner/workflow 경로에도 동일 정책 엔진이 적용된다.
+- [x] trusted user/channel 규칙이 승인 결정에 반영된다.
+- [x] quota 초과 상태에서 일관된 강등/차단이 동작한다.
+- [x] 기존 auto/manual/off 모드가 유지된다.
+- [x] planner/workflow 경로에도 동일 정책 엔진이 적용된다.
