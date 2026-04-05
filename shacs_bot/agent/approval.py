@@ -17,8 +17,11 @@ from shacs_bot.agent.hooks import (
     HookRegistry,
     NoOpHookRegistry,
 )
+from shacs_bot.agent.policy import PolicyEvaluator
+from shacs_bot.agent.usage import UsageTracker
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
+from shacs_bot.config.schema import PolicyConfig
 from shacs_bot.providers.base import LLMProvider
 
 # ── pending approvals 레지스트리 ────────────────────────────────
@@ -140,6 +143,8 @@ class ApprovalGate:
         origin: dict[str, Any],
         skill_name: str,
         workspace: Path,
+        policy_config: PolicyConfig | None = None,
+        usage_tracker: UsageTracker | None = None,
         hooks: HookRegistry | None = None,
     ):
         self._mode = mode
@@ -150,14 +155,39 @@ class ApprovalGate:
         self._origin = origin
         self._skill_name = skill_name
         self._workspace = workspace
+        self._policy_evaluator: PolicyEvaluator = PolicyEvaluator(policy_config or PolicyConfig())
+        self._usage_tracker: UsageTracker | None = usage_tracker
         self._hooks: HookRegistry = hooks or NoOpHookRegistry()
 
     async def check(self, tool_name: str, arguments: dict[str, Any]) -> ApprovalDecision:
+        if policy_decision := self._check_policy(tool_name, arguments):
+            return policy_decision
         if self._mode == "auto":
             return await self._check_auto(tool_name, arguments)
         if self._mode == "manual":
             return await self._check_manual(tool_name, arguments)
         return ApprovalDecision(denied=False, reason="")
+
+    def _check_policy(self, tool_name: str, arguments: dict[str, Any]) -> ApprovalDecision | None:
+        metadata: dict[str, Any] = self._origin.get("metadata", {})
+        actor = self._policy_evaluator.build_actor_context(
+            user_id=str(metadata.get("user_id") or self._origin.get("chat_id") or "") or None,
+            channel=str(self._origin.get("channel", "")),
+            is_dm=bool(metadata.get("is_dm", False)),
+        )
+        action = self._policy_evaluator.build_tool_action_context(tool_name)
+        quota = self._policy_evaluator.build_quota_context(
+            daily_cost=self._usage_tracker.get_daily_cost() if self._usage_tracker else 0.0
+        )
+        decision = self._policy_evaluator.evaluate(actor=actor, action=action, quota=quota)
+
+        if decision.result == "deny":
+            return ApprovalDecision(denied=True, reason=decision.reason)
+        if decision.result == "degrade":
+            return ApprovalDecision(denied=True, reason=decision.reason)
+        if decision.result == "allow" and decision.reason in {"trusted user", "trusted channel"}:
+            return ApprovalDecision(denied=False, reason=decision.reason)
+        return None
 
     # ── auto: 3단계 분류기 ──────────────────────────────────────────
 
@@ -249,7 +279,7 @@ class ApprovalGate:
                 ),
                 timeout=30,
             )
-            result = json.loads(response.content)
+            result = json.loads(response.content or "{}")
             approved = result.get("approved", False)
             reason = result.get("reason", "")
             logger.info(

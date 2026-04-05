@@ -16,9 +16,11 @@ from shacs_bot.agent.context import ContextBuilder
 from shacs_bot.agent.hooks import HookRegistry, NoOpHookRegistry
 from shacs_bot.agent.skills import SkillsLoader
 from shacs_bot.agent.tools.registry import ToolRegistry, create_default_tools
+from shacs_bot.agent.usage import UsageTracker
 from shacs_bot.bus.events import InboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.config.schema import ExecToolConfig
+from shacs_bot.config.schema import PolicyConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse
 from shacs_bot.utils.helpers import build_assistant_message
 from shacs_bot.workflow.runtime import WorkflowRuntime
@@ -52,6 +54,8 @@ class SubagentManager:
         agent_registry: AgentRegistry | None = None,
         hooks: HookRegistry | None = None,
         workflow_runtime: WorkflowRuntime | None = None,
+        policy_config: PolicyConfig | None = None,
+        usage_tracker: UsageTracker | None = None,
     ):
         self._provider: LLMProvider = provider
         self._workspace: Path = workspace
@@ -65,6 +69,8 @@ class SubagentManager:
         self._registry: AgentRegistry | None = agent_registry
         self._hooks: HookRegistry = hooks or NoOpHookRegistry()
         self._workflow_runtime: WorkflowRuntime | None = workflow_runtime
+        self._policy_config: PolicyConfig = policy_config or PolicyConfig()
+        self._usage_tracker: UsageTracker | None = usage_tracker
 
         self._skill_approval: str = "auto"
         self._running_tasks: dict[str, SubagentTask] = {}
@@ -296,6 +302,8 @@ class SubagentManager:
                     origin=origin,
                     skill_name=skill_name,
                     workspace=self._workspace,
+                    policy_config=self._policy_config,
+                    usage_tracker=self._usage_tracker,
                     hooks=self._hooks,
                 )
 
@@ -499,6 +507,8 @@ class SubagentManager:
                     origin=origin,
                     skill_name=agent_def.name,
                     workspace=self._workspace,
+                    policy_config=self._policy_config,
+                    usage_tracker=self._usage_tracker,
                     hooks=self._hooks,
                 )
 
