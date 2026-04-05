@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +23,19 @@ MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20MB
 MAX_MESSAGE_LEN = 2000  # Discord message character limit
 
 
+def discord_outbound_text(msg: OutboundMessage) -> str:
+    rendered_format = msg.metadata.get("_rendered_format") if msg.metadata else None
+    if rendered_format == "discord_markdown":
+        return msg.content
+    return DiscordChannel.render_text(msg.content)
+
+
 class DiscordChannel(BaseChannel):
     """Discord channel using Gateway websocket."""
 
     name = "discord"
+    _TABLE_RE = re.compile(r"(?m)^\|.*\|$(?:\n\|[\s:|-]*\|$)(?:\n\|.*\|$)*")
+    _HEADER_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 
     def __init__(self, config: DiscordConfig, bus: MessageBus):
         super().__init__(config, bus)
@@ -89,7 +99,7 @@ class DiscordChannel(BaseChannel):
             for media_path in msg.media or []:
                 await self._send_media(url, headers, media_path)
 
-            chunks = split_message(msg.content or "", max_len=MAX_MESSAGE_LEN)
+            chunks = split_message(discord_outbound_text(msg), max_len=MAX_MESSAGE_LEN)
             if not chunks:
                 return
 
@@ -127,6 +137,29 @@ class DiscordChannel(BaseChannel):
         except Exception as e:
             logger.error("Error sending Discord media {}: {}", file_path, e)
         return False
+
+    @classmethod
+    def render_text(cls, text: str) -> str:
+        if not text:
+            return ""
+        text = cls._TABLE_RE.sub(cls._convert_table, text)
+        return cls._HEADER_RE.sub(r"**\1**", text)
+
+    @staticmethod
+    def _convert_table(match: re.Match[str]) -> str:
+        lines = [ln.strip() for ln in match.group(0).strip().splitlines() if ln.strip()]
+        if len(lines) < 2:
+            return match.group(0)
+        headers = [h.strip() for h in lines[0].strip("|").split("|")]
+        start = 2 if re.fullmatch(r"[|\s:\-]+", lines[1]) else 1
+        rows: list[str] = []
+        for line in lines[start:]:
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            cells = (cells + [""] * len(headers))[: len(headers)]
+            parts = [f"**{headers[i]}**: {cells[i]}" for i in range(len(headers)) if cells[i]]
+            if parts:
+                rows.append(" · ".join(parts))
+        return "\n".join(rows)
 
     async def _send_payload(
         self, url: str, headers: dict[str, str], payload: dict[str, Any]

@@ -64,11 +64,11 @@
 
 ## 현재 상태 분석
 
-- `OutboundMessage`는 channel/chat_id/content/media/metadata 중심의 얇은 구조다.
-- `channels/manager.py`는 대상 채널을 찾아 `channel.send()`를 호출한다.
-- 채널별 config에는 `reply_in_thread`, `group_policy`, `send_progress`, `send_memory_hints` 같은 flag만 있고, 응답 의미 구조는 없다.
+- `OutboundMessage`는 이제 `render_hints`를 포함해 channel/chat_id/content/media/metadata/render_hints 구조로 확장되었다.
+- `channels/manager.py`는 대상 채널을 찾은 뒤 dispatch 직전에 renderer를 적용하고 `channel.send()`를 호출한다.
+- Slack/Discord/Telegram/Email은 각 채널 renderer를 통해 prerender를 소비하고, renderer가 없는 채널은 plain-text fallback을 유지한다.
 
-현재 구조에서는 각 채널이 문자열을 자기 방식으로 해석할 뿐이라 멀티채널 품질 규칙이 구현 내부에 분산된다.
+현재 구조는 canonical response와 channel renderer를 분리했고, 긴 응답 분할/힌트 필터/채널별 표현 차이를 테스트로 검증하는 단계까지 도달했다.
 
 ## 설계
 
@@ -99,10 +99,10 @@
 
 ## 검증 기준
 
-- [ ] 기존 plain text 응답이 regression 없이 전송됨
-- [ ] 동일한 canonical response가 Slack/Discord/Telegram/Email에서 각기 자연스럽게 표현됨
-- [ ] progress/tool/memory hint 표시 규칙이 채널별로 일관됨
-- [ ] 길이 초과 메시지가 채널 규칙에 맞게 분할됨
+- [x] 기존 plain text 응답이 regression 없이 전송됨
+- [x] 동일한 canonical response가 Slack/Discord/Telegram/Email에서 각기 자연스럽게 표현됨
+- [x] progress/tool/memory hint 표시 규칙이 채널별로 일관됨
+- [x] 길이 초과 메시지가 채널 규칙에 맞게 분할됨
 
 ## Must NOT
 

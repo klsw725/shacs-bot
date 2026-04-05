@@ -35,6 +35,8 @@ class EmailChannel(BaseChannel):
     """
 
     name = "email"
+    _TABLE_RE = re.compile(r"(?m)^\|.*\|$(?:\n\|[\s:|-]*\|$)(?:\n\|.*\|$)*")
+    _HEADER_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
     _IMAP_MONTHS = (
         "Jan",
         "Feb",
@@ -187,6 +189,41 @@ class EmailChannel(BaseChannel):
             logger.error("Email channel not configured, missing: {}", ", ".join(missing))
             return False
         return True
+
+    @classmethod
+    def render_subject(cls, text: str) -> str | None:
+        match = cls._HEADER_RE.search(text)
+        if not match:
+            return None
+        subject = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", match.group(1))
+        subject = re.sub(r"[*_`~]", "", subject)
+        subject = re.sub(r"\s+", " ", subject).strip()
+        return subject or None
+
+    @classmethod
+    def render_text(cls, text: str, *, strip_first_heading: bool = False) -> str:
+        if not text:
+            return ""
+        rendered = cls._TABLE_RE.sub(cls._convert_table, text)
+        if strip_first_heading:
+            rendered = cls._HEADER_RE.sub("", rendered, count=1).lstrip()
+        return cls._HEADER_RE.sub(r"\1", rendered).strip()
+
+    @staticmethod
+    def _convert_table(match: re.Match[str]) -> str:
+        lines = [ln.strip() for ln in match.group(0).strip().splitlines() if ln.strip()]
+        if len(lines) < 2:
+            return match.group(0)
+        headers = [h.strip() for h in lines[0].strip("|").split("|")]
+        start = 2 if re.fullmatch(r"[|\s:\-]+", lines[1]) else 1
+        rows: list[str] = []
+        for line in lines[start:]:
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            cells = (cells + [""] * len(headers))[: len(headers)]
+            parts = [f"{headers[i]}: {cells[i]}" for i in range(len(headers)) if cells[i]]
+            if parts:
+                rows.append(" · ".join(parts))
+        return "\n".join(rows)
 
     def _smtp_send(self, msg: EmailMessage) -> None:
         timeout = 30

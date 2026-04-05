@@ -83,6 +83,13 @@ def _markdown_to_telegram_html(text: str) -> str:
     return text
 
 
+def telegram_outbound_text(msg: OutboundMessage) -> str:
+    rendered_format = msg.metadata.get("_rendered_format") if msg.metadata else None
+    if rendered_format == "telegram_html":
+        return msg.content
+    return TelegramChannel.render_text(msg.content)
+
+
 class TelegramChannel(BaseChannel):
     """
     Telegram channel using long polling.
@@ -212,6 +219,10 @@ class TelegramChannel(BaseChannel):
             return "audio"
         return "document"
 
+    @classmethod
+    def render_text(cls, text: str) -> str:
+        return _markdown_to_telegram_html(text)
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Telegram."""
         if not self._app:
@@ -267,18 +278,18 @@ class TelegramChannel(BaseChannel):
         if msg.content and msg.content != "[empty message]":
             is_progress = msg.metadata.get("_progress", False)
             draft_id = msg.metadata.get("message_id")
+            rendered_text = telegram_outbound_text(msg)
 
-            for chunk in split_message(msg.content, max_len=4000):
+            for chunk in split_message(rendered_text, max_len=4000):
                 try:
-                    html = _markdown_to_telegram_html(chunk)
                     if is_progress and draft_id:
                         await self._app.bot.send_message_draft(
-                            chat_id=chat_id, draft_id=draft_id, text=html, parse_mode="HTML"
+                            chat_id=chat_id, draft_id=draft_id, text=chunk, parse_mode="HTML"
                         )
                     else:
                         await self._app.bot.send_message(
                             chat_id=chat_id,
-                            text=html,
+                            text=chunk,
                             parse_mode="HTML",
                             reply_parameters=reply_params,
                         )

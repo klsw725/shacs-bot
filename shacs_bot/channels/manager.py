@@ -18,7 +18,52 @@ from shacs_bot.agent.hooks import (
 from shacs_bot.bus.events import OutboundMessage
 from shacs_bot.bus.networks import MessageBus
 from shacs_bot.channels.base import BaseChannel
+from shacs_bot.channels.rendering import render_outbound_message
 from shacs_bot.config.schema import Config
+
+
+def _outbound_render_kind(msg: OutboundMessage) -> str:
+    return msg.render_hints.kind
+
+
+def _is_progress_outbound(msg: OutboundMessage) -> bool:
+    return _outbound_render_kind(msg) in {"progress", "tool_hint", "memory_hint"} or bool(
+        msg.metadata.get("_progress")
+    )
+
+
+def _is_tool_hint(msg: OutboundMessage) -> bool:
+    return _outbound_render_kind(msg) == "tool_hint" or bool(msg.metadata.get("_tool_hint"))
+
+
+def _is_memory_hint(msg: OutboundMessage) -> bool:
+    return _outbound_render_kind(msg) == "memory_hint" or bool(msg.metadata.get("_memory_hint"))
+
+
+def should_skip_outbound_progress(
+    msg: OutboundMessage,
+    *,
+    send_progress: bool,
+    send_tool_hints: bool,
+    send_memory_hints: bool,
+) -> bool:
+    if not _is_progress_outbound(msg):
+        return False
+
+    if msg.metadata.get("_skill_hint"):
+        return False
+
+    if _is_memory_hint(msg):
+        return not send_memory_hints
+
+    if _is_tool_hint(msg):
+        return not send_tool_hints
+
+    return not send_progress
+
+
+def prepare_outbound_message(msg: OutboundMessage) -> OutboundMessage:
+    return render_outbound_message(msg)
 
 
 # (config_attr, module_path, class_name, extra_kwargs: {constructor_kwarg: "dotted.config.path"})
@@ -134,21 +179,13 @@ class ChannelManager:
                 msg: OutboundMessage = await asyncio.wait_for(
                     fut=self._bus.consume_outbound(), timeout=1.0
                 )
-                if msg.metadata.get("_progress"):
-                    if msg.metadata.get("_skill_hint"):
-                        pass
-                    elif msg.metadata.get("_memory_hint"):
-                        if not self._config.channels.send_memory_hints:
-                            continue
-                    elif (
-                        msg.metadata.get("_tool_hint") and not self._config.channels.send_tool_hints
-                    ):
-                        continue
-                    elif (
-                        not msg.metadata.get("_tool_hint")
-                        and not self._config.channels.send_progress
-                    ):
-                        continue
+                if should_skip_outbound_progress(
+                    msg,
+                    send_progress=self._config.channels.send_progress,
+                    send_tool_hints=self._config.channels.send_tool_hints,
+                    send_memory_hints=self._config.channels.send_memory_hints,
+                ):
+                    continue
 
                 channel: BaseChannel | None = self._channels.get(msg.channel)
                 if channel:
@@ -168,9 +205,10 @@ class ChannelManager:
                             new_media: list[str] = ctx.payload.get("media", msg.media)
                             if new_content != msg.content or new_media != msg.media:
                                 msg = replace(msg, content=new_content, media=new_media)
-                        await channel.send(msg)
-                        if msg.media:
-                            self._cleanup_generated_media(msg.media)
+                        rendered_msg = prepare_outbound_message(msg)
+                        await channel.send(rendered_msg)
+                        if rendered_msg.media:
+                            self._cleanup_generated_media(rendered_msg.media)
                         await self._hooks.emit(
                             HookContext(
                                 event=AFTER_OUTBOUND_SEND,

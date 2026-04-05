@@ -61,30 +61,27 @@ def split_message(content: str, max_len: int = 2000) -> list[str]:
         return []
 
     chunks: list[str] = []
-    in_codeblock: bool = False
 
     while len(content) > max_len:
         cut: str = content[:max_len]
 
         # 먼저 줄바꿈(\n) 위치에서 끊어보고, 없으면 공백에서 끊고, 그래도 없으면 강제로 자른다
         pos: int = cut.rfind("\n")
-        if pos <= 0:
+        if pos <= max_len // 4:
             pos = cut.rfind(" ")
-        if pos <= 0:
+        if pos <= max_len // 4:
             pos = max_len
 
         part = content[:pos]
 
-        # codeblock 상태 추적
         if part.count("```") % 2 == 1:
-            in_codeblock = True
             part += "\n```"
 
         chunks.append(part)
 
         content = content[pos:].lstrip()
 
-        if in_codeblock:
+        if part.count("```") % 2 == 0 and part.endswith("\n```"):
             content = "```\n" + content
 
     chunks.append(content)
