@@ -57,6 +57,33 @@ class VectorMemory:
         vector = model.encode([text], convert_to_numpy=True)[0].tolist()
         table.add([{"text": text, "vector": vector, "timestamp": timestamp, "source": source}])
 
+    def rebuild(self, records: list[dict[str, str]]) -> int:
+        if not self._db or not self._model:
+            return 0
+
+        db = cast(Any, self._db)
+        model = cast(Any, self._model)
+
+        rows: list[dict[str, object]] = []
+        for record in records:
+            text: str = record.get("text", "")
+            if not text:
+                continue
+            vector = model.encode([text], convert_to_numpy=True)[0].tolist()
+            rows.append(
+                {
+                    "text": text,
+                    "vector": vector,
+                    "timestamp": record.get("timestamp", ""),
+                    "source": record.get("source", "history"),
+                }
+            )
+
+        if hasattr(db, "drop_table"):
+            db.drop_table("memories", ignore_missing=True)
+        self._table = db.create_table("memories", data=rows, mode="create")
+        return len(rows)
+
     def search(self, query: str, top_k: int = 5, min_score: float = 0.5) -> list[dict[str, Any]]:
         if not self._table or not self._model:
             return []

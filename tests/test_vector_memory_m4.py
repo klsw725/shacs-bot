@@ -14,17 +14,24 @@ from shacs_bot.config.schema import VectorMemoryConfig
 
 
 class _FakeVectorMemory:
+    _registry: dict[str, list[dict[str, str | float]]] = {}
+
+    @classmethod
+    def rows_for(cls, workspace: Path) -> list[dict[str, str | float]]:
+        return cls._registry[str(workspace / "memory" / "vector")]
+
     def __init__(self, workspace: Path, embedding_model: str = "all-MiniLM-L6-v2") -> None:
         self._db_path: Path = workspace / "memory" / "vector"
         self._embedding_model: str = embedding_model
-        self._rows: list[dict[str, str | float]] = []
+        self._key: str = str(self._db_path)
+        _ = self._registry.setdefault(self._key, [])
 
     def initialize(self) -> bool:
         self._db_path.mkdir(parents=True, exist_ok=True)
         return True
 
     def add(self, text: str, timestamp: str = "", source: str = "history") -> None:
-        self._rows.append(
+        self._registry[self._key].append(
             {
                 "text": text,
                 "timestamp": timestamp,
@@ -32,13 +39,24 @@ class _FakeVectorMemory:
             }
         )
 
+    def rebuild(self, records: list[dict[str, str]]) -> int:
+        self._registry[self._key] = [
+            {
+                "text": record["text"],
+                "timestamp": record.get("timestamp", ""),
+                "source": record.get("source", "history"),
+            }
+            for record in records
+        ]
+        return len(records)
+
     def search(
         self, query: str, top_k: int = 5, min_score: float = 0.5
     ) -> list[dict[str, str | float]]:
         del min_score
 
         results: list[dict[str, str | float]] = []
-        for row in self._rows:
+        for row in self._registry[self._key]:
             text = cast(str, row["text"])
             if query in text:
                 results.append(
@@ -51,7 +69,7 @@ class _FakeVectorMemory:
                 )
 
         if query == "카페 추천":
-            for row in self._rows:
+            for row in self._registry[self._key]:
                 text = cast(str, row["text"])
                 if "커피숍 추천" in text:
                     results.append(
@@ -99,6 +117,62 @@ def test_vector_memory_config_accepts_and_dumps_camel_case_keys() -> None:
     assert payload["vectorMemory"]["embeddingModel"] == "demo-model"
     assert payload["vectorMemory"]["topK"] == 7
     assert payload["vectorMemory"]["minScore"] == 0.75
+
+
+def test_memory_store_backfills_existing_history_on_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shacs_bot.memory import vector as vector_module
+
+    monkeypatch.setattr(vector_module, "is_available", lambda: True)
+    monkeypatch.setattr(vector_module, "VectorMemory", _FakeVectorMemory)
+
+    history_file = tmp_path / "memory" / "HISTORY.md"
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    _ = history_file.write_text(
+        "[2026-04-05 10:00] 커피숍 추천을 정리했다.\n\n"
+        + "[2026-04-05 10:05] 디저트 맛집도 함께 정리했다.\n\n",
+        encoding="utf-8",
+    )
+
+    store = MemoryStore(tmp_path, vector_config=VectorMemoryConfig(enabled=True))
+
+    result = store.semantic_search("카페 추천")
+
+    assert any("커피숍 추천을 정리했다." in cast(str, item["text"]) for item in result)
+    assert (tmp_path / "memory" / "vector" / "history_backfill.json").exists()
+
+
+def test_memory_store_rebuilds_backfill_when_history_changes_without_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shacs_bot.memory import vector as vector_module
+
+    monkeypatch.setattr(vector_module, "is_available", lambda: True)
+    monkeypatch.setattr(vector_module, "VectorMemory", _FakeVectorMemory)
+
+    history_file = tmp_path / "memory" / "HISTORY.md"
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    _ = history_file.write_text(
+        "[2026-04-05 10:00] 카페 추천 목록을 만들었다.\n\n",
+        encoding="utf-8",
+    )
+
+    _ = MemoryStore(tmp_path, vector_config=VectorMemoryConfig(enabled=True))
+    _ = history_file.write_text(
+        "[2026-04-05 10:00] 카페 추천 목록을 만들었다.\n\n"
+        + "[2026-04-05 10:02] 커피숍 추천을 정리했다.\n\n",
+        encoding="utf-8",
+    )
+
+    store = MemoryStore(tmp_path, vector_config=VectorMemoryConfig(enabled=True))
+
+    vector_rows = _FakeVectorMemory.rows_for(tmp_path)
+    result = store.semantic_search("카페 추천")
+
+    assert len(vector_rows) == 2
+    assert sum("카페 추천 목록을 만들었다." in cast(str, row["text"]) for row in vector_rows) == 1
+    assert any("커피숍 추천을 정리했다." in cast(str, item["text"]) for item in result)
 
 
 @pytest.mark.asyncio
