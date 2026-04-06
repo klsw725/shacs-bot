@@ -9,6 +9,7 @@ from typing import Any, Callable
 from loguru import logger
 
 from shacs_bot.agent.session.manager import Session, SessionManager
+from shacs_bot.config.schema import VectorMemoryConfig
 from shacs_bot.providers.base import LLMProvider, LLMResponse
 from shacs_bot.utils import ensure_dir
 from shacs_bot.utils.helpers import estimate_message_tokens, estimate_prompt_tokens_chain
@@ -41,10 +42,23 @@ class MemoryStore:
         }
     ]
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, vector_config: VectorMemoryConfig | None = None):
         self._memory_dir: Path = ensure_dir(workspace / "memory")
         self._memory_file: Path = self._memory_dir / "MEMORY.md"
         self._history_file: Path = self._memory_dir / "HISTORY.md"
+        self._vector_meta_file: Path = self._memory_dir / "vector" / "history_backfill.json"
+        self._vector = None
+
+        if vector_config and vector_config.enabled:
+            from shacs_bot.memory.vector import VectorMemory, is_available as vector_available
+
+            if vector_available():
+                vector_memory = VectorMemory(workspace, vector_config.embedding_model)
+                self._vector = vector_memory if vector_memory.initialize() else None
+                if self._vector is not None:
+                    self._backfill_history_if_needed()
+            else:
+                logger.info("Vector memory 의존성이 없어 grep-only 모드로 동작합니다.")
 
     def read_long_term(self) -> str:
         if self._memory_file.exists():
@@ -53,11 +67,22 @@ class MemoryStore:
         return ""
 
     def write_long_term(self, content: str) -> None:
-        self._memory_file.write_text(content, encoding="utf-8")
+        _ = self._memory_file.write_text(content, encoding="utf-8")
 
     def append_history(self, entry: str) -> None:
         with open(self._history_file, "a", encoding="utf-8") as f:
-            f.write(entry.rstrip() + "\n\n")
+            _ = f.write(entry.rstrip() + "\n\n")
+        if self._vector:
+            timestamp: str = self._extract_history_timestamp(entry)
+            self._vector.add(text=entry, timestamp=timestamp, source="history")
+            self._write_vector_backfill_meta(self._build_history_signature())
+
+    def semantic_search(
+        self, query: str, top_k: int = 5, min_score: float = 0.5
+    ) -> list[dict[str, Any]]:
+        if not self._vector:
+            return []
+        return self._vector.search(query, top_k=top_k, min_score=min_score)
 
     def get_memory_context(self) -> str:
         long_term: str = self.read_long_term()
@@ -155,6 +180,86 @@ class MemoryStore:
         """파일 저장을 위해 tool-call 페이로드 값을 텍스트 형식으로 정규화한다."""
         return entry if isinstance(entry, str) else json.dumps(entry, ensure_ascii=False)
 
+    def _backfill_history_if_needed(self) -> None:
+        if self._vector is None or not self._history_file.exists():
+            return
+
+        entries: list[str] = self._read_history_entries()
+        if not entries:
+            return
+
+        current_signature: dict[str, int | float] = self._build_history_signature(entries)
+        previous_signature: dict[str, int | float] | None = self._read_vector_backfill_meta()
+        if previous_signature == current_signature:
+            logger.debug("Vector memory backfill skipped: HISTORY.md unchanged")
+            return
+
+        records: list[dict[str, str]] = [
+            {
+                "text": entry,
+                "timestamp": self._extract_history_timestamp(entry),
+                "source": "history",
+            }
+            for entry in entries
+        ]
+        indexed_count: int = self._vector.rebuild(records)
+        self._write_vector_backfill_meta(current_signature)
+        logger.info("Vector memory backfill completed (entries={})", indexed_count)
+
+    def _read_history_entries(self) -> list[str]:
+        if not self._history_file.exists():
+            return []
+        text: str = self._history_file.read_text(encoding="utf-8")
+        return [entry.strip() for entry in text.split("\n\n") if entry.strip()]
+
+    def _extract_history_timestamp(self, entry: str) -> str:
+        return entry[1:17] if len(entry) > 18 and entry.startswith("[") else ""
+
+    def _build_history_signature(self, entries: list[str] | None = None) -> dict[str, int | float]:
+        if not self._history_file.exists():
+            return {"historyMtime": 0.0, "historySize": 0, "entryCount": 0}
+        stat = self._history_file.stat()
+        history_entries: list[str] = (
+            entries if entries is not None else self._read_history_entries()
+        )
+        return {
+            "historyMtime": stat.st_mtime,
+            "historySize": stat.st_size,
+            "entryCount": len(history_entries),
+        }
+
+    def _read_vector_backfill_meta(self) -> dict[str, int | float] | None:
+        if not self._vector_meta_file.exists():
+            return None
+        try:
+            payload = json.loads(self._vector_meta_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Vector memory backfill meta를 읽지 못해 재색인합니다.")
+            return None
+        if not isinstance(payload, dict):
+            return None
+        history_mtime = payload.get("historyMtime")
+        history_size = payload.get("historySize")
+        entry_count = payload.get("entryCount")
+        if not isinstance(history_mtime, int | float):
+            return None
+        if not isinstance(history_size, int):
+            return None
+        if not isinstance(entry_count, int):
+            return None
+        return {
+            "historyMtime": float(history_mtime),
+            "historySize": history_size,
+            "entryCount": entry_count,
+        }
+
+    def _write_vector_backfill_meta(self, signature: dict[str, int | float]) -> None:
+        self._vector_meta_file.parent.mkdir(parents=True, exist_ok=True)
+        _ = self._vector_meta_file.write_text(
+            json.dumps(signature, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
 
 class MemoryConsolidator:
     """통합(consolidation) 정책, 락(lock) 관리, 그리고 세션 오프셋 업데이트를 담당한다."""
@@ -170,8 +275,9 @@ class MemoryConsolidator:
         context_window_tokens: int,
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
+        vector_config: VectorMemoryConfig | None = None,
     ):
-        self._store: MemoryStore = MemoryStore(workspace)
+        self._store: MemoryStore = MemoryStore(workspace, vector_config=vector_config)
 
         self._provider: LLMProvider = provider
         self._model: str = model

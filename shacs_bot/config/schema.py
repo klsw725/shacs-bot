@@ -364,6 +364,14 @@ class MediaConfig(Base):
     video_duration_seconds: int = 8
 
 
+class VectorMemoryConfig(Base):
+    enabled: bool = False
+    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_provider: Literal["local", "openai"] = "local"
+    top_k: int = 5
+    min_score: float = 0.5
+
+
 class MCPServerConfig(Base):
     """MCP 서버 연결 설정 (stdio or HTTP)."""
 
@@ -386,6 +394,7 @@ class ToolsConfig(Base):
     web: WebToolConfig = Field(default_factory=WebToolConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
+    vector_memory: VectorMemoryConfig = Field(default_factory=VectorMemoryConfig)
     restrict_to_workspace: bool = False  # If true, block commands accessing path outside workspace
     skill_approval: Literal["auto", "manual", "off"] = "auto"  # 스킬 도구 호출 승인 모드
     mcp_servers: dict[str, MCPServerConfig] = Field(

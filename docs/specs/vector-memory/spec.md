@@ -285,8 +285,8 @@ async def execute(self, query: str, mode: str = "hybrid") -> str:
 
 ## 검증 기준
 
-- [ ] `uv sync` (vector-memory 없이) 시 기존 동작 무변경 확인
-- [ ] `uv sync --extra vector-memory` 후 벡터 메모리 활성화 확인
-- [ ] 대화 5턴 후 "아까 말한 거" 같은 시맨틱 질의로 관련 히스토리 검색 성공
-- [ ] grep 검색과 시맨틱 검색 결과 병합 시 중복 제거 확인
-- [ ] 벡터 DB 파일이 `workspace/memory/vector/`에 정상 생성 확인
+- [x] `uv sync` (vector-memory 없이) 시 기존 동작 무변경 확인
+- [x] `uv sync --extra vector-memory` 후 벡터 메모리 활성화 확인
+- [x] 대화 5턴 후 "아까 말한 거" 같은 시맨틱 질의로 관련 히스토리 검색 성공
+- [x] grep 검색과 시맨틱 검색 결과 병합 시 중복 제거 확인
+- [x] 벡터 DB 파일이 `workspace/memory/vector/`에 정상 생성 확인
