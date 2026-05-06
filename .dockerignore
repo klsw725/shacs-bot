@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+!.env.example
+.shacs-bot
+target
+**/target
+**/*.log
+.DS_Store
