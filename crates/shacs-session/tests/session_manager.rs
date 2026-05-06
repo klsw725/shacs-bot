@@ -1,0 +1,199 @@
+use serde_json::{json, Map, Value};
+use shacs_session::{find_legal_message_start, Session, SessionHistoryOptions, SessionManager};
+use std::error::Error;
+
+#[test]
+fn session_manager_saves_loads_metadata_and_history() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    let mut session = Session::new("cli:direct");
+    session
+        .metadata
+        .insert("keep".to_owned(), Value::String("value".to_owned()));
+    session.add_message("assistant", "old", Map::new());
+    session.add_message("user", "hello", Map::new());
+    let mut media_extra = Map::new();
+    media_extra.insert("media".to_owned(), json!(["image.png"]));
+    session.add_message("assistant", "seen", media_extra);
+    session.last_consolidated = 1;
+    manager.save(&session)?;
+
+    let loaded = manager.get_or_create("cli:direct");
+    let history = loaded.get_history_with_options(SessionHistoryOptions {
+        max_messages: 10,
+        include_timestamps: true,
+        ..SessionHistoryOptions::default()
+    });
+
+    if loaded.metadata["keep"] != "value"
+        || loaded.last_consolidated != 1
+        || history.len() != 2
+        || !history[0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[Message Time:")
+        || !history[1]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[image: image.png]")
+    {
+        return Err(format!(
+            "session persistence/history drifted: loaded={loaded:?} history={history:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn session_manager_exposes_python_compatibility_paths_and_payload() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let legacy = tempfile::tempdir()?;
+    let manager = SessionManager::with_legacy_sessions_dir(workspace.path(), legacy.path())?;
+    let mut session = Session::new("telegram:chat/1");
+    session
+        .metadata
+        .insert("topic".to_owned(), Value::String("compat".to_owned()));
+    session.add_message("user", "hello", Map::new());
+
+    let payload = session.payload();
+    if manager.workspace() != workspace.path()
+        || manager.sessions_dir() != workspace.path().join("sessions")
+        || manager.legacy_sessions_dir() != Some(legacy.path())
+        || manager.get_session_path("telegram:chat/1") != manager.session_path("telegram:chat/1")
+        || manager.legacy_session_path("telegram:chat/1")
+            != Some(legacy.path().join(format!(
+                "{}.jsonl",
+                SessionManager::safe_key("telegram:chat/1")
+            )))
+        || payload.get("last_consolidated").is_some()
+        || payload["key"] != "telegram:chat/1"
+        || payload["metadata"]["topic"] != "compat"
+        || payload["messages"].as_array().map(Vec::len) != Some(1)
+    {
+        return Err(format!("compat path/payload surface drifted: payload={payload:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn session_manager_repairs_orphan_tool_boundaries_and_file_cap() -> Result<(), Box<dyn Error>> {
+    let mut session = Session::new("cli:tools");
+    session.add_message("user", "start", Map::new());
+    let mut assistant_extra = Map::new();
+    assistant_extra.insert(
+        "tool_calls".to_owned(),
+        json!([{"id": "valid", "type": "function", "function": {"name": "repeat", "arguments": "{}"}}]),
+    );
+    session.add_message("assistant", "", assistant_extra);
+    let mut wrong_tool = Map::new();
+    wrong_tool.insert("tool_call_id".to_owned(), json!("wrong"));
+    wrong_tool.insert("name".to_owned(), json!("repeat"));
+    session.add_message("tool", "wrong", wrong_tool);
+    session.add_message("user", "next", Map::new());
+
+    let history = session.get_history(20, false);
+    if history.len() != 1 || history[0]["content"] != "next" {
+        return Err(format!("orphan repair drifted: {history:?}").into());
+    }
+
+    let mut assistant_suffix = Session::new("cli:assistant-suffix");
+    assistant_suffix.add_message("user", "question", Map::new());
+    assistant_suffix.add_message("assistant", "answer", Map::new());
+    let one_message_history = assistant_suffix.get_history(1, false);
+    if one_message_history.len() != 1 || one_message_history[0]["content"] != "question" {
+        return Err(
+            format!("history should restore user boundary: {one_message_history:?}").into(),
+        );
+    }
+
+    let messages = vec![json!({"role": "tool", "tool_call_id": "missing", "content": "orphan"})];
+    if find_legal_message_start(&messages) != 1 {
+        return Err("legal start should skip leading orphan tool result".into());
+    }
+
+    for index in 0..12 {
+        session.add_message("user", format!("msg {index}"), Map::new());
+    }
+    let archived = session.enforce_file_cap_with_limit(8);
+    if archived.is_empty() || session.messages.len() > 8 {
+        return Err(format!("file cap drifted: archived={archived:?} session={session:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn session_manager_reads_clears_and_deletes_legacy_nanobot_filename() -> Result<(), Box<dyn Error>>
+{
+    let workspace = tempfile::tempdir()?;
+    let manager = SessionManager::new(workspace.path())?;
+    let legacy_path = manager.legacy_nanobot_session_path("cli:direct");
+    std::fs::write(
+        &legacy_path,
+        concat!(
+            "{\"_type\":\"metadata\",\"key\":\"cli:direct\",\"metadata\":{\"keep\":true},\"last_consolidated\":1}\n",
+            "{\"role\":\"user\",\"content\":\"legacy prompt\"}\n",
+            "{\"role\":\"assistant\",\"content\":\"legacy answer\"}\n"
+        ),
+    )?;
+
+    let loaded = manager
+        .load_existing("cli:direct")
+        .ok_or("legacy session should load")?;
+    assert_eq!(loaded.messages.len(), 2);
+    assert_eq!(loaded.metadata["keep"], true);
+    assert_eq!(
+        manager.existing_session_path("cli:direct"),
+        Some(legacy_path.clone())
+    );
+
+    let mut manager = manager;
+    let cleared = manager.clear_session("cli:direct")?;
+    assert_eq!(cleared, Some(2));
+    let cleared_session = manager
+        .load_existing("cli:direct")
+        .ok_or("cleared legacy session should remain")?;
+    assert!(cleared_session.messages.is_empty());
+    assert_eq!(cleared_session.last_consolidated, 0);
+    assert_eq!(cleared_session.metadata["keep"], true);
+
+    assert!(manager.delete_session("cli:direct")?);
+    assert!(!legacy_path.exists());
+    assert!(!manager.delete_session("cli:direct")?);
+
+    let mut canonical = Session::new("cli:coexist");
+    canonical.add_message("user", "canonical prompt", Map::new());
+    manager.save(&canonical)?;
+    let coexist_legacy_path = manager.legacy_nanobot_session_path("cli:coexist");
+    std::fs::write(
+        &coexist_legacy_path,
+        concat!(
+            "{\"_type\":\"metadata\",\"key\":\"cli:coexist\"}\n",
+            "{\"role\":\"user\",\"content\":\"stale raw legacy\"}\n"
+        ),
+    )?;
+
+    assert_eq!(manager.clear_session("cli:coexist")?, Some(1));
+    assert!(!coexist_legacy_path.exists());
+    let cleared_coexist = manager
+        .load_existing("cli:coexist")
+        .ok_or("cleared canonical session should remain")?;
+    assert!(cleared_coexist.messages.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn session_manager_rejects_symlink_session_file_on_delete() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::NamedTempFile::new()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    let path = manager.session_path("cli:link");
+    symlink(outside.path(), &path)?;
+
+    assert!(manager.delete_session("cli:link").is_err());
+    assert!(path.exists());
+    Ok(())
+}

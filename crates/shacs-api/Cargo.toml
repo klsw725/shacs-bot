@@ -1,0 +1,20 @@
+[package]
+name = "shacs-api"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+axum = { version = "=0.8.4", default-features = false, features = ["http1", "json", "multipart", "tokio", "ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "sink"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shacs-channels = { path = "../shacs-channels" }
+shacs-providers = { path = "../shacs-providers" }
+shacs-utils = { path = "../shacs-utils" }
+tokio = { version = "=1.44.2", features = ["net", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "=1.44.2", features = ["io-util", "macros", "net", "rt", "sync"] }
+tokio-tungstenite = "=0.26.2"
+tower = { version = "=0.5.2", features = ["util"] }

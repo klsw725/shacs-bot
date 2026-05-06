@@ -1,0 +1,8 @@
+[package]
+name = "shacs-bus"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+shacs-channels = { path = "../shacs-channels" }
