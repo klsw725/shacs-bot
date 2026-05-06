@@ -1,77 +1,77 @@
-# shacs-bot usage guide
+# shacs-bot 사용 가이드
 
-This guide is for a person running `shacs-bot` locally for their own workspace. It does not assume a SaaS control plane, a fleet operator, or a separate administrator role.
+이 문서는 사용자가 자신의 workspace에서 `shacs-bot`을 로컬로 실행하는 경우를 기준으로 합니다. SaaS control plane, fleet operator, 별도 관리자 조직을 전제로 하지 않습니다.
 
-For design contracts and invariants, see [docs/specs/README.md](specs/README.md). This page describes the Rust CLI surface implemented now.
+설계 계약과 invariant는 [docs/specs/README.md](specs/README.md)를 참고하세요. 이 문서는 현재 Rust CLI에서 실제 구현된 사용자-facing 표면을 설명합니다.
 
-## Build from source
+## 소스에서 빌드
 
-From the repository root:
+저장소 루트에서 실행합니다:
 
 ```sh
 cargo build --manifest-path crates/shacs-cli/Cargo.toml --locked
 ```
 
-The examples below use `shacs-bot` as if the binary is on `PATH`. From a source checkout, prefix commands with `cargo run --manifest-path crates/shacs-cli/Cargo.toml --` when needed:
+아래 예시는 `shacs-bot` binary가 `PATH`에 있다고 가정합니다. 소스 checkout에서 바로 실행할 때는 필요하면 명령 앞에 `cargo run --manifest-path crates/shacs-cli/Cargo.toml --`를 붙이세요:
 
 ```sh
 cargo run --manifest-path crates/shacs-cli/Cargo.toml -- status
 ```
 
-## Configuration
+## 설정
 
-The current Rust CLI uses one JSON config file. By default it is loaded from:
+현재 Rust CLI는 하나의 JSON config 파일을 사용합니다. 기본 경로는 다음과 같습니다:
 
 ```text
 $HOME/.shacs-bot/config.json
 ```
 
-Use `--config <path>` or `-c <path>` to load a specific config file. Runtime commands also accept `--workspace <path>` or `-w <path>` as a non-persistent workspace override.
+특정 config 파일을 사용하려면 `--config <path>` 또는 `-c <path>`를 지정합니다. Runtime 명령은 config를 저장하지 않는 일회성 workspace override로 `--workspace <path>` 또는 `-w <path>`도 받습니다.
 
-Create or refresh the config and workspace templates:
+Config와 workspace template을 생성하거나 갱신합니다:
 
 ```sh
 shacs-bot onboard --workspace /tmp/ws
 shacs-bot --config /tmp/shacs-config.json onboard --workspace /tmp/ws
 ```
 
-`onboard` writes the JSON config, ensures runtime directories, and creates workspace template files such as `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `memory/MEMORY.md`, `memory/history.jsonl`, and `skills/` without overwriting existing workspace files. `onboard --wizard` is still deferred.
+`onboard`는 JSON config를 쓰고, runtime directory를 준비하며, `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `memory/MEMORY.md`, `memory/history.jsonl`, `skills/` 같은 workspace template 파일을 만듭니다. 이미 존재하는 workspace 파일은 덮어쓰지 않습니다. `onboard --wizard`는 아직 보류된 기능입니다.
 
-Inspect the current config and provider fields:
+현재 config와 provider field를 확인합니다:
 
 ```sh
 shacs-bot status
 shacs-bot status --config /tmp/shacs-config.json
 ```
 
-`status` prints plain text. It does not emit a JSON envelope and does not write config migrations back to disk.
+`status`는 plain text를 출력합니다. JSON envelope를 출력하지 않고, config migration을 disk에 다시 쓰지도 않습니다.
 
-Inspect local runtime/workspace state without reading secrets or session messages:
+Secret이나 session message 본문을 읽지 않고 로컬 runtime/workspace 상태를 확인합니다:
 
 ```sh
 shacs-bot runtime inspect
 shacs-bot runtime inspect --workspace /tmp/ws
 ```
 
-`runtime inspect` reports the selected config, workspace, data directory, provider/model, configured provider flags, runtime capability summary, and session count/latest session metadata. It does not expose `auth.json` token values or raw session messages, and it does not start or display long-running cron/heartbeat workers.
+`runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, runtime capability 요약, session 개수와 최신 session metadata를 보고합니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
 
-List local session files for the resolved workspace:
+해결된 workspace의 로컬 session 파일 목록을 봅니다:
 
 ```sh
 shacs-bot session list
 shacs-bot session list --workspace /tmp/ws
 ```
 
-Inspect one session by key without printing raw message bodies:
+Raw message 본문을 출력하지 않고 session 하나를 확인합니다:
 
 ```sh
 shacs-bot session inspect --session cli:direct
 shacs-bot session inspect --session cli:direct --workspace /tmp/ws
 ```
 
-`session list` shows keys, timestamps, and file paths. `session inspect` shows key, path, timestamps, message count, `last_consolidated`, metadata key names, and recovery marker names such as `pending_user_turn` or `runtime_checkpoint`. It intentionally does not print stored prompt/assistant content or raw metadata values.
+`session list`는 key, timestamp, file path를 보여줍니다. `session inspect`는 key, path, timestamp, message count, `last_consolidated`, metadata key 이름, `pending_user_turn` 또는 `runtime_checkpoint` 같은 recovery marker 이름만 보여줍니다. 저장된 prompt/assistant content나 raw metadata value는 출력하지 않습니다.
 
-Create an empty session file, print filtered conversation history, or inspect local diagnostics:
+빈 session 파일을 만들거나, 필터링된 conversation history를 출력하거나, 로컬 diagnostics를 확인합니다:
 
 ```sh
 shacs-bot session create --session cli:work
@@ -80,229 +80,229 @@ shacs-bot session history --session cli:work --json
 shacs-bot session diagnostics --session cli:work
 ```
 
-`session history` uses the same filtered replay view as the runtime: consolidated messages are skipped, orphan tool results are repaired, and the default text output truncates long visible user/assistant messages. Use `--json` when you need the filtered structured history, not the raw session file.
+`session history`는 runtime과 같은 filtered replay view를 사용합니다. Consolidated message는 건너뛰고, orphan tool result는 복구하며, 기본 text 출력에서는 긴 user/assistant message를 잘라 보여줍니다. Raw session 파일이 아니라 필터링된 구조화 history가 필요할 때 `--json`을 사용하세요.
 
-Export raw local session content only when explicitly needed:
+Raw 로컬 session content는 명시적으로 필요할 때만 export하세요:
 
 ```sh
 shacs-bot session export --session cli:work --format json --yes
 shacs-bot session export --session cli:work --format jsonl --yes
 ```
 
-`session export` can include raw prompts, assistant messages, metadata values, and tool payloads. It therefore requires `--yes`/`-y` and should be treated as sensitive local data.
+`session export`는 raw prompt, assistant message, metadata value, tool payload를 포함할 수 있습니다. 따라서 `--yes`/`-y` 확인이 필요하며 민감한 로컬 데이터로 취급해야 합니다.
 
-Clear or compact one local session file:
+로컬 session 파일 하나를 비우거나 compact합니다:
 
 ```sh
 shacs-bot session clear --session cli:work --yes
 shacs-bot session compact --session cli:work --keep-messages 8 --yes
 ```
 
-`session clear` keeps the session metadata but removes all messages and resets `last_consolidated`. `session compact` rewrites the JSONL file to keep only a recent legal suffix; it is a destructive local trim, not provider-backed summarization.
+`session clear`는 session metadata를 유지하면서 모든 message를 제거하고 `last_consolidated`를 reset합니다. `session compact`는 최근 legal suffix만 남기도록 JSONL 파일을 다시 씁니다. Provider 기반 요약이 아니라 로컬 destructive trim입니다.
 
-Delete one local session file:
+로컬 session 파일 하나를 삭제합니다:
 
 ```sh
 shacs-bot session delete --session cli:direct --yes
 ```
 
-Session deletion removes the matching workspace `sessions/*.jsonl` file from disk and cannot be undone. The CLI requires `--yes`/`-y` as an explicit confirmation. If the session does not exist, the command reports `Deleted: no` and does not create a missing `sessions/` directory.
+Session 삭제는 workspace의 `sessions/*.jsonl` 파일 하나를 disk에서 제거하며 되돌릴 수 없습니다. CLI는 명시적 확인으로 `--yes`/`-y`를 요구합니다. Session이 없으면 `Deleted: no`로 보고하고, 없는 `sessions/` directory를 만들지 않습니다.
 
-## Skills
+## 스킬
 
-List active local skill registry entries for the resolved workspace:
+해결된 workspace 기준으로 활성 로컬 skill registry entry를 나열합니다:
 
 ```sh
 shacs-bot skills list
 shacs-bot skills list --workspace /tmp/ws
 ```
 
-Inspect one skill without loading the full prompt body:
+Skill prompt 본문 전체를 로드하지 않고 하나의 skill을 확인합니다:
 
 ```sh
 shacs-bot skills show skill-creator
 shacs-bot skills show clawhub --workspace /tmp/ws
 ```
 
-`skills list` includes embedded built-in skills even before `onboard` materializes `builtin_skills/`. Workspace skills can shadow built-ins; use `skills list --all` to include inactive diagnostics such as shadowed, conflicted, or malformed entries. `skills show` prints source, status, body hash, requirements, install metadata, and diagnostics. ClawHub search/install/update commands remain a later skills slice.
+`skills list`는 `onboard`가 `builtin_skills/`를 materialize하기 전에도 embedded built-in skill을 포함합니다. Workspace skill은 built-in skill을 shadow할 수 있습니다. Shadowed, conflicted, malformed 같은 비활성 diagnostic까지 보려면 `skills list --all`을 사용하세요. `skills show`는 source, status, body hash, requirements, install metadata, diagnostics를 출력합니다. ClawHub search/install/update 명령은 이후 slice로 남아 있습니다.
 
-## One-shot CLI agent
+## 일회성 CLI 에이전트
 
-Send one message through the local `AgentLoop`:
+로컬 `AgentLoop`에 메시지 하나를 보냅니다:
 
 ```sh
 shacs-bot ask "hello" --workspace /tmp/ws
 ```
 
-The original nanobot-compatible direct form is also supported:
+기존 nanobot 호환 direct 형식도 지원합니다:
 
 ```sh
 shacs-bot agent -m "hello" --workspace /tmp/ws
 shacs-bot agent --message "hello" --session work --workspace /tmp/ws
 ```
 
-`ask` and `agent -m/--message` use the same direct execution path. They load config, resolve the configured provider/model, create an `AgentLoop`, run one user turn, and print the assistant text to stdout.
+`ask`와 `agent -m/--message`는 같은 direct execution path를 사용합니다. Config를 로드하고, 설정된 provider/model을 resolve하고, `AgentLoop`를 만든 뒤 user turn 하나를 실행하고 assistant text를 stdout에 출력합니다.
 
-Built-in slash commands are handled locally before a provider call:
+Provider 호출 전에 built-in slash command는 로컬에서 처리됩니다:
 
-- `/status`: report whether the current loop/session has an active task.
-- `/new`: clear the current session and start fresh.
-- `/stop`: request cancellation for any registered active task.
-- `/restart`: acknowledge a local restart request; the Rust CLI does not replace the current process in-place.
-- `/history [n]`: show recent visible user/assistant messages, default 10 and max 50.
-- `/dream`: run the configured Dream memory consolidation once.
-- `/dream-log [sha]`: show the latest memory commit diff or a selected commit diff.
-- `/dream-restore [sha]`: list restorable memory versions or revert tracked memory files to the state before a selected commit.
-- `/help`: show the slash-command list.
+- `/status`: 현재 loop/session에 active task가 있는지 보고합니다.
+- `/new`: 현재 session을 비우고 새로 시작합니다.
+- `/stop`: 등록된 active task에 cancellation을 요청합니다.
+- `/restart`: 로컬 restart 요청을 acknowledge합니다. Rust CLI는 현재 process를 in-place로 교체하지 않습니다.
+- `/history [n]`: 최근 visible user/assistant message를 보여줍니다. 기본값은 10, 최대값은 50입니다.
+- `/dream`: 설정된 Dream memory consolidation을 한 번 실행합니다.
+- `/dream-log [sha]`: 최신 memory commit diff 또는 선택한 commit diff를 보여줍니다.
+- `/dream-restore [sha]`: 복원 가능한 memory version 목록을 보여주거나 선택한 commit 이전 상태로 tracked memory file을 되돌립니다.
+- `/help`: slash command 목록을 보여줍니다.
 
-Exact commands remain exact: text such as `/status now` is treated as a normal user message rather than a `/status` command.
+정확히 일치하는 command만 command로 처리됩니다. 예를 들어 `/status now`는 `/status` command가 아니라 일반 user message로 처리됩니다.
 
-If an `ask` message begins with `-`, separate it from options with `--`, for example `shacs-bot ask -- "-starts-with-dash"`.
+`ask` message가 `-`로 시작하면 option과 구분하기 위해 `--`를 사용하세요. 예: `shacs-bot ask -- "-starts-with-dash"`.
 
-Supported direct-message options:
+지원되는 direct-message option:
 
 - `--config <path>` / `-c <path>`
 - `--workspace <path>` / `-w <path>`
-- `--session <id>` / `-s <id>`: defaults to `cli:direct`; values without `:` are stored as `cli:<id>`.
+- `--session <id>` / `-s <id>`: 기본값은 `cli:direct`입니다. `:`가 없는 값은 `cli:<id>`로 저장됩니다.
 - `--temperature <number>`
 - `--max-tokens <positive integer>`
-- `--allow-side-effects`: opt in to write/edit/exec tools for this local CLI turn.
-- `--markdown` / `--no-markdown`: accepted for nanobot CLI compatibility; the current Rust binary prints plain stdout text.
+- `--allow-side-effects`: 이 로컬 CLI turn에서 write/edit/exec tool을 명시적으로 허용합니다.
+- `--markdown` / `--no-markdown`: nanobot CLI 호환을 위해 받지만, 현재 Rust binary는 plain stdout text를 출력합니다.
 
-Running `shacs-bot agent` with no message does not start an interactive REPL yet. The interactive loop remains a later runtime/channel slice.
+Message 없이 `shacs-bot agent`만 실행해도 아직 interactive REPL은 시작하지 않습니다. Interactive loop는 이후 runtime/channel slice로 남아 있습니다.
 
-## Codex provider auth
+## Codex provider 인증
 
-Codex request/stream support is implemented under provider id `openai_codex`. Auth uses an OpenCode-style `auth.json` file next to `config.json`.
+Codex request/stream 지원은 provider id `openai_codex` 아래에 구현되어 있습니다. 인증은 `config.json` 옆의 OpenCode-style `auth.json` 파일을 사용합니다.
 
-Start browser OAuth login:
+브라우저 OAuth login을 시작합니다:
 
 ```sh
 shacs-bot provider codex login
 ```
 
-For terminals where a browser cannot be opened automatically, print the URL and complete the localhost callback manually:
+브라우저를 자동으로 열 수 없는 terminal에서는 URL을 출력하고 localhost callback을 수동으로 완료합니다:
 
 ```sh
 shacs-bot provider codex login --no-browser
 ```
 
-For headless environments, use the device flow:
+Headless 환경에서는 device flow를 사용합니다:
 
 ```sh
 shacs-bot provider codex login --headless
 ```
 
-Successful login stores `access`, `refresh`, `expires`, and optional `accountId` in `auth.json`, selects provider `openai_codex`, and selects model `gpt-5.4`. Runtime startup refreshes expired Codex access tokens when a refresh token is available and writes the refreshed session back to `auth.json`.
+Login에 성공하면 `auth.json`에 `access`, `refresh`, `expires`, optional `accountId`를 저장하고, provider를 `openai_codex`, model을 `gpt-5.4`로 선택합니다. Runtime startup은 refresh token이 있으면 만료된 Codex access token을 갱신하고, 갱신된 session을 다시 `auth.json`에 씁니다.
 
-`gpt-5.4` is the conservative ChatGPT-account Codex default. Newer Codex model slugs such as `gpt-5.5` may require account rollout or entitlement; provider-qualified ids such as `openai/gpt-5.5` are normalized before sending requests to the ChatGPT Codex backend.
+`gpt-5.4`는 ChatGPT account Codex의 보수적인 기본값입니다. `gpt-5.5` 같은 더 새로운 Codex model slug는 계정 rollout 또는 entitlement가 필요할 수 있습니다. `openai/gpt-5.5` 같은 provider-qualified id는 ChatGPT Codex backend로 보내기 전에 정규화됩니다.
 
-Import a token from stdin:
+stdin에서 token을 import합니다:
 
 ```sh
 printf '%s' "$CODEX_TOKEN" | shacs-bot provider codex import-token --token-stdin
 ```
 
-Or import from an environment variable:
+환경 변수에서 token을 import합니다:
 
 ```sh
 shacs-bot provider codex import-token --token-env CODEX_TOKEN --account-id acct_123
 ```
 
-`import-token` remains available as a fallback. It writes provider selection/config metadata to `config.json` but stores the bearer token only in `auth.json` next to that config file. The auth file uses a provider-keyed OAuth entry with fields such as `type`, `access`, optional `refresh`, optional `expires`, and optional `accountId`, and is written with secret-file permissions on Unix. Command output prints paths and status only; it does not print tokens.
+`import-token`은 fallback으로 유지됩니다. Provider 선택/config metadata는 `config.json`에 쓰지만 bearer token은 config 옆 `auth.json`에만 저장합니다. Auth file은 provider-keyed OAuth entry를 사용하며 `type`, `access`, optional `refresh`, optional `expires`, optional `accountId` 같은 field를 가집니다. Unix에서는 secret-file permission으로 작성됩니다. Command output은 path와 status만 출력하며 token은 출력하지 않습니다.
 
-By default, import selects `gpt-5.4` as the configured model. Use `--no-select` to store auth without changing the selected provider/model.
+기본적으로 import는 configured model을 `gpt-5.4`로 선택합니다. Auth만 저장하고 provider/model 선택을 바꾸지 않으려면 `--no-select`를 사용하세요.
 
-## Local OpenAI-compatible API
+## 로컬 OpenAI 호환 API
 
-Start the local API server:
+로컬 API server를 시작합니다:
 
 ```sh
 shacs-bot serve --bind 127.0.0.1:8900 --workspace /tmp/ws --timeout 120
 ```
 
-For compatibility with earlier API-oriented command shapes, `api serve` is an alias for the same command:
+이전 API 중심 command shape와의 호환을 위해 `api serve`는 같은 command의 alias입니다:
 
 ```sh
 shacs-bot api serve --bind 127.0.0.1:8900 --workspace /tmp/ws --timeout 120
 ```
 
-The default bind address comes from the JSON config API section and defaults to `127.0.0.1:8900`. Use `--bind <host:port>` or `--host <ip> --port <port>` to override it for one run.
+기본 bind address는 JSON config의 API section에서 오며 기본값은 `127.0.0.1:8900`입니다. 한 번의 실행에서만 바꾸려면 `--bind <host:port>` 또는 `--host <ip> --port <port>`를 사용하세요.
 
-Non-loopback binds require an explicit opt-in because the local API is unauthenticated:
+로컬 API는 인증이 없으므로 non-loopback bind에는 명시적 opt-in이 필요합니다:
 
 ```sh
 shacs-bot serve --bind 0.0.0.0:8900 --allow-remote --workspace /tmp/ws
 ```
 
-API turns use read/search/web tools by default. Write/edit/exec/self-modifying tools require:
+API turn은 기본적으로 read/search/web tool을 사용합니다. Write/edit/exec/self-modifying tool은 다음 option이 필요합니다:
 
 ```sh
 shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 ```
 
-Implemented endpoints:
+구현된 endpoint:
 
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 
-`POST /v1/chat/completions` accepts a single user message, optional `session_id`, optional `temperature`, optional `max_tokens`, JSON text or data-URL image content parts, multipart uploads, non-stream responses, and `stream=true` Server-Sent Events. Remote image URLs are rejected. Data URLs and uploaded files are persisted under the runtime media directory with a 10 MiB per-file limit.
+`POST /v1/chat/completions`는 단일 user message, optional `session_id`, optional `temperature`, optional `max_tokens`, JSON text 또는 data-URL image content part, multipart upload, non-stream response, `stream=true` Server-Sent Events를 받습니다. Remote image URL은 거부합니다. Data URL과 uploaded file은 runtime media directory 아래에 저장되며, 파일당 10 MiB 제한이 있습니다.
 
-Same-session API requests are serialized by session key. `--timeout` controls the HTTP wait timeout; if a timeout response is returned, the in-flight turn still owns that session lock until its blocking AgentLoop work exits.
+같은 session key의 API request는 직렬화됩니다. `--timeout`은 HTTP wait timeout을 제어합니다. Timeout response가 반환되어도 in-flight turn은 blocking `AgentLoop` 작업이 끝날 때까지 해당 session lock을 계속 소유합니다.
 
-## Channels
+## 채널
 
-Inspect the local channel registry and configured channel plugin settings:
+로컬 channel registry와 configured channel plugin 설정을 확인합니다:
 
 ```sh
 shacs-bot channels list
 shacs-bot channels status --workspace /tmp/ws
 ```
 
-`channels list` shows built-in channel descriptors, config-enabled state, capabilities, and worker boundary count. `channels status` summarizes configured channel plugins and runtime defaults such as progress/tool-hint delivery and send retry count. These commands are read-only diagnostics; use `run` to start runnable channel workers.
+`channels list`는 built-in channel descriptor, config-enabled 상태, capability, worker boundary 개수를 보여줍니다. `channels status`는 configured channel plugin과 progress/tool-hint delivery, send retry count 같은 runtime default를 요약합니다. 이 명령들은 read-only diagnostics입니다. Runnable channel worker를 시작하려면 `run`을 사용하세요.
 
-Start the selected channel runtime:
+선택된 channel runtime을 시작합니다:
 
 ```sh
 shacs-bot run --workspace /tmp/ws
 shacs-bot run --websocket-host 127.0.0.1 --websocket-port 8765 --workspace /tmp/ws
 ```
 
-`run` starts the WebSocket channel server when the `websocket` channel is enabled. Incoming JSON text or binary WebSocket frames are normalized through the channel contract, processed by the local `AgentLoop`, and returned as WebSocket server events. The WebSocket config is read from `channels.plugins.websocket` with `enabled`, `host`, `port`, and `path`; command-line `--websocket-host` and `--websocket-port` override the host and port for one run. Non-loopback WebSocket binds require `--allow-remote`.
+`run`은 `websocket` channel이 enabled이면 WebSocket channel server를 시작합니다. 들어오는 JSON text 또는 binary WebSocket frame은 channel contract를 통해 normalize되고, 로컬 `AgentLoop`에서 처리된 뒤 WebSocket server event로 반환됩니다. WebSocket config는 `channels.plugins.websocket`의 `enabled`, `host`, `port`, `path`에서 읽습니다. Command-line `--websocket-host`와 `--websocket-port`는 한 번의 실행에서 host/port를 override합니다. Non-loopback WebSocket bind에는 `--allow-remote`가 필요합니다.
 
-`run` also starts selected external channel transports when their plugin config contains enough credentials. Missing credentials are reported as `skipped-missing-credentials` rather than failing the whole runtime, so you can enable WebSocket first and add external channels incrementally.
+`run`은 plugin config에 충분한 인증 정보가 있으면 선택된 외부 channel transport도 시작합니다. 인증 정보가 없으면 전체 runtime을 실패시키지 않고 `skipped-missing-credentials`로 보고하므로, WebSocket부터 켜고 외부 channel을 점진적으로 추가할 수 있습니다.
 
-Minimal external channel config keys:
+최소 외부 channel config key:
 
 - `channels.plugins.telegram`: `enabled`, `botToken`/`bot_token`/`token`, optional `pollTimeoutSeconds`, `pollLimit`.
-- `channels.plugins.discord`: `enabled`, `botToken`/`bot_token`/`token`, `channelIds` or `defaultChannelId`, optional `pollIntervalSeconds`.
-- `channels.plugins.slack`: `enabled`, `botToken`/`bot_token`/`token`, `channelIds` or `defaultChannelId`, optional `pollIntervalSeconds`.
-- `channels.plugins.email.smtp`: `host`, `port`, `from`, optional `username`, `password`, `security`, `timeoutSeconds`; `channels.plugins.email.imap`: `host`, `port`, `username`, `password`, optional `mailbox`, `markSeen` (defaults to true), `pollIntervalSeconds`, `timeoutSeconds`, `security`.
-- `channels.plugins.whatsapp`: `enabled`, `bridgeUrl`, optional `bridgeToken`, `pollPath`, `sendPath`, `pollIntervalSeconds`, `groupPolicy`, and `allowlist.allowedSenders`.
+- `channels.plugins.discord`: `enabled`, `botToken`/`bot_token`/`token`, `channelIds` 또는 `defaultChannelId`, optional `pollIntervalSeconds`.
+- `channels.plugins.slack`: `enabled`, `botToken`/`bot_token`/`token`, `channelIds` 또는 `defaultChannelId`, optional `pollIntervalSeconds`.
+- `channels.plugins.email.smtp`: `host`, `port`, `from`, optional `username`, `password`, `security`, `timeoutSeconds`; `channels.plugins.email.imap`: `host`, `port`, `username`, `password`, optional `mailbox`, `markSeen`(기본 true), `pollIntervalSeconds`, `timeoutSeconds`, `security`.
+- `channels.plugins.whatsapp`: `enabled`, `bridgeUrl`, optional `bridgeToken`, `pollPath`, `sendPath`, `pollIntervalSeconds`, `groupPolicy`, `allowlist.allowedSenders`.
 
-External transports are intentionally minimal adapters: Telegram uses long polling, Discord/Slack poll configured channels over REST, Email uses SMTP/IMAP, and WhatsApp talks to a local bridge HTTP endpoint. They run in the same personal-use `shacs-bot run` process as the local AgentLoop. Email IMAP keeps an in-process UID cache to avoid repeating the same unseen message during a run; restart-time replay is still possible if the server leaves messages unseen.
+외부 transport는 의도적으로 최소 adapter입니다. Telegram은 long polling, Discord/Slack은 configured channel을 REST로 polling, Email은 SMTP/IMAP, WhatsApp은 로컬 bridge HTTP endpoint와 통신합니다. 모두 로컬 `AgentLoop`와 같은 personal-use `shacs-bot run` process 안에서 실행됩니다. Email IMAP은 한 번의 실행 중 같은 unseen message 반복 처리를 피하기 위해 in-process UID cache를 유지합니다. Server가 message를 unseen 상태로 남겨두면 restart 후 replay 가능성은 여전히 있습니다.
 
 ## Docker Compose
 
-The repository includes a multi-stage Dockerfile and `compose.yaml` for running the local HTTP API as a personal-use service:
+저장소에는 개인 사용 서비스로 로컬 HTTP API를 실행하기 위한 multi-stage Dockerfile과 `compose.yaml`이 포함되어 있습니다:
 
 ```sh
 docker compose up --build
 ```
 
-The compose service runs `shacs-bot serve` in the container. Check the API after startup:
+Compose service는 container 안에서 `shacs-bot serve`를 실행합니다. 시작 후 API를 확인합니다:
 
 ```sh
 curl http://127.0.0.1:18080/health
 ```
 
-Provider secrets should be supplied through your local config/environment workflow; do not bake secrets into the image.
+Provider secret은 로컬 config/environment workflow로 제공하세요. Image 안에 secret을 bake하지 마세요.
 
-## Reserved commands
+## 예약된 명령
 
-The following command names are reserved but not implemented in the Rust CLI yet:
+다음 command name은 예약되어 있지만 현재 Rust CLI에는 아직 구현되어 있지 않습니다:
 
 - `plugins`
 
-TUI commands, provider OAuth flows beyond the implemented Codex login, ClawHub install/update wrappers, and gateway supervision remain future migration slices. If a command is not listed above as implemented, do not treat it as available.
+TUI command, 구현된 Codex login 외의 provider OAuth flow, ClawHub install/update wrapper, gateway supervision은 이후 migration slice로 남아 있습니다. 위에서 구현된 것으로 명시하지 않은 command는 사용할 수 있는 기능으로 취급하지 마세요.
