@@ -43,6 +43,19 @@ cargo run --manifest-path crates/shacs-cli/Cargo.toml -- run --workspace /tmp/sh
 cargo run --manifest-path crates/shacs-cli/Cargo.toml -- serve --workspace /tmp/shacs-ws
 ```
 
+Docker Compose로 초기 설정과 장기 실행 서비스를 다룹니다:
+
+```sh
+export SHACS_UID=$(id -u)
+export SHACS_GID=$(id -g)
+mkdir -p ~/.shacs-bot
+docker compose run --rm shacs-cli onboard
+vim ~/.shacs-bot/config.json
+docker compose up -d shacs-gateway
+```
+
+Compose는 host의 `~/.shacs-bot`을 container의 `/home/shacs/.shacs-bot`에 mount합니다. Provider secret은 image에 넣지 말고 `onboard` 후 생성된 config/auth workflow 또는 `.env.example`을 참고한 shell environment로 제공하세요. 기본 UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. 로컬 OpenAI 호환 API만 띄우려면 provider 설정 후 `docker compose up -d shacs-api`와 `curl http://127.0.0.1:8900/health`를 사용하세요.
+
 CLI binary를 빌드해서 실행합니다:
 
 ```sh

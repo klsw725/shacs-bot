@@ -285,19 +285,42 @@ shacs-bot run --websocket-host 127.0.0.1 --websocket-port 8765 --workspace /tmp/
 
 ## Docker Compose
 
-저장소에는 개인 사용 서비스로 로컬 HTTP API를 실행하기 위한 multi-stage Dockerfile과 `compose.yaml`이 포함되어 있습니다:
+저장소에는 개인 사용 서비스로 로컬 HTTP API와 channel runtime을 실행하기 위한 multi-stage Dockerfile과 `docker-compose.yaml`이 포함되어 있습니다. Docker 동작은 upstream nanobot deployment와 같이 먼저 host config directory를 초기화하고, host의 `~/.shacs-bot`을 non-root container user의 `/home/shacs/.shacs-bot`에 mount하는 방식을 따릅니다:
 
 ```sh
-docker compose up --build
+export SHACS_UID=$(id -u)
+export SHACS_GID=$(id -g)
+mkdir -p ~/.shacs-bot
+docker compose run --rm shacs-cli onboard   # first-time setup
+vim ~/.shacs-bot/config.json                # add API keys or provider config
+docker compose up -d shacs-gateway          # start channel runtime
 ```
 
-Compose service는 container 안에서 `shacs-bot serve`를 실행합니다. 시작 후 API를 확인합니다:
+`shacs-gateway`는 container 안에서 `shacs-bot run --websocket-host 0.0.0.0 --allow-remote`를 실행하고 host loopback의 WebSocket port `8765`에만 publish합니다. Provider 설정이 없으면 runtime은 `provider not found: auto`로 시작하지 않으므로, 먼저 `config.json` 또는 `auth.json` workflow로 provider를 설정하세요.
+
+로컬 OpenAI 호환 API를 시작하려면 같은 config/workspace를 사용해 별도 API service를 띄웁니다:
 
 ```sh
-curl http://127.0.0.1:18080/health
+docker compose up -d shacs-api
+curl http://127.0.0.1:8900/health
 ```
 
-Provider secret은 로컬 config/environment workflow로 제공하세요. Image 안에 secret을 bake하지 마세요.
+CLI command를 container에서 한 번 실행하려면 다음처럼 `shacs-cli` service를 사용합니다:
+
+```sh
+docker compose run --rm shacs-cli ask "Hello!"
+docker compose run --rm shacs-cli status
+```
+
+Channel runtime logs를 확인하거나 서비스를 내리려면 다음 명령을 사용합니다:
+
+```sh
+docker compose up -d shacs-gateway
+docker compose logs -f shacs-gateway
+docker compose down
+```
+
+Provider secret은 로컬 config/environment workflow로 제공하세요. Image 안에 secret을 bake하지 마세요. 기본 container UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. Permission denied가 계속 나면 host에서 `sudo chown -R 1000:1000 ~/.shacs-bot`로 ownership을 맞추거나 Podman의 `--userns=keep-id` 같은 실행 user 전략을 사용하세요.
 
 ## 예약된 명령
 
