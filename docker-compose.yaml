@@ -1,0 +1,73 @@
+x-common-config: &common-config
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: shacs-bot:local
+  user: "${SHACS_UID:-1000}:${SHACS_GID:-1000}"
+  volumes:
+    - ~/.shacs-bot:/home/shacs/.shacs-bot
+  environment:
+    HOME: /home/shacs
+    RUST_LOG: ${RUST_LOG:-info}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    GROQ_API_KEY: ${GROQ_API_KEY:-}
+    DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    HF_TOKEN: ${HF_TOKEN:-}
+    CODEX_TOKEN: ${CODEX_TOKEN:-}
+    TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+
+services:
+  shacs-gateway:
+    container_name: shacs-gateway
+    <<: *common-config
+    command:
+      - run
+      - --websocket-host
+      - 0.0.0.0
+      - --allow-remote
+      - --workspace
+      - /home/shacs/.shacs-bot/workspace
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  shacs-api:
+    container_name: shacs-api
+    <<: *common-config
+    command:
+      - serve
+      - --host
+      - 0.0.0.0
+      - --allow-remote
+      - -w
+      - /home/shacs/.shacs-bot/workspace
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8900:8900"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  shacs-cli:
+    <<: *common-config
+    profiles:
+      - cli
+    command: ["status"]
+    stdin_open: true
+    tty: true
