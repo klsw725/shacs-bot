@@ -63,14 +63,9 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/lifecycle.rs`
-- `crates/shacs-core/tests/process_lifecycle.rs`
-- `crates/shacs-cli/src/lib.rs`
-- `crates/shacs-cli/tests/runtime_inspect_cli.rs`
-- `crates/shacs-cli/tests/release_candidate_smoke.rs`
-- `crates/shacs-cli/tests/session_recover_cli.rs`
-- `crates/shacs-cli/tests/session_submit_cli.rs`
-- `crates/shacs-cli/tests/api_serve.rs`
+- `crates/shacs-cli/src/lib.rs`의 `runtime_inspect_reports_capabilities_and_session_summary`, `runtime_update_records_marker_and_recover_clears_it`, `runtime_update_requires_running_binary_target_and_marker_guard_blocks_mutation`, `runtime_update_blocks_existing_interrupted_marker`, `runtime_recover_blocks_partial_migration_marker` 단위 테스트
+- `crates/shacs-config/src/lib.rs`의 config context/runtime directory/migration 단위 테스트
+- `docs/USAGE.md`와 `README.md`의 source/Cargo 기반 install-update-recover 사용자 절차
 
 ## TDD 계획
 
@@ -140,8 +135,7 @@
 - 상태: FullSpec evidence ready.
 - Required families: `PackagingUpgrade`, `DurabilityRecovery`, `Integration`.
 - FullSpec evidence:
-  - `crates/shacs-core/tests/process_lifecycle.rs`
-  - `crates/shacs-cli/tests/runtime_inspect_cli.rs`
-  - `crates/shacs-cli/tests/release_candidate_smoke.rs`
-  - `crates/shacs-core/tests/verification_matrix.rs`
+- `crates/shacs-cli/src/lib.rs` inline runtime inspect/update/recover tests
+- `crates/shacs-config/src/lib.rs` inline runtime layout/config migration tests
+- `README.md`, `docs/USAGE.md`
 - 비범위로 남는 항목: OS package manager별 installer, remote rolling upgrade, web installer, fleet management, SaaS update service.

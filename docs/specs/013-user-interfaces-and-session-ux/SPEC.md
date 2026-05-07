@@ -51,7 +51,7 @@
 - 브랜딩, 색상 테마, 고급 시각 디자인
 - 원격 멀티클라이언트 동시 편집 UX
 - 모바일 앱이나 브라우저 SaaS 콘솔
-- Slack, Discord, Telegram, Email 같은 외부 채널 adapter 자체, 단 이 범위는 012 runtime services의 mailbox 경계에서 다룬다.
+- Slack, Discord, Telegram, Email, WhatsApp bridge 같은 외부 채널 adapter 자체, 단 이 범위는 012 runtime services의 mailbox 경계에서 다룬다.
 
 ---
 

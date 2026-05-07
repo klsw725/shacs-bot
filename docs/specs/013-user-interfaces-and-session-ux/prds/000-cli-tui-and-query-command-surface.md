@@ -45,7 +45,7 @@
 - 모바일 앱
 - 멀티클라이언트 협업
 - SaaS 운영 포털
-- Slack, Discord, Telegram, Email channel adapter 구현, 단 이 범위는 012 runtime services PRD에서 다룬다.
+- Slack, Discord, Telegram, Email, WhatsApp bridge channel adapter 구현, 단 이 범위는 012 runtime services PRD에서 다룬다.
 
 ## 현재 구현 상태
 
@@ -67,16 +67,8 @@
 ### 로컬 근거
 
 - `crates/shacs-cli/src/lib.rs`
-- `crates/shacs-cli/src/transport.rs`
-- `crates/shacs-cli/src/tui.rs`
-- `crates/shacs-cli/tests/session_query_cli.rs`
-- `crates/shacs-cli/tests/session_submit_cli.rs`
-- `crates/shacs-cli/tests/session_approval_cli.rs`
-- `crates/shacs-cli/tests/session_recover_cli.rs`
-- `crates/shacs-cli/tests/session_cancel_cli.rs`
-- `crates/shacs-cli/tests/session_resume_cli.rs`
-- `crates/shacs-cli/tests/api_serve.rs`
-- `crates/shacs-core/tests/interface_projection.rs`
+- `crates/shacs-cli/src/lib.rs` inline tests for parser/session/runtime/API/WebSocket surface
+- `crates/shacs-core/tests/runtime_loop.rs`
 
 ## TDD 계획
 
@@ -122,9 +114,9 @@
 
 ## FullSpec Evidence
 
-- `InterfaceContract`: `crates/shacs-core/tests/interface_projection.rs`
-- `Integration`: `crates/shacs-cli/tests/api_serve.rs`, `crates/shacs-cli/src/tui.rs`
-- `SafetyRedaction`: `crates/shacs-cli/tests/session_query_cli.rs`, `crates/shacs-cli/src/transport.rs`
+- `InterfaceContract`: `crates/shacs-cli/src/lib.rs` inline parser/session/runtime/API/WebSocket tests
+- `Integration`: `crates/shacs-core/tests/runtime_loop.rs`, `crates/shacs-cli/src/lib.rs` inline API/WebSocket bridge tests
+- `SafetyRedaction`: `crates/shacs-cli/src/lib.rs` inline session inspect/export/diagnostics and media/error tests
 
 ## Open Risks
 

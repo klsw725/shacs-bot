@@ -65,11 +65,10 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/observability.rs`
-- `crates/shacs-core/tests/observability.rs`
-- `crates/shacs-core/tests/interface_projection.rs`
-- `crates/shacs-cli/tests/session_query_cli.rs`
-- `crates/shacs-cli/tests/api_serve.rs`
+- `crates/shacs-utils/src/progress_events.rs`
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-cli/src/lib.rs` inline observability/session diagnostics/runtime inspect tests
 
 ## TDD 계획
 
@@ -115,9 +114,9 @@
 
 ## FullSpec Evidence
 
-- `Unit`: `crates/shacs-core/tests/observability.rs`
-- `Integration`: `crates/shacs-core/tests/interface_projection.rs`, `crates/shacs-cli/tests/api_serve.rs`
-- `DurabilityRecovery`: `crates/shacs-core/tests/observability.rs`
+- `Unit`: `crates/shacs-utils/src/progress_events.rs` inline payload tests, `crates/shacs-cli/src/lib.rs` inline facade observability tests
+- `Integration`: `crates/shacs-core/tests/runtime_loop.rs`, `crates/shacs-core/tests/runtime_agent.rs`, `crates/shacs-cli/src/lib.rs` inline API/WebSocket/session diagnostics tests
+- `DurabilityRecovery`: `crates/shacs-cron/src/lib.rs` durable store/log tests, `crates/shacs-cli/src/lib.rs` inline runtime update/recover marker tests
 
 ## Open Risks
 
