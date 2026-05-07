@@ -190,6 +190,8 @@ pub struct ChannelsConfig {
     #[serde(default = "default_true")]
     pub send_progress: bool,
     #[serde(default)]
+    pub send_memory_hints: bool,
+    #[serde(default)]
     pub send_tool_hints: bool,
     #[serde(default = "default_send_max_retries")]
     pub send_max_retries: u32,
@@ -205,6 +207,7 @@ impl Default for ChannelsConfig {
     fn default() -> Self {
         Self {
             send_progress: true,
+            send_memory_hints: false,
             send_tool_hints: false,
             send_max_retries: default_send_max_retries(),
             transcription_provider: default_transcription_provider(),
@@ -826,6 +829,9 @@ pub fn ensure_runtime_dirs(context: &ConfigContext) -> std::io::Result<Vec<PathB
         context.data_dir.join("media"),
         context.data_dir.join("cron"),
         context.data_dir.join("logs"),
+        context.data_dir.join("channels"),
+        context.data_dir.join("channels").join("worker-metadata"),
+        context.data_dir.join("skills"),
     ];
     for dir in &dirs {
         fs::create_dir_all(dir)?;
