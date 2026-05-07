@@ -71,32 +71,33 @@
 
 ### 이미 반영된 것
 
-- `channel telegram-poll`은 Telegram Bot API one-shot polling connector다.
-- `channel discord-poll`은 Discord REST one-shot polling connector다.
-- `channel discord-worker`는 Discord REST polling 기반 foreground assistant worker로 구현돼 있다.
-- 두 connector는 mailbox message와 mailbox approval response를 core 경계로 라우팅한다.
+- `channel telegram-poll`과 `channel discord-poll`은 one-shot mailbox connector로 남아 있다.
+- `shacs-bot run`은 WebSocket server와 Telegram/Discord/Slack/Email/WhatsApp bridge transport를 장기 실행 local runtime process 안에서 시작한다.
+- 장기 실행 external transport는 `MessageBus`와 `ChannelManager` 경계를 통해 inbound/outbound를 전달하고, worker lifecycle은 channel adapter `start`/`stop` 경계가 관리한다.
+- 외부 agent processor는 process-local `SessionTurnLock`과 in-memory pending follow-up queue로 같은 session key의 turn을 직렬화한다.
+- WebSocket provider progress는 `delta`/`stream_end` event와 최종 `message` event로, Telegram/Discord/Slack progress는 preview message update로 노출된다. Email/WhatsApp은 final-only다.
+- Telegram offset, Discord REST last id, Discord Gateway resume state, Email UIDVALIDITY/seen UID, outbound delivery status는 runtime metadata JSON에 best-effort cursor/diagnostic hint로 저장된다.
 - mailbox ingress는 dedupe key를 가진 fact-only service command로 재진입한다.
-- `ask`, `session wait`, local API `/wait`, TUI는 bounded loop 또는 event loop를 이미 가진다.
 
 ### 아직 남은 것
 
-- Telegram connector는 assistant 답변까지 책임지는 장기 실행 worker가 아니다.
-- `discord-poll`의 mailbox message 경로는 외부 메시지를 preserved context로 합치지만, 그 자체로 assistant turn을 자동 시작하지 않는다.
-- Discord worker는 `TurnCompleted.committed_output`을 Discord safe reply로 전달하지만, channel-neutral outbound router는 아직 없다.
-- pending approval projection을 외부 채널 prompt로 내보내는 중앙 broker가 없다.
-- Discord worker는 cursor를 처리 후 전진시키지만, cursor와 outbound delivery receipt를 함께 다루는 durable service metadata store는 아직 없다.
-- TUI/API/channel worker가 동시에 mutating surface로 작동할 때 단일 runtime owner가 중재하는 구조가 아직 없다.
+- 현재 pending follow-up queue와 `SessionTurnLock`은 process-local이며, 재시작 후 복구되는 durable pending-message queue가 아니다.
+- runtime metadata JSON은 durable service metadata store나 exactly-once delivery 보장이 아니다.
+- pending approval projection을 외부 채널 prompt로 내보내는 중앙 broker는 아직 없다.
+- hosted webhook, Telegram webhook, provider-specific 운영 hardening, retry/backoff persistence는 아직 없다.
+- TUI/API/channel worker를 별도 multi-process owner lease로 중재하는 구조는 아직 없다.
 
 ### 로컬 근거
 
 - `crates/shacs-cli/src/lib.rs`
-- `crates/shacs-cli/src/api.rs`
-- `crates/shacs-cli/src/tui.rs`
-- `crates/shacs-surface/src/session_queries.rs`
-- `crates/shacs-core/src/core/orchestrator.rs`
-- `crates/shacs-core/src/core/message.rs`
-- `crates/shacs-runtime-adapters/src/discord.rs`
-- `crates/shacs-runtime-adapters/src/telegram.rs`
+- `crates/shacs-api/src/lib.rs`
+- `crates/shacs-channels/src/lib.rs`
+- `crates/shacs-channels/tests/common.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/src/runtime/loop_control.rs`
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
 - `docs/specs/012-runtime-services/prds/000-service-reentry-and-dedup.md`
 
 ## 목표 아키텍처
@@ -445,7 +446,7 @@ cursor는 fetch한 최고 메시지 기준이 아니라, durable하게 accepted/
 - 중복 테스트: duplicate external message id가 새 turn을 열지 않음
 - 안전성 테스트: 열린 턴 중 새 메시지가 조용히 cursor advance되지 않음
 - transport 테스트: Discord reply가 `allowed_mentions.parse = []`, `replied_user = false`를 유지
-- release gate: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`
+- release gate: `cargo fmt --manifest-path crates/shacs-cli/Cargo.toml -- --check`, `cargo clippy --manifest-path crates/shacs-cli/Cargo.toml --all-targets --locked -- -D warnings`, `cargo test --manifest-path crates/shacs-cli/Cargo.toml --locked`, `cargo test --manifest-path crates/shacs-core/Cargo.toml --test runtime_loop --locked`
 
 ## Open Risks
 

@@ -61,39 +61,33 @@ Attachment download와 streaming edit은 사용자-visible future work지만, �
 
 ### 이미 반영된 것
 
-- `channel telegram-poll`은 Telegram Bot API one-shot polling connector다.
-- `channel discord-poll`은 Discord REST one-shot polling connector다.
-- `channel discord-worker`는 Discord REST polling 기반 foreground assistant worker다.
-- Discord worker는 accepted normal message를 `SubmitUserInput` 경계로 라우팅한다.
-- Discord worker는 strict approval command를 `RespondToApproval` 경계로 라우팅하고 pending turn continuation을 수행한다.
-- Discord worker는 `TurnCompleted.committed_output`을 Discord safe reply로 전달한다.
-- Discord worker는 timeout 또는 outbound send 실패 시 cursor를 전진하지 않고 in-memory pending turn으로 재시도한다.
-- Discord worker는 default mention policy에서 `<@bot_user_id> approval ...` prompt를 사용한다.
-- Discord worker는 runtime root 아래 durable worker metadata에 pending turn mapping, prompted approval key, outbound delivery receipt를 저장하고 재시작 시 복원한다.
+- `channel telegram-poll`과 `channel discord-poll`은 one-shot mailbox connector다.
+- `shacs-bot run`은 WebSocket server와 Telegram/Discord/Slack/Email/WhatsApp bridge transport를 같은 local runtime process 안에서 시작한다.
+- Discord Gateway, Slack Socket Mode, Telegram long polling, Email IMAP polling, WhatsApp bridge WebSocket은 현재 구현된 long-running transport family다.
+- External runtime은 `MessageBus`와 `ChannelManager` 경계를 통해 inbound/outbound를 전달하고, channel adapter lifecycle이 worker start/stop을 관리한다.
+- 같은 session key의 accepted inbound는 process-local `SessionTurnLock`과 in-memory pending follow-up queue로 직렬화된다. Shared lock이 이미 busy이면 external inbound는 pending queue로 되돌려져 이후 재시도된다.
+- WebSocket progress는 coalesced `delta`/`stream_end` event와 최종 `message` event로, Telegram/Discord/Slack progress는 preview update로 전달된다. Email/WhatsApp은 final-only다.
+- Telegram offset, Discord REST last id, Discord Gateway resume state, Email UIDVALIDITY/seen UID, outbound delivery status는 runtime metadata JSON에 best-effort로 저장된다.
 
 ### 아직 남은 것
 
 - retry/backoff state가 durable metadata store에 저장되지 않는다.
-- `shacs-bot run` 또는 동등한 unified local runtime owner가 없다.
-- Discord REST polling loop는 transient 429/5xx/timeout을 분류해 backoff하지 않는다.
-- 열린 turn 중 도착한 메시지는 durable queue에 들어가지 않고 busy 안내와 cursor 미전진으로 처리된다.
-- worker runtime이 Discord에 하드코딩돼 있고 Telegram/Slack/Email assistant worker로 확장할 공통 추상화가 없다.
-- Gateway, Socket Mode, webhook-like ingest, IMAP polling 같은 long-running transport lifecycle abstraction이 없다.
+- process-local pending follow-up queue는 durable pending-message queue, cancellation persistence, restart replay가 아니다.
+- runtime metadata JSON은 cursor/dedupe/diagnostic hint일 뿐, transaction이나 exactly-once delivery를 보장하지 않는다.
+- hosted webhook, Telegram webhook, webhook-like ingest 운영 hardening은 아직 없다.
 - channel-neutral `ApprovalBroker`와 `OutboundRouter`가 없다.
 
 ### 로컬 근거
 
 - `crates/shacs-cli/src/lib.rs`
-- `crates/shacs-cli/src/api.rs`
-- `crates/shacs-cli/src/tui.rs`
-- `crates/shacs-cli/src/transport.rs`
-- `crates/shacs-core/src/core/store.rs`
-- `crates/shacs-core/src/core/lifecycle.rs`
-- `crates/shacs-contracts/src/service.rs`
-- `crates/shacs-surface/src/session_queries.rs`
-- `crates/shacs-runtime-adapters/src/discord.rs`
-- `crates/shacs-runtime-adapters/src/telegram.rs`
-- `crates/shacs-runtime-adapters/src/mailbox.rs`
+- `crates/shacs-api/src/lib.rs`
+- `crates/shacs-channels/src/lib.rs`
+- `crates/shacs-channels/tests/common.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/src/runtime/loop_control.rs`
+- `crates/shacs-core/src/runtime/lifecycle.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
 
 ## 목표 아키텍처
 
@@ -281,7 +275,7 @@ Discord Gateway는 이 abstraction의 첫 구현 후보일 뿐이다. Slack Sock
 - queue 테스트: open turn 중 pending enqueue, FIFO submit, cancellation, stale session rejection
 - abstraction 테스트: Discord/Telegram worker contract parity
 - Gateway 테스트: heartbeat timeout, reconnect, resume, identify backoff, handler enqueue-only
-- release gate: 새 테스트와 coverage matrix evidence locator가 `scripts/release-gate`에 연결돼야 한다.
+- release gate: 새 테스트와 coverage matrix evidence locator는 실제 Cargo command 목록과 추가되는 runner path가 있을 때만 연결한다.
 
 ## Open Risks
 

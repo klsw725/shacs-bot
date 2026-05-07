@@ -38,13 +38,13 @@
 - wake command와 resume 판단 입력 구현
 - service restart 이후 duplicate delivery, stale wake 처리 구현
 - 관측과 inspect를 위한 correlation metadata 연결
-- mailbox adapter 범위를 Slack, Discord, Telegram, Email 네 채널로 제한
+- mailbox adapter 범위를 Slack, Discord, Telegram, Email, WhatsApp bridge 다섯 채널로 제한
 - Email mailbox adapter는 이미 추출된 메시지 필드 정규화까지만 포함하고 IMAP/SMTP/MIME/network/provider-specific API는 제외
 
 ## 범위 제외
 
 - 특정 벤더 큐나 cron 선택
-- Slack, Discord, Telegram, Email 바깥의 추가 채널 adapter
+- Slack, Discord, Telegram, Email, WhatsApp bridge 바깥의 추가 채널 adapter
 - 관리자 inbox UI
 - 멀티노드 스케줄러 합의
 - 외부 조직용 webhook 운영 시스템
@@ -55,24 +55,24 @@
 
 - queue, scheduler, mailbox, hooks, background worker service command envelope와 dedupe 경계가 core service 모델에 구현돼 있다.
 - service reentry는 fact-only command로 처리되며 duplicate delivery, stale wake, metadata loss 이후 current turn 보호, non-mailbox dedupe marker replay가 검증된다.
-- Slack, Email adapter는 network-free normalizer 또는 strict approval parser 범위로 구현돼 있고, Telegram과 Discord는 CLI one-shot polling connector를 통해 같은 mailbox 경계로 라우팅된다.
+- Slack, Email adapter는 network-free normalizer 또는 strict approval parser 범위로 구현돼 있고, Telegram과 Discord는 CLI one-shot polling connector를 통해 같은 mailbox 경계로 라우팅된다. 장기 실행 channel worker runtime은 후속 PRD 범위로 확장됐으며, 현재 CLI runtime은 WebSocket과 Slack/Discord/Telegram/Email/WhatsApp bridge transport를 `MessageBus`와 `ChannelManager` 경계로 연결한다. 외부 agent processor와 API/CLI path는 같은 process-local `SessionTurnLock`을 공유해 session key별 turn을 직렬화하고, 같은 session follow-up을 in-memory pending queue에 보관해 현재 turn 뒤에 이어 처리한다. 이 queue와 lock은 process-local이며 PRD 002 Wave 4의 durable pending-message queue, cancellation persistence, restart replay를 의미하지 않는다. Built-in slash command는 `CommandRouter`에서 priority/exact/prefix로 분류되고 `/status`, `/stop`, `/restart` priority command만 active turn lock 전 처리된다. Exact/prefix command는 일반 user turn과 같은 lock 경계를 통과한다. Agent runner는 mid-turn injection을 model iteration 사이와 finalization 직전에 drain하되 cycle cap으로 무한 follow-up을 막는다. WebSocket provider progress는 coalesced `delta`/`stream_end` event로 노출하되 최종 `message` event를 authoritative answer로 유지한다. Telegram/Discord/Slack provider progress는 in-process preview message로 전송하고 최종 assistant answer로 같은 message를 갱신한다. Telegram topic, Slack thread, Discord thread, Email subject/reply context는 outbound reply metadata로 이어진다. Telegram offset, Discord REST last id, Discord Gateway resume state, Email IMAP seen UID + UIDVALIDITY hint, outbound delivery status는 runtime metadata JSON으로 best-effort 보존하지만 durable queue나 exactly-once delivery를 의미하지 않는다.
 - accepted service/mailbox events는 `service_correlation_id`를 observability projection으로 보존한다.
 
 ### 아직 남은 것
 
-- 실제 Slack/Discord Gateway, hosted webhook, Telegram webhook, IMAP/SMTP polling 같은 장기 실행 provider-specific network loop는 이 PRD 범위 밖이다. Discord REST one-shot polling CLI는 현재 포함 범위다. 장기 실행 assistant channel worker와 unified runtime supervisor 설계는 `docs/specs/012-runtime-services/prds/001-channel-worker-runtime.md`에서 별도 확장 범위로 다룬다.
+- hosted webhook, Telegram webhook, provider-specific 운영 hardening은 이 PRD 범위 밖이다. Discord REST one-shot polling CLI는 현재 포함 범위다. 장기 실행 assistant channel worker와 unified runtime supervisor 설계는 `docs/specs/012-runtime-services/prds/001-channel-worker-runtime.md`에서 별도 확장 범위로 다룬다.
 - service metadata와 session truth 경계는 유지되지만, 장기 운영용 metadata storage 고도화는 아직 별도 확장 범위다.
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/service.rs`
-- `crates/shacs-core/tests/runtime_services.rs`
-- `crates/shacs-core/tests/mailbox_adapter.rs`
-- `crates/shacs-runtime-adapters/src/slack.rs`
-- `crates/shacs-runtime-adapters/src/discord.rs`
-- `crates/shacs-runtime-adapters/src/telegram.rs`
-- `crates/shacs-runtime-adapters/src/email.rs`
-- `crates/shacs-runtime-adapters/src/subagent.rs`
+- `crates/shacs-command/src/lib.rs`
+- `crates/shacs-command/tests/router.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-channels/src/lib.rs`
+- `crates/shacs-api/src/lib.rs`
 
 ## TDD 계획
 
@@ -110,14 +110,11 @@
 
 ## Verification Evidence
 
-- 단위 테스트: `crates/shacs-core/tests/runtime_services.rs`의 `service_dedupe_markers_are_stable_for_non_mailbox_services`, `queue_payload_session_mismatch_is_ignored`, `queue_dedupe_key_mismatch_is_ignored`, `queue_service_kind_mismatch_is_ignored`, `hook_payload_and_dedupe_mismatches_are_ignored`, `background_worker_payload_and_dedupe_mismatches_are_ignored`, `scheduler_wake_target_session_mismatch_is_ignored`, `scheduler_dedupe_key_mismatch_is_ignored`가 dedupe key, envelope validation, metadata boundary를 검증한다.
-- 단위 테스트: `queue_work_ready_is_fact_only_and_does_not_open_turn`, `queued_work_cancelled_is_fact_only_and_does_not_increment_policy_retry`, `queue_delivery_retry_attempt_does_not_increment_turn_policy_retry`가 queue delivery fact-only command acceptance, dedupe, retry-attempt isolation을 검증한다.
-- 단위 테스트: `crates/shacs-core/tests/mailbox_adapter.rs`와 runtime adapter unit tests가 Email extracted-field normalizer, strict approval parser, mailbox ingress/approval envelope 변환을 검증한다.
-- 통합 테스트: `crates/shacs-core/tests/runtime_services.rs`의 `scheduler_missed_and_cancelled_wakes_are_fact_only`, `mailbox_message_rejected_is_fact_only_without_context_append`, `mailbox_approval_response_resolves_pending_approval_without_context_append`, `hook_observation_is_fact_only_and_deduped`, `hook_failure_is_fact_only_and_deduped`, `background_job_completion_is_fact_only_for_active_turn`, `background_worker_terminal_failures_are_fact_only_for_active_turn`, `background_worker_wake_request_is_fact_only_without_opening_turn`이 scheduler/mailbox/worker reentry, queue delivery retry, hooks observation/failure flow, background worker fact-only envelope를 검증한다.
-- 통합 테스트: accepted service/mailbox events preserve `service_correlation_id` for observability projection
-- 내구성 테스트: `replay_restores_non_mailbox_service_dedupe_markers`, `duplicate_scheduler_fire_is_idempotent`, `duplicate_queue_delivery_attempt_is_idempotent`, `duplicate_mailbox_message_does_not_append_twice`, `duplicate_mailbox_approval_response_is_idempotent`, `stale_scheduler_session_wake_after_metadata_loss_does_not_abort_current_turn`, `crates/shacs-core/tests/mailbox_adapter.rs`의 `surface_channel_ingress_persists_dedupe_across_resume`, `surface_channel_approval_response_persists_dedupe_across_resume_without_context_append`가 duplicate delivery, stale wake, restart after pending service signal, service metadata loss 이후 session-level stale wake가 current turn을 abort하지 않는 경계를 검증한다.
+- 단위/통합 테스트: `crates/shacs-command/tests/router.rs`가 built-in slash command priority/exact/prefix dispatch boundary를 검증한다.
+- 통합 테스트: `crates/shacs-core/tests/runtime_loop.rs`가 active session locking, priority command bypass, same-session pending follow-up drain, channel chat/session key preservation, registered cancellation observation을 검증한다.
+- runtime evidence: `crates/shacs-channels/src/lib.rs`, `crates/shacs-api/src/lib.rs`, `crates/shacs-cli/src/lib.rs` inline tests가 channel/API/CLI service entrypoint wiring을 검증한다.
 - 안전성 테스트: privileged command bypass 불가, closed turn reopen 방지
-- Spec016 matrix 증거: `crates/shacs-contracts/src/verification.rs`가 Spec012 `Unit`, `Integration`, `DurabilityRecovery`를 `CoverageLevel::FullSpec` / `CoverageStatus::Verified`로 선언하고, `crates/shacs-core/tests/verification_matrix.rs`의 `spec012_full_spec_evidence_covers_required_families`가 이를 검증한다.
+- 현 slice matrix는 별도 contracts crate가 아니라 실제 Cargo tests와 문서 locator를 기준으로 유지한다.
 
 ## Open Risks
 

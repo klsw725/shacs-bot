@@ -136,12 +136,13 @@ scheduler가 할 수 없는 일:
 
 mailbox는 외부 메시지, inbox, webhook 비슷한 외부 자극을 수집해 정규화하는 서비스다.
 
-현재 제품 범위에서 필요한 외부 채널은 아래 네 가지면 충분하다.
+현재 제품 범위에서 필요한 외부 채널은 아래 다섯 가지면 충분하다.
 
 - Slack
 - Discord
 - Telegram
 - Email
+- WhatsApp bridge
 
 Email mailbox 지원은 이미 추출된 메시지 필드(`source_id`, `external_message_id`, `from`, plain-text `text`, optional `subject`)를 정규화하는 adapter 경계까지만 포함하며, IMAP polling, SMTP sending, MIME parsing, OAuth, provider-specific mail API는 이 spec의 벤더 세부 프로토콜 제외 범위에 남긴다.
 
@@ -508,7 +509,7 @@ future Rust 구현은 최소한 아래 시나리오를 테스트로 가져갈 �
 이 문서는 다음을 정의하지 않는다.
 
 - 외부 메시징 벤더 프로토콜 전체
-- Slack, Discord, Telegram, Email 바깥의 추가 채널 지원
+- Slack, Discord, Telegram, Email, WhatsApp bridge 바깥의 추가 채널 지원
 - distributed queue consensus
 - 멀티유저 inbox ownership
 - 관리자 운영 콘솔
