@@ -49,6 +49,12 @@ pub struct ParsedCommand {
     pub args: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutedLoopCommand {
+    pub command: LoopCommand,
+    pub parsed: ParsedCommand,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandContext<M = (), S = (), L = ()> {
     pub msg: M,
@@ -240,31 +246,36 @@ pub enum HistoryCommandArgs {
 }
 
 pub fn parse_loop_command(content: &str) -> Option<LoopCommand> {
+    parse_loop_command_route(content).map(|route| route.command)
+}
+
+pub fn parse_loop_command_route(content: &str) -> Option<RoutedLoopCommand> {
     let router = CommandRouter::builtin();
     if let Some(command) = router.dispatch_priority(content) {
-        return match command.id {
-            CommandId::Stop => Some(LoopCommand::Stop),
-            CommandId::Restart => Some(LoopCommand::Restart),
-            CommandId::Status => Some(LoopCommand::Status),
-            _ => None,
-        };
+        return loop_command_from_parsed(command)
+            .filter(|route| route.parsed.kind == CommandKind::Priority);
     }
-    let command = router.dispatch(content)?;
-    match command.id {
-        CommandId::New => Some(LoopCommand::New),
+    loop_command_from_parsed(router.dispatch(content)?)
+}
+
+fn loop_command_from_parsed(parsed: ParsedCommand) -> Option<RoutedLoopCommand> {
+    let command = match parsed.id {
+        CommandId::Stop => Some(LoopCommand::Stop),
+        CommandId::Restart => Some(LoopCommand::Restart),
         CommandId::Status => Some(LoopCommand::Status),
-        CommandId::History => Some(LoopCommand::History(parse_history_args(&command.args))),
+        _ if parsed.kind == CommandKind::Priority => None,
+        CommandId::New => Some(LoopCommand::New),
+        CommandId::History => Some(LoopCommand::History(parse_history_args(&parsed.args))),
         CommandId::Dream => Some(LoopCommand::Dream),
         CommandId::DreamLog => Some(LoopCommand::DreamLog {
-            sha: parse_optional_sha(&command.args),
+            sha: parse_optional_sha(&parsed.args),
         }),
         CommandId::DreamRestore => Some(LoopCommand::DreamRestore {
-            sha: parse_optional_sha(&command.args),
+            sha: parse_optional_sha(&parsed.args),
         }),
         CommandId::Help => Some(LoopCommand::Help),
-        CommandId::Restart => Some(LoopCommand::Restart),
-        CommandId::Stop => Some(LoopCommand::Stop),
-    }
+    }?;
+    Some(RoutedLoopCommand { command, parsed })
 }
 
 fn parse_history_args(args: &str) -> HistoryCommandArgs {

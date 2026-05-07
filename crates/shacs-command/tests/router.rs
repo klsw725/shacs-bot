@@ -1,6 +1,7 @@
 use shacs_command::{
-    build_help_text, is_builtin_command, normalize_channel_command, parse_loop_command, CommandId,
-    CommandKind, CommandRouter, HistoryCommandArgs, LoopCommand,
+    build_help_text, is_builtin_command, normalize_channel_command, parse_loop_command,
+    parse_loop_command_route, CommandId, CommandKind, CommandRouter, HistoryCommandArgs,
+    LoopCommand,
 };
 use std::error::Error;
 
@@ -77,6 +78,26 @@ fn loop_command_parser_matches_builtin_router_semantics() {
             sha: Some("abc".to_owned())
         })
     );
+}
+
+#[test]
+fn loop_command_route_preserves_priority_exact_and_prefix_boundary() -> Result<(), Box<dyn Error>> {
+    let priority = parse_loop_command_route(" /status ").ok_or("missing status route")?;
+    assert_eq!(priority.command, LoopCommand::Status);
+    assert_eq!(priority.parsed.kind, CommandKind::Priority);
+
+    let exact = parse_loop_command_route("/new").ok_or("missing new route")?;
+    assert_eq!(exact.command, LoopCommand::New);
+    assert_eq!(exact.parsed.kind, CommandKind::Exact);
+
+    let prefix = parse_loop_command_route("/history 25").ok_or("missing history route")?;
+    assert_eq!(
+        prefix.command,
+        LoopCommand::History(HistoryCommandArgs::Count(25))
+    );
+    assert_eq!(prefix.parsed.kind, CommandKind::Prefix);
+    assert_eq!(prefix.parsed.args, "25");
+    Ok(())
 }
 
 #[test]
