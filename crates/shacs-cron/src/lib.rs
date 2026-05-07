@@ -433,6 +433,7 @@ pub struct PersistentCronService {
     store_path: PathBuf,
     action_path: PathBuf,
     store: Mutex<CronStore>,
+    operation: Mutex<()>,
     running: Mutex<bool>,
     next_id: Mutex<u64>,
     wake: Arc<(Mutex<u64>, Condvar)>,
@@ -468,6 +469,7 @@ impl PersistentCronService {
             store_path,
             action_path,
             store: Mutex::new(store),
+            operation: Mutex::new(()),
             running: Mutex::new(false),
             next_id: Mutex::new(1),
             wake: Arc::new((Mutex::new(0), Condvar::new())),
@@ -485,8 +487,9 @@ impl PersistentCronService {
     }
 
     pub fn start(&self) -> io::Result<()> {
+        let _operation = recover_lock(&self.operation);
         *recover_lock(&self.running) = true;
-        let mut store = self.refresh_store()?;
+        let mut store = self.refresh_store_unlocked()?;
         recompute_next_runs(&mut store, now_ms());
         self.save_store(&store)?;
         *recover_lock(&self.store) = store;
@@ -503,11 +506,16 @@ impl PersistentCronService {
     }
 
     pub fn refresh_store(&self) -> io::Result<CronStore> {
+        let _operation = recover_lock(&self.operation);
+        self.refresh_store_unlocked()
+    }
+
+    fn refresh_store_unlocked(&self) -> io::Result<CronStore> {
         let mut store = load_store_file(&self.store_path)?;
         let changed = self.merge_actions(&mut store)?;
         if self.is_running() && changed {
             self.save_store(&store)?;
-            fs::write(&self.action_path, "")?;
+            write_text_atomic(&self.action_path, "")?;
         }
         *recover_lock(&self.store) = store.clone();
         Ok(store)
@@ -524,7 +532,8 @@ impl PersistentCronService {
         due_now_ms: i64,
         executor: &dyn CronJobExecutor,
     ) -> io::Result<Vec<CronRunOutcome>> {
-        let mut store = self.refresh_store()?;
+        let _operation = recover_lock(&self.operation);
+        let mut store = self.refresh_store_unlocked()?;
         let mut outcomes = Vec::new();
         let mut index = 0;
         while index < store.jobs.len() {
@@ -555,7 +564,8 @@ impl PersistentCronService {
         force: bool,
         executor: &dyn CronJobExecutor,
     ) -> io::Result<bool> {
-        let mut store = self.refresh_store()?;
+        let _operation = recover_lock(&self.operation);
+        let mut store = self.refresh_store_unlocked()?;
         let Some(position) = store.jobs.iter().position(|job| job.id == job_id) else {
             return Ok(false);
         };
@@ -578,8 +588,9 @@ impl PersistentCronService {
     }
 
     fn mutate_store(&self, job: CronJob, action: CronActionKind) -> io::Result<()> {
+        let _operation = recover_lock(&self.operation);
         let running = self.is_running();
-        let mut store = self.refresh_store()?;
+        let mut store = self.refresh_store_unlocked()?;
         match action {
             CronActionKind::Add | CronActionKind::Update => {
                 store.jobs.retain(|existing| existing.id != job.id);
@@ -631,7 +642,13 @@ impl PersistentCronService {
                 action: action.to_owned(),
                 params,
             })?
-        )
+        )?;
+        file.flush()?;
+        file.sync_all()?;
+        if let Some(parent) = self.action_path.parent() {
+            fsync_dir(parent)?;
+        }
+        Ok(())
     }
 
     fn merge_actions(&self, store: &mut CronStore) -> io::Result<bool> {
@@ -673,7 +690,7 @@ impl PersistentCronService {
             fs::create_dir_all(parent)?;
         }
         let text = serde_json::to_string_pretty(store)?;
-        fs::write(&self.store_path, text)
+        write_text_atomic(&self.store_path, &text)
     }
 }
 
@@ -691,14 +708,14 @@ impl CronSupervisor {
         let max_sleep_ms = config.max_sleep_ms.max(1);
         let handle = thread::spawn(move || {
             while !thread_stop.load(Ordering::SeqCst) {
+                let (lock, condvar) = &*wake;
+                let generation = *recover_lock(lock);
                 let now = now_ms();
                 let next = thread_service.next_wake_at_ms();
                 let sleep_ms = next
                     .map(|next| next.saturating_sub(now).max(0) as u64)
                     .unwrap_or(max_sleep_ms)
                     .min(max_sleep_ms);
-                let (lock, condvar) = &*wake;
-                let generation = *recover_lock(lock);
                 let guard = recover_lock(lock);
                 let _ = condvar.wait_timeout_while(
                     guard,
@@ -805,6 +822,7 @@ impl CronService for PersistentCronService {
     }
 
     fn register_system_job(&self, mut job: CronJob) -> CronJob {
+        let _operation = recover_lock(&self.operation);
         let now = now_ms();
         job.state = CronJobState {
             next_run_at_ms: compute_next_run(&job.schedule, now).ok().flatten(),
@@ -812,7 +830,7 @@ impl CronService for PersistentCronService {
         };
         job.created_at_ms = now;
         job.updated_at_ms = now;
-        let mut store = self.refresh_store().unwrap_or_default();
+        let mut store = self.refresh_store_unlocked().unwrap_or_default();
         store.jobs.retain(|existing| existing.id != job.id);
         store.jobs.push(job.clone());
         let _ = self.save_store(&store);
@@ -822,8 +840,9 @@ impl CronService for PersistentCronService {
     }
 
     fn enable_job(&self, job_id: &str, enabled: bool) -> Option<CronJob> {
+        let _operation = recover_lock(&self.operation);
         let now = now_ms();
-        let mut store = self.refresh_store().ok()?;
+        let mut store = self.refresh_store_unlocked().ok()?;
         let job = store.jobs.iter_mut().find(|job| job.id == job_id)?;
         job.enabled = enabled;
         job.updated_at_ms = now;
@@ -845,8 +864,9 @@ impl CronService for PersistentCronService {
     }
 
     fn update_job(&self, job_id: &str, update: CronJobUpdate) -> UpdateJobResult {
+        let _operation = recover_lock(&self.operation);
         let now = now_ms();
-        let mut store = match self.refresh_store() {
+        let mut store = match self.refresh_store_unlocked() {
             Ok(store) => store,
             Err(_) => return UpdateJobResult::NotFound,
         };
@@ -965,6 +985,49 @@ fn load_store_file(path: &Path) -> io::Result<CronStore> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(CronStore::default()),
         Err(error) => Err(error),
     }
+}
+
+fn write_text_atomic(path: &Path, text: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = unique_tmp_path(path);
+    let write_result = (|| -> io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        file.write_all(text.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        fs::rename(&tmp_path, path)?;
+        if let Some(parent) = path.parent() {
+            fsync_dir(parent)?;
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+fn fsync_dir(path: &Path) -> io::Result<()> {
+    let dir = OpenOptions::new().read(true).open(path)?;
+    dir.sync_all()
+}
+
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let process_id = std::process::id();
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("cron.json");
+    path.with_file_name(format!(".{file_name}.{process_id}.{nanos}.tmp"))
 }
 
 fn recompute_next_runs(store: &mut CronStore, now_ms: i64) {
@@ -1366,6 +1429,74 @@ mod tests {
         assert_eq!(updated.schedule.every_ms, Some(120_000));
         assert_eq!(updated.payload.session_key.as_deref(), Some("s"));
         assert_eq!(updated.state.run_history[0].duration_ms, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn persistent_store_writes_atomically_without_temp_leftovers() -> Result<(), Box<dyn Error>> {
+        let root = temp_dir("cron-atomic-store")?;
+        let store_path = root.join("jobs.json");
+        let service = PersistentCronService::new(&store_path)?;
+        service.start()?;
+        service.add_job(AddCronJob {
+            name: "atomic".to_owned(),
+            schedule: CronSchedule::every(60_000),
+            message: "ping".to_owned(),
+            deliver: false,
+            channel: None,
+            to: None,
+            delete_after_run: false,
+            channel_meta: Value::Object(Default::default()),
+            session_key: None,
+        });
+
+        let saved: CronStore = serde_json::from_str(&fs::read_to_string(&store_path)?)?;
+        assert_eq!(saved.jobs.len(), 1);
+        let temp_files = fs::read_dir(&root)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".jobs.json.") && name.ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(temp_files.is_empty(), "leftover temp files: {temp_files:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn persistent_action_log_append_is_valid_jsonl_and_clears_atomically(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = temp_dir("cron-action-jsonl")?;
+        let store_path = root.join("jobs.json");
+        let service = PersistentCronService::new(&store_path)?;
+        let job = service.add_job(AddCronJob {
+            name: "queued".to_owned(),
+            schedule: CronSchedule::every(60_000),
+            message: "ping".to_owned(),
+            deliver: false,
+            channel: None,
+            to: None,
+            delete_after_run: false,
+            channel_meta: Value::Object(Default::default()),
+            session_key: None,
+        });
+
+        let action_text = fs::read_to_string(service.action_path())?;
+        let lines = action_text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let action: CronActionRecord = serde_json::from_str(lines[0])?;
+        assert_eq!(action.action, "add");
+        assert_eq!(action.params["id"], job.id);
+
+        service.start()?;
+        assert_eq!(fs::read_to_string(service.action_path())?, "");
+        let temp_files = fs::read_dir(&root)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".action.jsonl.") && name.ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(
+            temp_files.is_empty(),
+            "leftover action temp files: {temp_files:?}"
+        );
         Ok(())
     }
 
