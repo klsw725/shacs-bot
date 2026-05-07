@@ -41,7 +41,7 @@
 
 ### 이미 반영된 것
 
-- session meta, event record, checkpoint meta, replay/reduce, resume snapshot이 `crates/shacs-core/src/core/store.rs`, `reducer.rs`에 구현돼 있다.
+- session meta, history persistence, checkpoint/resume snapshot은 `crates/shacs-session/src/lib.rs`와 runtime checkpoint 경계에 구현돼 있다.
 - in-memory store와 file-backed store 모두 append/replay/checkpoint/resume 경로를 가진다.
 - atomic checkpoint write, truncated tail 무시, stale meta보다 event log sequence 우선, corrupted checkpoint fallback이 구현돼 있다.
 - Spec016 matrix에서 Unit, Integration, DurabilityRecovery가 FullSpec verified evidence로 승격돼 있다.
@@ -54,10 +54,11 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/store.rs`
-- `crates/shacs-core/src/core/reducer.rs`
-- `crates/shacs-core/tests/session_store_replay.rs`
-- `crates/shacs-core/tests/session_store_files.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
+- `crates/shacs-session/src/lib.rs`
 
 ## TDD 계획
 

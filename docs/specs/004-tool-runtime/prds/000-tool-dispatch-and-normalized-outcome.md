@@ -41,8 +41,8 @@
 
 ### 이미 반영된 것
 
-- `RunToolEffect`, `ToolDefinition`, `ToolRegistry`, `PermissionSnapshot`, `ToolCallOutcome`, `ToolReentry` 타입이 `crates/shacs-core/src/core/tool.rs`에 구현돼 있다.
-- provider tool 요청이 `ToolPending`으로 전이되고 `RunTool` effect를 발행하는 최소 bridge가 `crates/shacs-core/src/core/orchestrator.rs`에 구현돼 있다.
+- tool definition, registry, builtin executors, permission/resource checks는 `crates/shacs-core/src/tools/`와 `crates/shacs-core/src/runtime/tool_execution.rs`에 구현돼 있다.
+- provider tool 요청은 runtime runner의 tool loop로 전환되고 normalized result/progress event로 provider context와 observability hook에 연결된다.
 - tool reentry는 `ToolPending + RunTool`일 때만 수용되며, 성공/실패 결과는 `ToolOutcomeRecorded`로 기록되고 replay에 반영된다.
 - concrete filesystem `read` executor와 `proc_exec` executor가 runtime adapter 계층에 연결돼 있으며, configured provider submit 경로에서 read tool roundtrip이 검증된다.
 - permission snapshot, working directory, network/secret scope, artifact ref safety가 dispatch 전후 boundary로 검증된다.
@@ -59,11 +59,13 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/tool.rs`
-- `crates/shacs-core/src/core/message.rs`
-- `crates/shacs-core/src/core/orchestrator.rs`
-- `crates/shacs-core/src/core/reducer.rs`
-- `crates/shacs-core/tests/command_event_effect.rs`
+- `crates/shacs-core/src/tools/registry.rs`
+- `crates/shacs-core/src/tools/`
+- `crates/shacs-core/src/runtime/tool_execution.rs`
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/tests/tools.rs`
+- `crates/shacs-core/tests/runtime.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
 
 ## TDD 계획
 
@@ -101,43 +103,9 @@
 
 ## Verification Evidence
 
-- Integration FullSpec evidence: `crates/shacs-core/tests/tool_runtime.rs`, `crates/shacs-core/tests/command_event_effect.rs`, `crates/shacs-runtime-adapters/tests/filesystem_tool_executor.rs`, `crates/shacs-runtime-adapters/tests/proc_exec_tool_executor.rs`
-  - `missing_tool_returns_failed_reentry_without_executor_call`
-  - `runtime_dispatches_to_executor_matching_tool_kind`
-  - `missing_executor_for_tool_kind_returns_failed_reentry`
-  - `executor_output_is_normalized_into_completed_reentry`
-  - `executor_output_is_normalized_into_timed_out_reentry`
-  - `executor_output_is_normalized_into_cancelled_reentry`
-  - `executor_output_is_normalized_into_failed_reentry`
-  - `input_schema_mismatch_is_rejected_before_executor_runs`
-  - `malformed_json_input_schema_is_rejected_before_executor_runs`
-  - `unknown_input_schema_ref_is_rejected_before_executor_runs`
-  - `valid_input_schema_reaches_executor`
-  - `filesystem_read_returns_text_for_file_inside_allowed_root`
-  - `proc_exec_runs_approved_argv_in_allowed_working_directory`
-- SafetyRedaction FullSpec evidence: `crates/shacs-core/tests/tool_runtime.rs`, `crates/shacs-core/tests/host_safety.rs`, `crates/shacs-runtime-adapters/tests/filesystem_tool_executor.rs`
-  - `permission_mismatch_returns_failed_reentry_without_executor_call`
-  - `net_outbound_without_allowed_network_scope_is_rejected_before_executor_runs`
-  - `secret_read_without_allowed_secret_scope_is_rejected_before_executor_runs`
-  - `net_outbound_requested_scope_must_match_definition_and_allowlist`
-  - `working_directory_child_path_is_allowed`
-  - `unrelated_working_directory_is_rejected`
-  - `string_prefix_sibling_working_directory_is_rejected_before_executor_runs`
-  - `symlink_escape_working_directory_is_rejected_before_executor_runs`
-  - `binary_ref_outside_runtime_artifacts_is_rejected_after_executor_returns`
-  - `artifact_list_with_unsafe_ref_is_rejected_after_executor_returns`
-  - `artifact_list_with_safe_refs_is_returned_after_executor_returns`
-  - `max_output_bytes_resource_limit_truncates_text_reentry`
-- DurabilityRecovery FullSpec evidence: `crates/shacs-core/tests/command_event_effect.rs`, `crates/shacs-core/tests/session_store_replay.rs`
-  - `tool_success_reentry_retires_tool_effect_and_queues_model_with_identity`
-  - `tool_failure_records_outcome_and_aborts_turn`
-  - `tool_cancelled_reentry_records_outcome_and_aborts_turn`
-  - `tool_timeout_retries_with_new_runtool_effect_when_retry_budget_allows`
-  - `late_tool_result_after_parent_abort_is_rejected`
-  - `tool_reentry_without_toolpending_gate_is_rejected`
-  - `resume_after_tool_timeout_retry_restores_tool_retry_state_distinct_from_provider_retry_count`
-- Matrix evidence: `crates/shacs-contracts/src/verification.rs`, `crates/shacs-core/tests/verification_matrix.rs`
-  - Spec004 declares `CoverageLevel::FullSpec` with `CoverageStatus::Verified` evidence for `Integration`, `SafetyRedaction`, and `DurabilityRecovery`.
+- Integration evidence: `crates/shacs-core/tests/runtime.rs`, `crates/shacs-core/tests/runtime_agent.rs`, and `crates/shacs-core/tests/runtime_loop.rs` cover tool-call execution, result-message mapping, concurrent execution boundaries, checkpointed normalized tool results, throttled result handling, and provider/tool progress forwarding.
+- Safety evidence: `crates/shacs-core/tests/tools.rs` covers registry validation, filesystem/exec path restrictions, SSRF allowlist checks, symlink escape rejection, output truncation, and sensitive self-tool path blocking.
+- Durability evidence: `crates/shacs-core/tests/runtime_agent.rs` and `crates/shacs-core/tests/runtime_loop.rs` cover checkpoint persistence during tool execution, runtime checkpoint materialization, and session recovery context boundaries.
 
 ## Open Risks
 

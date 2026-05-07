@@ -52,14 +52,10 @@
 ### 로컬 근거
 
 - `crates/shacs-skills/src/lib.rs`
-- `crates/shacs-core/src/core/context.rs`
-- `crates/shacs-core/src/core/orchestrator.rs`
-- `crates/shacs-core/src/core/observability.rs`
-- `crates/shacs-core/tests/skill_discovery.rs`
-- `crates/shacs-core/tests/context_builder.rs`
-- `crates/shacs-core/tests/command_event_effect.rs`
-- `crates/shacs-core/tests/session_store_replay.rs`
-- `crates/shacs-core/tests/observability.rs`
+- `crates/shacs-core/src/runtime/context.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-cli/src/lib.rs`
 
 ## TDD 계획
 
@@ -98,35 +94,9 @@
 
 ## Verification Evidence
 
-- Unit FullSpec evidence: `crates/shacs-core/tests/skill_discovery.rs`
-  - `discovers_only_skill_md_from_allowed_roots`
-  - `selects_highest_precedence_canonical_skill`
-  - `plugin_provided_skill_has_highest_precedence_and_records_plugin_name`
-  - `marks_lower_precedence_candidates_as_shadowed`
-  - `marks_same_tier_plugin_duplicates_as_conflicted`
-  - `higher_tier_conflict_blocks_lower_tier_canonical_fallback`
-  - `malformed_skill_does_not_block_lower_valid_candidate`
-  - `invalid_directory_skill_name_is_malformed_and_does_not_block_valid_candidate`
-  - `malformed_only_skill_has_no_canonical_entry`
-  - `discovering_and_parsing_skills_does_not_mutate_session_state`
-  - `unclosed_frontmatter_is_malformed`
-  - `invalid_utf8_skill_is_malformed`
-  - `empty_frontmatter_name_is_malformed`
-  - `invalid_frontmatter_name_is_malformed`
-- Integration FullSpec evidence: `crates/shacs-core/tests/context_builder.rs`, `crates/shacs-core/tests/session_store_replay.rs`, `crates/shacs-core/tests/observability.rs`
-  - `builder_sorts_skills_and_tool_schema_deterministically`
-  - `builder_keeps_skill_body_out_of_messages_tool_schema_and_system_context`
-  - `builder_skips_conflicted_and_malformed_selected_skills_without_snapshot_body`
-  - `replay_persists_selected_skill_snapshot_for_same_turn_retry`
-  - `inspect_snapshot_exposes_selected_skills_and_reasons`
-- SafetyRedaction FullSpec evidence: `crates/shacs-core/tests/command_event_effect.rs`
-  - `submit_user_input_emits_events_in_kernel_order`
-  - `orchestrator_populates_skill_and_tool_schema_snapshots`
-  - `orchestrator_auto_selects_skill_from_user_input_and_records_reason`
-  - `skill_content_cannot_change_permission_mode_or_emit_host_effects`
-  - `plan_mode_tool_request_is_denied_before_dispatch`
-- Matrix evidence: `crates/shacs-contracts/src/verification.rs`, `crates/shacs-core/tests/verification_matrix.rs`
-  - Spec005 declares `CoverageLevel::FullSpec` with `CoverageStatus::Verified` evidence for `Unit`, `Integration`, and `SafetyRedaction`.
+- Unit evidence: `crates/shacs-skills/src/lib.rs` inline tests cover bundled skill catalog, sync behavior, precedence/shadowing, malformed/conflicted entries, and symlink rejection.
+- Integration evidence: `crates/shacs-core/tests/runtime_agent.rs` covers runtime context skill injection, extra skill roots, virtual builtins, parity metadata, and checkpointed agent configuration preservation.
+- CLI evidence: `crates/shacs-cli/src/lib.rs` inline tests cover skills list/show command projection and onboard/runtime config integration.
 
 ## Open Risks
 
