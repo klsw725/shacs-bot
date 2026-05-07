@@ -1,15 +1,15 @@
 use serde_json::{json, Map};
 use shacs_channels::{
-    discord_thread_session_key, email_session_key, normalize_websocket_frame,
-    normalize_whatsapp_bridge_message, route_channel_command, slack_thread_session_key,
-    telegram_topic_session_key, websocket_event_from_outbound, whatsapp_auth_frame,
-    whatsapp_outbound_frames, ChannelAdapter, ChannelAllowlist, ChannelCommandAction,
-    ChannelCommandRequest, ChannelDescriptor, ChannelError, ChannelManager, ChannelRegistry,
-    ChannelRetryPolicy, DiscordInbound, EmailInbound, InboundMessage, LiveChannelWorkerKind,
-    OutboundMessage, RecentMessageIds, SlackInbound, TelegramInbound, WebSocketInboundAction,
-    WebSocketServerEvent, WhatsAppBridgeMessage, WhatsAppChannelConfig, WhatsAppGroupPolicy,
-    WhatsAppOutboundFrame, DISCORD_CHANNEL, EMAIL_CHANNEL, SLACK_CHANNEL, TELEGRAM_CHANNEL,
-    WEBSOCKET_CHANNEL, WHATSAPP_CHANNEL,
+    builtin_channel_default_configs, builtin_channel_descriptors, discord_thread_session_key,
+    email_session_key, normalize_websocket_frame, normalize_whatsapp_bridge_message,
+    route_channel_command, slack_thread_session_key, telegram_topic_session_key,
+    websocket_event_from_outbound, whatsapp_auth_frame, whatsapp_outbound_frames, ChannelAdapter,
+    ChannelAllowlist, ChannelCommandAction, ChannelCommandRequest, ChannelDescriptor, ChannelError,
+    ChannelManager, ChannelRegistry, ChannelRetryPolicy, DiscordInbound, EmailInbound,
+    InboundMessage, LiveChannelWorkerKind, OutboundMessage, RecentMessageIds, SlackInbound,
+    TelegramInbound, WebSocketInboundAction, WebSocketServerEvent, WhatsAppBridgeMessage,
+    WhatsAppChannelConfig, WhatsAppGroupPolicy, WhatsAppOutboundFrame, DISCORD_CHANNEL,
+    EMAIL_CHANNEL, SLACK_CHANNEL, TELEGRAM_CHANNEL, WEBSOCKET_CHANNEL, WHATSAPP_CHANNEL,
 };
 use std::cell::RefCell;
 use std::error::Error;
@@ -139,6 +139,26 @@ fn builtin_registry_exposes_selected_channels_and_rejects_unknowns() -> Result<(
 }
 
 #[test]
+fn builtin_channel_default_configs_cover_all_builtin_channels() {
+    let defaults = builtin_channel_default_configs();
+    for descriptor in builtin_channel_descriptors() {
+        assert!(
+            defaults.contains_key(&descriptor.name),
+            "missing default config for {}",
+            descriptor.name
+        );
+    }
+    assert_eq!(defaults[WEBSOCKET_CHANNEL]["enabled"], json!(true));
+    assert_eq!(defaults[TELEGRAM_CHANNEL]["enabled"], json!(false));
+    assert_eq!(defaults[EMAIL_CHANNEL]["consentGranted"], json!(false));
+    assert_eq!(defaults[EMAIL_CHANNEL]["imap"]["security"], json!("tls"));
+    assert_eq!(
+        defaults[WHATSAPP_CHANNEL]["allowlist"]["allowedSenders"],
+        json!([])
+    );
+}
+
+#[test]
 fn builtin_live_worker_descriptors_mark_websocket_ready_and_external_workers_gated() {
     let workers = shacs_channels::builtin_live_worker_descriptors();
     assert!(workers.iter().any(|worker| {
@@ -209,6 +229,42 @@ fn manager_tracks_lifecycle_retries_and_stream_delta_dispatch() -> Result<(), Bo
 }
 
 #[test]
+fn manager_records_dispatch_error_and_clears_after_success() -> Result<(), Box<dyn Error>> {
+    let sends = Rc::new(RefCell::new(Vec::new()));
+    let deltas = Rc::new(RefCell::new(Vec::new()));
+    let starts = Rc::new(RefCell::new(0));
+    let stops = Rc::new(RefCell::new(0));
+    let fail_once = Rc::new(RefCell::new(true));
+    let adapter = RecordingAdapter {
+        name: TELEGRAM_CHANNEL.to_owned(),
+        sends: sends.clone(),
+        deltas,
+        starts,
+        stops,
+        fail_once: fail_once.clone(),
+    };
+    let mut manager =
+        ChannelManager::new().with_retry_policy(ChannelRetryPolicy { max_attempts: 1 });
+    manager.register_adapter(Box::new(adapter), true)?;
+
+    let error = manager
+        .dispatch_outbound(OutboundMessage::new(TELEGRAM_CHANNEL, "chat", "first"))
+        .expect_err("first dispatch should fail");
+    assert!(error.to_string().contains("transient"));
+    let status = manager.status(TELEGRAM_CHANNEL).ok_or("missing status")?;
+    assert!(status
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.contains("transient")));
+
+    manager.dispatch_outbound(OutboundMessage::new(TELEGRAM_CHANNEL, "chat", "second"))?;
+    let status = manager.status(TELEGRAM_CHANNEL).ok_or("missing status")?;
+    assert!(status.last_error.is_none());
+    assert_eq!(sends.borrow().len(), 1);
+    Ok(())
+}
+
+#[test]
 fn websocket_frames_preserve_legacy_envelope_media_and_streaming_shapes(
 ) -> Result<(), Box<dyn Error>> {
     let legacy = normalize_websocket_frame(json!("hello"), "client-1", "chat-a")?;
@@ -247,6 +303,32 @@ fn websocket_frames_preserve_legacy_envelope_media_and_streaming_shapes(
     };
     assert_eq!(inbound.media, vec!["data:image/png;base64,AA=="]);
     assert_eq!(inbound.metadata["media_names"], json!(["a.png"]));
+
+    let malformed = normalize_websocket_frame(
+        json!({
+            "type": "message",
+            "text": "bad media",
+            "media": [{ "name": "missing-data-url.png" }]
+        }),
+        "client-1",
+        "chat-a",
+    )
+    .expect_err("media item without data_url should fail");
+    assert!(malformed.to_string().contains("media item needs data_url"));
+
+    let malformed = normalize_websocket_frame(
+        json!({
+            "type": "message",
+            "text": "bad media",
+            "media": [false]
+        }),
+        "client-1",
+        "chat-a",
+    )
+    .expect_err("non-string media item should fail");
+    assert!(malformed
+        .to_string()
+        .contains("media item must be a string or object"));
 
     let mut metadata = Map::new();
     metadata.insert("_stream_delta".to_owned(), json!(true));

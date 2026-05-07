@@ -1,6 +1,6 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use shacs_command::{build_help_text, normalize_channel_command};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
@@ -349,6 +349,92 @@ pub fn builtin_channel_descriptors() -> Vec<ChannelDescriptor> {
     ]
 }
 
+pub fn builtin_channel_default_configs() -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            WEBSOCKET_CHANNEL.to_owned(),
+            json!({
+                "enabled": true,
+                "host": "127.0.0.1",
+                "port": 8765,
+                "path": "/"
+            }),
+        ),
+        (
+            TELEGRAM_CHANNEL.to_owned(),
+            json!({
+                "enabled": false,
+                "token": "",
+                "pollTimeoutSeconds": 30,
+                "pollLimit": 20
+            }),
+        ),
+        (
+            DISCORD_CHANNEL.to_owned(),
+            json!({
+                "enabled": false,
+                "token": "",
+                "allowFrom": [],
+                "allowChannels": [],
+                "groupPolicy": "mention",
+                "streaming": true
+            }),
+        ),
+        (
+            SLACK_CHANNEL.to_owned(),
+            json!({
+                "enabled": false,
+                "appToken": "",
+                "botToken": "",
+                "channelIds": [],
+                "allowFrom": []
+            }),
+        ),
+        (
+            EMAIL_CHANNEL.to_owned(),
+            json!({
+                "enabled": false,
+                "consentGranted": false,
+                "allowFrom": [],
+                "verifySpf": true,
+                "verifyDkim": true,
+                "smtp": {
+                    "host": "",
+                    "port": 587,
+                    "from": "",
+                    "username": "",
+                    "password": "",
+                    "security": "starttls",
+                    "timeoutSeconds": 30
+                },
+                "imap": {
+                    "host": "",
+                    "port": 993,
+                    "username": "",
+                    "password": "",
+                    "mailbox": "INBOX",
+                    "markSeen": true,
+                    "pollIntervalSeconds": 30,
+                    "timeoutSeconds": 30,
+                    "security": "tls"
+                }
+            }),
+        ),
+        (
+            WHATSAPP_CHANNEL.to_owned(),
+            json!({
+                "enabled": false,
+                "bridgeUrl": "",
+                "bridgeToken": "",
+                "groupPolicy": "open",
+                "allowlist": {
+                    "allowedSenders": []
+                }
+            }),
+        ),
+    ])
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveChannelWorkerKind {
@@ -420,7 +506,7 @@ pub fn builtin_live_worker_descriptors() -> Vec<LiveChannelWorkerDescriptor> {
         LiveChannelWorkerDescriptor::new(
             DISCORD_CHANNEL,
             LiveChannelWorkerKind::DiscordGateway,
-            "Discord REST polling worker",
+            "Discord Gateway worker",
         )
         .ready_for_runtime(true),
         LiveChannelWorkerDescriptor::new(
@@ -444,7 +530,7 @@ pub fn builtin_live_worker_descriptors() -> Vec<LiveChannelWorkerDescriptor> {
         LiveChannelWorkerDescriptor::new(
             SLACK_CHANNEL,
             LiveChannelWorkerKind::SlackSocketMode,
-            "Slack REST polling worker",
+            "Slack Socket Mode worker",
         )
         .ready_for_runtime(true),
         LiveChannelWorkerDescriptor::new(
@@ -635,6 +721,9 @@ impl ChannelManager {
         if let Some(stream_id) = stream_id {
             metadata.insert("stream_id".to_owned(), Value::String(stream_id));
         }
+        if let Some(reply_to) = message.reply_to.as_ref().filter(|value| !value.is_empty()) {
+            metadata.insert("reply_to".to_owned(), Value::String(reply_to.clone()));
+        }
         self.adapters
             .get(&message.channel)
             .ok_or_else(|| ChannelError::UnknownChannel(message.channel.clone()))?
@@ -798,7 +887,7 @@ fn normalize_websocket_object(
                 take_string(object, "chat_id").unwrap_or_else(|| default_chat_id.to_owned());
             let content = take_first_string(object, &["content", "text", "message"])
                 .ok_or_else(|| ChannelError::Protocol("message frame needs content".to_owned()))?;
-            let media = parse_websocket_media(object.remove("media"));
+            let media = parse_websocket_media(object.remove("media"))?;
             Ok(WebSocketInboundAction::Message(websocket_message(
                 client_id, &chat_id, content, media,
             )))
@@ -833,26 +922,48 @@ fn websocket_message(
     message
 }
 
-fn parse_websocket_media(value: Option<Value>) -> Vec<WebSocketInboundMedia> {
-    let Some(Value::Array(items)) = value else {
-        return Vec::new();
+fn parse_websocket_media(value: Option<Value>) -> Result<Vec<WebSocketInboundMedia>, ChannelError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
     };
-    items
-        .into_iter()
-        .filter_map(|item| match item {
+    let Value::Array(items) = value else {
+        if value.is_null() {
+            return Ok(Vec::new());
+        }
+        return Err(ChannelError::Protocol(
+            "websocket media must be an array".to_owned(),
+        ));
+    };
+    let mut media = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
             Value::Object(mut object) => {
-                take_string(&mut object, "data_url").map(|data_url| WebSocketInboundMedia {
-                    data_url,
-                    name: take_string(&mut object, "name"),
-                })
+                let data_url = take_string(&mut object, "data_url").ok_or_else(|| {
+                    ChannelError::Protocol("websocket media item needs data_url".to_owned())
+                })?;
+                let name = match object.remove("name") {
+                    Some(Value::String(name)) => Some(name),
+                    Some(Value::Null) | None => None,
+                    Some(_) => {
+                        return Err(ChannelError::Protocol(
+                            "websocket media item name must be a string".to_owned(),
+                        ))
+                    }
+                };
+                media.push(WebSocketInboundMedia { data_url, name });
             }
-            Value::String(data_url) => Some(WebSocketInboundMedia {
+            Value::String(data_url) => media.push(WebSocketInboundMedia {
                 data_url,
                 name: None,
             }),
-            _ => None,
-        })
-        .collect()
+            _ => {
+                return Err(ChannelError::Protocol(
+                    "websocket media item must be a string or object".to_owned(),
+                ))
+            }
+        }
+    }
+    Ok(media)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1432,4 +1543,71 @@ pub fn route_channel_command(request: ChannelCommandRequest) -> ChannelCommandAc
 
 fn now_iso() -> String {
     Local::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn whatsapp_websocket_frames_serialize_with_bridge_types() -> Result<(), String> {
+        let auth = whatsapp_auth_frame("bridge-token");
+        assert_eq!(
+            serde_json::to_value(auth).map_err(|error| error.to_string())?,
+            json!({"type": "auth", "token": "bridge-token"})
+        );
+
+        let mut outbound = OutboundMessage::new(WHATSAPP_CHANNEL, "15551234567", "hello");
+        outbound.media = vec!["/tmp/photo.jpg".to_owned()];
+        let frames = whatsapp_outbound_frames(outbound);
+        assert_eq!(
+            serde_json::to_value(&frames[0]).map_err(|error| error.to_string())?,
+            json!({"type": "send", "to": "15551234567", "text": "hello"})
+        );
+        assert_eq!(
+            serde_json::to_value(&frames[1]).map_err(|error| error.to_string())?,
+            json!({
+                "type": "send_media",
+                "to": "15551234567",
+                "filePath": "/tmp/photo.jpg",
+                "mimetype": "image/jpeg",
+                "fileName": "photo.jpg"
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn whatsapp_bridge_message_normalizes_websocket_payload() -> Result<(), String> {
+        let config = WhatsAppChannelConfig {
+            bridge_url: "ws://127.0.0.1:9001".to_owned(),
+            bridge_token: None,
+            allowlist: ChannelAllowlist::new(vec!["15551234567".to_owned()]),
+            group_policy: WhatsAppGroupPolicy::Open,
+        };
+        let message = WhatsAppBridgeMessage {
+            kind: "message".to_owned(),
+            pn: Some("15551234567@s.whatsapp.net".to_owned()),
+            sender: Some("abc@lid.whatsapp.net".to_owned()),
+            content: Some("hello".to_owned()),
+            id: Some("msg-1".to_owned()),
+            is_group: false,
+            was_mentioned: false,
+            media: vec!["/tmp/photo.jpg".to_owned()],
+            timestamp: Some("1710000000".to_owned()),
+        };
+        let inbound =
+            normalize_whatsapp_bridge_message(message, &config, &mut RecentMessageIds::new(8))
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "message should pass filters".to_owned())?;
+
+        assert_eq!(inbound.channel, WHATSAPP_CHANNEL);
+        assert_eq!(inbound.sender_id, "15551234567");
+        assert_eq!(inbound.chat_id, "abc@lid.whatsapp.net");
+        assert!(inbound.content.contains("hello"));
+        assert!(inbound.content.contains("[image: /tmp/photo.jpg]"));
+        assert_eq!(inbound.metadata["message_id"], json!("msg-1"));
+        Ok(())
+    }
 }
