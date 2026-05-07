@@ -13,7 +13,7 @@
 - 기본 성격은 self-hosted / personal-use assistant runtime이다.
 - 공식 인터페이스 표면은 CLI, TUI, local API다.
 - provider/auth family는 **OpenAI-compatible**, **Anthropic auth**, **Codex auth(OpenAI auth style)** 세 종류만 지원 대상으로 본다.
-- 외부 채널은 **Slack**, **Discord**, **Telegram**, **Email** 네 가지면 충분하다고 본다.
+- 외부 채널은 **Slack**, **Discord**, **Telegram**, **Email**, **WhatsApp bridge** 다섯 가지면 충분하다고 본다.
 
 이 범위는 특히 아래 문서에서 owner 또는 보조 경계로 다룬다.
 
