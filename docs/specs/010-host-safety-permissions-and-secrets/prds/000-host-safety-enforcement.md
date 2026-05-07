@@ -63,15 +63,12 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/host_safety.rs`
-- `crates/shacs-core/src/core/orchestrator.rs`
-- `crates/shacs-core/src/core/observability.rs`
-- `crates/shacs-core/tests/host_safety.rs`
-- `crates/shacs-core/tests/tool_runtime.rs`
-- `crates/shacs-core/tests/command_event_effect.rs`
-- `crates/shacs-core/tests/observability.rs`
-- `crates/shacs-runtime-adapters/tests/filesystem_tool_executor.rs`
-- `crates/shacs-runtime-adapters/tests/proc_exec_tool_executor.rs`
+- `crates/shacs-security/src/lib.rs`
+- `crates/shacs-core/src/tools/`
+- `crates/shacs-core/src/runtime/tool_execution.rs`
+- `crates/shacs-core/tests/tools.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-cli/src/lib.rs`
 
 ## TDD 계획
 

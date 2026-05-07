@@ -56,11 +56,10 @@
 
 ## 현재 구현 상태
 
-- `crates/shacs-core/src/core/subagent.rs`는 child identity, lifecycle, spawn envelope, result envelope, `SubagentReentry`를 정의한다.
-- `crates/shacs-core/tests/subagent_runtime.rs`는 spawn envelope/budget, active child ceiling, merge decision table, completed/failed/timed_out/cancelled result, duplicate, inactive-effect stale result, parent-close stale rejection, child identity mismatch rejection을 검증한다.
-- `crates/shacs-runtime-adapters/src/subagent.rs`는 `SubagentAdapter`와 `SubagentRuntime`을 제공하며, `SpawnSubagentEffect` 식별자를 보존해 terminal `SubagentReentry`로 정규화한다.
-- `crates/shacs-surface/src/session_queries.rs`의 runtime effect executor는 `Effect::SpawnSubagent`를 `ReentrySource::Subagent` command로 변환할 수 있다.
-- merge 판단은 `classify_subagent_merge`가 terminal reentry shape을 summary-only accept, terminal fact, parent abort decision으로 분류하고, `MainOrchestrator`가 synthetic reentry 경로에서 이를 상태 전이와 merge/abort 처리로 적용한다.
+- `crates/shacs-core/src/runtime/subagent.rs`는 child identity, lifecycle, spawn envelope, result envelope를 정의한다.
+- `crates/shacs-core/tests/runtime_loop.rs`는 spawn envelope, active child ceiling, completed result, stale result, parent/child identity mismatch, cancellation cleanup을 검증한다.
+- `crates/shacs-core/src/tools/spawn.rs`는 spawn tool이 runtime subagent 경계로 위임되는 경로를 제공한다.
+- parent runtime loop는 synthetic inbound message로 child result를 병합하거나 stale result를 폐기한다.
 
 ## 구현 웨이브
 
@@ -90,15 +89,11 @@
 
 ## Verification Evidence
 
-- 단위 테스트: `crates/shacs-core/tests/subagent_runtime.rs`의 `subagent_merge_decision_table_matches_terminal_reentry_shape`가 merge decision table을 고정한다.
-- 단위 테스트: `spawn_summary_subagent_emits_effect_and_tracks_child`가 spawn envelope identity, inherited policy/safety, inherited budget, timeout, pending effect를 검증한다.
-- 단위 테스트: `subagent_reentry_with_child_identity_mismatches_is_rejected`와 `old_child_result_with_new_fingerprint_is_rejected_after_effect_retired`가 identity mismatch와 inactive-effect stale classification을 검증한다.
-- 통합 테스트: `crates/shacs-core/tests/subagent_runtime.rs`가 spawn, active child ceiling, completed summary merge, failed/timed_out/cancelled child result의 `spawned -> awaiting_merge -> terminal` lifecycle 기록, parent abort 전 failure fact 보존, duplicate child result rejection, parent closed stale rejection을 검증한다.
-- adapter 테스트: `crates/shacs-runtime-adapters/tests/subagent_runtime.rs`가 `summary_subagent_runtime_normalizes_spawn_effect_to_subagent_completed_reentry`, `subagent_runtime_preserves_terminal_timeout_and_cancelled_identity`, `subagent_runtime_coerces_non_terminal_adapter_status_to_failed_reentry`로 envelope identity 보존과 terminal reentry 정규화를 검증한다.
-- surface 테스트: `runtime_effect_executor_converts_spawn_subagent_effect_to_subagent_reentry_command`가 `Effect::SpawnSubagent`가 무시되지 않고 synthetic subagent reentry command로 변환되는 경계를 검증한다.
-- 내구성 테스트: `crates/shacs-core/tests/session_store_replay.rs`의 `resumed_open_child_result_is_rejected_as_recovery_residual`, `replayed_terminal_close_discards_temporary_turn_artifacts`, `replayed_aborted_close_discards_temporary_turn_artifacts`가 restart/replay 뒤 child result가 부모 턴을 되살리거나 temporary artifact를 유지하지 않음을 검증한다.
+- 단위/통합 테스트: `crates/shacs-core/tests/runtime_loop.rs`의 `subagent_result_with_wrong_child_id_is_stale`, `subagent_result_with_matching_parent_and_child_accepts_summary`, `subagent_spawn_registers_active_task_and_cancels_by_session`, `subagent_finish_publishes_synthetic_inbound_and_closes_active_task`, `subagent_stale_result_does_not_publish_or_close_active_child`, `subagent_stale_inbound_is_not_persisted_as_session_content`, `subagent_parallelism_limit_rejects_excess_children`, `spawn_tool_can_delegate_to_subagent_runtime`가 subagent runtime 경계를 검증한다.
+- 도구 테스트: `crates/shacs-core/tests/tools.rs`의 spawn tool tests가 context propagation과 spawner delegation을 검증한다.
+- 내구성 테스트: `crates/shacs-core/tests/runtime_loop.rs`와 `runtime_agent.rs`의 checkpoint/session persistence tests가 child result가 parent session state를 되살리지 않는 runtime boundary를 검증한다.
 - 안전성 테스트: inherited safety and budget do not widen from parent
-- Spec016 matrix 증거: `crates/shacs-contracts/src/verification.rs`가 Spec011 `Unit`, `Integration`, `DurabilityRecovery`를 `CoverageLevel::FullSpec` / `CoverageStatus::Verified`로 선언하고, `crates/shacs-core/tests/verification_matrix.rs`의 `spec011_full_spec_evidence_covers_required_families`가 이를 검증한다.
+- 현 slice matrix는 별도 contracts crate가 아니라 실제 runtime tests와 문서 locator를 기준으로 유지한다.
 
 ## Open Risks
 
