@@ -41,8 +41,8 @@
 
 ### 이미 반영된 것
 
-- `SessionState`, `TurnState`, `TurnPhase`, 열린 턴 1개 불변식이 `crates/shacs-core/src/core/state.rs`에 구현돼 있다.
-- 열린 턴 생성, 금지된 phase 점프 차단, `completed`/`aborted` 진입 후 열린 턴 포인터 정리가 `crates/shacs-core/src/core/orchestrator.rs`에 구현돼 있다.
+- session history와 active turn runtime state는 `crates/shacs-session/src/lib.rs` 및 `crates/shacs-core/src/runtime/agent_loop.rs`/`runner.rs` 경계에 구현돼 있다.
+- 열린 턴 직렬화, duplicate active session 차단, terminal 처리 후 runtime metadata 정리가 runtime loop 경로에 구현돼 있다.
 - 닫힌 턴 late result 방어와 resume 이후 recovery abort 경로가 테스트까지 포함해 구현돼 있다.
 - terminal 진입 시 pending effect, pending approval, pending tool effect, tool output, child task, accepted subagent summary, seen reentry key 같은 turn-local 임시 산출물을 정리하고 terminal payload만 반환하는 경계가 테스트로 고정돼 있다.
 
@@ -52,9 +52,11 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/state.rs`
-- `crates/shacs-core/src/core/orchestrator.rs`
-- `crates/shacs-core/tests/session_kernel.rs`
+- `crates/shacs-session/src/lib.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
 
 ## TDD 계획
 
@@ -98,7 +100,7 @@
 - terminal state 이후 late result 무시 테스트
 - recovery 경로에서 열린 턴 중단 처리 테스트
 - terminal state 진입 시 turn-local temporary artifact discard 테스트
-- full-spec matrix evidence: `crates/shacs-contracts/src/verification.rs`에서 Spec001의 Unit/Integration/DurabilityRecovery family가 `CoverageLevel::FullSpec` verified evidence로 승격된다.
+- 현 slice evidence: `crates/shacs-core/tests/runtime_agent.rs`와 `crates/shacs-core/tests/runtime_loop.rs`가 session persistence, duplicate active turn rejection, checkpoint/terminal metadata cleanup을 검증한다.
 - owning spec의 phase 순서와 구현 타입 매핑 표
 
 ## Open Risks

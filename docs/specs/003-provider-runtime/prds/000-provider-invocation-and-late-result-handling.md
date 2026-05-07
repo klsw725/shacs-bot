@@ -42,8 +42,8 @@
 
 ### 이미 반영된 것
 
-- `InvokeModel` effect envelope, `ProviderAdapter`, `ProviderInvocationOutcome`, `ProviderReentry`가 `crates/shacs-core/src/core/provider.rs`, `message.rs`에 구현돼 있다.
-- provider 성공을 assistant 후보와 tool 요청 후보로 분기하고, 실패/timeout/cancelled를 typed provider reentry로 다루는 경로가 `crates/shacs-core/src/core/orchestrator.rs`에 구현돼 있다.
+- provider client/adapter 타입은 `crates/shacs-providers/src/`에 있고, runtime provider invocation은 `crates/shacs-core/src/runtime/runner.rs`와 `agent_loop.rs` 경계에서 처리된다.
+- provider 성공을 assistant output과 tool call 후보로 분기하고, 실패/timeout/cancelled를 runtime progress/error 경로로 다루는 처리가 구현돼 있다.
 - provider 성공은 유효한 outcome을 반드시 가져야 하고, retry 후 old effect 결과는 late result로 폐기되는 테스트가 있다.
 - OpenAI-compatible 및 Codex auth adapter는 SSE-style `data:` streaming chunk를 `ProviderStreamBuffer`에만 모은 뒤 `ProviderCallOutput::Final` outcome으로 정규화하며, `delta.tool_calls[]` fragment를 `index` 기준으로 병합해 단일 tool 후보로 만든다.
 - Anthropic auth adapter는 final JSON 응답과 SSE `data:` streaming 응답을 모두 공통 provider outcome으로 정규화하며, text delta와 `tool_use`/`input_json_delta` fragment를 최종 후보 결과로만 승격한다.
@@ -51,13 +51,13 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/provider.rs`
-- `crates/shacs-core/src/core/message.rs`
-- `crates/shacs-core/src/core/orchestrator.rs`
-- `crates/shacs-core/tests/command_event_effect.rs`
-- `crates/shacs-core/tests/provider_adapter.rs`
-- `crates/shacs-runtime-adapters/src/provider.rs`
-- `crates/shacs-surface/src/session_queries.rs`
+- `crates/shacs-providers/src/provider.rs`
+- `crates/shacs-providers/src/types.rs`
+- `crates/shacs-providers/src/clients/`
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-providers/tests/providers.rs`
 
 ## TDD 계획
 

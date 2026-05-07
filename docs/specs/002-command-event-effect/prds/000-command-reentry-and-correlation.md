@@ -41,8 +41,8 @@
 
 ### 이미 반영된 것
 
-- `Command`, `Event`, `Effect`, 공통 ID 타입, `ReentryCommand` envelope가 `crates/shacs-core/src/core/message.rs`, `ids.rs`에 구현돼 있다.
-- 필수 식별자 검증, session/turn/correlation/effect 검증, duplicate/closed-turn/unknown-effect 거절이 `crates/shacs-core/src/core/orchestrator.rs`에 구현돼 있다.
+- runtime message, provider/tool progress, session command 경계가 `crates/shacs-core/src/runtime/agent_loop.rs`, `runner.rs`, `loop_control.rs`에 구현돼 있다.
+- session/turn/effect 성격의 재진입과 duplicate active turn 거절은 runtime loop와 bus 경계에서 검증된다.
 - synthetic/external 재진입이 같은 검증 경로를 타는 테스트가 있다.
 - provider/tool/subagent/service 결과는 직접 state patch가 아니라 typed reentry command 또는 service command envelope로만 오케스트레이터에 되돌아온다.
 - provider/tool/subagent effect는 `causation_id`, `correlation_id`, `effect_id`를 보존하고, effect queue/retire event와 연결된다.
@@ -55,10 +55,11 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/ids.rs`
-- `crates/shacs-core/src/core/message.rs`
-- `crates/shacs-core/src/core/orchestrator.rs`
-- `crates/shacs-core/tests/command_event_effect.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/src/runtime/loop_control.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
 
 ## TDD 계획
 
@@ -96,30 +97,9 @@
 
 ## Verification Evidence
 
-- Unit FullSpec evidence: `crates/shacs-core/tests/session_store_replay.rs`
-  - `reducer_rejects_invalid_event_order_without_mutating_state`
-  - `append_assigns_monotonic_sequence_per_session`
-  - `duplicate_reentry_after_resume_is_rejected`
-  - `resume_after_provider_retry_restores_retry_state`
-  - `resume_after_tool_timeout_retry_restores_tool_retry_state_distinct_from_provider_retry_count`
-- Integration FullSpec evidence: `crates/shacs-core/tests/command_event_effect.rs`, `crates/shacs-core/tests/subagent_runtime.rs`
-  - `submit_user_input_emits_events_and_model_effect`
-  - `submit_user_input_emits_events_in_kernel_order`
-  - `emitted_effects_preserve_causation_and_correlation_identity`
-  - `provider_tool_request_emits_reentry_then_retire_then_dispatch_order`
-  - `tool_success_reentry_retires_tool_effect_and_queues_model_with_identity`
-  - `provider_transient_failure_below_retry_ceiling_retries_with_new_effect`
-  - `synthetic_and_external_reentry_share_validation_path`
-  - `duplicate_reentry_is_idempotent`
-  - `old_provider_effect_after_retry_is_discarded_as_late_result`
-  - `valid_old_provider_tool_request_after_retry_is_rejected_without_running_tool`
-  - `spawn_summary_subagent_emits_effect_and_tracks_child`
-- Static FullSpec evidence: `crates/shacs-core/tests/command_event_effect_static.rs`
-  - `command_event_effect_enums_are_exhaustive_static_boundaries`
-  - `reentry_envelope_key_and_required_identifiers_are_static`
-  - `effect_boundary_requires_causation_and_correlation_for_every_variant`
-- Matrix evidence: `crates/shacs-contracts/src/verification.rs`, `crates/shacs-core/tests/verification_matrix.rs`
-  - Spec002 declares `CoverageLevel::FullSpec` with `CoverageStatus::Verified` evidence for `Unit`, `Integration`, and `Static`.
+- Unit/integration evidence: `crates/shacs-core/tests/runtime_agent.rs` covers runtime bus serialization, session persistence, provider retry callbacks, tool-loop checkpointing, and callback panic isolation.
+- Integration evidence: `crates/shacs-core/tests/runtime_loop.rs` covers duplicate active session/turn rejection, priority command bypass, provider/tool progress forwarding, channel context preservation, and subagent synthetic inbound handling.
+- Static boundary evidence is maintained by the typed runtime modules in `crates/shacs-core/src/runtime/` and the compile-checked integration tests above.
 
 ## Open Risks
 
