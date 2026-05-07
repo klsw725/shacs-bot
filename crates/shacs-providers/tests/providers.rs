@@ -181,6 +181,20 @@ fn provider_client_factory_builds_codex_client() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn provider_client_factory_builds_github_copilot_client() -> Result<(), Box<dyn Error>> {
+    let spec = find_by_name("github_copilot").ok_or("github_copilot spec missing")?;
+    let client = provider_client_from_config(
+        ProviderConfig {
+            api_key: Some("copilot-token".to_owned()),
+            ..ProviderConfig::default()
+        },
+        spec,
+    )?;
+    drop(client);
+    Ok(())
+}
+
+#[test]
 fn provider_client_factory_builds_azure_openai_client() -> Result<(), Box<dyn Error>> {
     let spec = find_by_name("azure_openai").ok_or("azure_openai spec missing")?;
     let config = ProviderConfig {
@@ -279,10 +293,29 @@ fn provider_client_factory_exempts_oauth_openai_compatible_providers() -> Result
 
 #[test]
 fn provider_client_factory_rejects_unimplemented_backends() -> Result<(), Box<dyn Error>> {
-    let provider = "github_copilot";
-    let spec = find_by_name(provider).ok_or("spec missing")?;
-    let error = match provider_client_from_config(ProviderConfig::default(), spec) {
-        Ok(_) => return Err(format!("{provider} backend should fail").into()),
+    let spec = ProviderSpec {
+        name: "unsupported_backend_test",
+        keywords: &[],
+        env_key: None,
+        display_name: "Unsupported Backend Test",
+        backend: "unsupported_backend",
+        env_extras: &[],
+        is_gateway: false,
+        is_local: false,
+        detect_by_key_prefix: None,
+        detect_by_base_keyword: None,
+        default_api_base: None,
+        strip_model_prefix: false,
+        supports_max_completion_tokens: false,
+        model_overrides: &[],
+        is_oauth: false,
+        is_direct: false,
+        supports_prompt_caching: false,
+        thinking_style: None,
+        reasoning_as_content: false,
+    };
+    let error = match provider_client_from_config(ProviderConfig::default(), &spec) {
+        Ok(_) => return Err("unsupported backend should fail".into()),
         Err(error) => error,
     };
     let expected = format!(

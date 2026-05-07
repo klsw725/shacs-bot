@@ -355,7 +355,7 @@ const PROVIDERS: &[ProviderSpec] = &[
             &["github_copilot", "copilot"],
             None,
             "Github Copilot",
-            "github_copilot",
+            "openai_compat",
         )
     },
     ProviderSpec {
