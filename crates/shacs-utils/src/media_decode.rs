@@ -11,6 +11,7 @@ pub const MAX_FILE_SIZE: usize = DEFAULT_MAX_BYTES;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaDecodeError {
     Malformed,
+    UnsupportedType { mime_type: String },
     FileSizeExceeded { limit: usize },
     Io(String),
 }
@@ -23,19 +24,27 @@ pub fn save_base64_data_url(
     let regex = Regex::new(r"(?s)^data:([^;]+);base64,(.+)$")
         .map_err(|error| MediaDecodeError::Io(error.to_string()))?;
     let Some(captures) = regex.captures(data_url) else {
+        if data_url.starts_with("data:") {
+            return Err(MediaDecodeError::Malformed);
+        }
         return Ok(None);
     };
     let mime_type = captures
         .get(1)
         .map(|value| value.as_str())
         .unwrap_or_default();
+    if !is_supported_data_url_mime_type(mime_type) {
+        return Err(MediaDecodeError::UnsupportedType {
+            mime_type: mime_type.to_owned(),
+        });
+    }
     let payload = captures
         .get(2)
         .map(|value| value.as_str())
         .unwrap_or_default();
     let raw = match STANDARD.decode(payload) {
         Ok(raw) => raw,
-        Err(_) => return Ok(None),
+        Err(_) => return Err(MediaDecodeError::Malformed),
     };
     let limit = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
     if raw.len() > limit {
@@ -53,6 +62,20 @@ pub fn save_base64_data_url(
     Ok(Some(destination.to_string_lossy().to_string()))
 }
 
+fn is_supported_data_url_mime_type(mime_type: &str) -> bool {
+    matches!(
+        mime_type.to_ascii_lowercase().as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "text/plain"
+            | "application/json"
+            | "application/pdf"
+    )
+}
+
 fn guess_extension(mime_type: &str) -> &'static str {
     match mime_type.to_ascii_lowercase().as_str() {
         "image/png" => ".png",
@@ -61,6 +84,7 @@ fn guess_extension(mime_type: &str) -> &'static str {
         "image/webp" => ".webp",
         "text/plain" => ".txt",
         "application/json" => ".json",
+        "application/pdf" => ".pdf",
         _ => ".bin",
     }
 }
@@ -88,7 +112,13 @@ mod tests {
         assert_eq!(save_base64_data_url("nope", &dir, None), Ok(None));
         assert_eq!(
             save_base64_data_url("data:image/png;base64,%%%", &dir, None),
-            Ok(None)
+            Err(MediaDecodeError::Malformed)
+        );
+        assert_eq!(
+            save_base64_data_url("data:application/x-sh;base64,aGk=", &dir, None),
+            Err(MediaDecodeError::UnsupportedType {
+                mime_type: "application/x-sh".to_owned()
+            })
         );
         assert_eq!(
             save_base64_data_url("data:image/png;base64,aGk=", &dir, Some(1)),
