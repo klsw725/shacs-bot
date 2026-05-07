@@ -43,7 +43,7 @@
 
 ### 이미 반영된 것
 
-- recovery gate, retry/abort/late-result 판단, retry ceiling, resumed session 정리 정책이 `crates/shacs-core/src/core/policy.rs`, `orchestrator.rs`에 구현돼 있다.
+- recovery gate, retry/abort/late-result 판단, retry ceiling, resumed session 정리 정책이 `crates/shacs-core/src/runtime/agent_loop.rs`, `runner.rs`, `loop_control.rs`에 구현돼 있다.
 - provider retry, recovery 중 input/reentry 차단, duplicate reentry after resume, pending effect replay 복원이 테스트로 증명돼 있다.
 - tool reentry acceptance도 현재는 오케스트레이터 policy gate 아래에서 `ToolPending + RunTool` 조건으로 제한된다.
 - Spec016 matrix에서 Unit, Integration, SafetyRedaction이 FullSpec verified evidence로 승격돼 있다.
@@ -56,10 +56,11 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/policy.rs`
-- `crates/shacs-core/src/core/orchestrator.rs`
-- `crates/shacs-core/tests/command_event_effect.rs`
-- `crates/shacs-core/tests/session_store_replay.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/src/runtime/loop_control.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
 
 ## TDD 계획
 

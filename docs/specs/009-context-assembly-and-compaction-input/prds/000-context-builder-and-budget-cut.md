@@ -65,12 +65,10 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/context.rs`
-- `crates/shacs-core/src/core/orchestrator.rs`
-- `crates/shacs-core/tests/context_builder.rs`
-- `crates/shacs-core/tests/command_event_effect.rs`
-- `crates/shacs-core/tests/session_store_files.rs`
-- `crates/shacs-core/tests/session_store_replay.rs`
+- `crates/shacs-core/src/runtime/context.rs`
+- `crates/shacs-core/src/runtime/agent_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
 
 ## TDD 계획
 

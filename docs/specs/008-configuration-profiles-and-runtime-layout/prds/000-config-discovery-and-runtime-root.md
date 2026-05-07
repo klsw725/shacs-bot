@@ -61,11 +61,10 @@
 
 ### 로컬 근거
 
-- `crates/shacs-core/src/core/config.rs`
-- `crates/shacs-core/src/core/lifecycle.rs`
-- `crates/shacs-core/tests/config_discovery.rs`
-- `crates/shacs-cli/tests/provider_auth_cli.rs`
-- `crates/shacs-core/tests/session_store_files.rs`
+- `crates/shacs-config/src/lib.rs`
+- `crates/shacs-cli/src/lib.rs` inline provider auth/runtime config tests
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
 
 ## TDD 계획
 
