@@ -9,9 +9,10 @@ use shacs_api::{
     ChatCompletionAdapter, ChatCompletionInvocation, ChatCompletionRequest,
 };
 use shacs_channels::{
-    builtin_live_worker_descriptors, normalize_websocket_frame, normalize_whatsapp_bridge_message,
-    websocket_event_from_outbound, whatsapp_outbound_frames, ChannelCapabilities,
-    ChannelDescriptor, ChannelRegistry, DiscordInbound, EmailInbound, LiveChannelWorkerDescriptor,
+    builtin_channel_default_configs, builtin_live_worker_descriptors, normalize_websocket_frame,
+    normalize_whatsapp_bridge_message, websocket_event_from_outbound, whatsapp_outbound_frames,
+    ChannelAdapter, ChannelCapabilities, ChannelDescriptor, ChannelError, ChannelManager,
+    ChannelRegistry, ChannelRetryPolicy, DiscordInbound, EmailInbound, LiveChannelWorkerDescriptor,
     LiveChannelWorkerKind, OutboundMessage, RecentMessageIds, SlackInbound, TelegramInbound,
     WebSocketInboundAction, WebSocketServerEvent, WhatsAppBridgeMessage, WhatsAppChannelConfig,
     WhatsAppGroupPolicy, WhatsAppOutboundFrame, DISCORD_CHANNEL, EMAIL_CHANNEL, SLACK_CHANNEL,
@@ -19,14 +20,18 @@ use shacs_channels::{
 };
 use shacs_config::{
     config_context, default_config_path, ensure_runtime_dirs, load_auth_store,
-    load_config_with_env, save_auth_store_to_path, save_config_to_path, ApiConfig, ConfigBundle,
-    ConfigError, EnvSource, LoadOptions, ProcessEnv, ProviderAuth, ProviderConfig,
+    load_config_with_env, resolve_config_env_refs, save_auth_store_to_path, save_config_to_path,
+    ApiConfig, ConfigBundle, ConfigError, EnvSource, LoadOptions, ProcessEnv, ProviderAuth,
+    ProviderConfig,
 };
 use shacs_core::runtime::{
-    find_legal_message_start, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, ContextBuilder,
-    DreamLifecycle, InboundMessage, McpLifecycle, MessageBus, RuntimeCapabilityReport,
-    RuntimeCapabilityStatus, Session, SessionHistoryOptions, SessionManager,
-    SubagentExecutionConfig, SubagentRuntime,
+    find_legal_message_start, AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig,
+    AgentLoopTurnResult, ContextBuilder, DreamLifecycle, HeartbeatError, HeartbeatNotifier,
+    HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker,
+    InboundMessage, McpLifecycle, MessageBus, ProviderNotificationEvaluator,
+    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, Session,
+    SessionHistoryOptions, SessionManager, SessionTurnLock, StreamDeltaCoalescer,
+    SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolStatus, HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool,
@@ -36,7 +41,8 @@ use shacs_core::tools::{
 };
 use shacs_providers::{
     chat_with_retry, prepare_provider_request, resolve_provider_client, AgentDefaults, LlmResponse,
-    ProviderClient, ProviderError, ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
+    ProviderClient, ProviderError, ProviderEvent, ProviderRegistry, ProviderRetryMode,
+    ResolvedProviderClient,
 };
 use shacs_skills::{
     discover_skill_registry, sync_builtin_skills, SkillRegistryEntry, SkillRegistryOptions,
@@ -44,6 +50,10 @@ use shacs_skills::{
 };
 use shacs_templates::sync_workspace_templates;
 use shacs_utils::media_decode::{save_base64_data_url, MediaDecodeError, DEFAULT_MAX_BYTES};
+use shacs_utils::progress_events::{
+    build_tool_event_start_payload, build_tool_progress_finish_payload,
+    build_tool_progress_start_payload, ProgressEventStatus, ToolProgressEvent, ToolProgressPayload,
+};
 use shacs_utils::text::safe_filename;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -57,8 +67,12 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{connect as websocket_connect, Message as WebSocketMessage, WebSocket};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+const RUNTIME_DATA_SCHEMA_VERSION: u32 = 1;
+const RUNTIME_DATA_SCHEMA_MIN_VERSION: u32 = 1;
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_ISSUER: &str = "https://auth.openai.com";
 const CODEX_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
@@ -66,9 +80,23 @@ const CODEX_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/call
 const CODEX_DEVICE_URL: &str = "https://auth.openai.com/codex/device";
 const CODEX_PROVIDER_ID: &str = "openai_codex";
 const CODEX_DEFAULT_MODEL: &str = "gpt-5.4";
+const GITHUB_COPILOT_PROVIDER_ID: &str = "github_copilot";
+const GITHUB_COPILOT_DEFAULT_MODEL: &str = "github_copilot/gpt-4o";
 const CODEX_BROWSER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CODEX_DEVICE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const WEBSOCKET_STREAM_FLUSH_CHARS: usize = 32;
+const EXTERNAL_SESSION_PENDING_LIMIT: usize = 20;
 type ApiProviderEventCallback = Arc<dyn Fn(&shacs_providers::ProviderEvent) + Send + Sync>;
+type ExternalTransportRunner = Arc<
+    dyn Fn(
+            ExternalTransportSpec,
+            MessageBus,
+            mpsc::Receiver<OutboundMessage>,
+            Arc<AtomicBool>,
+            ExternalTransportRuntimeContext,
+        ) + Send
+        + Sync,
+>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CliCommand {
@@ -77,6 +105,8 @@ pub enum CliCommand {
     Onboard(OnboardOptions),
     Status(StatusOptions),
     RuntimeInspect(RuntimeInspectOptions),
+    RuntimeUpdate(RuntimeUpdateOptions),
+    RuntimeRecover(RuntimeRecoverOptions),
     Session(SessionCommand),
     Skills(SkillsCommand),
     Channels(ChannelsCommand),
@@ -103,6 +133,19 @@ pub struct StatusOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeInspectOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeUpdateOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub target_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeRecoverOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
 }
@@ -319,8 +362,47 @@ pub struct RunResult {
     pub messages: Vec<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShacsBotLifecycleEvent {
+    InitStarted,
+    InitCompleted,
+    InitFailed {
+        error: String,
+    },
+    RunStarted {
+        session_key: String,
+    },
+    RunCompleted {
+        session_key: String,
+        stop_reason: String,
+    },
+    RunFailed {
+        session_key: String,
+        error: String,
+    },
+    Shutdown,
+}
+
+pub type ShacsBotLifecycleHook = Arc<dyn Fn(&ShacsBotLifecycleEvent) + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShacsBotObservabilityEvent {
+    Provider {
+        event: Box<ProviderEvent>,
+    },
+    Tool {
+        event: Box<ToolProgressEvent>,
+        payload: Option<Box<ToolProgressPayload>>,
+    },
+}
+
+pub type ShacsBotObservabilityHook = Arc<dyn Fn(&ShacsBotObservabilityEvent) + Send + Sync>;
+type RuntimeToolEventCallback = Arc<dyn Fn(&ToolEvent) + Send + Sync>;
+
 pub struct ShacsBot {
     adapter: AgentLoopChatCompletionAdapter,
+    lifecycle_hooks: Vec<ShacsBotLifecycleHook>,
+    observability_hooks: Vec<ShacsBotObservabilityHook>,
 }
 
 pub type Nanobot = ShacsBot;
@@ -387,6 +469,7 @@ pub struct RunOptions {
 pub enum ProviderCommand {
     CodexImportToken(CodexImportTokenOptions),
     CodexLogin(CodexLoginOptions),
+    CopilotImportToken(CopilotImportTokenOptions),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -394,6 +477,13 @@ pub struct CodexImportTokenOptions {
     pub config_path: Option<PathBuf>,
     pub token_source: TokenSource,
     pub account_id: Option<String>,
+    pub select: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CopilotImportTokenOptions {
+    pub config_path: Option<PathBuf>,
+    pub token_source: TokenSource,
     pub select: bool,
 }
 
@@ -419,6 +509,15 @@ pub struct CodexImportOutcome {
     pub selected_model: Option<String>,
     pub selected: bool,
     pub has_account_id: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopilotImportOutcome {
+    pub config_path: PathBuf,
+    pub auth_path: PathBuf,
+    pub provider: String,
+    pub selected_model: Option<String>,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,6 +668,46 @@ pub struct RuntimeInspectReport {
     pub providers: Vec<ProviderStatus>,
     pub capabilities: Vec<RuntimeCapabilityReport>,
     pub sessions: RuntimeSessionInspect,
+    pub lifecycle: RuntimeLifecycleInspect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLifecycleInspect {
+    pub binary_version: String,
+    pub data_schema_version: u32,
+    pub data_schema_min_version: u32,
+    pub update_marker: Option<RuntimeUpdateMarker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUpdateMarker {
+    pub phase: String,
+    pub from_version: String,
+    pub target_version: String,
+    pub migration_required: bool,
+    pub completed_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUpdateOutcome {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub data_dir: PathBuf,
+    pub marker_path: PathBuf,
+    pub from_version: String,
+    pub target_version: String,
+    pub phase: String,
+    pub migration_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRecoverOutcome {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub data_dir: PathBuf,
+    pub marker_path: PathBuf,
+    pub recovered: bool,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -601,6 +740,7 @@ pub struct ChannelsReport {
     pub unknown_plugins: Vec<String>,
     pub worker_count: usize,
     pub send_progress: bool,
+    pub send_memory_hints: bool,
     pub send_tool_hints: bool,
     pub send_max_retries: u32,
 }
@@ -610,6 +750,7 @@ pub struct ChannelReportItem {
     pub descriptor: ChannelDescriptor,
     pub configured: bool,
     pub enabled: bool,
+    pub runtime_status: String,
     pub workers: Vec<LiveChannelWorkerDescriptor>,
 }
 
@@ -663,6 +804,7 @@ pub enum ChannelRuntimeWorkerState {
     Started,
     SkippedDisabled,
     SkippedMissingCredentials,
+    SkippedUnsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -675,21 +817,47 @@ struct TelegramRuntimeConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscordRuntimeConfig {
     token: String,
-    channel_ids: Vec<String>,
+    channel_filter: DiscordChannelFilter,
+    allowed_senders: Vec<String>,
+    group_policy: DiscordGroupPolicy,
+    streaming: bool,
     poll_interval_seconds: u64,
+    transport: DiscordTransportMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiscordTransportMode {
+    Gateway,
+    RestPolling,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiscordChannelFilter {
+    AllVisible,
+    Only(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscordGroupPolicy {
+    Mention,
+    Open,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SlackRuntimeConfig {
+    app_token: String,
     bot_token: String,
     channel_ids: Vec<String>,
-    poll_interval_seconds: u64,
+    allowed_senders: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EmailRuntimeConfig {
     smtp: Option<EmailSmtpRuntimeConfig>,
     imap: Option<EmailImapRuntimeConfig>,
+    allowed_senders: Vec<String>,
+    verify_spf: bool,
+    verify_dkim: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -724,12 +892,15 @@ enum EmailSecurity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedEmailInbound {
+    inbound: EmailInbound,
+    authentication_results: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct WhatsAppRuntimeConfig {
     bridge_url: String,
     bridge_token: Option<String>,
-    poll_path: String,
-    send_path: String,
-    poll_interval_seconds: u64,
     allowlist: shacs_channels::ChannelAllowlist,
     group_policy: WhatsAppGroupPolicy,
 }
@@ -961,14 +1132,70 @@ impl ShacsBot {
     }
 
     pub fn from_options(options: ShacsBotOptions) -> Result<Self, CliError> {
+        Self::from_options_with_lifecycle_hooks(options, Vec::new())
+    }
+
+    pub fn from_options_with_lifecycle_hooks(
+        options: ShacsBotOptions,
+        lifecycle_hooks: Vec<ShacsBotLifecycleHook>,
+    ) -> Result<Self, CliError> {
+        Self::from_options_with_hooks(options, lifecycle_hooks, Vec::new())
+    }
+
+    pub fn from_options_with_observability_hooks(
+        options: ShacsBotOptions,
+        observability_hooks: Vec<ShacsBotObservabilityHook>,
+    ) -> Result<Self, CliError> {
+        Self::from_options_with_hooks(options, Vec::new(), observability_hooks)
+    }
+
+    pub fn from_options_with_hooks(
+        options: ShacsBotOptions,
+        lifecycle_hooks: Vec<ShacsBotLifecycleHook>,
+        observability_hooks: Vec<ShacsBotObservabilityHook>,
+    ) -> Result<Self, CliError> {
+        emit_lifecycle_hooks(&lifecycle_hooks, ShacsBotLifecycleEvent::InitStarted);
         let bundle = load_runtime_config(RuntimeConfigOptions {
             config_path: options.config_path,
             workspace_override: options.workspace_override,
             resolve_env: true,
+        })
+        .map_err(|error| {
+            emit_lifecycle_hooks(
+                &lifecycle_hooks,
+                ShacsBotLifecycleEvent::InitFailed {
+                    error: error.to_string(),
+                },
+            );
+            error
         })?;
         let adapter =
-            AgentLoopChatCompletionAdapter::from_bundle(bundle, options.allow_side_effects)?;
-        Ok(Self { adapter })
+            AgentLoopChatCompletionAdapter::from_bundle(bundle, options.allow_side_effects)
+                .map_err(|error| {
+                    emit_lifecycle_hooks(
+                        &lifecycle_hooks,
+                        ShacsBotLifecycleEvent::InitFailed {
+                            error: error.to_string(),
+                        },
+                    );
+                    error
+                })?;
+        emit_lifecycle_hooks(&lifecycle_hooks, ShacsBotLifecycleEvent::InitCompleted);
+        Ok(Self {
+            adapter,
+            lifecycle_hooks,
+            observability_hooks,
+        })
+    }
+
+    pub fn with_lifecycle_hook(mut self, hook: ShacsBotLifecycleHook) -> Self {
+        self.lifecycle_hooks.push(hook);
+        self
+    }
+
+    pub fn with_observability_hook(mut self, hook: ShacsBotObservabilityHook) -> Self {
+        self.observability_hooks.push(hook);
+        self
     }
 
     pub fn run(&self, message: impl Into<String>) -> Result<RunResult, CliError> {
@@ -979,6 +1206,50 @@ impl ShacsBot {
     }
 
     pub fn run_with_options(&self, options: ShacsBotRunOptions) -> Result<RunResult, CliError> {
+        self.run_with_options_and_observability_hooks(options, Vec::new())
+    }
+
+    pub fn run_with_options_and_observability_hooks(
+        &self,
+        options: ShacsBotRunOptions,
+        run_observability_hooks: Vec<ShacsBotObservabilityHook>,
+    ) -> Result<RunResult, CliError> {
+        let session_key = options.session_key.trim().to_owned();
+        emit_lifecycle_hooks(
+            &self.lifecycle_hooks,
+            ShacsBotLifecycleEvent::RunStarted {
+                session_key: session_key.clone(),
+            },
+        );
+        let result = self.run_with_options_inner(options, &run_observability_hooks);
+        match &result {
+            Ok(result) => emit_lifecycle_hooks(
+                &self.lifecycle_hooks,
+                ShacsBotLifecycleEvent::RunCompleted {
+                    session_key,
+                    stop_reason: if result.content.is_empty() {
+                        "empty".to_owned()
+                    } else {
+                        "stop".to_owned()
+                    },
+                },
+            ),
+            Err(error) => emit_lifecycle_hooks(
+                &self.lifecycle_hooks,
+                ShacsBotLifecycleEvent::RunFailed {
+                    session_key,
+                    error: error.to_string(),
+                },
+            ),
+        }
+        result
+    }
+
+    fn run_with_options_inner(
+        &self,
+        options: ShacsBotRunOptions,
+        run_observability_hooks: &[ShacsBotObservabilityHook],
+    ) -> Result<RunResult, CliError> {
         if options.message.trim().is_empty() {
             return Err(CliError::InvalidArguments(
                 "ShacsBot::run requires a non-empty message".to_owned(),
@@ -991,9 +1262,197 @@ impl ShacsBot {
         }
         let mut invocation = sdk_message_invocation(self.adapter.configured_model(), &options)?;
         invocation.session_key = options.session_key.trim().to_owned();
+        let mut observability_hooks = self.observability_hooks.clone();
+        observability_hooks.extend(run_observability_hooks.iter().cloned());
         self.adapter
-            .complete_sdk_run(invocation)
+            .complete_sdk_run(invocation, &observability_hooks)
             .map_err(Into::into)
+    }
+}
+
+impl Drop for ShacsBot {
+    fn drop(&mut self) {
+        emit_lifecycle_hooks(&self.lifecycle_hooks, ShacsBotLifecycleEvent::Shutdown);
+    }
+}
+
+fn emit_lifecycle_hooks(hooks: &[ShacsBotLifecycleHook], event: ShacsBotLifecycleEvent) {
+    for hook in hooks {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(&event))).is_err() {
+            eprintln!(
+                "shacs bot lifecycle hook panicked during {}",
+                lifecycle_event_label(&event)
+            );
+        }
+    }
+}
+
+fn lifecycle_event_label(event: &ShacsBotLifecycleEvent) -> &'static str {
+    match event {
+        ShacsBotLifecycleEvent::InitStarted => "init_started",
+        ShacsBotLifecycleEvent::InitCompleted => "init_completed",
+        ShacsBotLifecycleEvent::InitFailed { .. } => "init_failed",
+        ShacsBotLifecycleEvent::RunStarted { .. } => "run_started",
+        ShacsBotLifecycleEvent::RunCompleted { .. } => "run_completed",
+        ShacsBotLifecycleEvent::RunFailed { .. } => "run_failed",
+        ShacsBotLifecycleEvent::Shutdown => "shutdown",
+    }
+}
+
+fn emit_observability_hooks(
+    hooks: &[ShacsBotObservabilityHook],
+    event: ShacsBotObservabilityEvent,
+) {
+    for hook in hooks {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(&event))).is_err() {
+            eprintln!(
+                "shacs bot observability hook panicked during {}",
+                observability_event_label(&event)
+            );
+        }
+    }
+}
+
+fn observability_event_label(event: &ShacsBotObservabilityEvent) -> String {
+    match event {
+        ShacsBotObservabilityEvent::Provider { .. } => "provider".to_owned(),
+        ShacsBotObservabilityEvent::Tool { event, .. } => {
+            format!("tool:{}:{:?}", event.name, event.status)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallProgressSnapshot {
+    call_id: String,
+    arguments: Value,
+}
+
+type PendingToolProgress = Arc<Mutex<BTreeMap<String, VecDeque<ToolCallProgressSnapshot>>>>;
+
+#[derive(Clone)]
+struct ObservabilityToolStartHook {
+    hooks: Vec<ShacsBotObservabilityHook>,
+    pending: PendingToolProgress,
+}
+
+impl ObservabilityToolStartHook {
+    fn new(hooks: Vec<ShacsBotObservabilityHook>, pending: PendingToolProgress) -> Self {
+        Self { hooks, pending }
+    }
+}
+
+impl AgentHook for ObservabilityToolStartHook {
+    fn before_execute_tools(&self, _context: &AgentHookContext, calls: &[RuntimeToolCall]) {
+        for call in calls {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending
+                    .entry(call.name.clone())
+                    .or_default()
+                    .push_back(ToolCallProgressSnapshot {
+                        call_id: call.id.clone(),
+                        arguments: call.arguments.clone(),
+                    });
+            }
+            let payload = build_tool_progress_start_payload(
+                call.id.clone(),
+                call.name.clone(),
+                call.arguments.clone(),
+            );
+            emit_observability_hooks(
+                &self.hooks,
+                ShacsBotObservabilityEvent::Tool {
+                    event: Box::new(build_tool_event_start_payload(call.name.clone(), "started")),
+                    payload: Some(Box::new(payload)),
+                },
+            );
+        }
+    }
+}
+
+fn observability_provider_callback(
+    hooks: &[ShacsBotObservabilityHook],
+    on_event: Option<ApiProviderEventCallback>,
+) -> Option<ApiProviderEventCallback> {
+    if hooks.is_empty() {
+        return on_event;
+    }
+    let hooks = hooks.to_vec();
+    Some(Arc::new(move |event: &ProviderEvent| {
+        emit_observability_hooks(
+            &hooks,
+            ShacsBotObservabilityEvent::Provider {
+                event: Box::new(event.clone()),
+            },
+        );
+        if let Some(callback) = &on_event {
+            callback(event);
+        }
+    }))
+}
+
+fn observability_tool_callback(
+    hooks: &[ShacsBotObservabilityHook],
+    pending: PendingToolProgress,
+) -> Option<RuntimeToolEventCallback> {
+    if hooks.is_empty() {
+        return None;
+    }
+    let hooks = hooks.to_vec();
+    Some(Arc::new(move |event: &ToolEvent| {
+        let payload = match &event.status {
+            ToolStatus::Ok | ToolStatus::Error => {
+                let snapshot = pending.lock().ok().and_then(|mut pending| {
+                    pending
+                        .get_mut(&event.name)
+                        .and_then(|queue| queue.pop_front())
+                });
+                let call_id = event
+                    .call_id
+                    .clone()
+                    .or_else(|| snapshot.as_ref().map(|snapshot| snapshot.call_id.clone()))
+                    .unwrap_or_else(|| event.name.clone());
+                let arguments = event
+                    .arguments
+                    .clone()
+                    .or_else(|| snapshot.map(|snapshot| snapshot.arguments))
+                    .unwrap_or_else(|| Value::Object(Map::new()));
+                let result = event
+                    .result
+                    .clone()
+                    .unwrap_or_else(|| Value::String(event.detail.clone()));
+                Some(build_tool_progress_finish_payload(
+                    call_id,
+                    event.name.clone(),
+                    arguments,
+                    result,
+                    event.status == ToolStatus::Ok,
+                    event.detail.clone(),
+                ))
+            }
+            ToolStatus::Waiting | ToolStatus::Skipped => None,
+        };
+        emit_observability_hooks(
+            &hooks,
+            ShacsBotObservabilityEvent::Tool {
+                event: Box::new(tool_progress_event_from_runtime(event)),
+                payload: payload.map(Box::new),
+            },
+        );
+    }))
+}
+
+fn tool_progress_event_from_runtime(event: &ToolEvent) -> ToolProgressEvent {
+    ToolProgressEvent {
+        name: event.name.clone(),
+        status: match &event.status {
+            ToolStatus::Ok => ProgressEventStatus::Ok,
+            ToolStatus::Error => ProgressEventStatus::Error,
+            ToolStatus::Waiting => ProgressEventStatus::Waiting,
+            ToolStatus::Skipped => ProgressEventStatus::Skipped,
+        },
+        detail: event.detail.clone(),
+        metadata: None,
     }
 }
 
@@ -1009,6 +1468,8 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Onboard(options) => onboard(options).map(format_onboard_outcome),
         CliCommand::Status(options) => status(options).map(format_status_report),
         CliCommand::RuntimeInspect(options) => runtime_inspect(options).map(format_runtime_inspect),
+        CliCommand::RuntimeUpdate(options) => runtime_update(options).map(format_runtime_update),
+        CliCommand::RuntimeRecover(options) => runtime_recover(options).map(format_runtime_recover),
         CliCommand::Session(command) => run_session_command(command),
         CliCommand::Skills(command) => run_skills_command(command),
         CliCommand::Channels(command) => run_channels_command(command),
@@ -1016,7 +1477,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Run(options) => run_runtime(options),
         CliCommand::Serve(options) => serve(options),
         CliCommand::Gateway(options) => gateway_preset(options).map(format_gateway_preset_report),
-        CliCommand::Web(options) => web_preset(options).map(format_web_preset_report),
+        CliCommand::Web(options) => serve_web_ui(options),
         CliCommand::Provider(command) => run_provider_command(command),
         CliCommand::Unsupported(command) => Err(CliError::Unsupported(format!(
             "{} ({})",
@@ -1091,11 +1552,13 @@ fn parse_runtime(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "runtime requires `inspect`".to_owned(),
+            "runtime requires `inspect`, `update`, or `recover`".to_owned(),
         ));
     };
     match action.as_str() {
         "inspect" => parse_runtime_inspect(parser, global_config),
+        "update" => parse_runtime_update(parser, global_config),
+        "recover" => parse_runtime_recover(parser, global_config),
         "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(CliError::InvalidArguments(format!(
             "unknown runtime action `{other}`"
@@ -1111,16 +1574,34 @@ pub fn load_runtime_config_with_env(
     options: RuntimeConfigOptions,
     env: &impl EnvSource,
 ) -> Result<ConfigBundle, CliError> {
+    let config_path = options.config_path;
+    let workspace_override = options.workspace_override;
+    let resolve_env = options.resolve_env;
     let mut bundle = load_config_with_env(
         LoadOptions {
-            config_path: options.config_path,
-            workspace_override: options.workspace_override,
-            resolve_env: options.resolve_env,
-            write_back_migrations: true,
+            config_path,
+            workspace_override: None,
+            resolve_env: false,
+            write_back_migrations: false,
         },
         env,
     )?;
+    guard_runtime_marker_for_mutation(&bundle.context.data_dir)?;
+    if !bundle.migrations.is_empty() {
+        save_config_to_path(&bundle.config, &bundle.context.config_path)?;
+    }
+    if let Some(workspace) = workspace_override {
+        bundle.config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+    }
+    if resolve_env {
+        resolve_config_env_refs(&mut bundle.config, env)?;
+    }
+    bundle.context = config_context(
+        Some(bundle.context.config_path.clone()),
+        Some(bundle.config.workspace_path()),
+    );
     apply_codex_auth_overlay(&mut bundle)?;
+    apply_copilot_auth_overlay(&mut bundle)?;
     Ok(bundle)
 }
 
@@ -1178,6 +1659,25 @@ fn codex_auth_is_expired(auth: &ProviderAuth) -> bool {
         .is_some_and(|expires| expires <= now_millis().saturating_add(60_000))
 }
 
+fn apply_copilot_auth_overlay(bundle: &mut ConfigBundle) -> Result<(), CliError> {
+    let auth = load_auth_store(&bundle.context.auth_path())?;
+    let Some(copilot_auth) = auth.providers.get(GITHUB_COPILOT_PROVIDER_ID).cloned() else {
+        return Ok(());
+    };
+    if codex_auth_is_expired(&copilot_auth) {
+        return Err(CliError::Provider(ProviderError::AuthRequired {
+            provider_id: GITHUB_COPILOT_PROVIDER_ID.to_owned(),
+        }));
+    }
+    let provider = bundle
+        .config
+        .providers
+        .entry(GITHUB_COPILOT_PROVIDER_ID.to_owned())
+        .or_insert_with(copilot_provider_config);
+    provider.api_key = Some(copilot_auth.access);
+    Ok(())
+}
+
 pub fn onboard(options: OnboardOptions) -> Result<OnboardOutcome, CliError> {
     if options.wizard {
         return Err(CliError::Unsupported(
@@ -1199,6 +1699,7 @@ pub fn onboard(options: OnboardOptions) -> Result<OnboardOutcome, CliError> {
     if let Some(workspace) = options.workspace {
         bundle.config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
     }
+    inject_builtin_channel_defaults(&mut bundle.config.channels.plugins);
 
     save_config_to_path(&bundle.config, &config_path)?;
     let context = config_context(
@@ -1223,6 +1724,30 @@ pub fn onboard(options: OnboardOptions) -> Result<OnboardOutcome, CliError> {
             .map(|migration| migration.key)
             .collect(),
     })
+}
+
+fn inject_builtin_channel_defaults(plugins: &mut BTreeMap<String, Value>) {
+    for (name, default_config) in builtin_channel_default_configs() {
+        match plugins.get_mut(&name) {
+            Some(existing) => merge_missing_json_defaults(existing, default_config),
+            None => {
+                plugins.insert(name, default_config);
+            }
+        }
+    }
+}
+
+fn merge_missing_json_defaults(existing: &mut Value, default_value: Value) {
+    if let (Value::Object(existing), Value::Object(defaults)) = (existing, default_value) {
+        for (key, default_child) in defaults {
+            match existing.get_mut(&key) {
+                Some(existing_child) => merge_missing_json_defaults(existing_child, default_child),
+                None => {
+                    existing.insert(key, default_child);
+                }
+            }
+        }
+    }
 }
 
 pub fn status(options: StatusOptions) -> Result<StatusReport, CliError> {
@@ -1274,6 +1799,7 @@ pub fn runtime_inspect(options: RuntimeInspectOptions) -> Result<RuntimeInspectR
         },
         &ProcessEnv,
     )?;
+    let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
     let workspace = bundle.context.workspace.clone();
     let workspace_exists = workspace.exists();
     let mut providers = bundle
@@ -1289,6 +1815,8 @@ pub fn runtime_inspect(options: RuntimeInspectOptions) -> Result<RuntimeInspectR
     providers.sort_by(|left, right| left.name.cmp(&right.name));
     let capabilities = runtime_capabilities(&bundle);
     let sessions = inspect_runtime_sessions(&workspace)?;
+    let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
+    let update_marker = read_runtime_update_marker(&marker_path)?;
 
     Ok(RuntimeInspectReport {
         config_path,
@@ -1301,7 +1829,250 @@ pub fn runtime_inspect(options: RuntimeInspectOptions) -> Result<RuntimeInspectR
         providers,
         capabilities,
         sessions,
+        lifecycle: RuntimeLifecycleInspect {
+            binary_version: VERSION.to_owned(),
+            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
+            data_schema_min_version: RUNTIME_DATA_SCHEMA_MIN_VERSION,
+            update_marker,
+        },
     })
+}
+
+pub fn runtime_update(options: RuntimeUpdateOptions) -> Result<RuntimeUpdateOutcome, CliError> {
+    let target_version = validate_runtime_target_version(&options.target_version)?;
+    if target_version != VERSION {
+        return Err(CliError::InvalidArguments(format!(
+            "runtime update target version `{target_version}` must match the running binary version `{VERSION}` in this source-install workflow"
+        )));
+    }
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    let bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: options.workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )?;
+    let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
+    let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
+    if let Some(existing) = read_runtime_update_marker(&marker_path)? {
+        if runtime_marker_blocks_mutation(&existing.phase) {
+            return Err(CliError::InvalidArguments(format!(
+                "runtime update blocked by existing {} marker; run `shacs-bot runtime recover` or inspect first",
+                existing.phase
+            )));
+        }
+    }
+
+    let started = runtime_update_marker_value(&target_version, "in_progress", None);
+    write_runtime_marker_atomically(&marker_path, &started)?;
+    let completed_at_ms = now_millis();
+    let completed =
+        runtime_update_marker_value(&target_version, "completed_cleanup", Some(completed_at_ms));
+    write_runtime_marker_atomically(&marker_path, &completed)?;
+
+    Ok(RuntimeUpdateOutcome {
+        config_path,
+        workspace: bundle.context.workspace,
+        data_dir: bundle.context.data_dir,
+        marker_path,
+        from_version: VERSION.to_owned(),
+        target_version,
+        phase: "completed_cleanup".to_owned(),
+        migration_required: false,
+    })
+}
+
+pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverOutcome, CliError> {
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    let bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: options.workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )?;
+    let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
+    let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
+    let Some(marker) = read_runtime_update_marker(&marker_path)? else {
+        return Ok(RuntimeRecoverOutcome {
+            config_path,
+            workspace: bundle.context.workspace,
+            data_dir: bundle.context.data_dir,
+            marker_path,
+            recovered: false,
+            detail: "no runtime update marker found".to_owned(),
+        });
+    };
+    if marker.phase == "partial_migration" {
+        return Err(CliError::InvalidArguments(
+            "runtime recover blocked: partial migration marker requires manual inspection"
+                .to_owned(),
+        ));
+    }
+    fs::remove_file(&marker_path)?;
+    sync_parent_dir(&marker_path)?;
+    Ok(RuntimeRecoverOutcome {
+        config_path,
+        workspace: bundle.context.workspace,
+        data_dir: bundle.context.data_dir,
+        marker_path,
+        recovered: true,
+        detail: format!(
+            "cleared runtime update marker phase={} target={}",
+            marker.phase, marker.target_version
+        ),
+    })
+}
+
+fn runtime_update_marker_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("update-marker.json")
+}
+
+fn guard_runtime_marker_for_mutation(data_dir: &Path) -> Result<(), CliError> {
+    let marker_path = runtime_update_marker_path(data_dir);
+    let Some(marker) = read_runtime_update_marker(&marker_path)? else {
+        return Ok(());
+    };
+    if runtime_marker_blocks_mutation(&marker.phase) {
+        return Err(CliError::InvalidArguments(format!(
+            "runtime mutation blocked by {} update marker; run `shacs-bot runtime inspect` or `shacs-bot runtime recover` first",
+            marker.phase
+        )));
+    }
+    Ok(())
+}
+
+fn runtime_marker_blocks_mutation(phase: &str) -> bool {
+    matches!(phase, "in_progress" | "partial_migration")
+}
+
+fn validate_runtime_target_version(input: &str) -> Result<String, CliError> {
+    let version = input.trim();
+    if version.is_empty() {
+        return Err(CliError::InvalidArguments(
+            "runtime update requires --target-version".to_owned(),
+        ));
+    }
+    if version.len() > 64
+        || version
+            .chars()
+            .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | '+')))
+    {
+        return Err(CliError::InvalidArguments(
+            "runtime update --target-version must contain only ASCII letters, digits, '.', '-', '_', or '+' and be at most 64 characters".to_owned(),
+        ));
+    }
+    Ok(version.to_owned())
+}
+
+fn runtime_update_marker_value(
+    target_version: &str,
+    phase: &str,
+    completed_at_ms: Option<u64>,
+) -> Value {
+    let mut marker = Map::new();
+    marker.insert("version".to_owned(), json!(1));
+    marker.insert("phase".to_owned(), json!(phase));
+    marker.insert("fromVersion".to_owned(), json!(VERSION));
+    marker.insert("targetVersion".to_owned(), json!(target_version));
+    marker.insert("binaryVersion".to_owned(), json!(VERSION));
+    marker.insert(
+        "dataSchemaVersion".to_owned(),
+        json!(RUNTIME_DATA_SCHEMA_VERSION),
+    );
+    marker.insert("migrationRequired".to_owned(), json!(false));
+    if let Some(completed_at_ms) = completed_at_ms {
+        marker.insert("completedAtMs".to_owned(), json!(completed_at_ms));
+    }
+    Value::Object(marker)
+}
+
+fn read_runtime_update_marker(path: &Path) -> Result<Option<RuntimeUpdateMarker>, CliError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(&fs::read_to_string(path)?).map_err(|error| {
+        CliError::InvalidArguments(format!("invalid runtime update marker: {error}"))
+    })?;
+    let phase = required_marker_string(&value, "phase")?;
+    validate_runtime_marker_phase(&phase)?;
+    let from_version = marker_string(&value, "fromVersion").unwrap_or_else(|| "unknown".to_owned());
+    let target_version = required_marker_string(&value, "targetVersion")?;
+    let migration_required = value
+        .get("migrationRequired")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let completed_at_ms = value.get("completedAtMs").and_then(Value::as_u64);
+    Ok(Some(RuntimeUpdateMarker {
+        phase,
+        from_version,
+        target_version,
+        migration_required,
+        completed_at_ms,
+    }))
+}
+
+fn validate_runtime_marker_phase(phase: &str) -> Result<(), CliError> {
+    match phase {
+        "in_progress" | "completed_cleanup" | "partial_migration" => Ok(()),
+        other => Err(CliError::InvalidArguments(format!(
+            "runtime update marker has unknown phase `{other}`"
+        ))),
+    }
+}
+
+fn required_marker_string(value: &Value, key: &str) -> Result<String, CliError> {
+    marker_string(value, key)
+        .ok_or_else(|| CliError::InvalidArguments(format!("runtime update marker missing `{key}`")))
+}
+
+fn marker_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn write_runtime_marker_atomically(path: &Path, value: &Value) -> Result<(), CliError> {
+    let parent = path.parent().ok_or_else(|| {
+        CliError::InvalidArguments("runtime marker path has no parent directory".to_owned())
+    })?;
+    fs::create_dir_all(parent)?;
+    let temp_path = path.with_extension(format!(
+        "json.tmp-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        serde_json::to_writer_pretty(&mut file, value).map_err(|error| {
+            CliError::InvalidArguments(format!("runtime marker could not be serialized: {error}"))
+        })?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+    }
+    fs::rename(&temp_path, path)?;
+    sync_parent_dir(path)?;
+    Ok(())
+}
+
+fn sync_parent_dir(path: &Path) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn runtime_capabilities(bundle: &ConfigBundle) -> Vec<RuntimeCapabilityReport> {
@@ -1487,10 +2258,17 @@ fn load_channels_report(
                 .filter(|worker| worker.channel == descriptor.name)
                 .cloned()
                 .collect::<Vec<_>>();
+            let runtime_status = channel_runtime_status(
+                &bundle.config.channels.plugins,
+                &workers,
+                enabled,
+                descriptor.enabled_by_default,
+            );
             ChannelReportItem {
                 descriptor,
                 configured,
                 enabled,
+                runtime_status,
                 workers,
             }
         })
@@ -1512,9 +2290,55 @@ fn load_channels_report(
         unknown_plugins,
         worker_count: workers.len(),
         send_progress: bundle.config.channels.send_progress,
+        send_memory_hints: bundle.config.channels.send_memory_hints,
         send_tool_hints: bundle.config.channels.send_tool_hints,
         send_max_retries: bundle.config.channels.send_max_retries,
     })
+}
+
+fn channel_runtime_status(
+    plugins: &BTreeMap<String, Value>,
+    workers: &[LiveChannelWorkerDescriptor],
+    enabled: bool,
+    default_enabled: bool,
+) -> String {
+    if !enabled {
+        return "disabled".to_owned();
+    }
+    if workers.is_empty() {
+        return "no-worker".to_owned();
+    }
+    let mut labels = Vec::new();
+    for worker in workers {
+        let status = if worker.channel == WEBSOCKET_CHANNEL {
+            if channel_enabled_from_plugins(plugins, WEBSOCKET_CHANNEL, default_enabled) {
+                "ready"
+            } else {
+                "disabled"
+            }
+        } else if !worker.requires_external_credentials {
+            "ready"
+        } else {
+            match worker_config_state(plugins, worker) {
+                WorkerConfigState::Ready => "ready",
+                WorkerConfigState::MissingCredentials => "missing-credentials",
+                WorkerConfigState::Unsupported(_) => "unsupported-config",
+            }
+        };
+        labels.push((worker.label.clone(), status.to_owned()));
+    }
+    if labels.len() == 1 {
+        labels
+            .pop()
+            .map(|(_, status)| status)
+            .unwrap_or_else(|| "no-worker".to_owned())
+    } else {
+        labels
+            .into_iter()
+            .map(|(label, status)| format!("{label}={status}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn channel_enabled_from_plugins(
@@ -1620,11 +2444,19 @@ fn runtime_worker_state(
             "websocket channel disabled by config".to_owned(),
         );
     }
-    if descriptor.requires_external_credentials && !worker_has_credentials(plugins, descriptor) {
-        return (
-            ChannelRuntimeWorkerState::SkippedMissingCredentials,
-            "missing channel credentials/config".to_owned(),
-        );
+    if descriptor.requires_external_credentials {
+        match worker_config_state(plugins, descriptor) {
+            WorkerConfigState::Ready => {}
+            WorkerConfigState::MissingCredentials => {
+                return (
+                    ChannelRuntimeWorkerState::SkippedMissingCredentials,
+                    "missing channel credentials/config".to_owned(),
+                );
+            }
+            WorkerConfigState::Unsupported(detail) => {
+                return (ChannelRuntimeWorkerState::SkippedUnsupported, detail);
+            }
+        }
     }
     (
         ChannelRuntimeWorkerState::Started,
@@ -1632,22 +2464,107 @@ fn runtime_worker_state(
     )
 }
 
-fn worker_has_credentials(
+enum WorkerConfigState {
+    Ready,
+    MissingCredentials,
+    Unsupported(String),
+}
+
+fn worker_config_state(
     plugins: &BTreeMap<String, Value>,
     descriptor: &LiveChannelWorkerDescriptor,
-) -> bool {
+) -> WorkerConfigState {
     match descriptor.kind {
-        LiveChannelWorkerKind::TelegramLongPolling => telegram_runtime_config(plugins).is_some(),
-        LiveChannelWorkerKind::DiscordGateway => discord_runtime_config(plugins).is_some(),
-        LiveChannelWorkerKind::SlackSocketMode => slack_runtime_config(plugins).is_some(),
-        LiveChannelWorkerKind::EmailSmtp => email_runtime_config(plugins)
-            .and_then(|config| config.smtp)
-            .is_some(),
-        LiveChannelWorkerKind::EmailImap => email_runtime_config(plugins)
-            .and_then(|config| config.imap)
-            .is_some(),
-        LiveChannelWorkerKind::WhatsAppBridge => whatsapp_runtime_config(plugins).is_some(),
-        LiveChannelWorkerKind::WebSocketServer => true,
+        LiveChannelWorkerKind::TelegramLongPolling => {
+            if telegram_runtime_config(plugins).is_some() {
+                WorkerConfigState::Ready
+            } else {
+                WorkerConfigState::MissingCredentials
+            }
+        }
+        LiveChannelWorkerKind::DiscordGateway => discord_worker_config_state(plugins),
+        LiveChannelWorkerKind::SlackSocketMode => slack_worker_config_state(plugins),
+        LiveChannelWorkerKind::EmailSmtp | LiveChannelWorkerKind::EmailImap => {
+            email_worker_config_state(plugins, descriptor.kind.clone())
+        }
+        LiveChannelWorkerKind::WhatsAppBridge => {
+            if whatsapp_runtime_config(plugins).is_some() {
+                WorkerConfigState::Ready
+            } else {
+                WorkerConfigState::MissingCredentials
+            }
+        }
+        LiveChannelWorkerKind::WebSocketServer => WorkerConfigState::Ready,
+    }
+}
+
+fn discord_worker_config_state(plugins: &BTreeMap<String, Value>) -> WorkerConfigState {
+    if discord_runtime_config(plugins).is_some() {
+        return WorkerConfigState::Ready;
+    }
+    let Some(object) = plugin_object(plugins, DISCORD_CHANNEL) else {
+        return WorkerConfigState::MissingCredentials;
+    };
+    let _ = object;
+    WorkerConfigState::MissingCredentials
+}
+
+fn slack_worker_config_state(plugins: &BTreeMap<String, Value>) -> WorkerConfigState {
+    if slack_runtime_config(plugins).is_some() {
+        return WorkerConfigState::Ready;
+    }
+    let Some(object) = plugin_object(plugins, SLACK_CHANNEL) else {
+        return WorkerConfigState::MissingCredentials;
+    };
+    let has_bot_token = plugin_string_alias(object, &["botToken", "bot_token", "token"]).is_some();
+    let has_app_token = plugin_string_alias(object, &["appToken", "app_token"]).is_some();
+    if has_bot_token || has_app_token {
+        WorkerConfigState::Unsupported(
+            "Slack Socket Mode requires both appToken/app_token and botToken/bot_token/token"
+                .to_owned(),
+        )
+    } else {
+        WorkerConfigState::MissingCredentials
+    }
+}
+
+fn email_worker_config_state(
+    plugins: &BTreeMap<String, Value>,
+    kind: LiveChannelWorkerKind,
+) -> WorkerConfigState {
+    let Some(object) = plugin_object(plugins, EMAIL_CHANNEL) else {
+        return WorkerConfigState::MissingCredentials;
+    };
+    if !plugin_bool_alias(object, &["consentGranted", "consent_granted"]).unwrap_or(false) {
+        return WorkerConfigState::Unsupported(
+            "Email channel requires consentGranted=true before SMTP/IMAP startup".to_owned(),
+        );
+    }
+    match kind {
+        LiveChannelWorkerKind::EmailSmtp => {
+            if email_smtp_runtime_config(object).is_some() {
+                WorkerConfigState::Ready
+            } else {
+                WorkerConfigState::MissingCredentials
+            }
+        }
+        LiveChannelWorkerKind::EmailImap => {
+            let Some(imap) = email_imap_runtime_config(object) else {
+                return WorkerConfigState::MissingCredentials;
+            };
+            if !matches!(imap.security, EmailSecurity::Tls) {
+                return WorkerConfigState::Unsupported(
+                    "Email IMAP polling supports TLS security only".to_owned(),
+                );
+            }
+            if allowed_sender_config(object).is_empty() {
+                return WorkerConfigState::Unsupported(
+                    "Email IMAP requires allowFrom/allowedSenders before polling".to_owned(),
+                );
+            }
+            WorkerConfigState::Ready
+        }
+        _ => WorkerConfigState::MissingCredentials,
     }
 }
 
@@ -1687,6 +2604,44 @@ fn runtime_needs_process(report: &ChannelRuntimeReport, specs: &[ExternalTranspo
     report.websocket.enabled || !specs.is_empty()
 }
 
+fn heartbeat_runtime_enabled(bundle: &ConfigBundle) -> bool {
+    bundle.config.gateway.heartbeat.enabled
+        && fs::read_to_string(bundle.context.workspace.join(HEARTBEAT_FILE_NAME))
+            .map(|content| !content.trim().is_empty())
+            .unwrap_or(false)
+}
+
+fn start_heartbeat_runtime(
+    adapter: Arc<AgentLoopChatCompletionAdapter>,
+    bundle: &ConfigBundle,
+) -> Result<Option<HeartbeatWorker>, CliError> {
+    if !heartbeat_runtime_enabled(bundle) {
+        return Ok(None);
+    }
+    let heartbeat = &bundle.config.gateway.heartbeat;
+    let service = HeartbeatService::new(
+        bundle.context.workspace.clone(),
+        adapter.resolved_model.clone(),
+        heartbeat.interval_s as u64,
+        heartbeat.enabled,
+        Some(bundle.config.agents.defaults.timezone.clone()),
+    );
+    let settings = adapter.loop_config().settings;
+    let provider = adapter.client.clone();
+    let executor_adapter = adapter.clone();
+    let executor: Arc<dyn HeartbeatTaskExecutor> =
+        Arc::new(move |tasks: &str| executor_adapter.execute_heartbeat_tasks(tasks));
+    let evaluator: Arc<dyn HeartbeatResponseEvaluator> = Arc::new(
+        ProviderNotificationEvaluator::new(provider.clone(), adapter.resolved_model.clone()),
+    );
+    let notifier: Arc<dyn HeartbeatNotifier> = Arc::new(|response: &str| {
+        eprintln!("heartbeat: {response}");
+        Ok::<(), HeartbeatError>(())
+    });
+    HeartbeatWorker::start(service, provider, settings, executor, evaluator, notifier)
+        .map_err(|error| CliError::Api(ApiError::internal(error.to_string())))
+}
+
 fn telegram_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<TelegramRuntimeConfig> {
     let object = plugin_object(plugins, TELEGRAM_CHANNEL)?;
     let token = plugin_string_alias(object, &["botToken", "bot_token", "token"])?;
@@ -1708,53 +2663,68 @@ fn telegram_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<Telegram
 fn discord_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<DiscordRuntimeConfig> {
     let object = plugin_object(plugins, DISCORD_CHANNEL)?;
     let token = plugin_string_alias(object, &["botToken", "bot_token", "token"])?;
-    let mut channel_ids = plugin_string_array_alias(
-        object,
-        &[
-            "channelIds",
-            "allowedChannelIds",
-            "channel_ids",
-            "allowed_channel_ids",
-        ],
-    );
-    if let Some(default_channel) = plugin_string_alias(
-        object,
-        &[
-            "defaultChannelId",
-            "default_channel_id",
-            "channelId",
-            "channel_id",
-        ],
-    ) {
-        if !channel_ids.contains(&default_channel) {
-            channel_ids.push(default_channel);
-        }
-    }
-    if channel_ids.is_empty() {
-        return None;
-    }
+    let (channel_ids, gateway_style) = discord_channel_config(object);
+    let transport = if gateway_style || channel_ids.is_empty() {
+        DiscordTransportMode::Gateway
+    } else {
+        DiscordTransportMode::RestPolling
+    };
+    let channel_filter = if channel_ids.is_empty() {
+        DiscordChannelFilter::AllVisible
+    } else {
+        DiscordChannelFilter::Only(channel_ids)
+    };
     Some(DiscordRuntimeConfig {
         token,
-        channel_ids,
+        channel_filter,
+        allowed_senders: allowed_sender_config(object),
+        group_policy: discord_group_policy(object),
+        streaming: plugin_bool_alias(object, &["streaming"]).unwrap_or(true),
         poll_interval_seconds: plugin_u64_alias(
             object,
             &["pollIntervalSeconds", "poll_interval_seconds"],
         )
         .unwrap_or(5)
         .max(1),
+        transport,
     })
 }
 
 fn slack_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<SlackRuntimeConfig> {
     let object = plugin_object(plugins, SLACK_CHANNEL)?;
+    let app_token = plugin_string_alias(object, &["appToken", "app_token"])?;
     let bot_token = plugin_string_alias(object, &["botToken", "bot_token", "token"])?;
+    let channel_ids = channel_id_config(object);
+    Some(SlackRuntimeConfig {
+        app_token,
+        bot_token,
+        channel_ids,
+        allowed_senders: allowed_sender_config(object),
+    })
+}
+
+fn allowed_sender_config(object: &Map<String, Value>) -> Vec<String> {
+    plugin_string_array_alias(
+        object,
+        &[
+            "allowFrom",
+            "allowedSenders",
+            "allow_from",
+            "allowed_senders",
+        ],
+    )
+}
+
+fn channel_id_config(object: &Map<String, Value>) -> Vec<String> {
     let mut channel_ids = plugin_string_array_alias(
         object,
         &[
             "channelIds",
             "allowedChannelIds",
+            "allowChannels",
             "channel_ids",
             "allowed_channel_ids",
+            "allow_channels",
         ],
     );
     if let Some(default_channel) = plugin_string_alias(
@@ -1770,40 +2740,64 @@ fn slack_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<SlackRuntim
             channel_ids.push(default_channel);
         }
     }
-    if channel_ids.is_empty() {
-        return None;
+    channel_ids
+}
+
+fn discord_channel_config(object: &Map<String, Value>) -> (Vec<String>, bool) {
+    let gateway_style =
+        object.contains_key("allowChannels") || object.contains_key("allow_channels");
+    (channel_id_config(object), gateway_style)
+}
+
+fn discord_group_policy(object: &Map<String, Value>) -> DiscordGroupPolicy {
+    match plugin_string_alias(object, &["groupPolicy", "group_policy"])
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("open") => DiscordGroupPolicy::Open,
+        _ => DiscordGroupPolicy::Mention,
     }
-    Some(SlackRuntimeConfig {
-        bot_token,
-        channel_ids,
-        poll_interval_seconds: plugin_u64_alias(
-            object,
-            &["pollIntervalSeconds", "poll_interval_seconds"],
-        )
-        .unwrap_or(5)
-        .max(1),
-    })
 }
 
 fn email_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<EmailRuntimeConfig> {
     let object = plugin_object(plugins, EMAIL_CHANNEL)?;
+    if !plugin_bool_alias(object, &["consentGranted", "consent_granted"]).unwrap_or(false) {
+        return None;
+    }
+    let allowed_senders = allowed_sender_config(object);
+    let imap = email_imap_runtime_config(object)
+        .filter(|imap| matches!(imap.security, EmailSecurity::Tls) && !allowed_senders.is_empty());
     Some(EmailRuntimeConfig {
         smtp: email_smtp_runtime_config(object),
-        imap: email_imap_runtime_config(object),
+        imap,
+        allowed_senders,
+        verify_spf: plugin_bool_alias(object, &["verifySpf", "verifySPF", "verify_spf"])
+            .unwrap_or(true),
+        verify_dkim: plugin_bool_alias(object, &["verifyDkim", "verifyDKIM", "verify_dkim"])
+            .unwrap_or(true),
     })
 }
 
 fn email_smtp_runtime_config(object: &Map<String, Value>) -> Option<EmailSmtpRuntimeConfig> {
     let smtp = nested_object(object, "smtp").unwrap_or(object);
     let host = plugin_string_alias(smtp, &["host", "smtpHost", "smtp_host"])?;
-    let from = plugin_string_alias(smtp, &["from", "fromEmail", "from_email"])?;
+    let from = plugin_string_alias(
+        smtp,
+        &[
+            "from",
+            "fromAddress",
+            "fromEmail",
+            "from_address",
+            "from_email",
+        ],
+    )?;
     Some(EmailSmtpRuntimeConfig {
         host,
         port: plugin_u64_alias(smtp, &["port", "smtpPort", "smtp_port"])
             .and_then(|value| u16::try_from(value).ok())
             .unwrap_or(587),
-        username: plugin_string_alias(smtp, &["username", "user"]),
-        password: plugin_string_alias(smtp, &["password"]),
+        username: plugin_string_alias(smtp, &["username", "user", "smtpUsername", "smtp_username"]),
+        password: plugin_string_alias(smtp, &["password", "smtpPassword", "smtp_password"]),
         from,
         security: email_security(smtp),
         timeout_seconds: plugin_u64_alias(smtp, &["timeoutSeconds", "timeout_seconds"])
@@ -1815,8 +2809,9 @@ fn email_smtp_runtime_config(object: &Map<String, Value>) -> Option<EmailSmtpRun
 fn email_imap_runtime_config(object: &Map<String, Value>) -> Option<EmailImapRuntimeConfig> {
     let imap = nested_object(object, "imap").unwrap_or(object);
     let host = plugin_string_alias(imap, &["host", "imapHost", "imap_host"])?;
-    let username = plugin_string_alias(imap, &["username", "user"])?;
-    let password = plugin_string_alias(imap, &["password"])?;
+    let username =
+        plugin_string_alias(imap, &["username", "user", "imapUsername", "imap_username"])?;
+    let password = plugin_string_alias(imap, &["password", "imapPassword", "imap_password"])?;
     Some(EmailImapRuntimeConfig {
         host,
         port: plugin_u64_alias(imap, &["port", "imapPort", "imap_port"])
@@ -1853,8 +2848,10 @@ fn email_security(object: &Map<String, Value>) -> EmailSecurity {
 
 fn whatsapp_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<WhatsAppRuntimeConfig> {
     let object = plugin_object(plugins, WHATSAPP_CHANNEL)?;
-    let bridge_url =
-        plugin_string_alias(object, &["bridgeUrl", "bridge_url", "baseUrl", "base_url"])?;
+    let bridge_url = normalize_whatsapp_bridge_websocket_url(&plugin_string_alias(
+        object,
+        &["bridgeUrl", "bridge_url", "baseUrl", "base_url"],
+    )?)?;
     let allowed = nested_object(object, "allowlist")
         .map(|allowlist| {
             plugin_string_array_alias(allowlist, &["allowedSenders", "allowed_senders"])
@@ -1871,16 +2868,6 @@ fn whatsapp_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<WhatsApp
     Some(WhatsAppRuntimeConfig {
         bridge_url,
         bridge_token: plugin_string_alias(object, &["bridgeToken", "bridge_token", "token"]),
-        poll_path: plugin_string_alias(object, &["pollPath", "poll_path"])
-            .unwrap_or_else(|| "/messages".to_owned()),
-        send_path: plugin_string_alias(object, &["sendPath", "send_path"])
-            .unwrap_or_else(|| "/send".to_owned()),
-        poll_interval_seconds: plugin_u64_alias(
-            object,
-            &["pollIntervalSeconds", "poll_interval_seconds"],
-        )
-        .unwrap_or(2)
-        .max(1),
         allowlist: if allowed.is_empty() {
             shacs_channels::ChannelAllowlist::allow_all()
         } else {
@@ -1888,6 +2875,20 @@ fn whatsapp_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<WhatsApp
         },
         group_policy,
     })
+}
+
+fn normalize_whatsapp_bridge_websocket_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        return Some(trimmed.to_owned());
+    }
+    if let Some(rest) = trimmed.strip_prefix("http://") {
+        return Some(format!("ws://{rest}"));
+    }
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        return Some(format!("wss://{rest}"));
+    }
+    None
 }
 
 fn plugin_object<'a>(
@@ -1998,6 +2999,7 @@ impl ChannelRuntimeWorkerState {
             Self::Started => "started",
             Self::SkippedDisabled => "skipped-disabled",
             Self::SkippedMissingCredentials => "skipped-missing-credentials",
+            Self::SkippedUnsupported => "skipped-unsupported",
         }
     }
 }
@@ -2112,6 +3114,7 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
         format!("Enabled channels: {enabled}"),
         format!("Worker boundaries: {}", report.worker_count),
         format!("Send progress: {}", report.send_progress),
+        format!("Send memory hints: {}", report.send_memory_hints),
         format!("Send tool hints: {}", report.send_tool_hints),
         format!("Send max retries: {}", report.send_max_retries),
         "Live workers: websocket runnable; external channels start only when transport adapters and credentials are available".to_owned(),
@@ -2128,15 +3131,7 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
         };
         lines.push(format!(
             "- {}: enabled={} configured={} runtime={} workers={}",
-            item.descriptor.name,
-            item.enabled,
-            item.configured,
-            if item.workers.iter().any(|worker| worker.ready_for_runtime) {
-                "runnable"
-            } else {
-                "credential-gated"
-            },
-            worker_labels
+            item.descriptor.name, item.enabled, item.configured, item.runtime_status, worker_labels
         ));
     }
     if !report.unknown_plugins.is_empty() {
@@ -2627,6 +3622,9 @@ fn run_provider_command(command: ProviderCommand) -> Result<String, CliError> {
             import_codex_token(options).map(format_codex_import_outcome)
         }
         ProviderCommand::CodexLogin(options) => codex_login(options),
+        ProviderCommand::CopilotImportToken(options) => {
+            import_copilot_token(options).map(format_copilot_import_outcome)
+        }
     }
 }
 
@@ -2778,6 +3776,70 @@ fn codex_provider_config() -> ProviderConfig {
         extra_headers: None,
         extra_body: None,
     }
+}
+
+fn copilot_provider_config() -> ProviderConfig {
+    ProviderConfig {
+        api_key: None,
+        api_base: Some("https://api.githubcopilot.com".to_owned()),
+        extra_headers: None,
+        extra_body: None,
+    }
+}
+
+pub fn import_copilot_token(
+    options: CopilotImportTokenOptions,
+) -> Result<CopilotImportOutcome, CliError> {
+    let token = read_token_source(&options.token_source)?.trim().to_owned();
+    if token.is_empty() {
+        return Err(CliError::InvalidArguments(
+            "GitHub Copilot token must not be empty".to_owned(),
+        ));
+    }
+
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    let mut bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            resolve_env: false,
+            write_back_migrations: true,
+        },
+        &ProcessEnv,
+    )?;
+    bundle
+        .config
+        .providers
+        .entry(GITHUB_COPILOT_PROVIDER_ID.to_owned())
+        .or_insert_with(copilot_provider_config);
+    let selected_model = options
+        .select
+        .then(|| GITHUB_COPILOT_DEFAULT_MODEL.to_owned());
+    if let Some(model) = &selected_model {
+        bundle.config.agents.defaults.provider = GITHUB_COPILOT_PROVIDER_ID.to_owned();
+        bundle.config.agents.defaults.model = model.clone();
+    }
+
+    let context = config_context(
+        Some(config_path.clone()),
+        Some(bundle.config.workspace_path()),
+    );
+    let auth_path = context.auth_path();
+    let mut auth = load_auth_store(&auth_path)?;
+    auth.providers.insert(
+        GITHUB_COPILOT_PROVIDER_ID.to_owned(),
+        ProviderAuth::oauth_access(token, None),
+    );
+    save_auth_store_to_path(&auth, &auth_path)?;
+    save_config_to_path(&bundle.config, &config_path)?;
+
+    Ok(CopilotImportOutcome {
+        config_path,
+        auth_path,
+        provider: GITHUB_COPILOT_PROVIDER_ID.to_owned(),
+        selected_model,
+        selected: options.select,
+    })
 }
 
 fn read_token_source(source: &TokenSource) -> Result<String, CliError> {
@@ -3416,15 +4478,32 @@ pub fn run_runtime(options: RunOptions) -> Result<String, CliError> {
         .unwrap_or(bundle.config.api.timeout)
         .max(0.001);
     let plugins = bundle.config.channels.plugins.clone();
+    let send_max_retries = bundle.config.channels.send_max_retries;
+    let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
+    let worker_metadata_dir = bundle
+        .context
+        .runtime_subdir("channels")
+        .join("worker-metadata");
+    let external_context = ExternalTransportRuntimeContext::new(
+        worker_metadata_dir,
+        channel_retry_policy(send_max_retries).max_attempts,
+    );
     let specs = external_transport_specs(&plugins);
-    if !runtime_needs_process(&report, &specs) {
+    let heartbeat_enabled = heartbeat_runtime_enabled(&bundle);
+    if !runtime_needs_process(&report, &specs) && !heartbeat_enabled {
         return Ok(plan);
     }
     let adapter = Arc::new(AgentLoopChatCompletionAdapter::from_bundle(
-        bundle,
+        bundle.clone(),
         options.allow_side_effects,
     )?);
-    let supervisor = ExternalChannelSupervisor::start(adapter.clone(), specs);
+    let heartbeat_worker = start_heartbeat_runtime(adapter.clone(), &bundle)?;
+    let supervisor = ExternalChannelSupervisor::start(
+        adapter.clone(),
+        specs,
+        send_max_retries,
+        external_context,
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -3446,6 +4525,11 @@ pub fn run_runtime(options: RunOptions) -> Result<String, CliError> {
         Ok(())
     };
     supervisor.stop();
+    if let Some(worker) = heartbeat_worker {
+        worker
+            .join()
+            .map_err(|_| CliError::Api(ApiError::internal("heartbeat worker panicked")))?;
+    }
     serve_result?;
     Ok(format!(
         "Channel runtime stopped: websocket_enabled={} ws://{}:{}{}",
@@ -3461,10 +4545,117 @@ struct ExternalChannelSupervisor {
     handles: Vec<thread::JoinHandle<()>>,
 }
 
+#[derive(Debug, Default)]
+struct ExternalSessionTurnCoordinator {
+    active_sessions: BTreeSet<String>,
+    pending_by_session: BTreeMap<String, VecDeque<InboundMessage>>,
+}
+
+#[derive(Debug)]
+struct ExternalAgentTurnResult {
+    session_key: String,
+    outbound: Vec<OutboundMessage>,
+    error: Option<String>,
+    retry_message: Option<InboundMessage>,
+}
+
+struct ExternalStreamRouting<'a> {
+    channel: &'a str,
+    chat_id: &'a str,
+    stream_id: &'a str,
+    metadata: &'a Map<String, Value>,
+    reply_to: Option<&'a str>,
+}
+
+impl ExternalSessionTurnCoordinator {
+    fn start_or_enqueue(
+        &mut self,
+        session_key: String,
+        message: InboundMessage,
+    ) -> Option<InboundMessage> {
+        if self.active_sessions.insert(session_key.clone()) {
+            return Some(message);
+        }
+        let queue = self.pending_by_session.entry(session_key).or_default();
+        if queue.len() >= EXTERNAL_SESSION_PENDING_LIMIT {
+            queue.pop_front();
+        }
+        queue.push_back(message);
+        None
+    }
+
+    fn enqueue(&mut self, session_key: String, message: InboundMessage) {
+        let queue = self.pending_by_session.entry(session_key).or_default();
+        if queue.len() >= EXTERNAL_SESSION_PENDING_LIMIT {
+            queue.pop_front();
+        }
+        queue.push_back(message);
+    }
+
+    fn defer_turn(&mut self, session_key: String, message: InboundMessage) {
+        self.active_sessions.remove(&session_key);
+        let queue = self.pending_by_session.entry(session_key).or_default();
+        if queue.len() >= EXTERNAL_SESSION_PENDING_LIMIT {
+            queue.pop_back();
+        }
+        queue.push_front(message);
+    }
+
+    fn start_next_ready(
+        &mut self,
+        mut is_busy: impl FnMut(&str) -> bool,
+    ) -> Option<(String, InboundMessage)> {
+        let session_key = self
+            .pending_by_session
+            .keys()
+            .find(|key| !self.active_sessions.contains(*key) && !is_busy(key))
+            .cloned()?;
+        let queue = self.pending_by_session.get_mut(&session_key)?;
+        let message = queue.pop_front()?;
+        if queue.is_empty() {
+            self.pending_by_session.remove(&session_key);
+        }
+        self.active_sessions.insert(session_key.clone());
+        Some((session_key, message))
+    }
+
+    fn finish_turn(&mut self, session_key: &str) -> Option<InboundMessage> {
+        if let Some(queue) = self.pending_by_session.get_mut(session_key) {
+            if let Some(message) = queue.pop_front() {
+                return Some(message);
+            }
+        }
+        self.pending_by_session.remove(session_key);
+        self.active_sessions.remove(session_key);
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExternalTransportRuntimeContext {
+    metadata_dir: PathBuf,
+    send_attempts: usize,
+}
+
+impl ExternalTransportRuntimeContext {
+    fn new(metadata_dir: PathBuf, send_attempts: usize) -> Self {
+        Self {
+            metadata_dir,
+            send_attempts: send_attempts.clamp(1, 10),
+        }
+    }
+
+    fn metadata_path(&self, name: &str) -> PathBuf {
+        self.metadata_dir.join(format!("{name}.json"))
+    }
+}
+
 impl ExternalChannelSupervisor {
     fn start(
         adapter: Arc<AgentLoopChatCompletionAdapter>,
         specs: Vec<ExternalTransportSpec>,
+        send_max_retries: u32,
+        transport_context: ExternalTransportRuntimeContext,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         if specs.is_empty() {
@@ -3473,23 +4664,18 @@ impl ExternalChannelSupervisor {
                 handles: Vec::new(),
             };
         }
-        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundMessage>();
-        let mut outbound_txs = BTreeMap::new();
-        let mut handles = Vec::new();
-        for spec in specs {
-            let channel = spec.channel().to_owned();
-            let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundMessage>();
-            outbound_txs.insert(channel.clone(), outbound_tx);
-            let worker_stop = stop.clone();
-            let worker_inbound = inbound_tx.clone();
-            handles.push(thread::spawn(move || {
-                run_external_transport_worker(spec, worker_inbound, outbound_rx, worker_stop);
-            }));
-        }
+        let runtime_bus = MessageBus::new();
         let processor_stop = stop.clone();
-        handles.push(thread::spawn(move || {
-            run_external_agent_processor(adapter, inbound_rx, outbound_txs, processor_stop);
-        }));
+        let handles = vec![thread::spawn(move || {
+            run_external_agent_processor(
+                adapter,
+                runtime_bus,
+                specs,
+                send_max_retries,
+                processor_stop,
+                transport_context,
+            );
+        })];
         Self { stop, handles }
     }
 
@@ -3511,73 +4697,946 @@ impl ExternalTransportSpec {
             Self::WhatsApp(_) => WHATSAPP_CHANNEL,
         }
     }
+
+    fn supports_streaming(&self) -> bool {
+        matches!(self, Self::Telegram(_) | Self::Discord(_) | Self::Slack(_))
+    }
 }
 
 fn run_external_agent_processor(
     adapter: Arc<AgentLoopChatCompletionAdapter>,
-    inbound_rx: mpsc::Receiver<InboundMessage>,
-    outbound_txs: BTreeMap<String, mpsc::Sender<OutboundMessage>>,
+    runtime_bus: MessageBus,
+    specs: Vec<ExternalTransportSpec>,
+    send_max_retries: u32,
     stop: Arc<AtomicBool>,
+    transport_context: ExternalTransportRuntimeContext,
 ) {
+    let mut channels = external_transport_channel_manager(
+        specs,
+        runtime_bus.clone(),
+        send_max_retries,
+        transport_context,
+    );
+    if let Err(error) = channels.start_all() {
+        eprintln!("external channel start failed: {error}");
+    }
+    let (turn_tx, turn_rx) = mpsc::channel::<ExternalAgentTurnResult>();
+    let mut turn_coordinator = ExternalSessionTurnCoordinator::default();
+    let mut turn_handles = Vec::new();
     while !stop.load(Ordering::SeqCst) {
-        let message = match inbound_rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(message) => message,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        };
-        let outbound =
-            match adapter.process_inbound_with_outbound(message, adapter.loop_config(), None) {
-                Ok((_, outbound)) => outbound,
-                Err(error) => {
-                    eprintln!("external channel turn failed: {error}");
-                    Vec::new()
-                }
-            };
-        for message in outbound {
-            if let Some(tx) = outbound_txs.get(&message.channel) {
-                let _ = tx.send(message);
+        join_finished_turns(&mut turn_handles);
+        let mut progressed = false;
+        while let Ok(result) = turn_rx.try_recv() {
+            progressed = true;
+            if let Some(error) = result.error {
+                eprintln!("external channel turn failed: {error}");
             }
+            for message in result.outbound {
+                runtime_bus.publish_outbound(message);
+            }
+            if let Some(message) = result.retry_message {
+                turn_coordinator.defer_turn(result.session_key, message);
+                continue;
+            } else if let Some(next) = turn_coordinator.finish_turn(&result.session_key) {
+                let session_key = adapter.external_effective_session_key(&next);
+                turn_handles.push(spawn_external_agent_turn(
+                    adapter.clone(),
+                    session_key,
+                    next,
+                    runtime_bus.clone(),
+                    turn_tx.clone(),
+                ));
+            }
+        }
+        while let Some(message) = runtime_bus.try_consume_inbound() {
+            progressed = true;
+            let session_key = adapter.external_effective_session_key(&message);
+            if adapter.external_session_is_active(&session_key) {
+                turn_coordinator.enqueue(session_key, message);
+            } else if let Some(next) =
+                turn_coordinator.start_or_enqueue(session_key.clone(), message)
+            {
+                turn_handles.push(spawn_external_agent_turn(
+                    adapter.clone(),
+                    session_key,
+                    next,
+                    runtime_bus.clone(),
+                    turn_tx.clone(),
+                ));
+            }
+        }
+        while let Some((session_key, message)) = turn_coordinator
+            .start_next_ready(|session_key| adapter.external_session_is_active(session_key))
+        {
+            progressed = true;
+            turn_handles.push(spawn_external_agent_turn(
+                adapter.clone(),
+                session_key,
+                message,
+                runtime_bus.clone(),
+                turn_tx.clone(),
+            ));
+        }
+        progressed |= drain_runtime_outbound(&runtime_bus, &mut channels);
+        if !progressed {
+            sleep_with_stop(&stop, Duration::from_millis(50));
+        }
+    }
+    for handle in turn_handles {
+        let _ = handle.join();
+    }
+    while let Ok(result) = turn_rx.try_recv() {
+        if let Some(error) = result.error {
+            eprintln!("external channel turn failed: {error}");
+        }
+        for message in result.outbound {
+            runtime_bus.publish_outbound(message);
+        }
+    }
+    drain_runtime_outbound(&runtime_bus, &mut channels);
+    if let Err(error) = channels.stop_all() {
+        eprintln!("external channel stop failed: {error}");
+    }
+}
+
+fn spawn_external_agent_turn(
+    adapter: Arc<AgentLoopChatCompletionAdapter>,
+    session_key: String,
+    message: InboundMessage,
+    runtime_bus: MessageBus,
+    result_tx: mpsc::Sender<ExternalAgentTurnResult>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let retry_message = message.clone();
+        let result = match adapter.process_external_inbound_with_streaming(
+            message,
+            adapter.loop_config(),
+            &runtime_bus,
+        ) {
+            Ok((_, outbound)) => ExternalAgentTurnResult {
+                session_key,
+                outbound,
+                error: None,
+                retry_message: None,
+            },
+            Err(error) => ExternalAgentTurnResult {
+                session_key,
+                outbound: Vec::new(),
+                retry_message: (error.status == 409 && error.error_type == "session_busy")
+                    .then_some(retry_message),
+                error: Some(error.to_string()),
+            },
+        };
+        let _ = result_tx.send(result);
+    })
+}
+
+fn join_finished_turns(handles: &mut Vec<thread::JoinHandle<()>>) {
+    let mut pending = Vec::new();
+    for handle in handles.drain(..) {
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            pending.push(handle);
+        }
+    }
+    *handles = pending;
+}
+
+fn drain_runtime_outbound(runtime_bus: &MessageBus, channels: &mut ChannelManager) -> bool {
+    let mut drained = false;
+    while let Some(message) = runtime_bus.try_consume_outbound() {
+        drained = true;
+        if let Err(error) = channels.dispatch_outbound(message) {
+            let statuses = channels
+                .status_report()
+                .into_iter()
+                .filter_map(|(name, status)| {
+                    status.last_error.map(|error| format!("{name}={error}"))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if statuses.is_empty() {
+                eprintln!("external channel outbound dispatch failed: {error}");
+            } else {
+                eprintln!("external channel outbound dispatch failed: {error}; status: {statuses}");
+            }
+        }
+    }
+    drained
+}
+
+fn external_transport_channel_manager(
+    specs: Vec<ExternalTransportSpec>,
+    inbound_bus: MessageBus,
+    send_max_retries: u32,
+    transport_context: ExternalTransportRuntimeContext,
+) -> ChannelManager {
+    external_transport_channel_manager_with_runner(
+        specs,
+        inbound_bus,
+        send_max_retries,
+        transport_context,
+        Arc::new(run_external_transport_worker),
+    )
+}
+
+fn external_transport_channel_manager_with_runner(
+    specs: Vec<ExternalTransportSpec>,
+    inbound_bus: MessageBus,
+    send_max_retries: u32,
+    transport_context: ExternalTransportRuntimeContext,
+    runner: ExternalTransportRunner,
+) -> ChannelManager {
+    let mut manager =
+        ChannelManager::new().with_retry_policy(channel_retry_policy(send_max_retries));
+    for spec in specs {
+        let channel = spec.channel().to_owned();
+        if let Err(error) = manager.register_adapter(
+            Box::new(ExternalTransportChannelAdapter::new(
+                spec,
+                inbound_bus.clone(),
+                transport_context.clone(),
+                runner.clone(),
+            )),
+            true,
+        ) {
+            eprintln!("external channel adapter registration failed for {channel}: {error}");
+        }
+    }
+    manager
+}
+
+fn channel_retry_policy(send_max_retries: u32) -> ChannelRetryPolicy {
+    ChannelRetryPolicy {
+        max_attempts: send_max_retries.clamp(1, 10) as usize,
+    }
+}
+
+struct ExternalTransportChannelAdapter {
+    channel: String,
+    spec: ExternalTransportSpec,
+    inbound_bus: MessageBus,
+    transport_context: ExternalTransportRuntimeContext,
+    runner: ExternalTransportRunner,
+    outbound_tx: Option<mpsc::Sender<OutboundMessage>>,
+    worker_stop: Option<Arc<AtomicBool>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl ExternalTransportChannelAdapter {
+    fn new(
+        spec: ExternalTransportSpec,
+        inbound_bus: MessageBus,
+        transport_context: ExternalTransportRuntimeContext,
+        runner: ExternalTransportRunner,
+    ) -> Self {
+        let channel = spec.channel().to_owned();
+        Self {
+            channel,
+            spec,
+            inbound_bus,
+            transport_context,
+            runner,
+            outbound_tx: None,
+            worker_stop: None,
+            handle: None,
         }
     }
 }
 
+impl ChannelAdapter for ExternalTransportChannelAdapter {
+    fn name(&self) -> &str {
+        &self.channel
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.spec.supports_streaming()
+    }
+
+    fn start(&mut self) -> Result<(), ChannelError> {
+        if self.handle.is_some() {
+            return Ok(());
+        }
+        let spec = self.spec.clone();
+        let inbound_bus = self.inbound_bus.clone();
+        let transport_context = self.transport_context.clone();
+        let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundMessage>();
+        let runner = self.runner.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.outbound_tx = Some(outbound_tx);
+        self.worker_stop = Some(stop.clone());
+        self.handle = Some(thread::spawn(move || {
+            runner(spec, inbound_bus, outbound_rx, stop, transport_context);
+        }));
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), ChannelError> {
+        if let Some(stop) = self.worker_stop.take() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        self.outbound_tx = None;
+        if let Some(handle) = self.handle.take() {
+            handle.join().map_err(|_| {
+                ChannelError::Delivery(format!("channel worker panicked: {}", self.channel))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn send(&self, message: OutboundMessage) -> Result<(), ChannelError> {
+        self.outbound_tx
+            .as_ref()
+            .ok_or_else(|| {
+                ChannelError::Delivery(format!("channel worker is not started: {}", self.channel))
+            })?
+            .send(message)
+            .map_err(|error| ChannelError::Delivery(error.to_string()))
+    }
+
+    fn send_delta(
+        &self,
+        chat_id: &str,
+        delta: &str,
+        metadata: Map<String, Value>,
+    ) -> Result<(), ChannelError> {
+        let reply_to = metadata_string(&metadata, "reply_to");
+        let mut message =
+            OutboundMessage::new(&self.channel, chat_id, delta).with_metadata(metadata);
+        message.reply_to = reply_to;
+        self.send(message)
+    }
+}
+
+#[derive(Clone, Default)]
+struct WebSocketEventSink {
+    events: Arc<Mutex<Vec<WebSocketServerEvent>>>,
+}
+
+impl WebSocketEventSink {
+    fn push(&self, event: WebSocketServerEvent) {
+        if let Ok(mut events) = self.events.lock() {
+            events.push(event);
+        }
+    }
+
+    fn take_events(&self) -> Vec<WebSocketServerEvent> {
+        self.events
+            .lock()
+            .map(|mut events| std::mem::take(&mut *events))
+            .unwrap_or_default()
+    }
+}
+
+struct WebSocketEventChannelAdapter {
+    sink: WebSocketEventSink,
+}
+
+impl WebSocketEventChannelAdapter {
+    fn new(sink: WebSocketEventSink) -> Self {
+        Self { sink }
+    }
+}
+
+impl ChannelAdapter for WebSocketEventChannelAdapter {
+    fn name(&self) -> &str {
+        WEBSOCKET_CHANNEL
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn start(&mut self) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    fn send(&self, message: OutboundMessage) -> Result<(), ChannelError> {
+        self.sink.push(websocket_event_from_outbound(message));
+        Ok(())
+    }
+
+    fn send_delta(
+        &self,
+        chat_id: &str,
+        delta: &str,
+        metadata: Map<String, Value>,
+    ) -> Result<(), ChannelError> {
+        self.send(OutboundMessage::new(WEBSOCKET_CHANNEL, chat_id, delta).with_metadata(metadata))
+    }
+}
+
+fn websocket_event_channel_manager(
+    send_max_retries: u32,
+    sink: WebSocketEventSink,
+) -> ChannelManager {
+    let mut manager =
+        ChannelManager::new().with_retry_policy(channel_retry_policy(send_max_retries));
+    if let Err(error) =
+        manager.register_adapter(Box::new(WebSocketEventChannelAdapter::new(sink)), true)
+    {
+        eprintln!("websocket channel adapter registration failed: {error}");
+    }
+    if let Err(error) = manager.start_all() {
+        eprintln!("websocket channel adapter startup failed: {error}");
+    }
+    manager
+}
+
+fn stream_metadata(stream_id: &str, end: bool) -> Map<String, Value> {
+    let mut metadata = Map::new();
+    metadata.insert("_stream_id".to_owned(), json!(stream_id));
+    if end {
+        metadata.insert("_stream_end".to_owned(), json!(true));
+    } else {
+        metadata.insert("_stream_delta".to_owned(), json!(true));
+    }
+    metadata
+}
+
+fn stream_outbound_message(
+    channel: &str,
+    chat_id: &str,
+    stream_id: &str,
+    content: String,
+    end: bool,
+) -> OutboundMessage {
+    OutboundMessage::new(channel, chat_id, content).with_metadata(stream_metadata(stream_id, end))
+}
+
+fn stream_outbound_message_with_routing(
+    channel: &str,
+    chat_id: &str,
+    stream_id: &str,
+    content: String,
+    end: bool,
+    routing_metadata: &Map<String, Value>,
+    reply_to: Option<&str>,
+) -> OutboundMessage {
+    let mut metadata = stream_metadata(stream_id, end);
+    metadata.extend(routing_metadata.clone());
+    let mut message = OutboundMessage::new(channel, chat_id, content).with_metadata(metadata);
+    if let Some(reply_to) = reply_to {
+        message.reply_to = Some(reply_to.to_owned());
+    }
+    message
+}
+
+fn stream_routing_metadata_from_inbound(inbound: &InboundMessage) -> Map<String, Value> {
+    let mut metadata = Map::new();
+    for key in [
+        "message_thread_id",
+        "subject",
+        "parent_channel_id",
+        "thread_id",
+    ] {
+        if let Some(value) = inbound.metadata.get(key).cloned() {
+            metadata.insert(key.to_owned(), value);
+        }
+    }
+    if let Some(value) = inbound.metadata.get("slack").cloned() {
+        metadata.insert("slack".to_owned(), value);
+    }
+    metadata
+}
+
+fn inbound_reply_to(inbound: &InboundMessage) -> Option<String> {
+    inbound
+        .metadata
+        .get("message_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn effective_external_session_key(config: &AgentLoopConfig, message: &InboundMessage) -> String {
+    if message.session_key_override.is_some() {
+        message.session_key()
+    } else {
+        config
+            .unified_session_key
+            .clone()
+            .unwrap_or_else(|| message.session_key())
+    }
+}
+
+fn provider_streaming_channel(channel: &str) -> bool {
+    matches!(
+        channel,
+        WEBSOCKET_CHANNEL | TELEGRAM_CHANNEL | DISCORD_CHANNEL | SLACK_CHANNEL
+    )
+}
+
+fn message_stream_id(message: &OutboundMessage) -> Option<String> {
+    message
+        .metadata
+        .get("_stream_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn message_metadata_bool(message: &OutboundMessage, key: &str) -> bool {
+    match message.metadata.get(key) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => matches!(value.as_str(), "true" | "1" | "yes"),
+        Some(Value::Number(value)) => value.as_i64().is_some_and(|number| number != 0),
+        _ => false,
+    }
+}
+
+fn metadata_string(metadata: &Map<String, Value>, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn message_is_stream_delta(message: &OutboundMessage) -> bool {
+    message_metadata_bool(message, "_stream_delta")
+}
+
+fn message_is_stream_end(message: &OutboundMessage) -> bool {
+    message_metadata_bool(message, "_stream_end")
+}
+
+#[derive(Debug, Default)]
+struct ExternalStreamPreviewStore {
+    by_stream: BTreeMap<String, ExternalStreamPreview>,
+    active_by_route: BTreeMap<String, String>,
+}
+
+#[derive(Debug)]
+struct ExternalStreamPreview {
+    remote_id: String,
+    text: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct EmailSeenUidState {
+    uid_validity: Option<u32>,
+    seen_uids: BTreeSet<String>,
+    seen_uid_order: VecDeque<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DiscordGatewayResumeState {
+    session_id: Option<String>,
+    sequence: Option<i64>,
+    resume_gateway_url: Option<String>,
+    bot_user_id: Option<String>,
+    token_hash: Option<String>,
+}
+
+struct DiscordGatewaySessionContext<'a> {
+    send_attempts: usize,
+    metadata_path: &'a Path,
+    resume_state: &'a mut DiscordGatewayResumeState,
+}
+
+impl ExternalStreamPreviewStore {
+    fn stream_key(message: &OutboundMessage, stream_id: &str) -> String {
+        format!("{}\u{1f}{stream_id}", outbound_route_key(message))
+    }
+
+    fn get_mut(&mut self, key: &str) -> Option<&mut ExternalStreamPreview> {
+        self.by_stream.get_mut(key)
+    }
+
+    fn insert(&mut self, message: &OutboundMessage, stream_id: &str, remote_id: String) {
+        let route_key = outbound_route_key(message);
+        let key = Self::stream_key(message, stream_id);
+        self.active_by_route.insert(route_key, key.clone());
+        self.by_stream.insert(
+            key,
+            ExternalStreamPreview {
+                remote_id,
+                text: message.content.clone(),
+            },
+        );
+    }
+
+    fn finish(&mut self, message: &OutboundMessage) -> Option<ExternalStreamPreview> {
+        let key = self.active_by_route.remove(&outbound_route_key(message))?;
+        let mut preview = self.by_stream.remove(&key)?;
+        preview.text = message.content.clone();
+        Some(preview)
+    }
+}
+
+fn outbound_route_key(message: &OutboundMessage) -> String {
+    let slack_thread = slack_outbound_thread_ts(message).unwrap_or_default();
+    let telegram_thread =
+        metadata_string(&message.metadata, "message_thread_id").unwrap_or_default();
+    let discord_thread = metadata_string(&message.metadata, "thread_id").unwrap_or_default();
+    let discord_parent =
+        metadata_string(&message.metadata, "parent_channel_id").unwrap_or_default();
+    let reply_to = message.reply_to.clone().unwrap_or_default();
+    format!(
+        "{}\u{1f}{}\u{1f}tg={}\u{1f}sl={}\u{1f}dp={}\u{1f}dt={}\u{1f}rp={}",
+        message.channel,
+        message.chat_id,
+        telegram_thread,
+        slack_thread,
+        discord_parent,
+        discord_thread,
+        reply_to
+    )
+}
+
+fn load_metadata_json(path: &Path) -> Value {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
+}
+
+fn save_metadata_json(path: &Path, value: &Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temp = path.with_extension(format!("json.tmp-{}", now_millis()));
+    let payload = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    {
+        let mut file = fs::File::create(&temp).map_err(|error| error.to_string())?;
+        file.write_all(&payload)
+            .map_err(|error| error.to_string())?;
+        file.write_all(b"\n").map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+    }
+    fs::rename(&temp, path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn delivery_record_id(message: &OutboundMessage) -> String {
+    let mut digest = Sha256::new();
+    digest.update(message.channel.as_bytes());
+    digest.update(b"\0");
+    digest.update(message.chat_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(message.content.as_bytes());
+    if let Some(reply_to) = message.reply_to.as_deref() {
+        digest.update(b"\0");
+        digest.update(reply_to.as_bytes());
+    }
+    hex_lower(&digest.finalize())
+}
+
+fn record_delivery_state(
+    path: &Path,
+    message: &OutboundMessage,
+    status: &str,
+    last_error: Option<&str>,
+) {
+    let mut root = load_metadata_json(path);
+    if !root.get("deliveries").is_some_and(Value::is_array) {
+        root["deliveries"] = json!([]);
+    }
+    let record = json!({
+        "id": delivery_record_id(message),
+        "channel": message.channel,
+        "chat_id": message.chat_id,
+        "reply_to": message.reply_to,
+        "content_sha256": sha256_hex(&message.content),
+        "status": status,
+        "updated_at": now_millis(),
+        "last_error": last_error,
+    });
+    if let Some(deliveries) = root["deliveries"].as_array_mut() {
+        deliveries.push(record);
+        let keep_from = deliveries.len().saturating_sub(128);
+        if keep_from > 0 {
+            deliveries.drain(0..keep_from);
+        }
+    }
+    if let Err(error) = save_metadata_json(path, &root) {
+        eprintln!("delivery metadata save failed: {error}");
+    }
+}
+
+fn sha256_hex(input: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(input.as_bytes());
+    hex_lower(&digest.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        value.push(HEX[(byte >> 4) as usize] as char);
+        value.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    value
+}
+
+fn load_telegram_offset(path: &Path) -> i64 {
+    load_metadata_json(path)
+        .get("offset")
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+}
+
+fn save_telegram_offset(path: &Path, offset: i64) {
+    let mut root = load_metadata_json(path);
+    root["offset"] = json!(offset);
+    if let Err(error) = save_metadata_json(path, &root) {
+        eprintln!("telegram metadata save failed: {error}");
+    }
+}
+
+fn load_discord_last_ids(path: &Path) -> BTreeMap<String, String> {
+    load_metadata_json(path)
+        .get("last_ids")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter_map(|(channel, message)| {
+            message
+                .as_str()
+                .map(|message| (channel.clone(), message.to_owned()))
+        })
+        .collect()
+}
+
+fn save_discord_last_ids(path: &Path, last_ids: &BTreeMap<String, String>) {
+    let mut root = load_metadata_json(path);
+    root["last_ids"] = json!(last_ids);
+    if let Err(error) = save_metadata_json(path, &root) {
+        eprintln!("discord metadata save failed: {error}");
+    }
+}
+
+fn email_metadata_key(config: &EmailImapRuntimeConfig) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        config.host, config.port, config.username, config.mailbox
+    )
+}
+
+fn load_email_seen_uid_state(path: &Path, key: &str) -> EmailSeenUidState {
+    let root = load_metadata_json(path);
+    if let Some(entry) = root
+        .get("mailboxes")
+        .and_then(|mailboxes| mailboxes.get(key))
+        .and_then(Value::as_object)
+    {
+        let order = entry
+            .get("seen")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<VecDeque<_>>();
+        return EmailSeenUidState {
+            uid_validity: entry
+                .get("uid_validity")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok()),
+            seen_uids: order.iter().cloned().collect(),
+            seen_uid_order: order,
+        };
+    }
+    let order = root
+        .get("seen")
+        .and_then(|seen| seen.get(key))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<VecDeque<_>>();
+    EmailSeenUidState {
+        uid_validity: None,
+        seen_uids: order.iter().cloned().collect(),
+        seen_uid_order: order,
+    }
+}
+
+fn save_email_seen_uid_state(path: &Path, key: &str, state: &EmailSeenUidState) {
+    let mut root = load_metadata_json(path);
+    if !root.get("mailboxes").is_some_and(Value::is_object) {
+        root["mailboxes"] = json!({});
+    }
+    root["mailboxes"][key] = json!({
+        "uid_validity": state.uid_validity,
+        "seen": state
+            .seen_uid_order
+            .iter()
+            .cloned()
+            .map(Value::String)
+            .collect::<Vec<_>>()
+    });
+    if let Err(error) = save_metadata_json(path, &root) {
+        eprintln!("email metadata save failed: {error}");
+    }
+}
+
+fn apply_email_uid_validity(state: &mut EmailSeenUidState, current: Option<u32>) {
+    if state.uid_validity.is_some() && current.is_some() && state.uid_validity != current {
+        state.seen_uids.clear();
+        state.seen_uid_order.clear();
+    }
+    if current.is_some() {
+        state.uid_validity = current;
+    }
+}
+
+fn load_discord_gateway_resume_state(path: &Path, token: &str) -> DiscordGatewayResumeState {
+    let root = load_metadata_json(path);
+    let expected_hash = sha256_hex(token);
+    if root
+        .get("token_hash")
+        .and_then(Value::as_str)
+        .is_some_and(|hash| hash != expected_hash)
+    {
+        return DiscordGatewayResumeState::default();
+    }
+    let state = DiscordGatewayResumeState {
+        session_id: root
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        sequence: root.get("sequence").and_then(Value::as_i64),
+        resume_gateway_url: root
+            .get("resume_gateway_url")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        bot_user_id: root
+            .get("bot_user_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        token_hash: Some(expected_hash),
+    };
+    if state.session_id.is_none()
+        && state.sequence.is_none()
+        && state.resume_gateway_url.is_none()
+        && state.bot_user_id.is_none()
+    {
+        DiscordGatewayResumeState::default()
+    } else {
+        state
+    }
+}
+
+fn save_discord_gateway_resume_state(path: &Path, state: &DiscordGatewayResumeState, token: &str) {
+    let mut root = load_metadata_json(path);
+    root["session_id"] = json!(state.session_id);
+    root["sequence"] = json!(state.sequence);
+    root["resume_gateway_url"] = json!(state.resume_gateway_url);
+    root["bot_user_id"] = json!(state.bot_user_id);
+    root["token_hash"] = json!(state
+        .token_hash
+        .clone()
+        .unwrap_or_else(|| sha256_hex(token)));
+    root["updated_at"] = json!(now_millis());
+    if let Err(error) = save_metadata_json(path, &root) {
+        eprintln!("discord gateway metadata save failed: {error}");
+    }
+}
+
+fn clear_discord_gateway_resume_state(path: &Path) {
+    let mut root = load_metadata_json(path);
+    if let Some(object) = root.as_object_mut() {
+        for key in [
+            "session_id",
+            "sequence",
+            "resume_gateway_url",
+            "bot_user_id",
+            "token_hash",
+            "updated_at",
+        ] {
+            object.remove(key);
+        }
+    }
+    if let Err(error) = save_metadata_json(path, &root) {
+        eprintln!("discord gateway metadata clear failed: {error}");
+    }
+}
+
+fn discord_gateway_identify_payload(token: &str) -> Value {
+    json!({
+        "op": 2,
+        "d": {
+            "token": token,
+            "intents": DISCORD_GATEWAY_INTENTS,
+            "properties": {
+                "os": std::env::consts::OS,
+                "browser": "shacs-bot",
+                "device": "shacs-bot"
+            }
+        }
+    })
+}
+
+fn discord_gateway_resume_payload(token: &str, session_id: &str, sequence: i64) -> Value {
+    json!({
+        "op": 6,
+        "d": {
+            "token": token,
+            "session_id": session_id,
+            "seq": sequence
+        }
+    })
+}
+
+fn discord_gateway_can_resume(state: &DiscordGatewayResumeState) -> Option<(&str, i64)> {
+    Some((state.session_id.as_deref()?, state.sequence?))
+}
+
 fn run_external_transport_worker(
     spec: ExternalTransportSpec,
-    inbound_tx: mpsc::Sender<InboundMessage>,
+    inbound_bus: MessageBus,
     outbound_rx: mpsc::Receiver<OutboundMessage>,
     stop: Arc<AtomicBool>,
+    transport_context: ExternalTransportRuntimeContext,
 ) {
     match spec {
         ExternalTransportSpec::Telegram(config) => {
-            run_telegram_transport(config, inbound_tx, outbound_rx, stop)
+            run_telegram_transport(config, inbound_bus, outbound_rx, stop, transport_context)
         }
         ExternalTransportSpec::Discord(config) => {
-            run_discord_transport(config, inbound_tx, outbound_rx, stop)
+            run_discord_transport(config, inbound_bus, outbound_rx, stop, transport_context)
         }
         ExternalTransportSpec::Slack(config) => {
-            run_slack_transport(config, inbound_tx, outbound_rx, stop)
+            run_slack_transport(config, inbound_bus, outbound_rx, stop, transport_context)
         }
         ExternalTransportSpec::Email(config) => {
-            run_email_transport(config, inbound_tx, outbound_rx, stop)
+            run_email_transport(config, inbound_bus, outbound_rx, stop, transport_context)
         }
         ExternalTransportSpec::WhatsApp(config) => {
-            run_whatsapp_transport(config, inbound_tx, outbound_rx, stop)
+            run_whatsapp_transport(config, inbound_bus, outbound_rx, stop, transport_context)
         }
     }
 }
 
 fn run_telegram_transport(
     config: TelegramRuntimeConfig,
-    inbound_tx: mpsc::Sender<InboundMessage>,
+    inbound_bus: MessageBus,
     outbound_rx: mpsc::Receiver<OutboundMessage>,
     stop: Arc<AtomicBool>,
+    transport_context: ExternalTransportRuntimeContext,
 ) {
     let agent = runtime_http_agent(Duration::from_secs(config.poll_timeout_seconds + 10));
-    let mut offset = 0_i64;
+    let metadata_path = transport_context.metadata_path("telegram");
+    let mut offset = load_telegram_offset(&metadata_path);
+    let mut streams = ExternalStreamPreviewStore::default();
     while !stop.load(Ordering::SeqCst) {
-        drain_outbound(&outbound_rx, |message| {
-            send_telegram_message(&agent, &config, message)
-        });
+        drain_outbound(
+            &outbound_rx,
+            transport_context.send_attempts,
+            &stop,
+            Some(&metadata_path),
+            |message| send_telegram_message(&agent, &config, &mut streams, message),
+        );
         let body = json!({
             "offset": offset,
             "timeout": config.poll_timeout_seconds,
@@ -3597,9 +5656,10 @@ fn run_telegram_transport(
                             offset = offset.max(update_id + 1);
                         }
                         if let Some(inbound) = telegram_update_to_inbound(update) {
-                            let _ = inbound_tx.send(inbound);
+                            inbound_bus.publish_inbound(inbound);
                         }
                     }
+                    save_telegram_offset(&metadata_path, offset);
                 }
             }
             Err(error) => eprintln!("telegram polling failed: {error}"),
@@ -3610,15 +5670,84 @@ fn run_telegram_transport(
 fn send_telegram_message(
     agent: &ureq::Agent,
     config: &TelegramRuntimeConfig,
+    streams: &mut ExternalStreamPreviewStore,
     message: OutboundMessage,
 ) -> Result<(), String> {
+    if message_is_stream_end(&message) {
+        return Ok(());
+    }
+    if message_is_stream_delta(&message) {
+        let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
+        let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
+        if let Some(preview) = streams.get_mut(&key) {
+            preview.text.push_str(&message.content);
+            post_json(
+                agent,
+                &telegram_url(&config.token, "editMessageText"),
+                None,
+                telegram_message_body(&message, &preview.text, Some(&preview.remote_id), false),
+            )?;
+            return Ok(());
+        }
+        let value = post_json(
+            agent,
+            &telegram_url(&config.token, "sendMessage"),
+            None,
+            telegram_message_body(&message, &message.content, None, true),
+        )?;
+        let remote_id = value
+            .get("result")
+            .and_then(|result| result.get("message_id"))
+            .and_then(json_id_string)
+            .ok_or_else(|| "Telegram sendMessage response missing message_id".to_owned())?;
+        streams.insert(&message, &stream_id, remote_id);
+        return Ok(());
+    }
+    if let Some(preview) = streams.finish(&message) {
+        post_json(
+            agent,
+            &telegram_url(&config.token, "editMessageText"),
+            None,
+            telegram_message_body(&message, &message.content, Some(&preview.remote_id), false),
+        )?;
+        return Ok(());
+    }
     post_json(
         agent,
         &telegram_url(&config.token, "sendMessage"),
         None,
-        json!({"chat_id": message.chat_id, "text": message.content}),
-    )
-    .map(|_| ())
+        telegram_message_body(&message, &message.content, None, true),
+    )?;
+    Ok(())
+}
+
+fn telegram_message_body(
+    message: &OutboundMessage,
+    text: &str,
+    remote_message_id: Option<&str>,
+    include_reply: bool,
+) -> Value {
+    let mut body = Map::new();
+    body.insert("chat_id".to_owned(), Value::String(message.chat_id.clone()));
+    body.insert("text".to_owned(), Value::String(text.to_owned()));
+    if let Some(remote_message_id) = remote_message_id {
+        body.insert(
+            "message_id".to_owned(),
+            Value::String(remote_message_id.to_owned()),
+        );
+    }
+    if let Some(thread_id) = metadata_string(&message.metadata, "message_thread_id") {
+        body.insert("message_thread_id".to_owned(), Value::String(thread_id));
+    }
+    if include_reply {
+        if let Some(reply_to) = message.reply_to.as_deref() {
+            body.insert(
+                "reply_parameters".to_owned(),
+                json!({ "message_id": reply_to }),
+            );
+        }
+    }
+    Value::Object(body)
 }
 
 fn telegram_update_to_inbound(update: &Value) -> Option<InboundMessage> {
@@ -3681,24 +5810,58 @@ fn redact_sensitive_url_text(text: &str) -> String {
 
 fn run_discord_transport(
     config: DiscordRuntimeConfig,
-    inbound_tx: mpsc::Sender<InboundMessage>,
+    inbound_bus: MessageBus,
     outbound_rx: mpsc::Receiver<OutboundMessage>,
     stop: Arc<AtomicBool>,
+    transport_context: ExternalTransportRuntimeContext,
+) {
+    match config.transport {
+        DiscordTransportMode::Gateway => {
+            run_discord_gateway_transport(config, inbound_bus, outbound_rx, stop, transport_context)
+        }
+        DiscordTransportMode::RestPolling => run_discord_rest_polling_transport(
+            config,
+            inbound_bus,
+            outbound_rx,
+            stop,
+            transport_context,
+        ),
+    }
+}
+
+fn run_discord_rest_polling_transport(
+    config: DiscordRuntimeConfig,
+    inbound_bus: MessageBus,
+    outbound_rx: mpsc::Receiver<OutboundMessage>,
+    stop: Arc<AtomicBool>,
+    transport_context: ExternalTransportRuntimeContext,
 ) {
     let agent = runtime_http_agent(Duration::from_secs(30));
-    let mut last_ids = BTreeMap::<String, String>::new();
+    let metadata_path = transport_context.metadata_path("discord-rest");
+    let mut last_ids = load_discord_last_ids(&metadata_path);
+    let mut streams = ExternalStreamPreviewStore::default();
     while !stop.load(Ordering::SeqCst) {
-        drain_outbound(&outbound_rx, |message| {
-            send_discord_message(&agent, &config, message)
-        });
-        for channel_id in &config.channel_ids {
+        drain_outbound(
+            &outbound_rx,
+            transport_context.send_attempts,
+            &stop,
+            Some(&metadata_path),
+            |message| send_discord_message(&agent, &config, &mut streams, message),
+        );
+        let DiscordChannelFilter::Only(channel_ids) = &config.channel_filter else {
+            eprintln!("discord REST polling requires configured channel ids");
+            sleep_with_stop(&stop, Duration::from_secs(config.poll_interval_seconds));
+            continue;
+        };
+        for channel_id in channel_ids {
             match poll_discord_channel(&agent, &config, channel_id, last_ids.get(channel_id)) {
                 Ok((messages, newest)) => {
                     if let Some(newest) = newest {
                         last_ids.insert(channel_id.clone(), newest);
+                        save_discord_last_ids(&metadata_path, &last_ids);
                     }
                     for inbound in messages {
-                        let _ = inbound_tx.send(inbound);
+                        inbound_bus.publish_inbound(inbound);
                     }
                 }
                 Err(error) => eprintln!("discord polling failed for {channel_id}: {error}"),
@@ -3706,6 +5869,341 @@ fn run_discord_transport(
         }
         sleep_with_stop(&stop, Duration::from_secs(config.poll_interval_seconds));
     }
+}
+
+const DISCORD_GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
+const DISCORD_GATEWAY_INTENTS: u64 = (1 << 9) | (1 << 12) | (1 << 15);
+
+fn run_discord_gateway_transport(
+    config: DiscordRuntimeConfig,
+    inbound_bus: MessageBus,
+    outbound_rx: mpsc::Receiver<OutboundMessage>,
+    stop: Arc<AtomicBool>,
+    transport_context: ExternalTransportRuntimeContext,
+) {
+    let agent = runtime_http_agent(Duration::from_secs(30));
+    let mut backoff = Duration::from_secs(1);
+    let metadata_path = transport_context.metadata_path("discord-gateway");
+    let mut resume_state = load_discord_gateway_resume_state(&metadata_path, &config.token);
+    while !stop.load(Ordering::SeqCst) {
+        match run_discord_gateway_session(
+            &config,
+            &agent,
+            &inbound_bus,
+            &outbound_rx,
+            &stop,
+            DiscordGatewaySessionContext {
+                send_attempts: transport_context.send_attempts,
+                metadata_path: &metadata_path,
+                resume_state: &mut resume_state,
+            },
+        ) {
+            Ok(()) => backoff = Duration::from_secs(1),
+            Err(error) => {
+                if !stop.load(Ordering::SeqCst) {
+                    eprintln!("discord gateway worker reconnecting: {error}");
+                    sleep_with_stop(&stop, backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                }
+            }
+        }
+    }
+}
+
+fn run_discord_gateway_session(
+    config: &DiscordRuntimeConfig,
+    agent: &ureq::Agent,
+    inbound_bus: &MessageBus,
+    outbound_rx: &mpsc::Receiver<OutboundMessage>,
+    stop: &Arc<AtomicBool>,
+    gateway_context: DiscordGatewaySessionContext<'_>,
+) -> Result<(), String> {
+    let send_attempts = gateway_context.send_attempts;
+    let metadata_path = gateway_context.metadata_path;
+    let resume_state = gateway_context.resume_state;
+    let gateway_url = resume_state
+        .resume_gateway_url
+        .as_deref()
+        .unwrap_or(DISCORD_GATEWAY_URL);
+    let (mut socket, _) = websocket_connect(gateway_url).map_err(|error| error.to_string())?;
+    set_websocket_timeouts(&mut socket, Duration::from_millis(500));
+    let mut heartbeat_interval = Duration::from_secs(30);
+    let mut next_heartbeat = Instant::now() + heartbeat_interval;
+    let mut last_seq = resume_state.sequence;
+    let mut heartbeat_acknowledged = true;
+    let mut bot_user_id = None::<String>;
+    let mut recent_ids = RecentMessageIds::new(1024);
+    let mut streams = ExternalStreamPreviewStore::default();
+
+    while !stop.load(Ordering::SeqCst) {
+        drain_outbound(
+            outbound_rx,
+            send_attempts,
+            stop,
+            Some(metadata_path),
+            |message| send_discord_message(agent, config, &mut streams, message),
+        );
+        if Instant::now() >= next_heartbeat {
+            if !heartbeat_acknowledged {
+                return Err("heartbeat ack timed out".to_owned());
+            }
+            send_websocket_json(&mut socket, json!({"op": 1, "d": last_seq}))?;
+            heartbeat_acknowledged = false;
+            next_heartbeat = Instant::now() + heartbeat_interval;
+        }
+
+        match socket.read() {
+            Ok(message) => {
+                let Some(text) = websocket_text(message)? else {
+                    continue;
+                };
+                let value =
+                    serde_json::from_str::<Value>(&text).map_err(|error| error.to_string())?;
+                if let Some(seq) = value.get("s").and_then(Value::as_i64) {
+                    last_seq = Some(seq);
+                    resume_state.sequence = Some(seq);
+                }
+                match value.get("op").and_then(Value::as_i64) {
+                    Some(10) => {
+                        if let Some(interval) = value
+                            .get("d")
+                            .and_then(|data| data.get("heartbeat_interval"))
+                            .and_then(Value::as_u64)
+                        {
+                            heartbeat_interval = Duration::from_millis(interval.max(1));
+                        }
+                        if let Some((session_id, sequence)) =
+                            discord_gateway_can_resume(resume_state)
+                        {
+                            send_websocket_json(
+                                &mut socket,
+                                discord_gateway_resume_payload(&config.token, session_id, sequence),
+                            )?;
+                        } else {
+                            identify_discord_gateway(&mut socket, &config.token)?;
+                        }
+                        send_websocket_json(&mut socket, json!({"op": 1, "d": last_seq}))?;
+                        heartbeat_acknowledged = false;
+                        next_heartbeat = Instant::now() + heartbeat_interval;
+                    }
+                    Some(11) => heartbeat_acknowledged = true,
+                    Some(7) => return Err("gateway requested reconnect".to_owned()),
+                    Some(9) => {
+                        *resume_state = DiscordGatewayResumeState::default();
+                        clear_discord_gateway_resume_state(metadata_path);
+                        return Err("gateway invalid session".to_owned());
+                    }
+                    Some(0) => handle_discord_gateway_dispatch(
+                        config,
+                        inbound_bus,
+                        &mut recent_ids,
+                        &mut bot_user_id,
+                        resume_state,
+                        metadata_path,
+                        &value,
+                    ),
+                    _ => {}
+                }
+            }
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(tungstenite::Error::ConnectionClosed) => {
+                return Err("gateway connection closed".to_owned())
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let _ = socket.close(None);
+    Ok(())
+}
+
+fn set_websocket_timeouts(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, timeout: Duration) {
+    match socket.get_mut() {
+        MaybeTlsStream::Plain(stream) => set_tcp_stream_timeouts(stream, timeout),
+        MaybeTlsStream::NativeTls(stream) => set_tcp_stream_timeouts(stream.get_ref(), timeout),
+        _ => {}
+    }
+}
+
+fn set_tcp_stream_timeouts(stream: &TcpStream, timeout: Duration) {
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+}
+
+fn websocket_text(message: WebSocketMessage) -> Result<Option<String>, String> {
+    if message.is_text() {
+        return message
+            .into_text()
+            .map(|text| Some(text.to_string()))
+            .map_err(|error| error.to_string());
+    }
+    Ok(None)
+}
+
+fn send_websocket_json(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    value: Value,
+) -> Result<(), String> {
+    socket
+        .send(WebSocketMessage::text(value.to_string()))
+        .map_err(|error| error.to_string())
+}
+
+fn identify_discord_gateway(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    token: &str,
+) -> Result<(), String> {
+    send_websocket_json(socket, discord_gateway_identify_payload(token))
+}
+
+fn handle_discord_gateway_dispatch(
+    config: &DiscordRuntimeConfig,
+    inbound_bus: &MessageBus,
+    recent_ids: &mut RecentMessageIds,
+    bot_user_id: &mut Option<String>,
+    resume_state: &mut DiscordGatewayResumeState,
+    metadata_path: &Path,
+    value: &Value,
+) {
+    match value.get("t").and_then(Value::as_str) {
+        Some("READY") => {
+            let data = value.get("d");
+            *bot_user_id = data
+                .and_then(|data| data.get("user"))
+                .and_then(|user| user.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            resume_state.bot_user_id = bot_user_id.clone();
+            resume_state.session_id = data
+                .and_then(|data| data.get("session_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            resume_state.resume_gateway_url = data
+                .and_then(|data| data.get("resume_gateway_url"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            save_discord_gateway_resume_state(metadata_path, resume_state, &config.token);
+        }
+        Some("MESSAGE_CREATE") => {
+            let Some(data) = value.get("d") else {
+                return;
+            };
+            if let Some(inbound) =
+                discord_gateway_message_to_inbound(config, bot_user_id.as_deref(), recent_ids, data)
+            {
+                inbound_bus.publish_inbound(inbound);
+            }
+            save_discord_gateway_resume_state(metadata_path, resume_state, &config.token);
+        }
+        _ => {}
+    }
+}
+
+fn discord_gateway_message_to_inbound(
+    config: &DiscordRuntimeConfig,
+    bot_user_id: Option<&str>,
+    recent_ids: &mut RecentMessageIds,
+    item: &Value,
+) -> Option<InboundMessage> {
+    let message_id = item.get("id").and_then(Value::as_str)?.to_owned();
+    if !recent_ids.remember(&message_id) {
+        return None;
+    }
+    let channel_id = item.get("channel_id").and_then(Value::as_str)?.to_owned();
+    let parent_channel_id = item
+        .get("parent_channel_id")
+        .or_else(|| item.get("parent_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if !discord_channel_allowed(
+        &config.channel_filter,
+        &channel_id,
+        parent_channel_id.as_deref(),
+    ) {
+        return None;
+    }
+    let author = item.get("author")?;
+    if author.get("bot").and_then(Value::as_bool).unwrap_or(false) {
+        return None;
+    }
+    let sender_id = author.get("id").and_then(Value::as_str)?.to_owned();
+    if bot_user_id.is_some_and(|bot| bot == sender_id) {
+        return None;
+    }
+    if !sender_allowed_for_rest(&config.allowed_senders, &sender_id) {
+        return None;
+    }
+    let guild_id = item
+        .get("guild_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mentioned = bot_user_id.is_some_and(|bot| discord_message_mentions_bot(item, bot));
+    if guild_id.is_some() && config.group_policy == DiscordGroupPolicy::Mention && !mentioned {
+        return None;
+    }
+    let mut content = item.get("content").and_then(Value::as_str)?.to_owned();
+    if let Some(bot) = bot_user_id {
+        content = strip_discord_bot_mention(&content, bot).to_owned();
+    }
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some(
+        DiscordInbound {
+            sender_id,
+            channel_id,
+            content: content.trim().to_owned(),
+            message_id: Some(message_id),
+            guild_id,
+            parent_channel_id,
+            thread_id: item
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            attachments: Vec::new(),
+        }
+        .into_message(),
+    )
+}
+
+fn discord_channel_allowed(
+    filter: &DiscordChannelFilter,
+    channel_id: &str,
+    parent_channel_id: Option<&str>,
+) -> bool {
+    match filter {
+        DiscordChannelFilter::AllVisible => true,
+        DiscordChannelFilter::Only(channel_ids) => channel_ids
+            .iter()
+            .any(|allowed| allowed == channel_id || parent_channel_id == Some(allowed.as_str())),
+    }
+}
+
+fn discord_message_mentions_bot(item: &Value, bot_user_id: &str) -> bool {
+    item.get("mentions")
+        .and_then(Value::as_array)
+        .is_some_and(|mentions| {
+            mentions.iter().any(|mention| {
+                mention
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == bot_user_id)
+            })
+        })
+}
+
+fn strip_discord_bot_mention<'a>(content: &'a str, bot_user_id: &str) -> &'a str {
+    let trimmed = content.trim_start();
+    let plain = format!("<@{bot_user_id}>");
+    let nickname = format!("<@!{bot_user_id}>");
+    trimmed
+        .strip_prefix(&plain)
+        .or_else(|| trimmed.strip_prefix(&nickname))
+        .map(str::trim_start)
+        .unwrap_or(trimmed)
 }
 
 fn poll_discord_channel(
@@ -3751,6 +6249,9 @@ fn poll_discord_channel(
             .and_then(Value::as_str)
             .unwrap_or("discord-user")
             .to_owned();
+        if !sender_allowed_for_rest(&config.allowed_senders, &sender_id) {
+            continue;
+        }
         messages.push(
             DiscordInbound {
                 sender_id,
@@ -3777,18 +6278,107 @@ fn poll_discord_channel(
 fn send_discord_message(
     agent: &ureq::Agent,
     config: &DiscordRuntimeConfig,
+    streams: &mut ExternalStreamPreviewStore,
     message: OutboundMessage,
 ) -> Result<(), String> {
-    post_json(
-        agent,
-        &format!(
-            "https://discord.com/api/v10/channels/{}/messages",
-            message.chat_id
-        ),
-        Some(discord_auth_header(&config.token)),
-        json!({"content": message.content}),
-    )
-    .map(|_| ())
+    let url = format!(
+        "https://discord.com/api/v10/channels/{}/messages",
+        message.chat_id
+    );
+    if message_is_stream_end(&message) {
+        return Ok(());
+    }
+    if message_is_stream_delta(&message) {
+        let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
+        let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
+        if let Some(preview) = streams.get_mut(&key) {
+            preview.text.push_str(&message.content);
+            let edit_url = format!("{url}/{}", preview.remote_id);
+            patch_json(
+                agent,
+                &edit_url,
+                Some(discord_auth_header(&config.token)),
+                discord_message_body(&message.chat_id, &preview.text, None),
+            )?;
+            return Ok(());
+        }
+        let value = post_json(
+            agent,
+            &url,
+            Some(discord_auth_header(&config.token)),
+            discord_message_body(
+                &message.chat_id,
+                &message.content,
+                message.reply_to.as_deref(),
+            ),
+        )?;
+        let remote_id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "Discord message response missing id".to_owned())?;
+        streams.insert(&message, &stream_id, remote_id);
+        return Ok(());
+    }
+    if let Some(preview) = streams.finish(&message) {
+        let edit_url = format!("{url}/{}", preview.remote_id);
+        patch_json(
+            agent,
+            &edit_url,
+            Some(discord_auth_header(&config.token)),
+            discord_message_body(&message.chat_id, &message.content, None),
+        )?;
+        return Ok(());
+    }
+    for (index, chunk) in discord_message_chunks(&message.content)
+        .into_iter()
+        .enumerate()
+    {
+        let reply_to = (index == 0)
+            .then_some(message.reply_to.as_deref())
+            .flatten();
+        let body = discord_message_body(&message.chat_id, &chunk, reply_to);
+        post_json(agent, &url, Some(discord_auth_header(&config.token)), body)?;
+    }
+    Ok(())
+}
+
+fn discord_message_body(channel_id: &str, content: &str, reply_to: Option<&str>) -> Value {
+    let mut body = json!({
+        "content": content,
+        "allowed_mentions": {
+            "parse": [],
+            "replied_user": false
+        }
+    });
+    if let Some(reply_to) = reply_to {
+        body["message_reference"] = json!({
+            "message_id": reply_to,
+            "channel_id": channel_id,
+            "fail_if_not_exists": false
+        });
+    }
+    body
+}
+
+fn discord_message_chunks(content: &str) -> Vec<String> {
+    const DISCORD_LIMIT: usize = 2000;
+    if content.is_empty() {
+        return vec![String::new()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for ch in content.chars() {
+        if current.len() + ch.len_utf8() > DISCORD_LIMIT {
+            chunks.push(current);
+            current = String::new();
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn discord_auth_header(token: &str) -> String {
@@ -3797,47 +6387,93 @@ fn discord_auth_header(token: &str) -> String {
 
 fn run_slack_transport(
     config: SlackRuntimeConfig,
-    inbound_tx: mpsc::Sender<InboundMessage>,
+    inbound_bus: MessageBus,
     outbound_rx: mpsc::Receiver<OutboundMessage>,
     stop: Arc<AtomicBool>,
+    transport_context: ExternalTransportRuntimeContext,
 ) {
     let agent = runtime_http_agent(Duration::from_secs(30));
-    let mut latest = BTreeMap::<String, String>::new();
+    let mut backoff = Duration::from_secs(1);
+    let metadata_path = transport_context.metadata_path("slack");
     while !stop.load(Ordering::SeqCst) {
-        drain_outbound(&outbound_rx, |message| {
-            send_slack_message(&agent, &config, message)
-        });
-        for channel_id in &config.channel_ids {
-            match poll_slack_channel(&agent, &config, channel_id, latest.get(channel_id)) {
-                Ok((messages, newest)) => {
-                    if let Some(newest) = newest {
-                        latest.insert(channel_id.clone(), newest);
-                    }
-                    for inbound in messages {
-                        let _ = inbound_tx.send(inbound);
-                    }
+        match run_slack_socket_mode_session(
+            &config,
+            &agent,
+            &inbound_bus,
+            &outbound_rx,
+            &stop,
+            transport_context.send_attempts,
+            &metadata_path,
+        ) {
+            Ok(()) => backoff = Duration::from_secs(1),
+            Err(error) => {
+                if !stop.load(Ordering::SeqCst) {
+                    eprintln!("slack socket mode worker reconnecting: {error}");
+                    sleep_with_stop(&stop, backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
                 }
-                Err(error) => eprintln!("slack polling failed for {channel_id}: {error}"),
             }
         }
-        sleep_with_stop(&stop, Duration::from_secs(config.poll_interval_seconds));
     }
 }
 
-fn poll_slack_channel(
-    agent: &ureq::Agent,
+fn run_slack_socket_mode_session(
     config: &SlackRuntimeConfig,
-    channel_id: &str,
-    oldest: Option<&String>,
-) -> Result<(Vec<InboundMessage>, Option<String>), String> {
-    let mut url =
-        format!("https://slack.com/api/conversations.history?channel={channel_id}&limit=10");
-    if let Some(oldest) = oldest {
-        url.push_str("&oldest=");
-        url.push_str(oldest);
-        url.push_str("&inclusive=false");
+    agent: &ureq::Agent,
+    inbound_bus: &MessageBus,
+    outbound_rx: &mpsc::Receiver<OutboundMessage>,
+    stop: &Arc<AtomicBool>,
+    send_attempts: usize,
+    metadata_path: &Path,
+) -> Result<(), String> {
+    let url = open_slack_socket_mode_url(agent, &config.app_token)?;
+    let (mut socket, _) = websocket_connect(url.as_str()).map_err(|error| error.to_string())?;
+    set_websocket_timeouts(&mut socket, Duration::from_millis(500));
+    let mut streams = ExternalStreamPreviewStore::default();
+    while !stop.load(Ordering::SeqCst) {
+        drain_outbound(
+            outbound_rx,
+            send_attempts,
+            stop,
+            Some(metadata_path),
+            |message| send_slack_message(agent, config, &mut streams, message),
+        );
+        match socket.read() {
+            Ok(message) => {
+                let Some(text) = websocket_text(message)? else {
+                    continue;
+                };
+                let envelope =
+                    serde_json::from_str::<Value>(&text).map_err(|error| error.to_string())?;
+                if let Some(ack) = slack_socket_ack_frame(&envelope) {
+                    send_websocket_json(&mut socket, ack)?;
+                }
+                if let Some(inbound) = slack_socket_envelope_to_inbound(config, &envelope) {
+                    inbound_bus.publish_inbound(inbound);
+                }
+            }
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(tungstenite::Error::ConnectionClosed) => {
+                return Err("socket mode connection closed".to_owned())
+            }
+            Err(error) => return Err(error.to_string()),
+        }
     }
-    let value = get_json(agent, &url, Some(bearer_header(&config.bot_token)))?;
+    let _ = socket.close(None);
+    Ok(())
+}
+
+fn open_slack_socket_mode_url(agent: &ureq::Agent, app_token: &str) -> Result<String, String> {
+    let value = post_json(
+        agent,
+        "https://slack.com/api/apps.connections.open",
+        Some(bearer_header(app_token)),
+        json!({}),
+    )?;
     if !value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         return Err(format!(
             "Slack API error: {}",
@@ -3847,59 +6483,220 @@ fn poll_slack_channel(
                 .unwrap_or("unknown")
         ));
     }
-    let Some(items) = value.get("messages").and_then(Value::as_array) else {
-        return Ok((Vec::new(), None));
-    };
-    let newest = items
-        .iter()
-        .filter_map(|item| item.get("ts").and_then(Value::as_str))
-        .max_by(|left, right| left.cmp(right))
-        .map(str::to_owned);
-    let mut messages = Vec::new();
-    for item in items.iter().rev() {
-        if item.get("subtype").is_some() {
-            continue;
-        }
-        let Some(content) = item
-            .get("text")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        messages.push(
-            SlackInbound {
-                user_id: item
-                    .get("user")
-                    .and_then(Value::as_str)
-                    .unwrap_or("slack-user")
-                    .to_owned(),
-                channel_id: channel_id.to_owned(),
-                content: content.to_owned(),
-                event_ts: item.get("ts").and_then(Value::as_str).map(str::to_owned),
-                thread_ts: item
-                    .get("thread_ts")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                channel_type: None,
-                files: Vec::new(),
-            }
-            .into_message(),
-        );
+    value
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Slack apps.connections.open response missing url".to_owned())
+}
+
+fn slack_socket_ack_frame(envelope: &Value) -> Option<Value> {
+    envelope
+        .get("envelope_id")
+        .and_then(Value::as_str)
+        .map(|envelope_id| json!({"envelope_id": envelope_id}))
+}
+
+fn slack_socket_envelope_to_inbound(
+    config: &SlackRuntimeConfig,
+    envelope: &Value,
+) -> Option<InboundMessage> {
+    let event = envelope.get("payload")?.get("event")?;
+    match event.get("type").and_then(Value::as_str) {
+        Some("message") | Some("app_mention") => {}
+        _ => return None,
     }
-    Ok((messages, newest))
+    if event.get("subtype").is_some() || event.get("bot_id").is_some() {
+        return None;
+    }
+    let user_id = event.get("user").and_then(Value::as_str)?.to_owned();
+    if slack_envelope_bot_user_ids(envelope)
+        .iter()
+        .any(|bot_user_id| bot_user_id == &user_id)
+    {
+        return None;
+    }
+    if !sender_allowed_for_rest(&config.allowed_senders, &user_id) {
+        return None;
+    }
+    let channel_id = event.get("channel").and_then(Value::as_str)?.to_owned();
+    if !slack_channel_allowed(&config.channel_ids, &channel_id) {
+        return None;
+    }
+    let content = event
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?
+        .to_owned();
+    Some(
+        SlackInbound {
+            user_id,
+            channel_id,
+            content,
+            event_ts: event.get("ts").and_then(Value::as_str).map(str::to_owned),
+            thread_ts: event
+                .get("thread_ts")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            channel_type: event
+                .get("channel_type")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            files: Vec::new(),
+        }
+        .into_message(),
+    )
+}
+
+fn slack_envelope_bot_user_ids(envelope: &Value) -> Vec<String> {
+    envelope
+        .get("authorizations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|authorization| {
+            authorization
+                .get("is_bot")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|authorization| authorization.get("user_id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn slack_channel_allowed(channel_ids: &[String], channel_id: &str) -> bool {
+    channel_ids.is_empty() || channel_ids.iter().any(|allowed| allowed == channel_id)
+}
+
+fn sender_allowed(allowed_senders: &[String], sender_id: &str) -> bool {
+    allowed_senders
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == sender_id)
+}
+
+fn sender_allowed_for_rest(allowed_senders: &[String], sender_id: &str) -> bool {
+    allowed_senders.is_empty() || sender_allowed(allowed_senders, sender_id)
 }
 
 fn send_slack_message(
     agent: &ureq::Agent,
     config: &SlackRuntimeConfig,
+    streams: &mut ExternalStreamPreviewStore,
     message: OutboundMessage,
 ) -> Result<(), String> {
+    let thread_ts = slack_outbound_thread_ts(&message);
+    if message_is_stream_end(&message) {
+        return Ok(());
+    }
+    if message_is_stream_delta(&message) {
+        let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
+        let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
+        if let Some(preview) = streams.get_mut(&key) {
+            preview.text.push_str(&message.content);
+            slack_update_message(
+                agent,
+                config,
+                &message.chat_id,
+                &preview.remote_id,
+                &preview.text,
+            )?;
+            return Ok(());
+        }
+        let ts = slack_post_message(
+            agent,
+            config,
+            &message.chat_id,
+            &message.content,
+            thread_ts.as_deref(),
+        )?;
+        streams.insert(&message, &stream_id, ts);
+        return Ok(());
+    }
+    if let Some(preview) = streams.finish(&message) {
+        slack_update_message(
+            agent,
+            config,
+            &message.chat_id,
+            &preview.remote_id,
+            &message.content,
+        )?;
+        return Ok(());
+    }
+    slack_post_message(
+        agent,
+        config,
+        &message.chat_id,
+        &message.content,
+        thread_ts.as_deref(),
+    )
+    .map(|_| ())
+}
+
+fn slack_outbound_thread_ts(message: &OutboundMessage) -> Option<String> {
+    message
+        .metadata
+        .get("slack")
+        .and_then(|slack| slack.get("thread_ts"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| metadata_string(&message.metadata, "thread_ts"))
+}
+
+fn slack_post_message(
+    agent: &ureq::Agent,
+    config: &SlackRuntimeConfig,
+    channel: &str,
+    text: &str,
+    thread_ts: Option<&str>,
+) -> Result<String, String> {
+    let body = slack_post_message_body(channel, text, thread_ts);
     let value = post_json(
         agent,
         "https://slack.com/api/chat.postMessage",
         Some(bearer_header(&config.bot_token)),
-        json!({"channel": message.chat_id, "text": message.content}),
+        body,
+    )?;
+    if value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        value
+            .get("ts")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "Slack API response missing ts".to_owned())
+    } else {
+        Err(format!(
+            "Slack API error: {}",
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ))
+    }
+}
+
+fn slack_post_message_body(channel: &str, text: &str, thread_ts: Option<&str>) -> Value {
+    let mut body = Map::new();
+    body.insert("channel".to_owned(), Value::String(channel.to_owned()));
+    body.insert("text".to_owned(), Value::String(text.to_owned()));
+    if let Some(thread_ts) = thread_ts.filter(|value| !value.is_empty()) {
+        body.insert("thread_ts".to_owned(), Value::String(thread_ts.to_owned()));
+    }
+    Value::Object(body)
+}
+
+fn slack_update_message(
+    agent: &ureq::Agent,
+    config: &SlackRuntimeConfig,
+    channel: &str,
+    ts: &str,
+    text: &str,
+) -> Result<(), String> {
+    let value = post_json(
+        agent,
+        "https://slack.com/api/chat.update",
+        Some(bearer_header(&config.bot_token)),
+        json!({"channel": channel, "ts": ts, "text": text}),
     )?;
     if value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         Ok(())
@@ -3916,28 +6713,47 @@ fn send_slack_message(
 
 fn run_email_transport(
     config: EmailRuntimeConfig,
-    inbound_tx: mpsc::Sender<InboundMessage>,
+    inbound_bus: MessageBus,
     outbound_rx: mpsc::Receiver<OutboundMessage>,
     stop: Arc<AtomicBool>,
+    transport_context: ExternalTransportRuntimeContext,
 ) {
     let mut last_poll = Instant::now();
-    let mut seen_uids = BTreeSet::new();
-    let mut seen_uid_order = VecDeque::new();
+    let metadata_path = transport_context.metadata_path("email-imap");
+    let mut seen_state = config
+        .imap
+        .as_ref()
+        .map(|imap| load_email_seen_uid_state(&metadata_path, &email_metadata_key(imap)))
+        .unwrap_or_default();
     while !stop.load(Ordering::SeqCst) {
         if let Some(smtp) = config.smtp.as_ref() {
-            drain_outbound(&outbound_rx, |message| send_email_message(smtp, message));
+            drain_outbound(
+                &outbound_rx,
+                transport_context.send_attempts,
+                &stop,
+                Some(&metadata_path),
+                |message| send_email_message(smtp, message),
+            );
         } else {
             discard_outbound(&outbound_rx, "email smtp is not configured");
         }
         if let Some(imap) = config.imap.as_ref() {
             if last_poll.elapsed() >= Duration::from_secs(imap.poll_interval_seconds) {
-                match poll_email_inbox(imap, &mut seen_uids, &mut seen_uid_order) {
+                match poll_email_inbox(&config, imap, &mut seen_state) {
                     Ok(messages) => {
                         for inbound in messages {
-                            let _ = inbound_tx.send(inbound);
+                            inbound_bus.publish_inbound(inbound);
                         }
+                        save_email_seen_uid_state(
+                            &metadata_path,
+                            &email_metadata_key(imap),
+                            &seen_state,
+                        );
                     }
-                    Err(error) => eprintln!("email imap polling failed: {error}"),
+                    Err(error) => eprintln!(
+                        "email imap polling failed: {}",
+                        redact_email_imap_error(error, imap)
+                    ),
                 }
                 last_poll = Instant::now();
             }
@@ -3950,27 +6766,36 @@ fn send_email_message(
     config: &EmailSmtpRuntimeConfig,
     message: OutboundMessage,
 ) -> Result<(), String> {
+    if message_is_stream_delta(&message) || message_is_stream_end(&message) {
+        return Ok(());
+    }
     let from = config
         .from
         .parse::<Mailbox>()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| redact_email_smtp_error(error.to_string(), config))?;
     let to = message
         .chat_id
         .parse::<Mailbox>()
-        .map_err(|error| error.to_string())?;
-    let email = EmailMessage::builder()
+        .map_err(|error| redact_email_smtp_error(error.to_string(), config))?;
+    let mut email_builder = EmailMessage::builder()
         .from(from)
         .to(to)
-        .subject("shacs-bot")
+        .subject(email_outbound_subject(&message));
+    if let Some(reply_to) = message.reply_to.as_ref().filter(|value| !value.is_empty()) {
+        email_builder = email_builder
+            .in_reply_to(reply_to.clone())
+            .references(reply_to.clone());
+    }
+    let email = email_builder
         .body(message.content)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| redact_email_smtp_error(error.to_string(), config))?;
     let mut builder = match config.security {
         EmailSecurity::Plain => SmtpTransport::builder_dangerous(&config.host).port(config.port),
         EmailSecurity::StartTls => SmtpTransport::starttls_relay(&config.host)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| redact_email_smtp_error(error.to_string(), config))?
             .port(config.port),
         EmailSecurity::Tls => SmtpTransport::relay(&config.host)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| redact_email_smtp_error(error.to_string(), config))?
             .port(config.port),
     };
     builder = builder.timeout(Some(Duration::from_secs(config.timeout_seconds)));
@@ -3980,14 +6805,48 @@ fn send_email_message(
     builder
         .build()
         .send(&email)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| redact_email_smtp_error(error.to_string(), config))?;
     Ok(())
 }
 
+fn email_outbound_subject(message: &OutboundMessage) -> String {
+    metadata_string(&message.metadata, "subject")
+        .map(|subject| {
+            if subject.to_ascii_lowercase().starts_with("re:") {
+                subject
+            } else {
+                format!("Re: {subject}")
+            }
+        })
+        .unwrap_or_else(|| "shacs-bot".to_owned())
+}
+
+fn redact_email_smtp_error(error: String, config: &EmailSmtpRuntimeConfig) -> String {
+    let mut secrets = vec![config.from.as_str()];
+    if let Some(username) = config.username.as_deref() {
+        secrets.push(username);
+    }
+    if let Some(password) = config.password.as_deref() {
+        secrets.push(password);
+    }
+    redact_email_error_values(error, &secrets)
+}
+
+fn redact_email_imap_error(error: String, config: &EmailImapRuntimeConfig) -> String {
+    redact_email_error_values(error, &[config.username.as_str(), config.password.as_str()])
+}
+
+fn redact_email_error_values(mut error: String, values: &[&str]) -> String {
+    for value in values.iter().copied().filter(|value| !value.is_empty()) {
+        error = error.replace(value, "[redacted]");
+    }
+    error
+}
+
 fn poll_email_inbox(
+    runtime: &EmailRuntimeConfig,
     config: &EmailImapRuntimeConfig,
-    seen_uids: &mut BTreeSet<String>,
-    seen_uid_order: &mut VecDeque<String>,
+    seen_state: &mut EmailSeenUidState,
 ) -> Result<Vec<InboundMessage>, String> {
     if !matches!(config.security, EmailSecurity::Tls) {
         return Err("only TLS IMAP polling is supported in this runtime".to_owned());
@@ -3996,19 +6855,19 @@ fn poll_email_inbox(
     let mut session = client
         .login(&config.username, &config.password)
         .map_err(|(error, _)| error.to_string())?;
-    session
+    let mailbox = session
         .select(&config.mailbox)
         .map_err(|error| error.to_string())?;
+    apply_email_uid_validity(seen_state, mailbox.uid_validity);
     let uids = session
         .uid_search("UNSEEN")
         .map_err(|error| error.to_string())?;
     let mut messages = Vec::new();
     for uid in uids.iter().take(10) {
         let uid = uid.to_string();
-        if seen_uids.contains(&uid) {
+        if seen_state.seen_uids.contains(&uid) {
             continue;
         }
-        remember_seen_email_uid(seen_uids, seen_uid_order, uid.clone());
         let fetches = session
             .uid_fetch(uid.clone(), "RFC822")
             .map_err(|error| error.to_string())?;
@@ -4016,9 +6875,21 @@ fn poll_email_inbox(
             let Some(body) = fetch.body() else {
                 continue;
             };
-            if let Some(inbound) = parse_email_body(body, uid.clone()) {
-                messages.push(inbound);
+            let parsed = parse_email_body(body, uid.clone())?;
+            if email_should_skip_inbound(runtime, config, &parsed) {
+                remember_seen_email_uid(
+                    &mut seen_state.seen_uids,
+                    &mut seen_state.seen_uid_order,
+                    uid.clone(),
+                );
+                continue;
             }
+            remember_seen_email_uid(
+                &mut seen_state.seen_uids,
+                &mut seen_state.seen_uid_order,
+                uid.clone(),
+            );
+            messages.push(parsed.inbound.into_message());
         }
         if config.mark_seen {
             let _ = session.uid_store(uid, "+FLAGS (\\Seen)");
@@ -4076,12 +6947,13 @@ fn remember_seen_email_uid(
     }
 }
 
-fn parse_email_body(body: &[u8], uid: String) -> Option<InboundMessage> {
-    let parsed = mailparse::parse_mail(body).ok()?;
+fn parse_email_body(body: &[u8], uid: String) -> Result<ParsedEmailInbound, String> {
+    let parsed = mailparse::parse_mail(body).map_err(|error| error.to_string())?;
     let headers = parsed.get_headers();
-    let sender = headers
+    let sender_header = headers
         .get_first_value("From")
         .unwrap_or_else(|| "unknown@example.invalid".to_owned());
+    let sender = email_address_from_header(&sender_header);
     let subject = headers
         .get_first_value("Subject")
         .unwrap_or_else(|| "(no subject)".to_owned());
@@ -4089,9 +6961,10 @@ fn parse_email_body(body: &[u8], uid: String) -> Option<InboundMessage> {
     let message_id = headers
         .get_first_value("Message-Id")
         .unwrap_or_else(|| uid.clone());
-    let body = parsed.get_body().unwrap_or_default();
-    Some(
-        EmailInbound {
+    let authentication_results = headers.get_first_value("Authentication-Results");
+    let body = parsed.get_body().map_err(|error| error.to_string())?;
+    Ok(ParsedEmailInbound {
+        inbound: EmailInbound {
             sender_email: sender,
             subject,
             date,
@@ -4099,18 +6972,114 @@ fn parse_email_body(body: &[u8], uid: String) -> Option<InboundMessage> {
             message_id,
             uid: Some(uid),
             attachments: Vec::new(),
+        },
+        authentication_results,
+    })
+}
+
+fn email_address_from_header(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some((_, rest)) = trimmed.rsplit_once('<') {
+        if let Some((address, _)) = rest.split_once('>') {
+            let address = address.trim();
+            if !address.is_empty() {
+                return address.to_owned();
+            }
         }
-        .into_message(),
-    )
+    }
+    trimmed.trim_matches('"').to_owned()
+}
+
+fn email_should_skip_inbound(
+    runtime: &EmailRuntimeConfig,
+    config: &EmailImapRuntimeConfig,
+    parsed: &ParsedEmailInbound,
+) -> bool {
+    let sender = parsed.inbound.sender_email.as_str();
+    email_is_self_sender(runtime, config, sender)
+        || !sender_allowed(&runtime.allowed_senders, sender)
+        || !email_authentication_passes(
+            parsed.authentication_results.as_deref(),
+            runtime.verify_spf,
+            runtime.verify_dkim,
+        )
+}
+
+fn email_is_self_sender(
+    runtime: &EmailRuntimeConfig,
+    config: &EmailImapRuntimeConfig,
+    sender: &str,
+) -> bool {
+    let mut self_addresses = vec![config.username.as_str()];
+    if let Some(smtp) = runtime.smtp.as_ref() {
+        self_addresses.push(smtp.from.as_str());
+        if let Some(username) = smtp.username.as_deref() {
+            self_addresses.push(username);
+        }
+    }
+    self_addresses
+        .into_iter()
+        .any(|address| address.eq_ignore_ascii_case(sender))
+}
+
+fn email_authentication_passes(
+    authentication_results: Option<&str>,
+    verify_spf: bool,
+    verify_dkim: bool,
+) -> bool {
+    if !verify_spf && !verify_dkim {
+        return true;
+    }
+    let Some(results) = authentication_results.map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    (!verify_spf || results.contains("spf=pass")) && (!verify_dkim || results.contains("dkim=pass"))
 }
 
 fn run_whatsapp_transport(
     config: WhatsAppRuntimeConfig,
-    inbound_tx: mpsc::Sender<InboundMessage>,
+    inbound_bus: MessageBus,
     outbound_rx: mpsc::Receiver<OutboundMessage>,
     stop: Arc<AtomicBool>,
+    transport_context: ExternalTransportRuntimeContext,
 ) {
-    let agent = runtime_http_agent(Duration::from_secs(30));
+    let mut backoff = Duration::from_secs(1);
+    let metadata_path = transport_context.metadata_path("whatsapp");
+    while !stop.load(Ordering::SeqCst) {
+        match run_whatsapp_bridge_session(
+            &config,
+            &inbound_bus,
+            &outbound_rx,
+            &stop,
+            transport_context.send_attempts,
+            &metadata_path,
+        ) {
+            Ok(()) => backoff = Duration::from_secs(1),
+            Err(error) => {
+                if !stop.load(Ordering::SeqCst) {
+                    eprintln!("whatsapp bridge worker reconnecting: {error}");
+                    sleep_with_stop(&stop, backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                }
+            }
+        }
+    }
+}
+
+fn run_whatsapp_bridge_session(
+    config: &WhatsAppRuntimeConfig,
+    inbound_bus: &MessageBus,
+    outbound_rx: &mpsc::Receiver<OutboundMessage>,
+    stop: &Arc<AtomicBool>,
+    send_attempts: usize,
+    metadata_path: &Path,
+) -> Result<(), String> {
+    let (mut socket, _) =
+        websocket_connect(config.bridge_url.as_str()).map_err(|error| error.to_string())?;
+    set_websocket_timeouts(&mut socket, Duration::from_millis(500));
+    if let Some(token) = config.bridge_token.as_deref() {
+        send_whatsapp_frame(&mut socket, &shacs_channels::whatsapp_auth_frame(token))?;
+    }
     let mut recent = RecentMessageIds::default();
     let channel_config = WhatsAppChannelConfig {
         bridge_url: config.bridge_url.clone(),
@@ -4119,42 +7088,49 @@ fn run_whatsapp_transport(
         group_policy: config.group_policy.clone(),
     };
     while !stop.load(Ordering::SeqCst) {
-        drain_outbound(&outbound_rx, |message| {
-            send_whatsapp_message(&agent, &config, message)
-        });
-        match get_json(
-            &agent,
-            &join_url_path(&config.bridge_url, &config.poll_path),
-            config
-                .bridge_token
-                .as_ref()
-                .map(|token| bearer_header(token)),
-        ) {
-            Ok(value) => {
+        drain_outbound(
+            outbound_rx,
+            send_attempts,
+            stop,
+            Some(metadata_path),
+            |message| send_whatsapp_message(&mut socket, message),
+        );
+        match socket.read() {
+            Ok(message) => {
+                let Some(text) = websocket_text(message)? else {
+                    continue;
+                };
+                let value =
+                    serde_json::from_str::<Value>(&text).map_err(|error| error.to_string())?;
                 for item in whatsapp_message_items(&value) {
-                    match serde_json::from_value::<WhatsAppBridgeMessage>(item.clone())
-                        .map_err(|error| error.to_string())
-                        .and_then(|message| {
-                            normalize_whatsapp_bridge_message(message, &channel_config, &mut recent)
-                                .map_err(|error| error.to_string())
-                        }) {
-                        Ok(Some(inbound)) => {
-                            let _ = inbound_tx.send(inbound);
-                        }
+                    match normalize_whatsapp_bridge_value(item, &channel_config, &mut recent) {
+                        Ok(Some(inbound)) => inbound_bus.publish_inbound(inbound),
                         Ok(None) => {}
                         Err(error) => eprintln!("whatsapp bridge message failed: {error}"),
                     }
                 }
             }
-            Err(error) => eprintln!("whatsapp bridge polling failed: {error}"),
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(tungstenite::Error::ConnectionClosed) => {
+                return Err("bridge connection closed".to_owned())
+            }
+            Err(error) => return Err(error.to_string()),
         }
-        sleep_with_stop(&stop, Duration::from_secs(config.poll_interval_seconds));
     }
+    let _ = socket.close(None);
+    Ok(())
 }
 
 fn whatsapp_message_items(value: &Value) -> Vec<&Value> {
     if let Some(items) = value.as_array() {
         return items.iter().collect();
+    }
+    if value.get("type").is_some() {
+        return vec![value];
     }
     value
         .get("messages")
@@ -4163,52 +7139,104 @@ fn whatsapp_message_items(value: &Value) -> Vec<&Value> {
         .unwrap_or_default()
 }
 
+fn normalize_whatsapp_bridge_value(
+    value: &Value,
+    config: &WhatsAppChannelConfig,
+    recent: &mut RecentMessageIds,
+) -> Result<Option<InboundMessage>, String> {
+    serde_json::from_value::<WhatsAppBridgeMessage>(value.clone())
+        .map_err(|error| error.to_string())
+        .and_then(|message| {
+            normalize_whatsapp_bridge_message(message, config, recent)
+                .map_err(|error| error.to_string())
+        })
+}
+
 fn send_whatsapp_message(
-    agent: &ureq::Agent,
-    config: &WhatsAppRuntimeConfig,
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     message: OutboundMessage,
 ) -> Result<(), String> {
+    if message_is_stream_delta(&message) || message_is_stream_end(&message) {
+        return Ok(());
+    }
     for frame in whatsapp_outbound_frames(message) {
-        let body = match frame {
-            WhatsAppOutboundFrame::Auth { token } => json!({"type": "auth", "token": token}),
-            WhatsAppOutboundFrame::Send { to, text } => {
-                json!({"type": "send", "to": to, "text": text})
-            }
-            WhatsAppOutboundFrame::SendMedia {
-                to,
-                file_path,
-                mimetype,
-                file_name,
-            } => json!({
-                "type": "send_media",
-                "to": to,
-                "filePath": file_path,
-                "mimetype": mimetype,
-                "fileName": file_name,
-            }),
-        };
-        post_json(
-            agent,
-            &join_url_path(&config.bridge_url, &config.send_path),
-            config
-                .bridge_token
-                .as_ref()
-                .map(|token| bearer_header(token)),
-            body,
-        )?;
+        send_whatsapp_frame(socket, &frame)?;
     }
     Ok(())
 }
 
+fn send_whatsapp_frame(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    frame: &WhatsAppOutboundFrame,
+) -> Result<(), String> {
+    socket
+        .send(WebSocketMessage::text(whatsapp_frame_text(frame)?))
+        .map_err(|error| error.to_string())
+}
+
+fn whatsapp_frame_text(frame: &WhatsAppOutboundFrame) -> Result<String, String> {
+    serde_json::to_string(frame).map_err(|error| error.to_string())
+}
+
 fn drain_outbound(
     outbound_rx: &mpsc::Receiver<OutboundMessage>,
+    attempts: usize,
+    stop: &Arc<AtomicBool>,
+    delivery_metadata_path: Option<&Path>,
     mut send: impl FnMut(OutboundMessage) -> Result<(), String>,
 ) {
     while let Ok(message) = outbound_rx.try_recv() {
-        if let Err(error) = send(message) {
-            eprintln!("external channel outbound failed: {error}");
+        let transport_marker_only = message_is_stream_end(&message);
+        if let Some(path) = delivery_metadata_path.filter(|_| !transport_marker_only) {
+            record_delivery_state(path, &message, "pending", None);
+        }
+        match send_with_transport_retries(message.clone(), attempts, stop, &mut send) {
+            Ok(()) => {
+                if let Some(path) = delivery_metadata_path {
+                    let status = if transport_marker_only {
+                        "processed"
+                    } else {
+                        "sent"
+                    };
+                    record_delivery_state(path, &message, status, None);
+                }
+            }
+            Err(error) => {
+                if let Some(path) = delivery_metadata_path {
+                    record_delivery_state(path, &message, "failed", Some(&error));
+                }
+                eprintln!("external channel outbound failed: {error}");
+            }
         }
     }
+}
+
+fn send_with_transport_retries(
+    message: OutboundMessage,
+    attempts: usize,
+    stop: &Arc<AtomicBool>,
+    send: &mut impl FnMut(OutboundMessage) -> Result<(), String>,
+) -> Result<(), String> {
+    let attempts = attempts.clamp(1, 10);
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        match send(message.clone()) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < attempts {
+                    sleep_with_stop(
+                        stop,
+                        Duration::from_millis(100 * (attempt as u64 + 1).min(5)),
+                    );
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "transport send stopped before delivery".to_owned()))
 }
 
 fn discard_outbound(outbound_rx: &mpsc::Receiver<OutboundMessage>, reason: &str) {
@@ -4266,6 +7294,26 @@ fn post_json(
     })?)
 }
 
+fn patch_json(
+    agent: &ureq::Agent,
+    url: &str,
+    authorization: Option<String>,
+    body: Value,
+) -> Result<Value, String> {
+    let mut request = agent.patch(url).header("Content-Type", "application/json");
+    if let Some(authorization) = authorization {
+        request = request.header("Authorization", authorization);
+    }
+    let body = serde_json::to_string(&body).map_err(|error| error.to_string())?;
+    read_json_response(request.send(body).map_err(|error| {
+        format!(
+            "request to {} failed: {}",
+            redact_sensitive_url_text(url),
+            redact_sensitive_url_text(&error.to_string())
+        )
+    })?)
+}
+
 fn read_json_response(mut response: ureq::http::Response<ureq::Body>) -> Result<Value, String> {
     let status = response.status().as_u16();
     let body = response
@@ -4291,14 +7339,6 @@ fn json_id_string(value: &Value) -> Option<String> {
         .map(str::to_owned)
         .or_else(|| value.as_i64().map(|value| value.to_string()))
         .or_else(|| value.as_u64().map(|value| value.to_string()))
-}
-
-fn join_url_path(base: &str, path: &str) -> String {
-    format!(
-        "{}/{}",
-        base.trim_end_matches('/'),
-        path.trim_start_matches('/')
-    )
 }
 
 fn sleep_with_stop(stop: &AtomicBool, duration: Duration) {
@@ -4329,6 +7369,13 @@ pub fn web_preset(options: WebOptions) -> Result<WebPresetReport, CliError> {
         workspace_override: options.workspace_override.clone(),
         resolve_env: true,
     })?;
+    web_preset_from_bundle(&bundle, &options)
+}
+
+fn web_preset_from_bundle(
+    bundle: &ConfigBundle,
+    options: &WebOptions,
+) -> Result<WebPresetReport, CliError> {
     let gateway_options = GatewayOptions {
         config_path: options.config_path.clone(),
         workspace_override: options.workspace_override.clone(),
@@ -4336,18 +7383,56 @@ pub fn web_preset(options: WebOptions) -> Result<WebPresetReport, CliError> {
         verbose: options.verbose,
     };
     let gateway_addr = resolve_gateway_addr(&gateway_options, &bundle.config.gateway)?;
-    let websocket = websocket_preset(&bundle.config.channels.plugins, &options)?;
+    let websocket = websocket_preset(&bundle.config.channels.plugins, options)?;
     let assets_dir = shacs_web::manifest_dist_dir();
     let assets_populated = shacs_web::dist_is_populated(&assets_dir);
     Ok(WebPresetReport {
-        config_path: bundle.context.config_path,
-        workspace: bundle.context.workspace,
+        config_path: bundle.context.config_path.clone(),
+        workspace: bundle.context.workspace.clone(),
         gateway_addr,
         websocket,
         assets_dir,
         assets_populated,
         verbose: options.verbose,
     })
+}
+
+pub fn serve_web_ui(options: WebOptions) -> Result<String, CliError> {
+    let bundle = load_runtime_config(RuntimeConfigOptions {
+        config_path: options.config_path.clone(),
+        workspace_override: options.workspace_override.clone(),
+        resolve_env: true,
+    })?;
+    let report = web_preset_from_bundle(&bundle, &options)?;
+    let timeout_seconds = bundle.config.api.timeout.max(0.001);
+    let websocket_path = web_ui_websocket_path(&report);
+    let adapter = Arc::new(AgentLoopChatCompletionAdapter::from_bundle(bundle, false)?);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    eprintln!("{}", format_web_preset_report(report.clone()));
+    runtime.block_on(shacs_api::serve_web_ui_with_timeout_and_websocket_path(
+        report.gateway_addr,
+        adapter,
+        Duration::from_secs_f64(timeout_seconds),
+        &websocket_path,
+        report.assets_dir.clone(),
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        },
+    ))?;
+    Ok(format!(
+        "Web UI server stopped: http://{} (websocket_path={websocket_path})",
+        report.gateway_addr
+    ))
+}
+
+fn web_ui_websocket_path(report: &WebPresetReport) -> String {
+    if report.websocket.path == "/" {
+        shacs_api::WEBSOCKET_PATH.to_owned()
+    } else {
+        report.websocket.path.clone()
+    }
 }
 
 pub fn format_gateway_preset_report(report: GatewayPresetReport) -> String {
@@ -4364,17 +7449,15 @@ pub fn format_gateway_preset_report(report: GatewayPresetReport) -> String {
 }
 
 pub fn format_web_preset_report(report: WebPresetReport) -> String {
+    let websocket_path = web_ui_websocket_path(&report);
     let mut lines = vec![
-        "Web UI preset ready (use `shacs-bot run` to start WebSocket runtime)".to_owned(),
+        "Web UI server ready".to_owned(),
         format!("Config: {}", report.config_path.display()),
         format!("Workspace: {}", report.workspace.display()),
-        format!("Gateway URL: http://{}", report.gateway_addr),
+        format!("Web URL: http://{}", report.gateway_addr),
         format!(
-            "WebSocket: enabled={} ws://{}:{}{}",
-            report.websocket.enabled,
-            report.websocket.host,
-            report.websocket.port,
-            report.websocket.path
+            "WebSocket: enabled={} ws://{}{}",
+            report.websocket.enabled, report.gateway_addr, websocket_path
         ),
         format!("Assets: {}", report.assets_dir.display()),
         format!("Assets populated: {}", report.assets_populated),
@@ -4395,7 +7478,7 @@ pub fn help_text() -> String {
         "Commands:",
         "  onboard   Create or refresh config and workspace templates",
         "  status    Show config, workspace, model, and provider status",
-        "  runtime   Inspect local runtime/workspace state",
+        "  runtime   Inspect, update, or recover local runtime/workspace state",
         "  session   Manage local session files",
         "  skills    List and inspect local skill registry entries",
         "  channels  List channel registry/config status",
@@ -4404,9 +7487,9 @@ pub fn help_text() -> String {
         "  serve     Start the local OpenAI-compatible HTTP API",
         "  api serve Compatibility alias for serve",
         "  gateway   Report gateway preset boundary without starting channels",
-        "  web       Report WebUI asset and WebSocket preset boundary",
+        "  web       Start the Web UI, API, and WebSocket on one port",
         "  agent     Alias for one-shot direct AgentLoop messages with -m/--message",
-        "  provider  Manage provider auth; Codex login/import-token are available",
+        "  provider  Manage provider auth; Codex login/import-token and Copilot import-token are available",
         "  plugins   Reserved for a later plugin slice",
         "",
         "Options:",
@@ -4431,10 +7514,11 @@ pub fn help_text() -> String {
         "      --max-messages <n> Limit session history output",
         "      --format <json|jsonl> Select session export format",
         "      --keep-messages <n> Retain this many messages during session compact",
+        "      --target-version <v> Record runtime update target version",
         "      --all             Include inactive skill diagnostics in skills list",
         "  -y, --yes            Confirm irreversible session delete",
         "      --allow-side-effects  Enable write/edit/exec tools in CLI turns",
-        "      --token-stdin     Read Codex token from stdin for provider codex import-token",
+        "      --token-stdin     Read provider token from stdin for import-token commands",
         "      --token-env <var> Read Codex token from an environment variable",
         "      --account-id <id> Store optional ChatGPT account id for Codex",
         "  -h, --help            Show help",
@@ -4529,6 +7613,64 @@ fn parse_runtime_inspect(
         }
     }
     Ok(CliCommand::RuntimeInspect(options))
+}
+
+fn parse_runtime_update(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = RuntimeUpdateOptions {
+        config_path: global_config,
+        workspace_override: None,
+        target_version: String::new(),
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--target-version" => options.target_version = take_value(&mut parser, &arg)?,
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown runtime update argument `{other}`"
+                )))
+            }
+        }
+    }
+    if options.target_version.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "runtime update requires --target-version".to_owned(),
+        ));
+    }
+    validate_runtime_target_version(&options.target_version)?;
+    Ok(CliCommand::RuntimeUpdate(options))
+}
+
+fn parse_runtime_recover(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = RuntimeRecoverOptions {
+        config_path: global_config,
+        workspace_override: None,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown runtime recover argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(CliCommand::RuntimeRecover(options))
 }
 
 fn parse_session(
@@ -5026,6 +8168,9 @@ fn parse_provider(
     };
     match first.as_str() {
         "codex" | "openai-codex" | "openai_codex" => parse_provider_codex(parser, global_config),
+        "copilot" | "github-copilot" | "github_copilot" => {
+            parse_provider_copilot(parser, global_config)
+        }
         "login" => {
             let Some(provider) = parser.next() else {
                 return Err(CliError::InvalidArguments(
@@ -5047,6 +8192,24 @@ fn parse_provider(
     }
 }
 
+fn parse_provider_copilot(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "provider copilot requires `import-token`".to_owned(),
+        ));
+    };
+    match action.as_str() {
+        "import-token" => parse_copilot_import_token(parser, global_config),
+        "--help" | "-h" => Ok(CliCommand::Help),
+        other => Err(CliError::InvalidArguments(format!(
+            "unknown provider copilot action `{other}`"
+        ))),
+    }
+}
+
 fn parse_provider_codex(
     mut parser: ArgParser,
     global_config: Option<PathBuf>,
@@ -5064,6 +8227,42 @@ fn parse_provider_codex(
             "unknown provider codex action `{other}`"
         ))),
     }
+}
+
+fn parse_copilot_import_token(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut config_path = global_config;
+    let mut token_source = None;
+    let mut select = false;
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => config_path = Some(take_path(&mut parser, &arg)?),
+            "--token-stdin" => token_source = Some(TokenSource::Stdin),
+            "--token-env" => token_source = Some(TokenSource::Env(take_value(&mut parser, &arg)?)),
+            "--select" => select = true,
+            "--no-select" => select = false,
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown provider copilot import-token argument `{other}`"
+                )))
+            }
+        }
+    }
+    let token_source = token_source.ok_or_else(|| {
+        CliError::InvalidArguments(
+            "provider copilot import-token requires --token-stdin or --token-env <name>".to_owned(),
+        )
+    })?;
+    Ok(CliCommand::Provider(ProviderCommand::CopilotImportToken(
+        CopilotImportTokenOptions {
+            config_path,
+            token_source,
+            select,
+        },
+    )))
 }
 
 fn parse_codex_import_token(
@@ -5535,6 +8734,9 @@ pub struct AgentLoopChatCompletionAdapter {
     _mcp_runtime: Option<McpRuntime>,
     _mcp_reports: Vec<McpServerConnectionReport>,
     allow_side_effect_tools: bool,
+    send_progress: bool,
+    send_max_retries: u32,
+    session_turn_lock: SessionTurnLock,
 }
 
 impl AgentLoopChatCompletionAdapter {
@@ -5570,6 +8772,9 @@ impl AgentLoopChatCompletionAdapter {
             _mcp_runtime: tooling.mcp_runtime,
             _mcp_reports: tooling.mcp_reports,
             allow_side_effect_tools,
+            send_progress: bundle.config.channels.send_progress,
+            send_max_retries: bundle.config.channels.send_max_retries,
+            session_turn_lock: SessionTurnLock::new(),
         })
     }
 
@@ -5600,7 +8805,31 @@ impl AgentLoopChatCompletionAdapter {
             .defaults
             .unified_session
             .then(|| "api:default".to_owned());
+        config.concurrent_tools = true;
         config
+    }
+
+    fn context_builder(&self) -> ContextBuilder {
+        let mut extra_roots = Vec::new();
+        if let Some(data_dir) = self
+            .media_dir
+            .parent()
+            .and_then(|media_dir| media_dir.parent())
+        {
+            extra_roots.push(data_dir.join("skills"));
+        }
+        ContextBuilder::new(&self.workspace)
+            .with_timezone(self.defaults.timezone.clone())
+            .with_disabled_skills(self.defaults.disabled_skills.clone())
+            .with_skill_roots(extra_roots)
+    }
+
+    fn external_effective_session_key(&self, message: &InboundMessage) -> String {
+        effective_external_session_key(&self.loop_config(), message)
+    }
+
+    fn external_session_is_active(&self, session_key: &str) -> bool {
+        self.session_turn_lock.is_active(session_key)
     }
 
     fn run_agent_loop(
@@ -5608,22 +8837,36 @@ impl AgentLoopChatCompletionAdapter {
         invocation: ChatCompletionInvocation,
         on_event: Option<ApiProviderEventCallback>,
     ) -> Result<LlmResponse, ApiError> {
-        self.run_agent_loop_with_origin(invocation, on_event, "api", "user", shacs_api::API_CHAT_ID)
+        self.run_agent_loop_with_origin(
+            invocation,
+            on_event,
+            "api",
+            "user",
+            shacs_api::API_CHAT_ID,
+            &[],
+        )
     }
 
     fn complete_direct(
         &self,
         invocation: ChatCompletionInvocation,
     ) -> Result<LlmResponse, ApiError> {
-        self.run_agent_loop_with_origin(invocation, None, "cli", "user", "direct")
+        self.run_agent_loop_with_origin(invocation, None, "cli", "user", "direct", &[])
     }
 
     fn complete_sdk_run(
         &self,
         invocation: ChatCompletionInvocation,
+        observability_hooks: &[ShacsBotObservabilityHook],
     ) -> Result<RunResult, ApiError> {
-        let turn =
-            self.run_agent_loop_turn_with_origin(invocation, None, "sdk", "user", "default")?;
+        let turn = self.run_agent_loop_turn_with_origin(
+            invocation,
+            None,
+            "sdk",
+            "user",
+            "default",
+            observability_hooks,
+        )?;
         let messages = SessionManager::new(&self.workspace)
             .map_err(|error| {
                 ApiError::internal(format!("session manager could not be initialized: {error}"))
@@ -5645,9 +8888,16 @@ impl AgentLoopChatCompletionAdapter {
         channel: &str,
         sender_id: &str,
         chat_id: &str,
+        observability_hooks: &[ShacsBotObservabilityHook],
     ) -> Result<LlmResponse, ApiError> {
-        let turn = self
-            .run_agent_loop_turn_with_origin(invocation, on_event, channel, sender_id, chat_id)?;
+        let turn = self.run_agent_loop_turn_with_origin(
+            invocation,
+            on_event,
+            channel,
+            sender_id,
+            chat_id,
+            observability_hooks,
+        )?;
         Ok(llm_response_from_turn(turn))
     }
 
@@ -5658,6 +8908,7 @@ impl AgentLoopChatCompletionAdapter {
         channel: &str,
         sender_id: &str,
         chat_id: &str,
+        observability_hooks: &[ShacsBotObservabilityHook],
     ) -> Result<AgentLoopTurnResult, ApiError> {
         let mut config = self.loop_config();
         config.settings.temperature = invocation
@@ -5668,7 +8919,8 @@ impl AgentLoopChatCompletionAdapter {
             InboundMessage::new(channel, sender_id, chat_id, invocation_text(&invocation))
                 .with_media(invocation.media_paths.clone())
                 .with_session_key_override(invocation.session_key.clone());
-        let (result, _) = self.process_inbound_with_outbound(message, config, on_event)?;
+        let (result, _) =
+            self.process_inbound_with_outbound(message, config, on_event, observability_hooks)?;
         Ok(result)
     }
 
@@ -5678,38 +8930,325 @@ impl AgentLoopChatCompletionAdapter {
         client_id: &str,
         default_chat_id: &str,
     ) -> Result<Vec<WebSocketServerEvent>, ApiError> {
+        let mut events = Vec::new();
+        self.process_websocket_frame_events(frame, client_id, default_chat_id, &mut |event| {
+            events.push(event);
+        })?;
+        Ok(events)
+    }
+
+    fn process_websocket_frame_events(
+        &self,
+        frame: Value,
+        client_id: &str,
+        default_chat_id: &str,
+        emit: &mut dyn FnMut(WebSocketServerEvent),
+    ) -> Result<(), ApiError> {
         let action = match normalize_websocket_frame(frame, client_id, default_chat_id) {
             Ok(action) => action,
             Err(error) => {
-                return Ok(vec![WebSocketServerEvent::Error {
+                emit(WebSocketServerEvent::Error {
                     chat_id: Some(default_chat_id.to_owned()),
                     detail: Some(error.to_string()),
-                }])
+                });
+                return Ok(());
             }
         };
         match action {
-            WebSocketInboundAction::NewChat => Ok(vec![WebSocketServerEvent::Ready {
+            WebSocketInboundAction::NewChat => emit(WebSocketServerEvent::Ready {
                 chat_id: default_chat_id.to_owned(),
                 client_id: client_id.to_owned(),
-            }]),
+            }),
             WebSocketInboundAction::Attach { chat_id } => {
-                Ok(vec![WebSocketServerEvent::Attached { chat_id }])
+                emit(WebSocketServerEvent::Attached { chat_id })
             }
             WebSocketInboundAction::Message(mut inbound) => {
                 let session_key = inbound.session_key();
+                let chat_id = inbound.chat_id.clone();
                 let media_paths =
                     <Self as ChatCompletionAdapter>::persist_media_data_urls(self, &inbound.media)?;
                 inbound.media = media_paths;
                 inbound.session_key_override = Some(session_key);
-                let (_, outbound) =
-                    self.process_inbound_with_outbound(inbound, self.loop_config(), None)?;
-                Ok(outbound
+                let stream_id = format!("{chat_id}:{}", now_millis());
+                let (_, outbound) = self.process_websocket_inbound_with_streaming(
+                    inbound,
+                    self.loop_config(),
+                    &chat_id,
+                    &stream_id,
+                    emit,
+                )?;
+                let sink = WebSocketEventSink::default();
+                let mut manager =
+                    websocket_event_channel_manager(self.send_max_retries, sink.clone());
+                for message in outbound
                     .into_iter()
                     .filter(|message| message.channel == WEBSOCKET_CHANNEL)
-                    .map(websocket_event_from_outbound)
-                    .collect())
+                {
+                    if let Err(error) = manager.dispatch_outbound(message) {
+                        emit(WebSocketServerEvent::Error {
+                            chat_id: Some(default_chat_id.to_owned()),
+                            detail: Some(error.to_string()),
+                        });
+                        return Ok(());
+                    }
+                }
+                for event in sink.take_events() {
+                    emit(event);
+                }
             }
         }
+        Ok(())
+    }
+
+    fn process_websocket_inbound_with_streaming(
+        &self,
+        inbound: InboundMessage,
+        config: AgentLoopConfig,
+        chat_id: &str,
+        stream_id: &str,
+        emit: &mut dyn FnMut(WebSocketServerEvent),
+    ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
+        if !self.send_progress {
+            return self.process_inbound_with_outbound(inbound, config, None, &[]);
+        }
+
+        let (event_tx, event_rx) = mpsc::channel();
+        let callback = Arc::new(move |event: &ProviderEvent| {
+            let _ = event_tx.send(event.clone());
+        });
+        thread::scope(|scope| {
+            let handle = scope.spawn(move || {
+                self.process_inbound_with_outbound(inbound, config, Some(callback), &[])
+            });
+            let stream_result =
+                self.emit_websocket_stream_events(event_rx, chat_id, stream_id, emit);
+            let loop_result = match handle.join() {
+                Ok(result) => result,
+                Err(_) => Err(ApiError::internal("websocket agent loop task panicked")),
+            };
+            stream_result?;
+            loop_result
+        })
+    }
+
+    fn process_external_inbound_with_streaming(
+        &self,
+        inbound: InboundMessage,
+        config: AgentLoopConfig,
+        runtime_bus: &MessageBus,
+    ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
+        let channel = inbound.channel.clone();
+        let chat_id = inbound.chat_id.clone();
+        let session_key = self.external_effective_session_key(&inbound);
+        let routing_metadata = stream_routing_metadata_from_inbound(&inbound);
+        let reply_to = inbound_reply_to(&inbound);
+        if !self.send_progress || !provider_streaming_channel(&channel) {
+            return self.process_inbound_with_outbound(inbound, config, None, &[]);
+        }
+
+        let stream_id = format!("{channel}:{chat_id}:{session_key}:{}", now_millis());
+        let (event_tx, event_rx) = mpsc::channel();
+        let callback = Arc::new(move |event: &ProviderEvent| {
+            let _ = event_tx.send(event.clone());
+        });
+        thread::scope(|scope| {
+            let handle = scope.spawn(move || {
+                self.process_inbound_with_outbound(inbound, config, Some(callback), &[])
+            });
+            let routing = ExternalStreamRouting {
+                channel: &channel,
+                chat_id: &chat_id,
+                stream_id: &stream_id,
+                metadata: &routing_metadata,
+                reply_to: reply_to.as_deref(),
+            };
+            self.publish_external_stream_events(event_rx, routing, runtime_bus)?;
+            match handle.join() {
+                Ok(result) => result,
+                Err(_) => Err(ApiError::internal(
+                    "external channel agent loop task panicked",
+                )),
+            }
+        })
+    }
+
+    fn publish_external_stream_events(
+        &self,
+        event_rx: mpsc::Receiver<ProviderEvent>,
+        routing: ExternalStreamRouting<'_>,
+        runtime_bus: &MessageBus,
+    ) -> Result<(), ApiError> {
+        let mut coalescer = StreamDeltaCoalescer::new();
+        let mut pending_chars = 0usize;
+        let mut emitted_stream_event = false;
+        let mut emitted_stream_end = false;
+        for event in event_rx {
+            if let ProviderEvent::TextDelta { text } = &event {
+                pending_chars = pending_chars.saturating_add(text.chars().count());
+            }
+            let mut batch = coalescer.push(&event);
+            if batch.is_none() && pending_chars >= WEBSOCKET_STREAM_FLUSH_CHARS {
+                batch = coalescer.flush();
+            }
+            if let Some(batch) = batch {
+                pending_chars = 0;
+                if !batch.text.is_empty() {
+                    emitted_stream_event = true;
+                    runtime_bus.publish_outbound(stream_outbound_message_with_routing(
+                        routing.channel,
+                        routing.chat_id,
+                        routing.stream_id,
+                        batch.text,
+                        false,
+                        routing.metadata,
+                        routing.reply_to,
+                    ));
+                }
+            }
+            if matches!(event, ProviderEvent::Finish { .. }) {
+                emitted_stream_event = true;
+                emitted_stream_end = true;
+                runtime_bus.publish_outbound(stream_outbound_message_with_routing(
+                    routing.channel,
+                    routing.chat_id,
+                    routing.stream_id,
+                    String::new(),
+                    true,
+                    routing.metadata,
+                    routing.reply_to,
+                ));
+            }
+        }
+        if let Some(batch) = coalescer.flush() {
+            if !batch.text.is_empty() {
+                emitted_stream_event = true;
+                runtime_bus.publish_outbound(stream_outbound_message_with_routing(
+                    routing.channel,
+                    routing.chat_id,
+                    routing.stream_id,
+                    batch.text,
+                    false,
+                    routing.metadata,
+                    routing.reply_to,
+                ));
+            }
+        }
+        if emitted_stream_event && !emitted_stream_end {
+            runtime_bus.publish_outbound(stream_outbound_message_with_routing(
+                routing.channel,
+                routing.chat_id,
+                routing.stream_id,
+                String::new(),
+                true,
+                routing.metadata,
+                routing.reply_to,
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_websocket_stream_events(
+        &self,
+        event_rx: mpsc::Receiver<ProviderEvent>,
+        chat_id: &str,
+        stream_id: &str,
+        emit: &mut dyn FnMut(WebSocketServerEvent),
+    ) -> Result<(), ApiError> {
+        let sink = WebSocketEventSink::default();
+        let mut manager = websocket_event_channel_manager(self.send_max_retries, sink.clone());
+        let mut coalescer = StreamDeltaCoalescer::new();
+        let mut pending_chars = 0usize;
+        let mut emitted_stream_event = false;
+        let mut emitted_stream_end = false;
+        for event in event_rx {
+            if let ProviderEvent::TextDelta { text } = &event {
+                pending_chars = pending_chars.saturating_add(text.chars().count());
+            }
+            let mut batch = coalescer.push(&event);
+            if batch.is_none() && pending_chars >= WEBSOCKET_STREAM_FLUSH_CHARS {
+                batch = coalescer.flush();
+            }
+            if let Some(batch) = batch {
+                pending_chars = 0;
+                if !batch.text.is_empty() {
+                    emitted_stream_event = true;
+                    Self::emit_websocket_stream_outbound(
+                        &mut manager,
+                        &sink,
+                        chat_id,
+                        stream_id,
+                        batch.text,
+                        false,
+                        emit,
+                    )?;
+                }
+            }
+            if matches!(event, ProviderEvent::Finish { .. }) {
+                emitted_stream_event = true;
+                emitted_stream_end = true;
+                Self::emit_websocket_stream_outbound(
+                    &mut manager,
+                    &sink,
+                    chat_id,
+                    stream_id,
+                    String::new(),
+                    true,
+                    emit,
+                )?;
+            }
+        }
+        if let Some(batch) = coalescer.flush() {
+            if !batch.text.is_empty() {
+                emitted_stream_event = true;
+                Self::emit_websocket_stream_outbound(
+                    &mut manager,
+                    &sink,
+                    chat_id,
+                    stream_id,
+                    batch.text,
+                    false,
+                    emit,
+                )?;
+            }
+        }
+        if emitted_stream_event && !emitted_stream_end {
+            Self::emit_websocket_stream_outbound(
+                &mut manager,
+                &sink,
+                chat_id,
+                stream_id,
+                String::new(),
+                true,
+                emit,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn emit_websocket_stream_outbound(
+        manager: &mut ChannelManager,
+        sink: &WebSocketEventSink,
+        chat_id: &str,
+        stream_id: &str,
+        content: String,
+        end: bool,
+        emit: &mut dyn FnMut(WebSocketServerEvent),
+    ) -> Result<(), ApiError> {
+        manager
+            .dispatch_outbound(stream_outbound_message(
+                WEBSOCKET_CHANNEL,
+                chat_id,
+                stream_id,
+                content,
+                end,
+            ))
+            .map_err(|error| {
+                ApiError::internal(format!("websocket stream dispatch failed: {error}"))
+            })?;
+        for event in sink.take_events() {
+            emit(event);
+        }
+        Ok(())
     }
 
     fn process_inbound_with_outbound(
@@ -5717,6 +9256,7 @@ impl AgentLoopChatCompletionAdapter {
         message: InboundMessage,
         config: AgentLoopConfig,
         on_event: Option<ApiProviderEventCallback>,
+        observability_hooks: &[ShacsBotObservabilityHook],
     ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
         let sessions = SessionManager::new(&self.workspace).map_err(|error| {
             ApiError::internal(format!("session manager could not be initialized: {error}"))
@@ -5737,18 +9277,41 @@ impl AgentLoopChatCompletionAdapter {
         let mut loop_runtime = AgentLoop::new(
             bus,
             sessions,
-            ContextBuilder::new(&self.workspace),
+            self.context_builder(),
             &tools,
             self.client.as_ref(),
             config,
         )
-        .with_context_tools(shacs_core::runtime::RuntimeContextTools::new().with_spawn(spawn_tool));
+        .with_context_tools(shacs_core::runtime::RuntimeContextTools::new().with_spawn(spawn_tool))
+        .with_session_turn_lock(self.session_turn_lock.clone());
+        let on_event = observability_provider_callback(observability_hooks, on_event);
         if let Some(callback) = on_event {
             loop_runtime = loop_runtime.with_provider_event_callback(callback);
         }
+        if !observability_hooks.is_empty() {
+            let pending = Arc::new(Mutex::new(BTreeMap::new()));
+            loop_runtime = loop_runtime
+                .with_agent_hook(Arc::new(ObservabilityToolStartHook::new(
+                    observability_hooks.to_vec(),
+                    pending.clone(),
+                )))
+                .with_tool_event_callback(
+                    observability_tool_callback(observability_hooks, pending)
+                        .expect("observability hook should create tool callback"),
+                );
+        }
         let result = loop_runtime
             .process_message(message)
-            .map_err(|error| ApiError::internal(format!("agent loop request failed: {error}")))?;
+            .map_err(|error| match error {
+                shacs_core::runtime::AgentLoopError::DuplicateActiveTurn { session_key } => {
+                    ApiError {
+                        status: 409,
+                        message: format!("session turn already active: {session_key}"),
+                        error_type: "session_busy".to_owned(),
+                    }
+                }
+                error => ApiError::internal(format!("agent loop request failed: {error}")),
+            })?;
         let mut outbound = Vec::new();
         while let Some(message) = outbound_bus.consume_outbound() {
             outbound.push(message);
@@ -5769,6 +9332,15 @@ impl AgentLoopChatCompletionAdapter {
         subagent.enable_web = true;
         subagent.restrict_to_workspace = true;
         subagent
+    }
+
+    fn execute_heartbeat_tasks(&self, tasks: &str) -> Result<String, HeartbeatError> {
+        let message = InboundMessage::new("heartbeat", "system", "heartbeat", tasks.to_owned())
+            .with_session_key_override("heartbeat");
+        let (turn, _) = self
+            .process_inbound_with_outbound(message, self.loop_config(), None, &[])
+            .map_err(|error| HeartbeatError::Execute(error.to_string()))?;
+        Ok(turn.final_content.unwrap_or_default())
     }
 }
 
@@ -5835,13 +9407,26 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         for data_url in data_urls {
             match save_base64_data_url(data_url, &self.media_dir, Some(DEFAULT_MAX_BYTES)) {
                 Ok(Some(path)) => paths.push(path),
-                Ok(None) => {}
+                Ok(None) => {
+                    return Err(ApiError::unsupported_media(
+                        "media URL must be a valid base64 data URL",
+                    ))
+                }
                 Err(MediaDecodeError::FileSizeExceeded { limit }) => {
                     return Err(ApiError::payload_too_large(format!(
                         "media data URL exceeds {limit} bytes"
                     )))
                 }
-                Err(MediaDecodeError::Malformed) => {}
+                Err(MediaDecodeError::Malformed) => {
+                    return Err(ApiError::unsupported_media(
+                        "media URL must be a valid base64 data URL",
+                    ))
+                }
+                Err(MediaDecodeError::UnsupportedType { mime_type }) => {
+                    return Err(ApiError::unsupported_media(format!(
+                        "media data URL type is not supported: {mime_type}"
+                    )))
+                }
                 Err(MediaDecodeError::Io(error)) => {
                     return Err(ApiError::internal(format!(
                         "media data URL could not be saved: {error}"
@@ -5890,6 +9475,16 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
             client_id,
             default_chat_id,
         )
+    }
+
+    fn process_websocket_frame_streaming(
+        &self,
+        frame: Value,
+        client_id: &str,
+        default_chat_id: &str,
+        on_event: &mut dyn FnMut(WebSocketServerEvent),
+    ) -> Result<(), ApiError> {
+        self.process_websocket_frame_events(frame, client_id, default_chat_id, on_event)
     }
 }
 
@@ -6258,8 +9853,20 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
         format!("Data dir: {}", display_path(&report.data_dir)),
         format!("Provider: {}", report.provider),
         format!("Model: {}", report.model),
+        format!("Binary version: {}", report.lifecycle.binary_version),
+        format!(
+            "Data schema: {} (min {})",
+            report.lifecycle.data_schema_version, report.lifecycle.data_schema_min_version
+        ),
         format!("Sessions: {}", report.sessions.count),
     ];
+    match report.lifecycle.update_marker {
+        Some(marker) => lines.push(format!(
+            "Update marker: {} {} -> {} (migration_required={})",
+            marker.phase, marker.from_version, marker.target_version, marker.migration_required
+        )),
+        None => lines.push("Update marker: none".to_owned()),
+    }
     if let Some(latest_key) = report.sessions.latest_key {
         let updated = report
             .sessions
@@ -6290,6 +9897,35 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
         ));
     }
     lines.join("\n")
+}
+
+fn format_runtime_update(outcome: RuntimeUpdateOutcome) -> String {
+    [
+        "shacs-bot runtime update".to_owned(),
+        format!("Config: {}", display_path(&outcome.config_path)),
+        format!("Workspace: {}", display_path(&outcome.workspace)),
+        format!("Data dir: {}", display_path(&outcome.data_dir)),
+        format!("Current version: {}", outcome.from_version),
+        format!("Target version: {}", outcome.target_version),
+        format!("Migration required: {}", outcome.migration_required),
+        format!("Phase: {}", outcome.phase),
+        format!("Marker: {}", display_path(&outcome.marker_path)),
+        "Note: Rust source installs still require replacing/rebuilding the binary separately. This command records the local no-op runtime upgrade marker and compatibility evidence.".to_owned(),
+    ]
+    .join("\n")
+}
+
+fn format_runtime_recover(outcome: RuntimeRecoverOutcome) -> String {
+    [
+        "shacs-bot runtime recover".to_owned(),
+        format!("Config: {}", display_path(&outcome.config_path)),
+        format!("Workspace: {}", display_path(&outcome.workspace)),
+        format!("Data dir: {}", display_path(&outcome.data_dir)),
+        format!("Marker: {}", display_path(&outcome.marker_path)),
+        format!("Recovered: {}", outcome.recovered),
+        format!("Detail: {}", outcome.detail),
+    ]
+    .join("\n")
 }
 
 fn format_session_list(report: SessionListReport) -> String {
@@ -6488,6 +10124,23 @@ fn format_codex_import_outcome(outcome: CodexImportOutcome) -> String {
     .join("\n")
 }
 
+fn format_copilot_import_outcome(outcome: CopilotImportOutcome) -> String {
+    let model_line = outcome
+        .selected_model
+        .as_deref()
+        .map(|model| format!("Selected model: {model}"))
+        .unwrap_or_else(|| "Selected model: unchanged".to_owned());
+    [
+        "GitHub Copilot token imported.".to_owned(),
+        format!("Config: {}", display_path(&outcome.config_path)),
+        format!("Auth: {}", display_path(&outcome.auth_path)),
+        format!("Provider: {}", outcome.provider),
+        model_line,
+        format!("Selected: {}", configured_label(outcome.selected)),
+    ]
+    .join("\n")
+}
+
 fn format_codex_login_outcome(outcome: CodexLoginOutcome) -> String {
     [
         "Codex login complete.".to_owned(),
@@ -6603,7 +10256,10 @@ mod tests {
     use serde_json::json;
     use shacs_config::{save_config_to_path, AuthStore, Config};
     use shacs_core::runtime::Session;
-    use shacs_providers::{GenerationSettings, ProviderClient, ProviderEvent, ProviderRequest};
+    use shacs_core::tools::{JsonMap, Tool, ToolResult};
+    use shacs_providers::{
+        GenerationSettings, ProviderClient, ProviderEvent, ProviderRequest, ToolCallRequest,
+    };
     use shacs_templates::WorkspaceSyncOutcome;
     use std::collections::{BTreeMap, VecDeque};
     use std::error::Error;
@@ -6780,11 +10436,38 @@ mod tests {
             Some(PathBuf::from("/tmp/workspace"))
         );
 
+        let parsed = parse_cli_args(["runtime", "update", "--target-version", VERSION])?;
+        let CliCommand::RuntimeUpdate(options) = parsed else {
+            return Err("expected runtime update command".into());
+        };
+        assert_eq!(options.target_version, VERSION);
+
+        let parsed = parse_cli_args(["runtime", "recover", "-w", "/tmp/runtime"])?;
+        let CliCommand::RuntimeRecover(options) = parsed else {
+            return Err("expected runtime recover command".into());
+        };
+        assert_eq!(
+            options.workspace_override,
+            Some(PathBuf::from("/tmp/runtime"))
+        );
+
         let error = parse_cli_args(["runtime"])
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
-        assert!(error.contains("runtime requires `inspect`"));
+        assert!(error.contains("runtime requires `inspect`, `update`, or `recover`"));
+
+        let error = parse_cli_args(["runtime", "update"])
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(error.contains("runtime update requires --target-version"));
+
+        let error = parse_cli_args(["runtime", "update", "--target-version", "bad\nversion"])
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(error.contains("must contain only ASCII"));
         Ok(())
     }
 
@@ -7009,6 +10692,34 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_runtime_requires_enabled_non_empty_workspace_file() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        let context = config_context(Some(config_path), Some(workspace.clone()));
+        let mut bundle = ConfigBundle {
+            config,
+            context,
+            migrations: Vec::new(),
+        };
+
+        assert!(!heartbeat_runtime_enabled(&bundle));
+        fs::write(workspace.join(HEARTBEAT_FILE_NAME), "\n\n")?;
+        assert!(!heartbeat_runtime_enabled(&bundle));
+        fs::write(
+            workspace.join(HEARTBEAT_FILE_NAME),
+            "## Active\n- refresh docs",
+        )?;
+        assert!(heartbeat_runtime_enabled(&bundle));
+        bundle.config.gateway.heartbeat.enabled = false;
+        assert!(!heartbeat_runtime_enabled(&bundle));
+        Ok(())
+    }
+
+    #[test]
     fn channel_runtime_plan_starts_websocket_and_skips_unconfigured_external_workers(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -7073,12 +10784,14 @@ mod tests {
         );
         config.channels.plugins.insert(
             "slack".to_owned(),
-            json!({ "enabled": true, "botToken": "slack-token", "channelIds": ["C123"] }),
+            json!({ "enabled": true, "appToken": "slack-app-token", "botToken": "slack-token", "channelIds": ["C123"] }),
         );
         config.channels.plugins.insert(
             "email".to_owned(),
             json!({
                 "enabled": true,
+                "consentGranted": true,
+                "allowFrom": ["sender@example.com"],
                 "smtp": {
                     "host": "smtp.example.com",
                     "from": "bot@example.com"
@@ -7140,6 +10853,407 @@ mod tests {
     }
 
     #[test]
+    fn channel_runtime_plan_starts_original_discord_gateway_config() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        config
+            .channels
+            .plugins
+            .insert("websocket".to_owned(), json!({ "enabled": false }));
+        config.channels.plugins.insert(
+            "discord".to_owned(),
+            json!({
+                "enabled": true,
+                "token": "discord-token",
+                "allowFrom": [],
+                "replyInThread": false
+            }),
+        );
+        config.channels.plugins.insert(
+            "slack".to_owned(),
+            json!({
+                "enabled": true,
+                "appToken": "slack-app-token",
+                "botToken": "slack-bot-token",
+                "replyInThread": true
+            }),
+        );
+        save_config_to_path(&config, &config_path)?;
+
+        let report = channel_runtime_plan(RunOptions {
+            config_path: Some(config_path),
+            ..RunOptions::default()
+        })?;
+        let discord = report
+            .workers
+            .iter()
+            .find(|worker| worker.descriptor.channel == "discord")
+            .ok_or("discord worker missing")?;
+        let slack = report
+            .workers
+            .iter()
+            .find(|worker| worker.descriptor.channel == "slack")
+            .ok_or("slack worker missing")?;
+        assert_eq!(discord.state, ChannelRuntimeWorkerState::Started);
+        assert_eq!(slack.state, ChannelRuntimeWorkerState::Started);
+        let formatted = format_channel_runtime_plan(report);
+        assert!(formatted.contains("discord / Discord Gateway worker: started"));
+        assert!(formatted.contains("slack / Slack Socket Mode worker: started"));
+        Ok(())
+    }
+
+    #[test]
+    fn external_runtime_parsers_accept_original_channel_aliases() -> Result<(), Box<dyn Error>> {
+        let mut plugins = BTreeMap::new();
+        plugins.insert(
+            "discord".to_owned(),
+            json!({
+                "enabled": true,
+                "token": "discord-token",
+                "allowChannels": ["123"],
+                "allowFrom": ["user-1"]
+            }),
+        );
+        plugins.insert(
+            "slack".to_owned(),
+            json!({
+                "enabled": true,
+                "app_token": "slack-app-token",
+                "botToken": "slack-token",
+                "allowChannels": ["C123"],
+                "allowFrom": ["U123"]
+            }),
+        );
+        plugins.insert(
+            "email".to_owned(),
+            json!({
+                "enabled": true,
+                "consentGranted": true,
+                "allowFrom": ["sender@example.com"],
+                "smtpHost": "smtp.example.com",
+                "smtpUsername": "smtp-user",
+                "smtpPassword": "smtp-password",
+                "fromAddress": "bot@example.com",
+                "imapHost": "imap.example.com",
+                "imapUsername": "imap-user",
+                "imapPassword": "imap-password"
+            }),
+        );
+
+        let discord = discord_runtime_config(&plugins).ok_or("discord runtime config missing")?;
+        assert_eq!(
+            discord.channel_filter,
+            DiscordChannelFilter::Only(vec!["123".to_owned()])
+        );
+        assert_eq!(discord.allowed_senders, vec!["user-1".to_owned()]);
+        assert_eq!(discord.transport, DiscordTransportMode::Gateway);
+        let slack = slack_runtime_config(&plugins).ok_or("slack runtime config missing")?;
+        assert_eq!(slack.app_token, "slack-app-token");
+        assert_eq!(slack.channel_ids, vec!["C123".to_owned()]);
+        assert_eq!(slack.allowed_senders, vec!["U123".to_owned()]);
+        let email = email_runtime_config(&plugins).ok_or("email runtime config missing")?;
+        let email_smtp = email.smtp.ok_or("email smtp runtime config missing")?;
+        assert_eq!(email_smtp.from, "bot@example.com");
+        assert_eq!(email_smtp.username.as_deref(), Some("smtp-user"));
+        assert_eq!(email_smtp.password.as_deref(), Some("smtp-password"));
+        let email_imap = email.imap.ok_or("email imap runtime config missing")?;
+        assert_eq!(email_imap.username, "imap-user");
+        assert_eq!(email_imap.password, "imap-password");
+        assert!(sender_allowed(&discord.allowed_senders, "user-1"));
+        assert!(!sender_allowed(&discord.allowed_senders, "user-2"));
+        assert!(!sender_allowed(&[], "user-1"));
+
+        let mut whatsapp_plugins = BTreeMap::new();
+        whatsapp_plugins.insert(
+            "whatsapp".to_owned(),
+            json!({ "enabled": true, "bridgeUrl": "http://127.0.0.1:9001" }),
+        );
+        let whatsapp =
+            whatsapp_runtime_config(&whatsapp_plugins).ok_or("whatsapp runtime config missing")?;
+        assert_eq!(whatsapp.bridge_url, "ws://127.0.0.1:9001");
+        assert!(
+            normalize_whatsapp_bridge_websocket_url("https://bridge.example/ws")
+                .is_some_and(|url| url == "wss://bridge.example/ws")
+        );
+        assert!(normalize_whatsapp_bridge_websocket_url("ftp://bridge.example/ws").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn slack_socket_mode_ack_and_envelope_normalization() -> Result<(), Box<dyn Error>> {
+        let config = SlackRuntimeConfig {
+            app_token: "xapp-token".to_owned(),
+            bot_token: "xoxb-token".to_owned(),
+            channel_ids: vec!["C123".to_owned()],
+            allowed_senders: vec!["U123".to_owned()],
+        };
+        let envelope = json!({
+            "envelope_id": "env-1",
+            "payload": {
+                "event": {
+                    "type": "app_mention",
+                    "user": "U123",
+                    "channel": "C123",
+                    "text": "<@BOT> hello",
+                    "ts": "1710000000.000100",
+                    "thread_ts": "1710000000.000001",
+                    "channel_type": "channel"
+                }
+            },
+            "authorizations": [{"user_id": "UBOT", "is_bot": true}]
+        });
+
+        assert_eq!(
+            slack_socket_ack_frame(&envelope),
+            Some(json!({"envelope_id": "env-1"}))
+        );
+        let inbound = slack_socket_envelope_to_inbound(&config, &envelope)
+            .ok_or("slack socket envelope was not normalized")?;
+        assert_eq!(inbound.channel, SLACK_CHANNEL);
+        assert_eq!(inbound.sender_id, "U123");
+        assert_eq!(inbound.chat_id, "C123");
+        assert_eq!(inbound.content, "<@BOT> hello");
+        assert_eq!(
+            inbound.session_key_override.as_deref(),
+            Some("slack:C123:1710000000.000001")
+        );
+
+        let subtype = json!({
+            "payload": {"event": {"type": "message", "subtype": "bot_message", "user": "U123", "channel": "C123", "text": "bot"}}
+        });
+        assert!(slack_socket_envelope_to_inbound(&config, &subtype).is_none());
+
+        let self_message = json!({
+            "payload": {"event": {"type": "message", "user": "UBOT", "channel": "C123", "text": "self"}},
+            "authorizations": [{"user_id": "UBOT", "is_bot": true}]
+        });
+        assert!(slack_socket_envelope_to_inbound(&config, &self_message).is_none());
+
+        let blocked_channel = json!({
+            "payload": {"event": {"type": "message", "user": "U123", "channel": "C999", "text": "blocked"}}
+        });
+        assert!(slack_socket_envelope_to_inbound(&config, &blocked_channel).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn whatsapp_websocket_helper_serializes_and_normalizes_bridge_values(
+    ) -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            whatsapp_frame_text(&WhatsAppOutboundFrame::Send {
+                to: "15551234567".to_owned(),
+                text: "hello".to_owned(),
+            })?,
+            r#"{"type":"send","to":"15551234567","text":"hello"}"#
+        );
+
+        let config = WhatsAppChannelConfig {
+            bridge_url: "ws://127.0.0.1:9001".to_owned(),
+            bridge_token: Some("bridge-token".to_owned()),
+            allowlist: shacs_channels::ChannelAllowlist::allow_all(),
+            group_policy: WhatsAppGroupPolicy::Open,
+        };
+        let value = json!({
+            "type": "message",
+            "pn": "15551234567@s.whatsapp.net",
+            "sender": "15551234567@s.whatsapp.net",
+            "content": "hello from bridge",
+            "id": "wa-1",
+            "isGroup": false,
+            "wasMentioned": false,
+            "media": [],
+            "timestamp": "1710000000"
+        });
+        let inbound =
+            normalize_whatsapp_bridge_value(&value, &config, &mut RecentMessageIds::new(16))?
+                .ok_or("whatsapp bridge value did not normalize")?;
+        assert_eq!(inbound.channel, WHATSAPP_CHANNEL);
+        assert_eq!(inbound.sender_id, "15551234567");
+        assert_eq!(inbound.content, "hello from bridge");
+        assert_eq!(whatsapp_message_items(&value), vec![&value]);
+        assert_eq!(whatsapp_message_items(&json!([value.clone()])).len(), 1);
+        assert_eq!(
+            whatsapp_message_items(&json!({ "messages": [value] })).len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discord_gateway_message_filter_matches_original_semantics() -> Result<(), Box<dyn Error>> {
+        let config = DiscordRuntimeConfig {
+            token: "token".to_owned(),
+            channel_filter: DiscordChannelFilter::AllVisible,
+            allowed_senders: vec!["user-1".to_owned()],
+            group_policy: DiscordGroupPolicy::Mention,
+            streaming: true,
+            poll_interval_seconds: 5,
+            transport: DiscordTransportMode::Gateway,
+        };
+        let mut recent = RecentMessageIds::new(16);
+        let event = json!({
+            "id": "m1",
+            "channel_id": "c1",
+            "guild_id": "g1",
+            "content": "<@bot-1> hello",
+            "author": {"id": "user-1", "bot": false},
+            "mentions": [{"id": "bot-1"}]
+        });
+
+        let inbound =
+            discord_gateway_message_to_inbound(&config, Some("bot-1"), &mut recent, &event)
+                .ok_or("accepted mentioned guild message missing")?;
+        assert_eq!(inbound.content, "hello");
+        assert_eq!(inbound.chat_id, "c1");
+        assert!(
+            discord_gateway_message_to_inbound(&config, Some("bot-1"), &mut recent, &event)
+                .is_none()
+        );
+
+        let unmentioned = json!({
+            "id": "m2",
+            "channel_id": "c1",
+            "guild_id": "g1",
+            "content": "hello",
+            "author": {"id": "user-1", "bot": false},
+            "mentions": []
+        });
+        assert!(discord_gateway_message_to_inbound(
+            &config,
+            Some("bot-1"),
+            &mut RecentMessageIds::new(16),
+            &unmentioned,
+        )
+        .is_none());
+
+        let everyone = json!({
+            "id": "m4",
+            "channel_id": "c1",
+            "guild_id": "g1",
+            "content": "@everyone hello",
+            "author": {"id": "user-1", "bot": false},
+            "mention_everyone": true,
+            "mentions": []
+        });
+        assert!(discord_gateway_message_to_inbound(
+            &config,
+            Some("bot-1"),
+            &mut RecentMessageIds::new(16),
+            &everyone,
+        )
+        .is_none());
+
+        let thread_config = DiscordRuntimeConfig {
+            token: "token".to_owned(),
+            channel_filter: DiscordChannelFilter::Only(vec!["parent-1".to_owned()]),
+            allowed_senders: vec!["user-1".to_owned()],
+            group_policy: DiscordGroupPolicy::Open,
+            streaming: true,
+            poll_interval_seconds: 5,
+            transport: DiscordTransportMode::Gateway,
+        };
+        let thread_message = json!({
+            "id": "m5",
+            "channel_id": "thread-1",
+            "parent_id": "parent-1",
+            "guild_id": "g1",
+            "content": "hello thread",
+            "author": {"id": "user-1", "bot": false},
+            "mentions": []
+        });
+        assert!(discord_gateway_message_to_inbound(
+            &thread_config,
+            Some("bot-1"),
+            &mut RecentMessageIds::new(16),
+            &thread_message,
+        )
+        .is_some());
+
+        let dm = json!({
+            "id": "m3",
+            "channel_id": "dm1",
+            "content": "hello dm",
+            "author": {"id": "user-1", "bot": false},
+            "mentions": []
+        });
+        assert!(discord_gateway_message_to_inbound(
+            &config,
+            Some("bot-1"),
+            &mut RecentMessageIds::new(16),
+            &dm,
+        )
+        .is_some());
+
+        let open_sender_config = DiscordRuntimeConfig {
+            allowed_senders: Vec::new(),
+            ..config.clone()
+        };
+        let open_sender_message = json!({
+            "id": "m6",
+            "channel_id": "dm1",
+            "content": "hello from new sender",
+            "author": {"id": "user-2", "bot": false},
+            "mentions": []
+        });
+        assert!(discord_gateway_message_to_inbound(
+            &open_sender_config,
+            Some("bot-1"),
+            &mut RecentMessageIds::new(16),
+            &open_sender_message,
+        )
+        .is_some());
+
+        let restricted_sender_config = DiscordRuntimeConfig {
+            allowed_senders: vec!["user-1".to_owned()],
+            ..open_sender_config
+        };
+        let restricted_sender_message = json!({
+            "id": "m7",
+            "channel_id": "dm1",
+            "content": "blocked sender",
+            "author": {"id": "user-2", "bot": false},
+            "mentions": []
+        });
+        assert!(discord_gateway_message_to_inbound(
+            &restricted_sender_config,
+            Some("bot-1"),
+            &mut RecentMessageIds::new(16),
+            &restricted_sender_message,
+        )
+        .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn channels_report_recognizes_send_memory_hints() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        fs::write(
+            &config_path,
+            json!({
+                "agents": {"defaults": {"workspace": workspace}},
+                "channels": {
+                    "sendMemoryHints": true,
+                    "discord": {"enabled": false}
+                }
+            })
+            .to_string(),
+        )?;
+
+        let report = load_channels_report(Some(config_path), None)?;
+        assert!(report.send_memory_hints);
+        assert!(!report
+            .unknown_plugins
+            .iter()
+            .any(|plugin| plugin == "sendMemoryHints"));
+        Ok(())
+    }
+
+    #[test]
     fn external_transport_specs_respect_enabled_and_external_only_runtime(
     ) -> Result<(), Box<dyn Error>> {
         let mut plugins = BTreeMap::new();
@@ -7149,7 +11263,7 @@ mod tests {
         );
         plugins.insert(
             "slack".to_owned(),
-            json!({ "enabled": true, "botToken": "slack-token", "channelIds": ["C123"] }),
+            json!({ "enabled": true, "appToken": "slack-app-token", "botToken": "slack-token", "channelIds": ["C123"] }),
         );
         let specs = external_transport_specs(&plugins);
         assert_eq!(specs.len(), 1);
@@ -7175,6 +11289,718 @@ mod tests {
     }
 
     #[test]
+    fn external_outbound_channel_manager_dispatches_via_channel_adapters(
+    ) -> Result<(), Box<dyn Error>> {
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let inbound_bus = MessageBus::new();
+        let mut manager = external_transport_channel_manager_with_runner(
+            vec![test_telegram_spec(), test_slack_spec()],
+            inbound_bus.clone(),
+            0,
+            test_transport_context()?,
+            recording_transport_runner(observed_tx),
+        );
+        manager.start_all()?;
+        manager.dispatch_outbound(OutboundMessage::new(TELEGRAM_CHANNEL, "chat-1", "hello"))?;
+
+        let delivered = observed_rx.recv_timeout(Duration::from_millis(50))?;
+        assert_eq!(delivered.channel, TELEGRAM_CHANNEL);
+        assert_eq!(delivered.chat_id, "chat-1");
+        assert_eq!(delivered.content, "hello");
+        assert!(observed_rx.try_recv().is_err());
+        manager.stop_all()?;
+        manager.start_all()?;
+        manager.dispatch_outbound(OutboundMessage::new(SLACK_CHANNEL, "chat-2", "again"))?;
+        let restarted = observed_rx.recv_timeout(Duration::from_millis(50))?;
+        assert_eq!(restarted.channel, SLACK_CHANNEL);
+        assert_eq!(restarted.chat_id, "chat-2");
+        assert_eq!(restarted.content, "again");
+        manager.stop_all()?;
+        assert!(inbound_bus.try_consume_inbound().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn external_outbound_channel_manager_preserves_streaming_frames() -> Result<(), Box<dyn Error>>
+    {
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let inbound_bus = MessageBus::new();
+        let mut manager = external_transport_channel_manager_with_runner(
+            vec![test_telegram_spec()],
+            inbound_bus,
+            0,
+            test_transport_context()?,
+            recording_transport_runner(observed_tx),
+        );
+        manager.start_all()?;
+
+        let mut metadata = Map::new();
+        metadata.insert("_stream_delta".to_owned(), json!(true));
+        metadata.insert("_stream_id".to_owned(), json!("stream-1"));
+        manager.dispatch_outbound(
+            OutboundMessage::new(TELEGRAM_CHANNEL, "chat-1", "chunk")
+                .with_reply_to("message-1")
+                .with_metadata(metadata),
+        )?;
+
+        let delivered = observed_rx.recv_timeout(Duration::from_millis(50))?;
+        assert_eq!(delivered.channel, TELEGRAM_CHANNEL);
+        assert_eq!(delivered.chat_id, "chat-1");
+        assert_eq!(delivered.content, "chunk");
+        assert_eq!(delivered.reply_to.as_deref(), Some("message-1"));
+        assert_eq!(delivered.metadata["reply_to"], json!("message-1"));
+        assert_eq!(delivered.metadata["stream_id"], json!("stream-1"));
+        manager.stop_all()?;
+        Ok(())
+    }
+
+    #[test]
+    fn external_outbound_channel_manager_reports_unknown_channels() -> Result<(), Box<dyn Error>> {
+        let inbound_bus = MessageBus::new();
+        let mut manager = external_transport_channel_manager_with_runner(
+            Vec::new(),
+            inbound_bus,
+            0,
+            test_transport_context()?,
+            recording_transport_runner(mpsc::channel().0),
+        );
+        let error = match manager.dispatch_outbound(OutboundMessage::new(
+            TELEGRAM_CHANNEL,
+            "chat-1",
+            "hello",
+        )) {
+            Ok(()) => return Err("expected unknown channel error".into()),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, ChannelError::UnknownChannel(channel) if channel == TELEGRAM_CHANNEL)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn channel_retry_policy_treats_send_max_retries_as_total_attempts() {
+        assert_eq!(channel_retry_policy(0).max_attempts, 1);
+        assert_eq!(channel_retry_policy(2).max_attempts, 2);
+        assert_eq!(channel_retry_policy(11).max_attempts, 10);
+    }
+
+    #[test]
+    fn external_session_turn_coordinator_queues_same_session_followups() {
+        let mut coordinator = ExternalSessionTurnCoordinator::default();
+        let first = InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "one");
+        let followup = InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "two");
+        let other = InboundMessage::new(TELEGRAM_CHANNEL, "u2", "chat-2", "other");
+
+        assert_eq!(
+            coordinator
+                .start_or_enqueue("telegram:chat-1".to_owned(), first)
+                .map(|message| message.content),
+            Some("one".to_owned())
+        );
+        assert!(coordinator
+            .start_or_enqueue("telegram:chat-1".to_owned(), followup)
+            .is_none());
+        assert_eq!(
+            coordinator
+                .start_or_enqueue("telegram:chat-2".to_owned(), other)
+                .map(|message| message.content),
+            Some("other".to_owned())
+        );
+        assert_eq!(
+            coordinator
+                .finish_turn("telegram:chat-1")
+                .map(|message| message.content),
+            Some("two".to_owned())
+        );
+        assert!(coordinator.finish_turn("telegram:chat-1").is_none());
+    }
+
+    #[test]
+    fn external_session_turn_coordinator_defers_shared_lock_conflicts() {
+        let mut coordinator = ExternalSessionTurnCoordinator::default();
+        let first = InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "one");
+        let retry = InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "retry");
+
+        assert!(coordinator
+            .start_or_enqueue("telegram:chat-1".to_owned(), first)
+            .is_some());
+        coordinator.defer_turn("telegram:chat-1".to_owned(), retry);
+        assert!(coordinator
+            .start_next_ready(|session_key| session_key == "telegram:chat-1")
+            .is_none());
+        assert_eq!(
+            coordinator
+                .start_next_ready(|_| false)
+                .map(|(_, message)| message.content),
+            Some("retry".to_owned())
+        );
+    }
+
+    #[test]
+    fn adapter_reports_duplicate_session_turn_as_retryable_busy_error() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let turn_lock = SessionTurnLock::new();
+        let _guard = turn_lock
+            .acquire("telegram:chat-1")
+            .map_err(|error| format!("test lock acquire failed: {error:?}"))?;
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults::default(),
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse::default(),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir,
+            tools: ToolRegistry::new(),
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: false,
+            send_max_retries: 0,
+            session_turn_lock: turn_lock,
+        };
+
+        let error = adapter
+            .process_external_inbound_with_streaming(
+                InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "hello"),
+                adapter.loop_config(),
+                &MessageBus::new(),
+            )
+            .expect_err("expected session busy error");
+        assert_eq!(error.status, 409);
+        assert_eq!(error.error_type, "session_busy");
+        Ok(())
+    }
+
+    #[test]
+    fn external_effective_session_key_honors_unified_session() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let mut config = AgentLoopConfig::new(root.path(), "model");
+        config.unified_session_key = Some("unified:default".to_owned());
+        let message = InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "hello");
+        assert_eq!(
+            effective_external_session_key(&config, &message),
+            "unified:default"
+        );
+
+        let override_message = InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "hello")
+            .with_session_key_override("telegram:chat-1");
+        assert_eq!(
+            effective_external_session_key(&config, &override_message),
+            "telegram:chat-1"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn worker_metadata_updates_preserve_delivery_history() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("telegram.json");
+        let message = OutboundMessage::new(TELEGRAM_CHANNEL, "chat", "hello");
+
+        record_delivery_state(&path, &message, "pending", None);
+        save_telegram_offset(&path, 42);
+
+        let metadata = load_metadata_json(&path);
+        assert_eq!(metadata["offset"], json!(42));
+        assert!(metadata
+            .get("deliveries")
+            .and_then(Value::as_array)
+            .is_some_and(|deliveries| !deliveries.is_empty()));
+        Ok(())
+    }
+
+    #[test]
+    fn platform_outbound_helpers_preserve_reply_context() {
+        let mut telegram_metadata = Map::new();
+        telegram_metadata.insert("message_thread_id".to_owned(), json!("topic-1"));
+        let telegram = OutboundMessage::new(TELEGRAM_CHANNEL, "chat", "hello")
+            .with_reply_to("11")
+            .with_metadata(telegram_metadata);
+        let telegram_body = telegram_message_body(&telegram, "hello", None, true);
+        assert_eq!(telegram_body["message_thread_id"], json!("topic-1"));
+        assert_eq!(telegram_body["reply_parameters"]["message_id"], json!("11"));
+
+        let mut slack_metadata = Map::new();
+        slack_metadata.insert("slack".to_owned(), json!({ "thread_ts": "171.1" }));
+        let slack =
+            OutboundMessage::new(SLACK_CHANNEL, "C123", "hello").with_metadata(slack_metadata);
+        assert_eq!(slack_outbound_thread_ts(&slack).as_deref(), Some("171.1"));
+        assert_eq!(
+            slack_post_message_body("C123", "hello", slack_outbound_thread_ts(&slack).as_deref())
+                ["thread_ts"],
+            json!("171.1")
+        );
+
+        let mut email_metadata = Map::new();
+        email_metadata.insert("subject".to_owned(), json!("Question"));
+        let email = OutboundMessage::new(EMAIL_CHANNEL, "user@example.com", "hello")
+            .with_metadata(email_metadata);
+        assert_eq!(email_outbound_subject(&email), "Re: Question");
+    }
+
+    #[test]
+    fn stream_outbound_routing_metadata_distinguishes_threads() {
+        let mut routing_a = Map::new();
+        routing_a.insert("slack".to_owned(), json!({ "thread_ts": "171.1" }));
+        let mut routing_b = Map::new();
+        routing_b.insert("slack".to_owned(), json!({ "thread_ts": "172.1" }));
+        let first = stream_outbound_message_with_routing(
+            SLACK_CHANNEL,
+            "C123",
+            "stream-a",
+            "chunk".to_owned(),
+            false,
+            &routing_a,
+            Some("m1"),
+        );
+        let second = stream_outbound_message_with_routing(
+            SLACK_CHANNEL,
+            "C123",
+            "stream-b",
+            "chunk".to_owned(),
+            false,
+            &routing_b,
+            Some("m2"),
+        );
+        assert_ne!(outbound_route_key(&first), outbound_route_key(&second));
+        assert_eq!(first.metadata["slack"]["thread_ts"], json!("171.1"));
+        assert_eq!(first.reply_to.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn worker_metadata_store_roundtrips_external_worker_state() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let telegram_path = root.path().join("telegram.json");
+        save_telegram_offset(&telegram_path, 42);
+        assert_eq!(load_telegram_offset(&telegram_path), 42);
+
+        let discord_path = root.path().join("discord-rest.json");
+        let mut last_ids = BTreeMap::new();
+        last_ids.insert("channel-1".to_owned(), "message-9".to_owned());
+        save_discord_last_ids(&discord_path, &last_ids);
+        assert_eq!(load_discord_last_ids(&discord_path), last_ids);
+
+        let email_path = root.path().join("email-imap.json");
+        let key = "imap.example.com:993:user:INBOX";
+        let order = VecDeque::from(["1".to_owned(), "2".to_owned()]);
+        let state = EmailSeenUidState {
+            uid_validity: Some(123),
+            seen_uids: order.iter().cloned().collect(),
+            seen_uid_order: order.clone(),
+        };
+        save_email_seen_uid_state(&email_path, key, &state);
+        let loaded = load_email_seen_uid_state(&email_path, key);
+        assert_eq!(loaded.uid_validity, Some(123));
+        assert!(loaded.seen_uids.contains("1"));
+        assert_eq!(loaded.seen_uid_order, order);
+        Ok(())
+    }
+
+    #[test]
+    fn email_uid_validity_change_clears_seen_uid_cache() {
+        let mut state = EmailSeenUidState {
+            uid_validity: Some(1),
+            seen_uids: BTreeSet::from(["10".to_owned()]),
+            seen_uid_order: VecDeque::from(["10".to_owned()]),
+        };
+        apply_email_uid_validity(&mut state, Some(2));
+        assert_eq!(state.uid_validity, Some(2));
+        assert!(state.seen_uids.is_empty());
+        assert!(state.seen_uid_order.is_empty());
+
+        remember_seen_email_uid(
+            &mut state.seen_uids,
+            &mut state.seen_uid_order,
+            "11".to_owned(),
+        );
+        apply_email_uid_validity(&mut state, Some(2));
+        assert!(state.seen_uids.contains("11"));
+    }
+
+    #[test]
+    fn email_runtime_requires_consent_and_allow_from_for_imap() -> Result<(), Box<dyn Error>> {
+        let mut plugins = BTreeMap::new();
+        plugins.insert(
+            "email".to_owned(),
+            json!({
+                "enabled": true,
+                "imap": {
+                    "host": "imap.example.com",
+                    "username": "bot@example.com",
+                    "password": "email-password"
+                }
+            }),
+        );
+        assert!(email_runtime_config(&plugins).is_none());
+
+        let imap_descriptor = builtin_live_worker_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.kind == LiveChannelWorkerKind::EmailImap)
+            .ok_or("missing email imap descriptor")?;
+        assert!(matches!(
+            worker_config_state(&plugins, &imap_descriptor),
+            WorkerConfigState::Unsupported(detail) if detail.contains("consentGranted")
+        ));
+
+        plugins.insert(
+            "email".to_owned(),
+            json!({
+                "enabled": true,
+                "consentGranted": true,
+                "imap": {
+                    "host": "imap.example.com",
+                    "username": "bot@example.com",
+                    "password": "email-password"
+                }
+            }),
+        );
+        assert!(matches!(
+            worker_config_state(&plugins, &imap_descriptor),
+            WorkerConfigState::Unsupported(detail) if detail.contains("allowFrom")
+        ));
+        assert!(email_runtime_config(&plugins).is_some_and(|config| config.imap.is_none()));
+
+        plugins.insert(
+            "email".to_owned(),
+            json!({
+                "enabled": true,
+                "consentGranted": true,
+                "allowFrom": ["sender@example.com"],
+                "imap": {
+                    "host": "imap.example.com",
+                    "username": "bot@example.com",
+                    "password": "email-password",
+                    "security": "starttls"
+                }
+            }),
+        );
+        assert!(matches!(
+            worker_config_state(&plugins, &imap_descriptor),
+            WorkerConfigState::Unsupported(detail) if detail.contains("TLS")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_email_body_extracts_sender_defaults_and_auth_results() -> Result<(), Box<dyn Error>> {
+        let parsed = parse_email_body(
+            b"From: Alice <alice@example.com>\r\nSubject: Hello\r\nMessage-Id: <m1@example.com>\r\nAuthentication-Results: mx.example; spf=pass smtp.mailfrom=example.com; dkim=pass header.d=example.com\r\n\r\nBody text",
+            "42".to_owned(),
+        )?;
+
+        assert_eq!(parsed.inbound.sender_email, "alice@example.com");
+        assert_eq!(parsed.inbound.subject, "Hello");
+        assert_eq!(parsed.inbound.message_id, "<m1@example.com>");
+        assert_eq!(parsed.inbound.body, "Body text");
+        assert!(parsed
+            .authentication_results
+            .as_deref()
+            .is_some_and(|value| value.contains("spf=pass") && value.contains("dkim=pass")));
+
+        let defaults = parse_email_body(b"\r\nNo headers", "43".to_owned())?;
+        assert_eq!(defaults.inbound.sender_email, "unknown@example.invalid");
+        assert_eq!(defaults.inbound.subject, "(no subject)");
+        assert_eq!(defaults.inbound.message_id, "43");
+        Ok(())
+    }
+
+    #[test]
+    fn email_inbound_hardening_filters_sender_auth_and_self_loop() -> Result<(), Box<dyn Error>> {
+        let runtime = EmailRuntimeConfig {
+            smtp: Some(EmailSmtpRuntimeConfig {
+                host: "smtp.example.com".to_owned(),
+                port: 587,
+                username: Some("smtp-user@example.com".to_owned()),
+                password: Some("smtp-password".to_owned()),
+                from: "bot@example.com".to_owned(),
+                security: EmailSecurity::StartTls,
+                timeout_seconds: 30,
+            }),
+            imap: None,
+            allowed_senders: vec!["alice@example.com".to_owned()],
+            verify_spf: true,
+            verify_dkim: true,
+        };
+        let imap = EmailImapRuntimeConfig {
+            host: "imap.example.com".to_owned(),
+            port: 993,
+            username: "bot@example.com".to_owned(),
+            password: "imap-password".to_owned(),
+            mailbox: "INBOX".to_owned(),
+            security: EmailSecurity::Tls,
+            poll_interval_seconds: 60,
+            timeout_seconds: 30,
+            mark_seen: true,
+        };
+
+        let accepted = parse_email_body(
+            b"From: Alice <alice@example.com>\r\nAuthentication-Results: mx; spf=pass; dkim=pass\r\n\r\nHi",
+            "1".to_owned(),
+        )?;
+        assert!(!email_should_skip_inbound(&runtime, &imap, &accepted));
+
+        let bad_auth = parse_email_body(
+            b"From: Alice <alice@example.com>\r\nAuthentication-Results: mx; spf=pass\r\n\r\nHi",
+            "2".to_owned(),
+        )?;
+        assert!(email_should_skip_inbound(&runtime, &imap, &bad_auth));
+
+        let disallowed = parse_email_body(
+            b"From: Eve <eve@example.com>\r\nAuthentication-Results: mx; spf=pass; dkim=pass\r\n\r\nHi",
+            "3".to_owned(),
+        )?;
+        assert!(email_should_skip_inbound(&runtime, &imap, &disallowed));
+
+        let self_loop = parse_email_body(
+            b"From: bot@example.com\r\nAuthentication-Results: mx; spf=pass; dkim=pass\r\n\r\nHi",
+            "4".to_owned(),
+        )?;
+        assert!(email_should_skip_inbound(&runtime, &imap, &self_loop));
+        Ok(())
+    }
+
+    #[test]
+    fn email_error_redaction_hides_credentials_and_addresses() {
+        let smtp = EmailSmtpRuntimeConfig {
+            host: "smtp.example.com".to_owned(),
+            port: 587,
+            username: Some("smtp-user@example.com".to_owned()),
+            password: Some("smtp-password".to_owned()),
+            from: "bot@example.com".to_owned(),
+            security: EmailSecurity::StartTls,
+            timeout_seconds: 30,
+        };
+        let redacted = redact_email_smtp_error(
+            "login failed for smtp-user@example.com using smtp-password from bot@example.com"
+                .to_owned(),
+            &smtp,
+        );
+        assert!(!redacted.contains("smtp-user@example.com"));
+        assert!(!redacted.contains("smtp-password"));
+        assert!(!redacted.contains("bot@example.com"));
+
+        let imap = EmailImapRuntimeConfig {
+            host: "imap.example.com".to_owned(),
+            port: 993,
+            username: "imap-user@example.com".to_owned(),
+            password: "imap-password".to_owned(),
+            mailbox: "INBOX".to_owned(),
+            security: EmailSecurity::Tls,
+            poll_interval_seconds: 60,
+            timeout_seconds: 30,
+            mark_seen: true,
+        };
+        let redacted = redact_email_imap_error(
+            "imap-user@example.com could not login with imap-password".to_owned(),
+            &imap,
+        );
+        assert!(!redacted.contains("imap-user@example.com"));
+        assert!(!redacted.contains("imap-password"));
+    }
+
+    #[test]
+    fn drain_outbound_retries_real_send_attempts() -> Result<(), Box<dyn Error>> {
+        let (tx, rx) = mpsc::channel();
+        tx.send(OutboundMessage::new(TELEGRAM_CHANNEL, "chat", "hello"))?;
+        drop(tx);
+        let stop = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_for_send = attempts.clone();
+
+        drain_outbound(&rx, 3, &stop, None, move |_message| {
+            let mut attempts = attempts_for_send
+                .lock()
+                .map_err(|_| "attempt lock poisoned".to_owned())?;
+            *attempts += 1;
+            if *attempts < 3 {
+                Err("temporary send failure".to_owned())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(*attempts.lock().map_err(|_| "attempt lock poisoned")?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn drain_outbound_records_best_effort_delivery_metadata() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let metadata_path = root.path().join("telegram.json");
+        let (tx, rx) = mpsc::channel();
+        tx.send(OutboundMessage::new(TELEGRAM_CHANNEL, "chat", "hello"))?;
+        drop(tx);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        drain_outbound(&rx, 1, &stop, Some(&metadata_path), |_message| Ok(()));
+
+        let metadata = load_metadata_json(&metadata_path);
+        let deliveries = metadata
+            .get("deliveries")
+            .and_then(Value::as_array)
+            .ok_or("missing deliveries")?;
+        assert!(deliveries
+            .iter()
+            .any(|delivery| delivery.get("status").and_then(Value::as_str) == Some("pending")));
+        assert!(deliveries
+            .iter()
+            .any(|delivery| delivery.get("status").and_then(Value::as_str) == Some("sent")));
+        assert!(deliveries
+            .iter()
+            .all(|delivery| delivery.get("content").is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn discord_gateway_resume_payload_and_metadata_roundtrip() -> Result<(), Box<dyn Error>> {
+        let identify = discord_gateway_identify_payload("token");
+        assert_eq!(identify["op"], json!(2));
+        assert_eq!(identify["d"]["intents"], json!(DISCORD_GATEWAY_INTENTS));
+
+        let resume = discord_gateway_resume_payload("token", "session-1", 77);
+        assert_eq!(resume["op"], json!(6));
+        assert_eq!(resume["d"]["session_id"], json!("session-1"));
+        assert_eq!(resume["d"]["seq"], json!(77));
+
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("discord-gateway.json");
+        let state = DiscordGatewayResumeState {
+            session_id: Some("session-1".to_owned()),
+            sequence: Some(77),
+            resume_gateway_url: Some("wss://resume.example".to_owned()),
+            bot_user_id: Some("bot-1".to_owned()),
+            token_hash: Some(sha256_hex("token")),
+        };
+        save_discord_gateway_resume_state(&path, &state, "token");
+        assert_eq!(load_discord_gateway_resume_state(&path, "token"), state);
+        assert_eq!(
+            load_discord_gateway_resume_state(&path, "other-token"),
+            DiscordGatewayResumeState::default()
+        );
+        clear_discord_gateway_resume_state(&path);
+        assert_eq!(
+            load_discord_gateway_resume_state(&path, "token"),
+            DiscordGatewayResumeState::default()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn email_and_whatsapp_external_transports_remain_final_only() {
+        assert!(!provider_streaming_channel(EMAIL_CHANNEL));
+        assert!(!provider_streaming_channel(WHATSAPP_CHANNEL));
+        assert!(!test_email_spec().supports_streaming());
+        assert!(!test_whatsapp_spec().supports_streaming());
+    }
+
+    #[test]
+    fn websocket_events_dispatch_through_channel_manager() -> Result<(), Box<dyn Error>> {
+        let sink = WebSocketEventSink::default();
+        let mut manager = websocket_event_channel_manager(1, sink.clone());
+        manager.dispatch_outbound(OutboundMessage::new(WEBSOCKET_CHANNEL, "chat-1", "hello"))?;
+
+        let mut metadata = Map::new();
+        metadata.insert("_stream_delta".to_owned(), json!(true));
+        metadata.insert("_stream_id".to_owned(), json!("stream-1"));
+        manager.dispatch_outbound(
+            OutboundMessage::new(WEBSOCKET_CHANNEL, "chat-1", "chunk").with_metadata(metadata),
+        )?;
+
+        let events = sink.take_events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            WebSocketServerEvent::Message { chat_id, text, .. }
+                if chat_id == "chat-1" && text == "hello"
+        ));
+        assert!(matches!(
+            &events[1],
+            WebSocketServerEvent::Delta { chat_id, text, stream_id }
+                if chat_id == "chat-1" && text == "chunk" && stream_id.as_deref() == Some("stream-1")
+        ));
+        Ok(())
+    }
+
+    fn recording_transport_runner(
+        observed_tx: mpsc::Sender<OutboundMessage>,
+    ) -> ExternalTransportRunner {
+        Arc::new(move |_spec, _inbound_bus, outbound_rx, stop, _context| {
+            while !stop.load(Ordering::SeqCst) {
+                match outbound_rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(message) => {
+                        let _ = observed_tx.send(message);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+    }
+
+    fn test_transport_context() -> Result<ExternalTransportRuntimeContext, Box<dyn Error>> {
+        Ok(ExternalTransportRuntimeContext::new(
+            tempfile::tempdir()?.path().join("worker-metadata"),
+            1,
+        ))
+    }
+
+    fn test_telegram_spec() -> ExternalTransportSpec {
+        ExternalTransportSpec::Telegram(TelegramRuntimeConfig {
+            token: "telegram-token".to_owned(),
+            poll_timeout_seconds: 1,
+            poll_limit: 1,
+        })
+    }
+
+    fn test_slack_spec() -> ExternalTransportSpec {
+        ExternalTransportSpec::Slack(SlackRuntimeConfig {
+            app_token: "slack-app-token".to_owned(),
+            bot_token: "slack-token".to_owned(),
+            channel_ids: vec!["C123".to_owned()],
+            allowed_senders: Vec::new(),
+        })
+    }
+
+    fn test_email_spec() -> ExternalTransportSpec {
+        ExternalTransportSpec::Email(EmailRuntimeConfig {
+            smtp: None,
+            imap: Some(EmailImapRuntimeConfig {
+                host: "imap.example.com".to_owned(),
+                port: 993,
+                username: "user".to_owned(),
+                password: "password".to_owned(),
+                mailbox: "INBOX".to_owned(),
+                security: EmailSecurity::Tls,
+                poll_interval_seconds: 60,
+                timeout_seconds: 30,
+                mark_seen: true,
+            }),
+            allowed_senders: vec!["sender@example.com".to_owned()],
+            verify_spf: true,
+            verify_dkim: true,
+        })
+    }
+
+    fn test_whatsapp_spec() -> ExternalTransportSpec {
+        ExternalTransportSpec::WhatsApp(WhatsAppRuntimeConfig {
+            bridge_url: "ws://127.0.0.1:9001".to_owned(),
+            bridge_token: None,
+            allowlist: shacs_channels::ChannelAllowlist::allow_all(),
+            group_policy: WhatsAppGroupPolicy::Open,
+        })
+    }
+
+    #[test]
     fn channel_runtime_plan_allows_external_only_with_disabled_non_loopback_websocket(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -7188,7 +12014,7 @@ mod tests {
         );
         config.channels.plugins.insert(
             "slack".to_owned(),
-            json!({ "enabled": true, "botToken": "slack-token", "channelIds": ["C123"] }),
+            json!({ "enabled": true, "appToken": "slack-app-token", "botToken": "slack-token", "channelIds": ["C123"] }),
         );
         save_config_to_path(&config, &config_path)?;
 
@@ -7221,6 +12047,8 @@ mod tests {
             "email".to_owned(),
             json!({
                 "enabled": true,
+                "consentGranted": true,
+                "allowFrom": ["sender@example.com"],
                 "imap": {
                     "host": "imap.example.com",
                     "username": "bot@example.com",
@@ -7344,6 +12172,23 @@ mod tests {
             return Err("expected codex login command".into());
         };
         assert!(options.headless);
+
+        let parsed = parse_cli_args([
+            "provider",
+            "github-copilot",
+            "import-token",
+            "--token-env",
+            "COPILOT_TOKEN",
+            "--select",
+        ])?;
+        let CliCommand::Provider(ProviderCommand::CopilotImportToken(options)) = parsed else {
+            return Err("expected copilot import-token command".into());
+        };
+        assert_eq!(
+            options.token_source,
+            TokenSource::Env("COPILOT_TOKEN".to_owned())
+        );
+        assert!(options.select);
         Ok(())
     }
 
@@ -7532,8 +12377,8 @@ mod tests {
         assert!(report.assets_dir.ends_with(shacs_web::WEB_DIST_DIR_NAME));
         assert!(report.verbose);
         let formatted = format_web_preset_report(report);
-        assert!(formatted.contains("shacs-bot run"));
-        assert!(formatted.contains("ws://0.0.0.0:8767/ws"));
+        assert!(formatted.contains("Web UI server ready"));
+        assert!(formatted.contains("ws://127.0.0.1:8901/ws"));
         Ok(())
     }
 
@@ -7589,7 +12434,7 @@ mod tests {
         let status = format_channels_status(report.clone());
         assert!(status.contains("Channel runtime status"));
         assert!(status.contains("WebSocket server"));
-        assert!(status.contains("runtime=runnable"));
+        assert!(status.contains("runtime=disabled"));
         assert!(status.contains("custom-local"));
         let list = format_channels_list(report);
         assert!(list.contains("websocket"));
@@ -7613,6 +12458,16 @@ mod tests {
         assert_eq!(outcome.workspace, workspace);
         assert!(outcome.config_path.exists());
         assert!(outcome.workspace.join("AGENTS.md").exists());
+        assert!(root.path().join("data").join("media").exists());
+        assert!(root.path().join("data").join("cron").exists());
+        assert!(root.path().join("data").join("logs").exists());
+        assert!(root
+            .path()
+            .join("data")
+            .join("channels")
+            .join("worker-metadata")
+            .exists());
+        assert!(root.path().join("data").join("skills").exists());
         assert!(outcome.workspace.join("memory").join("MEMORY.md").exists());
         assert!(outcome.workspace.join("skills").exists());
         assert!(outcome
@@ -7632,6 +12487,76 @@ mod tests {
 
         let saved = fs::read_to_string(outcome.config_path)?;
         assert!(saved.contains(&outcome.workspace.to_string_lossy().to_string()));
+        let saved_json: Value = serde_json::from_str(&saved)?;
+        let channels = saved_json["channels"]
+            .as_object()
+            .ok_or("channels config should be an object")?;
+        for channel in [
+            WEBSOCKET_CHANNEL,
+            TELEGRAM_CHANNEL,
+            DISCORD_CHANNEL,
+            SLACK_CHANNEL,
+            EMAIL_CHANNEL,
+            WHATSAPP_CHANNEL,
+        ] {
+            assert!(
+                channels.contains_key(channel),
+                "missing channel default: {channel}"
+            );
+        }
+        assert_eq!(channels[WEBSOCKET_CHANNEL]["enabled"], json!(true));
+        assert_eq!(channels[EMAIL_CHANNEL]["consentGranted"], json!(false));
+        Ok(())
+    }
+
+    #[test]
+    fn onboard_merges_missing_channel_defaults_without_overwriting_existing_values(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        config.channels.plugins.insert(
+            TELEGRAM_CHANNEL.to_owned(),
+            json!({ "enabled": true, "token": "${TELEGRAM_TOKEN}" }),
+        );
+        config.channels.plugins.insert(
+            EMAIL_CHANNEL.to_owned(),
+            json!({
+                "enabled": true,
+                "smtp": { "host": "smtp.example.com", "password": "${SMTP_PASSWORD}" }
+            }),
+        );
+        save_config_to_path(&config, &config_path)?;
+
+        onboard(OnboardOptions {
+            config_path: Some(config_path.clone()),
+            workspace: None,
+            wizard: false,
+        })?;
+
+        let saved: Value = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+        let channels = saved["channels"]
+            .as_object()
+            .ok_or("channels config should be an object")?;
+        assert_eq!(channels[TELEGRAM_CHANNEL]["enabled"], json!(true));
+        assert_eq!(
+            channels[TELEGRAM_CHANNEL]["token"],
+            json!("${TELEGRAM_TOKEN}")
+        );
+        assert_eq!(channels[TELEGRAM_CHANNEL]["pollLimit"], json!(20));
+        assert_eq!(
+            channels[EMAIL_CHANNEL]["smtp"]["host"],
+            json!("smtp.example.com")
+        );
+        assert_eq!(
+            channels[EMAIL_CHANNEL]["smtp"]["password"],
+            json!("${SMTP_PASSWORD}")
+        );
+        assert_eq!(channels[EMAIL_CHANNEL]["smtp"]["port"], json!(587));
+        assert!(channels.contains_key(WEBSOCKET_CHANNEL));
+        assert!(channels.contains_key(WHATSAPP_CHANNEL));
         Ok(())
     }
 
@@ -7698,6 +12623,61 @@ mod tests {
         assert!(saved.contains("${OPENROUTER_API_KEY}"));
         assert!(!saved.contains("secret"));
         assert!(!saved.contains("runtime-workspace"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_config_migration_writeback_preserves_env_placeholders() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let saved_workspace = root.path().join("saved-workspace");
+        fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&json!({
+                "agents": {
+                    "defaults": {
+                        "workspace": saved_workspace.to_string_lossy(),
+                        "sessionTtlMinutes": 15
+                    }
+                },
+                "providers": {
+                    "openrouter": {
+                        "apiKey": "${OPENROUTER_API_KEY}"
+                    }
+                },
+                "tools": {
+                    "exec": {
+                        "restrictToWorkspace": true
+                    }
+                }
+            }))?,
+        )?;
+
+        let mut env = BTreeMap::new();
+        env.insert("OPENROUTER_API_KEY".to_owned(), "secret".to_owned());
+        let runtime_workspace = root.path().join("runtime-workspace");
+        let bundle = load_runtime_config_with_env(
+            RuntimeConfigOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(runtime_workspace.clone()),
+                resolve_env: true,
+            },
+            &env,
+        )?;
+
+        assert_eq!(bundle.context.workspace, runtime_workspace);
+        assert_eq!(
+            bundle.config.providers["openrouter"].api_key.as_deref(),
+            Some("secret")
+        );
+        let saved = fs::read_to_string(config_path)?;
+        assert!(saved.contains("${OPENROUTER_API_KEY}"));
+        assert!(!saved.contains("secret"));
+        assert!(!saved.contains("runtime-workspace"));
+        assert!(saved.contains("idleCompactAfterMinutes"));
+        assert!(saved.contains("restrictToWorkspace"));
+        assert!(!saved.contains("sessionTtlMinutes"));
         Ok(())
     }
 
@@ -7824,6 +12804,12 @@ mod tests {
         assert_eq!(report.model, "gpt-5.4");
         assert_eq!(report.sessions.count, 1);
         assert_eq!(report.sessions.latest_key.as_deref(), Some("cli:direct"));
+        assert_eq!(report.lifecycle.binary_version, VERSION);
+        assert_eq!(
+            report.lifecycle.data_schema_version,
+            RUNTIME_DATA_SCHEMA_VERSION
+        );
+        assert!(report.lifecycle.update_marker.is_none());
         assert!(report
             .capabilities
             .iter()
@@ -7834,8 +12820,173 @@ mod tests {
         }));
         let output = format_runtime_inspect(report);
         assert!(output.contains("shacs-bot runtime inspect"));
+        assert!(output.contains("Binary version:"));
+        assert!(output.contains("Update marker: none"));
         assert!(output.contains("Sessions: 1"));
         assert!(!output.contains("hello"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_update_records_marker_and_recover_clears_it() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+
+        let update = runtime_update(RuntimeUpdateOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            target_version: VERSION.to_owned(),
+        })?;
+
+        assert_eq!(update.from_version, VERSION);
+        assert_eq!(update.target_version, VERSION);
+        assert_eq!(update.phase, "completed_cleanup");
+        assert!(update.marker_path.exists());
+        let inspect = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        let marker = inspect
+            .lifecycle
+            .update_marker
+            .ok_or("missing update marker")?;
+        assert_eq!(marker.phase, "completed_cleanup");
+        assert_eq!(marker.target_version, VERSION);
+        let output = format_runtime_update(update);
+        assert!(output.contains(&format!("Target version: {VERSION}")));
+        assert!(output.contains("Phase: completed_cleanup"));
+
+        let recover = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert!(recover.recovered);
+        assert!(!recover.marker_path.exists());
+        let output = format_runtime_recover(recover);
+        assert!(output.contains("Recovered: true"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_update_requires_running_binary_target_and_marker_guard_blocks_mutation(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+
+        let mismatch = runtime_update(RuntimeUpdateOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            target_version: "999.0.0".to_owned(),
+        })
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+        assert!(mismatch.contains("must match the running binary version"));
+
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_update_marker_value(VERSION, "in_progress", None),
+        )?;
+
+        let blocked = load_runtime_config(RuntimeConfigOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            resolve_env: false,
+        })
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+        assert!(blocked.contains("runtime mutation blocked by in_progress update marker"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_update_blocks_existing_interrupted_marker() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_update_marker_value("0.2.0", "in_progress", None),
+        )?;
+
+        let error = runtime_update(RuntimeUpdateOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            target_version: VERSION.to_owned(),
+        })
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+
+        assert!(error.contains("blocked by existing in_progress marker"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_recover_blocks_partial_migration_marker() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_update_marker_value(VERSION, "partial_migration", None),
+        )?;
+
+        let error = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+
+        assert!(error.contains("partial migration marker requires manual inspection"));
+        assert!(marker_path.exists());
         Ok(())
     }
 
@@ -8266,16 +13417,28 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
+            send_progress: true,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
         };
 
-        let paths = adapter.persist_media_data_urls(&[
-            "data:text/plain;base64,aGk=".to_owned(),
-            "not-a-data-url".to_owned(),
-        ])?;
+        let paths = adapter.persist_media_data_urls(&["data:text/plain;base64,aGk=".to_owned()])?;
 
         assert_eq!(paths.len(), 1);
         assert!(PathBuf::from(&paths[0]).starts_with(&media_dir));
         assert_eq!(fs::read_to_string(&paths[0])?, "hi");
+
+        let error = adapter
+            .persist_media_data_urls(&["data:text/plain;base64,%%%".to_owned()])
+            .expect_err("malformed data URL should fail");
+        assert_eq!(error.status, 415);
+        assert_eq!(error.error_type, "unsupported_media_type");
+
+        let error = adapter
+            .persist_media_data_urls(&["data:application/x-sh;base64,aGk=".to_owned()])
+            .expect_err("unsupported media type should fail");
+        assert_eq!(error.status, 415);
+        assert!(error.message.contains("application/x-sh"));
         Ok(())
     }
 
@@ -8311,6 +13474,9 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
+            send_progress: true,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -8360,6 +13526,213 @@ mod tests {
     }
 
     #[test]
+    fn websocket_frame_bridge_rejects_malformed_media_without_agent_loop(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 1,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: captured.clone(),
+                response: LlmResponse {
+                    content: Some("agent ok".to_owned()),
+                    finish_reason: "stop".to_owned(),
+                    ..LlmResponse::default()
+                },
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir: media_dir.clone(),
+            tools: ToolRegistry::new(),
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
+        };
+
+        let error = adapter
+            .process_websocket_frame(
+                json!({
+                    "type": "message",
+                    "chat_id": "chat-b",
+                    "text": "hello from websocket",
+                    "media": [{ "data_url": "data:text/plain;base64,%%%", "name": "bad.txt" }]
+                }),
+                "client-1",
+                "chat-a",
+            )
+            .expect_err("malformed websocket media should fail");
+
+        assert_eq!(error.status, 415);
+        assert_eq!(error.error_type, "unsupported_media_type");
+        assert!(fs::read_dir(&media_dir).is_err());
+        assert!(captured
+            .lock()
+            .map_err(|_| "captured lock poisoned")?
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_frame_bridge_emits_coalesced_delta_and_stream_end() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 1,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(StreamingProviderClient {
+                captured: captured.clone(),
+                response: LlmResponse {
+                    content: Some("hello".to_owned()),
+                    finish_reason: "stop".to_owned(),
+                    ..LlmResponse::default()
+                },
+                events: vec![
+                    ProviderEvent::TextDelta {
+                        text: "hel".to_owned(),
+                    },
+                    ProviderEvent::TextDelta {
+                        text: "lo".to_owned(),
+                    },
+                    ProviderEvent::Finish {
+                        usage: json!({}),
+                        reason: "stop".to_owned(),
+                    },
+                ],
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir,
+            tools: ToolRegistry::new(),
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
+        };
+
+        let events = adapter.process_websocket_frame(
+            json!({
+                "type": "message",
+                "chat_id": "chat-stream",
+                "text": "stream please"
+            }),
+            "client-1",
+            "chat-a",
+        )?;
+
+        assert!(matches!(
+            &events[0],
+            WebSocketServerEvent::Delta { chat_id, text, stream_id }
+                if chat_id == "chat-stream" && text == "hello" && stream_id.is_some()
+        ));
+        assert!(matches!(
+            &events[1],
+            WebSocketServerEvent::StreamEnd { chat_id, stream_id }
+                if chat_id == "chat-stream" && stream_id.is_some()
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(WebSocketServerEvent::Message { chat_id, text, .. })
+                if chat_id == "chat-stream" && text == "hello"
+        ));
+        let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
+        assert_eq!(requests.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn external_stream_events_publish_coalesced_delta_and_stream_end() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults::default(),
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse::default(),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir,
+            tools: ToolRegistry::new(),
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx.send(ProviderEvent::TextDelta {
+            text: "he".to_owned(),
+        })?;
+        event_tx.send(ProviderEvent::TextDelta {
+            text: "llo".to_owned(),
+        })?;
+        event_tx.send(ProviderEvent::Finish {
+            usage: json!({}),
+            reason: "stop".to_owned(),
+        })?;
+        drop(event_tx);
+        let bus = MessageBus::new();
+        let routing_metadata = Map::new();
+
+        adapter.publish_external_stream_events(
+            event_rx,
+            ExternalStreamRouting {
+                channel: TELEGRAM_CHANNEL,
+                chat_id: "chat-stream",
+                stream_id: "stream-1",
+                metadata: &routing_metadata,
+                reply_to: None,
+            },
+            &bus,
+        )?;
+
+        let delta = bus.try_consume_outbound().ok_or("missing delta")?;
+        assert_eq!(delta.channel, TELEGRAM_CHANNEL);
+        assert_eq!(delta.chat_id, "chat-stream");
+        assert_eq!(delta.content, "hello");
+        assert_eq!(delta.metadata["_stream_delta"], json!(true));
+        assert_eq!(delta.metadata["_stream_id"], json!("stream-1"));
+        let end = bus.try_consume_outbound().ok_or("missing stream end")?;
+        assert_eq!(end.channel, TELEGRAM_CHANNEL);
+        assert_eq!(end.chat_id, "chat-stream");
+        assert_eq!(end.content, "");
+        assert_eq!(end.metadata["_stream_end"], json!(true));
+        assert!(bus.try_consume_outbound().is_none());
+        Ok(())
+    }
+
+    #[test]
     fn websocket_frame_bridge_handles_control_and_protocol_frames_without_agent_loop(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -8383,6 +13756,9 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
+            send_progress: true,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
         };
 
         assert_eq!(
@@ -8447,6 +13823,9 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
+            send_progress: true,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
         };
 
         let response = adapter.complete_chat(ChatCompletionInvocation {
@@ -8517,6 +13896,9 @@ mod tests {
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
+            send_progress: true,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
         };
 
         let output = complete_direct_message(
@@ -8570,7 +13952,12 @@ mod tests {
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
+                send_progress: true,
+                send_max_retries: 0,
+                session_turn_lock: SessionTurnLock::new(),
             },
+            lifecycle_hooks: Vec::new(),
+            observability_hooks: Vec::new(),
         };
 
         let result = bot.run_with_options(ShacsBotRunOptions {
@@ -8592,6 +13979,340 @@ mod tests {
         let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].model, "gpt-5");
+        Ok(())
+    }
+
+    #[test]
+    fn programmatic_facade_emits_lifecycle_hooks_around_sdk_run() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_hook = events.clone();
+        let hook: ShacsBotLifecycleHook = Arc::new(move |event| {
+            if let Ok(mut events) = events_for_hook.lock() {
+                events.push(event.clone());
+            }
+        });
+        let bot = ShacsBot {
+            adapter: AgentLoopChatCompletionAdapter {
+                configured_model: "openai/gpt-5".to_owned(),
+                provider_id: "openai".to_owned(),
+                defaults: AgentDefaults {
+                    model: "openai/gpt-5".to_owned(),
+                    max_tool_iterations: 1,
+                    ..AgentDefaults::default()
+                },
+                resolved_model: "gpt-5".to_owned(),
+                client: Arc::new(FakeProviderClient {
+                    captured: Arc::new(Mutex::new(Vec::new())),
+                    response: LlmResponse {
+                        content: Some("sdk ok".to_owned()),
+                        finish_reason: "stop".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                }),
+                retry_mode: ProviderRetryMode::Standard,
+                workspace,
+                media_dir,
+                tools: ToolRegistry::new(),
+                _mcp_runtime: None,
+                _mcp_reports: Vec::new(),
+                allow_side_effect_tools: false,
+                send_progress: true,
+                send_max_retries: 0,
+                session_turn_lock: SessionTurnLock::new(),
+            },
+            lifecycle_hooks: vec![hook],
+            observability_hooks: Vec::new(),
+        };
+
+        let result = bot.run_with_options(ShacsBotRunOptions {
+            message: "hello from sdk".to_owned(),
+            session_key: "sdk:hooks".to_owned(),
+            ..ShacsBotRunOptions::default()
+        })?;
+        assert_eq!(result.content, "sdk ok");
+        drop(bot);
+
+        let events = events.lock().map_err(|_| "events lock poisoned")?;
+        assert!(matches!(
+            events.first(),
+            Some(ShacsBotLifecycleEvent::RunStarted { session_key }) if session_key == "sdk:hooks"
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ShacsBotLifecycleEvent::RunCompleted { session_key, stop_reason }
+                if session_key == "sdk:hooks" && stop_reason == "stop"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ShacsBotLifecycleEvent::Shutdown)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn programmatic_facade_lifecycle_hook_panic_does_not_abort_run() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_hook = events.clone();
+        let recording_hook: ShacsBotLifecycleHook = Arc::new(move |event| {
+            if let Ok(mut events) = events_for_hook.lock() {
+                events.push(event.clone());
+            }
+        });
+        let panic_hook: ShacsBotLifecycleHook =
+            Arc::new(|_| panic!("hook panic should be isolated"));
+        let bot = ShacsBot {
+            adapter: AgentLoopChatCompletionAdapter {
+                configured_model: "openai/gpt-5".to_owned(),
+                provider_id: "openai".to_owned(),
+                defaults: AgentDefaults {
+                    model: "openai/gpt-5".to_owned(),
+                    max_tool_iterations: 1,
+                    ..AgentDefaults::default()
+                },
+                resolved_model: "gpt-5".to_owned(),
+                client: Arc::new(FakeProviderClient {
+                    captured: Arc::new(Mutex::new(Vec::new())),
+                    response: LlmResponse {
+                        content: Some("sdk ok".to_owned()),
+                        finish_reason: "stop".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                }),
+                retry_mode: ProviderRetryMode::Standard,
+                workspace,
+                media_dir,
+                tools: ToolRegistry::new(),
+                _mcp_runtime: None,
+                _mcp_reports: Vec::new(),
+                allow_side_effect_tools: false,
+                send_progress: true,
+                send_max_retries: 0,
+                session_turn_lock: SessionTurnLock::new(),
+            },
+            lifecycle_hooks: vec![recording_hook, panic_hook],
+            observability_hooks: Vec::new(),
+        };
+
+        let result = bot.run("hello from sdk")?;
+        assert_eq!(result.content, "sdk ok");
+        let error = bot.run_with_options(ShacsBotRunOptions {
+            message: "   ".to_owned(),
+            session_key: "sdk:bad".to_owned(),
+            ..ShacsBotRunOptions::default()
+        });
+        assert!(error.is_err());
+
+        let events = events.lock().map_err(|_| "events lock poisoned")?;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ShacsBotLifecycleEvent::RunFailed { session_key, error }
+                if session_key == "sdk:bad" && error.contains("non-empty message")
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn programmatic_facade_emits_provider_and_tool_observability_events(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_hook = events.clone();
+        let recording_hook: ShacsBotObservabilityHook = Arc::new(move |event| {
+            if let Ok(mut events) = events_for_hook.lock() {
+                events.push(event.clone());
+            }
+        });
+        let panic_hook: ShacsBotObservabilityHook =
+            Arc::new(|_| panic!("observability hook panic should be isolated"));
+        let mut arguments = Map::new();
+        arguments.insert("path".to_owned(), json!("README.md"));
+        let bot = ShacsBot {
+            adapter: AgentLoopChatCompletionAdapter {
+                configured_model: "openai/gpt-5".to_owned(),
+                provider_id: "openai".to_owned(),
+                defaults: AgentDefaults {
+                    model: "openai/gpt-5".to_owned(),
+                    max_tool_iterations: 1,
+                    ..AgentDefaults::default()
+                },
+                resolved_model: "gpt-5".to_owned(),
+                client: Arc::new(StreamingProviderClient {
+                    captured: Arc::new(Mutex::new(Vec::new())),
+                    response: LlmResponse {
+                        content: Some("checking file".to_owned()),
+                        tool_calls: vec![ToolCallRequest::new(
+                            "call-1",
+                            "missing_tool",
+                            arguments.clone(),
+                        )],
+                        finish_reason: "tool_calls".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                    events: vec![
+                        ProviderEvent::TextDelta {
+                            text: "checking".to_owned(),
+                        },
+                        ProviderEvent::Finish {
+                            usage: json!({"prompt_tokens": 1}),
+                            reason: "tool_calls".to_owned(),
+                        },
+                    ],
+                }),
+                retry_mode: ProviderRetryMode::Standard,
+                workspace,
+                media_dir,
+                tools: ToolRegistry::new(),
+                _mcp_runtime: None,
+                _mcp_reports: Vec::new(),
+                allow_side_effect_tools: false,
+                send_progress: true,
+                send_max_retries: 0,
+                session_turn_lock: SessionTurnLock::new(),
+            },
+            lifecycle_hooks: Vec::new(),
+            observability_hooks: vec![panic_hook],
+        };
+
+        let result = bot.run_with_options_and_observability_hooks(
+            ShacsBotRunOptions {
+                message: "hello from sdk".to_owned(),
+                session_key: "sdk:observability".to_owned(),
+                ..ShacsBotRunOptions::default()
+            },
+            vec![recording_hook],
+        )?;
+
+        assert_eq!(result.tools_used, vec!["missing_tool"]);
+        let events = events.lock().map_err(|_| "events lock poisoned")?;
+        assert!(events.iter().any(|event| match event {
+            ShacsBotObservabilityEvent::Provider { event } => matches!(
+                event.as_ref(),
+                ProviderEvent::TextDelta { text } if text == "checking"
+            ),
+            ShacsBotObservabilityEvent::Tool { .. } => false,
+        }));
+        let start = events.iter().find_map(|event| match event {
+            ShacsBotObservabilityEvent::Tool {
+                event,
+                payload: Some(payload),
+            } if event.name == "missing_tool" && payload.phase == "start" => Some(payload),
+            _ => None,
+        });
+        let Some(start) = start else {
+            return Err("missing tool start observability payload".into());
+        };
+        assert_eq!(start.call_id, "call-1");
+        assert_eq!(start.arguments.get("path"), Some(&json!("README.md")));
+        let finish = events.iter().find_map(|event| match event {
+            ShacsBotObservabilityEvent::Tool {
+                event,
+                payload: Some(payload),
+            } if event.name == "missing_tool" && payload.phase == "error" => Some(payload),
+            _ => None,
+        });
+        let Some(finish) = finish else {
+            return Err("missing tool finish observability payload".into());
+        };
+        assert_eq!(finish.call_id, "call-1");
+        assert!(finish
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("missing_tool") && error.contains("not found")));
+        Ok(())
+    }
+
+    #[test]
+    fn programmatic_facade_tool_observability_preserves_json_result_extras(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_hook = events.clone();
+        let recording_hook: ShacsBotObservabilityHook = Arc::new(move |event| {
+            if let Ok(mut events) = events_for_hook.lock() {
+                events.push(event.clone());
+            }
+        });
+        let mut arguments = Map::new();
+        arguments.insert("path".to_owned(), json!("artifact.txt"));
+        let mut tools = ToolRegistry::new();
+        tools.register(JsonArtifactTool);
+        let bot = ShacsBot {
+            adapter: AgentLoopChatCompletionAdapter {
+                configured_model: "openai/gpt-5".to_owned(),
+                provider_id: "openai".to_owned(),
+                defaults: AgentDefaults {
+                    model: "openai/gpt-5".to_owned(),
+                    max_tool_iterations: 1,
+                    ..AgentDefaults::default()
+                },
+                resolved_model: "gpt-5".to_owned(),
+                client: Arc::new(StreamingProviderClient {
+                    captured: Arc::new(Mutex::new(Vec::new())),
+                    response: LlmResponse {
+                        content: Some("making artifact".to_owned()),
+                        tool_calls: vec![ToolCallRequest::new(
+                            "call-json",
+                            "json_artifact",
+                            arguments,
+                        )],
+                        finish_reason: "tool_calls".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                    events: vec![ProviderEvent::Finish {
+                        usage: json!({}),
+                        reason: "tool_calls".to_owned(),
+                    }],
+                }),
+                retry_mode: ProviderRetryMode::Standard,
+                workspace,
+                media_dir,
+                tools,
+                _mcp_runtime: None,
+                _mcp_reports: Vec::new(),
+                allow_side_effect_tools: false,
+                send_progress: true,
+                send_max_retries: 0,
+                session_turn_lock: SessionTurnLock::new(),
+            },
+            lifecycle_hooks: Vec::new(),
+            observability_hooks: vec![recording_hook],
+        };
+
+        let result = bot.run("hello from sdk")?;
+        assert_eq!(result.tools_used, vec!["json_artifact"]);
+        let events = events.lock().map_err(|_| "events lock poisoned")?;
+        let finish = events.iter().find_map(|event| match event {
+            ShacsBotObservabilityEvent::Tool {
+                event,
+                payload: Some(payload),
+            } if event.name == "json_artifact" && payload.phase == "end" => Some(payload),
+            _ => None,
+        });
+        let Some(finish) = finish else {
+            return Err("missing json_artifact finish payload".into());
+        };
+        assert_eq!(finish.call_id, "call-json");
+        assert_eq!(finish.arguments.get("path"), Some(&json!("artifact.txt")));
+        assert_eq!(
+            finish.result.as_ref().and_then(|value| value.get("ok")),
+            Some(&json!(true))
+        );
+        assert_eq!(finish.files, vec![json!("artifact.txt")]);
+        assert_eq!(finish.embeds, vec![json!({"type": "text"})]);
         Ok(())
     }
 
@@ -8650,6 +14371,38 @@ mod tests {
         assert!(outcome.selected_model.is_none());
         let output = format_codex_import_outcome(outcome);
         assert!(output.contains("Selected model: unchanged"));
+        Ok(())
+    }
+
+    #[test]
+    fn copilot_import_token_writes_auth_without_leaking_token_to_config_or_output(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let outcome = import_copilot_token(CopilotImportTokenOptions {
+            config_path: Some(config_path.clone()),
+            token_source: TokenSource::Literal("secret-copilot-token".to_owned()),
+            select: true,
+        })?;
+
+        assert_eq!(outcome.config_path, config_path);
+        assert_eq!(
+            outcome.selected_model.as_deref(),
+            Some(GITHUB_COPILOT_DEFAULT_MODEL)
+        );
+        let config_text = fs::read_to_string(&outcome.config_path)?;
+        assert!(config_text.contains(GITHUB_COPILOT_PROVIDER_ID));
+        assert!(config_text.contains(GITHUB_COPILOT_DEFAULT_MODEL));
+        assert!(!config_text.contains("secret-copilot-token"));
+        let output = format_copilot_import_outcome(outcome.clone());
+        assert!(!output.contains("secret-copilot-token"));
+
+        let auth = load_auth_store(&outcome.auth_path)?;
+        let copilot = auth
+            .providers
+            .get(GITHUB_COPILOT_PROVIDER_ID)
+            .ok_or("missing copilot auth")?;
+        assert_eq!(copilot.access, "secret-copilot-token");
         Ok(())
     }
 
@@ -8922,6 +14675,44 @@ mod tests {
     }
 
     #[test]
+    fn runtime_config_overlays_copilot_auth_without_persisting_secret() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let mut config = Config::default();
+        config.providers.insert(
+            GITHUB_COPILOT_PROVIDER_ID.to_owned(),
+            copilot_provider_config(),
+        );
+        save_config_to_path(&config, &config_path)?;
+        let auth_path = config_context(Some(config_path.clone()), None).auth_path();
+        let mut auth = AuthStore::default();
+        auth.providers.insert(
+            GITHUB_COPILOT_PROVIDER_ID.to_owned(),
+            ProviderAuth::oauth_access("copilot-runtime-token", None),
+        );
+        save_auth_store_to_path(&auth, &auth_path)?;
+
+        let bundle = load_runtime_config(RuntimeConfigOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            resolve_env: false,
+        })?;
+        let provider = bundle
+            .config
+            .providers
+            .get(GITHUB_COPILOT_PROVIDER_ID)
+            .ok_or("missing copilot provider")?;
+        assert_eq!(provider.api_key.as_deref(), Some("copilot-runtime-token"));
+        assert_eq!(
+            provider.api_base.as_deref(),
+            Some("https://api.githubcopilot.com")
+        );
+        assert!(!fs::read_to_string(config_path)?.contains("copilot-runtime-token"));
+        Ok(())
+    }
+
+    #[test]
     fn cli_session_key_defaults_and_preserves_explicit_channel_prefix() {
         assert_eq!(cli_session_key(None), "cli:direct");
         assert_eq!(cli_session_key(Some("work")), "cli:work");
@@ -8954,6 +14745,44 @@ mod tests {
     struct FakeProviderClient {
         captured: std::sync::Arc<Mutex<Vec<ProviderRequest>>>,
         response: LlmResponse,
+    }
+
+    struct StreamingProviderClient {
+        captured: std::sync::Arc<Mutex<Vec<ProviderRequest>>>,
+        response: LlmResponse,
+        events: Vec<ProviderEvent>,
+    }
+
+    struct JsonArtifactTool;
+
+    impl Tool for JsonArtifactTool {
+        fn name(&self) -> &str {
+            "json_artifact"
+        }
+
+        fn description(&self) -> &str {
+            "Return a structured artifact payload"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            })
+        }
+
+        fn read_only(&self) -> bool {
+            true
+        }
+
+        fn execute(&self, _params: JsonMap) -> ToolResult {
+            ToolResult::Json(json!({
+                "ok": true,
+                "files": ["artifact.txt"],
+                "embeds": [{"type": "text"}]
+            }))
+        }
     }
 
     type MockFormCalls = Vec<(String, Vec<(String, String)>)>;
@@ -9032,6 +14861,43 @@ mod tests {
             _on_event: &mut dyn FnMut(ProviderEvent),
         ) -> Result<LlmResponse, ProviderError> {
             self.chat(request)
+        }
+    }
+
+    impl ProviderClient for StreamingProviderClient {
+        fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+            self.captured
+                .lock()
+                .map_err(|_| ProviderError::Api {
+                    status: Some(500),
+                    message: "streaming fake lock failed".to_owned(),
+                    retryable: false,
+                    headers: BTreeMap::new(),
+                    body: None,
+                })?
+                .push(request);
+            Ok(self.response.clone())
+        }
+
+        fn chat_stream(
+            &self,
+            request: ProviderRequest,
+            on_event: &mut dyn FnMut(ProviderEvent),
+        ) -> Result<LlmResponse, ProviderError> {
+            self.captured
+                .lock()
+                .map_err(|_| ProviderError::Api {
+                    status: Some(500),
+                    message: "streaming fake lock failed".to_owned(),
+                    retryable: false,
+                    headers: BTreeMap::new(),
+                    body: None,
+                })?
+                .push(request);
+            for event in &self.events {
+                on_event(event.clone());
+            }
+            Ok(self.response.clone())
         }
     }
 }

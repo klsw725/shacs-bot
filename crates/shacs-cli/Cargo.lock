@@ -1625,6 +1625,7 @@ dependencies = [
  "shacs-channels",
  "shacs-providers",
  "shacs-utils",
+ "shacs-web",
  "tokio",
 ]
 
@@ -1666,6 +1667,7 @@ dependencies = [
  "shacs-web",
  "tempfile",
  "tokio",
+ "tungstenite",
  "ureq",
 ]
 
@@ -1703,6 +1705,7 @@ dependencies = [
  "shacs-providers",
  "shacs-security",
  "shacs-session",
+ "shacs-skills",
  "shacs-templates",
  "shacs-utils",
  "ureq",
@@ -2065,6 +2068,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
+ "native-tls",
  "rand",
  "sha1",
  "thiserror",
