@@ -1,10 +1,10 @@
 use crate::runtime::{
-    AgentRunSpec, AgentRunner, AutoCompact, AutoCompactArchiveOutcome, ContextBuildRequest,
-    ContextBuilder, DreamProcessor, DreamRunOutcome, InboundMessage, LoopTaskCancelResult,
-    LoopTaskRegistry, MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage,
-    ProviderArchiveConsolidator, ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt,
-    Session, SessionHistoryOptions, SessionManager, SessionTurnAcquireError, SessionTurnLock,
-    TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
+    AgentHook, AgentRunSpec, AgentRunner, AutoCompact, AutoCompactArchiveOutcome,
+    ContextBuildRequest, ContextBuilder, DreamProcessor, DreamRunOutcome, InboundMessage,
+    LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore, MessageBus,
+    OutboundMessage, ProviderArchiveConsolidator, ProviderEventCallback, RuntimeContextTools,
+    RuntimeInterrupt, Session, SessionHistoryOptions, SessionManager, SessionTurnAcquireError,
+    SessionTurnLock, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, pending_ask_user_id, MessageSender,
@@ -14,7 +14,8 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use shacs_command::{
-    build_help_text, is_builtin_command, parse_loop_command, HistoryCommandArgs, LoopCommand,
+    build_help_text, is_builtin_command, parse_loop_command_route, CommandKind, HistoryCommandArgs,
+    LoopCommand,
 };
 use shacs_providers::{GenerationSettings, ProviderClient, ProviderError, ProviderRetryMode};
 use shacs_utils::gitstore::{GitCliStore, GitStore};
@@ -115,6 +116,7 @@ pub struct AgentLoop<'a> {
     auto_compact: Option<AutoCompact>,
     tool_event_callback: Option<ToolEventCallback>,
     provider_event_callback: Option<ProviderEventCallback>,
+    agent_hook: Option<Arc<dyn AgentHook>>,
     stopped: bool,
 }
 
@@ -142,6 +144,7 @@ impl<'a> AgentLoop<'a> {
             auto_compact: None,
             tool_event_callback: None,
             provider_event_callback: None,
+            agent_hook: None,
             stopped: false,
         }
     }
@@ -158,6 +161,11 @@ impl<'a> AgentLoop<'a> {
 
     pub fn with_provider_event_callback(mut self, callback: ProviderEventCallback) -> Self {
         self.provider_event_callback = Some(callback);
+        self
+    }
+
+    pub fn with_agent_hook(mut self, hook: Arc<dyn AgentHook>) -> Self {
+        self.agent_hook = Some(hook);
         self
     }
 
@@ -292,11 +300,31 @@ impl<'a> AgentLoop<'a> {
         message: InboundMessage,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         let session_key = self.effective_session_key(&message);
+        let routed_command = parse_loop_command_route(&message.content);
+
+        if let Some(route) = routed_command
+            .as_ref()
+            .filter(|route| route.parsed.kind == CommandKind::Priority)
+        {
+            return match self.turn_lock.acquire(session_key.clone()) {
+                Ok(_turn_guard) => {
+                    let mut session = self.sessions.get_or_create(&session_key);
+                    materialize_recovery_markers(&mut session);
+                    self.handle_loop_command(route.command.clone(), &message, session, true)
+                }
+                Err(SessionTurnAcquireError::AlreadyActive { .. }) => {
+                    let session = self.sessions.get_or_create(&session_key);
+                    self.handle_loop_command(route.command.clone(), &message, session, false)
+                }
+            };
+        }
+
+        let _turn_guard = self.turn_lock.acquire(session_key.clone())?;
         let mut session = self.sessions.get_or_create(&session_key);
         materialize_recovery_markers(&mut session);
 
-        if let Some(command) = parse_loop_command(&message.content) {
-            return self.handle_priority_command(command, &message, session);
+        if let Some(route) = routed_command {
+            return self.handle_loop_command(route.command, &message, session, true);
         }
 
         if self.stopped {
@@ -307,10 +335,9 @@ impl<'a> AgentLoop<'a> {
                 content,
                 Some(AgentLoopCommandResult::StopRequested),
                 "stopped",
+                true,
             );
         }
-
-        let _turn_guard = self.turn_lock.acquire(session_key.clone())?;
 
         let mut session_summary = None;
         if let Some(auto_compact) = self.auto_compact.as_mut() {
@@ -395,6 +422,7 @@ impl<'a> AgentLoop<'a> {
         spec.cancellation_token = self.task_registry.cancellation_token(&session_key);
         spec.tool_event_callback = self.tool_event_callback.clone();
         spec.provider_event_callback = self.provider_event_callback.clone();
+        spec.agent_hook = self.agent_hook.clone();
         spec.mid_turn_injection_callback = Some(mid_turn_injection_callback(
             self.bus.clone(),
             session_key.clone(),
@@ -479,11 +507,12 @@ impl<'a> AgentLoop<'a> {
         Ok(())
     }
 
-    fn handle_priority_command(
+    fn handle_loop_command(
         &mut self,
         command: LoopCommand,
         message: &InboundMessage,
         mut session: Session,
+        save_session: bool,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         match command {
             LoopCommand::Status => {
@@ -503,6 +532,7 @@ impl<'a> AgentLoop<'a> {
                     &content,
                     Some(AgentLoopCommandResult::Status),
                     "status",
+                    save_session,
                 )
             }
             LoopCommand::New => {
@@ -517,6 +547,7 @@ impl<'a> AgentLoop<'a> {
                     "Started a new session.",
                     Some(AgentLoopCommandResult::NewSession),
                     "new_session",
+                    save_session,
                 )
             }
             LoopCommand::Stop => {
@@ -536,6 +567,7 @@ impl<'a> AgentLoop<'a> {
                     &content,
                     Some(AgentLoopCommandResult::StopRequested),
                     "stop_requested",
+                    save_session,
                 )
             }
             LoopCommand::Restart => self.publish_command_response(
@@ -544,6 +576,7 @@ impl<'a> AgentLoop<'a> {
                 "Restart requested. Stop and start the local shacs-bot process to apply it.",
                 Some(AgentLoopCommandResult::RestartRequested),
                 "restart_requested",
+                save_session,
             ),
             LoopCommand::History(HistoryCommandArgs::Count(count)) => {
                 let content = format_history_command(&session, count);
@@ -553,6 +586,7 @@ impl<'a> AgentLoop<'a> {
                     &content,
                     Some(AgentLoopCommandResult::History),
                     "history",
+                    save_session,
                 )
             }
             LoopCommand::History(HistoryCommandArgs::Invalid) => self.publish_command_response(
@@ -561,6 +595,7 @@ impl<'a> AgentLoop<'a> {
                 "Usage: /history [n] where n is between 1 and 50.",
                 Some(AgentLoopCommandResult::History),
                 "history_usage",
+                save_session,
             ),
             LoopCommand::Dream => {
                 let store = MemoryStore::new(&self.config.workspace)?;
@@ -577,6 +612,7 @@ impl<'a> AgentLoop<'a> {
                     &content,
                     Some(AgentLoopCommandResult::Dream),
                     "dream",
+                    save_session,
                 )
             }
             LoopCommand::DreamLog { sha } => {
@@ -588,6 +624,7 @@ impl<'a> AgentLoop<'a> {
                     &content,
                     Some(AgentLoopCommandResult::DreamLog),
                     "dream_log",
+                    save_session,
                 )
             }
             LoopCommand::DreamRestore { sha } => {
@@ -599,6 +636,7 @@ impl<'a> AgentLoop<'a> {
                     &content,
                     Some(AgentLoopCommandResult::DreamRestore),
                     "dream_restore",
+                    save_session,
                 )
             }
             LoopCommand::Help => self.publish_command_response(
@@ -607,6 +645,7 @@ impl<'a> AgentLoop<'a> {
                 &build_help_text(),
                 Some(AgentLoopCommandResult::Help),
                 "help",
+                save_session,
             ),
         }
     }
@@ -618,9 +657,12 @@ impl<'a> AgentLoop<'a> {
         content: &str,
         command: Option<AgentLoopCommandResult>,
         stop_reason: &str,
+        save_session: bool,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         let session_key = session.key.clone();
-        self.sessions.save(&session)?;
+        if save_session {
+            self.sessions.save(&session)?;
+        }
         self.bus.publish_outbound(outbound_for(
             message,
             &session_key,
@@ -1290,6 +1332,7 @@ fn outbound_for(
         "stop_reason".to_owned(),
         Value::String(stop_reason.to_owned()),
     );
+    copy_reply_routing_metadata(inbound, &mut metadata);
     OutboundMessage {
         channel: inbound.channel.clone(),
         chat_id: inbound.chat_id.clone(),
@@ -1302,6 +1345,22 @@ fn outbound_for(
         media: Vec::new(),
         metadata,
         buttons,
+    }
+}
+
+fn copy_reply_routing_metadata(inbound: &InboundMessage, metadata: &mut Map<String, Value>) {
+    for key in [
+        "message_thread_id",
+        "subject",
+        "parent_channel_id",
+        "thread_id",
+    ] {
+        if let Some(value) = inbound.metadata.get(key).cloned() {
+            metadata.insert(key.to_owned(), value);
+        }
+    }
+    if let Some(value) = inbound.metadata.get("slack").cloned() {
+        metadata.insert("slack".to_owned(), value);
     }
 }
 

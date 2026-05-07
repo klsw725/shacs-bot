@@ -35,6 +35,10 @@ impl SessionTurnLock {
             .cloned()
             .collect()
     }
+
+    pub fn is_active(&self, session_key: &str) -> bool {
+        recover_lock(&self.active_sessions).contains(session_key)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

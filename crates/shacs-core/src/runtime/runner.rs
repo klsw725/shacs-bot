@@ -24,6 +24,7 @@ const FINALIZATION_RETRY_PROMPT: &str =
 const LENGTH_RECOVERY_PROMPT: &str = "Output limit reached. Continue exactly where you left off — no recap, no apology. Break remaining work into smaller steps if needed.";
 const MAX_EMPTY_RETRIES: usize = 2;
 const MAX_LENGTH_RECOVERIES: usize = 3;
+const MAX_INJECTION_CYCLES: usize = 5;
 const MICROCOMPACT_KEEP_RECENT: usize = 10;
 const MICROCOMPACT_MIN_CHARS: usize = 500;
 const SNIP_SAFETY_BUFFER: usize = 1024;
@@ -210,11 +211,17 @@ pub enum ToolStatus {
     Skipped,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolEvent {
     pub name: String,
     pub status: ToolStatus,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -250,6 +257,7 @@ impl AgentRunner {
         let mut empty_content_retries = 0;
         let mut length_recoveries = 0;
         let mut had_injections = false;
+        let mut injection_cycles = 0usize;
         start_runtime_turn(&spec.context_tools);
 
         for iteration in 0..spec.max_iterations {
@@ -262,11 +270,12 @@ impl AgentRunner {
                     had_injections,
                 ));
             }
-            let injections = drain_mid_turn_injections(&spec);
-            if !injections.is_empty() {
-                had_injections = true;
-                messages.extend(injections);
-            }
+            append_mid_turn_injections(
+                &spec,
+                &mut messages,
+                &mut had_injections,
+                &mut injection_cycles,
+            );
             invoke_agent_hook_before_iteration(&spec, &hook_context(iteration, &messages));
             let messages_for_model = govern_messages_for_model(&spec, &messages);
             let request = ProviderRequest {
@@ -343,6 +352,10 @@ impl AgentRunner {
                 }
 
                 let executable_calls_for_checkpoint = executable_calls.clone();
+                let executable_calls_by_id = executable_calls_for_checkpoint
+                    .iter()
+                    .map(|call| (call.id.clone(), call.clone()))
+                    .collect::<BTreeMap<_, _>>();
                 if cancellation_requested(&spec) {
                     append_skipped_tool_results(
                         &executable_calls_for_checkpoint,
@@ -381,8 +394,11 @@ impl AgentRunner {
                     executor.execute_tool_calls(executable_calls, &spec.tool_context)
                 };
                 for raw_message in &report.messages {
+                    let event = tool_event_for_message(
+                        raw_message,
+                        executable_calls_by_id.get(&raw_message.tool_call_id),
+                    );
                     let message = normalize_tool_message(&spec, raw_message.clone());
-                    let event = tool_event_for_message(&message);
                     emit_events(&spec, std::slice::from_ref(&event));
                     tool_events.push(event);
                     completed_tool_results.push(message.to_json());
@@ -426,10 +442,17 @@ impl AgentRunner {
                         completed_tool_results,
                         pending_interrupt_tool_call(&interrupt, &executable_calls_for_checkpoint),
                     );
+                    let pending_call =
+                        pending_interrupt_tool_call(&interrupt, &executable_calls_for_checkpoint)
+                            .into_iter()
+                            .next();
                     let event = ToolEvent {
                         name: interrupt_name(&interrupt),
                         status: ToolStatus::Waiting,
                         detail: interrupt_text(&interrupt).unwrap_or_default(),
+                        call_id: pending_call.as_ref().map(|call| call.id.clone()),
+                        arguments: pending_call.map(|call| call.arguments),
+                        result: None,
                     };
                     emit_events(&spec, std::slice::from_ref(&event));
                     tool_events.push(event);
@@ -595,6 +618,16 @@ impl AgentRunner {
                 messages.push(assistant_message(Some(&content), &response));
                 messages
                     .push(serde_json::json!({"role": "user", "content": LENGTH_RECOVERY_PROMPT}));
+                invoke_agent_hook_after_iteration(&spec, &hook_context(iteration, &messages));
+                continue;
+            }
+
+            if append_mid_turn_injections(
+                &spec,
+                &mut messages,
+                &mut had_injections,
+                &mut injection_cycles,
+            ) {
                 invoke_agent_hook_after_iteration(&spec, &hook_context(iteration, &messages));
                 continue;
             }
@@ -791,15 +824,38 @@ impl ProviderRetryWaiter for CallbackRetryWaiter<'_> {
     }
 }
 
-fn drain_mid_turn_injections(spec: &AgentRunSpec<'_>) -> Vec<Value> {
-    spec.mid_turn_injection_callback
+fn drain_mid_turn_injections(spec: &AgentRunSpec<'_>, injection_cycles: &mut usize) -> Vec<Value> {
+    if *injection_cycles >= MAX_INJECTION_CYCLES {
+        return Vec::new();
+    }
+    let injections = spec
+        .mid_turn_injection_callback
         .as_ref()
         .map(|callback| {
             catch_unwind(AssertUnwindSafe(|| callback()))
                 .ok()
                 .unwrap_or_default()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if !injections.is_empty() {
+        *injection_cycles += 1;
+    }
+    injections
+}
+
+fn append_mid_turn_injections(
+    spec: &AgentRunSpec<'_>,
+    messages: &mut Vec<Value>,
+    had_injections: &mut bool,
+    injection_cycles: &mut usize,
+) -> bool {
+    let injections = drain_mid_turn_injections(spec, injection_cycles);
+    if injections.is_empty() {
+        return false;
+    }
+    *had_injections = true;
+    messages.extend(injections);
+    true
 }
 
 fn emit_checkpoint(
@@ -1177,15 +1233,21 @@ fn apply_external_lookup_throttle(
             *count += 1;
             if *count > MAX_REPEAT_EXTERNAL_LOOKUPS {
                 let content = "Error: repeated external lookup blocked. Use the results you already have to answer, or try a meaningfully different source.\n\n[Analyze the error above and try a different approach.]".to_owned();
+                let call_id = call.id.clone();
+                let name = call.name.clone();
+                let arguments = call.arguments.clone();
                 messages.push(RuntimeToolMessage {
-                    tool_call_id: call.id,
-                    name: call.name.clone(),
+                    tool_call_id: call_id.clone(),
+                    name: name.clone(),
                     content,
                 });
                 events.push(ToolEvent {
-                    name: call.name,
+                    name,
                     status: ToolStatus::Error,
                     detail: "repeated external lookup blocked".to_owned(),
+                    call_id: Some(call_id),
+                    arguments: Some(arguments),
+                    result: Some(Value::String("repeated external lookup blocked".to_owned())),
                 });
                 continue;
             }
@@ -1238,7 +1300,10 @@ fn truncate_text(content: &str, max_chars: usize) -> String {
     truncated
 }
 
-fn tool_event_for_message(message: &RuntimeToolMessage) -> ToolEvent {
+fn tool_event_for_message(
+    message: &RuntimeToolMessage,
+    call: Option<&RuntimeToolCall>,
+) -> ToolEvent {
     let is_error = message.content.starts_with("Error") || is_workspace_violation(&message.content);
     ToolEvent {
         name: message.name.clone(),
@@ -1248,7 +1313,14 @@ fn tool_event_for_message(message: &RuntimeToolMessage) -> ToolEvent {
             ToolStatus::Ok
         },
         detail: event_detail(&message.content),
+        call_id: Some(message.tool_call_id.clone()),
+        arguments: call.map(|call| call.arguments.clone()),
+        result: Some(tool_event_result_value(&message.content)),
     }
+}
+
+fn tool_event_result_value(content: &str) -> Value {
+    serde_json::from_str(content).unwrap_or_else(|_| Value::String(content.to_owned()))
 }
 
 fn event_detail(content: &str) -> String {

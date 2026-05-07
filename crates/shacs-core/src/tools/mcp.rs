@@ -262,11 +262,14 @@ impl StdioMcpConnection {
         server_name: &str,
         timeout_seconds: u64,
     ) -> Result<Vec<McpCapability>, String> {
-        let mut capabilities = parse_tool_capabilities(
-            server_name,
-            timeout_seconds,
-            self.request("tools/list", json!({}))?,
-        );
+        let mut capabilities = Vec::new();
+        if let Ok(result) = self.request("tools/list", json!({})) {
+            capabilities.extend(parse_tool_capabilities(
+                server_name,
+                timeout_seconds,
+                result,
+            ));
+        }
         if let Ok(result) = self.request("resources/list", json!({})) {
             capabilities.extend(parse_resource_capabilities(
                 server_name,
@@ -1185,5 +1188,31 @@ mod tests {
             parts_from_mcp_result("resources/read", &json!({"contents": [{"blob": "abcd"}]})),
             vec!["[Binary resource: 4 bytes]".to_owned()]
         );
+    }
+
+    #[test]
+    fn stdio_mcp_parses_resource_and_prompt_capabilities_without_tools() {
+        let resources = parse_resource_capabilities(
+            "srv",
+            7,
+            json!({"resources": [{"uri": "file://README.md", "description": "Readme"}]}),
+        );
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].kind, McpCapabilityKind::Resource);
+        assert_eq!(resources[0].name, "file://README.md");
+        assert_eq!(resources[0].uri.as_deref(), Some("file://README.md"));
+        assert_eq!(resources[0].timeout_seconds, 7);
+
+        let prompts = parse_prompt_capabilities(
+            "srv",
+            9,
+            json!({"prompts": [{"name": "plan", "arguments": [{"name": "topic", "required": true}]}]}),
+        );
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].kind, McpCapabilityKind::Prompt);
+        assert_eq!(prompts[0].name, "plan");
+        assert_eq!(prompts[0].arguments[0].name, "topic");
+        assert!(prompts[0].arguments[0].required);
+        assert_eq!(prompts[0].timeout_seconds, 9);
     }
 }

@@ -937,26 +937,41 @@ fn subagent_partial_progress_formats_completed_steps_and_failure() -> Result<(),
             name: "read".to_owned(),
             status: ToolStatus::Ok,
             detail: "read docs".to_owned(),
+            call_id: None,
+            arguments: None,
+            result: None,
         },
         ToolEvent {
             name: "grep".to_owned(),
             status: ToolStatus::Ok,
             detail: "found patterns".to_owned(),
+            call_id: None,
+            arguments: None,
+            result: None,
         },
         ToolEvent {
             name: "write".to_owned(),
             status: ToolStatus::Ok,
             detail: "drafted patch".to_owned(),
+            call_id: None,
+            arguments: None,
+            result: None,
         },
         ToolEvent {
             name: "clippy".to_owned(),
             status: ToolStatus::Ok,
             detail: "checked".to_owned(),
+            call_id: None,
+            arguments: None,
+            result: None,
         },
         ToolEvent {
             name: "test".to_owned(),
             status: ToolStatus::Error,
             detail: "failed assertion".to_owned(),
+            call_id: None,
+            arguments: None,
+            result: None,
         },
     ];
     let progress = format_partial_progress_from_tool_events(&events, None);
@@ -1608,6 +1623,98 @@ fn loop_rejects_duplicate_active_turn_for_same_session() -> Result<(), Box<dyn E
     ) {
         return Err(format!("duplicate active turn should fail: {result:?}").into());
     }
+    Ok(())
+}
+
+#[test]
+fn loop_priority_status_bypasses_active_session_lock() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let turn_lock = SessionTurnLock::new();
+    let _guard = turn_lock
+        .acquire("telegram:chat-1")
+        .map_err(|error| format!("test lock acquire failed: {error:?}"))?;
+    let mut sessions = SessionManager::new(workspace.path())?;
+    let mut active_session = Session::new("telegram:chat-1");
+    active_session
+        .metadata
+        .insert("pending_user_turn".to_owned(), json!(true));
+    sessions.save(&active_session)?;
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        sessions,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_session_turn_lock(turn_lock);
+
+    let result = loop_runtime.process_message(InboundMessage::new(
+        "telegram", "user-1", "chat-1", "/status",
+    ))?;
+    assert_eq!(result.command, Some(AgentLoopCommandResult::Status));
+    assert_eq!(result.stop_reason, "status");
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("telegram:chat-1")
+        .ok_or("missing active session")?;
+    assert_eq!(raw["metadata"]["pending_user_turn"], true);
+    assert_eq!(raw["messages"].as_array().map(Vec::len), Some(0));
+    Ok(())
+}
+
+#[test]
+fn loop_new_command_recovers_from_stopped_state() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    );
+
+    loop_runtime.process_direct("/stop", Some("cli:direct"))?;
+    let _ = bus.consume_outbound().ok_or("missing stop outbound")?;
+    let result = loop_runtime.process_direct("/new", Some("cli:direct"))?;
+    assert_eq!(result.command, Some(AgentLoopCommandResult::NewSession));
+    assert_eq!(result.stop_reason, "new_session");
+    Ok(())
+}
+
+#[test]
+fn loop_exact_commands_do_not_bypass_active_session_lock() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let turn_lock = SessionTurnLock::new();
+    let _guard = turn_lock
+        .acquire("telegram:chat-1")
+        .map_err(|error| format!("test lock acquire failed: {error:?}"))?;
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_session_turn_lock(turn_lock);
+
+    let result =
+        loop_runtime.process_message(InboundMessage::new("telegram", "user-1", "chat-1", "/new"));
+    assert!(matches!(
+        result,
+        Err(AgentLoopError::DuplicateActiveTurn { ref session_key }) if session_key == "telegram:chat-1"
+    ));
     Ok(())
 }
 

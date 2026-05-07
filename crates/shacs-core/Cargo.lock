@@ -968,6 +968,7 @@ dependencies = [
  "shacs-providers",
  "shacs-security",
  "shacs-session",
+ "shacs-skills",
  "shacs-templates",
  "shacs-utils",
  "tempfile",
@@ -1024,6 +1025,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "shacs-skills"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

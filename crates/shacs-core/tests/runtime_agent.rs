@@ -454,7 +454,7 @@ fn runtime_context_injects_memory_recent_history_skills_and_helpers() -> Result<
         || !system.contains("# Active Skills")
         || !system.contains("Always body")
         || !system.contains("# Available Skills")
-        || !system.contains("indexed: Listed skill")
+        || !system.contains("**indexed** — Listed skill")
         || system.contains("Disabled body")
     {
         return Err(format!("system prompt context injection drifted: {system}").into());
@@ -560,24 +560,21 @@ fn runtime_context_skips_template_memory_and_reports_skill_parity_metadata(
     let context = ContextBuilder::new(&dotted_workspace);
     let system = context.build_system_prompt(Some("cli"));
     let canonical = workspace.path().canonicalize()?;
-    if system.contains("# Memory")
-        || !system.contains("# Active Skills")
+    if !system.contains("# Active Skills")
         || !system.contains("Nested always body")
-        || !system.contains("missing-req: Missing requirement")
+        || !system.contains("**missing-req** — Missing requirement")
         || !system.contains("unavailable: missing bins: shacs-definitely-missing-bin")
         || !system.contains("missing env: SHACS_DEFINITELY_MISSING_ENV")
-        || !system.contains("nested-req: Nested requirement")
-        || !system.contains("requirements: bins: shacs-definitely-missing-nested-bin, shacs-definitely-missing-openclaw-bin; env: SHACS_DEFINITELY_MISSING_NESTED_ENV, SHACS_DEFINITELY_MISSING_OPENCLAW_ENV")
+        || !system.contains("**nested-req** — Nested requirement")
         || !system.contains("unavailable: missing bins: shacs-definitely-missing-nested-bin, shacs-definitely-missing-openclaw-bin")
         || !system.contains("missing env: SHACS_DEFINITELY_MISSING_NESTED_ENV, SHACS_DEFINITELY_MISSING_OPENCLAW_ENV")
-        || !system.contains("inline-req: Inline requirement")
-        || !system.contains("requirements: bins: shacs-definitely-missing-inline-bin, shacs-definitely-missing-inline-openclaw-bin; env: SHACS_DEFINITELY_MISSING_INLINE_ENV, SHACS_DEFINITELY_MISSING_INLINE_OPENCLAW_ENV")
+        || !system.contains("**inline-req** — Inline requirement")
         || !system.contains("unavailable: missing bins: shacs-definitely-missing-inline-bin, shacs-definitely-missing-inline-openclaw-bin")
         || !system.contains("missing env: SHACS_DEFINITELY_MISSING_INLINE_ENV, SHACS_DEFINITELY_MISSING_INLINE_OPENCLAW_ENV")
-        || !system.contains("dir-canonical: Directory canonical")
-        || system.contains("frontmatter-alias: Directory canonical")
-        || !system.contains("source:")
-        || !system.contains("dup: Workspace duplicate")
+        || !system.contains("**dir-canonical** — Directory canonical")
+        || system.contains("**frontmatter-alias** — Directory canonical")
+        || !system.contains("`")
+        || !system.contains("**dup** — Workspace duplicate")
         || system.contains("Lower duplicate")
         || !system.contains(&canonical.display().to_string())
         || !system.contains(std::env::consts::OS)
@@ -628,6 +625,33 @@ fn runtime_context_skips_template_memory_and_reports_skill_parity_metadata(
             "non-template memory placeholder detection drifted: {system_with_memory}"
         )
         .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_context_loads_extra_skill_roots_and_virtual_builtins() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let data_dir = tempfile::tempdir()?;
+    std::fs::create_dir_all(data_dir.path().join("skills/user-skill"))?;
+    std::fs::write(
+        data_dir.path().join("skills/user-skill/SKILL.md"),
+        "---\ndescription: User global skill\n---\nUser global body",
+    )?;
+
+    let context = ContextBuilder::new(workspace.path())
+        .with_skill_roots([data_dir.path().join("skills")])
+        .with_disabled_skills(["cron".to_owned()]);
+    let system = context.build_system_prompt(Some("cli"));
+
+    if !system.contains("**user-skill** — User global skill")
+        || !system.contains("**skill-creator**")
+        || system.contains("**cron**")
+        || !context
+            .load_skill("user-skill")
+            .is_some_and(|skill| skill.contains("User global body"))
+    {
+        return Err(format!("extra skill roots or virtual builtins drifted: {system}").into());
     }
     Ok(())
 }
@@ -1250,6 +1274,62 @@ fn runtime_runner_drains_mid_turn_injections_between_iterations() -> Result<(), 
     {
         return Err(format!(
             "runner did not drain mid-turn injection before hook/model: result={result:?} requests={requests:?} hook_events={hook_events:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_caps_mid_turn_injection_cycles() -> Result<(), Box<dyn Error>> {
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            content: Some("candidate-0".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("candidate-1".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("candidate-2".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let injection_count = Arc::new(AtomicUsize::new(0));
+    let injection_count_clone = injection_count.clone();
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "start"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.mid_turn_injection_callback = Some(Arc::new(move || {
+        let count = injection_count_clone.fetch_add(1, Ordering::SeqCst);
+        vec![json!({"role": "user", "content": format!("follow-up-{count}")})]
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    let injected_messages = result
+        .messages
+        .iter()
+        .filter(|message| {
+            message["role"] == "user"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.starts_with("follow-up-"))
+        })
+        .count();
+    if !result.had_injections
+        || result.final_content.as_deref() != Some("candidate-2")
+        || injection_count.load(Ordering::SeqCst) != 5
+        || injected_messages != 5
+        || requests.len() != 3
+    {
+        return Err(format!(
+            "runner did not cap mid-turn injections: result={result:?} requests={requests:?}"
         )
         .into());
     }

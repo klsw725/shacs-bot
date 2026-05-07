@@ -3,6 +3,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::{Datelike, Local, Offset, Utc};
 use serde_json::{json, Map, Value};
+use shacs_skills::builtin_skills;
 use shacs_templates::{render_agent_template, template_variables, AgentTemplate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -22,6 +23,7 @@ pub struct ContextBuilder {
     workspace: PathBuf,
     timezone: Option<String>,
     disabled_skills: Vec<String>,
+    extra_skill_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +57,7 @@ impl ContextBuilder {
             workspace: workspace.as_ref().to_path_buf(),
             timezone: None,
             disabled_skills: Vec::new(),
+            extra_skill_roots: Vec::new(),
         }
     }
 
@@ -68,6 +71,11 @@ impl ContextBuilder {
         disabled_skills: impl IntoIterator<Item = String>,
     ) -> Self {
         self.disabled_skills = disabled_skills.into_iter().collect();
+        self
+    }
+
+    pub fn with_skill_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.extra_skill_roots = roots.into_iter().collect();
         self
     }
 
@@ -193,12 +201,15 @@ impl ContextBuilder {
         )
     }
 
-    fn skill_roots(&self) -> [PathBuf; 3] {
-        [
+    fn skill_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![
             self.workspace.join("skills"),
+            self.workspace.join(".shacs-bot").join("skills"),
             self.workspace.join(".nanobot").join("skills"),
             self.workspace.join("builtin_skills"),
-        ]
+        ];
+        roots.extend(self.extra_skill_roots.clone());
+        roots
     }
 
     fn load_skill_documents(&self) -> Vec<SkillDocument> {
@@ -234,8 +245,36 @@ impl ContextBuilder {
                 }
             }
         }
+        for document in self.virtual_builtin_skill_documents() {
+            if document.disabled || disabled.contains(&document.name.as_str()) {
+                continue;
+            }
+            if !seen.insert(document.name.clone()) {
+                continue;
+            }
+            documents.push(document);
+        }
         documents.sort_by(|left, right| left.name.cmp(&right.name));
         documents
+    }
+
+    fn virtual_builtin_skill_documents(&self) -> Vec<SkillDocument> {
+        builtin_skills()
+            .iter()
+            .filter_map(|skill| {
+                let file = skill
+                    .files
+                    .iter()
+                    .find(|file| file.relative_path == "SKILL.md")?;
+                let raw = String::from_utf8(file.content.to_vec()).ok()?;
+                let source_path = self
+                    .workspace
+                    .join("builtin_skills")
+                    .join(skill.name)
+                    .join("SKILL.md");
+                SkillDocument::from_raw(source_path, raw)
+            })
+            .collect()
     }
 
     fn load_always_skills(&self) -> Option<String> {
@@ -243,9 +282,9 @@ impl ContextBuilder {
             .load_skill_documents()
             .into_iter()
             .filter(|skill| skill.always && skill.available)
-            .map(|skill| format!("## {}\n\n{}", skill.name, skill.body))
+            .map(|skill| format!("### Skill: {}\n\n{}", skill.name, skill.body))
             .collect::<Vec<_>>()
-            .join("\n\n");
+            .join("\n\n---\n\n");
         (!content.is_empty()).then_some(content)
     }
 
@@ -350,29 +389,13 @@ impl ContextBuilder {
     }
 
     fn skills_index_summary(&self) -> String {
-        self.load_skill_documents()
+        let always = self
+            .load_skill_documents()
             .into_iter()
-            .filter(|skill| !skill.always)
-            .map(|skill| {
-                let mut line = format!("- {}", skill.name);
-                if let Some(description) = skill.description.filter(|value| !value.is_empty()) {
-                    line.push_str(&format!(": {description}"));
-                }
-                if let Some(requirements) = skill.requirements.filter(|value| !value.is_empty()) {
-                    line.push_str(&format!(" (requirements: {requirements})"));
-                }
-                if !skill.available {
-                    if let Some(summary) =
-                        skill.unavailable_summary.filter(|value| !value.is_empty())
-                    {
-                        line.push_str(&format!(" (unavailable: {summary})"));
-                    }
-                }
-                line.push_str(&format!(" [source: {}]", skill.source_path.display()));
-                line
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .filter(|skill| skill.always)
+            .map(|skill| skill.name)
+            .collect::<BTreeSet<_>>();
+        self.build_skills_summary(&always)
     }
 
     fn build_user_content(&self, text: &str, media: &[String]) -> Value {
@@ -436,7 +459,6 @@ impl ContextBuilder {
 struct SkillDocument {
     name: String,
     description: Option<String>,
-    requirements: Option<String>,
     unavailable_summary: Option<String>,
     source_path: PathBuf,
     always: bool,
@@ -449,23 +471,22 @@ struct SkillDocument {
 impl SkillDocument {
     fn from_path(path: &Path) -> Option<Self> {
         let raw = fs::read_to_string(path).ok()?;
+        Self::from_raw(path.to_path_buf(), raw)
+    }
+
+    fn from_raw(source_path: PathBuf, raw: String) -> Option<Self> {
         let (frontmatter, body) = split_frontmatter(&raw);
         let metadata = parse_frontmatter(frontmatter.unwrap_or_default());
-        let fallback_name = skill_name_from_path(path);
+        let fallback_name = skill_name_from_path(&source_path);
         let name = fallback_name;
         let requirement = SkillRequirement::from_metadata(&metadata);
         let unavailable_summary = requirement.unavailable_summary();
-        let requirements = metadata
-            .get("requirements")
-            .cloned()
-            .or_else(|| requirement.summary());
         let body = body.trim().to_owned();
         Some(Self {
             name,
             description: metadata.get("description").cloned(),
-            requirements,
             unavailable_summary: unavailable_summary.clone(),
-            source_path: path.to_path_buf(),
+            source_path,
             always: parse_bool(metadata.get("always"))
                 || parse_bool(metadata.get("metadata.nanobot.always"))
                 || parse_bool(metadata.get("metadata.openclaw.always")),
@@ -501,17 +522,6 @@ impl SkillRequirement {
                 parse_inline_metadata_requires(metadata.get("metadata"), "openclaw", "env"),
             ]),
         }
-    }
-
-    fn summary(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if !self.bins.is_empty() {
-            parts.push(format!("bins: {}", self.bins.join(", ")));
-        }
-        if !self.env.is_empty() {
-            parts.push(format!("env: {}", self.env.join(", ")));
-        }
-        (!parts.is_empty()).then(|| parts.join("; "))
     }
 
     fn unavailable_summary(&self) -> Option<String> {
