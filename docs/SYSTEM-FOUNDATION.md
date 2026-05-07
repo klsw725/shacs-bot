@@ -52,7 +52,7 @@
 현재 범위에서 제품 표면과 외부 연동은 의도적으로 좁게 잡는다.
 
 - provider/auth family는 **OpenAI-compatible**, **Anthropic auth**, **Codex auth(OpenAI auth style)** 세 종류만 지원 대상으로 본다.
-- 외부 채널은 **Slack**, **Discord**, **Telegram**, **Email** 네 가지면 충분하다고 본다.
+- 외부 채널은 **Slack**, **Discord**, **Telegram**, **Email**, **WhatsApp bridge** 다섯 가지면 충분하다고 본다.
 - 공식 인터페이스 표면은 CLI, TUI, local API를 기준으로 잡고, 외부 채널은 별도 mailbox/runtime service 경계에서 다룬다.
 
 즉 초기 단계의 목표는 많은 벤더와 채널을 넓게 덮는 플랫폼이 아니라, 실제로 필요한 소수의 provider/auth 조합과 채널만 안정적으로 설명 가능하게 붙이는 것이다.
