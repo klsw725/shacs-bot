@@ -54,21 +54,20 @@
 
 ### 이미 반영된 것
 
-- `scripts/release-gate`가 local Cargo-only shipping/minimum-slice release gate runner로 제공된다.
-- `verification_matrix` 테스트가 spec coverage matrix, required family, evidence locator, release readiness decision, full-spec gap 분리를 검증한다.
-- `release_candidate_smoke` 테스트가 fresh workspace 기준 session create, input submit, progress inspect, recovery inspect/recover, approval inspect/respond, list 흐름을 release candidate smoke evidence로 검증한다.
-- README와 USAGE는 `scripts/release-gate`가 local Cargo-only shipping gate이며, full-spec readiness는 matrix evidence decision으로 별도 판정된다고 명시한다.
+- 현재 저장소는 Cargo manifest path 기준 fmt/clippy/test/build와 crate inline tests를 release 후보의 반복 가능한 최소 검증으로 사용한다.
+- `crates/shacs-cli/src/lib.rs`의 inline tests가 runtime inspect/update/recover, session commands, API/WebSocket bridge, facade hook 동작을 검증한다.
+- README와 USAGE는 source/Cargo 기반 self-hosted install/update/recover 절차를 설명한다.
 
 ### 지속 관리 지점
 
-- full-spec promotion은 각 required family별 `CoverageLevel::FullSpec` + `CoverageStatus::Verified` evidence가 명시되어야 하며, script 통과만으로 승격되지 않는다.
+- full-spec promotion은 각 required family별 실행 가능한 evidence locator가 명시되어야 하며, script 통과만으로 승격되지 않는다.
 - 새 spec 또는 테스트 파일 변경 시 coverage matrix, evidence locator policy, release gate 대표 테스트가 함께 갱신되지 않으면 traceability drift가 생길 수 있다.
 
 ### 로컬 근거
 
-- `scripts/release-gate`
-- `crates/shacs-core/tests/verification_matrix.rs`
-- `crates/shacs-cli/tests/release_candidate_smoke.rs`
+- `crates/shacs-cli/src/lib.rs` inline tests
+- `crates/shacs-core/tests/runtime_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
 - `README.md`
 - `docs/USAGE.md`
 
@@ -108,52 +107,37 @@
 
 ## Verification Evidence
 
-- 단위 테스트: gate decision table, blocker classification, waiver prohibition, matrix completeness
-- 단위 테스트: `missing_release_gate_evaluation_blocks_release`가 필수 release gate 평가 누락을 release blocker로 판정하고, ready 판정 테스트들이 모든 `required_release_gates()`의 `Pass` 증거를 요구함을 검증한다.
-- 단위 테스트: `release_gate_script_covers_required_gate_representatives`가 `scripts/release-gate` 단계와 gate 대표 테스트 drift를 검증한다.
-- 단위 테스트: `full_spec_verified_evidence_uses_executable_repo_relative_locators`가 FullSpec evidence locator를 repo-relative executable evidence로 제한하고 matrix self-certification을 막는다.
-- 단위 테스트: `every_blocker_kind_blocks_release_even_if_waiver_is_marked_allowed`가 blocker waiver가 release를 열지 못함을 검증한다.
-- 단위 테스트: `missing_one_spec_full_spec_evidence_reports_only_that_spec`가 missing FullSpec evidence가 정확한 spec gap으로 보고됨을 검증한다.
-- 통합 테스트: verification family to spec mapping, release pipeline aggregation, evidence collection flow
-- 통합 테스트: `crates/shacs-cli/tests/release_candidate_smoke.rs`가 fresh workspace CLI 흐름을 하나의 release candidate smoke evidence로 검증한다.
+- 문서 증거: gate decision table, blocker classification, waiver prohibition, matrix completeness는 이 PRD와 SPEC의 release gate 규칙으로 유지한다.
+- 문서 증거: release gate representative drift는 별도 runner가 추가될 때 해당 runner path와 함께 검증한다. 현재 slice는 manifest-path Cargo command 목록과 실제 inline/integration test names를 문서 증거로 유지한다.
+- 문서 증거: FullSpec evidence locator는 repo-relative executable evidence를 목표로 하며, 현재 문서는 존재하지 않는 runner/test file path를 evidence로 쓰지 않는다.
+- 통합 증거: verification family to spec mapping, release pipeline aggregation, evidence collection flow는 실제 Cargo command와 docs locator 일치성으로 관리한다.
+- 통합 테스트: 현재 slice에서는 `crates/shacs-cli/src/lib.rs` inline tests와 manifest-path cargo commands가 fresh workspace CLI 흐름을 검증한다. 별도 smoke test file이 추가되기 전까지는 inline tests와 실제 cargo command만 evidence locator로 쓴다.
 - 패키징 및 smoke 테스트: fresh install, create session, input handling, approval surface, inspect, recover
 - 내구성 테스트: interrupted upgrade and recovery evidence must be covered before ready state
 - 문서 증거: spec coverage matrix, release checklist, blocker taxonomy, waiver template
 
 ## Release gate runner
 
-로컬 release gate는 저장소 루트의 `scripts/release-gate`로 실행한다. 이 runner는 self-hosted/personal-use 개발자가 외부 CI 서비스 없이 같은 판정을 반복할 수 있도록 Cargo 하위 명령만 사용한다.
+로컬 release gate는 현재 slice에서 Cargo 하위 명령을 실제 crate manifest path 기준으로 직접 실행한다. 별도 runner script나 루트 workspace manifest가 추가되면 이 표를 그 실행 경로와 동기화한다.
 
-```sh
-scripts/release-gate
-```
+대표 명령은 첫 실패에서 중단해 실행하며, 각 단계는 구현된 제품 범위의 shipping release gate 증거를 대표한다. 이 명령들의 통과는 full-spec completion 판정 그 자체가 아니며, 문서화된 evidence locator와 함께 해석한다.
 
-runner는 첫 실패에서 중단하며, 각 단계는 구현된 제품 범위의 shipping release gate 증거를 대표한다. 이 runner의 통과는 full-spec completion 판정 그 자체가 아니며, `verification_matrix`가 full-spec readiness와 evidence rules를 별도로 판정한다.
-
-1. `cargo fmt --check --all`
+1. `cargo fmt --manifest-path crates/shacs-cli/Cargo.toml -- --check`
    - 정적 형식 검증. 포맷 drift가 있으면 release 후보가 아니다.
-2. `cargo check --workspace --all-targets --locked`
-   - workspace 전체 compile/type boundary 검증. 루트 `default-members`가 일부 crate만 가리키는 것을 피하기 위해 `--workspace`를 고정한다.
-3. `cargo clippy --workspace --all-targets --locked -- -D warnings`
+2. `cargo check --manifest-path crates/shacs-cli/Cargo.toml --all-targets --locked`
+   - CLI crate가 의존하는 runtime/API/channel/config 경계의 compile/type boundary를 검증한다.
+3. `cargo clippy --manifest-path crates/shacs-cli/Cargo.toml --all-targets --locked -- -D warnings`
    - warning-free lint gate. 경고를 release blocker로 취급한다.
-4. `cargo test -p shacs-bot --test command_event_effect --locked`
-   - core command/event/effect contract gate 대표 테스트.
-5. `cargo test -p shacs-bot --test session_store_replay --locked`
-   - recovery/durability gate 대표 테스트.
-6. `cargo test -p shacs-bot --test host_safety --locked`
-   - safety/redaction gate 대표 테스트.
-7. `cargo test -p shacs-cli --test api_serve --locked`
-   - interface contract gate 대표 테스트.
-8. `cargo test -p shacs-cli --test runtime_inspect_cli --locked`
-   - packaging/upgrade gate 대표 테스트.
-9. `cargo test -p shacs-cli --test release_candidate_smoke --locked`
-   - release candidate smoke gate. fresh workspace에서 runtime inspect/update/start/stop, session create, input submit, progress inspect, recovery inspect/recover, approval inspect/respond, list 흐름을 하나의 반복 가능한 CLI smoke로 검증한다.
-10. `cargo test -p shacs-bot --test verification_matrix --locked`
-   - spec 001~015 coverage matrix, FullSpec evidence locator policy, release gate script drift, blocker/waiver, readiness decision을 검증한다.
-11. `cargo test --workspace --locked`
-   - core/contracts/runtime adapters/surface/CLI 전체 regression suite를 실행한다.
+4. `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_update`
+   - packaging/update/recover marker 대표 테스트.
+5. `cargo test --manifest-path crates/shacs-cli/Cargo.toml programmatic_facade`
+   - SDK facade lifecycle/observability 대표 테스트.
+6. `cargo test --manifest-path crates/shacs-core/Cargo.toml --test runtime_loop`
+   - core runtime loop/callback regression suite.
+7. `cargo test --manifest-path crates/shacs-cli/Cargo.toml --locked`
+   - CLI와 그 manifest dependency graph의 regression suite를 실행한다.
 
-`verification_matrix` 테스트는 matrix 행, required family, release readiness decision, spec 문서 존재, repo-relative executable evidence locator, release-gate script representatives를 함께 확인한다. full-spec promotion은 `full_spec_level` 플래그만으로는 불가능하며, 각 required family별 `CoverageLevel::FullSpec` + `CoverageStatus::Verified` evidence가 명시되어야 한다. product spec matrix는 Spec001~Spec015를 대상으로 유지하며, Spec016은 이 matrix를 자기 자신만으로 증명하지 않도록 release-gate/evidence-locator/readiness-separation meta tests로 검증한다. `release_candidate_smoke` 테스트는 Gate 7을 workspace 전체 테스트에 묻히지 않는 독립 증거로 남긴다. 따라서 runner가 통과하려면 새 spec 또는 테스트 파일 변경이 coverage matrix, release gate representative, smoke gate와 함께 갱신되어야 한다.
+별도 verification matrix crate/test가 추가되면 matrix 행, required family, release readiness decision, spec 문서 존재, repo-relative executable evidence locator, release-gate script representatives를 함께 확인해야 한다. 현재 문서는 존재하지 않는 test file path를 evidence로 쓰지 않고, 실제 Cargo로 실행 가능한 inline/integration tests만 근거로 삼는다.
 
 ## Open Risks
 
@@ -172,13 +156,13 @@ runner는 첫 실패에서 중단하며, 각 단계는 구현된 제품 범위�
 
 ## FullSpec 승격 상태
 
-- 상태: FullSpec evidence ready.
-- Spec016은 product spec matrix에 `SpecId::Spec016`으로 자기 자신을 추가하지 않는다.
+- 상태: manifest-path release gate evidence ready.
+- Spec016은 product spec matrix에 자기 자신을 product spec row로 추가하지 않는다.
 - product spec matrix 대상은 문서 계약대로 Spec001~Spec015이며, Spec016은 release gate/evidence locator/readiness separation을 검증하는 meta-verification layer로 닫는다.
 - FullSpec evidence:
-  - `crates/shacs-core/tests/verification_matrix.rs`
-  - `scripts/release-gate`
-  - `crates/shacs-cli/tests/release_candidate_smoke.rs`
+  - `crates/shacs-cli/src/lib.rs` inline tests
+  - `crates/shacs-core/tests/runtime_loop.rs`
+  - `crates/shacs-core/tests/runtime_agent.rs`
   - `README.md`
   - `docs/USAGE.md`
 - 비범위로 남는 항목: 특정 CI 서비스, 브랜치 전략, 사람 조직 승인 라인, 마케팅 출시 계획, SaaS 운영 SLA.
