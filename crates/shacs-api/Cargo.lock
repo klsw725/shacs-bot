@@ -1039,6 +1039,7 @@ dependencies = [
  "shacs-channels",
  "shacs-providers",
  "shacs-utils",
+ "shacs-web",
  "tokio",
  "tokio-tungstenite",
  "tower",
@@ -1094,6 +1095,18 @@ dependencies = [
  "serde_json",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "shacs-web"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "getrandom 0.2.17",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

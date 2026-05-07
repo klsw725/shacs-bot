@@ -17,6 +17,7 @@ use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -243,6 +244,19 @@ pub trait ChatCompletionAdapter {
             "websocket frame handling is not configured for this adapter",
         ))
     }
+
+    fn process_websocket_frame_streaming(
+        &self,
+        frame: Value,
+        client_id: &str,
+        default_chat_id: &str,
+        on_event: &mut dyn FnMut(WebSocketServerEvent),
+    ) -> Result<(), ApiError> {
+        for event in self.process_websocket_frame(frame, client_id, default_chat_id)? {
+            on_event(event);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -250,6 +264,12 @@ pub struct ApiRouterState {
     adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
     timeout: Duration,
     session_locks: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+}
+
+#[derive(Clone)]
+pub struct WebUiRouterState {
+    api: ApiRouterState,
+    assets_dir: PathBuf,
 }
 
 impl ApiRouterState {
@@ -319,6 +339,25 @@ pub fn websocket_router_with_timeout_and_path(
         .fallback(axum_not_found)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(ApiRouterState::with_timeout(adapter, timeout))
+}
+
+pub fn web_ui_router_with_timeout_and_websocket_path(
+    adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
+    timeout: Duration,
+    websocket_path: &str,
+    assets_dir: impl Into<PathBuf>,
+) -> Router {
+    Router::new()
+        .route(HEALTH_PATH, any(webui_axum_dispatch))
+        .route(MODELS_PATH, any(webui_axum_dispatch))
+        .route(CHAT_COMPLETIONS_PATH, any(webui_axum_dispatch))
+        .route(websocket_path, any(webui_websocket_upgrade_axum))
+        .fallback(webui_static_or_api_fallback)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .with_state(WebUiRouterState {
+            api: ApiRouterState::with_timeout(adapter, timeout),
+            assets_dir: assets_dir.into(),
+        })
 }
 
 pub async fn serve_api_listener(
@@ -431,6 +470,42 @@ pub async fn serve_websocket_with_timeout_and_path(
         adapter,
         timeout,
         websocket_path,
+        shutdown,
+    )
+    .await
+}
+
+pub async fn serve_web_ui_listener_with_timeout_and_websocket_path(
+    listener: TcpListener,
+    adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
+    timeout: Duration,
+    websocket_path: &str,
+    assets_dir: impl Into<PathBuf>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    axum::serve(
+        listener,
+        web_ui_router_with_timeout_and_websocket_path(adapter, timeout, websocket_path, assets_dir),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+}
+
+pub async fn serve_web_ui_with_timeout_and_websocket_path(
+    addr: SocketAddr,
+    adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
+    timeout: Duration,
+    websocket_path: &str,
+    assets_dir: impl Into<PathBuf>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    serve_web_ui_listener_with_timeout_and_websocket_path(
+        listener,
+        adapter,
+        timeout,
+        websocket_path,
+        assets_dir,
         shutdown,
     )
     .await
@@ -600,14 +675,75 @@ async fn axum_dispatch(State(state): State<ApiRouterState>, request: Request) ->
     axum_response_from_api(response)
 }
 
+async fn webui_axum_dispatch(State(state): State<WebUiRouterState>, request: Request) -> Response {
+    axum_dispatch(State(state.api), request).await
+}
+
+async fn webui_websocket_upgrade_axum(
+    State(state): State<WebUiRouterState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    websocket_upgrade_axum(State(state.api), headers, ws).await
+}
+
+async fn webui_static_or_api_fallback(
+    State(state): State<WebUiRouterState>,
+    request: Request,
+) -> Response {
+    let path = request.uri().path().to_owned();
+    if is_api_path(&path) {
+        return axum_dispatch(State(state.api), request).await;
+    }
+    match shacs_web::static_files::serve_static(&state.assets_dir, &path) {
+        Ok(Some(static_response)) => axum_static_response(static_response),
+        Ok(None) => axum_not_found().await,
+        Err(shacs_web::static_files::StaticFileError::Forbidden) => {
+            StatusCode::FORBIDDEN.into_response()
+        }
+        Err(shacs_web::static_files::StaticFileError::ReadError) => {
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn is_api_path(path: &str) -> bool {
+    path == HEALTH_PATH
+        || path == MODELS_PATH
+        || path == CHAT_COMPLETIONS_PATH
+        || path == "/v1"
+        || path.starts_with("/v1/")
+}
+
+fn axum_static_response(response: shacs_web::static_files::StaticFileResponse) -> Response {
+    let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK);
+    let content_type = HeaderValue::from_str(&response.content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    let cache_control = HeaderValue::from_str(&response.cache_control)
+        .unwrap_or_else(|_| HeaderValue::from_static("no-cache"));
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, cache_control),
+        ],
+        Body::from(response.body),
+    )
+        .into_response()
+}
+
 async fn axum_not_found() -> Response {
     axum_response_from_api(error_response(ApiError::not_found("API route not found")))
 }
 
 async fn websocket_upgrade_axum(
     State(state): State<ApiRouterState>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if let Err(error) = validate_websocket_origin(&headers) {
+        return axum_response_from_api(error_response(error));
+    }
     let client_id = "websocket-client".to_owned();
     let chat_id = "default".to_owned();
     ws.on_upgrade(move |socket| handle_websocket_connection(state, socket, client_id, chat_id))
@@ -621,42 +757,36 @@ async fn handle_websocket_connection(
     default_chat_id: String,
 ) {
     while let Some(message) = socket.recv().await {
-        let events = match websocket_frame_from_axum(message) {
+        let result = match websocket_frame_from_axum(message) {
             Ok(Some(frame)) => {
                 dispatch_websocket_frame(
                     state.adapter.clone(),
                     frame,
                     client_id.clone(),
                     default_chat_id.clone(),
+                    &mut socket,
                 )
                 .await
             }
             Ok(None) => continue,
-            Err(error) => Ok(vec![WebSocketServerEvent::Error {
-                chat_id: Some(default_chat_id.clone()),
-                detail: Some(error.message),
-            }]),
-        };
-        let events = match events {
-            Ok(events) => events,
-            Err(error) => vec![WebSocketServerEvent::Error {
-                chat_id: Some(default_chat_id.clone()),
-                detail: Some(error.message),
-            }],
-        };
-        for event in events {
-            let payload = match serde_json::to_string(&event) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    let fallback = WebSocketServerEvent::Error {
+            Err(error) => {
+                send_websocket_event(
+                    &mut socket,
+                    WebSocketServerEvent::Error {
                         chat_id: Some(default_chat_id.clone()),
-                        detail: Some(format!("websocket event could not be serialized: {error}")),
-                    };
-                    fallback_payload(&fallback)
-                }
+                        detail: Some(error.message),
+                    },
+                    &default_chat_id,
+                )
+                .await
+            }
+        };
+        if let Err(error) = result {
+            let fallback = WebSocketServerEvent::Error {
+                chat_id: Some(default_chat_id.clone()),
+                detail: Some(error.message),
             };
-            if socket
-                .send(AxumWebSocketMessage::Text(payload.into()))
+            if send_websocket_event(&mut socket, fallback, &default_chat_id)
                 .await
                 .is_err()
             {
@@ -671,20 +801,50 @@ async fn dispatch_websocket_frame(
     frame: Value,
     client_id: String,
     default_chat_id: String,
-) -> Result<Vec<WebSocketServerEvent>, ApiError> {
-    tokio::task::spawn_blocking(move || {
-        adapter.process_websocket_frame(frame, &client_id, &default_chat_id)
-    })
-    .await
-    .unwrap_or_else(|_| Err(ApiError::internal("websocket frame task failed")))
+    socket: &mut WebSocket,
+) -> Result<(), ApiError> {
+    let fallback_chat_id = default_chat_id.clone();
+    let (event_tx, mut event_rx) = mpsc::channel::<WebSocketServerEvent>(64);
+    let task = tokio::task::spawn_blocking(move || {
+        let mut emit = move |event| {
+            let _ = event_tx.blocking_send(event);
+        };
+        adapter.process_websocket_frame_streaming(frame, &client_id, &default_chat_id, &mut emit)
+    });
+
+    while let Some(event) = event_rx.recv().await {
+        send_websocket_event(socket, event, &fallback_chat_id).await?;
+    }
+
+    task.await
+        .unwrap_or_else(|_| Err(ApiError::internal("websocket frame task failed")))
+}
+
+async fn send_websocket_event(
+    socket: &mut WebSocket,
+    event: WebSocketServerEvent,
+    fallback_chat_id: &str,
+) -> Result<(), ApiError> {
+    let payload = match serde_json::to_string(&event) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let fallback = WebSocketServerEvent::Error {
+                chat_id: Some(fallback_chat_id.to_owned()),
+                detail: Some(format!("websocket event could not be serialized: {error}")),
+            };
+            fallback_payload(&fallback)
+        }
+    };
+    socket
+        .send(AxumWebSocketMessage::Text(payload.into()))
+        .await
+        .map_err(|_| ApiError::internal("websocket client disconnected"))
 }
 
 fn websocket_frame_from_axum(
     message: Result<AxumWebSocketMessage, axum::Error>,
 ) -> Result<Option<Value>, ApiError> {
-    match message
-        .map_err(|error| ApiError::invalid_request(format!("websocket frame failed: {error}")))?
-    {
+    match message.map_err(|_| ApiError::invalid_request("websocket frame could not be read"))? {
         AxumWebSocketMessage::Text(text) => websocket_json_from_bytes(text.as_str().as_bytes()),
         AxumWebSocketMessage::Binary(bytes) => websocket_json_from_bytes(bytes.as_ref()),
         AxumWebSocketMessage::Ping(_) | AxumWebSocketMessage::Pong(_) => Ok(None),
@@ -696,9 +856,47 @@ fn websocket_json_from_bytes(bytes: &[u8]) -> Result<Option<Value>, ApiError> {
     if bytes.is_empty() {
         return Ok(None);
     }
-    serde_json::from_slice(bytes).map(Some).map_err(|error| {
-        ApiError::invalid_request(format!("websocket frame must be valid JSON: {error}"))
-    })
+    if bytes.len() > MAX_REQUEST_BODY_BYTES {
+        return Err(ApiError::payload_too_large(format!(
+            "websocket frame exceeds {MAX_REQUEST_BODY_BYTES} bytes"
+        )));
+    }
+    serde_json::from_slice(bytes)
+        .map(Some)
+        .map_err(|_| ApiError::invalid_request("websocket frame must be valid JSON"))
+}
+
+fn validate_websocket_origin(headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(origin) = header_str(headers, header::ORIGIN) else {
+        return Ok(());
+    };
+    let Some(host) = header_str(headers, header::HOST) else {
+        return Err(ApiError::invalid_request(
+            "websocket origin requires a host header",
+        ));
+    };
+    if websocket_origin_matches_host(origin, host) {
+        Ok(())
+    } else {
+        Err(ApiError::invalid_request("websocket origin is not allowed"))
+    }
+}
+
+fn header_str(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn websocket_origin_matches_host(origin: &str, host: &str) -> bool {
+    let Some(authority) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    authority
+        .split('/')
+        .next()
+        .is_some_and(|origin_host| origin_host.eq_ignore_ascii_case(host))
 }
 
 fn fallback_payload(event: &WebSocketServerEvent) -> String {
@@ -1527,6 +1725,7 @@ mod tests {
     use serde_json::json;
     use shacs_providers::types::{text_response, usage};
     use std::error::Error;
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -2124,6 +2323,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_ui_router_serves_static_api_and_websocket_on_one_surface(
+    ) -> Result<(), Box<dyn Error>> {
+        let assets_dir = unique_test_dir("web-ui-router")?;
+        fs::write(assets_dir.join("index.html"), "<html>app</html>")?;
+        fs::write(assets_dir.join("app.js"), "console.log('app')")?;
+        let adapter = Arc::new(FakeAdapter::new("gpt-5", text_response("unused")));
+        let app = web_ui_router_with_timeout_and_websocket_path(
+            adapter.clone(),
+            Duration::from_secs(30),
+            WEBSOCKET_PATH,
+            assets_dir.clone(),
+        );
+
+        let root = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(root.status(), StatusCode::OK);
+        assert_eq!(response_text(root).await?, "<html>app</html>");
+
+        let asset = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/app.js")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(asset.status(), StatusCode::OK);
+        assert_eq!(response_text(asset).await?, "console.log('app')");
+
+        let api_404 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/unknown")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(api_404.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response_json(api_404).await?["error"]["type"], "not_found");
+
+        let ws = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(WEBSOCKET_PATH)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(ws.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(adapter.call_count(), 0);
+        let _ = fs::remove_dir_all(assets_dir);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn serve_websocket_listener_round_trips_json_frames() -> Result<(), Box<dyn Error>> {
         let adapter = Arc::new(FakeAdapter::new("gpt-5", text_response("unused")));
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -2163,6 +2426,43 @@ mod tests {
         let _ = shutdown_tx.send(());
         server.await??;
         Ok(())
+    }
+
+    #[test]
+    fn websocket_json_from_bytes_rejects_oversized_frames_before_parse() {
+        let bytes = vec![b' '; MAX_REQUEST_BODY_BYTES + 1];
+
+        let error = websocket_json_from_bytes(&bytes).expect_err("oversized frame should fail");
+
+        assert_eq!(error.status, 413);
+        assert_eq!(error.error_type, "payload_too_large");
+        assert!(error.message.contains("websocket frame exceeds"));
+    }
+
+    #[test]
+    fn websocket_json_from_bytes_hides_parser_details() {
+        let error = websocket_json_from_bytes(b"{").expect_err("invalid JSON should fail");
+
+        assert_eq!(error.status, 400);
+        assert_eq!(error.message, "websocket frame must be valid JSON");
+    }
+
+    #[test]
+    fn websocket_origin_must_match_host_when_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8900"));
+        assert!(validate_websocket_origin(&headers).is_ok());
+
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:8900"),
+        );
+        assert!(validate_websocket_origin(&headers).is_ok());
+
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://evil.test"));
+        let error = validate_websocket_origin(&headers).expect_err("origin mismatch should fail");
+        assert_eq!(error.status, 400);
+        assert_eq!(error.message, "websocket origin is not allowed");
     }
 
     #[tokio::test]
@@ -2497,5 +2797,15 @@ mod tests {
     async fn response_text(response: Response) -> Result<String, Box<dyn Error>> {
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await?;
         Ok(String::from_utf8(bytes.to_vec())?)
+    }
+
+    fn unique_test_dir(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "shacs-api-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir_all(&path)?;
+        Ok(path)
     }
 }
