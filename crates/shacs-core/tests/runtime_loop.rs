@@ -813,6 +813,12 @@ fn subagent_finish_publishes_synthetic_inbound_and_closes_active_task() -> Resul
 #[test]
 fn subagent_run_spawn_executes_agent_and_publishes_result() -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
+    let skill_dir = workspace.path().join("skills").join("configured-env");
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\ndescription: Configured env skill\nrequires.env: SHACS_SUBAGENT_TEST_CONFIGURED_ENV_ONLY\n---\nUse configured env.\n",
+    )?;
     let bus = MessageBus::new();
     let runtime = SubagentRuntime::with_bus(bus.clone());
     let outcome = runtime.spawn_from_request(SpawnRequest {
@@ -826,11 +832,12 @@ fn subagent_run_spawn_executes_agent_and_publishes_result() -> Result<(), Box<dy
         content: Some("subagent done".to_owned()),
         ..LlmResponse::default()
     }]);
-    let result = runtime.run_spawn(
-        outcome.envelope.clone(),
-        &client,
-        SubagentExecutionConfig::new(workspace.path(), "test-model"),
-    );
+    let mut config = SubagentExecutionConfig::new(workspace.path(), "test-model");
+    config.exec_env = BTreeMap::from([(
+        "SHACS_SUBAGENT_TEST_CONFIGURED_ENV_ONLY".to_owned(),
+        "configured".to_owned(),
+    )]);
+    let result = runtime.run_spawn(outcome.envelope.clone(), &client, config);
     if result.status != ChildResultStatus::Completed
         || result.summary != "subagent done"
         || runtime.running_count() != 0
@@ -846,6 +853,12 @@ fn subagent_run_spawn_executes_agent_and_publishes_result() -> Result<(), Box<dy
         return Err(format!("run_spawn announcement drifted: {inbound:?}").into());
     }
     let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    let system_prompt = requests[0]
+        .messages
+        .first()
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if requests.len() != 1
         || requests[0].model != "test-model"
         || !requests[0]
@@ -856,13 +869,9 @@ fn subagent_run_spawn_executes_agent_and_publishes_result() -> Result<(), Box<dy
             .tools
             .iter()
             .any(|tool| tool.to_string().contains("spawn"))
-        || !requests[0]
-            .messages
-            .first()
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .contains("# Subagent")
+        || !system_prompt.contains("# Subagent")
+        || !system_prompt.contains("**configured-env**")
+        || system_prompt.contains("SHACS_SUBAGENT_TEST_CONFIGURED_ENV_ONLY")
     {
         return Err(format!("run_spawn provider request drifted: {requests:?}").into());
     }

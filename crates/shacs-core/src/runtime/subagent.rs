@@ -278,6 +278,7 @@ pub struct SubagentExecutionConfig {
     pub exec_sandbox: Option<String>,
     pub exec_path_append: Option<String>,
     pub exec_allowed_env_keys: Vec<String>,
+    pub exec_env: BTreeMap<String, String>,
 }
 
 impl SubagentExecutionConfig {
@@ -298,6 +299,7 @@ impl SubagentExecutionConfig {
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         }
     }
 }
@@ -582,7 +584,9 @@ impl SubagentRuntime {
         cancellation_token: CancellationToken,
     ) -> ChildResultEnvelope {
         let registry = build_subagent_tool_registry(config);
-        let system_prompt = ContextBuilder::new(&config.workspace).build_subagent_prompt();
+        let system_prompt = ContextBuilder::new(&config.workspace)
+            .with_configured_env(config.exec_env.clone())
+            .build_subagent_prompt();
         let messages = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "user", "content": envelope.task_goal}),
@@ -804,6 +808,7 @@ pub fn build_subagent_tool_registry(config: &SubagentExecutionConfig) -> ToolReg
         exec_config.sandbox = config.exec_sandbox.clone();
         exec_config.path_append = config.exec_path_append.clone();
         exec_config.allowed_env_keys = config.exec_allowed_env_keys.clone();
+        exec_config.env = config.exec_env.clone();
         registry.register(ExecTool::new(exec_config));
     }
     if config.enable_web {

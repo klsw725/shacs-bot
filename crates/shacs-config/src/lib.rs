@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
@@ -377,6 +379,8 @@ pub struct ExecToolConfig {
     pub sandbox: String,
     #[serde(default)]
     pub allowed_env_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for ExecToolConfig {
@@ -387,6 +391,7 @@ impl Default for ExecToolConfig {
             path_append: String::new(),
             sandbox: String::new(),
             allowed_env_keys: Vec::new(),
+            env: BTreeMap::new(),
         }
     }
 }
@@ -1149,6 +1154,35 @@ mod tests {
             default_config_path(),
             home_dir().join(".shacs-bot/config.json")
         );
+    }
+
+    #[test]
+    fn config_deserializes_top_level_and_exec_env() -> Result<(), Box<dyn std::error::Error>> {
+        let config: Config = serde_json::from_value(json!({
+            "env": {
+                "NOTION_TOKEN_KEY": "configured",
+                "EMPTY_OK": ""
+            },
+            "tools": {
+                "exec": {
+                    "env": {
+                        "SHACS_TOKEN": "configured"
+                    }
+                }
+            }
+        }))?;
+        assert_eq!(
+            config.env.get("NOTION_TOKEN_KEY").map(String::as_str),
+            Some("configured")
+        );
+        assert_eq!(config.env.get("EMPTY_OK").map(String::as_str), Some(""));
+        assert_eq!(
+            config.tools.exec.env.get("SHACS_TOKEN").map(String::as_str),
+            Some("configured")
+        );
+        assert!(Config::default().env.is_empty());
+        assert!(Config::default().tools.exec.env.is_empty());
+        Ok(())
     }
 
     #[test]

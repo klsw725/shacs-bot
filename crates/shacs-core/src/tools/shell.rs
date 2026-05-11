@@ -5,7 +5,7 @@ use crate::tools::{IntegerSchema, JsonMap, StringSchema, Tool, ToolParameters, T
 use regex::Regex;
 use serde_json::Value;
 use shacs_security::NetworkGuard;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -25,6 +25,7 @@ pub struct ExecConfig {
     pub sandbox: Option<String>,
     pub path_append: Option<String>,
     pub allowed_env_keys: Vec<String>,
+    pub env: BTreeMap<String, String>,
     pub path_context: PathContext,
     pub network_guard: NetworkGuard,
 }
@@ -40,6 +41,7 @@ impl ExecConfig {
             sandbox: None,
             path_append: None,
             allowed_env_keys: Vec::new(),
+            env: BTreeMap::new(),
             path_context,
             network_guard: NetworkGuard::default(),
         }
@@ -208,6 +210,7 @@ impl ExecTool {
                 env.insert(key.clone(), value);
             }
         }
+        env.extend(self.config.env.clone());
         env
     }
 

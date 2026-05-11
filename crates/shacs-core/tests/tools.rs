@@ -17,6 +17,7 @@ use shacs_core::tools::{
 use shacs_cron::{
     system_job, CronJobState, CronRunStatus, CronSchedule, CronService, InMemoryCronService,
 };
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
@@ -1268,6 +1269,31 @@ fn exec_tool_runs_command_and_reports_exit_code() -> Result<(), Box<dyn Error>> 
         .into_text();
     if !result.contains("hello") || !result.contains("Exit code: 0") {
         return Err(format!("exec did not return expected output: {result}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn exec_tool_injects_configured_env_after_allowed_process_env() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let mut config = ExecConfig::new(PathContext::workspace(temp.path()));
+    config.allowed_env_keys = vec!["HOME".to_owned(), "SHACS_CONFIG_ONLY".to_owned()];
+    config.env = BTreeMap::from([
+        ("HOME".to_owned(), "/configured-home".to_owned()),
+        ("SHACS_CONFIG_ONLY".to_owned(), "configured".to_owned()),
+    ]);
+    let tool = ExecTool::new(config);
+
+    let result = tool
+        .execute(json_map(json!({
+            "command": "printf '%s|%s' \"$SHACS_CONFIG_ONLY\" \"$HOME\"",
+            "timeout": 5
+        }))?)
+        .into_text();
+    if !result.contains("configured|/configured-home") || !result.contains("Exit code: 0") {
+        return Err(
+            format!("configured env was not injected after allowed process env: {result}").into(),
+        );
     }
     Ok(())
 }

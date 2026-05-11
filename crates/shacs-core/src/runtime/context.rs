@@ -24,6 +24,7 @@ pub struct ContextBuilder {
     timezone: Option<String>,
     disabled_skills: Vec<String>,
     extra_skill_roots: Vec<PathBuf>,
+    configured_env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,7 @@ impl ContextBuilder {
             timezone: None,
             disabled_skills: Vec::new(),
             extra_skill_roots: Vec::new(),
+            configured_env: BTreeMap::new(),
         }
     }
 
@@ -76,6 +78,11 @@ impl ContextBuilder {
 
     pub fn with_skill_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
         self.extra_skill_roots = roots.into_iter().collect();
+        self
+    }
+
+    pub fn with_configured_env(mut self, env: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.configured_env = env.into_iter().collect();
         self
     }
 
@@ -234,7 +241,7 @@ impl ContextBuilder {
                 if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
                     continue;
                 }
-                if let Some(document) = SkillDocument::from_path(&path) {
+                if let Some(document) = SkillDocument::from_path(&path, &self.configured_env) {
                     if document.disabled || disabled.contains(&document.name.as_str()) {
                         continue;
                     }
@@ -272,7 +279,7 @@ impl ContextBuilder {
                     .join("builtin_skills")
                     .join(skill.name)
                     .join("SKILL.md");
-                SkillDocument::from_raw(source_path, raw)
+                SkillDocument::from_raw(source_path, raw, &self.configured_env)
             })
             .collect()
     }
@@ -469,18 +476,22 @@ struct SkillDocument {
 }
 
 impl SkillDocument {
-    fn from_path(path: &Path) -> Option<Self> {
+    fn from_path(path: &Path, configured_env: &BTreeMap<String, String>) -> Option<Self> {
         let raw = fs::read_to_string(path).ok()?;
-        Self::from_raw(path.to_path_buf(), raw)
+        Self::from_raw(path.to_path_buf(), raw, configured_env)
     }
 
-    fn from_raw(source_path: PathBuf, raw: String) -> Option<Self> {
+    fn from_raw(
+        source_path: PathBuf,
+        raw: String,
+        configured_env: &BTreeMap<String, String>,
+    ) -> Option<Self> {
         let (frontmatter, body) = split_frontmatter(&raw);
         let metadata = parse_frontmatter(frontmatter.unwrap_or_default());
         let fallback_name = skill_name_from_path(&source_path);
         let name = fallback_name;
         let requirement = SkillRequirement::from_metadata(&metadata);
-        let unavailable_summary = requirement.unavailable_summary();
+        let unavailable_summary = requirement.unavailable_summary(configured_env);
         let body = body.trim().to_owned();
         Some(Self {
             name,
@@ -524,7 +535,7 @@ impl SkillRequirement {
         }
     }
 
-    fn unavailable_summary(&self) -> Option<String> {
+    fn unavailable_summary(&self, configured_env: &BTreeMap<String, String>) -> Option<String> {
         let missing_bins = self
             .bins
             .iter()
@@ -534,11 +545,7 @@ impl SkillRequirement {
         let missing_env = self
             .env
             .iter()
-            .filter(|name| {
-                env::var_os(name)
-                    .map(|value| value.is_empty())
-                    .unwrap_or(true)
-            })
+            .filter(|name| !env_requirement_available(name, configured_env))
             .cloned()
             .collect::<Vec<_>>();
         let mut parts = Vec::new();
@@ -550,6 +557,16 @@ impl SkillRequirement {
         }
         (!parts.is_empty()).then(|| parts.join("; "))
     }
+}
+
+fn env_requirement_available(name: &str, configured_env: &BTreeMap<String, String>) -> bool {
+    configured_env
+        .get(name)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        || env::var_os(name)
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
 }
 
 fn merge_runtime_context(runtime_context: String, user_content: Value) -> Value {
@@ -964,4 +981,47 @@ fn parse_bool(value: Option<&String>) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn configured_env_satisfies_skill_requires_env() -> Result<(), Box<dyn Error>> {
+        let workspace = tempfile::tempdir()?;
+        let skill_dir = workspace.path().join("skills").join("configured-env");
+        fs::create_dir_all(&skill_dir)?;
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Configured env skill\nrequires.env: SHACS_CORE_TEST_CONFIGURED_ENV_ONLY\n---\nUse configured env.\n",
+        )?;
+
+        let unavailable =
+            ContextBuilder::new(workspace.path()).build_skills_summary(&BTreeSet::new());
+        if !unavailable.contains("unavailable: missing env: SHACS_CORE_TEST_CONFIGURED_ENV_ONLY") {
+            return Err(format!(
+                "skill unexpectedly available without configured env: {unavailable}"
+            )
+            .into());
+        }
+
+        let available = ContextBuilder::new(workspace.path())
+            .with_configured_env(BTreeMap::from([(
+                "SHACS_CORE_TEST_CONFIGURED_ENV_ONLY".to_owned(),
+                "configured".to_owned(),
+            )]))
+            .build_skills_summary(&BTreeSet::new());
+        let configured_line = available
+            .lines()
+            .find(|line| line.contains("configured-env"))
+            .unwrap_or_default();
+        if configured_line.is_empty() || configured_line.contains("unavailable") {
+            return Err(
+                format!("configured env did not satisfy skill requirement: {available}").into(),
+            );
+        }
+        Ok(())
+    }
 }
