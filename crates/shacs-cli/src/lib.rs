@@ -8737,6 +8737,11 @@ pub struct AgentLoopChatCompletionAdapter {
     send_progress: bool,
     send_max_retries: u32,
     session_turn_lock: SessionTurnLock,
+    exec_timeout_seconds: u64,
+    exec_sandbox: Option<String>,
+    exec_path_append: Option<String>,
+    exec_allowed_env_keys: Vec<String>,
+    exec_env: BTreeMap<String, String>,
 }
 
 impl AgentLoopChatCompletionAdapter {
@@ -8755,6 +8760,10 @@ impl AgentLoopChatCompletionAdapter {
         let retry_mode = ProviderRetryMode::from_config(&defaults.provider_retry_mode);
         let media_dir = bundle.context.media_dir(Some("api"));
         fs::create_dir_all(&media_dir)?;
+        let exec_sandbox = non_empty(Some(bundle.config.tools.exec.sandbox.as_str()))
+            .then(|| bundle.config.tools.exec.sandbox.clone());
+        let exec_path_append = non_empty(Some(bundle.config.tools.exec.path_append.as_str()))
+            .then(|| bundle.config.tools.exec.path_append.clone());
         let tooling = production_tool_registry(&bundle, allow_side_effect_tools)?;
         let provider_id = resolved.provider_id.clone();
         let resolved_model = resolved.model.clone();
@@ -8775,6 +8784,11 @@ impl AgentLoopChatCompletionAdapter {
             send_progress: bundle.config.channels.send_progress,
             send_max_retries: bundle.config.channels.send_max_retries,
             session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: u64::from(bundle.config.tools.exec.timeout),
+            exec_sandbox,
+            exec_path_append,
+            exec_allowed_env_keys: bundle.config.tools.exec.allowed_env_keys.clone(),
+            exec_env: configured_exec_env(&bundle.config),
         })
     }
 
@@ -8822,6 +8836,7 @@ impl AgentLoopChatCompletionAdapter {
             .with_timezone(self.defaults.timezone.clone())
             .with_disabled_skills(self.defaults.disabled_skills.clone())
             .with_skill_roots(extra_roots)
+            .with_configured_env(self.exec_env.clone())
     }
 
     fn external_effective_session_key(&self, message: &InboundMessage) -> String {
@@ -9331,6 +9346,11 @@ impl AgentLoopChatCompletionAdapter {
         subagent.enable_exec = self.allow_side_effect_tools;
         subagent.enable_web = true;
         subagent.restrict_to_workspace = true;
+        subagent.exec_timeout_seconds = self.exec_timeout_seconds;
+        subagent.exec_sandbox = self.exec_sandbox.clone();
+        subagent.exec_path_append = self.exec_path_append.clone();
+        subagent.exec_allowed_env_keys = self.exec_allowed_env_keys.clone();
+        subagent.exec_env = self.exec_env.clone();
         subagent
     }
 
@@ -9565,6 +9585,7 @@ fn production_tool_registry(
         exec_config.path_append = non_empty(Some(bundle.config.tools.exec.path_append.as_str()))
             .then(|| bundle.config.tools.exec.path_append.clone());
         exec_config.allowed_env_keys = bundle.config.tools.exec.allowed_env_keys.clone();
+        exec_config.env = configured_exec_env(&bundle.config);
         registry.register(ExecTool::new(exec_config));
     }
     if bundle.config.tools.web.enable {
@@ -9619,6 +9640,12 @@ fn production_tool_registry(
         mcp_runtime,
         mcp_reports,
     })
+}
+
+fn configured_exec_env(config: &shacs_config::Config) -> BTreeMap<String, String> {
+    let mut env = config.env.clone();
+    env.extend(config.tools.exec.env.clone());
+    env
 }
 
 fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
@@ -11467,6 +11494,11 @@ mod tests {
             send_progress: false,
             send_max_retries: 0,
             session_turn_lock: turn_lock,
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         };
 
         let error = adapter
@@ -12335,6 +12367,121 @@ mod tests {
             runtime_capabilities(&bundle)[0].status,
             RuntimeCapabilityStatus::Available
         );
+        Ok(())
+    }
+
+    #[test]
+    fn adapter_wires_exec_env_to_context_and_subagents() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        let skill_dir = workspace.join("skills").join("configured-env");
+        fs::create_dir_all(&skill_dir)?;
+        fs::create_dir_all(&media_dir)?;
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Configured env skill\nrequires.env: SHACS_CLI_TEST_CONFIGURED_ENV_ONLY\n---\nUse configured env.\n",
+        )?;
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults::default(),
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse::default(),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace: workspace.clone(),
+            media_dir,
+            tools: ToolRegistry::new(),
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: true,
+            send_progress: false,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 123,
+            exec_sandbox: Some("sandboxed".to_owned()),
+            exec_path_append: Some("/configured/bin".to_owned()),
+            exec_allowed_env_keys: vec!["HOME".to_owned()],
+            exec_env: BTreeMap::from([(
+                "SHACS_CLI_TEST_CONFIGURED_ENV_ONLY".to_owned(),
+                "configured".to_owned(),
+            )]),
+        };
+
+        let skills = adapter
+            .context_builder()
+            .build_skills_summary(&BTreeSet::new());
+        let configured_line = skills
+            .lines()
+            .find(|line| line.contains("configured-env"))
+            .unwrap_or_default();
+        if configured_line.is_empty() || configured_line.contains("unavailable") {
+            return Err(
+                format!("adapter context builder did not use configured env: {skills}").into(),
+            );
+        }
+
+        let subagent = adapter.subagent_execution_config(&adapter.loop_config());
+        assert_eq!(subagent.exec_timeout_seconds, 123);
+        assert_eq!(subagent.exec_sandbox.as_deref(), Some("sandboxed"));
+        assert_eq!(
+            subagent.exec_path_append.as_deref(),
+            Some("/configured/bin")
+        );
+        assert_eq!(subagent.exec_allowed_env_keys, vec!["HOME".to_owned()]);
+        assert_eq!(
+            subagent
+                .exec_env
+                .get("SHACS_CLI_TEST_CONFIGURED_ENV_ONLY")
+                .map(String::as_str),
+            Some("configured")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_tool_registry_wires_exec_env() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let mut config = shacs_config::Config {
+            env: BTreeMap::from([
+                (
+                    "SHACS_CLI_EXEC_CONFIG_ONLY".to_owned(),
+                    "configured".to_owned(),
+                ),
+                ("SHACS_CLI_EXEC_OVERRIDE".to_owned(), "global".to_owned()),
+            ]),
+            ..shacs_config::Config::default()
+        };
+        config.tools.exec.env =
+            BTreeMap::from([("SHACS_CLI_EXEC_OVERRIDE".to_owned(), "exec".to_owned())]);
+        let bundle = ConfigBundle {
+            config,
+            context: shacs_config::ConfigContext {
+                config_path: root.path().join("config.json"),
+                data_dir: root.path().join("data"),
+                workspace,
+            },
+            migrations: Vec::new(),
+        };
+
+        let tooling = production_tool_registry(&bundle, true)?;
+        let result = tooling
+            .registry
+            .execute(
+                "exec",
+                json!({
+                    "command": "printf '%s|%s' \"$SHACS_CLI_EXEC_CONFIG_ONLY\" \"$SHACS_CLI_EXEC_OVERRIDE\"",
+                    "timeout": 5
+                }),
+            )
+            .into_text();
+        if !result.contains("configured|exec") || !result.contains("Exit code: 0") {
+            return Err(format!("production registry exec env was not wired: {result}").into());
+        }
         Ok(())
     }
 
@@ -13420,6 +13567,11 @@ mod tests {
             send_progress: true,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         };
 
         let paths = adapter.persist_media_data_urls(&["data:text/plain;base64,aGk=".to_owned()])?;
@@ -13477,6 +13629,11 @@ mod tests {
             send_progress: true,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -13560,6 +13717,11 @@ mod tests {
             send_progress: true,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         };
 
         let error = adapter
@@ -13631,6 +13793,11 @@ mod tests {
             send_progress: true,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -13689,6 +13856,11 @@ mod tests {
             send_progress: true,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         };
         let (event_tx, event_rx) = mpsc::channel();
         event_tx.send(ProviderEvent::TextDelta {
@@ -13759,6 +13931,11 @@ mod tests {
             send_progress: true,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         };
 
         assert_eq!(
@@ -13826,6 +14003,11 @@ mod tests {
             send_progress: true,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         };
 
         let response = adapter.complete_chat(ChatCompletionInvocation {
@@ -13899,6 +14081,11 @@ mod tests {
             send_progress: true,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
         };
 
         let output = complete_direct_message(
@@ -13955,6 +14142,11 @@ mod tests {
                 send_progress: true,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
+                exec_timeout_seconds: 60,
+                exec_sandbox: None,
+                exec_path_append: None,
+                exec_allowed_env_keys: Vec::new(),
+                exec_env: BTreeMap::new(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: Vec::new(),
@@ -14023,6 +14215,11 @@ mod tests {
                 send_progress: true,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
+                exec_timeout_seconds: 60,
+                exec_sandbox: None,
+                exec_path_append: None,
+                exec_allowed_env_keys: Vec::new(),
+                exec_env: BTreeMap::new(),
             },
             lifecycle_hooks: vec![hook],
             observability_hooks: Vec::new(),
@@ -14096,6 +14293,11 @@ mod tests {
                 send_progress: true,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
+                exec_timeout_seconds: 60,
+                exec_sandbox: None,
+                exec_path_append: None,
+                exec_allowed_env_keys: Vec::new(),
+                exec_env: BTreeMap::new(),
             },
             lifecycle_hooks: vec![recording_hook, panic_hook],
             observability_hooks: Vec::new(),
@@ -14179,6 +14381,11 @@ mod tests {
                 send_progress: true,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
+                exec_timeout_seconds: 60,
+                exec_sandbox: None,
+                exec_path_append: None,
+                exec_allowed_env_keys: Vec::new(),
+                exec_env: BTreeMap::new(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![panic_hook],
@@ -14287,6 +14494,11 @@ mod tests {
                 send_progress: true,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
+                exec_timeout_seconds: 60,
+                exec_sandbox: None,
+                exec_path_append: None,
+                exec_allowed_env_keys: Vec::new(),
+                exec_env: BTreeMap::new(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![recording_hook],
