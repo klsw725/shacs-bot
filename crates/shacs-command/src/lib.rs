@@ -330,7 +330,7 @@ pub fn normalize_channel_command(content: &str, bot_name: Option<&str>) -> Strin
 
 pub fn build_help_text() -> String {
     [
-        "🐈 shacs-bot commands:",
+        "🦈 shacs-bot commands:",
         "/new — Stop current task and start a new conversation",
         "/stop — Stop the current task",
         "/restart — Restart the bot",

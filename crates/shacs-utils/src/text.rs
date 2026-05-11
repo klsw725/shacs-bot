@@ -302,7 +302,7 @@ pub fn build_status_content(snapshot: &StatusSnapshot) -> String {
         token_line.push_str(&format!(" ({}% cached)", cached * 100 / last_in));
     }
     let mut lines = vec![
-        format!("🐈 shacs-bot v{}", snapshot.version),
+        format!("🦈 shacs-bot v{}", snapshot.version),
         format!("🧠 Model: {}", snapshot.model),
         token_line,
         format!("📚 Context: {ctx_used}/{ctx_total} ({ctx_pct}% of input budget)"),
@@ -506,7 +506,7 @@ mod tests {
             max_completion_tokens: 1_000,
         };
         let status = build_status_content(&snapshot);
-        assert!(status.contains("🐈 shacs-bot v0.1.0"));
+        assert!(status.contains("🦈 shacs-bot v0.1.0"));
         assert!(status.contains("50% cached"));
         assert!(status.contains("search usage"));
 
