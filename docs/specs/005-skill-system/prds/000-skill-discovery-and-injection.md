@@ -18,7 +18,7 @@
 
 ## Dependency Cut
 
-이 PRD는 스킬이 코드 실행 단위가 아닌 Markdown 지식 팩이라는 전제를 구현한다. plugin 설치 시스템, 원격 배포, 추천 랭킹은 다루지 않는다. 범위는 로컬 탐색, 정규화, 레지스트리, 주입 경계까지다.
+이 PRD는 스킬이 코드 실행 단위가 아닌 Markdown 지식 팩이라는 전제를 구현한다. app 설치 시스템, 원격 배포, 추천 랭킹은 다루지 않는다. 범위는 로컬 탐색, 정규화, 레지스트리, 주입 경계까지다.
 
 ## 범위
 
@@ -47,7 +47,7 @@
 
 ### 비범위 / 후속 확장
 
-- plugin 자산 설치/제거/업데이트 lifecycle, 스킬 편집 UI, 원격 저장소, 실행 가능한 plugin 권한 위임은 본 PRD 범위 밖이다.
+- app bundle 설치/제거/업데이트 lifecycle, 스킬 편집 UI, 원격 저장소, 실행 가능한 app 권한 위임은 본 PRD 범위 밖이다.
 
 ### 로컬 근거
 
@@ -69,9 +69,9 @@
 
 ### Wave 1. discovery 경로와 source kind 모델링
 
-- bundled, user_global, workspace_local, plugin_provided source kind를 타입으로 고정한다.
+- bundled, user_global, workspace_local, app_provided source kind를 타입으로 고정한다.
 - 지정된 경로 규약에서만 `SKILL.md`를 찾는 탐색기를 구현한다.
-- 탐색 결과에 source path와 plugin name optional을 보존한다.
+- 탐색 결과에 source path와 app id optional을 보존한다.
 
 ### Wave 2. Markdown 파싱과 진단 상태
 
@@ -81,7 +81,7 @@
 
 ### Wave 3. precedence와 canonical registry 구축
 
-- `bundled < user-global < workspace-local < plugin-provided` 우선순위를 코드로 고정한다.
+- `bundled < user-global < workspace-local < app-provided` 우선순위를 코드로 고정한다.
 - 같은 계층 중복은 병합하지 않고 충돌로 남긴다.
 - 조회 API는 canonical source와 진단 메타데이터를 함께 제공한다.
 
@@ -102,7 +102,7 @@
 
 - auto-selection은 단순 문자열 기반이다. 고급 추천/랭킹 개선은 본 PRD 범위 밖이다.
 - skill body는 로컬 Markdown context input이다. 실행 권한, permission 변경, tool dispatch 권한을 갖지 않는다.
-- plugin-provided skill 경로는 전제하지만 plugin 자산 lifecycle 자체는 본 PRD 범위 밖이므로, 설치/제거/업데이트 계약은 별도 문서 정리가 필요하다.
+- app-provided skill 경로는 전제하지만 app bundle lifecycle 자체는 본 PRD 범위 밖이므로, 설치/제거/업데이트 계약은 `017-app-operating-environment/`와 `015-packaging-process-lifecycle-and-upgrades/`에서 다룬다.
 
 ## 종료 기준
 

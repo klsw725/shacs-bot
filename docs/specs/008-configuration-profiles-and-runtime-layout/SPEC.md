@@ -63,6 +63,7 @@ config는 `shacs-bot`의 실행 정책과 환경 연결점을 정의하는 정�
 - runtime data root 경로
 - timeout과 token budget의 기본값
 - skill discovery 루트
+- app bundle 설치 루트와 app registry 위치
 
 config는 세션 이력이나 실행 결과 자체가 아니다.
 
@@ -134,11 +135,13 @@ config schema version은 특정 설정 파일 포맷이 어떤 구조와 의미 
   config.toml
   secrets.toml
   skills/
-  plugins/
+  apps/
+  app-registry.toml
   runtime/
     artifacts/
     sessions/
     checkpoints/
+    app-ledger/
     logs/
     cache/
     tmp/
@@ -147,11 +150,13 @@ config schema version은 특정 설정 파일 포맷이 어떤 구조와 의미 
   config.toml
   secrets.toml
   skills/
-  plugins/
+  apps/
+  app-registry.toml
   runtime/
     artifacts/
     sessions/
     checkpoints/
+    app-ledger/
     logs/
     cache/
     tmp/
@@ -161,14 +166,20 @@ config schema version은 특정 설정 파일 포맷이 어떤 구조와 의미 
 
 - `~/.shacs/config.toml`: 사용자 전역 기본 설정
 - `~/.shacs/secrets.toml`: 사용자 전역 secret 저장 위치
-- `~/.shacs/plugins/`: 로컬에 설치된 plugin 제공 자산 루트
+- `~/.shacs/apps/`: 사용자 전역 app bundle 설치 루트
+- `~/.shacs/app-registry.toml`: 사용자 전역 app registry와 grant reference metadata의 저장 위치
 - `~/.shacs/runtime/`: 전역 런타임 데이터 루트
 - `<workspace>/.shacs/config.toml`: 워크스페이스 오버라이드 설정
 - `<workspace>/.shacs/secrets.toml`: 워크스페이스 한정 secret, 필요 시만 사용
-- `<workspace>/.shacs/plugins/`: 워크스페이스 전용 plugin 제공 자산 루트
+- `<workspace>/.shacs/apps/`: 워크스페이스 전용 app bundle 설치 루트
+- `<workspace>/.shacs/app-registry.toml`: 워크스페이스 app registry와 grant reference metadata의 저장 위치
 - `<workspace>/.shacs/runtime/`: 워크스페이스 한정 세션/로그 저장 루트
 
+`.shacs`는 `shacs-bot` 구현체가 사용하는 filesystem namespace다. app bundle 확장자인 `.shacsapp`은 이 namespace 아래의 `apps/` 루트에 설치될 때 공식 설치 단위가 된다.
+
 `runtime/artifacts/`는 runtime-managed artifact의 공식 저장 위치다. tool runtime의 `binary_ref` / `artifact_list`, diagnostics bundle이 외부 파일을 참조해야 할 때는 기본적으로 이 루트 아래의 안정된 참조만 사용해야 한다. workspace 원본 파일 경로나 executor 내부 임시 객체는 artifact 참조를 가장해 직접 노출하면 안 된다.
+
+`runtime/app-ledger/`는 app process receipt, permission decision 요약, artifact reference, recover/restart evidence 같은 app 실행 영수증을 저장하는 기본 루트다. raw secret value나 provider hidden reasoning은 이 루트에도 저장하면 안 된다.
 
 > 참고 메모: runtime-managed artifact 계약은 004의 tool/runtime 결과 참조, 014의 diagnostics artifact, 015의 upgrade/recover 흐름과 함께 해석된다.
 > 이 문서는 공식 저장 루트를 정의하지만, 보존/정리/orphan 처리와 upgrade/recover 시 유효성 같은 lifecycle 규칙은 교차 문서 차원에서 더 정리될 여지가 있다.
@@ -350,8 +361,10 @@ runtime data는 최소한 아래 범주로 나뉘어야 한다.
 
 ```text
 runtime/
+  artifacts/     # runtime-managed artifact 참조 루트
   sessions/      # session store, event log, metadata
   checkpoints/   # checkpoint 파일 또는 checkpoint backing store
+  app-ledger/    # task ledger entry와 app process receipt 저장 루트
   logs/          # 실행 로그, trace, diagnostics
   cache/         # 재생성 가능한 캐시
   tmp/           # 프로세스 생존 범위 임시 파일
@@ -359,8 +372,10 @@ runtime/
 
 ### 각 디렉터리의 책임
 
+- `artifacts/`: tool/runtime/diagnostics가 참조하는 runtime-managed artifact 루트
 - `sessions/`: 공식 session metadata와 event log가 위치하는 루트
 - `checkpoints/`: session replay 가속용 checkpoint 저장 위치
+- `app-ledger/`: 017의 task ledger entry와 app process receipt를 파일로 저장하는 기본 루트
 - `logs/`: 사람이 읽을 수 있는 진단 로그와 tracing 산출물
 - `cache/`: 지워져도 재구성 가능한 비공식 캐시
 - `tmp/`: 프로세스 종료나 정리 후 사라져도 되는 임시 산출물
@@ -369,6 +384,7 @@ runtime/
 
 - `cache/`에 공식 session state 저장
 - `tmp/`에 checkpoint 저장
+- `app-ledger/`에 raw secret value 또는 provider hidden reasoning 저장
 - `logs/`에 secret 원문 기록
 - `sessions/`와 `checkpoints/`를 UI 캐시와 혼합 저장
 

@@ -83,7 +83,7 @@
 - 원격 스킬 마켓플레이스
 - 스킬 서명, 배포 채널, 패키지 저장소 프로토콜
 - 실행 가능한 스킬 코드 샌드박스
-- 플러그인 생명주기 전체 명세
+- app 생명주기 전체 명세
 - 고급 스킬 추천 랭킹 시스템
 
 초기 범위에서 필요한 것은 복잡한 유통 체계가 아니라, 로컬 단일 사용자 환경에서 예측 가능한 탐색과 안전한 주입이다.
@@ -98,7 +98,7 @@
 bundled-skills/<skill-name>/SKILL.md
 ~/.shacs/skills/<skill-name>/SKILL.md
 <workspace>/.shacs/skills/<skill-name>/SKILL.md
-<workspace>/.shacs/plugins/<plugin-name>/skills/<skill-name>/SKILL.md
+<workspace>/.shacs/apps/<app-id>.shacsapp/skills/<skill-name>/SKILL.md
 ```
 
 설명:
@@ -106,9 +106,9 @@ bundled-skills/<skill-name>/SKILL.md
 - `bundled-skills/`는 애플리케이션과 함께 제공되는 기본 스킬 집합이다.
 - `~/.shacs/skills/`는 사용자 전역 스킬 위치다.
 - `<workspace>/.shacs/skills/`는 현재 작업공간 전용 스킬 위치다.
-- `<workspace>/.shacs/plugins/.../skills/`는 로컬에 이미 설치된 플러그인이 제공하는 스킬 위치다.
+- `<workspace>/.shacs/apps/.../skills/`는 로컬에 이미 설치된 app bundle이 제공하는 스킬 위치다.
 
-여기서 플러그인 제공 스킬은 파일 시스템에 놓인 Markdown 팩일 뿐이다. 플러그인이 스킬을 통해 오케스트레이터 권한을 우회해서는 안 된다.
+여기서 app 제공 스킬은 파일 시스템에 놓인 Markdown 팩일 뿐이다. app이 스킬을 통해 오케스트레이터 권한을 우회해서는 안 된다.
 
 ### 발견 단위
 
@@ -121,7 +121,7 @@ bundled-skills/<skill-name>/SKILL.md
 동일한 `skill-name`이 여러 위치에서 발견되면 아래 우선순위를 적용한다.
 
 ```text
-bundled < user-global < workspace-local < plugin-provided
+bundled < user-global < workspace-local < app-provided
 ```
 
 이 규칙은 `docs/SYSTEM-FOUNDATION.md`의 방향을 그대로 구현 규칙으로 고정한 것이다.
@@ -132,7 +132,7 @@ bundled < user-global < workspace-local < plugin-provided
 
 예:
 
-- 두 개의 서로 다른 plugin이 각각 `review/SKILL.md`를 제공하는 경우
+- 두 개의 서로 다른 app이 각각 `review/SKILL.md`를 제공하는 경우
 - workspace 로컬 경로 안에 중복 마운트로 같은 이름이 두 번 나타나는 경우
 
 초기 구현의 기본 정책:
@@ -225,9 +225,9 @@ summary: Rust 코드 리뷰 체크리스트
 - `skill_name`
 - `display_name`
 - `summary` optional
-- `source_kind`, 예: bundled, user_global, workspace_local, plugin_provided
+- `source_kind`, 예: bundled, user_global, workspace_local, app_provided
 - `source_path`
-- `plugin_name` optional
+- `app_id` optional
 - `body_markdown`
 - `body_hash` 또는 이에 준하는 변경 감지용 값
 - `parse_status`, 예: valid, malformed, conflicted, shadowed
@@ -371,13 +371,13 @@ summary: 릴리스 전 체크리스트
 ### 예시 2. conflicting 스킬
 
 ```text
-<workspace>/.shacs/plugins/git-helper/skills/review/SKILL.md
-<workspace>/.shacs/plugins/security-helper/skills/review/SKILL.md
+<workspace>/.shacs/apps/git-helper.shacsapp/skills/review/SKILL.md
+<workspace>/.shacs/apps/security-helper.shacsapp/skills/review/SKILL.md
 ```
 
 문제점:
 
-- 둘 다 `plugin-provided` 계층이다.
+- 둘 다 `app-provided` 계층이다.
 - 둘 다 같은 `review` 이름을 제공한다.
 - 같은 우선순위 안에서 자동 병합 기준이 없다.
 
@@ -455,7 +455,7 @@ future Rust 구현은 최소한 아래 시나리오를 테스트로 가져갈 �
 금지 예:
 
 - 같은 이름 스킬 여러 개를 단순 문자열 concat으로 합쳐 사용
-- 충돌한 plugin 스킬을 임의 순서로 병합해 하나의 지침처럼 주입
+- 충돌한 app-provided 스킬을 임의 순서로 병합해 하나의 지침처럼 주입
 
 왜 금지인가:
 
@@ -508,13 +508,13 @@ future Rust 구현은 최소한 아래 시나리오를 테스트로 가져갈 �
 - 스킬 추천 UX 세부 화면
 - 스킬 설치용 네트워크 프로토콜
 - 서명 검증, trust policy, 원격 배포 메타데이터
-- plugin 시스템 전체 수명주기와 바이너리 로딩 계약
+- app 시스템 전체 수명주기와 바이너리 로딩 계약
 - 다중 파일 스킬 팩 포맷
 
 이 항목들은 필요가 생기면 별도 문서에서 다룬다. 단, 어떤 확장도 "스킬은 read-only Markdown 지식 팩이며 최종 권한은 오케스트레이터에 남는다"는 원칙을 뒤집어서는 안 된다.
 
-> 참고 메모: 현재 스킬 탐색 규약은 plugin-provided skill 경로를 전제로 하지만, plugin 자산 자체의 설치/업데이트/제거 lifecycle은 이 문서 범위 밖에 남아 있다.
-> 따라서 이 문서는 skill discovery와 injection 경계만 다루고, plugin ownership 계약은 정의하지 않는다.
+> 참고 메모: 현재 스킬 탐색 규약은 app-provided skill 경로를 전제로 하지만, app bundle 자체의 설치/업데이트/제거 lifecycle은 `017-app-operating-environment/`와 `015-packaging-process-lifecycle-and-upgrades/`가 소유한다.
+> 따라서 이 문서는 skill discovery와 injection 경계만 다루고, app ownership 계약은 정의하지 않는다.
 
 ---
 
