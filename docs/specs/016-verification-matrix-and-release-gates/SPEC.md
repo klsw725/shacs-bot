@@ -2,7 +2,7 @@
 
 ## 문서 목적
 
-이 문서는 `docs/SYSTEM-FOUNDATION.md`와 `docs/specs/001-session-kernel/SPEC.md`부터 `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`까지의 상위 구현 계약을 바탕으로 `shacs-bot`의 검증 전략, 테스트 매트릭스, release gate, 완료 기준을 구현 가능한 수준으로 고정한다.
+이 문서는 `docs/SYSTEM-FOUNDATION.md`, `docs/specs/001-session-kernel/SPEC.md`부터 `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`까지의 상위 구현 계약, 그리고 `docs/specs/017-app-operating-environment/SPEC.md`의 AI app operating environment 계약을 바탕으로 `shacs-bot`의 검증 전략, 테스트 매트릭스, release gate, 완료 기준을 구현 가능한 수준으로 고정한다.
 
 목표는 다음과 같다.
 
@@ -481,6 +481,6 @@ Rust 구현은 최소한 다음 성격의 검증 체계를 만들 수 있어야 
 
 ## 결론
 
-`shacs-bot`의 release readiness는 일부 기능이 돌아가는 데모가 아니라, 001부터 015까지의 계약이 family별 검증과 release gate로 증명되었는지에 따라 판단되어야 한다. 특히 truth correctness, recovery, approval, redaction, packaging, upgrade safety는 모두 blocker 수준으로 다뤄야 하며, 이 항목들이 비어 있으면 완성도가 아니라 미완성이다.
+`shacs-bot`의 release readiness는 일부 기능이 돌아가는 데모가 아니라, 001부터 015까지의 계약과 017의 app operating environment 계약이 family별 검증과 release gate로 증명되었는지에 따라 판단되어야 한다. 특히 truth correctness, recovery, approval, redaction, packaging, upgrade safety, app/process/permission ledger는 모두 blocker 수준으로 다뤄야 하며, 이 항목들이 비어 있으면 완성도가 아니라 미완성이다.
 
 핵심은 "보여줄 수 있다"가 아니라 "반복 가능하게 증명할 수 있다"를 릴리스 기준으로 삼는 데 있다.

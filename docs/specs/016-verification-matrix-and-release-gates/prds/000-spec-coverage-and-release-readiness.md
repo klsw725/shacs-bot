@@ -2,7 +2,7 @@
 
 ## 목표
 
-이 문서는 `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`의 하위 실행 문서다. 전체 spec 001~015를 release 가능한 제품 수준까지 검증하기 위한 테스트 체계, coverage 운영 방식, gate 집행 절차를 실제 실행 문서로 정리한다.
+이 문서는 `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`의 하위 실행 문서다. 전체 spec 001~015와 017을 release 가능한 제품 수준까지 검증하기 위한 테스트 체계, coverage 운영 방식, gate 집행 절차를 실제 실행 문서로 정리한다.
 
 이번 PRD의 목표는 "데모가 된다"와 "출시 가능하다"를 코드와 증거로 구분하는 것이다. 각 spec에 대해 어떤 자동 검증이 있어야 하는지, blocker가 무엇인지, release candidate가 어디서 멈춰야 하는지를 구현과 운영 절차 양쪽에서 고정한다.
 
@@ -26,11 +26,12 @@
   - `docs/specs/013-user-interfaces-and-session-ux/SPEC.md`
   - `docs/specs/014-observability-diagnostics-and-inspection/SPEC.md`
   - `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`
+  - `docs/specs/017-app-operating-environment/SPEC.md`
 
 ## Dependency Cut
 
 - 이 PRD는 개별 기능을 직접 구현하지 않고, 각 spec PRD가 남기는 테스트와 증거를 release gate에 연결한다.
-- 009~015는 각각의 domain test family를 제공해야 하며, 이 PRD는 이를 하나의 coverage matrix와 gate runner로 묶는다.
+- 009~015와 017은 각각의 domain test family를 제공해야 하며, 이 PRD는 이를 하나의 coverage matrix와 gate runner로 묶는다.
 - 014와 015의 diagnostics, packaging 증거는 release readiness 판단의 필수 입력이다.
 - 010의 safety와 redaction은 waiver 금지 대상이라 별도 blocker lane으로 취급한다.
 
@@ -83,7 +84,7 @@
 
 ### Wave 1. Coverage matrix와 traceability 구축
 
-- spec 001~015 각각에 대해 required verification family를 명시한 matrix를 만든다.
+- spec 001~015와 017 각각에 대해 required verification family를 명시한 matrix를 만든다.
 - 테스트 케이스와 spec 조항을 연결하는 traceability 메타데이터를 도입한다.
 - 미연결 spec 항목이 있으면 보고되도록 한다.
 
@@ -148,7 +149,7 @@
 
 ## 종료 기준
 
-- spec 001~015 모두에 required verification family가 매핑된다.
+- spec 001~015와 017 모두에 required verification family가 매핑된다.
 - release gate 1~7이 자동 또는 반복 가능한 절차로 실행된다.
 - blocker와 waiver 금지 대상이 명시적 규칙과 테스트로 강제된다.
 - release candidate smoke test가 self-hosted 사용자 최소 흐름을 검증한다.
