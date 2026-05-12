@@ -11,6 +11,7 @@
 스펙 세트 전체는 아래 제품 범위를 전제로 읽어야 한다.
 
 - 기본 성격은 self-hosted / personal-use assistant runtime이다.
+- 장기 도착점은 사용자가 설치한 AI app을 실행, 관찰, 복구하는 개인용 AI Operating System이다. 이 최종 상위 계약은 `017-app-operating-environment/`가 소유한다.
 - 공식 인터페이스 표면은 CLI, TUI, local API다.
 - provider/auth family는 **OpenAI-compatible**, **Anthropic auth**, **Codex auth(OpenAI auth style)** 세 종류만 지원 대상으로 본다.
 - 외부 채널은 **Slack**, **Discord**, **Telegram**, **Email**, **WhatsApp bridge** 다섯 가지면 충분하다고 본다.
@@ -41,6 +42,7 @@
 14. `014-observability-diagnostics-and-inspection`
 15. `015-packaging-process-lifecycle-and-upgrades`
 16. `016-verification-matrix-and-release-gates`
+17. `017-app-operating-environment`
 
 ## 운영 원칙
 

@@ -19,9 +19,9 @@
 
 ## 프로젝트 한 줄 정의
 
-`shacs-bot`은 **사용자 본인이 직접 설치하고 운영하는 Rust 기반 개인형 AI 어시스턴트**다.
+`shacs-bot`은 **사용자 본인이 직접 설치하고 운영하는 Rust 기반 개인형 AI Operating System**이다.
 
-이 프로젝트는 일반적인 채팅봇보다 **로컬 작업 수행**, **지속 세션**, **툴 사용**, **개인 워크스페이스 기반 동작**, **명시적인 오케스트레이션**에 더 가깝다. 방향성은 “거대한 멀티테넌트 SaaS 에이전트 플랫폼”이 아니라, **한 명의 사용자를 위해 장기간 안정적으로 동작하는 self-hosted assistant runtime**이다.
+이 프로젝트는 일반적인 채팅봇보다 **로컬 작업 수행**, **지속 세션**, **툴 사용**, **개인 워크스페이스 기반 동작**, **명시적인 오케스트레이션**에 더 가깝다. 방향성은 “거대한 멀티테넌트 SaaS 에이전트 플랫폼”이 아니라, **한 명의 사용자를 위해 장기간 안정적으로 동작하는 self-hosted assistant runtime**에서 출발해, 사용자가 설치한 AI app을 실행하고 관찰하고 복구하는 개인용 AI 컴퓨터의 userland로 수렴하는 것이다.
 
 ---
 
@@ -32,6 +32,12 @@
 - 기본 주체는 조직 운영자나 관리자 팀이 아니라 **사용자 본인**이다.
 - 사용자는 직접 설치, 설정, 업데이트, 실행, 복구를 할 수 있어야 한다.
 - 운영 환경은 서버 클러스터가 아니라 **개인 개발 환경, 개인 서버, 홈랩, 단일 워크스테이션**을 우선 가정한다.
+
+### 이름 규약
+
+`shacs-bot`은 현재 구현체, CLI, runtime process 이름이다. `shacs`는 장기 AI Operating System의 짧은 filesystem namespace로 쓴다.
+
+따라서 사용자/워크스페이스 데이터 루트는 `.shacs/`를 사용하고, 설치 가능한 AI app bundle은 `.shacs/apps/<app-id>.shacsapp/` 아래에 놓는다. `.shacsapp`은 독립 최상위 workspace 이름이 아니라 `.shacs/apps/` 아래에서 의미를 갖는 app bundle 디렉터리 확장자다.
 
 ### 지향점
 
@@ -66,13 +72,15 @@
 이는 다음 판단에 기반한다.
 
 - `nanobot` 계열의 장점: 작은 중심 루프, 읽기 쉬운 코어, 단순한 재진입 모델
-- `opencode` 계열의 장점: 세션 중심 오케스트레이션, 정책과 상태 제어의 응집
-- `claude-code` / `OpenHarness` / `openclaw` 계열의 장점: 주변 서비스 분리, 스케줄링/메일박스/태스크/플러그인 경계 설정
+- `opencode` 계열의 장점: 세션 중심 오케스트레이션, 프로젝트/워크트리 경계, permission 요청과 응답의 공식 상태화
+- `claude-code` / `OpenHarness` / `openclaw` 계열의 장점: 주변 서비스 분리, 스케줄링/메일박스/태스크, skill/MCP/app bundle을 하나의 사용자 활성화 단위로 묶는 경계 설정
+- `oh-my-opencode` 계열의 장점: 사용자는 intent를 주고 시스템은 계획, 위임, 검증, 복구를 끝까지 수행하는 낮은 인지 부하의 작업 경험
 
-`shacs-bot`은 이 셋을 그대로 복제하지 않는다. 대신 다음처럼 조합한다.
+`shacs-bot`은 이 참고점들을 그대로 복제하지 않는다. 대신 다음처럼 조합한다.
 
 - **코어는 `nanobot + opencode` 성격으로 가져간다.**
-- **주변 서비스 설계는 `claude-code`, `OpenHarness`, `openclaw`에서 아이디어만 가져온다.**
+- **주변 서비스와 app bundle 경계는 `claude-code`, `OpenHarness`, `openclaw`에서 아이디어만 가져온다.**
+- **검증 가능한 위임 경험은 `oh-my-opencode`에서 방향만 가져오되, 최종 상태와 권한은 이 프로젝트의 오케스트레이터 계약으로 재해석한다.**
 - **최종 상태 변경 권한은 메인 오케스트레이터에 남긴다.**
 
 ---
@@ -225,13 +233,14 @@ MainOrchestrator
 ```text
 ~/.shacs/skills/<skill-name>/SKILL.md
 <workspace>/.shacs/skills/<skill-name>/SKILL.md
+<workspace>/.shacs/apps/<app-id>.shacsapp/skills/<skill-name>/SKILL.md
 bundled-skills/<skill-name>/SKILL.md
 ```
 
 ### 초기 스킬 로딩 우선순위
 
 ```text
-bundled < user-global < workspace-local < plugin-provided
+bundled < user-global < workspace-local < app-provided
 ```
 
 ### 초기 범위
@@ -413,7 +422,7 @@ bundled < user-global < workspace-local < plugin-provided
 - tool roundtrip 패턴
 - Markdown 기반 skill 로딩
 - queue/scheduler/mailbox의 외부 서비스화
-- gateway/control-plane 사고방식
+- 외부 자극을 command로 정규화하는 서비스 사고방식
 
 ### 채택하지 않을 것
 
@@ -444,6 +453,7 @@ bundled < user-global < workspace-local < plugin-provided
 14. `docs/specs/014-observability-diagnostics-and-inspection/SPEC.md`
 15. `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`
 16. `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`
+17. `docs/specs/017-app-operating-environment/SPEC.md`
 
 `docs/product/cli-experience.md` 같은 제품 문서는 인터페이스 메모와 사용성 설명에 중요하지만, 위 architecture spec 세트를 대체하지 않는다.
 
