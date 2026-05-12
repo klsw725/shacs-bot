@@ -60,6 +60,8 @@
 
 runtime service는 세션 코어 밖에서 대기열, 시간 기반 깨움, 외부 메시지 수신, hook 실행, 장기 작업 감시 같은 보조 기능을 수행하는 서비스 컴포넌트다.
 
+app bundle은 runtime service 정의를 제공할 수 있지만, service는 app process를 깨우는 자극을 만들 뿐이다. service가 session truth, app registry, permission grant를 직접 확정하면 안 된다.
+
 ### service-owned metadata
 
 service-owned metadata는 서비스가 자기 운영을 위해 들고 있어도 되는 부가 정보다. 예:
@@ -68,6 +70,7 @@ service-owned metadata는 서비스가 자기 운영을 위해 들고 있어도 
 - scheduler next fire time
 - mailbox external message id
 - hook registration revision
+- app service registration revision
 - worker heartbeat
 
 이 값은 세션 truth가 아니다.

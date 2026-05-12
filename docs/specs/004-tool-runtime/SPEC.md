@@ -111,6 +111,8 @@ future Rust 구현에서 registry 항목은 대략 아래 의미를 가져야 �
 - `capabilities`, 예: `fs_read`, `fs_write`, `proc_exec`, `net_outbound`
 - `input_schema_ref` 또는 validator
 - `executor_kind`, 예: filesystem, shell, provider-backed
+- `source_app_id`, app bundle에서 노출된 tool이면
+- `source_device_id`, MCP 또는 외부 device에서 노출된 tool이면
 - `default_timeout_ms`
 - `max_timeout_ms`
 - `result_kind`, 예: text, bytes, json, file-list
@@ -121,6 +123,8 @@ future Rust 구현에서 registry 항목은 대략 아래 의미를 가져야 �
 1. registry는 오케스트레이터 초기화 시 구성되거나 명시적 reload를 통해 갱신된다.
 2. 턴 중간에 registry 의미가 바뀌더라도 이미 발행된 `Effect::RunTool`의 해석은 해당 effect 생성 시점 정의를 따른다.
 3. registry 조회 실패는 실행기 내부 panic 이유가 아니라 정규화된 실패 결과가 되어야 한다.
+4. app 또는 MCP device가 제공한 tool은 app/device identity와 definition revision을 함께 고정해야 한다.
+5. tool registry는 app install/enable 상태를 읽을 수는 있어도, app을 직접 enable하거나 grant를 확정하면 안 된다.
 
 ### capability 분류 최소 기준
 
@@ -152,6 +156,7 @@ future Rust 구현에서 registry 항목은 대략 아래 의미를 가져야 �
 - `issued_at`
 - `timeout_ms`
 - `permission_snapshot`
+- `app_process_id`, app process에서 발생한 tool call이면
 - `working_directory` 또는 실행 기준 위치
 - `resource_limits`, 필요 시 크기 또는 출력 제한
 

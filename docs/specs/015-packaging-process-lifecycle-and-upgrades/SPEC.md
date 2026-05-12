@@ -59,6 +59,8 @@
 
 packaging unit은 사용자가 설치하고 교체하는 공식 배포 단위다. 초기 기준은 Rust 바이너리와 기본 번들 자산, 예: bundled skills, 기본 schema metadata, 문서 참조를 포함하는 로컬 설치 단위다.
 
+`shacs-bot` 자체의 packaging unit과 `.shacsapp` app bundle은 다르다. 전자는 runtime binary와 core schema를 교체하고, 후자는 해당 runtime 위에서 실행될 capability bundle을 설치한다.
+
 ### runtime instance
 
 runtime instance는 특정 버전의 `shacs-bot` 프로세스가 특정 runtime root를 사용해 실행 중인 실제 인스턴스다.
@@ -108,6 +110,7 @@ interrupted upgrade는 바이너리 교체, migration, restart 도중 중단되�
 1. 실행 가능한 바이너리 버전과 data schema compatibility 범위가 함께 식별 가능해야 한다.
 2. 패키징 산출물은 runtime data, session data, secrets를 덮어쓰는 방식이면 안 된다.
 3. 업그레이드는 설치 산출물 교체와 runtime data migration을 구분해 설명 가능해야 한다.
+4. runtime 업그레이드는 installed app registry와 app ledger를 임의 삭제하거나 silent migration하면 안 된다.
 
 ---
 

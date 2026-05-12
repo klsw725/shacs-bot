@@ -173,6 +173,8 @@ inspect가 담당하지 않는 것:
 - `event_id`, 있으면
 - `approval_request_id`, 있으면
 - `child_task_id`, 있으면
+- `app_id`, `app_process_id`, 있으면
+- `device_id`, `port_id`, 있으면
 - `service_correlation_id`, 있으면
 - 시각 정보, 예: `occurred_at`, `recorded_at`
 
@@ -202,6 +204,7 @@ inspect surface는 013에서 정의한 interface surface가 읽는 공통 진단
 - 마지막 durably committed event sequence
 - 최근 N개의 공식 event 요약
 - 현재 pending approval과 pending effect 요약
+- 현재 app process, device status, 최근 task receipt 요약
 - 마지막 abort reason 또는 recovery required reason
 - 마지막 recover 시각과 결과
 - 관련 diagnostics record 요약

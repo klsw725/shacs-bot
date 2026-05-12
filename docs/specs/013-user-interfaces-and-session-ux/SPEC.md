@@ -81,6 +81,10 @@ selection은 사용자가 현재 집중할 세션 하나를 명시적으로 고�
 
 inspect surface는 진행 상태, 최근 event, pending approval, 열린 턴, recovery 필요 여부 같은 설명용 정보를 조회하는 읽기 전용 인터페이스다.
 
+### app/process projection
+
+app/process projection은 설치된 app, enabled 상태, 필요한 secret/permission, device 상태, 실행 중 app process, task receipt를 사용자가 이해할 수 있게 보여주는 읽기 모델이다. projection은 app registry나 session truth를 대체하지 않는다.
+
 ### recover flow
 
 recover flow는 crash, interrupted upgrade, late result, 열린 턴 잔재 같은 상황에서 사용자가 세션을 안전한 상태로 되돌리고 다시 작업을 시작하게 만드는 UX 흐름이다.
@@ -192,6 +196,14 @@ local API가 해서는 안 되는 일:
   - 마지막 durable event sequence
   - late result 관찰 여부
   - recover 가능한 action 집합
+- `AppListProjection`
+  - app id, name, version, enabled state
+  - install path와 manifest digest 요약
+  - missing secret 또는 denied grant 요약
+- `AppProcessProjection`
+  - app process id와 originating intent
+  - status, active grants, device status
+  - tool/MCP call 요약과 artifact/receipt 참조
 
 ### query 경계
 
@@ -201,6 +213,7 @@ local API가 해서는 안 되는 일:
 - `InspectSession`
 - 현재 포커스 세션의 `SessionFocusProjection` 조회
 - approval / progress / recovery projection 조회
+- app list / app process / app permission projection 조회
 
 이 query들은 세션 truth를 바꾸지 않는다. query는 command와 달리 상태 전이를 요청하지 않고, 공식 projection을 읽기 전용으로 가져오는 경계다.
 
@@ -214,8 +227,11 @@ local API가 해서는 안 되는 일:
 - `CancelTurn`
 - `RecoverSession`
 - `RespondToApproval`
+- `InstallApp`, `EnableApp`, `DisableApp`, `OpenApp`, `UninstallApp`
 
 `SelectSession`은 기본적으로 UI 로컬 포커스 상태다. selection 자체가 세션 truth를 바꾸지 않는 한, command가 아니라 인터페이스 내부 상태로 다뤄야 한다.
+
+app 관련 command도 내부 registry 파일을 직접 수정하지 않고 `MainOrchestrator`가 소유한 공식 command 경계로 재진입해야 한다. app supervisor는 lifecycle/effect 실행을 보조할 수 있지만 command owner가 되면 안 된다.
 
 인터페이스는 아래를 직접 확정하면 안 된다.
 

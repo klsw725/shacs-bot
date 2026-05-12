@@ -65,6 +65,10 @@ host safety는 `shacs-bot`이 사용자의 로컬 머신 또는 self-hosted 환�
 
 permission은 특정 작업 후보를 지금 이 턴에서 effect로 내려도 되는지에 대한 오케스트레이터의 공식 승인 결과다. permission은 tool runtime의 재량이 아니라 `MainOrchestrator`의 결정이다.
 
+### app grant
+
+app grant는 app manifest가 요청한 permission/secret/resource 범위 중 사용자가 승인한 durable 또는 turn-local 권한 기록이다. grant는 app manifest의 선언과 다르며, 최종 효과 실행 전에는 여전히 현재 safety context와 함께 다시 평가되어야 한다.
+
 ### safety context
 
 safety context는 특정 effect가 어떤 권한 경계 아래에서 발행되었는지를 설명하는 snapshot이다. 예:
@@ -75,6 +79,7 @@ safety context는 특정 effect가 어떤 권한 경계 아래에서 발행되�
 - network 허용 대상 범주
 - redaction 요구사항
 - secret access scope
+- app id와 app grant scope, 있으면
 
 ### secret
 
@@ -101,6 +106,7 @@ inherited safety context는 상위 턴 또는 상위 실행 경계에서 이미 
 5. approval은 위험 작업을 effect 생성 이전에 멈추는 정책 게이트다.
 6. 한 턴의 승인 결과가 다음 턴의 무제한 권한으로 암묵 승격되면 안 된다.
 7. self-hosted 환경이라도 host boundary는 workspace 중심으로 설명 가능해야 한다.
+8. app manifest의 permission 선언은 요청일 뿐이며, app-wide grant도 현재 effect의 safety snapshot을 넓힐 수 없다.
 
 ---
 
