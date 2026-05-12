@@ -13,6 +13,8 @@
 
 이 spec의 완료 기준은 session kernel의 POC를 만드는 것이 아니라, 이 문서가 정의한 권한 경계, 상태 모델, 턴 수명주기, 불변식, 실패 처리 규칙을 충족하는 **완전한 기능 구현과 검증을 끝내는 것**이다.
 
+현재 코드베이스에는 이미 `AgentLoop`, `AgentRunner`, `SessionManager`, `SessionTurnLock`, `runtime_checkpoint` 기반의 session kernel 구현이 존재한다. 따라서 001 작업은 새 `SessionState`/`TurnState`/phase enum을 전면 도입하는 재작성 작업이 아니라, 현재 구현을 이 문서의 개념 계약에 매핑하고 부족한 관측/검증/문서 gap만 외과적으로 보강하는 작업이어야 한다.
+
 ---
 
 ## 상위 기준과의 관계
@@ -25,6 +27,30 @@
 - 목표는 분산 플랫폼이 아니라 self-hosted / personal-use 환경에서의 단일 사용자 세션 정확성이다.
 
 따라서 이 문서는 분산 실행, 멀티유저 동기화, 다중 오케스트레이터 협상 같은 구조를 다루지 않는다.
+
+---
+
+## 현재 구현과의 관계
+
+이 문서의 용어는 제품/아키텍처 계약을 설명하는 개념명이다. current Rust 구현에서 반드시 동일한 이름의 타입을 가져야 한다는 뜻은 아니다.
+
+현재 코드 기준 매핑은 아래와 같다.
+
+| spec 개념 | current code 기준 |
+|---|---|
+| `MainOrchestrator` | `crates/shacs-core/src/runtime/agent_loop.rs`의 `AgentLoop` |
+| session kernel | `AgentLoop`가 세션 로드, 턴 락, context build, runner 호출, checkpoint 저장/정리, outbound publish를 조정하는 경계 |
+| `SessionState` | `crates/shacs-session/src/lib.rs`의 `Session` + `SessionManager` + `metadata` + `last_consolidated` |
+| `TurnState` | 별도 durable 타입이 아니라 `SessionTurnLock`, `AgentRunSpec`, `AgentRunResult`, `runtime_checkpoint`, `pending_user_turn` marker가 함께 이루는 실행 중 상태 |
+| model/tool loop | `crates/shacs-core/src/runtime/runner.rs`의 `AgentRunner`와 `crates/shacs-core/src/runtime/tool_execution.rs`의 `RuntimeToolExecutor` |
+| opened turn invariant | `crates/shacs-core/src/runtime/loop_control.rs`의 `SessionTurnLock` |
+
+따라서 새 001 작업은 다음을 목표로 삼는다.
+
+1. 기존 `AgentLoop`/`AgentRunner`/`SessionManager` 구조를 보존한다.
+2. `SessionState`와 `TurnState`라는 개념 경계를 코드의 실제 타입/metadata/checkpoint와 명시적으로 연결한다.
+3. 명시 phase enum을 바로 도입하지 않는다. 필요하면 inspect/read-model 또는 checkpoint schema부터 보강한다.
+4. 전면 리팩터링보다 현재 구현의 불변식, recovery evidence, 테스트 이름, 문서 근거를 맞춘다.
 
 ---
 
@@ -42,19 +68,21 @@ session kernel은 한 세션의 입력을 받아, 필요한 문맥을 구성하�
 
 ### 상태 전이
 
-상태 전이는 `SessionState` 또는 `TurnState`의 관측 가능한 필드가 변경되는 모든 경우를 뜻한다. 상태 전이는 오직 `MainOrchestrator`의 결정에 의해 일어나야 한다.
+상태 전이는 `SessionState` 또는 `TurnState`에 해당하는 관측 가능한 사실이 변경되는 모든 경우를 뜻한다. current code에서는 `Session`/`SessionManager` 저장 내용, runtime metadata marker, checkpoint, runner result, turn lock 상태가 이 관측 가능한 사실에 해당한다. 상태 전이는 오직 `MainOrchestrator` 역할을 하는 `AgentLoop`의 결정에 의해 일어나야 한다.
 
 ---
 
 ## 권한 모델
 
-### `MainOrchestrator`의 단일 권한
+### `MainOrchestrator` 역할의 단일 권한
 
-`MainOrchestrator`는 다음에 대한 유일한 권한자다.
+`MainOrchestrator`는 제품 계약상의 권한자 이름이다. current code에서 이 역할은 `AgentLoop`가 수행한다.
+
+이 역할은 다음에 대한 유일한 권한자다.
 
 - 새 턴 시작 승인
-- `SessionState` 변경
-- `TurnState` 생성, 변경, 종료
+- `SessionState`에 해당하는 durable session 사실 변경
+- `TurnState`에 해당하는 active turn marker, checkpoint, runner result 생성, 변경, 종료
 - `Effect` 발행 순서 결정
 - 외부 결과를 상태에 반영할지 폐기할지 결정
 - retry, abort, compact, resume 판단
@@ -86,7 +114,7 @@ LLM provider, tool runtime, session store, queue, scheduler, mailbox, 외부 채
 
 ### `SessionState`의 책임 경계
 
-`SessionState`는 턴을 넘어 유지되어야 하는 세션의 진실 원천이다.
+`SessionState`는 턴을 넘어 유지되어야 하는 세션의 진실 원천이다. current code에서는 별도 `SessionState` 타입이 아니라 `Session`과 `SessionManager`가 이 역할을 한다.
 
 `SessionState`에는 최소한 다음 종류의 정보가 포함되어야 한다.
 
@@ -97,6 +125,14 @@ LLM provider, tool runtime, session store, queue, scheduler, mailbox, 외부 채
 - compact 이후에도 보존해야 하는 핵심 작업 문맥
 - 세션 수준 정책 상태, 예: permission mode, 선택된 스킬, resume 메타데이터
 - append 가능한 이벤트 이력과 연결될 수 있는 버전 정보 또는 순서 정보
+
+현재 구현에서 이미 대응되는 필드는 다음과 같다.
+
+- 세션 식별자: `Session.key`
+- 누적 대화 기록: `Session.messages`
+- durable metadata: `Session.metadata`
+- compaction 경계: `Session.last_consolidated`
+- 저장/조회/삭제/list 경계: `SessionManager`
 
 `SessionState`에 두면 안 되는 것:
 
@@ -110,7 +146,7 @@ LLM provider, tool runtime, session store, queue, scheduler, mailbox, 외부 채
 
 ### `TurnState`의 책임 경계
 
-`TurnState`는 현재 진행 중인 단일 턴의 실행 컨트롤 블록이다.
+`TurnState`는 현재 진행 중인 단일 턴의 실행 컨트롤 블록이다. current code에서는 아직 별도 durable `TurnState` 타입이 없다. 대신 active turn lock, runner input/result, cancellation token, checkpoint metadata가 합쳐져 이 역할을 한다.
 
 `TurnState`에는 최소한 다음 종류의 정보가 포함되어야 한다.
 
@@ -122,6 +158,16 @@ LLM provider, tool runtime, session store, queue, scheduler, mailbox, 외부 채
 - 대기 중인 effect의 종류와 상관관계 정보
 - 아직 최종 반영되지 않은 임시 산출물, 예: 모델 초안 응답, tool result envelope
 - abort 사유 또는 failure 원인, 아직 닫히지 않았다면 진행 중 원인
+
+현재 구현에서 이 개념은 아래 요소로 분산되어 있다.
+
+- 열린 턴 존재 여부: `SessionTurnLock`
+- 턴 입력과 실행 config: `AgentRunSpec`
+- 턴 결과와 stop reason: `AgentRunResult` / `AgentLoopTurnResult`
+- 중단 또는 복구 evidence: `runtime_checkpoint`, `pending_user_turn` metadata
+- 취소 상태: `CancellationToken`과 `LoopTaskRegistry`
+
+따라서 001 후속 작업에서 별도 `TurnState` 타입을 만들기보다, 먼저 이 분산 상태를 inspect 가능한 read model 또는 명시 checkpoint schema로 설명 가능하게 만드는 것을 우선한다.
 
 `TurnState`에 두면 안 되는 것:
 
@@ -145,7 +191,7 @@ LLM provider, tool runtime, session store, queue, scheduler, mailbox, 외부 채
 
 ## 턴 수명주기
 
-한 턴은 아래 phase를 순서대로 지난다. 구현에서 내부 세부 phase가 더 늘어날 수는 있지만, 외부적으로는 아래 단계 의미를 깨면 안 된다.
+한 턴은 개념적으로 아래 phase를 순서대로 지난다. current code가 이 phase들을 동일한 enum으로 저장해야 한다는 뜻은 아니다. 구현에서 내부 세부 phase가 더 늘어나거나 runner/checkpoint 이름이 다를 수는 있지만, 외부적으로는 아래 단계 의미를 깨면 안 된다.
 
 1. `accepted`
 2. `context_building`
@@ -154,6 +200,8 @@ LLM provider, tool runtime, session store, queue, scheduler, mailbox, 외부 채
 5. `completed` 또는 `aborted`
 
 ## phase 정의
+
+current code 기준으로는 `AgentLoop::process_message`가 `accepted`와 `context_building`에 해당하는 작업을 수행하고, `AgentRunner::run`이 `model_pending`/`tool_pending`/`result_applying`에 해당하는 내부 루프를 수행한다. `runtime_checkpoint`의 `phase` 값은 이 개념 phase를 관찰하기 위한 evidence이지, 현재로서는 공식 durable phase enum이 아니다.
 
 ### 1. `accepted`
 
@@ -167,7 +215,7 @@ LLM provider, tool runtime, session store, queue, scheduler, mailbox, 외부 채
 
 이 단계에서 해야 하는 일:
 
-- 새 `TurnState` 생성
+- current implementation 기준으로는 `SessionTurnLock`을 획득하고, `Session`에 user turn과 필요한 runtime marker를 기록한다.
 - 입력을 턴 시작 원인으로 기록
 - 턴 시작 이벤트 append 준비
 
@@ -288,7 +336,7 @@ LLM provider 호출 effect가 발행되었고, 오케스트레이터가 그 결�
 아래 불변식은 구현과 테스트에서 강제 대상이다.
 
 1. 한 세션에는 동시에 하나의 열린 턴만 존재한다.
-2. `SessionState` 변경은 오직 `MainOrchestrator`를 통해서만 일어난다.
+2. `SessionState`에 해당하는 durable session 변경은 오직 `MainOrchestrator` 역할을 하는 `AgentLoop`를 통해서만 일어난다.
 3. 외부 effect 결과는 턴 상관관계가 일치할 때만 반영 가능하다.
 4. `completed` 턴은 최종 결과가 세션 기록에 반영된 뒤에만 닫힐 수 있다.
 5. `aborted` 턴의 미완료 산출물은 최종 assistant 응답처럼 기록되면 안 된다.
@@ -305,39 +353,39 @@ LLM provider 호출 effect가 발행되었고, 오케스트레이터가 그 결�
 아래는 tool 호출이 한 번 포함된 일반적인 정상 턴 시퀀스다.
 
 1. 사용자가 새 요청을 보낸다.
-2. 인터페이스는 이를 `Command`로 변환해 `MainOrchestrator`에 전달한다.
-3. 오케스트레이터는 세션에 열린 턴이 없음을 확인하고 `TurnState(accepted)`를 생성한다.
-4. 오케스트레이터는 `context_building`으로 진입해 세션 기록과 스킬 문맥을 조합한다.
-5. 오케스트레이터는 provider 호출 `Effect`를 발행하고 `model_pending`으로 전이한다.
+2. 인터페이스는 이를 `Command` 또는 `InboundMessage`로 변환해 `AgentLoop`에 전달한다.
+3. `AgentLoop`는 `SessionTurnLock`으로 세션에 열린 턴이 없음을 확인하고 턴 처리를 시작한다.
+4. `AgentLoop`는 세션 기록과 스킬 문맥을 조합해 `AgentRunSpec`을 만든다.
+5. `AgentRunner`는 provider 호출을 수행하며 개념상 `model_pending`으로 진입한다.
 6. provider가 tool call 요청을 반환한다.
-7. 오케스트레이터는 요청된 tool이 현재 정책에서 허용되는지 판단한다.
-8. 허용되면 tool 실행 `Effect`를 발행하고 `tool_pending`으로 전이한다.
+7. `AgentRunner`/tool execution 경계는 요청된 tool이 실행 가능한지 확인한다. host safety 정책 확정은 007/010의 오케스트레이터 정책 경계와 충돌하면 안 된다.
+8. 허용되면 tool 실행으로 들어가고 개념상 `tool_pending` 상태가 된다.
 9. tool runtime이 결과를 반환한다.
-10. 오케스트레이터는 결과를 임시 산출물로 턴에 연결하고 다시 `context_building`으로 진입한다.
-11. 오케스트레이터는 tool 결과를 포함한 새 provider 호출 `Effect`를 발행하고 `model_pending`으로 전이한다.
+10. `AgentRunner`는 tool 결과를 messages에 연결하고 새 provider 호출로 이어간다.
+11. tool 결과를 포함한 새 provider 호출이 수행되며 개념상 `model_pending`으로 재진입한다.
 12. provider가 최종 assistant 응답 초안을 반환한다.
-13. 오케스트레이터는 `result_applying`으로 전이해 응답과 관련 이벤트를 세션 기록에 반영한다.
-14. 오케스트레이터는 열린 턴을 닫고 턴을 `completed`로 종료한다.
+13. `AgentLoop`는 `AgentRunResult`를 받아 새 runner message를 세션 기록에 append하고 runtime marker를 정리한다.
+14. `SessionTurnGuard`가 해제되며 열린 턴이 닫히고, 결과는 `completed` stop reason 또는 이에 준하는 terminal outcome으로 남는다.
 15. 세션은 다음 입력을 받을 수 있는 안정 상태가 된다.
 
-이 시퀀스에서 중요한 점은 provider와 tool runtime이 실제 작업은 했지만, 무엇을 기록하고 무엇을 버릴지는 모두 오케스트레이터가 결정했다는 점이다.
+이 시퀀스에서 중요한 점은 provider와 tool runtime이 실제 작업은 했지만, 무엇을 durable session 기록으로 남길지는 `AgentLoop` 경계에서만 결정된다는 점이다.
 
 ---
 
 ## 실패 및 중단 시퀀스 예시
 
-아래는 tool 실행 중 permission 거절로 턴이 중단되는 예시다.
+아래는 tool 실행 중 permission 거절 또는 interrupt로 턴이 중단되는 예시다.
 
 1. 사용자가 파일 수정 성격의 요청을 보낸다.
-2. 오케스트레이터는 새 턴을 `accepted`로 연다.
+2. `AgentLoop`는 새 턴 처리를 시작하고 세션 turn lock을 획득한다.
 3. 문맥을 구성한 뒤 provider 호출을 발행하고 `model_pending`으로 전이한다.
 4. provider가 쓰기 성격 tool call 요청을 반환한다.
-5. 오케스트레이터는 현재 세션 permission mode를 검사한다.
+5. 오케스트레이터 정책 경계는 현재 세션 permission mode를 검사한다.
 6. 현재 정책상 해당 tool은 사용자 확인 없이는 허용되지 않으며, 이 턴에서는 즉시 승인이 불가능하다고 판단한다.
 7. 오케스트레이터는 tool effect를 발행하지 않는다.
-8. 오케스트레이터는 거절 사유를 턴의 abort reason으로 기록한다.
+8. `AgentRunner`/`AgentLoop`는 거절, tool error, cancellation, ask_user interrupt 같은 terminal 또는 paused outcome을 관측 가능하게 남긴다.
 9. 오케스트레이터는 미실행 tool call 초안을 세션의 최종 수행 사실처럼 기록하지 않는다.
-10. 오케스트레이터는 턴을 `aborted`로 종료하고 열린 턴 포인터를 정리한다.
+10. `AgentLoop`는 runtime marker를 정리하거나 recovery marker를 남기고 열린 turn lock을 해제한다.
 11. 세션은 중단 사유를 가진 안정 상태로 돌아간다.
 
 이 경우 금지되는 동작은 다음과 같다.
@@ -379,7 +427,7 @@ LLM provider 호출 effect가 발행되었고, 오케스트레이터가 그 결�
 - 세션 기록이 뒤늦게 변형된다.
 - resume 시 동일 결과를 보장하기 어렵다.
 
-### 4. `TurnState`에 장기 정책 보관
+### 4. `TurnState` 역할 상태에 장기 정책 보관
 
 예: permission mode 변경을 턴 종료와 함께 사라지는 임시 필드에만 두는 경우
 
@@ -388,7 +436,7 @@ LLM provider 호출 effect가 발행되었고, 오케스트레이터가 그 결�
 - 다음 턴 해석이 달라질 수 있다.
 - resume 이후 정책 일관성이 깨진다.
 
-### 5. `SessionState`에 실행 핸들 보관
+### 5. `SessionState` 역할 상태에 실행 핸들 보관
 
 예: 살아 있는 프로세스 핸들, 소켓 연결 객체, transport 세부 객체를 그대로 저장하는 경우
 
@@ -419,6 +467,13 @@ Rust 구현은 최소한 다음 성격의 테스트를 만들 수 있어야 한�
 - 늦게 도착한 provider 또는 tool 결과가 이미 닫힌 턴의 결과를 덮어쓰지 않는지 확인하는 테스트
 - compact 또는 resume 이후에도 마지막 확정 결과와 다음 턴 가능 여부가 유지되는지 확인하는 테스트
 
+current code 기준으로는 다음 테스트 성격도 함께 유지해야 한다.
+
+- `AgentLoop::process_message`가 세션별 turn lock을 획득하고 중복 active turn을 거절하는지
+- `runtime_checkpoint`와 `pending_user_turn` marker가 crash/recovery evidence로 남고 성공처럼 오인되지 않는지
+- `AgentRunner`의 tool loop가 checkpoint와 stop reason을 일관되게 남기는지
+- `SessionManager`가 JSONL 저장, history repair, orphan tool result filtering, compaction metadata를 보존하는지
+
 이 문서의 목적은 테스트 이름을 나열하는 것이 아니라, 어떤 테스트가 반드시 가능해야 하는지 고정하는 데 있다.
 
 ---
@@ -434,6 +489,8 @@ Rust 구현은 최소한 다음 성격의 테스트를 만들 수 있어야 한�
 - 멀티유저 세션 격리 모델
 - 분산 락, 클러스터 리더 선출, 원격 워커 토폴로지
 - 웹 API, TUI, 외부 채널 transport 사양
+- `AgentLoop`/`AgentRunner`를 새 이름의 `MainOrchestrator` 타입으로 단순 rename하는 작업
+- 기존 runtime loop를 버리고 새 `SessionState`/`TurnState` 저장소로 전면 교체하는 작업
 
 이 항목들은 별도 하위 문서에서 다룬다. 단, 어떤 하위 문서도 이 문서의 권한 경계를 뒤집어서는 안 된다.
 
@@ -441,6 +498,10 @@ Rust 구현은 최소한 다음 성격의 테스트를 만들 수 있어야 한�
 
 ## 결론
 
-`shacs-bot`의 session kernel은 강한 `MainOrchestrator`가 `SessionState`와 `TurnState`의 경계를 엄격히 나누고, 한 번에 하나의 턴만 통제하며, 모든 외부 실행 결과를 검증 후 반영하는 구조로 구현되어야 한다.
+`shacs-bot`의 session kernel은 강한 `MainOrchestrator` 역할이 `SessionState`와 `TurnState` 개념 경계를 엄격히 나누고, 한 번에 하나의 턴만 통제하며, 모든 외부 실행 결과를 검증 후 반영하는 구조여야 한다.
+
+현재 코드에서는 이 역할을 `AgentLoop`/`AgentRunner`/`SessionManager`/`SessionTurnLock` 조합이 이미 상당 부분 수행한다. 따라서 001의 다음 작업은 전면 재구현이 아니라, current architecture를 기준으로 불변식과 recovery evidence를 더 명시적으로 문서화하고 필요한 inspect/checkpoint/test gap만 보강하는 것이다.
+
+2026-05-12 기준으로 001은 current architecture mapping 기준 완료로 닫는다. 완료 판정은 `AgentLoop`/`AgentRunner`/`SessionManager`/`SessionTurnLock` 구조를 공식 구현 경로로 인정하고, 별도 durable `TurnState` 타입이나 phase enum 전면 도입을 비목표로 둔다는 뜻이다. 이후 변경은 001을 다시 여는 것이 아니라, 관련 owner spec에서 inspect projection, checkpoint schema, recovery evidence를 좁게 보강하는 방식으로 진행한다.
 
 핵심은 기능 수를 늘리는 것이 아니라, 한 세션의 한 턴이 언제 시작되고 언제 닫히며, 어떤 결과가 기록될 수 있고 어떤 결과는 버려져야 하는지를 일관되게 설명할 수 있게 만드는 것이다.
