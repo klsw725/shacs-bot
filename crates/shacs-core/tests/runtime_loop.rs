@@ -2482,6 +2482,107 @@ fn loop_forwards_tool_and_provider_progress_callbacks() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+#[test]
+fn loop_does_not_persist_provider_stream_delta_as_session_content() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = StreamMockProvider::new(
+        vec![LlmResponse {
+            content: Some("FINAL_PROVIDER_OUTPUT".to_owned()),
+            ..LlmResponse::default()
+        }],
+        vec![ProviderEvent::TextDelta {
+            text: "STREAM_DELTA_SHOULD_NOT_PERSIST".to_owned(),
+        }],
+    );
+    let provider_events = Arc::new(Mutex::new(Vec::<ProviderEvent>::new()));
+    let provider_events_clone = provider_events.clone();
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_provider_event_callback(Arc::new(move |event| {
+        if let Ok(mut events) = provider_events_clone.lock() {
+            events.push(event.clone());
+        }
+    }));
+
+    let result = loop_runtime.process_direct("stream please", Some("cli:provider-stream"))?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:provider-stream")
+        .ok_or("missing session")?;
+    let raw_text = raw.to_string();
+    let provider_events = provider_events.lock().map_err(|error| error.to_string())?;
+    if result.final_content.as_deref() != Some("FINAL_PROVIDER_OUTPUT")
+        || provider_events.first()
+            != Some(&ProviderEvent::TextDelta {
+                text: "STREAM_DELTA_SHOULD_NOT_PERSIST".to_owned(),
+            })
+        || raw_text.contains("STREAM_DELTA_SHOULD_NOT_PERSIST")
+        || !raw_text.contains("FINAL_PROVIDER_OUTPUT")
+    {
+        return Err(format!(
+            "provider stream delta should stay observational: result={result:?} events={provider_events:?} raw={raw:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_provider_error_publishes_error_and_clears_runtime_markers() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    );
+
+    let result = loop_runtime.process_direct("fail provider", Some("cli:provider-error"))?;
+    let outbound = bus
+        .consume_outbound()
+        .ok_or("missing provider error outbound")?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:provider-error")
+        .ok_or("missing session")?;
+    if result.stop_reason != "error"
+        || !result
+            .final_content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no mock response")
+        || outbound.metadata["stop_reason"] != "error"
+        || !outbound.content.contains("no mock response")
+        || raw["metadata"].get("pending_user_turn").is_some()
+        || raw["metadata"].get("runtime_checkpoint").is_some()
+        || raw["messages"].as_array().map(Vec::len) != Some(2)
+        || raw["messages"][1]["role"] != "assistant"
+        || !raw["messages"][1]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no mock response")
+    {
+        return Err(format!(
+            "provider error should be session-visible only through runtime boundary: result={result:?} outbound={outbound:?} raw={raw:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 struct StreamMockProvider {
     inner: MockProvider,
     events: Vec<ProviderEvent>,
