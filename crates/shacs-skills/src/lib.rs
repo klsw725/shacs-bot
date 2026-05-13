@@ -927,6 +927,89 @@ mod tests {
     }
 
     #[test]
+    fn registry_applies_precedence_across_configured_roots(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let user = tempfile::tempdir()?;
+        let plugin = tempfile::tempdir()?;
+        let name = "precedence-probe";
+
+        write_test_skill(&workspace.path().join(BUILTIN_SKILLS_DIR), name, "builtin")?;
+        write_test_skill(&user.path().join("skills"), name, "user")?;
+        write_test_skill(&workspace.path().join(".nanobot/skills"), name, "legacy")?;
+        write_test_skill(&workspace.path().join("skills"), name, "workspace")?;
+        write_test_skill(plugin.path(), name, "plugin")?;
+
+        let mut options = SkillRegistryOptions::new(workspace.path());
+        options.user_skills_dir = Some(user.path().join("skills"));
+        options.plugin_roots = vec![plugin.path().to_path_buf()];
+        let registry = discover_skill_registry(options)?;
+        let entries = registry
+            .entries
+            .iter()
+            .filter(|entry| entry.descriptor.name == name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(entries.len(), 5);
+        assert!(entries.iter().any(|entry| {
+            entry.status == SkillRegistryStatus::Active
+                && entry.descriptor.source_kind == SkillSourceKind::PluginProvided
+        }));
+        for source_kind in [
+            SkillSourceKind::MaterializedBuiltin,
+            SkillSourceKind::UserGlobal,
+            SkillSourceKind::WorkspaceLegacy,
+            SkillSourceKind::WorkspaceLocal,
+        ] {
+            assert!(entries.iter().any(|entry| {
+                entry.status == SkillRegistryStatus::Shadowed
+                    && entry.descriptor.source_kind == source_kind
+            }));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registry_conflicts_duplicate_plugin_roots() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let plugin_a = tempfile::tempdir()?;
+        let plugin_b = tempfile::tempdir()?;
+        let name = "review";
+
+        write_test_skill(plugin_a.path(), name, "plugin a")?;
+        write_test_skill(plugin_b.path(), name, "plugin b")?;
+
+        let mut options = SkillRegistryOptions::new(workspace.path());
+        options.plugin_roots = vec![plugin_a.path().to_path_buf(), plugin_b.path().to_path_buf()];
+        let registry = discover_skill_registry(options)?;
+        let entries = registry
+            .entries
+            .iter()
+            .filter(|entry| entry.descriptor.name == name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| {
+            entry.status == SkillRegistryStatus::Conflicted
+                && entry.descriptor.source_kind == SkillSourceKind::PluginProvided
+        }));
+        assert!(!registry
+            .active_entries()
+            .into_iter()
+            .any(|entry| entry.descriptor.name == name));
+        Ok(())
+    }
+
+    fn write_test_skill(root: &std::path::Path, name: &str, description: &str) -> io::Result<()> {
+        let skill_dir = root.join(name);
+        fs::create_dir_all(&skill_dir)?;
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n{description}"),
+        )
+    }
+
+    #[test]
     fn registry_reports_malformed_and_conflicted_skills() -> Result<(), Box<dyn std::error::Error>>
     {
         let workspace = tempfile::tempdir()?;
