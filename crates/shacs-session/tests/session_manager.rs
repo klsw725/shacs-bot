@@ -46,6 +46,41 @@ fn session_manager_saves_loads_metadata_and_history() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn session_manager_writes_metadata_header_then_message_jsonl() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    let mut session = Session::new("cli:shape");
+    session.metadata.insert(
+        "runtime_checkpoint".to_owned(),
+        json!({ "phase": "awaiting_tools" }),
+    );
+    session.add_message("user", "hello", Map::new());
+    session.add_message("assistant", "world", Map::new());
+    session.last_consolidated = 1;
+
+    manager.save_with_fsync(&session)?;
+    let path = manager.session_path("cli:shape");
+    let lines = std::fs::read_to_string(path)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if lines.len() != 3
+        || lines[0]["_type"] != "metadata"
+        || lines[0]["key"] != "cli:shape"
+        || lines[0]["metadata"]["runtime_checkpoint"]["phase"] != "awaiting_tools"
+        || lines[0]["last_consolidated"] != 1
+        || lines[1]["role"] != "user"
+        || lines[1]["content"] != "hello"
+        || lines[2]["role"] != "assistant"
+        || lines[2]["content"] != "world"
+    {
+        return Err(format!("session JSONL shape drifted: {lines:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn session_manager_exposes_python_compatibility_paths_and_payload() -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
     let legacy = tempfile::tempdir()?;
