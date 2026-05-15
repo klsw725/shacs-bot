@@ -2,9 +2,9 @@
 
 ## 목표
 
-이 문서는 `docs/specs/009-context-assembly-and-compaction-input/SPEC.md`의 하위 실행 문서다. SPEC을 대체하지 않고, context builder, compaction input filtering, token budgeting, deterministic truncation을 실제 구현 단위로 쪼개어 완료 기준까지 내린다.
+이 문서는 `docs/specs/009-context-assembly-and-compaction-input/SPEC.md`의 하위 실행 문서다. 목표는 현재 구현을 formal `ProviderInputSnapshot`, `SemanticBlock`, `TokenBudget` 시스템으로 과장하지 않고, 지금 있는 context builder, memory, compaction, runner governance, provider shaping 경로를 Spec 009에 맞게 매핑하는 것이다.
 
-이번 PRD의 목표는 provider 호출 직전의 입력 조립 경계를 코드로 고정하는 것이다. 같은 durable state와 같은 turn input이면 항상 같은 provider input snapshot이 나오도록 만들고, budget 초과 시에도 어떤 블록이 유지되고 어떤 블록이 잘리는지 설명 가능하게 한다.
+이번 PRD는 2026-05-15 현재 아키텍처 매핑 기준으로 Spec 009를 닫는다. formal snapshot과 deterministic block budget은 구현 완료로 주장하지 않고 후속 작업으로 분리한다.
 
 ## SPEC 입력
 
@@ -24,111 +24,120 @@
 
 ## Dependency Cut
 
-- 001에서 turn open/close와 replay 가능한 상태 경계를 받는다.
-- 006에서 replay, checkpoint, event tail을 받아 source snapshot을 고정한다.
-- 005와 008에서 skill registry snapshot, provider profile snapshot, tool schema snapshot을 받는다.
-- 003은 이 PRD가 만든 snapshot을 그대로 실행해야 하며, provider adapter가 문맥을 임의 수정하면 안 된다.
-- 010은 secret 원문과 미확정 민감 값이 snapshot, compaction input, diagnostics에 들어가지 않도록 경계를 제공한다.
-- 011은 subagent 결과가 merge 전 후보 결과라는 전제를 제공한다.
+- 001과 006에서 replay 가능한 session history와 durable state 경계를 받는다.
+- 005와 008에서 skill, provider profile, runtime layout 기준을 받는다.
+- 003은 canonical provider request를 provider별 wire format으로 바꾸는 계층이다.
+- 010은 secret 원문이 context, compaction, provider input에 섞이지 않도록 하는 미래 통합 pass의 기준을 준다.
+- 011은 subagent 결과가 수용 전 후보라는 전제를 준다.
+
+현재 provider adapter는 snapshot을 그대로 실행하는 strict runtime이 아니다. adapter는 `ProviderRequest`의 canonical messages, tools, reasoning 입력을 provider wire format으로 shaping한다. 이 PRD는 그 shaping을 현재 구현으로 인정하되, provider가 source를 다시 선택하는 구조로 보지 않는다.
 
 ## 범위
 
-- context source snapshot 고정 단계 구현
-- semantic block 모델과 정규화 규칙 구현
-- token estimation, budget policy, truncation order 구현
-- provider input snapshot 직렬화 규약 구현
-- compaction input 후보 필터링과 durable summary 입력 경계 구현
-- 결정성, redaction, stale exclusion 검증 테스트 추가
+- `ContextBuilder` 기반 context assembly의 현재 동작 정리
+- `MemoryStore`, `ProviderArchiveConsolidator`, `TokenConsolidationConfig` 기반 memory와 archive 경로 정리
+- `AgentLoop`와 `AutoCompact` 기반 context building 전 compaction 경로 정리
+- `AgentRunner`의 `govern_messages_for_model`, `microcompact`, `snip_history`를 runner-side message governance로 분류
+- `SessionHistoryOptions`, `get_history_with_options`를 current history selection 경로로 반영
+- `ProviderRequest`와 provider별 message shaping을 현재 provider input 경계로 반영
+- formal snapshot, semantic block, budget work를 미래 gap으로 유지
 
 ## 범위 제외
 
+- Rust 코드나 테스트 변경
 - provider별 프롬프트 문구 최적화
-- 고급 압축 알고리즘 연구
-- UI용 reasoning 표시
-- 멀티세션 검색 및 랭킹
+- 고급 summary compression
+- semantic retrieval
+- multi-session ranking
+- UI reasoning display
+- multi-user, admin, operator workflow
 
 ## 현재 구현 상태
 
-### 이미 반영된 것
+2026-05-15 기준 Spec 009는 현재 아키텍처 매핑으로 종료한다. 이 종료는 아래 분산 경로가 문맥 조립과 compaction 입력 경계를 설명하고, 관련 테스트가 핵심 동작을 고정한다는 뜻이다. formal `ProviderInputSnapshot`, `SemanticBlock`, `TokenBudget` 모델 구현을 뜻하지 않는다.
 
-- `ContextBuilder`가 system policy, compacted memory, recent conversation, tool result, subagent result, skill, current request block을 결정적으로 조립한다.
-- provider input snapshot과 compaction input snapshot이 같은 source truth에서 목적별로 분리된다.
-- token estimate, deterministic budget cut, truncation marker, tool/subagent/skill snapshot, redaction 경계가 테스트로 검증된다.
-- compaction 이후 file-backed checkpoint에서 provider profile snapshot, selected skill body, tool schema가 복원되는 경로가 검증된다.
-- Spec016 matrix에서 Unit, Integration, SafetyRedaction이 FullSpec verified evidence로 승격돼 있다.
+### 이미 현재 아키텍처에 매핑되는 것
 
-### 아직 남은 것
+- `crates/shacs-core/src/runtime/context.rs`의 `ContextBuilder`, `ContextBuildRequest`, `build_system_prompt`, `build_runtime_context`, `build_messages`, `load_skills_for_context`가 system prompt, runtime context, messages, memory, recent history, skill, media input을 조립한다.
+- `crates/shacs-core/src/runtime/memory.rs`의 `MemoryStore::memory_context_from_workspace`, `MemoryStore::recent_history_from_workspace`, `ProviderArchiveConsolidator`, `TokenConsolidationConfig`가 memory context, recent history, provider archive, token 기준 consolidation을 맡는다.
+- `crates/shacs-core/src/runtime/agent_loop.rs`의 `AgentLoop::maybe_consolidate_session_by_tokens`는 context building 전에 over budget session을 줄이고 metadata와 agent configuration 보존을 검증한다.
+- `crates/shacs-core/src/runtime/autocompact.rs`의 `AutoCompact`는 auto compact summary를 context building에 공급한다.
+- `crates/shacs-core/src/runtime/runner.rs`의 `govern_messages_for_model`, `microcompact`, `snip_history`는 formal semantic block budget이 아니라 현재 runner-side message governance다.
+- `crates/shacs-session/src/lib.rs`의 `SessionHistoryOptions`, `get_history_with_options`는 history input 범위를 조절한다.
+- `crates/shacs-providers`의 `ProviderRequest`와 OpenAI-compatible, Responses, Anthropic, Codex, Azure builder는 canonical messages를 provider wire format으로 바꾼다.
 
-- token estimation은 제품 최소 범위의 근사치이며 provider별 tokenizer parity는 아직 별도 범위다.
-- 고급 summary 압축 알고리즘과 멀티세션 검색/랭킹은 구현 범위 밖이다.
-- 위 항목은 현재 deterministic context assembly와 compaction input FullSpec slice의 blocker가 아니라 후속 context optimization 범위다.
+### 아직 남은 formal work
 
-### 로컬 근거
-
-- `crates/shacs-core/src/runtime/context.rs`
-- `crates/shacs-core/src/runtime/agent_loop.rs`
-- `crates/shacs-core/tests/runtime_agent.rs`
-- `crates/shacs-core/tests/runtime_loop.rs`
-
-## TDD 계획
-
-1. source snapshot이 같은 입력에서 동일 snapshot을 만드는 단위 테스트를 먼저 만든다.
-2. tool, subagent, skill, summary block이 올바른 우선순위와 정규화 규칙을 따르는 테스트를 추가한다.
-3. secret, partial chunk, late result, UI projection 필드가 제외되는 안전성 테스트를 추가한다.
-4. 긴 세션에서 compaction input과 budget cut이 같이 동작하는 통합 테스트를 추가한다.
-5. replay 후 재실행해도 snapshot hash 또는 동등 비교가 유지되는 내구성 테스트를 추가한다.
+- `ContextSourceSnapshot`, `SemanticBlock`, `TokenBudget`, `TruncationPlan`, `ProviderInputSnapshot`, `CompactionInputSnapshot` 타입 경계
+- source hash, source sequence, effect id audit metadata
+- provider profile, tool schema, selected skill body를 하나로 얼린 단일 source snapshot 타입
+- formal block priority token budget과 truncation plan
+- provider runtime strict snapshot immutability beyond provider wire-format shaping
+- context, compaction, provider 입력을 관통하는 단일 secret exclusion pass
+- provider tokenizer parity
+- advanced summary compression, semantic retrieval, multi-session ranking, UI reasoning display
 
 ## 구현 웨이브
 
-### Wave 1. Source snapshot과 block 모델 고정
+### Wave 1. 현재 context builder 매핑 고정
 
-- `SessionState`, skill snapshot, provider profile snapshot, tool schema snapshot, current turn input을 하나의 context source bundle로 고정한다.
-- checkpoint에서 복원된 preselected skill은 현재 registry가 비어 있어도 checkpointed skill body snapshot을 우선 사용한다.
-- semantic block 타입을 만들고 system/policy, compacted memory, recent conversation, tool result, subagent result, skill, current request를 분리한다.
-- block 생성 시점에 ephemeral candidate를 거르는 필터를 넣는다.
+- `ContextBuilder`가 어떤 입력을 받아 system prompt, runtime context, messages를 만드는지 문서와 테스트 이름으로 고정했다.
+- `runtime_context_merges_last_same_role_history_message`가 system-first, history-order-preserving, same-role merge, deterministic `ContextBuilder::build_messages` 동작을 고정한다.
+- memory, recent history, skill roots, virtual builtin, media message가 들어가는 경로를 formal snapshot 대신 current architecture mapping으로 설명한다.
+- 산출물은 현재 구현 설명이며, `ContextSourceSnapshot` 타입 도입이 아니다.
 
-### Wave 2. 정규화와 budget cut 구현
+### Wave 2. memory와 compaction 경계 정리
 
-- 각 block을 provider 전달용 공통 표현으로 정규화한다.
-- token estimation 계층을 만들고 block별 estimate를 기록한다.
-- budget 초과 시 유지 우선순위, 축약 규칙, 완전 제외 규칙을 deterministic하게 적용한다.
-- truncation 결과와 근거를 snapshot metadata에 남긴다.
+- `MemoryStore`의 memory context와 recent history 경로를 context source로 정리했다.
+- `ProviderArchiveConsolidator`와 `TokenConsolidationConfig`를 archive, token consolidation 경로로 정리했다.
+- `AgentLoop::maybe_consolidate_session_by_tokens`와 `AutoCompact`를 context building 전 compaction 경로로 명시했다.
 
-### Wave 3. Compaction input과 provider snapshot 연결
+### Wave 3. runner governance와 provider shaping 분리
 
-- compaction input builder를 분리해 durable summary 입력 집합을 별도로 만든다.
-- provider input snapshot과 compaction input이 같은 source truth를 공유하되 목적별 출력 구조는 분리한다.
-- snapshot 직렬화, 비교, 테스트 fixture를 고정한다.
+- `govern_messages_for_model`, `microcompact`, `snip_history`를 provider 호출 전 message governance로 분류했다.
+- 이 governance가 formal `SemanticBlock`과 `TruncationPlan`은 아니라고 명시한다.
+- provider adapter는 canonical messages를 provider wire format으로 바꾸는 책임으로 한정한다.
 
-### Wave 4. 오케스트레이터 통합과 회귀 검증
+### Wave 4. future formal model 설계 보존
 
-- `MainOrchestrator`의 `context_building` phase에서 source snapshot 고정과 builder 호출을 연결한다.
-- provider runtime, tool/subagent merge 이후 새 턴에서 snapshot 재구성이 일관되는지 검증한다.
-- long-session, summary 존재, summary 부재, over-budget, stale-result 유입 케이스를 회귀 테스트로 묶는다.
+- 현재 매핑을 바탕으로 `ContextSourceSnapshot`, `SemanticBlock`, `TokenBudget`, `TruncationPlan`, `ProviderInputSnapshot`, `CompactionInputSnapshot` 도입 계획은 후속 작업으로 둔다.
+- source hash, sequence, effect id, compaction boundary, truncation marker audit metadata 설계는 후속 작업으로 둔다.
+- context, compaction, provider 입력의 secret exclusion을 하나의 pass로 묶는 방안은 후속 작업으로 둔다.
 
 ## Verification Evidence
 
-- 단위 테스트: context source selection, block normalization, token budgeting, truncation priority
-- 단위 테스트: `tool_result_context_preserves_correlation_metadata_and_limits_raw_output`이 provider message snapshot의 tool result block에 `effect_id`, `correlation_id`, `tool_call_id`를 보존하고 raw tool output/error를 redaction 후 제한하는지 검증한다.
-- 단위 테스트: `budget_cut_preserves_current_request_and_policy_blocks`와 `budget_cut_records_estimates_and_keeps_compaction_input_source_truth`가 block별 token estimate, input/output budget 분리, low-priority block truncation marker, provider snapshot과 compaction input source truth 분리를 검증한다.
-- 통합 테스트: long-session compaction path, provider snapshot 생성, replay 후 동일 snapshot 재생성
-- 경계 테스트: `compaction_input_excludes_open_turn_user_request_but_messages_keep_it`, `retry_invoke_uses_rebuilt_context_snapshot`, `resume_after_completed_turn_restores_replaced_preserved_context`가 provider messages에는 열린 턴 요청을 유지하되 durable compaction input은 닫힌 턴 source만 수집하고 completion-boundary preserved context는 기존 완료 턴 입력을 보존함을 검증한다.
-- 내구성 테스트: `file_store_resume_restores_checkpointed_agent_configuration_after_compaction`이 compaction 이후 file-backed checkpoint에서 provider profile snapshot, selected skill body snapshot, injected tool schema를 복원하는지 검증한다.
-- 안전성 테스트: secret exclusion, partial provider chunk exclusion, late result exclusion
-- 안전성 테스트: `builder_redacts_secret_like_tool_payloads_from_snapshots`와 `replacement_preserved_context_redacts_secret_like_completed_turn_payloads`가 provider message snapshot 및 completion-boundary preserved context에 raw secret-like 값이 남지 않고 `[REDACTED_SECRET]`로 대체되는지 검증한다.
-- 내구성 테스트: checkpoint + event tail replay 뒤 snapshot 동일성
-- 문서 증거: snapshot 필드와 block 우선순위를 SPEC과 1:1로 매핑한 표
+현재 증거로 사용할 테스트 이름은 다음과 같다.
+
+- `runtime_context_builds_system_runtime_and_media_messages`
+- `runtime_context_injects_memory_recent_history_skills_and_helpers`
+- `runtime_context_loads_extra_skill_roots_and_virtual_builtins`
+- `runtime_context_merges_last_same_role_history_message`
+- `runtime_memory_store_appends_sanitizes_cursors_and_feeds_context`
+- `runtime_archive_consolidator_summarizes_or_raw_archives_on_provider_failure`
+- `runtime_token_consolidation_archives_on_user_boundary_and_preserves_agent_configuration`
+- `loop_consolidates_over_budget_session_before_building_context_and_preserves_metadata`
+- `loop_consumes_auto_compact_summary_when_building_context`
+- `responses_builder_converts_messages_tools_and_reasoning`
+- `provider_spec_sanitizes_openai_compatible_history_and_tool_ids`
+- `anthropic_builder_converts_messages_tools_thinking_and_cache`
+
+`runtime_context_merges_last_same_role_history_message`는 system-first, history-order-preserving, same-role merge, deterministic `ContextBuilder::build_messages` 동작을 증거로 둔다. 이 증거는 현재 아키텍처 매핑 기준 종료를 뒷받침한다. formal source snapshot hash, block priority budget, provider tokenizer parity, unified secret exclusion pass가 검증됐다는 뜻은 아니다.
 
 ## Open Risks
 
-- token estimation 오차가 크면 truncation 결과가 provider 한도와 어긋날 수 있다.
-- tool 또는 subagent 결과의 구조화 수준이 낮으면 정규화 규칙이 흔들릴 수 있다.
-- summary block과 recent conversation block의 중복 정보가 커지면 budget 효율이 떨어질 수 있다.
+아래 항목은 Spec 009의 현재 아키텍처 매핑 종료를 막지 않는다. formal model로 올릴 때 남는 리스크다.
+
+- runner-side `microcompact`와 `snip_history`는 동작상 유용하지만, block priority 기반 `TruncationPlan`보다 설명력이 낮다.
+- provider별 tokenizer parity가 없어 provider 한도와 내부 추정이 어긋날 수 있다.
+- provider adapter shaping과 formal snapshot immutability의 경계가 문서화되지 않으면 완료 기준이 다시 과장될 수 있다.
+- secret exclusion이 context, compaction, provider 입력에서 단일 pass로 묶이지 않으면 경로별 차이가 남을 수 있다.
 
 ## 종료 기준
 
-- provider input snapshot이 공식 source만으로 결정적으로 생성된다.
-- compaction input이 durable 사실만 포함하고 partial, stale, secret 원문을 제외한다.
-- budget 초과 시 block 유지/축약/제외 규칙이 자동 테스트로 증명된다.
-- replay 후 동일 입력에서 동일 snapshot이 다시 만들어진다.
-- 009와 016이 요구하는 단위, 통합, 안전성 검증 증거가 모두 준비된다.
+이 PRD의 현재 종료 기준은 2026-05-15 현재 아키텍처 매핑 기준 Spec 009 종료다.
+
+- 현재 구현이 `ContextBuilder`, `ContextBuildRequest`, `MemoryStore`, `ProviderArchiveConsolidator`, `TokenConsolidationConfig`, `AgentLoop::maybe_consolidate_session_by_tokens`, `AutoCompact`, `AgentRunner` message governance, `SessionHistoryOptions`, `ProviderRequest`, provider-specific shaping으로 분산돼 있음을 문서가 정확히 설명한다.
+- formal `ContextSourceSnapshot`, `SemanticBlock`, `TokenBudget`, `TruncationPlan`, `ProviderInputSnapshot`, `CompactionInputSnapshot`을 현재 동작으로 주장하지 않는다.
+- provider adapter가 canonical messages를 wire format으로 shaping한다는 현재 경계를 명시한다.
+- `runtime_context_merges_last_same_role_history_message`를 포함한 test evidence는 current architecture mapping 종료의 근거로 쓰되, formal snapshot과 token budget 구현 증거로 과장하지 않는다.
+- self-hosted 사용자가 긴 세션, memory, compaction, provider 호출 경계를 이해하는 데 필요한 남은 future work가 보존된다.

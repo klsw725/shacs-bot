@@ -415,6 +415,80 @@ fn runtime_context_builds_system_runtime_and_media_messages() -> Result<(), Box<
 }
 
 #[test]
+fn runtime_context_merges_last_same_role_history_message() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    std::fs::write(workspace.path().join("AGENTS.md"), "Be useful")?;
+
+    let context = ContextBuilder::new(workspace.path()).with_timezone("Asia/Seoul");
+    let history = vec![
+        json!({"role": "user", "content": "prior user"}),
+        json!({"role": "assistant", "content": "prior assistant"}),
+    ];
+
+    let first_messages = context.build_messages(ContextBuildRequest {
+        history: history.clone(),
+        current_message: "current request",
+        channel: Some("cli"),
+        chat_id: Some("direct"),
+        current_role: "assistant",
+        session_summary: Some("summary"),
+        ..ContextBuildRequest::new("current request")
+    });
+    let second_messages = context.build_messages(ContextBuildRequest {
+        history,
+        current_message: "current request",
+        channel: Some("cli"),
+        chat_id: Some("direct"),
+        current_role: "assistant",
+        session_summary: Some("summary"),
+        ..ContextBuildRequest::new("current request")
+    });
+
+    if first_messages != second_messages {
+        return Err(format!(
+            "context build should be deterministic: {first_messages:?} != {second_messages:?}"
+        )
+        .into());
+    }
+    if first_messages.is_empty() || first_messages[0]["role"] != "system" {
+        return Err(format!("system message should be first: {first_messages:?}").into());
+    }
+    if first_messages[1]["role"].as_str() != Some("user")
+        || first_messages[2]["role"].as_str() != Some("assistant")
+    {
+        return Err(format!("history order should be preserved: {first_messages:?}").into());
+    }
+    if first_messages.len() != 3 {
+        return Err(format!(
+            "same-role merge should keep history length plus system: {first_messages:?}"
+        )
+        .into());
+    }
+    if first_messages[1]["content"].as_str() != Some("prior user")
+        || !first_messages[2]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("prior assistant")
+        || !first_messages[2]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[Runtime Context")
+        || !first_messages[2]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("current request")
+        || !first_messages[2]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("summary")
+    {
+        return Err(format!("same-role context merge drifted: {first_messages:?}").into());
+    }
+
+    Ok(())
+}
+
+#[test]
 fn runtime_context_injects_memory_recent_history_skills_and_helpers() -> Result<(), Box<dyn Error>>
 {
     let workspace = tempfile::tempdir()?;
