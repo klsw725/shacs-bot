@@ -1341,6 +1341,35 @@ mod tests {
     }
 
     #[test]
+    fn ensure_runtime_dirs_creates_current_layout_contract(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("instance").join("config.json");
+        let workspace_path = root.path().join("workspace-override");
+        fs::create_dir_all(config_path.parent().ok_or("missing parent")?)?;
+
+        let context = config_context(Some(config_path), Some(workspace_path.clone()));
+        let dirs = ensure_runtime_dirs(&context)?;
+        let expected_dirs = vec![
+            root.path().join("instance"),
+            workspace_path,
+            root.path().join("instance").join("media"),
+            root.path().join("instance").join("cron"),
+            root.path().join("instance").join("logs"),
+            root.path().join("instance").join("channels"),
+            root.path()
+                .join("instance")
+                .join("channels")
+                .join("worker-metadata"),
+            root.path().join("instance").join("skills"),
+        ];
+
+        assert_eq!(dirs, expected_dirs);
+        assert!(dirs.iter().all(|dir| dir.is_dir()));
+        Ok(())
+    }
+
+    #[test]
     fn public_path_helpers_follow_active_config_context() -> Result<(), Box<dyn std::error::Error>>
     {
         let root = tempfile::tempdir()?;

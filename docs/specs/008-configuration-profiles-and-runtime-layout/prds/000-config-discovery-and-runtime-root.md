@@ -2,11 +2,12 @@
 
 ## 목표
 
-이 문서는 `docs/specs/008-configuration-profiles-and-runtime-layout/SPEC.md`의 하위 실행 문서다. 목표는 config discovery, precedence, profile 구성, secrets 분리, runtime root와 하위 디렉터리 초기화를 구현 가능한 작업 단위로 고정하는 것이다.
+이 문서는 `docs/specs/008-configuration-profiles-and-runtime-layout/SPEC.md`의 하위 실행 문서다. 현재 목표는 지금 구현된 configuration discovery와 runtime root 경계를 current architecture에 맞춰 문서화하고, 2026-05-15 기준 Spec 008을 그 범위에서 완료로 닫는 것이다.
 
-- 전역과 workspace 설정을 예측 가능한 discovery 순서로 읽는다.
-- config와 secrets를 분리하고 precedence를 키 단위로 적용한다.
-- runtime root와 하위 디렉터리 레이아웃을 부트스트랩 시 일관되게 초기화한다.
+- 현재 `.shacs-bot/config.json`과 `.shacs-bot/auth.json` 경계를 정확히 설명한다.
+- JSON config loading, env placeholder resolution, auth store, path helper, runtime dir 생성 범위를 current architecture로 고정한다.
+- formal TOML layered config, split profile type, formal runtime layout은 future work로 남긴다.
+- 이 완료가 formal TOML layered config/profile/runtime layout 구현 완료를 뜻하지 않음을 명시한다.
 
 ## SPEC 입력
 
@@ -19,112 +20,150 @@
 
 ## Dependency Cut
 
-이 PRD는 설정 탐색과 runtime layout을 구현 대상으로 삼는다. GUI 편집기, 원격 sync, cloud secret manager 연동은 범위 밖이다. 로컬 self-hosted 사용자가 파일만 보고 상태를 이해할 수 있는 수준이 완료 기준이다.
+이 PRD는 현재 설정 탐색, auth 저장, runtime path helper, runtime dir 생성, skill discovery 증거를 문서화 대상으로 삼는다. GUI config editor, remote config sync, cloud secret manager, multi-user RBAC/admin workflow, SaaS control plane, cluster layout은 범위 밖이다.
+
+기준은 self-hosted, personal-use 사용자가 로컬 파일과 디렉터리만 보고 상태를 이해할 수 있는 것이다.
 
 ## 범위
 
-- built-in, user-global, workspace-local, explicit override discovery
-- config와 secrets의 별도 로딩 경로
-- key 단위 precedence 적용
-- provider, permission, runtime profile 로딩 골격
-- runtime root와 하위 디렉터리 생성 규약
-- schema version과 migration 진입점
-- provider/auth family를 OpenAI-compatible, Anthropic auth, Codex auth(OpenAI auth style) 세 종류로 제한하는 로딩/검증 규칙
+- `.shacs-bot/config.json` 중심의 현재 JSON config 경로
+- `.shacs-bot/auth.json` 중심의 현재 auth store 경로
+- `load_config_with_env`, `load_config_or_default`의 현재 로딩 경계
+- `resolve_config_env_refs`, `interpolate_env_with_source`의 환경 변수 placeholder 해석
+- `migrate_config_value`의 legacy key migration
+- `ProviderConfig`의 `api_key`, `api_base`, `extra_headers`, `extra_body` 필드
+- `AuthStore`, `ProviderAuth` 인증 저장 경계
+- `default_config_path`, `shacs_home_dir`, `get_config_path`, `get_data_dir`, `get_runtime_subdir`, `get_media_dir`, `get_cron_dir`, `get_logs_dir`, `ensure_runtime_dirs` path helper
+- `workspace`, `history/cli_history`, `bridge`, `sessions`, `media`, `cron`, `logs`, `channels`, `skills` runtime dir 매핑
+- `ContextBuilder`와 `shacs-skills` 기반 skill root, context, discovery 증거
+- Spec 008 current architecture mapping 기준 완료 선언
 
 ## 범위 제외
 
-- 웹 기반 설정 편집기
-- 원격 config 배포
-- 멀티유저 정책 계층
-- 모든 provider 벤더 옵션 완전 노출
-- OpenAI-compatible, Anthropic auth, Codex auth(OpenAI auth style) 바깥의 추가 provider/auth family 지원
+- `.shacs/config.toml`과 `.shacs/secrets.toml` layered discovery 구현 완료 선언
+- `ConfigSnapshot`, `SecretsSnapshot`, `ProviderProfile`, `PermissionProfile`, `RuntimeProfile` split type 구현 완료 선언
+- `api_key_ref` secret-reference model 구현 완료 선언
+- `schema_version` validator와 future schema rejection 구현 완료 선언
+- formal `.shacs/runtime/{artifacts,sessions,checkpoints,app-ledger,logs,cache,tmp}` layout 구현 완료 선언
+- deep source-origin provenance 구현 완료 선언
+- runtime migration entrypoint 구현 완료 선언
+- broad provider/auth-family expansion
 
 ## 현재 구현 상태
 
 ### 이미 반영된 것
 
-- built-in, user-global, workspace-local, explicit override config discovery와 precedence merge가 구현돼 있다.
-- config와 secrets는 별도 snapshot으로 로드되며, provider secret은 `api_key_ref`를 통해 참조된다.
-- provider/permission/runtime profile, runtime root layout bootstrap, unsupported schema/malformed layer diagnostics가 검증된다.
-- CLI `provider codex login`은 OpenCode/Nanobot과 같은 Codex/ChatGPT browser OAuth를 기본값으로 제공한다. headless 환경은 device-code 계열 fallback을 쓰는 방향으로 남겨 두며, 사용자가 이미 확보한 bearer token 저장은 명시적 `provider codex import-token` fallback으로 둔다.
-- Provider auth material은 `secrets.toml`에만 저장하고, 대응되는 `codex_auth` provider profile과 non-secret `api_key_ref`/session reference만 `config.toml`에 기록한다. 현재 Codex browser OAuth는 provider auth session JSON을 저장하고, 이 session bundle 구조는 향후 Anthropic 등 다른 provider auth family가 같은 저장 경계를 재사용할 수 있게 provider-neutral 형태를 유지한다.
-- 만료된 Codex OAuth session은 provider adapter 생성 전에 refresh한다. refresh 가능한 session bundle은 새 access token과 rotated refresh token을 같은 `secrets.toml` entry에 atomic하게 저장한 뒤 갱신된 secrets snapshot으로 adapter를 만든다. raw imported bearer token은 refresh 대상이 아니며, refresh token이 없는 만료 session은 model network 호출 전에 재로그인을 요구한다.
-- `provider codex login`의 browser OAuth와 `provider codex import-token` fallback이 구현돼 있다. `provider codex login --headless` device-code fallback은 아직 명시적 미구현 상태다.
-- config source-origin evidence와 profile snapshot 출처 추적이 검증 증거로 연결돼 있다.
-- Spec016 matrix에서 Unit, Integration, PackagingUpgrade가 FullSpec verified evidence로 승격돼 있다.
+- `crates/shacs-config/src/lib.rs`는 `.shacs-bot/config.json`과 `.shacs-bot/auth.json`을 현재 기본 경계로 사용한다.
+- 현재 config 로딩은 JSON 기반이다.
+- 환경 변수 placeholder는 `resolve_config_env_refs`와 `interpolate_env_with_source` 경계에서 재귀적으로 해석되고, 빠진 환경 변수는 진단된다.
+- legacy config key는 `migrate_config_value` 경계에서 현재 shape로 보정된다.
+- path helper는 active config context에 따라 config path, data dir, runtime subdir, media dir, cron dir, logs dir을 계산한다.
+- `ensure_runtime_dirs`는 현재 runtime directory set을 생성한다.
+- 현재 runtime dir 증거는 `workspace`, `history/cli_history`, `bridge`, `sessions`, `media`, `cron`, `logs`, `channels`, `skills`다.
+- 현재 provider config는 `ProviderConfig`의 `api_key`, `api_base`, `extra_headers`, `extra_body`를 사용한다.
+- 현재 auth 저장은 `AuthStore`, `ProviderAuth` 경계로 설명한다.
+- `ContextBuilder`와 `shacs-skills`는 skill root, context, discovery 증거를 제공한다.
 
 ### 아직 남은 것
 
-- deep merge 출처 설명과 runtime migration 진입점은 현재 minimum-slice 범위에 맞춰 제한적으로 유지된다.
-- OpenAI-compatible, Anthropic auth, Codex auth(OpenAI auth style) 외 provider/auth family는 지원 범위 밖이다.
-- 위 항목은 현재 로컬 config discovery/runtime layout FullSpec slice의 blocker가 아니라 후속 migration/provenance 확장 범위다.
+- `.shacs/config.toml`과 `.shacs/secrets.toml`의 layered discovery는 future work다.
+- formal `ConfigSnapshot`, `SecretsSnapshot`, `ProviderProfile`, `PermissionProfile`, `RuntimeProfile` 분리는 future work다.
+- `api_key_ref` secret-reference model은 future work다.
+- `schema_version` validator와 unsupported future schema rejection은 future work다.
+- formal `.shacs/runtime/{artifacts,sessions,checkpoints,app-ledger,logs,cache,tmp}` layout은 future work다.
+- deep source-origin provenance와 runtime migration entrypoint는 future work다.
+
+위 항목은 Spec 008의 current architecture mapping 기준 완료를 막지 않는다. 다만 formal TOML/profile/runtime layout 구현 완료를 주장하려면 별도 구현과 검증 범위를 다시 잡아야 한다.
 
 ### 로컬 근거
 
 - `crates/shacs-config/src/lib.rs`
-- `crates/shacs-cli/src/lib.rs` inline provider auth/runtime config tests
-- `crates/shacs-core/tests/runtime_agent.rs`
-- `crates/shacs-core/tests/runtime_loop.rs`
+- `crates/shacs-core`의 runtime context와 provider adapter 관련 테스트
+- `crates/shacs-core`의 runtime recovery와 session management 관련 테스트
+- `ContextBuilder`
+- `shacs-skills`
 
 ## TDD 계획
 
-1. 없는 config 파일이 조용히 무시되는 테스트를 작성한다.
-2. malformed 상위 계층이 다른 유효 계층까지 무효화하지 않는 테스트를 작성한다.
-3. precedence가 `built-in < user-global < workspace-local < explicit override` 순으로 적용되는 테스트를 작성한다.
-4. secrets가 config와 분리되어 로드되고 accidental config merge에 섞이지 않는 테스트를 작성한다.
-5. runtime root 초기화 시 필수 하위 디렉터리가 생성되는 테스트를 작성한다.
+이 PRD의 현재 단계는 새 구현을 요구하지 않는다. 기존 테스트 증거와 `ensure_runtime_dirs_creates_current_layout_contract`를 current architecture mapping 완료 증거에 연결한다.
+
+1. JSON 기본 경로와 provider 기본값이 `.shacs-bot` 규약을 따르는지 확인한다.
+2. config 저장, auth 저장, runtime context roundtrip이 깨지지 않는지 확인한다.
+3. public path helper가 active config context를 따르는지 확인한다.
+4. 환경 변수 placeholder가 재귀 해석되고 missing env를 진단하는지 확인한다.
+5. legacy migration writeback이 env template과 workspace override를 잘못 덮어쓰지 않는지 확인한다.
+6. provider adapter가 resolved model과 config defaults를 사용하는지 확인한다.
+7. status 표면이 config workspace와 provider fields를 보고하는지 확인한다.
+8. runtime recovery와 session management command가 현재 runtime 경계와 충돌하지 않는지 확인한다.
+9. `ensure_runtime_dirs`가 현재 runtime directory layout 계약을 생성하는지 확인한다.
 
 ## 구현 웨이브
 
-### Wave 1. discovery 입력과 snapshot 타입 고정
+### Wave 1. 현재 경로와 파일 형식 문서화
 
-- config snapshot, secrets snapshot, merged runtime config 타입을 정의한다.
-- discovery 컨텍스트에 workspace 유무와 explicit override 입력을 포함한다.
-- 한 번의 부트스트랩에서 일관된 snapshot을 사용하도록 경계를 만든다.
+- `.shacs-bot/config.json`과 `.shacs-bot/auth.json`을 현재 구현 경계로 고정한다.
+- `.shacs/config.toml`과 `.shacs/secrets.toml`은 future work로 내린다.
+- JSON config loading과 auth store를 current architecture로 설명한다.
 
-### Wave 2. discovery와 precedence 구현
+### Wave 2. 현재 config loading과 migration 매핑
 
-- built-in defaults, user-global, workspace-local, explicit override 순으로 config를 읽는다.
-- secrets는 별도 채널로 읽고 precedence를 독립 적용한다.
-- malformed 계층은 진단하되 다른 유효 계층을 유지한다.
+- `load_config_with_env`, `load_config_or_default`를 현재 loading 경계로 연결한다.
+- `resolve_config_env_refs`, `interpolate_env_with_source`를 env placeholder 해석 증거로 연결한다.
+- `migrate_config_value`를 legacy migration 증거로 연결하되, formal schema migration으로 과장하지 않는다.
 
-### Wave 3. profile 조립과 secrets 분리
+### Wave 3. provider/auth shape 정리
 
-- provider, permission, runtime profile의 최소 구조를 정의한다.
-- 비민감 옵션과 민감 값을 분리 결합하되 출처를 추적 가능하게 유지한다.
-- config에 민감 값이 직접 섞이지 않도록 검증 경로를 추가한다.
+- 현재 provider config 필드를 `api_key`, `api_base`, `extra_headers`, `extra_body`로 적는다.
+- `AuthStore`, `ProviderAuth`를 현재 auth 저장 경계로 적는다.
+- `api_key_ref`는 future secret-reference model로 둔다.
 
-### Wave 4. runtime root 부트스트랩과 migration 진입점
+### Wave 4. runtime dir와 skill discovery 매핑
 
-- `artifacts/`, `sessions/`, `checkpoints/`, `logs/`, `cache/`, `tmp/` 디렉터리 규약을 초기화한다.
-- session store와 tool runtime이 runtime root를 일관되게 참조하게 연결한다.
-- schema version 체크와 향후 migration 진입점을 마련한다.
+- 현재 path helper와 `ensure_runtime_dirs`를 runtime dir 증거로 연결한다.
+- `workspace`, `history/cli_history`, `bridge`, `sessions`, `media`, `cron`, `logs`, `channels`, `skills`를 현재 layout 이름으로 적는다.
+- `ensure_runtime_dirs_creates_current_layout_contract`를 data dir, workspace override, media, cron, logs, channels, `channels/worker-metadata`, skills 생성 증거로 적는다.
+- `ContextBuilder`와 `shacs-skills`를 skill root, context, discovery 증거로 연결한다.
+
+### Wave 5. future work와 exit criteria 분리
+
+- formal profile split, TOML layered discovery, formal runtime layout, schema validator, deep provenance, runtime migration entrypoint를 future work로 유지한다.
+- current architecture mapping 기준으로 Spec 008을 완료로 닫는다.
+- 이 완료가 formal TOML/profile/runtime layout 구현 완료가 아님을 명시한다.
+- out-of-scope 항목이 self-hosted, personal-use framing을 벗어나지 않게 정리한다.
 
 ## Verification Evidence
 
-- discovery precedence 테스트
-- malformed 계층 격리 테스트
-- secrets 분리 테스트
-- structured config source-origin evidence 테스트
-- runtime root 디렉터리 생성 테스트
-- tool result artifact ref가 runtime-managed artifact 참조만 노출하는지 검증
-- profile snapshot 출처 추적 검증
-- explicit config/secrets override 파일 precedence 검증
-- OpenAI-compatible, Anthropic auth, Codex auth(OpenAI auth style) provider family 로딩 검증
-- Codex browser login/import가 token을 stdout/stderr/config에 노출하지 않고 `secrets.toml`에 저장하는지 검증
-- Codex provider transport/provider errors가 bearer token을 redaction하는지 검증
-- 만료된 Codex OAuth session이 adapter 생성 전에 refresh되고 rotated refresh token을 `secrets.toml`에 저장하는지 검증
-- refresh token이 없는 만료 Codex OAuth session이 model network 호출 전에 재로그인을 요구하는지 검증
+- `defaults_use_shacs_paths_and_nanobot_provider_values`
+- `load_save_refresh_and_runtime_context_roundtrip`
+- `public_path_helpers_follow_active_config_context`
+- `ensure_runtime_dirs_creates_current_layout_contract`
+- `resolves_env_refs_recursively_and_reports_missing`
+- `migration_writeback_preserves_env_templates_and_does_not_persist_workspace_override`
+- `runtime_config_migration_writeback_preserves_env_placeholders`
+- `migrates_legacy_keys_without_overriding_new_values`
+- `provider_adapter_uses_resolved_model_and_config_defaults`
+- `status_reports_config_workspace_and_provider_fields`
+- `runtime_recover_blocks_partial_migration_marker`
+- `session_management_commands_cover_history_export_clear_diagnostics_and_compact`
+
+이 증거는 현재 JSON config, env placeholder, path helper, auth/runtime context, provider defaults, status reporting, recovery, session command 표면을 뒷받침한다. `ensure_runtime_dirs_creates_current_layout_contract`는 현재 runtime directory layout의 생성 계약을 뒷받침한다. TOML layered discovery, `api_key_ref`, split profile type, formal runtime layout 검증으로 해석하지 않는다.
 
 ## Open Risks
 
-- precedence를 깊은 병합으로 과하게 처리하면 값 출처 설명 가능성이 떨어질 수 있다.
-- runtime root와 workspace root 경계가 흐리면 artifact와 세션 데이터 위치가 불명확해질 수 있다.
-- secrets 분리 규칙이 약하면 사용자가 민감 값을 잘못 커밋할 위험이 남는다.
+- 문서가 다시 TOML layered config를 현재 완료처럼 쓰면 실제 코드와 기대가 어긋난다.
+- Spec 008 완료를 formal TOML/profile/runtime layout 구현 완료로 읽으면 남은 future work 범위가 가려진다.
+- `api_key_ref`를 현재 구현처럼 쓰면 provider config와 auth store의 실제 경계가 흐려진다.
+- 현재 runtime dir와 formal `.shacs/runtime` layout을 섞어 쓰면 사용자 복구 경로가 불명확해진다.
+- deep provenance와 schema validator가 없다는 점을 감추면 future migration 작업의 범위를 잘못 잡을 수 있다.
 
 ## 종료 기준
 
-- config discovery와 precedence가 고정된 순서로 동작한다.
-- secrets는 config와 별도 경로로 로드되고 병합 출처가 설명 가능하다.
-- runtime root와 필수 하위 디렉터리가 일관되게 초기화된다.
-- `docs/specs/008-configuration-profiles-and-runtime-layout/SPEC.md`의 경로 규약과 비목표를 침범하지 않는다.
+- SPEC과 PRD가 현재 경로를 `.shacs-bot/config.json`, `.shacs-bot/auth.json`으로 설명한다.
+- SPEC과 PRD가 current provider config를 `api_key`, `api_base`, `extra_headers`, `extra_body`로 설명한다.
+- SPEC과 PRD가 현재 runtime dir를 `workspace`, `history/cli_history`, `bridge`, `sessions`, `media`, `cron`, `logs`, `channels`, `skills`로 설명한다.
+- SPEC과 PRD가 `ensure_runtime_dirs_creates_current_layout_contract`를 현재 runtime dir 생성 증거로 포함한다.
+- SPEC과 PRD가 `ContextBuilder`와 `shacs-skills`를 현재 skill discovery 증거로 연결한다.
+- SPEC과 PRD가 TOML layered discovery, split profile type, `api_key_ref`, schema validator, formal runtime layout, deep provenance, runtime migration entrypoint를 future work로 둔다.
+- SPEC과 PRD가 Spec 008을 current architecture mapping 기준 완료로 닫는다.
+- SPEC과 PRD가 formal TOML layered config/profile/runtime layout 구현 완료를 주장하지 않는다.
+- 문서는 self-hosted, personal-use framing을 유지하고 admin/operator organization workflows를 도입하지 않는다.
