@@ -2,11 +2,17 @@
 
 ## 목표
 
-이 문서는 `docs/specs/007-main-orchestrator-policy/SPEC.md`의 하위 실행 문서다. 목표는 `MainOrchestrator`가 소유해야 하는 정책 결정을 코드 구조, 결정표, snapshot 전달, recovery 연결까지 포함해 실행 가능한 구현 계획으로 고정하는 것이다.
+이 문서는 `docs/specs/007-main-orchestrator-policy/SPEC.md`의 하위 실행 문서다. 목표는 formal `PolicyDecisionEngine`을 이미 완료된 구현으로 요구하는 것이 아니라, 현재 코드에 존재하는 main orchestrator policy 경계를 current architecture 기준으로 정리하고 2026-05-14 기준 완료로 닫는 것이다.
 
-- 새 턴 수용, approval, selection, retry, abort, timeout, late result 판단을 오케스트레이터 단일 권한으로 구현한다.
-- durable policy state와 turn-local policy state를 분리한다.
-- policy snapshot이 provider/tool effect로 내려가되, 실행기가 policy owner를 대체하지 못하게 한다.
+현재 완료 기준은 다음이다.
+
+- 새 턴 수용과 동시 턴 차단은 `AgentLoop::process_message`와 `SessionTurnLock`로 설명한다.
+- recovery cleanup은 `materialize_recovery_markers`, `pending_user_turn`, `runtime_checkpoint`로 설명한다.
+- runtime retry와 abort는 `AgentRunner`의 현재 동작으로 설명한다.
+- `ProviderRetryDecision`은 `shacs-providers`에 남아 있으며, 아직 orchestrator policy ownership 아래로 중앙화되지 않았다고 명시한다.
+- subagent correlation과 stale discard는 late-result policy의 일부 구현으로 설명한다.
+- `ProviderSelectionSnapshot`, `StaticProviderSelector`, `ContextBuilder`, `SpawnEnvelope` snapshot은 얕은 selection과 context/policy snapshot 증거로 설명한다.
+- `ask_user` interrupt는 full approval과 permission matrix가 아니라고 명시한다.
 
 ## SPEC 입력
 
@@ -21,99 +27,156 @@
 
 ## Dependency Cut
 
-이 PRD는 정책 판단의 소유권과 평가 시점을 구현 대상으로 삼는다. 개별 executor 내부 알고리즘이나 UI 승인 화면은 범위 밖이다. 목표는 오케스트레이터 정책 계층의 최소 완성본을 먼저 세우는 것이다.
+이 PRD는 현재 아키텍처를 문서화하는 작업이다. 이번 문서 정리는 Rust code, executor 내부 알고리즘, UI 화면을 변경하지 않는다. 완료 근거에는 2026-05-14에 추가된 focused Rust test까지 포함한다. formal policy engine 설계는 후속 owner 작업으로 남긴다.
+
+현재 범위는 self-hosted, personal-use 단일 사용자 런타임에 맞춘다. 멀티유저 승인 체계, 원격 운영자 콘솔, 조직 운영 정책은 범위 밖이다.
 
 ## 범위
 
-- policy state 모델, durable/turn-local 경계
-- 새 턴 수용 정책
-- selection 정책과 snapshot 생성
-- approval 정책과 대기/거절/승인 분기
-- retry, abort, timeout, late result 결정
-- recovery 이후 정책 재구성 연결
+- current architecture 기준 policy boundary mapping
+- 새 턴 수용 gate와 `SessionTurnLock` 설명
+- recovery marker cleanup 설명
+- `AgentRunner` retry와 abort 설명
+- provider retry ownership의 현재 한계 설명
+- subagent stale discard와 late-result 부분 구현 설명
+- 얕은 selection과 snapshot 증거 설명
+- future policy-engine gap 재분류
 
 ## 범위 제외
 
-- 관리자 승인 체인
-- 통계 기반 자동 최적화
+- 이번 PRD 문서 변경 안에서의 Rust code 또는 test 추가 변경
+- formal `PolicyDecisionEngine` 구현
+- formal approval과 permission matrix 구현
+- executor-facing tool schema와 policy surface 구현
+- provider retry ownership 재배치
 - 멀티유저 역할 기반 정책
-- provider 벤더별 상세 튜닝 UI
 
 ## 현재 구현 상태
 
+### 완료 판정
+
+Spec 007은 2026-05-14 기준 current architecture mapping으로 완료돼 닫혔다. 완료의 의미는 정책 관련 현재 구현 경계와 한계를 문서가 정확히 설명한다는 뜻이다. formal `PolicyDecisionEngine`이 완성됐다는 뜻이 아니다.
+
 ### 이미 반영된 것
 
-- recovery gate, retry/abort/late-result 판단, retry ceiling, resumed session 정리 정책이 `crates/shacs-core/src/runtime/agent_loop.rs`, `runner.rs`, `loop_control.rs`에 구현돼 있다.
-- provider retry, recovery 중 input/reentry 차단, duplicate reentry after resume, pending effect replay 복원이 테스트로 증명돼 있다.
-- tool reentry acceptance도 현재는 오케스트레이터 policy gate 아래에서 `ToolPending + RunTool` 조건으로 제한된다.
-- Spec016 matrix에서 Unit, Integration, SafetyRedaction이 FullSpec verified evidence로 승격돼 있다.
+- `AgentLoop::process_message`는 recovery marker 정리와 새 사용자 턴 처리의 현재 진입점이다.
+- `SessionTurnLock`은 같은 세션의 새 턴이 동시에 진행되지 않도록 막는 current ingress gate다.
+- `materialize_recovery_markers`는 `pending_user_turn`, `runtime_checkpoint` marker를 정리한다. 이전 열린 턴을 자동 성공으로 만들지 않고 interrupted assistant message 또는 placeholder message로 물질화한다.
+- `AgentRunner`는 provider 실행 실패 뒤 retry 또는 abort를 결정하는 현재 runtime 경계다.
+- `ProviderRetryDecision`은 `shacs-providers`에 존재한다. 이 점은 provider retry 구조의 증거이지만, 아직 orchestrator policy 소유의 중앙 decision API는 아니다.
+- subagent correlation과 stale discard는 late result policy의 일부를 구현한다.
+- `ProviderSelectionSnapshot`, `StaticProviderSelector`, `ContextBuilder`, `SpawnEnvelope` snapshot은 현재 selection과 context/policy snapshot 경계가 얕게나마 존재함을 보여준다.
+- `ask_user` interrupt는 사용자에게 묻는 현재 상호작용 표면이다. full approval과 permission matrix는 아니다.
 
 ### 아직 남은 것
 
-- approval/selection policy와 durable/turn-local policy state의 더 분리된 모델은 아직 얕다.
-- 정책 snapshot은 effect에 실리기 시작했지만, 더 풍부한 executor-facing policy surface는 아직 미구현이다.
-- 위 항목은 현재 MainOrchestrator 단일 정책 소유권 FullSpec slice의 blocker가 아니라 후속 policy surface 확장 범위다.
+- formal `PolicyState`, `PolicySnapshot`, `ApprovalState`
+- orchestrator 소유 `RetryDecision`, `LateResultDecision`
+- `plan`, `default`, `auto` capability matrix
+- approval request state, response correlation, timeout, late approval discard
+- provider, tool, subagent별 explicit timeout policy table
+- executor-facing tool schema와 policy snapshot surface
+- provider retry 판단의 orchestrator policy ownership 중앙화
+- durable policy state와 turn-local policy state의 명시적 타입 분리
+
+위 항목은 current architecture 완료의 blocker가 아니다. future policy engine 작업의 범위다.
 
 ### 로컬 근거
 
 - `crates/shacs-core/src/runtime/agent_loop.rs`
-- `crates/shacs-core/src/runtime/runner.rs`
 - `crates/shacs-core/src/runtime/loop_control.rs`
-- `crates/shacs-core/tests/runtime_loop.rs`
-- `crates/shacs-core/tests/runtime_agent.rs`
-
-## TDD 계획
-
-1. 열린 턴이 없을 때만 새 턴이 수용되는 테스트를 작성한다.
-2. permission mode와 capability 조합에 따라 approval 결정표가 동작하는 테스트를 작성한다.
-3. provider/tool 실패 결과별 retry 또는 abort 결정 테스트를 작성한다.
-4. late result가 현재 활성 correlation 집합 밖이면 폐기되는 테스트를 작성한다.
-5. recovery 후 durable policy state가 다시 구성되고 turn-local 판단은 승계되지 않는 테스트를 작성한다.
+- `crates/shacs-core/src/runtime/runner.rs`
+- `crates/shacs-core/src/runtime/subagent.rs`
+- `crates/shacs-core/src/runtime/lifecycle.rs`
+- `crates/shacs-core/src/runtime/context.rs`
+- `crates/shacs-providers`
+- 관련 runtime, recovery, subagent, provider selection 테스트
 
 ## 구현 웨이브
 
-### Wave 1. policy state와 결정 API 골격
+### Wave 1. current architecture inventory
 
-- durable policy state와 turn-local policy state를 서로 다른 타입 또는 필드 영역으로 분리한다.
-- `PolicyDecisionEngine`에 해당하는 평가 API를 도입한다.
-- 새 턴 수용, selection, approval, retry/abort, late result 판단 entrypoint를 고정한다.
+- 새 턴 gate를 `AgentLoop::process_message`와 `SessionTurnLock`로 매핑한다.
+- recovery cleanup을 `materialize_recovery_markers`, `pending_user_turn`, `runtime_checkpoint`로 매핑한다.
+- retry와 abort의 현재 위치를 `AgentRunner`로 매핑한다.
+- subagent stale discard와 selection snapshot 표면을 현재 증거로 정리한다.
 
-### Wave 2. 결정표 구현과 snapshot 생성
+### Wave 2. completion scope 재정의
 
-- spec의 결정표를 코드 분기와 테스트 케이스로 옮긴다.
-- provider invocation과 tool execution에 필요한 policy snapshot을 생성한다.
-- snapshot이 effect executor 계약일 뿐 정책 권한 위임이 아님을 코드 구조로 보장한다.
+- Spec 007 완료 기준을 formal policy engine에서 current architecture mapping으로 바꾼다.
+- `ProviderRetryDecision`이 provider crate에 남아 있다는 점을 완료 범위의 한계로 명시한다.
+- `ask_user` interrupt를 full approval matrix로 과장하지 않는다.
+- self-hosted, personal-use framing을 유지한다.
 
-### Wave 3. 실패 및 late result 처리 통합
+### Wave 3. future policy engine gap 보존
 
-- provider/tool/subagent 결과 재진입 시 retry, abort, alternate selection 분기를 연결한다.
-- 활성 correlation 집합 기반 late result 판별을 구현한다.
-- 이미 닫힌 턴 결과는 관찰 이벤트 후보로만 남기고 상태에는 반영하지 않는다.
+- formal `PolicyState`, `PolicySnapshot`, `ApprovalState`, `RetryDecision`, `LateResultDecision`을 future gap으로 남긴다.
+- `plan`, `default`, `auto` capability matrix를 future work로 남긴다.
+- explicit timeout policy table과 executor-facing policy surface를 future work로 남긴다.
+- provider retry ownership 중앙화를 future work로 남긴다.
 
-### Wave 4. recovery와 durable 재구성
+### Future Wave. formal policy engine
 
-- replay/resume 이후 durable policy state를 복원한다.
-- approval 대기 중 effect, retry count, timeout deadline 같은 turn-local 상태는 새 턴으로 넘기지 않는다.
-- recovery 중 열린 턴 정리와 policy decision 연계를 검증한다.
+이 wave는 현재 PRD의 완료 범위가 아니다. 후속 작업에서 필요하면 다음을 구현한다.
+
+- durable policy state와 turn-local policy state의 명시적 타입 분리
+- orchestrator-owned decision API
+- approval과 permission matrix
+- timeout, retry, abort, late-result 결정표
+- executor-facing tool schema와 policy snapshot
+- provider retry 판단의 중앙화 또는 input/decision 경계 분리
 
 ## Verification Evidence
 
-- 정책 결정표 단위 테스트
-- approval mode별 테스트
-- retry/abort/late result 테스트
-- snapshot 생성과 executor 경계 검증
-- durable/turn-local 경계에 대한 replay 검증
-- durable policy state와 turn-local policy state가 별도 snapshot으로 분리되는 unit 테스트
+현재 Spec 007 closure는 문서 정합성과 `runtime_loop`에 추가된 focused Rust test evidence로 검증한다. production Rust code, lockfile, 다른 spec은 변경하지 않는다.
+
+- `SPEC.md`가 formal policy engine 구현 완료를 주장하지 않는다.
+- `SPEC.md`가 current architecture evidence를 빠짐없이 반영한다.
+- `SPEC.md`가 future policy engine gap을 삭제하지 않고 후속 작업으로 재분류한다.
+- 이 PRD가 current state, implementation waves, verification evidence, risks, exit criteria를 current architecture 기준으로 설명한다.
+- 두 문서 모두 self-hosted, personal-use framing을 유지한다.
+- 두 문서 모두 운영자 조직이나 멀티유저 승인 workflow를 현재 범위로 들여오지 않는다.
+- focused runtime_loop test인 `subagent_spawn_inherits_snapshot_contract`가 `SpawnEnvelope`의 얕은 context/policy snapshot 상속 계약을 고정한다.
+
+2026-05-14 closure 증거로 다음 Rust 테스트를 둔다.
+
+- `session_turn_lock_rejects_duplicate_active_session`
+- `loop_pending_user_turn_recovery_closes_interrupted_prior_turn`
+- `loop_runtime_checkpoint_materializes_placeholders_and_clears_metadata`
+- `static_provider_selector_rejects_hot_swap_without_mutating_current_turn`
+- `subagent_spawn_inherits_snapshot_contract`
+- `runtime_runner_stops_on_ask_user_without_later_tools`
+- subagent stale result 계열 테스트
+
+코드 근거로는 다음 표면을 확인 대상으로 둔다.
+
+- `AgentLoop::process_message`
+- `SessionTurnLock`
+- `materialize_recovery_markers`
+- `pending_user_turn`
+- `runtime_checkpoint`
+- `AgentRunner`
+- `ProviderRetryDecision`
+- subagent correlation과 stale discard
+- `ProviderSelectionSnapshot`
+- `StaticProviderSelector`
+- `ContextBuilder`
+- `SpawnEnvelope`, 특히 `subagent_spawn_inherits_snapshot_contract`가 고정한 spawn 시점의 얕은 context/policy snapshot
+- `ask_user` interrupt
 
 ## Open Risks
 
-- 정책 판단이 여러 모듈로 흩어지면 ownership이 무너질 수 있다.
-- decision API가 과도하게 범용화되면 결정 시점이 흐려질 수 있다.
-- durable과 turn-local 경계가 약하면 recovery 후 잘못된 승인 상태가 남을 수 있다.
+- 문서가 formal policy engine을 current implementation처럼 말하면 현재 코드보다 앞서간 계약이 된다.
+- `ProviderRetryDecision` 위치를 숨기면 retry ownership이 이미 중앙화된 것처럼 오해될 수 있다.
+- `ask_user` interrupt를 approval matrix로 부르면 permission policy가 구현된 것처럼 보일 수 있다.
+- selection snapshot 증거를 과장하면 executor-facing policy surface가 이미 완성된 것처럼 보일 수 있다.
+- future gap을 삭제하면 후속 formal policy engine 작업의 범위가 사라진다.
 
 ## 종료 기준
 
-- 핵심 정책 판단이 `MainOrchestrator` 단일 경로로 수렴한다.
-- durable 정책과 turn-local 정책이 분리되어 replay와 resume 후에도 일관된다.
-- effect snapshot은 생성되지만 executor는 정책 확정자가 되지 않는다.
-- `docs/specs/007-main-orchestrator-policy/SPEC.md`의 결정표와 금지 패턴이 코드와 테스트에 반영된다.
+- `docs/specs/007-main-orchestrator-policy/SPEC.md`가 2026-05-14 기준 current architecture mapping으로 완료돼 닫혔음을 설명한다.
+- `docs/specs/007-main-orchestrator-policy/SPEC.md`가 formal policy engine gap을 future work로 남긴다.
+- 이 PRD가 현재 상태, 구현 웨이브, 검증 증거, 위험, 종료 기준을 current architecture 기준으로 갱신한다.
+- 두 문서가 full formal policy engine 구현 완료를 주장하지 않는다.
+- 두 문서가 self-hosted, personal-use 단일 사용자 framing을 유지한다.
+- Spec 007 closure는 focused runtime_loop test `subagent_spawn_inherits_snapshot_contract`와 문서 갱신으로 구성되며, production Rust code, lockfile, 다른 spec은 변경하지 않는다.

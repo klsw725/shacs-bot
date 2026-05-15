@@ -769,6 +769,28 @@ fn subagent_spawn_registers_active_task_and_cancels_by_session() -> Result<(), B
 }
 
 #[test]
+fn subagent_spawn_inherits_snapshot_contract() -> Result<(), Box<dyn Error>> {
+    let runtime = SubagentRuntime::new();
+    let outcome = runtime.spawn_from_request(SpawnRequest {
+        task: "Inspect docs".to_owned(),
+        label: Some("docs".to_owned()),
+        origin_channel: "telegram".to_owned(),
+        origin_chat_id: "chat-1".to_owned(),
+        session_key: "session-1".to_owned(),
+    })?;
+
+    if outcome.envelope.inherited_context_snapshot["origin_channel"] != "telegram"
+        || outcome.envelope.inherited_context_snapshot["origin_chat_id"] != "chat-1"
+        || outcome.envelope.inherited_policy_snapshot["capability_ceiling"] != "parent"
+        || outcome.envelope.parent_turn_id != "turn:session-1"
+        || outcome.envelope.parallelism_group != "session-1"
+    {
+        return Err(format!("subagent spawn snapshots drifted: {outcome:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn subagent_finish_publishes_synthetic_inbound_and_closes_active_task() -> Result<(), Box<dyn Error>>
 {
     let bus = MessageBus::new();
