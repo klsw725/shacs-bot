@@ -2,9 +2,13 @@
 
 ## 목표
 
-이 문서는 `docs/specs/012-runtime-services/SPEC.md`의 하위 실행 문서다. `channel discord-worker` foreground REST polling slice 이후, channel worker를 장기 실행 local runtime 구조로 승격하기 위한 후속 Wave를 고정한다.
+이 문서는 `docs/specs/012-runtime-services/SPEC.md`와 `docs/specs/012-runtime-services/prds/001-channel-worker-runtime.md`의 후속 실행 문서다. 기존 문서는 durable metadata store, pending queue, retry/backoff controller, supervisor, broker/router를 다음 필수 구현처럼 제시했다. 현재 문서는 2026-05-17 기준 이미 구현된 channel runtime follow-up 범위를 Spec 012 current architecture 종료 증거로 정리하고, durable runtime 확장은 명시적인 future gap으로 둔다.
 
-목표는 Discord 전용 worker를 그대로 키우는 것이 아니라, self-hosted / personal-use 환경에서 여러 channel transport가 같은 runtime supervisor, durable metadata, pending queue, approval broker, outbound router 경계를 공유하게 만드는 것이다. 외부 채널은 transport와 delivery를 소유하지만, session truth, approval truth, assistant final output 확정은 여전히 core/session store가 소유한다.
+이번 PRD의 목표는 다음과 같다.
+
+1. 현재 `shacs-bot run`과 channel runtime 후속 구현의 실제 상태를 기록한다.
+2. 다음 작업을 current architecture 문서 정렬과 작은 local runtime 개선 중심으로 제한한다.
+3. durable supervisor, webhook hosting, transactional metadata, multi-process owner coordination을 완료 주장이나 기본 범위로 두지 않는다.
 
 ## SPEC 입력
 
@@ -17,281 +21,127 @@
   - `docs/specs/002-command-event-effect/SPEC.md`
   - `docs/specs/006-session-store/SPEC.md`
   - `docs/specs/007-main-orchestrator-policy/SPEC.md`
-  - `docs/specs/011-subagent-runtime/SPEC.md`
-- 교차 의존:
   - `docs/specs/010-host-safety-permissions-and-secrets/SPEC.md`
-  - `docs/specs/013-user-interfaces-and-session-ux/SPEC.md`
-  - `docs/specs/014-observability-diagnostics-and-inspection/SPEC.md`
-  - `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`
-  - `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`
+  - `docs/specs/011-subagent-runtime/SPEC.md`
 
 ## Dependency Cut
 
-- 001은 one-shot connector와 foreground assistant worker의 역할 분리를 제공한다.
-- 001은 `channel discord-worker`가 core command/projection 경계를 통해 turn submit, wait, approval, final reply를 수행하는 최소 vertical slice를 제공한다.
-- 012는 service-owned metadata, dedupe, retry, stale reentry, fact-only service signal의 owner 경계를 제공한다.
+- PRD 000은 process-local reentry, queueing, lock, cancellation/status tracking의 현재 의미를 제공한다.
+- PRD 001은 local channel runtime process와 `ChannelManager` 중심 경계를 제공한다.
 - 013은 TUI, local API, channel worker가 같은 session projection과 command 의미를 공유해야 함을 제공한다.
-- 014는 worker state, retry/backoff, delivery failure를 diagnostics/inspect surface에 안전하게 노출하는 기준을 제공한다.
-- 015는 long-running local runtime owner, heartbeat, stale owner, safe shutdown, recovery의 기준을 제공한다.
-- 016은 후속 Wave가 release gate와 coverage matrix에 executable evidence를 남겨야 함을 제공한다.
+- 014는 status, dispatch error, retry attempt, metadata hint를 diagnostics surface에 노출할 때의 기준을 제공한다.
+- 015는 process lifecycle과 upgrades를 다루지만, 현재 문서는 formal owner lease나 stale owner recovery가 구현됐다고 보지 않는다.
+- 016은 release gate와 coverage matrix가 executable evidence를 가져야 함을 제공한다.
 
 ## 범위
 
-- durable worker metadata store
-- unified local runner 또는 `shacs-bot run`
-- retry/backoff policy for channel transport
-- durable pending-message queue
-- multi-channel worker abstraction
-- Gateway / long-running transport abstraction
-- worker state diagnostics와 verification evidence 계획
+- `shacs-bot run`에서 WebSocket과 external channel transport가 함께 뜨는 현재 상태.
+- Discord Gateway, Slack Socket Mode, Telegram long polling, Email IMAP polling, WhatsApp bridge WebSocket의 current transport family.
+- `MessageBus`와 `ChannelManager` 경계를 통한 inbound/outbound dispatch.
+- process-local same-session follow-up queue.
+- runtime metadata JSON의 best-effort cursor, diagnostic, delivery hint.
+- progress projection 차이. WebSocket은 `delta`/`stream_end`와 final `message`, Telegram/Discord/Slack은 preview update, Email/WhatsApp은 final-only.
+- platform normalizer와 outbound helper의 session metadata, reply context, content contract 보존.
+- 남은 future durable runtime work 정리.
 
 ## 범위 제외
 
-- 멀티테넌트 gateway 운영
-- 조직 단위 관리자 inbox
-- public webhook hosting 의무화
-- Slack/Discord/Telegram/Email 바깥의 추가 채널
-- 외부 채널 또는 metadata store가 session truth를 직접 소유하는 구조
-- provider/tool runtime을 channel transport 내부에 숨기는 구조
-- attachment download와 streaming edit의 상세 구현 계약
-
-Attachment download와 streaming edit은 사용자-visible future work지만, 이 PRD에서는 후속 PRD가 필요한 별도 설계 항목으로만 남긴다. attachment는 artifact, permission, redaction, size/type 제한을 먼저 고정해야 하고, streaming edit은 partial chunk가 session truth가 아니라 transport-level provisional UI라는 점을 먼저 고정해야 한다.
+- distributed task queue.
+- multi-node leader election.
+- organization inbox.
+- operator dashboard.
+- multi-tenant webhook fan-out.
+- public webhook hosting obligation.
+- multi-user task distribution.
+- vendor-specific queue/cron product dependency.
+- Slack, Discord, Telegram, Email, WhatsApp 바깥의 추가 channel.
+- hosted webhook, Telegram webhook, provider-specific operational hardening.
+- attachment download와 streaming edit 상세.
 
 ## 현재 구현 상태
 
-### 이미 반영된 것
+### 현재 아키텍처 매핑
 
-- `channel telegram-poll`과 `channel discord-poll`은 one-shot mailbox connector다.
-- `shacs-bot run`은 WebSocket server와 Telegram/Discord/Slack/Email/WhatsApp bridge transport를 같은 local runtime process 안에서 시작한다.
+- `shacs-bot run`은 WebSocket server와 Telegram, Discord, Slack, Email, WhatsApp bridge transport를 같은 local runtime process 안에서 시작한다.
 - Discord Gateway, Slack Socket Mode, Telegram long polling, Email IMAP polling, WhatsApp bridge WebSocket은 현재 구현된 long-running transport family다.
-- External runtime은 `MessageBus`와 `ChannelManager` 경계를 통해 inbound/outbound를 전달하고, channel adapter lifecycle이 worker start/stop을 관리한다.
-- 같은 session key의 accepted inbound는 process-local `SessionTurnLock`과 in-memory pending follow-up queue로 직렬화된다. Shared lock이 이미 busy이면 external inbound는 pending queue로 되돌려져 이후 재시도된다.
-- WebSocket progress는 coalesced `delta`/`stream_end` event와 최종 `message` event로, Telegram/Discord/Slack progress는 preview update로 전달된다. Email/WhatsApp은 final-only다.
-- Telegram offset, Discord REST last id, Discord Gateway resume state, Email UIDVALIDITY/seen UID, outbound delivery status는 runtime metadata JSON에 best-effort로 저장된다.
+- external runtime은 `MessageBus`와 `ChannelManager` 경계를 통해 inbound/outbound를 전달한다.
+- channel adapter lifecycle은 `ChannelManager`의 start/stop, status, lifecycle error reporting으로 관리된다.
+- outbound dispatch는 channel adapter를 통해 수행되고, retry attempt와 dispatch error는 manager/metadata 경계에서 관찰된다.
+- same-session accepted inbound는 process-local `SessionTurnLock`과 in-memory pending follow-up queue로 직렬화된다.
+- shared lock conflict가 있으면 external inbound는 deferred/pending 처리로 돌아가 이후 재시도된다.
+- runtime metadata JSON은 Telegram offset, Discord REST last id, Discord Gateway resume state, Email UIDVALIDITY/seen UID, outbound delivery status를 best-effort로 저장한다.
+- WebSocket progress는 coalesced `delta`, `stream_end`, final `message` event로 전달된다.
+- Telegram, Discord, Slack progress는 preview update로 전달된다. Email과 WhatsApp은 final-only다.
+- platform normalizer와 outbound helper는 session metadata, reply context, content contract를 보존한다.
 
-### 아직 남은 것
+### partial 또는 formal-looking but incomplete
 
-- retry/backoff state가 durable metadata store에 저장되지 않는다.
-- process-local pending follow-up queue는 durable pending-message queue, cancellation persistence, restart replay가 아니다.
-- runtime metadata JSON은 cursor/dedupe/diagnostic hint일 뿐, transaction이나 exactly-once delivery를 보장하지 않는다.
-- hosted webhook, Telegram webhook, webhook-like ingest 운영 hardening은 아직 없다.
-- channel-neutral `ApprovalBroker`와 `OutboundRouter`가 없다.
+- retry/backoff state는 durable metadata store에 저장되지 않는다.
+- process-local pending follow-up queue는 durable pending-message queue가 아니다.
+- cancellation persistence와 restart replay는 없다.
+- runtime metadata JSON은 transaction이나 exactly-once delivery를 보장하지 않는다.
+- channel-neutral `ApprovalBroker`와 `OutboundRouter`는 없다.
+- formal `RuntimeSupervisor`, owner lease/heartbeat, stale owner recovery, safe shutdown layer는 없다.
+- multi-process TUI/API/channel owner coordination은 아직 해결된 상태가 아니다.
 
-### 로컬 근거
+### future gap
 
-- `crates/shacs-cli/src/lib.rs`
-- `crates/shacs-api/src/lib.rs`
-- `crates/shacs-channels/src/lib.rs`
-- `crates/shacs-channels/tests/common.rs`
-- `crates/shacs-core/src/runtime/agent_loop.rs`
-- `crates/shacs-core/src/runtime/loop_control.rs`
-- `crates/shacs-core/src/runtime/lifecycle.rs`
-- `crates/shacs-core/tests/runtime_loop.rs`
-- `crates/shacs-core/tests/runtime_agent.rs`
+- durable queue와 durable scheduler.
+- formal wake command envelope.
+- formal service command envelope와 typed dedupe key/retry state.
+- durable pending-message queue.
+- cancellation persistence와 restart replay.
+- transactional service metadata store.
+- durable retry/backoff scheduler.
+- channel-neutral `ApprovalBroker`와 `OutboundRouter`.
+- formal `RuntimeSupervisor`, owner lease/heartbeat, stale owner recovery, safe shutdown.
+- hosted webhook, Telegram webhook, provider-specific operational hardening.
+- attachment download와 streaming edit 상세.
 
-## 목표 아키텍처
+## waves / next work
 
-```text
-shacs-bot run
-  ├─ RuntimeSupervisor
-  │   ├─ owner lease / heartbeat
-  │   ├─ worker lifecycle
-  │   ├─ retry/backoff scheduling
-  │   └─ safe shutdown / stale owner recovery
-  ├─ ControlPlane
-  │   ├─ TUI client
-  │   ├─ Local API client
-  │   └─ one-shot CLI command client
-  ├─ WorkerMetadataStore
-  │   ├─ cursors
-  │   ├─ pending external message mappings
-  │   ├─ outbound delivery receipts
-  │   └─ retry/backoff observations
-  ├─ PendingMessageQueue
-  ├─ ChannelWorkers
-  │   ├─ DiscordWorker
-  │   ├─ TelegramWorker
-  │   └─ future Slack / Email workers
-  ├─ ChannelTransports
-  │   ├─ REST polling
-  │   ├─ Gateway / Socket Mode
-  │   └─ webhook-like ingest / IMAP polling
-  ├─ SessionTurnDriver
-  ├─ ApprovalBroker
-  └─ OutboundRouter
-```
+### Wave 1. Documentation alignment
 
-## 역할 경계
+- PRD 000, 001, 002와 Spec 012가 process-local runtime mapping을 같은 용어로 설명하게 맞춘다.
+- durable queue, exactly-once, transactional metadata, formal supervisor 표현을 future gap으로 옮긴다.
+- self-hosted/personal-use 범위 밖 platform 문장을 제거하거나 범위 제외로 옮긴다.
 
-### WorkerMetadataStore
+### Wave 2. Current runtime evidence 유지
 
-WorkerMetadataStore가 해야 하는 일:
+- `MessageBus`, `SessionTurnLock`, `LoopTaskRegistry`, `ChannelManager`, `ExternalSessionTurnCoordinator`, runtime metadata JSON, platform normalizer 테스트 이름을 문서 evidence에 연결한다.
+- API/WebSocket local surface evidence는 health/models/chat/WebSocket/streaming tests로 요약한다.
+- verification matrix에서 durable runtime 완료 증거처럼 읽히는 표현을 피한다.
 
-- channel worker cursor를 저장한다.
-- external message id와 submitted turn id의 pending mapping을 저장한다.
-- approval prompt delivery state를 저장한다.
-- outbound reply delivery receipt와 failure를 저장한다.
-- retry/backoff observation을 diagnostics가 읽을 수 있게 저장한다.
+### Wave 3. Small local runtime improvements only
 
-WorkerMetadataStore가 해서는 안 되는 일:
+- current architecture 안에서 필요한 작업은 status/error wording, metadata diagnostics, progress projection 설명 개선처럼 local runtime에 닿는 작은 작업으로 제한한다.
+- durable retry/backoff, webhook hosting, supervisor owner lease는 별도 설계 결정 전까지 시작하지 않는다.
 
-- session truth를 대체한다.
-- assistant final output을 확정한다.
-- approval response를 채택한다.
-- raw secret 또는 provider token을 저장한다.
+### Wave 4. Formal durable runtime decision
 
-### RuntimeSupervisor
+- 나중에 필요성이 확인되면 durable queue, scheduler, wake envelope, typed dedupe/retry, transactional metadata, restart replay를 별도 PRD로 연다.
+- 그 결정은 self-hosted personal runtime에 정말 필요한지 먼저 확인해야 한다.
 
-RuntimeSupervisor가 해야 하는 일:
+## Verification Evidence
 
-- runtime owner lease와 heartbeat를 유지한다.
-- worker start, stop, restart, backoff를 관리한다.
-- safe shutdown 시 metadata flush를 유도한다.
-- stale owner와 interrupted runtime을 inspect/recovery surface에 노출한다.
-- TUI, local API, channel worker의 mutation 경계를 단일 owner 전략 아래 정렬한다.
+- Bus: `bus_preserves_fifo_and_sizes_for_inbound_and_outbound`, `bounded_bus_reports_capacity_for_both_queues`, `cloned_bus_handles_share_queues_and_blocking_consumers_wake`, `drain_matching_limits_matches_and_preserves_retained_fifo`.
+- Loop/control: `loop_priority_new_cancels_registered_task_before_clearing_session`, `loop_priority_status_reports_registered_async_task`, `session_turn_lock_rejects_duplicate_active_session`, `loop_observes_registered_cancellation_token_before_provider_call`, `adapter_reports_duplicate_session_turn_as_retryable_busy_error`.
+- Runner/progress: `stream_coalescer_batches_text_deltas_without_session_persistence`, `runtime_runner_drains_mid_turn_injections_between_iterations`, `runtime_runner_caps_mid_turn_injection_cycles`.
+- Channel worker/metadata: `builtin_live_worker_descriptors_mark_websocket_ready_and_external_workers_gated`, `manager_tracks_lifecycle_retries_and_stream_delta_dispatch`, `manager_records_dispatch_error_and_clears_after_success`, `manager_lifecycle_continues_after_adapter_errors`, `external_transport_specs_respect_enabled_and_external_only_runtime`, `external_outbound_channel_manager_dispatches_via_channel_adapters`, `external_outbound_channel_manager_preserves_streaming_frames`, `external_session_turn_coordinator_queues_same_session_followups`, `external_session_turn_coordinator_defers_shared_lock_conflicts`, `worker_metadata_updates_preserve_delivery_history`, `platform_outbound_helpers_preserve_reply_context`, `email_uid_validity_change_clears_seen_uid_cache`, `email_runtime_requires_consent_and_allow_from_for_imap`, `platform_normalizers_preserve_session_metadata_and_content_contracts`, `whatsapp_bridge_normalizes_auth_dedupe_group_policy_media_and_outbound_frames`.
+- API/local surface: `crates/shacs-api/src/lib.rs`의 health, models, chat, WebSocket, streaming tests를 local API/WebSocket runtime evidence로 요약한다.
 
-RuntimeSupervisor가 해서는 안 되는 일:
-
-- provider/tool execution 결과를 임의 생성한다.
-- session store replay 없이 runtime-local cache를 truth로 사용한다.
-- external transport availability를 session completion으로 승격한다.
-
-### RetryBackoffController
-
-RetryBackoffController가 해야 하는 일:
-
-- 429, 5xx, timeout, transport failure를 retryable/non-retryable로 분류한다.
-- `Retry-After` 같은 provider hint를 보존한다.
-- exponential backoff와 jitter를 적용한다.
-- retry exhaustion을 diagnostics에 노출한다.
-
-RetryBackoffController가 해서는 안 되는 일:
-
-- retry attempt를 turn policy retry count로 섞는다.
-- outbound retry 성공을 session truth로 승격한다.
-- non-idempotent send를 중복 전송하게 만든다.
-
-### PendingMessageQueue
-
-PendingMessageQueue가 해야 하는 일:
-
-- 열린 turn 중 도착한 accepted inbound message를 durable queue에 저장한다.
-- external message id 기준 dedupe를 적용한다.
-- 현재 turn 완료 뒤 FIFO 또는 명시된 ordering policy로 다음 message를 submit한다.
-- queue 상태와 blocked reason을 inspect/diagnostics에 노출한다.
-
-PendingMessageQueue가 해서는 안 되는 일:
-
-- session이 없는데 임의로 session을 생성한다.
-- 열린 turn이 있는데 새 turn을 조용히 강제 개시한다.
-- queued message를 preserved context에 몰래 합친다.
-
-### ChannelWorker abstraction
-
-ChannelWorker가 해야 하는 일:
-
-- provider-specific payload를 normalized inbound event로 변환한다.
-- sender/channel allowlist와 mention/open policy를 적용한다.
-- channel-specific outbound send/edit/reply를 수행한다.
-- cursor, delivery receipt, retry observation을 WorkerMetadataStore에 기록한다.
-- core command/projection 경계를 통해 SessionTurnDriver, ApprovalBroker, OutboundRouter와 연결한다.
-
-ChannelWorker가 해서는 안 되는 일:
-
-- provider/tool execution 직접 수행
-- `TurnCompleted` 직접 생성
-- approval policy 직접 결정
-- raw transport payload를 session truth에 직접 저장
-
-### GatewayTransport abstraction
-
-GatewayTransport가 해야 하는 일:
-
-- long-running connection lifecycle을 관리한다.
-- heartbeat, reconnect, resume, backoff를 수행한다.
-- inbound event를 durable queue 또는 worker ingress boundary로 넘긴다.
-- shutdown과 runtime ownership을 따른다.
-- channel-specific protocol detail을 adapter 내부로 격리한다.
-
-GatewayTransport가 해서는 안 되는 일:
-
-- provider execution 완료까지 event handler를 붙잡는다.
-- session store를 직접 mutate한다.
-- Discord 전용 Gateway 모델을 모든 channel에 강제한다.
-
-Discord Gateway는 이 abstraction의 첫 구현 후보일 뿐이다. Slack Socket Mode, Telegram long polling 또는 webhook-like ingest, Email IMAP polling도 같은 long-running transport family로 다뤄야 한다.
-
-## 구현 웨이브
-
-### Wave 1. Durable worker metadata
-
-- cursor file 경계를 WorkerMetadataStore로 승격한다.
-- external message id, submitted turn id, reply target, outbound delivery state를 durable하게 저장한다.
-- crash after fetch before submit, crash after submit before reply, duplicate external id를 테스트한다.
-- metadata store가 session truth를 대체하지 못하도록 타입과 테스트로 막는다.
-
-### Wave 2. Unified local runner
-
-- `shacs-bot run` 또는 동등한 local runtime owner command를 추가한다.
-- runtime owner lease, heartbeat, safe shutdown, stale recovery를 연결한다.
-- TUI/API/channel worker가 같은 owner process 또는 control plane 아래에서 mutation을 수행하도록 정렬한다.
-- active owner 중복 실행과 stale owner recovery를 테스트한다.
-
-### Wave 3. Retry/backoff policy
-
-- Discord REST polling/send에서 429, 5xx, timeout, transport failure를 분류한다.
-- `ProviderHttpResponse` 또는 channel response metadata에 retry hint를 보존한다.
-- retry/backoff state를 WorkerMetadataStore와 diagnostics에 기록한다.
-- retry exhaustion, duplicate outbound 방지, non-retryable error 처리를 테스트한다.
-
-### Wave 4. Durable pending-message queue
-
-- busy 안내 + cursor 미전진만 있는 현재 정책을 durable pending queue로 확장한다.
-- 열린 turn 중 도착한 accepted message를 queue에 넣고 current turn 완료 뒤 순서대로 submit한다.
-- queue dedupe key, ordering, cancellation, stale session handling을 구현한다.
-- queued message가 session truth를 직접 바꾸지 않는지 테스트한다.
-
-### Wave 5. Multi-channel worker abstraction
-
-- Discord worker의 common turn-driving logic을 ChannelWorker / SessionTurnDriver / ApprovalBroker / OutboundRouter 경계로 분리한다.
-- Telegram worker를 두 번째 구현 후보로 삼아 channel-neutral contract를 검증한다.
-- Discord 2000자, Telegram 4096자 같은 outbound limit을 channel adapter별 policy로 분리한다.
-- common worker contract test를 추가한다.
-
-### Wave 6. Gateway / long-running transport abstraction
-
-- GatewayTransport abstraction을 추가한다.
-- Discord Gateway를 첫 adapter 후보로 구현하되, abstraction은 Discord 전용이 아니어야 한다.
-- heartbeat, reconnect, resume, identify/rate-limit, shutdown을 테스트한다.
-- inbound handler는 durable queue enqueue까지만 수행하고 provider execution을 기다리지 않게 만든다.
-
-## Verification Evidence 계획
-
-- 단위 테스트: WorkerMetadataStore cursor/pending/outbound receipt roundtrip
-- 내구성 테스트: crash after fetch before submit, crash after submit before reply, restart after outbound failure
-- 중복 테스트: duplicate external message id, duplicate approval response, duplicate outbound retry
-- lifecycle 테스트: active owner duplicate start rejection, stale owner recovery, safe shutdown metadata flush
-- retry 테스트: 429 retry-after, 5xx backoff, timeout backoff, retry exhaustion diagnostics
-- queue 테스트: open turn 중 pending enqueue, FIFO submit, cancellation, stale session rejection
-- abstraction 테스트: Discord/Telegram worker contract parity
-- Gateway 테스트: heartbeat timeout, reconnect, resume, identify backoff, handler enqueue-only
-- release gate: 새 테스트와 coverage matrix evidence locator는 실제 Cargo command 목록과 추가되는 runner path가 있을 때만 연결한다.
+이 증거는 current local runtime과 channel follow-up behavior를 뒷받침한다. durable queue, durable scheduler, transactional metadata, formal supervisor의 완료 증거는 아니다.
 
 ## Open Risks
 
-- service metadata가 session truth처럼 오용될 수 있다.
-- pending queue가 사용자 메시지를 영구 보류할 수 있다.
-- unified runtime owner가 기존 CLI/TUI/API mutation UX와 충돌할 수 있다.
-- retry/backoff가 duplicate outbound delivery를 만들 수 있다.
-- Gateway reconnect/resume 오류가 silent message loss로 이어질 수 있다.
-- channel-neutral abstraction을 너무 일찍 일반화하면 Discord/Telegram의 실제 transport 차이를 숨길 수 있다.
+- 문서가 다시 future durable runtime을 현재 요구사항처럼 말하면 구현 상태와 제품 범위가 어긋난다.
+- process-local follow-up queue를 restart-safe queue로 읽으면 장애 복구 기대가 잘못 잡힌다.
+- metadata JSON을 exactly-once ledger로 읽으면 channel duplicate, cursor reset, delivery retry 설명이 틀어진다.
+- hosted webhook이나 multi-process owner coordination을 기본 범위로 넣으면 개인용 self-hosted 제품보다 platform 운영 제품처럼 변한다.
 
 ## 종료 기준
 
-- restart 이후 cursor, pending message, outbound delivery state가 복구된다.
-- `shacs-bot run` 또는 동등한 unified owner 전략이 구현되거나 명시적 제한으로 고정된다.
-- retry/backoff와 pending queue가 session truth를 직접 변경하지 않는다.
-- Discord worker logic이 channel-neutral worker 경계로 분리되어 Telegram worker 같은 두 번째 구현을 받을 수 있다.
-- GatewayTransport는 provider execution을 직접 수행하지 않고 durable ingress boundary까지만 책임진다.
-- diagnostics/inspect surface에서 worker lifecycle, queue, retry, delivery failure를 설명할 수 있다.
-- release-gate와 coverage matrix가 후속 Wave evidence를 추적한다.
+- PRD 002는 현재 `shacs-bot run` channel runtime follow-up 구현을 Spec 012 current architecture 종료 범위의 local runtime mapping으로 설명한다.
+- PRD 002는 durable queue, scheduler, wake envelope, retry/backoff scheduler, transactional metadata, supervisor, broker/router를 future gap으로 둔다.
+- PRD 002는 public webhook hosting, organization inbox, operator dashboard, multi-tenant fan-out, extra channel expansion을 현재 범위에서 제외한다.
+- PRD 002는 Spec 012가 formal durable runtime으로 완료됐다고 주장하지 않는다.

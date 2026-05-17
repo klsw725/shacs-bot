@@ -2,9 +2,13 @@
 
 ## 목표
 
-이 문서는 `docs/specs/012-runtime-services/SPEC.md`의 하위 실행 문서다. queue, scheduler, mailbox, hooks, background worker를 제품 기능이 아니라 재진입 보조 서비스로 다루며, dedupe, retry, wake, failure-safe reentry 구현 계획을 고정한다.
+이 문서는 `docs/specs/012-runtime-services/SPEC.md`의 하위 실행 문서다. 기존 문서는 queue, scheduler, mailbox, hooks, background worker의 durable service command envelope와 dedupe/retry/wake 계약이 이미 필요한 완료 조건처럼 보였다. 현재 문서는 그 표현을 낮추고, 2026-05-17 기준 Spec 012를 process-local runtime 경계의 current architecture mapping으로 닫는다.
 
-이번 PRD의 목표는 어떤 서비스도 세션 truth를 직접 건드리지 못하게 하면서, 중복 전달, 재시작, 지연 전달 상황에서도 오케스트레이터가 안정적으로 같은 결론을 내리게 만드는 것이다.
+이번 PRD의 목표는 다음과 같다.
+
+1. 현재 구현된 reentry 관련 runtime 경계를 정확히 적는다.
+2. process-local queue와 metadata JSON을 durable queue나 exactly-once ledger로 오해하지 않게 한다.
+3. future durable service envelope, dedupe key, retry state, wake contract를 남은 작업으로 둔다.
 
 ## SPEC 입력
 
@@ -14,119 +18,117 @@
   - `docs/specs/002-command-event-effect/SPEC.md`
   - `docs/specs/006-session-store/SPEC.md`
   - `docs/specs/007-main-orchestrator-policy/SPEC.md`
-  - `docs/specs/011-subagent-runtime/SPEC.md`
-- 교차 의존:
   - `docs/specs/010-host-safety-permissions-and-secrets/SPEC.md`
-  - `docs/specs/013-user-interfaces-and-session-ux/SPEC.md`
-  - `docs/specs/014-observability-diagnostics-and-inspection/SPEC.md`
-  - `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`
-  - `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`
+  - `docs/specs/011-subagent-runtime/SPEC.md`
 
 ## Dependency Cut
 
-- 002는 service command envelope와 correlation 규약의 기반이 된다.
-- 006은 replay 가능한 truth source를 제공하므로 서비스 메타데이터가 truth를 대체하면 안 된다.
-- 007은 wake 이후 resume, ignore, retry, reject 결정을 가진다.
-- 011은 subagent completion과 background completion이 같은 reentry 규약 아래 돌아와야 함을 요구한다.
-- 015는 service restart와 interrupted lifecycle에서 stale wake가 정상 가능성임을 제공한다.
+- 002는 command/effect/event 경계를 제공한다. 현재 runtime service mapping은 이 경계를 우회하면 안 된다.
+- 006은 replay 가능한 session truth를 제공한다. runtime metadata JSON은 이 truth를 대체하지 않는다.
+- 007은 active turn과 follow-up을 오케스트레이터 경계 안에서 판단하게 한다.
+- 010은 외부 channel, email, network, secret 입력을 self-hosted 사용자 안전 범위 안에 묶는다.
+- 011은 subagent와 background-like task가 parent runtime 아래로 회수되어야 함을 제공한다.
 
 ## 범위
 
-- queue, scheduler, mailbox, hooks, background worker의 emit 범위 구현
-- service-owned metadata와 session truth 경계 구현
-- dedupe key와 idempotent reentry 처리 구현
-- wake command와 resume 판단 입력 구현
-- service restart 이후 duplicate delivery, stale wake 처리 구현
-- 관측과 inspect를 위한 correlation metadata 연결
-- mailbox adapter 범위를 Slack, Discord, Telegram, Email, WhatsApp bridge 다섯 채널로 제한
-- Email mailbox adapter는 이미 추출된 메시지 필드 정규화까지만 포함하고 IMAP/SMTP/MIME/network/provider-specific API는 제외
+- `MessageBus`의 process-local inbound/outbound FIFO, bounded queue, blocking consume wake, matching drain 의미 정리.
+- `SessionTurnLock`, `CancellationToken`, `LoopTaskRegistry`의 process-local same-session guard, cancellation, status tracking 의미 정리.
+- command router priority와 normal turn boundary 정리.
+- external inbound same-session follow-up queue 정리.
+- runtime metadata JSON을 cursor, diagnostic, delivery hint로 정리.
+- 현재 구현 증거와 남은 future durable runtime 작업 분리.
 
 ## 범위 제외
 
-- 특정 벤더 큐나 cron 선택
-- Slack, Discord, Telegram, Email, WhatsApp bridge 바깥의 추가 채널 adapter
-- 관리자 inbox UI
-- 멀티노드 스케줄러 합의
-- 외부 조직용 webhook 운영 시스템
+- distributed task queue.
+- multi-node leader election.
+- organization inbox.
+- operator dashboard.
+- multi-tenant webhook fan-out.
+- public webhook hosting obligation.
+- multi-user task distribution.
+- vendor-specific queue/cron product dependency.
+- Slack, Discord, Telegram, Email, WhatsApp 바깥의 추가 channel.
 
 ## 현재 구현 상태
 
-### 이미 반영된 것
+### 현재 아키텍처 매핑
 
-- queue, scheduler, mailbox, hooks, background worker service command envelope와 dedupe 경계가 core service 모델에 구현돼 있다.
-- service reentry는 fact-only command로 처리되며 duplicate delivery, stale wake, metadata loss 이후 current turn 보호, non-mailbox dedupe marker replay가 검증된다.
-- Slack, Email adapter는 network-free normalizer 또는 strict approval parser 범위로 구현돼 있고, Telegram과 Discord는 CLI one-shot polling connector를 통해 같은 mailbox 경계로 라우팅된다. 장기 실행 channel worker runtime은 후속 PRD 범위로 확장됐으며, 현재 CLI runtime은 WebSocket과 Slack/Discord/Telegram/Email/WhatsApp bridge transport를 `MessageBus`와 `ChannelManager` 경계로 연결한다. 외부 agent processor와 API/CLI path는 같은 process-local `SessionTurnLock`을 공유해 session key별 turn을 직렬화하고, 같은 session follow-up을 in-memory pending queue에 보관해 현재 turn 뒤에 이어 처리한다. 이 queue와 lock은 process-local이며 PRD 002 Wave 4의 durable pending-message queue, cancellation persistence, restart replay를 의미하지 않는다. Built-in slash command는 `CommandRouter`에서 priority/exact/prefix로 분류되고 `/status`, `/stop`, `/restart` priority command만 active turn lock 전 처리된다. Exact/prefix command는 일반 user turn과 같은 lock 경계를 통과한다. Agent runner는 mid-turn injection을 model iteration 사이와 finalization 직전에 drain하되 cycle cap으로 무한 follow-up을 막는다. WebSocket provider progress는 coalesced `delta`/`stream_end` event로 노출하되 최종 `message` event를 authoritative answer로 유지한다. Telegram/Discord/Slack provider progress는 in-process preview message로 전송하고 최종 assistant answer로 같은 message를 갱신한다. Telegram topic, Slack thread, Discord thread, Email subject/reply context는 outbound reply metadata로 이어진다. Telegram offset, Discord REST last id, Discord Gateway resume state, Email IMAP seen UID + UIDVALIDITY hint, outbound delivery status는 runtime metadata JSON으로 best-effort 보존하지만 durable queue나 exactly-once delivery를 의미하지 않는다.
-- accepted service/mailbox events는 `service_correlation_id`를 observability projection으로 보존한다.
+- `MessageBus`는 process-local inbound/outbound queue다. FIFO, bounded capacity, blocking consumer wake, matching drain, queue size helper를 제공한다.
+- `SessionTurnLock`은 같은 session의 active turn 중복을 막는다. duplicate active session은 retryable busy error로 보고될 수 있다.
+- `LoopTaskRegistry`와 `CancellationToken`은 active loop task의 status와 cancellation을 process-local로 추적한다.
+- command router는 priority, exact, prefix command를 분리한다. `/status`, `/stop`, `/restart` 계열 priority command는 active turn lock 앞에서 처리될 수 있고, exact/prefix command는 normal turn boundary를 따른다.
+- external inbound same-session follow-up은 `ExternalSessionTurnCoordinator`의 process-local pending queue를 통해 직렬화된다.
+- runner는 mid-turn injection을 iteration 사이에서 drain하고 cycle을 cap한다.
+- progress projection은 persistence truth가 아니다. `delta`, `stream_end`, preview update는 진행 표시이며 final answer가 authoritative output이다.
 
-### 아직 남은 것
+### partial 또는 formal-looking but incomplete
 
-- hosted webhook, Telegram webhook, provider-specific 운영 hardening은 이 PRD 범위 밖이다. Discord REST one-shot polling CLI는 현재 포함 범위다. 장기 실행 assistant channel worker와 unified runtime supervisor 설계는 `docs/specs/012-runtime-services/prds/001-channel-worker-runtime.md`에서 별도 확장 범위로 다룬다.
-- service metadata와 session truth 경계는 유지되지만, 장기 운영용 metadata storage 고도화는 아직 별도 확장 범위다.
+- service command envelope라는 방향은 남아 있지만, 모든 service가 typed command envelope, typed dedupe key, retry state를 공유하는 상태는 아니다.
+- wake/resume이라는 모델은 유용하지만, durable scheduler와 formal wake command envelope는 없다.
+- metadata JSON은 Telegram offset, Discord REST last id/Gateway resume state, Email UIDVALIDITY/seen UID, outbound delivery status를 best-effort로 보존한다. 이것은 transactional store가 아니다.
+- outbound retry는 `ChannelManager`와 adapter dispatch 수준의 attempt 관찰이다. durable retry/backoff scheduler가 아니다.
+- follow-up queue는 process-local이다. durable pending-message queue, cancellation persistence, restart replay가 아니다.
 
-### 로컬 근거
+### future gap
 
-- `crates/shacs-command/src/lib.rs`
-- `crates/shacs-command/tests/router.rs`
-- `crates/shacs-core/src/runtime/agent_loop.rs`
-- `crates/shacs-core/src/runtime/runner.rs`
-- `crates/shacs-core/tests/runtime_loop.rs`
-- `crates/shacs-core/tests/runtime_agent.rs`
-- `crates/shacs-channels/src/lib.rs`
-- `crates/shacs-api/src/lib.rs`
+- durable queue.
+- durable scheduler와 formal wake command envelope.
+- 모든 runtime service에 공통으로 적용되는 formal service command envelope.
+- typed dedupe key와 retry state persistence.
+- exactly-once delivery.
+- durable pending-message queue.
+- cancellation persistence와 restart replay.
+- transactional service metadata store.
+- durable retry/backoff scheduler.
+- formal `RuntimeSupervisor`, owner lease/heartbeat, stale owner recovery, safe shutdown.
+- multi-process TUI/API/channel owner coordination.
 
-## TDD 계획
+## waves / next work
 
-1. 서비스별 dedupe key 생성과 envelope validation 단위 테스트를 만든다.
-2. 같은 key가 두 번 들어와도 turn이 다시 열리지 않는 idempotency 테스트를 추가한다.
-3. scheduler, mailbox, worker가 wake command를 보내고 오케스트레이터가 resume 여부를 판단하는 통합 테스트를 추가한다.
-4. service restart 뒤 duplicate delivery, stale wake, already-closed turn 재진입 테스트를 추가한다.
-5. emit 금지 command를 서비스가 만들 수 없도록 타입 또는 검증 테스트를 추가한다.
+### Wave 1. Current mapping 정리
 
-## 구현 웨이브
+- process-local bus, turn lock, active task registry, command router priority, follow-up queue를 current architecture로 고정한다.
+- metadata JSON을 cursor, diagnostic, delivery hint로만 설명한다.
+- durable queue, exactly-once, transactional metadata 주장을 제거한다.
 
-### Wave 1. Service envelope와 emit 범위 고정
+### Wave 2. Reentry vocabulary 축소
 
-- 서비스별 command envelope 스키마와 공통 correlation 필드를 정의한다.
-- queue, scheduler, mailbox, hooks, background worker가 emit 가능한 command 집합을 타입으로 제한한다.
-- 세션 상태 직접 변경 command와 privileged command는 생성 단계에서 막는다.
+- service reentry를 모든 service가 공유하는 완료된 envelope가 아니라, 현재 channel/runtime boundary가 따르는 재진입 방향으로 표현한다.
+- wake/resume은 future formal model로 남긴다.
+- retry는 transport/outbound dispatch attempt와 session policy retry를 구분한다.
 
-### Wave 2. Dedupe와 metadata 경계 구현
+### Wave 3. 검증 증거 연결
 
-- 서비스별 dedupe key 계산기를 구현한다.
-- service-owned metadata 저장소와 session truth 저장소를 분리한다.
-- 오케스트레이터 재진입 시 processed marker 검사와 idempotent 처리 경로를 구현한다.
+- bus FIFO와 bounded queue 테스트를 current mapping evidence로 연결한다.
+- loop/control 테스트를 same-session lock, cancellation, priority command evidence로 연결한다.
+- runner/progress 테스트를 progress projection과 mid-turn injection evidence로 연결한다.
 
-### Wave 3. Wake and resume 경로 연결
+### Wave 4. Formal durable runtime 결정 보류
 
-- wake command를 단순 "확인 필요" 신호로 제한한다.
-- 오케스트레이터가 replay, open turn, pending effect, stale 여부를 보고 resume 또는 ignore를 결정하게 만든다.
-- mailbox approval response와 background completion도 같은 재진입 규약으로 묶는다.
-
-### Wave 4. 재시작, 중복 전달, 관측 가능성 회귀 검증
-
-- 서비스 재시작 후 이전 delivery 재전송을 허용하되 truth가 변하지 않게 만든다.
-- late service signal과 stale wake가 inspect, diagnostics, trace에서 구분되도록 연결한다.
-- duplicate delivery, missed fire, cancelled work, stale background completion 테스트를 묶는다.
+- durable queue, scheduler, wake envelope, typed dedupe/retry state, restart replay를 future work로 유지한다.
+- Spec 012는 current architecture 기준으로 닫고, formal durable runtime 기준 종료는 별도 future work로 남긴다.
 
 ## Verification Evidence
 
-- 단위/통합 테스트: `crates/shacs-command/tests/router.rs`가 built-in slash command priority/exact/prefix dispatch boundary를 검증한다.
-- 통합 테스트: `crates/shacs-core/tests/runtime_loop.rs`가 active session locking, priority command bypass, same-session pending follow-up drain, channel chat/session key preservation, registered cancellation observation을 검증한다.
-- runtime evidence: `crates/shacs-channels/src/lib.rs`, `crates/shacs-api/src/lib.rs`, `crates/shacs-cli/src/lib.rs` inline tests가 channel/API/CLI service entrypoint wiring을 검증한다.
-- 안전성 테스트: privileged command bypass 불가, closed turn reopen 방지
-- 현 slice matrix는 별도 contracts crate가 아니라 실제 Cargo tests와 문서 locator를 기준으로 유지한다.
+- Bus: `bus_preserves_fifo_and_sizes_for_inbound_and_outbound`, `bounded_bus_reports_capacity_for_both_queues`, `cloned_bus_handles_share_queues_and_blocking_consumers_wake`, `drain_matching_limits_matches_and_preserves_retained_fifo`.
+- Loop/control: `loop_priority_new_cancels_registered_task_before_clearing_session`, `loop_priority_status_reports_registered_async_task`, `session_turn_lock_rejects_duplicate_active_session`, `loop_observes_registered_cancellation_token_before_provider_call`, `adapter_reports_duplicate_session_turn_as_retryable_busy_error`.
+- Runner/progress: `stream_coalescer_batches_text_deltas_without_session_persistence`, `runtime_runner_drains_mid_turn_injections_between_iterations`, `runtime_runner_caps_mid_turn_injection_cycles`.
+- API/local surface는 `crates/shacs-api/src/lib.rs`의 health, models, chat, WebSocket, streaming tests로 확인되는 local runtime boundary를 증거로 삼는다.
+
+이 증거는 current process-local architecture를 설명한다. durable queue, durable scheduler, exactly-once delivery, transactional metadata store의 완료 증거로 쓰면 안 된다.
 
 ## Open Risks
 
-- 서비스 메타데이터와 truth 저장소의 경계가 흐리면 replay correctness가 깨질 수 있다.
-- dedupe key 설계가 약하면 다른 이벤트를 중복으로 잘못 묶을 수 있다.
-- restart 직후 stale wake 폭주가 있으면 diagnostics는 많아지지만 실제 상태는 안 바뀌는 상황을 잘 설명해야 한다.
-- 참고 메모: service reentry의 dedupe/stale 판단은 007의 ingress arbitration과 shared correlation 계약에 의존하므로, 서비스 레벨에서 우선순위를 독자 정의하면 안 된다.
+- process-local queue와 lock을 durable runtime guarantee처럼 읽으면 restart recovery 기대가 과해진다.
+- metadata JSON을 dedupe ledger처럼 쓰면 중복 전달이나 cursor loss를 잘못 설명하게 된다.
+- priority command boundary를 service policy 전체로 확장하면 built-in command router의 현재 의미를 넘어선다.
+- future durable runtime을 도입할 때 현재 local simplicity를 잃을 수 있다. self-hosted/personal-use 기본값을 유지해야 한다.
 
 ## 종료 기준
 
-- 모든 runtime service 결과가 command envelope로만 재진입한다.
-- 서비스 메타데이터가 없어도 session truth replay가 가능하다.
-- duplicate delivery와 stale wake가 truth를 재적용하거나 닫힌 턴을 되살리지 않는다.
-- emit 금지 command를 서비스가 만들 수 없거나 즉시 거절된다.
-- 012와 016이 요구하는 단위, 통합, 내구성 검증 증거가 확보된다.
+- 문서는 process-local queue, lock, active task tracking, command priority, follow-up queue, metadata JSON hint를 현재 구현으로 설명한다.
+- 문서는 durable queue, scheduler, wake envelope, exactly-once, transactional metadata, restart replay를 future gap으로 설명한다.
+- 문서는 Spec 012를 current architecture 기준으로 닫는다.
+- 문서는 Spec 012가 formal durable runtime으로 완료됐다고 주장하지 않는다.
+- future durable runtime을 진행하려면 별도 PRD에서 envelope, dedupe, retry, wake, recovery 기준과 테스트를 다시 잡는다.
