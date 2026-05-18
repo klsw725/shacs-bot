@@ -10,11 +10,11 @@
 - 단일 사용자 self-hosted 환경에 맞는 process model과 런타임 자산 배치를 정의한다.
 - version compatibility, schema migration, interrupted upgrade 처리 규칙을 정한다.
 - 업그레이드와 재시작이 session correctness를 깨지 않도록 공식 절차와 금지 패턴을 명시한다.
-- future Rust 구현에서 bootstrap flow, runtime marker, migration runner, upgrade guard, 테스트 시나리오를 직접 도출할 수 있게 한다.
+- Rust 구현에서 bootstrap flow, runtime marker, migration runner, upgrade guard, 테스트 시나리오를 직접 도출할 수 있게 한다.
 
 이 문서는 배포 편의 메모가 아니다. 구현이 이 문서와 충돌하면 "일단 실행되니까 괜찮다"는 식으로 process lifecycle과 upgrade semantics를 흐리지 말고, 사용자가 스스로 설치하고 복구할 수 있는 계약부터 다시 점검해야 한다.
 
-이 spec의 완료 기준은 바이너리 하나를 빌드해 띄우는 POC가 아니라, 이 문서가 정의한 install/update/start/stop/recover lifecycle, process ownership, version compatibility, migration, interrupted upgrade handling을 충족하는 **완전한 기능 구현과 검증**이다.
+이 spec의 FullSpec 완료 기준은 바이너리 하나를 빌드해 띄우는 POC가 아니라, 이 문서가 정의한 install/update/start/stop/recover lifecycle, process ownership, version compatibility, migration, interrupted upgrade handling을 충족하는 **완전한 기능 구현과 검증**이다. 현재 구현은 self-hosted/personal-use 로컬 lifecycle baseline을 충족하지만, 모든 migration/upgrade 제품 표면을 완성한 상태는 아니다. OS package manager, remote rolling upgrade, web installer, fleet management, SaaS updater는 명시적 비범위다.
 
 ---
 
@@ -50,6 +50,26 @@
 - 조직 단위 자동 배포 시스템
 - 웹 기반 installer
 - SaaS hosted update service
+
+---
+
+## 현재 구현 평가
+
+현재 확인된 구현 증거는 self-hosted/local lifecycle baseline이다.
+
+- Cargo 기반 build/install-equivalent 경로와 Dockerfile, Docker Compose 기반 로컬 실행 표면이 있다.
+- 공식 `runtime start`, `runtime stop`, `runtime restart`가 구현되어 있고, `runtime start`는 lifecycle admission/ownership 획득 후 기존 channel runtime foreground 경로를 실행한다.
+- `run`, `serve`, `runtime start`는 장기 실행 loop 진입 전에 ownership marker를 획득하고 heartbeat를 갱신하며, 정상 종료 시 자신이 소유한 marker만 정리한다.
+- `runtime stop`과 `runtime restart`는 active ownership을 직접 삭제하지 않고 stop-request marker를 기록한다. active owner가 없거나 stale owner만 있으면 그 상태를 보고한다.
+- `runtime inspect`는 binary version, data schema version, compatibility classification, ownership status, stop request marker, update marker, capabilities, sessions를 보고한다.
+- `runtime update`는 source-install workflow에서 target version이 실행 중인 binary version과 일치해야 하며, update marker를 `in_progress`에서 `completed_cleanup`으로 남긴다.
+- 현재 compatibility/admission 판단은 바이너리 상수인 `RUNTIME_DATA_SCHEMA_VERSION`과 runtime marker 상태에 근거한다. current schema에서는 실제 runtime data transform이 필요 없으므로 `migration_required=false`인 no-op completion을 남긴다. 이는 current schema의 증거이며, 저장된 데이터를 실제로 변환하는 migration framework가 검증됐다는 뜻은 아니다.
+- migration-required/inspect-only/incompatible/partial marker 상태는 running/mutation admission을 차단한다.
+- `runtime recover`는 partial migration과 active ownership을 차단하고, partial migration이 아닌 update marker와 stale ownership marker를 안전하게 정리한다.
+- diagnostics/recovery evidence는 update marker와 recovery 결과를 설명하는 수준까지 확인된다.
+- ownership active/stale classification, active ownership conflict, stop/restart request observation, stale ownership recovery, compatibility/admission guard가 단위 테스트로 확인된다.
+
+따라서 현재 상태는 self-hosted/personal-use 로컬 lifecycle baseline 완료로 본다. 전체 FullSpec 중 실제 stored-data transform migration, 더 넓은 upgrade 제품 표면, 회귀 coverage 일부는 남아 있다. OS package manager, remote rolling upgrade, web installer, fleet management, SaaS updater는 이 spec의 현재 구현 범위 밖이다.
 
 ---
 
@@ -116,6 +136,8 @@ interrupted upgrade는 바이너리 교체, migration, restart 도중 중단되�
 
 ## process model
 
+> 현재 구현 메모: `run`, `serve`, `runtime start`는 runtime root에 대한 active/stale ownership marker를 사용한다. `runtime stop/restart`는 active owner marker를 직접 삭제하지 않고 stop-request marker를 기록한다.
+
 ### 기본 모델
 
 초기 구현의 기본 모델은 단일 사용자, 단일 runtime root, 단일 주 런타임 인스턴스를 기준으로 한다.
@@ -139,6 +161,8 @@ interrupted upgrade는 바이너리 교체, migration, restart 도중 중단되�
 ---
 
 ## start, stop, restart lifecycle
+
+> 현재 구현 메모: 명시적 lifecycle 명령은 `runtime start`, `runtime stop`, `runtime restart` 형태로 제공된다. `run`과 `serve`도 같은 ownership/admission guard를 사용하는 기존 foreground 표면이다.
 
 ### start
 
@@ -238,6 +262,8 @@ update는 새 버전 산출물을 받아 설치하는 행위이고, upgrade는 �
 - compatible with migration required
 - read-only inspect compatible only
 - incompatible, start blocked
+
+현재 구현의 compatibility/admission은 `RUNTIME_DATA_SCHEMA_VERSION` 같은 바이너리 상수와 ownership/update/migration marker 상태를 조합해 판단한다. current schema에서는 migration이 필요하지 않아 `migration_required=false`인 no-op completion만 검증되어 있으며, 저장된 runtime data를 새 schema로 실제 변환하는 경로는 아직 검증된 제품 표면이 아니다.
 
 ---
 
@@ -449,7 +475,7 @@ recover는 crash, stale ownership, interrupted upgrade, partial migration, repla
 
 ## Rust 구현으로 이어질 체크포인트
 
-구체 타입 이름은 바뀔 수 있지만, 아래 질문에는 모두 "예"라고 답할 수 있어야 한다.
+구체 타입 이름은 바뀔 수 있지만, 아래 질문에는 현재 구현 증거 또는 남은 구현 항목으로 답할 수 있어야 한다.
 
 - `BinaryVersion`, `DataSchemaVersion`, `CompatibilityResult`, `MigrationPlan`, `UpgradeMarker`, `OwnershipMarker` 같은 타입 경계가 있는가?
 - start bootstrap에서 compatibility 검사, stale marker 검사, interrupted upgrade 검사를 분리된 단계로 수행할 수 있는가?
@@ -462,7 +488,7 @@ recover는 crash, stale ownership, interrupted upgrade, partial migration, repla
 
 ## 테스트 관점에서 꼭 검증할 시나리오
 
-Rust 구현은 최소한 다음 성격의 테스트를 만들 수 있어야 한다.
+Rust 구현은 최소한 다음 성격의 테스트를 검증해야 한다. 현재 coverage가 있는 항목은 구현 평가와 PRD evidence에 기록하고, 실제 data-transform migration이나 replay 검증처럼 아직 제품 표면이 아닌 항목은 남은 coverage로 둔다.
 
 - compatibility OK일 때만 running으로 진입하는지 확인하는 테스트
 - migration required 상태에서 migration 전 running 진입이 차단되는지 확인하는 테스트

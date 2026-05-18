@@ -218,9 +218,9 @@ demo behavior는 제한된 경로에서만 동작하거나, 실패/복구/경계
 
 ### 010. host safety, permissions, and secrets
 
-- 단위 테스트: capability evaluation, redaction
-- 통합 테스트: approval flow, denied execution
-- 안전성 테스트: secret leakage prevention, boundary enforcement
+- 단위 테스트: redaction, MCP default-deny registration, config default-deny
+- 통합 테스트: guard-denied execution, boundary enforcement
+- 안전성 테스트: secret leakage prevention, oversized tool result redaction evidence, default-deny MCP tools/resources/prompts evidence
 
 ### 011. subagent runtime
 
@@ -278,6 +278,8 @@ demo behavior는 제한된 경로에서만 동작하거나, 실패/복구/경계
 - permission boundary 통과
 - secret leakage 없음
 - diagnostics/inspect redaction 통과
+- oversized tool result persistence redaction 통과
+- MCP capability registration이 명시적 enable 전까지 default-deny임
 
 ### Gate 5. interface contract 테스트 통과
 
@@ -294,7 +296,7 @@ demo behavior는 제한된 경로에서만 동작하거나, 실패/복구/경계
 - fresh workspace 기준 release candidate 실행
 - 세션 생성
 - 기본 입력 처리
-- 승인 필요 작업 surface
+- guard-denied 작업 surface
 - inspect
 - recover, 필요 시 시뮬레이션
 

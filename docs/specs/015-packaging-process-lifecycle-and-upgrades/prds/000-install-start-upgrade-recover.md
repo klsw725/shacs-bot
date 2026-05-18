@@ -4,7 +4,7 @@
 
 이 문서는 `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`의 하위 실행 문서다. self-hosted 사용자가 직접 설치, 시작, 중지, 업그레이드, 복구할 수 있는 실제 제품 수명주기를 구현 단위로 내린다.
 
-이번 PRD의 목표는 바이너리 교체가 아니라, runtime root ownership, compatibility 검사, migration gate, interrupted upgrade 방어까지 포함한 전체 lifecycle을 shipping 가능한 수준으로 고정하는 것이다.
+이번 PRD의 목표는 바이너리 교체가 아니라, runtime root ownership, compatibility 검사, migration gate, interrupted upgrade 방어까지 포함한 self-hosted/local lifecycle baseline을 shipping 가능한 수준으로 고정하는 것이다. 현재 범위는 로컬 수명주기와 admission guard이며, 완전한 stored-data transform migration 제품 표면까지 포함하지 않는다.
 
 ## SPEC 입력
 
@@ -44,98 +44,107 @@
 - fleet management
 - 원격 rolling upgrade
 - 웹 installer
+- SaaS updater
 
 ## 현재 구현 상태
 
-### 이미 반영된 것
+### 이미 반영된 self-hosted/local lifecycle baseline
 
-- runtime inspect/start/stop/recover/restart CLI 경로가 runtime root ownership marker와 compatibility guard를 기준으로 동작한다.
-- runtime update CLI 경로가 target version을 받아 upgrade marker를 기록하고, 현재 no-op migration completion 경로를 거쳐 `completed_cleanup` 상태를 inspect/start 가능한 상태로 남긴다.
-- active ownership과 stale ownership이 구분되며, `runtime recover`는 stale marker만 지우고 active ownership, partial migration, interrupted upgrade는 차단한다.
-- session store format compatibility, inspect-only compatible, incompatible data, migration required, partial migration marker가 mutation guard와 recovery projection에 반영된다.
-- interrupted upgrade marker details와 process lifecycle blockers가 diagnostics/recovery evidence로 노출된다.
-- ownership/upgrade marker write는 temporary file, file sync, atomic rename, parent directory sync를 사용해 interrupted write가 false healthy 상태로 보이는 위험을 줄인다.
+- Cargo 기반 build/install-equivalent 경로와 Dockerfile, Docker Compose 기반 로컬 실행 표면이 있다.
+- 공식 `runtime start`, `runtime stop`, `runtime restart`가 있으며 `runtime start`는 기존 channel runtime foreground 경로를 lifecycle admission/ownership 이후 실행한다.
+- `run`, `serve`, `runtime start`는 active ownership marker와 heartbeat를 기록하고, stop/restart request marker를 관찰해 종료한다.
+- `runtime inspect`는 binary version, data schema version, compatibility classification, ownership status, stop request marker, update marker, capabilities, sessions를 보고한다.
+- `runtime update`는 source-install workflow에서 target version이 실행 중인 binary version과 일치해야 하며, update marker를 `in_progress`에서 `completed_cleanup`으로 남긴다.
+- 현재 compatibility/admission은 `RUNTIME_DATA_SCHEMA_VERSION` 같은 binary constants와 marker state를 근거로 한다. migration evidence는 current schema에서 `migration_required=false`인 no-op completion이다. 이는 현재 schema에서 runtime data transform이 필요 없다는 증거이며, 저장된 데이터를 실제 변환하는 migration framework가 검증됐다는 뜻은 아니다.
+- migration-required/inspect-only/incompatible/partial marker 상태는 running/mutation admission을 차단한다.
+- `runtime recover`는 partial migration과 active ownership을 차단하고, partial migration이 아닌 update marker와 stale ownership marker를 정리한다.
+- diagnostics/recovery evidence는 update marker와 recovery 결과를 설명하는 수준까지 확인된다.
 
-### 비범위 / 후속 확장
+### 비범위
 
-- OS package manager별 installer, 원격 rolling upgrade, 웹 installer는 비범위다.
-- migration rollback/cleanup 전략은 실제 data-transform migration이 추가될 때 확장할 장기 운영 risk다. 현재 FullSpec evidence는 self-hosted local update, no-op migration completion, marker durability, compatibility guard, inspect/recover blocking 범위에서 닫으며, data-transform migration rollback은 현재 제품 범위의 release blocker가 아니다.
+- OS package manager별 installer, 원격 rolling upgrade, 웹 installer, fleet management, SaaS updater
 
 ### 로컬 근거
 
-- `crates/shacs-cli/src/lib.rs`의 `runtime_inspect_reports_capabilities_and_session_summary`, `runtime_update_records_marker_and_recover_clears_it`, `runtime_update_requires_running_binary_target_and_marker_guard_blocks_mutation`, `runtime_update_blocks_existing_interrupted_marker`, `runtime_recover_blocks_partial_migration_marker` 단위 테스트
+- `crates/shacs-cli/src/lib.rs`의 runtime parser, inspect/update/recover, ownership active/stale, active conflict, stale recover cleanup, stop/restart request, compatibility/admission 단위 테스트
 - `crates/shacs-config/src/lib.rs`의 config context/runtime directory/migration 단위 테스트
 - `docs/USAGE.md`와 `README.md`의 source/Cargo 기반 install-update-recover 사용자 절차
 
-## TDD 계획
+## TDD 상태와 남은 coverage
 
-1. compatibility 결과 분류와 start 허용 결정표 단위 테스트를 만든다.
-2. ownership marker 생성, active marker 충돌, stale marker 정리 테스트를 추가한다.
-3. install 후 first start, safe stop, clean restart 통합 테스트를 추가한다.
-4. migration required, interrupted upgrade, partial migration, inspect-only mode 테스트를 추가한다.
-5. recover 이후 start 가능 여부와 writable state 전환 테스트를 추가한다.
+1. compatibility 결과 분류와 start 허용 결정표 단위 테스트는 현재 admission guard evidence에 포함된다.
+2. ownership marker 생성, active marker 충돌, active/stale classification, stale marker 정리 테스트는 현재 evidence에 포함된다.
+3. `runtime stop`/`runtime restart` request marker 기록과 장기 실행 shutdown predicate 관찰은 현재 evidence에 포함된다.
+4. migration-required, interrupted update marker, partial migration, inspect-only, incompatible 상태의 admission block은 현재 evidence에 포함된다.
+5. install 후 first start, safe stop, clean restart, 실제 stored-data transform migration, recover 이후 start 가능 여부의 end-to-end coverage는 남은 coverage다.
 
 ## 구현 웨이브
 
 ### Wave 1. Packaging metadata와 bootstrap guard 구현
 
-- binary version, schema compatibility 범위, bundled resource metadata를 식별 가능한 형식으로 제공한다.
+- 현재 구현은 binary version과 runtime data schema version을 식별 가능한 형식으로 제공한다.
 - start 진입 전 runtime root, config, secrets, ownership marker, compatibility 상태를 검사한다.
 - active ownership marker가 유효하면 중복 start를 막는다.
 
 ### Wave 2. Lifecycle 제어 구현
 
-- install, start, stop, restart 절차를 명시적 단계로 구현한다.
-- stop 시 새 입력 수용 중지, draining, shutdown reason 기록, marker 정리를 연결한다.
+- 현재 구현은 `runtime start`, `runtime stop`, `runtime restart` 절차를 명시적 CLI 표면으로 제공한다.
+- stop/restart는 active ownership marker를 직접 삭제하지 않고 stop-request marker를 남기며, active owner 또는 stale owner 상태를 보고한다.
 - CLI와 inspect surface에서 현재 lifecycle 상태를 읽을 수 있게 한다.
 
 ### Wave 3. Compatibility와 migration gate 구현
 
-- fully compatible, migration required, inspect-only, incompatible 분류를 구현한다.
-- migration runner가 대상 버전, 결과 버전, partial marker를 기록하게 만든다.
-- migration 완료 전 running 상태 진입을 금지한다.
+- 현재 구현은 binary constants와 marker state 기반으로 fully compatible, migration required, inspect-only, incompatible admission을 분류한다.
+- current schema에서는 `migration_required=false` no-op completion과 partial marker 차단을 기록한다.
+- 실제 stored-data transform migration은 별도 제품 표면으로 남아 있으며, migration 완료 전 running 상태 진입 금지는 admission guard로 유지한다.
 
-### Wave 4. Interrupted upgrade와 recover 완성
+### Wave 4. Interrupted upgrade와 recover 상태
 
-- upgrade marker, partial migration marker, stale ownership marker를 감지한다.
-- inspect/recover surface가 upgrade marker의 from/target version, phase, partial migration 여부와 무엇이 아직 막는지 기록하게 만든다.
-- interrupted upgrade 이후 inspect-only는 허용하되 mutation은 막는다.
-- install, update, recover, restart 경로를 end-to-end 회귀 테스트로 묶는다.
+- update marker, partial migration marker, stale ownership marker 감지는 현재 evidence에 포함된다.
+- inspect/recover surface는 update marker와 recovery 결과를 설명하고, `completed_cleanup` 상태를 남긴다.
+- interrupted update 또는 partial migration 이후 mutation admission은 막는다.
+- install, update, recover, restart 경로를 묶는 end-to-end 회귀 테스트는 남은 coverage다.
 
 ## Verification Evidence
 
-- 단위 테스트: `classify_data_compatibility`, `evaluate_start_admission_with_data_compatibility`, marker parsing, no-op migration runner phase/result marker, migration state machine
-- 통합 테스트: install/start/stop/restart, migration-required start, recover flow
-- 통합 테스트: CLI `runtime start` ownership marker write, second start active ownership conflict, `runtime stop` marker cleanup, stale-only `runtime recover` marker cleanup, active/partial-migration/interrupted-upgrade recover blocking, `runtime restart` marker rewrite
-- 통합 테스트: CLI `runtime update --target-version ...` upgrade marker completion, active ownership update blocking, partial migration update blocking, update 후 clean start
-- 통합 테스트: bootstrap이 session store format version을 관측해 inspect-only compatible과 incompatible data를 mutation guard와 recovery projection에 반영
-- 내구성 테스트: interrupted upgrade marker details, partial migration, stale ownership, atomic marker write/cleanup, crash during upgrade
-- 패키징 테스트: `runtime inspect` version metadata exposure, bundled resource discovery, inspect-only mode
-- 문서 증거: lifecycle 단계표, fully compatible / migration required / inspect-only compatible / incompatible compatibility 결과표, recover 결정표
-- matrix 증거: `SpecId::Spec015` FullSpec evidence가 `PackagingUpgrade`, `DurabilityRecovery`, `Integration`을 모두 Verified로 가리킨다.
+### 현재 확인된 evidence
+
+- `runtime inspect`가 binary version, data schema version, update marker, capabilities, sessions를 보고하는 테스트
+- `runtime diagnostics`와 `runtime recover`가 update marker와 recovery 결과를 설명하는 테스트
+- `runtime update --target-version ...`이 실행 중인 binary version과 같은 target version만 허용하고, `in_progress`에서 `completed_cleanup` marker로 이어지는 테스트
+- partial migration marker가 `runtime recover`에서 차단되는 테스트
+- no-op migration completion이 `migration_required=false` baseline으로 남는 테스트
+- Dockerfile release CLI binary build와 Docker Compose `shacs-gateway`, `shacs-api`, one-shot `shacs-cli` 서비스 구성
+
+### Baseline evidence
+
+- CLI `runtime start` parser와 lifecycle admission/ownership 경로
+- active ownership conflict, active/stale ownership classification, stale-only `runtime recover` cleanup
+- `runtime stop`/`runtime restart` request marker write와 장기 실행 shutdown predicate 관찰
+- partial migration, migration-required, inspect-only, incompatible 상태의 start/mutation admission block
+- current schema no-op migration completion과 interrupted update marker recovery. 이는 `migration_required=false` current schema 증거이며, 실제 stored-data transform migration 증거는 아니다.
 
 ## Open Risks
 
-- marker 정리 순서가 잘못되면 중단 후 false healthy 상태로 보일 수 있다. 현재 marker write/delete 경로는 atomic rename과 directory sync로 방어한다.
-- migration이 in-place overwrite에 기대면 rollback과 recovery 설명이 어려워질 수 있다. 현재 구현은 data-transform migration을 수행하지 않고 marker 기반 no-op completion만 제공한다.
-- inspect-only와 writable mode 경계가 약하면 손상 상태에서도 mutation이 열릴 수 있다. 현재 CLI/API/session mutation guard가 partial migration, inspect-only compatibility, incompatible data를 차단한다.
-- 참고 메모: ownership/stale/interrupted-upgrade marker의 위치와 cleanup 순서는 008, 014와 함께 정리되어야 하므로, 본 PRD만으로 runtime-managed file lifecycle이 완결되지는 않는다.
+- marker 정리 순서가 잘못되면 중단 후 false healthy 상태로 보일 수 있다. 현재 구현은 active ownership을 stop 명령에서 직접 삭제하지 않고 owner/recover가 정리하도록 제한한다.
+- migration이 in-place overwrite에 기대면 rollback과 recovery 설명이 어려워질 수 있다. 현재 schema는 data-transform migration이 필요 없어 no-op completion만 제공한다.
 
 ## 종료 기준
 
-- 사용자가 로컬에서 build/install-equivalent Cargo artifact, start, stop, inspect, update marker flow, recover를 수행할 수 있다.
-- active ownership과 stale ownership이 구분되며 중복 주 인스턴스 실행이 막힌다.
-- compatibility mismatch와 interrupted upgrade가 감지되면 running 진입이 차단된다.
-- migration required는 migration 전 running이 차단되고, inspect-only compatible은 mutation이 차단되며, incompatible data는 start가 차단된다.
-- migration 완료 전 성공 실행처럼 보이지 않는다.
-- 015와 016이 요구하는 패키징, 통합, 내구성 검증 증거가 준비된다.
+### self-hosted/personal-use local lifecycle baseline 종료 상태
 
-## FullSpec 승격 상태
+- 사용자가 로컬에서 Cargo build/install-equivalent artifact와 Docker 기반 실행 표면을 확인할 수 있다.
+- 공식 `runtime start`, `runtime stop`, `runtime restart`와 기존 `run`, `serve`가 ownership/admission guard 아래 동작한다.
+- `runtime inspect`, `runtime diagnostics`, `runtime update`, `runtime recover`가 compatibility, ownership, update marker와 recovery evidence를 다룬다.
+- update marker flow는 no-op migration completion 기준으로 `completed_cleanup`까지 확인된다.
 
-- 상태: FullSpec evidence ready.
-- Required families: `PackagingUpgrade`, `DurabilityRecovery`, `Integration`.
-- FullSpec evidence:
-- `crates/shacs-cli/src/lib.rs` inline runtime inspect/update/recover tests
-- `crates/shacs-config/src/lib.rs` inline runtime layout/config migration tests
-- `README.md`, `docs/USAGE.md`
-- 비범위로 남는 항목: OS package manager별 installer, remote rolling upgrade, web installer, fleet management, SaaS update service.
+## Spec 015 승격 상태
+
+- 상태: self-hosted/personal-use local lifecycle baseline complete. 전체 FullSpec의 stored-data transform migration과 더 넓은 upgrade 제품 표면은 complete로 주장하지 않는다.
+- 대상 families: `PackagingUpgrade`, `DurabilityRecovery`, `Integration`.
+- 현재 evidence:
+  - `crates/shacs-cli/src/lib.rs` inline runtime lifecycle, ownership, stop/restart, compatibility, inspect/update/recover tests
+  - `crates/shacs-config/src/lib.rs` inline runtime layout/config migration tests
+  - Dockerfile, Docker Compose 로컬 실행 구성
+- 남은 coverage: install/update/recover/restart end-to-end 회귀, 실제 stored-data transform migration 경로.
+- 남은 비범위 항목: OS package manager별 installer, remote rolling upgrade, web installer, fleet management, SaaS update service.
