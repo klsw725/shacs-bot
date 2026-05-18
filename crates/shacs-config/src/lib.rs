@@ -1135,7 +1135,7 @@ fn default_mcp_tool_timeout() -> u32 {
 }
 
 fn default_mcp_enabled_tools() -> Vec<String> {
-    vec!["*".to_owned()]
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -1154,6 +1154,31 @@ mod tests {
             default_config_path(),
             home_dir().join(".shacs-bot/config.json")
         );
+    }
+
+    #[test]
+    fn mcp_enabled_tools_defaults_to_empty_default_deny() {
+        let config = McpServerConfig::default();
+        assert!(config.enabled_tools.is_empty());
+    }
+
+    #[test]
+    fn missing_mcp_enabled_tools_deserializes_to_empty_default_deny() -> Result<(), String> {
+        let config: Config = serde_json::from_value(json!({
+            "tools": {
+                "mcpServers": {
+                    "local": {"command": "server"}
+                }
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+        let server = config
+            .tools
+            .mcp_servers
+            .get("local")
+            .ok_or_else(|| "missing local MCP server".to_owned())?;
+        assert!(server.enabled_tools.is_empty());
+        Ok(())
     }
 
     #[test]

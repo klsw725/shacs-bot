@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::redaction::{redact_string, redact_value};
 use crate::text::{safe_filename, stringify_text_blocks, truncate_text};
 
 pub const TOOL_RESULTS_DIR: &str = ".nanobot/tool-results";
@@ -61,30 +62,65 @@ pub fn maybe_persist_tool_result(
     if max_chars == 0 {
         return Some(content.clone());
     }
-    let (text_payload, file_payload, suffix) = content_text_payload(content)?;
-    if text_payload.chars().count() <= max_chars {
+    let payload = content_text_payload(content)?;
+    if payload.text.chars().count() <= max_chars {
         return Some(content.clone());
     }
-    let workspace = workspace?;
-    let persisted = persist_tool_result(
+    let original_size = payload.text.chars().count();
+    let Some(workspace) = workspace else {
+        return Some(Value::String(payload.fallback_text(max_chars)));
+    };
+    match persist_tool_result(
         workspace,
         session_key.unwrap_or("default"),
         tool_call_id,
-        &file_payload,
-        &text_payload,
-        suffix,
-    )
-    .ok()?;
-    Some(Value::String(persisted.reference_text()))
+        &payload.redacted_file,
+        &payload.redacted_preview,
+        payload.suffix,
+        original_size,
+    ) {
+        Ok(persisted) => Some(Value::String(persisted.reference_text())),
+        Err(_) => Some(Value::String(payload.fallback_text(max_chars))),
+    }
 }
 
-fn content_text_payload(content: &Value) -> Option<(String, String, &'static str)> {
+struct ToolResultPayload {
+    text: String,
+    redacted_file: String,
+    redacted_preview: String,
+    suffix: &'static str,
+}
+
+impl ToolResultPayload {
+    fn fallback_text(&self, max_chars: usize) -> String {
+        truncate_text(&self.redacted_preview, max_chars)
+    }
+}
+
+fn content_text_payload(content: &Value) -> Option<ToolResultPayload> {
     match content {
-        Value::String(text) => Some((text.clone(), text.clone(), "txt")),
+        Value::String(text) => Some(ToolResultPayload {
+            text: text.clone(),
+            redacted_file: redact_string(text),
+            redacted_preview: redact_string(text),
+            suffix: "txt",
+        }),
         Value::Array(blocks) => stringify_text_blocks(blocks).map(|text| {
-            let json_payload =
-                serde_json::to_string_pretty(content).unwrap_or_else(|_| content.to_string());
-            (text, json_payload, "json")
+            let redacted = redact_value(content);
+            let redacted_file =
+                serde_json::to_string_pretty(&redacted).unwrap_or_else(|_| redacted.to_string());
+            let redacted_preview = match &redacted {
+                Value::Array(redacted_blocks) => {
+                    stringify_text_blocks(redacted_blocks).unwrap_or_else(|| redact_string(&text))
+                }
+                _ => redact_string(&text),
+            };
+            ToolResultPayload {
+                text,
+                redacted_file,
+                redacted_preview,
+                suffix: "json",
+            }
         }),
         _ => None,
     }
@@ -97,6 +133,7 @@ fn persist_tool_result(
     file_payload: &str,
     preview_payload: &str,
     suffix: &str,
+    original_size: usize,
 ) -> std::io::Result<PersistedToolResult> {
     let root = workspace.join(TOOL_RESULTS_DIR);
     let bucket = root.join(non_empty_safe_filename(session_key));
@@ -117,8 +154,8 @@ fn persist_tool_result(
     let preview = truncate_text(preview_payload, TOOL_RESULT_PREVIEW_CHARS);
     Ok(PersistedToolResult {
         path,
-        original_size: preview_payload.chars().count(),
-        truncated_preview: preview_payload.chars().count() > TOOL_RESULT_PREVIEW_CHARS,
+        original_size,
+        truncated_preview: original_size > TOOL_RESULT_PREVIEW_CHARS,
         preview,
     })
 }
@@ -276,6 +313,54 @@ mod tests {
     }
 
     #[test]
+    fn redacts_oversized_string_tool_result_in_file_and_reference() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!(
+            "shacs-utils-tool-results-redacted-string-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let secret = "OPENAI_API_KEY=sk-secret-token visible text";
+        let reference = maybe_persist_text_tool_result(Some(&root), None, "call", secret, 3)
+            .ok_or_else(|| "missing reference".to_owned())?;
+        let stored =
+            fs::read_to_string(root.join(TOOL_RESULTS_DIR).join("default").join("call.txt"))
+                .map_err(|error| error.to_string())?;
+        assert!(stored.contains(crate::redaction::REDACTED));
+        assert!(reference.contains(crate::redaction::REDACTED));
+        assert!(!stored.contains("sk-secret-token"));
+        assert!(!reference.contains("sk-secret-token"));
+        Ok(())
+    }
+
+    #[test]
+    fn redacts_json_like_oversized_string_tool_result_in_file_and_reference() -> Result<(), String>
+    {
+        let root = std::env::temp_dir().join(format!(
+            "shacs-utils-tool-results-redacted-json-like-string-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let secret = r#"before {"api_key":"plain-secret"} after with enough output to persist"#;
+        let reference = maybe_persist_text_tool_result(Some(&root), None, "call", secret, 24)
+            .ok_or_else(|| "missing reference".to_owned())?;
+        let stored =
+            fs::read_to_string(root.join(TOOL_RESULTS_DIR).join("default").join("call.txt"))
+                .map_err(|error| error.to_string())?;
+        assert!(stored.contains("before"));
+        assert!(stored.contains(crate::redaction::REDACTED));
+        assert!(reference.contains(crate::redaction::REDACTED));
+        assert!(!stored.contains("plain-secret"));
+        assert!(!reference.contains("plain-secret"));
+        Ok(())
+    }
+
+    #[test]
     fn persists_text_block_arrays_as_json_reference() -> Result<(), String> {
         let root = std::env::temp_dir().join(format!(
             "shacs-utils-tool-results-json-{}",
@@ -314,9 +399,162 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn redacts_oversized_text_block_json_in_file_and_reference() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!(
+            "shacs-utils-tool-results-redacted-json-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let content = json!([
+            {"type": "text", "text": "safe output"},
+            {"type": "text", "text": "Authorization: Bearer ghp_secret_token"}
+        ]);
+        let reference = maybe_persist_tool_result(Some(&root), None, "call", &content, 3)
+            .ok_or_else(|| "missing reference".to_owned())?;
+        let reference = reference
+            .as_str()
+            .ok_or_else(|| "reference was not string".to_owned())?;
+        let stored = fs::read_to_string(
+            root.join(TOOL_RESULTS_DIR)
+                .join("default")
+                .join("call.json"),
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(stored.contains(crate::redaction::REDACTED));
+        assert!(reference.contains(crate::redaction::REDACTED));
+        assert!(!stored.contains("ghp_secret_token"));
+        assert!(!reference.contains("ghp_secret_token"));
+        Ok(())
+    }
+
+    #[test]
+    fn redacts_json_like_text_block_payload_in_file_and_reference() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!(
+            "shacs-utils-tool-results-redacted-json-like-block-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let content = json!([
+            {"type": "text", "text": "safe output"},
+            {"type": "text", "text": "client_secret: \"plain-secret\" after"}
+        ]);
+        let reference = maybe_persist_tool_result(Some(&root), None, "call", &content, 3)
+            .ok_or_else(|| "missing reference".to_owned())?;
+        let reference = reference
+            .as_str()
+            .ok_or_else(|| "reference was not string".to_owned())?;
+        let stored = fs::read_to_string(
+            root.join(TOOL_RESULTS_DIR)
+                .join("default")
+                .join("call.json"),
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(stored.contains("safe output"));
+        assert!(stored.contains(crate::redaction::REDACTED));
+        assert!(reference.contains(crate::redaction::REDACTED));
+        assert!(!stored.contains("plain-secret"));
+        assert!(!reference.contains("plain-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn redacts_oversized_result_without_workspace_instead_of_falling_back_to_raw(
+    ) -> Result<(), String> {
+        let secret =
+            r#"before {"api_key":"plain-secret"} after with enough extra output to persist"#;
+        let result = maybe_persist_text_tool_result(None, None, "call", secret, 64)
+            .ok_or_else(|| "missing fallback".to_owned())?;
+        assert!(result.contains("api_key"));
+        assert!(result.contains(crate::redaction::REDACTED));
+        assert!(result.contains("after"));
+        assert!(!result.contains("plain-secret"));
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
-    fn rejects_existing_leaf_symlink() -> Result<(), String> {
+    fn redacts_json_like_text_block_payload_when_persistence_fails() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "shacs-utils-tool-results-json-like-fail-closed-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        let bucket = root.join(TOOL_RESULTS_DIR).join("default");
+        fs::create_dir_all(&bucket).map_err(|error| error.to_string())?;
+        let outside = root.join("outside.json");
+        fs::write(&outside, "outside").map_err(|error| error.to_string())?;
+        symlink(&outside, bucket.join("call.json")).map_err(|error| error.to_string())?;
+
+        let content = json!([
+            {"type": "text", "text": "safe output"},
+            {"type": "text", "text": "client_secret: \"plain-secret\" after with enough output"}
+        ]);
+        let result = maybe_persist_tool_result(Some(&root), None, "call", &content, 64)
+            .ok_or_else(|| "missing fail-closed fallback".to_owned())?;
+        let result = result
+            .as_str()
+            .ok_or_else(|| "fallback was not string".to_owned())?;
+        assert!(result.contains("safe output"));
+        assert!(result.contains(crate::redaction::REDACTED));
+        assert!(!result.contains("plain-secret"));
+        assert_eq!(
+            fs::read_to_string(outside).map_err(|error| error.to_string())?,
+            "outside"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redacts_oversized_result_when_persistence_fails() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "shacs-utils-tool-results-fail-closed-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        let bucket = root.join(TOOL_RESULTS_DIR).join("default");
+        fs::create_dir_all(&bucket).map_err(|error| error.to_string())?;
+        let outside = root.join("outside.txt");
+        fs::write(&outside, "outside").map_err(|error| error.to_string())?;
+        symlink(&outside, bucket.join("call.txt")).map_err(|error| error.to_string())?;
+
+        let result = maybe_persist_text_tool_result(
+            Some(&root),
+            None,
+            "call",
+            "before Authorization: Bearer ghp_secret_token after with enough extra output to persist",
+            64,
+        )
+        .ok_or_else(|| "missing fail-closed fallback".to_owned())?;
+        assert!(result.contains("before Authorization: Bearer"));
+        assert!(result.contains(crate::redaction::REDACTED));
+        assert!(result.contains("after"));
+        assert!(!result.contains("ghp_secret_token"));
+        assert_eq!(
+            fs::read_to_string(outside).map_err(|error| error.to_string())?,
+            "outside"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_existing_leaf_symlink_and_returns_safe_fallback() -> Result<(), String> {
         use std::os::unix::fs::symlink;
 
         let root = std::env::temp_dir().join(format!(
@@ -331,10 +569,9 @@ mod tests {
         let outside = root.join("outside.txt");
         fs::write(&outside, "outside").map_err(|error| error.to_string())?;
         symlink(&outside, bucket.join("call.txt")).map_err(|error| error.to_string())?;
-        assert_eq!(
-            maybe_persist_text_tool_result(Some(&root), None, "call", "abcdef", 3),
-            None
-        );
+        let result = maybe_persist_text_tool_result(Some(&root), None, "call", "abcdef", 3)
+            .ok_or_else(|| "missing fail-closed fallback".to_owned())?;
+        assert_eq!(result, "abc\n... (truncated)");
         assert_eq!(
             fs::read_to_string(outside).map_err(|error| error.to_string())?,
             "outside"

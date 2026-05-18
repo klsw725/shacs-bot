@@ -182,6 +182,64 @@ pub struct SessionSummary {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionProjectionOptions {
+    pub max_messages: usize,
+    pub max_tokens: usize,
+    pub include_timestamps: bool,
+}
+
+impl Default for SessionProjectionOptions {
+    fn default() -> Self {
+        Self {
+            max_messages: 120,
+            max_tokens: 0,
+            include_timestamps: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUxSummary {
+    pub key: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUxDetail {
+    pub key: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub path: PathBuf,
+    pub message_count: usize,
+    pub metadata_keys: Vec<String>,
+    pub last_consolidated: usize,
+    pub recovery_markers: Vec<String>,
+    pub checkpoint_phase: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUxDiagnostics {
+    pub key: String,
+    pub path: PathBuf,
+    pub exists: bool,
+    pub message_count: usize,
+    pub last_consolidated: usize,
+    pub metadata_keys: Vec<String>,
+    pub recovery_markers: Vec<String>,
+    pub checkpoint_phase: Option<String>,
+    pub legal_start: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionUxHistory {
+    pub key: String,
+    pub path: PathBuf,
+    pub history: Vec<Value>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionManager {
     workspace: PathBuf,
@@ -204,6 +262,21 @@ impl SessionManager {
             legacy_sessions_dir: None,
             cache: BTreeMap::new(),
         })
+    }
+
+    pub fn open_existing(workspace: impl AsRef<Path>) -> std::io::Result<Option<Self>> {
+        let workspace = workspace.as_ref().to_path_buf();
+        let sessions_dir = workspace.join("sessions");
+        if !sessions_dir.exists() {
+            return Ok(None);
+        }
+        reject_symlink(&sessions_dir)?;
+        Ok(Some(Self {
+            workspace,
+            sessions_dir,
+            legacy_sessions_dir: None,
+            cache: BTreeMap::new(),
+        }))
     }
 
     pub fn with_legacy_sessions_dir(
@@ -375,6 +448,82 @@ impl SessionManager {
 
     pub fn read_session_payload(&self, key: &str) -> Option<Value> {
         self.load_existing(key).map(|session| session.payload())
+    }
+
+    pub fn list_session_ux(&self) -> std::io::Result<Vec<SessionUxSummary>> {
+        self.list_sessions().map(|sessions| {
+            sessions
+                .into_iter()
+                .map(|session| SessionUxSummary {
+                    key: session.key,
+                    created_at: session.created_at,
+                    updated_at: session.updated_at,
+                    path: session.path,
+                })
+                .collect()
+        })
+    }
+
+    pub fn session_ux_detail(&self, key: &str) -> Option<SessionUxDetail> {
+        let path = self
+            .existing_session_path(key)
+            .unwrap_or_else(|| self.session_path(key));
+        self.load_existing(key)
+            .map(|session| session_ux_detail_from_session(session, path))
+    }
+
+    pub fn session_ux_history(
+        &self,
+        key: &str,
+        options: SessionProjectionOptions,
+    ) -> Option<SessionUxHistory> {
+        self.session_ux_history_with_options(
+            key,
+            SessionHistoryOptions {
+                max_messages: options.max_messages,
+                max_tokens: options.max_tokens,
+                include_timestamps: options.include_timestamps,
+            },
+        )
+    }
+
+    pub fn session_ux_history_with_options(
+        &self,
+        key: &str,
+        options: SessionHistoryOptions,
+    ) -> Option<SessionUxHistory> {
+        let path = self
+            .existing_session_path(key)
+            .unwrap_or_else(|| self.session_path(key));
+        self.load_existing(key).map(|session| {
+            let history = session.get_history_with_options(options);
+            SessionUxHistory {
+                key: session.key,
+                path,
+                history,
+            }
+        })
+    }
+
+    pub fn session_ux_diagnostics(&self, key: &str) -> SessionUxDiagnostics {
+        let path = self
+            .existing_session_path(key)
+            .unwrap_or_else(|| self.session_path(key));
+        if let Some(session) = self.load_existing(key) {
+            session_ux_diagnostics_from_session(session, path)
+        } else {
+            SessionUxDiagnostics {
+                key: key.to_owned(),
+                path,
+                exists: false,
+                message_count: 0,
+                last_consolidated: 0,
+                metadata_keys: Vec::new(),
+                recovery_markers: Vec::new(),
+                checkpoint_phase: None,
+                legal_start: 0,
+            }
+        }
     }
 
     pub fn invalidate(&mut self, key: &str) {
@@ -578,6 +727,62 @@ fn session_payload(session: &Session) -> Value {
         "metadata": session.metadata,
         "messages": session.messages,
     })
+}
+
+fn session_ux_detail_from_session(session: Session, path: PathBuf) -> SessionUxDetail {
+    let (metadata_keys, recovery_markers, checkpoint_phase) =
+        session_ux_metadata(&session.metadata);
+    SessionUxDetail {
+        key: session.key,
+        created_at: Some(session.created_at),
+        updated_at: Some(session.updated_at),
+        path,
+        message_count: session.messages.len(),
+        metadata_keys,
+        last_consolidated: session.last_consolidated,
+        recovery_markers,
+        checkpoint_phase,
+    }
+}
+
+fn session_ux_diagnostics_from_session(session: Session, path: PathBuf) -> SessionUxDiagnostics {
+    let (metadata_keys, recovery_markers, checkpoint_phase) =
+        session_ux_metadata(&session.metadata);
+    let legal_start = find_legal_message_start(&session.messages);
+    SessionUxDiagnostics {
+        key: session.key,
+        path,
+        exists: true,
+        message_count: session.messages.len(),
+        last_consolidated: session.last_consolidated,
+        metadata_keys,
+        recovery_markers,
+        checkpoint_phase,
+        legal_start,
+    }
+}
+
+fn session_ux_metadata(
+    metadata: &Map<String, Value>,
+) -> (Vec<String>, Vec<String>, Option<String>) {
+    let mut metadata_keys = metadata.keys().cloned().collect::<Vec<_>>();
+    metadata_keys.sort();
+    let mut recovery_markers = Vec::new();
+    if metadata.contains_key("pending_user_turn") {
+        recovery_markers.push("pending_user_turn".to_owned());
+    }
+    if metadata.contains_key("runtime_checkpoint") {
+        recovery_markers.push("runtime_checkpoint".to_owned());
+    }
+    if metadata.contains_key("_last_summary") {
+        recovery_markers.push("_last_summary".to_owned());
+    }
+    let checkpoint_phase = metadata
+        .get("runtime_checkpoint")
+        .and_then(|checkpoint| checkpoint.get("phase"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    (metadata_keys, recovery_markers, checkpoint_phase)
 }
 
 fn validate_regular_session_paths(paths: &[PathBuf]) -> std::io::Result<()> {

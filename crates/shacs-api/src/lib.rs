@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use shacs_channels::WebSocketServerEvent;
 use shacs_providers::{GenerationSettings, LlmResponse, ProviderEvent, ProviderRequest};
+use shacs_session::{SessionManager, SessionProjectionOptions, SessionUxDiagnostics};
+use shacs_utils::diagnostics::{
+    DiagnosticsKind, DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot,
+};
 pub use shacs_utils::media_decode::{save_base64_data_url, MediaDecodeError, MAX_FILE_SIZE};
 pub use shacs_utils::runtime::EMPTY_FINAL_RESPONSE_MESSAGE;
 use std::collections::{BTreeMap, HashMap};
@@ -28,6 +32,8 @@ use tokio::time::{timeout, Duration};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const MODELS_PATH: &str = "/v1/models";
+pub const SESSIONS_PATH: &str = "/v1/sessions";
+pub const DIAGNOSTICS_PATH: &str = "/v1/diagnostics";
 pub const HEALTH_PATH: &str = "/health";
 pub const WEBSOCKET_PATH: &str = "/ws";
 pub const JSON_CONTENT_TYPE: &str = "application/json";
@@ -234,6 +240,22 @@ pub trait ChatCompletionAdapter {
         ))
     }
 
+    fn session_workspace(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
+        let mut snapshot = DiagnosticsSnapshot::unavailable(
+            "runtime diagnostics are not configured for this adapter",
+        );
+        snapshot.diagnostics.push(DiagnosticsRecord::new(
+            DiagnosticsSeverity::Info,
+            DiagnosticsKind::Api,
+            "diagnostics request was read-only",
+        ));
+        snapshot
+    }
+
     fn process_websocket_frame(
         &self,
         _frame: Value,
@@ -314,6 +336,7 @@ pub fn api_router_with_timeout_and_websocket_path(
     Router::new()
         .route(HEALTH_PATH, any(axum_dispatch))
         .route(MODELS_PATH, any(axum_dispatch))
+        .route(DIAGNOSTICS_PATH, any(axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(axum_dispatch))
         .route(websocket_path, any(websocket_upgrade_axum))
         .fallback(axum_dispatch)
@@ -350,6 +373,7 @@ pub fn web_ui_router_with_timeout_and_websocket_path(
     Router::new()
         .route(HEALTH_PATH, any(webui_axum_dispatch))
         .route(MODELS_PATH, any(webui_axum_dispatch))
+        .route(DIAGNOSTICS_PATH, any(webui_axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(webui_axum_dispatch))
         .route(websocket_path, any(webui_websocket_upgrade_axum))
         .fallback(webui_static_or_api_fallback)
@@ -633,13 +657,180 @@ pub fn handle_api_request(
         (ApiMethod::Get, MODELS_PATH) => {
             json_response(200, models_response_with_owned_by(&adapter.models()))
         }
+        (ApiMethod::Get, DIAGNOSTICS_PATH) => {
+            json_response(200, adapter.diagnostics_snapshot().redacted_value())
+        }
+        (ApiMethod::Get, path) if path == SESSIONS_PATH || path.starts_with("/v1/sessions/") => {
+            handle_session_query_request(path, adapter)
+        }
         (ApiMethod::Post, CHAT_COMPLETIONS_PATH) => {
             handle_chat_completion_request(request, adapter)
         }
-        (_, HEALTH_PATH) | (_, MODELS_PATH) | (_, CHAT_COMPLETIONS_PATH) => error_response(
+        (_, HEALTH_PATH)
+        | (_, MODELS_PATH)
+        | (_, DIAGNOSTICS_PATH)
+        | (_, CHAT_COMPLETIONS_PATH)
+        | (_, SESSIONS_PATH) => error_response(ApiError::method_not_allowed(
+            "method is not supported for this endpoint",
+        )),
+        (_, path) if path.starts_with("/v1/sessions/") => error_response(
             ApiError::method_not_allowed("method is not supported for this endpoint"),
         ),
         _ => error_response(ApiError::not_found("API route not found")),
+    }
+}
+
+fn handle_session_query_request(
+    path: &str,
+    adapter: &(impl ChatCompletionAdapter + ?Sized),
+) -> ApiHttpResponse {
+    let Some(workspace) = adapter.session_workspace() else {
+        return error_response(ApiError::not_found(
+            "session query surface is not configured",
+        ));
+    };
+    let Some(route) = session_query_route(path) else {
+        return error_response(ApiError::not_found("session API route not found"));
+    };
+    let manager = match SessionManager::open_existing(&workspace) {
+        Ok(manager) => manager,
+        Err(error) => {
+            return error_response(ApiError::internal(format!(
+                "session store could not be opened: {error}"
+            )))
+        }
+    };
+    match route {
+        SessionQueryRoute::List => handle_session_list_query(manager.as_ref()),
+        SessionQueryRoute::Detail(key) => handle_session_detail_query(manager.as_ref(), &key),
+        SessionQueryRoute::History(key) => handle_session_history_query(manager.as_ref(), &key),
+        SessionQueryRoute::Diagnostics(key) => {
+            handle_session_diagnostics_query(manager.as_ref(), &workspace, &key)
+        }
+    }
+}
+
+fn handle_session_list_query(manager: Option<&SessionManager>) -> ApiHttpResponse {
+    let Some(manager) = manager else {
+        return json_response(200, json!({ "object": "list", "data": [] }));
+    };
+    match manager.list_session_ux() {
+        Ok(sessions) => json_response(200, json!({ "object": "list", "data": sessions })),
+        Err(error) => error_response(ApiError::internal(format!(
+            "session list could not be read: {error}"
+        ))),
+    }
+}
+
+fn handle_session_detail_query(manager: Option<&SessionManager>, key: &str) -> ApiHttpResponse {
+    let Some(manager) = manager else {
+        return error_response(ApiError::not_found(format!(
+            "session `{key}` was not found"
+        )));
+    };
+    match manager.session_ux_detail(key) {
+        Some(detail) => json_response(200, json!(detail)),
+        None => error_response(ApiError::not_found(format!(
+            "session `{key}` was not found"
+        ))),
+    }
+}
+
+fn handle_session_history_query(manager: Option<&SessionManager>, key: &str) -> ApiHttpResponse {
+    let Some(manager) = manager else {
+        return error_response(ApiError::not_found(format!(
+            "session `{key}` was not found"
+        )));
+    };
+    match manager.session_ux_history(key, SessionProjectionOptions::default()) {
+        Some(history) => json_response(200, json!(history)),
+        None => error_response(ApiError::not_found(format!(
+            "session `{key}` was not found"
+        ))),
+    }
+}
+
+fn handle_session_diagnostics_query(
+    manager: Option<&SessionManager>,
+    workspace: &std::path::Path,
+    key: &str,
+) -> ApiHttpResponse {
+    if let Some(manager) = manager {
+        return json_response(200, json!(manager.session_ux_diagnostics(key)));
+    }
+    json_response(
+        200,
+        json!(SessionUxDiagnostics {
+            key: key.to_owned(),
+            path: workspace
+                .join("sessions")
+                .join(format!("{}.jsonl", SessionManager::safe_key(key))),
+            exists: false,
+            message_count: 0,
+            last_consolidated: 0,
+            metadata_keys: Vec::new(),
+            recovery_markers: Vec::new(),
+            checkpoint_phase: None,
+            legal_start: 0,
+        }),
+    )
+}
+
+enum SessionQueryRoute {
+    List,
+    Detail(String),
+    History(String),
+    Diagnostics(String),
+}
+
+fn session_query_route(path: &str) -> Option<SessionQueryRoute> {
+    if path == SESSIONS_PATH {
+        return Some(SessionQueryRoute::List);
+    }
+    let suffix = path.strip_prefix("/v1/sessions/")?;
+    let mut segments = suffix.split('/');
+    let key = decode_path_segment(segments.next()?)?;
+    if key.is_empty() {
+        return None;
+    }
+    match (segments.next(), segments.next()) {
+        (None, None) => Some(SessionQueryRoute::Detail(key)),
+        (Some("history"), None) => Some(SessionQueryRoute::History(key)),
+        (Some("diagnostics"), None) => Some(SessionQueryRoute::Diagnostics(key)),
+        _ => None,
+    }
+}
+
+fn decode_path_segment(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    return None;
+                }
+                let high = hex_value(bytes[index + 1])?;
+                let low = hex_value(bytes[index + 2])?;
+                output.push(high << 4 | low);
+                index += 3;
+            }
+            byte => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(output).ok()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1724,6 +1915,7 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
     use shacs_providers::types::{text_response, usage};
+    use shacs_session::{Session, SessionManager};
     use std::error::Error;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1743,6 +1935,7 @@ mod tests {
         stream_events: Vec<ProviderEvent>,
         captured: Mutex<Vec<ChatCompletionInvocation>>,
         websocket_frames: Mutex<Vec<Value>>,
+        session_workspace: Option<PathBuf>,
     }
 
     struct SlowAdapter {
@@ -1788,7 +1981,13 @@ mod tests {
                 stream_events: Vec::new(),
                 captured: Mutex::new(Vec::new()),
                 websocket_frames: Mutex::new(Vec::new()),
+                session_workspace: None,
             }
+        }
+
+        fn with_session_workspace(mut self, workspace: PathBuf) -> Self {
+            self.session_workspace = Some(workspace);
+            self
         }
 
         fn with_stream_events(mut self, events: Vec<ProviderEvent>) -> Self {
@@ -1867,6 +2066,24 @@ mod tests {
                 bytes.len(),
                 filename.unwrap_or("upload.bin")
             ))
+        }
+
+        fn session_workspace(&self) -> Option<PathBuf> {
+            self.session_workspace.clone()
+        }
+
+        fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
+            let mut snapshot = DiagnosticsSnapshot::unavailable("fake diagnostics configured");
+            snapshot.generated_at_ms = 1;
+            for diagnostic in &mut snapshot.diagnostics {
+                diagnostic.timestamp_ms = 1;
+            }
+            snapshot.runtime = json!({
+                "provider": "fake",
+                "api_key": "sk-raw-secret",
+                "config_path": "/tmp/shacs/config.json",
+            });
+            snapshot
         }
 
         fn process_websocket_frame(
@@ -2020,6 +2237,24 @@ mod tests {
         assert_eq!(models.body["data"][0]["id"], "gpt-5");
         assert_eq!(models.body["data"][0]["owned_by"], "shacs-bot");
         assert_eq!(adapter.call_count(), 0);
+    }
+
+    #[test]
+    fn api_diagnostics_inspect_is_read_only_redacted_and_matches_cli_projection() {
+        let adapter = FakeAdapter::new("gpt-5", text_response("unused"));
+
+        let response = handle_api_request(ApiHttpRequest::get(DIAGNOSTICS_PATH), &adapter);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body,
+            adapter.diagnostics_snapshot().redacted_value()
+        );
+        assert_eq!(response.body["runtime"]["api_key"], "[REDACTED]");
+        let serialized = serde_json::to_string(&response.body).unwrap_or_default();
+        assert!(!serialized.contains("sk-raw-secret"));
+        assert_eq!(adapter.call_count(), 0);
+        assert_eq!(adapter.websocket_frame_count(), 0);
     }
 
     #[test]
@@ -2267,6 +2502,169 @@ mod tests {
         assert_eq!(body["data"][0]["id"], "gpt-5");
         assert_eq!(body["data"][0]["owned_by"], "shacs-bot");
         assert_eq!(adapter.call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn axum_router_exposes_session_query_projection_without_raw_detail(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace = unique_test_dir("api-session-query")?;
+        let mut manager = SessionManager::new(&workspace)?;
+        let mut session = Session::new("api:work");
+        session
+            .metadata
+            .insert("api_token".to_owned(), json!("secret-value"));
+        session.metadata.insert(
+            "runtime_checkpoint".to_owned(),
+            json!({ "phase": "awaiting_tools", "raw": "hidden" }),
+        );
+        session.add_message("user", "hello", Map::new());
+        session.add_message("assistant", "world", Map::new());
+        manager.save(&session)?;
+
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("unused")).with_session_workspace(workspace),
+        );
+        let app = api_router(adapter.clone());
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(SESSIONS_PATH)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list_body = response_json(list).await?;
+        assert_eq!(list_body["data"][0]["key"], "api:work");
+        assert!(!list_body.to_string().contains("secret-value"));
+
+        let detail = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/sessions/api:work")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail_body = response_json(detail).await?;
+        assert_eq!(
+            detail_body["metadata_keys"],
+            json!(["api_token", "runtime_checkpoint"])
+        );
+        assert_eq!(detail_body["checkpoint_phase"], "awaiting_tools");
+        assert!(detail_body.get("messages").is_none());
+        let detail_text = detail_body.to_string();
+        assert!(!detail_text.contains("secret-value"));
+        assert!(!detail_text.contains("hidden"));
+
+        let history = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/sessions/api:work/history")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(history.status(), StatusCode::OK);
+        let history_body = response_json(history).await?;
+        assert_eq!(history_body["history"][0]["content"], "hello");
+
+        let diagnostics = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/sessions/api:work/diagnostics")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(diagnostics.status(), StatusCode::OK);
+        let diagnostics_body = response_json(diagnostics).await?;
+        assert_eq!(diagnostics_body["exists"], true);
+        assert_eq!(diagnostics_body["checkpoint_phase"], "awaiting_tools");
+        assert!(!diagnostics_body.to_string().contains("secret-value"));
+        assert!(!diagnostics_body.to_string().contains("hidden"));
+        assert_eq!(adapter.call_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn session_query_routes_are_read_only_and_validate_segments() -> Result<(), Box<dyn Error>> {
+        let workspace = unique_test_dir("api-session-read-only")?;
+        let adapter = FakeAdapter::new("gpt-5", text_response("unused"))
+            .with_session_workspace(workspace.clone());
+
+        let list = handle_api_request(ApiHttpRequest::get(SESSIONS_PATH), &adapter);
+        assert_eq!(list.status, 200);
+        assert_eq!(list.body["data"], json!([]));
+
+        let missing = handle_api_request(ApiHttpRequest::get("/v1/sessions/missing"), &adapter);
+        assert_eq!(missing.status, 404);
+
+        let missing_history = handle_api_request(
+            ApiHttpRequest::get("/v1/sessions/missing/history"),
+            &adapter,
+        );
+        assert_eq!(missing_history.status, 404);
+
+        let missing_diagnostics = handle_api_request(
+            ApiHttpRequest::get("/v1/sessions/missing/diagnostics"),
+            &adapter,
+        );
+        assert_eq!(missing_diagnostics.status, 200);
+        assert_eq!(missing_diagnostics.body["exists"], false);
+
+        let invalid_percent = handle_api_request(ApiHttpRequest::get("/v1/sessions/%zz"), &adapter);
+        assert_eq!(invalid_percent.status, 404);
+
+        let extra_segment = handle_api_request(
+            ApiHttpRequest::get("/v1/sessions/missing/history/extra"),
+            &adapter,
+        );
+        assert_eq!(extra_segment.status, 404);
+
+        let wrong_method = handle_api_request(
+            ApiHttpRequest {
+                method: ApiMethod::Post,
+                path: SESSIONS_PATH.to_owned(),
+                headers: BTreeMap::new(),
+                body: None,
+            },
+            &adapter,
+        );
+        assert_eq!(wrong_method.status, 405);
+        assert!(!workspace.join("sessions").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn session_query_routes_decode_encoded_session_keys() -> Result<(), Box<dyn Error>> {
+        let workspace = unique_test_dir("api-session-encoded")?;
+        let mut manager = SessionManager::new(&workspace)?;
+        let mut session = Session::new("api:encoded/key");
+        session.add_message("user", "hello", Map::new());
+        manager.save(&session)?;
+        let adapter =
+            FakeAdapter::new("gpt-5", text_response("unused")).with_session_workspace(workspace);
+
+        let detail = handle_api_request(
+            ApiHttpRequest::get("/v1/sessions/api%3Aencoded%2Fkey"),
+            &adapter,
+        );
+        assert_eq!(detail.status, 200);
+        assert_eq!(detail.body["key"], "api:encoded/key");
+
+        let history = handle_api_request(
+            ApiHttpRequest::get("/v1/sessions/api%3Aencoded%2Fkey/history"),
+            &adapter,
+        );
+        assert_eq!(history.status, 200);
+        assert_eq!(history.body["history"][0]["content"], "hello");
         Ok(())
     }
 

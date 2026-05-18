@@ -710,21 +710,19 @@ pub fn register_mcp_capabilities(
     let mut registered_count = 0;
 
     for capability in capabilities {
+        let wrapped = wrapped_capability_name(&capability);
+        if !allow_all_tools && !enabled.contains(&capability.name) && !enabled.contains(&wrapped) {
+            continue;
+        }
+        if enabled.contains(&capability.name) {
+            matched_enabled_tools.insert(capability.name.clone());
+        }
+        if enabled.contains(&wrapped) {
+            matched_enabled_tools.insert(wrapped.clone());
+        }
+
         match capability.kind {
             McpCapabilityKind::Tool => {
-                let wrapped = wrapped_name(&capability.server_name, "", &capability.name);
-                if !allow_all_tools
-                    && !enabled.contains(&capability.name)
-                    && !enabled.contains(&wrapped)
-                {
-                    continue;
-                }
-                if enabled.contains(&capability.name) {
-                    matched_enabled_tools.insert(capability.name.clone());
-                }
-                if enabled.contains(&wrapped) {
-                    matched_enabled_tools.insert(wrapped.clone());
-                }
                 registry.register(McpToolWrapper::new(client.clone(), capability));
             }
             McpCapabilityKind::Resource => {
@@ -750,6 +748,15 @@ pub fn register_mcp_capabilities(
         registered_count,
         unmatched_enabled_tools,
     }
+}
+
+fn wrapped_capability_name(capability: &McpCapability) -> String {
+    let kind = match capability.kind {
+        McpCapabilityKind::Tool => "",
+        McpCapabilityKind::Resource => "resource",
+        McpCapabilityKind::Prompt => "prompt",
+    };
+    wrapped_name(&capability.server_name, kind, &capability.name)
 }
 
 pub fn sanitize_mcp_name(name: &str) -> String {

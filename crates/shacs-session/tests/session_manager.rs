@@ -1,5 +1,8 @@
 use serde_json::{json, Map, Value};
-use shacs_session::{find_legal_message_start, Session, SessionHistoryOptions, SessionManager};
+use shacs_session::{
+    find_legal_message_start, Session, SessionHistoryOptions, SessionManager,
+    SessionProjectionOptions,
+};
 use std::error::Error;
 
 #[test]
@@ -107,6 +110,67 @@ fn session_manager_exposes_python_compatibility_paths_and_payload() -> Result<()
         || payload["messages"].as_array().map(Vec::len) != Some(1)
     {
         return Err(format!("compat path/payload surface drifted: payload={payload:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn session_ux_projection_hides_raw_values_but_preserves_query_semantics(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    let mut session = Session::new("cli:ux");
+    session.metadata.insert(
+        "api_token".to_owned(),
+        Value::String("secret-value".to_owned()),
+    );
+    session.metadata.insert(
+        "runtime_checkpoint".to_owned(),
+        json!({ "phase": "awaiting_tools", "raw": "hidden" }),
+    );
+    session.add_message("user", "hello secret", Map::new());
+    session.add_message("assistant", "world", Map::new());
+    manager.save(&session)?;
+
+    let summaries = manager.list_session_ux()?;
+    let detail = manager
+        .session_ux_detail("cli:ux")
+        .ok_or("missing UX detail")?;
+    let diagnostics = manager.session_ux_diagnostics("cli:ux");
+    let history = manager
+        .session_ux_history(
+            "cli:ux",
+            SessionProjectionOptions {
+                max_messages: 10,
+                include_timestamps: false,
+                ..SessionProjectionOptions::default()
+            },
+        )
+        .ok_or("missing UX history")?;
+
+    if summaries.len() != 1
+        || summaries[0].key != "cli:ux"
+        || detail.metadata_keys != ["api_token", "runtime_checkpoint"]
+        || detail.recovery_markers != ["runtime_checkpoint"]
+        || detail.checkpoint_phase.as_deref() != Some("awaiting_tools")
+        || detail.message_count != 2
+        || detail.last_consolidated != 0
+        || diagnostics.legal_start != 0
+        || history.history.len() != 2
+        || history.history[0]["content"] != "hello secret"
+    {
+        return Err(format!(
+            "UX projection drifted: summaries={summaries:?} detail={detail:?} diagnostics={diagnostics:?} history={history:?}"
+        )
+        .into());
+    }
+
+    let detail_json = serde_json::to_value(&detail)?;
+    if detail_json.to_string().contains("secret-value")
+        || detail_json.to_string().contains("hidden")
+        || detail_json.get("messages").is_some()
+    {
+        return Err(format!("UX detail exposed raw values: {detail_json}").into());
     }
     Ok(())
 }

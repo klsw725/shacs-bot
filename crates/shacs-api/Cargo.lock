@@ -1038,6 +1038,7 @@ dependencies = [
  "serde_json",
  "shacs-channels",
  "shacs-providers",
+ "shacs-session",
  "shacs-utils",
  "shacs-web",
  "tokio",
@@ -1081,6 +1082,16 @@ dependencies = [
  "sha2",
  "shacs-config",
  "ureq",
+]
+
+[[package]]
+name = "shacs-session"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

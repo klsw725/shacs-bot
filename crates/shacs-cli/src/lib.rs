@@ -25,13 +25,13 @@ use shacs_config::{
     ProviderConfig,
 };
 use shacs_core::runtime::{
-    find_legal_message_start, AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig,
-    AgentLoopTurnResult, ContextBuilder, DreamLifecycle, HeartbeatError, HeartbeatNotifier,
-    HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker,
-    InboundMessage, McpLifecycle, MessageBus, ProviderNotificationEvaluator,
-    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, Session,
-    SessionHistoryOptions, SessionManager, SessionTurnLock, StreamDeltaCoalescer,
-    SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolStatus, HEARTBEAT_FILE_NAME,
+    AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, ContextBuilder,
+    DreamLifecycle, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
+    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle,
+    MessageBus, ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
+    RuntimeToolCall, Session, SessionHistoryOptions, SessionManager, SessionTurnLock,
+    StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolStatus,
+    HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool,
@@ -49,11 +49,17 @@ use shacs_skills::{
     SkillRegistryStatus,
 };
 use shacs_templates::sync_workspace_templates;
+use shacs_utils::diagnostics::{
+    write_diagnostics_bundle, CrashEvidence, DiagnosticsBundleManifest, DiagnosticsKind,
+    DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot, OperationalLogRecord,
+    RecoveryEvidence, TraceRecord, TraceStatus,
+};
 use shacs_utils::media_decode::{save_base64_data_url, MediaDecodeError, DEFAULT_MAX_BYTES};
 use shacs_utils::progress_events::{
     build_tool_event_start_payload, build_tool_progress_finish_payload,
     build_tool_progress_start_payload, ProgressEventStatus, ToolProgressEvent, ToolProgressPayload,
 };
+use shacs_utils::redaction::redact_string;
 use shacs_utils::text::safe_filename;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -61,7 +67,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -73,6 +79,10 @@ use tungstenite::{connect as websocket_connect, Message as WebSocketMessage, Web
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUNTIME_DATA_SCHEMA_VERSION: u32 = 1;
 const RUNTIME_DATA_SCHEMA_MIN_VERSION: u32 = 1;
+const RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS: u64 = 30_000;
+const RUNTIME_OWNERSHIP_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const RUNTIME_OWNERSHIP_MUTATION_LOCK_ERROR: &str =
+    "runtime mutation blocked by concurrent runtime ownership mutation; try again";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_ISSUER: &str = "https://auth.openai.com";
 const CODEX_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
@@ -105,8 +115,12 @@ pub enum CliCommand {
     Onboard(OnboardOptions),
     Status(StatusOptions),
     RuntimeInspect(RuntimeInspectOptions),
+    RuntimeDiagnostics(RuntimeDiagnosticsOptions),
     RuntimeUpdate(RuntimeUpdateOptions),
     RuntimeRecover(RuntimeRecoverOptions),
+    RuntimeStart(RuntimeStartOptions),
+    RuntimeStop(RuntimeStopOptions),
+    RuntimeRestart(RuntimeStopOptions),
     Session(SessionCommand),
     Skills(SkillsCommand),
     Channels(ChannelsCommand),
@@ -138,6 +152,13 @@ pub struct RuntimeInspectOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeDiagnosticsOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub bundle_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeUpdateOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
@@ -146,6 +167,18 @@ pub struct RuntimeUpdateOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeRecoverOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeStartOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeStopOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
 }
@@ -671,12 +704,85 @@ pub struct RuntimeInspectReport {
     pub lifecycle: RuntimeLifecycleInspect,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeDiagnosticsReport {
+    pub snapshot: DiagnosticsSnapshot,
+    pub bundle: Option<DiagnosticsBundleManifest>,
+    pub bundle_path: Option<PathBuf>,
+    pub bundle_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeLifecycleInspect {
     pub binary_version: String,
     pub data_schema_version: u32,
     pub data_schema_min_version: u32,
+    pub compatibility: RuntimeCompatibility,
+    pub ownership: RuntimeOwnershipStatus,
+    pub stop_request: Option<RuntimeStopRequestMarker>,
     pub update_marker: Option<RuntimeUpdateMarker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCompatibility {
+    FullyCompatible,
+    MigrationRequired,
+    InspectOnly,
+    Incompatible,
+}
+
+impl RuntimeCompatibility {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::FullyCompatible => "fully_compatible",
+            Self::MigrationRequired => "migration_required",
+            Self::InspectOnly => "inspect_only",
+            Self::Incompatible => "incompatible",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeOwnershipState {
+    None,
+    Active,
+    Stale,
+}
+
+impl RuntimeOwnershipState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Active => "active",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeOwnershipStatus {
+    pub state: RuntimeOwnershipState,
+    pub marker: Option<RuntimeOwnershipMarker>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeOwnershipMarker {
+    pub pid: u32,
+    pub started_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub binary_version: String,
+    pub data_schema_version: u32,
+    pub mode: String,
+    pub config_path: String,
+    pub workspace: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStopRequestMarker {
+    pub request: String,
+    pub requested_at_ms: u64,
+    pub owner_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -708,6 +814,33 @@ pub struct RuntimeRecoverOutcome {
     pub marker_path: PathBuf,
     pub recovered: bool,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStopOutcome {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub data_dir: PathBuf,
+    pub request_path: PathBuf,
+    pub status: RuntimeStopOutcomeStatus,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeStopOutcomeStatus {
+    RequestWritten,
+    NoActiveOwner,
+    StaleOwnerOnly,
+}
+
+impl RuntimeStopOutcomeStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::RequestWritten => "request_written",
+            Self::NoActiveOwner => "no_active_owner",
+            Self::StaleOwnerOnly => "stale_owner_only",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1468,8 +1601,14 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Onboard(options) => onboard(options).map(format_onboard_outcome),
         CliCommand::Status(options) => status(options).map(format_status_report),
         CliCommand::RuntimeInspect(options) => runtime_inspect(options).map(format_runtime_inspect),
+        CliCommand::RuntimeDiagnostics(options) => {
+            runtime_diagnostics(options).map(format_runtime_diagnostics)
+        }
         CliCommand::RuntimeUpdate(options) => runtime_update(options).map(format_runtime_update),
         CliCommand::RuntimeRecover(options) => runtime_recover(options).map(format_runtime_recover),
+        CliCommand::RuntimeStart(options) => runtime_start(options),
+        CliCommand::RuntimeStop(options) => runtime_stop(options).map(format_runtime_stop),
+        CliCommand::RuntimeRestart(options) => runtime_restart(options).map(format_runtime_restart),
         CliCommand::Session(command) => run_session_command(command),
         CliCommand::Skills(command) => run_skills_command(command),
         CliCommand::Channels(command) => run_channels_command(command),
@@ -1552,11 +1691,15 @@ fn parse_runtime(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "runtime requires `inspect`, `update`, or `recover`".to_owned(),
+            "runtime requires `start`, `stop`, `restart`, `inspect`, `diagnostics`, `update`, or `recover`".to_owned(),
         ));
     };
     match action.as_str() {
+        "start" => parse_runtime_start(parser, global_config),
+        "stop" => parse_runtime_stop(parser, global_config, false),
+        "restart" => parse_runtime_stop(parser, global_config, true),
         "inspect" => parse_runtime_inspect(parser, global_config),
+        "diagnostics" | "diagnose" => parse_runtime_diagnostics(parser, global_config),
         "update" => parse_runtime_update(parser, global_config),
         "recover" => parse_runtime_recover(parser, global_config),
         "--help" | "-h" => Ok(CliCommand::Help),
@@ -1788,6 +1931,13 @@ pub fn status(options: StatusOptions) -> Result<StatusReport, CliError> {
 }
 
 pub fn runtime_inspect(options: RuntimeInspectOptions) -> Result<RuntimeInspectReport, CliError> {
+    runtime_inspect_inner(options, true)
+}
+
+fn runtime_inspect_inner(
+    options: RuntimeInspectOptions,
+    ensure_dirs: bool,
+) -> Result<RuntimeInspectReport, CliError> {
     let config_path = options.config_path.unwrap_or_else(default_config_path);
     let config_exists = config_path.exists();
     let bundle = load_config_with_env(
@@ -1799,7 +1949,9 @@ pub fn runtime_inspect(options: RuntimeInspectOptions) -> Result<RuntimeInspectR
         },
         &ProcessEnv,
     )?;
-    let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
+    if ensure_dirs {
+        let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
+    }
     let workspace = bundle.context.workspace.clone();
     let workspace_exists = workspace.exists();
     let mut providers = bundle
@@ -1817,6 +1969,11 @@ pub fn runtime_inspect(options: RuntimeInspectOptions) -> Result<RuntimeInspectR
     let sessions = inspect_runtime_sessions(&workspace)?;
     let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
     let update_marker = read_runtime_update_marker(&marker_path)?;
+    let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
+    let stop_request = read_runtime_stop_request_marker(&runtime_stop_request_marker_path(
+        &bundle.context.data_dir,
+    ))?;
+    let compatibility = evaluate_runtime_compatibility(RUNTIME_DATA_SCHEMA_VERSION);
 
     Ok(RuntimeInspectReport {
         config_path,
@@ -1833,9 +1990,250 @@ pub fn runtime_inspect(options: RuntimeInspectOptions) -> Result<RuntimeInspectR
             binary_version: VERSION.to_owned(),
             data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
             data_schema_min_version: RUNTIME_DATA_SCHEMA_MIN_VERSION,
+            compatibility,
+            ownership,
+            stop_request,
             update_marker,
         },
     })
+}
+
+pub fn runtime_diagnostics(
+    options: RuntimeDiagnosticsOptions,
+) -> Result<RuntimeDiagnosticsReport, CliError> {
+    let inspect = runtime_inspect_inner(
+        RuntimeInspectOptions {
+            config_path: options.config_path,
+            workspace_override: options.workspace_override,
+        },
+        false,
+    )?;
+    let mut snapshot = diagnostics_snapshot_from_runtime_inspect(&inspect);
+    let (bundle, bundle_path, bundle_error) = match options.bundle_path {
+        Some(path) => match write_diagnostics_bundle(&path, &snapshot) {
+            Ok(outcome) => (Some(outcome.manifest), Some(outcome.path), None),
+            Err(error) => {
+                let message = format!("diagnostics bundle could not be written: {error}");
+                let mut record = DiagnosticsRecord::new(
+                    DiagnosticsSeverity::Warning,
+                    DiagnosticsKind::Runtime,
+                    "diagnostics bundle generation failed",
+                );
+                record.detail = json!({
+                    "path": redact_string(&path.to_string_lossy()),
+                    "error": redact_string(&message),
+                });
+                snapshot.diagnostics.push(record);
+                (None, Some(path), Some(message))
+            }
+        },
+        None => (None, None, None),
+    };
+    Ok(RuntimeDiagnosticsReport {
+        snapshot,
+        bundle,
+        bundle_path,
+        bundle_error,
+    })
+}
+
+fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> DiagnosticsSnapshot {
+    let providers = report
+        .providers
+        .iter()
+        .map(|provider| {
+            json!({
+                "name": provider.name,
+                "api_key_configured": provider.has_api_key,
+                "api_base_configured": provider.has_api_base,
+            })
+        })
+        .collect::<Vec<_>>();
+    let capabilities = report
+        .capabilities
+        .iter()
+        .map(|capability| {
+            json!({
+                "component": capability.component,
+                "status": runtime_capability_label(&capability.status),
+                "reason": capability.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut diagnostics = vec![DiagnosticsRecord::new(
+        DiagnosticsSeverity::Info,
+        DiagnosticsKind::Runtime,
+        "local runtime diagnostics snapshot generated",
+    )];
+    if !report.config_exists {
+        diagnostics.push(DiagnosticsRecord::new(
+            DiagnosticsSeverity::Warning,
+            DiagnosticsKind::Configuration,
+            "config file is missing",
+        ));
+    }
+    if !report.workspace_exists {
+        diagnostics.push(DiagnosticsRecord::new(
+            DiagnosticsSeverity::Warning,
+            DiagnosticsKind::Runtime,
+            "workspace directory is missing",
+        ));
+    }
+    if report.lifecycle.update_marker.is_some() {
+        diagnostics.push(DiagnosticsRecord::new(
+            DiagnosticsSeverity::Info,
+            DiagnosticsKind::Recovery,
+            "runtime update marker is present",
+        ));
+    }
+    let mut crash_evidence = Vec::new();
+    if !report.config_exists {
+        crash_evidence.push(CrashEvidence {
+            timestamp_ms: shacs_utils::diagnostics::current_time_ms(),
+            summary: "config file is missing during diagnostics inspection".to_owned(),
+            correlation: Default::default(),
+            fields: json!({ "path": report.config_path }),
+        });
+    }
+    if !report.workspace_exists {
+        crash_evidence.push(CrashEvidence {
+            timestamp_ms: shacs_utils::diagnostics::current_time_ms(),
+            summary: "workspace directory is missing during diagnostics inspection".to_owned(),
+            correlation: Default::default(),
+            fields: json!({ "path": report.workspace }),
+        });
+    }
+    let recovery_evidence = report
+        .lifecycle
+        .update_marker
+        .as_ref()
+        .map(|marker| RecoveryEvidence {
+            timestamp_ms: shacs_utils::diagnostics::current_time_ms(),
+            status: match marker.phase.as_str() {
+                "completed_cleanup" => TraceStatus::Ok,
+                "partial_migration" => TraceStatus::Error,
+                _ => TraceStatus::Waiting,
+            },
+            summary: format!("runtime update marker phase `{}` observed", marker.phase),
+            correlation: Default::default(),
+            fields: json!({
+                "phase": marker.phase,
+                "from_version": marker.from_version,
+                "target_version": marker.target_version,
+                "migration_required": marker.migration_required,
+                "completed_at_ms": marker.completed_at_ms,
+            }),
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let provider_progress = report
+        .providers
+        .iter()
+        .map(|provider| {
+            json!({
+                "name": provider.name,
+                "api_key_configured": provider.has_api_key,
+                "api_base_configured": provider.has_api_base,
+                "source": "runtime diagnostics provider snapshot",
+            })
+        })
+        .collect::<Vec<_>>();
+    let tool_progress = report
+        .capabilities
+        .iter()
+        .map(|capability| {
+            json!({
+                "component": capability.component,
+                "status": runtime_capability_label(&capability.status),
+                "reason": capability.reason,
+                "source": "runtime capability snapshot",
+            })
+        })
+        .collect::<Vec<_>>();
+    let update_marker = report
+        .lifecycle
+        .update_marker
+        .as_ref()
+        .map(|marker| {
+            json!({
+                "phase": marker.phase,
+                "from_version": marker.from_version,
+                "target_version": marker.target_version,
+                "migration_required": marker.migration_required,
+                "completed_at_ms": marker.completed_at_ms,
+            })
+        })
+        .unwrap_or(Value::Null);
+    let ownership = json!({
+        "state": report.lifecycle.ownership.state.as_str(),
+        "reason": report.lifecycle.ownership.reason,
+        "marker": report.lifecycle.ownership.marker.as_ref().map(|marker| json!({
+            "pid": marker.pid,
+            "started_at_ms": marker.started_at_ms,
+            "updated_at_ms": marker.updated_at_ms,
+            "binary_version": marker.binary_version,
+            "data_schema_version": marker.data_schema_version,
+            "mode": marker.mode,
+            "config_path": marker.config_path,
+            "workspace": marker.workspace,
+        })).unwrap_or(Value::Null),
+    });
+    DiagnosticsSnapshot {
+        generated_at_ms: shacs_utils::diagnostics::current_time_ms(),
+        runtime: json!({
+            "config": {
+                "path": report.config_path,
+                "exists": report.config_exists,
+            },
+            "workspace": {
+                "path": report.workspace,
+                "exists": report.workspace_exists,
+            },
+            "data_dir": report.data_dir,
+            "defaults": {
+                "provider": report.provider,
+                "model": report.model,
+            },
+            "providers": providers,
+            "capabilities": capabilities,
+            "sessions": {
+                "count": report.sessions.count,
+                "latest_key": report.sessions.latest_key,
+                "latest_updated_at": report.sessions.latest_updated_at,
+            },
+            "lifecycle": {
+                "binary_version": report.lifecycle.binary_version,
+                "data_schema_version": report.lifecycle.data_schema_version,
+                "data_schema_min_version": report.lifecycle.data_schema_min_version,
+                "compatibility": report.lifecycle.compatibility.as_str(),
+                "ownership": ownership,
+                "update_marker": update_marker.clone(),
+            },
+            "update_marker": update_marker,
+            "cron": { "status": "not_running_in_cli_snapshot" },
+        }),
+        operational_logs: vec![OperationalLogRecord::new(
+            DiagnosticsSeverity::Info,
+            DiagnosticsKind::Runtime,
+            "runtime diagnostics inspected local files only",
+        )],
+        traces: vec![TraceRecord {
+            timestamp_ms: shacs_utils::diagnostics::current_time_ms(),
+            name: "runtime_diagnostics".to_owned(),
+            status: TraceStatus::Ok,
+            correlation: Default::default(),
+            fields: json!({ "surface": "cli" }),
+        }],
+        diagnostics,
+        crash_evidence,
+        recovery_evidence,
+        provider_progress,
+        tool_progress,
+        subagent_progress: vec![json!({
+            "status": "available_when_runtime_executes_subagents",
+            "source": "runtime capability snapshot"
+        })],
+    }
 }
 
 pub fn runtime_update(options: RuntimeUpdateOptions) -> Result<RuntimeUpdateOutcome, CliError> {
@@ -1855,8 +2253,8 @@ pub fn runtime_update(options: RuntimeUpdateOptions) -> Result<RuntimeUpdateOutc
         },
         &ProcessEnv,
     )?;
-    let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
     let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
+    let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
     if let Some(existing) = read_runtime_update_marker(&marker_path)? {
         if runtime_marker_blocks_mutation(&existing.phase) {
             return Err(CliError::InvalidArguments(format!(
@@ -1865,6 +2263,7 @@ pub fn runtime_update(options: RuntimeUpdateOptions) -> Result<RuntimeUpdateOutc
             )));
         }
     }
+    guard_runtime_non_update_admission(&bundle.context.data_dir)?;
 
     let started = runtime_update_marker_value(&target_version, "in_progress", None);
     write_runtime_marker_atomically(&marker_path, &started)?;
@@ -1885,6 +2284,73 @@ pub fn runtime_update(options: RuntimeUpdateOptions) -> Result<RuntimeUpdateOutc
     })
 }
 
+pub fn runtime_start(options: RuntimeStartOptions) -> Result<String, CliError> {
+    run_runtime_with_mode(
+        RunOptions {
+            config_path: options.config_path,
+            workspace_override: options.workspace_override,
+            ..RunOptions::default()
+        },
+        "runtime-start",
+    )
+}
+
+pub fn runtime_stop(options: RuntimeStopOptions) -> Result<RuntimeStopOutcome, CliError> {
+    runtime_stop_or_restart(options, "stop")
+}
+
+pub fn runtime_restart(options: RuntimeStopOptions) -> Result<RuntimeStopOutcome, CliError> {
+    runtime_stop_or_restart(options, "restart")
+}
+
+fn runtime_stop_or_restart(
+    options: RuntimeStopOptions,
+    request: &str,
+) -> Result<RuntimeStopOutcome, CliError> {
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    let bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: options.workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )?;
+    let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
+    let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
+    let request_path = runtime_stop_request_marker_path(&bundle.context.data_dir);
+    let (status, detail) = match ownership.state {
+        RuntimeOwnershipState::Active => {
+            let owner_pid = ownership.marker.as_ref().map(|marker| marker.pid);
+            write_runtime_marker_atomically(
+                &request_path,
+                &runtime_stop_request_marker_value(request, owner_pid),
+            )?;
+            (
+                RuntimeStopOutcomeStatus::RequestWritten,
+                format!("wrote {request} request for active runtime"),
+            )
+        }
+        RuntimeOwnershipState::Stale => (
+            RuntimeStopOutcomeStatus::StaleOwnerOnly,
+            "stale ownership marker exists; run `shacs-bot runtime recover`".to_owned(),
+        ),
+        RuntimeOwnershipState::None => (
+            RuntimeStopOutcomeStatus::NoActiveOwner,
+            "no active runtime owner found".to_owned(),
+        ),
+    };
+    Ok(RuntimeStopOutcome {
+        config_path,
+        workspace: bundle.context.workspace,
+        data_dir: bundle.context.data_dir,
+        request_path,
+        status,
+        detail,
+    })
+}
+
 pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverOutcome, CliError> {
     let config_path = options.config_path.unwrap_or_else(default_config_path);
     let bundle = load_config_with_env(
@@ -1898,34 +2364,50 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
     )?;
     let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
     let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
-    let Some(marker) = read_runtime_update_marker(&marker_path)? else {
+    let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
+    if ownership.state == RuntimeOwnershipState::Active {
+        return Err(active_runtime_owner_recover_error());
+    }
+    let update_marker = read_runtime_update_marker(&marker_path)?;
+    if let Some(marker) = update_marker.as_ref() {
+        if marker.phase == "partial_migration" {
+            return Err(CliError::InvalidArguments(
+                "runtime recover blocked: partial migration marker requires manual inspection"
+                    .to_owned(),
+            ));
+        }
+    }
+    let mut details = Vec::new();
+    if let Some(marker) = update_marker {
+        fs::remove_file(&marker_path)?;
+        sync_parent_dir(&marker_path)?;
+        details.push(format!(
+            "cleared runtime update marker phase={} target={}",
+            marker.phase, marker.target_version
+        ));
+    }
+    if ownership.state == RuntimeOwnershipState::Stale
+        && remove_stale_runtime_ownership_marker(&bundle.context.data_dir, now_millis())?
+    {
+        details.push("cleared stale runtime ownership marker".to_owned());
+    }
+    if details.is_empty() {
         return Ok(RuntimeRecoverOutcome {
             config_path,
             workspace: bundle.context.workspace,
             data_dir: bundle.context.data_dir,
             marker_path,
             recovered: false,
-            detail: "no runtime update marker found".to_owned(),
+            detail: "no runtime update or stale ownership marker found".to_owned(),
         });
-    };
-    if marker.phase == "partial_migration" {
-        return Err(CliError::InvalidArguments(
-            "runtime recover blocked: partial migration marker requires manual inspection"
-                .to_owned(),
-        ));
     }
-    fs::remove_file(&marker_path)?;
-    sync_parent_dir(&marker_path)?;
     Ok(RuntimeRecoverOutcome {
         config_path,
         workspace: bundle.context.workspace,
         data_dir: bundle.context.data_dir,
         marker_path,
         recovered: true,
-        detail: format!(
-            "cleared runtime update marker phase={} target={}",
-            marker.phase, marker.target_version
-        ),
+        detail: details.join("; "),
     })
 }
 
@@ -1934,21 +2416,495 @@ fn runtime_update_marker_path(data_dir: &Path) -> PathBuf {
 }
 
 fn guard_runtime_marker_for_mutation(data_dir: &Path) -> Result<(), CliError> {
+    guard_runtime_admission(data_dir)?;
+    Ok(())
+}
+
+fn guard_runtime_admission(data_dir: &Path) -> Result<(), CliError> {
+    guard_runtime_update_marker_for_admission(data_dir)?;
+    guard_runtime_non_update_admission(data_dir)
+}
+
+fn guard_runtime_ownership_acquire_admission(data_dir: &Path) -> Result<(), CliError> {
+    guard_runtime_update_marker_for_admission(data_dir)?;
+    guard_runtime_compatibility_for_admission(evaluate_runtime_compatibility(
+        RUNTIME_DATA_SCHEMA_VERSION,
+    ))
+}
+
+fn guard_runtime_update_marker_for_admission(data_dir: &Path) -> Result<(), CliError> {
     let marker_path = runtime_update_marker_path(data_dir);
-    let Some(marker) = read_runtime_update_marker(&marker_path)? else {
-        return Ok(());
-    };
-    if runtime_marker_blocks_mutation(&marker.phase) {
-        return Err(CliError::InvalidArguments(format!(
-            "runtime mutation blocked by {} update marker; run `shacs-bot runtime inspect` or `shacs-bot runtime recover` first",
-            marker.phase
-        )));
+    if let Some(marker) = read_runtime_update_marker(&marker_path)? {
+        if runtime_marker_blocks_mutation(&marker.phase) || marker.migration_required {
+            return Err(CliError::InvalidArguments(format!(
+                "runtime mutation blocked by {} update marker; run `shacs-bot runtime inspect` or `shacs-bot runtime recover` first",
+                marker.phase
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn guard_runtime_non_update_admission(data_dir: &Path) -> Result<(), CliError> {
+    guard_runtime_compatibility_for_admission(evaluate_runtime_compatibility(
+        RUNTIME_DATA_SCHEMA_VERSION,
+    ))?;
+    let ownership = inspect_runtime_ownership(data_dir, now_millis())?;
+    if ownership.state == RuntimeOwnershipState::Active {
+        return Err(active_runtime_ownership_error(&ownership));
     }
     Ok(())
 }
 
 fn runtime_marker_blocks_mutation(phase: &str) -> bool {
     matches!(phase, "in_progress" | "partial_migration")
+}
+
+fn evaluate_runtime_compatibility(stored_schema_version: u32) -> RuntimeCompatibility {
+    evaluate_runtime_compatibility_with_bounds(
+        stored_schema_version,
+        RUNTIME_DATA_SCHEMA_VERSION,
+        RUNTIME_DATA_SCHEMA_MIN_VERSION,
+    )
+}
+
+fn evaluate_runtime_compatibility_with_bounds(
+    stored_schema_version: u32,
+    current_schema_version: u32,
+    min_schema_version: u32,
+) -> RuntimeCompatibility {
+    if stored_schema_version == current_schema_version {
+        RuntimeCompatibility::FullyCompatible
+    } else if stored_schema_version > current_schema_version {
+        RuntimeCompatibility::InspectOnly
+    } else if stored_schema_version >= min_schema_version {
+        RuntimeCompatibility::MigrationRequired
+    } else {
+        RuntimeCompatibility::Incompatible
+    }
+}
+
+fn guard_runtime_compatibility_for_admission(
+    compatibility: RuntimeCompatibility,
+) -> Result<(), CliError> {
+    match compatibility {
+        RuntimeCompatibility::FullyCompatible => Ok(()),
+        other => Err(CliError::InvalidArguments(format!(
+            "runtime mutation blocked by {} data schema compatibility",
+            other.as_str()
+        ))),
+    }
+}
+
+fn runtime_ownership_marker_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("ownership-marker.json")
+}
+
+fn runtime_ownership_mutation_lock_path(marker_path: &Path) -> PathBuf {
+    marker_path.with_extension("json.lock")
+}
+
+struct RuntimeOwnershipMutationLock {
+    path: PathBuf,
+}
+
+impl RuntimeOwnershipMutationLock {
+    fn acquire(marker_path: &Path) -> Result<Self, CliError> {
+        let path = runtime_ownership_mutation_lock_path(marker_path);
+        let parent = path.parent().ok_or_else(|| {
+            CliError::InvalidArguments(
+                "runtime ownership mutation lock path has no parent directory".to_owned(),
+            )
+        })?;
+        fs::create_dir_all(parent)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_file) => Ok(Self { path }),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(
+                CliError::InvalidArguments(RUNTIME_OWNERSHIP_MUTATION_LOCK_ERROR.to_owned()),
+            ),
+            Err(error) => Err(CliError::Io(error)),
+        }
+    }
+}
+
+impl Drop for RuntimeOwnershipMutationLock {
+    fn drop(&mut self) {
+        let _remove_result = fs::remove_file(&self.path);
+        let _sync_result = sync_parent_dir(&self.path);
+    }
+}
+
+fn runtime_stop_request_marker_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("stop-request.json")
+}
+
+fn runtime_ownership_marker_value(
+    pid: u32,
+    started_at_ms: u64,
+    updated_at_ms: u64,
+    mode: &str,
+    config_path: &Path,
+    workspace: &Path,
+) -> Value {
+    json!({
+        "pid": pid,
+        "startedAtMs": started_at_ms,
+        "updatedAtMs": updated_at_ms,
+        "binaryVersion": VERSION,
+        "dataSchemaVersion": RUNTIME_DATA_SCHEMA_VERSION,
+        "mode": mode,
+        "configPath": config_path.to_string_lossy(),
+        "workspace": workspace.to_string_lossy(),
+    })
+}
+
+fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipMarker>, CliError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(&fs::read_to_string(path)?).map_err(|error| {
+        CliError::InvalidArguments(format!("invalid runtime ownership marker: {error}"))
+    })?;
+    let pid = value
+        .get("pid")
+        .and_then(Value::as_u64)
+        .filter(|pid| *pid <= u32::MAX as u64)
+        .ok_or_else(|| {
+            CliError::InvalidArguments("runtime ownership marker missing `pid`".to_owned())
+        })? as u32;
+    let started_at_ms = required_marker_u64(&value, "startedAtMs")?;
+    let updated_at_ms = required_marker_u64(&value, "updatedAtMs")?;
+    Ok(Some(RuntimeOwnershipMarker {
+        pid,
+        started_at_ms,
+        updated_at_ms,
+        binary_version: required_marker_string(&value, "binaryVersion")?,
+        data_schema_version: value
+            .get("dataSchemaVersion")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as u32,
+        mode: required_marker_string(&value, "mode")?,
+        config_path: required_marker_string(&value, "configPath")?,
+        workspace: required_marker_string(&value, "workspace")?,
+    }))
+}
+
+fn inspect_runtime_ownership(
+    data_dir: &Path,
+    now_ms: u64,
+) -> Result<RuntimeOwnershipStatus, CliError> {
+    let marker_path = runtime_ownership_marker_path(data_dir);
+    let Some(marker) = read_runtime_ownership_marker(&marker_path)? else {
+        return Ok(RuntimeOwnershipStatus {
+            state: RuntimeOwnershipState::None,
+            marker: None,
+            reason: "no ownership marker found".to_owned(),
+        });
+    };
+    Ok(classify_runtime_ownership_marker(marker, now_ms))
+}
+
+fn classify_runtime_ownership_marker(
+    marker: RuntimeOwnershipMarker,
+    now_ms: u64,
+) -> RuntimeOwnershipStatus {
+    if !pid_is_alive(marker.pid) {
+        return RuntimeOwnershipStatus {
+            state: RuntimeOwnershipState::Stale,
+            marker: Some(marker),
+            reason: "owner pid is not alive".to_owned(),
+        };
+    }
+    if now_ms.saturating_sub(marker.updated_at_ms) > RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS {
+        return RuntimeOwnershipStatus {
+            state: RuntimeOwnershipState::Stale,
+            marker: Some(marker),
+            reason: "ownership heartbeat is stale".to_owned(),
+        };
+    }
+    RuntimeOwnershipStatus {
+        state: RuntimeOwnershipState::Active,
+        marker: Some(marker),
+        reason: "owner pid and heartbeat are active".to_owned(),
+    }
+}
+
+fn runtime_ownership_marker_matches(
+    marker: &RuntimeOwnershipMarker,
+    pid: u32,
+    started_at_ms: u64,
+) -> bool {
+    marker.pid == pid && marker.started_at_ms == started_at_ms
+}
+
+fn active_runtime_ownership_error(ownership: &RuntimeOwnershipStatus) -> CliError {
+    let pid = ownership
+        .marker
+        .as_ref()
+        .map(|marker| marker.pid.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    CliError::InvalidArguments(format!(
+        "runtime mutation blocked by active runtime ownership pid={pid}; request stop or inspect first"
+    ))
+}
+
+fn active_runtime_owner_recover_error() -> CliError {
+    CliError::InvalidArguments(
+        "runtime recover blocked: active runtime owner must stop first".to_owned(),
+    )
+}
+
+fn is_runtime_ownership_mutation_lock_error(error: &CliError) -> bool {
+    matches!(
+        error,
+        CliError::InvalidArguments(message) if message == RUNTIME_OWNERSHIP_MUTATION_LOCK_ERROR
+    )
+}
+
+fn write_runtime_marker_if_absent_or_concurrent(
+    path: &Path,
+    marker: &Value,
+) -> Result<(), CliError> {
+    write_runtime_marker_if_absent(path, marker).map_err(|error| {
+        if matches!(&error, CliError::Io(io_error) if io_error.kind() == io::ErrorKind::AlreadyExists)
+        {
+            CliError::InvalidArguments(
+                "runtime mutation blocked by concurrent runtime ownership; request stop or inspect first"
+                    .to_owned(),
+            )
+        } else {
+            error
+        }
+    })
+}
+
+fn acquire_runtime_ownership_marker(
+    data_dir: &Path,
+    path: &Path,
+    marker: &Value,
+) -> Result<(), CliError> {
+    let _mutation_lock = RuntimeOwnershipMutationLock::acquire(path)?;
+    let ownership = inspect_runtime_ownership(data_dir, now_millis())?;
+    match ownership.state {
+        RuntimeOwnershipState::None => {
+            write_runtime_marker_if_absent_or_concurrent(path, marker)?;
+        }
+        RuntimeOwnershipState::Stale => {
+            if path.exists() {
+                fs::remove_file(path)?;
+                sync_parent_dir(path)?;
+            }
+            write_runtime_marker_if_absent_or_concurrent(path, marker)?;
+        }
+        RuntimeOwnershipState::Active => return Err(active_runtime_ownership_error(&ownership)),
+    }
+    Ok(())
+}
+
+fn update_runtime_ownership_heartbeat_if_current(
+    path: &Path,
+    pid: u32,
+    started_at_ms: u64,
+    marker: &Value,
+) -> Result<bool, CliError> {
+    let _mutation_lock = RuntimeOwnershipMutationLock::acquire(path)?;
+    let Some(current_marker) = read_runtime_ownership_marker(path)? else {
+        return Ok(false);
+    };
+    if !runtime_ownership_marker_matches(&current_marker, pid, started_at_ms) {
+        return Ok(false);
+    }
+    write_runtime_marker_atomically(path, marker)?;
+    Ok(true)
+}
+
+fn remove_runtime_ownership_marker_if_current(
+    path: &Path,
+    pid: u32,
+    started_at_ms: u64,
+) -> Result<bool, CliError> {
+    let _mutation_lock = RuntimeOwnershipMutationLock::acquire(path)?;
+    let Some(marker) = read_runtime_ownership_marker(path)? else {
+        return Ok(false);
+    };
+    if !runtime_ownership_marker_matches(&marker, pid, started_at_ms) {
+        return Ok(false);
+    }
+    fs::remove_file(path)?;
+    sync_parent_dir(path)?;
+    Ok(true)
+}
+
+fn remove_stale_runtime_ownership_marker(data_dir: &Path, now_ms: u64) -> Result<bool, CliError> {
+    let path = runtime_ownership_marker_path(data_dir);
+    let _mutation_lock = RuntimeOwnershipMutationLock::acquire(&path)?;
+    let ownership = inspect_runtime_ownership(data_dir, now_ms)?;
+    match ownership.state {
+        RuntimeOwnershipState::None => Ok(false),
+        RuntimeOwnershipState::Active => Err(active_runtime_owner_recover_error()),
+        RuntimeOwnershipState::Stale => {
+            if path.exists() {
+                fs::remove_file(&path)?;
+                sync_parent_dir(&path)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+struct RuntimeOwnershipLease {
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    pid: u32,
+    started_at_ms: u64,
+}
+
+impl RuntimeOwnershipLease {
+    fn acquire(bundle: &ConfigBundle, mode: &str) -> Result<Self, CliError> {
+        guard_runtime_ownership_acquire_admission(&bundle.context.data_dir)?;
+        let path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let request_path = runtime_stop_request_marker_path(&bundle.context.data_dir);
+        let pid = std::process::id();
+        let started_at_ms = now_millis();
+        let marker = runtime_ownership_marker_value(
+            pid,
+            started_at_ms,
+            started_at_ms,
+            mode,
+            &bundle.context.config_path,
+            &bundle.context.workspace,
+        );
+        acquire_runtime_ownership_marker(&bundle.context.data_dir, &path, &marker)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut lease = Self {
+            path,
+            stop,
+            handle: None,
+            pid,
+            started_at_ms,
+        };
+        if request_path.exists() {
+            fs::remove_file(&request_path)?;
+            sync_parent_dir(&request_path)?;
+        }
+        let thread_stop = lease.stop.clone();
+        let thread_path = lease.path.clone();
+        let config_path = bundle.context.config_path.clone();
+        let workspace = bundle.context.workspace.clone();
+        let mode = mode.to_owned();
+        let handle = thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                thread::sleep(RUNTIME_OWNERSHIP_HEARTBEAT_INTERVAL);
+                if thread_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let marker = runtime_ownership_marker_value(
+                    pid,
+                    started_at_ms,
+                    now_millis(),
+                    &mode,
+                    &config_path,
+                    &workspace,
+                );
+                match update_runtime_ownership_heartbeat_if_current(
+                    &thread_path,
+                    pid,
+                    started_at_ms,
+                    &marker,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(error) if is_runtime_ownership_mutation_lock_error(&error) => continue,
+                    Err(_error) => break,
+                }
+            }
+        });
+        lease.handle = Some(handle);
+        Ok(lease)
+    }
+
+    fn cleanup(mut self) -> Result<(), CliError> {
+        self.cleanup_inner()
+    }
+
+    fn cleanup_inner(&mut self) -> Result<(), CliError> {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .map_err(|_| CliError::Api(ApiError::internal("runtime heartbeat panicked")))?;
+        }
+        remove_runtime_ownership_marker_if_current(&self.path, self.pid, self.started_at_ms)?;
+        Ok(())
+    }
+}
+
+impl Drop for RuntimeOwnershipLease {
+    fn drop(&mut self) {
+        let _cleanup_result = self.cleanup_inner();
+    }
+}
+
+fn runtime_stop_request_marker_value(request: &str, owner_pid: Option<u32>) -> Value {
+    json!({
+        "request": request,
+        "requestedAtMs": now_millis(),
+        "ownerPid": owner_pid,
+    })
+}
+
+fn read_runtime_stop_request_marker(
+    path: &Path,
+) -> Result<Option<RuntimeStopRequestMarker>, CliError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(&fs::read_to_string(path)?).map_err(|error| {
+        CliError::InvalidArguments(format!("invalid runtime stop request marker: {error}"))
+    })?;
+    Ok(Some(RuntimeStopRequestMarker {
+        request: required_marker_string(&value, "request")?,
+        requested_at_ms: required_marker_u64(&value, "requestedAtMs")?,
+        owner_pid: value
+            .get("ownerPid")
+            .and_then(Value::as_u64)
+            .filter(|pid| *pid <= u32::MAX as u64)
+            .map(|pid| pid as u32),
+    }))
+}
+
+fn runtime_stop_request_observed(data_dir: &Path) -> Result<Option<String>, CliError> {
+    let marker_path = runtime_stop_request_marker_path(data_dir);
+    Ok(read_runtime_stop_request_marker(&marker_path)?.map(|marker| marker.request))
+}
+
+fn required_marker_u64(value: &Value, key: &str) -> Result<u64, CliError> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CliError::InvalidArguments(format!("runtime marker missing `{key}`")))
 }
 
 fn validate_runtime_target_version(input: &str) -> Result<String, CliError> {
@@ -2052,7 +3008,7 @@ fn write_runtime_marker_atomically(path: &Path, value: &Value) -> Result<(), Cli
             .map(|duration| duration.as_nanos())
             .unwrap_or_default()
     ));
-    {
+    let write_result = (|| {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -2062,10 +3018,57 @@ fn write_runtime_marker_atomically(path: &Path, value: &Value) -> Result<(), Cli
         })?;
         file.write_all(b"\n")?;
         file.sync_all()?;
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _cleanup_result = fs::remove_file(&temp_path);
+        let _sync_result = sync_parent_dir(path);
+        return Err(error);
     }
-    fs::rename(&temp_path, path)?;
     sync_parent_dir(path)?;
     Ok(())
+}
+
+fn write_runtime_marker_if_absent(path: &Path, value: &Value) -> Result<(), CliError> {
+    let parent = path.parent().ok_or_else(|| {
+        CliError::InvalidArguments("runtime marker path has no parent directory".to_owned())
+    })?;
+    fs::create_dir_all(parent)?;
+    let temp_path = path.with_extension(format!(
+        "json.tmp-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    let write_result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        serde_json::to_writer_pretty(&mut file, value).map_err(|error| {
+            CliError::InvalidArguments(format!("runtime marker could not be serialized: {error}"))
+        })?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::hard_link(&temp_path, path)?;
+        Ok(())
+    })();
+    let temp_cleanup_result = fs::remove_file(&temp_path);
+    match write_result {
+        Ok(()) => {
+            let _ = temp_cleanup_result;
+            sync_parent_dir(path)?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = temp_cleanup_result;
+            let _ = sync_parent_dir(path);
+            Err(error)
+        }
+    }
 }
 
 fn sync_parent_dir(path: &Path) -> Result<(), CliError> {
@@ -3173,7 +4176,7 @@ pub fn session_list(options: SessionListOptions) -> Result<SessionListReport, Cl
         });
     }
     let sessions = SessionManager::new(&workspace)?
-        .list_sessions()?
+        .list_session_ux()?
         .into_iter()
         .map(|session| SessionListItem {
             key: session.key,
@@ -3203,48 +4206,21 @@ pub fn session_inspect(options: SessionInspectOptions) -> Result<SessionInspectR
         )));
     }
     let manager = SessionManager::new(&workspace)?;
-    let path = manager.session_path(&options.session);
-    let value = manager.read_session_file(&options.session).ok_or_else(|| {
+    let detail = manager.session_ux_detail(&options.session).ok_or_else(|| {
         CliError::InvalidArguments(format!("session `{}` was not found", options.session))
     })?;
-    let message_count = value
-        .get("messages")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let mut metadata_keys = value
-        .get("metadata")
-        .and_then(Value::as_object)
-        .map(|metadata| metadata.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    metadata_keys.sort();
-    let (recovery_markers, checkpoint_phase) = recovery_summary_from_session_value(&value);
-    let last_consolidated = value
-        .get("last_consolidated")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or_default();
 
     Ok(SessionInspectReport {
         workspace,
-        key: value
-            .get("key")
-            .and_then(Value::as_str)
-            .unwrap_or(&options.session)
-            .to_owned(),
-        path,
-        created_at: value
-            .get("created_at")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        updated_at: value
-            .get("updated_at")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        message_count,
-        metadata_keys,
-        last_consolidated,
-        recovery_markers,
-        checkpoint_phase,
+        key: detail.key,
+        path: detail.path,
+        created_at: detail.created_at,
+        updated_at: detail.updated_at,
+        message_count: detail.message_count,
+        metadata_keys: detail.metadata_keys,
+        last_consolidated: detail.last_consolidated,
+        recovery_markers: detail.recovery_markers,
+        checkpoint_phase: detail.checkpoint_phase,
     })
 }
 
@@ -3287,22 +4263,23 @@ pub fn session_history(
         )));
     }
     let manager = SessionManager::new(&workspace)?;
-    let session = manager.load_existing(&options.session).ok_or_else(|| {
-        CliError::InvalidArguments(format!("session `{}` was not found", options.session))
-    })?;
-    let path = manager
-        .existing_session_path(&options.session)
-        .unwrap_or_else(|| manager.session_path(&options.session));
-    let history = session.get_history_with_options(SessionHistoryOptions {
-        max_messages: options.max_messages,
-        max_tokens: options.max_tokens,
-        include_timestamps: options.timestamps,
-    });
+    let history = manager
+        .session_ux_history_with_options(
+            &options.session,
+            SessionHistoryOptions {
+                max_messages: options.max_messages,
+                max_tokens: options.max_tokens,
+                include_timestamps: options.timestamps,
+            },
+        )
+        .ok_or_else(|| {
+            CliError::InvalidArguments(format!("session `{}` was not found", options.session))
+        })?;
     Ok(SessionHistoryCliReport {
         workspace,
-        key: session.key,
-        path,
-        history,
+        key: history.key,
+        path: history.path,
+        history: history.history,
         json: options.json,
     })
 }
@@ -3408,54 +4385,23 @@ pub fn session_diagnostics(
         });
     }
     let manager = SessionManager::new(&workspace)?;
-    let path = manager
-        .existing_session_path(&options.session)
-        .unwrap_or(fallback_path);
-    let Some(value) = manager.read_session_file(&options.session) else {
-        return Ok(SessionDiagnosticsReport {
-            workspace,
-            key: options.session,
-            path,
-            exists: false,
-            message_count: 0,
-            last_consolidated: 0,
-            metadata_keys: Vec::new(),
-            recovery_markers: Vec::new(),
-            checkpoint_phase: None,
-            legal_start: 0,
-        });
+    let diagnostics = manager.session_ux_diagnostics(&options.session);
+    let path = if diagnostics.exists {
+        diagnostics.path
+    } else {
+        fallback_path
     };
-    let messages = value
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut metadata_keys = value
-        .get("metadata")
-        .and_then(Value::as_object)
-        .map(|metadata| metadata.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    metadata_keys.sort();
-    let (recovery_markers, checkpoint_phase) = recovery_summary_from_session_value(&value);
     Ok(SessionDiagnosticsReport {
         workspace,
-        key: value
-            .get("key")
-            .and_then(Value::as_str)
-            .unwrap_or(&options.session)
-            .to_owned(),
+        key: diagnostics.key,
         path,
-        exists: true,
-        message_count: messages.len(),
-        last_consolidated: value
-            .get("last_consolidated")
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or_default(),
-        metadata_keys,
-        recovery_markers,
-        checkpoint_phase,
-        legal_start: find_legal_message_start(&messages),
+        exists: diagnostics.exists,
+        message_count: diagnostics.message_count,
+        last_consolidated: diagnostics.last_consolidated,
+        metadata_keys: diagnostics.metadata_keys,
+        recovery_markers: diagnostics.recovery_markers,
+        checkpoint_phase: diagnostics.checkpoint_phase,
+        legal_start: diagnostics.legal_start,
     })
 }
 
@@ -3552,28 +4498,6 @@ fn session_path_without_creating_dir(workspace: &Path, key: &str) -> PathBuf {
     workspace
         .join("sessions")
         .join(format!("{}.jsonl", SessionManager::safe_key(key)))
-}
-
-fn recovery_summary_from_session_value(value: &Value) -> (Vec<String>, Option<String>) {
-    let Some(metadata) = value.get("metadata").and_then(Value::as_object) else {
-        return (Vec::new(), None);
-    };
-    let mut markers = Vec::new();
-    if metadata.contains_key("pending_user_turn") {
-        markers.push("pending_user_turn".to_owned());
-    }
-    if metadata.contains_key("runtime_checkpoint") {
-        markers.push("runtime_checkpoint".to_owned());
-    }
-    if metadata.contains_key("_last_summary") {
-        markers.push("_last_summary".to_owned());
-    }
-    let phase = metadata
-        .get("runtime_checkpoint")
-        .and_then(|checkpoint| checkpoint.get("phase"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    (markers, phase)
 }
 
 fn session_to_jsonl(session: &Session) -> Result<String, CliError> {
@@ -4442,6 +5366,8 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         .timeout
         .unwrap_or(bundle.config.api.timeout)
         .max(0.001);
+    let ownership = RuntimeOwnershipLease::acquire(&bundle, "serve")?;
+    let data_dir = bundle.context.data_dir.clone();
     let adapter = Arc::new(AgentLoopChatCompletionAdapter::from_bundle(
         bundle,
         options.allow_api_side_effects,
@@ -4454,18 +5380,24 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
     } else {
         eprintln!("Serving shacs-bot API on http://{addr}");
     }
-    runtime.block_on(shacs_api::serve_api_with_timeout(
+    let serve_result = runtime.block_on(shacs_api::serve_api_with_timeout(
         addr,
         adapter,
         Duration::from_secs_f64(timeout_seconds),
         async {
-            let _ = tokio::signal::ctrl_c().await;
+            wait_for_ctrl_c_or_runtime_request(data_dir).await;
         },
-    ))?;
+    ));
+    ownership.cleanup()?;
+    serve_result?;
     Ok(format!("API server stopped: http://{addr}"))
 }
 
 pub fn run_runtime(options: RunOptions) -> Result<String, CliError> {
+    run_runtime_with_mode(options, "run")
+}
+
+fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliError> {
     let bundle = load_runtime_config(RuntimeConfigOptions {
         config_path: options.config_path.clone(),
         workspace_override: options.workspace_override.clone(),
@@ -4493,6 +5425,8 @@ pub fn run_runtime(options: RunOptions) -> Result<String, CliError> {
     if !runtime_needs_process(&report, &specs) && !heartbeat_enabled {
         return Ok(plan);
     }
+    let ownership = RuntimeOwnershipLease::acquire(&bundle, mode)?;
+    let data_dir = bundle.context.data_dir.clone();
     let adapter = Arc::new(AgentLoopChatCompletionAdapter::from_bundle(
         bundle.clone(),
         options.allow_side_effects,
@@ -4509,18 +5443,19 @@ pub fn run_runtime(options: RunOptions) -> Result<String, CliError> {
         .build()?;
     eprintln!("{plan}");
     let serve_result = if report.websocket.enabled {
+        let request_data_dir = data_dir.clone();
         runtime.block_on(shacs_api::serve_websocket_with_timeout_and_path(
             report.websocket_addr,
             adapter,
             Duration::from_secs_f64(timeout_seconds),
             &report.websocket.path,
-            async {
-                let _ = tokio::signal::ctrl_c().await;
+            async move {
+                wait_for_ctrl_c_or_runtime_request(request_data_dir).await;
             },
         ))
     } else {
         runtime.block_on(async {
-            let _ = tokio::signal::ctrl_c().await;
+            wait_for_ctrl_c_or_runtime_request(data_dir).await;
         });
         Ok(())
     };
@@ -4530,6 +5465,7 @@ pub fn run_runtime(options: RunOptions) -> Result<String, CliError> {
             .join()
             .map_err(|_| CliError::Api(ApiError::internal("heartbeat worker panicked")))?;
     }
+    ownership.cleanup()?;
     serve_result?;
     Ok(format!(
         "Channel runtime stopped: websocket_enabled={} ws://{}:{}{}",
@@ -4538,6 +5474,19 @@ pub fn run_runtime(options: RunOptions) -> Result<String, CliError> {
         report.websocket.port,
         report.websocket.path
     ))
+}
+
+async fn wait_for_ctrl_c_or_runtime_request(data_dir: PathBuf) {
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if runtime_stop_request_observed(&data_dir).ok().flatten().is_some() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 struct ExternalChannelSupervisor {
@@ -7478,7 +8427,7 @@ pub fn help_text() -> String {
         "Commands:",
         "  onboard   Create or refresh config and workspace templates",
         "  status    Show config, workspace, model, and provider status",
-        "  runtime   Inspect, update, or recover local runtime/workspace state",
+        "  runtime   Start, stop, restart, inspect, diagnose, update, or recover local runtime state",
         "  session   Manage local session files",
         "  skills    List and inspect local skill registry entries",
         "  channels  List channel registry/config status",
@@ -7613,6 +8562,88 @@ fn parse_runtime_inspect(
         }
     }
     Ok(CliCommand::RuntimeInspect(options))
+}
+
+fn parse_runtime_start(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = RuntimeStartOptions {
+        config_path: global_config,
+        workspace_override: None,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown runtime start argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(CliCommand::RuntimeStart(options))
+}
+
+fn parse_runtime_stop(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    restart: bool,
+) -> Result<CliCommand, CliError> {
+    let mut options = RuntimeStopOptions {
+        config_path: global_config,
+        workspace_override: None,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown runtime stop/restart argument `{other}`"
+                )))
+            }
+        }
+    }
+    if restart {
+        Ok(CliCommand::RuntimeRestart(options))
+    } else {
+        Ok(CliCommand::RuntimeStop(options))
+    }
+}
+
+fn parse_runtime_diagnostics(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = RuntimeDiagnosticsOptions {
+        config_path: global_config,
+        workspace_override: None,
+        bundle_path: None,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--bundle" => options.bundle_path = Some(take_path(&mut parser, &arg)?),
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown runtime diagnostics argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(CliCommand::RuntimeDiagnostics(options))
 }
 
 fn parse_runtime_update(
@@ -9399,6 +10430,46 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         self.run_agent_loop(invocation, None)
     }
 
+    fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
+        DiagnosticsSnapshot {
+            generated_at_ms: shacs_utils::diagnostics::current_time_ms(),
+            runtime: json!({
+                "workspace": { "path": self.workspace, "exists": self.workspace.exists() },
+                "media_dir": { "path": self.media_dir, "exists": self.media_dir.exists() },
+                "defaults": {
+                    "provider": self.provider_id,
+                    "model": self.configured_model,
+                    "resolved_model": self.resolved_model,
+                },
+                "capabilities": {
+                    "side_effect_tools_allowed": self.allow_side_effect_tools,
+                    "send_progress": self.send_progress,
+                    "send_max_retries": self.send_max_retries,
+                    "exec_timeout_seconds": self.exec_timeout_seconds,
+                    "exec_sandbox": self.exec_sandbox,
+                    "exec_allowed_env_keys": self.exec_allowed_env_keys,
+                    "exec_env_keys": self.exec_env.keys().collect::<Vec<_>>(),
+                }
+            }),
+            operational_logs: vec![OperationalLogRecord::new(
+                DiagnosticsSeverity::Info,
+                DiagnosticsKind::Api,
+                "API diagnostics inspected adapter state only",
+            )],
+            traces: Vec::new(),
+            diagnostics: vec![DiagnosticsRecord::new(
+                DiagnosticsSeverity::Info,
+                DiagnosticsKind::Runtime,
+                "agent loop adapter diagnostics snapshot generated",
+            )],
+            crash_evidence: Vec::new(),
+            recovery_evidence: Vec::new(),
+            provider_progress: Vec::new(),
+            tool_progress: Vec::new(),
+            subagent_progress: Vec::new(),
+        }
+    }
+
     fn stream_chat(
         &self,
         invocation: ChatCompletionInvocation,
@@ -9455,6 +10526,10 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
             }
         }
         Ok(paths)
+    }
+
+    fn session_workspace(&self) -> Option<PathBuf> {
+        Some(self.workspace.clone())
     }
 
     fn persist_uploaded_file(
@@ -9885,8 +10960,33 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
             "Data schema: {} (min {})",
             report.lifecycle.data_schema_version, report.lifecycle.data_schema_min_version
         ),
+        format!("Compatibility: {}", report.lifecycle.compatibility.as_str()),
+        format!(
+            "Ownership: {} ({})",
+            report.lifecycle.ownership.state.as_str(),
+            report.lifecycle.ownership.reason
+        ),
         format!("Sessions: {}", report.sessions.count),
     ];
+    if let Some(marker) = &report.lifecycle.ownership.marker {
+        lines.push(format!(
+            "Owner: pid={} mode={} updated_at_ms={}",
+            marker.pid, marker.mode, marker.updated_at_ms
+        ));
+    }
+    if let Some(request) = &report.lifecycle.stop_request {
+        lines.push(format!(
+            "Stop request: {} requested_at_ms={} owner_pid={}",
+            request.request,
+            request.requested_at_ms,
+            request
+                .owner_pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        ));
+    } else {
+        lines.push("Stop request: none".to_owned());
+    }
     match report.lifecycle.update_marker {
         Some(marker) => lines.push(format!(
             "Update marker: {} {} -> {} (migration_required={})",
@@ -9926,6 +11026,31 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
     lines.join("\n")
 }
 
+fn format_runtime_diagnostics(report: RuntimeDiagnosticsReport) -> String {
+    let mut output = match serde_json::to_string_pretty(&report.snapshot.redacted_value()) {
+        Ok(value) => value,
+        Err(error) => format!(
+            "{{\n  \"error\": \"diagnostics snapshot could not be formatted safely: {error}\"\n}}"
+        ),
+    };
+    if let Some(path) = report.bundle_path {
+        match report.bundle_error {
+            Some(error) => {
+                output.push_str(&format!(
+                    "\nBundle: failed at {} ({error})",
+                    redact_string(&display_path(&path)),
+                    error = redact_string(&error)
+                ));
+            }
+            None => output.push_str(&format!(
+                "\nBundle: {}",
+                redact_string(&display_path(&path))
+            )),
+        }
+    }
+    output
+}
+
 fn format_runtime_update(outcome: RuntimeUpdateOutcome) -> String {
     [
         "shacs-bot runtime update".to_owned(),
@@ -9950,6 +11075,27 @@ fn format_runtime_recover(outcome: RuntimeRecoverOutcome) -> String {
         format!("Data dir: {}", display_path(&outcome.data_dir)),
         format!("Marker: {}", display_path(&outcome.marker_path)),
         format!("Recovered: {}", outcome.recovered),
+        format!("Detail: {}", outcome.detail),
+    ]
+    .join("\n")
+}
+
+fn format_runtime_stop(outcome: RuntimeStopOutcome) -> String {
+    format_runtime_stop_like("shacs-bot runtime stop", outcome)
+}
+
+fn format_runtime_restart(outcome: RuntimeStopOutcome) -> String {
+    format_runtime_stop_like("shacs-bot runtime restart", outcome)
+}
+
+fn format_runtime_stop_like(title: &str, outcome: RuntimeStopOutcome) -> String {
+    [
+        title.to_owned(),
+        format!("Config: {}", display_path(&outcome.config_path)),
+        format!("Workspace: {}", display_path(&outcome.workspace)),
+        format!("Data dir: {}", display_path(&outcome.data_dir)),
+        format!("Request marker: {}", display_path(&outcome.request_path)),
+        format!("Status: {}", outcome.status.as_str()),
         format!("Detail: {}", outcome.detail),
     ]
     .join("\n")
@@ -10356,6 +11502,49 @@ mod tests {
     }
 
     #[test]
+    fn parser_handles_runtime_lifecycle_commands() -> Result<(), Box<dyn Error>> {
+        let parsed = parse_cli_args([
+            "--config",
+            "/tmp/a.json",
+            "runtime",
+            "start",
+            "--workspace",
+            "/tmp/workspace",
+        ])?;
+        let CliCommand::RuntimeStart(options) = parsed else {
+            return Err("expected runtime start command".into());
+        };
+        assert_eq!(options.config_path, Some(PathBuf::from("/tmp/a.json")));
+        assert_eq!(
+            options.workspace_override,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+
+        let parsed = parse_cli_args(["runtime", "stop", "--workspace", "/tmp/workspace"])?;
+        let CliCommand::RuntimeStop(options) = parsed else {
+            return Err("expected runtime stop command".into());
+        };
+        assert_eq!(
+            options.workspace_override,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+
+        let parsed =
+            parse_cli_args(["runtime", "stop", "--workspace", "/tmp/workspace", "--help"])?;
+        assert!(matches!(parsed, CliCommand::Help));
+
+        let parsed = parse_cli_args(["runtime", "restart", "--config", "/tmp/b.json", "--help"])?;
+        assert!(matches!(parsed, CliCommand::Help));
+
+        let parsed = parse_cli_args(["runtime", "restart", "--config", "/tmp/b.json"])?;
+        let CliCommand::RuntimeRestart(options) = parsed else {
+            return Err("expected runtime restart command".into());
+        };
+        assert_eq!(options.config_path, Some(PathBuf::from("/tmp/b.json")));
+        Ok(())
+    }
+
+    #[test]
     fn parser_handles_gateway_and_web_options() -> Result<(), Box<dyn Error>> {
         let parsed = parse_cli_args([
             "--config",
@@ -10482,7 +11671,7 @@ mod tests {
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
-        assert!(error.contains("runtime requires `inspect`, `update`, or `recover`"));
+        assert!(error.contains("runtime requires `start`, `stop`, `restart`, `inspect`, `diagnostics`, `update`, or `recover`"));
 
         let error = parse_cli_args(["runtime", "update"])
             .err()
@@ -12975,6 +14164,84 @@ mod tests {
     }
 
     #[test]
+    fn runtime_diagnostics_outputs_redacted_snapshot_and_bundle() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let bundle_path = root.path().join("diagnostics.zip");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        config.agents.defaults.provider = "openai_codex".to_owned();
+        config.agents.defaults.model = "gpt-5.4".to_owned();
+        config.providers.insert(
+            "openai_codex".to_owned(),
+            ProviderConfig {
+                api_key: Some("sk-raw-secret".to_owned()),
+                api_base: Some("https://chatgpt.com/backend-api".to_owned()),
+                extra_headers: None,
+                extra_body: None,
+            },
+        );
+        save_config_to_path(&config, &config_path)?;
+
+        let parsed = parse_cli_args([
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+            "runtime",
+            "diagnostics",
+            "--bundle",
+            bundle_path.to_string_lossy().as_ref(),
+        ])?;
+        let CliCommand::RuntimeDiagnostics(options) = parsed else {
+            return Err("expected runtime diagnostics command".into());
+        };
+        let report = runtime_diagnostics(options)?;
+        let output = format_runtime_diagnostics(report);
+
+        assert!(bundle_path.exists());
+        assert!(!workspace.exists());
+        assert!(output.contains("local runtime diagnostics snapshot generated"));
+        assert!(output.contains("runtime diagnostics provider snapshot"));
+        assert!(output.contains("runtime capability snapshot"));
+        assert!(output.contains("[REDACTED]") || !output.contains("api_key"));
+        assert!(!output.contains("sk-raw-secret"));
+        assert!(!output.contains("raw-token"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_diagnostics_bundle_generation_failure_is_safe() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let bundle_path = root.path().join("missing").join("diagnostics.zip");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                api_key: Some("sk-bundle-secret".to_owned()),
+                api_base: None,
+                extra_headers: None,
+                extra_body: None,
+            },
+        );
+        save_config_to_path(&config, &config_path)?;
+
+        let report = runtime_diagnostics(RuntimeDiagnosticsOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            bundle_path: Some(bundle_path),
+        })?;
+        let output = format_runtime_diagnostics(report);
+
+        assert!(output.contains("Bundle: failed"));
+        assert!(output.contains("diagnostics bundle generation failed"));
+        assert!(!output.contains("sk-bundle-secret"));
+        Ok(())
+    }
+
+    #[test]
     fn runtime_update_records_marker_and_recover_clears_it() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
@@ -13134,6 +14401,461 @@ mod tests {
 
         assert!(error.contains("partial migration marker requires manual inspection"));
         assert!(marker_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_ownership_classifies_active_and_stale_markers() -> Result<(), Box<dyn Error>> {
+        let now = now_millis();
+        let active = RuntimeOwnershipMarker {
+            pid: std::process::id(),
+            started_at_ms: now,
+            updated_at_ms: now,
+            binary_version: VERSION.to_owned(),
+            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
+            mode: "run".to_owned(),
+            config_path: "/tmp/config.json".to_owned(),
+            workspace: "/tmp/workspace".to_owned(),
+        };
+        let status = classify_runtime_ownership_marker(active, now);
+        assert_eq!(status.state, RuntimeOwnershipState::Active);
+
+        let stale_pid = RuntimeOwnershipMarker {
+            pid: 999_999,
+            started_at_ms: now,
+            updated_at_ms: now,
+            binary_version: VERSION.to_owned(),
+            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
+            mode: "run".to_owned(),
+            config_path: "/tmp/config.json".to_owned(),
+            workspace: "/tmp/workspace".to_owned(),
+        };
+        let status = classify_runtime_ownership_marker(stale_pid, now);
+        assert_eq!(status.state, RuntimeOwnershipState::Stale);
+
+        let stale_heartbeat = RuntimeOwnershipMarker {
+            pid: std::process::id(),
+            started_at_ms: now,
+            updated_at_ms: now.saturating_sub(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS + 1),
+            binary_version: VERSION.to_owned(),
+            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
+            mode: "serve".to_owned(),
+            config_path: "/tmp/config.json".to_owned(),
+            workspace: "/tmp/workspace".to_owned(),
+        };
+        let status = classify_runtime_ownership_marker(stale_heartbeat, now);
+        assert_eq!(status.state, RuntimeOwnershipState::Stale);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_active_ownership_blocks_start_admission() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let now = now_millis();
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(
+                std::process::id(),
+                now,
+                now,
+                "run",
+                &config_path,
+                &workspace,
+            ),
+        )?;
+
+        let error = run_runtime(RunOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            ..RunOptions::default()
+        })
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+        assert!(error.contains("active runtime ownership"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_ownership_marker_write_if_absent_returns_already_exists_and_preserves_existing_content(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let marker_path = root.path().join("runtime-ownership.json");
+        let existing = serde_json::json!({"owner": "existing"});
+        write_runtime_marker_atomically(&marker_path, &existing)?;
+        let before = fs::read_to_string(&marker_path)?;
+
+        let error =
+            write_runtime_marker_if_absent(&marker_path, &serde_json::json!({"owner": "new"}))
+                .err()
+                .ok_or_else(|| "expected already exists error".to_owned())?;
+        let io_error = match error {
+            CliError::Io(error) => error,
+            other => {
+                return Err(format!("expected io error, got {other:?}").into());
+            }
+        };
+        assert_eq!(io_error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&marker_path)?, before);
+        assert_eq!(fs::read_dir(root.path())?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_ownership_heartbeat_update_preserves_different_owner_marker(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let marker_path = root.path().join("runtime").join("ownership-marker.json");
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let current_started_at_ms = now_millis();
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(
+                std::process::id(),
+                current_started_at_ms,
+                current_started_at_ms,
+                "run",
+                &config_path,
+                &workspace,
+            ),
+        )?;
+        let before = read_runtime_ownership_marker(&marker_path)?
+            .ok_or_else(|| "expected ownership marker".to_owned())?;
+        let old_started_at_ms = current_started_at_ms.saturating_sub(1);
+        let heartbeat_marker = runtime_ownership_marker_value(
+            std::process::id(),
+            old_started_at_ms,
+            now_millis(),
+            "run",
+            &config_path,
+            &workspace,
+        );
+
+        let updated = update_runtime_ownership_heartbeat_if_current(
+            &marker_path,
+            std::process::id(),
+            old_started_at_ms,
+            &heartbeat_marker,
+        )?;
+
+        assert!(!updated);
+        let after = read_runtime_ownership_marker(&marker_path)?
+            .ok_or_else(|| "expected ownership marker after heartbeat".to_owned())?;
+        assert_eq!(after, before);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_stale_ownership_cleanup_rechecks_active_marker_before_removing(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let marker_path = runtime_ownership_marker_path(data_dir);
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let stale_started_at_ms = now_millis();
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(
+                999_999,
+                stale_started_at_ms,
+                stale_started_at_ms,
+                "run",
+                &config_path,
+                &workspace,
+            ),
+        )?;
+        let active_started_at_ms = now_millis();
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(
+                std::process::id(),
+                active_started_at_ms,
+                active_started_at_ms,
+                "run",
+                &config_path,
+                &workspace,
+            ),
+        )?;
+
+        let error = remove_stale_runtime_ownership_marker(data_dir, now_millis())
+            .err()
+            .ok_or_else(|| "expected active owner recover error".to_owned())?;
+
+        assert!(error
+            .to_string()
+            .contains("active runtime owner must stop first"));
+        let marker = read_runtime_ownership_marker(&marker_path)?
+            .ok_or_else(|| "expected active ownership marker".to_owned())?;
+        assert_eq!(marker.pid, std::process::id());
+        assert_eq!(marker.started_at_ms, active_started_at_ms);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_ownership_acquire_cleans_marker_when_stop_request_removal_fails(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let ownership_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let request_path = runtime_stop_request_marker_path(&bundle.context.data_dir);
+        fs::create_dir_all(&request_path)?;
+
+        let error = RuntimeOwnershipLease::acquire(&bundle, "run")
+            .err()
+            .ok_or_else(|| "expected stop request removal failure".to_owned())?;
+
+        assert!(error.to_string().contains("CLI I/O failed"));
+        assert!(!ownership_path.exists());
+        assert!(request_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_marker_atomic_write_removes_temp_on_rename_failure() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let marker_path = root.path().join("ownership-marker.json");
+        fs::create_dir(&marker_path)?;
+
+        let error = write_runtime_marker_atomically(&marker_path, &json!({"owner": "new"}))
+            .err()
+            .ok_or_else(|| "expected atomic marker rename failure".to_owned())?;
+
+        assert!(error.to_string().contains("CLI I/O failed"));
+        let mut entries = Vec::new();
+        for entry_result in fs::read_dir(root.path())? {
+            let entry = entry_result?;
+            entries.push(entry.file_name().to_string_lossy().to_string());
+        }
+        assert_eq!(entries, vec!["ownership-marker.json".to_owned()]);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_recover_clears_stale_ownership_marker() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(
+                999_999,
+                now_millis(),
+                now_millis(),
+                "run",
+                &config_path,
+                &workspace,
+            ),
+        )?;
+
+        let recovered = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+        assert!(recovered.recovered);
+        assert!(!marker_path.exists());
+        assert!(recovered.detail.contains("stale runtime ownership"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_stop_and_restart_write_request_for_active_owner() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let now = now_millis();
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(
+                std::process::id(),
+                now,
+                now,
+                "runtime-start",
+                &config_path,
+                &workspace,
+            ),
+        )?;
+
+        let stopped = runtime_stop(RuntimeStopOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert_eq!(stopped.status, RuntimeStopOutcomeStatus::RequestWritten);
+        assert_eq!(
+            runtime_stop_request_observed(&bundle.context.data_dir)?.as_deref(),
+            Some("stop")
+        );
+
+        let restarted = runtime_restart(RuntimeStopOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+        assert_eq!(restarted.status, RuntimeStopOutcomeStatus::RequestWritten);
+        assert_eq!(
+            runtime_stop_request_observed(&bundle.context.data_dir)?.as_deref(),
+            Some("restart")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_stop_reports_no_active_or_stale_owner() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let no_owner = runtime_stop(RuntimeStopOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert_eq!(no_owner.status, RuntimeStopOutcomeStatus::NoActiveOwner);
+
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        write_runtime_marker_atomically(
+            &runtime_ownership_marker_path(&bundle.context.data_dir),
+            &runtime_ownership_marker_value(
+                999_999,
+                now_millis(),
+                now_millis(),
+                "run",
+                &config_path,
+                &workspace,
+            ),
+        )?;
+        let stale = runtime_stop(RuntimeStopOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+        assert_eq!(stale.status, RuntimeStopOutcomeStatus::StaleOwnerOnly);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_compatibility_classification_and_admission() {
+        assert_eq!(
+            evaluate_runtime_compatibility(RUNTIME_DATA_SCHEMA_VERSION),
+            RuntimeCompatibility::FullyCompatible
+        );
+        assert_eq!(
+            evaluate_runtime_compatibility(RUNTIME_DATA_SCHEMA_VERSION + 1),
+            RuntimeCompatibility::InspectOnly
+        );
+        assert_eq!(
+            evaluate_runtime_compatibility_with_bounds(1, 2, 1),
+            RuntimeCompatibility::MigrationRequired
+        );
+        assert_eq!(
+            evaluate_runtime_compatibility(0),
+            RuntimeCompatibility::Incompatible
+        );
+        assert!(
+            guard_runtime_compatibility_for_admission(RuntimeCompatibility::FullyCompatible)
+                .is_ok()
+        );
+        for compatibility in [
+            RuntimeCompatibility::MigrationRequired,
+            RuntimeCompatibility::InspectOnly,
+            RuntimeCompatibility::Incompatible,
+        ] {
+            assert!(guard_runtime_compatibility_for_admission(compatibility).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_migration_required_marker_blocks_admission() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
+        let mut marker = runtime_update_marker_value(VERSION, "completed_cleanup", None);
+        marker["migrationRequired"] = json!(true);
+        write_runtime_marker_atomically(&marker_path, &marker)?;
+        let error = load_runtime_config(RuntimeConfigOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            resolve_env: false,
+        })
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+        assert!(error.contains("runtime mutation blocked"));
         Ok(())
     }
 
@@ -13472,8 +15194,8 @@ mod tests {
         assert!(!help.contains("serve     Reserved"));
         assert!(help.contains("gateway   Report gateway"));
         assert!(!help.contains("gateway   Reserved"));
-        assert!(help.contains("web       Report WebUI"));
-        assert!(help.contains("runtime   Inspect local runtime"));
+        assert!(help.contains("web       Start the Web UI"));
+        assert!(help.contains("runtime   Start, stop, restart"));
         assert!(help.contains("ask       Send one message"));
         assert!(help.contains("agent     Alias"));
         assert!(help.contains("provider  Manage provider auth"));

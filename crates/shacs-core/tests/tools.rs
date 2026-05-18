@@ -2793,7 +2793,12 @@ fn mcp_registers_tools_resources_prompts_and_filters_enabled_tools() -> Result<(
         &mut registry,
         client,
         capabilities,
-        &["search-docs".to_owned(), "missing".to_owned()],
+        &[
+            "search-docs".to_owned(),
+            "README.md".to_owned(),
+            "mcp_srv_one_prompt_plan".to_owned(),
+            "missing".to_owned(),
+        ],
     );
     if report.registered_count != 3 || report.unmatched_enabled_tools != ["missing"] {
         return Err(format!("unexpected MCP registration report: {report:?}").into());
@@ -2931,20 +2936,17 @@ fn mcp_empty_enabled_tools_registers_no_tools() -> Result<(), Box<dyn Error>> {
         &[],
     );
 
-    if report.registered_count != 2 || !report.unmatched_enabled_tools.is_empty() {
+    if report.registered_count != 0 || !report.unmatched_enabled_tools.is_empty() {
         return Err(format!("unexpected empty enabledTools report: {report:?}").into());
     }
-    if registry.has("mcp_srv_tool") {
-        return Err("empty enabledTools should not register MCP tools".into());
-    }
-    let resource = registry
-        .get("mcp_srv_resource_res")
-        .ok_or("resource was not registered")?;
-    let prompt = registry
-        .get("mcp_srv_prompt_prompt")
-        .ok_or("prompt was not registered")?;
-    if !resource.read_only() || !prompt.read_only() {
-        return Err("MCP resource and prompt wrappers must be read-only".into());
+    for name in [
+        "mcp_srv_tool",
+        "mcp_srv_resource_res",
+        "mcp_srv_prompt_prompt",
+    ] {
+        if registry.has(name) {
+            return Err(format!("empty enabledTools should not register {name}").into());
+        }
     }
     Ok(())
 }

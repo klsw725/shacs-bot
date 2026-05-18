@@ -1624,6 +1624,7 @@ dependencies = [
  "serde_json",
  "shacs-channels",
  "shacs-providers",
+ "shacs-session",
  "shacs-utils",
  "shacs-web",
  "tokio",

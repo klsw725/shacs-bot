@@ -41,7 +41,7 @@ shacs-bot --config /tmp/shacs-config.json onboard --workspace /tmp/ws
 
 Config 문자열 값은 load 시 `${ENV_NAME}` 형태의 environment variable reference를 해석합니다. 예를 들어 provider key는 config에 `"apiKey": "${OPENROUTER_API_KEY}"`로 남겨두고 실행 환경에서 값을 제공할 수 있으며, migration write-back은 실제 secret 값을 config 파일에 저장하지 않습니다. 참조한 environment variable이 없으면 config load가 실패합니다.
 
-스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. 빈 문자열은 `requires.env`를 만족하지 않습니다. Secret 값을 넣은 config 파일은 커밋하거나 공유하지 마세요.
+스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. 빈 문자열은 `requires.env`를 만족하지 않습니다. Secret 값을 넣은 config 파일은 커밋하거나 공유하지 마세요.
 
 현재 config와 provider field를 확인합니다:
 
@@ -59,7 +59,17 @@ shacs-bot runtime inspect
 shacs-bot runtime inspect --workspace /tmp/ws
 ```
 
-`runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility version, update marker, runtime capability 요약, session 개수와 최신 session metadata를 보고합니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
+`runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, ownership status, stop request marker, update marker, runtime capability 요약, session 개수와 최신 session metadata를 보고합니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
+
+공식 로컬 lifecycle 명령으로 foreground channel runtime을 시작하거나 실행 중인 owner에게 종료/재시작을 요청합니다:
+
+```sh
+shacs-bot runtime start --workspace /tmp/ws
+shacs-bot runtime stop --workspace /tmp/ws
+shacs-bot runtime restart --workspace /tmp/ws
+```
+
+`runtime start`는 기존 `run`과 같은 channel runtime foreground 경로를 lifecycle admission과 ownership marker 획득 이후 실행합니다. `runtime stop`과 `runtime restart`는 data directory 아래 `runtime/stop-request.json`을 기록할 뿐 active ownership marker를 직접 삭제하거나 숨은 daemon을 시작하지 않습니다. 실행 중인 owner는 stop/restart request를 관찰하면 장기 실행 loop를 종료하고 정상 종료 시 자신이 소유한 `runtime/ownership-marker.json`만 정리합니다. active owner가 없으면 no-op 상태를 보고하고, stale owner만 있으면 `runtime recover`로 정리하라고 보고합니다.
 
 소스 checkout/Cargo 기반 설치에서 새 binary를 빌드하거나 교체한 뒤 runtime upgrade evidence를 기록합니다. 현재 Rust 구현은 session data transform migration이 없는 no-op migration 경로만 수행하며, 실제 binary 교체나 `git pull`/`cargo install`은 사용자가 별도로 수행합니다:
 
@@ -78,7 +88,7 @@ shacs-bot runtime recover
 shacs-bot runtime recover --workspace /tmp/ws
 ```
 
-`runtime recover`는 marker가 없으면 no-op으로 보고하고, partial migration marker는 세션 truth를 추측으로 고치지 않기 위해 차단합니다. 완료/중단 marker를 지운 뒤에는 다시 `runtime inspect`로 marker가 없는 상태를 확인할 수 있습니다.
+`runtime recover`는 marker가 없으면 no-op으로 보고하고, partial migration marker와 active ownership은 세션 truth나 실행 중인 owner를 추측으로 고치지 않기 위해 차단합니다. 완료/중단 update marker 또는 stale ownership marker를 지운 뒤에는 다시 `runtime inspect`로 marker가 없는 상태를 확인할 수 있습니다.
 
 Rust programmatic facade(`ShacsBot`/`Nanobot`)는 lifecycle hook과 별도로 observability hook을 제공합니다. Observability hook은 provider stream event와 tool start/finish progress payload를 in-process callback으로 그대로 전달하므로, tool arguments나 provider delta에 민감한 내용이 포함될 수 있습니다. Hook 구현자는 필요한 경우 직접 redaction 후 저장/로그 처리해야 하며, hook panic은 runtime을 중단하지 않고 redacted event kind만 stderr에 남깁니다.
 
