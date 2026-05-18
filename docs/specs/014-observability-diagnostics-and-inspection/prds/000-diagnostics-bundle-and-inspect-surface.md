@@ -41,26 +41,48 @@
 ## 범위 제외
 
 - 원격 observability SaaS
-- 조직용 대시보드
+- 조직 또는 관리자용 대시보드
 - 시계열 metrics 플랫폼 구축
-- 보안 감사 조직 워크플로우
+- SOC 또는 보안 감사 포털
+- 멀티테넌트 APM
+- 분산 trace aggregation
+- 장기 성능 분석 제품 전략
 
 ## 현재 구현 상태
 
-### 이미 반영된 것
+이 PRD의 self-hosted/local diagnostics bundle and inspect surface 범위는 구현 근거를 갖춘 상태다. SaaS/admin/APM/Web UI/distributed trace aggregation 항목은 계속 명시적 비범위다.
 
-- inspect snapshot, diagnostics record, diagnostics bundle, redaction status, recovery evidence가 core observability 계층에 구현돼 있다.
-- operational log record, trace record, crash evidence가 event truth를 대체하지 않는 보조 증거 모델로 분리돼 있다.
-- rejected reentry, aborted turn, service correlation, subagent child task, process lifecycle blocker가 recent events/diagnostics/recovery projection에 반영된다.
-- provider/tool failure는 correlation, severity, next action, redaction status를 가진 diagnostics record로 요약할 수 있다.
-- interrupted upgrade와 partial migration 상태는 diagnostics bundle과 recovery inspect에서 user-correctable evidence로 노출된다.
-- unsafe artifact refs, bundle generation failure, secret-like diagnostics/session summary/log/trace payload는 redaction 또는 rejection evidence로 처리된다.
-- CLI/API diagnostics inspect는 같은 diagnostics bundle 의미를 노출하고 read-only query로 event log를 변경하지 않는다.
-- Spec016 matrix evidence: FullSpec Verified for `Unit`, `Integration`, `DurabilityRecovery`.
+### 현재 코드에서 확인되는 것
 
-### 아직 남은 것
+- CLI는 `status`, `runtime inspect`, `runtime diagnostics`, `runtime update`, `runtime recover`, session diagnostics 조회 surface를 제공한다.
+- session 계층은 `SessionUxDetail`, `SessionUxDiagnostics`로 세션 요약, checkpoint, recovery marker, redacted diagnostics metadata 값을 projection한다.
+- API는 `/health`, `/v1/diagnostics`, 로컬 session diagnostics query를 제공한다. `/health`는 alive check이며 readiness, dependency, degraded 상태 모델은 아니다.
+- provider/tool progress callback plumbing과 `ToolProgressEvent`/payload helper가 있다.
+- runtime checkpoint와 `pending_user_turn` marker 성격의 복구 근거가 있다.
+- shared diagnostics redaction은 diagnostics serialization과 bundle writing 전에 적용된다. 기존 scoped redaction은 self-tool 출력, email error, URL 또는 token-like text, session diagnostics metadata 값에서 유지된다.
 
-- remote observability SaaS, 조직용 dashboard, 시계열 metrics 플랫폼은 비범위다.
+### 부분 구현 또는 future gap
+
+- `OperationalLogRecord`, `TraceRecord`, `DiagnosticsRecord`, `CrashEvidence`, `RecoveryEvidence` formal model은 `shacs-utils`의 local JSON evidence model로 구현되어 있다.
+- diagnostics bundle과 artifact generator는 `runtime diagnostics --bundle <path>` 로컬 zip artifact로 구현되어 있다.
+- durable trace/log store와 event replay 기반 inspection은 snapshot/evidence field 수준만 완료되어 있으며, 장기 저장 제품은 아니다.
+- readiness/dependency health와 degraded health state는 `/health`의 현재 의미 밖이다.
+- provider/tool/subagent progress inspection은 snapshot field와 기존 callback/progress payload 재사용 수준까지 완료되어 있으며, 별도 장기 저장/조회 제품은 아니다.
+- event stream reconnect/backpressure/dropped-event accounting은 별도 future gap이다.
+- Web UI diagnostics/status surface와 multi-session observability ordering/isolation은 현재 구현 완료로 분류하지 않는다.
+
+### 명시적 비범위
+
+- remote observability SaaS
+- organization/admin dashboard
+- time-series metrics platform
+- SOC/audit portal
+- multi-tenant APM
+- distributed trace aggregation
+- long-term performance analytics product strategy
+
+### 아직 남은 위험
+
 - triage 근거를 충분히 남기면서도 redaction 누락을 막는 균형은 계속 open risk다.
 
 ### 로컬 근거
@@ -68,7 +90,15 @@
 - `crates/shacs-utils/src/progress_events.rs`
 - `crates/shacs-core/src/runtime/runner.rs`
 - `crates/shacs-core/src/runtime/agent_loop.rs`
-- `crates/shacs-cli/src/lib.rs` inline observability/session diagnostics/runtime inspect tests
+- `crates/shacs-core/src/tools/self_tool.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-core/tests/tools.rs`
+- `crates/shacs-cli/src/lib.rs`
+- `crates/shacs-api/src/lib.rs`
+- `crates/shacs-session/src/lib.rs`
+- `crates/shacs-config/src/lib.rs`
+- `crates/shacs-cron/src/lib.rs`
 
 ## TDD 계획
 
@@ -104,7 +134,7 @@
 - late result, stale wake, replay mismatch가 trace와 diagnostics에 설명 가능하게 남는지 검증한다.
 - inspect와 bundle의 정보 깊이가 다르되 의미는 일치하는지 회귀 테스트를 묶는다.
 
-## Verification Evidence
+## 필요한 검증 증거
 
 - 단위 테스트: diagnostics classification, provider/tool failure diagnostics, redaction pass, bundle field filtering, rejected artifact reference filtering, bundle generation failure diagnostics
 - 통합 테스트: inspect projection, diagnostics bundle generation, diagnostics bundle generation rejection evidence, trace correlation, operational log correlation, recent subagent event `child_task_id` correlation, recent service event `service_correlation_id` correlation, event-derived diagnostics from rejected reentry and aborted turn events with `recorded_at_ms`, CLI/API diagnostics read-only parity
@@ -112,11 +142,10 @@
 - 안전성 테스트: secret leakage prevention in logs, traces, inspect, bundle, embedded session summaries, transport-consumed diagnostics outputs
 - 문서 증거: event/log/trace/inspect 역할표, redaction 적용 지점 표
 
-## FullSpec Evidence
+## 현재 확인된 검증 근거
 
-- `Unit`: `crates/shacs-utils/src/progress_events.rs` inline payload tests, `crates/shacs-cli/src/lib.rs` inline facade observability tests
-- `Integration`: `crates/shacs-core/tests/runtime_loop.rs`, `crates/shacs-core/tests/runtime_agent.rs`, `crates/shacs-cli/src/lib.rs` inline API/WebSocket/session diagnostics tests
-- `DurabilityRecovery`: `crates/shacs-cron/src/lib.rs` durable store/log tests, `crates/shacs-cli/src/lib.rs` inline runtime update/recover marker tests
+- 016 기준의 전체 완료 증거로 보지 않는다.
+- 현재 근거는 `crates/shacs-utils/src/progress_events.rs`, `crates/shacs-core/tests/runtime_loop.rs`, `crates/shacs-core/tests/runtime_agent.rs`, `crates/shacs-core/tests/tools.rs`, `crates/shacs-cli/src/lib.rs`, `crates/shacs-api/src/lib.rs`, `crates/shacs-session/src/lib.rs`, `crates/shacs-config/src/lib.rs`, `crates/shacs-cron/src/lib.rs`의 부분 기능 검증이다.
 
 ## Open Risks
 
@@ -124,10 +153,12 @@
 - 반대로 redaction 적용 지점이 빠지면 민감 값이 diagnostics artifact에 남을 수 있다.
 - inspect surface가 편의를 위해 추론을 섞기 시작하면 truth와 진단 출력이 어긋날 수 있다.
 
-## 종료 기준
+## self-hosted/local baseline 종료 기준
 
 - inspect surface가 현재 상태와 최근 실패 원인을 읽기 전용으로 설명할 수 있다.
 - diagnostics bundle은 redaction을 통과한 구조화 출력만 노출한다.
 - crash와 recovery evidence가 로컬에서 재현 가능한 형태로 남는다.
 - log, trace, diagnostics가 event truth를 대체하지 않는다.
-- 014와 016이 요구하는 단위, 통합, 내구성, 안전성 검증 증거가 확보된다.
+- 014의 self-hosted/local baseline에 필요한 단위, 통합, 안전성 검증 증거가 확보된다.
+
+016 전체 matrix 기준의 장기 저장, replay, Web UI, 분산/운영 제품 범위는 이 PRD의 종료 기준이 아니라 future 또는 비범위 항목이다.

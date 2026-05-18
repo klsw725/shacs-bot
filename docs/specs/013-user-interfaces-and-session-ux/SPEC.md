@@ -6,7 +6,7 @@
 
 목표는 다음과 같다.
 
-- CLI, TUI, local API가 무엇을 표시하고 무엇을 표시하지 말아야 하는지 정의한다.
+- CLI, future TUI, local API가 무엇을 표시하고 무엇을 표시하지 말아야 하는지 정의한다.
 - session create, resume, list, select, cancel, inspect, recover 흐름을 동일한 상태 의미론으로 묶는다.
 - approval, progress, error surface가 어떤 공식 상태를 투영해야 하는지 고정한다.
 - 인터페이스가 `MainOrchestrator`를 우회하지 않고도 충분히 작업 가능한 제품 경험을 제공하도록 경계를 명시한다.
@@ -14,7 +14,7 @@
 
 이 문서는 화면 아이디어를 적어 두는 제품 메모가 아니다. 구현이 이 문서와 충돌하면 임시 UX 편의나 transport 특성 때문에 오케스트레이터 권한 모델을 약화하지 말고, 인터페이스와 상태 투영 경계부터 다시 점검해야 한다.
 
-이 spec의 완료 기준은 CLI 명령 몇 개가 돌아가는 데모나 TUI mockup이 아니라, 이 문서가 정의한 interface boundary, session flow, approval/progress/error projection, recovery UX, transport 간 의미 일치를 충족하는 **완전한 기능 구현과 검증**이다.
+이 spec의 최종 완료 기준은 CLI 명령 몇 개가 돌아가는 데모나 TUI mockup이 아니라, 이 문서가 정의한 interface boundary, session flow, approval/progress/error projection, recovery UX, transport 간 의미 일치를 충족하는 **완전한 기능 구현과 검증**이다. 현재 문서는 이 목표가 이미 모두 구현됐다고 판정하지 않고, 구현된 표면과 앞으로 정리할 표면을 함께 구분한다.
 
 ---
 
@@ -55,11 +55,34 @@
 
 ---
 
+## 현재 구현 판정
+
+현재 코드 기준으로 확인되는 구현은 CLI/session command UX, `shacs-session`의 session UX projection/query model, local API session query/WebSocket/chat completion/streaming surface, `shacs-web`의 정적 웹 UI helper와 session/protocol helper, command router, runtime loop command 처리다. 근거는 다음 경로를 기준으로 삼는다.
+
+- `crates/shacs-session/src/lib.rs`
+- `crates/shacs-cli/src/lib.rs`
+- `crates/shacs-api/src/lib.rs`
+- `crates/shacs-command/src/lib.rs`
+- `crates/shacs-core/tests/runtime_loop.rs`
+- `crates/shacs-core/tests/runtime_agent.rs`
+- `crates/shacs-command/tests/router.rs`
+- `crates/shacs-web/src/lib.rs`
+- `crates/shacs-web/src/sessions.rs`
+- `crates/shacs-web/src/protocol.rs`
+
+현재 구현으로 `SessionUxSummary`, `SessionUxDetail`, `SessionUxDiagnostics`, `SessionUxHistory`, `SessionProjectionOptions`가 session store 옆의 공통 읽기 모델로 추가되었고, CLI list/inspect/history/diagnostics 및 local API의 session list/detail/history/diagnostics 조회가 이 의미론을 공유한다. 이 projection은 raw export와 분리되어 있어 기본 list/inspect/diagnostics 표면이 raw messages나 secret-like metadata 원문을 노출하지 않는다는 기존 안전 동작을 유지한다. 단, `SessionUxSummary`는 아직 lifecycle, 열린 턴 여부, recover 필요 여부를 모두 표현하는 최종 summary projection이 아니라 현재 세션 목록 조회에 필요한 최소 필드 중심이다.
+
+아직 완성 구현으로 보지 않는 것은 terminal TUI, approval/progress/recovery 전체를 포괄하는 transport 공통 projection builder, 그리고 `SessionSummaryProjection`, `ApprovalProjection`, `ProgressProjection`, `RecoveryProjection` 같은 이름의 exact shared model이다. 이 이름들은 현재 아키텍처가 수렴해야 할 설계 어휘로 다루며, 코드에 같은 이름의 공통 구현이 있다는 주장으로 읽으면 안 된다.
+
+CLI, local API, WebSocket, web helper가 이미 존재하더라도 이 spec의 transport parity는 현재 완료 판정이 아니라 유지해야 할 아키텍처 목표다. TUI는 별도 구현 근거가 확인되기 전까지 future surface로 분류한다.
+
+---
+
 ## 핵심 정의
 
 ### interface surface
 
-interface surface는 사용자가 `shacs-bot`과 상호작용하는 공식 진입점이다. 초기 범위는 아래 세 가지다.
+interface surface는 사용자가 `shacs-bot`과 상호작용하는 공식 진입점이다. 설계 범위는 아래 세 가지다.
 
 - CLI
 - TUI
@@ -67,7 +90,7 @@ interface surface는 사용자가 `shacs-bot`과 상호작용하는 공식 진�
 
 ### projection
 
-projection은 `MainOrchestrator`와 session store가 가진 공식 상태를 인터페이스가 표시하기 좋은 읽기 모델로 변환한 표현이다. projection은 세션 진실 원천이 아니다.
+projection은 `MainOrchestrator`와 session store가 가진 공식 상태를 인터페이스가 표시하기 좋은 읽기 모델로 변환한 표현이다. projection은 세션 진실 원천이 아니다. 이 문서의 projection 이름은 완성 시점의 공통 모델을 부르는 설계 어휘이며, 현재 모든 표면이 이미 같은 타입을 공유한다는 뜻은 아니다.
 
 ### session UX
 
@@ -94,7 +117,7 @@ recover flow는 crash, interrupted upgrade, late result, 열린 턴 잔재 같�
 ## 인터페이스 계층의 기본 원칙
 
 1. 인터페이스는 command를 만들고 projection을 보여줄 수 있어도 세션 상태를 직접 수정하면 안 된다.
-2. 같은 세션 사실은 CLI, TUI, local API에서 같은 의미로 보여야 한다.
+2. 같은 세션 사실은 최종적으로 CLI, TUI, local API에서 같은 의미로 보여야 한다.
 3. progress, approval, error는 추측으로 합성하면 안 되고 공식 상태나 event에 기반해야 한다.
 4. selection과 포커스는 UI 로컬 상태일 수 있지만, cancel, resume, recover 같은 공식 동작은 반드시 command를 통해 오케스트레이터에 재진입해야 한다.
 5. recovery UX는 손상된 실행을 감추는 것이 아니라, 무엇이 durable하고 무엇이 중단되었는지 드러내야 한다.
@@ -123,7 +146,7 @@ CLI가 해서는 안 되는 일:
 
 ### 2. TUI
 
-TUI는 같은 공식 상태를 더 연속적인 작업 화면으로 보여주는 interactive shell이다.
+TUI는 같은 공식 상태를 더 연속적인 작업 화면으로 보여주는 future interactive shell이다. 현재 문서는 terminal TUI가 이미 구현됐다고 보지 않는다.
 
 TUI가 해야 하는 일:
 
@@ -144,7 +167,7 @@ local API는 같은 런타임을 다른 로컬 도구가 호출할 수 있게 �
 
 local API가 해야 하는 일:
 
-- CLI와 TUI가 사용하는 것과 같은 command와 projection 의미 제공
+- CLI와 future TUI가 따라야 할 command와 projection 의미 제공
 - request/response 또는 stream 형태로 session projection 노출
 - idempotent 조회와 상관관계 있는 mutation 요청 제공
 
@@ -158,9 +181,9 @@ local API가 해서는 안 되는 일:
 
 ## 공유 읽기 모델과 query/command 경계
 
-### 공식 projection 범주
+### projection 설계 범주
 
-모든 인터페이스는 최소한 아래 projection 범주를 읽을 수 있어야 한다.
+아래 이름은 공통 projection model로 수렴하기 위한 설계 범주다. 현재 exact shared model 구현이 확인된다는 뜻이 아니며, 구현이 성숙하면 모든 인터페이스는 최소한 아래 의미를 읽을 수 있어야 한다.
 
 - `SessionSummaryProjection`
   - `session_id`
@@ -507,7 +530,7 @@ error surface는 사용자가 무엇이 실패했는지, 다시 시도 가능한
 5. selection UI 상태는 세션 truth와 분리되어야 한다.
 6. inspect surface는 읽기 전용이어야 한다.
 7. raw secret과 redaction 전 민감 출력은 어떤 인터페이스 기본 출력에도 노출되면 안 된다.
-8. CLI, TUI, local API는 같은 command와 projection 의미를 공유해야 한다.
+8. CLI, future TUI, local API는 같은 command와 projection 의미를 공유해야 한다.
 9. approval request는 request id 없이 응답되면 안 된다.
 10. cancel requested와 cancel completed는 구분되어 표시되어야 한다.
 
@@ -549,10 +572,10 @@ error surface는 사용자가 무엇이 실패했는지, 다시 시도 가능한
 
 ## Rust 구현으로 이어질 체크포인트
 
-구체 타입 이름은 바뀔 수 있지만, 아래 질문에는 모두 "예"라고 답할 수 있어야 한다.
+구체 타입 이름은 바뀔 수 있지만, 최종 구현은 아래 질문에 모두 "예"라고 답할 수 있어야 한다. 현재 코드에 같은 이름의 exact shared model이 있다는 뜻은 아니다. 현재 구현은 session list/detail/history/diagnostics용 `SessionUx*` 읽기 모델과 local API query route를 제공하지만, TUI와 approval/progress 전체 projection은 남아 있다.
 
 - `SessionSummaryProjection`, `SessionFocusProjection`, `ApprovalProjection`, `RecoveryProjection` 같은 읽기 모델이 분리되는가?
-- CLI, TUI, local API가 공통 command schema 또는 공통 내부 command 타입에 매핑되는가?
+- CLI, future TUI, local API가 공통 command schema 또는 공통 내부 command 타입에 매핑되는가?
 - selection 같은 UI 로컬 상태와 session truth가 타입 경계로 구분되는가?
 - recovery-required 세션을 projection 수준에서 식별할 수 있는가?
 - approval request id와 response command correlation을 강제할 수 있는가?
@@ -564,11 +587,11 @@ error surface는 사용자가 무엇이 실패했는지, 다시 시도 가능한
 
 Rust 구현은 최소한 다음 성격의 테스트를 만들 수 있어야 한다.
 
-- 새 세션 생성 후 summary projection이 안정적으로 반환되는지 확인하는 테스트
+- 새 세션 생성 후 summary projection이 안정적으로 반환되는지 확인하는 테스트. Staged 구현에서는 `shacs-session` projection 테스트와 local API session query 테스트가 이 일부를 검증한다.
 - recovery-required 세션이 resume 시 일반 active session projection으로 보이지 않는지 확인하는 테스트
 - approval request id 없는 응답이 거절되는지 확인하는 테스트
 - cancel requested 이후 cancel completed 전까지 상태가 구분되는지 확인하는 테스트
-- CLI, TUI, local API가 같은 session summary 의미를 공유하는지 확인하는 contract test
+- CLI, future TUI, local API가 같은 session summary 의미를 공유하는지 확인하는 contract test. Staged 구현에서는 CLI와 local API가 `shacs-session`의 session UX projection 의미를 공유하며, future TUI parity는 남아 있다.
 - inspect surface가 secret 원문이나 redaction 전 payload를 노출하지 않는지 확인하는 테스트
 - stale approval 또는 stale recover action이 공식 상태를 바꾸지 않는지 확인하는 테스트
 
@@ -590,6 +613,6 @@ Rust 구현은 최소한 다음 성격의 테스트를 만들 수 있어야 한�
 
 ## 결론
 
-`shacs-bot`의 사용자 인터페이스는 CLI, TUI, local API 세 표면이 같은 공식 상태를 다른 형태로 보여주는 구조여야 한다. create, resume, list, select, cancel, inspect, recover는 모두 command와 projection의 명시적 계약으로 설명되어야 하며, approval, progress, error surface는 오케스트레이터가 확정한 사실만 드러내야 한다.
+`shacs-bot`의 사용자 인터페이스는 현재 구현된 CLI, local API, WebSocket, web helper 표면에서 시작해, future TUI까지 같은 공식 상태를 다른 형태로 보여주는 구조로 수렴해야 한다. create, resume, list, select, cancel, inspect, recover는 모두 command와 projection의 명시적 계약으로 설명되어야 하며, approval, progress, error surface는 오케스트레이터가 확정한 사실만 드러내야 한다.
 
 핵심은 인터페이스가 똑똑한 척 상태를 대신 확정하는 것이 아니라, 사용자가 현재 세션이 어디까지 진행되었고 무엇을 할 수 있으며 왜 멈췄는지를 정확히 이해하게 만드는 데 있다.

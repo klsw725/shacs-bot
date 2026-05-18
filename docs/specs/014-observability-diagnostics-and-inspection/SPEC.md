@@ -27,7 +27,7 @@
 - host safety와 secret redaction 규칙은 로그와 진단 출력에도 동일하게 적용되어야 한다.
 - 목표는 self-hosted / personal-use 환경에서 사용자가 스스로 원인을 파악하고 복구할 수 있는 수준의 운영 가능성이다.
 
-따라서 이 문서는 중앙 수집형 SaaS 텔레메트리, 조직 단위 감사 콘솔, 멀티테넌트 APM, 원격 SOC 운영 흐름을 다루지 않는다.
+따라서 이 문서는 중앙 수집형 SaaS 텔레메트리, 조직 단위 감사 콘솔, 멀티테넌트 APM, 원격 SOC 운영 흐름, 분산 trace aggregation, 장기 성능 분석 제품 전략을 다루지 않는다.
 
 ---
 
@@ -47,8 +47,43 @@
 - 특정 log library, tracing backend, metrics backend 선택
 - 원격 observability SaaS 연동
 - 시계열 DB 구축
-- 관리자용 대시보드 제품 설계
-- 조직별 보안 감사 정책
+- 관리자 또는 조직 운영용 대시보드 제품 설계
+- SOC 또는 조직별 보안 감사 포털
+- 멀티테넌트 APM과 분산 trace aggregation
+- 장기 성능 분석 제품 전략
+
+---
+
+## 현재 구현 평가
+
+이 문서는 self-hosted/local diagnostics baseline 구현 근거를 갖춘 상태다. 현재 코드는 로컬 상태 조회, formal diagnostics/redaction model, runtime marker 기반 projection, redacted diagnostics bundle, CLI/API diagnostics snapshot을 갖추고 있다. 단, 아래 명시적 비범위와 future gap은 FullSpec 완료로 보지 않는다.
+
+### 현재 코드에서 확인되는 기반
+
+- CLI는 `crates/shacs-cli/src/lib.rs`에서 `status`, `runtime inspect`, `runtime diagnostics`, `runtime update`, `runtime recover`, session diagnostics 조회 surface를 제공한다.
+- session 계층은 `crates/shacs-session/src/lib.rs`의 `SessionUxDetail`, `SessionUxDiagnostics`로 세션 요약, checkpoint, recovery marker, redacted diagnostics metadata 값을 projection한다.
+- API는 `crates/shacs-api/src/lib.rs`에서 `/health`, `/v1/diagnostics`, 로컬 session diagnostics query를 제공한다. `/health`는 기본 alive check이며 readiness나 dependency degraded 상태까지 표현하지 않는다.
+- provider/tool 진행 상황은 callback plumbing과 `crates/shacs-utils/src/progress_events.rs`의 `ToolProgressEvent`, payload helper로 전달된다.
+- runtime은 `crates/shacs-core/src/runtime/runner.rs`, `crates/shacs-core/src/runtime/agent_loop.rs`, `crates/shacs-core/tests/runtime_loop.rs`, `crates/shacs-core/tests/runtime_agent.rs`에서 checkpoint와 `pending_user_turn` 성격의 marker를 검증한다.
+- shared redaction은 `crates/shacs-utils/src/redaction.rs`에서 diagnostics snapshot과 bundle serialization 전에 재귀 적용된다. 기존 scoped redaction은 `crates/shacs-core/src/tools/self_tool.rs`, `crates/shacs-core/tests/tools.rs`, `crates/shacs-config/src/lib.rs`, `crates/shacs-cron/src/lib.rs`, session diagnostics metadata 경로에서 유지된다.
+
+### 부분 구현 또는 future gap
+
+- `OperationalLogRecord`, `TraceRecord`, `DiagnosticsRecord`, `CrashEvidence`, `RecoveryEvidence` 같은 local JSON evidence model은 `crates/shacs-utils/src/diagnostics.rs`에 있다.
+- diagnostics bundle과 artifact generator는 `runtime diagnostics --bundle <path>` 로컬 zip artifact로 구현되어 있다.
+- durable trace/log store, event replay 기반 inspection, provider/tool/subagent progress는 현재 snapshot/evidence field 수준이며, 장기 저장 제품 또는 분산 수집 계층은 아니다.
+- readiness와 dependency health, degraded health state, event stream reconnect/backpressure/dropped-event accounting은 별도 future 범위다.
+- Web UI diagnostics/status surface와 multi-session observability ordering/isolation도 현재 구현 완료로 분류하지 않는다.
+
+### 제품 관점의 명시적 비범위
+
+- remote observability SaaS
+- organization/admin dashboard
+- time-series metrics platform
+- SOC/audit portal
+- multi-tenant APM
+- distributed trace aggregation
+- long-term performance analytics product strategy
 
 ---
 
@@ -498,8 +533,12 @@ Rust 구현은 최소한 다음 성격의 테스트를 만들 수 있어야 한�
 이 문서는 다음을 정의하지 않는다.
 
 - 중앙 observability 수집 서버
-- 관리자 감사 포털
+- remote observability SaaS
+- organization/admin dashboard
+- 관리자 감사 포털 또는 SOC/audit portal
 - 조직 정책 기반 retention 규칙
+- time-series metrics platform
+- multi-tenant APM
 - 분산 노드 간 trace aggregation
 - 장기 성능 분석용 metrics 제품 전략
 

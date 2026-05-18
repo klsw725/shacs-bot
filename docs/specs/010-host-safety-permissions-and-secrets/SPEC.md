@@ -2,13 +2,13 @@
 
 ## 문서 목적
 
-이 문서는 `shacs-bot`의 host safety, permission, secret handling을 현재 구현과 앞으로 남은 작업으로 나누어 정리한다. Spec 010은 아직 완료된 명세가 아니다. 현재 코드는 이미 여러 안전 장치를 갖고 있지만, formal `SafetySnapshot`, `PermissionMode`, approval engine, 통합 redaction pipeline이 완성된 상태는 아니다.
+이 문서는 `shacs-bot`의 host safety, permission, secret handling을 현재 구현과 앞으로 남은 작업으로 나누어 정리한다. Spec 010은 현재 `self-hosted/local baseline` 기준으로 닫힌 상태다. 이것은 formal `SafetySnapshot`, `PermissionMode`, approval engine, 통합 redaction pipeline이 완성되었다는 뜻이 아니라, 개인용 로컬 런타임에서 요구되는 guard-denied execution, default-deny MCP 등록, oversized tool result redaction 기준이 구현과 검증으로 닫혔다는 뜻이다.
 
 이 문서의 현재 역할은 다음과 같다.
 
 1. 현재 구현된 안전 경계를 정확히 설명한다.
 2. 현재 아키텍처 매핑으로 인정할 수 있는 범위를 고정한다.
-3. future host safety와 permission 작업을 현재 구현으로 오해하지 않게 분리한다.
+3. future formal host safety와 permission 작업을 현재 local baseline 완료 범위와 분리한다.
 
 `shacs-bot`은 `self-hosted/personal-use` 성격의, 사용자가 직접 설치하고 운영하는 개인용 런타임을 기본으로 본다. 따라서 사용자의 워크스페이스와 로컬 환경을 보호하는 것이 핵심이며, 관리자 승인 체계나 조직 정책 배포를 기본 가정하지 않는다.
 
@@ -30,7 +30,7 @@
 1. filesystem, process, network, secrets의 현재 안전 경계.
 2. 현재 구현을 Spec 010 요구사항에 어떻게 매핑할지.
 3. 현재 테스트 증거로 확인되는 안전 동작.
-4. 아직 future work로 남겨야 하는 host safety, permission, redaction 항목.
+4. local baseline 완료 밖의 future formal host safety, permission, redaction 항목.
 
 이 문서는 다음을 현재 기능으로 선언하지 않는다.
 
@@ -51,8 +51,9 @@
 5. Secret과 auth는 `crates/shacs-config/src/lib.rs`의 `AuthStore`, `ProviderAuth`, env placeholder 처리와 `crates/shacs-cli/src/lib.rs`의 Codex, Copilot token import, login, auth overlay 처리로 구성된다.
 6. CLI는 token import와 login 과정에서 config나 output에 raw token을 남기지 않는 방향으로 동작하며, transport, email error redaction과 session diagnostics, export surface를 갖고 있다.
 7. Inspect와 self tool은 `crates/shacs-core/src/tools/self_tool.rs`의 `SelfTool`, `SENSITIVE_NAMES`, `redact_object`, `redact_value`, `is_sensitive`, `is_blocked`, `is_read_only`로 민감 field redaction과 차단을 수행한다.
-8. Tool result persistence는 `crates/shacs-utils/src/tool_results.rs`에서 oversized result를 별도 저장하고 symlink hardening을 적용한다. 다만 universal pre-persistence secret redaction pass는 아직 없다.
-9. Subagent 제한은 `crates/shacs-core/src/runtime/subagent.rs`의 `SubagentExecutionConfig`, `build_subagent_tool_registry`로 일부 상속된다. formal inherited `SafetySnapshot`은 아니다.
+8. Tool result persistence는 `crates/shacs-utils/src/tool_results.rs`에서 oversized result를 별도 저장하기 전에 redaction을 적용하고 symlink hardening을 수행한다.
+9. MCP capability 등록은 `crates/shacs-config/src/lib.rs`의 empty `enabledTools` 기본값과 `crates/shacs-core/src/tools/mcp.rs`의 등록 필터로 tools, resources, prompts 모두 default-deny다. 사용자가 `*`, raw capability name, wrapped capability name 중 하나를 명시한 경우에만 등록된다.
+10. Subagent 제한은 `crates/shacs-core/src/runtime/subagent.rs`의 `SubagentExecutionConfig`, `build_subagent_tool_registry`로 일부 상속된다. formal inherited `SafetySnapshot`은 아니다.
 
 ---
 
@@ -66,10 +67,11 @@ Spec 010의 현재 매핑은 formal permission model이 아니라, 다음 조건
 4. network와 web tool은 private, loopback, link local, internal URL, private redirect를 client 호출 전에 차단해야 한다.
 5. auth와 secret 처리 surface는 raw token을 config, output, diagnostics에 쉽게 남기지 않아야 한다.
 6. inspect와 self tool은 민감 field와 read only path를 숨기거나 차단해야 한다.
-7. 큰 tool result persistence는 symlink hardening을 가져야 한다.
-8. subagent 실행은 상위 context와 제한된 tool registry를 따르는 범위 안에서만 현재 매핑으로 본다.
+7. 큰 tool result persistence는 파일 저장과 반환 reference 전에 redaction을 적용하고 symlink hardening을 가져야 한다.
+8. MCP capability 등록은 tools, resources, prompts 모두 명시적으로 enable되지 않으면 등록하지 않아야 한다.
+9. subagent 실행은 상위 context와 제한된 tool registry를 따르는 범위 안에서만 현재 매핑으로 본다.
 
-이 매핑은 Spec 010 완료 선언이 아니다. 현재 구현이 future formal model을 일부 대체해 주는 근거일 뿐이다.
+이 매핑은 Spec 010의 self-hosted/local baseline 완료 선언이다. future formal model을 완료했다는 선언은 아니며, local baseline 밖의 formal permission model은 별도 future work다.
 
 ## Capability와 permission의 현재 상태
 
@@ -122,7 +124,7 @@ future permission work는 다음을 포함한다.
 5. `SelfTool`은 민감 이름, 민감 값, 차단 path, read only path를 기준으로 inspect 결과를 redaction하거나 차단한다.
 6. session diagnostics와 export surface는 session 관리 명령 안에서 노출 경계를 가진다.
 
-아직 없는 것은 하나의 `RedactedValue` 타입과 통합 redaction pipeline이다. 특히 tool result persistence에는 oversized result 저장과 symlink hardening이 있지만, 모든 provider, context, compaction, tool, event persistence 직전에 raw secret을 통과시키지 않는 universal pre-persistence secret redaction pass는 아직 없다.
+아직 없는 것은 하나의 `RedactedValue` 타입과 통합 redaction pipeline이다. oversized tool result persistence sink는 파일 저장과 반환 reference 전에 redaction을 적용한다. 다만 모든 provider, context, compaction, tool, event persistence 직전에 raw secret을 통과시키지 않는 universal pre-persistence secret redaction pass는 아직 없다.
 
 future work는 다음이다.
 
@@ -180,7 +182,17 @@ Secrets, auth, redaction:
 6. `codex_login_success_saves_oauth_session_without_config_secret`
 7. `self_tool_checks_summary_paths_and_redacts_sensitive_fields`
 8. `self_tool_blocks_sensitive_and_read_only_paths`
-9. `session_management_commands_cover_history_export_clear_diagnostics_and_compact`
+9. `redacts_oversized_string_tool_result_in_file_and_reference`
+10. `redacts_oversized_text_block_json_in_file_and_reference`
+11. `session_management_commands_cover_history_export_clear_diagnostics_and_compact`
+
+MCP default-deny:
+
+1. `mcp_enabled_tools_defaults_to_empty_default_deny`
+2. `missing_mcp_enabled_tools_deserializes_to_empty_default_deny`
+3. `mcp_empty_enabled_tools_registers_no_tools`
+4. `mcp_registers_tools_resources_prompts_and_filters_enabled_tools`
+5. `mcp_wrappers_retry_transient_errors_once`
 
 Ask, interruption, inheritance:
 
@@ -190,11 +202,11 @@ Ask, interruption, inheritance:
 4. `spawn_tool_uses_context_and_delegates_to_spawner`
 5. `subagent_stale_inbound_is_not_persisted_as_session_content`
 
-위 테스트들은 현재 안전 장치의 근거다. formal approval engine이나 formal `SafetySnapshot` 완료 증거로 읽으면 안 된다.
+위 테스트들은 Spec 010 self-hosted/local baseline 완료의 근거다. formal approval engine이나 formal `SafetySnapshot` 완료 증거로 읽으면 안 된다.
 
 ## Future gaps
 
-다음 항목은 현재 blocker가 아니라 future host safety와 permission work다.
+다음 항목은 현재 local baseline blocker가 아니라 future formal host safety와 permission work다.
 
 1. `SafetyCapability`, `PermissionMode`, `SafetySnapshot`, `SecretRef`, `RedactedValue`, `ApprovalRequest`, `ApprovalDecision` 타입 도입.
 2. `fs_read`, `fs_write`, `proc_exec`, `net_outbound`, `secret_read`에 대한 formal capability evaluator.
@@ -224,6 +236,6 @@ Ask, interruption, inheritance:
 
 ## 결론
 
-Spec 010은 현재 구현을 완료된 formal permission system으로 선언하지 않는다. 현재 상태는 filesystem, shell, network, auth, self inspection, result persistence, subagent runtime에 흩어진 safety guard를 통해 host safety의 일부를 달성한 단계다.
+Spec 010은 self-hosted/local baseline 기준으로 완료되었다. 현재 상태는 filesystem, shell, network, auth, self inspection, MCP capability registration, result persistence, subagent runtime에 흩어진 safety guard로 로컬 개인용 런타임의 baseline을 닫는다.
 
-다음 단계의 핵심은 이 current architecture mapping을 유지하면서, formal capability evaluator, permission mode, approval gate, inherited safety snapshot, unified redaction pipeline을 별도 작업으로 완성하는 것이다.
+다음 단계의 핵심은 이 local baseline을 유지하면서, formal capability evaluator, permission mode, approval gate, inherited safety snapshot, unified redaction pipeline을 별도 future work로 완성하는 것이다.
