@@ -24,6 +24,7 @@ use shacs_config::{
     ApiConfig, ConfigBundle, ConfigError, EnvSource, LoadOptions, ProcessEnv, ProviderAuth,
     ProviderConfig,
 };
+use shacs_core::app::{AppError, AppId, AppLifecycleState, AppRegistryEntry, AppRegistryStore};
 use shacs_core::runtime::{
     AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, ContextBuilder,
     DreamLifecycle, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
@@ -123,6 +124,7 @@ pub enum CliCommand {
     RuntimeRestart(RuntimeStopOptions),
     Session(SessionCommand),
     Skills(SkillsCommand),
+    Apps(AppsCommand),
     Channels(ChannelsCommand),
     Ask(AskOptions),
     Run(RunOptions),
@@ -203,6 +205,16 @@ pub enum SkillsCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppsCommand {
+    Install(AppsInstallOptions),
+    List(AppsListOptions),
+    Inspect(AppsInspectOptions),
+    Enable(AppsIdOptions),
+    Disable(AppsIdOptions),
+    Uninstall(AppsIdOptions),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelsCommand {
     List(ChannelsListOptions),
     Status(ChannelsStatusOptions),
@@ -218,6 +230,33 @@ pub struct ChannelsListOptions {
 pub struct ChannelsStatusOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppsInstallOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub bundle_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppsListOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppsInspectOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub app_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppsIdOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub app_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1140,6 +1179,7 @@ pub struct SessionDeleteReport {
 
 #[derive(Debug)]
 pub enum CliError {
+    App(AppError),
     Api(ApiError),
     Config(ConfigError),
     Io(std::io::Error),
@@ -1151,6 +1191,7 @@ pub enum CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::App(error) => write!(formatter, "{error}"),
             Self::Api(error) => write!(formatter, "{error}"),
             Self::Config(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "CLI I/O failed: {error}"),
@@ -1162,6 +1203,12 @@ impl fmt::Display for CliError {
 }
 
 impl std::error::Error for CliError {}
+
+impl From<AppError> for CliError {
+    fn from(error: AppError) -> Self {
+        Self::App(error)
+    }
+}
 
 impl From<ConfigError> for CliError {
     fn from(error: ConfigError) -> Self {
@@ -1611,6 +1658,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::RuntimeRestart(options) => runtime_restart(options).map(format_runtime_restart),
         CliCommand::Session(command) => run_session_command(command),
         CliCommand::Skills(command) => run_skills_command(command),
+        CliCommand::Apps(command) => run_apps_command(command),
         CliCommand::Channels(command) => run_channels_command(command),
         CliCommand::Ask(options) => ask(options),
         CliCommand::Run(options) => run_runtime(options),
@@ -1648,6 +1696,7 @@ where
         "runtime" => parse_runtime(parser, global_config),
         "session" | "sessions" => parse_session(parser, global_config),
         "skills" | "skill" => parse_skills(parser, global_config),
+        "apps" | "app" => parse_apps(parser, global_config),
         "channels" | "channel" => parse_channels(parser, global_config),
         "ask" => parse_ask(parser, global_config, false),
         "agent" => parse_ask(parser, global_config, true),
@@ -3136,6 +3185,17 @@ fn run_skills_command(command: SkillsCommand) -> Result<String, CliError> {
     }
 }
 
+fn run_apps_command(command: AppsCommand) -> Result<String, CliError> {
+    match command {
+        AppsCommand::Install(options) => apps_install(options).map(format_apps_entry_report),
+        AppsCommand::List(options) => apps_list(options).map(format_apps_list),
+        AppsCommand::Inspect(options) => apps_inspect(options).map(format_apps_inspect),
+        AppsCommand::Enable(options) => apps_enable(options).map(format_apps_entry_report),
+        AppsCommand::Disable(options) => apps_disable(options).map(format_apps_entry_report),
+        AppsCommand::Uninstall(options) => apps_uninstall(options).map(format_apps_uninstall),
+    }
+}
+
 fn run_channels_command(command: ChannelsCommand) -> Result<String, CliError> {
     match command {
         ChannelsCommand::List(options) => channels_list(options).map(format_channels_list),
@@ -3149,6 +3209,130 @@ pub fn channels_list(options: ChannelsListOptions) -> Result<ChannelsReport, Cli
 
 pub fn channels_status(options: ChannelsStatusOptions) -> Result<ChannelsReport, CliError> {
     load_channels_report(options.config_path, options.workspace_override)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppsEntryReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub registry_path: PathBuf,
+    pub entry: AppRegistryEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppsListReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub registry_path: PathBuf,
+    pub entries: Vec<AppRegistryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppsUninstallReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub registry_path: PathBuf,
+    pub app_id: String,
+    pub removed: bool,
+}
+
+pub fn apps_install(options: AppsInstallOptions) -> Result<AppsEntryReport, CliError> {
+    let (config_path, workspace, store) =
+        apps_store(options.config_path, options.workspace_override)?;
+    let entry = store.install_in_workspace(&workspace, options.bundle_path)?;
+    Ok(AppsEntryReport {
+        config_path,
+        workspace,
+        registry_path: store.registry_path(),
+        entry,
+    })
+}
+
+pub fn apps_list(options: AppsListOptions) -> Result<AppsListReport, CliError> {
+    let (config_path, workspace, store) =
+        apps_store(options.config_path, options.workspace_override)?;
+    Ok(AppsListReport {
+        config_path,
+        workspace,
+        registry_path: store.registry_path(),
+        entries: store.list()?,
+    })
+}
+
+pub fn apps_inspect(options: AppsInspectOptions) -> Result<AppsEntryReport, CliError> {
+    let app_id = AppId::parse(options.app_id)?;
+    let (config_path, workspace, store) =
+        apps_store(options.config_path, options.workspace_override)?;
+    let entry = store
+        .inspect(&app_id)?
+        .ok_or_else(|| AppError::UnknownApp(app_id.clone()))?;
+    Ok(AppsEntryReport {
+        config_path,
+        workspace,
+        registry_path: store.registry_path(),
+        entry,
+    })
+}
+
+pub fn apps_enable(options: AppsIdOptions) -> Result<AppsEntryReport, CliError> {
+    let app_id = AppId::parse(options.app_id)?;
+    let (config_path, workspace, store) =
+        apps_store(options.config_path, options.workspace_override)?;
+    let entry = store.enable(&app_id)?;
+    Ok(AppsEntryReport {
+        config_path,
+        workspace,
+        registry_path: store.registry_path(),
+        entry,
+    })
+}
+
+pub fn apps_disable(options: AppsIdOptions) -> Result<AppsEntryReport, CliError> {
+    let app_id = AppId::parse(options.app_id)?;
+    let (config_path, workspace, store) =
+        apps_store(options.config_path, options.workspace_override)?;
+    let entry = store.disable(&app_id)?;
+    Ok(AppsEntryReport {
+        config_path,
+        workspace,
+        registry_path: store.registry_path(),
+        entry,
+    })
+}
+
+pub fn apps_uninstall(options: AppsIdOptions) -> Result<AppsUninstallReport, CliError> {
+    let app_id = AppId::parse(options.app_id.clone())?;
+    let (config_path, workspace, store) =
+        apps_store(options.config_path, options.workspace_override)?;
+    let removed = store.uninstall_in_workspace(&workspace, &app_id)?.is_some();
+    Ok(AppsUninstallReport {
+        config_path,
+        workspace,
+        registry_path: store.registry_path(),
+        app_id: options.app_id,
+        removed,
+    })
+}
+
+fn apps_store(
+    config_path: Option<PathBuf>,
+    workspace_override: Option<PathBuf>,
+) -> Result<(PathBuf, PathBuf, AppRegistryStore), CliError> {
+    let config_path = config_path.unwrap_or_else(default_config_path);
+    let bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )?;
+    Ok((
+        config_path,
+        bundle.context.workspace,
+        AppRegistryStore::new(bundle.context.data_dir),
+    ))
 }
 
 pub fn skills_list(options: SkillsListOptions) -> Result<SkillsListReport, CliError> {
@@ -4069,6 +4253,85 @@ pub fn format_skills_show(report: SkillsShowReport) -> String {
         lines.push(format!("Diagnostics: {}", entry.diagnostics.join("; ")));
     }
     lines.join("\n")
+}
+
+pub fn format_apps_list(report: AppsListReport) -> String {
+    let mut lines = vec![
+        "Apps".to_owned(),
+        format!("Config: {}", display_path(&report.config_path)),
+        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Registry: {}", display_path(&report.registry_path)),
+    ];
+    if report.entries.is_empty() {
+        lines.push("No apps installed.".to_owned());
+        return lines.join("\n");
+    }
+    for entry in report.entries {
+        lines.push(format!(
+            "- {} {} [{}] {}",
+            entry.app_id,
+            entry.version,
+            app_lifecycle_label(&entry.lifecycle_state),
+            entry.digest
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn format_apps_inspect(report: AppsEntryReport) -> String {
+    format_apps_entry("App", report)
+}
+
+pub fn format_apps_entry_report(report: AppsEntryReport) -> String {
+    format_apps_entry("App", report)
+}
+
+fn format_apps_entry(title: &str, report: AppsEntryReport) -> String {
+    let entry = report.entry;
+    let mut lines = vec![
+        format!("{title}: {}", entry.app_id),
+        format!("Version: {}", entry.version),
+        format!("State: {}", app_lifecycle_label(&entry.lifecycle_state)),
+        format!("Digest: {}", entry.digest),
+        format!("Bundle: {}", display_path(&entry.bundle_path)),
+        format!("Config: {}", display_path(&report.config_path)),
+        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Registry: {}", display_path(&report.registry_path)),
+        format!("Permission requests: {}", entry.permission_requests.len()),
+        format!("Secret requests: {}", entry.secret_requests.len()),
+        format!("Process snapshots: {}", entry.process_snapshots.len()),
+    ];
+    if let Some(grant_reference) = entry.grant_reference.as_deref() {
+        lines.push(format!("Grant reference: {grant_reference}"));
+    }
+    if !entry.unavailable_reasons.is_empty() {
+        lines.push(format!(
+            "Unavailable: {}",
+            entry.unavailable_reasons.join("; ")
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn format_apps_uninstall(report: AppsUninstallReport) -> String {
+    [
+        format!("App: {}", report.app_id),
+        format!("Removed: {}", yes_no_label(report.removed)),
+        format!("Config: {}", display_path(&report.config_path)),
+        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Registry: {}", display_path(&report.registry_path)),
+    ]
+    .join("\n")
+}
+
+fn app_lifecycle_label(state: &AppLifecycleState) -> &'static str {
+    match state {
+        AppLifecycleState::Installed => "installed",
+        AppLifecycleState::Enabled => "enabled",
+        AppLifecycleState::Disabled => "disabled",
+        AppLifecycleState::Unavailable => "unavailable",
+        AppLifecycleState::Uninstalling => "uninstalling",
+    }
 }
 
 pub fn format_channels_list(report: ChannelsReport) -> String {
@@ -8430,6 +8693,7 @@ pub fn help_text() -> String {
         "  runtime   Start, stop, restart, inspect, diagnose, update, or recover local runtime state",
         "  session   Manage local session files",
         "  skills    List and inspect local skill registry entries",
+        "  apps      Install, list, inspect, enable, disable, or uninstall local app bundles",
         "  channels  List channel registry/config status",
         "  ask       Send one message through the local AgentLoop",
         "  run       Start selected channel runtime workers",
@@ -8465,6 +8729,8 @@ pub fn help_text() -> String {
         "      --keep-messages <n> Retain this many messages during session compact",
         "      --target-version <v> Record runtime update target version",
         "      --all             Include inactive skill diagnostics in skills list",
+        "      --bundle <path>   Local .shacsapp bundle for apps install",
+        "      --app-id <id>     Select an app for apps commands",
         "  -y, --yes            Confirm irreversible session delete",
         "      --allow-side-effects  Enable write/edit/exec tools in CLI turns",
         "      --token-stdin     Read provider token from stdin for import-token commands",
@@ -8814,6 +9080,167 @@ fn parse_skills_show(
         ));
     }
     Ok(CliCommand::Skills(SkillsCommand::Show(options)))
+}
+
+fn parse_apps(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "apps requires `install`, `list`, `inspect`, `enable`, `disable`, or `uninstall`"
+                .to_owned(),
+        ));
+    };
+    match action.as_str() {
+        "install" => parse_apps_install(parser, global_config),
+        "list" | "ls" => parse_apps_list(parser, global_config),
+        "inspect" | "show" => parse_apps_inspect(parser, global_config),
+        "enable" => parse_apps_id_action(parser, global_config, "enable"),
+        "disable" => parse_apps_id_action(parser, global_config, "disable"),
+        "uninstall" | "remove" => parse_apps_id_action(parser, global_config, "uninstall"),
+        "--help" | "-h" => Ok(CliCommand::Help),
+        other => Err(CliError::InvalidArguments(format!(
+            "unknown apps subcommand `{other}`"
+        ))),
+    }
+}
+
+fn parse_apps_install(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = AppsInstallOptions {
+        config_path: global_config,
+        workspace_override: None,
+        bundle_path: PathBuf::new(),
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--bundle" => options.bundle_path = take_path(&mut parser, &arg)?,
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other if other.starts_with('-') => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown apps install argument `{other}`"
+                )))
+            }
+            other => {
+                if options.bundle_path.as_os_str().is_empty() {
+                    options.bundle_path = PathBuf::from(other);
+                } else {
+                    return Err(CliError::InvalidArguments(
+                        "apps install accepts exactly one bundle path".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    if options.bundle_path.as_os_str().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "apps install requires a bundle path".to_owned(),
+        ));
+    }
+    Ok(CliCommand::Apps(AppsCommand::Install(options)))
+}
+
+fn parse_apps_list(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = AppsListOptions {
+        config_path: global_config,
+        workspace_override: None,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown apps list argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(CliCommand::Apps(AppsCommand::List(options)))
+}
+
+fn parse_apps_inspect(
+    parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    match parse_apps_id_options(parser, global_config, "inspect")? {
+        Some(options) => Ok(CliCommand::Apps(AppsCommand::Inspect(options))),
+        None => Ok(CliCommand::Help),
+    }
+}
+
+fn parse_apps_id_action(
+    parser: ArgParser,
+    global_config: Option<PathBuf>,
+    action: &str,
+) -> Result<CliCommand, CliError> {
+    let Some(options) = parse_apps_id_options(parser, global_config, action)? else {
+        return Ok(CliCommand::Help);
+    };
+    let options = AppsIdOptions {
+        config_path: options.config_path,
+        workspace_override: options.workspace_override,
+        app_id: options.app_id,
+    };
+    match action {
+        "enable" => Ok(CliCommand::Apps(AppsCommand::Enable(options))),
+        "disable" => Ok(CliCommand::Apps(AppsCommand::Disable(options))),
+        _ => Ok(CliCommand::Apps(AppsCommand::Uninstall(options))),
+    }
+}
+
+fn parse_apps_id_options(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    action: &str,
+) -> Result<Option<AppsInspectOptions>, CliError> {
+    let mut options = AppsInspectOptions {
+        config_path: global_config,
+        workspace_override: None,
+        app_id: String::new(),
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--app-id" | "--id" => options.app_id = take_value(&mut parser, &arg)?,
+            "--help" | "-h" => return Ok(None),
+            other if other.starts_with('-') => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown apps {action} argument `{other}`"
+                )))
+            }
+            other => {
+                if !options.app_id.is_empty() {
+                    return Err(CliError::InvalidArguments(format!(
+                        "apps {action} accepts exactly one app id"
+                    )));
+                }
+                options.app_id = other.to_owned();
+            }
+        }
+    }
+    if options.app_id.trim().is_empty() {
+        return Err(CliError::InvalidArguments(format!(
+            "apps {action} requires an app id"
+        )));
+    }
+    Ok(Some(options))
 }
 
 fn parse_channels(
@@ -11498,6 +11925,235 @@ mod tests {
         };
         assert_eq!(options.host.as_deref(), Some("127.0.0.1"));
         assert_eq!(options.port, Some(8901));
+        Ok(())
+    }
+
+    #[test]
+    fn parser_handles_apps_command_surface() -> Result<(), Box<dyn Error>> {
+        let parsed = parse_cli_args([
+            "apps",
+            "install",
+            "--bundle",
+            "/tmp/demo.shacsapp",
+            "--workspace",
+            "/tmp/workspace",
+            "--config",
+            "/tmp/config.json",
+        ])?;
+        let CliCommand::Apps(AppsCommand::Install(options)) = parsed else {
+            return Err("expected apps install command".into());
+        };
+        assert_eq!(options.bundle_path, PathBuf::from("/tmp/demo.shacsapp"));
+        assert_eq!(
+            options.workspace_override,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+        assert_eq!(options.config_path, Some(PathBuf::from("/tmp/config.json")));
+
+        let parsed = parse_cli_args(["apps", "list", "-w", "/tmp/workspace"])?;
+        let CliCommand::Apps(AppsCommand::List(options)) = parsed else {
+            return Err("expected apps list command".into());
+        };
+        assert_eq!(
+            options.workspace_override,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+
+        let parsed = parse_cli_args(["apps", "inspect", "demo.app"])?;
+        let CliCommand::Apps(AppsCommand::Inspect(options)) = parsed else {
+            return Err("expected apps inspect command".into());
+        };
+        assert_eq!(options.app_id, "demo.app");
+
+        let parsed = parse_cli_args(["apps", "inspect", "--help"])?;
+        assert!(matches!(parsed, CliCommand::Help));
+
+        let parsed = parse_cli_args(["apps", "show", "--app-id", "demo.app"])?;
+        let CliCommand::Apps(AppsCommand::Inspect(options)) = parsed else {
+            return Err("expected apps show command".into());
+        };
+        assert_eq!(options.app_id, "demo.app");
+
+        let parsed = parse_cli_args(["apps", "enable", "demo.app"])?;
+        let CliCommand::Apps(AppsCommand::Enable(options)) = parsed else {
+            return Err("expected apps enable command".into());
+        };
+        assert_eq!(options.app_id, "demo.app");
+
+        let parsed = parse_cli_args(["apps", "enable", "--help"])?;
+        assert!(matches!(parsed, CliCommand::Help));
+
+        let parsed = parse_cli_args(["apps", "disable", "demo.app"])?;
+        let CliCommand::Apps(AppsCommand::Disable(options)) = parsed else {
+            return Err("expected apps disable command".into());
+        };
+        assert_eq!(options.app_id, "demo.app");
+
+        let parsed = parse_cli_args(["apps", "disable", "--help"])?;
+        assert!(matches!(parsed, CliCommand::Help));
+
+        let parsed = parse_cli_args(["apps", "uninstall", "demo.app"])?;
+        let CliCommand::Apps(AppsCommand::Uninstall(options)) = parsed else {
+            return Err("expected apps uninstall command".into());
+        };
+        assert_eq!(options.app_id, "demo.app");
+
+        let parsed = parse_cli_args(["apps", "uninstall", "--help"])?;
+        assert!(matches!(parsed, CliCommand::Help));
+        Ok(())
+    }
+
+    #[test]
+    fn apps_commands_use_configured_workspace() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let configured_workspace = root.path().join("configured-workspace");
+        let overridden_workspace = root.path().join("overridden-workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = configured_workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+
+        let report = apps_list(AppsListOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert_eq!(report.workspace, configured_workspace);
+
+        let overridden = apps_list(AppsListOptions {
+            config_path: Some(config_path),
+            workspace_override: Some(overridden_workspace.clone()),
+        })?;
+        assert_eq!(overridden.workspace, overridden_workspace);
+        Ok(())
+    }
+
+    #[test]
+    fn apps_install_rejects_bundle_outside_resolved_workspace() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let outside = root.path().join("outside");
+        let bundle = outside.join("demo.app.shacsapp");
+
+        fs::create_dir_all(&workspace)?;
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+
+        fs::create_dir_all(&bundle)?;
+        fs::write(bundle.join("entry.md"), "# entry")?;
+        fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "demo.app",
+                "version": "1.0.0",
+                "entry": "entry.md"
+            }))?,
+        )?;
+
+        let error = apps_install(AppsInstallOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            bundle_path: bundle,
+        })
+        .err()
+        .ok_or("expected invalid bundle location")?;
+
+        assert!(matches!(
+            error,
+            CliError::App(AppError::InvalidBundleLocation { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn apps_install_accepts_relative_bundle_path_inside_workspace() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::Builder::new()
+            .prefix("shacs-cli-apps-")
+            .tempdir_in(".")?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let bundle = workspace.join(".shacs/apps/demo.app.shacsapp");
+
+        fs::create_dir_all(&bundle)?;
+        let mut config = Config::default();
+        let canonical_workspace = workspace.canonicalize()?;
+        config.agents.defaults.workspace = canonical_workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+
+        fs::write(bundle.join("entry.md"), "# entry")?;
+        fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "demo.app",
+                "version": "1.0.0",
+                "entry": "entry.md"
+            }))?,
+        )?;
+
+        let report = apps_install(AppsInstallOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            bundle_path: bundle.clone(),
+        })?;
+
+        assert_eq!(report.entry.app_id, AppId::parse("demo.app")?);
+        assert_eq!(report.entry.bundle_path, bundle.canonicalize()?);
+        Ok(())
+    }
+
+    #[test]
+    fn apps_uninstall_rejects_poisoned_registry_bundle_path() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let bundle = workspace.join(".shacs/apps/demo.app.shacsapp");
+        let outside = root.path().join("outside-delete-target");
+
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+
+        fs::create_dir_all(&bundle)?;
+        fs::write(bundle.join("entry.md"), "# entry")?;
+        fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "demo.app",
+                "version": "1.0.0",
+                "entry": "entry.md"
+            }))?,
+        )?;
+        fs::create_dir_all(&outside)?;
+        fs::write(outside.join("keep.txt"), "keep")?;
+
+        let install = apps_install(AppsInstallOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            bundle_path: bundle.clone(),
+        })?;
+        let mut registry: serde_json::Value =
+            serde_json::from_slice(&fs::read(install.registry_path)?)?;
+        registry["entries"]["demo.app"]["bundlePath"] = json!(outside);
+        fs::write(
+            root.path().join("apps/registry.json"),
+            serde_json::to_vec_pretty(&registry)?,
+        )?;
+
+        let error = apps_uninstall(AppsIdOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            app_id: "demo.app".to_owned(),
+        })
+        .err()
+        .ok_or("expected poisoned bundle path rejection")?;
+
+        assert!(matches!(
+            error,
+            CliError::App(AppError::InvalidBundleLocation { .. })
+        ));
+        assert!(outside.join("keep.txt").exists());
+        assert!(bundle.exists());
         Ok(())
     }
 
