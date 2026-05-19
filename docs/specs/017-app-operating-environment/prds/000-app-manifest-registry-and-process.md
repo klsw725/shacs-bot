@@ -4,7 +4,7 @@
 
 이 문서는 `docs/specs/017-app-operating-environment/SPEC.md`의 하위 실행 문서다. Spec 017이 정의한 장기 제품 계약을 첫 구현 가능한 baseline으로 낮춰, self-hosted 사용자가 자기 workspace에 local app bundle을 설치하고 상태를 관찰할 수 있는 최소 app operating environment를 고정한다.
 
-이번 PRD의 목표는 app manifest, app registry, lifecycle state, process snapshot, permission/secret request reference, task ledger receipt의 첫 타입과 저장 의미를 정리하는 것이다. 현재 상태는 아직 구현되지 않았으며, 이 문서는 첫 buildable baseline을 정의한다.
+이번 PRD의 목표는 app manifest, app registry, lifecycle state, process snapshot, permission/secret request reference, task ledger receipt의 첫 타입과 저장 의미를 정리하는 것이다. 현재 상태는 local app manifest, registry, process projection, task ledger baseline 구현 완료이며, 이 문서는 full AI OS 완성이 아니라 첫 buildable baseline의 closure를 기록한다.
 
 ## SPEC 입력
 
@@ -29,7 +29,7 @@
 - 013은 app list, process card, approval, settings 같은 UI projection을 소유한다. 이 PRD는 UI가 읽을 registry와 snapshot 의미만 제공한다.
 - 014는 diagnostics, receipts, task ledger projection을 소유한다. 이 PRD는 `runtime/app-ledger/` 아래 redacted execution receipt의 최소 record 의미를 정의한다.
 - 015는 host runtime lifecycle, packaging safety, install/update/recover gate를 소유한다. 이 PRD의 app install은 host binary install이나 runtime upgrade가 아니다.
-- 016은 release evidence와 gate mapping을 소유한다. 이 PRD는 구현 후 repo-relative executable evidence를 016의 matrix에 연결해야 한다.
+- 016은 release evidence와 gate mapping을 소유한다. 이 PRD의 closure evidence는 repo-relative executable evidence로 016의 matrix에 연결해야 한다.
 
 ## 범위
 
@@ -59,22 +59,23 @@
 
 ## 현재 구현 상태
 
-### 아직 구현되지 않은 baseline
+### 구현 완료된 local baseline
 
-- Spec 017의 app operating environment는 현재 제품 계약과 구현 체크포인트로만 존재한다.
-- `AppManifest`, `AppRegistry`, `AppRegistryEntry`, `AppLifecycleState`, `AppProcessSnapshot`, `TaskLedgerEntry`를 완료 구현으로 주장하지 않는다.
-- 이 PRD는 첫 구현 가능한 baseline을 정의하며, 구현 완료나 FullSpec 승격을 주장하지 않는다.
+- Spec 017의 app operating environment 중 local app bundle baseline은 구현되어 closure 상태다.
+- 완료 범위는 `AppManifest`, `AppRegistry`, `AppRegistryEntry`, `AppLifecycleState`, `AppProcessSnapshot`, `TaskLedgerEntry`의 core 타입과 저장 의미다.
+- 구현 evidence는 `crates/shacs-core/src/app.rs`, `crates/shacs-core/tests/app_environment.rs`, `crates/shacs-cli/src/lib.rs`의 apps command surface에 있다.
+- 이 closure는 local app manifest/registry/process projection/task ledger baseline 완료를 뜻한다. remote marketplace, dynamic plugin ABI, 실제 app process 실행, MCP server 내부, secret vault backend, SaaS/admin/fleet workflow, visual UI design 완료를 뜻하지 않는다.
 
-### 구현 시 지켜야 할 현재 계약
+### 현재 구현 계약
 
-- local app bundle 기본 위치는 `<workspace>/.shacs/apps/<app-id>.shacsapp/`이며, 사용자 전역 설치가 필요하면 `~/.shacs/apps/<app-id>.shacsapp/`와 같은 의미를 유지한다.
+- local app bundle 기본 위치는 선택된 workspace의 `<workspace>/.shacs/apps/<app-id>.shacsapp/`이며, 현재 공개 설치 표면은 이 위치의 bundle만 registry에 등록한다.
 - `manifest.json`은 bundle identity의 진실 원천이다.
 - install은 manifest를 검증하고 digest를 기록하지만 app process를 만들지 않는다.
 - permission과 secret 선언은 request다. 최종 grant와 secret value 주입은 010의 host safety 경계에서 결정한다.
-- process snapshot은 session truth가 아니다. session truth와 recovery 판단은 기존 session/runtime owner를 따라야 한다.
+- process snapshot은 session truth가 아니라 projection이다. session truth와 recovery 판단은 기존 session/runtime owner를 따라야 한다.
 - ledger receipt는 raw secret value, hidden reasoning, 불필요한 file contents를 저장하지 않는다.
 
-## TDD 계획
+## 회귀 테스트 기준
 
 1. manifest parse validation: 유효한 `manifest.json`은 `AppManifest`로 파싱되고, 필수 id/version/entry 누락과 bundle 밖 path 참조는 validation 실패로 남긴다.
 2. id collision과 digest mismatch: 같은 `AppId`가 이미 등록된 경우 충돌을 진단하고, 같은 id/path의 manifest digest가 registry 기록과 다르면 mismatch로 보고한다.
@@ -84,11 +85,11 @@
 6. denied permission receipt: permission denial은 app crash나 session corruption이 아니라 redacted `TaskLedgerEntry` receipt로 남는다.
 7. uninstall preserving ledger references: uninstall은 registry entry와 bundle 제거를 처리하지만 historical ledger/session reference는 설명 가능한 상태로 보존한다.
 
-## 구현 웨이브
+## 구현된 범위
 
 ### Wave 1. Manifest와 local bundle validation
 
-- `AppId`, `AppBundlePath`, `AppManifest`의 최소 타입을 만든다.
+- `AppId`, `AppBundlePath`, `AppManifest`의 최소 타입을 구현했다.
 - `<workspace>/.shacs/apps/<app-id>.shacsapp/manifest.json`을 기준으로 bundle identity를 읽는다.
 - manifest 필수 필드, bundle 내부 resource path, permission/secret declaration schema를 검증한다.
 - digest 계산은 manifest와 등록된 static resource summary를 재현 가능한 방식으로 기록한다.
@@ -115,10 +116,10 @@
 
 ## Verification Evidence
 
-- evidence는 아직 pending이다. 구현 전에는 완료 evidence나 FullSpec 승격을 주장하지 않는다.
-- 구현 시 evidence는 repo-relative executable tests로 채워야 한다.
-- 최소 evidence 후보는 manifest parse validation, id collision/digest mismatch, install no auto-run, enable/disable projection, missing secret unavailable status, denied permission receipt, uninstall preserving ledger references 테스트다.
-- 016 release gate에 연결할 때는 존재하지 않는 test file path를 쓰지 않고, 실제 Cargo로 실행 가능한 test path와 command만 기록한다.
+- 구현 evidence는 `crates/shacs-core/src/app.rs`의 core module, `crates/shacs-core/tests/app_environment.rs`의 app environment tests, `crates/shacs-cli/src/lib.rs`의 apps command parser와 command surface다.
+- executable evidence는 존재하지 않는 경로가 아니라 Cargo로 실행 가능한 test와 command여야 한다.
+- 최소 command evidence는 `cargo test --manifest-path crates/shacs-core/Cargo.toml --test app_environment`와 `cargo test --manifest-path crates/shacs-cli/Cargo.toml`로 연결한다.
+- 이 evidence는 local baseline closure만 뒷받침한다. FullSpec 승격이나 전체 AI Operating System 완성 evidence로 쓰지 않는다.
 
 ## Open Risks
 
@@ -127,12 +128,14 @@
 - digest 범위를 너무 넓히면 작은 asset 변경이 불필요한 reinstall처럼 보일 수 있고, 너무 좁히면 manifest와 실제 bundle drift를 놓칠 수 있다.
 - ledger receipt에 편의를 위해 raw secret이나 hidden reasoning을 넣으면 010과 014의 redaction 계약을 깨뜨린다.
 
-## 종료 기준
+## 종료 상태
 
-- 사용자가 local `.shacs/apps/<app-id>.shacsapp/` bundle을 설치할 때 manifest validation과 digest recording이 실행된다.
+아래 기준은 local app manifest/registry/process projection/task ledger baseline의 closure 기준이다. 현재 구현은 이 PRD를 닫지만, Spec 017의 장기 제품 전체를 닫지는 않는다.
+
+- 사용자가 workspace-local `.shacs/apps/<app-id>.shacsapp/` bundle을 등록할 때 manifest validation과 digest recording이 실행된다.
 - registry entry가 app id, version, digest, bundle path, lifecycle state, request summary, grant reference를 저장한다.
 - install은 app code 실행, MCP/device start, tool execution, secret injection, permission grant를 만들지 않는다.
-- enabled, disabled, unavailable, uninstalling 상태가 UI와 diagnostics projection에서 같은 의미로 읽힌다.
+- enabled, disabled, unavailable, uninstalling 상태가 CLI command surface와 diagnostics/read projection에서 같은 의미로 읽힌다.
 - process snapshot은 session truth owner가 아니라 app/process 읽기 projection으로만 쓰인다.
 - task ledger receipt는 `runtime/app-ledger/` 아래 redacted form으로 남고, uninstall 후에도 historical reference를 설명할 수 있다.
 - 016에 연결 가능한 repo-relative executable evidence가 준비된다.

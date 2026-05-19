@@ -30,6 +30,22 @@
 
 ---
 
+## 현재 구현 상태
+
+현재 구현은 local app manifest, registry, process projection, task ledger receipt baseline을 완료한 상태다. 이 완료 범위는 개인 사용자가 자기 workspace의 local `.shacs/apps/<app-id>.shacsapp/` bundle을 등록하고 관찰하는 첫 기준이며, 전체 AI Operating System 완성을 뜻하지 않는다.
+
+구현 evidence는 다음 repo-relative 경로에 남아 있다.
+
+- `crates/shacs-core/src/app.rs`: manifest validation, registry store, lifecycle state, process snapshot, task ledger entry redaction과 persistence의 core 타입과 동작
+- `crates/shacs-core/tests/app_environment.rs`: manifest, registry, process projection, ledger baseline 회귀 테스트
+- `crates/shacs-cli/src/lib.rs`: `apps install/list/inspect/show/enable/disable/uninstall` command surface와 parser evidence
+
+이 baseline에서도 app install은 실제 app process 실행, supervisor start, MCP server 내부 구현, secret vault backend 구현, permission grant 확정을 만들지 않는다. `AppProcessSnapshot`은 session truth owner가 아니라 기존 session/runtime 상태에서 읽는 projection이다.
+
+비목표도 그대로 유지한다. remote marketplace, Rust dynamic plugin ABI, arbitrary in-process third-party code loading, SaaS/admin/fleet workflow, OS별 visual UI design은 구현 완료로 주장하지 않는다. 실행 가능한 evidence는 존재하지 않는 경로가 아니라 `cargo test`와 해당 Cargo command로 확인해야 한다.
+
+---
+
 ## reference 채택 원칙
 
 `docs/refs`는 구현 복제 대상이 아니라 제품 의미론을 뽑아내는 참고 집합이다.
@@ -96,7 +112,7 @@ app은 단일 prompt나 단일 tool이 아니다. app은 다음 리소스를 하
 
 ### app bundle
 
-app bundle은 파일 시스템에 놓이는 설치 단위다. 설치된 bundle의 기본 위치는 `~/.shacs/apps/<app-id>.shacsapp/` 또는 `<workspace>/.shacs/apps/<app-id>.shacsapp/`다.
+app bundle은 파일 시스템에 놓이는 설치 단위다. 현재 구현된 설치 표면은 선택된 workspace의 `<workspace>/.shacs/apps/<app-id>.shacsapp/`에 이미 놓인 local bundle을 registry에 등록한다.
 
 `shacs-bot`은 구현체와 CLI/runtime 이름이고, `.shacs`는 filesystem namespace다. 따라서 `.shacsapp`은 workspace 루트에 흩어지는 독립 디렉터리가 아니라 `.shacs/apps/` 아래에 등록되는 app bundle 확장자다.
 
@@ -221,15 +237,15 @@ install app
 예시 명령 표면:
 
 ```sh
-shacs-bot apps install ./apps/notion.shacsapp
+shacs-bot apps install /tmp/ws/.shacs/apps/notion.shacsapp --workspace /tmp/ws
 shacs-bot apps list
-shacs-bot apps open notion
-shacs-bot apps permissions notion
+shacs-bot apps inspect notion
+shacs-bot apps enable notion
 shacs-bot apps disable notion
 shacs-bot apps uninstall notion
 ```
 
-`install`은 local bundle을 검증한 뒤 사용자 전역 또는 workspace-local `.shacs/apps/<app-id>.shacsapp/` 설치 루트로 복사/등록하는 의미다. remote catalog에서 이름만으로 받아오는 동작은 초기 계약이 아니다.
+현재 `install`은 workspace-local `.shacs/apps/<app-id>.shacsapp/` bundle을 검증한 뒤 registry에 등록하는 의미다. 다른 위치에서 bundle을 복사하거나 remote catalog에서 이름만으로 받아오는 동작은 초기 계약이 아니다.
 
 CLI 명령은 공식 의미론의 한 projection일 뿐이다. TUI/local API는 같은 app registry, grant reference, process status, ledger를 표시해야 한다.
 
