@@ -1,7 +1,7 @@
 use shacs_command::{
     build_help_text, is_builtin_command, normalize_channel_command, parse_loop_command,
-    parse_loop_command_route, CommandId, CommandKind, CommandRouter, HistoryCommandArgs,
-    LoopCommand,
+    parse_loop_command_route, CommandId, CommandKind, CommandRouter, GoalCommandArgs,
+    HistoryCommandArgs, LoopCommand,
 };
 use std::error::Error;
 
@@ -29,6 +29,7 @@ fn builtin_router_distinguishes_priority_exact_and_prefix_commands() -> Result<(
     assert!(!router.is_dispatchable_command("/stop"));
     assert!(router.is_priority("/stop"));
     assert!(router.is_dispatchable_command("/history 5"));
+    assert!(router.is_dispatchable_command("/goal ship PRD 001"));
     Ok(())
 }
 
@@ -54,6 +55,46 @@ fn loop_command_parser_matches_builtin_router_semantics() {
     assert_eq!(parse_loop_command("/restart"), Some(LoopCommand::Restart));
     assert_eq!(parse_loop_command("/dream"), Some(LoopCommand::Dream));
     assert_eq!(parse_loop_command("/help"), Some(LoopCommand::Help));
+    assert_eq!(
+        parse_loop_command("/goal"),
+        Some(LoopCommand::Goal(GoalCommandArgs::Status))
+    );
+    assert_eq!(
+        parse_loop_command("/goal status"),
+        Some(LoopCommand::Goal(GoalCommandArgs::Status))
+    );
+    assert_eq!(
+        parse_loop_command("/goal pause"),
+        Some(LoopCommand::Goal(GoalCommandArgs::Pause))
+    );
+    assert_eq!(
+        parse_loop_command("/goal resume"),
+        Some(LoopCommand::Goal(GoalCommandArgs::Resume))
+    );
+    assert_eq!(
+        parse_loop_command("/goal clear"),
+        Some(LoopCommand::Goal(GoalCommandArgs::Clear))
+    );
+    assert_eq!(
+        parse_loop_command("/goal done"),
+        Some(LoopCommand::Goal(GoalCommandArgs::Done))
+    );
+    assert_eq!(
+        parse_loop_command("/goal blocked waiting for token"),
+        Some(LoopCommand::Goal(GoalCommandArgs::Blocked(
+            "waiting for token".to_owned()
+        )))
+    );
+    assert_eq!(
+        parse_loop_command("/goal blocked"),
+        Some(LoopCommand::Goal(GoalCommandArgs::Invalid))
+    );
+    assert_eq!(
+        parse_loop_command("/goal ship PRD 001"),
+        Some(LoopCommand::Goal(GoalCommandArgs::Set(
+            "ship PRD 001".to_owned()
+        )))
+    );
     assert_eq!(
         parse_loop_command("/history 25"),
         Some(LoopCommand::History(HistoryCommandArgs::Count(25)))
@@ -97,6 +138,14 @@ fn loop_command_route_preserves_priority_exact_and_prefix_boundary() -> Result<(
     );
     assert_eq!(prefix.parsed.kind, CommandKind::Prefix);
     assert_eq!(prefix.parsed.args, "25");
+
+    let goal = parse_loop_command_route("/goal Ship It").ok_or("missing goal route")?;
+    assert_eq!(
+        goal.command,
+        LoopCommand::Goal(GoalCommandArgs::Set("Ship It".to_owned()))
+    );
+    assert_eq!(goal.parsed.kind, CommandKind::Prefix);
+    assert_eq!(goal.parsed.args, "Ship It");
     Ok(())
 }
 
@@ -119,6 +168,7 @@ fn channel_normalization_strips_bot_suffix_and_aliases_dream_commands() {
 #[test]
 fn builtin_command_detection_and_help_cover_registered_commands() {
     assert!(is_builtin_command("/dream-restore abc"));
+    assert!(is_builtin_command("/goal ship PRD 001"));
     assert!(is_builtin_command("/status"));
     assert!(!is_builtin_command("/status now"));
     assert!(!is_builtin_command("hello"));
@@ -129,6 +179,7 @@ fn builtin_command_detection_and_help_cover_registered_commands() {
         "/stop",
         "/restart",
         "/status",
+        "/goal",
         "/history",
         "/dream",
         "/dream-log",

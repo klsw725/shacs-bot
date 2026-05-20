@@ -1,10 +1,15 @@
 use crate::runtime::{
+    clear_goal, create_persistent_goal, mark_goal_blocked, mark_goal_done, pause_goal,
+    persistent_goal_from_session, remove_persistent_goal, resume_goal, store_persistent_goal,
+};
+use crate::runtime::{
     AgentHook, AgentRunSpec, AgentRunner, AutoCompact, AutoCompactArchiveOutcome,
-    ContextBuildRequest, ContextBuilder, DreamProcessor, DreamRunOutcome, InboundMessage,
-    LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore, MessageBus,
-    OutboundMessage, ProviderArchiveConsolidator, ProviderEventCallback, RuntimeContextTools,
-    RuntimeInterrupt, Session, SessionHistoryOptions, SessionManager, SessionTurnAcquireError,
-    SessionTurnLock, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
+    ContextBuildRequest, ContextBuilder, DreamProcessor, DreamRunOutcome, GoalMetadataError,
+    InboundMessage, LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore,
+    MessageBus, OutboundMessage, PersistentGoal, PersistentGoalStatus, ProviderArchiveConsolidator,
+    ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt, Session, SessionHistoryOptions,
+    SessionManager, SessionTurnAcquireError, SessionTurnLock, TokenConsolidationConfig,
+    ToolEventCallback, ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, pending_ask_user_id, MessageSender,
@@ -14,8 +19,8 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use shacs_command::{
-    build_help_text, is_builtin_command, parse_loop_command_route, CommandKind, HistoryCommandArgs,
-    LoopCommand,
+    build_help_text, is_builtin_command, parse_loop_command_route, CommandKind, GoalCommandArgs,
+    HistoryCommandArgs, LoopCommand,
 };
 use shacs_providers::{GenerationSettings, ProviderClient, ProviderError, ProviderRetryMode};
 use shacs_utils::gitstore::{GitCliStore, GitStore};
@@ -79,6 +84,7 @@ pub enum AgentLoopCommandResult {
     Status,
     NewSession,
     StopRequested,
+    Goal,
     History,
     Dream,
     DreamLog,
@@ -539,14 +545,25 @@ impl<'a> AgentLoop<'a> {
                 self.stopped = false;
                 let _ = self.task_registry.cancel(&session.key);
                 session.clear();
-                session.metadata.remove(PENDING_USER_TURN_KEY);
-                session.metadata.remove(RUNTIME_CHECKPOINT_KEY);
+                clear_runtime_markers(&mut session);
+                remove_persistent_goal(&mut session);
                 self.publish_command_response(
                     message,
                     session,
                     "Started a new session.",
                     Some(AgentLoopCommandResult::NewSession),
                     "new_session",
+                    save_session,
+                )
+            }
+            LoopCommand::Goal(args) => {
+                let content = handle_goal_command(&mut session, args)?;
+                self.publish_command_response(
+                    message,
+                    session,
+                    &content,
+                    Some(AgentLoopCommandResult::Goal),
+                    "goal",
                     save_session,
                 )
             }
@@ -763,6 +780,7 @@ pub struct AgentLoopRunSummary {
 pub enum AgentLoopError {
     Session(std::io::Error),
     Memory(MemoryConsolidationError),
+    GoalMetadata(GoalMetadataError),
     DuplicateActiveTurn { session_key: String },
 }
 
@@ -771,6 +789,7 @@ impl fmt::Display for AgentLoopError {
         match self {
             Self::Session(error) => write!(formatter, "session persistence failed: {error}"),
             Self::Memory(error) => write!(formatter, "memory consolidation failed: {error}"),
+            Self::GoalMetadata(error) => write!(formatter, "goal metadata failed: {error}"),
             Self::DuplicateActiveTurn { session_key } => {
                 write!(
                     formatter,
@@ -968,6 +987,91 @@ fn append_new_runner_messages(
 fn clear_runtime_markers(session: &mut Session) {
     session.metadata.remove(PENDING_USER_TURN_KEY);
     session.metadata.remove(RUNTIME_CHECKPOINT_KEY);
+}
+
+fn handle_goal_command(
+    session: &mut Session,
+    args: GoalCommandArgs,
+) -> Result<String, AgentLoopError> {
+    match args {
+        GoalCommandArgs::Status => Ok(format_goal_status(
+            persistent_goal_from_session(session).as_ref(),
+        )),
+        GoalCommandArgs::Invalid => {
+            Ok("Usage: /goal [status|pause|resume|clear|done|blocked <reason>|<text>].".to_owned())
+        }
+        GoalCommandArgs::Set(text) => set_goal_command(session, text),
+        GoalCommandArgs::Pause => update_existing_goal(session, pause_goal, "Goal paused."),
+        GoalCommandArgs::Resume => update_existing_goal(session, resume_goal, "Goal resumed."),
+        GoalCommandArgs::Clear => update_existing_goal(session, clear_goal, "Goal cleared."),
+        GoalCommandArgs::Done => update_existing_goal(session, mark_goal_done, "Goal marked done."),
+        GoalCommandArgs::Blocked(reason) => {
+            let Some(goal) = persistent_goal_from_session(session) else {
+                return Ok("No persistent goal is set.".to_owned());
+            };
+            let next = mark_goal_blocked(&goal, reason, now_iso());
+            store_persistent_goal(session, &next).map_err(AgentLoopError::GoalMetadata)?;
+            Ok("Goal marked blocked.".to_owned())
+        }
+    }
+}
+
+fn set_goal_command(session: &mut Session, text: String) -> Result<String, AgentLoopError> {
+    if let Some(existing) = persistent_goal_from_session(session) {
+        if !existing.is_terminal() {
+            return Ok(
+                "A persistent goal is already active. Use /goal clear before setting a new goal."
+                    .to_owned(),
+            );
+        }
+    }
+    let goal = create_persistent_goal(
+        session.key.clone(),
+        text,
+        now_iso(),
+        DEFAULT_GOAL_TURN_BUDGET,
+    );
+    store_persistent_goal(session, &goal).map_err(AgentLoopError::GoalMetadata)?;
+    Ok(format!("Goal set: {}", goal.text))
+}
+
+fn update_existing_goal(
+    session: &mut Session,
+    update: impl FnOnce(&PersistentGoal, String) -> PersistentGoal,
+    success: &str,
+) -> Result<String, AgentLoopError> {
+    let Some(goal) = persistent_goal_from_session(session) else {
+        return Ok("No persistent goal is set.".to_owned());
+    };
+    let next = update(&goal, now_iso());
+    store_persistent_goal(session, &next).map_err(AgentLoopError::GoalMetadata)?;
+    Ok(success.to_owned())
+}
+
+fn format_goal_status(goal: Option<&PersistentGoal>) -> String {
+    let Some(goal) = goal else {
+        return "No persistent goal is set.".to_owned();
+    };
+    let status = match goal.status {
+        PersistentGoalStatus::Active => "active",
+        PersistentGoalStatus::Paused => "paused",
+        PersistentGoalStatus::Blocked => "blocked",
+        PersistentGoalStatus::Done => "done",
+        PersistentGoalStatus::Cleared => "cleared",
+    };
+    let verdict = goal
+        .last_verdict
+        .map(|verdict| format!("{verdict:?}").to_ascii_lowercase())
+        .unwrap_or_else(|| "none".to_owned());
+    let blocked = goal
+        .blocked_reason
+        .as_ref()
+        .map(|reason| format!("\nBlocked reason: {reason}"))
+        .unwrap_or_default();
+    format!(
+        "Goal: {}\nStatus: {}\nBudget: {}/{} turns used\nLast verdict: {}{}",
+        goal.text, status, goal.turns_used, goal.turn_budget, verdict, blocked
+    )
 }
 
 fn format_history_command(session: &Session, count: usize) -> String {

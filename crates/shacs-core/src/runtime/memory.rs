@@ -13,6 +13,9 @@ use shacs_templates::{
     render_agent_template, render_workspace_template, template_variables, AgentTemplate,
     WorkspaceTemplate,
 };
+use shacs_utils::evaluator::{
+    stable_sha256_digest, EvidenceKind, EvidenceRef, MemoryEvidenceOmittedReason, RedactionStatus,
+};
 use shacs_utils::gitstore::{GitCliStore, GitStore};
 use shacs_utils::text::{strip_think, truncate_text};
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,6 +62,13 @@ pub struct MemoryConsolidationOutcome {
     pub processed_entries: usize,
     pub processed_cursor: u64,
     pub memory_updated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryEvidenceSearchOutcome {
+    pub candidate_refs: Vec<EvidenceRef>,
+    pub filtered_omitted_count: usize,
+    pub omitted_reason: MemoryEvidenceOmittedReason,
 }
 
 #[derive(Debug)]
@@ -846,6 +856,62 @@ impl MemoryStore {
 
     pub fn read_entries(&self) -> Vec<MemoryHistoryEntry> {
         read_entries_from_path(&self.history_path())
+    }
+
+    pub fn search_evidence_refs(
+        &self,
+        query: &str,
+        cutoff: &str,
+        _max_result_refs: usize,
+    ) -> Result<MemoryEvidenceSearchOutcome, serde_json::Error> {
+        let entries = self.read_entries();
+        let query_lower = query.to_lowercase();
+        let cutoff_omitted = entries
+            .iter()
+            .filter(|entry| !cutoff.is_empty() && entry.timestamp.as_str() > cutoff)
+            .count();
+        let cutoff_kept = entries
+            .iter()
+            .filter(|entry| cutoff.is_empty() || entry.timestamp.as_str() <= cutoff);
+        let relevance_omitted = cutoff_kept
+            .clone()
+            .filter(|entry| {
+                !query.is_empty() && !entry.content.to_lowercase().contains(&query_lower)
+            })
+            .count();
+        let candidate_refs = cutoff_kept
+            .filter(|entry| query.is_empty() || entry.content.to_lowercase().contains(&query_lower))
+            .map(|entry| {
+                let digest = stable_sha256_digest(&json!({
+                    "cursor": entry.cursor,
+                    "timestamp": entry.timestamp,
+                    "content": entry.content,
+                }))?;
+                Ok(EvidenceRef {
+                    kind: EvidenceKind::MemoryEvidenceSet,
+                    id: format!("memory-history-{}", entry.cursor),
+                    digest,
+                    summary: format!("memory history entry {}", entry.cursor),
+                    redaction_status: RedactionStatus::Redacted,
+                    owner_spec: Some("runtime.memory.MemoryStore".to_owned()),
+                    locator: Some(format!("memory://history/{}", entry.cursor)),
+                    retention_hint: Some("audit_replay".to_owned()),
+                })
+            })
+            .collect::<Result<Vec<_>, serde_json::Error>>()?;
+        let omitted_reason = if cutoff_omitted > 0 {
+            MemoryEvidenceOmittedReason::OmittedByCutoff
+        } else if relevance_omitted > 0 {
+            MemoryEvidenceOmittedReason::OmittedByRelevance
+        } else {
+            MemoryEvidenceOmittedReason::OmittedByBudget
+        };
+
+        Ok(MemoryEvidenceSearchOutcome {
+            candidate_refs,
+            filtered_omitted_count: cutoff_omitted + relevance_omitted,
+            omitted_reason,
+        })
     }
 
     pub fn read_unprocessed_history(&self, since_cursor: u64) -> Vec<MemoryHistoryEntry> {

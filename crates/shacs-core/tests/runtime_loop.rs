@@ -1,23 +1,1574 @@
 use serde_json::{json, Map, Value};
 use shacs_core::runtime::{
-    build_subagent_tool_registry, format_partial_progress_from_tool_events, ActiveLoopTask,
+    app_provided_skill_reference_evidence, authored_skill_ready_for_active_registry,
+    build_runtime_memory_evidence, build_spec018_diagnostics_manifest,
+    build_spec018_ledger_inspect_result, build_spec018_projection, build_subagent_tool_registry,
+    consume_evaluator_decision, coordinate_automation_run, create_persistent_goal,
+    evaluate_spec018_release_gate, evaluator_consumption_idempotency_key,
+    format_partial_progress_from_tool_events, freeze_session_search_snapshot, run_local_replay,
+    runtime_curator_proposal_record, runtime_improvement_apply_readiness,
+    runtime_improvement_apply_record, runtime_improvement_proposal_behavior_inert,
+    runtime_improvement_rollback_projection, runtime_improvement_status_after_apply_record,
+    runtime_improvement_verification_record, runtime_mcp_exposure_projection,
+    runtime_memory_evidence_request, runtime_skill_list_disclosure,
+    runtime_skill_reference_evidence, runtime_skill_view_disclosure,
+    runtime_spec018_channel_projection, runtime_spec018_local_api_projection, ActiveLoopTask,
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AutoCompact,
-    CancellationToken, ChildResultEnvelope, ChildResultStatus, ContextBuilder, DreamLifecycle,
-    InboundMessage, LoopTaskRegisterResult, McpLifecycle, MergeDecision, MessageBus,
+    AutomationSourceEvent, AutomationSourceEventKind, CancellationToken, ChildResultEnvelope,
+    ChildResultStatus, ContextBuilder, DreamLifecycle, EvaluatorDecisionInput,
+    GoalCompletionVerdict, InboundMessage, LedgerConsumptionStatus, LoopTaskRegisterResult,
+    McpLifecycle, MergeDecision, MessageBus, PersistentGoal, PersistentGoalStatus,
     ProviderHotSwapResult, ProviderSelectionSnapshot, RuntimeCapabilityStatus, RuntimeContextTools,
-    Session, SessionManager, SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector,
-    SubagentExecutionConfig, SubagentProgressUpdate, SubagentRuntime, SubagentRuntimeConfig,
-    ToolEvent, ToolStatus,
+    RuntimeDecisionKind, RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults,
+    RuntimeReplayInput, RuntimeSelectedAction, RuntimeSpec018DiagnosticsManifestInput,
+    RuntimeSpec018LedgerInspectInput, RuntimeSpec018ProjectionInput,
+    RuntimeSpec018ReleaseGateInput, Session, SessionManager, SessionTurnAcquireError,
+    SessionTurnLock, StaticProviderSelector, SubagentExecutionConfig, SubagentMergeState,
+    SubagentProgressUpdate, SubagentRuntime, SubagentRuntimeConfig, ToolEvent, ToolStatus,
+    PERSISTENT_GOAL_METADATA_KEY,
 };
 use shacs_core::tools::{AskUserTool, MessageTool, SpawnRequest, SpawnTool, ToolRegistry};
 use shacs_providers::{
     GenerationSettings, LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest,
     ToolCallRequest,
 };
+use shacs_skills::{
+    SkillDescriptor, SkillRegistry, SkillRegistryEntry, SkillRegistryStatus, SkillSourceKind,
+};
+use shacs_utils::evaluator::{
+    spec018_acknowledgement_is_user_decision, spec018_evidence_ref_has_owner_and_redaction,
+    spec018_ledger_inspect_links_runtime_projection_and_diagnostics,
+    spec018_manifest_includes_all_evidence_categories, spec018_manifest_redaction_is_valid,
+    ApprovalDecisionKind, ApprovalDecisionRef, ApprovalRequestRef, ApprovalRequestStatus,
+    AuthoredSkillLifecycleState, AutomationExecutionMode, AutomationRecursionGuard,
+    AuxiliaryJudgeRole, AuxiliaryJudgeRoute, AuxiliaryJudgeRouteFinalStatus,
+    CheckpointGateDecision, CheckpointGateStatus, ConfidenceBand, CuratorActionProposed,
+    CuratorProposalFinalStatus, CuratorTargetKind, DeliverySeverity, EvaluatorKind, EvidenceKind,
+    EvidenceRef, ImprovementActorAuthority, ImprovementApplyRecord, ImprovementApproval,
+    ImprovementAuthorityAction, ImprovementCheckpoint, ImprovementProposal,
+    ImprovementProposalStatus, ImprovementRollbackResult, ImprovementVerificationNextAction,
+    JudgeFallbackReason, MemoryEvidenceOmittedReason, OwnerPrimitiveRef, ProjectionStatus,
+    ProjectionSurface, ProviderFallbackStep, ProviderModelSnapshot, ProviderRouteRole,
+    RedactionStatus, ReplayComparisonSeverity, ReplayComparisonStatus, ReplayDatasetItem,
+    ReplayRunStatus, ReplaySafeMockOutcome, ReplayToolOutcomePolicy, Spec018AllowedDecision,
+    Spec018ApprovalDecisionKind, Spec018ApprovalProjectionItem, Spec018AutomationDeliveryStatus,
+    Spec018BlockedProjectionItem, Spec018BlockedReasonClass, Spec018ClosureCoverageBucket,
+    Spec018LedgerInspectQuery, Spec018LedgerInspectQueryKind, Spec018Projection,
+    Spec018ProjectionStatus, Spec018ProjectionStatusKind, Spec018ReleaseBlocker,
+    Spec018ReleaseBlockerCategory, Spec018ReleaseBlockerSeverity, Spec018ReleaseCoverageEntry,
+    Spec018ReleaseCoverageStatus, Spec018RetryEligibility, Spec018RollbackEligibility,
+    Spec018SkippedEvidence, Spec018SkippedEvidenceClassification,
+    Spec018VerificationProjectionItem, Spec018VerificationResultKind, SuggestedNextAction,
+    TaskOutcomeClass, VerdictKind,
+};
 use shacs_utils::gitstore::{GitCliStore, GitStore};
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
+
+fn runtime_eval_evidence() -> EvidenceRef {
+    EvidenceRef {
+        kind: EvidenceKind::SessionEvent,
+        id: "event-1".to_owned(),
+        digest: "event-digest".to_owned(),
+        summary: "session event".to_owned(),
+        redaction_status: RedactionStatus::AlreadySafe,
+        owner_spec: None,
+        locator: None,
+        retention_hint: None,
+    }
+}
+
+fn spec018_evidence_ref(
+    kind: EvidenceKind,
+    id: &str,
+    redaction_status: RedactionStatus,
+) -> EvidenceRef {
+    EvidenceRef {
+        kind,
+        id: id.to_owned(),
+        digest: format!("digest-{id}"),
+        summary: format!("summary-{id}"),
+        redaction_status,
+        owner_spec: Some("018".to_owned()),
+        locator: Some(format!("inspect://{id}")),
+        retention_hint: Some("local".to_owned()),
+    }
+}
+
+fn runtime_spec018_release_entry(
+    bucket: Spec018ClosureCoverageBucket,
+    id: &str,
+) -> Spec018ReleaseCoverageEntry {
+    Spec018ReleaseCoverageEntry {
+        entry_id: id.to_owned(),
+        capability_area: bucket,
+        required_evidence: vec![spec018_evidence_ref(
+            EvidenceKind::DiagnosticRecord,
+            &format!("required-{id}"),
+            RedactionStatus::Redacted,
+        )],
+        test_refs: vec![spec018_evidence_ref(
+            EvidenceKind::TaskResult,
+            &format!("test-{id}"),
+            RedactionStatus::AlreadySafe,
+        )],
+        replay_refs: vec![spec018_evidence_ref(
+            EvidenceKind::ReplayResult,
+            &format!("replay-{id}"),
+            RedactionStatus::Redacted,
+        )],
+        manual_refs: vec![spec018_evidence_ref(
+            EvidenceKind::DiagnosticRecord,
+            &format!("manual-{id}"),
+            RedactionStatus::AlreadySafe,
+        )],
+        diagnostics_artifact_refs: vec![spec018_evidence_ref(
+            EvidenceKind::DiagnosticRecord,
+            &format!("diagnostics-{id}"),
+            RedactionStatus::Redacted,
+        )],
+        status: Spec018ReleaseCoverageStatus::Pass,
+        blocker_refs: Vec::new(),
+    }
+}
+
+fn spec018_status(
+    kind: Spec018ProjectionStatusKind,
+    evidence_refs: Vec<EvidenceRef>,
+) -> Spec018ProjectionStatus {
+    Spec018ProjectionStatus {
+        kind,
+        severity: None,
+        blocked_reason_class: None,
+        user_action_hint: None,
+        evidence_refs,
+        retry_eligibility: None,
+    }
+}
+
+fn replay_evidence(kind: EvidenceKind, id: &str) -> EvidenceRef {
+    EvidenceRef {
+        kind,
+        id: id.to_owned(),
+        digest: format!("digest-{id}"),
+        summary: "redacted replay evidence".to_owned(),
+        redaction_status: RedactionStatus::Redacted,
+        owner_spec: Some("018".to_owned()),
+        locator: Some(format!("replay://{id}")),
+        retention_hint: Some("local".to_owned()),
+    }
+}
+
+fn replay_tool_policy(recorded: bool, safe_mock_schema: Option<&str>) -> ReplayToolOutcomePolicy {
+    ReplayToolOutcomePolicy {
+        tool_call_ref: replay_evidence(EvidenceKind::ToolPayload, "tool-1"),
+        expected_schema_digest: "schema-a".to_owned(),
+        recorded_outcome_ref: recorded
+            .then(|| replay_evidence(EvidenceKind::ReplayResult, "recorded-1")),
+        safe_mock_outcome: safe_mock_schema.map(|schema| ReplaySafeMockOutcome {
+            mock_reason: "local safe destructive substitute".to_owned(),
+            source: "redacted local fixture".to_owned(),
+            expected_schema_digest: schema.to_owned(),
+            limitations: vec!["does not prove live side effects".to_owned()],
+            outcome_ref: replay_evidence(EvidenceKind::ReplayResult, "mock-1"),
+        }),
+        blocked_reason: None,
+    }
+}
+
+fn replay_route() -> AuxiliaryJudgeRoute {
+    let fallback_step = ProviderFallbackStep {
+        provider_id: "primary-judge".to_owned(),
+        model_id: "primary-model".to_owned(),
+        reason: JudgeFallbackReason::PrimaryUnavailable,
+    };
+
+    AuxiliaryJudgeRoute {
+        route_id: "route-1".to_owned(),
+        judge_role: AuxiliaryJudgeRole::ReplayJudge,
+        provider_snapshot: ProviderModelSnapshot {
+            snapshot_id: "snapshot-fallback-judge".to_owned(),
+            provider_id: "fallback-judge".to_owned(),
+            model_id: "fallback-model".to_owned(),
+            profile_ref: "profile://local".to_owned(),
+            role: ProviderRouteRole::AuxiliaryJudge,
+            routing_reason: "primary judge unavailable".to_owned(),
+            fallback_chain: vec![fallback_step.clone()],
+            evaluator_role: Some(AuxiliaryJudgeRole::ReplayJudge),
+        },
+        fallback_chain: vec![fallback_step],
+        routing_reason: "primary judge unavailable".to_owned(),
+        final_status: AuxiliaryJudgeRouteFinalStatus::FallbackSelected,
+    }
+}
+
+fn replay_item(case_id: &str, policies: Vec<ReplayToolOutcomePolicy>) -> ReplayDatasetItem {
+    ReplayDatasetItem {
+        dataset_id: "dataset-1".to_owned(),
+        case_id: case_id.to_owned(),
+        trajectory_refs: vec![replay_evidence(
+            EvidenceKind::TrajectoryRecord,
+            "trajectory-1",
+        )],
+        expected_verdict: VerdictKind::Pass,
+        expected_outcome: TaskOutcomeClass::Verify,
+        expected_projection_status: ProjectionStatus::Success,
+        expected_confidence_band: ConfidenceBand::High,
+        allowed_judge_roles: vec![AuxiliaryJudgeRole::ReplayJudge],
+        redaction_profile: "default".to_owned(),
+        tool_outcome_policies: policies,
+        actual_verdict: Some(VerdictKind::Pass),
+        actual_outcome: Some(TaskOutcomeClass::Verify),
+        actual_projection_status: Some(ProjectionStatus::Success),
+        actual_confidence_band: Some(ConfidenceBand::High),
+        auxiliary_judge_routes: vec![replay_route()],
+        diagnostics_refs: vec![replay_evidence(
+            EvidenceKind::DiagnosticRecord,
+            "diagnostic-1",
+        )],
+        coverage_refs: vec![replay_evidence(EvidenceKind::ReplayRecord, "coverage-1")],
+    }
+}
+
+fn replay_input<'a>(
+    dataset: &'a [ReplayDatasetItem],
+    selected: &'a [String],
+) -> RuntimeReplayInput<'a> {
+    RuntimeReplayInput {
+        run_id: "run-1".to_owned(),
+        dataset_id: "dataset-1".to_owned(),
+        dataset,
+        selected_case_ids: selected,
+        started_at_ms: 10,
+        completed_at_ms: 20,
+        diagnostics_ref: replay_evidence(EvidenceKind::DiagnosticRecord, "run-diagnostic"),
+    }
+}
+
+fn runtime_eval_goal() -> PersistentGoal {
+    create_persistent_goal("session-1", "ship it", "created", 2)
+}
+
+#[test]
+fn replay_runner_executes_selected_cases_only_and_never_dispatches_live_tools() {
+    let dataset = vec![
+        replay_item("case-1", vec![replay_tool_policy(true, None)]),
+        replay_item("case-2", vec![replay_tool_policy(false, None)]),
+    ];
+    let selected = vec!["case-1".to_owned()];
+
+    let outcome = run_local_replay(replay_input(&dataset, &selected));
+
+    assert_eq!(outcome.run_record.case_results.len(), 1);
+    assert_eq!(outcome.run_record.case_results[0].case_id, "case-1");
+    assert_eq!(outcome.live_tool_dispatch_count, 0);
+    assert_eq!(outcome.replayed_tool_policy_count, 1);
+    assert_eq!(outcome.run_record.status, ReplayRunStatus::Passed);
+}
+
+#[test]
+fn replay_runner_replays_recorded_outcome_and_records_auxiliary_fallback_route() {
+    let dataset = vec![replay_item("case-1", vec![replay_tool_policy(true, None)])];
+    let selected = vec!["case-1".to_owned()];
+
+    let outcome = run_local_replay(replay_input(&dataset, &selected));
+    let route = &outcome.auxiliary_judge_routes[0];
+
+    assert_eq!(
+        outcome.run_record.case_results[0].comparison_status,
+        ReplayComparisonStatus::Match
+    );
+    assert_eq!(route.provider_snapshot.provider_id, "fallback-judge");
+    assert_eq!(
+        route.fallback_chain[0].reason,
+        JudgeFallbackReason::PrimaryUnavailable
+    );
+    assert_eq!(
+        route.final_status,
+        AuxiliaryJudgeRouteFinalStatus::FallbackSelected
+    );
+}
+
+#[test]
+fn replay_runner_blocks_safe_mock_schema_mismatch_and_release_gate_pass() {
+    let dataset = vec![replay_item(
+        "case-1",
+        vec![replay_tool_policy(false, Some("schema-b"))],
+    )];
+    let selected = vec!["case-1".to_owned()];
+
+    let outcome = run_local_replay(replay_input(&dataset, &selected));
+    let case = &outcome.run_record.case_results[0];
+
+    assert_eq!(
+        case.comparison_status,
+        ReplayComparisonStatus::SchemaMismatch
+    );
+    assert_eq!(case.severity, ReplayComparisonSeverity::Blocked);
+    assert_eq!(outcome.run_record.status, ReplayRunStatus::Blocked);
+}
+
+#[test]
+fn replay_runner_blocks_empty_and_unknown_selected_cases() {
+    let dataset = vec![replay_item("case-1", vec![replay_tool_policy(true, None)])];
+    let empty = Vec::new();
+    let unknown = vec!["missing-case".to_owned()];
+
+    let empty_outcome = run_local_replay(replay_input(&dataset, &empty));
+    let unknown_outcome = run_local_replay(replay_input(&dataset, &unknown));
+
+    assert_eq!(empty_outcome.run_record.status, ReplayRunStatus::Blocked);
+    assert_eq!(unknown_outcome.run_record.status, ReplayRunStatus::Blocked);
+    assert_eq!(
+        empty_outcome.run_record.case_results[0].case_id,
+        "__selection__"
+    );
+    assert_eq!(
+        unknown_outcome.run_record.case_results[0].case_id,
+        "missing-case"
+    );
+    assert_eq!(
+        unknown_outcome.run_record.case_results[0]
+            .blocked_reason
+            .as_deref(),
+        Some("blocked_unknown_selected_replay_case")
+    );
+}
+
+#[test]
+fn replay_runner_blocks_disallowed_auxiliary_judge_role() {
+    let mut item = replay_item("case-1", vec![replay_tool_policy(true, None)]);
+    item.allowed_judge_roles = vec![AuxiliaryJudgeRole::GoalCompletion];
+    let dataset = vec![item];
+    let selected = vec!["case-1".to_owned()];
+
+    let outcome = run_local_replay(replay_input(&dataset, &selected));
+
+    assert_eq!(outcome.run_record.status, ReplayRunStatus::Blocked);
+    assert_eq!(
+        outcome.run_record.case_results[0].blocked_reason.as_deref(),
+        Some("blocked_disallowed_judge_role")
+    );
+}
+
+#[test]
+fn replay_runner_separates_verdict_and_confidence_mismatch_severity() {
+    let mut verdict_case = replay_item("case-1", vec![replay_tool_policy(true, None)]);
+    verdict_case.actual_verdict = Some(VerdictKind::Fail);
+    let mut confidence_case = replay_item("case-2", vec![replay_tool_policy(true, None)]);
+    confidence_case.actual_confidence_band = Some(ConfidenceBand::Medium);
+    let dataset = vec![verdict_case, confidence_case];
+    let selected = vec!["case-1".to_owned(), "case-2".to_owned()];
+
+    let outcome = run_local_replay(replay_input(&dataset, &selected));
+
+    assert_eq!(
+        outcome.run_record.case_results[0].comparison_status,
+        ReplayComparisonStatus::VerdictKindMismatch
+    );
+    assert_eq!(
+        outcome.run_record.case_results[0].severity,
+        ReplayComparisonSeverity::High
+    );
+    assert_eq!(
+        outcome.run_record.case_results[1].comparison_status,
+        ReplayComparisonStatus::ConfidenceBandMismatch
+    );
+    assert_eq!(
+        outcome.run_record.case_results[1].severity,
+        ReplayComparisonSeverity::Low
+    );
+}
+
+#[test]
+fn replay_runner_does_not_mutate_session_or_config_values_passed_around() {
+    let session = Session::new("session-1");
+    let config = AgentLoopConfig::new("/tmp/shacs", "test-model");
+    let original_session = session.clone();
+    let original_config = config.clone();
+    let dataset = vec![replay_item("case-1", vec![replay_tool_policy(true, None)])];
+    let selected = vec!["case-1".to_owned()];
+
+    let outcome = run_local_replay(replay_input(&dataset, &selected));
+
+    assert_eq!(session, original_session);
+    assert_eq!(config.workspace, original_config.workspace);
+    assert_eq!(config.model, original_config.model);
+    assert_eq!(config.max_iterations, original_config.max_iterations);
+    assert_eq!(outcome.run_record.status, ReplayRunStatus::Passed);
+}
+
+fn runtime_eval_gates(now_ms: u64) -> RuntimePolicyGateResults {
+    RuntimePolicyGateResults {
+        now_ms,
+        ..RuntimePolicyGateResults::all_passed()
+    }
+}
+
+fn runtime_eval_input(
+    evaluator_kind: EvaluatorKind,
+    goal: Option<&PersistentGoal>,
+    verdict: Option<GoalCompletionVerdict>,
+) -> EvaluatorDecisionInput {
+    EvaluatorDecisionInput {
+        verdict_id: "verdict-1".to_owned(),
+        evaluator_kind,
+        evaluator_version: "eval-v1".to_owned(),
+        source_ledger_ref: "evaluation-ledger:verdict-1".to_owned(),
+        frozen_snapshot_digest: "snapshot-digest".to_owned(),
+        current_target_snapshot_digest: "snapshot-digest".to_owned(),
+        goal_id: goal.map(|goal| goal.id.clone()),
+        turn_id: Some("turn-1".to_owned()),
+        expires_at_ms: None,
+        suggested_action: SuggestedNextAction::None,
+        confidence: 0.9,
+        evidence_refs: vec![runtime_eval_evidence()],
+        redaction_status: RedactionStatus::AlreadySafe,
+        explicit_goal_completion_verdict: verdict,
+        blocked_reason: None,
+        unblock_hint: None,
+        created_at_ms: 100,
+        correlation_id: "corr-1".to_owned(),
+        superseding_verdict_ref: None,
+        task_outcome_class: None,
+    }
+}
+
+fn automation_source_event(source: AutomationSourceEventKind) -> AutomationSourceEvent {
+    AutomationSourceEvent {
+        runtime_service_event_id: "runtime-event-1".to_owned(),
+        source_owner: "runtime-service".to_owned(),
+        received_at_ms: 100,
+        job_id: "job-1".to_owned(),
+        session_id: Some("session-1".to_owned()),
+        goal_id: Some("goal-1".to_owned()),
+        active_goal: true,
+        pending_automation: false,
+        execution_mode: AutomationExecutionMode::SkillBackedAgent,
+        timeout_policy_ref: "timeout-policy-1".to_owned(),
+        retry_policy_ref: "retry-policy-1".to_owned(),
+        delivery_policy_ref: "delivery-policy-1".to_owned(),
+        recursion_guard: AutomationRecursionGuard {
+            token: "guard-1".to_owned(),
+            source_run_id: None,
+            depth: 0,
+            max_depth: 3,
+            parent_refs: Vec::new(),
+            blocked_reason: None,
+        },
+        prd008_goal_gate_ref: Some("goal-gate-1".to_owned()),
+        source,
+    }
+}
+
+#[test]
+fn automation_heartbeat_without_goal_or_pending_work_is_suppressed() {
+    let mut event = automation_source_event(AutomationSourceEventKind::Heartbeat);
+    event.active_goal = false;
+    event.pending_automation = false;
+    event.goal_id = None;
+
+    let outcome = coordinate_automation_run(&event, &[]);
+
+    assert!(outcome.request.is_none());
+    assert!(outcome.run_state_record.is_none());
+    assert!(outcome.delivery_record.is_none());
+    assert_eq!(
+        outcome.suppress_reason.as_deref(),
+        Some("heartbeat has no active goal or pending automation")
+    );
+    assert!(!outcome.task_outcome_eligibility.evaluator_should_run);
+}
+
+#[test]
+fn automation_duplicate_cron_wake_is_idempotently_suppressed() {
+    let event = automation_source_event(AutomationSourceEventKind::Cron {
+        approved_automation_rule_ref: Some("rule-1".to_owned()),
+    });
+    let first = coordinate_automation_run(&event, &[]);
+    let existing = vec![first.run_state_record.clone().expect("first run state")];
+    let second = coordinate_automation_run(&event, &existing);
+
+    assert!(first.request.is_some());
+    assert!(second.request.is_none());
+    assert_eq!(
+        second.suppress_reason.as_deref(),
+        Some("duplicate automation wake idempotency key")
+    );
+}
+
+#[test]
+fn automation_app_task_result_carries_required_evidence_without_app_apply_authority() {
+    let event = automation_source_event(AutomationSourceEventKind::AppTaskResult {
+        app_task_id: Some("app-task-1".to_owned()),
+        manifest_ref: Some("manifest-1".to_owned()),
+        capability_scope: Some("capability:write".to_owned()),
+        evidence_ref: "evidence-1".to_owned(),
+        self_improvement_apply_requested: true,
+    });
+
+    let outcome = coordinate_automation_run(&event, &[]);
+
+    assert!(outcome.request.is_some());
+    assert!(outcome
+        .task_outcome_eligibility
+        .evidence_refs
+        .contains(&"app-task-1".to_owned()));
+    assert!(outcome
+        .task_outcome_eligibility
+        .evidence_refs
+        .contains(&"manifest-1".to_owned()));
+    assert!(outcome
+        .task_outcome_eligibility
+        .evidence_refs
+        .contains(&"capability:write".to_owned()));
+    assert!(
+        !outcome
+            .task_outcome_eligibility
+            .app_authority_can_apply_self_improvement
+    );
+}
+
+#[test]
+fn automation_recursion_guard_suppresses_self_triggered_loop() {
+    let event = automation_source_event(AutomationSourceEventKind::ManualResume {
+        resume_ref: "resume-1".to_owned(),
+    });
+    let first = coordinate_automation_run(&event, &[]);
+    let mut loop_event = event.clone();
+    loop_event.recursion_guard.source_run_id =
+        first.request.as_ref().map(|request| request.run_id.clone());
+
+    let outcome = coordinate_automation_run(&loop_event, &[]);
+
+    assert!(outcome.request.is_none());
+    assert_eq!(
+        outcome.suppress_reason.as_deref(),
+        Some("self-triggered automation loop")
+    );
+    assert_eq!(
+        outcome
+            .run_state_record
+            .as_ref()
+            .and_then(|record| record.suppress_reason.as_deref()),
+        Some("self-triggered automation loop")
+    );
+}
+
+#[test]
+fn automation_local_api_background_keeps_refs_without_raw_payload() {
+    let event = automation_source_event(AutomationSourceEventKind::LocalApiBackground {
+        caller_auth_ref: Some("auth-ref-1".to_owned()),
+        redaction_profile_ref: Some("redaction-profile-1".to_owned()),
+        redacted_evidence_ref: "redacted-evidence-1".to_owned(),
+    });
+
+    let outcome = coordinate_automation_run(&event, &[]);
+    let serialized = serde_json::to_string(&event).expect("event should serialize");
+
+    assert!(outcome.request.is_some());
+    assert!(outcome
+        .task_outcome_eligibility
+        .evidence_refs
+        .contains(&"auth-ref-1".to_owned()));
+    assert!(outcome
+        .task_outcome_eligibility
+        .evidence_refs
+        .contains(&"redaction-profile-1".to_owned()));
+    assert!(!serialized.contains("raw_payload"));
+}
+
+#[test]
+fn automation_channel_event_projects_delivery_only_when_user_visible() {
+    let visible = automation_source_event(AutomationSourceEventKind::ChannelEvent {
+        channel_event_ref: "channel-event-1".to_owned(),
+        user_visible: true,
+        redacted_message: "deployment finished".to_owned(),
+        target_surface: ProjectionSurface::Channel,
+        severity: DeliverySeverity::Info,
+    });
+    let hidden = automation_source_event(AutomationSourceEventKind::ChannelEvent {
+        channel_event_ref: "channel-event-2".to_owned(),
+        user_visible: false,
+        redacted_message: "internal typing signal".to_owned(),
+        target_surface: ProjectionSurface::Channel,
+        severity: DeliverySeverity::Info,
+    });
+
+    let visible_outcome = coordinate_automation_run(&visible, &[]);
+    let hidden_outcome = coordinate_automation_run(&hidden, &[]);
+
+    assert!(visible_outcome.delivery_record.is_some());
+    assert!(hidden_outcome.delivery_record.is_none());
+    assert!(hidden_outcome.request.is_none());
+}
+
+#[test]
+fn runtime_spec018_projection_keeps_schema_metadata_and_redacted_evidence_only(
+) -> Result<(), Box<dyn Error>> {
+    let safe_goal_ref = spec018_evidence_ref(
+        EvidenceKind::SessionEvent,
+        "goal-safe",
+        RedactionStatus::AlreadySafe,
+    );
+    let unsafe_goal_ref = spec018_evidence_ref(
+        EvidenceKind::SessionEvent,
+        "goal-unsafe",
+        RedactionStatus::RedactionFailed,
+    );
+    let safe_goal_status_ref = spec018_evidence_ref(
+        EvidenceKind::EvaluatorSummary,
+        "goal-status-safe",
+        RedactionStatus::Redacted,
+    );
+    let safe_automation_ref = spec018_evidence_ref(
+        EvidenceKind::ChannelMessage,
+        "automation-safe",
+        RedactionStatus::Redacted,
+    );
+    let safe_approval_ref = spec018_evidence_ref(
+        EvidenceKind::ProviderSnapshot,
+        "approval-safe",
+        RedactionStatus::AlreadySafe,
+    );
+    let unsafe_approval_status_ref = spec018_evidence_ref(
+        EvidenceKind::ToolPayload,
+        "approval-status-unsafe",
+        RedactionStatus::RedactionFailed,
+    );
+    let safe_blocked_diagnostics_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "blocked-diagnostics-safe",
+        RedactionStatus::AlreadySafe,
+    );
+    let unsafe_blocked_ref = spec018_evidence_ref(
+        EvidenceKind::TaskResult,
+        "blocked-unsafe",
+        RedactionStatus::RedactionFailed,
+    );
+    let safe_verification_ref = spec018_evidence_ref(
+        EvidenceKind::ReplayRecord,
+        "verification-safe",
+        RedactionStatus::Redacted,
+    );
+    let unsafe_verification_status_ref = spec018_evidence_ref(
+        EvidenceKind::MemoryEvidenceSet,
+        "verification-status-unsafe",
+        RedactionStatus::RedactionFailed,
+    );
+    let raw_secret = "sk-projection-secret";
+
+    let projection = build_spec018_projection(RuntimeSpec018ProjectionInput {
+        generated_at_ms: 42,
+        session_id: "session-018",
+        goal_summaries: &[shacs_utils::evaluator::Spec018GoalSummary {
+            goal_id: "goal-018".to_owned(),
+            summary: format!("ship the runtime projection with {raw_secret}"),
+            status: spec018_status(
+                Spec018ProjectionStatusKind::Completed,
+                vec![safe_goal_status_ref.clone()],
+            ),
+            evidence_refs: vec![safe_goal_ref.clone(), unsafe_goal_ref.clone()],
+        }],
+        automation_summaries: &[Spec018AutomationDeliveryStatus {
+            delivery_id: "delivery-018".to_owned(),
+            run_id: "run-018".to_owned(),
+            target_surface: ProjectionSurface::Channel,
+            severity: DeliverySeverity::Warning,
+            suppress_reason: None,
+            acknowledged: false,
+            status: spec018_status(Spec018ProjectionStatusKind::Completed, vec![]),
+            evidence_refs: vec![safe_automation_ref.clone()],
+        }],
+        approval_summaries: &[Spec018ApprovalProjectionItem {
+            proposal_id: "proposal-visible".to_owned(),
+            target_kind: "local_tool".to_owned(),
+            requested_scope: vec!["scope:runtime".to_owned()],
+            risk_summary: format!("visible approval {raw_secret}"),
+            rollback_summary: format!("rollback available {raw_secret}"),
+            allowed_decisions: vec![
+                Spec018AllowedDecision {
+                    decision: Spec018ApprovalDecisionKind::Approve,
+                    unavailable_reason: None,
+                },
+                Spec018AllowedDecision {
+                    decision: Spec018ApprovalDecisionKind::InspectEvidence,
+                    unavailable_reason: Some(format!("inspect only {raw_secret}")),
+                },
+            ],
+            status: spec018_status(
+                Spec018ProjectionStatusKind::ApprovalRequired,
+                vec![unsafe_approval_status_ref.clone()],
+            ),
+            evidence_refs: vec![safe_approval_ref.clone()],
+        }],
+        blocked_summaries: &[Spec018BlockedProjectionItem {
+            source_kind: "runtime".to_owned(),
+            source_ref: "blocked-018".to_owned(),
+            blocked_reason_class: Spec018BlockedReasonClass::CapabilityDenied,
+            blocked_reason: format!("local capability denied {raw_secret}"),
+            user_action_hint: format!("approve local capability {raw_secret}"),
+            retry_eligibility: Spec018RetryEligibility::RetryAfterUserAction,
+            diagnostics_ref: safe_blocked_diagnostics_ref.clone(),
+            evidence_refs: vec![unsafe_blocked_ref.clone()],
+        }],
+        verification_summaries: &[Spec018VerificationProjectionItem {
+            proposal_id: Some("proposal-018".to_owned()),
+            replay_case_id: None,
+            expected_behavior: format!("verification stayed user-visible {raw_secret}"),
+            last_result: Spec018VerificationResultKind::Failed,
+            failure_reason: Some(format!("one assertion failed {raw_secret}")),
+            rollback_eligibility: Spec018RollbackEligibility::Available,
+            status: spec018_status(
+                Spec018ProjectionStatusKind::VerificationFailed,
+                vec![unsafe_verification_status_ref.clone()],
+            ),
+            evidence_refs: vec![safe_verification_ref.clone()],
+        }],
+        replay_summaries: &[],
+        recent_evaluator_decision_summaries: &[],
+    });
+
+    assert_eq!(projection.schema_label, "018Projection");
+    assert_eq!(projection.schema_version, "018Projection.v1");
+    assert_eq!(projection.session_id, "session-018");
+    assert_eq!(
+        projection.evidence_refs,
+        vec![
+            safe_goal_ref,
+            safe_goal_status_ref,
+            safe_automation_ref,
+            safe_approval_ref,
+            safe_blocked_diagnostics_ref,
+            safe_verification_ref,
+        ]
+    );
+    let serialized = serde_json::to_string(&projection)?;
+    assert!(!serialized.contains("goal-unsafe"));
+    assert!(!serialized.contains("approval-status-unsafe"));
+    assert!(!serialized.contains("blocked-unsafe"));
+    assert!(!serialized.contains("verification-status-unsafe"));
+    assert!(!serialized.contains(raw_secret));
+
+    Ok(())
+}
+
+#[test]
+fn runtime_spec018_channel_projection_filters_hidden_items_and_keeps_visible_statuses(
+) -> Result<(), Box<dyn Error>> {
+    let visible_delivery = Spec018AutomationDeliveryStatus {
+        delivery_id: "delivery-visible".to_owned(),
+        run_id: "run-visible".to_owned(),
+        target_surface: ProjectionSurface::Channel,
+        severity: DeliverySeverity::Info,
+        suppress_reason: None,
+        acknowledged: true,
+        status: spec018_status(
+            Spec018ProjectionStatusKind::WaitingForUser,
+            vec![spec018_evidence_ref(
+                EvidenceKind::ChannelMessage,
+                "delivery-visible-status",
+                RedactionStatus::AlreadySafe,
+            )],
+        ),
+        evidence_refs: vec![spec018_evidence_ref(
+            EvidenceKind::ChannelMessage,
+            "delivery-visible",
+            RedactionStatus::AlreadySafe,
+        )],
+    };
+    let suppressed_delivery = Spec018AutomationDeliveryStatus {
+        delivery_id: "delivery-hidden".to_owned(),
+        run_id: "run-hidden".to_owned(),
+        target_surface: ProjectionSurface::Channel,
+        severity: DeliverySeverity::Warning,
+        suppress_reason: Some("internal noise".to_owned()),
+        acknowledged: false,
+        status: spec018_status(Spec018ProjectionStatusKind::Suppressed, vec![]),
+        evidence_refs: vec![spec018_evidence_ref(
+            EvidenceKind::ChannelMessage,
+            "delivery-hidden",
+            RedactionStatus::Redacted,
+        )],
+    };
+    let visible_approval = Spec018ApprovalProjectionItem {
+        proposal_id: "proposal-visible".to_owned(),
+        target_kind: "local_tool".to_owned(),
+        requested_scope: vec!["scope:runtime".to_owned()],
+        risk_summary: "visible approval".to_owned(),
+        rollback_summary: "rollback available".to_owned(),
+        allowed_decisions: vec![
+            Spec018AllowedDecision {
+                decision: Spec018ApprovalDecisionKind::Approve,
+                unavailable_reason: None,
+            },
+            Spec018AllowedDecision {
+                decision: Spec018ApprovalDecisionKind::InspectEvidence,
+                unavailable_reason: Some("inspect only".to_owned()),
+            },
+        ],
+        status: spec018_status(Spec018ProjectionStatusKind::ApprovalRequired, vec![]),
+        evidence_refs: vec![spec018_evidence_ref(
+            EvidenceKind::ProviderSnapshot,
+            "approval-visible",
+            RedactionStatus::AlreadySafe,
+        )],
+    };
+    let inspect_only_approval = Spec018ApprovalProjectionItem {
+        proposal_id: "proposal-hidden".to_owned(),
+        target_kind: "local_tool".to_owned(),
+        requested_scope: vec!["scope:runtime".to_owned()],
+        risk_summary: "hidden approval".to_owned(),
+        rollback_summary: "rollback available".to_owned(),
+        allowed_decisions: vec![Spec018AllowedDecision {
+            decision: Spec018ApprovalDecisionKind::InspectEvidence,
+            unavailable_reason: None,
+        }],
+        status: spec018_status(Spec018ProjectionStatusKind::ApprovalRequired, vec![]),
+        evidence_refs: vec![spec018_evidence_ref(
+            EvidenceKind::ProviderSnapshot,
+            "approval-hidden",
+            RedactionStatus::Redacted,
+        )],
+    };
+    let blocked_item = Spec018BlockedProjectionItem {
+        source_kind: "runtime".to_owned(),
+        source_ref: "blocked-visible".to_owned(),
+        blocked_reason_class: Spec018BlockedReasonClass::CapabilityDenied,
+        blocked_reason: "local capability denied".to_owned(),
+        user_action_hint: "approve local capability".to_owned(),
+        retry_eligibility: Spec018RetryEligibility::RetryAfterUserAction,
+        diagnostics_ref: spec018_evidence_ref(
+            EvidenceKind::DiagnosticRecord,
+            "blocked-diagnostics",
+            RedactionStatus::AlreadySafe,
+        ),
+        evidence_refs: vec![],
+    };
+    let verification_item = Spec018VerificationProjectionItem {
+        proposal_id: Some("proposal-visible".to_owned()),
+        replay_case_id: None,
+        expected_behavior: "verification failed visibly".to_owned(),
+        last_result: Spec018VerificationResultKind::Failed,
+        failure_reason: Some("one assertion failed".to_owned()),
+        rollback_eligibility: Spec018RollbackEligibility::Available,
+        status: spec018_status(Spec018ProjectionStatusKind::VerificationFailed, vec![]),
+        evidence_refs: vec![spec018_evidence_ref(
+            EvidenceKind::ReplayRecord,
+            "verification-visible",
+            RedactionStatus::AlreadySafe,
+        )],
+    };
+    let projection = build_spec018_projection(RuntimeSpec018ProjectionInput {
+        generated_at_ms: 42,
+        session_id: "session-018",
+        goal_summaries: &[],
+        automation_summaries: &[visible_delivery.clone(), suppressed_delivery],
+        approval_summaries: &[visible_approval.clone(), inspect_only_approval],
+        blocked_summaries: std::slice::from_ref(&blocked_item),
+        verification_summaries: std::slice::from_ref(&verification_item),
+        replay_summaries: &[],
+        recent_evaluator_decision_summaries: &[],
+    });
+
+    let channel_projection = runtime_spec018_channel_projection(&projection);
+    let acknowledged_as_decision =
+        spec018_acknowledgement_is_user_decision(&visible_delivery, &visible_approval);
+
+    assert_eq!(channel_projection.automation_summaries.len(), 1);
+    assert_eq!(
+        channel_projection.automation_summaries[0].delivery_id,
+        "delivery-visible"
+    );
+    assert_eq!(channel_projection.approval_summaries.len(), 1);
+    assert_eq!(
+        channel_projection.approval_summaries[0].proposal_id,
+        "proposal-visible"
+    );
+    assert_eq!(channel_projection.blocked_summaries.len(), 1);
+    assert_eq!(
+        channel_projection.blocked_summaries[0].source_ref,
+        "blocked-visible"
+    );
+    assert_eq!(channel_projection.verification_summaries.len(), 1);
+    assert_eq!(
+        channel_projection.verification_summaries[0].status.kind,
+        Spec018ProjectionStatusKind::VerificationFailed
+    );
+    let serialized = serde_json::to_string(&channel_projection)?;
+    assert!(!serialized.contains("delivery-hidden"));
+    assert!(!serialized.contains("approval-hidden"));
+    assert!(!channel_projection
+        .evidence_refs
+        .iter()
+        .any(|evidence_ref| evidence_ref.id == "delivery-hidden"
+            || evidence_ref.id == "approval-hidden"));
+    assert!(!acknowledged_as_decision);
+
+    let unsafe_ref = spec018_evidence_ref(
+        EvidenceKind::ChannelMessage,
+        "channel-unsafe",
+        RedactionStatus::RedactionFailed,
+    );
+    let unsafe_projection = Spec018Projection {
+        schema_label: shacs_utils::evaluator::SPEC018_PROJECTION_SCHEMA_LABEL.to_owned(),
+        schema_version: shacs_utils::evaluator::SPEC018_PROJECTION_SCHEMA_VERSION.to_owned(),
+        generated_at_ms: 42,
+        session_id: "session-018".to_owned(),
+        goal_summaries: vec![],
+        automation_summaries: vec![Spec018AutomationDeliveryStatus {
+            delivery_id: "delivery-unsafe-nested".to_owned(),
+            run_id: "run-unsafe-nested".to_owned(),
+            target_surface: ProjectionSurface::Channel,
+            severity: DeliverySeverity::Info,
+            suppress_reason: Some("contains sk-channel-secret".to_owned()),
+            acknowledged: false,
+            status: spec018_status(
+                Spec018ProjectionStatusKind::WaitingForUser,
+                vec![unsafe_ref.clone()],
+            ),
+            evidence_refs: vec![unsafe_ref.clone()],
+        }],
+        approval_summaries: vec![],
+        blocked_summaries: vec![],
+        verification_summaries: vec![],
+        replay_summaries: vec![],
+        recent_evaluator_decision_summaries: vec![],
+        evidence_refs: vec![unsafe_ref],
+    };
+    let sanitized_channel = runtime_spec018_channel_projection(&unsafe_projection);
+    let serialized = serde_json::to_string(&sanitized_channel)?;
+    assert!(sanitized_channel.evidence_refs.is_empty());
+    assert!(sanitized_channel.automation_summaries[0]
+        .status
+        .evidence_refs
+        .is_empty());
+    assert!(!serialized.contains("channel-unsafe"));
+    assert!(!serialized.contains("sk-channel-secret"));
+
+    Ok(())
+}
+
+#[test]
+fn runtime_spec018_local_api_projection_sanitizes_unsanitized_nested_refs(
+) -> Result<(), Box<dyn Error>> {
+    let safe_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "diagnostics-018",
+        RedactionStatus::AlreadySafe,
+    );
+    let unsafe_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "diagnostics-unsafe",
+        RedactionStatus::RedactionFailed,
+    );
+    let projection = Spec018Projection {
+        schema_label: shacs_utils::evaluator::SPEC018_PROJECTION_SCHEMA_LABEL.to_owned(),
+        schema_version: shacs_utils::evaluator::SPEC018_PROJECTION_SCHEMA_VERSION.to_owned(),
+        generated_at_ms: 42,
+        session_id: "session-018".to_owned(),
+        goal_summaries: vec![shacs_utils::evaluator::Spec018GoalSummary {
+            goal_id: "goal-local-api".to_owned(),
+            summary: "local api projection".to_owned(),
+            status: Spec018ProjectionStatus {
+                kind: Spec018ProjectionStatusKind::Running,
+                severity: None,
+                blocked_reason_class: None,
+                user_action_hint: None,
+                evidence_refs: vec![safe_ref.clone(), unsafe_ref.clone()],
+                retry_eligibility: None,
+            },
+            evidence_refs: vec![unsafe_ref.clone()],
+        }],
+        automation_summaries: vec![],
+        approval_summaries: vec![],
+        blocked_summaries: vec![],
+        verification_summaries: vec![],
+        replay_summaries: vec![],
+        recent_evaluator_decision_summaries: vec![],
+        evidence_refs: vec![safe_ref.clone(), unsafe_ref.clone()],
+    };
+
+    let local_projection = runtime_spec018_local_api_projection(&projection);
+    let serialized = serde_json::to_string(&local_projection)?;
+
+    assert_eq!(
+        local_projection.goal_summaries[0].status.evidence_refs,
+        vec![safe_ref.clone()]
+    );
+    assert_eq!(
+        local_projection.goal_summaries[0].evidence_refs,
+        Vec::<EvidenceRef>::new()
+    );
+    assert_eq!(local_projection.evidence_refs, vec![safe_ref]);
+    assert!(!serialized.contains("diagnostics-unsafe"));
+
+    Ok(())
+}
+
+#[test]
+fn runtime_spec018_diagnostics_manifest_builds_all_categories_without_raw_secret(
+) -> Result<(), Box<dyn Error>> {
+    let evaluator_ref = spec018_evidence_ref(
+        EvidenceKind::EvaluatorSummary,
+        "evaluator-ref",
+        RedactionStatus::Redacted,
+    );
+    let ledger_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "ledger-ref",
+        RedactionStatus::AlreadySafe,
+    );
+    let automation_ref = spec018_evidence_ref(
+        EvidenceKind::TaskResult,
+        "automation-ref",
+        RedactionStatus::Redacted,
+    );
+    let memory_ref = spec018_evidence_ref(
+        EvidenceKind::MemoryEvidenceSet,
+        "memory-ref",
+        RedactionStatus::Redacted,
+    );
+    let improvement_ref = spec018_evidence_ref(
+        EvidenceKind::ImprovementApplyRecord,
+        "improvement-ref",
+        RedactionStatus::Redacted,
+    );
+    let replay_ref = spec018_evidence_ref(
+        EvidenceKind::ReplayResult,
+        "replay-ref",
+        RedactionStatus::Redacted,
+    );
+    let projection_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "projection-ref",
+        RedactionStatus::AlreadySafe,
+    );
+    let skipped = Spec018SkippedEvidence {
+        source_ref: spec018_evidence_ref(
+            EvidenceKind::EvaluatorSummary,
+            "stale-verdict",
+            RedactionStatus::Redacted,
+        ),
+        classification: Spec018SkippedEvidenceClassification::Stale,
+        redacted_summary: "stale verdict skipped".to_owned(),
+    };
+    let diagnostics_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "diagnostics-artifact",
+        RedactionStatus::Redacted,
+    );
+    let raw_secret = "sk-runtime-secret";
+
+    let manifest = build_spec018_diagnostics_manifest(RuntimeSpec018DiagnosticsManifestInput {
+        manifest_id: "manifest-018",
+        generated_at_ms: 42,
+        redaction_profile: "default",
+        evaluator_refs: std::slice::from_ref(&evaluator_ref),
+        ledger_refs: std::slice::from_ref(&ledger_ref),
+        automation_refs: std::slice::from_ref(&automation_ref),
+        memory_refs: std::slice::from_ref(&memory_ref),
+        improvement_refs: std::slice::from_ref(&improvement_ref),
+        replay_refs: std::slice::from_ref(&replay_ref),
+        projection_refs: std::slice::from_ref(&projection_ref),
+        skipped_evidence: std::slice::from_ref(&skipped),
+        diagnostics_artifact_refs: std::slice::from_ref(&diagnostics_ref),
+    });
+    let serialized = serde_json::to_string(&manifest)?;
+
+    assert!(spec018_manifest_includes_all_evidence_categories(&manifest));
+    assert!(spec018_manifest_redaction_is_valid(&manifest));
+    assert_eq!(manifest.redaction_summary.skipped_ref_count, 1);
+    assert!(!serialized.contains(raw_secret));
+
+    Ok(())
+}
+
+#[test]
+fn runtime_spec018_ledger_inspect_links_verdict_to_decision_projection_and_diagnostics() {
+    let query = Spec018LedgerInspectQuery {
+        query_kind: Spec018LedgerInspectQueryKind::VerdictId,
+        target_ref: "verdict-1".to_owned(),
+        include_skipped: true,
+        include_diagnostics_refs: true,
+        redaction_profile: "default".to_owned(),
+    };
+    let source_ref = spec018_evidence_ref(
+        EvidenceKind::EvaluatorSummary,
+        "verdict-1",
+        RedactionStatus::Redacted,
+    );
+    let consumption_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "consumption-1",
+        RedactionStatus::AlreadySafe,
+    );
+    let decision_ref = spec018_evidence_ref(
+        EvidenceKind::TaskResult,
+        "runtime-decision-1",
+        RedactionStatus::Redacted,
+    );
+    let projection_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "projection-item-1",
+        RedactionStatus::Redacted,
+    );
+    let diagnostics_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "diagnostics-1",
+        RedactionStatus::Redacted,
+    );
+    let skipped = Spec018SkippedEvidence {
+        source_ref: spec018_evidence_ref(
+            EvidenceKind::EvaluatorSummary,
+            "superseded-verdict",
+            RedactionStatus::Redacted,
+        ),
+        classification: Spec018SkippedEvidenceClassification::Superseded,
+        redacted_summary: "superseded verdict skipped".to_owned(),
+    };
+
+    let result = build_spec018_ledger_inspect_result(RuntimeSpec018LedgerInspectInput {
+        query: &query,
+        source_refs: std::slice::from_ref(&source_ref),
+        consumption_record_refs: std::slice::from_ref(&consumption_ref),
+        runtime_decision_refs: std::slice::from_ref(&decision_ref),
+        projection_item_refs: std::slice::from_ref(&projection_ref),
+        diagnostics_artifact_refs: std::slice::from_ref(&diagnostics_ref),
+        skipped_evidence: std::slice::from_ref(&skipped),
+    });
+
+    assert!(spec018_ledger_inspect_links_runtime_projection_and_diagnostics(&result));
+    assert_eq!(result.skipped_evidence.len(), 1);
+    assert_eq!(result.diagnostics_artifact_refs.len(), 1);
+}
+
+#[test]
+fn runtime_spec018_release_gate_blocks_until_all_buckets_and_no_blockers() {
+    let entries: Vec<_> = [
+        Spec018ClosureCoverageBucket::EvaluatorFoundation,
+        Spec018ClosureCoverageBucket::GoalContinuation,
+        Spec018ClosureCoverageBucket::ApprovalGate,
+        Spec018ClosureCoverageBucket::AutomationRuntime,
+        Spec018ClosureCoverageBucket::MemorySkillIntegration,
+        Spec018ClosureCoverageBucket::SelfImprovementWiring,
+        Spec018ClosureCoverageBucket::ReplayRunner,
+        Spec018ClosureCoverageBucket::ProjectionSemantics,
+        Spec018ClosureCoverageBucket::DiagnosticsIntegration,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, bucket)| runtime_spec018_release_entry(bucket, &format!("entry-{index}")))
+    .collect();
+    let manifest_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "release-manifest",
+        RedactionStatus::Redacted,
+    );
+    let ledger_inspect_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "release-ledger-inspect",
+        RedactionStatus::Redacted,
+    );
+
+    let passing = evaluate_spec018_release_gate(RuntimeSpec018ReleaseGateInput {
+        coverage_entries: &entries,
+        blockers: &[],
+        diagnostics_manifest_ref: Some(&manifest_ref),
+        ledger_inspect_ref: Some(&ledger_inspect_ref),
+    });
+    assert!(passing.final_closure_passed);
+
+    let missing_diagnostics = evaluate_spec018_release_gate(RuntimeSpec018ReleaseGateInput {
+        coverage_entries: &entries,
+        blockers: &[],
+        diagnostics_manifest_ref: None,
+        ledger_inspect_ref: Some(&ledger_inspect_ref),
+    });
+    assert!(!missing_diagnostics.final_closure_passed);
+
+    let mut ownerless_manifest_ref = manifest_ref.clone();
+    ownerless_manifest_ref.owner_spec = None;
+    let invalid_manifest = evaluate_spec018_release_gate(RuntimeSpec018ReleaseGateInput {
+        coverage_entries: &entries,
+        blockers: &[],
+        diagnostics_manifest_ref: Some(&ownerless_manifest_ref),
+        ledger_inspect_ref: Some(&ledger_inspect_ref),
+    });
+    assert!(!invalid_manifest.final_closure_passed);
+    assert!(invalid_manifest
+        .blockers
+        .iter()
+        .all(|blocker| spec018_evidence_ref_has_owner_and_redaction(&blocker.source_ref)));
+
+    let mut failed_redaction_ledger_ref = ledger_inspect_ref.clone();
+    failed_redaction_ledger_ref.redaction_status = RedactionStatus::RedactionFailed;
+    let invalid_ledger = evaluate_spec018_release_gate(RuntimeSpec018ReleaseGateInput {
+        coverage_entries: &entries,
+        blockers: &[],
+        diagnostics_manifest_ref: Some(&manifest_ref),
+        ledger_inspect_ref: Some(&failed_redaction_ledger_ref),
+    });
+    assert!(!invalid_ledger.final_closure_passed);
+    assert!(invalid_ledger
+        .blockers
+        .iter()
+        .all(|blocker| spec018_evidence_ref_has_owner_and_redaction(&blocker.source_ref)));
+
+    let mut missing_entry_refs = entries.clone();
+    missing_entry_refs[0].diagnostics_artifact_refs.clear();
+    let missing_entry_ref_outcome = evaluate_spec018_release_gate(RuntimeSpec018ReleaseGateInput {
+        coverage_entries: &missing_entry_refs,
+        blockers: &[],
+        diagnostics_manifest_ref: Some(&manifest_ref),
+        ledger_inspect_ref: Some(&ledger_inspect_ref),
+    });
+    assert!(!missing_entry_ref_outcome.final_closure_passed);
+
+    let unverified_improvement = Spec018ReleaseBlocker {
+        blocker_id: "unverified-improvement".to_owned(),
+        category: Spec018ReleaseBlockerCategory::UnverifiedAppliedImprovement,
+        source_ref: spec018_evidence_ref(
+            EvidenceKind::ImprovementApplyRecord,
+            "apply-record",
+            RedactionStatus::Redacted,
+        ),
+        severity: Spec018ReleaseBlockerSeverity::Blocking,
+        redacted_summary: "applied improvement lacks verification".to_owned(),
+        resolution_hint: "run local verification and attach redacted ref".to_owned(),
+    };
+    let failed_replay = Spec018ReleaseBlocker {
+        blocker_id: "failed-replay".to_owned(),
+        category: Spec018ReleaseBlockerCategory::FailedReplayRegression,
+        source_ref: spec018_evidence_ref(
+            EvidenceKind::ReplayResult,
+            "failed-replay-result",
+            RedactionStatus::Redacted,
+        ),
+        severity: Spec018ReleaseBlockerSeverity::Blocking,
+        redacted_summary: "replay regression failed".to_owned(),
+        resolution_hint: "inspect replay result and fix regression".to_owned(),
+    };
+    let blocked = evaluate_spec018_release_gate(RuntimeSpec018ReleaseGateInput {
+        coverage_entries: &entries,
+        blockers: &[unverified_improvement, failed_replay],
+        diagnostics_manifest_ref: Some(&manifest_ref),
+        ledger_inspect_ref: Some(&ledger_inspect_ref),
+    });
+    assert!(!blocked.final_closure_passed);
+
+    let incomplete = evaluate_spec018_release_gate(RuntimeSpec018ReleaseGateInput {
+        coverage_entries: &entries[..entries.len() - 1],
+        blockers: &[],
+        diagnostics_manifest_ref: Some(&manifest_ref),
+        ledger_inspect_ref: Some(&ledger_inspect_ref),
+    });
+    assert!(!incomplete.final_closure_passed);
+    assert_eq!(incomplete.missing_buckets.len(), 1);
+}
+
+#[test]
+fn automation_continue_eligibility_returns_prd008_gate_metadata_without_execution() {
+    let event = automation_source_event(AutomationSourceEventKind::SubagentResult {
+        merge_state: SubagentMergeState::Reviewable,
+        result_ref: "subagent-result-1".to_owned(),
+    });
+
+    let outcome = coordinate_automation_run(&event, &[]);
+
+    assert!(outcome.request.is_some());
+    assert!(outcome.task_outcome_eligibility.evaluator_should_run);
+    assert!(
+        outcome
+            .task_outcome_eligibility
+            .continue_requires_prd008_goal_gate
+    );
+    assert!(!outcome.task_outcome_eligibility.direct_execution_allowed);
+    assert_eq!(
+        outcome.prd008_linkage.goal_gate_ref.as_deref(),
+        Some("goal-gate-1")
+    );
+    assert!(outcome.prd008_linkage.can_build_evaluator_decision_input);
+}
+
+#[test]
+fn evaluator_consumption_is_idempotent_for_terminal_verdict() {
+    let goal = runtime_eval_goal();
+    let input = runtime_eval_input(
+        EvaluatorKind::GoalCompletion,
+        Some(&goal),
+        Some(GoalCompletionVerdict::Done),
+    );
+    let gates = runtime_eval_gates(100);
+
+    let (first_decision, first_record) =
+        consume_evaluator_decision(&input, Some(&goal), &[], &gates);
+    let existing = vec![first_record.clone()];
+    let (second_decision, second_record) =
+        consume_evaluator_decision(&input, Some(&goal), &existing, &gates);
+
+    assert_eq!(first_record.status, LedgerConsumptionStatus::Consumed);
+    assert_eq!(first_record, second_record);
+    assert_eq!(
+        first_record.idempotency_key,
+        evaluator_consumption_idempotency_key(&input)
+    );
+    assert_eq!(
+        first_decision.selected_action,
+        RuntimeSelectedAction::CompleteGoal
+    );
+    assert_eq!(second_decision.selected_action, RuntimeSelectedAction::None);
+    assert!(second_decision.next_goal_state.is_none());
+}
+
+#[test]
+fn evaluator_consumption_discards_stale_snapshot_without_goal_effect() {
+    let goal = runtime_eval_goal();
+    let mut input = runtime_eval_input(
+        EvaluatorKind::GoalCompletion,
+        Some(&goal),
+        Some(GoalCompletionVerdict::Continue),
+    );
+    input.current_target_snapshot_digest = "new-snapshot-digest".to_owned();
+
+    let (decision, record) =
+        consume_evaluator_decision(&input, Some(&goal), &[], &runtime_eval_gates(100));
+
+    assert_eq!(record.status, LedgerConsumptionStatus::DiscardedStale);
+    assert_eq!(decision.selected_action, RuntimeSelectedAction::None);
+    assert!(decision.next_goal_state.is_none());
+    let stale = decision.stale_verdict.expect("stale evidence");
+    assert_eq!(stale.expected_digest, "snapshot-digest");
+    assert_eq!(stale.current_digest, "new-snapshot-digest");
+}
+
+#[test]
+fn evaluator_consumption_discards_expired_verdict_without_continuation() {
+    let goal = runtime_eval_goal();
+    let mut input = runtime_eval_input(
+        EvaluatorKind::GoalCompletion,
+        Some(&goal),
+        Some(GoalCompletionVerdict::Continue),
+    );
+    input.expires_at_ms = Some(99);
+
+    let (decision, record) =
+        consume_evaluator_decision(&input, Some(&goal), &[], &runtime_eval_gates(100));
+
+    assert_eq!(record.status, LedgerConsumptionStatus::DiscardedExpired);
+    assert_eq!(decision.selected_action, RuntimeSelectedAction::None);
+    assert!(decision.continuation.is_none());
+    assert!(decision.next_goal_state.is_none());
+}
+
+#[test]
+fn evaluator_continue_does_not_reactivate_paused_or_cleared_goal() {
+    for status in [PersistentGoalStatus::Paused, PersistentGoalStatus::Cleared] {
+        let mut goal = runtime_eval_goal();
+        goal.status = status;
+        let input = runtime_eval_input(
+            EvaluatorKind::GoalCompletion,
+            Some(&goal),
+            Some(GoalCompletionVerdict::Continue),
+        );
+
+        let (decision, record) =
+            consume_evaluator_decision(&input, Some(&goal), &[], &runtime_eval_gates(100));
+
+        assert_eq!(record.status, LedgerConsumptionStatus::BlockedByPolicy);
+        assert_eq!(decision.selected_action, RuntimeSelectedAction::None);
+        assert!(decision.next_goal_state.is_none());
+    }
+}
+
+#[test]
+fn evaluator_continue_requires_all_runtime_gates() {
+    let goal = runtime_eval_goal();
+    let input = runtime_eval_input(
+        EvaluatorKind::GoalCompletion,
+        Some(&goal),
+        Some(GoalCompletionVerdict::Continue),
+    );
+    let gates = runtime_eval_gates(100);
+
+    let (decision, record) = consume_evaluator_decision(&input, Some(&goal), &[], &gates);
+    assert_eq!(record.status, LedgerConsumptionStatus::Consumed);
+    assert_eq!(
+        decision.selected_action,
+        RuntimeSelectedAction::ContinueGoal
+    );
+    assert_eq!(
+        decision
+            .next_goal_state
+            .as_ref()
+            .map(|goal| goal.turns_used),
+        Some(1)
+    );
+
+    let mut exhausted_goal = goal.clone();
+    exhausted_goal.turns_used = exhausted_goal.turn_budget;
+    let blocked_cases: Vec<(Option<PersistentGoal>, RuntimePolicyGateResults)> = vec![
+        (None, runtime_eval_gates(100)),
+        (Some(exhausted_goal), runtime_eval_gates(100)),
+        (
+            Some(goal.clone()),
+            RuntimePolicyGateResults {
+                user_interrupted: true,
+                ..runtime_eval_gates(100)
+            },
+        ),
+        (
+            Some(goal.clone()),
+            RuntimePolicyGateResults {
+                permission_gate_passed: false,
+                ..runtime_eval_gates(100)
+            },
+        ),
+        (
+            Some(goal.clone()),
+            RuntimePolicyGateResults {
+                recursion_guard_passed: false,
+                ..runtime_eval_gates(100)
+            },
+        ),
+        (
+            Some(goal.clone()),
+            RuntimePolicyGateResults {
+                runtime_cancelled: true,
+                ..runtime_eval_gates(100)
+            },
+        ),
+    ];
+
+    for (blocked_goal, blocked_gates) in blocked_cases {
+        let (decision, record) =
+            consume_evaluator_decision(&input, blocked_goal.as_ref(), &[], &blocked_gates);
+        assert_eq!(record.status, LedgerConsumptionStatus::BlockedByPolicy);
+        assert_eq!(decision.selected_action, RuntimeSelectedAction::None);
+        assert!(decision.next_goal_state.is_none());
+    }
+}
+
+#[test]
+fn evaluator_done_returns_next_goal_state_without_mutating_session_truth() {
+    let goal = runtime_eval_goal();
+    let input = runtime_eval_input(
+        EvaluatorKind::GoalCompletion,
+        Some(&goal),
+        Some(GoalCompletionVerdict::Done),
+    );
+
+    let (decision, record) =
+        consume_evaluator_decision(&input, Some(&goal), &[], &runtime_eval_gates(100));
+
+    assert_eq!(record.status, LedgerConsumptionStatus::Consumed);
+    assert_eq!(goal.status, PersistentGoalStatus::Active);
+    assert_eq!(
+        decision.selected_action,
+        RuntimeSelectedAction::CompleteGoal
+    );
+    assert_eq!(
+        decision.next_goal_state.as_ref().map(|goal| goal.status),
+        Some(PersistentGoalStatus::Done)
+    );
+}
+
+#[test]
+fn evaluator_blocked_projects_reason_and_unblock_hint() {
+    let goal = runtime_eval_goal();
+    let mut input = runtime_eval_input(
+        EvaluatorKind::GoalCompletion,
+        Some(&goal),
+        Some(GoalCompletionVerdict::Blocked),
+    );
+    input.blocked_reason = Some("needs user choice".to_owned());
+    input.unblock_hint = Some("answer the pending question".to_owned());
+
+    let (decision, record) =
+        consume_evaluator_decision(&input, Some(&goal), &[], &runtime_eval_gates(100));
+
+    assert_eq!(record.status, LedgerConsumptionStatus::Consumed);
+    assert_eq!(decision.selected_action, RuntimeSelectedAction::BlockGoal);
+    assert_eq!(
+        decision.blocked_reason.as_deref(),
+        Some("needs user choice")
+    );
+    assert_eq!(
+        decision.unblock_hint.as_deref(),
+        Some("answer the pending question")
+    );
+    assert_eq!(
+        decision.next_goal_state.as_ref().map(|goal| goal.status),
+        Some(PersistentGoalStatus::Blocked)
+    );
+}
+
+#[test]
+fn evaluator_capability_requires_approval_and_permission_gates() {
+    let mut input = runtime_eval_input(EvaluatorKind::SafetyCapability, None, None);
+    input.goal_id = None;
+
+    for gates in [
+        RuntimePolicyGateResults {
+            approval_gate_passed: false,
+            ..runtime_eval_gates(100)
+        },
+        RuntimePolicyGateResults {
+            permission_gate_passed: false,
+            ..runtime_eval_gates(100)
+        },
+    ] {
+        let (decision, record) = consume_evaluator_decision(&input, None, &[], &gates);
+        assert_eq!(record.status, LedgerConsumptionStatus::BlockedByPolicy);
+        assert_eq!(decision.selected_action, RuntimeSelectedAction::None);
+    }
+
+    let (decision, record) =
+        consume_evaluator_decision(&input, None, &[], &runtime_eval_gates(100));
+    assert_eq!(record.status, LedgerConsumptionStatus::Consumed);
+    assert_eq!(decision.decision_kind, RuntimeDecisionKind::Capability);
+    assert_eq!(
+        decision.selected_action,
+        RuntimeSelectedAction::ApplyCapability
+    );
+}
+
+#[test]
+fn evaluator_consumption_fails_without_any_evidence_link() {
+    let goal = runtime_eval_goal();
+    let mut input = runtime_eval_input(
+        EvaluatorKind::GoalCompletion,
+        Some(&goal),
+        Some(GoalCompletionVerdict::Done),
+    );
+    input.source_ledger_ref.clear();
+    input.evidence_refs.clear();
+
+    let (decision, record) =
+        consume_evaluator_decision(&input, Some(&goal), &[], &runtime_eval_gates(100));
+
+    assert_eq!(record.status, LedgerConsumptionStatus::FailedToApply);
+    assert_eq!(decision.decision_kind, RuntimeDecisionKind::FailedToApply);
+    assert_eq!(decision.selected_action, RuntimeSelectedAction::None);
+    assert!(decision.next_goal_state.is_none());
+}
+
+#[test]
+fn evaluator_task_outcome_verify_and_rollback_require_owner_primitives() {
+    for task_class in [TaskOutcomeClass::Verify, TaskOutcomeClass::Rollback] {
+        let mut input = runtime_eval_input(EvaluatorKind::TaskOutcome, None, None);
+        input.task_outcome_class = Some(task_class.clone());
+        let blocked_gates = RuntimePolicyGateResults {
+            owner_primitive_ready: false,
+            ..runtime_eval_gates(100)
+        };
+
+        let (decision, record) = consume_evaluator_decision(&input, None, &[], &blocked_gates);
+        assert_eq!(record.status, LedgerConsumptionStatus::BlockedByPolicy);
+        assert_eq!(decision.selected_action, RuntimeSelectedAction::None);
+    }
+}
 
 #[test]
 fn loop_process_direct_saves_turn_and_publishes_outbound() -> Result<(), Box<dyn Error>> {
@@ -134,6 +1685,161 @@ fn loop_invalid_history_and_help_publish_without_provider_call() -> Result<(), B
         .lock()
         .map_err(|error| error.to_string())?
         .is_empty());
+    Ok(())
+}
+
+#[test]
+fn loop_goal_lifecycle_persists_metadata_without_provider_call() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    );
+
+    let set = loop_runtime.process_direct("/goal ship PRD 001", Some("cli:goal"))?;
+    assert_eq!(set.command, Some(AgentLoopCommandResult::Goal));
+    assert!(bus
+        .consume_outbound()
+        .ok_or("missing set outbound")?
+        .content
+        .contains("Goal set: ship PRD 001"));
+
+    let conflict = loop_runtime.process_direct("/goal replace it", Some("cli:goal"))?;
+    assert_eq!(conflict.command, Some(AgentLoopCommandResult::Goal));
+    assert!(bus
+        .consume_outbound()
+        .ok_or("missing conflict outbound")?
+        .content
+        .contains("already active"));
+
+    for (command, expected_status, expected_content) in [
+        ("/goal pause", PersistentGoalStatus::Paused, "Goal paused."),
+        (
+            "/goal resume",
+            PersistentGoalStatus::Active,
+            "Goal resumed.",
+        ),
+    ] {
+        let result = loop_runtime.process_direct(command, Some("cli:goal"))?;
+        assert_eq!(result.command, Some(AgentLoopCommandResult::Goal));
+        assert!(bus
+            .consume_outbound()
+            .ok_or("missing lifecycle outbound")?
+            .content
+            .contains(expected_content));
+        let raw = loop_runtime
+            .session_manager()
+            .read_session_file("cli:goal")
+            .ok_or("missing goal session")?;
+        assert_eq!(
+            raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["status"],
+            serde_json::to_value(expected_status)?
+        );
+    }
+
+    let status = loop_runtime.process_direct("/goal status", Some("cli:goal"))?;
+    assert_eq!(status.command, Some(AgentLoopCommandResult::Goal));
+    let status_outbound = bus.consume_outbound().ok_or("missing status outbound")?;
+    assert!(status_outbound.content.contains("Goal: ship PRD 001"));
+    assert!(status_outbound.content.contains("Budget: 0/8 turns used"));
+
+    let blocked = loop_runtime.process_direct("/goal blocked waiting", Some("cli:goal"))?;
+    assert_eq!(blocked.command, Some(AgentLoopCommandResult::Goal));
+    assert!(bus
+        .consume_outbound()
+        .ok_or("missing blocked outbound")?
+        .content
+        .contains("Goal marked blocked."));
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:goal")
+        .ok_or("missing blocked session")?;
+    assert_eq!(
+        raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["status"],
+        serde_json::to_value(PersistentGoalStatus::Blocked)?
+    );
+    assert_eq!(
+        raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["blocked_reason"],
+        "waiting"
+    );
+
+    loop_runtime.process_direct("/goal resume", Some("cli:goal"))?;
+    let _ = bus.consume_outbound().ok_or("missing resume outbound")?;
+    loop_runtime.process_direct("/goal done", Some("cli:goal"))?;
+    assert!(bus
+        .consume_outbound()
+        .ok_or("missing done outbound")?
+        .content
+        .contains("Goal marked done."));
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:goal")
+        .ok_or("missing done session")?;
+    assert_eq!(
+        raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["status"],
+        serde_json::to_value(PersistentGoalStatus::Done)?
+    );
+
+    loop_runtime.process_direct("/goal next goal", Some("cli:goal"))?;
+    assert!(bus
+        .consume_outbound()
+        .ok_or("missing replacement outbound")?
+        .content
+        .contains("Goal set: next goal"));
+    loop_runtime.process_direct("/goal clear", Some("cli:goal"))?;
+    assert!(bus
+        .consume_outbound()
+        .ok_or("missing clear outbound")?
+        .content
+        .contains("Goal cleared."));
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:goal")
+        .ok_or("missing cleared goal session")?;
+    assert_eq!(
+        raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["status"],
+        serde_json::to_value(PersistentGoalStatus::Cleared)?
+    );
+    assert!(client
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?
+        .is_empty());
+    Ok(())
+}
+
+#[test]
+fn loop_new_clears_persistent_goal_metadata() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    );
+
+    loop_runtime.process_direct("/goal ship PRD 001", Some("cli:goal-new"))?;
+    let _ = bus.consume_outbound().ok_or("missing set outbound")?;
+    loop_runtime.process_direct("/new", Some("cli:goal-new"))?;
+    let _ = bus.consume_outbound().ok_or("missing new outbound")?;
+
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:goal-new")
+        .ok_or("missing new goal session")?;
+    assert!(raw["metadata"].get(PERSISTENT_GOAL_METADATA_KEY).is_none());
     Ok(())
 }
 
@@ -2603,6 +4309,631 @@ fn loop_provider_error_publishes_error_and_clears_runtime_markers() -> Result<()
         .into());
     }
     Ok(())
+}
+
+#[test]
+fn prd010_frozen_session_snapshot_digest_survives_later_session_changes(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    let mut session = Session::new("session-prd010");
+    session.add_message("user", "approval evidence is here", Map::new());
+    manager.save(&session)?;
+
+    let snapshot =
+        freeze_session_search_snapshot(&manager, "session-prd010", "approval", "snapshot-prd010")?;
+
+    session.add_message("assistant", "approval evidence changed later", Map::new());
+    manager.save(&session)?;
+
+    if snapshot.matched_event_refs.len() != 1 || snapshot.result_digest.len() != 64 {
+        return Err(format!("frozen snapshot changed unexpectedly: {snapshot:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd010_skill_list_view_and_reference_use_progressive_disclosure() -> Result<(), Box<dyn Error>> {
+    let registry = test_skill_registry(SkillSourceKind::WorkspaceLocal, Some("api_key=sk-secret"));
+
+    let list = runtime_skill_list_disclosure(&registry);
+    let list_json = serde_json::to_value(&list)?;
+    if list.len() != 1
+        || list_json.to_string().contains("sk-secret")
+        || list_json.to_string().contains("redacted_body")
+    {
+        return Err(format!("skill list leaked raw body: {list_json}").into());
+    }
+
+    if runtime_skill_view_disclosure(&registry, "prd010-skill", false).is_ok() {
+        return Err("skill view should require an explicit request".into());
+    }
+    let view = runtime_skill_view_disclosure(&registry, "prd010-skill", true)?;
+    if view
+        .redacted_body
+        .as_deref()
+        .unwrap_or_default()
+        .contains("sk-secret")
+        || view.body_digest.is_none()
+    {
+        return Err(format!("skill view did not redact body: {view:?}").into());
+    }
+
+    let reference = runtime_skill_reference_evidence(&registry, "prd010-skill")?;
+    if reference.redacted_body.is_some()
+        || reference
+            .evidence_ref
+            .as_ref()
+            .map(|evidence| evidence.digest.as_str())
+            != Some("skill-digest-prd010")
+    {
+        return Err(format!("skill reference carried wrong evidence: {reference:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd010_authored_skill_requires_dry_run_and_approval_before_active() -> Result<(), Box<dyn Error>>
+{
+    let mut lifecycle = shacs_utils::evaluator::authored_skill_lifecycle_draft(
+        "authored-prd010",
+        vec![runtime_eval_evidence()],
+    );
+
+    lifecycle.state = AuthoredSkillLifecycleState::DryRunPending;
+    lifecycle.dry_run_passed = true;
+    if authored_skill_ready_for_active_registry(&lifecycle) {
+        return Err("dry run alone should not allow active registry promotion".into());
+    }
+
+    lifecycle.state = AuthoredSkillLifecycleState::ApprovalPending;
+    lifecycle.approval_granted = true;
+    if authored_skill_ready_for_active_registry(&lifecycle) {
+        return Err("approval pending should not be active before active_candidate".into());
+    }
+
+    lifecycle.state = AuthoredSkillLifecycleState::ActiveCandidate;
+    if !authored_skill_ready_for_active_registry(&lifecycle) {
+        return Err("active_candidate with dry run and approval should be promotable".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd010_curator_proposal_records_without_owner_mutation() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let store = shacs_core::runtime::MemoryStore::new(workspace.path())?;
+    store.append_history("duplicate memory", None)?;
+    let registry = test_skill_registry(SkillSourceKind::WorkspaceLocal, Some("body"));
+
+    let before_memory_entries = store.read_entries().len();
+    let before_skill_status = registry.find("prd010-skill").ok_or("missing skill")?.status;
+    let proposal = runtime_curator_proposal_record(
+        "proposal-prd010",
+        CuratorTargetKind::Memory,
+        vec![runtime_eval_evidence()],
+        "duplicate memory",
+        vec![runtime_eval_evidence()],
+        CuratorActionProposed::DeleteMemory,
+        Some(runtime_eval_evidence()),
+    );
+
+    if proposal.final_status != CuratorProposalFinalStatus::ApprovalPending
+        || store.read_entries().len() != before_memory_entries
+        || registry.find("prd010-skill").ok_or("missing skill")?.status != before_skill_status
+    {
+        return Err(format!("curator proposal mutated owners: {proposal:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd010_memory_evidence_is_bounded_and_lineaged() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let store = shacs_core::runtime::MemoryStore::new(workspace.path())?;
+    store.append_history("alpha relevant memory", None)?;
+    store.append_history("alpha second memory", None)?;
+
+    let request = runtime_memory_evidence_request(RuntimeMemoryEvidenceRequestInput {
+        request_id: "request-prd010".to_owned(),
+        session_id: "session-prd010".to_owned(),
+        query: "alpha".to_owned(),
+        evaluator_kind: EvaluatorKind::GoalCompletion,
+        max_result_refs: 1,
+        cutoff: "9999-12-31T23:59:59Z".to_owned(),
+        redaction_profile: "default".to_owned(),
+        caller_reason: "goal completion evidence".to_owned(),
+    });
+    let evidence = build_runtime_memory_evidence(&store, &request)?;
+
+    if evidence.request_id != "request-prd010"
+        || evidence.query != "[redacted]"
+        || evidence.result_count != 1
+        || evidence.omitted_count != 1
+        || evidence.omitted_reason != Some(MemoryEvidenceOmittedReason::OmittedByBudget)
+        || evidence.result_digest.len() != 64
+    {
+        return Err(format!("memory evidence was not bounded/lineaged: {evidence:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd010_memory_evidence_uses_cutoff_and_relevance_omission_reasons() -> Result<(), Box<dyn Error>>
+{
+    let workspace = tempfile::tempdir()?;
+    let store = shacs_core::runtime::MemoryStore::new(workspace.path())?;
+    store.append_history("alpha relevant memory", None)?;
+    store.append_history("beta unrelated memory", None)?;
+
+    let cutoff_request = runtime_memory_evidence_request(RuntimeMemoryEvidenceRequestInput {
+        request_id: "request-cutoff".to_owned(),
+        session_id: "session-prd010".to_owned(),
+        query: "alpha".to_owned(),
+        evaluator_kind: EvaluatorKind::GoalCompletion,
+        max_result_refs: 10,
+        cutoff: "0000".to_owned(),
+        redaction_profile: "default".to_owned(),
+        caller_reason: "contains raw caller secret sk-test".to_owned(),
+    });
+    let cutoff = build_runtime_memory_evidence(&store, &cutoff_request)?;
+    assert_eq!(
+        cutoff.omitted_reason,
+        Some(MemoryEvidenceOmittedReason::OmittedByCutoff)
+    );
+    assert_eq!(cutoff.result_count, 0);
+
+    let relevance_request = runtime_memory_evidence_request(RuntimeMemoryEvidenceRequestInput {
+        request_id: "request-relevance".to_owned(),
+        session_id: "session-prd010".to_owned(),
+        query: "alpha".to_owned(),
+        evaluator_kind: EvaluatorKind::GoalCompletion,
+        max_result_refs: 10,
+        cutoff: "9999-12-31T23:59:59Z".to_owned(),
+        redaction_profile: "default".to_owned(),
+        caller_reason: "contains raw caller secret sk-test".to_owned(),
+    });
+    let relevance = build_runtime_memory_evidence(&store, &relevance_request)?;
+    let serialized = serde_json::to_string(&relevance)?;
+    assert_eq!(
+        relevance.omitted_reason,
+        Some(MemoryEvidenceOmittedReason::OmittedByRelevance)
+    );
+    assert!(!serialized.contains("sk-test"));
+    assert!(!serialized.contains("alpha"));
+
+    Ok(())
+}
+
+#[test]
+fn prd010_app_provided_skill_reference_requires_manifest_and_task_boundary(
+) -> Result<(), Box<dyn Error>> {
+    let registry = test_skill_registry(SkillSourceKind::PluginProvided, Some("plugin body"));
+
+    if app_provided_skill_reference_evidence(&registry, "prd010-skill", None, None).is_ok() {
+        return Err("app provided skill ref should require manifest evidence".into());
+    }
+    if app_provided_skill_reference_evidence(
+        &registry,
+        "prd010-skill",
+        Some(runtime_eval_evidence()),
+        None,
+    )
+    .is_ok()
+    {
+        return Err("app provided skill ref should require task boundary evidence".into());
+    }
+    let manifest_ref = EvidenceRef {
+        id: "app-manifest-1".to_owned(),
+        digest: "app-manifest-digest-1".to_owned(),
+        summary: "app manifest evidence".to_owned(),
+        ..runtime_eval_evidence()
+    };
+    let task_boundary_ref = EvidenceRef {
+        id: "app-task-boundary-1".to_owned(),
+        digest: "app-task-boundary-digest-1".to_owned(),
+        summary: "app task boundary evidence".to_owned(),
+        ..runtime_eval_evidence()
+    };
+    let reference = app_provided_skill_reference_evidence(
+        &registry,
+        "prd010-skill",
+        Some(manifest_ref.clone()),
+        Some(task_boundary_ref.clone()),
+    )?;
+
+    if reference.evidence_ref.is_none()
+        || reference.redacted_body.is_some()
+        || reference.app_manifest_ref != Some(manifest_ref)
+        || reference.app_task_boundary_ref != Some(task_boundary_ref)
+    {
+        return Err(
+            format!("app skill reference lost lineage or leaked body: {reference:?}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn prd011_pre_approval_proposal_is_runtime_inert() -> Result<(), Box<dyn Error>> {
+    let proposed = prd011_improvement_proposal(ImprovementProposalStatus::Proposed);
+    let approval_pending = prd011_improvement_proposal(ImprovementProposalStatus::ApprovalPending);
+
+    if !runtime_improvement_proposal_behavior_inert(&proposed)
+        || !runtime_improvement_proposal_behavior_inert(&approval_pending)
+    {
+        return Err("pre-approval proposals must not affect runtime behavior".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd011_missing_checkpoint_blocks_apply_without_apply_record() -> Result<(), Box<dyn Error>> {
+    let proposal = prd011_improvement_proposal(ImprovementProposalStatus::Checkpointed);
+    let approval = prd011_improvement_approval(vec!["tool:memory.search".to_owned()]);
+
+    let readiness = runtime_improvement_apply_readiness(
+        &proposal,
+        Some(&approval),
+        None,
+        None,
+        20,
+        Some(runtime_eval_evidence()),
+    );
+    let apply_record: Option<ImprovementApplyRecord> = None;
+
+    if readiness.ready
+        || readiness.status != ImprovementProposalStatus::BlockedCheckpointUnavailable
+        || apply_record.is_some()
+    {
+        return Err(format!("missing checkpoint should block apply: {readiness:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd011_expired_approval_blocks_apply_readiness() -> Result<(), Box<dyn Error>> {
+    let proposal = prd011_improvement_proposal(ImprovementProposalStatus::Checkpointed);
+    let approval = prd011_improvement_approval(vec!["tool:memory.search".to_owned()]);
+    let checkpoint = prd011_improvement_checkpoint(true);
+    let gate = prd011_checkpoint_gate();
+
+    let readiness = runtime_improvement_apply_readiness(
+        &proposal,
+        Some(&approval),
+        Some(&checkpoint),
+        Some(&gate),
+        101,
+        Some(runtime_eval_evidence()),
+    );
+
+    if readiness.ready || readiness.status != ImprovementProposalStatus::BlockedApprovalRequired {
+        return Err(format!("expired approval should block apply: {readiness:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd011_app_task_can_create_but_not_approve_apply_or_rollback() -> Result<(), Box<dyn Error>> {
+    if !shacs_utils::evaluator::app_task_improvement_authority(
+        &ImprovementActorAuthority::AppTask,
+        &ImprovementAuthorityAction::CreateProposal,
+    ) || shacs_utils::evaluator::app_task_improvement_authority(
+        &ImprovementActorAuthority::AppTask,
+        &ImprovementAuthorityAction::Approve,
+    ) || shacs_utils::evaluator::app_task_improvement_authority(
+        &ImprovementActorAuthority::AppTask,
+        &ImprovementAuthorityAction::Apply,
+    ) || shacs_utils::evaluator::app_task_improvement_authority(
+        &ImprovementActorAuthority::AppTask,
+        &ImprovementAuthorityAction::Rollback,
+    ) {
+        return Err("app task authority must stop at proposal creation".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd011_mcp_exposure_default_deny_and_scope_only_widening() -> Result<(), Box<dyn Error>> {
+    let proposal = prd011_improvement_proposal(ImprovementProposalStatus::Checkpointed);
+    let no_approval = runtime_mcp_exposure_projection(
+        "tool:memory.search",
+        "session",
+        "deny",
+        Some(&proposal),
+        None,
+        20,
+    );
+    if shacs_utils::evaluator::mcp_exposure_can_widen(&no_approval) {
+        return Err("mcp exposure widened without approval".into());
+    }
+
+    let wildcard_approval = prd011_improvement_approval(vec!["*".to_owned()]);
+    let wildcard = runtime_mcp_exposure_projection(
+        "tool:memory.search",
+        "session",
+        "deny",
+        Some(&proposal),
+        Some(&wildcard_approval),
+        20,
+    );
+    if shacs_utils::evaluator::mcp_exposure_can_widen(&wildcard) {
+        return Err("wildcard scope must not widen without explicit matching approval".into());
+    }
+
+    let broad_kind_approval = prd011_improvement_approval(vec!["tool_exposure".to_owned()]);
+    let broad = runtime_mcp_exposure_projection(
+        "tool:memory.search",
+        "session",
+        "deny",
+        Some(&proposal),
+        Some(&broad_kind_approval),
+        20,
+    );
+    if shacs_utils::evaluator::mcp_exposure_can_widen(&broad) || broad.approval_ref.is_some() {
+        return Err("target kind approval must not widen a specific MCP target_ref".into());
+    }
+
+    let exact_approval = prd011_improvement_approval(vec!["tool:memory.search".to_owned()]);
+    let exact = runtime_mcp_exposure_projection(
+        "tool:memory.search",
+        "session",
+        "deny",
+        Some(&proposal),
+        Some(&exact_approval),
+        20,
+    );
+    if !shacs_utils::evaluator::mcp_exposure_can_widen(&exact)
+        || exact.approval_ref.as_ref() != Some(&exact_approval.decision_ref)
+    {
+        return Err(format!("exact approved scope should widen only itself: {exact:?}").into());
+    }
+
+    let expired = runtime_mcp_exposure_projection(
+        "tool:memory.search",
+        "session",
+        "deny",
+        Some(&proposal),
+        Some(&exact_approval),
+        101,
+    );
+    if shacs_utils::evaluator::mcp_exposure_can_widen(&expired) || expired.approval_ref.is_some() {
+        return Err("expired exact approval must not widen MCP exposure".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn prd011_apply_verify_and_rollback_records_preserve_lineage() -> Result<(), Box<dyn Error>> {
+    let proposal = prd011_improvement_proposal(ImprovementProposalStatus::Checkpointed);
+    let approval = prd011_improvement_approval(vec!["tool:memory.search".to_owned()]);
+    let checkpoint = prd011_improvement_checkpoint(true);
+    let gate = prd011_checkpoint_gate();
+
+    let readiness = runtime_improvement_apply_readiness(
+        &proposal,
+        Some(&approval),
+        Some(&checkpoint),
+        Some(&gate),
+        20,
+        Some(runtime_eval_evidence()),
+    );
+    if !readiness.ready {
+        return Err(
+            format!("approved checkpointed proposal should be ready: {readiness:?}").into(),
+        );
+    }
+
+    let owner_apply_ref = OwnerPrimitiveRef {
+        owner_spec: "010-host-safety-permissions".to_owned(),
+        primitive_ref: "owner-primitive://tool-exposure/apply".to_owned(),
+    };
+    let apply_input = json!({
+        "approval_ref": approval.decision_ref.decision_id.clone(),
+        "proposal_id": proposal.proposal_id.clone(),
+        "target": proposal.target_kind.clone(),
+    });
+    let apply_record = runtime_improvement_apply_record(
+        "apply-prd011",
+        &proposal,
+        owner_apply_ref.clone(),
+        &apply_input,
+        prd011_evidence(EvidenceKind::ImprovementApplyRecord, "apply-outcome"),
+    )?;
+    if apply_record.action_ref != owner_apply_ref
+        || apply_record.input_digest != shacs_utils::evaluator::stable_sha256_digest(&apply_input)?
+        || runtime_improvement_status_after_apply_record()
+            != ImprovementProposalStatus::AppliedUnverified
+    {
+        return Err(format!("apply record lost owner/input lineage: {apply_record:?}").into());
+    }
+
+    let verification = runtime_improvement_verification_record(
+        "verify-prd011",
+        &proposal,
+        "tool exposure remains scoped to the approved session resource",
+        prd011_evidence(EvidenceKind::ImprovementVerification, "verify-failure"),
+        false,
+        Some(&checkpoint),
+        true,
+    );
+    if verification.next_action != ImprovementVerificationNextAction::Rollback
+        || verification.correlation_id != proposal.correlation_id
+    {
+        return Err(
+            format!("verification did not preserve rollback lineage: {verification:?}").into(),
+        );
+    }
+
+    let owner_rollback_ref = checkpoint
+        .rollback_capability
+        .clone()
+        .ok_or("missing rollback capability")?;
+    let rollback = runtime_improvement_rollback_projection(
+        "rollback-prd011",
+        &proposal,
+        Some(&checkpoint),
+        &verification,
+        Some(owner_rollback_ref.clone()),
+        "restore the checkpoint through the owner primitive",
+    );
+    let rollback_record = rollback
+        .rollback_record
+        .as_ref()
+        .ok_or("missing rollback record")?;
+    if rollback.status != ImprovementProposalStatus::RolledBack
+        || rollback_record.owner_rollback_ref != Some(owner_rollback_ref)
+        || rollback_record.verify_failure_ref != verification.observed_result_ref
+        || rollback_record.checkpoint_ref != checkpoint.checkpoint_ref
+        || rollback_record.result != ImprovementRollbackResult::RolledBack
+        || approval.decision_ref.decision != ApprovalDecisionKind::Approved
+    {
+        return Err(
+            format!("rollback record lost approval/owner lineage: {rollback_record:?}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn prd011_rollback_unavailable_projects_manual_recovery() -> Result<(), Box<dyn Error>> {
+    let proposal = prd011_improvement_proposal(ImprovementProposalStatus::Checkpointed);
+    let checkpoint = prd011_improvement_checkpoint(false);
+    let verification = runtime_improvement_verification_record(
+        "verify-prd011",
+        &proposal,
+        "tool exposure remains scoped",
+        prd011_evidence(EvidenceKind::ImprovementVerification, "verify-failure"),
+        false,
+        Some(&checkpoint),
+        false,
+    );
+
+    let rollback = runtime_improvement_rollback_projection(
+        "rollback-prd011",
+        &proposal,
+        Some(&checkpoint),
+        &verification,
+        None,
+        "manually restore checkpoint-prd011 via the tool exposure owner",
+    );
+    let rollback_record = rollback
+        .rollback_record
+        .as_ref()
+        .ok_or("missing rollback record")?;
+
+    if rollback.status != ImprovementProposalStatus::BlockedRollbackUnavailable
+        || rollback.manual_recovery_hint.as_deref()
+            != Some("manually restore checkpoint-prd011 via the tool exposure owner")
+        || rollback_record.result != ImprovementRollbackResult::BlockedManualRecoveryRequired
+        || rollback_record.owner_rollback_ref.is_some()
+    {
+        return Err(
+            format!("rollback unavailable should carry manual recovery: {rollback:?}").into(),
+        );
+    }
+    Ok(())
+}
+
+fn prd011_improvement_proposal(status: ImprovementProposalStatus) -> ImprovementProposal {
+    ImprovementProposal {
+        proposal_id: "proposal-prd011".to_owned(),
+        target_kind: "tool_exposure".to_owned(),
+        target_ref: Some("tool:memory.search".to_owned()),
+        target_source: Some("app_task".to_owned()),
+        proposed_diff_summary_ref: prd011_evidence(EvidenceKind::ImprovementProposal, "diff"),
+        risk_summary: "widens one MCP tool exposure scope".to_owned(),
+        evidence_refs: vec![runtime_eval_evidence()],
+        expected_benefit: "allows approved local tool use".to_owned(),
+        rollback_plan: "restore owner checkpoint through rollback primitive".to_owned(),
+        status,
+        correlation_id: "corr-prd011".to_owned(),
+    }
+}
+
+fn prd011_improvement_approval(approved_scope: Vec<String>) -> ImprovementApproval {
+    ImprovementApproval {
+        proposal_id: "proposal-prd011".to_owned(),
+        request_ref: ApprovalRequestRef {
+            request_id: "approval-request-prd011".to_owned(),
+            action_digest: "action-digest-prd011".to_owned(),
+            snapshot_digest: "snapshot-digest-prd011".to_owned(),
+            created_at_ms: 10,
+            expires_at_ms: 100,
+            displayed_risk_summary: "widens one MCP tool exposure scope".to_owned(),
+            status: ApprovalRequestStatus::Approved,
+            correlation_id: "corr-prd011".to_owned(),
+        },
+        decision_ref: ApprovalDecisionRef {
+            decision_id: "approval-decision-prd011".to_owned(),
+            request_id: "approval-request-prd011".to_owned(),
+            action_digest: "action-digest-prd011".to_owned(),
+            snapshot_digest: "snapshot-digest-prd011".to_owned(),
+            decision: ApprovalDecisionKind::Approved,
+            decided_at_ms: 20,
+            actor_local_user: "local-user".to_owned(),
+            correlation_id: "corr-prd011".to_owned(),
+        },
+        approved_scope,
+        expires_at_ms: 100,
+        actor_local_user: "local-user".to_owned(),
+        correlation_id: "corr-prd011".to_owned(),
+    }
+}
+
+fn prd011_improvement_checkpoint(with_rollback: bool) -> ImprovementCheckpoint {
+    ImprovementCheckpoint {
+        checkpoint_ref: "checkpoint-prd011".to_owned(),
+        target_digest_before: "target-digest-before-prd011".to_owned(),
+        inspect_ref: prd011_evidence(EvidenceKind::ImprovementCheckpoint, "checkpoint"),
+        rollback_capability: with_rollback.then(|| OwnerPrimitiveRef {
+            owner_spec: "010-host-safety-permissions".to_owned(),
+            primitive_ref: "owner-primitive://tool-exposure/rollback".to_owned(),
+        }),
+        proposal_id: "proposal-prd011".to_owned(),
+        correlation_id: "corr-prd011".to_owned(),
+    }
+}
+
+fn prd011_checkpoint_gate() -> CheckpointGateDecision {
+    CheckpointGateDecision {
+        status: CheckpointGateStatus::Required,
+        required: true,
+        reason: "owner checkpoint is available".to_owned(),
+        checkpoint_ref: Some("checkpoint-prd011".to_owned()),
+    }
+}
+
+fn prd011_evidence(kind: EvidenceKind, id: &str) -> EvidenceRef {
+    EvidenceRef {
+        kind,
+        id: format!("{id}-prd011"),
+        digest: format!("{id}-digest-prd011"),
+        summary: "prd011 runtime evidence".to_owned(),
+        redaction_status: RedactionStatus::AlreadySafe,
+        owner_spec: Some("018".to_owned()),
+        locator: Some(format!("diagnostics://prd011/{id}")),
+        retention_hint: Some("local".to_owned()),
+    }
+}
+
+fn test_skill_registry(source_kind: SkillSourceKind, raw: Option<&str>) -> SkillRegistry {
+    SkillRegistry {
+        entries: vec![SkillRegistryEntry {
+            descriptor: SkillDescriptor {
+                name: "prd010-skill".to_owned(),
+                description: Some("PRD010 skill".to_owned()),
+                source_kind,
+                source_path: None,
+                body_hash: "skill-digest-prd010".to_owned(),
+                requirements: Vec::new(),
+                install_metadata: None,
+            },
+            status: SkillRegistryStatus::Active,
+            diagnostics: Vec::new(),
+            raw: raw.map(str::to_owned),
+        }],
+    }
 }
 
 struct StreamMockProvider {

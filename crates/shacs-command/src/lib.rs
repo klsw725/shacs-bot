@@ -8,6 +8,7 @@ pub enum CommandId {
     Restart,
     Status,
     New,
+    Goal,
     History,
     Dream,
     DreamLog,
@@ -22,6 +23,7 @@ impl CommandId {
             Self::Restart => "/restart",
             Self::Status => "/status",
             Self::New => "/new",
+            Self::Goal => "/goal",
             Self::History => "/history",
             Self::Dream => "/dream",
             Self::DreamLog => "/dream-log",
@@ -134,6 +136,7 @@ impl CommandRouter {
             CommandId::New,
             CommandId::Status,
             CommandId::History,
+            CommandId::Goal,
             CommandId::Dream,
             CommandId::DreamLog,
             CommandId::DreamRestore,
@@ -143,6 +146,7 @@ impl CommandRouter {
         }
         for command in [
             CommandId::History,
+            CommandId::Goal,
             CommandId::DreamLog,
             CommandId::DreamRestore,
         ] {
@@ -231,6 +235,7 @@ pub enum LoopCommand {
     Status,
     New,
     Stop,
+    Goal(GoalCommandArgs),
     History(HistoryCommandArgs),
     Dream,
     DreamLog { sha: Option<String> },
@@ -242,6 +247,19 @@ pub enum LoopCommand {
 #[serde(rename_all = "snake_case")]
 pub enum HistoryCommandArgs {
     Count(usize),
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalCommandArgs {
+    Status,
+    Set(String),
+    Pause,
+    Resume,
+    Clear,
+    Done,
+    Blocked(String),
     Invalid,
 }
 
@@ -265,6 +283,7 @@ fn loop_command_from_parsed(parsed: ParsedCommand) -> Option<RoutedLoopCommand> 
         CommandId::Status => Some(LoopCommand::Status),
         _ if parsed.kind == CommandKind::Priority => None,
         CommandId::New => Some(LoopCommand::New),
+        CommandId::Goal => Some(LoopCommand::Goal(parse_goal_args(&parsed.args))),
         CommandId::History => Some(LoopCommand::History(parse_history_args(&parsed.args))),
         CommandId::Dream => Some(LoopCommand::Dream),
         CommandId::DreamLog => Some(LoopCommand::DreamLog {
@@ -276,6 +295,35 @@ fn loop_command_from_parsed(parsed: ParsedCommand) -> Option<RoutedLoopCommand> 
         CommandId::Help => Some(LoopCommand::Help),
     }?;
     Some(RoutedLoopCommand { command, parsed })
+}
+
+fn parse_goal_args(args: &str) -> GoalCommandArgs {
+    let rest = args.trim();
+    if rest.is_empty() || rest.eq_ignore_ascii_case("status") {
+        return GoalCommandArgs::Status;
+    }
+    for (keyword, command) in [
+        ("pause", GoalCommandArgs::Pause),
+        ("resume", GoalCommandArgs::Resume),
+        ("clear", GoalCommandArgs::Clear),
+        ("done", GoalCommandArgs::Done),
+    ] {
+        if rest.eq_ignore_ascii_case(keyword) {
+            return command;
+        }
+    }
+    let Some((first, blocked_reason)) = split_first_token(rest) else {
+        return GoalCommandArgs::Invalid;
+    };
+    if first.eq_ignore_ascii_case("blocked") {
+        if blocked_reason.trim().is_empty() {
+            GoalCommandArgs::Invalid
+        } else {
+            GoalCommandArgs::Blocked(blocked_reason.trim().to_owned())
+        }
+    } else {
+        GoalCommandArgs::Set(rest.to_owned())
+    }
 }
 
 fn parse_history_args(args: &str) -> HistoryCommandArgs {
@@ -335,6 +383,7 @@ pub fn build_help_text() -> String {
         "/stop — Stop the current task",
         "/restart — Restart the bot",
         "/status — Show bot status",
+        "/goal [status|pause|resume|clear|done|blocked <reason>|<text>] — Manage the persistent goal",
         "/history [n] — Show the last N conversation messages (default 10)",
         "/dream — Manually trigger Dream consolidation",
         "/dream-log — Show what the last Dream changed",
@@ -360,6 +409,7 @@ fn command_from_exact(raw: &str) -> Option<CommandId> {
         "/restart" => Some(CommandId::Restart),
         "/status" => Some(CommandId::Status),
         "/new" => Some(CommandId::New),
+        "/goal" => Some(CommandId::Goal),
         "/history" => Some(CommandId::History),
         "/dream" => Some(CommandId::Dream),
         "/dream-log" => Some(CommandId::DreamLog),

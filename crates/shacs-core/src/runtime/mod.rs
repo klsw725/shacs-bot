@@ -1,10 +1,17 @@
 mod agent_loop;
 mod autocompact;
+mod automation;
 mod context;
+mod diagnostics_release;
+mod goal;
 mod lifecycle;
 mod loop_control;
 mod memory;
+mod memory_skill_curator;
+mod projection;
+mod replay;
 mod runner;
+mod self_improvement;
 mod subagent;
 mod tool_execution;
 
@@ -13,7 +20,28 @@ pub use agent_loop::{
     AgentLoopRunSummary, AgentLoopTurnResult,
 };
 pub use autocompact::{AutoCompact, AutoCompactArchiveOutcome, RECENT_SUFFIX_MESSAGES};
+pub use automation::{
+    coordinate_automation_run, AutomationCoordinationOutcome, AutomationPrd008LinkageMetadata,
+    AutomationSourceEvent, AutomationSourceEventKind, AutomationTaskOutcomeEligibility,
+    SubagentMergeState,
+};
 pub use context::{add_assistant_message, add_tool_result, ContextBuildRequest, ContextBuilder};
+pub use diagnostics_release::{
+    build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
+    evaluate_spec018_release_gate, RuntimeSpec018DiagnosticsManifestInput,
+    RuntimeSpec018LedgerInspectInput, RuntimeSpec018ReleaseGateInput,
+};
+pub use goal::{
+    apply_completion_verdict, build_goal_completion_evaluation_request, clear_goal,
+    consume_evaluator_decision, continuation_decision, create_persistent_goal,
+    evaluator_consumption_idempotency_key, mark_goal_blocked, mark_goal_done, pause_goal,
+    persistent_goal_from_session, remove_persistent_goal, resume_goal, store_persistent_goal,
+    EvaluatorDecisionInput, GoalCompletionVerdict, GoalContinuationDecision,
+    GoalContinuationStopReason, GoalEvaluationRequest, GoalMetadataError, LedgerConsumptionRecord,
+    LedgerConsumptionStatus, PersistentGoal, PersistentGoalStatus, RuntimeContinuationDecision,
+    RuntimeDecisionKind, RuntimeDecisionRecord, RuntimePolicyGateResults, RuntimeSelectedAction,
+    StaleVerdictRecord, DEFAULT_GOAL_TURN_BUDGET, PERSISTENT_GOAL_METADATA_KEY,
+};
 pub use lifecycle::{
     DreamLifecycle, McpLifecycle, ProviderHotSwapResult, ProviderSelectionSnapshot,
     RuntimeCapabilityReport, RuntimeCapabilityStatus, StaticProviderSelector,
@@ -35,10 +63,30 @@ pub use memory::{
     DREAM_STALE_THRESHOLD_DAYS, DREAM_USER_FILE_MAX_CHARS, HISTORY_ENTRY_HARD_CAP,
     RAW_ARCHIVE_MAX_CHARS,
 };
+pub use memory_skill_curator::{
+    app_provided_skill_reference_evidence, authored_skill_ready_for_active_registry,
+    build_runtime_memory_evidence, freeze_session_search_snapshot,
+    freeze_session_search_snapshot_from_session, runtime_curator_proposal_record,
+    runtime_memory_evidence_request, runtime_skill_list_disclosure,
+    runtime_skill_reference_evidence, runtime_skill_view_disclosure,
+    MemorySkillCuratorRuntimeError, RuntimeMemoryEvidenceRequestInput,
+};
+pub use projection::{
+    build_spec018_projection, runtime_spec018_channel_projection,
+    runtime_spec018_local_api_projection, RuntimeSpec018ProjectionInput,
+};
+pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub use runner::{
     AgentHook, AgentHookContext, AgentRunResult, AgentRunSpec, AgentRunner, CompositeHook,
     MidTurnInjectionCallback, NoopAgentHook, ProviderEventCallback, RetryWaitCallback, ToolEvent,
     ToolEventCallback, ToolStatus,
+};
+pub use self_improvement::{
+    runtime_improvement_apply_readiness, runtime_improvement_apply_record,
+    runtime_improvement_approved_scope_matches, runtime_improvement_proposal_behavior_inert,
+    runtime_improvement_rollback_projection, runtime_improvement_status_after_apply_record,
+    runtime_improvement_verification_record, runtime_mcp_exposure_projection,
+    SelfImprovementApplyReadiness, SelfImprovementRollbackProjection,
 };
 pub use shacs_bus::{InboundMessage, MessageBus, MessageBusError, OutboundMessage};
 pub use shacs_heartbeat::{
