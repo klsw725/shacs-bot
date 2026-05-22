@@ -35,9 +35,9 @@
 
 ### 이름 규약
 
-`shacs-bot`은 현재 구현체, CLI, runtime process 이름이다. `shacs`는 장기 AI Operating System의 짧은 filesystem namespace로 쓴다.
+`shacs-bot`은 현재 구현체, CLI, runtime process 이름이다. 현재 사용자 데이터 루트도 구현체 이름에 맞춰 `.shacs-bot/`을 사용한다.
 
-따라서 사용자/워크스페이스 데이터 루트는 `.shacs/`를 사용하고, 설치 가능한 AI app bundle은 `.shacs/apps/<app-id>.shacsapp/` 아래에 놓는다. `.shacsapp`은 독립 최상위 workspace 이름이 아니라 `.shacs/apps/` 아래에서 의미를 갖는 app bundle 디렉터리 확장자다.
+따라서 기본 사용자 데이터 루트는 `~/.shacs-bot/`이고, 설치 가능한 AI app bundle은 config data dir의 `apps/<app-id>.shacsapp/` 아래에 놓는다. 기본 config 기준으로는 `~/.shacs-bot/apps/<app-id>.shacsapp/`이다. `.shacsapp`은 독립 최상위 workspace 이름이 아니라 data dir의 `apps/` 아래에서 의미를 갖는 app bundle 디렉터리 확장자다.
 
 ### 지향점
 
@@ -231,9 +231,9 @@ MainOrchestrator
 ### 초기 디렉터리 규약
 
 ```text
-~/.shacs/skills/<skill-name>/SKILL.md
-<workspace>/.shacs/skills/<skill-name>/SKILL.md
-<workspace>/.shacs/apps/<app-id>.shacsapp/skills/<skill-name>/SKILL.md
+~/.shacs-bot/skills/<skill-name>/SKILL.md
+<workspace>/.shacs-bot/skills/<skill-name>/SKILL.md
+<data-dir>/apps/<app-id>.shacsapp/skills/<skill-name>/SKILL.md
 bundled-skills/<skill-name>/SKILL.md
 ```
 

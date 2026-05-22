@@ -165,10 +165,10 @@ shacs-bot skills show clawhub --workspace /tmp/ws
 
 ## 앱
 
-현재 Rust CLI의 app 표면은 사용자가 자기 workspace 안에 둔 local `.shacsapp` bundle을 registry에 등록하고 상태를 관찰하는 baseline입니다. Bundle은 해결된 workspace의 `.shacs/apps/<app-id>.shacsapp/` 경로에 있어야 하며, manifest의 `id`와 directory 이름이 일치해야 합니다.
+현재 Rust CLI의 app 표면은 사용자가 local `.shacsapp` bundle을 registry에 등록하고 상태를 관찰하는 baseline입니다. Bundle은 config data dir의 `apps/<app-id>.shacsapp/` 경로에 있어야 하며, 기본 config 기준으로는 `~/.shacs-bot/apps/<app-id>.shacsapp/`입니다. Manifest의 `id`와 directory 이름은 일치해야 합니다.
 
 ```sh
-shacs-bot apps install /tmp/ws/.shacs/apps/demo.app.shacsapp --workspace /tmp/ws
+shacs-bot apps install ~/.shacs-bot/apps/demo.app.shacsapp --workspace /tmp/ws
 shacs-bot apps list --workspace /tmp/ws
 shacs-bot apps inspect demo.app --workspace /tmp/ws
 shacs-bot apps enable demo.app --workspace /tmp/ws
@@ -176,9 +176,9 @@ shacs-bot apps disable demo.app --workspace /tmp/ws
 shacs-bot apps uninstall demo.app --workspace /tmp/ws
 ```
 
-`apps install`은 `--bundle <path>` 또는 positional bundle path를 받습니다. 상대 경로도 canonicalize 후 선택된 workspace의 `.shacs/apps/<app-id>.shacsapp/`로 해석되면 허용됩니다. Install은 manifest와 선언 resource/skill/entry file을 읽어 digest와 summary를 registry에 저장하지만, app process를 자동 실행하지 않고 permission grant나 secret 주입을 승인하지도 않습니다. Registry의 grant reference는 permission/secret request를 나중에 연결하기 위한 placeholder이며 승인 상태가 아닙니다.
+`apps install`은 `--bundle <path>` 또는 positional bundle path를 받습니다. 상대 경로도 canonicalize 후 config data dir의 `apps/<app-id>.shacsapp/`로 해석되면 허용됩니다. Install은 manifest와 선언 resource/skill/entry file을 읽어 digest와 summary를 registry에 저장하지만, app process를 자동 실행하지 않고 permission grant나 secret 주입을 승인하지도 않습니다. Registry의 grant reference는 permission/secret request를 나중에 연결하기 위한 placeholder이며 승인 상태가 아닙니다.
 
-`apps list`는 app id, version, lifecycle state, digest를 요약합니다. `apps inspect`/`apps show`는 bundle path, permission/secret request 개수, process snapshot 개수, unavailable reason, grant reference를 표시합니다. `apps enable`과 `apps disable`은 registry lifecycle state만 바꾸며 실행 중인 process를 시작하거나 중지하지 않습니다. `apps uninstall`은 registry entry와 workspace 안의 해당 local bundle directory를 제거하며, persisted registry path가 workspace/id convention과 맞지 않으면 임의 경로를 삭제하지 않습니다.
+`apps list`는 app id, version, lifecycle state, digest를 요약합니다. `apps inspect`/`apps show`는 bundle path, permission/secret request 개수, process snapshot 개수, unavailable reason, grant reference를 표시합니다. `apps enable`과 `apps disable`은 registry lifecycle state만 바꾸며 실행 중인 process를 시작하거나 중지하지 않습니다. `apps uninstall`은 registry entry와 config data dir 안의 해당 local bundle directory를 제거하며, persisted registry path가 data-dir/id convention과 맞지 않으면 임의 경로를 삭제하지 않습니다.
 
 ## 일회성 CLI 에이전트
 
