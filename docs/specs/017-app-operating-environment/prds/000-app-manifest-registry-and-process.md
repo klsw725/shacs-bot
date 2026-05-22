@@ -2,7 +2,7 @@
 
 ## 목표
 
-이 문서는 `docs/specs/017-app-operating-environment/SPEC.md`의 하위 실행 문서다. Spec 017이 정의한 장기 제품 계약을 첫 구현 가능한 baseline으로 낮춰, self-hosted 사용자가 자기 workspace에 local app bundle을 설치하고 상태를 관찰할 수 있는 최소 app operating environment를 고정한다.
+이 문서는 `docs/specs/017-app-operating-environment/SPEC.md`의 하위 실행 문서다. Spec 017이 정의한 장기 제품 계약을 첫 구현 가능한 baseline으로 낮춰, self-hosted 사용자가 config data dir에 local app bundle을 설치하고 상태를 관찰할 수 있는 최소 app operating environment를 고정한다.
 
 이번 PRD의 목표는 app manifest, app registry, lifecycle state, process snapshot, permission/secret request reference, task ledger receipt의 첫 타입과 저장 의미를 정리하는 것이다. 현재 상태는 local app manifest, registry, process projection, task ledger baseline 구현 완료이며, 이 문서는 full AI OS 완성이 아니라 첫 buildable baseline의 closure를 기록한다.
 
@@ -34,7 +34,7 @@
 ## 범위
 
 - `AppManifest`, `AppId`, `AppBundlePath` 타입 의미 정의
-- `.shacs/apps/<app-id>.shacsapp/` local bundle convention 고정
+- `<data-dir>/apps/<app-id>.shacsapp/` local bundle convention 고정
 - `AppRegistry`와 `AppRegistryEntry`의 최소 저장 필드 정의
 - lifecycle state의 최소 집합 정의: `installed`, `enabled`, `disabled`, `unavailable`, `uninstalling`
 - app install 시 manifest parse와 validation, app id/version/digest/resource/permission/secret summary 기록
@@ -68,7 +68,7 @@
 
 ### 현재 구현 계약
 
-- local app bundle 기본 위치는 선택된 workspace의 `<workspace>/.shacs/apps/<app-id>.shacsapp/`이며, 현재 공개 설치 표면은 이 위치의 bundle만 registry에 등록한다.
+- local app bundle 기본 위치는 config data dir의 `apps/<app-id>.shacsapp/`이며, 기본 config 기준으로는 `~/.shacs-bot/apps/<app-id>.shacsapp/`이다. 현재 공개 설치 표면은 이 위치의 bundle만 registry에 등록한다.
 - `manifest.json`은 bundle identity의 진실 원천이다.
 - install은 manifest를 검증하고 digest를 기록하지만 app process를 만들지 않는다.
 - permission과 secret 선언은 request다. 최종 grant와 secret value 주입은 010의 host safety 경계에서 결정한다.
@@ -90,7 +90,7 @@
 ### Wave 1. Manifest와 local bundle validation
 
 - `AppId`, `AppBundlePath`, `AppManifest`의 최소 타입을 구현했다.
-- `<workspace>/.shacs/apps/<app-id>.shacsapp/manifest.json`을 기준으로 bundle identity를 읽는다.
+- `<data-dir>/apps/<app-id>.shacsapp/manifest.json`을 기준으로 bundle identity를 읽는다.
 - manifest 필수 필드, bundle 내부 resource path, permission/secret declaration schema를 검증한다.
 - digest 계산은 manifest와 등록된 static resource summary를 재현 가능한 방식으로 기록한다.
 
@@ -132,7 +132,7 @@
 
 아래 기준은 local app manifest/registry/process projection/task ledger baseline의 closure 기준이다. 현재 구현은 이 PRD를 닫지만, Spec 017의 장기 제품 전체를 닫지는 않는다.
 
-- 사용자가 workspace-local `.shacs/apps/<app-id>.shacsapp/` bundle을 등록할 때 manifest validation과 digest recording이 실행된다.
+- 사용자가 data-dir-local `apps/<app-id>.shacsapp/` bundle을 등록할 때 manifest validation과 digest recording이 실행된다.
 - registry entry가 app id, version, digest, bundle path, lifecycle state, request summary, grant reference를 저장한다.
 - install은 app code 실행, MCP/device start, tool execution, secret injection, permission grant를 만들지 않는다.
 - enabled, disabled, unavailable, uninstalling 상태가 CLI command surface와 diagnostics/read projection에서 같은 의미로 읽힌다.
