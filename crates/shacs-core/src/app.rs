@@ -63,10 +63,9 @@ impl AppBundlePath {
         self.path.join(APP_MANIFEST_FILE)
     }
 
-    pub fn for_workspace(workspace: &Path, app_id: &AppId) -> Self {
+    pub fn for_data_dir(data_dir: &Path, app_id: &AppId) -> Self {
         Self::new(
-            workspace
-                .join(".shacs")
+            data_dir
                 .join("apps")
                 .join(format!("{app_id}.{APP_BUNDLE_EXTENSION}")),
         )
@@ -87,16 +86,15 @@ impl AppBundlePath {
         AppId::parse(app_id.to_owned())
     }
 
-    pub fn validate_workspace_location(
+    pub fn validate_data_dir_location(
         &self,
-        workspace: &Path,
+        data_dir: &Path,
         app_id: &AppId,
     ) -> Result<(), AppError> {
         let actual = self.path.canonicalize().map_err(AppError::Io)?;
-        let expected = workspace
+        let expected = data_dir
             .canonicalize()
             .map_err(AppError::Io)?
-            .join(".shacs")
             .join("apps")
             .join(format!("{app_id}.{APP_BUNDLE_EXTENSION}"));
         if actual != expected {
@@ -244,7 +242,11 @@ impl AppRegistryStore {
     }
 
     pub fn registry_path(&self) -> PathBuf {
-        self.data_dir.join("apps").join("registry.json")
+        self.apps_dir().join("registry.json")
+    }
+
+    pub fn apps_dir(&self) -> PathBuf {
+        self.data_dir.join("apps")
     }
 
     pub fn ledger_dir(&self) -> PathBuf {
@@ -264,14 +266,13 @@ impl AppRegistryStore {
         write_json_atomic(&self.registry_path(), registry)
     }
 
-    pub fn install_in_workspace(
+    pub fn install_local_bundle(
         &self,
-        workspace: &Path,
         bundle_path: impl Into<PathBuf>,
     ) -> Result<AppRegistryEntry, AppError> {
         let bundle = AppBundlePath::new(bundle_path);
         let app_id = bundle.app_id_from_bundle_name()?;
-        bundle.validate_workspace_location(workspace, &app_id)?;
+        bundle.validate_data_dir_location(&self.data_dir, &app_id)?;
         let validated = AppManifest::load_from_bundle(&bundle)?;
         self.install_validated(validated)
     }
@@ -359,15 +360,15 @@ impl AppRegistryStore {
         Ok(removed)
     }
 
-    pub fn uninstall_in_workspace(
+    pub fn uninstall_local_app(
         &self,
-        workspace: &Path,
         app_id: &AppId,
     ) -> Result<Option<AppRegistryEntry>, AppError> {
         let Some(entry) = self.inspect(app_id)? else {
             return Ok(None);
         };
-        AppBundlePath::new(&entry.bundle_path).validate_workspace_location(workspace, app_id)?;
+        AppBundlePath::new(&entry.bundle_path)
+            .validate_data_dir_location(&self.data_dir, app_id)?;
         self.uninstall(app_id)
     }
 

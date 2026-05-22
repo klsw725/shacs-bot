@@ -3239,7 +3239,7 @@ pub struct AppsUninstallReport {
 pub fn apps_install(options: AppsInstallOptions) -> Result<AppsEntryReport, CliError> {
     let (config_path, workspace, store) =
         apps_store(options.config_path, options.workspace_override)?;
-    let entry = store.install_in_workspace(&workspace, options.bundle_path)?;
+    let entry = store.install_local_bundle(options.bundle_path)?;
     Ok(AppsEntryReport {
         config_path,
         workspace,
@@ -3304,7 +3304,7 @@ pub fn apps_uninstall(options: AppsIdOptions) -> Result<AppsUninstallReport, Cli
     let app_id = AppId::parse(options.app_id.clone())?;
     let (config_path, workspace, store) =
         apps_store(options.config_path, options.workspace_override)?;
-    let removed = store.uninstall_in_workspace(&workspace, &app_id)?.is_some();
+    let removed = store.uninstall_local_app(&app_id)?.is_some();
     Ok(AppsUninstallReport {
         config_path,
         workspace,
@@ -12028,7 +12028,7 @@ mod tests {
     }
 
     #[test]
-    fn apps_install_rejects_bundle_outside_resolved_workspace() -> Result<(), Box<dyn Error>> {
+    fn apps_install_rejects_bundle_outside_resolved_data_dir() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
         let workspace = root.path().join("workspace");
@@ -12067,14 +12067,15 @@ mod tests {
     }
 
     #[test]
-    fn apps_install_accepts_relative_bundle_path_inside_workspace() -> Result<(), Box<dyn Error>> {
+    fn apps_install_accepts_relative_bundle_path_inside_data_dir() -> Result<(), Box<dyn Error>> {
         let root = tempfile::Builder::new()
             .prefix("shacs-cli-apps-")
             .tempdir_in(".")?;
         let config_path = root.path().join("config.json");
         let workspace = root.path().join("workspace");
-        let bundle = workspace.join(".shacs/apps/demo.app.shacsapp");
+        let bundle = root.path().join("apps/demo.app.shacsapp");
 
+        fs::create_dir_all(&workspace)?;
         fs::create_dir_all(&bundle)?;
         let mut config = Config::default();
         let canonical_workspace = workspace.canonicalize()?;
@@ -12107,7 +12108,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
         let workspace = root.path().join("workspace");
-        let bundle = workspace.join(".shacs/apps/demo.app.shacsapp");
+        let bundle = root.path().join("apps/demo.app.shacsapp");
         let outside = root.path().join("outside-delete-target");
 
         let mut config = Config::default();

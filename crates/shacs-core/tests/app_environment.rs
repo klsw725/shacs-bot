@@ -36,15 +36,28 @@ fn id_collision_and_digest_mismatch_are_detected() -> Result<(), Box<dyn Error>>
     let data_dir = root.path().join("data");
     let store = AppRegistryStore::new(&data_dir);
     let bundle = write_bundle(root.path(), "collision.app", json!({}))?;
-    let first = store.install_in_workspace(root.path(), &bundle)?;
+    let first = store.install_local_bundle(&bundle)?;
 
-    let collision_workspace = root.path().join("other");
-    let collision_bundle = write_bundle(&collision_workspace, "collision.app", json!({}))?;
+    let mut registry = store.load()?;
+    let entry = registry
+        .entries
+        .get_mut(&first.app_id)
+        .ok_or("expected installed entry")?;
+    entry.bundle_path = root.path().join("data/apps/other.app.shacsapp");
+    store.save(&registry)?;
     let error = store
-        .install_in_workspace(&collision_workspace, &collision_bundle)
+        .install_local_bundle(&bundle)
         .err()
         .ok_or("expected id collision")?;
     assert!(matches!(error, AppError::AppIdCollision(app_id) if app_id == first.app_id));
+
+    let mut registry = store.load()?;
+    let entry = registry
+        .entries
+        .get_mut(&first.app_id)
+        .ok_or("expected installed entry")?;
+    entry.bundle_path = first.bundle_path.clone();
+    store.save(&registry)?;
 
     write_manifest(
         &bundle,
@@ -53,7 +66,7 @@ fn id_collision_and_digest_mismatch_are_detected() -> Result<(), Box<dyn Error>>
     )?;
     fs::write(bundle.join("asset.txt"), "changed")?;
     let error = store
-        .install_in_workspace(root.path(), &bundle)
+        .install_local_bundle(&bundle)
         .err()
         .ok_or("expected digest mismatch")?;
     assert!(matches!(error, AppError::DigestMismatch(app_id) if app_id == first.app_id));
@@ -67,7 +80,7 @@ fn install_records_registry_without_runtime_side_effects() -> Result<(), Box<dyn
     let store = AppRegistryStore::new(&data_dir);
     let bundle = write_bundle(root.path(), "quiet.app", json!({}))?;
 
-    let entry = store.install_in_workspace(root.path(), bundle)?;
+    let entry = store.install_local_bundle(bundle)?;
     assert_eq!(entry.lifecycle_state, AppLifecycleState::Installed);
     assert!(entry.grant_reference.is_none());
     assert!(entry.process_snapshots.is_empty());
@@ -77,23 +90,20 @@ fn install_records_registry_without_runtime_side_effects() -> Result<(), Box<dyn
 }
 
 #[test]
-fn install_in_workspace_rejects_outside_bundle_before_manifest_reading(
-) -> Result<(), Box<dyn Error>> {
+fn install_rejects_outside_data_dir_bundle_before_manifest_reading() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
-    let workspace = root.path().join("workspace");
-    let store = AppRegistryStore::new(root.path().join("data"));
+    let data_dir = root.path().join("data");
+    let store = AppRegistryStore::new(&data_dir);
     let bundle = root.path().join("outside").join("rogue.app.shacsapp");
 
-    fs::create_dir_all(&workspace)?;
+    fs::create_dir_all(&data_dir)?;
     fs::create_dir_all(&bundle)?;
 
     let error = store
-        .install_in_workspace(&workspace, &bundle)
+        .install_local_bundle(&bundle)
         .err()
-        .ok_or("expected workspace rejection")?;
-    let expected = workspace
-        .canonicalize()?
-        .join(".shacs/apps/rogue.app.shacsapp");
+        .ok_or("expected data dir rejection")?;
+    let expected = data_dir.canonicalize()?.join("apps/rogue.app.shacsapp");
     let actual = bundle.canonicalize()?;
     assert!(
         matches!(error, AppError::InvalidBundleLocation { expected: actual_expected, actual: actual_path } if actual_expected == expected && actual_path == actual)
@@ -102,13 +112,11 @@ fn install_in_workspace_rejects_outside_bundle_before_manifest_reading(
 }
 
 #[test]
-fn uninstall_in_workspace_rejects_poisoned_bundle_path_at_core_level() -> Result<(), Box<dyn Error>>
-{
+fn uninstall_rejects_poisoned_bundle_path_at_core_level() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
-    let workspace = root.path();
     let store = AppRegistryStore::new(root.path().join("data"));
-    let bundle = write_bundle(workspace, "poison.app", json!({}))?;
-    let app_id = store.install_in_workspace(root.path(), &bundle)?.app_id;
+    let bundle = write_bundle(root.path(), "poison.app", json!({}))?;
+    let app_id = store.install_local_bundle(&bundle)?.app_id;
     let outside = root.path().join("outside-delete-target");
 
     fs::create_dir_all(&outside)?;
@@ -123,7 +131,7 @@ fn uninstall_in_workspace_rejects_poisoned_bundle_path_at_core_level() -> Result
     store.save(&registry)?;
 
     let error = store
-        .uninstall_in_workspace(workspace, &app_id)
+        .uninstall_local_app(&app_id)
         .err()
         .ok_or("expected poisoned registry rejection")?;
     let canonical_outside = outside.canonicalize()?;
@@ -140,7 +148,7 @@ fn enable_disable_lifecycle_projection_does_not_create_process_truth() -> Result
     let root = tempfile::tempdir()?;
     let store = AppRegistryStore::new(root.path().join("data"));
     let bundle = write_bundle(root.path(), "toggle.app", json!({}))?;
-    let app_id = store.install_in_workspace(root.path(), bundle)?.app_id;
+    let app_id = store.install_local_bundle(bundle)?.app_id;
 
     let enabled = store.enable(&app_id)?;
     assert_eq!(enabled.lifecycle_state, AppLifecycleState::Enabled);
@@ -164,7 +172,7 @@ fn missing_secret_request_maps_to_unavailable_without_secret_value() -> Result<(
         }),
     )?;
 
-    let entry = store.install_in_workspace(root.path(), bundle)?;
+    let entry = store.install_local_bundle(bundle)?;
     assert_eq!(entry.lifecycle_state, AppLifecycleState::Unavailable);
     assert!(entry
         .grant_reference
@@ -189,7 +197,7 @@ fn denied_permission_receipt_is_redacted_and_registry_truth_is_preserved(
             "permissions": [{"id": "fs.read", "reason": "read selected files"}]
         }),
     )?;
-    let entry = store.install_in_workspace(root.path(), bundle)?;
+    let entry = store.install_local_bundle(bundle)?;
     assert!(entry
         .grant_reference
         .as_deref()
@@ -241,7 +249,7 @@ fn uninstall_removes_registry_and_bundle_but_preserves_ledger_references(
     let root = tempfile::tempdir()?;
     let store = AppRegistryStore::new(root.path().join("data"));
     let bundle = write_bundle(root.path(), "remove.app", json!({}))?;
-    let app_id = store.install_in_workspace(root.path(), &bundle)?.app_id;
+    let app_id = store.install_local_bundle(&bundle)?.app_id;
     let receipt = TaskLedgerEntry {
         receipt_id: "remove-1".to_owned(),
         app_id: app_id.clone(),
@@ -268,7 +276,7 @@ fn uninstall_removes_registry_and_bundle_but_preserves_ledger_references(
     );
 
     let removed = store
-        .uninstall_in_workspace(root.path(), &app_id)?
+        .uninstall_local_app(&app_id)?
         .ok_or("expected removed entry")?;
     assert_eq!(removed.app_id, app_id);
     assert!(!bundle.exists());
@@ -348,11 +356,11 @@ fn manifest_required_field_omissions_fail() -> Result<(), Box<dyn Error>> {
 }
 
 fn write_bundle(
-    root: &Path,
+    data_root: &Path,
     app_id: &str,
     overrides: serde_json::Value,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    let apps_dir = root.join(".shacs").join("apps");
+    let apps_dir = data_root.join("data").join("apps");
     write_bundle_at(&apps_dir, app_id, overrides)
 }
 
