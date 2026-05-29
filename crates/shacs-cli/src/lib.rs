@@ -35,15 +35,16 @@ use shacs_core::runtime::{
     HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
-    AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool,
-    McpRuntime, McpServerConnectionReport, McpServerSpec, NetworkGuard, PathContext, ReadFileTool,
-    SelfRuntimeState, SelfTool, SpawnTool, StdioMcpConnector, ToolRegistry, WebFetchConfig,
-    WebFetchTool, WebSearchConfig, WebSearchTool, WriteFileTool,
+    AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
+    ImageGenerateTool, ImageGenerateToolConfig, ListDirTool, McpRuntime, McpServerConnectionReport,
+    McpServerSpec, MessageTool, NetworkGuard, PathContext, ReadFileTool, SelfRuntimeState,
+    SelfTool, SpawnTool, StdioMcpConnector, ToolRegistry, WebFetchConfig, WebFetchTool,
+    WebSearchConfig, WebSearchTool, WriteFileTool,
 };
 use shacs_providers::{
-    chat_with_retry, prepare_provider_request, resolve_provider_client, AgentDefaults, LlmResponse,
-    ProviderClient, ProviderError, ProviderEvent, ProviderRegistry, ProviderRetryMode,
-    ResolvedProviderClient,
+    chat_with_retry, prepare_provider_request, resolve_image_generation_client,
+    resolve_provider_client, AgentDefaults, LlmResponse, ProviderClient, ProviderError,
+    ProviderEvent, ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
 };
 use shacs_skills::{
     discover_skill_registry, sync_builtin_skills, SkillRegistryEntry, SkillRegistryOptions,
@@ -97,6 +98,8 @@ const CODEX_BROWSER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CODEX_DEVICE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const WEBSOCKET_STREAM_FLUSH_CHARS: usize = 32;
 const EXTERNAL_SESSION_PENDING_LIMIT: usize = 20;
+const EXTERNAL_TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(7);
+const EXTERNAL_TYPING_INDICATOR_KEY: &str = "_typing_indicator";
 type ApiProviderEventCallback = Arc<dyn Fn(&shacs_providers::ProviderEvent) + Send + Sync>;
 type ExternalTransportRunner = Arc<
     dyn Fn(
@@ -542,6 +545,7 @@ pub enum ProviderCommand {
     CodexImportToken(CodexImportTokenOptions),
     CodexLogin(CodexLoginOptions),
     CopilotImportToken(CopilotImportTokenOptions),
+    ImportApiKey(ProviderApiKeyImportOptions),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -557,6 +561,13 @@ pub struct CopilotImportTokenOptions {
     pub config_path: Option<PathBuf>,
     pub token_source: TokenSource,
     pub select: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderApiKeyImportOptions {
+    pub config_path: Option<PathBuf>,
+    pub provider: String,
+    pub token_source: TokenSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,6 +601,13 @@ pub struct CopilotImportOutcome {
     pub provider: String,
     pub selected_model: Option<String>,
     pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderApiKeyImportOutcome {
+    pub config_path: PathBuf,
+    pub auth_path: PathBuf,
+    pub provider: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,9 +756,24 @@ pub struct RuntimeInspectReport {
     pub model: String,
     pub provider: String,
     pub providers: Vec<ProviderStatus>,
+    pub generated_media: Vec<GeneratedMediaArtifactInspect>,
     pub capabilities: Vec<RuntimeCapabilityReport>,
     pub sessions: RuntimeSessionInspect,
     pub lifecycle: RuntimeLifecycleInspect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedMediaArtifactInspect {
+    pub artifact_id: String,
+    pub media_ref: String,
+    pub metadata_ref: String,
+    pub mime_type: String,
+    pub byte_len: u64,
+    pub sha256: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub created_at: String,
+    pub redacted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -911,7 +944,6 @@ pub struct ChannelsReport {
     pub channels: Vec<ChannelReportItem>,
     pub unknown_plugins: Vec<String>,
     pub worker_count: usize,
-    pub send_progress: bool,
     pub send_memory_hints: bool,
     pub send_tool_hints: bool,
     pub send_max_retries: u32,
@@ -1852,6 +1884,7 @@ pub fn load_runtime_config_with_env(
     );
     apply_codex_auth_overlay(&mut bundle)?;
     apply_copilot_auth_overlay(&mut bundle)?;
+    apply_api_key_auth_overlay(&mut bundle)?;
     Ok(bundle)
 }
 
@@ -1868,6 +1901,9 @@ fn apply_codex_auth_overlay_with_transport(
     let Some(mut codex_auth) = auth.providers.get(CODEX_PROVIDER_ID).cloned() else {
         return Ok(());
     };
+    if codex_auth.kind != "oauth" {
+        return Ok(());
+    }
     if codex_auth_is_expired(&codex_auth) {
         let Some(refresh) = codex_auth
             .refresh
@@ -1914,6 +1950,9 @@ fn apply_copilot_auth_overlay(bundle: &mut ConfigBundle) -> Result<(), CliError>
     let Some(copilot_auth) = auth.providers.get(GITHUB_COPILOT_PROVIDER_ID).cloned() else {
         return Ok(());
     };
+    if copilot_auth.kind != "oauth" {
+        return Ok(());
+    }
     if codex_auth_is_expired(&copilot_auth) {
         return Err(CliError::Provider(ProviderError::AuthRequired {
             provider_id: GITHUB_COPILOT_PROVIDER_ID.to_owned(),
@@ -1925,6 +1964,25 @@ fn apply_copilot_auth_overlay(bundle: &mut ConfigBundle) -> Result<(), CliError>
         .entry(GITHUB_COPILOT_PROVIDER_ID.to_owned())
         .or_insert_with(copilot_provider_config);
     provider.api_key = Some(copilot_auth.access);
+    Ok(())
+}
+
+fn apply_api_key_auth_overlay(bundle: &mut ConfigBundle) -> Result<(), CliError> {
+    let auth = load_auth_store(&bundle.context.auth_path())?;
+    for (provider_id, provider_auth) in auth.providers {
+        if provider_auth.kind != "apiKey" {
+            continue;
+        }
+        let access = provider_auth.access.trim();
+        if access.is_empty() {
+            continue;
+        }
+        let provider = bundle.config.providers.entry(provider_id).or_default();
+        if non_empty(provider.api_key.as_deref()) {
+            continue;
+        }
+        provider.api_key = Some(access.to_owned());
+    }
     Ok(())
 }
 
@@ -2003,7 +2061,7 @@ fn merge_missing_json_defaults(existing: &mut Value, default_value: Value) {
 pub fn status(options: StatusOptions) -> Result<StatusReport, CliError> {
     let config_path = options.config_path.unwrap_or_else(default_config_path);
     let config_exists = config_path.exists();
-    let bundle = load_config_with_env(
+    let mut bundle = load_config_with_env(
         LoadOptions {
             config_path: Some(config_path.clone()),
             workspace_override: None,
@@ -2012,6 +2070,7 @@ pub fn status(options: StatusOptions) -> Result<StatusReport, CliError> {
         },
         &ProcessEnv,
     )?;
+    apply_api_key_auth_overlay(&mut bundle)?;
     let workspace = bundle.context.workspace;
     let workspace_exists = workspace.exists();
     let mut providers = bundle
@@ -2047,7 +2106,7 @@ fn runtime_inspect_inner(
 ) -> Result<RuntimeInspectReport, CliError> {
     let config_path = options.config_path.unwrap_or_else(default_config_path);
     let config_exists = config_path.exists();
-    let bundle = load_config_with_env(
+    let mut bundle = load_config_with_env(
         LoadOptions {
             config_path: Some(config_path.clone()),
             workspace_override: options.workspace_override,
@@ -2056,6 +2115,7 @@ fn runtime_inspect_inner(
         },
         &ProcessEnv,
     )?;
+    apply_api_key_auth_overlay(&mut bundle)?;
     if ensure_dirs {
         let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
     }
@@ -2072,6 +2132,8 @@ fn runtime_inspect_inner(
         })
         .collect::<Vec<_>>();
     providers.sort_by(|left, right| left.name.cmp(&right.name));
+    let generated_media =
+        inspect_generated_media(&bundle.context.media_dir(Some("image-generation")))?;
     let capabilities = runtime_capabilities(&bundle);
     let sessions = inspect_runtime_sessions(&workspace)?;
     let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
@@ -2091,6 +2153,7 @@ fn runtime_inspect_inner(
         model: bundle.config.agents.defaults.model,
         provider: bundle.config.agents.defaults.provider,
         providers,
+        generated_media,
         capabilities,
         sessions,
         lifecycle: RuntimeLifecycleInspect {
@@ -2103,6 +2166,68 @@ fn runtime_inspect_inner(
             update_marker,
         },
     })
+}
+
+fn inspect_generated_media(
+    media_dir: &Path,
+) -> Result<Vec<GeneratedMediaArtifactInspect>, CliError> {
+    if !media_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let canonical_media_dir = fs::canonicalize(media_dir)?;
+    let mut artifacts = Vec::new();
+    for entry in fs::read_dir(&canonical_media_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let canonical_path = fs::canonicalize(&path)?;
+        if !canonical_path.starts_with(&canonical_media_dir) {
+            continue;
+        }
+        let Ok(value) = fs::read_to_string(&canonical_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .ok_or(())
+        else {
+            continue;
+        };
+        let revised_redacted = value
+            .get("revisedPrompt")
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("redacted"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        artifacts.push(GeneratedMediaArtifactInspect {
+            artifact_id: json_string_field(&value, "artifactId"),
+            media_ref: json_string_field(&value, "mediaRef"),
+            metadata_ref: format!(
+                "media/image-generation/{}",
+                canonical_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+            ),
+            mime_type: json_string_field(&value, "mimeType"),
+            byte_len: value.get("byteLen").and_then(Value::as_u64).unwrap_or(0),
+            sha256: json_string_field(&value, "sha256"),
+            provider_id: json_string_field(&value, "providerId"),
+            model_id: json_string_field(&value, "modelId"),
+            created_at: json_string_field(&value, "createdAt"),
+            redacted: revised_redacted,
+        });
+    }
+    artifacts.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+    Ok(artifacts)
+}
+
+fn json_string_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 pub fn runtime_diagnostics(
@@ -2164,6 +2289,24 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
                 "component": capability.component,
                 "status": runtime_capability_label(&capability.status),
                 "reason": capability.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    let generated_media = report
+        .generated_media
+        .iter()
+        .map(|artifact| {
+            json!({
+                "artifact_id": artifact.artifact_id,
+                "media_ref": artifact.media_ref,
+                "metadata_ref": artifact.metadata_ref,
+                "mime_type": artifact.mime_type,
+                "byte_len": artifact.byte_len,
+                "sha256": artifact.sha256,
+                "provider_id": artifact.provider_id,
+                "model_id": artifact.model_id,
+                "created_at": artifact.created_at,
+                "redacted": artifact.redacted,
             })
         })
         .collect::<Vec<_>>();
@@ -2303,6 +2446,7 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
             },
             "providers": providers,
             "capabilities": capabilities,
+            "generated_media": generated_media,
             "sessions": {
                 "count": report.sessions.count,
                 "latest_key": report.sessions.latest_key,
@@ -3534,7 +3678,6 @@ fn load_channels_report(
         channels,
         unknown_plugins,
         worker_count: workers.len(),
-        send_progress: bundle.config.channels.send_progress,
         send_memory_hints: bundle.config.channels.send_memory_hints,
         send_tool_hints: bundle.config.channels.send_tool_hints,
         send_max_retries: bundle.config.channels.send_max_retries,
@@ -4437,7 +4580,6 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
         format!("Configured channels: {configured}"),
         format!("Enabled channels: {enabled}"),
         format!("Worker boundaries: {}", report.worker_count),
-        format!("Send progress: {}", report.send_progress),
         format!("Send memory hints: {}", report.send_memory_hints),
         format!("Send tool hints: {}", report.send_tool_hints),
         format!("Send max retries: {}", report.send_max_retries),
@@ -4870,6 +5012,9 @@ fn run_provider_command(command: ProviderCommand) -> Result<String, CliError> {
         ProviderCommand::CopilotImportToken(options) => {
             import_copilot_token(options).map(format_copilot_import_outcome)
         }
+        ProviderCommand::ImportApiKey(options) => {
+            import_provider_api_key(options).map(format_provider_api_key_import_outcome)
+        }
     }
 }
 
@@ -5084,6 +5229,68 @@ pub fn import_copilot_token(
         provider: GITHUB_COPILOT_PROVIDER_ID.to_owned(),
         selected_model,
         selected: options.select,
+    })
+}
+
+pub fn import_provider_api_key(
+    options: ProviderApiKeyImportOptions,
+) -> Result<ProviderApiKeyImportOutcome, CliError> {
+    let token = read_token_source(&options.token_source)?.trim().to_owned();
+    if token.is_empty() {
+        return Err(CliError::InvalidArguments(
+            "provider API key must not be empty".to_owned(),
+        ));
+    }
+
+    let registry = ProviderRegistry::new();
+    let spec = registry.find_by_name(&options.provider).ok_or_else(|| {
+        CliError::Provider(ProviderError::ProviderNotFound {
+            provider_id: options.provider.clone(),
+            suggestions: registry
+                .specs()
+                .iter()
+                .map(|spec| spec.name.to_owned())
+                .collect(),
+        })
+    })?;
+    if spec.is_oauth {
+        return Err(CliError::InvalidArguments(format!(
+            "provider `{}` uses an OAuth auth workflow; use its provider-specific import/login command",
+            spec.name
+        )));
+    }
+
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    let mut bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            resolve_env: false,
+            write_back_migrations: true,
+        },
+        &ProcessEnv,
+    )?;
+    bundle
+        .config
+        .providers
+        .entry(spec.name.to_owned())
+        .or_default();
+
+    let context = config_context(
+        Some(config_path.clone()),
+        Some(bundle.config.workspace_path()),
+    );
+    let auth_path = context.auth_path();
+    let mut auth = load_auth_store(&auth_path)?;
+    auth.providers
+        .insert(spec.name.to_owned(), ProviderAuth::api_key(token));
+    save_auth_store_to_path(&auth, &auth_path)?;
+    save_config_to_path(&bundle.config, &config_path)?;
+
+    Ok(ProviderApiKeyImportOutcome {
+        config_path,
+        auth_path,
+        provider: spec.name.to_owned(),
     })
 }
 
@@ -5829,6 +6036,13 @@ struct ExternalAgentTurnResult {
     retry_message: Option<InboundMessage>,
 }
 
+#[derive(Debug, Clone)]
+struct ExternalTypingIndicator {
+    session_key: String,
+    message: OutboundMessage,
+    next_at: Instant,
+}
+
 struct ExternalStreamRouting<'a> {
     channel: &'a str,
     chat_id: &'a str,
@@ -5993,11 +6207,13 @@ fn run_external_agent_processor(
     let (turn_tx, turn_rx) = mpsc::channel::<ExternalAgentTurnResult>();
     let mut turn_coordinator = ExternalSessionTurnCoordinator::default();
     let mut turn_handles = Vec::new();
+    let mut typing_indicators = Vec::new();
     while !stop.load(Ordering::SeqCst) {
         join_finished_turns(&mut turn_handles);
         let mut progressed = false;
         while let Ok(result) = turn_rx.try_recv() {
             progressed = true;
+            finish_external_typing_indicator(&mut typing_indicators, &result.session_key);
             if let Some(error) = result.error {
                 eprintln!("external channel turn failed: {error}");
             }
@@ -6009,6 +6225,13 @@ fn run_external_agent_processor(
                 continue;
             } else if let Some(next) = turn_coordinator.finish_turn(&result.session_key) {
                 let session_key = adapter.external_effective_session_key(&next);
+                start_external_typing_indicator(
+                    &adapter,
+                    &runtime_bus,
+                    &mut typing_indicators,
+                    &session_key,
+                    &next,
+                );
                 turn_handles.push(spawn_external_agent_turn(
                     adapter.clone(),
                     session_key,
@@ -6026,6 +6249,13 @@ fn run_external_agent_processor(
             } else if let Some(next) =
                 turn_coordinator.start_or_enqueue(session_key.clone(), message)
             {
+                start_external_typing_indicator(
+                    &adapter,
+                    &runtime_bus,
+                    &mut typing_indicators,
+                    &session_key,
+                    &next,
+                );
                 turn_handles.push(spawn_external_agent_turn(
                     adapter.clone(),
                     session_key,
@@ -6039,6 +6269,13 @@ fn run_external_agent_processor(
             .start_next_ready(|session_key| adapter.external_session_is_active(session_key))
         {
             progressed = true;
+            start_external_typing_indicator(
+                &adapter,
+                &runtime_bus,
+                &mut typing_indicators,
+                &session_key,
+                &message,
+            );
             turn_handles.push(spawn_external_agent_turn(
                 adapter.clone(),
                 session_key,
@@ -6047,6 +6284,7 @@ fn run_external_agent_processor(
                 turn_tx.clone(),
             ));
         }
+        progressed |= publish_due_external_typing_indicators(&mut typing_indicators, &runtime_bus);
         progressed |= drain_runtime_outbound(&runtime_bus, &mut channels);
         if !progressed {
             sleep_with_stop(&stop, Duration::from_millis(50));
@@ -6067,6 +6305,57 @@ fn run_external_agent_processor(
     if let Err(error) = channels.stop_all() {
         eprintln!("external channel stop failed: {error}");
     }
+}
+
+fn start_external_typing_indicator(
+    adapter: &AgentLoopChatCompletionAdapter,
+    runtime_bus: &MessageBus,
+    active: &mut Vec<ExternalTypingIndicator>,
+    session_key: &str,
+    inbound: &InboundMessage,
+) {
+    if !adapter.send_progress {
+        return;
+    }
+    let Some(message) = external_typing_indicator_message(inbound) else {
+        return;
+    };
+    runtime_bus.publish_outbound(message.clone());
+    active.push(ExternalTypingIndicator {
+        session_key: session_key.to_owned(),
+        message,
+        next_at: Instant::now() + EXTERNAL_TYPING_REFRESH_INTERVAL,
+    });
+}
+
+fn finish_external_typing_indicator(active: &mut Vec<ExternalTypingIndicator>, session_key: &str) {
+    active.retain(|indicator| indicator.session_key != session_key);
+}
+
+fn publish_due_external_typing_indicators(
+    active: &mut [ExternalTypingIndicator],
+    runtime_bus: &MessageBus,
+) -> bool {
+    let now = Instant::now();
+    let mut published = false;
+    for indicator in active {
+        if indicator.next_at > now {
+            continue;
+        }
+        runtime_bus.publish_outbound(indicator.message.clone());
+        indicator.next_at = now + EXTERNAL_TYPING_REFRESH_INTERVAL;
+        published = true;
+    }
+    published
+}
+
+fn external_typing_indicator_message(inbound: &InboundMessage) -> Option<OutboundMessage> {
+    if inbound.channel != DISCORD_CHANNEL {
+        return None;
+    }
+    let mut metadata = Map::new();
+    metadata.insert(EXTERNAL_TYPING_INDICATOR_KEY.to_owned(), Value::Bool(true));
+    Some(OutboundMessage::new(&inbound.channel, &inbound.chat_id, "").with_metadata(metadata))
 }
 
 fn spawn_external_agent_turn(
@@ -6474,6 +6763,10 @@ fn message_is_stream_delta(message: &OutboundMessage) -> bool {
 
 fn message_is_stream_end(message: &OutboundMessage) -> bool {
     message_metadata_bool(message, "_stream_end")
+}
+
+fn message_is_typing_indicator(message: &OutboundMessage) -> bool {
+    message_metadata_bool(message, EXTERNAL_TYPING_INDICATOR_KEY)
 }
 
 #[derive(Debug, Default)]
@@ -7446,9 +7739,9 @@ fn discord_channel_allowed(
 ) -> bool {
     match filter {
         DiscordChannelFilter::AllVisible => true,
-        DiscordChannelFilter::Only(channel_ids) => channel_ids
-            .iter()
-            .any(|allowed| allowed == channel_id || parent_channel_id == Some(allowed.as_str())),
+        DiscordChannelFilter::Only(channel_ids) => channel_ids.iter().any(|allowed| {
+            allowed == "*" || allowed == channel_id || parent_channel_id == Some(allowed.as_str())
+        }),
     }
 }
 
@@ -7551,6 +7844,12 @@ fn send_discord_message(
     streams: &mut ExternalStreamPreviewStore,
     message: OutboundMessage,
 ) -> Result<(), String> {
+    if message_is_typing_indicator(&message) {
+        if let Err(error) = send_discord_typing_indicator(agent, config, &message.chat_id) {
+            eprintln!("discord typing indicator failed: {error}");
+        }
+        return Ok(());
+    }
     let url = format!(
         "https://discord.com/api/v10/channels/{}/messages",
         message.chat_id
@@ -7629,6 +7928,22 @@ fn discord_message_body(channel_id: &str, content: &str, reply_to: Option<&str>)
         });
     }
     body
+}
+
+fn send_discord_typing_indicator(
+    agent: &ureq::Agent,
+    config: &DiscordRuntimeConfig,
+    channel_id: &str,
+) -> Result<(), String> {
+    post_empty(
+        agent,
+        &discord_typing_url(channel_id),
+        Some(discord_auth_header(&config.token)),
+    )
+}
+
+fn discord_typing_url(channel_id: &str) -> String {
+    format!("https://discord.com/api/v10/channels/{channel_id}/typing")
 }
 
 fn discord_message_chunks(content: &str) -> Vec<String> {
@@ -7855,6 +8170,9 @@ fn send_slack_message(
     streams: &mut ExternalStreamPreviewStore,
     message: OutboundMessage,
 ) -> Result<(), String> {
+    if message_is_typing_indicator(&message) {
+        return Ok(());
+    }
     let thread_ts = slack_outbound_thread_ts(&message);
     if message_is_stream_end(&message) {
         return Ok(());
@@ -8456,13 +8774,16 @@ fn drain_outbound(
     mut send: impl FnMut(OutboundMessage) -> Result<(), String>,
 ) {
     while let Ok(message) = outbound_rx.try_recv() {
+        let typing_indicator = message_is_typing_indicator(&message);
         let transport_marker_only = message_is_stream_end(&message);
-        if let Some(path) = delivery_metadata_path.filter(|_| !transport_marker_only) {
+        if let Some(path) =
+            delivery_metadata_path.filter(|_| !transport_marker_only && !typing_indicator)
+        {
             record_delivery_state(path, &message, "pending", None);
         }
         match send_with_transport_retries(message.clone(), attempts, stop, &mut send) {
             Ok(()) => {
-                if let Some(path) = delivery_metadata_path {
+                if let Some(path) = delivery_metadata_path.filter(|_| !typing_indicator) {
                     let status = if transport_marker_only {
                         "processed"
                     } else {
@@ -8472,7 +8793,7 @@ fn drain_outbound(
                 }
             }
             Err(error) => {
-                if let Some(path) = delivery_metadata_path {
+                if let Some(path) = delivery_metadata_path.filter(|_| !typing_indicator) {
                     record_delivery_state(path, &message, "failed", Some(&error));
                 }
                 eprintln!("external channel outbound failed: {error}");
@@ -8562,6 +8883,25 @@ fn post_json(
             redact_sensitive_url_text(&error.to_string())
         )
     })?)
+}
+
+fn post_empty(agent: &ureq::Agent, url: &str, authorization: Option<String>) -> Result<(), String> {
+    let mut request = agent.post(url);
+    if let Some(authorization) = authorization {
+        request = request.header("Authorization", authorization);
+    }
+    let response = request.send_empty().map_err(|error| {
+        format!(
+            "request to {} failed: {}",
+            redact_sensitive_url_text(url),
+            redact_sensitive_url_text(&error.to_string())
+        )
+    })?;
+    let status = response.status().as_u16();
+    if status >= 400 {
+        return Err(format!("HTTP {status}"));
+    }
+    Ok(())
 }
 
 fn patch_json(
@@ -8763,7 +9103,7 @@ pub fn help_text() -> String {
         "  gateway   Report gateway preset boundary without starting channels",
         "  web       Start the Web UI, API, and WebSocket on one port",
         "  agent     Alias for one-shot direct AgentLoop messages with -m/--message",
-        "  provider  Manage provider auth; Codex login/import-token and Copilot import-token are available",
+        "  provider  Manage provider auth; generic import-key, Codex login/import-token, and Copilot import-token are available",
         "  plugins   Reserved for a later plugin slice",
         "",
         "Options:",
@@ -8794,8 +9134,8 @@ pub fn help_text() -> String {
         "      --app-id <id>     Select an app for apps commands",
         "  -y, --yes            Confirm irreversible session delete",
         "      --allow-side-effects  Enable write/edit/exec tools in CLI turns",
-        "      --token-stdin     Read provider token from stdin for import-token commands",
-        "      --token-env <var> Read Codex token from an environment variable",
+        "      --token-stdin     Read provider token from stdin for import-token/import-key commands",
+        "      --token-env <var> Read provider token from an environment variable",
         "      --account-id <id> Store optional ChatGPT account id for Codex",
         "  -h, --help            Show help",
         "  -v, --version         Show version",
@@ -9690,6 +10030,7 @@ fn parse_provider(
         "copilot" | "github-copilot" | "github_copilot" => {
             parse_provider_copilot(parser, global_config)
         }
+        "import-key" => parse_provider_import_key(parser, global_config, None),
         "login" => {
             let Some(provider) = parser.next() else {
                 return Err(CliError::InvalidArguments(
@@ -9705,8 +10046,24 @@ fn parse_provider(
             }
         }
         "--help" | "-h" => Ok(CliCommand::Help),
+        other => parse_named_provider_action(other.to_owned(), parser, global_config),
+    }
+}
+
+fn parse_named_provider_action(
+    provider: String,
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(format!(
+            "provider `{provider}` requires `import-key`"
+        )));
+    };
+    match action.as_str() {
+        "import-key" => parse_provider_import_key(parser, global_config, Some(provider)),
         other => Err(CliError::InvalidArguments(format!(
-            "unknown provider subcommand `{other}`"
+            "unknown provider `{provider}` action `{other}`"
         ))),
     }
 }
@@ -9819,6 +10176,50 @@ fn parse_codex_import_token(
             token_source,
             account_id,
             select,
+        },
+    )))
+}
+
+fn parse_provider_import_key(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    provider_override: Option<String>,
+) -> Result<CliCommand, CliError> {
+    let mut config_path = global_config;
+    let mut provider = provider_override;
+    let mut token_source = None;
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => config_path = Some(take_path(&mut parser, &arg)?),
+            "--provider" => provider = Some(take_value(&mut parser, &arg)?),
+            "--token-stdin" => token_source = Some(TokenSource::Stdin),
+            "--token-env" => token_source = Some(TokenSource::Env(take_value(&mut parser, &arg)?)),
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown provider import-key argument `{other}`"
+                )))
+            }
+        }
+    }
+    let provider = provider.ok_or_else(|| {
+        CliError::InvalidArguments("provider import-key requires --provider <id>".to_owned())
+    })?;
+    if provider.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "provider import-key requires a non-empty provider id".to_owned(),
+        ));
+    }
+    let token_source = token_source.ok_or_else(|| {
+        CliError::InvalidArguments(
+            "provider import-key requires --token-stdin or --token-env <name>".to_owned(),
+        )
+    })?;
+    Ok(CliCommand::Provider(ProviderCommand::ImportApiKey(
+        ProviderApiKeyImportOptions {
+            config_path,
+            provider,
+            token_source,
         },
     )))
 }
@@ -10250,6 +10651,7 @@ pub struct AgentLoopChatCompletionAdapter {
     workspace: PathBuf,
     media_dir: PathBuf,
     tools: ToolRegistry,
+    message_tool: Option<MessageTool>,
     _mcp_runtime: Option<McpRuntime>,
     _mcp_reports: Vec<McpServerConnectionReport>,
     allow_side_effect_tools: bool,
@@ -10298,10 +10700,11 @@ impl AgentLoopChatCompletionAdapter {
             workspace: bundle.context.workspace,
             media_dir,
             tools: tooling.registry,
+            message_tool: tooling.message_tool,
             _mcp_runtime: tooling.mcp_runtime,
             _mcp_reports: tooling.mcp_reports,
             allow_side_effect_tools,
-            send_progress: bundle.config.channels.send_progress,
+            send_progress: true,
             send_max_retries: bundle.config.channels.send_max_retries,
             runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
@@ -10320,6 +10723,9 @@ impl AgentLoopChatCompletionAdapter {
 
     fn loop_config(&self) -> AgentLoopConfig {
         let mut config = AgentLoopConfig::new(&self.workspace, self.resolved_model.clone());
+        if let Some(media_root) = self.media_dir.parent() {
+            config.media_roots.push(media_root.to_path_buf());
+        }
         config.settings = shacs_providers::GenerationSettings {
             temperature: self.defaults.temperature,
             max_tokens: self.defaults.max_tokens,
@@ -10833,6 +11239,9 @@ impl AgentLoopChatCompletionAdapter {
         )
         .with_context_tools(shacs_core::runtime::RuntimeContextTools::new().with_spawn(spawn_tool))
         .with_session_turn_lock(self.session_turn_lock.clone());
+        if let Some(message_tool) = &self.message_tool {
+            loop_runtime = loop_runtime.with_message_tool_delivery(message_tool.clone());
+        }
         let on_event = observability_provider_callback(observability_hooks, on_event);
         if let Some(callback) = on_event {
             loop_runtime = loop_runtime.with_provider_event_callback(callback);
@@ -11118,6 +11527,7 @@ fn invocation_text(invocation: &ChatCompletionInvocation) -> String {
 
 struct ProductionTooling {
     registry: ToolRegistry,
+    message_tool: Option<MessageTool>,
     mcp_runtime: Option<McpRuntime>,
     mcp_reports: Vec<McpServerConnectionReport>,
 }
@@ -11155,6 +11565,13 @@ fn production_tool_registry(
     registry.register(ListDirTool::new(path_context.clone()));
     registry.register(GlobTool::new(path_context.clone()));
     registry.register(GrepTool::new(path_context.clone()));
+    let message_tool = if allow_side_effect_tools {
+        let tool = MessageTool::new(workspace).with_media_roots([bundle.context.media_dir(None)]);
+        registry.register(tool.clone());
+        Some(tool)
+    } else {
+        None
+    };
     if allow_side_effect_tools && bundle.config.tools.exec.enable {
         let mut exec_config = ExecConfig::new(path_context.clone());
         exec_config.network_guard = NetworkGuard::with_ssrf_whitelist(
@@ -11174,6 +11591,35 @@ fn production_tool_registry(
         exec_config.allowed_env_keys = bundle.config.tools.exec.allowed_env_keys.clone();
         exec_config.env = configured_exec_env(&bundle.config);
         registry.register(ExecTool::new(exec_config));
+    }
+    if allow_side_effect_tools && bundle.config.tools.image_generation.enable {
+        let image_config = &bundle.config.tools.image_generation;
+        let provider_registry = ProviderRegistry::new();
+        let resolved = resolve_image_generation_client(
+            &provider_registry,
+            &image_config.provider,
+            &image_config.model,
+            &bundle.config.providers,
+        )
+        .map_err(|error| {
+            CliError::Config(ConfigError::Env(format!(
+                "image_generate provider could not be configured: {}",
+                render_image_generation_provider_error(error)
+            )))
+        })?;
+        let image_media_dir = bundle.context.media_dir(Some("image-generation"));
+        fs::create_dir_all(&image_media_dir)?;
+        registry.register(ImageGenerateTool::new(
+            resolved.client,
+            image_media_dir,
+            ImageGenerateToolConfig {
+                provider_id: resolved.provider_id,
+                model_id: resolved.model,
+                default_format: image_config.default_format.clone(),
+                max_count: image_config.max_count,
+                max_bytes: image_config.max_bytes,
+            },
+        ));
     }
     if bundle.config.tools.web.enable {
         let network_guard = NetworkGuard::with_ssrf_whitelist(
@@ -11224,6 +11670,7 @@ fn production_tool_registry(
     };
     Ok(ProductionTooling {
         registry,
+        message_tool,
         mcp_runtime,
         mcp_reports,
     })
@@ -11233,6 +11680,37 @@ fn configured_exec_env(config: &shacs_config::Config) -> BTreeMap<String, String
     let mut env = config.env.clone();
     env.extend(config.tools.exec.env.clone());
     env
+}
+
+fn render_image_generation_provider_error(error: ProviderError) -> String {
+    match error {
+        ProviderError::AuthRequired { provider_id } => {
+            format!("provider {provider_id} requires configured authentication")
+        }
+        ProviderError::UnsupportedCapability {
+            provider_id,
+            capability,
+        } => format!("provider {provider_id} does not support {capability}"),
+        ProviderError::ProviderNotFound { provider_id, .. } => {
+            format!("provider {provider_id} was not found")
+        }
+        ProviderError::ModelNotFound {
+            provider_id,
+            model_id,
+            ..
+        } => format!("model {provider_id}/{model_id} was not found"),
+        ProviderError::Api {
+            status,
+            message,
+            retryable,
+            ..
+        } => format!(
+            "provider API error status={} retryable={retryable}: {message}",
+            status
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        ),
+    }
 }
 
 fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
@@ -11357,6 +11835,12 @@ fn api_error_from_provider_error(error: ProviderError) -> ApiError {
             message: format!("provider `{provider_id}` requires authentication"),
             error_type: "authentication_error".to_owned(),
         },
+        ProviderError::UnsupportedCapability {
+            provider_id,
+            capability,
+        } => ApiError::invalid_request(format!(
+            "provider `{provider_id}` does not support `{capability}`"
+        )),
         ProviderError::Api {
             status, message, ..
         } => {
@@ -11512,6 +11996,16 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
             .latest_updated_at
             .unwrap_or_else(|| "unknown".to_owned());
         lines.push(format!("Latest session: {latest_key} ({updated})"));
+    }
+    lines.push(format!(
+        "Generated image artifacts: {}",
+        report.generated_media.len()
+    ));
+    for artifact in &report.generated_media {
+        lines.push(format!(
+            "  - {}: {} {} bytes redacted={}",
+            artifact.artifact_id, artifact.mime_type, artifact.byte_len, artifact.redacted
+        ));
     }
     if report.providers.is_empty() {
         lines.push("Configured providers: none".to_owned());
@@ -11826,6 +12320,16 @@ fn format_copilot_import_outcome(outcome: CopilotImportOutcome) -> String {
     .join("\n")
 }
 
+fn format_provider_api_key_import_outcome(outcome: ProviderApiKeyImportOutcome) -> String {
+    [
+        "Provider API key imported.".to_owned(),
+        format!("Config: {}", display_path(&outcome.config_path)),
+        format!("Auth: {}", display_path(&outcome.auth_path)),
+        format!("Provider: {}", outcome.provider),
+    ]
+    .join("\n")
+}
+
 fn format_codex_login_outcome(outcome: CodexLoginOutcome) -> String {
     [
         "Codex login complete.".to_owned(),
@@ -11939,7 +12443,9 @@ impl ArgParser {
 mod tests {
     use super::*;
     use serde_json::json;
-    use shacs_config::{save_config_to_path, AuthStore, Config};
+    use shacs_config::{
+        load_auth_store, save_auth_store_to_path, save_config_to_path, AuthStore, Config,
+    };
     use shacs_core::runtime::Session;
     use shacs_core::tools::{JsonMap, Tool, ToolResult};
     use shacs_providers::{
@@ -12908,6 +13414,16 @@ mod tests {
         );
         assert_eq!(discord.allowed_senders, vec!["user-1".to_owned()]);
         assert_eq!(discord.transport, DiscordTransportMode::Gateway);
+        assert!(discord_channel_allowed(
+            &DiscordChannelFilter::Only(vec!["*".to_owned()]),
+            "any-channel",
+            None,
+        ));
+        assert!(discord_channel_allowed(
+            &DiscordChannelFilter::Only(vec!["parent-channel".to_owned()]),
+            "thread-channel",
+            Some("parent-channel"),
+        ));
         let slack = slack_runtime_config(&plugins).ok_or("slack runtime config missing")?;
         assert_eq!(slack.app_token, "slack-app-token");
         assert_eq!(slack.channel_ids, vec!["C123".to_owned()]);
@@ -13419,18 +13935,19 @@ mod tests {
             workspace,
             media_dir,
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: false,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: turn_lock,
             exec_timeout_seconds: 60,
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            runtime_verbose: false,
         };
 
         let error = adapter
@@ -13480,6 +13997,31 @@ mod tests {
             .get("deliveries")
             .and_then(Value::as_array)
             .is_some_and(|deliveries| !deliveries.is_empty()));
+        Ok(())
+    }
+
+    #[test]
+    fn typing_indicator_outbound_is_not_recorded_as_delivery_metadata() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("discord.json");
+        let mut metadata = Map::new();
+        metadata.insert(EXTERNAL_TYPING_INDICATOR_KEY.to_owned(), Value::Bool(true));
+        let typing = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "").with_metadata(metadata);
+        let (tx, rx) = mpsc::channel();
+        tx.send(typing)?;
+        drop(tx);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut sent = Vec::new();
+
+        drain_outbound(&rx, 1, &stop, Some(&path), |message| {
+            sent.push(message);
+            Ok(())
+        });
+
+        assert_eq!(sent.len(), 1);
+        assert!(message_is_typing_indicator(&sent[0]));
+        assert!(!path.exists());
         Ok(())
     }
 
@@ -14153,6 +14695,30 @@ mod tests {
             TokenSource::Env("COPILOT_TOKEN".to_owned())
         );
         assert!(options.select);
+
+        let parsed = parse_cli_args([
+            "provider",
+            "import-key",
+            "--provider",
+            "openrouter",
+            "--token-env",
+            "OPENROUTER_API_KEY",
+        ])?;
+        let CliCommand::Provider(ProviderCommand::ImportApiKey(options)) = parsed else {
+            return Err("expected generic provider import-key command".into());
+        };
+        assert_eq!(options.provider, "openrouter");
+        assert_eq!(
+            options.token_source,
+            TokenSource::Env("OPENROUTER_API_KEY".to_owned())
+        );
+
+        let parsed = parse_cli_args(["provider", "openrouter", "import-key", "--token-stdin"])?;
+        let CliCommand::Provider(ProviderCommand::ImportApiKey(options)) = parsed else {
+            return Err("expected named provider import-key command".into());
+        };
+        assert_eq!(options.provider, "openrouter");
+        assert_eq!(options.token_source, TokenSource::Stdin);
         Ok(())
     }
 
@@ -14327,12 +14893,12 @@ mod tests {
             workspace: workspace.clone(),
             media_dir,
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: true,
             send_progress: false,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 123,
             exec_sandbox: Some("sandboxed".to_owned()),
@@ -14342,6 +14908,7 @@ mod tests {
                 "SHACS_CLI_TEST_CONFIGURED_ENV_ONLY".to_owned(),
                 "configured".to_owned(),
             )]),
+            runtime_verbose: false,
         };
 
         let skills = adapter
@@ -14419,6 +14986,56 @@ mod tests {
     }
 
     #[test]
+    fn production_tool_registry_gates_image_generate_by_side_effects_and_config(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let mut bundle = image_generation_test_bundle(root.path())?;
+
+        let disabled_side_effects = production_tool_registry(&bundle, false)?;
+        assert!(!disabled_side_effects.registry.has("image_generate"));
+
+        bundle.config.tools.image_generation.enable = false;
+        let disabled_config = production_tool_registry(&bundle, true)?;
+        assert!(!disabled_config.registry.has("image_generate"));
+
+        bundle.config.tools.image_generation.enable = true;
+        let enabled = production_tool_registry(&bundle, true)?;
+        assert!(enabled.registry.has("image_generate"));
+        let schema_text = serde_json::to_string(&enabled.registry.definitions())?;
+        for forbidden in ["apiKey", "endpoint", "baseUrl", "providerOptions"] {
+            if schema_text.contains(forbidden) {
+                return Err(
+                    format!("image_generate schema leaked forbidden field: {forbidden}").into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn image_generation_test_bundle(root: &Path) -> Result<ConfigBundle, Box<dyn Error>> {
+        let workspace = root.join("workspace");
+        let mut config = shacs_config::Config::default();
+        config.tools.image_generation.enable = true;
+        config.tools.image_generation.provider = "openai".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                api_key: Some("sk-test".to_owned()),
+                ..ProviderConfig::default()
+            },
+        );
+        Ok(ConfigBundle {
+            config,
+            context: shacs_config::ConfigContext {
+                config_path: root.join("config.json"),
+                data_dir: root.join("data"),
+                workspace,
+            },
+            migrations: Vec::new(),
+        })
+    }
+
+    #[test]
     fn web_preset_reports_assets_and_preserves_websocket_plugin() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
@@ -14470,7 +15087,6 @@ mod tests {
         let workspace = root.path().join("workspace");
         let mut config = Config::default();
         config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
-        config.channels.send_progress = false;
         config.channels.send_tool_hints = true;
         config.channels.send_max_retries = 5;
         config.channels.plugins.insert(
@@ -14490,10 +15106,11 @@ mod tests {
 
         assert_eq!(report.config_path, config_path);
         assert_eq!(report.workspace, workspace);
-        assert!(!report.send_progress);
         assert!(report.send_tool_hints);
         assert_eq!(report.send_max_retries, 5);
         assert_eq!(report.unknown_plugins, vec!["custom-local".to_owned()]);
+        let formatted = format_channels_status(report.clone());
+        assert!(!formatted.contains("Send progress"));
         let websocket = report
             .channels
             .iter()
@@ -14829,6 +15446,181 @@ mod tests {
     }
 
     #[test]
+    fn apply_api_key_auth_overlay_creates_missing_provider_entry() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        save_config_to_path(&Config::default(), &config_path)?;
+
+        let auth_path = config_context(Some(config_path.clone()), None).auth_path();
+        let mut auth = AuthStore::default();
+        auth.providers
+            .insert("openrouter".to_owned(), ProviderAuth::api_key("sk-or-test"));
+        save_auth_store_to_path(&auth, &auth_path)?;
+
+        let mut bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &ProcessEnv,
+        )?;
+        apply_api_key_auth_overlay(&mut bundle)?;
+
+        let provider = bundle
+            .config
+            .providers
+            .get("openrouter")
+            .ok_or("missing openrouter provider")?;
+        assert_eq!(provider.api_key.as_deref(), Some("sk-or-test"));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_api_key_auth_overlay_preserves_explicit_keys_and_ignores_blank_or_oauth_auth(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let mut config = Config::default();
+        config.providers.insert(
+            "openrouter".to_owned(),
+            ProviderConfig {
+                api_key: Some("sk-config".to_owned()),
+                api_base: None,
+                extra_headers: None,
+                extra_body: None,
+            },
+        );
+        config
+            .providers
+            .insert("blank".to_owned(), ProviderConfig::default());
+        config
+            .providers
+            .insert("oauth".to_owned(), ProviderConfig::default());
+        save_config_to_path(&config, &config_path)?;
+
+        let auth_path = config_context(Some(config_path.clone()), None).auth_path();
+        let mut auth = AuthStore::default();
+        auth.providers
+            .insert("openrouter".to_owned(), ProviderAuth::api_key("sk-or-test"));
+        auth.providers
+            .insert("blank".to_owned(), ProviderAuth::api_key("   \t  "));
+        auth.providers.insert(
+            "oauth".to_owned(),
+            ProviderAuth::oauth_access("oauth-token", None),
+        );
+        save_auth_store_to_path(&auth, &auth_path)?;
+
+        let mut bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &ProcessEnv,
+        )?;
+        apply_api_key_auth_overlay(&mut bundle)?;
+
+        assert_eq!(
+            bundle
+                .config
+                .providers
+                .get("openrouter")
+                .and_then(|provider| provider.api_key.as_deref()),
+            Some("sk-config")
+        );
+        assert_eq!(
+            bundle
+                .config
+                .providers
+                .get("blank")
+                .and_then(|provider| provider.api_key.as_deref()),
+            None
+        );
+        assert_eq!(
+            bundle
+                .config
+                .providers
+                .get("oauth")
+                .and_then(|provider| provider.api_key.as_deref()),
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn status_and_runtime_inspect_report_api_key_from_auth_store() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        save_config_to_path(&Config::default(), &config_path)?;
+
+        let auth_path = config_context(Some(config_path.clone()), None).auth_path();
+        let mut auth = AuthStore::default();
+        auth.providers
+            .insert("openrouter".to_owned(), ProviderAuth::api_key("sk-or-test"));
+        save_auth_store_to_path(&auth, &auth_path)?;
+
+        let status_report = status(StatusOptions {
+            config_path: Some(config_path.clone()),
+        })?;
+        let status_provider = status_report
+            .providers
+            .iter()
+            .find(|provider| provider.name == "openrouter")
+            .ok_or("missing status provider")?;
+        assert!(status_provider.has_api_key);
+
+        let inspect_report = runtime_inspect_inner(
+            RuntimeInspectOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+            },
+            false,
+        )?;
+        let inspect_provider = inspect_report
+            .providers
+            .iter()
+            .find(|provider| provider.name == "openrouter")
+            .ok_or("missing runtime inspect provider")?;
+        assert!(inspect_provider.has_api_key);
+        Ok(())
+    }
+
+    #[test]
+    fn import_provider_api_key_persists_secret_only_in_auth_store() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        save_config_to_path(&Config::default(), &config_path)?;
+
+        let outcome = import_provider_api_key(ProviderApiKeyImportOptions {
+            config_path: Some(config_path.clone()),
+            provider: "openrouter".to_owned(),
+            token_source: TokenSource::Literal("sk-or-test".to_owned()),
+        })?;
+        assert_eq!(outcome.config_path, config_path);
+
+        let auth = load_auth_store(&outcome.auth_path)?;
+        let provider_auth = auth
+            .providers
+            .get("openrouter")
+            .ok_or("missing auth provider")?;
+        assert_eq!(provider_auth.kind, "apiKey");
+        assert_eq!(provider_auth.access, "sk-or-test");
+
+        let config_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&outcome.config_path)?)?;
+        let provider_json = config_json
+            .get("providers")
+            .and_then(|providers| providers.get("openrouter"))
+            .ok_or("missing config provider")?;
+        assert!(provider_json.get("apiKey").is_none());
+        assert!(!fs::read_to_string(&outcome.config_path)?.contains("sk-or-test"));
+        Ok(())
+    }
+
+    #[test]
     fn status_does_not_write_back_legacy_config_migrations() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
@@ -14903,6 +15695,7 @@ mod tests {
         assert!(output.contains("Binary version:"));
         assert!(output.contains("Update marker: none"));
         assert!(output.contains("Sessions: 1"));
+        assert!(output.contains("Generated image artifacts: 0"));
         assert!(!output.contains("hello"));
         Ok(())
     }
@@ -14927,6 +15720,26 @@ mod tests {
             },
         );
         save_config_to_path(&config, &config_path)?;
+        let media_dir =
+            config_context(Some(config_path.clone()), None).media_dir(Some("image-generation"));
+        fs::create_dir_all(&media_dir)?;
+        fs::write(media_dir.join("img-test.png"), b"not real png")?;
+        fs::write(
+            media_dir.join("img-test.json"),
+            serde_json::to_vec_pretty(&json!({
+                "artifactId": "img-test",
+                "mediaRef": "media/image-generation/img-test.png",
+                "mimeType": "image/png",
+                "byteLen": 12,
+                "sha256": "abc123",
+                "providerId": "openai",
+                "modelId": "gpt-image-2",
+                "createdAt": "2026-05-28T00:00:00Z",
+                "requestOptionSummary": {"format": "png", "count": 1},
+                "revisedPrompt": {"sha256": "prompt-digest", "redacted": true},
+                "providerRequestId": "req-1"
+            }))?,
+        )?;
 
         let parsed = parse_cli_args([
             "--config",
@@ -14945,6 +15758,10 @@ mod tests {
         assert!(bundle_path.exists());
         assert!(!workspace.exists());
         assert!(output.contains("local runtime diagnostics snapshot generated"));
+        assert!(output.contains("generated_media"));
+        assert!(output.contains("img-test"));
+        assert!(!output.contains("private prompt"));
+        assert!(!output.contains("not real png"));
         assert!(output.contains("runtime diagnostics provider snapshot"));
         assert!(output.contains("runtime capability snapshot"));
         assert!(output.contains("[REDACTED]") || !output.contains("api_key"));
@@ -15943,6 +16760,7 @@ mod tests {
         assert!(help.contains("ask       Send one message"));
         assert!(help.contains("agent     Alias"));
         assert!(help.contains("provider  Manage provider auth"));
+        assert!(help.contains("generic import-key"));
         assert!(help.contains("channels  List channel"));
         assert!(!help.contains("channels  Reserved"));
         assert!(help.contains("-m, --message"));
@@ -15951,6 +16769,7 @@ mod tests {
         assert!(help.contains("--gateway-port"));
         assert!(help.contains("--websocket-host"));
         assert!(help.contains("--token-stdin"));
+        assert!(help.contains("--token-env <var>"));
         assert!(help.contains(
             "--verbose         Print runtime preview logs for run/web and serve diagnostics"
         ));
@@ -16031,6 +16850,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/workspace"),
             media_dir: PathBuf::from("/tmp/data/media/api"),
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
@@ -16048,6 +16868,74 @@ mod tests {
         assert!(!adapter.runtime_verbose);
         let adapter = adapter.with_runtime_verbose(true);
         assert!(adapter.runtime_verbose);
+    }
+
+    #[test]
+    fn external_typing_indicator_targets_discord_channel_or_thread_only(
+    ) -> Result<(), Box<dyn Error>> {
+        let discord = DiscordInbound {
+            sender_id: "user-1".to_owned(),
+            channel_id: "parent-channel".to_owned(),
+            content: "hi".to_owned(),
+            message_id: Some("message-1".to_owned()),
+            guild_id: Some("guild-1".to_owned()),
+            parent_channel_id: Some("parent-channel".to_owned()),
+            thread_id: Some("thread-channel".to_owned()),
+            attachments: Vec::new(),
+        }
+        .into_message();
+
+        let typing = external_typing_indicator_message(&discord)
+            .ok_or("expected Discord typing indicator")?;
+        assert_eq!(typing.channel, DISCORD_CHANNEL);
+        assert_eq!(typing.chat_id, "thread-channel");
+        assert!(typing.content.is_empty());
+        assert!(message_is_typing_indicator(&typing));
+        assert_eq!(
+            discord_typing_url(&typing.chat_id),
+            "https://discord.com/api/v10/channels/thread-channel/typing"
+        );
+
+        let slack = SlackInbound {
+            user_id: "user-1".to_owned(),
+            channel_id: "C123".to_owned(),
+            content: "hi".to_owned(),
+            event_ts: Some("1710000000.000100".to_owned()),
+            thread_ts: Some("1710000000.000001".to_owned()),
+            channel_type: Some("channel".to_owned()),
+            files: Vec::new(),
+        }
+        .into_message();
+        assert!(external_typing_indicator_message(&slack).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn external_typing_indicator_refreshes_until_turn_finishes() -> Result<(), Box<dyn Error>> {
+        let mut metadata = Map::new();
+        metadata.insert(EXTERNAL_TYPING_INDICATOR_KEY.to_owned(), Value::Bool(true));
+        let message =
+            OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "").with_metadata(metadata);
+        let runtime_bus = MessageBus::new();
+        let mut active = vec![ExternalTypingIndicator {
+            session_key: "discord:channel-1".to_owned(),
+            message,
+            next_at: Instant::now() - Duration::from_secs(1),
+        }];
+
+        assert!(publish_due_external_typing_indicators(
+            &mut active,
+            &runtime_bus
+        ));
+        let outbound = runtime_bus
+            .try_consume_outbound()
+            .ok_or("missing refreshed typing indicator")?;
+        assert!(message_is_typing_indicator(&outbound));
+        assert!(active[0].next_at > Instant::now());
+
+        finish_external_typing_indicator(&mut active, "discord:channel-1");
+        assert!(active.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -16124,18 +17012,19 @@ mod tests {
             workspace,
             media_dir: media_dir.clone(),
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            runtime_verbose: false,
         };
 
         let paths = adapter.persist_media_data_urls(&["data:text/plain;base64,aGk=".to_owned()])?;
@@ -16187,18 +17076,19 @@ mod tests {
             workspace: workspace.clone(),
             media_dir: media_dir.clone(),
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            runtime_verbose: false,
         };
 
         let events = adapter.process_websocket_frame(
@@ -16276,18 +17166,19 @@ mod tests {
             workspace,
             media_dir: media_dir.clone(),
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            runtime_verbose: false,
         };
 
         let error = adapter
@@ -16353,18 +17244,19 @@ mod tests {
             workspace,
             media_dir,
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            runtime_verbose: false,
         };
 
         let events = adapter.process_websocket_frame(
@@ -16417,18 +17309,19 @@ mod tests {
             workspace,
             media_dir,
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            runtime_verbose: false,
         };
         let (event_tx, event_rx) = mpsc::channel();
         event_tx.send(ProviderEvent::TextDelta {
@@ -16493,18 +17386,19 @@ mod tests {
             workspace,
             media_dir,
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            runtime_verbose: false,
         };
 
         assert_eq!(
@@ -16566,18 +17460,19 @@ mod tests {
             workspace,
             media_dir,
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            runtime_verbose: false,
         };
 
         let response = adapter.complete_chat(ChatCompletionInvocation {
@@ -16645,18 +17540,19 @@ mod tests {
             workspace: workspace.clone(),
             media_dir,
             tools: ToolRegistry::new(),
+            message_tool: None,
             _mcp_runtime: None,
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
-            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            runtime_verbose: false,
         };
 
         let output = complete_direct_message(
@@ -16707,18 +17603,19 @@ mod tests {
                 workspace: workspace.clone(),
                 media_dir,
                 tools: ToolRegistry::new(),
+                message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
-                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
+                runtime_verbose: false,
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: Vec::new(),
@@ -16781,18 +17678,19 @@ mod tests {
                 workspace,
                 media_dir,
                 tools: ToolRegistry::new(),
+                message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
-                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
+                runtime_verbose: false,
             },
             lifecycle_hooks: vec![hook],
             observability_hooks: Vec::new(),
@@ -16860,18 +17758,19 @@ mod tests {
                 workspace,
                 media_dir,
                 tools: ToolRegistry::new(),
+                message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
-                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
+                runtime_verbose: false,
             },
             lifecycle_hooks: vec![recording_hook, panic_hook],
             observability_hooks: Vec::new(),
@@ -16949,18 +17848,19 @@ mod tests {
                 workspace,
                 media_dir,
                 tools: ToolRegistry::new(),
+                message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
-                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
+                runtime_verbose: false,
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![panic_hook],
@@ -17063,18 +17963,19 @@ mod tests {
                 workspace,
                 media_dir,
                 tools,
+                message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
-                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
                 exec_path_append: None,
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
+                runtime_verbose: false,
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![recording_hook],
