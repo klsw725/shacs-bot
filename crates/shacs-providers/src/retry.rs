@@ -429,7 +429,8 @@ pub fn is_transient_provider_error(error: &ProviderError) -> bool {
         }
         ProviderError::ProviderNotFound { .. }
         | ProviderError::ModelNotFound { .. }
-        | ProviderError::AuthRequired { .. } => false,
+        | ProviderError::AuthRequired { .. }
+        | ProviderError::UnsupportedCapability { .. } => false,
     }
 }
 

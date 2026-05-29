@@ -114,10 +114,12 @@ fn provider_registry_preserves_key_nanobot_metadata() -> Result<(), Box<dyn Erro
         || azure.env_key.is_some()
         || openai.default_api_base != Some("https://api.openai.com/v1")
         || !openai.supports_max_completion_tokens
+        || !openai.supports_image_generation
         || !openrouter.is_gateway
         || openrouter.detect_by_key_prefix != Some("sk-or-")
         || openrouter.default_api_base != Some("https://openrouter.ai/api/v1")
         || !openrouter.supports_prompt_caching
+        || !openrouter.supports_image_generation
         || zhipu.env_key != Some("ZAI_API_KEY")
         || zhipu.env_extras != [("ZHIPUAI_API_KEY", "{api_key}")]
         || xiaomi.env_key != Some("XIAOMIMIMO_API_KEY")
@@ -285,6 +287,7 @@ fn provider_client_factory_exempts_oauth_openai_compatible_providers() -> Result
         supports_prompt_caching: false,
         thinking_style: None,
         reasoning_as_content: false,
+        supports_image_generation: false,
     };
     let client = provider_client_from_config(ProviderConfig::default(), &spec)?;
     drop(client);
@@ -313,6 +316,7 @@ fn provider_client_factory_rejects_unimplemented_backends() -> Result<(), Box<dy
         supports_prompt_caching: false,
         thinking_style: None,
         reasoning_as_content: false,
+        supports_image_generation: false,
     };
     let error = match provider_client_from_config(ProviderConfig::default(), &spec) {
         Ok(_) => return Err("unsupported backend should fail".into()),

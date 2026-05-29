@@ -21,6 +21,7 @@ pub struct ProviderSpec {
     pub supports_prompt_caching: bool,
     pub thinking_style: Option<&'static str>,
     pub reasoning_as_content: bool,
+    pub supports_image_generation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +214,7 @@ const PROVIDERS: &[ProviderSpec] = &[
         detect_by_base_keyword: Some("openrouter"),
         default_api_base: Some("https://openrouter.ai/api/v1"),
         supports_prompt_caching: true,
+        supports_image_generation: true,
         ..provider(
             "openrouter",
             &["openrouter"],
@@ -325,6 +327,7 @@ const PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec {
         default_api_base: Some("https://api.openai.com/v1"),
         supports_max_completion_tokens: true,
+        supports_image_generation: true,
         ..provider(
             "openai",
             &["openai", "gpt"],
@@ -562,5 +565,6 @@ const fn provider(
         supports_prompt_caching: false,
         thinking_style: None,
         reasoning_as_content: false,
+        supports_image_generation: false,
     }
 }

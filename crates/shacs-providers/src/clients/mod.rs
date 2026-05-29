@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod azure_openai;
 pub mod codex;
+pub mod image_generation;
 pub mod openai_compatible;
 pub mod transcription;
 

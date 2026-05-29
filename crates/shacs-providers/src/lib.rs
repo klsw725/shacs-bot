@@ -23,6 +23,18 @@ pub use clients::codex::{
     parse_codex_stream, CodexClient, CodexHttpStreamResponse, CodexHttpTransport,
     CodexRequestParts, UreqCodexHttpTransport,
 };
+pub use clients::image_generation::{
+    build_openai_image_generation_request, build_openrouter_image_generation_request,
+    image_generation_client_from_config, openai_image_generation_capability,
+    openai_image_generation_client_from_config, openrouter_image_generation_client_from_config,
+    parse_openai_image_generation_response, parse_openrouter_image_generation_response,
+    resolve_image_generation_api_base, resolve_image_generation_client,
+    DefaultModelImageGenerationClient, GeneratedImage, ImageGenerationCapability,
+    ImageGenerationClient, ImageGenerationHttpResponse, ImageGenerationHttpTransport,
+    ImageGenerationRequest, ImageGenerationRequestParts, ImageGenerationResult,
+    OpenAiImageGenerationClient, OpenRouterImageGenerationClient, ResolvedImageGenerationClient,
+    UreqImageGenerationHttpTransport,
+};
 pub use clients::openai_compatible::{
     build_chat_completions_request, build_chat_completions_stream_request, build_headers,
     build_responses_request, chat_completions_tool, merge_json_objects,

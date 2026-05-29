@@ -15,6 +15,10 @@ pub enum ProviderError {
     AuthRequired {
         provider_id: String,
     },
+    UnsupportedCapability {
+        provider_id: String,
+        capability: String,
+    },
     Api {
         status: Option<u16>,
         message: String,
@@ -36,6 +40,13 @@ impl Display for ProviderError {
                 ..
             } => write!(formatter, "model not found: {provider_id}/{model_id}"),
             Self::AuthRequired { provider_id } => write!(formatter, "auth required: {provider_id}"),
+            Self::UnsupportedCapability {
+                provider_id,
+                capability,
+            } => write!(
+                formatter,
+                "unsupported provider capability: {provider_id}/{capability}"
+            ),
             Self::Api { message, .. } => write!(formatter, "provider API error: {message}"),
         }
     }
