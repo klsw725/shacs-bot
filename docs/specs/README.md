@@ -22,6 +22,7 @@
 - channel 범위: `012-runtime-services/`, 보조 경계는 `013-user-interfaces-and-session-ux/`. one-shot mailbox connector, 초기 장기 실행 assistant channel worker, follow-up runtime waves는 `012-runtime-services/prds/000-service-reentry-and-dedup.md`, `012-runtime-services/prds/001-channel-worker-runtime.md`, `012-runtime-services/prds/002-channel-runtime-follow-up-waves.md`에서 분리해 다룬다.
 - evaluation/automation/self-improvement 범위: `018-evaluation-automation-and-self-improvement/`가 goal evaluator, capability evaluator, task outcome evaluator, scheduled automation, 자기 개선, checkpoint/rollback, replay, diagnostics의 통합 최종 계약을 소유한다.
 - 018 구현 상태: `018-evaluation-automation-and-self-improvement/prds/000-014`는 Rust contract/runtime helper 기준으로 구현되었고, `crates/shacs-utils`와 `crates/shacs-core`의 포맷, clippy, 관련 테스트 및 QA/목표/코드/보안/문서 재리뷰를 통과해 closed 상태다.
+- image generation / generated media 범위: `019-image-generation-and-generated-media/`가 provider image generation capability, `image_generate` tool, generated image artifact 저장 계약을 소유한다.
 
 ## 읽는 순서 권장
 
@@ -46,6 +47,7 @@
 16. `016-verification-matrix-and-release-gates`
 17. `017-app-operating-environment`
 18. `018-evaluation-automation-and-self-improvement`
+19. `019-image-generation-and-generated-media`
 
 ## 운영 원칙
 
