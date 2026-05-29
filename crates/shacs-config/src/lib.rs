@@ -136,13 +136,17 @@ impl Default for DreamConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
-    #[serde(default, alias = "api_key")]
+    #[serde(default, alias = "api_key", skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    #[serde(default, alias = "api_base")]
+    #[serde(default, alias = "api_base", skip_serializing_if = "Option::is_none")]
     pub api_base: Option<String>,
-    #[serde(default, alias = "extra_headers")]
+    #[serde(
+        default,
+        alias = "extra_headers",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub extra_headers: Option<BTreeMap<String, String>>,
-    #[serde(default, alias = "extra_body")]
+    #[serde(default, alias = "extra_body", skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<Map<String, Value>>,
 }
 
@@ -184,12 +188,22 @@ impl ProviderAuth {
             account_id,
         }
     }
+
+    pub fn api_key(access: impl Into<String>) -> Self {
+        Self {
+            kind: "apiKey".to_owned(),
+            access: access.into(),
+            refresh: None,
+            expires: None,
+            account_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelsConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing)]
     pub send_progress: bool,
     #[serde(default)]
     pub send_memory_hints: bool,
@@ -288,6 +302,8 @@ pub struct ToolsConfig {
     #[serde(default)]
     pub exec: ExecToolConfig,
     #[serde(default)]
+    pub image_generation: ImageGenerationToolConfig,
+    #[serde(default)]
     pub my: MyToolConfig,
     #[serde(default)]
     pub restrict_to_workspace: bool,
@@ -295,6 +311,36 @@ pub struct ToolsConfig {
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
     pub ssrf_whitelist: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageGenerationToolConfig {
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default = "default_image_generation_provider")]
+    pub provider: String,
+    #[serde(default = "default_image_generation_model")]
+    pub model: String,
+    #[serde(default = "default_image_generation_format")]
+    pub default_format: String,
+    #[serde(default = "default_image_generation_max_count")]
+    pub max_count: u32,
+    #[serde(default = "default_image_generation_max_bytes")]
+    pub max_bytes: usize,
+}
+
+impl Default for ImageGenerationToolConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            provider: default_image_generation_provider(),
+            model: default_image_generation_model(),
+            default_format: default_image_generation_format(),
+            max_count: default_image_generation_max_count(),
+            max_bytes: default_image_generation_max_bytes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1126,6 +1172,26 @@ fn default_web_timeout() -> u32 {
     30
 }
 
+fn default_image_generation_provider() -> String {
+    "auto".to_owned()
+}
+
+fn default_image_generation_model() -> String {
+    "gpt-image-2".to_owned()
+}
+
+fn default_image_generation_format() -> String {
+    "png".to_owned()
+}
+
+fn default_image_generation_max_count() -> u32 {
+    1
+}
+
+fn default_image_generation_max_bytes() -> usize {
+    10 * 1024 * 1024
+}
+
 fn default_exec_timeout() -> u32 {
     60
 }
@@ -1144,22 +1210,62 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn defaults_use_shacs_paths_and_nanobot_provider_values() {
+    fn defaults_use_shacs_paths_and_nanobot_provider_values(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let config = Config::default();
         assert_eq!(config.agents.defaults.workspace, "~/.shacs-bot/workspace");
         assert_eq!(config.agents.defaults.model, "anthropic/claude-opus-4-5");
         assert_eq!(config.agents.defaults.max_tokens, 8192);
         assert!(config.channels.send_progress);
+        assert!(!serde_json::to_value(&config)?
+            .to_string()
+            .contains("sendProgress"));
         assert_eq!(
             default_config_path(),
             home_dir().join(".shacs-bot/config.json")
         );
+        Ok(())
     }
 
     #[test]
     fn mcp_enabled_tools_defaults_to_empty_default_deny() {
         let config = McpServerConfig::default();
         assert!(config.enabled_tools.is_empty());
+    }
+
+    #[test]
+    fn image_generation_tool_defaults_to_disabled_safe_values() {
+        let config = Config::default();
+        assert!(!config.tools.image_generation.enable);
+        assert_eq!(config.tools.image_generation.provider, "auto");
+        assert_eq!(config.tools.image_generation.model, "gpt-image-2");
+        assert_eq!(config.tools.image_generation.default_format, "png");
+        assert_eq!(config.tools.image_generation.max_count, 1);
+        assert_eq!(config.tools.image_generation.max_bytes, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn image_generation_tool_deserializes_camel_case_fields() -> Result<(), String> {
+        let config: Config = serde_json::from_value(json!({
+            "tools": {
+                "imageGeneration": {
+                    "enable": true,
+                    "provider": "openai",
+                    "model": "custom-image-model",
+                    "defaultFormat": "jpeg",
+                    "maxCount": 2,
+                    "maxBytes": 4096
+                }
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+        assert!(config.tools.image_generation.enable);
+        assert_eq!(config.tools.image_generation.provider, "openai");
+        assert_eq!(config.tools.image_generation.model, "custom-image-model");
+        assert_eq!(config.tools.image_generation.default_format, "jpeg");
+        assert_eq!(config.tools.image_generation.max_count, 2);
+        assert_eq!(config.tools.image_generation.max_bytes, 4096);
+        Ok(())
     }
 
     #[test]
@@ -1230,6 +1336,7 @@ mod tests {
             camel.api_base_or(Some("fallback")),
             Some("https://api.example.test")
         );
+        assert_eq!(serde_json::to_value(ProviderConfig::default())?, json!({}));
         Ok(())
     }
 
