@@ -66,6 +66,8 @@ pub trait AgentHook: Send + Sync {
 
     fn before_execute_tools(&self, _context: &AgentHookContext, _calls: &[RuntimeToolCall]) {}
 
+    fn after_response(&self, _context: &AgentHookContext, _response: &LlmResponse) {}
+
     fn after_iteration(&self, _context: &AgentHookContext) {}
 
     fn finalize_content(&self, _context: &AgentHookContext, content: String) -> String {
@@ -119,6 +121,12 @@ impl AgentHook for CompositeHook {
     fn before_execute_tools(&self, context: &AgentHookContext, calls: &[RuntimeToolCall]) {
         for hook in &self.hooks {
             invoke_hook_lifecycle(|| hook.before_execute_tools(context, calls));
+        }
+    }
+
+    fn after_response(&self, context: &AgentHookContext, response: &LlmResponse) {
+        for hook in &self.hooks {
+            invoke_hook_lifecycle(|| hook.after_response(context, response));
         }
     }
 
@@ -288,6 +296,7 @@ impl AgentRunner {
             let model = request_model(&spec, request, hook_context(iteration, &messages))?;
             let response = model.response;
             accumulate_usage(&mut usage, &response.usage);
+            invoke_agent_hook_after_response(&spec, &hook_context(iteration, &messages), &response);
 
             if cancellation_requested(&spec) {
                 return Ok(cancelled_run_result(
@@ -549,6 +558,11 @@ impl AgentRunner {
                     request_model(&spec, retry_request, hook_context(iteration, &messages))?;
                 let retry_response = retry_model.response;
                 accumulate_usage(&mut usage, &retry_response.usage);
+                invoke_agent_hook_after_response(
+                    &spec,
+                    &hook_context(iteration, &messages),
+                    &retry_response,
+                );
                 if retry_model.hook_streamed {
                     invoke_agent_hook_stream_end(&spec, &hook_context(iteration, &messages), false);
                 }
@@ -939,6 +953,16 @@ fn invoke_agent_hook_before_execute_tools(
 ) {
     if let Some(hook) = &spec.agent_hook {
         invoke_hook_lifecycle(|| hook.before_execute_tools(context, calls));
+    }
+}
+
+fn invoke_agent_hook_after_response(
+    spec: &AgentRunSpec<'_>,
+    context: &AgentHookContext,
+    response: &LlmResponse,
+) {
+    if let Some(hook) = &spec.agent_hook {
+        invoke_hook_lifecycle(|| hook.after_response(context, response));
     }
 }
 
@@ -1414,5 +1438,159 @@ fn interrupt_text(interrupt: &RuntimeInterrupt) -> Option<String> {
 fn interrupt_name(interrupt: &RuntimeInterrupt) -> String {
     match interrupt {
         RuntimeInterrupt::AskUser { name, .. } => name.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct RecordingHook {
+        label: &'static str,
+        events: Arc<Mutex<Vec<String>>>,
+        append_suffix: bool,
+    }
+
+    impl AgentHook for RecordingHook {
+        fn after_response(&self, _context: &AgentHookContext, response: &LlmResponse) {
+            let content = response.content.clone().unwrap_or_default();
+            self.events
+                .lock()
+                .expect("events lock")
+                .push(format!("{}:response:{content}", self.label));
+        }
+
+        fn finalize_content(&self, _context: &AgentHookContext, content: String) -> String {
+            self.events
+                .lock()
+                .expect("events lock")
+                .push(format!("{}:finalize:{content}", self.label));
+            if self.append_suffix {
+                format!("{content}{}", self.label)
+            } else {
+                content
+            }
+        }
+    }
+
+    struct QueueProviderClient {
+        responses: Mutex<VecDeque<LlmResponse>>,
+    }
+
+    impl ProviderClient for QueueProviderClient {
+        fn chat(&self, _request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+            self.responses
+                .lock()
+                .expect("response queue lock")
+                .pop_front()
+                .ok_or_else(|| ProviderError::Api {
+                    status: None,
+                    message: "missing queued response".to_owned(),
+                    retryable: false,
+                    headers: BTreeMap::new(),
+                    body: None,
+                })
+        }
+
+        fn chat_stream(
+            &self,
+            request: ProviderRequest,
+            _on_event: &mut dyn FnMut(ProviderEvent),
+        ) -> Result<LlmResponse, ProviderError> {
+            self.chat(request)
+        }
+    }
+
+    fn blank_response() -> LlmResponse {
+        LlmResponse {
+            content: Some(String::new()),
+            ..LlmResponse::default()
+        }
+    }
+
+    #[test]
+    fn composite_hook_forwards_after_response_and_finalize_content() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let hook_a: Arc<dyn AgentHook> = Arc::new(RecordingHook {
+            label: "a",
+            events: events.clone(),
+            append_suffix: true,
+        });
+        let hook_b: Arc<dyn AgentHook> = Arc::new(RecordingHook {
+            label: "b",
+            events: events.clone(),
+            append_suffix: true,
+        });
+        let composite = CompositeHook::new(vec![hook_a, hook_b]);
+        let context = AgentHookContext {
+            iteration: 3,
+            messages: vec![json!({"role": "user", "content": "hello"})],
+        };
+        let response = LlmResponse {
+            content: Some("reply".to_owned()),
+            ..LlmResponse::default()
+        };
+
+        composite.after_response(&context, &response);
+        let finalized = composite.finalize_content(&context, "seed".to_owned());
+
+        assert_eq!(finalized, "seedab");
+        assert_eq!(
+            events.lock().expect("events lock").clone(),
+            vec![
+                "a:response:reply",
+                "b:response:reply",
+                "a:finalize:seed",
+                "b:finalize:seeda"
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_runner_invokes_after_response_for_retry_response(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let client = QueueProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                blank_response(),
+                blank_response(),
+                LlmResponse {
+                    content: Some("final answer".to_owned()),
+                    ..LlmResponse::default()
+                },
+            ])),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let hook: Arc<dyn AgentHook> = Arc::new(RecordingHook {
+            label: "hook",
+            events: events.clone(),
+            append_suffix: false,
+        });
+        let tools = ToolRegistry::new();
+        let mut spec = AgentRunSpec::new(
+            vec![json!({"role": "user", "content": "hello"})],
+            &tools,
+            &client,
+            "model",
+        );
+        spec.max_iterations = 2;
+        spec.agent_hook = Some(hook);
+
+        let result = AgentRunner::new().run(spec)?;
+
+        assert_eq!(result.final_content.as_deref(), Some("final answer"));
+        assert_eq!(
+            events.lock().expect("events lock").clone(),
+            vec![
+                "hook:response:",
+                "hook:response:",
+                "hook:response:final answer",
+                "hook:finalize:final answer",
+            ]
+        );
+        Ok(())
     }
 }

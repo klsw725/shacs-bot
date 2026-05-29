@@ -26,8 +26,8 @@ use shacs_config::{
 };
 use shacs_core::app::{AppError, AppId, AppLifecycleState, AppRegistryEntry, AppRegistryStore};
 use shacs_core::runtime::{
-    AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, ContextBuilder,
-    DreamLifecycle, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
+    AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
+    ContextBuilder, DreamLifecycle, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
     HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle,
     MessageBus, ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
     RuntimeToolCall, Session, SessionHistoryOptions, SessionManager, SessionTurnLock,
@@ -1548,6 +1548,64 @@ impl AgentHook for ObservabilityToolStartHook {
             );
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RuntimeVerboseLogHook;
+
+impl AgentHook for RuntimeVerboseLogHook {
+    fn before_execute_tools(&self, _context: &AgentHookContext, calls: &[RuntimeToolCall]) {
+        for call in calls {
+            eprintln!(
+                "Tool call {} args={}",
+                call.name,
+                runtime_tool_args_preview(&call.arguments)
+            );
+        }
+    }
+
+    fn after_response(&self, _context: &AgentHookContext, response: &LlmResponse) {
+        eprintln!(
+            "LLM response preview: {}",
+            runtime_response_preview(response)
+        );
+        eprintln!("LLM usage {}", runtime_usage_preview(response));
+    }
+}
+
+fn runtime_preview_text(value: &str, max_chars: usize) -> String {
+    let redacted = redact_string(value.trim());
+    let preview = truncate_for_history(&redacted, max_chars);
+    if preview.is_empty() {
+        "<empty>".to_owned()
+    } else {
+        preview
+    }
+}
+
+fn runtime_message_preview(message: &InboundMessage) -> String {
+    runtime_preview_text(&message.content, 80)
+}
+
+fn runtime_response_preview(response: &LlmResponse) -> String {
+    runtime_preview_text(response.content.as_deref().unwrap_or(""), 120)
+}
+
+fn runtime_tool_args_preview(arguments: &Value) -> String {
+    runtime_preview_text(&arguments.to_string(), 200)
+}
+
+fn runtime_usage_value(response: &LlmResponse, key: &str) -> u64 {
+    response.usage.get(key).copied().unwrap_or_default()
+}
+
+fn runtime_usage_preview(response: &LlmResponse) -> String {
+    format!(
+        "prompt={} completion={} cached={}",
+        runtime_usage_value(response, "prompt_tokens"),
+        runtime_usage_value(response, "completion_tokens"),
+        runtime_usage_value(response, "cached_tokens"),
+    )
 }
 
 fn observability_provider_callback(
@@ -5690,10 +5748,10 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
     }
     let ownership = RuntimeOwnershipLease::acquire(&bundle, mode)?;
     let data_dir = bundle.context.data_dir.clone();
-    let adapter = Arc::new(AgentLoopChatCompletionAdapter::from_bundle(
-        bundle.clone(),
-        options.allow_side_effects,
-    )?);
+    let adapter = Arc::new(
+        AgentLoopChatCompletionAdapter::from_bundle(bundle.clone(), options.allow_side_effects)?
+            .with_runtime_verbose(options.verbose),
+    );
     let heartbeat_worker = start_heartbeat_runtime(adapter.clone(), &bundle)?;
     let supervisor = ExternalChannelSupervisor::start(
         adapter.clone(),
@@ -8618,7 +8676,10 @@ pub fn serve_web_ui(options: WebOptions) -> Result<String, CliError> {
     let report = web_preset_from_bundle(&bundle, &options)?;
     let timeout_seconds = bundle.config.api.timeout.max(0.001);
     let websocket_path = web_ui_websocket_path(&report);
-    let adapter = Arc::new(AgentLoopChatCompletionAdapter::from_bundle(bundle, false)?);
+    let adapter = Arc::new(
+        AgentLoopChatCompletionAdapter::from_bundle(bundle, false)?
+            .with_runtime_verbose(options.verbose),
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -8719,7 +8780,7 @@ pub fn help_text() -> String {
         "      --temperature <n> Override generation temperature for ask/agent",
         "      --max-tokens <n>  Override max output tokens for ask/agent",
         "      --markdown/--no-markdown  Accept nanobot direct CLI render flags",
-        "      --verbose         Print additional serve diagnostics",
+        "      --verbose         Print runtime preview logs for run/web and serve diagnostics",
         "      --allow-remote    Permit non-loopback API binding",
         "      --allow-api-side-effects  Enable write/edit/exec tools in API turns",
         "      --session <id>    Use a CLI session key for ask/agent",
@@ -10194,6 +10255,7 @@ pub struct AgentLoopChatCompletionAdapter {
     allow_side_effect_tools: bool,
     send_progress: bool,
     send_max_retries: u32,
+    runtime_verbose: bool,
     session_turn_lock: SessionTurnLock,
     exec_timeout_seconds: u64,
     exec_sandbox: Option<String>,
@@ -10241,6 +10303,7 @@ impl AgentLoopChatCompletionAdapter {
             allow_side_effect_tools,
             send_progress: bundle.config.channels.send_progress,
             send_max_retries: bundle.config.channels.send_max_retries,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: u64::from(bundle.config.tools.exec.timeout),
             exec_sandbox,
@@ -10248,6 +10311,11 @@ impl AgentLoopChatCompletionAdapter {
             exec_allowed_env_keys: bundle.config.tools.exec.allowed_env_keys.clone(),
             exec_env: configured_exec_env(&bundle.config),
         })
+    }
+
+    pub fn with_runtime_verbose(mut self, runtime_verbose: bool) -> Self {
+        self.runtime_verbose = runtime_verbose;
+        self
     }
 
     fn loop_config(&self) -> AgentLoopConfig {
@@ -10731,6 +10799,14 @@ impl AgentLoopChatCompletionAdapter {
         on_event: Option<ApiProviderEventCallback>,
         observability_hooks: &[ShacsBotObservabilityHook],
     ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
+        if self.runtime_verbose {
+            eprintln!(
+                "Processing message from {}:{}: {}",
+                message.channel.as_str(),
+                message.sender_id.as_str(),
+                runtime_message_preview(&message),
+            );
+        }
         let sessions = SessionManager::new(&self.workspace).map_err(|error| {
             ApiError::internal(format!("session manager could not be initialized: {error}"))
         })?;
@@ -10761,17 +10837,26 @@ impl AgentLoopChatCompletionAdapter {
         if let Some(callback) = on_event {
             loop_runtime = loop_runtime.with_provider_event_callback(callback);
         }
+        let mut agent_hook: Option<Arc<dyn AgentHook>> = self
+            .runtime_verbose
+            .then(|| Arc::new(RuntimeVerboseLogHook) as Arc<dyn AgentHook>);
         if !observability_hooks.is_empty() {
             let pending = Arc::new(Mutex::new(BTreeMap::new()));
-            loop_runtime = loop_runtime
-                .with_agent_hook(Arc::new(ObservabilityToolStartHook::new(
-                    observability_hooks.to_vec(),
-                    pending.clone(),
-                )))
-                .with_tool_event_callback(
-                    observability_tool_callback(observability_hooks, pending)
-                        .expect("observability hook should create tool callback"),
-                );
+            let observability_hook: Arc<dyn AgentHook> = Arc::new(ObservabilityToolStartHook::new(
+                observability_hooks.to_vec(),
+                pending.clone(),
+            ));
+            agent_hook = Some(match agent_hook {
+                Some(existing) => Arc::new(CompositeHook::new(vec![existing, observability_hook])),
+                None => observability_hook,
+            });
+            loop_runtime = loop_runtime.with_tool_event_callback(
+                observability_tool_callback(observability_hooks, pending)
+                    .expect("observability hook should create tool callback"),
+            );
+        }
+        if let Some(hook) = agent_hook {
+            loop_runtime = loop_runtime.with_agent_hook(hook);
         }
         let result = loop_runtime
             .process_message(message)
@@ -13339,6 +13424,7 @@ mod tests {
             allow_side_effect_tools: false,
             send_progress: false,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: turn_lock,
             exec_timeout_seconds: 60,
             exec_sandbox: None,
@@ -14246,6 +14332,7 @@ mod tests {
             allow_side_effect_tools: true,
             send_progress: false,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 123,
             exec_sandbox: Some("sandboxed".to_owned()),
@@ -15864,6 +15951,103 @@ mod tests {
         assert!(help.contains("--gateway-port"));
         assert!(help.contains("--websocket-host"));
         assert!(help.contains("--token-stdin"));
+        assert!(help.contains(
+            "--verbose         Print runtime preview logs for run/web and serve diagnostics"
+        ));
+    }
+
+    #[test]
+    fn runtime_verbose_preview_helpers_truncate_input_response_and_tool_args() {
+        let input = InboundMessage::new("websocket", "user-1", "chat-1", "a".repeat(81));
+        assert_eq!(
+            runtime_message_preview(&input),
+            format!("{}…", "a".repeat(80))
+        );
+
+        let response = LlmResponse {
+            content: Some("b".repeat(121)),
+            usage: BTreeMap::from([
+                ("prompt_tokens".to_owned(), 11),
+                ("completion_tokens".to_owned(), 7),
+                ("cached_tokens".to_owned(), 3),
+            ]),
+            ..LlmResponse::default()
+        };
+        assert_eq!(
+            runtime_response_preview(&response),
+            format!("{}…", "b".repeat(120))
+        );
+        assert_eq!(
+            runtime_usage_preview(&response),
+            "prompt=11 completion=7 cached=3"
+        );
+
+        let tool_args = json!({"text": "c".repeat(250)});
+        let preview = runtime_tool_args_preview(&tool_args);
+        assert!(preview.ends_with('…'));
+        assert_eq!(preview.chars().count(), 201);
+    }
+
+    #[test]
+    fn runtime_verbose_preview_helpers_redact_before_truncating() {
+        let input = InboundMessage::new(
+            "websocket",
+            "user-1",
+            "chat-1",
+            "OPENAI_API_KEY=sk-secret-token visible text",
+        );
+        let preview = runtime_message_preview(&input);
+        assert!(!preview.contains("sk-secret-token"));
+        assert!(preview.contains("[REDACTED]") || preview.contains("OPENAI_API_KEY"));
+
+        let response = LlmResponse {
+            content: Some("Authorization: Bearer ghp_secret_token after".to_owned()),
+            ..LlmResponse::default()
+        };
+        let preview = runtime_response_preview(&response);
+        assert!(!preview.contains("ghp_secret_token"));
+
+        let tool_args = json!({
+            "api_key": "plain-secret",
+            "query": "visible"
+        });
+        let preview = runtime_tool_args_preview(&tool_args);
+        assert!(!preview.contains("plain-secret"));
+        assert!(preview.contains("visible"));
+    }
+
+    #[test]
+    fn agent_loop_adapter_builder_sets_runtime_verbose_flag() {
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults::default(),
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse::default(),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace: PathBuf::from("/tmp/workspace"),
+            media_dir: PathBuf::from("/tmp/data/media/api"),
+            tools: ToolRegistry::new(),
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+        };
+
+        assert!(!adapter.runtime_verbose);
+        let adapter = adapter.with_runtime_verbose(true);
+        assert!(adapter.runtime_verbose);
     }
 
     #[test]
@@ -15945,6 +16129,7 @@ mod tests {
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
@@ -16007,6 +16192,7 @@ mod tests {
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
@@ -16095,6 +16281,7 @@ mod tests {
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
@@ -16171,6 +16358,7 @@ mod tests {
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
@@ -16234,6 +16422,7 @@ mod tests {
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
@@ -16309,6 +16498,7 @@ mod tests {
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
@@ -16381,6 +16571,7 @@ mod tests {
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
@@ -16459,6 +16650,7 @@ mod tests {
             allow_side_effect_tools: false,
             send_progress: true,
             send_max_retries: 0,
+            runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
             exec_sandbox: None,
@@ -16520,6 +16712,7 @@ mod tests {
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
+                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
@@ -16593,6 +16786,7 @@ mod tests {
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
+                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
@@ -16671,6 +16865,7 @@ mod tests {
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
+                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
@@ -16759,6 +16954,7 @@ mod tests {
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
+                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
@@ -16872,6 +17068,7 @@ mod tests {
                 allow_side_effect_tools: false,
                 send_progress: true,
                 send_max_retries: 0,
+                runtime_verbose: false,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
                 exec_sandbox: None,
