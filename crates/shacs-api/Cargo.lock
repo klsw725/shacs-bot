@@ -1075,6 +1075,7 @@ dependencies = [
 name = "shacs-providers"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "httpdate",
  "regex",
  "serde",
@@ -1104,6 +1105,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "ureq",
  "zip",
 ]
