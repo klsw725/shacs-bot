@@ -13,7 +13,14 @@ RUN cargo build --manifest-path crates/shacs-cli/Cargo.toml --release --locked
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libssl3 \
+        nodejs \
+        npm \
+        python-is-python3 \
+        python3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /bin/bash shacs \
     && mkdir -p /home/shacs/.shacs-bot \
