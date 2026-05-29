@@ -2154,6 +2154,53 @@ fn message_tool_sends_with_context_media_buttons_and_metadata() -> Result<(), Bo
 }
 
 #[test]
+fn message_tool_resolves_generated_media_refs_to_media_root() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let media_root = temp.path().join("data").join("media");
+    let sent = Arc::new(Mutex::new(Vec::<OutboundMessage>::new()));
+    let capture = sent.clone();
+    let tool = shacs_core::tools::MessageTool::with_sender(
+        temp.path().join("workspace"),
+        Arc::new(move |message: OutboundMessage| {
+            capture
+                .lock()
+                .map_err(|error| error.to_string())?
+                .push(message);
+            Ok(())
+        }),
+        "telegram",
+        "chat-1",
+        None,
+    )
+    .with_media_roots([media_root.clone()]);
+
+    let result = tool
+        .execute(json_map(json!({
+            "content": "generated image",
+            "media": ["media/image-generation/img-1.png"]
+        }))?)
+        .into_text();
+
+    if result != "Message sent to telegram:chat-1 with 1 attachments" {
+        return Err(format!("unexpected send result: {result}").into());
+    }
+    let messages = sent.lock().map_err(|error| error.to_string())?;
+    let media = messages
+        .first()
+        .and_then(|message| message.media.first())
+        .ok_or("missing media")?;
+    let expected = media_root
+        .join("image-generation")
+        .join("img-1.png")
+        .to_string_lossy()
+        .into_owned();
+    if media != &expected {
+        return Err(format!("generated media ref resolved incorrectly: {media}").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn message_tool_validates_target_sender_buttons_and_cross_chat_reply() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;

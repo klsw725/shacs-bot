@@ -3,6 +3,7 @@ mod base;
 mod cron;
 mod file_state;
 mod filesystem;
+mod image_generation;
 mod mcp;
 mod message;
 mod notebook;
@@ -25,6 +26,7 @@ pub use file_state::{FileReadState, FileState};
 pub use filesystem::{
     resolve_path, EditFileTool, ListDirTool, PathContext, ReadFileTool, WriteFileTool,
 };
+pub use image_generation::{ImageGenerateTool, ImageGenerateToolConfig};
 pub use mcp::{
     is_transient_mcp_error, normalize_schema_for_openai, register_mcp_capabilities,
     sanitize_mcp_name, McpCallOutcome, McpCapability, McpCapabilityKind, McpClient, McpConnector,

@@ -3772,6 +3772,116 @@ fn loop_message_tool_delivery_suppresses_final_and_blocks_cross_target(
 }
 
 #[test]
+fn loop_message_tool_delivery_media_validation_allows_media_roots_and_rejects_outside_paths(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let media_root = tempfile::tempdir()?;
+    let outside_root = tempfile::tempdir()?;
+    let allowed_file = media_root.path().join("allowed.txt");
+    let outside_file = outside_root.path().join("outside.txt");
+    std::fs::write(&allowed_file, b"allowed")?;
+    std::fs::write(&outside_file, b"outside")?;
+
+    let run_case = |media: Vec<String>,
+                    final_content: &'static str|
+     -> Result<(String, Vec<String>), Box<dyn Error>> {
+        let bus = MessageBus::new();
+        let message_tool = MessageTool::new(workspace.path());
+        let mut registry = ToolRegistry::new();
+        registry.register(message_tool.clone());
+        let client = MockProvider::new(vec![
+            LlmResponse {
+                finish_reason: "tool_calls".to_owned(),
+                tool_calls: vec![ToolCallRequest::new(
+                    "msg-media",
+                    "message",
+                    Map::from_iter([
+                        ("content".to_owned(), json!("tool delivery")),
+                        ("media".to_owned(), json!(media)),
+                    ]),
+                )],
+                ..LlmResponse::default()
+            },
+            LlmResponse {
+                content: Some(final_content.to_owned()),
+                ..LlmResponse::default()
+            },
+        ]);
+        let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+        config.media_roots = vec![media_root.path().to_path_buf()];
+        let mut loop_runtime = AgentLoop::new(
+            bus.clone(),
+            SessionManager::new(workspace.path())?,
+            ContextBuilder::new(workspace.path()),
+            &registry,
+            &client,
+            config,
+        )
+        .with_message_tool_delivery(message_tool);
+
+        loop_runtime.process_message(InboundMessage::new("telegram", "user-1", "chat-1", "go"))?;
+        let outbound = bus.consume_outbound().ok_or("missing outbound")?;
+        if bus.consume_outbound().is_some() {
+            return Err("unexpected extra outbound".into());
+        }
+        Ok((outbound.content, outbound.media))
+    };
+
+    let allowed_media = allowed_file.canonicalize()?.to_string_lossy().into_owned();
+    let (allowed_content, allowed_files) = run_case(vec![allowed_media.clone()], "allowed final")?;
+    if allowed_content != "tool delivery" || allowed_files != vec![allowed_media] {
+        return Err(format!(
+            "allowed media delivery drifted: {allowed_content:?} {allowed_files:?}"
+        )
+        .into());
+    }
+
+    let remote = run_case(
+        vec!["https://example.invalid/media.png".to_owned()],
+        "remote final",
+    )?;
+    if remote.0 != "remote final" || !remote.1.is_empty() {
+        return Err(format!("remote media was not rejected: {remote:?}").into());
+    }
+
+    let outside_media = outside_file.canonicalize()?.to_string_lossy().into_owned();
+    let outside = run_case(vec![outside_media], "outside final")?;
+    if outside.0 != "outside final" || !outside.1.is_empty() {
+        return Err(format!("outside media was not rejected: {outside:?}").into());
+    }
+
+    #[cfg(unix)]
+    {
+        let symlink_path = media_root.path().join("symlink.txt");
+        std::os::unix::fs::symlink(&allowed_file, &symlink_path)?;
+        let symlink_media = symlink_path.to_string_lossy().into_owned();
+        let symlink = run_case(vec![symlink_media], "symlink final")?;
+        if symlink.0 != "symlink final" || !symlink.1.is_empty() {
+            return Err(format!("symlink media was not rejected: {symlink:?}").into());
+        }
+
+        let real_parent = media_root.path().join("real-parent");
+        std::fs::create_dir_all(&real_parent)?;
+        let nested_file = real_parent.join("nested.txt");
+        std::fs::write(&nested_file, b"nested")?;
+        let parent_symlink = media_root.path().join("parent-symlink");
+        std::os::unix::fs::symlink(&real_parent, &parent_symlink)?;
+        let parent_symlink_media = parent_symlink
+            .join("nested.txt")
+            .to_string_lossy()
+            .into_owned();
+        let parent_symlink = run_case(vec![parent_symlink_media], "parent symlink final")?;
+        if parent_symlink.0 != "parent symlink final" || !parent_symlink.1.is_empty() {
+            return Err(
+                format!("parent symlink media was not rejected: {parent_symlink:?}").into(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn loop_checkpoint_callback_persists_during_tool_execution_and_success_clears(
 ) -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;

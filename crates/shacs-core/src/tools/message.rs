@@ -67,6 +67,7 @@ pub struct MessageTool {
     id: usize,
     sender: Arc<Mutex<Option<Arc<dyn MessageSender>>>>,
     workspace: PathBuf,
+    media_roots: Vec<PathBuf>,
     initial_context: MessageContext,
 }
 
@@ -85,6 +86,7 @@ impl MessageTool {
             id: NEXT_MESSAGE_TOOL_ID.fetch_add(1, Ordering::Relaxed),
             sender: Arc::new(Mutex::new(None)),
             workspace: workspace.into(),
+            media_roots: Vec::new(),
             initial_context: MessageContext::new(
                 default_channel.into(),
                 default_chat_id.into(),
@@ -108,6 +110,11 @@ impl MessageTool {
         );
         tool.set_sender(sender);
         tool
+    }
+
+    pub fn with_media_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.media_roots = roots.into_iter().collect();
+        self
     }
 
     pub fn set_context(
@@ -276,7 +283,7 @@ impl MessageTool {
             return "Error: Message sending not configured".to_owned();
         };
 
-        let media = parse_media(params.get("media"), &self.workspace);
+        let media = parse_media(params.get("media"), &self.workspace, &self.media_roots);
         let mut metadata = if same_target {
             context.metadata.as_object().cloned().unwrap_or_default()
         } else {
@@ -345,7 +352,7 @@ fn parse_buttons(value: &Value) -> Result<Vec<Vec<String>>, String> {
         .collect()
 }
 
-fn parse_media(value: Option<&Value>, workspace: &Path) -> Vec<String> {
+fn parse_media(value: Option<&Value>, workspace: &Path, media_roots: &[PathBuf]) -> Vec<String> {
     value
         .and_then(Value::as_array)
         .into_iter()
@@ -357,6 +364,11 @@ fn parse_media(value: Option<&Value>, workspace: &Path) -> Vec<String> {
                 || Path::new(path).is_absolute()
             {
                 path.to_owned()
+            } else if let Some(suffix) = path.strip_prefix("media/") {
+                media_roots
+                    .first()
+                    .map(|root| root.join(suffix).to_string_lossy().into_owned())
+                    .unwrap_or_else(|| workspace.join(path).to_string_lossy().into_owned())
             } else {
                 workspace.join(path).to_string_lossy().into_owned()
             }

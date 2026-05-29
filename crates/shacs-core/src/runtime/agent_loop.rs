@@ -41,6 +41,7 @@ type MessageDeliveryTarget = Arc<Mutex<Option<(String, String)>>>;
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
     pub workspace: PathBuf,
+    pub media_roots: Vec<PathBuf>,
     pub model: String,
     pub settings: GenerationSettings,
     pub retry_mode: ProviderRetryMode,
@@ -60,6 +61,7 @@ impl AgentLoopConfig {
     pub fn new(workspace: impl Into<PathBuf>, model: impl Into<String>) -> Self {
         Self {
             workspace: workspace.into(),
+            media_roots: Vec::new(),
             model: model.into(),
             settings: GenerationSettings::default(),
             retry_mode: ProviderRetryMode::Standard,
@@ -195,6 +197,7 @@ impl<'a> AgentLoop<'a> {
         let sender = Arc::new(BusMessageSender {
             bus: self.bus.clone(),
             workspace: self.config.workspace.clone(),
+            media_roots: self.config.media_roots.clone(),
             current_target: target.clone(),
         });
         message_tool.set_sender(sender);
@@ -844,6 +847,7 @@ impl Drop for MessageDeliveryTargetGuard {
 struct BusMessageSender {
     bus: MessageBus,
     workspace: PathBuf,
+    media_roots: Vec<PathBuf>,
     current_target: MessageDeliveryTarget,
 }
 
@@ -855,7 +859,7 @@ impl MessageSender for BusMessageSender {
                 return Err("cross-target message delivery is not allowed in AgentLoop".to_owned());
             }
         }
-        let media = validate_outbound_media(&self.workspace, &message.media)?;
+        let media = validate_outbound_media(&self.workspace, &self.media_roots, &message.media)?;
         let metadata = message.metadata.as_object().cloned().unwrap_or_default();
         self.bus.publish_outbound(OutboundMessage {
             channel: message.channel,
@@ -870,10 +874,20 @@ impl MessageSender for BusMessageSender {
     }
 }
 
-fn validate_outbound_media(workspace: &Path, media: &[String]) -> Result<Vec<String>, String> {
+fn validate_outbound_media(
+    workspace: &Path,
+    media_roots: &[PathBuf],
+    media: &[String],
+) -> Result<Vec<String>, String> {
     let workspace = workspace
         .canonicalize()
         .map_err(|error| format!("workspace could not be resolved: {error}"))?;
+    let mut allowed_roots = vec![workspace.clone()];
+    allowed_roots.extend(
+        media_roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok()),
+    );
     media
         .iter()
         .map(|item| {
@@ -881,20 +895,36 @@ fn validate_outbound_media(workspace: &Path, media: &[String]) -> Result<Vec<Str
                 return Err("remote media delivery is not allowed in AgentLoop".to_owned());
             }
             let candidate = PathBuf::from(item);
-            let canonical = candidate
-                .canonicalize()
-                .map_err(|error| format!("media path could not be resolved: {error}"))?;
-            let metadata = std::fs::symlink_metadata(&canonical)
+            let metadata = std::fs::symlink_metadata(&candidate)
                 .map_err(|error| format!("media metadata could not be read: {error}"))?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err("media path is not an allowed regular file".to_owned());
             }
-            if !canonical.starts_with(&workspace) {
-                return Err("media path escapes workspace".to_owned());
+            reject_symlink_media_parents(&candidate)?;
+            let canonical = candidate
+                .canonicalize()
+                .map_err(|error| format!("media path could not be resolved: {error}"))?;
+            if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+                return Err("media path escapes allowed media roots".to_owned());
             }
             Ok(canonical.to_string_lossy().into_owned())
         })
         .collect()
+}
+
+fn reject_symlink_media_parents(candidate: &Path) -> Result<(), String> {
+    for parent in candidate
+        .ancestors()
+        .skip(1)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        let metadata = std::fs::symlink_metadata(parent)
+            .map_err(|error| format!("media parent metadata could not be read: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("media path is not an allowed regular file".to_owned());
+        }
+    }
+    Ok(())
 }
 
 fn append_user_turn(session: &mut Session, message: &InboundMessage) {
