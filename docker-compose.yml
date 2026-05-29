@@ -28,6 +28,7 @@ services:
       - --websocket-host
       - 0.0.0.0
       - --allow-remote
+      - --verbose
       - --workspace
       - /home/shacs/.shacs-bot/workspace
     restart: unless-stopped
