@@ -6,7 +6,7 @@ use crate::types::{finish_reason_from_openai_responses, LlmResponse, ToolCallReq
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1352,6 +1352,7 @@ pub fn merge_json_objects(target: &mut Map<String, Value>, source: &Map<String, 
 fn convert_messages_to_responses_input(messages: &[Value]) -> (String, Vec<Value>) {
     let mut instructions = Vec::new();
     let mut input = Vec::new();
+    let mut omitted_function_call_ids = BTreeSet::new();
     for (index, message) in messages.iter().filter_map(Value::as_object).enumerate() {
         let role = message
             .get("role")
@@ -1388,11 +1389,24 @@ fn convert_messages_to_responses_input(messages: &[Value]) -> (String, Vec<Value
                             call.get("id").and_then(Value::as_str).unwrap_or_default(),
                         );
                         let function = call.get("function").and_then(Value::as_object);
+                        let call_id = if call_id.is_empty() {
+                            format!("call_{index}")
+                        } else {
+                            call_id
+                        };
+                        let name = function
+                            .and_then(|function| function.get("name"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if name.is_empty() {
+                            omitted_function_call_ids.insert(call_id);
+                            continue;
+                        }
                         input.push(json!({
                             "type": "function_call",
                             "id": item_id.unwrap_or_else(|| format!("fc_{index}")),
-                            "call_id": if call_id.is_empty() { format!("call_{index}") } else { call_id },
-                            "name": function.and_then(|function| function.get("name")).and_then(Value::as_str).unwrap_or_default(),
+                            "call_id": call_id,
+                            "name": name,
                             "arguments": function.and_then(|function| function.get("arguments")).and_then(Value::as_str).unwrap_or("{}"),
                         }));
                     }
@@ -1405,6 +1419,9 @@ fn convert_messages_to_responses_input(messages: &[Value]) -> (String, Vec<Value
                         .and_then(Value::as_str)
                         .unwrap_or("call_0"),
                 );
+                if omitted_function_call_ids.contains(&call_id) {
+                    continue;
+                }
                 let output = message
                     .get("content")
                     .and_then(value_to_text)

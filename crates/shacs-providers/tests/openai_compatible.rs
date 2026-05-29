@@ -145,6 +145,76 @@ fn responses_builder_converts_messages_tools_and_reasoning() -> Result<(), Box<d
 }
 
 #[test]
+fn responses_builder_skips_empty_function_call_names_and_matching_outputs(
+) -> Result<(), Box<dyn Error>> {
+    let parts = build_responses_request(
+        &ProviderRequest {
+            model: "gpt-5".to_owned(),
+            messages: vec![
+                json!({"role": "user", "content": "install curl"}),
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {"id": "call_empty|fc_empty", "type": "function", "function": {"name": "", "arguments": "{}"}},
+                        {"id": "call_missing|fc_missing", "type": "function", "function": {"arguments": "{}"}},
+                        {"id": "call_good|fc_good", "type": "function", "function": {"name": "search", "arguments": "{\"query\":\"curl\"}"}}
+                    ]
+                }),
+                json!({"role": "tool", "tool_call_id": "call_empty|fc_empty", "content": "bad"}),
+                json!({"role": "tool", "tool_call_id": "call_missing|fc_missing", "content": "bad"}),
+                json!({"role": "tool", "tool_call_id": "call_good|fc_good", "content": "ok"}),
+            ],
+            tools: vec![chat_completions_tool(
+                "search",
+                "Search",
+                json!({"type": "object"}),
+            )],
+            settings: GenerationSettings::default(),
+            tool_choice: None,
+        },
+        &ProviderConfig::default(),
+        false,
+    );
+    let input = parts.body["input"]
+        .as_array()
+        .ok_or("responses input should be an array")?;
+    if input.iter().any(|item| {
+        item["type"] == "function_call" && item["name"].as_str().unwrap_or_default().is_empty()
+    }) {
+        return Err(format!("responses input retained empty function name: {input:?}").into());
+    }
+    if input.iter().any(|item| {
+        item["type"] == "function_call_output"
+            && matches!(
+                item["call_id"].as_str(),
+                Some("call_empty" | "call_missing")
+            )
+    }) {
+        return Err(format!("responses input retained orphan tool output: {input:?}").into());
+    }
+    let function_call = input
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .ok_or("valid function call should remain")?;
+    if function_call["call_id"] != "call_good"
+        || function_call["id"] != "fc_good"
+        || function_call["name"] != "search"
+        || function_call["arguments"] != "{\"query\":\"curl\"}"
+    {
+        return Err(format!("valid function call changed: {function_call:?}").into());
+    }
+    if !input.iter().any(|item| {
+        item["type"] == "function_call_output"
+            && item["call_id"] == "call_good"
+            && item["output"] == "ok"
+    }) {
+        return Err(format!("valid function output missing: {input:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn responses_builder_omits_temperature_for_reasoning_models() -> Result<(), Box<dyn Error>> {
     let reasoning = build_responses_request(
         &ProviderRequest {
