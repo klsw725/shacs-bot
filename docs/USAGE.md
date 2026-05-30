@@ -92,6 +92,8 @@ shacs-bot runtime recover --workspace /tmp/ws
 
 Rust programmatic facade(`ShacsBot`/`Nanobot`)는 lifecycle hook과 별도로 observability hook을 제공합니다. Observability hook은 provider stream event와 tool start/finish progress payload를 in-process callback으로 그대로 전달하므로, tool arguments나 provider delta에 민감한 내용이 포함될 수 있습니다. Hook 구현자는 필요한 경우 직접 redaction 후 저장/로그 처리해야 하며, hook panic은 runtime을 중단하지 않고 redacted event kind만 stderr에 남깁니다.
 
+일반 runtime turn은 skill 사용 알림을 기본으로 보냅니다. Always-on skill이 실제 system prompt에 적재되는 새 session에서는 활성 skill 알림을 한 번 보내고, 선택 skill의 `SKILL.md`를 성공적으로 참고하면 해당 skill 사용 알림을 보냅니다. 단순히 사용 가능한 skill 목록에 나타나는 catalog 정보는 사용 알림으로 보내지 않고, 도구/MCP/subagent 호출도 별도 사용 알림으로 보내지 않습니다.
+
 해결된 workspace의 로컬 session 파일 목록을 봅니다:
 
 ```sh
@@ -320,7 +322,7 @@ shacs-bot channels list
 shacs-bot channels status --workspace /tmp/ws
 ```
 
-`channels list`는 built-in channel descriptor, config-enabled 상태, capability, worker boundary 개수를 보여줍니다. `channels status`는 configured channel plugin과 `channels.sendMemoryHints`, `channels.sendToolHints`, send retry count 같은 runtime default를 요약합니다. `sendMaxRetries`는 `ChannelManager`가 channel adapter로 메시지를 넘기는 dispatch/enqueue와 실제 transport send의 총 시도 횟수이며, 값은 최소 1회, 최대 10회로 제한됩니다. 이 명령들은 read-only diagnostics입니다. Runnable channel worker를 시작하려면 `run`을 사용하세요.
+`channels list`는 built-in channel descriptor, config-enabled 상태, capability, worker boundary 개수를 보여줍니다. `channels status`는 configured channel plugin과 `channels.sendMemoryHints`, send retry count 같은 runtime default를 요약합니다. `sendMaxRetries`는 `ChannelManager`가 channel adapter로 메시지를 넘기는 dispatch/enqueue와 실제 transport send의 총 시도 횟수이며, 값은 최소 1회, 최대 10회로 제한됩니다. 이 명령들은 read-only diagnostics입니다. Runnable channel worker를 시작하려면 `run`을 사용하세요.
 
 선택된 channel runtime을 시작합니다:
 
