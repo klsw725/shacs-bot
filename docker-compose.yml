@@ -31,6 +31,7 @@ services:
       - --verbose
       - --workspace
       - /home/shacs/.shacs-bot/workspace
+      - --allow-side-effects
     restart: unless-stopped
     ports:
       - "127.0.0.1:8765:8765"
