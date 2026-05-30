@@ -473,6 +473,7 @@ pub enum ShacsBotObservabilityEvent {
 
 pub type ShacsBotObservabilityHook = Arc<dyn Fn(&ShacsBotObservabilityEvent) + Send + Sync>;
 type RuntimeToolEventCallback = Arc<dyn Fn(&ToolEvent) + Send + Sync>;
+type RuntimeNotificationSink = Arc<dyn Fn(OutboundMessage) + Send + Sync>;
 
 pub struct ShacsBot {
     adapter: AgentLoopChatCompletionAdapter,
@@ -945,7 +946,6 @@ pub struct ChannelsReport {
     pub unknown_plugins: Vec<String>,
     pub worker_count: usize,
     pub send_memory_hints: bool,
-    pub send_tool_hints: bool,
     pub send_max_retries: u32,
 }
 
@@ -1627,6 +1627,82 @@ fn runtime_tool_args_preview(arguments: &Value) -> String {
     runtime_preview_text(&arguments.to_string(), 200)
 }
 
+fn publish_runtime_notification(
+    bus: &MessageBus,
+    live_sink: Option<&RuntimeNotificationSink>,
+    message: OutboundMessage,
+) {
+    if let Some(sink) = live_sink {
+        sink(message);
+    } else {
+        bus.publish_outbound(message);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SkillNotificationUsage {
+    Active,
+    Selected,
+}
+
+impl SkillNotificationUsage {
+    fn metadata_value(self) -> &'static str {
+        match self {
+            Self::Active => "active_always",
+            Self::Selected => "selected",
+        }
+    }
+}
+
+fn skill_usage_notification_message(
+    channel: &str,
+    chat_id: &str,
+    routing_metadata: &Map<String, Value>,
+    reply_to: Option<&str>,
+    skill_names: &[String],
+    usage: SkillNotificationUsage,
+) -> Option<OutboundMessage> {
+    if skill_names.is_empty() {
+        return None;
+    }
+    let content = match usage {
+        SkillNotificationUsage::Active if skill_names.len() == 1 => {
+            format!("Using active skill: {}", skill_names[0])
+        }
+        SkillNotificationUsage::Active => {
+            format!("Using active skills: {}", skill_names.join(", "))
+        }
+        SkillNotificationUsage::Selected if skill_names.len() == 1 => {
+            format!("Using skill: {}", skill_names[0])
+        }
+        SkillNotificationUsage::Selected => format!("Using skills: {}", skill_names.join(", ")),
+    };
+    let mut metadata = routing_metadata.clone();
+    metadata.insert(
+        "runtime_notification".to_owned(),
+        json!({
+            "kind": "skill",
+            "phase": "start",
+            "usage": usage.metadata_value(),
+            "skill_names": skill_names,
+        }),
+    );
+    let mut message = OutboundMessage::new(channel, chat_id, content).with_metadata(metadata);
+    if let Some(reply_to) = reply_to {
+        message.reply_to = Some(reply_to.to_owned());
+    }
+    Some(message)
+}
+
+fn is_skill_runtime_notification(message: &shacs_channels::OutboundMessage) -> bool {
+    message
+        .metadata
+        .get("runtime_notification")
+        .and_then(|value| value.get("kind"))
+        .and_then(Value::as_str)
+        == Some("skill")
+}
+
 fn runtime_usage_value(response: &LlmResponse, key: &str) -> u64 {
     response.usage.get(key).copied().unwrap_or_default()
 }
@@ -1710,6 +1786,65 @@ fn observability_tool_callback(
             },
         );
     }))
+}
+
+fn selected_skill_notification_callback(
+    context_builder: ContextBuilder,
+    bus: MessageBus,
+    live_sink: Option<RuntimeNotificationSink>,
+    channel: String,
+    chat_id: String,
+    routing_metadata: Map<String, Value>,
+    reply_to: Option<String>,
+) -> RuntimeToolEventCallback {
+    let notified = Arc::new(Mutex::new(BTreeSet::<String>::new()));
+    Arc::new(move |event: &ToolEvent| {
+        if event.name != "read_file" || event.status != ToolStatus::Ok {
+            return;
+        }
+        let Some(path) = event
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get("path"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let Some(skill_name) = context_builder.skill_name_for_source_path(path) else {
+            return;
+        };
+        let should_notify = notified
+            .lock()
+            .map(|mut notified| notified.insert(skill_name.clone()))
+            .unwrap_or(false);
+        if !should_notify {
+            return;
+        }
+        if let Some(notification) = skill_usage_notification_message(
+            &channel,
+            &chat_id,
+            &routing_metadata,
+            reply_to.as_deref(),
+            std::slice::from_ref(&skill_name),
+            SkillNotificationUsage::Selected,
+        ) {
+            publish_runtime_notification(&bus, live_sink.as_ref(), notification);
+        }
+    })
+}
+
+fn combine_tool_event_callbacks(
+    callbacks: Vec<RuntimeToolEventCallback>,
+) -> Option<RuntimeToolEventCallback> {
+    match callbacks.as_slice() {
+        [] => None,
+        [_] => callbacks.into_iter().next(),
+        _ => Some(Arc::new(move |event: &ToolEvent| {
+            for callback in &callbacks {
+                callback(event);
+            }
+        })),
+    }
 }
 
 fn tool_progress_event_from_runtime(event: &ToolEvent) -> ToolProgressEvent {
@@ -3679,7 +3814,6 @@ fn load_channels_report(
         unknown_plugins,
         worker_count: workers.len(),
         send_memory_hints: bundle.config.channels.send_memory_hints,
-        send_tool_hints: bundle.config.channels.send_tool_hints,
         send_max_retries: bundle.config.channels.send_max_retries,
     })
 }
@@ -4581,7 +4715,6 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
         format!("Enabled channels: {enabled}"),
         format!("Worker boundaries: {}", report.worker_count),
         format!("Send memory hints: {}", report.send_memory_hints),
-        format!("Send tool hints: {}", report.send_tool_hints),
         format!("Send max retries: {}", report.send_max_retries),
         "Live workers: websocket runnable; external channels start only when transport adapters and credentials are available".to_owned(),
     ];
@@ -5826,12 +5959,35 @@ fn complete_direct_message(
 ) -> Result<String, CliError> {
     let mut invocation = direct_message_invocation(adapter.configured_model(), options)?;
     invocation.session_key = cli_session_key(options.session.as_deref());
-    let response = adapter.complete_direct(invocation)?;
-    Ok(render_agent_response(
-        response.content.unwrap_or_default(),
-        options.markdown,
-        None,
-    ))
+    let mut config = adapter.loop_config();
+    config.settings.temperature = invocation
+        .temperature
+        .unwrap_or(config.settings.temperature);
+    config.settings.max_tokens = invocation.max_tokens.unwrap_or(config.settings.max_tokens);
+    let message = InboundMessage::new("cli", "user", "direct", invocation_text(&invocation))
+        .with_media(invocation.media_paths.clone())
+        .with_session_key_override(invocation.session_key.clone());
+    let (turn, outbound) = adapter.process_inbound_with_outbound(message, config, None, &[])?;
+    let content = render_direct_turn_content(turn.final_content.unwrap_or_default(), outbound);
+    Ok(render_agent_response(content, options.markdown, None))
+}
+
+fn render_direct_turn_content(
+    final_content: String,
+    outbound: Vec<shacs_channels::OutboundMessage>,
+) -> String {
+    let mut parts = outbound
+        .into_iter()
+        .filter(is_skill_runtime_notification)
+        .filter_map(|message| {
+            let content = message.content.trim();
+            (!content.is_empty()).then(|| content.to_owned())
+        })
+        .collect::<Vec<_>>();
+    if !final_content.trim().is_empty() {
+        parts.push(final_content);
+    }
+    parts.join("\n\n")
 }
 
 fn direct_message_invocation(
@@ -10656,6 +10812,7 @@ pub struct AgentLoopChatCompletionAdapter {
     _mcp_reports: Vec<McpServerConnectionReport>,
     allow_side_effect_tools: bool,
     send_progress: bool,
+    send_tool_hints: bool,
     send_max_retries: u32,
     runtime_verbose: bool,
     session_turn_lock: SessionTurnLock,
@@ -10705,6 +10862,7 @@ impl AgentLoopChatCompletionAdapter {
             _mcp_reports: tooling.mcp_reports,
             allow_side_effect_tools,
             send_progress: true,
+            send_tool_hints: bundle.config.channels.send_tool_hints,
             send_max_retries: bundle.config.channels.send_max_retries,
             runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
@@ -10792,13 +10950,6 @@ impl AgentLoopChatCompletionAdapter {
             shacs_api::API_CHAT_ID,
             &[],
         )
-    }
-
-    fn complete_direct(
-        &self,
-        invocation: ChatCompletionInvocation,
-    ) -> Result<LlmResponse, ApiError> {
-        self.run_agent_loop_with_origin(invocation, None, "cli", "user", "direct", &[])
     }
 
     fn complete_sdk_run(
@@ -10956,25 +11107,84 @@ impl AgentLoopChatCompletionAdapter {
         emit: &mut dyn FnMut(WebSocketServerEvent),
     ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
         if !self.send_progress {
-            return self.process_inbound_with_outbound(inbound, config, None, &[]);
+            return self.process_websocket_inbound_with_live_notifications(inbound, config, emit);
         }
 
         let (event_tx, event_rx) = mpsc::channel();
         let callback = Arc::new(move |event: &ProviderEvent| {
             let _ = event_tx.send(event.clone());
         });
+        let (notification_tx, notification_rx) = mpsc::channel();
+        let live_sink: RuntimeNotificationSink = Arc::new(move |message| {
+            let _ = notification_tx.send(message);
+        });
         thread::scope(|scope| {
             let handle = scope.spawn(move || {
-                self.process_inbound_with_outbound(inbound, config, Some(callback), &[])
+                self.process_inbound_with_outbound_inner(
+                    inbound,
+                    config,
+                    Some(callback),
+                    &[],
+                    Some(live_sink),
+                )
             });
-            let stream_result =
-                self.emit_websocket_stream_events(event_rx, chat_id, stream_id, emit);
+            let stream_result = self.emit_websocket_stream_events(
+                event_rx,
+                Some(notification_rx),
+                chat_id,
+                stream_id,
+                emit,
+            );
             let loop_result = match handle.join() {
                 Ok(result) => result,
                 Err(_) => Err(ApiError::internal("websocket agent loop task panicked")),
             };
             stream_result?;
             loop_result
+        })
+    }
+
+    fn process_websocket_inbound_with_live_notifications(
+        &self,
+        inbound: InboundMessage,
+        config: AgentLoopConfig,
+        emit: &mut dyn FnMut(WebSocketServerEvent),
+    ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
+        let (notification_tx, notification_rx) = mpsc::channel();
+        let live_sink: RuntimeNotificationSink = Arc::new(move |message| {
+            let _ = notification_tx.send(message);
+        });
+        thread::scope(|scope| {
+            let handle = scope.spawn(move || {
+                self.process_inbound_with_outbound_inner(
+                    inbound,
+                    config,
+                    None,
+                    &[],
+                    Some(live_sink),
+                )
+            });
+            let sink = WebSocketEventSink::default();
+            let mut manager = websocket_event_channel_manager(self.send_max_retries, sink.clone());
+            while !handle.is_finished() {
+                Self::drain_websocket_runtime_notifications(
+                    &notification_rx,
+                    &mut manager,
+                    &sink,
+                    emit,
+                )?;
+                thread::sleep(Duration::from_millis(20));
+            }
+            Self::drain_websocket_runtime_notifications(
+                &notification_rx,
+                &mut manager,
+                &sink,
+                emit,
+            )?;
+            match handle.join() {
+                Ok(result) => result,
+                Err(_) => Err(ApiError::internal("websocket agent loop task panicked")),
+            }
         })
     }
 
@@ -10989,8 +11199,18 @@ impl AgentLoopChatCompletionAdapter {
         let session_key = self.external_effective_session_key(&inbound);
         let routing_metadata = stream_routing_metadata_from_inbound(&inbound);
         let reply_to = inbound_reply_to(&inbound);
+        let live_runtime_bus = runtime_bus.clone();
+        let live_sink: RuntimeNotificationSink = Arc::new(move |message| {
+            live_runtime_bus.publish_outbound(message);
+        });
         if !self.send_progress || !provider_streaming_channel(&channel) {
-            return self.process_inbound_with_outbound(inbound, config, None, &[]);
+            return self.process_inbound_with_outbound_inner(
+                inbound,
+                config,
+                None,
+                &[],
+                Some(live_sink),
+            );
         }
 
         let stream_id = format!("{channel}:{chat_id}:{session_key}:{}", now_millis());
@@ -11000,7 +11220,13 @@ impl AgentLoopChatCompletionAdapter {
         });
         thread::scope(|scope| {
             let handle = scope.spawn(move || {
-                self.process_inbound_with_outbound(inbound, config, Some(callback), &[])
+                self.process_inbound_with_outbound_inner(
+                    inbound,
+                    config,
+                    Some(callback),
+                    &[],
+                    Some(live_sink),
+                )
             });
             let routing = ExternalStreamRouting {
                 channel: &channel,
@@ -11097,6 +11323,7 @@ impl AgentLoopChatCompletionAdapter {
     fn emit_websocket_stream_events(
         &self,
         event_rx: mpsc::Receiver<ProviderEvent>,
+        notification_rx: Option<mpsc::Receiver<OutboundMessage>>,
         chat_id: &str,
         stream_id: &str,
         emit: &mut dyn FnMut(WebSocketServerEvent),
@@ -11107,7 +11334,20 @@ impl AgentLoopChatCompletionAdapter {
         let mut pending_chars = 0usize;
         let mut emitted_stream_event = false;
         let mut emitted_stream_end = false;
-        for event in event_rx {
+        loop {
+            if let Some(notification_rx) = notification_rx.as_ref() {
+                Self::drain_websocket_runtime_notifications(
+                    notification_rx,
+                    &mut manager,
+                    &sink,
+                    emit,
+                )?;
+            }
+            let event = match event_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             if let ProviderEvent::TextDelta { text } = &event {
                 pending_chars = pending_chars.saturating_add(text.chars().count());
             }
@@ -11144,6 +11384,14 @@ impl AgentLoopChatCompletionAdapter {
                 )?;
             }
         }
+        if let Some(notification_rx) = notification_rx.as_ref() {
+            Self::drain_websocket_runtime_notifications(
+                notification_rx,
+                &mut manager,
+                &sink,
+                emit,
+            )?;
+        }
         if let Some(batch) = coalescer.flush() {
             if !batch.text.is_empty() {
                 emitted_stream_event = true;
@@ -11168,6 +11416,28 @@ impl AgentLoopChatCompletionAdapter {
                 true,
                 emit,
             )?;
+        }
+        Ok(())
+    }
+
+    fn drain_websocket_runtime_notifications(
+        notification_rx: &mpsc::Receiver<OutboundMessage>,
+        manager: &mut ChannelManager,
+        sink: &WebSocketEventSink,
+        emit: &mut dyn FnMut(WebSocketServerEvent),
+    ) -> Result<(), ApiError> {
+        while let Ok(message) = notification_rx.try_recv() {
+            if message.channel != WEBSOCKET_CHANNEL || !is_skill_runtime_notification(&message) {
+                continue;
+            }
+            manager.dispatch_outbound(message).map_err(|error| {
+                ApiError::internal(format!(
+                    "websocket runtime notification dispatch failed: {error}"
+                ))
+            })?;
+            for event in sink.take_events() {
+                emit(event);
+            }
         }
         Ok(())
     }
@@ -11205,6 +11475,23 @@ impl AgentLoopChatCompletionAdapter {
         on_event: Option<ApiProviderEventCallback>,
         observability_hooks: &[ShacsBotObservabilityHook],
     ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
+        self.process_inbound_with_outbound_inner(
+            message,
+            config,
+            on_event,
+            observability_hooks,
+            None,
+        )
+    }
+
+    fn process_inbound_with_outbound_inner(
+        &self,
+        message: InboundMessage,
+        config: AgentLoopConfig,
+        on_event: Option<ApiProviderEventCallback>,
+        observability_hooks: &[ShacsBotObservabilityHook],
+        live_notification_sink: Option<RuntimeNotificationSink>,
+    ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
         if self.runtime_verbose {
             eprintln!(
                 "Processing message from {}:{}: {}",
@@ -11218,6 +11505,36 @@ impl AgentLoopChatCompletionAdapter {
         })?;
         let bus = MessageBus::new();
         let outbound_bus = bus.clone();
+        let session_key = effective_external_session_key(&config, &message);
+        let routing_metadata = stream_routing_metadata_from_inbound(&message);
+        let reply_to = inbound_reply_to(&message);
+        let is_new_session = sessions
+            .load_existing(&session_key)
+            .map(|session| session.messages.is_empty())
+            .unwrap_or(true);
+        let context_builder = self.context_builder();
+        if is_new_session && !shacs_command::is_builtin_command(&message.content) {
+            if let Some(notification) = skill_usage_notification_message(
+                &message.channel,
+                &message.chat_id,
+                &routing_metadata,
+                reply_to.as_deref(),
+                &context_builder.active_always_skill_names(),
+                SkillNotificationUsage::Active,
+            ) {
+                publish_runtime_notification(&bus, live_notification_sink.as_ref(), notification);
+            }
+        }
+        let skill_callback_context = context_builder.clone();
+        let skill_notification_callback = selected_skill_notification_callback(
+            skill_callback_context,
+            outbound_bus.clone(),
+            live_notification_sink.clone(),
+            message.channel.clone(),
+            message.chat_id.clone(),
+            routing_metadata.clone(),
+            reply_to.clone(),
+        );
         let subagent_runtime = SubagentRuntime::with_bus(bus.clone());
         let spawn_config = self.subagent_execution_config(&config);
         let subagent_client = self.client.clone();
@@ -11232,7 +11549,7 @@ impl AgentLoopChatCompletionAdapter {
         let mut loop_runtime = AgentLoop::new(
             bus,
             sessions,
-            self.context_builder(),
+            context_builder,
             &tools,
             self.client.as_ref(),
             config,
@@ -11249,6 +11566,7 @@ impl AgentLoopChatCompletionAdapter {
         let mut agent_hook: Option<Arc<dyn AgentHook>> = self
             .runtime_verbose
             .then(|| Arc::new(RuntimeVerboseLogHook) as Arc<dyn AgentHook>);
+        let mut tool_event_callbacks = vec![skill_notification_callback];
         if !observability_hooks.is_empty() {
             let pending = Arc::new(Mutex::new(BTreeMap::new()));
             let observability_hook: Arc<dyn AgentHook> = Arc::new(ObservabilityToolStartHook::new(
@@ -11259,10 +11577,12 @@ impl AgentLoopChatCompletionAdapter {
                 Some(existing) => Arc::new(CompositeHook::new(vec![existing, observability_hook])),
                 None => observability_hook,
             });
-            loop_runtime = loop_runtime.with_tool_event_callback(
-                observability_tool_callback(observability_hooks, pending)
-                    .expect("observability hook should create tool callback"),
-            );
+            if let Some(callback) = observability_tool_callback(observability_hooks, pending) {
+                tool_event_callbacks.push(callback);
+            }
+        }
+        if let Some(callback) = combine_tool_event_callbacks(tool_event_callbacks) {
+            loop_runtime = loop_runtime.with_tool_event_callback(callback);
         }
         if let Some(hook) = agent_hook {
             loop_runtime = loop_runtime.with_agent_hook(hook);
@@ -11365,6 +11685,7 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
                 "capabilities": {
                     "side_effect_tools_allowed": self.allow_side_effect_tools,
                     "send_progress": self.send_progress,
+                    "send_tool_hints": self.send_tool_hints,
                     "send_max_retries": self.send_max_retries,
                     "exec_timeout_seconds": self.exec_timeout_seconds,
                     "exec_sandbox": self.exec_sandbox,
@@ -13940,6 +14261,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: false,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: turn_lock,
             exec_timeout_seconds: 60,
@@ -14898,6 +15220,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: true,
             send_progress: false,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 123,
@@ -15087,7 +15410,6 @@ mod tests {
         let workspace = root.path().join("workspace");
         let mut config = Config::default();
         config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
-        config.channels.send_tool_hints = true;
         config.channels.send_max_retries = 5;
         config.channels.plugins.insert(
             "websocket".to_owned(),
@@ -15106,11 +15428,11 @@ mod tests {
 
         assert_eq!(report.config_path, config_path);
         assert_eq!(report.workspace, workspace);
-        assert!(report.send_tool_hints);
         assert_eq!(report.send_max_retries, 5);
         assert_eq!(report.unknown_plugins, vec!["custom-local".to_owned()]);
         let formatted = format_channels_status(report.clone());
         assert!(!formatted.contains("Send progress"));
+        assert!(!formatted.contains("Send tool hints"));
         let websocket = report
             .channels
             .iter()
@@ -16855,6 +17177,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
+            send_tool_hints: false,
             send_max_retries: 0,
             runtime_verbose: false,
             session_turn_lock: SessionTurnLock::new(),
@@ -17017,6 +17340,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
@@ -17081,6 +17405,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
@@ -17104,15 +17429,26 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![WebSocketServerEvent::Message {
-                chat_id: "chat-b".to_owned(),
-                text: "agent ok".to_owned(),
-                buttons: Vec::new(),
-                button_prompt: None,
-                media: Vec::new(),
-                reply_to: None,
-                kind: None,
-            }]
+            vec![
+                WebSocketServerEvent::Message {
+                    chat_id: "chat-b".to_owned(),
+                    text: "Using active skills: memory, my".to_owned(),
+                    buttons: Vec::new(),
+                    button_prompt: None,
+                    media: Vec::new(),
+                    reply_to: None,
+                    kind: None,
+                },
+                WebSocketServerEvent::Message {
+                    chat_id: "chat-b".to_owned(),
+                    text: "agent ok".to_owned(),
+                    buttons: Vec::new(),
+                    button_prompt: None,
+                    media: Vec::new(),
+                    reply_to: None,
+                    kind: None,
+                },
+            ]
         );
         let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
         assert_eq!(requests.len(), 1);
@@ -17171,6 +17507,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
@@ -17249,6 +17586,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
@@ -17271,11 +17609,16 @@ mod tests {
 
         assert!(matches!(
             &events[0],
+            WebSocketServerEvent::Message { chat_id, text, .. }
+                if chat_id == "chat-stream" && text == "Using active skills: memory, my"
+        ));
+        assert!(matches!(
+            &events[1],
             WebSocketServerEvent::Delta { chat_id, text, stream_id }
                 if chat_id == "chat-stream" && text == "hello" && stream_id.is_some()
         ));
         assert!(matches!(
-            &events[1],
+            &events[2],
             WebSocketServerEvent::StreamEnd { chat_id, stream_id }
                 if chat_id == "chat-stream" && stream_id.is_some()
         ));
@@ -17314,6 +17657,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
@@ -17391,6 +17735,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
@@ -17465,6 +17810,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
@@ -17545,6 +17891,7 @@ mod tests {
             _mcp_reports: Vec::new(),
             allow_side_effect_tools: false,
             send_progress: true,
+            send_tool_hints: false,
             send_max_retries: 0,
             session_turn_lock: SessionTurnLock::new(),
             exec_timeout_seconds: 60,
@@ -17564,12 +17911,104 @@ mod tests {
             },
         )?;
 
-        assert_eq!(output, "direct ok");
+        assert_eq!(output, "Using active skills: memory, my\n\ndirect ok");
         let session_files = fs::read_dir(workspace.join("sessions"))?.count();
         assert_eq!(session_files, 1);
         let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].model, "gpt-5");
+        Ok(())
+    }
+
+    #[test]
+    fn direct_message_renders_selected_skill_notification_before_final_answer_once(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        fs::create_dir_all(workspace.join("skills/weather"))?;
+        fs::write(
+            workspace.join("skills/weather/SKILL.md"),
+            "---\ndescription: Weather skill\n---\nWeather body",
+        )?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut arguments = Map::new();
+        arguments.insert("path".to_owned(), json!("skills/weather/SKILL.md"));
+        let mut tools = ToolRegistry::new();
+        tools.register(ReadFileTool::new(PathContext {
+            workspace: Some(workspace.clone()),
+            allowed_dir: Some(workspace.clone()),
+            media_dir: Some(media_dir.clone()),
+            extra_allowed_dirs: Vec::new(),
+        }));
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 2,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(SequentialProviderClient {
+                captured: captured.clone(),
+                responses: Mutex::new(VecDeque::from([
+                    LlmResponse {
+                        tool_calls: vec![ToolCallRequest::new(
+                            "call-read-skill",
+                            "read_file",
+                            arguments,
+                        )],
+                        finish_reason: "tool_calls".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                    LlmResponse {
+                        content: Some("final answer".to_owned()),
+                        finish_reason: "stop".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                ])),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir,
+            tools,
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            runtime_verbose: false,
+        };
+
+        let output = complete_direct_message(
+            &adapter,
+            &AskOptions {
+                message: "weather in Seoul".to_owned(),
+                session: Some("work".to_owned()),
+                ..AskOptions::default()
+            },
+        )?;
+
+        let skill_index = output
+            .find("Using skill: weather")
+            .ok_or("missing direct selected skill notification")?;
+        let final_index = output.find("final answer").ok_or("missing final answer")?;
+        assert!(skill_index < final_index, "output: {output}");
+        assert_eq!(output.matches("Using skill: weather").count(), 1);
+        assert!(!output.contains("Using tool:"));
+        assert_eq!(output.matches("final answer").count(), 1);
+        let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
+        assert_eq!(requests.len(), 2);
         Ok(())
     }
 
@@ -17608,6 +18047,7 @@ mod tests {
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
+                send_tool_hints: false,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
@@ -17683,6 +18123,7 @@ mod tests {
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
+                send_tool_hints: false,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
@@ -17763,6 +18204,7 @@ mod tests {
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
+                send_tool_hints: false,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
@@ -17853,6 +18295,7 @@ mod tests {
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
+                send_tool_hints: false,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
@@ -17968,6 +18411,7 @@ mod tests {
                 _mcp_reports: Vec::new(),
                 allow_side_effect_tools: false,
                 send_progress: true,
+                send_tool_hints: false,
                 send_max_retries: 0,
                 session_turn_lock: SessionTurnLock::new(),
                 exec_timeout_seconds: 60,
@@ -18002,6 +18446,304 @@ mod tests {
         );
         assert_eq!(finish.files, vec![json!("artifact.txt")]);
         assert_eq!(finish.embeds, vec![json!({"type": "text"})]);
+        Ok(())
+    }
+
+    #[test]
+    fn skill_usage_notification_content_marks_active_and_selected_skills() {
+        let routing = Map::new();
+        let active = skill_usage_notification_message(
+            "direct",
+            "chat-1",
+            &routing,
+            None,
+            &["memory".to_owned(), "my".to_owned()],
+            SkillNotificationUsage::Active,
+        )
+        .expect("active skill notification should be present");
+        assert_eq!(active.content, "Using active skills: memory, my");
+        assert_eq!(active.metadata["runtime_notification"]["kind"], "skill");
+        assert_eq!(
+            active.metadata["runtime_notification"]["usage"],
+            "active_always"
+        );
+
+        let selected = skill_usage_notification_message(
+            "direct",
+            "chat-1",
+            &routing,
+            None,
+            &["weather".to_owned()],
+            SkillNotificationUsage::Selected,
+        )
+        .expect("selected skill notification should be present");
+        assert_eq!(selected.content, "Using skill: weather");
+        assert_eq!(
+            selected.metadata["runtime_notification"]["usage"],
+            "selected"
+        );
+    }
+
+    #[test]
+    fn process_inbound_with_outbound_does_not_publish_runtime_tool_usage_notifications(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let mut arguments = Map::new();
+        arguments.insert("path".to_owned(), json!("artifact.txt"));
+        let mut tools = ToolRegistry::new();
+        tools.register(JsonArtifactTool);
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 1,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse {
+                    tool_calls: vec![ToolCallRequest::new(
+                        "call-json",
+                        "json_artifact",
+                        arguments,
+                    )],
+                    finish_reason: "tool_calls".to_owned(),
+                    ..LlmResponse::default()
+                },
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir,
+            tools,
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+        };
+
+        let inbound = InboundMessage::new("direct", "user", "chat-1", "make artifact")
+            .with_metadata(Map::from_iter([
+                ("message_id".to_owned(), json!("message-1")),
+                ("thread_id".to_owned(), json!("thread-1")),
+                ("slack".to_owned(), json!({"thread_ts": "171.1"})),
+            ]));
+        let (_turn, outbound) =
+            adapter.process_inbound_with_outbound(inbound, adapter.loop_config(), None, &[])?;
+        assert!(!outbound
+            .iter()
+            .any(|message| message.content == "Using tool: json_artifact"));
+        assert!(!outbound.iter().any(|message| message
+            .metadata
+            .get("runtime_notification")
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            == Some("tool")));
+        Ok(())
+    }
+
+    #[test]
+    fn external_active_skill_notification_publishes_before_tool_finishes(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(workspace.join("skills/always"))?;
+        fs::write(
+            workspace.join("skills/always/SKILL.md"),
+            "---\ndescription: Always\nalways: true\n---\nAlways body",
+        )?;
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let mut tools = ToolRegistry::new();
+        tools.register(BlockingArtifactTool { gate: gate.clone() });
+        let adapter = Arc::new(AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 1,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse {
+                    tool_calls: vec![ToolCallRequest::new(
+                        "call-blocking",
+                        "blocking_artifact",
+                        Map::new(),
+                    )],
+                    finish_reason: "tool_calls".to_owned(),
+                    ..LlmResponse::default()
+                },
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir,
+            tools,
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+        });
+        let runtime_bus = MessageBus::new();
+        let turn_adapter = adapter.clone();
+        let turn_bus = runtime_bus.clone();
+        let handle = std::thread::spawn(move || {
+            turn_adapter.process_external_inbound_with_streaming(
+                InboundMessage::new(TELEGRAM_CHANNEL, "user", "chat-1", "make artifact"),
+                turn_adapter.loop_config(),
+                &turn_bus,
+            )
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut notification = None;
+        while Instant::now() < deadline {
+            if let Some(message) = runtime_bus.try_consume_outbound() {
+                if message.content.contains("always")
+                    && message.metadata["runtime_notification"]["kind"] == "skill"
+                {
+                    notification = Some(message);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let notification = notification.ok_or("missing live active skill usage notification")?;
+        assert_eq!(notification.channel, TELEGRAM_CHANNEL);
+        assert_eq!(
+            notification.metadata["runtime_notification"]["usage"],
+            "active_always"
+        );
+        assert!(!handle.is_finished());
+
+        let (lock, cvar) = &*gate;
+        *lock.lock().map_err(|_| "gate lock poisoned")? = true;
+        cvar.notify_all();
+        let result = handle.join().map_err(|_| "external turn thread panicked")?;
+        let (_turn, outbound) = result?;
+        assert!(!outbound
+            .iter()
+            .any(|message| message.content == "Using tool: blocking_artifact"));
+        Ok(())
+    }
+
+    #[test]
+    fn process_inbound_with_outbound_publishes_active_skill_notification_once_for_new_session(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(workspace.join("skills/always"))?;
+        fs::write(
+            workspace.join("skills/always/SKILL.md"),
+            "---\nname: always\nalways: true\ndescription: Always on\n---\nAlways body",
+        )?;
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 1,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse {
+                    content: Some("ok".to_owned()),
+                    ..LlmResponse::default()
+                },
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir,
+            tools: ToolRegistry::new(),
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+        };
+
+        let (_first_turn, first_outbound) = adapter.process_inbound_with_outbound(
+            InboundMessage::new("direct", "user", "chat-1", "hello"),
+            adapter.loop_config(),
+            None,
+            &[],
+        )?;
+        assert!(first_outbound.iter().any(|message| message
+            .content
+            .starts_with("Using active skills: ")
+            && message.content.contains("always")
+            && message.metadata["runtime_notification"]["kind"] == "skill"));
+
+        let (_second_turn, second_outbound) = adapter.process_inbound_with_outbound(
+            InboundMessage::new("direct", "user", "chat-1", "again"),
+            adapter.loop_config(),
+            None,
+            &[],
+        )?;
+        assert!(!second_outbound
+            .iter()
+            .any(|message| message.content.contains("always")
+                && message.metadata["runtime_notification"]["kind"] == "skill"));
+
+        let (_status_turn, status_outbound) = adapter.process_inbound_with_outbound(
+            InboundMessage::new("direct", "user", "chat-2", "/status"),
+            adapter.loop_config(),
+            None,
+            &[],
+        )?;
+        assert!(!status_outbound
+            .iter()
+            .any(|message| message.content.contains("always")
+                && message.metadata["runtime_notification"]["kind"] == "skill"));
+
+        let (_unknown_slash_turn, unknown_slash_outbound) = adapter.process_inbound_with_outbound(
+            InboundMessage::new("direct", "user", "chat-3", "/status now"),
+            adapter.loop_config(),
+            None,
+            &[],
+        )?;
+        assert!(unknown_slash_outbound
+            .iter()
+            .any(|message| message.content.contains("always")
+                && message.metadata["runtime_notification"]["kind"] == "skill"));
         Ok(())
     }
 
@@ -18442,6 +19184,11 @@ mod tests {
         events: Vec<ProviderEvent>,
     }
 
+    struct SequentialProviderClient {
+        captured: std::sync::Arc<Mutex<Vec<ProviderRequest>>>,
+        responses: Mutex<VecDeque<LlmResponse>>,
+    }
+
     struct JsonArtifactTool;
 
     impl Tool for JsonArtifactTool {
@@ -18471,6 +19218,43 @@ mod tests {
                 "files": ["artifact.txt"],
                 "embeds": [{"type": "text"}]
             }))
+        }
+    }
+
+    struct BlockingArtifactTool {
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl Tool for BlockingArtifactTool {
+        fn name(&self) -> &str {
+            "blocking_artifact"
+        }
+
+        fn description(&self) -> &str {
+            "Block until the test releases execution"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        fn read_only(&self) -> bool {
+            true
+        }
+
+        fn execute(&self, _params: JsonMap) -> ToolResult {
+            let (lock, cvar) = &*self.gate;
+            let mut released = match lock.lock() {
+                Ok(guard) => guard,
+                Err(_) => return ToolResult::Text("Error: gate lock poisoned".to_owned()),
+            };
+            while !*released {
+                released = match cvar.wait(released) {
+                    Ok(guard) => guard,
+                    Err(_) => return ToolResult::Text("Error: gate wait poisoned".to_owned()),
+                };
+            }
+            ToolResult::Text("blocked artifact complete".to_owned())
         }
     }
 
@@ -18542,6 +19326,46 @@ mod tests {
                 })?
                 .push(request);
             Ok(self.response.clone())
+        }
+
+        fn chat_stream(
+            &self,
+            request: ProviderRequest,
+            _on_event: &mut dyn FnMut(ProviderEvent),
+        ) -> Result<LlmResponse, ProviderError> {
+            self.chat(request)
+        }
+    }
+
+    impl ProviderClient for SequentialProviderClient {
+        fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+            self.captured
+                .lock()
+                .map_err(|_| ProviderError::Api {
+                    status: Some(500),
+                    message: "sequential fake capture lock failed".to_owned(),
+                    retryable: false,
+                    headers: BTreeMap::new(),
+                    body: None,
+                })?
+                .push(request);
+            self.responses
+                .lock()
+                .map_err(|_| ProviderError::Api {
+                    status: Some(500),
+                    message: "sequential fake response lock failed".to_owned(),
+                    retryable: false,
+                    headers: BTreeMap::new(),
+                    body: None,
+                })?
+                .pop_front()
+                .ok_or_else(|| ProviderError::Api {
+                    status: Some(500),
+                    message: "sequential fake response exhausted".to_owned(),
+                    retryable: false,
+                    headers: BTreeMap::new(),
+                    body: None,
+                })
         }
 
         fn chat_stream(

@@ -1659,6 +1659,7 @@ dependencies = [
  "sha2",
  "shacs-api",
  "shacs-channels",
+ "shacs-command",
  "shacs-config",
  "shacs-core",
  "shacs-providers",

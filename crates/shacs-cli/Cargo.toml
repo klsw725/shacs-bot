@@ -7,6 +7,7 @@ rust-version = "1.75"
 [dependencies]
 shacs-api = { path = "../shacs-api" }
 shacs-channels = { path = "../shacs-channels" }
+shacs-command = { path = "../shacs-command" }
 shacs-config = { path = "../shacs-config" }
 shacs-core = { path = "../shacs-core" }
 shacs-providers = { path = "../shacs-providers" }
