@@ -295,6 +295,31 @@ impl ContextBuilder {
         (!content.is_empty()).then_some(content)
     }
 
+    pub fn active_always_skill_names(&self) -> Vec<String> {
+        self.load_skill_documents()
+            .into_iter()
+            .filter(|skill| skill.always && skill.available)
+            .map(|skill| skill.name)
+            .collect()
+    }
+
+    pub fn skill_name_for_source_path(&self, path: impl AsRef<Path>) -> Option<String> {
+        let path = path.as_ref();
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workspace.join(path)
+        };
+        let candidate = fs::canonicalize(candidate).ok()?;
+        self.load_skill_documents()
+            .into_iter()
+            .filter(|skill| skill.available)
+            .find_map(|skill| {
+                let source_path = fs::canonicalize(skill.source_path).ok()?;
+                (source_path == candidate).then_some(skill.name)
+            })
+    }
+
     fn build_skills_index(&self) -> Option<String> {
         let skills_summary = self.skills_index_summary();
         if skills_summary.is_empty() {

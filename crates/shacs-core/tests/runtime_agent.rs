@@ -517,6 +517,27 @@ fn runtime_context_injects_memory_recent_history_skills_and_helpers() -> Result<
 
     let context = ContextBuilder::new(workspace.path())
         .with_disabled_skills(["manually-disabled".to_owned()]);
+    let active_always = context.active_always_skill_names();
+    if !active_always.contains(&"always".to_owned())
+        || !active_always.contains(&"memory".to_owned())
+        || !active_always.contains(&"my".to_owned())
+        || active_always.contains(&"indexed".to_owned())
+    {
+        return Err(format!("active always skill inventory drifted: {:?}", active_always).into());
+    }
+    assert_eq!(
+        context.skill_name_for_source_path("skills/always/SKILL.md"),
+        Some("always".to_owned())
+    );
+    assert_eq!(
+        context.skill_name_for_source_path(workspace.path().join("skills/indexed.md")),
+        Some("indexed".to_owned())
+    );
+    assert_eq!(
+        context.skill_name_for_source_path("skills/disabled.md"),
+        None
+    );
+    assert_eq!(context.skill_name_for_source_path("missing/SKILL.md"), None);
     let system = context.build_system_prompt(Some("cli"));
     if !system.contains("# Memory")
         || !system.contains("## Long-term Memory")
