@@ -454,6 +454,9 @@ bundled < user-global < workspace-local < app-provided
 15. `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`
 16. `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`
 17. `docs/specs/017-app-operating-environment/SPEC.md`
+18. `docs/specs/018-evaluation-automation-and-self-improvement/SPEC.md`
+19. `docs/specs/019-image-generation-and-generated-media/SPEC.md`
+20. `docs/specs/020-tool-search-and-provider-tool-surface/SPEC.md`
 
 `docs/product/cli-experience.md` 같은 제품 문서는 인터페이스 메모와 사용성 설명에 중요하지만, 위 architecture spec 세트를 대체하지 않는다.
 

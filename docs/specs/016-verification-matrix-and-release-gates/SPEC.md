@@ -2,7 +2,7 @@
 
 ## 문서 목적
 
-이 문서는 `docs/SYSTEM-FOUNDATION.md`, `docs/specs/001-session-kernel/SPEC.md`부터 `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`까지의 상위 구현 계약, 그리고 `docs/specs/017-app-operating-environment/SPEC.md`의 AI app operating environment 계약을 바탕으로 `shacs-bot`의 검증 전략, 테스트 매트릭스, release gate, 완료 기준을 구현 가능한 수준으로 고정한다.
+이 문서는 `docs/SYSTEM-FOUNDATION.md`와 numbered spec set 전체를 바탕으로 `shacs-bot`의 검증 전략, 테스트 매트릭스, release gate, 완료 기준을 구현 가능한 수준으로 고정한다.
 
 목표는 다음과 같다.
 
@@ -252,6 +252,40 @@ demo behavior는 제한된 경로에서만 동작하거나, 실패/복구/경계
 - 내구성 테스트: interrupted upgrade, stale ownership
 - 통합 테스트: compatibility 검사와 migration gate
 
+### 016. verification matrix and release gates
+
+- 단위 테스트: blocker/waiver decision table, release readiness classification, demo-vs-full implementation classification
+- 통합 테스트: release gate runner, evidence locator mapping, spec coverage reporting
+- 메타 테스트: missing spec coverage detection, flaky/manual-only gate rejection
+
+### 017. app operating environment
+
+- 단위 테스트: manifest validation, app id collision, lifecycle state, permission/secret declaration parsing
+- 통합 테스트: app registry install/list/inspect flow, process projection, task ledger receipt persistence
+- 안전성 테스트: install does not execute app, secret value redaction, permission grant boundary preservation
+- 내구성 테스트: reload during active process, uninstall with historical ledger/session references preserved
+
+### 018. evaluation, automation, and self-improvement
+
+- 단위 테스트: verdict mapping, approval correlation, stale/expired rejection, recursion guard, outcome classification
+- 통합 테스트: goal lifecycle, scheduled job wake, subagent/app task outcome, provider fallback, UI projection
+- 복구 테스트: checkpoint create/restore, failed rollback diagnostics, replay without destructive tool execution
+- 안전성 테스트: trajectory/diagnostics/ledger redaction, silent self-improvement mutation rejection
+
+### 019. image generation and generated media
+
+- 단위 테스트: provider capability resolution, OpenAI request/response parsing, option validation, artifact metadata creation
+- 통합 테스트: `image_generate` registration gate, generated media write, provider failure and media write failure paths
+- 안전성 테스트: side-effect gate, auth absence before provider call, media subtree boundary, raw base64/prompt diagnostics redaction
+- 회귀 테스트: Codex/provider expansion fixtures, partial-only stream failure, expiring URL persistence policy
+
+### 020. tool search and provider tool surface
+
+- 단위 테스트: config mode, threshold activation, visible/deferred split, catalog ranking, bridge argument parsing
+- 통합 테스트: runner provider request assembly, bridge describe/call roundtrip, underlying tool execution mapping
+- 안전성 테스트: core tools never defer, MCP default-deny preservation, subagent out-of-scope denial, bridge recursion rejection
+- 관측 테스트: activation summary, deferred count, bridge-to-underlying tool event mapping, replay/ledger mapping evidence
+
 ---
 
 ## 공통 release gate
@@ -483,6 +517,6 @@ Rust 구현은 최소한 다음 성격의 검증 체계를 만들 수 있어야 
 
 ## 결론
 
-`shacs-bot`의 release readiness는 일부 기능이 돌아가는 데모가 아니라, 001부터 015까지의 계약과 017의 app operating environment 계약이 family별 검증과 release gate로 증명되었는지에 따라 판단되어야 한다. 특히 truth correctness, recovery, approval, redaction, packaging, upgrade safety, app/process/permission ledger는 모두 blocker 수준으로 다뤄야 하며, 이 항목들이 비어 있으면 완성도가 아니라 미완성이다.
+`shacs-bot`의 release readiness는 일부 기능이 돌아가는 데모가 아니라, numbered spec set 전체의 계약이 family별 검증과 release gate로 증명되었는지에 따라 판단되어야 한다. 특히 truth correctness, recovery, approval, redaction, packaging, upgrade safety, app/process/permission ledger는 모두 blocker 수준으로 다뤄야 하며, 이 항목들이 비어 있으면 완성도가 아니라 미완성이다.
 
 핵심은 "보여줄 수 있다"가 아니라 "반복 가능하게 증명할 수 있다"를 릴리스 기준으로 삼는 데 있다.
