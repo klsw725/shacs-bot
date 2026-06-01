@@ -14,6 +14,7 @@ mod search;
 mod self_tool;
 mod shell;
 mod spawn;
+mod tool_search;
 mod web;
 
 pub use ask::{
@@ -51,6 +52,11 @@ pub use shacs_security::{
 };
 pub use shell::{ExecConfig, ExecTool};
 pub use spawn::{SpawnRequest, SpawnTool, SubagentSpawner};
+pub use tool_search::{
+    assemble_tool_surface, bridge_tool_names, bridge_tool_schemas,
+    estimate_serialized_schema_tokens, ActivationState, DeferredToolCatalog,
+    DeferredToolCatalogEntry, ToolSearchMatch, ToolSurfaceAssembly, ToolSurfaceAssemblyInput,
+};
 pub use web::{
     HttpResponse, SearchHttpClient, SearchHttpResponse, UreqSearchHttpClient, UreqWebClient,
     UreqWebSearchClient, WebClient, WebFetchConfig, WebFetchTool, WebSearchClient, WebSearchConfig,

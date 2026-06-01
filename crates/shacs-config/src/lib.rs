@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -303,6 +303,8 @@ pub struct ToolsConfig {
     pub exec: ExecToolConfig,
     #[serde(default)]
     pub image_generation: ImageGenerationToolConfig,
+    #[serde(default, deserialize_with = "deserialize_tool_search_config")]
+    pub tool_search: ToolSearchConfig,
     #[serde(default)]
     pub my: MyToolConfig,
     #[serde(default)]
@@ -311,6 +313,121 @@ pub struct ToolsConfig {
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
     pub ssrf_whitelist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolSearchMode {
+    Off,
+    On,
+    #[default]
+    Auto,
+}
+
+impl ToolSearchMode {
+    fn from_value(value: &Value) -> Self {
+        match value {
+            Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "off" => Self::Off,
+                "on" => Self::On,
+                "auto" => Self::Auto,
+                _ => Self::Auto,
+            },
+            Value::Bool(true) => Self::Auto,
+            Value::Bool(false) => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolSearchMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(Self::from_value(&value))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolSearchConfig {
+    pub enabled: ToolSearchMode,
+    pub threshold_pct: u8,
+    pub search_default_limit: usize,
+    pub max_search_limit: usize,
+}
+
+impl Default for ToolSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: ToolSearchMode::Auto,
+            threshold_pct: default_tool_search_threshold_pct(),
+            search_default_limit: default_tool_search_default_limit(),
+            max_search_limit: default_tool_search_max_limit(),
+        }
+    }
+}
+
+impl ToolSearchConfig {
+    fn from_value(value: &Value) -> Self {
+        let Some(object) = value.as_object() else {
+            return Self::default();
+        };
+        let max_search_limit = object
+            .get("maxSearchLimit")
+            .and_then(limit_value)
+            .unwrap_or_else(default_tool_search_max_limit)
+            .clamp(1, 50);
+        Self {
+            enabled: object
+                .get("enabled")
+                .map(ToolSearchMode::from_value)
+                .unwrap_or_default(),
+            threshold_pct: object
+                .get("thresholdPct")
+                .and_then(percent_value)
+                .unwrap_or_else(default_tool_search_threshold_pct),
+            search_default_limit: object
+                .get("searchDefaultLimit")
+                .and_then(limit_value)
+                .unwrap_or_else(default_tool_search_default_limit)
+                .clamp(1, max_search_limit),
+            max_search_limit,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolSearchConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(Self::from_value(&value))
+    }
+}
+
+fn deserialize_tool_search_config<'de, D>(deserializer: D) -> Result<ToolSearchConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    ToolSearchConfig::deserialize(deserializer)
+}
+
+fn percent_value(value: &Value) -> Option<u8> {
+    value
+        .as_i64()
+        .map(|value| value.clamp(0, 100) as u8)
+        .or_else(|| value.as_u64().map(|value| value.min(100) as u8))
+}
+
+fn limit_value(value: &Value) -> Option<usize> {
+    value
+        .as_i64()
+        .map(|value| value.max(1) as usize)
+        .or_else(|| value.as_u64().map(|value| value.max(1) as usize))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1192,6 +1309,18 @@ fn default_image_generation_max_bytes() -> usize {
     10 * 1024 * 1024
 }
 
+fn default_tool_search_threshold_pct() -> u8 {
+    10
+}
+
+fn default_tool_search_default_limit() -> usize {
+    5
+}
+
+fn default_tool_search_max_limit() -> usize {
+    20
+}
+
 fn default_exec_timeout() -> u32 {
     60
 }
@@ -1265,6 +1394,101 @@ mod tests {
         assert_eq!(config.tools.image_generation.default_format, "jpeg");
         assert_eq!(config.tools.image_generation.max_count, 2);
         assert_eq!(config.tools.image_generation.max_bytes, 4096);
+        Ok(())
+    }
+
+    #[test]
+    fn tool_search_defaults_to_auto_safe_limits() {
+        let config = Config::default();
+        assert_eq!(config.tools.tool_search.enabled, ToolSearchMode::Auto);
+        assert_eq!(config.tools.tool_search.threshold_pct, 10);
+        assert_eq!(config.tools.tool_search.search_default_limit, 5);
+        assert_eq!(config.tools.tool_search.max_search_limit, 20);
+    }
+
+    #[test]
+    fn tool_search_deserializes_string_modes() -> Result<(), String> {
+        for (enabled, expected) in [
+            ("off", ToolSearchMode::Off),
+            ("on", ToolSearchMode::On),
+            ("auto", ToolSearchMode::Auto),
+        ] {
+            let config: Config = serde_json::from_value(json!({
+                "tools": {"toolSearch": {"enabled": enabled}}
+            }))
+            .map_err(|error| error.to_string())?;
+            assert_eq!(config.tools.tool_search.enabled, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tool_search_preserves_enabled_boolean_shorthand() -> Result<(), String> {
+        let enabled: Config = serde_json::from_value(json!({
+            "tools": {"toolSearch": {"enabled": true}}
+        }))
+        .map_err(|error| error.to_string())?;
+        let disabled: Config = serde_json::from_value(json!({
+            "tools": {"toolSearch": {"enabled": false}}
+        }))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(enabled.tools.tool_search.enabled, ToolSearchMode::Auto);
+        assert_eq!(disabled.tools.tool_search.enabled, ToolSearchMode::Off);
+        Ok(())
+    }
+
+    #[test]
+    fn tool_search_clamps_numeric_limits() -> Result<(), String> {
+        let config: Config = serde_json::from_value(json!({
+            "tools": {
+                "toolSearch": {
+                    "thresholdPct": 125,
+                    "searchDefaultLimit": 99,
+                    "maxSearchLimit": 51
+                }
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(config.tools.tool_search.threshold_pct, 100);
+        assert_eq!(config.tools.tool_search.max_search_limit, 50);
+        assert_eq!(config.tools.tool_search.search_default_limit, 50);
+
+        let config: Config = serde_json::from_value(json!({
+            "tools": {
+                "toolSearch": {
+                    "thresholdPct": -5,
+                    "searchDefaultLimit": 0,
+                    "maxSearchLimit": 0
+                }
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(config.tools.tool_search.threshold_pct, 0);
+        assert_eq!(config.tools.tool_search.max_search_limit, 1);
+        assert_eq!(config.tools.tool_search.search_default_limit, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn tool_search_safe_defaults_malformed_values() -> Result<(), String> {
+        let config: Config = serde_json::from_value(json!({
+            "tools": {"toolSearch": "bad"}
+        }))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(config.tools.tool_search, ToolSearchConfig::default());
+
+        let config: Config = serde_json::from_value(json!({
+            "tools": {
+                "toolSearch": {
+                    "enabled": "sometimes",
+                    "thresholdPct": "many",
+                    "searchDefaultLimit": [],
+                    "maxSearchLimit": {}
+                }
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(config.tools.tool_search, ToolSearchConfig::default());
         Ok(())
     }
 

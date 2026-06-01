@@ -1,18 +1,24 @@
 use serde_json::{json, Value};
+use shacs_core::runtime::{
+    dispatch_bridge_tool_call, RuntimeToolCall, RuntimeToolExecutor, ToolExecutionContext,
+    ToolSearchActivationReason, ToolSearchConfig, ToolSearchDiagnosticsSummary, ToolSearchMode,
+    ToolSearchRuntimeInput,
+};
 use shacs_core::tools::{
     ask_user_options_from_messages, ask_user_outbound, ask_user_tool_result_messages,
     pending_ask_user_id, AskUserTool, CronTool,
 };
 use shacs_core::tools::{
-    is_transient_mcp_error, normalize_schema_for_openai, register_mcp_capabilities,
-    sanitize_mcp_name, tool_parameters, tool_parameters_schema, wrap_command, EditFileTool,
-    ExecConfig, ExecTool, FileState, JsonMap, McpCallOutcome, McpCapability, McpCapabilityKind,
-    McpClient, McpConnector, McpErrorKind, McpOperation, McpPromptArgument, McpRuntime,
-    McpServerSpec, McpTransportKind, NotebookEditTool, ObjectSchema, OutboundMessage, PathContext,
-    ReadFileTool, Schema, SearchHttpClient, SearchHttpResponse, SelfRuntimeState, SelfTool,
-    SpawnRequest, StringSchema, Tool, ToolParameters, ToolRegistry, ToolResult,
-    UreqWebSearchClient, WebClient, WebFetchConfig, WebFetchTool, WebSearchClient, WebSearchConfig,
-    WebSearchResult, WebSearchTool, WriteFileTool,
+    assemble_tool_surface, estimate_serialized_schema_tokens, is_transient_mcp_error,
+    normalize_schema_for_openai, register_mcp_capabilities, sanitize_mcp_name, tool_parameters,
+    tool_parameters_schema, wrap_command, ActivationState, EditFileTool, ExecConfig, ExecTool,
+    FileState, JsonMap, McpCallOutcome, McpCapability, McpCapabilityKind, McpClient, McpConnector,
+    McpErrorKind, McpOperation, McpPromptArgument, McpRuntime, McpServerSpec, McpTransportKind,
+    NotebookEditTool, ObjectSchema, OutboundMessage, PathContext, ReadFileTool, Schema,
+    SearchHttpClient, SearchHttpResponse, SelfRuntimeState, SelfTool, SpawnRequest, StringSchema,
+    Tool, ToolParameters, ToolRegistry, ToolResult, ToolSurfaceAssemblyInput, UreqWebSearchClient,
+    WebClient, WebFetchConfig, WebFetchTool, WebSearchClient, WebSearchConfig, WebSearchResult,
+    WebSearchTool, WriteFileTool,
 };
 use shacs_cron::{
     system_job, CronJobState, CronRunStatus, CronSchedule, CronService, InMemoryCronService,
@@ -126,6 +132,322 @@ fn registry_sorts_builtin_tools_before_mcp_tools() -> Result<(), Box<dyn Error>>
 
     if names != ["alpha", "mcp_beta"] {
         return Err(format!("unexpected schema order: {names:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn tool_search_off_preserves_definition_order_without_catalog() -> Result<(), Box<dyn Error>> {
+    let definitions = vec![
+        tool_schema("mcp_beta_lookup", "Beta lookup", ["query"]),
+        tool_schema("read_file", "Read files", ["path"]),
+        json!({ "name": "legacy_top_level", "description": "legacy", "parameters": {} }),
+    ];
+
+    let assembled = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: definitions.clone(),
+        runtime: tool_search_runtime(ToolSearchMode::Off, 10, Some(100)),
+    });
+
+    if assembled.provider_tools != definitions
+        || assembled.activation_state != ActivationState::PassThrough
+        || assembled.catalog.is_some()
+    {
+        return Err(format!("off mode did not pass through exactly: {assembled:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn tool_search_on_defers_mcp_only_and_appends_bridge_schemas() -> Result<(), Box<dyn Error>> {
+    let definitions = vec![
+        tool_schema(
+            "mcp_github_search_repositories",
+            "Find GitHub repositories",
+            ["query"],
+        ),
+        tool_schema("read_file", "Read files", ["path"]),
+        json!({ "name": "legacy_top_level", "description": "legacy", "parameters": {} }),
+        tool_schema(
+            "mcp_slack_post_message",
+            "Post Slack messages",
+            ["channel", "text"],
+        ),
+    ];
+
+    let assembled = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions,
+        runtime: tool_search_runtime(ToolSearchMode::On, 10, None),
+    });
+
+    if assembled.activation_state != ActivationState::Activated {
+        return Err(format!("on mode did not activate: {assembled:?}").into());
+    }
+    let names = schema_names(&assembled.provider_tools)?;
+    if names
+        != [
+            "read_file",
+            "legacy_top_level",
+            "tool_search",
+            "tool_describe",
+            "tool_call",
+        ]
+    {
+        return Err(format!("visible order or bridge order drifted: {names:?}").into());
+    }
+
+    let catalog = assembled
+        .catalog
+        .as_ref()
+        .ok_or("missing deferred catalog")?;
+    let catalog_names = catalog
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    if catalog_names != ["mcp_github_search_repositories", "mcp_slack_post_message"] {
+        return Err(format!("unexpected catalog names: {catalog_names:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn tool_search_auto_uses_ceil_schema_token_threshold() -> Result<(), Box<dyn Error>> {
+    let mcp_definition = tool_schema(
+        "mcp_github_search_repositories",
+        "Find repositories",
+        ["query"],
+    );
+    let estimated_tokens = estimate_serialized_schema_tokens(&mcp_definition);
+    let definitions = vec![
+        tool_schema("read_file", "Read files", ["path"]),
+        mcp_definition,
+    ];
+
+    let threshold_pass = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: definitions.clone(),
+        runtime: tool_search_runtime(ToolSearchMode::Auto, 100, Some(estimated_tokens + 1)),
+    });
+    if threshold_pass.activation_state
+        != (ActivationState::ThresholdPassThrough {
+            estimated_tokens,
+            threshold_tokens: estimated_tokens + 1,
+        })
+        || threshold_pass.provider_tools != definitions
+    {
+        return Err(format!("auto threshold pass-through drifted: {threshold_pass:?}").into());
+    }
+
+    let activated = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: definitions.clone(),
+        runtime: tool_search_runtime(ToolSearchMode::Auto, 100, Some(estimated_tokens)),
+    });
+    if activated.activation_state != ActivationState::Activated || activated.catalog.is_none() {
+        return Err(format!("auto did not activate at threshold: {activated:?}").into());
+    }
+
+    let unknown_context = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: definitions.clone(),
+        runtime: tool_search_runtime(ToolSearchMode::Auto, 1, None),
+    });
+    if unknown_context.activation_state
+        != (ActivationState::UnknownContextPassThrough { estimated_tokens })
+        || unknown_context.provider_tools != definitions
+    {
+        return Err(format!("unknown context did not pass through: {unknown_context:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn tool_search_diagnostics_summary_reports_activation_reason_families() -> Result<(), Box<dyn Error>>
+{
+    let mcp_definition = tool_schema("mcp_github_search", "Find repositories", ["query"]);
+    let estimated_tokens = estimate_serialized_schema_tokens(&mcp_definition);
+    let mcp_definitions = vec![mcp_definition.clone()];
+    let plain_definitions = vec![tool_schema("read_file", "Read files", ["path"])];
+
+    let off_runtime = tool_search_runtime(ToolSearchMode::Off, 10, Some(100));
+    let off = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: mcp_definitions.clone(),
+        runtime: off_runtime,
+    });
+    let off_summary = ToolSearchDiagnosticsSummary::from_assembly(off_runtime, &off);
+    if off_summary.reason != ToolSearchActivationReason::Off
+        || off_summary.activated
+        || off_summary.visible_count != 1
+        || off_summary.deferred_count != 0
+        || off_summary.scope_digest.is_some()
+    {
+        return Err(format!("off diagnostics summary drifted: {off_summary:?}").into());
+    }
+
+    let forced_runtime = tool_search_runtime(ToolSearchMode::On, 10, None);
+    let forced = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: mcp_definitions.clone(),
+        runtime: forced_runtime,
+    });
+    let forced_summary = ToolSearchDiagnosticsSummary::from_assembly(forced_runtime, &forced);
+    if forced_summary.reason != ToolSearchActivationReason::ForcedOn
+        || !forced_summary.activated
+        || forced_summary.deferred_count != 1
+        || !forced_summary
+            .scope_digest
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("sha256:")
+    {
+        return Err(format!("forced diagnostics summary drifted: {forced_summary:?}").into());
+    }
+
+    let threshold_runtime = tool_search_runtime(
+        ToolSearchMode::Auto,
+        100,
+        Some(estimated_tokens.saturating_add(1)),
+    );
+    let threshold = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: mcp_definitions.clone(),
+        runtime: threshold_runtime,
+    });
+    let threshold_summary =
+        ToolSearchDiagnosticsSummary::from_assembly(threshold_runtime, &threshold);
+    if threshold_summary.reason != ToolSearchActivationReason::Threshold
+        || threshold_summary.activated
+    {
+        return Err(format!("threshold diagnostics summary drifted: {threshold_summary:?}").into());
+    }
+
+    let unknown_runtime = tool_search_runtime(ToolSearchMode::Auto, 1, None);
+    let unknown = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: mcp_definitions.clone(),
+        runtime: unknown_runtime,
+    });
+    let unknown_summary = ToolSearchDiagnosticsSummary::from_assembly(unknown_runtime, &unknown);
+    if unknown_summary.reason != ToolSearchActivationReason::UnknownContextWindow
+        || unknown_summary.activated
+    {
+        return Err(format!("unknown diagnostics summary drifted: {unknown_summary:?}").into());
+    }
+
+    let no_deferred_runtime = tool_search_runtime(ToolSearchMode::On, 10, None);
+    let no_deferred = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: plain_definitions,
+        runtime: no_deferred_runtime,
+    });
+    let no_deferred_summary =
+        ToolSearchDiagnosticsSummary::from_assembly(no_deferred_runtime, &no_deferred);
+    if no_deferred_summary.reason != ToolSearchActivationReason::NoDeferrableTools
+        || no_deferred_summary.activated
+    {
+        return Err(
+            format!("no-deferrable diagnostics summary drifted: {no_deferred_summary:?}").into(),
+        );
+    }
+
+    let collision_runtime = tool_search_runtime(ToolSearchMode::On, 10, None);
+    let collision = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: vec![
+            tool_schema("tool_search", "Reserved", ["query"]),
+            mcp_definition,
+        ],
+        runtime: collision_runtime,
+    });
+    let collision_summary =
+        ToolSearchDiagnosticsSummary::from_assembly(collision_runtime, &collision);
+    if collision_summary.reason != ToolSearchActivationReason::BridgeCollision
+        || collision_summary.activated
+    {
+        return Err(format!("collision diagnostics summary drifted: {collision_summary:?}").into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn tool_search_bridge_name_collision_preserves_original_definitions() -> Result<(), Box<dyn Error>>
+{
+    let definitions = vec![
+        tool_schema(
+            "tool_search",
+            "Existing tool with reserved bridge name",
+            ["query"],
+        ),
+        tool_schema(
+            "mcp_github_search_repositories",
+            "Find repositories",
+            ["query"],
+        ),
+    ];
+
+    let assembled = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: definitions.clone(),
+        runtime: tool_search_runtime(ToolSearchMode::On, 10, None),
+    });
+
+    if assembled.activation_state
+        != (ActivationState::CollisionPassThrough {
+            tool_name: "tool_search".to_owned(),
+        })
+        || assembled.provider_tools != definitions
+        || assembled.catalog.is_some()
+    {
+        return Err(format!("collision did not preserve originals: {assembled:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn deferred_catalog_keeps_full_schema_and_search_results_omit_it() -> Result<(), Box<dyn Error>> {
+    let definitions = vec![
+        tool_schema(
+            "mcp_github_search_repositories",
+            "Find GitHub repositories by owner and language",
+            ["query", "language"],
+        ),
+        tool_schema(
+            "mcp_slack_post_message",
+            "Post Slack messages",
+            ["channel", "text"],
+        ),
+        tool_schema("mcp_acme_foobar", "Alpha lookup", ["needle"]),
+    ];
+
+    let assembled = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: definitions.clone(),
+        runtime: tool_search_runtime(ToolSearchMode::On, 10, None),
+    });
+    let catalog = assembled
+        .catalog
+        .as_ref()
+        .ok_or("missing deferred catalog")?;
+    let first_entry = catalog.entries.first().ok_or("missing catalog entry")?;
+    if first_entry.full_schema != definitions[0]
+        || first_entry.parameter_names != ["language".to_owned(), "query".to_owned()]
+        || first_entry.source_kind != "mcp_tool"
+        || first_entry.source_name != "github"
+        || !catalog.scope_digest.starts_with("sha256:")
+    {
+        return Err(format!("catalog entry shape drifted: {first_entry:?}").into());
+    }
+
+    let ranked = catalog.search("language github", Some(2));
+    let first_ranked = ranked.first().ok_or("missing ranked search result")?;
+    let ranked_names = ranked
+        .iter()
+        .map(|item| item.name.as_str())
+        .collect::<Vec<_>>();
+    if ranked_names != ["mcp_github_search_repositories"] || first_ranked.rank != 1 {
+        return Err(format!("deterministic ranking drifted: {ranked:?}").into());
+    }
+    let rendered_match = format!("{first_ranked:?}");
+    if rendered_match.contains("full_schema") || rendered_match.contains("parameters") {
+        return Err(format!("search result exposed schema-like details: {ranked:?}").into());
+    }
+
+    let fallback = catalog.search("foo", Some(1));
+    let first_fallback = fallback.first().ok_or("missing fallback search result")?;
+    if first_fallback.name != "mcp_acme_foobar" || first_fallback.score != 1 {
+        return Err(format!("name substring fallback did not return match: {fallback:?}").into());
     }
     Ok(())
 }
@@ -465,6 +787,76 @@ fn spawn_tool_defaults_errors_and_thread_local_context() -> Result<(), Box<dyn E
 }
 
 struct NamedTool(&'static str);
+
+fn tool_search_runtime(
+    enabled: ToolSearchMode,
+    threshold_pct: u8,
+    context_window_tokens: Option<usize>,
+) -> ToolSearchRuntimeInput {
+    ToolSearchRuntimeInput {
+        config: ToolSearchConfig {
+            enabled,
+            threshold_pct,
+            search_default_limit: 5,
+            max_search_limit: 20,
+        },
+        context_window_tokens,
+    }
+}
+
+fn tool_schema<const PARAMETER_COUNT: usize>(
+    name: &str,
+    description: &str,
+    parameter_names: [&str; PARAMETER_COUNT],
+) -> Value {
+    let mut properties = serde_json::Map::new();
+    for parameter_name in parameter_names {
+        properties.insert(
+            parameter_name.to_owned(),
+            json!({ "type": "string", "description": parameter_name }),
+        );
+    }
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": []
+            }
+        }
+    })
+}
+
+fn deferred_catalog_names(catalog: &shacs_core::tools::DeferredToolCatalog) -> Vec<String> {
+    catalog
+        .entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+fn parse_json_content(content: &str) -> Result<Value, Box<dyn Error>> {
+    serde_json::from_str(content).map_err(Into::into)
+}
+
+fn schema_names(definitions: &[Value]) -> Result<Vec<String>, Box<dyn Error>> {
+    definitions
+        .iter()
+        .map(|schema| {
+            schema
+                .get("function")
+                .and_then(Value::as_object)
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .or_else(|| schema.get("name").and_then(Value::as_str))
+                .map(str::to_owned)
+                .ok_or_else(|| "missing schema name".into())
+        })
+        .collect()
+}
 
 impl Tool for NamedTool {
     fn name(&self) -> &str {
@@ -2994,6 +3386,272 @@ fn mcp_empty_enabled_tools_registers_no_tools() -> Result<(), Box<dyn Error>> {
         if registry.has(name) {
             return Err(format!("empty enabledTools should not register {name}").into());
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn mcp_default_deny_excludes_disabled_capabilities_from_tool_search_bridge(
+) -> Result<(), Box<dyn Error>> {
+    let operations = Arc::new(Mutex::new(Vec::<McpOperation>::new()));
+    let capture = operations.clone();
+    let client = Arc::new(move |operation: McpOperation| {
+        if let Ok(mut operations) = capture.lock() {
+            operations.push(operation);
+        }
+        McpCallOutcome::Success(vec!["disabled execution should not run".to_owned()])
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(NamedTool("mcp_registry_allowed"));
+    let report = register_mcp_capabilities(
+        &mut registry,
+        client,
+        vec![
+            mcp_tool_capability("srv", "disabled-tool", Some("Disabled tool")),
+            McpCapability {
+                kind: McpCapabilityKind::Resource,
+                server_name: "srv".to_owned(),
+                name: "disabled-resource".to_owned(),
+                description: Some("Disabled resource".to_owned()),
+                input_schema: None,
+                uri: Some("mem://disabled-resource".to_owned()),
+                arguments: Vec::new(),
+                timeout_seconds: 30,
+            },
+            McpCapability {
+                kind: McpCapabilityKind::Prompt,
+                server_name: "srv".to_owned(),
+                name: "disabled-prompt".to_owned(),
+                description: Some("Disabled prompt".to_owned()),
+                input_schema: None,
+                uri: None,
+                arguments: Vec::new(),
+                timeout_seconds: 30,
+            },
+        ],
+        &[],
+    );
+    if report.registered_count != 0 || !report.unmatched_enabled_tools.is_empty() {
+        return Err(format!("empty enabledTools should deny every capability: {report:?}").into());
+    }
+
+    let definitions = registry.definitions();
+    let definition_names = schema_names(&definitions)?;
+    let disabled_names = [
+        "mcp_srv_disabled-tool",
+        "mcp_srv_resource_disabled-resource",
+        "mcp_srv_prompt_disabled-prompt",
+    ];
+    for disabled_name in disabled_names {
+        if definition_names.iter().any(|name| name == disabled_name) {
+            return Err(
+                format!("disabled capability reached definitions: {definition_names:?}").into(),
+            );
+        }
+    }
+
+    let assembled = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions,
+        runtime: tool_search_runtime(ToolSearchMode::On, 10, None),
+    });
+    if assembled.activation_state != ActivationState::Activated {
+        return Err(
+            format!("sentinel MCP definition should activate Tool Search: {assembled:?}").into(),
+        );
+    }
+    let catalog = assembled
+        .catalog
+        .as_ref()
+        .ok_or("missing sentinel deferred catalog")?;
+    let catalog_names = deferred_catalog_names(catalog);
+    if catalog_names != ["mcp_registry_allowed".to_owned()] {
+        return Err(
+            format!("disabled capability reached deferred catalog: {catalog_names:?}").into(),
+        );
+    }
+
+    let executor = RuntimeToolExecutor::new(&registry);
+    let search = dispatch_bridge_tool_call(
+        RuntimeToolCall::new(
+            "search-disabled",
+            "tool_search",
+            json!({ "query": "disabled", "limit": 5 }),
+        ),
+        Some(catalog),
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+    );
+    let search_messages = search.messages();
+    let search_message = search_messages
+        .first()
+        .ok_or("missing disabled search response")?;
+    let search_content = parse_json_content(&search_message.content)?;
+    if search_content["matches"].as_array().map(Vec::len) != Some(0) {
+        return Err(format!("disabled capability appeared in search: {search_content}").into());
+    }
+
+    for (call_id, bridge_name, arguments) in [
+        (
+            "describe-disabled",
+            "tool_describe",
+            json!({ "name": "mcp_srv_disabled-tool" }),
+        ),
+        (
+            "call-disabled",
+            "tool_call",
+            json!({ "name": "mcp_srv_disabled-tool", "arguments": {} }),
+        ),
+    ] {
+        let report = dispatch_bridge_tool_call(
+            RuntimeToolCall::new(call_id, bridge_name, arguments),
+            Some(catalog),
+            &registry,
+            &executor,
+            &ToolExecutionContext::default(),
+        );
+        let messages = report.messages();
+        let message = messages
+            .first()
+            .ok_or("missing disabled bridge rejection")?;
+        if message.tool_call_id != call_id
+            || !message
+                .content
+                .contains("outside the current deferred tool catalog")
+        {
+            return Err(format!("disabled bridge path did not fail closed: {report:?}").into());
+        }
+    }
+
+    let operations = operations.lock().map_err(|error| error.to_string())?;
+    if !operations.is_empty() {
+        return Err(format!("disabled MCP capability started execution: {operations:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn mcp_allow_lists_register_raw_wrapped_and_star_into_deferred_catalog(
+) -> Result<(), Box<dyn Error>> {
+    let client: Arc<dyn McpClient> =
+        Arc::new(|_operation: McpOperation| McpCallOutcome::Success(vec!["allowed".to_owned()]));
+    let mut registry = ToolRegistry::new();
+    let report = register_mcp_capabilities(
+        &mut registry,
+        client.clone(),
+        vec![
+            mcp_tool_capability("srv", "raw-tool", Some("Raw allowed")),
+            McpCapability {
+                kind: McpCapabilityKind::Prompt,
+                server_name: "srv".to_owned(),
+                name: "plan".to_owned(),
+                description: Some("Wrapped allowed prompt".to_owned()),
+                input_schema: None,
+                uri: None,
+                arguments: Vec::new(),
+                timeout_seconds: 30,
+            },
+            mcp_tool_capability("srv", "skip-tool", Some("Skipped tool")),
+        ],
+        &["raw-tool".to_owned(), "mcp_srv_prompt_plan".to_owned()],
+    );
+    if report.registered_count != 2 || !report.unmatched_enabled_tools.is_empty() {
+        return Err(format!("raw/wrapped allow-list registration drifted: {report:?}").into());
+    }
+
+    let definitions = registry.definitions();
+    let definition_names = schema_names(&definitions)?;
+    for expected in ["mcp_srv_raw-tool", "mcp_srv_prompt_plan"] {
+        if !definition_names.iter().any(|name| name == expected) {
+            return Err(format!(
+                "allow-listed MCP capability missing from definitions: {definition_names:?}"
+            )
+            .into());
+        }
+    }
+    if definition_names
+        .iter()
+        .any(|name| name == "mcp_srv_skip-tool")
+    {
+        return Err(
+            format!("non-allow-listed MCP capability registered: {definition_names:?}").into(),
+        );
+    }
+
+    let assembled = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions,
+        runtime: tool_search_runtime(ToolSearchMode::On, 10, None),
+    });
+    let catalog = assembled
+        .catalog
+        .as_ref()
+        .ok_or("missing allow-list deferred catalog")?;
+    let catalog_names = deferred_catalog_names(catalog);
+    for expected in ["mcp_srv_raw-tool", "mcp_srv_prompt_plan"] {
+        if !catalog_names.iter().any(|name| name == expected) {
+            return Err(format!(
+                "allow-listed MCP capability missing from catalog: {catalog_names:?}"
+            )
+            .into());
+        }
+    }
+    if catalog_names.iter().any(|name| name == "mcp_srv_skip-tool") {
+        return Err(
+            format!("non-allow-listed MCP capability entered catalog: {catalog_names:?}").into(),
+        );
+    }
+
+    let mut star_registry = ToolRegistry::new();
+    let star_report = register_mcp_capabilities(
+        &mut star_registry,
+        client,
+        vec![
+            mcp_tool_capability("srv", "star-tool", Some("Star tool")),
+            McpCapability {
+                kind: McpCapabilityKind::Resource,
+                server_name: "srv".to_owned(),
+                name: "docs".to_owned(),
+                description: Some("Star resource".to_owned()),
+                input_schema: None,
+                uri: Some("mem://docs".to_owned()),
+                arguments: Vec::new(),
+                timeout_seconds: 30,
+            },
+            McpCapability {
+                kind: McpCapabilityKind::Prompt,
+                server_name: "srv".to_owned(),
+                name: "star-plan".to_owned(),
+                description: Some("Star prompt".to_owned()),
+                input_schema: None,
+                uri: None,
+                arguments: Vec::new(),
+                timeout_seconds: 30,
+            },
+        ],
+        &["*".to_owned()],
+    );
+    if star_report.registered_count != 3 || !star_report.unmatched_enabled_tools.is_empty() {
+        return Err(format!("star allow-list registration drifted: {star_report:?}").into());
+    }
+    let star_definitions = star_registry.definitions();
+    let registered_mcp_names = schema_names(&star_definitions)?
+        .into_iter()
+        .filter(|name| name.starts_with("mcp_"))
+        .collect::<Vec<_>>();
+    let star_assembled = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: star_definitions,
+        runtime: tool_search_runtime(ToolSearchMode::On, 10, None),
+    });
+    let star_catalog = star_assembled
+        .catalog
+        .as_ref()
+        .ok_or("missing star allow-list deferred catalog")?;
+    let star_catalog_names = deferred_catalog_names(star_catalog);
+    if star_catalog_names != registered_mcp_names {
+        return Err(format!(
+            "Tool Search should consume only registry definitions for star allow-list: {star_catalog_names:?} vs {registered_mcp_names:?}"
+        )
+        .into());
     }
     Ok(())
 }

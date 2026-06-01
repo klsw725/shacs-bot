@@ -31,8 +31,8 @@ use shacs_core::runtime::{
     HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle,
     MessageBus, ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
     RuntimeToolCall, Session, SessionHistoryOptions, SessionManager, SessionTurnLock,
-    StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolStatus,
-    HEARTBEAT_FILE_NAME,
+    StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig,
+    ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -59,7 +59,8 @@ use shacs_utils::diagnostics::{
 use shacs_utils::media_decode::{save_base64_data_url, MediaDecodeError, DEFAULT_MAX_BYTES};
 use shacs_utils::progress_events::{
     build_tool_event_start_payload, build_tool_progress_finish_payload,
-    build_tool_progress_start_payload, ProgressEventStatus, ToolProgressEvent, ToolProgressPayload,
+    build_tool_progress_start_payload, project_tool_progress_arguments, ProgressEventStatus,
+    ToolProgressEvent, ToolProgressPayload,
 };
 use shacs_utils::redaction::redact_string;
 use shacs_utils::text::safe_filename;
@@ -1557,19 +1558,20 @@ impl ObservabilityToolStartHook {
 impl AgentHook for ObservabilityToolStartHook {
     fn before_execute_tools(&self, _context: &AgentHookContext, calls: &[RuntimeToolCall]) {
         for call in calls {
+            let projected_arguments = project_tool_progress_arguments(&call.name, &call.arguments);
             if let Ok(mut pending) = self.pending.lock() {
                 pending
                     .entry(call.name.clone())
                     .or_default()
                     .push_back(ToolCallProgressSnapshot {
                         call_id: call.id.clone(),
-                        arguments: call.arguments.clone(),
+                        arguments: projected_arguments.clone(),
                     });
             }
             let payload = build_tool_progress_start_payload(
                 call.id.clone(),
                 call.name.clone(),
-                call.arguments.clone(),
+                projected_arguments,
             );
             emit_observability_hooks(
                 &self.hooks,
@@ -1591,7 +1593,7 @@ impl AgentHook for RuntimeVerboseLogHook {
             eprintln!(
                 "Tool call {} args={}",
                 call.name,
-                runtime_tool_args_preview(&call.arguments)
+                runtime_tool_args_preview(&call.name, &call.arguments)
             );
         }
     }
@@ -1623,8 +1625,11 @@ fn runtime_response_preview(response: &LlmResponse) -> String {
     runtime_preview_text(response.content.as_deref().unwrap_or(""), 120)
 }
 
-fn runtime_tool_args_preview(arguments: &Value) -> String {
-    runtime_preview_text(&arguments.to_string(), 200)
+fn runtime_tool_args_preview(name: &str, arguments: &Value) -> String {
+    runtime_preview_text(
+        &project_tool_progress_arguments(name, arguments).to_string(),
+        200,
+    )
 }
 
 fn publish_runtime_notification(
@@ -1760,7 +1765,8 @@ fn observability_tool_callback(
                     .unwrap_or_else(|| event.name.clone());
                 let arguments = event
                     .arguments
-                    .clone()
+                    .as_ref()
+                    .map(|arguments| project_tool_progress_arguments(&event.name, arguments))
                     .or_else(|| snapshot.map(|snapshot| snapshot.arguments))
                     .unwrap_or_else(|| Value::Object(Map::new()));
                 let result = event
@@ -10821,6 +10827,7 @@ pub struct AgentLoopChatCompletionAdapter {
     exec_path_append: Option<String>,
     exec_allowed_env_keys: Vec<String>,
     exec_env: BTreeMap<String, String>,
+    tool_search: ToolSearchConfig,
 }
 
 impl AgentLoopChatCompletionAdapter {
@@ -10871,6 +10878,7 @@ impl AgentLoopChatCompletionAdapter {
             exec_path_append,
             exec_allowed_env_keys: bundle.config.tools.exec.allowed_env_keys.clone(),
             exec_env: configured_exec_env(&bundle.config),
+            tool_search: runtime_tool_search_config(&bundle.config.tools.tool_search),
         })
     }
 
@@ -10897,6 +10905,7 @@ impl AgentLoopChatCompletionAdapter {
             .defaults
             .context_block_limit
             .map(|value| value as usize);
+        config.tool_search = self.tool_search;
         config.history_options = SessionHistoryOptions {
             max_messages: self.defaults.max_messages as usize,
             max_tokens: replay_token_budget(
@@ -12001,6 +12010,19 @@ fn configured_exec_env(config: &shacs_config::Config) -> BTreeMap<String, String
     let mut env = config.env.clone();
     env.extend(config.tools.exec.env.clone());
     env
+}
+
+fn runtime_tool_search_config(config: &shacs_config::ToolSearchConfig) -> ToolSearchConfig {
+    ToolSearchConfig {
+        enabled: match config.enabled {
+            shacs_config::ToolSearchMode::Off => ToolSearchMode::Off,
+            shacs_config::ToolSearchMode::On => ToolSearchMode::On,
+            shacs_config::ToolSearchMode::Auto => ToolSearchMode::Auto,
+        },
+        threshold_pct: config.threshold_pct,
+        search_default_limit: config.search_default_limit,
+        max_search_limit: config.max_search_limit,
+    }
 }
 
 fn render_image_generation_provider_error(error: ProviderError) -> String {
@@ -14270,6 +14292,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let error = adapter
@@ -15232,6 +15256,8 @@ mod tests {
                 "configured".to_owned(),
             )]),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let skills = adapter
@@ -17155,7 +17181,7 @@ mod tests {
         );
 
         let tool_args = json!({"text": "c".repeat(250)});
-        let preview = runtime_tool_args_preview(&tool_args);
+        let preview = runtime_tool_args_preview("message", &tool_args);
         assert!(preview.ends_with('…'));
         assert_eq!(preview.chars().count(), 201);
     }
@@ -17183,9 +17209,18 @@ mod tests {
             "api_key": "plain-secret",
             "query": "visible"
         });
-        let preview = runtime_tool_args_preview(&tool_args);
+        let preview = runtime_tool_args_preview("web_search", &tool_args);
         assert!(!preview.contains("plain-secret"));
         assert!(preview.contains("visible"));
+
+        let bridge_args = json!({
+            "name": "mcp_demo",
+            "arguments": {"query": "RAW_NESTED_ARGUMENT"}
+        });
+        let preview = runtime_tool_args_preview("tool_call", &bridge_args);
+        assert!(preview.contains("mcp_demo"));
+        assert!(!preview.contains("RAW_NESTED_ARGUMENT"));
+        assert!(!preview.contains("arguments"));
     }
 
     #[test]
@@ -17217,11 +17252,57 @@ mod tests {
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         assert!(!adapter.runtime_verbose);
         let adapter = adapter.with_runtime_verbose(true);
         assert!(adapter.runtime_verbose);
+    }
+
+    #[test]
+    fn agent_loop_adapter_loop_config_carries_tool_search_config() {
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults::default(),
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse::default(),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace: PathBuf::from("/tmp/workspace"),
+            media_dir: PathBuf::from("/tmp/data/media/api"),
+            tools: ToolRegistry::new(),
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            tool_search: ToolSearchConfig {
+                enabled: ToolSearchMode::On,
+                threshold_pct: 42,
+                search_default_limit: 3,
+                max_search_limit: 9,
+            },
+        };
+
+        let config = adapter.loop_config();
+        assert_eq!(config.tool_search.enabled, ToolSearchMode::On);
+        assert_eq!(config.tool_search.threshold_pct, 42);
+        assert_eq!(config.tool_search.search_default_limit, 3);
+        assert_eq!(config.tool_search.max_search_limit, 9);
     }
 
     #[test]
@@ -17380,6 +17461,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let paths = adapter.persist_media_data_urls(&["data:text/plain;base64,aGk=".to_owned()])?;
@@ -17445,6 +17528,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -17547,6 +17632,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let error = adapter
@@ -17626,6 +17713,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -17697,6 +17786,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
         let (event_tx, event_rx) = mpsc::channel();
         event_tx.send(ProviderEvent::TextDelta {
@@ -17775,6 +17866,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         assert_eq!(
@@ -17850,6 +17943,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let response = adapter.complete_chat(ChatCompletionInvocation {
@@ -17931,6 +18026,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let output = complete_direct_message(
@@ -18019,6 +18116,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             runtime_verbose: false,
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let output = complete_direct_message(
@@ -18087,6 +18186,8 @@ mod tests {
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
+
+                tool_search: ToolSearchConfig::default(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: Vec::new(),
@@ -18163,6 +18264,8 @@ mod tests {
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
+
+                tool_search: ToolSearchConfig::default(),
             },
             lifecycle_hooks: vec![hook],
             observability_hooks: Vec::new(),
@@ -18244,6 +18347,8 @@ mod tests {
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
+
+                tool_search: ToolSearchConfig::default(),
             },
             lifecycle_hooks: vec![recording_hook, panic_hook],
             observability_hooks: Vec::new(),
@@ -18335,6 +18440,8 @@ mod tests {
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
+
+                tool_search: ToolSearchConfig::default(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![panic_hook],
@@ -18385,6 +18492,81 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("missing_tool") && error.contains("not found")));
+        Ok(())
+    }
+
+    #[test]
+    fn tool_observability_projects_bridge_arguments_for_start_and_pending_finish(
+    ) -> Result<(), Box<dyn Error>> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_hook = events.clone();
+        let recording_hook: ShacsBotObservabilityHook = Arc::new(move |event| {
+            if let Ok(mut events) = events_for_hook.lock() {
+                events.push(event.clone());
+            }
+        });
+        let pending = Arc::new(Mutex::new(BTreeMap::new()));
+        let start_hook =
+            ObservabilityToolStartHook::new(vec![recording_hook.clone()], pending.clone());
+        let context = AgentHookContext {
+            iteration: 0,
+            messages: Vec::new(),
+        };
+        start_hook.before_execute_tools(
+            &context,
+            &[RuntimeToolCall::new(
+                "bridge-call-1",
+                "tool_call",
+                json!({
+                    "name": "mcp_parent_only",
+                    "arguments": {
+                        "token": "RAW_BRIDGE_SECRET",
+                        "rawNested": "RAW_NESTED_ARGUMENT"
+                    }
+                }),
+            )],
+        );
+        let callback = observability_tool_callback(&[recording_hook], pending)
+            .ok_or("missing observability callback")?;
+        callback(&ToolEvent {
+            name: "tool_call".to_owned(),
+            status: ToolStatus::Ok,
+            detail: "mapped".to_owned(),
+            call_id: None,
+            arguments: None,
+            result: Some(json!({"ok": true})),
+        });
+
+        let events = events.lock().map_err(|_| "events lock poisoned")?;
+        let serialized = format!("{events:?}");
+        if serialized.contains("RAW_BRIDGE_SECRET")
+            || serialized.contains("RAW_NESTED_ARGUMENT")
+            || serialized.contains("rawNested")
+        {
+            return Err(format!("bridge observability leaked raw arguments: {serialized}").into());
+        }
+        let start = events.iter().find_map(|event| match event {
+            ShacsBotObservabilityEvent::Tool {
+                event,
+                payload: Some(payload),
+            } if event.name == "tool_call" && payload.phase == "start" => Some(payload),
+            _ => None,
+        });
+        let finish = events.iter().find_map(|event| match event {
+            ShacsBotObservabilityEvent::Tool {
+                event,
+                payload: Some(payload),
+            } if event.name == "tool_call" && payload.phase == "end" => Some(payload),
+            _ => None,
+        });
+        let Some(start) = start else {
+            return Err("missing bridge start payload".into());
+        };
+        let Some(finish) = finish else {
+            return Err("missing bridge finish payload".into());
+        };
+        assert_eq!(start.arguments, json!({"name": "mcp_parent_only"}));
+        assert_eq!(finish.arguments, json!({"name": "mcp_parent_only"}));
         Ok(())
     }
 
@@ -18451,6 +18633,8 @@ mod tests {
                 exec_allowed_env_keys: Vec::new(),
                 exec_env: BTreeMap::new(),
                 runtime_verbose: false,
+
+                tool_search: ToolSearchConfig::default(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![recording_hook],
@@ -18565,6 +18749,8 @@ mod tests {
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let inbound = InboundMessage::new("direct", "user", "chat-1", "make artifact")
@@ -18640,6 +18826,8 @@ mod tests {
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+
+            tool_search: ToolSearchConfig::default(),
         });
         let runtime_bus = MessageBus::new();
         let turn_adapter = adapter.clone();
@@ -18729,6 +18917,8 @@ mod tests {
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+
+            tool_search: ToolSearchConfig::default(),
         };
 
         let (_first_turn, first_outbound) = adapter.process_inbound_with_outbound(

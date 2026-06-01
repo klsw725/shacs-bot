@@ -5,6 +5,7 @@ use shacs_core::runtime::{
     MemoryGitBoundary, MemoryLineAge, MemoryStore, MessageBus, MessageBusError, OutboundMessage,
     ProviderArchiveConsolidator, ProviderMemoryConsolidator, Session, SessionHistoryOptions,
     SessionManager, SkillsLoader, StreamDeltaCoalescer, SubagentManager, TokenConsolidationConfig,
+    ToolSearchConfig, ToolSearchMode,
 };
 use shacs_core::tools::{
     AskUserTool, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters, ToolRegistry,
@@ -15,7 +16,7 @@ use shacs_providers::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -1236,6 +1237,17 @@ fn runtime_runner_executes_tool_loop_and_accumulates_usage() -> Result<(), Box<d
         "test-model",
     );
     spec.max_iterations = 4;
+    spec.tool_search = ToolSearchConfig {
+        enabled: ToolSearchMode::On,
+        threshold_pct: 0,
+        search_default_limit: 1,
+        max_search_limit: 1,
+    };
+    spec.context_window_tokens = Some(8_192);
+    assert_eq!(
+        spec.tool_search_runtime_input().context_window_tokens,
+        Some(8_192)
+    );
     spec.checkpoint_callback = Some(Arc::new(move |checkpoint| {
         if let Ok(mut checkpoints) = checkpoints.lock() {
             checkpoints.push(checkpoint.clone());
@@ -1257,7 +1269,10 @@ fn runtime_runner_executes_tool_loop_and_accumulates_usage() -> Result<(), Box<d
         return Err(format!("runner tool loop drifted: {result:?}").into());
     }
     let requests = client.requests.lock().map_err(|error| error.to_string())?;
-    if requests.len() != 2 || requests[1].messages.len() != 3 || requests[0].tools.is_empty() {
+    if requests.len() != 2
+        || requests[1].messages.len() != 3
+        || requests[0].tools != registry.definitions()
+    {
         return Err(format!("runner request sequence drifted: {requests:?}").into());
     }
     let checkpoints = checkpoint_capture
@@ -1272,6 +1287,488 @@ fn runtime_runner_executes_tool_loop_and_accumulates_usage() -> Result<(), Box<d
         || checkpoints[2]["assistant_message"]["content"] != "done"
     {
         return Err(format!("runner checkpoint callbacks drifted: {checkpoints:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_tool_search_off_uses_registry_definitions() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(RepeatTool);
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("done".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = ToolSearchConfig {
+        enabled: ToolSearchMode::Off,
+        threshold_pct: 0,
+        search_default_limit: 2,
+        max_search_limit: 4,
+    };
+
+    let result = AgentRunner::new().run(spec)?;
+    let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    if result.final_content.as_deref() != Some("done")
+        || requests.len() != 1
+        || requests[0].tools != registry.definitions()
+    {
+        return Err(format!(
+            "Tool Search off should preserve provider tools: result={result:?} requests={requests:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_tool_search_activation_hides_mcp_and_adds_bridge_tools(
+) -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(RepeatTool);
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("done".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+
+    let result = AgentRunner::new().run(spec)?;
+    let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    let names = provider_tool_names(requests.first().ok_or("missing provider request")?)?;
+    if result.final_content.as_deref() != Some("done")
+        || names != ["repeat", "tool_search", "tool_describe", "tool_call"]
+        || names.iter().any(|name| name.starts_with("mcp_"))
+    {
+        return Err(format!(
+            "activated Tool Search provider surface drifted: names={names:?} requests={requests:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_tool_search_activation_diagnostics_are_observable() -> Result<(), Box<dyn Error>>
+{
+    let mut registry = ToolRegistry::new();
+    registry.register(RepeatTool);
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("done".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+
+    let result = AgentRunner::new().run(spec)?;
+    let event = result
+        .tool_events
+        .iter()
+        .find(|event| event.name == "tool_search_activation")
+        .ok_or("missing Tool Search activation event")?;
+    let activation = event
+        .result
+        .as_ref()
+        .and_then(|result| result.get("activation"))
+        .ok_or("missing activation summary")?;
+
+    if activation["mode"] != "on"
+        || activation["activated"] != true
+        || activation["reason"] != "forced_on"
+        || activation["visible_count"] != 4
+        || activation["deferred_count"] != 1
+        || !activation["scope_digest"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("sha256:")
+    {
+        return Err(format!("activation diagnostics drifted: {activation}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_bridge_events_use_redacted_bounded_evidence() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    for name in [
+        "mcp_alpha_lookup",
+        "mcp_beta_lookup",
+        "mcp_gamma_lookup",
+        "mcp_delta_lookup",
+        "mcp_epsilon_lookup",
+        "mcp_zeta_lookup",
+    ] {
+        registry.register(NamedMcpTool(name));
+    }
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            tool_calls: vec![ToolCallRequest::new(
+                "bridge-search",
+                "tool_search",
+                Map::from_iter([
+                    ("query".to_owned(), json!("lookup token sk-secret")),
+                    ("limit".to_owned(), json!(10)),
+                ]),
+            )],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            tool_calls: vec![ToolCallRequest::new(
+                "bridge-describe",
+                "tool_describe",
+                Map::from_iter([("name".to_owned(), json!("mcp_echo_lookup"))]),
+            )],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            tool_calls: vec![ToolCallRequest::new(
+                "bridge-call",
+                "tool_call",
+                Map::from_iter([
+                    ("name".to_owned(), json!("mcp_echo_lookup")),
+                    ("arguments".to_owned(), json!({"query": "secret token"})),
+                ]),
+            )],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("done".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+    spec.max_iterations = 6;
+
+    let result = AgentRunner::new().run(spec)?;
+    let search_event = result
+        .tool_events
+        .iter()
+        .find(|event| event.call_id.as_deref() == Some("bridge-search"))
+        .ok_or("missing search event")?;
+    let search_evidence = &search_event
+        .result
+        .as_ref()
+        .ok_or("missing search result")?["query_evidence"];
+    if search_evidence["redacted_query"] != "[redacted]"
+        || search_evidence["matched_names"].as_array().map(Vec::len) != Some(4)
+        || !search_evidence["scope_digest"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("sha256:")
+    {
+        return Err(format!("search evidence drifted: {search_evidence}").into());
+    }
+
+    let describe_event = result
+        .tool_events
+        .iter()
+        .find(|event| event.call_id.as_deref() == Some("bridge-describe"))
+        .ok_or("missing describe event")?;
+    let describe_json = serde_json::to_string(describe_event)?;
+    if describe_json.contains("schema")
+        || describe_json.contains("properties")
+        || describe_event
+            .result
+            .as_ref()
+            .ok_or("missing describe result")?["describe_evidence"]["requested_name"]
+            != "mcp_echo_lookup"
+        || describe_event
+            .result
+            .as_ref()
+            .ok_or("missing describe result")?["describe_evidence"]["found"]
+            != true
+    {
+        return Err(format!("describe evidence exposed schema: {describe_json}").into());
+    }
+
+    let call_event = result
+        .tool_events
+        .iter()
+        .find(|event| event.call_id.as_deref() == Some("bridge-call"))
+        .ok_or("missing call event")?;
+    let call_json = serde_json::to_string(call_event)?;
+    let mapping = &call_event.result.as_ref().ok_or("missing call result")?["mapping_evidence"];
+    if mapping["bridge_call_id"] != "bridge-call"
+        || mapping["bridge_name"] != "tool_call"
+        || mapping["underlying_name"] != "mcp_echo_lookup"
+        || !mapping["scope_digest"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("sha256:")
+        || call_json.contains("secret token")
+        || call_json.contains("arguments")
+    {
+        return Err(format!("call evidence drifted or leaked arguments: {call_json}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_bridge_search_describe_call_roundtrip_completes_turn(
+) -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(RepeatTool);
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            tool_calls: vec![ToolCallRequest::new(
+                "bridge-search",
+                "tool_search",
+                Map::from_iter([
+                    ("query".to_owned(), json!("echo")),
+                    ("limit".to_owned(), json!(1)),
+                ]),
+            )],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            tool_calls: vec![ToolCallRequest::new(
+                "bridge-describe",
+                "tool_describe",
+                Map::from_iter([("name".to_owned(), json!("mcp_echo_lookup"))]),
+            )],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            tool_calls: vec![ToolCallRequest::new(
+                "bridge-call",
+                "tool_call",
+                Map::from_iter([
+                    ("name".to_owned(), json!("mcp_echo_lookup")),
+                    ("arguments".to_owned(), json!({"query": "hello"})),
+                ]),
+            )],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("done".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+    spec.max_iterations = 6;
+
+    let result = AgentRunner::new().run(spec)?;
+    if result.stop_reason != "completed"
+        || result.final_content.as_deref() != Some("done")
+        || result.tools_used != ["tool_search", "tool_describe", "mcp_echo_lookup"]
+        || result.messages[1]["tool_calls"][0]["function"]["name"] != "tool_search"
+        || result.messages[2]["tool_call_id"] != "bridge-search"
+        || !result.messages[2]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("mcp_echo_lookup")
+        || result.messages[3]["tool_calls"][0]["function"]["name"] != "tool_describe"
+        || result.messages[4]["tool_call_id"] != "bridge-describe"
+        || !result.messages[4]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("mcp_echo_lookup")
+        || result.messages[5]["tool_calls"][0]["function"]["name"] != "tool_call"
+        || result.messages[6]["tool_call_id"] != "bridge-call"
+        || result.messages[6]["name"] != "tool_call"
+        || result.messages[6]["content"] != "mcp:hello"
+    {
+        return Err(format!("bridge roundtrip drifted: {result:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_direct_visible_tool_still_executes_with_tool_search_active(
+) -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(RepeatTool);
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            tool_calls: vec![ToolCallRequest::new(
+                "direct-repeat",
+                "repeat",
+                Map::from_iter([("text".to_owned(), json!("ha"))]),
+            )],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("done".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+
+    let result = AgentRunner::new().run(spec)?;
+    let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    let names = provider_tool_names(requests.first().ok_or("missing provider request")?)?;
+    if result.final_content.as_deref() != Some("done")
+        || result.tools_used != ["repeat"]
+        || result.messages[2]["tool_call_id"] != "direct-repeat"
+        || result.messages[2]["name"] != "repeat"
+        || result.messages[2]["content"] != "haha"
+        || names != ["repeat", "tool_search", "tool_describe", "tool_call"]
+    {
+        return Err(
+            format!("direct visible tool path drifted: result={result:?} names={names:?}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_rebuilds_catalog_and_rejects_stale_bridge_call() -> Result<(), Box<dyn Error>> {
+    let fresh_name = Arc::new(AtomicBool::new(false));
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(SwitchingMcpTool {
+        fresh_name: fresh_name.clone(),
+        calls: tool_calls.clone(),
+    });
+    let fresh_name_after_first_request = fresh_name.clone();
+    let client = MutatingProvider::new(
+        vec![
+            LlmResponse {
+                tool_calls: vec![ToolCallRequest::new(
+                    "search-stale-catalog",
+                    "tool_search",
+                    Map::from_iter([("query".to_owned(), json!("lookup"))]),
+                )],
+                finish_reason: "tool_calls".to_owned(),
+                ..LlmResponse::default()
+            },
+            LlmResponse {
+                tool_calls: vec![ToolCallRequest::new(
+                    "stale-bridge-call",
+                    "tool_call",
+                    Map::from_iter([
+                        ("name".to_owned(), json!("mcp_stale_lookup")),
+                        ("arguments".to_owned(), json!({"query": "old"})),
+                    ]),
+                )],
+                finish_reason: "tool_calls".to_owned(),
+                ..LlmResponse::default()
+            },
+            LlmResponse {
+                content: Some("done".to_owned()),
+                ..LlmResponse::default()
+            },
+        ],
+        Arc::new(move |request_count| {
+            if request_count == 1 {
+                fresh_name_after_first_request.store(true, Ordering::SeqCst);
+            }
+        }),
+    );
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+    spec.max_iterations = 5;
+
+    let result = AgentRunner::new().run(spec)?;
+    let stale_result = result
+        .messages
+        .iter()
+        .find(|message| message["tool_call_id"] == "stale-bridge-call")
+        .ok_or("missing stale bridge tool result")?;
+    if result.final_content.as_deref() != Some("done")
+        || tool_calls.load(Ordering::SeqCst) != 0
+        || result.tools_used != ["tool_search", "tool_call"]
+        || !stale_result["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not deferred in the current catalog")
+    {
+        return Err(format!(
+            "stale bridge call should fail closed without executing: result={result:?} stale_result={stale_result:?} calls={}",
+            tool_calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_bridge_schemas_remain_provider_agnostic_canonical_tools(
+) -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("done".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+
+    let result = AgentRunner::new().run(spec)?;
+    let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    let request = requests.first().ok_or("missing provider request")?;
+    let names = provider_tool_names(request)?;
+    let forbidden_keys = ["defer", "provider", "provider_native", "tool_search_beta"];
+    let canonical = request.tools.iter().all(|tool| {
+        tool.get("type") == Some(&json!("function"))
+            && tool.get("function").is_some_and(Value::is_object)
+            && forbidden_keys.iter().all(|key| tool.get(*key).is_none())
+    });
+    if result.final_content.as_deref() != Some("done")
+        || names != ["tool_search", "tool_describe", "tool_call"]
+        || !canonical
+    {
+        return Err(format!(
+            "bridge schemas should remain canonical provider-agnostic tools: names={names:?} tools={:?}",
+            request.tools
+        )
+        .into());
     }
     Ok(())
 }
@@ -1911,8 +2408,10 @@ fn runtime_runner_handles_error_empty_length_and_tool_result_governance(
     error_spec.fail_on_tool_error = true;
     let error_result = AgentRunner::new().run(error_spec)?;
     if error_result.stop_reason != "tool_error"
-        || error_result.tool_events.first().map(|event| &event.name)
-            != Some(&"error_tool".to_owned())
+        || !error_result
+            .tool_events
+            .iter()
+            .any(|event| event.name == "error_tool")
     {
         return Err(format!("fail_on_tool_error drifted: {error_result:?}").into());
     }
@@ -2250,6 +2749,35 @@ impl Tool for LargeTool {
 
 struct EmptyTool;
 
+struct McpEchoTool;
+
+struct NamedMcpTool(&'static str);
+
+impl Tool for NamedMcpTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn description(&self) -> &str {
+        "Lookup test MCP tool."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("query", StringSchema::new("Query"))
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        ToolResult::Text(self.0.to_owned())
+    }
+}
+
+struct SwitchingMcpTool {
+    fresh_name: Arc<AtomicBool>,
+    calls: Arc<AtomicUsize>,
+}
+
 impl Tool for EmptyTool {
     fn name(&self) -> &str {
         "empty_tool"
@@ -2265,6 +2793,61 @@ impl Tool for EmptyTool {
 
     fn execute(&self, _params: JsonMap) -> ToolResult {
         ToolResult::Text(String::new())
+    }
+}
+
+impl Tool for McpEchoTool {
+    fn name(&self) -> &str {
+        "mcp_echo_lookup"
+    }
+
+    fn description(&self) -> &str {
+        "Echo lookup for deferred Tool Search tests."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("query", StringSchema::new("Query"))
+            .required(["query"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, params: JsonMap) -> ToolResult {
+        let query = params
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        ToolResult::Text(format!("mcp:{query}"))
+    }
+}
+
+impl Tool for SwitchingMcpTool {
+    fn name(&self) -> &str {
+        if self.fresh_name.load(Ordering::SeqCst) {
+            "mcp_fresh_lookup"
+        } else {
+            "mcp_stale_lookup"
+        }
+    }
+
+    fn description(&self) -> &str {
+        "Switching lookup for per-iteration catalog scope tests."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("query", StringSchema::new("Query"))
+            .required(["query"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let query = params
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        ToolResult::Text(format!("switch:{query}"))
     }
 }
 
@@ -2428,6 +3011,36 @@ impl Tool for CountingTool {
     }
 }
 
+fn activated_tool_search_config() -> ToolSearchConfig {
+    ToolSearchConfig {
+        enabled: ToolSearchMode::On,
+        threshold_pct: 0,
+        search_default_limit: 2,
+        max_search_limit: 4,
+    }
+}
+
+fn provider_tool_names(request: &ProviderRequest) -> Result<Vec<String>, Box<dyn Error>> {
+    request
+        .tools
+        .iter()
+        .map(|tool| {
+            provider_tool_name(tool)
+                .map(str::to_owned)
+                .ok_or_else(|| "missing provider tool name".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn provider_tool_name(tool: &Value) -> Option<&str> {
+    tool.get("function")
+        .and_then(Value::as_object)
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
+        .or_else(|| tool.get("name").and_then(Value::as_str))
+}
+
 struct MockProvider {
     responses: Mutex<VecDeque<LlmResponse>>,
     requests: Mutex<Vec<ProviderRequest>>,
@@ -2447,11 +3060,27 @@ struct StreamMockProvider {
     events: Vec<ProviderEvent>,
 }
 
+struct MutatingProvider {
+    responses: Mutex<VecDeque<LlmResponse>>,
+    requests: Mutex<Vec<ProviderRequest>>,
+    after_request: Arc<dyn Fn(usize) + Send + Sync>,
+}
+
 impl StreamMockProvider {
     fn new(responses: Vec<LlmResponse>, events: Vec<ProviderEvent>) -> Self {
         Self {
             inner: MockProvider::new(responses),
             events,
+        }
+    }
+}
+
+impl MutatingProvider {
+    fn new(responses: Vec<LlmResponse>, after_request: Arc<dyn Fn(usize) + Send + Sync>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into()),
+            requests: Mutex::new(Vec::new()),
+            after_request,
         }
     }
 }
@@ -2479,6 +3108,33 @@ impl ProviderClient for MockProvider {
             .lock()
             .map_err(|error| provider_error(error.to_string()))?
             .push(request);
+        self.responses
+            .lock()
+            .map_err(|error| provider_error(error.to_string()))?
+            .pop_front()
+            .ok_or_else(|| provider_error("no mock response"))
+    }
+
+    fn chat_stream(
+        &self,
+        request: ProviderRequest,
+        _on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat(request)
+    }
+}
+
+impl ProviderClient for MutatingProvider {
+    fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+        let request_count = {
+            let mut requests = self
+                .requests
+                .lock()
+                .map_err(|error| provider_error(error.to_string()))?;
+            requests.push(request);
+            requests.len()
+        };
+        (self.after_request)(request_count);
         self.responses
             .lock()
             .map_err(|error| provider_error(error.to_string()))?

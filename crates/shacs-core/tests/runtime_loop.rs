@@ -1,9 +1,10 @@
 use serde_json::{json, Map, Value};
 use shacs_core::runtime::{
     app_provided_skill_reference_evidence, authored_skill_ready_for_active_registry,
-    build_runtime_memory_evidence, build_spec018_diagnostics_manifest,
-    build_spec018_ledger_inspect_result, build_spec018_projection, build_subagent_tool_registry,
-    consume_evaluator_decision, coordinate_automation_run, create_persistent_goal,
+    bridge_underlying_mapping_evidence_ref, build_runtime_memory_evidence,
+    build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
+    build_spec018_projection, build_subagent_tool_registry, consume_evaluator_decision,
+    coordinate_automation_run, create_persistent_goal, dispatch_bridge_tool_call,
     evaluate_spec018_release_gate, evaluator_consumption_idempotency_key,
     format_partial_progress_from_tool_events, freeze_session_search_snapshot, run_local_replay,
     runtime_curator_proposal_record, runtime_improvement_apply_readiness,
@@ -12,22 +13,30 @@ use shacs_core::runtime::{
     runtime_improvement_verification_record, runtime_mcp_exposure_projection,
     runtime_memory_evidence_request, runtime_skill_list_disclosure,
     runtime_skill_reference_evidence, runtime_skill_view_disclosure,
-    runtime_spec018_channel_projection, runtime_spec018_local_api_projection, ActiveLoopTask,
-    AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AutoCompact,
-    AutomationSourceEvent, AutomationSourceEventKind, CancellationToken, ChildResultEnvelope,
-    ChildResultStatus, ContextBuilder, DreamLifecycle, EvaluatorDecisionInput,
-    GoalCompletionVerdict, InboundMessage, LedgerConsumptionStatus, LoopTaskRegisterResult,
-    McpLifecycle, MergeDecision, MessageBus, PersistentGoal, PersistentGoalStatus,
-    ProviderHotSwapResult, ProviderSelectionSnapshot, RuntimeCapabilityStatus, RuntimeContextTools,
-    RuntimeDecisionKind, RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults,
-    RuntimeReplayInput, RuntimeSelectedAction, RuntimeSpec018DiagnosticsManifestInput,
+    runtime_spec018_channel_projection, runtime_spec018_local_api_projection,
+    tool_search_prd005_release_evidence_checklist, ActiveLoopTask, AgentLoop,
+    AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentRunSpec, AgentRunner,
+    AutoCompact, AutomationSourceEvent, AutomationSourceEventKind, BridgeUnderlyingMappingEvidence,
+    CancellationToken, ChildResultEnvelope, ChildResultStatus, ContextBuilder, DreamLifecycle,
+    EvaluatorDecisionInput, GoalCompletionVerdict, InboundMessage, LedgerConsumptionStatus,
+    LoopTaskRegisterResult, McpLifecycle, MergeDecision, MessageBus, PersistentGoal,
+    PersistentGoalStatus, ProviderHotSwapResult, ProviderSelectionSnapshot,
+    RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind,
+    RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults, RuntimeReplayInput,
+    RuntimeSelectedAction, RuntimeSpec018DiagnosticsManifestInput,
     RuntimeSpec018LedgerInspectInput, RuntimeSpec018ProjectionInput,
-    RuntimeSpec018ReleaseGateInput, Session, SessionManager, SessionTurnAcquireError,
-    SessionTurnLock, StaticProviderSelector, SubagentExecutionConfig, SubagentMergeState,
-    SubagentProgressUpdate, SubagentRuntime, SubagentRuntimeConfig, ToolEvent, ToolStatus,
+    RuntimeSpec018ReleaseGateInput, RuntimeToolCall, RuntimeToolExecutor, Session, SessionManager,
+    SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector, SubagentExecutionConfig,
+    SubagentMergeState, SubagentProgressUpdate, SubagentRuntime, SubagentRuntimeConfig, ToolEvent,
+    ToolExecutionContext, ToolSearchConfig, ToolSearchMode, ToolSearchReleaseEvidence,
+    ToolSearchReleaseEvidenceBucket, ToolSearchRuntimeInput, ToolStatus,
     PERSISTENT_GOAL_METADATA_KEY,
 };
-use shacs_core::tools::{AskUserTool, MessageTool, SpawnRequest, SpawnTool, ToolRegistry};
+use shacs_core::tools::{
+    assemble_tool_surface, ActivationState, AskUserTool, JsonMap, MessageTool, SchemaFragment,
+    SpawnRequest, SpawnTool, Tool, ToolParameters, ToolRegistry, ToolResult,
+    ToolSurfaceAssemblyInput,
+};
 use shacs_providers::{
     GenerationSettings, LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest,
     ToolCallRequest,
@@ -59,7 +68,7 @@ use shacs_utils::evaluator::{
     Spec018ReleaseCoverageStatus, Spec018RetryEligibility, Spec018RollbackEligibility,
     Spec018SkippedEvidence, Spec018SkippedEvidenceClassification,
     Spec018VerificationProjectionItem, Spec018VerificationResultKind, SuggestedNextAction,
-    TaskOutcomeClass, VerdictKind,
+    TaskOutcomeClass, TrajectoryRecord, TrajectoryStats, VerdictKind,
 };
 use shacs_utils::gitstore::{GitCliStore, GitStore};
 use std::collections::{BTreeMap, VecDeque};
@@ -93,6 +102,19 @@ fn spec018_evidence_ref(
         owner_spec: Some("018".to_owned()),
         locator: Some(format!("inspect://{id}")),
         retention_hint: Some("local".to_owned()),
+    }
+}
+
+fn prd005_evidence_ref(id: &str, redaction_status: RedactionStatus) -> EvidenceRef {
+    EvidenceRef {
+        kind: EvidenceKind::DiagnosticRecord,
+        id: id.to_owned(),
+        digest: format!("digest-{id}"),
+        summary: format!("summary-{id}"),
+        redaction_status,
+        owner_spec: Some("020".to_owned()),
+        locator: Some(format!("prd005://{id}")),
+        retention_hint: Some("release_evidence".to_owned()),
     }
 }
 
@@ -1266,6 +1288,180 @@ fn runtime_spec018_release_gate_blocks_until_all_buckets_and_no_blockers() {
     });
     assert!(!incomplete.final_closure_passed);
     assert_eq!(incomplete.missing_buckets.len(), 1);
+}
+
+#[test]
+fn tool_search_prd005_release_evidence_checklist_requires_all_buckets() {
+    let evidence = [
+        (
+            ToolSearchReleaseEvidenceBucket::Config,
+            "tool_search_off_preserves_definition_order_without_catalog",
+        ),
+        (
+            ToolSearchReleaseEvidenceBucket::Assembler,
+            "tool_search_diagnostics_summary_reports_activation_reason_families",
+        ),
+        (
+            ToolSearchReleaseEvidenceBucket::Bridge,
+            "runtime_runner_bridge_events_use_redacted_bounded_evidence",
+        ),
+        (
+            ToolSearchReleaseEvidenceBucket::RunnerWiring,
+            "runtime_runner_bridge_search_describe_call_roundtrip_completes_turn",
+        ),
+        (
+            ToolSearchReleaseEvidenceBucket::McpDefaultDeny,
+            "mcp_default_deny_excludes_disabled_capabilities_from_tool_search_bridge",
+        ),
+        (
+            ToolSearchReleaseEvidenceBucket::SubagentScope,
+            "subagent_tool_search_catalog_uses_child_registry_not_parent_definitions",
+        ),
+        (
+            ToolSearchReleaseEvidenceBucket::ReplaySafety,
+            "replay_runner_executes_selected_cases_only_and_never_dispatches_live_tools",
+        ),
+        (
+            ToolSearchReleaseEvidenceBucket::Diagnostics,
+            "runtime_runner_tool_search_activation_diagnostics_are_observable",
+        ),
+    ]
+    .into_iter()
+    .map(|(bucket, test_name)| ToolSearchReleaseEvidence {
+        bucket,
+        test_names: vec![test_name.to_owned()],
+        manual_qa_refs: Vec::new(),
+        evidence_refs: vec![prd005_evidence_ref(test_name, RedactionStatus::Redacted)],
+    })
+    .collect::<Vec<_>>();
+
+    let passing = tool_search_prd005_release_evidence_checklist(&evidence);
+    assert!(passing.passed);
+    assert_eq!(passing.required_buckets.len(), 8);
+    assert_eq!(passing.covered_buckets.len(), 8);
+    assert!(passing
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::Config));
+    assert!(passing
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::Assembler));
+    assert!(passing
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::Bridge));
+    assert!(passing
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::RunnerWiring));
+    assert!(passing
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::McpDefaultDeny));
+    assert!(passing
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::SubagentScope));
+    assert!(passing
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::ReplaySafety));
+    assert!(passing
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::Diagnostics));
+
+    let incomplete = tool_search_prd005_release_evidence_checklist(&evidence[..evidence.len() - 1]);
+    assert!(!incomplete.passed);
+    assert_eq!(
+        incomplete.missing_buckets,
+        vec![ToolSearchReleaseEvidenceBucket::Diagnostics]
+    );
+
+    let label_only = tool_search_prd005_release_evidence_checklist(&[ToolSearchReleaseEvidence {
+        bucket: ToolSearchReleaseEvidenceBucket::Config,
+        test_names: vec!["label_without_evidence".to_owned()],
+        manual_qa_refs: Vec::new(),
+        evidence_refs: Vec::new(),
+    }]);
+    assert!(!label_only.passed);
+    assert!(!label_only
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::Config));
+
+    let mut ownerless_ref = prd005_evidence_ref("ownerless", RedactionStatus::Redacted);
+    ownerless_ref.owner_spec = None;
+    let ownerless = tool_search_prd005_release_evidence_checklist(&[ToolSearchReleaseEvidence {
+        bucket: ToolSearchReleaseEvidenceBucket::Bridge,
+        test_names: vec!["ownerless_ref".to_owned()],
+        manual_qa_refs: Vec::new(),
+        evidence_refs: vec![ownerless_ref],
+    }]);
+    assert!(!ownerless
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::Bridge));
+
+    let redaction_failed =
+        tool_search_prd005_release_evidence_checklist(&[ToolSearchReleaseEvidence {
+            bucket: ToolSearchReleaseEvidenceBucket::Diagnostics,
+            test_names: Vec::new(),
+            manual_qa_refs: vec!["manual-label".to_owned()],
+            evidence_refs: vec![prd005_evidence_ref(
+                "redaction-failed",
+                RedactionStatus::RedactionFailed,
+            )],
+        }]);
+    assert!(!redaction_failed
+        .covered_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::Diagnostics));
+}
+
+#[test]
+fn bridge_underlying_mapping_evidence_ref_is_safe_for_trajectory_tool_refs(
+) -> Result<(), Box<dyn Error>> {
+    let evidence_ref = bridge_underlying_mapping_evidence_ref(&BridgeUnderlyingMappingEvidence {
+        bridge_call_id: "bridge-call-token=RAW_BRIDGE_SECRET".to_owned(),
+        bridge_name: "tool_call".to_owned(),
+        underlying_name: "mcp_parent_only".to_owned(),
+        scope_digest: "scope-RAW_SCHEMA_SHOULD_NOT_LEAK".to_owned(),
+    });
+    if evidence_ref.kind != EvidenceKind::ToolPayload
+        || evidence_ref.owner_spec.as_deref() != Some("020")
+        || evidence_ref.redaction_status != RedactionStatus::Redacted
+    {
+        return Err(format!("mapping evidence ref contract drifted: {evidence_ref:?}").into());
+    }
+
+    let trajectory = TrajectoryRecord {
+        trajectory_id: "trajectory-bridge-mapping".to_owned(),
+        session_ref: spec018_evidence_ref(
+            EvidenceKind::SessionEvent,
+            "trajectory-session",
+            RedactionStatus::Redacted,
+        ),
+        event_refs: Vec::new(),
+        model_call_refs: Vec::new(),
+        tool_refs: vec![evidence_ref],
+        evaluator_refs: Vec::new(),
+        provider_snapshot_refs: Vec::new(),
+        redaction_profile: "prd005-redacted".to_owned(),
+        stats: TrajectoryStats {
+            started_at_ms: 1,
+            completed_at_ms: Some(2),
+            model_call_count: 1,
+            tool_call_count: 1,
+            input_tokens: None,
+            output_tokens: None,
+        },
+        correlation_id: "corr-bridge-mapping".to_owned(),
+    };
+    let serialized = serde_json::to_string(&trajectory)?;
+    for forbidden in [
+        "RAW_BRIDGE_SECRET",
+        "RAW_SCHEMA_SHOULD_NOT_LEAK",
+        "bridge-call-token",
+        "scope-RAW_SCHEMA",
+        "arguments",
+        "schema",
+    ] {
+        if serialized.contains(forbidden) {
+            return Err(format!("trajectory tool_ref leaked {forbidden}: {serialized}").into());
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -2665,6 +2861,255 @@ fn subagent_tool_registry_excludes_parent_only_tools() -> Result<(), Box<dyn Err
         }
     }
     Ok(())
+}
+
+#[test]
+fn subagent_tool_search_catalog_uses_child_registry_not_parent_definitions(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let parent_calls = Arc::new(Mutex::new(0usize));
+    let mut parent_registry = ToolRegistry::new();
+    parent_registry.register(ParentOnlyMcpTool {
+        calls: parent_calls.clone(),
+    });
+    let parent_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: parent_registry.definitions(),
+        runtime: child_tool_search_runtime(),
+    });
+    let parent_catalog = parent_surface
+        .catalog
+        .as_ref()
+        .ok_or("parent MCP catalog should exist")?;
+    if !parent_catalog
+        .entries
+        .iter()
+        .any(|entry| entry.name == "mcp_parent_only")
+    {
+        return Err(format!(
+            "parent-only MCP tool missing from parent catalog: {parent_catalog:?}"
+        )
+        .into());
+    }
+
+    let mut config = SubagentExecutionConfig::new(workspace.path(), "test-model");
+    config.allow_side_effect_tools = true;
+    config.enable_exec = true;
+    config.enable_web = true;
+    let child_registry = build_subagent_tool_registry(&config);
+    let child_definitions = child_registry.definitions();
+    let child_definition_names = tool_definition_names(&child_definitions)?;
+    if child_definition_names
+        .iter()
+        .any(|name| name == "mcp_parent_only")
+    {
+        return Err(format!(
+            "child definitions included parent-only tool: {child_definition_names:?}"
+        )
+        .into());
+    }
+
+    let child_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
+        definitions: child_definitions,
+        runtime: child_tool_search_runtime(),
+    });
+    if child_surface.activation_state != ActivationState::PassThrough
+        || child_surface.catalog.is_some()
+    {
+        return Err(format!(
+            "child Tool Search surface should be built from child definitions only: {child_surface:?}"
+        )
+        .into());
+    }
+
+    let child_executor = RuntimeToolExecutor::new(&child_registry);
+    for (call_id, bridge_name, arguments) in [
+        (
+            "child-search-parent-only",
+            "tool_search",
+            json!({ "query": "parent only" }),
+        ),
+        (
+            "child-describe-parent-only",
+            "tool_describe",
+            json!({ "name": "mcp_parent_only" }),
+        ),
+        (
+            "child-call-parent-only",
+            "tool_call",
+            json!({ "name": "mcp_parent_only", "arguments": {} }),
+        ),
+    ] {
+        let report = dispatch_bridge_tool_call(
+            RuntimeToolCall::new(call_id, bridge_name, arguments),
+            child_surface.catalog.as_ref(),
+            &child_registry,
+            &child_executor,
+            &ToolExecutionContext::default(),
+        );
+        let messages = report.messages();
+        let message = messages.first().ok_or("missing child bridge rejection")?;
+        if message.tool_call_id != call_id
+            || !message
+                .content
+                .contains("deferred tool catalog is not available")
+        {
+            return Err(
+                format!("parent-only child bridge path did not fail closed: {report:?}").into(),
+            );
+        }
+    }
+
+    let parent_call_count = parent_calls.lock().map_err(|error| error.to_string())?;
+    if *parent_call_count != 0 {
+        return Err("child bridge dispatch executed parent-only tool".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn core_bridge_tool_events_serialize_safe_for_subagent_progress() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(ParentOnlyMcpTool {
+        calls: Arc::new(Mutex::new(0)),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![
+                ToolCallRequest::new(
+                    "search-1",
+                    "tool_search",
+                    Map::from_iter([
+                        (
+                            "query".to_owned(),
+                            json!("token=RAW_BRIDGE_SECRET parent only"),
+                        ),
+                        ("limit".to_owned(), json!(5)),
+                    ]),
+                ),
+                ToolCallRequest::new(
+                    "describe-1",
+                    "tool_describe",
+                    Map::from_iter([("name".to_owned(), json!("mcp_parent_only"))]),
+                ),
+                ToolCallRequest::new(
+                    "call-1",
+                    "tool_call",
+                    Map::from_iter([
+                        ("name".to_owned(), json!("mcp_parent_only")),
+                        (
+                            "arguments".to_owned(),
+                            json!({
+                                "token": "RAW_BRIDGE_SECRET",
+                                "raw_schema": "RAW_SCHEMA_SHOULD_NOT_LEAK"
+                            }),
+                        ),
+                    ]),
+                ),
+            ],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("done".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "use deferred tools"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = child_tool_search_runtime().config;
+    spec.max_iterations = 3;
+
+    let result = AgentRunner::new().run(spec)?;
+    let tool_events = result
+        .tool_events
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let progress = SubagentProgressUpdate {
+        phase: "awaiting_tools".to_owned(),
+        iteration: 1,
+        tool_events,
+        usage: Value::Null,
+        error: None,
+    };
+    let serialized = serde_json::to_string(&progress)?;
+    for forbidden in [
+        "RAW_BRIDGE_SECRET",
+        "RAW_SCHEMA_SHOULD_NOT_LEAK",
+        "raw_schema",
+        "Parent-only MCP test tool",
+        "schema",
+    ] {
+        if serialized.contains(forbidden) {
+            return Err(
+                format!("subagent progress ToolEvent leaked {forbidden}: {serialized}").into(),
+            );
+        }
+    }
+    if !serialized.contains("tool_search")
+        || !serialized.contains("tool_describe")
+        || !serialized.contains("tool_call")
+    {
+        return Err(format!("missing bridge ToolEvents in progress payload: {serialized}").into());
+    }
+    Ok(())
+}
+
+struct ParentOnlyMcpTool {
+    calls: Arc<Mutex<usize>>,
+}
+
+impl Tool for ParentOnlyMcpTool {
+    fn name(&self) -> &str {
+        "mcp_parent_only"
+    }
+
+    fn description(&self) -> &str {
+        "Parent-only MCP test tool."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new().to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        if let Ok(mut calls) = self.calls.lock() {
+            *calls += 1;
+        }
+        "parent-only executed".into()
+    }
+}
+
+fn child_tool_search_runtime() -> ToolSearchRuntimeInput {
+    ToolSearchRuntimeInput {
+        config: ToolSearchConfig {
+            enabled: ToolSearchMode::On,
+            threshold_pct: 10,
+            search_default_limit: 5,
+            max_search_limit: 20,
+        },
+        context_window_tokens: None,
+    }
+}
+
+fn tool_definition_names(definitions: &[Value]) -> Result<Vec<String>, Box<dyn Error>> {
+    definitions
+        .iter()
+        .map(|definition| {
+            definition
+                .get("function")
+                .and_then(Value::as_object)
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .or_else(|| definition.get("name").and_then(Value::as_str))
+                .map(str::to_owned)
+                .ok_or_else(|| "missing tool definition name".into())
+        })
+        .collect()
 }
 
 #[test]

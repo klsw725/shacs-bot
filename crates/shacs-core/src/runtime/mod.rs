@@ -14,6 +14,7 @@ mod runner;
 mod self_improvement;
 mod subagent;
 mod tool_execution;
+mod tool_search;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
@@ -28,8 +29,10 @@ pub use automation::{
 pub use context::{add_assistant_message, add_tool_result, ContextBuildRequest, ContextBuilder};
 pub use diagnostics_release::{
     build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
-    evaluate_spec018_release_gate, RuntimeSpec018DiagnosticsManifestInput,
-    RuntimeSpec018LedgerInspectInput, RuntimeSpec018ReleaseGateInput,
+    evaluate_spec018_release_gate, tool_search_prd005_release_evidence_checklist,
+    RuntimeSpec018DiagnosticsManifestInput, RuntimeSpec018LedgerInspectInput,
+    RuntimeSpec018ReleaseGateInput, ToolSearchReleaseEvidence, ToolSearchReleaseEvidenceBucket,
+    ToolSearchReleaseEvidenceChecklist,
 };
 pub use goal::{
     apply_completion_verdict, build_goal_completion_evaluation_request, clear_goal,
@@ -79,7 +82,7 @@ pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub use runner::{
     AgentHook, AgentHookContext, AgentRunResult, AgentRunSpec, AgentRunner, CompositeHook,
     MidTurnInjectionCallback, NoopAgentHook, ProviderEventCallback, RetryWaitCallback, ToolEvent,
-    ToolEventCallback, ToolStatus,
+    ToolEventCallback, ToolSearchConfig, ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
 };
 pub use self_improvement::{
     runtime_improvement_apply_readiness, runtime_improvement_apply_record,
@@ -111,6 +114,12 @@ pub use subagent::{
 pub use tool_execution::{
     RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
     RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext,
+};
+pub use tool_search::{
+    bridge_underlying_mapping_evidence_ref, dispatch_bridge_tool_call, dispatch_bridge_tool_calls,
+    BridgeToolCall, BridgeToolExecutionReport, BridgeToolResult, BridgeUnderlyingMappingEvidence,
+    ResolvedDeferredToolCall, ToolCallScopeError, ToolDescribeEvidence, ToolSearchActivationReason,
+    ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
 };
 
 pub type Dream<'a> = DreamProcessor<'a>;
