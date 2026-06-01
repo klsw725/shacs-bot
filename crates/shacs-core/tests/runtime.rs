@@ -1,11 +1,12 @@
 use serde_json::{json, Value};
 use shacs_core::runtime::{
-    RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutor,
-    ToolExecutionContext,
+    dispatch_bridge_tool_call, dispatch_bridge_tool_calls, RuntimeContextTools, RuntimeInterrupt,
+    RuntimeToolCall, RuntimeToolExecutor, ToolExecutionContext,
 };
 use shacs_core::tools::{
-    AskUserTool, CronTool, JsonMap, MessageTool, OutboundMessage, SchemaFragment, SpawnRequest,
-    SpawnTool, StringSchema, Tool, ToolParameters, ToolRegistry, ToolResult,
+    AskUserTool, CronTool, DeferredToolCatalog, DeferredToolCatalogEntry, JsonMap, MessageTool,
+    OutboundMessage, SchemaFragment, SpawnRequest, SpawnTool, StringSchema, Tool, ToolParameters,
+    ToolRegistry, ToolResult,
 };
 use shacs_cron::InMemoryCronService;
 use std::error::Error;
@@ -115,6 +116,68 @@ struct DelayTool {
     active: Arc<AtomicUsize>,
     max_active: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
+}
+
+struct NamedRepeatTool(&'static str);
+
+impl Tool for NamedRepeatTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn description(&self) -> &str {
+        "Repeat text."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("text", StringSchema::new("Text"))
+            .property(
+                "times",
+                shacs_core::tools::IntegerSchema::new("Repeat count").minimum(1),
+            )
+            .required(["text", "times"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, params: JsonMap) -> ToolResult {
+        let text = params
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let times = params.get("times").and_then(Value::as_u64).unwrap_or(1);
+        ToolResult::Text(text.repeat(times as usize))
+    }
+}
+
+struct DeferredAskTool;
+
+impl Tool for DeferredAskTool {
+    fn name(&self) -> &str {
+        "mcp_ask_user"
+    }
+
+    fn description(&self) -> &str {
+        "Ask the user from a deferred tool."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("question", StringSchema::new("Question"))
+            .required(["question"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, params: JsonMap) -> ToolResult {
+        ToolResult::AskUserInterrupt {
+            question: params
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            options: vec!["Yes".to_owned(), "No".to_owned()],
+        }
+    }
 }
 
 impl DelayTool {
@@ -479,6 +542,393 @@ fn runtime_preserves_ask_user_interrupt_and_skips_later_tools() -> Result<(), Bo
 }
 
 #[test]
+fn bridge_dispatcher_search_and_describe_use_current_catalog() -> Result<(), Box<dyn Error>> {
+    let registry = ToolRegistry::new();
+    let executor = RuntimeToolExecutor::new(&registry);
+    let catalog = bridge_catalog([
+        (
+            "mcp_github_search_repositories",
+            "Find GitHub repositories",
+            ["query"],
+        ),
+        ("mcp_slack_post_message", "Post Slack messages", ["channel"]),
+    ]);
+
+    let search = dispatch_bridge_tool_call(
+        RuntimeToolCall::new(
+            "search-call",
+            "tool_search",
+            json!({ "query": "github", "limit": 1 }),
+        ),
+        Some(&catalog),
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+    );
+    let search_messages = search.messages();
+    let search_message = search_messages.first().ok_or("missing search message")?;
+    let search_content = parse_json_content(&search_message.content)?;
+    if search_message.tool_call_id != "search-call"
+        || search_message.name != "tool_search"
+        || search_content["matches"].as_array().map(Vec::len) != Some(1)
+        || search_content["matches"][0]["name"] != "mcp_github_search_repositories"
+        || search_content["matches"][0].get("schema").is_some()
+    {
+        return Err(format!("unexpected search result: {search:?}").into());
+    }
+
+    let describe = dispatch_bridge_tool_call(
+        RuntimeToolCall::new(
+            "describe-call",
+            "tool_describe",
+            json!({ "name": "mcp_github_search_repositories" }),
+        ),
+        Some(&catalog),
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+    );
+    let describe_messages = describe.messages();
+    let describe_message = describe_messages
+        .first()
+        .ok_or("missing describe message")?;
+    let describe_content = parse_json_content(&describe_message.content)?;
+    if describe_message.tool_call_id != "describe-call"
+        || describe_message.name != "tool_describe"
+        || describe_content["name"] != "mcp_github_search_repositories"
+        || describe_content["schema"]["function"]["parameters"]["properties"]
+            .get("query")
+            .is_none()
+    {
+        return Err(format!("unexpected describe result: {describe:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn bridge_dispatcher_fails_closed_without_catalog() -> Result<(), Box<dyn Error>> {
+    let registry = ToolRegistry::new();
+    let executor = RuntimeToolExecutor::new(&registry);
+    let report = dispatch_bridge_tool_call(
+        RuntimeToolCall::new(
+            "missing-catalog",
+            "tool_search",
+            json!({ "query": "github" }),
+        ),
+        None,
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+    );
+    let messages = report.messages();
+    let message = messages.first().ok_or("missing error message")?;
+    if message.tool_call_id != "missing-catalog"
+        || !message
+            .content
+            .contains("deferred tool catalog is not available")
+        || !message
+            .content
+            .contains("[Analyze the error above and try a different approach.]")
+    {
+        return Err(format!("missing catalog was not fail-closed: {report:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn bridge_dispatcher_rejects_recursive_core_and_out_of_scope_calls() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(RepeatTool);
+    let executor = RuntimeToolExecutor::new(&registry);
+    let catalog = bridge_catalog([("mcp_repeat", "Repeat deferred text", ["text"])]);
+    let cases = [
+        (
+            "recursive",
+            json!({ "name": "tool_search", "arguments": {} }),
+            "recursive bridge tool call rejected",
+        ),
+        (
+            "core",
+            json!({ "name": "repeat", "arguments": {} }),
+            "call it directly",
+        ),
+        (
+            "unknown",
+            json!({ "name": "mcp_missing", "arguments": {} }),
+            "outside the current deferred tool catalog",
+        ),
+    ];
+
+    for (call_id, arguments, expected) in cases {
+        let report = dispatch_bridge_tool_call(
+            RuntimeToolCall::new(call_id, "tool_call", arguments),
+            Some(&catalog),
+            &registry,
+            &executor,
+            &ToolExecutionContext::default(),
+        );
+        let messages = report.messages();
+        let message = messages.first().ok_or("missing rejection message")?;
+        if message.tool_call_id != call_id || !message.content.contains(expected) {
+            return Err(format!("unexpected rejection for {call_id}: {report:?}").into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn bridge_dispatcher_accepts_object_and_json_string_arguments() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(NamedRepeatTool("mcp_repeat"));
+    let executor = RuntimeToolExecutor::new(&registry);
+    let catalog = bridge_catalog([("mcp_repeat", "Repeat deferred text", ["text"])]);
+    let report = dispatch_bridge_tool_calls(
+        vec![
+            RuntimeToolCall::new(
+                "object-call",
+                "tool_call",
+                json!({ "name": "mcp_repeat", "arguments": { "text": "ha", "times": 2 } }),
+            ),
+            RuntimeToolCall::new(
+                "string-call",
+                "tool_call",
+                json!({ "name": "mcp_repeat", "arguments": "{\"text\":\"yo\",\"times\":3}" }),
+            ),
+        ],
+        Some(&catalog),
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+        false,
+    );
+
+    let messages = report.messages();
+    let contents = messages
+        .iter()
+        .map(|message| {
+            (
+                message.tool_call_id.as_str(),
+                message.name.as_str(),
+                message.content.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if contents
+        != [
+            ("object-call", "tool_call", "haha"),
+            ("string-call", "tool_call", "yoyoyo"),
+        ]
+        || report.resolved_calls.len() != 2
+        || report.resolved_calls[0].underlying_name != "mcp_repeat"
+    {
+        return Err(format!("bridge did not execute normalized arguments: {report:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn bridge_dispatcher_rejects_invalid_arguments_before_execution() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(CountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let catalog = bridge_catalog([("count", "Count executions", ["unused"])]);
+    let cases = [
+        ("array-args", json!({ "name": "count", "arguments": [] })),
+        ("bad-json", json!({ "name": "count", "arguments": "{" })),
+        ("scalar-json", json!({ "name": "count", "arguments": "[]" })),
+    ];
+
+    for (call_id, arguments) in cases {
+        let report = dispatch_bridge_tool_call(
+            RuntimeToolCall::new(call_id, "tool_call", arguments),
+            Some(&catalog),
+            &registry,
+            &executor,
+            &ToolExecutionContext::default(),
+        );
+        let messages = report.messages();
+        let message = messages.first().ok_or("missing invalid argument message")?;
+        if !message.content.contains("Invalid bridge arguments") {
+            return Err(format!("invalid arguments were not rejected: {report:?}").into());
+        }
+    }
+    if calls.load(Ordering::SeqCst) != 0 {
+        return Err("invalid bridge arguments reached underlying executor".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn bridge_dispatcher_preserves_underlying_validation_error_shape() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(NamedRepeatTool("mcp_repeat"));
+    let executor = RuntimeToolExecutor::new(&registry);
+    let catalog = bridge_catalog([("mcp_repeat", "Repeat deferred text", ["text"])]);
+    let report = dispatch_bridge_tool_call(
+        RuntimeToolCall::new(
+            "invalid-repeat",
+            "tool_call",
+            json!({ "name": "mcp_repeat", "arguments": {} }),
+        ),
+        Some(&catalog),
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+    );
+    let messages = report.messages();
+    let message = messages.first().ok_or("missing validation error message")?;
+    if message.tool_call_id != "invalid-repeat"
+        || message.name != "tool_call"
+        || !message
+            .content
+            .contains("Error: Invalid parameters for tool 'mcp_repeat'")
+        || !message.content.contains("missing required text")
+        || !message
+            .content
+            .contains("[Analyze the error above and try a different approach.]")
+    {
+        return Err(format!("validation error shape drifted: {report:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn bridge_dispatcher_propagates_ask_user_interrupt() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(DeferredAskTool);
+    registry.register(CountingTool {
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let catalog = bridge_catalog([
+        ("mcp_ask_user", "Ask deferred question", ["question"]),
+        ("count", "Count executions", ["unused"]),
+    ]);
+    let report = dispatch_bridge_tool_calls(
+        vec![
+            RuntimeToolCall::new(
+                "ask-bridge",
+                "tool_call",
+                json!({ "name": "mcp_ask_user", "arguments": { "question": "Continue?" } }),
+            ),
+            RuntimeToolCall::new(
+                "after-bridge",
+                "tool_call",
+                json!({ "name": "count", "arguments": {} }),
+            ),
+        ],
+        Some(&catalog),
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+        false,
+    );
+    if !report.messages().is_empty()
+        || report.skipped_tool_calls.len() != 1
+        || report.skipped_tool_calls[0].id != "after-bridge"
+        || report.skipped_tool_calls[0].name != "tool_call"
+    {
+        return Err(format!("ask_user bridge boundary drifted: {report:?}").into());
+    }
+    match report.interrupt {
+        Some(RuntimeInterrupt::AskUser {
+            tool_call_id,
+            name,
+            question,
+            options,
+        }) if tool_call_id == "ask-bridge"
+            && name == "mcp_ask_user"
+            && question == "Continue?"
+            && options == ["Yes", "No"] =>
+        {
+            Ok(())
+        }
+        other => Err(format!("unexpected bridge interrupt: {other:?}").into()),
+    }
+}
+
+#[test]
+fn bridge_dispatcher_concurrency_uses_underlying_tool_metadata() -> Result<(), Box<dyn Error>> {
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(DelayTool::new(
+        "mcp_safe_a",
+        true,
+        active.clone(),
+        max_active.clone(),
+        calls.clone(),
+    ));
+    registry.register(DelayTool::new(
+        "mcp_safe_b",
+        true,
+        active,
+        max_active.clone(),
+        calls.clone(),
+    ));
+    let executor = RuntimeToolExecutor::new(&registry);
+    let catalog = bridge_catalog([
+        ("mcp_safe_a", "Safe deferred A", ["unused"]),
+        ("mcp_safe_b", "Safe deferred B", ["unused"]),
+    ]);
+    let report = dispatch_bridge_tool_calls(
+        vec![
+            RuntimeToolCall::new(
+                "safe-a",
+                "tool_call",
+                json!({ "name": "mcp_safe_a", "arguments": {} }),
+            ),
+            RuntimeToolCall::new(
+                "safe-b",
+                "tool_call",
+                json!({ "name": "mcp_safe_b", "arguments": {} }),
+            ),
+        ],
+        Some(&catalog),
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+        true,
+    );
+    let contents = report
+        .messages()
+        .iter()
+        .map(|message| {
+            (
+                message.tool_call_id.clone(),
+                message.name.clone(),
+                message.content.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if contents
+        != [
+            (
+                "safe-a".to_owned(),
+                "tool_call".to_owned(),
+                "mcp_safe_a".to_owned(),
+            ),
+            (
+                "safe-b".to_owned(),
+                "tool_call".to_owned(),
+                "mcp_safe_b".to_owned(),
+            ),
+        ]
+        || max_active.load(Ordering::SeqCst) != 2
+        || calls.load(Ordering::SeqCst) != 2
+    {
+        return Err(
+            format!("bridge concurrency did not use underlying metadata: {report:?}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
     let sent = Arc::new(Mutex::new(Vec::<OutboundMessage>::new()));
@@ -635,4 +1085,56 @@ fn json_map(value: Value) -> Result<JsonMap, Box<dyn Error>> {
         Value::Object(map) => Ok(map),
         other => Err(format!("expected object, got {other}").into()),
     }
+}
+
+fn parse_json_content(content: &str) -> Result<Value, Box<dyn Error>> {
+    serde_json::from_str(content).map_err(Into::into)
+}
+
+fn bridge_catalog<const COUNT: usize, const PARAMETER_COUNT: usize>(
+    entries: [(&str, &str, [&str; PARAMETER_COUNT]); COUNT],
+) -> DeferredToolCatalog {
+    DeferredToolCatalog::new(
+        entries
+            .into_iter()
+            .map(
+                |(name, description, parameter_names)| DeferredToolCatalogEntry {
+                    name: name.to_owned(),
+                    description: description.to_owned(),
+                    parameter_names: parameter_names.into_iter().map(str::to_owned).collect(),
+                    full_schema: runtime_tool_schema(name, description, parameter_names),
+                    source_kind: "mcp_tool".to_owned(),
+                    source_name: "test".to_owned(),
+                },
+            )
+            .collect(),
+        2,
+        3,
+    )
+}
+
+fn runtime_tool_schema<const PARAMETER_COUNT: usize>(
+    name: &str,
+    description: &str,
+    parameter_names: [&str; PARAMETER_COUNT],
+) -> Value {
+    let mut properties = serde_json::Map::new();
+    for parameter_name in parameter_names {
+        properties.insert(
+            parameter_name.to_owned(),
+            json!({ "type": "string", "description": parameter_name }),
+        );
+    }
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": []
+            }
+        }
+    })
 }
