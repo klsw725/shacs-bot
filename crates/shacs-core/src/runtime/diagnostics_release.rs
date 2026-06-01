@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use shacs_utils::evaluator::{
     spec018_evidence_ref_has_owner_and_redaction, spec018_release_gate_outcome, EvidenceRef,
     RedactionStatus, Spec018DiagnosticsEvidenceManifest, Spec018DiagnosticsRedactionSummary,
@@ -5,8 +6,88 @@ use shacs_utils::evaluator::{
     Spec018ReleaseBlockerCategory, Spec018ReleaseBlockerSeverity, Spec018ReleaseCoverageEntry,
     Spec018ReleaseGateOutcome, Spec018SkippedEvidence,
 };
+use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSearchReleaseEvidenceBucket {
+    Config,
+    Assembler,
+    Bridge,
+    RunnerWiring,
+    McpDefaultDeny,
+    SubagentScope,
+    ReplaySafety,
+    Diagnostics,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolSearchReleaseEvidence {
+    pub bucket: ToolSearchReleaseEvidenceBucket,
+    pub test_names: Vec<String>,
+    pub manual_qa_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSearchReleaseEvidenceChecklist {
+    pub required_buckets: Vec<ToolSearchReleaseEvidenceBucket>,
+    pub covered_buckets: Vec<ToolSearchReleaseEvidenceBucket>,
+    pub missing_buckets: Vec<ToolSearchReleaseEvidenceBucket>,
+    pub passed: bool,
+}
+
+impl ToolSearchReleaseEvidenceBucket {
+    pub fn required_prd005_buckets() -> Vec<Self> {
+        vec![
+            Self::Config,
+            Self::Assembler,
+            Self::Bridge,
+            Self::RunnerWiring,
+            Self::McpDefaultDeny,
+            Self::SubagentScope,
+            Self::ReplaySafety,
+            Self::Diagnostics,
+        ]
+    }
+}
+
+pub fn tool_search_prd005_release_evidence_checklist(
+    evidence: &[ToolSearchReleaseEvidence],
+) -> ToolSearchReleaseEvidenceChecklist {
+    let required_buckets = ToolSearchReleaseEvidenceBucket::required_prd005_buckets();
+    let covered = evidence
+        .iter()
+        .filter(|entry| {
+            (!entry.test_names.is_empty() || !entry.manual_qa_refs.is_empty())
+                && entry
+                    .evidence_refs
+                    .iter()
+                    .any(spec018_evidence_ref_has_owner_and_redaction)
+        })
+        .map(|entry| entry.bucket)
+        .collect::<BTreeSet<_>>();
+    let covered_buckets = required_buckets
+        .iter()
+        .copied()
+        .filter(|bucket| covered.contains(bucket))
+        .collect::<Vec<_>>();
+    let missing_buckets = required_buckets
+        .iter()
+        .copied()
+        .filter(|bucket| !covered.contains(bucket))
+        .collect::<Vec<_>>();
+    let passed = missing_buckets.is_empty();
+
+    ToolSearchReleaseEvidenceChecklist {
+        required_buckets,
+        covered_buckets,
+        missing_buckets,
+        passed,
+    }
+}
+
 pub struct RuntimeSpec018DiagnosticsManifestInput<'a> {
     pub manifest_id: &'a str,
     pub generated_at_ms: u64,
