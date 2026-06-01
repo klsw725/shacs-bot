@@ -25,6 +25,9 @@ use shacs_config::{
     ProviderConfig,
 };
 use shacs_core::app::{AppError, AppId, AppLifecycleState, AppRegistryEntry, AppRegistryStore};
+use shacs_core::app_authoring::{
+    AppAuthoringError, AppAuthoringInitOutcome, AppAuthoringInitReport, AppAuthoringStore,
+};
 use shacs_core::runtime::{
     AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
     ContextBuilder, DreamLifecycle, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
@@ -210,6 +213,7 @@ pub enum SkillsCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppsCommand {
+    Init(AppsInitOptions),
     Install(AppsInstallOptions),
     List(AppsListOptions),
     Inspect(AppsInspectOptions),
@@ -234,6 +238,13 @@ pub struct ChannelsListOptions {
 pub struct ChannelsStatusOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppsInitOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub app_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1213,6 +1224,7 @@ pub struct SessionDeleteReport {
 #[derive(Debug)]
 pub enum CliError {
     App(AppError),
+    AppAuthoring(AppAuthoringError),
     Api(ApiError),
     Config(ConfigError),
     Io(std::io::Error),
@@ -1225,6 +1237,7 @@ impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::App(error) => write!(formatter, "{error}"),
+            Self::AppAuthoring(error) => write!(formatter, "{error}"),
             Self::Api(error) => write!(formatter, "{error}"),
             Self::Config(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "CLI I/O failed: {error}"),
@@ -1240,6 +1253,12 @@ impl std::error::Error for CliError {}
 impl From<AppError> for CliError {
     fn from(error: AppError) -> Self {
         Self::App(error)
+    }
+}
+
+impl From<AppAuthoringError> for CliError {
+    fn from(error: AppAuthoringError) -> Self {
+        Self::AppAuthoring(error)
     }
 }
 
@@ -3530,6 +3549,7 @@ fn run_skills_command(command: SkillsCommand) -> Result<String, CliError> {
 
 fn run_apps_command(command: AppsCommand) -> Result<String, CliError> {
     match command {
+        AppsCommand::Init(options) => apps_init(options).map(format_apps_init),
         AppsCommand::Install(options) => apps_install(options).map(format_apps_entry_report),
         AppsCommand::List(options) => apps_list(options).map(format_apps_list),
         AppsCommand::Inspect(options) => apps_inspect(options).map(format_apps_inspect),
@@ -3577,6 +3597,35 @@ pub struct AppsUninstallReport {
     pub registry_path: PathBuf,
     pub app_id: String,
     pub removed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppsInitReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub data_dir: PathBuf,
+    pub authoring: AppAuthoringInitReport,
+}
+
+pub fn apps_init(options: AppsInitOptions) -> Result<AppsInitReport, CliError> {
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    let bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: options.workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )?;
+    let data_dir = bundle.context.data_dir;
+    let authoring = AppAuthoringStore::new(&data_dir).init_app(options.app_id)?;
+    Ok(AppsInitReport {
+        config_path,
+        workspace: bundle.context.workspace,
+        data_dir,
+        authoring,
+    })
 }
 
 pub fn apps_install(options: AppsInstallOptions) -> Result<AppsEntryReport, CliError> {
@@ -4617,6 +4666,56 @@ pub fn format_apps_list(report: AppsListReport) -> String {
         ));
     }
     lines.join("\n")
+}
+
+pub fn format_apps_init(report: AppsInitReport) -> String {
+    let outcome = match &report.authoring.outcome {
+        AppAuthoringInitOutcome::Created => "created",
+        AppAuthoringInitOutcome::AlreadyExistsSameContent => "already-exists-same-content",
+    };
+    let file_list = report
+        .authoring
+        .generated_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    [
+        format!("App authoring draft: {}", report.authoring.app_id),
+        format!("Outcome: {outcome}"),
+        format!("Draft id: {}", report.authoring.draft_id),
+        format!(
+            "Draft path: {}",
+            display_path_escaped(&report.authoring.draft_path)
+        ),
+        format!(
+            "Manifest candidate: {}",
+            display_path_escaped(&report.authoring.manifest_candidate_path)
+        ),
+        format!(
+            "README candidate: {}",
+            display_path_escaped(&report.authoring.readme_candidate_path)
+        ),
+        format!(
+            "Scaffold plan: {}",
+            display_path_escaped(&report.authoring.scaffold_plan_path)
+        ),
+        format!(
+            "Draft metadata: {}",
+            display_path_escaped(&report.authoring.draft_metadata_path)
+        ),
+        format!("Config: {}", display_path_escaped(&report.config_path)),
+        format!("Workspace: {}", display_path_escaped(&report.workspace)),
+        format!("Data dir: {}", display_path_escaped(&report.data_dir)),
+        format!(
+            "Revision digest: {}",
+            report.authoring.current_revision_digest
+        ),
+        format!("Generated files: {file_list}"),
+        format!("Validation: {}", report.authoring.validation_status),
+        format!("Next action: {}", report.authoring.next_action),
+    ]
+    .join("\n")
 }
 
 pub fn format_apps_inspect(report: AppsEntryReport) -> String {
@@ -7023,6 +7122,17 @@ impl ExternalStreamPreviewStore {
         self.by_stream.get_mut(key)
     }
 
+    fn active_preview_mut(
+        &mut self,
+        message: &OutboundMessage,
+    ) -> Option<&mut ExternalStreamPreview> {
+        let key = self
+            .active_by_route
+            .get(&outbound_route_key(message))?
+            .clone();
+        self.by_stream.get_mut(&key)
+    }
+
     fn insert(&mut self, message: &OutboundMessage, stream_id: &str, remote_id: String) {
         let route_key = outbound_route_key(message);
         let key = Self::stream_key(message, stream_id);
@@ -7042,6 +7152,43 @@ impl ExternalStreamPreviewStore {
         preview.text = message.content.clone();
         Some(preview)
     }
+}
+
+fn external_stream_final_candidate(message: &OutboundMessage) -> bool {
+    metadata_string(&message.metadata, "session_key").is_some()
+        && metadata_string(&message.metadata, "stop_reason").is_some()
+}
+
+fn send_external_stream_preview_delta<F>(
+    preview: &mut ExternalStreamPreview,
+    delta: &str,
+    mut send_update: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str, &str) -> Result<(), String>,
+{
+    let updated_text = format!("{}{}", preview.text, delta);
+    send_update(&preview.remote_id, &updated_text)?;
+    preview.text = updated_text;
+    Ok(())
+}
+
+fn send_external_stream_preview_final<F>(
+    streams: &mut ExternalStreamPreviewStore,
+    message: &OutboundMessage,
+    mut send_update: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str, &str) -> Result<(), String>,
+{
+    let remote_id = streams
+        .active_preview_mut(message)
+        .ok_or_else(|| "external stream preview missing".to_owned())?
+        .remote_id
+        .clone();
+    send_update(&remote_id, &message.content)?;
+    let _ = streams.finish(message);
+    Ok(())
 }
 
 fn outbound_route_key(message: &OutboundMessage) -> String {
@@ -7454,13 +7601,15 @@ fn send_telegram_message(
         let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
         let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
         if let Some(preview) = streams.get_mut(&key) {
-            preview.text.push_str(&message.content);
-            post_json(
-                agent,
-                &telegram_url(&config.token, "editMessageText"),
-                None,
-                telegram_message_body(&message, &preview.text, Some(&preview.remote_id), false),
-            )?;
+            send_external_stream_preview_delta(preview, &message.content, |remote_id, text| {
+                post_json(
+                    agent,
+                    &telegram_url(&config.token, "editMessageText"),
+                    None,
+                    telegram_message_body(&message, text, Some(remote_id), false),
+                )
+                .map(|_| ())
+            })?;
             return Ok(());
         }
         let value = post_json(
@@ -7477,13 +7626,20 @@ fn send_telegram_message(
         streams.insert(&message, &stream_id, remote_id);
         return Ok(());
     }
-    if let Some(preview) = streams.finish(&message) {
-        post_json(
-            agent,
-            &telegram_url(&config.token, "editMessageText"),
-            None,
-            telegram_message_body(&message, &message.content, Some(&preview.remote_id), false),
-        )?;
+    if external_stream_final_candidate(&message)
+        && streams
+            .active_by_route
+            .contains_key(&outbound_route_key(&message))
+    {
+        send_external_stream_preview_final(streams, &message, |remote_id, text| {
+            post_json(
+                agent,
+                &telegram_url(&config.token, "editMessageText"),
+                None,
+                telegram_message_body(&message, text, Some(remote_id), false),
+            )
+            .map(|_| ())
+        })?;
         return Ok(());
     }
     post_json(
@@ -8072,14 +8228,16 @@ fn send_discord_message(
         let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
         let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
         if let Some(preview) = streams.get_mut(&key) {
-            preview.text.push_str(&message.content);
-            let edit_url = format!("{url}/{}", preview.remote_id);
-            patch_json(
-                agent,
-                &edit_url,
-                Some(discord_auth_header(&config.token)),
-                discord_message_body(&message.chat_id, &preview.text, None),
-            )?;
+            send_external_stream_preview_delta(preview, &message.content, |remote_id, text| {
+                let edit_url = format!("{url}/{remote_id}");
+                patch_json(
+                    agent,
+                    &edit_url,
+                    Some(discord_auth_header(&config.token)),
+                    discord_message_body(&message.chat_id, text, None),
+                )
+                .map(|_| ())
+            })?;
             return Ok(());
         }
         let value = post_json(
@@ -8100,14 +8258,21 @@ fn send_discord_message(
         streams.insert(&message, &stream_id, remote_id);
         return Ok(());
     }
-    if let Some(preview) = streams.finish(&message) {
-        let edit_url = format!("{url}/{}", preview.remote_id);
-        patch_json(
-            agent,
-            &edit_url,
-            Some(discord_auth_header(&config.token)),
-            discord_message_body(&message.chat_id, &message.content, None),
-        )?;
+    if external_stream_final_candidate(&message)
+        && streams
+            .active_by_route
+            .contains_key(&outbound_route_key(&message))
+    {
+        send_external_stream_preview_final(streams, &message, |remote_id, text| {
+            let edit_url = format!("{url}/{remote_id}");
+            patch_json(
+                agent,
+                &edit_url,
+                Some(discord_auth_header(&config.token)),
+                discord_message_body(&message.chat_id, text, None),
+            )
+            .map(|_| ())
+        })?;
         return Ok(());
     }
     for (index, chunk) in discord_message_chunks(&message.content)
@@ -8392,14 +8557,9 @@ fn send_slack_message(
         let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
         let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
         if let Some(preview) = streams.get_mut(&key) {
-            preview.text.push_str(&message.content);
-            slack_update_message(
-                agent,
-                config,
-                &message.chat_id,
-                &preview.remote_id,
-                &preview.text,
-            )?;
+            send_external_stream_preview_delta(preview, &message.content, |remote_id, text| {
+                slack_update_message(agent, config, &message.chat_id, remote_id, text)
+            })?;
             return Ok(());
         }
         let ts = slack_post_message(
@@ -8412,14 +8572,14 @@ fn send_slack_message(
         streams.insert(&message, &stream_id, ts);
         return Ok(());
     }
-    if let Some(preview) = streams.finish(&message) {
-        slack_update_message(
-            agent,
-            config,
-            &message.chat_id,
-            &preview.remote_id,
-            &message.content,
-        )?;
+    if external_stream_final_candidate(&message)
+        && streams
+            .active_by_route
+            .contains_key(&outbound_route_key(&message))
+    {
+        send_external_stream_preview_final(streams, &message, |remote_id, text| {
+            slack_update_message(agent, config, &message.chat_id, remote_id, text)
+        })?;
         return Ok(());
     }
     slack_post_message(
@@ -14777,6 +14937,138 @@ mod tests {
         assert!(deliveries
             .iter()
             .all(|delivery| delivery.get("content").is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn discord_stream_preview_delta_retry_keeps_text_stable() -> Result<(), Box<dyn Error>> {
+        let mut streams = ExternalStreamPreviewStore::default();
+        let message = stream_outbound_message(
+            DISCORD_CHANNEL,
+            "channel-1",
+            "stream-1",
+            "hello".to_owned(),
+            false,
+        );
+        streams.insert(&message, "stream-1", "remote-1".to_owned());
+        let key = ExternalStreamPreviewStore::stream_key(&message, "stream-1");
+        let mut attempts = 0usize;
+        let mut observed_texts = Vec::new();
+
+        {
+            let preview = streams.get_mut(&key).ok_or("missing preview")?;
+            let result =
+                send_external_stream_preview_delta(preview, " world", |remote_id, text| {
+                    assert_eq!(remote_id, "remote-1");
+                    observed_texts.push(text.to_owned());
+                    attempts += 1;
+                    Err("temporary patch failure".to_owned())
+                });
+            assert!(result.is_err());
+        }
+
+        assert_eq!(
+            streams.get_mut(&key).ok_or("missing preview")?.text,
+            "hello"
+        );
+
+        {
+            let preview = streams.get_mut(&key).ok_or("missing preview")?;
+            let result =
+                send_external_stream_preview_delta(preview, " world", |remote_id, text| {
+                    assert_eq!(remote_id, "remote-1");
+                    observed_texts.push(text.to_owned());
+                    attempts += 1;
+                    Ok(())
+                });
+            assert!(result.is_ok());
+        }
+
+        assert_eq!(attempts, 2);
+        assert_eq!(observed_texts, vec!["hello world", "hello world"]);
+        assert_eq!(
+            streams.get_mut(&key).ok_or("missing preview")?.text,
+            "hello world"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discord_stream_preview_final_retry_keeps_preview_until_success() -> Result<(), Box<dyn Error>>
+    {
+        let mut streams = ExternalStreamPreviewStore::default();
+        let preview_message = stream_outbound_message(
+            DISCORD_CHANNEL,
+            "channel-1",
+            "stream-1",
+            "preview".to_owned(),
+            false,
+        );
+        let final_message = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "final answer");
+        streams.insert(&preview_message, "stream-1", "remote-1".to_owned());
+        let key = ExternalStreamPreviewStore::stream_key(&preview_message, "stream-1");
+        let mut attempts = 0usize;
+        let mut observed_texts = Vec::new();
+
+        let first =
+            send_external_stream_preview_final(&mut streams, &final_message, |remote_id, text| {
+                assert_eq!(remote_id, "remote-1");
+                observed_texts.push(text.to_owned());
+                attempts += 1;
+                Err("temporary patch failure".to_owned())
+            });
+        assert!(first.is_err());
+        assert!(streams.by_stream.contains_key(&key));
+
+        let second =
+            send_external_stream_preview_final(&mut streams, &final_message, |remote_id, text| {
+                assert_eq!(remote_id, "remote-1");
+                observed_texts.push(text.to_owned());
+                attempts += 1;
+                Ok(())
+            });
+        assert!(second.is_ok());
+        assert_eq!(attempts, 2);
+        assert_eq!(observed_texts, vec!["final answer", "final answer"]);
+        assert!(!streams.by_stream.contains_key(&key));
+        Ok(())
+    }
+
+    #[test]
+    fn external_stream_final_candidate_requires_final_markers() -> Result<(), Box<dyn Error>> {
+        let mut streams = ExternalStreamPreviewStore::default();
+        let preview_message = stream_outbound_message(
+            DISCORD_CHANNEL,
+            "channel-1",
+            "stream-1",
+            "preview".to_owned(),
+            false,
+        );
+        streams.insert(&preview_message, "stream-1", "remote-1".to_owned());
+        let key = ExternalStreamPreviewStore::stream_key(&preview_message, "stream-1");
+
+        let mut notification_metadata = Map::new();
+        notification_metadata.insert(
+            "runtime_notification".to_owned(),
+            json!({"kind": "skill", "phase": "start"}),
+        );
+        let notification = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "notification")
+            .with_metadata(notification_metadata);
+        assert!(!external_stream_final_candidate(&notification));
+        assert!(streams.active_preview_mut(&notification).is_some());
+
+        let mut final_metadata = Map::new();
+        final_metadata.insert("session_key".to_owned(), json!("discord:channel-1"));
+        final_metadata.insert("stop_reason".to_owned(), json!("stop"));
+        let final_message = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "final answer")
+            .with_metadata(final_metadata);
+        assert!(external_stream_final_candidate(&final_message));
+        send_external_stream_preview_final(&mut streams, &final_message, |remote_id, text| {
+            assert_eq!(remote_id, "remote-1");
+            assert_eq!(text, "final answer");
+            Ok(())
+        })?;
+        assert!(!streams.by_stream.contains_key(&key));
         Ok(())
     }
 
