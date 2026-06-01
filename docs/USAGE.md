@@ -37,7 +37,7 @@ shacs-bot onboard --workspace /tmp/ws
 shacs-bot --config /tmp/shacs-config.json onboard --workspace /tmp/ws
 ```
 
-`onboard`는 JSON config를 쓰고, runtime directory를 준비하며, `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `memory/MEMORY.md`, `memory/history.jsonl`, `skills/` 같은 workspace template 파일을 만듭니다. 이미 존재하는 workspace 파일은 덮어쓰지 않습니다. `onboard --wizard`는 아직 보류된 기능입니다.
+`onboard`는 JSON config를 쓰고, runtime directory를 준비하며, `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `memory/MEMORY.md`, `memory/history.jsonl`, `skills/` 같은 workspace template 파일을 만듭니다. 또한 active built-in skill을 `builtin_skills/` 아래에 materialize하지만, reference-only deferred built-in skill은 복사하지 않습니다. 이미 존재하는 workspace 파일은 덮어쓰지 않습니다. `onboard --wizard`는 아직 보류된 기능입니다.
 
 Config 문자열 값은 load 시 `${ENV_NAME}` 형태의 environment variable reference를 해석합니다. 예를 들어 provider key는 config에 `"apiKey": "${OPENROUTER_API_KEY}"`로 남겨두고 실행 환경에서 값을 제공할 수 있으며, migration write-back은 실제 secret 값을 config 파일에 저장하지 않습니다. 참조한 environment variable이 없으면 config load가 실패합니다.
 
@@ -163,7 +163,7 @@ shacs-bot skills show skill-creator
 shacs-bot skills show clawhub --workspace /tmp/ws
 ```
 
-`skills list`는 `onboard`가 `builtin_skills/`를 materialize하기 전에도 embedded built-in skill을 포함합니다. Workspace skill은 built-in skill을 shadow할 수 있습니다. Shadowed, conflicted, malformed 같은 비활성 diagnostic까지 보려면 `skills list --all`을 사용하세요. `skills show`는 source, status, body hash, requirements, install metadata, diagnostics를 출력합니다. ClawHub search/install/update 명령은 이후 slice로 남아 있습니다.
+`skills list`는 `onboard`가 `builtin_skills/`를 materialize하기 전에도 embedded active built-in skill을 포함합니다. Deferred built-in skill은 reference-only source로 보관되며 `onboard`, `skills list`, `skills show`에는 나오지 않습니다. Workspace skill은 built-in skill을 shadow할 수 있습니다. Shadowed, conflicted, malformed 같은 비활성 diagnostic까지 보려면 `skills list --all`을 사용하세요. `skills show`는 source, status, body hash, requirements, install metadata, diagnostics를 출력합니다. ClawHub search/install/update 명령은 이후 slice로 남아 있습니다.
 
 ## 앱
 
