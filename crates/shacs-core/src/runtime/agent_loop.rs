@@ -50,6 +50,7 @@ pub struct AgentLoopConfig {
     pub history_options: SessionHistoryOptions,
     pub unified_session_key: Option<String>,
     pub max_iterations_message: Option<String>,
+    pub tool_search: crate::runtime::ToolSearchConfig,
     pub context_window_tokens: Option<usize>,
     pub context_block_limit: Option<usize>,
     pub concurrent_tools: bool,
@@ -70,6 +71,7 @@ impl AgentLoopConfig {
             history_options: SessionHistoryOptions::default(),
             unified_session_key: None,
             max_iterations_message: None,
+            tool_search: crate::runtime::ToolSearchConfig::default(),
             context_window_tokens: None,
             context_block_limit: None,
             concurrent_tools: false,
@@ -410,6 +412,7 @@ impl<'a> AgentLoop<'a> {
         spec.max_tool_result_chars = self.config.max_tool_result_chars;
         spec.workspace = Some(self.config.workspace.clone());
         spec.session_key = Some(session_key.clone());
+        spec.tool_search = self.config.tool_search;
         spec.context_window_tokens = self.config.context_window_tokens;
         spec.context_block_limit = self.config.context_block_limit;
         spec.concurrent_tools = self.config.concurrent_tools;
