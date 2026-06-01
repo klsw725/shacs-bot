@@ -18,6 +18,9 @@ pub struct BuiltinSkillFile {
     pub executable: bool,
 }
 
+mod builtins_generated;
+use builtins_generated::{BUILTIN_SKILLS, DEFERRED_BUILTIN_SKILLS};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltinSkillsSyncOutcome {
     pub created_files: Vec<String>,
@@ -153,6 +156,14 @@ pub fn builtin_skill(name: &str) -> Option<&'static BuiltinSkill> {
     BUILTIN_SKILLS.iter().find(|skill| skill.name == name)
 }
 
+pub fn deferred_builtin_skills() -> &'static [&'static str] {
+    DEFERRED_BUILTIN_SKILLS
+}
+
+pub fn is_deferred_builtin_skill(name: &str) -> bool {
+    DEFERRED_BUILTIN_SKILLS.contains(&name)
+}
+
 pub fn sync_builtin_skills(workspace: impl AsRef<Path>) -> io::Result<BuiltinSkillsSyncOutcome> {
     let workspace = workspace.as_ref();
     let root = workspace.join(BUILTIN_SKILLS_DIR);
@@ -173,6 +184,7 @@ pub fn sync_builtin_skills(workspace: impl AsRef<Path>) -> io::Result<BuiltinSki
             let destination = skill_dir.join(file.relative_path);
             let relative = format!("{BUILTIN_SKILLS_DIR}/{}/{}", skill.name, file.relative_path);
             if let Some(parent) = destination.parent() {
+                ensure_no_symlink_descendant(&root, parent)?;
                 let parent_relative = relative_parent(&relative);
                 ensure_dir(parent, &parent_relative, &mut outcome)?;
             }
@@ -370,6 +382,9 @@ fn discover_root(
             continue;
         }
         if !metadata.is_dir() {
+            continue;
+        }
+        if source_kind == SkillSourceKind::MaterializedBuiltin && is_deferred_builtin_skill(&name) {
             continue;
         }
         let skill_path = path.join("SKILL.md");
@@ -607,6 +622,23 @@ fn ensure_dir(
     }
 }
 
+fn ensure_no_symlink_descendant(root: &Path, path: &Path) -> io::Result<()> {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return Ok(());
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Err(symlink_error()),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn existing_regular_file_or_missing(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -656,159 +688,37 @@ fn set_executable_if_needed(_path: &Path, _executable: bool) -> io::Result<()> {
     Ok(())
 }
 
-const CRON_FILES: &[BuiltinSkillFile] = &[BuiltinSkillFile {
-    relative_path: "SKILL.md",
-    content: include_bytes!("../cron/SKILL.md"),
-    executable: false,
-}];
-
-const WEATHER_FILES: &[BuiltinSkillFile] = &[BuiltinSkillFile {
-    relative_path: "SKILL.md",
-    content: include_bytes!("../weather/SKILL.md"),
-    executable: false,
-}];
-
-const TMUX_FILES: &[BuiltinSkillFile] = &[
-    BuiltinSkillFile {
-        relative_path: "SKILL.md",
-        content: include_bytes!("../tmux/SKILL.md"),
-        executable: false,
-    },
-    BuiltinSkillFile {
-        relative_path: "scripts/find-sessions.sh",
-        content: include_bytes!("../tmux/scripts/find-sessions.sh"),
-        executable: true,
-    },
-    BuiltinSkillFile {
-        relative_path: "scripts/wait-for-text.sh",
-        content: include_bytes!("../tmux/scripts/wait-for-text.sh"),
-        executable: true,
-    },
-];
-
-const MY_FILES: &[BuiltinSkillFile] = &[
-    BuiltinSkillFile {
-        relative_path: "SKILL.md",
-        content: include_bytes!("../my/SKILL.md"),
-        executable: false,
-    },
-    BuiltinSkillFile {
-        relative_path: "references/examples.md",
-        content: include_bytes!("../my/references/examples.md"),
-        executable: false,
-    },
-];
-
-const GITHUB_FILES: &[BuiltinSkillFile] = &[BuiltinSkillFile {
-    relative_path: "SKILL.md",
-    content: include_bytes!("../github/SKILL.md"),
-    executable: false,
-}];
-
-const SKILL_CREATOR_FILES: &[BuiltinSkillFile] = &[
-    BuiltinSkillFile {
-        relative_path: "SKILL.md",
-        content: include_bytes!("../skill-creator/SKILL.md"),
-        executable: false,
-    },
-    BuiltinSkillFile {
-        relative_path: "scripts/init_skill.py",
-        content: include_bytes!("../skill-creator/scripts/init_skill.py"),
-        executable: true,
-    },
-    BuiltinSkillFile {
-        relative_path: "scripts/package_skill.py",
-        content: include_bytes!("../skill-creator/scripts/package_skill.py"),
-        executable: true,
-    },
-    BuiltinSkillFile {
-        relative_path: "scripts/quick_validate.py",
-        content: include_bytes!("../skill-creator/scripts/quick_validate.py"),
-        executable: true,
-    },
-];
-
-const CLAWHUB_FILES: &[BuiltinSkillFile] = &[BuiltinSkillFile {
-    relative_path: "SKILL.md",
-    content: include_bytes!("../clawhub/SKILL.md"),
-    executable: false,
-}];
-
-const SUMMARIZE_FILES: &[BuiltinSkillFile] = &[BuiltinSkillFile {
-    relative_path: "SKILL.md",
-    content: include_bytes!("../summarize/SKILL.md"),
-    executable: false,
-}];
-
-const MEMORY_FILES: &[BuiltinSkillFile] = &[BuiltinSkillFile {
-    relative_path: "SKILL.md",
-    content: include_bytes!("../memory/SKILL.md"),
-    executable: false,
-}];
-
-const BUILTIN_SKILLS: &[BuiltinSkill] = &[
-    BuiltinSkill {
-        name: "cron",
-        files: CRON_FILES,
-    },
-    BuiltinSkill {
-        name: "weather",
-        files: WEATHER_FILES,
-    },
-    BuiltinSkill {
-        name: "tmux",
-        files: TMUX_FILES,
-    },
-    BuiltinSkill {
-        name: "my",
-        files: MY_FILES,
-    },
-    BuiltinSkill {
-        name: "github",
-        files: GITHUB_FILES,
-    },
-    BuiltinSkill {
-        name: "skill-creator",
-        files: SKILL_CREATOR_FILES,
-    },
-    BuiltinSkill {
-        name: "clawhub",
-        files: CLAWHUB_FILES,
-    },
-    BuiltinSkill {
-        name: "summarize",
-        files: SUMMARIZE_FILES,
-    },
-    BuiltinSkill {
-        name: "memory",
-        files: MEMORY_FILES,
-    },
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
-    fn bundled_catalog_contains_shacs_skill_set() -> Result<(), Box<dyn std::error::Error>> {
+    fn bundled_catalog_contains_shacs_and_imported_skill_set(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let names = builtin_skills()
             .iter()
             .map(|skill| skill.name)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            [
-                "cron",
-                "weather",
-                "tmux",
-                "my",
-                "github",
-                "skill-creator",
-                "clawhub",
-                "summarize",
-                "memory"
-            ]
-        );
+            .collect::<BTreeSet<_>>();
+        for name in [
+            "cron",
+            "weather",
+            "tmux",
+            "my",
+            "github",
+            "skill-creator",
+            "clawhub",
+            "summarize",
+            "memory",
+            "test-driven-development",
+            "github-pr-workflow",
+            "google-workspace",
+            "serving-llms-vllm",
+        ] {
+            assert!(names.contains(name), "missing bundled skill {name}");
+        }
+        assert!(names.len() >= 77, "bundled skill catalog shrank: {names:?}");
+
         let Some(skill_creator) = builtin_skill("skill-creator") else {
             return Err("skill-creator is not bundled".into());
         };
@@ -816,6 +726,65 @@ mod tests {
             .files
             .iter()
             .any(|file| file.relative_path == "scripts/package_skill.py" && file.executable));
+
+        let imported = builtin_skill("test-driven-development")
+            .ok_or("test-driven-development is not bundled")?;
+        let skill_file = imported
+            .files
+            .iter()
+            .find(|file| file.relative_path == "SKILL.md")
+            .ok_or("imported skill missing SKILL.md")?;
+        let body = std::str::from_utf8(skill_file.content)?;
+        assert!(body.contains("metadata.shacs.imported_from"));
+        assert!(body.contains("shacs-bot adaptation"));
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_catalog_files_are_unique_safe_and_valid() -> Result<(), Box<dyn std::error::Error>> {
+        let mut names = BTreeSet::new();
+        for skill in builtin_skills() {
+            assert!(
+                names.insert(skill.name),
+                "duplicate bundled skill {}",
+                skill.name
+            );
+            assert!(
+                skill
+                    .files
+                    .iter()
+                    .any(|file| file.relative_path == "SKILL.md"),
+                "{} is missing SKILL.md",
+                skill.name
+            );
+            let mut relative_paths = BTreeSet::new();
+            for file in skill.files {
+                let relative = std::path::Path::new(file.relative_path);
+                assert!(
+                    !relative.is_absolute(),
+                    "{} has absolute bundled path {}",
+                    skill.name,
+                    file.relative_path
+                );
+                assert!(
+                    !relative
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir)),
+                    "{} has unsafe bundled path {}",
+                    skill.name,
+                    file.relative_path
+                );
+                assert!(
+                    relative_paths.insert(file.relative_path),
+                    "{} has duplicate bundled path {}",
+                    skill.name,
+                    file.relative_path
+                );
+                if file.relative_path == "SKILL.md" {
+                    std::str::from_utf8(file.content)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -877,6 +846,17 @@ mod tests {
             .map(|entry| entry.descriptor.name.clone())
             .collect::<Vec<_>>();
         assert!(active_names.contains(&"skill-creator".to_owned()));
+        assert!(active_names.contains(&"test-driven-development".to_owned()));
+        assert!(active_names.contains(&"github-pr-workflow".to_owned()));
+        assert!(active_names.contains(&"google-workspace".to_owned()));
+        let tdd = registry
+            .find("test-driven-development")
+            .ok_or("missing imported tdd skill")?;
+        assert_eq!(tdd.descriptor.source_kind, SkillSourceKind::VirtualBuiltin);
+        assert!(tdd
+            .raw
+            .as_deref()
+            .is_some_and(|raw| raw.contains("shacs-bot adaptation")));
         let clawhub = registry.find("clawhub").ok_or("missing clawhub")?;
         assert_eq!(
             clawhub.descriptor.source_kind,
@@ -1000,6 +980,134 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn bundled_catalog_matches_skill_directories() -> Result<(), Box<dyn std::error::Error>> {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let directory_names = fs::read_dir(crate_dir)?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                (path.join("SKILL.md").is_file() && !is_deferred_builtin_skill(&name))
+                    .then_some(name)
+            })
+            .collect::<BTreeSet<_>>();
+        let catalog_names = builtin_skills()
+            .iter()
+            .map(|skill| skill.name.to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(directory_names, catalog_names);
+        Ok(())
+    }
+
+    #[test]
+    fn deferred_builtins_are_not_bundled_or_materialized() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert!(deferred_builtin_skills().contains(&"hermes-agent"));
+        for name in deferred_builtin_skills() {
+            assert!(
+                builtin_skill(name).is_none(),
+                "deferred skill {name} is bundled"
+            );
+        }
+
+        let workspace = tempfile::tempdir()?;
+        sync_builtin_skills(workspace.path())?;
+        for name in deferred_builtin_skills() {
+            assert!(
+                !workspace
+                    .path()
+                    .join(BUILTIN_SKILLS_DIR)
+                    .join(name)
+                    .exists(),
+                "deferred skill {name} was materialized"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registry_ignores_deferred_materialized_builtins_but_allows_workspace_override(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        write_test_skill(
+            &workspace.path().join(BUILTIN_SKILLS_DIR),
+            "hermes-agent",
+            "stale materialized",
+        )?;
+
+        let registry = discover_skill_registry(SkillRegistryOptions::new(workspace.path()))?;
+        assert!(registry.find("hermes-agent").is_none());
+
+        write_test_skill(
+            &workspace.path().join("skills"),
+            "hermes-agent",
+            "user override",
+        )?;
+        let registry = discover_skill_registry(SkillRegistryOptions::new(workspace.path()))?;
+        let entry = registry
+            .find("hermes-agent")
+            .ok_or("workspace override should remain visible")?;
+        assert_eq!(entry.status, SkillRegistryStatus::Active);
+        assert_eq!(
+            entry.descriptor.source_kind,
+            SkillSourceKind::WorkspaceLocal
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_builtin_skills_materializes_every_catalog_file(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        sync_builtin_skills(workspace.path())?;
+
+        for skill in builtin_skills() {
+            for file in skill.files {
+                let path = workspace
+                    .path()
+                    .join(BUILTIN_SKILLS_DIR)
+                    .join(skill.name)
+                    .join(file.relative_path);
+                assert!(path.exists(), "missing synced file {}", path.display());
+                assert_eq!(fs::read(&path)?, file.content);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = fs::metadata(&path)?.permissions().mode();
+                    assert_eq!(
+                        mode & 0o111 != 0,
+                        file.executable,
+                        "executable bit drifted for {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registry_exposes_every_virtual_builtin_without_onboard(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let registry = discover_skill_registry(SkillRegistryOptions::new(workspace.path()))?;
+
+        for skill in builtin_skills() {
+            let entry = registry
+                .find(skill.name)
+                .ok_or_else(|| format!("missing virtual builtin {}", skill.name))?;
+            assert_eq!(entry.status, SkillRegistryStatus::Active);
+            assert_eq!(
+                entry.descriptor.source_kind,
+                SkillSourceKind::VirtualBuiltin
+            );
+            assert!(!entry.descriptor.body_hash.is_empty());
+            assert!(entry.raw.as_deref().is_some_and(|raw| !raw.is_empty()));
+        }
+        Ok(())
+    }
+
     fn write_test_skill(root: &std::path::Path, name: &str, description: &str) -> io::Result<()> {
         let skill_dir = root.join(name);
         fs::create_dir_all(&skill_dir)?;
@@ -1069,6 +1177,27 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.contains("root must not be a symlink")));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_builtin_skills_rejects_intermediate_dir_symlink_escape(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let skill_dir = workspace
+            .path()
+            .join("builtin_skills/baoyu-article-illustrator");
+        fs::create_dir_all(&skill_dir)?;
+        symlink(outside.path(), skill_dir.join("references"))?;
+
+        let error = sync_builtin_skills(workspace.path())
+            .expect_err("intermediate symlink escape is rejected");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!outside.path().join("palettes").exists());
         Ok(())
     }
 
