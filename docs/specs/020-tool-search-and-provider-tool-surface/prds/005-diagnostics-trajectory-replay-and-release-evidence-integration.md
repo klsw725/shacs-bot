@@ -1,5 +1,32 @@
 # PRD 005. diagnostics trajectory replay and release evidence integration
 
+상태: 완료
+
+완료 근거:
+
+1. `crates/shacs-core/src/runtime/tool_search.rs`는 Tool Search activation mode, actual activated 여부, reason family, visible/deferred count, catalog scope digest를 `ToolSearchDiagnosticsSummary`로 표현한다.
+2. `crates/shacs-core/src/runtime/runner.rs`는 provider iteration마다 `tool_search_activation` event를 남기고, bridge `tool_search`, `tool_describe`, `tool_call` event를 raw full schema 없이 bounded/redacted evidence로 변환한다.
+3. `tool_search` evidence는 redacted query, requested limit, bounded matched names, scope digest를 남기며, `tool_describe` evidence는 requested name과 found 여부만 남긴다.
+4. `tool_call` evidence는 bridge call id, bridge name, underlying tool name, scope digest mapping을 남기고 secret-bearing underlying arguments를 diagnostics event에 넣지 않는다.
+5. `crates/shacs-utils/src/progress_events.rs`와 `crates/shacs-cli/src/lib.rs`는 CLI observability start/finish payload와 verbose args preview에서 Tool Search bridge arguments를 safe projection으로 줄여 raw nested `tool_call.arguments`를 저장하거나 송신하지 않는다.
+6. subagent progress는 sanitized core `ToolEvent` serialization regression으로 raw bridge arguments, raw schema, secret text가 들어가지 않음을 고정했다.
+7. replay는 live tool dispatch를 추가하지 않고 `live_tool_dispatch_count == 0` recorded-evidence-only 경로를 regression으로 고정했다.
+8. `bridge_underlying_mapping_evidence_ref`는 bridge call id, bridge name, underlying name, scope digest mapping을 redacted `EvidenceRef`로 만들어 trajectory `tool_refs`에 연결할 수 있게 한다.
+9. `tool_search_prd005_release_evidence_checklist`는 config, assembler, bridge, runner wiring, MCP default-deny, subagent scope, replay safety, diagnostics evidence bucket을 모두 요구하고, 각 bucket은 label과 owner/redaction이 유효한 `EvidenceRef`를 함께 가져야 covered로 본다.
+
+검증:
+
+1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check` 통과.
+2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings` 통과.
+3. `cargo test --manifest-path crates/shacs-utils/Cargo.toml progress_events` 통과: 3 passed.
+4. `cargo test --manifest-path crates/shacs-cli/Cargo.toml tool_observability_projects_bridge_arguments_for_start_and_pending_finish` 통과.
+5. `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_verbose_preview_helpers_redact_before_truncating` 통과.
+6. `cargo test --manifest-path crates/shacs-core/Cargo.toml tool_search_prd005_release_evidence_checklist_requires_all_buckets` 통과.
+7. `cargo test --manifest-path crates/shacs-core/Cargo.toml bridge_underlying_mapping_evidence_ref_is_safe_for_trajectory_tool_refs` 통과.
+8. `cargo test --manifest-path crates/shacs-core/Cargo.toml core_bridge_tool_events_serialize_safe_for_subagent_progress` 통과.
+9. `cargo test --manifest-path crates/shacs-core/Cargo.toml` 통과: lib 16, app_environment 11, runtime 17, runtime_agent 49, runtime_loop 105, tools 75, doctest 0.
+10. `lsp_diagnostics` 확인: PRD 005 관련 Rust 변경 파일에서 diagnostics 없음.
+
 ## 목표
 
 이 문서는 Tool Search의 여섯 번째 구현 PRD다.

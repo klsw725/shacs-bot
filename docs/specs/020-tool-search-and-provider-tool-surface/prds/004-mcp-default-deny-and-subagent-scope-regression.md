@@ -113,3 +113,22 @@ disabled MCP capability, parent-only tool, child registry 밖 tool은 search, de
 3. disabled capability는 search, describe, call에서 모두 부재한다.
 4. subagent catalog는 child registry-only scope를 사용한다.
 5. parent-only tool은 child bridge로 호출될 수 없다.
+
+## 구현 상태
+
+상태: 완료.
+
+구현 증거:
+
+1. `crates/shacs-core/tests/tools.rs`에 `mcp_default_deny_excludes_disabled_capabilities_from_tool_search_bridge`를 추가해 empty MCP `enabledTools`가 capability를 `ToolRegistry::definitions()`, deferred catalog, `tool_search`, `tool_describe`, `tool_call` 어디에도 노출하지 않고 underlying MCP execution도 시작하지 않음을 고정했다.
+2. `crates/shacs-core/tests/tools.rs`에 `mcp_allow_lists_register_raw_wrapped_and_star_into_deferred_catalog`를 추가해 raw capability allow-list, wrapped `mcp_<server>_<kind>_<name>` allow-list, `*` allow-list가 registry-registered MCP definitions만 deferred catalog로 전달함을 고정했다.
+3. `crates/shacs-core/tests/runtime_loop.rs`에 `subagent_tool_search_catalog_uses_child_registry_not_parent_definitions`를 추가해 child Tool Search surface가 `build_subagent_tool_registry()` child definitions만 사용하고 parent-only MCP tool을 child search/describe/call scope에서 fail-closed 처리하며 parent-only execution을 시작하지 않음을 고정했다.
+4. 정책 구현 파일인 `crates/shacs-core/src/tools/mcp.rs`와 `crates/shacs-core/src/runtime/subagent.rs` 변경은 필요하지 않았다.
+
+검증 증거:
+
+1. `cargo test --manifest-path crates/shacs-core/Cargo.toml --test tools mcp_ && cargo test --manifest-path crates/shacs-core/Cargo.toml --test runtime_loop subagent_tool`
+2. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
+3. `cargo check --manifest-path crates/shacs-core/Cargo.toml`
+4. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
+5. `cargo test --manifest-path crates/shacs-core/Cargo.toml`

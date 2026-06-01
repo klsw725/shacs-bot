@@ -1,5 +1,24 @@
 # PRD 003. agent runner provider request live wiring
 
+상태: 완료
+
+완료 근거:
+
+1. `crates/shacs-core/src/runtime/runner.rs`는 provider iteration마다 `spec.tools.definitions()`를 다시 읽고 `assemble_tool_surface`와 `spec.tool_search_runtime_input()`으로 provider-visible tool surface를 조립한다.
+2. 활성화된 iteration의 `ProviderRequest.tools`는 visible tools와 `tool_search`, `tool_describe`, `tool_call` bridge schemas만 포함하고, deferred `mcp_` schema는 provider request에 직접 노출하지 않는다.
+3. 현재 iteration의 deferred catalog만 bridge dispatcher에 전달하며, 다음 provider iteration에서는 registry definitions로 catalog를 다시 만든다.
+4. 활성 catalog가 있는 bridge calls는 `dispatch_bridge_tool_calls`로 라우팅하고, direct visible/core calls는 기존 `RuntimeToolExecutor` 경로로 실행한다.
+5. bridge assistant history는 provider가 반환한 bridge tool call 그대로 보존하고, bridge result는 original bridge call id와 bridge name으로 상관시킨다. resolved `tool_call`의 `tools_used`는 가능한 경우 underlying tool name으로 기록한다.
+6. provider adapter나 provider-native Tool Search beta 없이 canonical provider tool schema만으로 동작함을 runner test에서 고정했다.
+
+검증:
+
+1. `cargo test --manifest-path crates/shacs-core/Cargo.toml runtime_runner` 통과: runtime_agent runner 필터 20 passed.
+2. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check` 통과.
+3. `cargo check --manifest-path crates/shacs-core/Cargo.toml` 통과.
+4. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings` 통과.
+5. `cargo test --manifest-path crates/shacs-core/Cargo.toml` 통과: lib 16, app_environment 11, runtime 17, runtime_agent 47, runtime_loop 103, tools 72, doctest 0.
+
 ## 목표
 
 이 문서는 Tool Search의 네 번째 구현 PRD다.
