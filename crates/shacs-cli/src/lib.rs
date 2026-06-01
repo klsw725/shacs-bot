@@ -9465,7 +9465,7 @@ pub fn help_text() -> String {
         "  runtime   Start, stop, restart, inspect, diagnose, update, or recover local runtime state",
         "  session   Manage local session files",
         "  skills    List and inspect local skill registry entries",
-        "  apps      Install, list, inspect, enable, disable, or uninstall local app bundles",
+        "  apps      Init authoring drafts; install, list, inspect, enable, disable, or uninstall local app bundles",
         "  channels  List channel registry/config status",
         "  ask       Send one message through the local AgentLoop",
         "  run       Start selected channel runtime workers",
@@ -9860,11 +9860,12 @@ fn parse_apps(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "apps requires `install`, `list`, `inspect`, `enable`, `disable`, or `uninstall`"
+            "apps requires `init`, `install`, `list`, `inspect`, `enable`, `disable`, or `uninstall`"
                 .to_owned(),
         ));
     };
     match action.as_str() {
+        "init" | "new" => parse_apps_init(parser, global_config),
         "install" => parse_apps_install(parser, global_config),
         "list" | "ls" => parse_apps_list(parser, global_config),
         "inspect" | "show" => parse_apps_inspect(parser, global_config),
@@ -9876,6 +9877,46 @@ fn parse_apps(
             "unknown apps subcommand `{other}`"
         ))),
     }
+}
+
+fn parse_apps_init(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = AppsInitOptions {
+        config_path: global_config,
+        workspace_override: None,
+        app_id: String::new(),
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--app-id" | "--id" => options.app_id = take_value(&mut parser, &arg)?,
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other if other.starts_with('-') => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown apps init argument `{other}`"
+                )))
+            }
+            other => {
+                if !options.app_id.is_empty() {
+                    return Err(CliError::InvalidArguments(
+                        "apps init accepts exactly one app id".to_owned(),
+                    ));
+                }
+                options.app_id = other.to_owned();
+            }
+        }
+    }
+    if options.app_id.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "apps init requires an app id".to_owned(),
+        ));
+    }
+    Ok(CliCommand::Apps(AppsCommand::Init(options)))
 }
 
 fn parse_apps_install(
@@ -12924,6 +12965,13 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+fn display_path_escaped(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .flat_map(char::escape_default)
+        .collect()
+}
+
 fn exists_label(exists: bool) -> &'static str {
     if exists {
         "exists"
@@ -13110,6 +13158,34 @@ mod tests {
         );
         assert_eq!(options.config_path, Some(PathBuf::from("/tmp/config.json")));
 
+        let parsed = parse_cli_args([
+            "apps",
+            "init",
+            "demo.app",
+            "--workspace",
+            "/tmp/workspace",
+            "--config",
+            "/tmp/config.json",
+        ])?;
+        let CliCommand::Apps(AppsCommand::Init(options)) = parsed else {
+            return Err("expected apps init command".into());
+        };
+        assert_eq!(options.app_id, "demo.app");
+        assert_eq!(
+            options.workspace_override,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+        assert_eq!(options.config_path, Some(PathBuf::from("/tmp/config.json")));
+
+        let parsed = parse_cli_args(["apps", "new", "--app-id", "demo_app"])?;
+        let CliCommand::Apps(AppsCommand::Init(options)) = parsed else {
+            return Err("expected apps new command".into());
+        };
+        assert_eq!(options.app_id, "demo_app");
+
+        let parsed = parse_cli_args(["apps", "init", "--help"])?;
+        assert!(matches!(parsed, CliCommand::Help));
+
         let parsed = parse_cli_args(["apps", "list", "-w", "/tmp/workspace"])?;
         let CliCommand::Apps(AppsCommand::List(options)) = parsed else {
             return Err("expected apps list command".into());
@@ -13184,6 +13260,173 @@ mod tests {
             workspace_override: Some(overridden_workspace.clone()),
         })?;
         assert_eq!(overridden.workspace, overridden_workspace);
+        Ok(())
+    }
+
+    #[test]
+    fn apps_init_creates_authoring_draft_without_registry_mutation() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+
+        let report = apps_init(AppsInitOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            app_id: "demo.app".to_owned(),
+        })?;
+
+        assert_eq!(report.config_path, config_path);
+        assert_eq!(report.workspace, workspace);
+        assert_eq!(report.authoring.app_id, AppId::parse("demo.app")?);
+        assert_eq!(report.authoring.draft_id.as_str(), "draft-demo.app");
+        assert!(report.authoring.draft_metadata_path.exists());
+        assert!(report.authoring.scaffold_plan_path.exists());
+        assert!(report.authoring.manifest_candidate_path.exists());
+        assert!(report.authoring.readme_candidate_path.exists());
+        assert!(!root.path().join("apps/registry.json").exists());
+        assert!(!root.path().join("apps/demo.app.shacsapp").exists());
+        assert!(!root.path().join("runtime").exists());
+
+        let output = format_apps_init(report);
+        assert!(output.contains("App authoring draft: demo.app"));
+        assert!(output.contains("Outcome: created"));
+        assert!(output.contains("Validation: static scaffold created"));
+        assert!(output.contains("Next action: review candidates"));
+        assert!(!output.contains("State: installed"));
+        assert!(!output.contains("State: enabled"));
+        assert!(!output.contains("running"));
+        Ok(())
+    }
+
+    #[test]
+    fn apps_init_escapes_control_chars_in_report_paths() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path().join("line\nbreak");
+        let config_path = data_dir.join("config.json");
+        let workspace = data_dir.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        save_config_to_path(&Config::default(), &config_path)?;
+
+        let report = apps_init(AppsInitOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(workspace),
+            app_id: "demo.app".to_owned(),
+        })?;
+        let output = format_apps_init(report.clone());
+        assert!(output.contains("line\\nbreak"));
+        assert!(!output.contains("line\nbreak"));
+
+        fs::write(&report.authoring.readme_candidate_path, "changed")?;
+        let error = apps_init(AppsInitOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            app_id: "demo.app".to_owned(),
+        })
+        .err()
+        .ok_or("expected escaped path conflict")?
+        .to_string();
+        assert!(error.contains("line\\nbreak"));
+        assert!(!error.contains("line\nbreak"));
+        Ok(())
+    }
+
+    #[test]
+    fn apps_init_is_idempotent_and_conflicts_on_modified_candidates() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        save_config_to_path(&Config::default(), &config_path)?;
+
+        let first = apps_init(AppsInitOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            app_id: "demo.app".to_owned(),
+        })?;
+        let second = apps_init(AppsInitOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            app_id: "demo.app".to_owned(),
+        })?;
+        assert_eq!(
+            second.authoring.outcome,
+            AppAuthoringInitOutcome::AlreadyExistsSameContent
+        );
+        assert_eq!(first.authoring.draft_path, second.authoring.draft_path);
+
+        fs::write(&first.authoring.readme_candidate_path, "changed")?;
+        let error = apps_init(AppsInitOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            app_id: "demo.app".to_owned(),
+        })
+        .err()
+        .ok_or("expected apps init conflict")?;
+        assert!(matches!(
+            error,
+            CliError::AppAuthoring(AppAuthoringError::Conflict(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn apps_init_blocks_installed_app_without_registry_mutation() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let bundle = root.path().join("apps/demo.app.shacsapp");
+        save_config_to_path(&Config::default(), &config_path)?;
+        fs::create_dir_all(&bundle)?;
+        fs::write(bundle.join("entry.md"), "# entry")?;
+        fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "demo.app",
+                "version": "1.0.0",
+                "entry": "entry.md"
+            }))?,
+        )?;
+        let install = apps_install(AppsInstallOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            bundle_path: bundle,
+        })?;
+        let before = fs::read(&install.registry_path)?;
+
+        let error = apps_init(AppsInitOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            app_id: "demo.app".to_owned(),
+        })
+        .err()
+        .ok_or("expected installed app blocker")?;
+        assert!(matches!(
+            error,
+            CliError::AppAuthoring(AppAuthoringError::InstalledApp(app_id)) if app_id == AppId::parse("demo.app")?
+        ));
+        assert_eq!(fs::read(&install.registry_path)?, before);
+        assert!(!root.path().join("authoring/apps/draft-demo.app").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn apps_init_rejects_invalid_app_ids_without_raw_control_output() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        save_config_to_path(&Config::default(), &config_path)?;
+        let error = apps_init(AppsInitOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            app_id: "bad\napp".to_owned(),
+        })
+        .err()
+        .ok_or("expected invalid app id")?
+        .to_string();
+        assert!(error.contains("bad\\napp"));
+        assert!(!error.contains("bad\napp"));
         Ok(())
     }
 
@@ -17499,6 +17742,7 @@ mod tests {
         assert!(help.contains("agent     Alias"));
         assert!(help.contains("provider  Manage provider auth"));
         assert!(help.contains("generic import-key"));
+        assert!(help.contains("apps      Init authoring drafts"));
         assert!(help.contains("channels  List channel"));
         assert!(!help.contains("channels  Reserved"));
         assert!(help.contains("-m, --message"));

@@ -167,9 +167,10 @@ shacs-bot skills show clawhub --workspace /tmp/ws
 
 ## 앱
 
-현재 Rust CLI의 app 표면은 사용자가 local `.shacsapp` bundle을 registry에 등록하고 상태를 관찰하는 baseline입니다. Bundle은 config data dir의 `apps/<app-id>.shacsapp/` 경로에 있어야 하며, 기본 config 기준으로는 `~/.shacs-bot/apps/<app-id>.shacsapp/`입니다. Manifest의 `id`와 directory 이름은 일치해야 합니다.
+현재 Rust CLI의 app 표면은 사용자가 local `.shacsapp` bundle을 registry에 등록하고 상태를 관찰하는 baseline입니다. `apps init`은 설치 전 authoring draft만 생성하며 install, enable, start를 수행하지 않습니다. Bundle은 config data dir의 `apps/<app-id>.shacsapp/` 경로에 있어야 하며, 기본 config 기준으로는 `~/.shacs-bot/apps/<app-id>.shacsapp/`입니다. Manifest의 `id`와 directory 이름은 일치해야 합니다.
 
 ```sh
+shacs-bot apps init demo.app --workspace /tmp/ws
 shacs-bot apps install ~/.shacs-bot/apps/demo.app.shacsapp --workspace /tmp/ws
 shacs-bot apps list --workspace /tmp/ws
 shacs-bot apps inspect demo.app --workspace /tmp/ws
@@ -177,6 +178,8 @@ shacs-bot apps enable demo.app --workspace /tmp/ws
 shacs-bot apps disable demo.app --workspace /tmp/ws
 shacs-bot apps uninstall demo.app --workspace /tmp/ws
 ```
+
+`apps init <app-id>`은 config data dir 아래 `authoring/apps/draft-<app-id>/`에 `draft.json`, `scaffold-plan.json`, `candidates/manifest.json`, `candidates/README.md`를 만듭니다. 이 명령은 app registry를 변경하지 않고, MCP/process/package/network 실행, secret read, grant 생성, active skill 주입을 하지 않습니다. 같은 내용의 draft가 이미 있으면 idempotent하게 기존 draft summary를 보여주며, 다른 내용이면 덮어쓰지 않고 conflict로 멈춥니다.
 
 `apps install`은 `--bundle <path>` 또는 positional bundle path를 받습니다. 상대 경로도 canonicalize 후 config data dir의 `apps/<app-id>.shacsapp/`로 해석되면 허용됩니다. Install은 manifest와 선언 resource/skill/entry file을 읽어 digest와 summary를 registry에 저장하지만, app process를 자동 실행하지 않고 permission grant나 secret 주입을 승인하지도 않습니다. Registry의 grant reference는 permission/secret request를 나중에 연결하기 위한 placeholder이며 승인 상태가 아닙니다.
 
