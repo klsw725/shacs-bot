@@ -44,3 +44,6 @@ venv.bak/
 
 # Code 
 docs/refs/
+# Python caches
+__pycache__/
+*.py[cod]
