@@ -3,7 +3,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::{Datelike, Local, Offset, Utc};
 use serde_json::{json, Map, Value};
-use shacs_skills::builtin_skills;
+use shacs_skills::{builtin_skills, is_deferred_builtin_skill, BUILTIN_SKILLS_DIR};
 use shacs_templates::{render_agent_template, template_variables, AgentTemplate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -227,7 +227,9 @@ impl ContextBuilder {
             .collect::<Vec<_>>();
         let mut documents = Vec::new();
         let mut seen = BTreeSet::new();
+        let materialized_builtin_root = self.workspace.join(BUILTIN_SKILLS_DIR);
         for root in self.skill_roots() {
+            let is_materialized_builtin_root = root == materialized_builtin_root;
             let Ok(entries) = fs::read_dir(root) else {
                 continue;
             };
@@ -242,7 +244,11 @@ impl ContextBuilder {
                     continue;
                 }
                 if let Some(document) = SkillDocument::from_path(&path, &self.configured_env) {
-                    if document.disabled || disabled.contains(&document.name.as_str()) {
+                    if document.disabled
+                        || disabled.contains(&document.name.as_str())
+                        || (is_materialized_builtin_root
+                            && is_deferred_builtin_skill(document.name.as_str()))
+                    {
                         continue;
                     }
                     if !seen.insert(document.name.clone()) {

@@ -734,6 +734,14 @@ fn runtime_context_loads_extra_skill_roots_and_virtual_builtins() -> Result<(), 
         "---\ndescription: User global skill\n---\nUser global body",
     )?;
 
+    std::fs::create_dir_all(workspace.path().join("builtin_skills/hermes-agent"))?;
+    std::fs::write(
+        workspace
+            .path()
+            .join("builtin_skills/hermes-agent/SKILL.md"),
+        "---\ndescription: Stale deferred builtin\n---\nStale Hermes body",
+    )?;
+
     let context = ContextBuilder::new(workspace.path())
         .with_skill_roots([data_dir.path().join("skills")])
         .with_disabled_skills(["cron".to_owned()]);
@@ -741,10 +749,16 @@ fn runtime_context_loads_extra_skill_roots_and_virtual_builtins() -> Result<(), 
 
     if !system.contains("**user-skill** — User global skill")
         || !system.contains("**skill-creator**")
+        || !system.contains("**test-driven-development**")
+        || system.contains("**hermes-agent**")
+        || context.load_skill("hermes-agent").is_some()
         || system.contains("**cron**")
         || !context
             .load_skill("user-skill")
             .is_some_and(|skill| skill.contains("User global body"))
+        || !context
+            .load_skill("test-driven-development")
+            .is_some_and(|skill| skill.contains("shacs-bot adaptation"))
     {
         return Err(format!("extra skill roots or virtual builtins drifted: {system}").into());
     }

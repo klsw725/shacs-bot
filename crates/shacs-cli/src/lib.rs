@@ -15496,6 +15496,18 @@ mod tests {
             .join("SKILL.md")
             .exists());
         assert!(outcome
+            .workspace
+            .join("builtin_skills")
+            .join("test-driven-development")
+            .join("SKILL.md")
+            .exists());
+        assert!(!outcome
+            .workspace
+            .join("builtin_skills")
+            .join("hermes-agent")
+            .join("SKILL.md")
+            .exists());
+        assert!(outcome
             .template_files
             .iter()
             .any(|path| path == "AGENTS.md"));
@@ -15708,6 +15720,11 @@ mod tests {
         let mut config = Config::default();
         config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
         save_config_to_path(&config, &config_path)?;
+        fs::create_dir_all(workspace.join("builtin_skills/hermes-agent"))?;
+        fs::write(
+            workspace.join("builtin_skills/hermes-agent/SKILL.md"),
+            "---\ndescription: Stale deferred builtin\n---\nStale Hermes body",
+        )?;
 
         let list = skills_list(SkillsListOptions {
             config_path: Some(config_path.clone()),
@@ -15718,18 +15735,32 @@ mod tests {
         assert!(list.entries.iter().any(|entry| {
             entry.descriptor.name == "clawhub" && entry.status == SkillRegistryStatus::Active
         }));
+        assert!(list.entries.iter().any(|entry| {
+            entry.descriptor.name == "test-driven-development"
+                && entry.status == SkillRegistryStatus::Active
+        }));
         let output = format_skills_list(list);
         assert!(output.contains("clawhub"));
+        assert!(output.contains("test-driven-development"));
+        assert!(!output.contains("hermes-agent"));
+        assert!(matches!(
+            skills_show(SkillsShowOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                name: "hermes-agent".to_owned(),
+            }),
+            Err(CliError::InvalidArguments(message)) if message.contains("unknown skill")
+        ));
 
         let show = skills_show(SkillsShowOptions {
             config_path: Some(config_path),
             workspace_override: None,
-            name: "skill-creator".to_owned(),
+            name: "test-driven-development".to_owned(),
         })?;
-        assert_eq!(show.entry.descriptor.name, "skill-creator");
+        assert_eq!(show.entry.descriptor.name, "test-driven-development");
         assert!(!show.entry.descriptor.body_hash.is_empty());
         let output = format_skills_show(show);
-        assert!(output.contains("Skill: skill-creator"));
+        assert!(output.contains("Skill: test-driven-development"));
         assert!(output.contains("virtual-builtin"));
         Ok(())
     }
