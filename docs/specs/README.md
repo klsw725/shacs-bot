@@ -12,6 +12,7 @@
 
 - 기본 성격은 self-hosted / personal-use assistant runtime이다.
 - 장기 도착점은 사용자가 설치한 AI app을 실행, 관찰, 복구하는 개인용 AI Operating System이다. 이 최종 상위 계약은 `017-app-operating-environment/`가 소유한다.
+- App Maker / app authoring 범위는 사용자가 app 초안, 제안, 설치 handoff를 만드는 경험이며 `021-app-maker-and-app-authoring/`가 소유한다.
 - 공식 인터페이스 표면은 CLI, TUI, local API다.
 - provider/auth family는 **OpenAI-compatible**, **Anthropic auth**, **Codex auth(OpenAI auth style)** 세 종류만 지원 대상으로 본다.
 - 외부 채널은 **Slack**, **Discord**, **Telegram**, **Email**, **WhatsApp bridge** 다섯 가지면 충분하다고 본다.
@@ -50,6 +51,7 @@
 18. `018-evaluation-automation-and-self-improvement`
 19. `019-image-generation-and-generated-media`
 20. `020-tool-search-and-provider-tool-surface`
+21. `021-app-maker-and-app-authoring`
 
 ## 운영 원칙
 

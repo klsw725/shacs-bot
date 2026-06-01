@@ -368,6 +368,7 @@ duration: this-task
 - process card, approval center, app list, settings projection은 `013-user-interfaces-and-session-ux/`가 소유한다.
 - install/update/recover/restart의 host process lifecycle은 `015-packaging-process-lifecycle-and-upgrades/`가 소유한다.
 - diagnostics, receipts, task ledger projection은 `014-observability-diagnostics-and-inspection/`와 연결된다.
+- App Maker, app authoring, draft/proposal/install handoff는 `021-app-maker-and-app-authoring/`가 소유하고, 이 문서는 설치된 bundle의 install, registry, enable/start runtime 의미론을 계속 소유한다.
 
 이 문서가 소유하는 것은 위 요소를 **설치 가능한 AI app operating environment**로 묶는 상위 개념과 lifecycle 계약이다.
 
