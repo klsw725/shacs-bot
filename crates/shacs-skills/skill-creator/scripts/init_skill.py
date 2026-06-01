@@ -96,7 +96,7 @@ Documentation and reference material intended to be loaded into context to infor
 Files not intended to be loaded into context, but rather used within the output Codex produces.
 
 **Examples from other skills:**
-- Brand styling: PowerPoint template files (.pptx), logo files
+- Brand styling: slide deck template files (.pptx), logo files
 - Frontend builder: HTML/React boilerplate project directories
 - Typography: Font files (.ttf, .woff2)
 
