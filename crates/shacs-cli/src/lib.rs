@@ -6190,18 +6190,20 @@ struct ExternalSessionTurnCoordinator {
     pending_by_session: BTreeMap<String, VecDeque<InboundMessage>>,
 }
 
-#[derive(Debug)]
 struct ExternalAgentTurnResult {
     session_key: String,
     outbound: Vec<OutboundMessage>,
     error: Option<String>,
     retry_message: Option<InboundMessage>,
+    subagent_runtime: Option<SubagentRuntime>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ExternalTypingIndicator {
     session_key: String,
     message: OutboundMessage,
+    turn_active: bool,
+    subagent_runtimes: Vec<SubagentRuntime>,
     next_at: Instant,
 }
 
@@ -6375,7 +6377,11 @@ fn run_external_agent_processor(
         let mut progressed = false;
         while let Ok(result) = turn_rx.try_recv() {
             progressed = true;
-            finish_external_typing_indicator(&mut typing_indicators, &result.session_key);
+            finish_external_typing_indicator(
+                &mut typing_indicators,
+                &result.session_key,
+                result.subagent_runtime.as_ref(),
+            );
             if let Some(error) = result.error {
                 eprintln!("external channel turn failed: {error}");
             }
@@ -6479,6 +6485,18 @@ fn start_external_typing_indicator(
     if !adapter.send_progress {
         return;
     }
+    if let Some(indicator) = active
+        .iter_mut()
+        .find(|indicator| indicator.session_key == session_key)
+    {
+        let message =
+            external_typing_indicator_message(inbound).unwrap_or_else(|| indicator.message.clone());
+        runtime_bus.publish_outbound(message.clone());
+        indicator.message = message;
+        indicator.turn_active = true;
+        indicator.next_at = Instant::now() + EXTERNAL_TYPING_REFRESH_INTERVAL;
+        return;
+    }
     let Some(message) = external_typing_indicator_message(inbound) else {
         return;
     };
@@ -6486,29 +6504,58 @@ fn start_external_typing_indicator(
     active.push(ExternalTypingIndicator {
         session_key: session_key.to_owned(),
         message,
+        turn_active: true,
+        subagent_runtimes: Vec::new(),
         next_at: Instant::now() + EXTERNAL_TYPING_REFRESH_INTERVAL,
     });
 }
 
-fn finish_external_typing_indicator(active: &mut Vec<ExternalTypingIndicator>, session_key: &str) {
-    active.retain(|indicator| indicator.session_key != session_key);
+fn finish_external_typing_indicator(
+    active: &mut Vec<ExternalTypingIndicator>,
+    session_key: &str,
+    subagent_runtime: Option<&SubagentRuntime>,
+) {
+    for indicator in active.iter_mut() {
+        if indicator.session_key != session_key {
+            continue;
+        }
+        indicator.turn_active = false;
+        if let Some(runtime) =
+            subagent_runtime.filter(|runtime| runtime.running_count_by_session(session_key) > 0)
+        {
+            indicator.subagent_runtimes.push(runtime.clone());
+        }
+    }
+    active.retain_mut(external_typing_indicator_still_active);
 }
 
 fn publish_due_external_typing_indicators(
-    active: &mut [ExternalTypingIndicator],
+    active: &mut Vec<ExternalTypingIndicator>,
     runtime_bus: &MessageBus,
 ) -> bool {
     let now = Instant::now();
     let mut published = false;
-    for indicator in active {
+    active.retain_mut(|indicator| {
+        if !external_typing_indicator_still_active(indicator) {
+            return false;
+        }
         if indicator.next_at > now {
-            continue;
+            return true;
         }
         runtime_bus.publish_outbound(indicator.message.clone());
         indicator.next_at = now + EXTERNAL_TYPING_REFRESH_INTERVAL;
         published = true;
-    }
+        true
+    });
     published
+}
+
+fn external_typing_indicator_still_active(indicator: &mut ExternalTypingIndicator) -> bool {
+    let session_key = indicator.session_key.clone();
+    indicator
+        .subagent_runtimes
+        .retain(|runtime| runtime.running_count_by_session(&session_key) > 0);
+    indicator.turn_active || !indicator.subagent_runtimes.is_empty()
 }
 
 fn external_typing_indicator_message(inbound: &InboundMessage) -> Option<OutboundMessage> {
@@ -6534,11 +6581,12 @@ fn spawn_external_agent_turn(
             adapter.loop_config(),
             &runtime_bus,
         ) {
-            Ok((_, outbound)) => ExternalAgentTurnResult {
+            Ok((_, outbound, subagent_runtime)) => ExternalAgentTurnResult {
                 session_key,
                 outbound,
                 error: None,
                 retry_message: None,
+                subagent_runtime: Some(subagent_runtime),
             },
             Err(error) => ExternalAgentTurnResult {
                 session_key,
@@ -6546,6 +6594,7 @@ fn spawn_external_agent_turn(
                 retry_message: (error.status == 409 && error.error_type == "session_busy")
                     .then_some(retry_message),
                 error: Some(error.to_string()),
+                subagent_runtime: None,
             },
         };
         let _ = result_tx.send(result);
@@ -11135,6 +11184,7 @@ impl AgentLoopChatCompletionAdapter {
                     Some(callback),
                     &[],
                     Some(live_sink),
+                    None,
                 )
             });
             let stream_result = self.emit_websocket_stream_events(
@@ -11171,6 +11221,7 @@ impl AgentLoopChatCompletionAdapter {
                     None,
                     &[],
                     Some(live_sink),
+                    None,
                 )
             });
             let sink = WebSocketEventSink::default();
@@ -11202,24 +11253,34 @@ impl AgentLoopChatCompletionAdapter {
         inbound: InboundMessage,
         config: AgentLoopConfig,
         runtime_bus: &MessageBus,
-    ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
+    ) -> Result<
+        (
+            AgentLoopTurnResult,
+            Vec<shacs_channels::OutboundMessage>,
+            SubagentRuntime,
+        ),
+        ApiError,
+    > {
         let channel = inbound.channel.clone();
         let chat_id = inbound.chat_id.clone();
         let session_key = self.external_effective_session_key(&inbound);
         let routing_metadata = stream_routing_metadata_from_inbound(&inbound);
         let reply_to = inbound_reply_to(&inbound);
+        let subagent_runtime = SubagentRuntime::with_bus(runtime_bus.clone());
         let live_runtime_bus = runtime_bus.clone();
         let live_sink: RuntimeNotificationSink = Arc::new(move |message| {
             live_runtime_bus.publish_outbound(message);
         });
         if !self.send_progress || !provider_streaming_channel(&channel) {
-            return self.process_inbound_with_outbound_inner(
+            let result = self.process_inbound_with_outbound_inner(
                 inbound,
                 config,
                 None,
                 &[],
                 Some(live_sink),
-            );
+                Some(subagent_runtime.clone()),
+            )?;
+            return Ok((result.0, result.1, subagent_runtime));
         }
 
         let stream_id = format!("{channel}:{chat_id}:{session_key}:{}", now_millis());
@@ -11228,6 +11289,7 @@ impl AgentLoopChatCompletionAdapter {
             let _ = event_tx.send(event.clone());
         });
         thread::scope(|scope| {
+            let child_runtime = subagent_runtime.clone();
             let handle = scope.spawn(move || {
                 self.process_inbound_with_outbound_inner(
                     inbound,
@@ -11235,6 +11297,7 @@ impl AgentLoopChatCompletionAdapter {
                     Some(callback),
                     &[],
                     Some(live_sink),
+                    Some(child_runtime),
                 )
             });
             let routing = ExternalStreamRouting {
@@ -11246,7 +11309,7 @@ impl AgentLoopChatCompletionAdapter {
             };
             self.publish_external_stream_events(event_rx, routing, runtime_bus)?;
             match handle.join() {
-                Ok(result) => result,
+                Ok(result) => result.map(|(turn, outbound)| (turn, outbound, subagent_runtime)),
                 Err(_) => Err(ApiError::internal(
                     "external channel agent loop task panicked",
                 )),
@@ -11490,6 +11553,7 @@ impl AgentLoopChatCompletionAdapter {
             on_event,
             observability_hooks,
             None,
+            None,
         )
     }
 
@@ -11500,6 +11564,7 @@ impl AgentLoopChatCompletionAdapter {
         on_event: Option<ApiProviderEventCallback>,
         observability_hooks: &[ShacsBotObservabilityHook],
         live_notification_sink: Option<RuntimeNotificationSink>,
+        subagent_runtime: Option<SubagentRuntime>,
     ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
         if self.runtime_verbose {
             eprintln!(
@@ -11544,7 +11609,8 @@ impl AgentLoopChatCompletionAdapter {
             routing_metadata.clone(),
             reply_to.clone(),
         );
-        let subagent_runtime = SubagentRuntime::with_bus(bus.clone());
+        let subagent_runtime =
+            subagent_runtime.unwrap_or_else(|| SubagentRuntime::with_bus(bus.clone()));
         let spawn_config = self.subagent_execution_config(&config);
         let subagent_client = self.client.clone();
         let spawner_runtime = subagent_runtime.clone();
@@ -12789,7 +12855,7 @@ mod tests {
     use shacs_config::{
         load_auth_store, save_auth_store_to_path, save_config_to_path, AuthStore, Config,
     };
-    use shacs_core::runtime::Session;
+    use shacs_core::runtime::{ChildResultEnvelope, ChildResultStatus, Session};
     use shacs_core::tools::{JsonMap, Tool, ToolResult};
     use shacs_providers::{
         GenerationSettings, ProviderClient, ProviderEvent, ProviderRequest, ToolCallRequest,
@@ -14302,7 +14368,8 @@ mod tests {
                 adapter.loop_config(),
                 &MessageBus::new(),
             )
-            .expect_err("expected session busy error");
+            .err()
+            .ok_or("expected session busy error")?;
         assert_eq!(error.status, 409);
         assert_eq!(error.error_type, "session_busy");
         Ok(())
@@ -17355,6 +17422,8 @@ mod tests {
         let mut active = vec![ExternalTypingIndicator {
             session_key: "discord:channel-1".to_owned(),
             message,
+            turn_active: true,
+            subagent_runtimes: Vec::new(),
             next_at: Instant::now() - Duration::from_secs(1),
         }];
 
@@ -17368,8 +17437,65 @@ mod tests {
         assert!(message_is_typing_indicator(&outbound));
         assert!(active[0].next_at > Instant::now());
 
-        finish_external_typing_indicator(&mut active, "discord:channel-1");
+        finish_external_typing_indicator(&mut active, "discord:channel-1", None);
         assert!(active.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn external_typing_indicator_survives_parent_finish_until_subagent_finishes(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut metadata = Map::new();
+        metadata.insert(EXTERNAL_TYPING_INDICATOR_KEY.to_owned(), Value::Bool(true));
+        let message =
+            OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "").with_metadata(metadata);
+        let runtime = SubagentRuntime::new();
+        let outcome = runtime.spawn_from_request(shacs_core::tools::SpawnRequest {
+            task: "Inspect workspace".to_owned(),
+            label: Some("inspect".to_owned()),
+            origin_channel: DISCORD_CHANNEL.to_owned(),
+            origin_chat_id: "channel-1".to_owned(),
+            session_key: "discord:channel-1".to_owned(),
+        })?;
+        let mut active = vec![ExternalTypingIndicator {
+            session_key: "discord:channel-1".to_owned(),
+            message,
+            turn_active: true,
+            subagent_runtimes: Vec::new(),
+            next_at: Instant::now() - Duration::from_secs(1),
+        }];
+
+        finish_external_typing_indicator(&mut active, "discord:channel-1", Some(&runtime));
+
+        if active.len() != 1 || active[0].turn_active || active[0].subagent_runtimes.len() != 1 {
+            return Err(
+                format!("typing indicator did not track subagent: {}", active.len()).into(),
+            );
+        }
+        let runtime_bus = MessageBus::new();
+        assert!(publish_due_external_typing_indicators(
+            &mut active,
+            &runtime_bus
+        ));
+        let outbound = runtime_bus
+            .try_consume_outbound()
+            .ok_or("missing subagent typing refresh")?;
+        assert!(message_is_typing_indicator(&outbound));
+
+        let result = ChildResultEnvelope::from_spawn(
+            &outcome.envelope,
+            ChildResultStatus::Completed,
+            "done",
+        );
+        runtime.publish_child_result(result);
+        active[0].next_at = Instant::now() - Duration::from_secs(1);
+
+        assert!(!publish_due_external_typing_indicators(
+            &mut active,
+            &runtime_bus
+        ));
+        assert!(active.is_empty());
+        assert!(runtime_bus.try_consume_outbound().is_none());
         Ok(())
     }
 
@@ -18865,7 +18991,7 @@ mod tests {
         *lock.lock().map_err(|_| "gate lock poisoned")? = true;
         cvar.notify_all();
         let result = handle.join().map_err(|_| "external turn thread panicked")?;
-        let (_turn, outbound) = result?;
+        let (_turn, outbound, _subagent_runtime) = result?;
         assert!(!outbound
             .iter()
             .any(|message| message.content == "Using tool: blocking_artifact"));
