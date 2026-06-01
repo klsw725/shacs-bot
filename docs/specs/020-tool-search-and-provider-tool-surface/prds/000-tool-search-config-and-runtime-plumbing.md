@@ -115,3 +115,28 @@ assembler, catalog search, bridge execution은 후속 PRD가 소유한다.
 3. context window input이 후속 assembler에 넘길 수 있는 형태로 준비된다.
 4. `ProviderRequest.tools` behavior는 아직 기존과 동일하다.
 5. 문서와 테스트가 provider-native beta를 구현 완료처럼 표현하지 않는다.
+
+## 구현 상태
+
+상태: 완료.
+
+구현 증거:
+
+1. `crates/shacs-config/src/lib.rs`에 `tools.toolSearch` camelCase config와 `ToolSearchConfig` / `ToolSearchMode` normalization을 추가했다.
+2. `enabled` 문자열 `off` / `on` / `auto`와 boolean shorthand를 파싱하고, malformed `toolSearch` 또는 malformed field는 config load 실패 없이 safe default로 정규화한다.
+3. `thresholdPct`, `searchDefaultLimit`, `maxSearchLimit` clamp를 config test로 고정했다.
+4. `crates/shacs-core/src/runtime/runner.rs`의 `AgentRunSpec`은 Tool Search config와 optional `context_window_tokens`를 `ToolSearchRuntimeInput`으로 만들 수 있다.
+5. `AgentLoopConfig`와 CLI `AgentLoopChatCompletionAdapter::loop_config()`가 normalized Tool Search config를 전달한다.
+6. runner provider request는 기존 `tools: spec.tools.definitions()` 경로를 유지하며, focused core test가 Tool Search 설정을 켠 상태에서도 provider-visible tools pass-through를 확인한다.
+
+검증 증거:
+
+1. `cargo fmt --manifest-path crates/shacs-cli/Cargo.toml -- --check`
+2. `cargo test --manifest-path crates/shacs-config/Cargo.toml tool_search`
+3. `cargo test --manifest-path crates/shacs-core/Cargo.toml runtime_runner_executes_tool_loop_and_accumulates_usage`
+4. `cargo test --manifest-path crates/shacs-cli/Cargo.toml agent_loop_adapter_loop_config_carries_tool_search_config`
+5. `cargo check --manifest-path crates/shacs-core/Cargo.toml`
+6. `cargo check --manifest-path crates/shacs-cli/Cargo.toml`
+7. `cargo clippy --manifest-path crates/shacs-config/Cargo.toml --all-targets -- -D warnings`
+8. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
+9. `cargo clippy --manifest-path crates/shacs-cli/Cargo.toml --all-targets -- -D warnings`

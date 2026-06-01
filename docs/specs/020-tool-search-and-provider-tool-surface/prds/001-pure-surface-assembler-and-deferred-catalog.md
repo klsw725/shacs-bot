@@ -124,3 +124,24 @@ pure 함수로 먼저 분리해야 후속 runner 연결과 regression test가 pr
 3. bridge schemas와 deferred catalog shape가 후속 dispatcher에서 쓸 수 있게 정의된다.
 4. 비활성 경로는 기존 definitions order를 보존한다.
 5. provider-native beta는 optional future로만 남는다.
+
+## 구현 상태
+
+상태: 완료.
+
+구현 증거:
+
+1. `crates/shacs-core/src/tools/tool_search.rs`에 pure `ToolSurfaceAssemblyInput`, `ToolSurfaceAssembly`, `ActivationState`, `DeferredToolCatalog`, `DeferredToolCatalogEntry`, `ToolSearchMatch`와 `assemble_tool_surface`를 추가했다.
+2. assembler는 `ToolSearchRuntimeInput`과 current definitions `Vec<Value>`만 소비하고, runner live wiring이나 bridge dispatcher execution은 추가하지 않았다.
+3. `mcp_` schema만 deferred catalog로 이동하며 core/builtin/unknown schema는 visible에 남기고, 활성화 시 visible definitions 뒤에 `tool_search`, `tool_describe`, `tool_call` bridge schema를 붙인다.
+4. bridge name collision, `off` pass-through, `on` activation, `auto` threshold/unknown-context pass-through, serialized schema `ceil(chars / 4)` token estimate를 구현했다.
+5. catalog entry는 name, description, top-level parameter names, full schema, source kind/name, catalog scope digest를 보존하고, catalog search result는 full schema 없이 deterministic score/rank와 source summary만 반환한다.
+
+검증 증거:
+
+1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
+2. `cargo test --manifest-path crates/shacs-core/Cargo.toml tool_search`
+3. `cargo test --manifest-path crates/shacs-core/Cargo.toml deferred_catalog`
+4. `cargo check --manifest-path crates/shacs-core/Cargo.toml`
+5. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
+6. `cargo test --manifest-path crates/shacs-core/Cargo.toml`

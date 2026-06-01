@@ -1,5 +1,23 @@
 # PRD 002. bridge dispatcher and executor unwrap
 
+상태: 완료
+
+완료 근거:
+
+1. `crates/shacs-core/src/runtime/tool_search.rs`에 current `DeferredToolCatalog`만 대상으로 하는 bridge dispatcher를 추가했다.
+2. `tool_search`, `tool_describe`, `tool_call`은 missing catalog, recursive bridge call, direct-call-required, out-of-catalog, invalid arguments를 실행 전에 fail-closed error로 반환한다.
+3. valid `tool_call`은 original bridge call id를 유지한 underlying `RuntimeToolCall`로 unwrap하고 `RuntimeToolExecutor` 경계로 실행한다.
+4. provider-visible `RuntimeToolMessage`는 bridge call id와 bridge name correlation을 유지하고, `ResolvedDeferredToolCall` mapping은 diagnostics 후속 작업에서 쓸 수 있게 노출한다.
+5. `crates/shacs-core/tests/runtime.rs`에 search/describe success, missing catalog, recursive/core/out-of-scope rejection, JSON string/object arguments, invalid arguments pre-execution rejection, underlying validation error shape, ask-user interrupt propagation, underlying concurrency metadata tests를 추가했다.
+
+검증:
+
+1. `cargo test --manifest-path crates/shacs-core/Cargo.toml bridge_dispatcher` 통과: 8 passed.
+2. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check` 통과.
+3. `cargo check --manifest-path crates/shacs-core/Cargo.toml` 통과.
+4. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings` 통과.
+5. `cargo test --manifest-path crates/shacs-core/Cargo.toml` 통과: lib 16, app_environment 11, runtime 17, runtime_agent 41, runtime_loop 103, tools 72, doctest 0.
+
 ## 목표
 
 이 문서는 Tool Search의 세 번째 구현 PRD다.
