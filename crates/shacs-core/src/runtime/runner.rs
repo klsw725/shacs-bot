@@ -1,8 +1,16 @@
-use crate::runtime::{
-    CancellationToken, RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeInterrupt,
-    RuntimeToolCall, RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext,
+use crate::runtime::tool_search::{
+    BridgeUnderlyingMappingEvidence, ToolDescribeEvidence, ToolSearchDiagnosticsSummary,
+    ToolSearchQueryEvidence,
 };
-use crate::tools::ToolRegistry;
+use crate::runtime::{
+    dispatch_bridge_tool_calls, CancellationToken, ResolvedDeferredToolCall,
+    RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
+    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext,
+};
+use crate::tools::{
+    assemble_tool_surface, bridge_tool_names, DeferredToolCatalog, ToolRegistry,
+    ToolSurfaceAssemblyInput,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shacs_providers::{
@@ -29,6 +37,8 @@ const MICROCOMPACT_KEEP_RECENT: usize = 10;
 const MICROCOMPACT_MIN_CHARS: usize = 500;
 const SNIP_SAFETY_BUFFER: usize = 1024;
 const MAX_REPEAT_EXTERNAL_LOOKUPS: usize = 2;
+const MAX_TOOL_SEARCH_EVIDENCE_MATCHES: usize = 5;
+const MAX_TOOL_SEARCH_QUERY_CHARS: usize = 120;
 const BACKFILL_CONTENT: &str = "[Tool result unavailable — call was interrupted or lost]";
 const FATAL_SKIP_CONTENT: &str = "[Tool call skipped because a fatal tool error stopped the turn]";
 const COMPACTABLE_TOOLS: [&str; 7] = [
@@ -161,6 +171,7 @@ pub struct AgentRunSpec<'a> {
     pub fail_on_tool_error: bool,
     pub workspace: Option<PathBuf>,
     pub session_key: Option<String>,
+    pub tool_search: ToolSearchConfig,
     pub context_window_tokens: Option<usize>,
     pub context_block_limit: Option<usize>,
     pub tool_event_callback: Option<ToolEventCallback>,
@@ -196,6 +207,7 @@ impl<'a> AgentRunSpec<'a> {
             fail_on_tool_error: false,
             workspace: None,
             session_key: None,
+            tool_search: ToolSearchConfig::default(),
             context_window_tokens: None,
             context_block_limit: None,
             tool_event_callback: None,
@@ -208,6 +220,45 @@ impl<'a> AgentRunSpec<'a> {
             cancellation_token: None,
         }
     }
+
+    pub fn tool_search_runtime_input(&self) -> ToolSearchRuntimeInput {
+        ToolSearchRuntimeInput {
+            config: self.tool_search,
+            context_window_tokens: self.context_window_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSearchMode {
+    Off,
+    On,
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolSearchConfig {
+    pub enabled: ToolSearchMode,
+    pub threshold_pct: u8,
+    pub search_default_limit: usize,
+    pub max_search_limit: usize,
+}
+
+impl Default for ToolSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: ToolSearchMode::Auto,
+            threshold_pct: 10,
+            search_default_limit: 5,
+            max_search_limit: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolSearchRuntimeInput {
+    pub config: ToolSearchConfig,
+    pub context_window_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,9 +337,21 @@ impl AgentRunner {
             );
             invoke_agent_hook_before_iteration(&spec, &hook_context(iteration, &messages));
             let messages_for_model = govern_messages_for_model(&spec, &messages);
+            let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
+                definitions: spec.tools.definitions(),
+                runtime: spec.tool_search_runtime_input(),
+            });
+            let activation_summary = ToolSearchDiagnosticsSummary::from_assembly(
+                spec.tool_search_runtime_input(),
+                &tool_surface,
+            );
+            let activation_event = tool_search_activation_event(activation_summary);
+            emit_events(&spec, std::slice::from_ref(&activation_event));
+            tool_events.push(activation_event);
+            let current_catalog = tool_surface.catalog;
             let request = ProviderRequest {
                 messages: messages_for_model,
-                tools: spec.tools.definitions(),
+                tools: tool_surface.provider_tools,
                 model: spec.model.clone(),
                 settings: spec.settings.clone(),
                 tool_choice: None,
@@ -338,6 +401,7 @@ impl AgentRunner {
                     .with_thinking_blocks(response.thinking_blocks.clone())
                     .to_json(),
                 );
+                let mut iteration_tool_uses = iteration_tool_uses(&runtime_calls);
                 emit_checkpoint(
                     &spec,
                     "awaiting_tools",
@@ -345,7 +409,6 @@ impl AgentRunner {
                     Vec::new(),
                     runtime_calls.clone(),
                 );
-                tools_used.extend(runtime_calls.iter().map(|call| call.name.clone()));
 
                 let (executable_calls, throttled_messages, throttled_events) =
                     apply_external_lookup_throttle(runtime_calls, &mut external_lookup_counts);
@@ -372,6 +435,7 @@ impl AgentRunner {
                         &mut completed_tool_results,
                         &mut messages,
                     );
+                    append_iteration_tool_uses(&mut tools_used, iteration_tool_uses);
                     emit_checkpoint(
                         &spec,
                         "tools_completed",
@@ -387,25 +451,35 @@ impl AgentRunner {
                         had_injections,
                     ));
                 }
-                let report = if spec.concurrent_tools {
-                    invoke_agent_hook_before_execute_tools(
-                        &spec,
-                        &hook_context(iteration, &messages),
-                        &executable_calls,
-                    );
-                    executor.execute_tool_calls_concurrent(executable_calls, &spec.tool_context)
-                } else {
-                    invoke_agent_hook_before_execute_tools(
-                        &spec,
-                        &hook_context(iteration, &messages),
-                        &executable_calls,
-                    );
-                    executor.execute_tool_calls(executable_calls, &spec.tool_context)
-                };
+                invoke_agent_hook_before_execute_tools(
+                    &spec,
+                    &hook_context(iteration, &messages),
+                    &executable_calls,
+                );
+                let report = execute_tool_dispatch(
+                    executable_calls,
+                    current_catalog.as_ref(),
+                    &spec,
+                    &executor,
+                );
+                apply_resolved_bridge_tool_uses(
+                    &mut iteration_tool_uses,
+                    &report.resolved_bridge_calls,
+                );
+                append_iteration_tool_uses(&mut tools_used, iteration_tool_uses);
+                let resolved_bridge_calls_by_id = report
+                    .resolved_bridge_calls
+                    .iter()
+                    .map(|resolved_call| (resolved_call.original_call_id.clone(), resolved_call))
+                    .collect::<BTreeMap<_, _>>();
                 for raw_message in &report.messages {
                     let event = tool_event_for_message(
                         raw_message,
                         executable_calls_by_id.get(&raw_message.tool_call_id),
+                        current_catalog.as_ref(),
+                        resolved_bridge_calls_by_id
+                            .get(&raw_message.tool_call_id)
+                            .copied(),
                     );
                     let message = normalize_tool_message(&spec, raw_message.clone());
                     emit_events(&spec, std::slice::from_ref(&event));
@@ -744,6 +818,135 @@ fn cancelled_run_result(
 struct ModelResponse {
     response: LlmResponse,
     hook_streamed: bool,
+}
+
+struct ToolDispatchReport {
+    messages: Vec<RuntimeToolMessage>,
+    interrupt: Option<RuntimeInterrupt>,
+    resolved_bridge_calls: Vec<ResolvedDeferredToolCall>,
+}
+
+struct IterationToolUse {
+    call_id: String,
+    name: String,
+}
+
+fn execute_tool_dispatch(
+    calls: Vec<RuntimeToolCall>,
+    catalog: Option<&DeferredToolCatalog>,
+    spec: &AgentRunSpec<'_>,
+    executor: &RuntimeToolExecutor<'_>,
+) -> ToolDispatchReport {
+    let Some(catalog) = catalog else {
+        return direct_tool_dispatch(calls, spec, executor);
+    };
+    if !calls.iter().any(is_bridge_tool_call) {
+        return direct_tool_dispatch(calls, spec, executor);
+    }
+
+    let mut messages = Vec::new();
+    let mut resolved_bridge_calls = Vec::new();
+    let mut index = 0;
+    while index < calls.len() {
+        let segment_start = index;
+        let bridge_segment = is_bridge_tool_call(&calls[index]);
+        while index < calls.len() && is_bridge_tool_call(&calls[index]) == bridge_segment {
+            index += 1;
+        }
+        let segment = calls[segment_start..index].to_vec();
+        if bridge_segment {
+            let report = dispatch_bridge_tool_calls(
+                segment,
+                Some(catalog),
+                spec.tools,
+                executor,
+                &spec.tool_context,
+                spec.concurrent_tools,
+            );
+            resolved_bridge_calls.extend(report.resolved_calls);
+            messages.extend(report.results.into_iter().map(|result| result.message));
+            if let Some(interrupt) = report.interrupt {
+                return ToolDispatchReport {
+                    messages,
+                    interrupt: Some(interrupt),
+                    resolved_bridge_calls,
+                };
+            }
+        } else {
+            let report = direct_runtime_report(segment, spec, executor);
+            messages.extend(report.messages);
+            if let Some(interrupt) = report.interrupt {
+                return ToolDispatchReport {
+                    messages,
+                    interrupt: Some(interrupt),
+                    resolved_bridge_calls,
+                };
+            }
+        }
+    }
+
+    ToolDispatchReport {
+        messages,
+        interrupt: None,
+        resolved_bridge_calls,
+    }
+}
+
+fn direct_tool_dispatch(
+    calls: Vec<RuntimeToolCall>,
+    spec: &AgentRunSpec<'_>,
+    executor: &RuntimeToolExecutor<'_>,
+) -> ToolDispatchReport {
+    let report = direct_runtime_report(calls, spec, executor);
+    ToolDispatchReport {
+        messages: report.messages,
+        interrupt: report.interrupt,
+        resolved_bridge_calls: Vec::new(),
+    }
+}
+
+fn direct_runtime_report(
+    calls: Vec<RuntimeToolCall>,
+    spec: &AgentRunSpec<'_>,
+    executor: &RuntimeToolExecutor<'_>,
+) -> RuntimeToolExecutionReport {
+    if spec.concurrent_tools {
+        executor.execute_tool_calls_concurrent(calls, &spec.tool_context)
+    } else {
+        executor.execute_tool_calls(calls, &spec.tool_context)
+    }
+}
+
+fn is_bridge_tool_call(call: &RuntimeToolCall) -> bool {
+    bridge_tool_names().contains(&call.name.as_str())
+}
+
+fn iteration_tool_uses(calls: &[RuntimeToolCall]) -> Vec<IterationToolUse> {
+    calls
+        .iter()
+        .map(|call| IterationToolUse {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+        })
+        .collect()
+}
+
+fn apply_resolved_bridge_tool_uses(
+    tool_uses: &mut [IterationToolUse],
+    resolved_calls: &[ResolvedDeferredToolCall],
+) {
+    for resolved_call in resolved_calls {
+        if let Some(tool_use) = tool_uses
+            .iter_mut()
+            .find(|tool_use| tool_use.call_id == resolved_call.original_call_id)
+        {
+            tool_use.name = resolved_call.underlying_name.clone();
+        }
+    }
+}
+
+fn append_iteration_tool_uses(tools_used: &mut Vec<String>, tool_uses: Vec<IterationToolUse>) {
+    tools_used.extend(tool_uses.into_iter().map(|tool_use| tool_use.name));
 }
 
 fn request_model(
@@ -1324,10 +1527,31 @@ fn truncate_text(content: &str, max_chars: usize) -> String {
     truncated
 }
 
+fn tool_search_activation_event(summary: ToolSearchDiagnosticsSummary) -> ToolEvent {
+    ToolEvent {
+        name: "tool_search_activation".to_owned(),
+        status: ToolStatus::Ok,
+        detail: format!(
+            "Tool Search mode={} activated={} visible={} deferred={}",
+            summary.mode, summary.activated, summary.visible_count, summary.deferred_count
+        ),
+        call_id: None,
+        arguments: None,
+        result: Some(serde_json::json!({ "activation": summary })),
+    }
+}
+
 fn tool_event_for_message(
     message: &RuntimeToolMessage,
     call: Option<&RuntimeToolCall>,
+    catalog: Option<&DeferredToolCatalog>,
+    resolved_bridge_call: Option<&ResolvedDeferredToolCall>,
 ) -> ToolEvent {
+    if let Some(event) = bridge_tool_event_for_message(message, call, catalog, resolved_bridge_call)
+    {
+        return event;
+    }
+
     let is_error = message.content.starts_with("Error") || is_workspace_violation(&message.content);
     ToolEvent {
         name: message.name.clone(),
@@ -1341,6 +1565,175 @@ fn tool_event_for_message(
         arguments: call.map(|call| call.arguments.clone()),
         result: Some(tool_event_result_value(&message.content)),
     }
+}
+
+fn bridge_tool_event_for_message(
+    message: &RuntimeToolMessage,
+    call: Option<&RuntimeToolCall>,
+    catalog: Option<&DeferredToolCatalog>,
+    resolved_bridge_call: Option<&ResolvedDeferredToolCall>,
+) -> Option<ToolEvent> {
+    let scope_digest = catalog.map(|catalog| catalog.scope_digest.clone())?;
+    let status = if message.content.starts_with("Error") || is_workspace_violation(&message.content)
+    {
+        ToolStatus::Error
+    } else {
+        ToolStatus::Ok
+    };
+    match message.name.as_str() {
+        "tool_search" => Some(tool_search_query_event(message, call, status, scope_digest)),
+        "tool_describe" => Some(tool_describe_event(message, call, status, scope_digest)),
+        "tool_call" => Some(tool_call_mapping_event(
+            message,
+            call,
+            status,
+            scope_digest,
+            resolved_bridge_call,
+        )),
+        _ => None,
+    }
+}
+
+fn tool_search_query_event(
+    message: &RuntimeToolMessage,
+    call: Option<&RuntimeToolCall>,
+    status: ToolStatus,
+    scope_digest: String,
+) -> ToolEvent {
+    let result = tool_event_result_value(&message.content);
+    let matched_names = result
+        .get("matches")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("name").and_then(Value::as_str))
+        .take(MAX_TOOL_SEARCH_EVIDENCE_MATCHES)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let arguments = call.and_then(|call| call.arguments.as_object());
+    let query = arguments
+        .and_then(|arguments| arguments.get("query"))
+        .and_then(Value::as_str)
+        .or_else(|| result.get("query").and_then(Value::as_str))
+        .unwrap_or_default();
+    let limit = arguments
+        .and_then(|arguments| arguments.get("limit"))
+        .and_then(Value::as_u64)
+        .and_then(|limit| usize::try_from(limit).ok());
+    let evidence = ToolSearchQueryEvidence {
+        redacted_query: redacted_tool_search_query(query),
+        limit,
+        matched_names,
+        scope_digest,
+    };
+
+    ToolEvent {
+        name: message.name.clone(),
+        status,
+        detail: format!(
+            "tool_search matched {} deferred tools",
+            evidence.matched_names.len()
+        ),
+        call_id: Some(message.tool_call_id.clone()),
+        arguments: Some(serde_json::json!({
+            "query": evidence.redacted_query,
+            "limit": evidence.limit,
+        })),
+        result: Some(serde_json::json!({ "query_evidence": evidence })),
+    }
+}
+
+fn tool_describe_event(
+    message: &RuntimeToolMessage,
+    call: Option<&RuntimeToolCall>,
+    status: ToolStatus,
+    scope_digest: String,
+) -> ToolEvent {
+    let result = tool_event_result_value(&message.content);
+    let requested_name = call
+        .and_then(|call| call.arguments.as_object())
+        .and_then(|arguments| arguments.get("name"))
+        .and_then(Value::as_str)
+        .or_else(|| result.get("name").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_owned();
+    let evidence = ToolDescribeEvidence {
+        requested_name,
+        found: status == ToolStatus::Ok,
+        scope_digest,
+    };
+
+    ToolEvent {
+        name: message.name.clone(),
+        status,
+        detail: format!(
+            "tool_describe requested {} found={}",
+            evidence.requested_name, evidence.found
+        ),
+        call_id: Some(message.tool_call_id.clone()),
+        arguments: Some(serde_json::json!({ "name": evidence.requested_name })),
+        result: Some(serde_json::json!({ "describe_evidence": evidence })),
+    }
+}
+
+fn tool_call_mapping_event(
+    message: &RuntimeToolMessage,
+    call: Option<&RuntimeToolCall>,
+    status: ToolStatus,
+    scope_digest: String,
+    resolved_bridge_call: Option<&ResolvedDeferredToolCall>,
+) -> ToolEvent {
+    let requested_name = call
+        .and_then(|call| call.arguments.as_object())
+        .and_then(|arguments| arguments.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let evidence = resolved_bridge_call.map(|resolved_call| BridgeUnderlyingMappingEvidence {
+        bridge_call_id: resolved_call.original_call_id.clone(),
+        bridge_name: resolved_call.bridge_name.clone(),
+        underlying_name: resolved_call.underlying_name.clone(),
+        scope_digest: resolved_call.scope_digest.clone(),
+    });
+
+    ToolEvent {
+        name: message.name.clone(),
+        status,
+        detail: evidence
+            .as_ref()
+            .map(|evidence| {
+                format!(
+                    "tool_call mapped bridge call {} to {}",
+                    evidence.bridge_call_id, evidence.underlying_name
+                )
+            })
+            .unwrap_or_else(|| format!("tool_call rejected {requested_name}")),
+        call_id: Some(message.tool_call_id.clone()),
+        arguments: None,
+        result: Some(serde_json::json!({
+            "mapping_evidence": evidence,
+            "scope_digest": scope_digest,
+        })),
+    }
+}
+
+fn redacted_tool_search_query(query: &str) -> String {
+    let trimmed = query.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if ["sk-", "token", "secret", "password", "api_key", "apikey"]
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return "[redacted]".to_owned();
+    }
+    if trimmed.chars().count() <= MAX_TOOL_SEARCH_QUERY_CHARS {
+        return trimmed.to_owned();
+    }
+    let mut bounded = trimmed
+        .chars()
+        .take(MAX_TOOL_SEARCH_QUERY_CHARS)
+        .collect::<String>();
+    bounded.push_str("...");
+    bounded
 }
 
 fn tool_event_result_value(content: &str) -> Value {
