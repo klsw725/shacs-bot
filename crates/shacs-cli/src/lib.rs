@@ -1718,6 +1718,31 @@ fn skill_usage_notification_message(
     Some(message)
 }
 
+fn subagent_start_notification_message(
+    channel: &str,
+    chat_id: &str,
+    routing_metadata: &Map<String, Value>,
+    reply_to: Option<&str>,
+    outcome: &shacs_core::runtime::SubagentSpawnOutcome,
+) -> OutboundMessage {
+    let mut metadata = routing_metadata.clone();
+    metadata.insert(
+        "runtime_notification".to_owned(),
+        json!({
+            "kind": "subagent",
+            "phase": "start",
+            "child_task_id": outcome.envelope.child_task_id,
+            "label": outcome.envelope.label,
+        }),
+    );
+    let mut message = OutboundMessage::new(channel, chat_id, outcome.user_message.clone())
+        .with_metadata(metadata);
+    if let Some(reply_to) = reply_to {
+        message.reply_to = Some(reply_to.to_owned());
+    }
+    message
+}
+
 fn is_skill_runtime_notification(message: &shacs_channels::OutboundMessage) -> bool {
     message
         .metadata
@@ -1725,6 +1750,18 @@ fn is_skill_runtime_notification(message: &shacs_channels::OutboundMessage) -> b
         .and_then(|value| value.get("kind"))
         .and_then(Value::as_str)
         == Some("skill")
+}
+
+fn is_visible_runtime_notification(message: &shacs_channels::OutboundMessage) -> bool {
+    is_skill_runtime_notification(message)
+        || matches!(
+            message
+                .metadata
+                .get("runtime_notification")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str),
+            Some("subagent")
+        )
 }
 
 fn runtime_usage_value(response: &LlmResponse, key: &str) -> u64 {
@@ -6083,7 +6120,7 @@ fn render_direct_turn_content(
 ) -> String {
     let mut parts = outbound
         .into_iter()
-        .filter(is_skill_runtime_notification)
+        .filter(is_visible_runtime_notification)
         .filter_map(|message| {
             let content = message.content.trim();
             (!content.is_empty()).then(|| content.to_owned())
@@ -11700,7 +11737,7 @@ impl AgentLoopChatCompletionAdapter {
         emit: &mut dyn FnMut(WebSocketServerEvent),
     ) -> Result<(), ApiError> {
         while let Ok(message) = notification_rx.try_recv() {
-            if message.channel != WEBSOCKET_CHANNEL || !is_skill_runtime_notification(&message) {
+            if message.channel != WEBSOCKET_CHANNEL || !is_visible_runtime_notification(&message) {
                 continue;
             }
             manager.dispatch_outbound(message).map_err(|error| {
@@ -11815,10 +11852,30 @@ impl AgentLoopChatCompletionAdapter {
         let spawn_config = self.subagent_execution_config(&config);
         let subagent_client = self.client.clone();
         let spawner_runtime = subagent_runtime.clone();
+        let notification_bus = bus.clone();
+        let live_notification_sink = live_notification_sink.clone();
+        let notification_channel = message.channel.clone();
+        let notification_chat_id = message.chat_id.clone();
+        let notification_metadata = routing_metadata.clone();
+        let notification_reply_to = reply_to.clone();
         let spawn_tool = SpawnTool::new(Arc::new(move |request| {
             spawner_runtime
                 .spawn_and_run_background(request, subagent_client.clone(), spawn_config.clone())
-                .map(|outcome| outcome.user_message)
+                .map(|outcome| {
+                    let notification = subagent_start_notification_message(
+                        &notification_channel,
+                        &notification_chat_id,
+                        &notification_metadata,
+                        notification_reply_to.as_deref(),
+                        &outcome,
+                    );
+                    publish_runtime_notification(
+                        &notification_bus,
+                        live_notification_sink.as_ref(),
+                        notification,
+                    );
+                    outcome.user_message
+                })
         }));
         let mut tools = self.tools.clone();
         tools.register(spawn_tool.clone());
@@ -15300,6 +15357,20 @@ mod tests {
         assert!(!external_stream_final_candidate(&notification));
         assert!(streams.active_preview_mut(&notification).is_some());
 
+        let mut subagent_metadata = Map::new();
+        subagent_metadata.insert(
+            "runtime_notification".to_owned(),
+            json!({"kind": "subagent", "phase": "start"}),
+        );
+        let subagent_notification = OutboundMessage::new(
+            DISCORD_CHANNEL,
+            "channel-1",
+            "Subagent [summary] started (id: child-1). I'll notify you when it completes.",
+        )
+        .with_metadata(subagent_metadata);
+        assert!(!external_stream_final_candidate(&subagent_notification));
+        assert!(streams.active_preview_mut(&subagent_notification).is_some());
+
         let mut final_metadata = Map::new();
         final_metadata.insert("session_key".to_owned(), json!("discord:channel-1"));
         final_metadata.insert("stop_reason".to_owned(), json!("stop"));
@@ -15381,6 +15452,49 @@ mod tests {
             &events[1],
             WebSocketServerEvent::Delta { chat_id, text, stream_id }
                 if chat_id == "chat-1" && text == "chunk" && stream_id.as_deref() == Some("stream-1")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_runtime_notifications_include_subagent_and_exclude_tool(
+    ) -> Result<(), Box<dyn Error>> {
+        let sink = WebSocketEventSink::default();
+        let mut manager = websocket_event_channel_manager(1, sink.clone());
+        let (tx, rx) = mpsc::channel();
+        let mut subagent_metadata = Map::new();
+        subagent_metadata.insert(
+            "runtime_notification".to_owned(),
+            json!({"kind": "subagent", "phase": "start"}),
+        );
+        tx.send(
+            OutboundMessage::new(WEBSOCKET_CHANNEL, "chat-1", "Subagent [summary] started")
+                .with_metadata(subagent_metadata),
+        )?;
+        let mut tool_metadata = Map::new();
+        tool_metadata.insert(
+            "runtime_notification".to_owned(),
+            json!({"kind": "tool", "phase": "start"}),
+        );
+        tx.send(
+            OutboundMessage::new(WEBSOCKET_CHANNEL, "chat-1", "Using tool: spawn")
+                .with_metadata(tool_metadata),
+        )?;
+        drop(tx);
+        let mut events = Vec::new();
+
+        AgentLoopChatCompletionAdapter::drain_websocket_runtime_notifications(
+            &rx,
+            &mut manager,
+            &sink,
+            &mut |event| events.push(event),
+        )?;
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            WebSocketServerEvent::Message { chat_id, text, .. }
+                if chat_id == "chat-1" && text == "Subagent [summary] started"
         ));
         Ok(())
     }
@@ -19362,6 +19476,81 @@ mod tests {
     }
 
     #[test]
+    fn subagent_start_notification_uses_outcome_content_and_metadata() {
+        let routing = Map::from_iter([("thread_id".to_owned(), json!("thread-1"))]);
+        let outcome = shacs_core::runtime::SubagentSpawnOutcome {
+            envelope: shacs_core::runtime::SpawnEnvelope::from_spawn_request(
+                shacs_core::tools::SpawnRequest {
+                    task: "draft the summary".to_owned(),
+                    label: Some("summary".to_owned()),
+                    origin_channel: "discord".to_owned(),
+                    origin_chat_id: "channel-1".to_owned(),
+                    session_key: "discord:channel-1".to_owned(),
+                },
+                "child-42".to_owned(),
+            ),
+            user_message:
+                "Subagent [summary] started (id: child-42). I'll notify you when it completes."
+                    .to_owned(),
+        };
+        let notification = subagent_start_notification_message(
+            "discord",
+            "channel-1",
+            &routing,
+            Some("message-1"),
+            &outcome,
+        );
+
+        assert_eq!(notification.content, outcome.user_message);
+        assert_eq!(notification.reply_to.as_deref(), Some("message-1"));
+        assert_eq!(notification.metadata["thread_id"], json!("thread-1"));
+        assert_eq!(
+            notification.metadata["runtime_notification"]["kind"],
+            "subagent"
+        );
+        assert_eq!(
+            notification.metadata["runtime_notification"]["phase"],
+            "start"
+        );
+        assert_eq!(
+            notification.metadata["runtime_notification"]["child_task_id"],
+            "child-42"
+        );
+        assert_eq!(
+            notification.metadata["runtime_notification"]["label"],
+            "summary"
+        );
+        assert!(notification.metadata.get("session_key").is_none());
+        assert!(notification.metadata.get("stop_reason").is_none());
+    }
+
+    #[test]
+    fn direct_render_includes_subagent_runtime_notifications_but_not_tools() {
+        let mut subagent_metadata = Map::new();
+        subagent_metadata.insert(
+            "runtime_notification".to_owned(),
+            json!({"kind": "subagent", "phase": "start"}),
+        );
+        let mut tool_metadata = Map::new();
+        tool_metadata.insert(
+            "runtime_notification".to_owned(),
+            json!({"kind": "tool", "phase": "start"}),
+        );
+
+        let output = render_direct_turn_content(
+            "final answer".to_owned(),
+            vec![
+                OutboundMessage::new("cli", "direct", "Subagent [summary] started")
+                    .with_metadata(subagent_metadata),
+                OutboundMessage::new("cli", "direct", "Using tool: spawn")
+                    .with_metadata(tool_metadata),
+            ],
+        );
+
+        assert_eq!(output, "Subagent [summary] started\n\nfinal answer");
+    }
+
+    #[test]
     fn process_inbound_with_outbound_does_not_publish_runtime_tool_usage_notifications(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -19432,6 +19621,111 @@ mod tests {
             .and_then(|value| value.get("kind"))
             .and_then(Value::as_str)
             == Some("tool")));
+        Ok(())
+    }
+
+    #[test]
+    fn process_inbound_with_outbound_publishes_subagent_start_notification(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let mut arguments = Map::new();
+        arguments.insert("task".to_owned(), json!("draft the summary"));
+        arguments.insert("label".to_owned(), json!("summary"));
+        let mut tools = ToolRegistry::new();
+        tools.register(JsonArtifactTool);
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 1,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse {
+                    tool_calls: vec![ToolCallRequest::new("call-spawn", "spawn", arguments)],
+                    finish_reason: "tool_calls".to_owned(),
+                    ..LlmResponse::default()
+                },
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir,
+            tools,
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            tool_search: ToolSearchConfig::default(),
+        };
+
+        let inbound = InboundMessage::new("direct", "user", "chat-1", "make summary")
+            .with_metadata(Map::from_iter([
+                ("message_id".to_owned(), json!("message-1")),
+                ("thread_id".to_owned(), json!("thread-1")),
+                ("slack".to_owned(), json!({"thread_ts": "171.1"})),
+            ]));
+        let (_turn, outbound) = adapter.process_inbound_with_outbound_inner(
+            inbound,
+            adapter.loop_config(),
+            None,
+            &[],
+            None,
+            Some(SubagentRuntime::new()),
+        )?;
+
+        let notification = outbound.iter().find(|message| {
+            message
+                .metadata
+                .get("runtime_notification")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str)
+                == Some("subagent")
+                && message
+                    .metadata
+                    .get("runtime_notification")
+                    .and_then(|value| value.get("phase"))
+                    .and_then(Value::as_str)
+                    == Some("start")
+        });
+        let Some(notification) = notification else {
+            return Err("missing subagent start notification".into());
+        };
+        let child_task_id = notification
+            .metadata
+            .get("runtime_notification")
+            .and_then(|value| value.get("child_task_id"))
+            .and_then(Value::as_str)
+            .ok_or("missing child_task_id")?;
+        assert_eq!(
+            notification.content,
+            format!(
+                "Subagent [summary] started (id: {child_task_id}). I'll notify you when it completes."
+            )
+        );
+        assert_eq!(
+            notification
+                .metadata
+                .get("runtime_notification")
+                .and_then(|value| value.get("label"))
+                .and_then(Value::as_str),
+            Some("summary")
+        );
         Ok(())
     }
 
