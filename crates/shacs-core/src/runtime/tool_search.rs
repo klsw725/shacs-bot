@@ -1,6 +1,8 @@
+use crate::runtime::tool_execution::permissioned_action_input_from_context;
 use crate::runtime::{
-    RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
-    RuntimeToolMessage, ToolExecutionContext, ToolSearchMode, ToolSearchRuntimeInput,
+    normalize_resolved_deferred_tool_call, PermissionedAction, RuntimeInterrupt, RuntimeToolCall,
+    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext,
+    ToolSearchMode, ToolSearchRuntimeInput,
 };
 use crate::tools::{
     bridge_tool_names, ActivationState, DeferredToolCatalog, ToolRegistry, ToolSurfaceAssembly,
@@ -218,6 +220,8 @@ pub struct BridgeToolExecutionReport {
     pub interrupt: Option<RuntimeInterrupt>,
     pub skipped_tool_calls: Vec<RuntimeToolCall>,
     pub resolved_calls: Vec<ResolvedDeferredToolCall>,
+    #[serde(default)]
+    pub permissioned_actions: Vec<PermissionedAction>,
 }
 
 impl BridgeToolExecutionReport {
@@ -237,6 +241,7 @@ impl BridgeToolExecutionReport {
                 .collect(),
             interrupt: self.interrupt,
             skipped_tool_calls: self.skipped_tool_calls,
+            permissioned_actions: self.permissioned_actions,
         }
     }
 
@@ -246,6 +251,7 @@ impl BridgeToolExecutionReport {
             interrupt: None,
             skipped_tool_calls: Vec::new(),
             resolved_calls: Vec::new(),
+            permissioned_actions: Vec::new(),
         }
     }
 
@@ -565,6 +571,15 @@ fn flush_pending(
         .iter()
         .map(|entry| entry.resolved_call.to_runtime_call())
         .collect::<Vec<_>>();
+    report
+        .permissioned_actions
+        .extend(pending.iter().map(|entry| {
+            normalize_resolved_deferred_tool_call(
+                executor.registry(),
+                &entry.resolved_call,
+                permissioned_action_input_from_context(context),
+            )
+        }));
     let runtime_report = if concurrent_tools {
         executor.execute_tool_calls_concurrent(tool_calls, context)
     } else {
