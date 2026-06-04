@@ -1702,6 +1702,7 @@ dependencies = [
  "sha2",
  "shacs-bus",
  "shacs-command",
+ "shacs-config",
  "shacs-cron",
  "shacs-heartbeat",
  "shacs-providers",
