@@ -52,6 +52,7 @@
 19. `019-image-generation-and-generated-media`
 20. `020-tool-search-and-provider-tool-surface`
 21. `021-app-maker-and-app-authoring`
+22. `022-auto-approval-permissions`
 
 ## 운영 원칙
 
