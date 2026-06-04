@@ -16,6 +16,7 @@ sha2 = "0.10"
 shacs-cron = { path = "../shacs-cron" }
 shacs-command = { path = "../shacs-command" }
 shacs-bus = { path = "../shacs-bus" }
+shacs-config = { path = "../shacs-config" }
 shacs-heartbeat = { path = "../shacs-heartbeat" }
 shacs-providers = { path = "../shacs-providers" }
 shacs-security = { path = "../shacs-security" }

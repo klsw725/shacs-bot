@@ -8,6 +8,7 @@ mod lifecycle;
 mod loop_control;
 mod memory;
 mod memory_skill_curator;
+mod permission_action;
 mod projection;
 mod replay;
 mod runner;
@@ -73,6 +74,12 @@ pub use memory_skill_curator::{
     runtime_memory_evidence_request, runtime_skill_list_disclosure,
     runtime_skill_reference_evidence, runtime_skill_view_disclosure,
     MemorySkillCuratorRuntimeError, RuntimeMemoryEvidenceRequestInput,
+};
+pub use permission_action::{
+    normalize_resolved_deferred_tool_call, normalize_runtime_tool_call, ActionNormalizationError,
+    ActionNormalizationState, ContainmentSnapshotRef, IntentSnapshotRef, PermissionDecisionInput,
+    PermissionMode, PermissionModeSnapshot, PermissionedAction, PermissionedActionInput,
+    PermissionedActionOrigin, SafetyCapability, TargetRef,
 };
 pub use projection::{
     build_spec018_projection, runtime_spec018_channel_projection,
