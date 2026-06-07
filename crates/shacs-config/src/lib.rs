@@ -10,6 +10,14 @@ use std::process;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod permissions;
+
+pub use permissions::{
+    AutoApprovalConfig, PermissionActivationContext, PermissionConfigDiagnostics,
+    PermissionConfigSnapshot, PermissionMode, PermissionModeSource, PermissionsConfig,
+    SafetyCapability,
+};
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -24,6 +32,8 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub gateway: GatewayConfig,
+    #[serde(default, skip_serializing_if = "PermissionsConfig::is_default")]
+    pub permissions: PermissionsConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
 }
@@ -1489,6 +1499,48 @@ mod tests {
         }))
         .map_err(|error| error.to_string())?;
         assert_eq!(config.tools.tool_search, ToolSearchConfig::default());
+        Ok(())
+    }
+
+    #[test]
+    fn permissions_config_deserializes_top_level_and_safe_fallbacks() -> Result<(), String> {
+        let config: Config = serde_json::from_value(json!({
+            "permissions": {
+                "mode": "auto",
+                "autoApproval": {
+                    "enabled": true,
+                    "protectedTargets": ["~/.ssh"]
+                }
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(config.permissions.mode, PermissionMode::Auto);
+        assert!(config.permissions.auto_approval.enabled);
+        assert_eq!(
+            config.permissions.auto_approval.protected_targets,
+            ["~/.ssh"]
+        );
+
+        let workspace_snapshot = config.permissions.normalized_snapshot(
+            PermissionModeSource::WorkspaceConfig,
+            PermissionActivationContext::default(),
+        );
+        assert_eq!(workspace_snapshot.mode, PermissionMode::Default);
+        assert_eq!(
+            workspace_snapshot.source,
+            PermissionModeSource::DefaultFallback
+        );
+
+        let malformed: Config = serde_json::from_value(json!({
+            "permissions": {"mode": "sk-secret-mode"}
+        }))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(malformed.permissions.mode, PermissionMode::Default);
+        assert!(malformed
+            .permissions
+            .diagnostics()
+            .malformed_fields
+            .contains(&"permissions.mode".to_owned()));
         Ok(())
     }
 

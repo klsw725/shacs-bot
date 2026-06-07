@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use shacs_core::runtime::{
-    dispatch_bridge_tool_call, dispatch_bridge_tool_calls, RuntimeContextTools, RuntimeInterrupt,
+    dispatch_bridge_tool_call, dispatch_bridge_tool_calls, ActionNormalizationError,
+    ActionNormalizationState, PermissionedActionOrigin, RuntimeContextTools, RuntimeInterrupt,
     RuntimeToolCall, RuntimeToolExecutor, ToolExecutionContext,
 };
 use shacs_core::tools::{
@@ -331,6 +332,20 @@ fn runtime_returns_tool_errors_without_stopping_batch() -> Result<(), Box<dyn Er
         || calls.load(Ordering::SeqCst) != 1
     {
         return Err(format!("runtime did not preserve tool error behavior: {report:?}").into());
+    }
+    if report.permissioned_actions.len() != 2
+        || report.permissioned_actions[0].tool_name != "missing_tool"
+        || report.permissioned_actions[0].normalization_state
+            != ActionNormalizationState::DenyCandidate
+        || !report.permissioned_actions[0]
+            .normalization_errors
+            .contains(&ActionNormalizationError::UnknownTool {
+                tool_name: "missing_tool".to_owned(),
+            })
+        || report.permissioned_actions[1].tool_name != "count"
+        || report.permissioned_actions[1].normalization_state != ActionNormalizationState::Ready
+    {
+        return Err(format!("runtime did not report pre-execution actions: {report:?}").into());
     }
     Ok(())
 }
@@ -722,6 +737,23 @@ fn bridge_dispatcher_accepts_object_and_json_string_arguments() -> Result<(), Bo
         || report.resolved_calls[0].underlying_name != "mcp_repeat"
     {
         return Err(format!("bridge did not execute normalized arguments: {report:?}").into());
+    }
+    if report.permissioned_actions.len() != 2
+        || report.permissioned_actions[0].tool_name != "mcp_repeat"
+        || report.permissioned_actions[0].normalization_state != ActionNormalizationState::Ready
+    {
+        return Err(
+            format!("bridge did not report deferred permissioned actions: {report:?}").into(),
+        );
+    }
+    match &report.permissioned_actions[0].origin {
+        PermissionedActionOrigin::DeferredBridge {
+            bridge_name,
+            parent_origin,
+            ..
+        } if bridge_name == "tool_call"
+            && matches!(**parent_origin, PermissionedActionOrigin::UserTurn) => {}
+        other => return Err(format!("bridge origin did not preserve parent: {other:?}").into()),
     }
     Ok(())
 }

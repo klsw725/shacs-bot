@@ -1,3 +1,7 @@
+use crate::runtime::{
+    normalize_runtime_tool_call, PermissionModeSnapshot, PermissionedAction,
+    PermissionedActionInput, PermissionedActionOrigin,
+};
 use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -126,6 +130,8 @@ pub struct RuntimeToolExecutionReport {
     pub messages: Vec<RuntimeToolMessage>,
     pub interrupt: Option<RuntimeInterrupt>,
     pub skipped_tool_calls: Vec<RuntimeToolCall>,
+    #[serde(default)]
+    pub permissioned_actions: Vec<PermissionedAction>,
 }
 
 impl RuntimeToolExecutionReport {
@@ -134,6 +140,7 @@ impl RuntimeToolExecutionReport {
             messages,
             interrupt: None,
             skipped_tool_calls: Vec::new(),
+            permissioned_actions: Vec::new(),
         }
     }
 }
@@ -214,6 +221,10 @@ impl<'a> RuntimeToolExecutor<'a> {
         }
     }
 
+    pub(crate) fn registry(&self) -> &ToolRegistry {
+        self.registry
+    }
+
     pub fn execute_tool_calls(
         &self,
         tool_calls: Vec<RuntimeToolCall>,
@@ -239,6 +250,16 @@ impl<'a> RuntimeToolExecutor<'a> {
         let _guard = AppliedToolContext::apply(&self.context_tools, context);
         let mut messages = Vec::new();
         let all_calls = tool_calls.clone();
+        let permissioned_actions = all_calls
+            .iter()
+            .map(|call| {
+                normalize_runtime_tool_call(
+                    self.registry,
+                    call,
+                    permissioned_action_input_from_context(context),
+                )
+            })
+            .collect::<Vec<_>>();
 
         for batch in partition_tool_batches(self.registry, tool_calls, concurrent_tools) {
             let results = if concurrent_tools && batch.len() > 1 {
@@ -258,6 +279,7 @@ impl<'a> RuntimeToolExecutor<'a> {
                                 options,
                             }),
                             skipped_tool_calls: all_calls[result.original_index + 1..].to_vec(),
+                            permissioned_actions,
                         };
                     }
                     ToolResult::Text(content) => messages.push(RuntimeToolMessage {
@@ -274,7 +296,63 @@ impl<'a> RuntimeToolExecutor<'a> {
             }
         }
 
-        RuntimeToolExecutionReport::completed(messages)
+        RuntimeToolExecutionReport {
+            messages,
+            interrupt: None,
+            skipped_tool_calls: Vec::new(),
+            permissioned_actions,
+        }
+    }
+}
+
+pub(crate) fn permissioned_action_input_from_context(
+    context: &ToolExecutionContext,
+) -> PermissionedActionInput {
+    let channel = non_empty_or(&context.channel, "cli");
+    let chat_id = non_empty_or(&context.chat_id, "direct");
+    let session_id = context
+        .session_key
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("{channel}:{chat_id}"));
+    let turn_id = context
+        .message_id
+        .clone()
+        .or_else(|| {
+            context
+                .metadata
+                .get("message_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| format!("turn:{session_id}"));
+    let origin = if context.in_cron_context {
+        PermissionedActionOrigin::CronWake { job_id: None }
+    } else if context.channel.trim().is_empty() {
+        PermissionedActionOrigin::UserTurn
+    } else {
+        PermissionedActionOrigin::ChannelInbound {
+            channel,
+            message_id: context.message_id.clone(),
+        }
+    };
+
+    PermissionedActionInput {
+        session_id,
+        turn_id,
+        origin,
+        permission_mode_snapshot: PermissionModeSnapshot::default(),
+        containment_snapshot: None,
+        intent_snapshot: None,
+    }
+}
+
+fn non_empty_or(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_owned()
+    } else {
+        trimmed.to_owned()
     }
 }
 
