@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 use shacs_core::runtime::{
     dispatch_bridge_tool_call, dispatch_bridge_tool_calls, ActionNormalizationError,
-    ActionNormalizationState, PermissionedActionOrigin, RuntimeContextTools, RuntimeInterrupt,
-    RuntimeToolCall, RuntimeToolExecutor, ToolExecutionContext,
+    ActionNormalizationState, ContainmentSnapshotRef, PermissionedActionOrigin,
+    RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutor,
+    ToolExecutionContext,
 };
 use shacs_core::tools::{
     AskUserTool, CronTool, DeferredToolCatalog, DeferredToolCatalogEntry, JsonMap, MessageTool,
@@ -759,6 +760,81 @@ fn bridge_dispatcher_accepts_object_and_json_string_arguments() -> Result<(), Bo
 }
 
 #[test]
+fn runtime_permission_actions_include_context_containment() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(RepeatTool);
+    registry.register(NamedRepeatTool("mcp_repeat"));
+    let executor = RuntimeToolExecutor::new(&registry);
+    let containment = ContainmentSnapshotRef {
+        contained: Some(true),
+        digest: Some("container token=sk-container-secret".to_owned()),
+        summary: Some("sandbox bearer sk-summary-secret".to_owned()),
+    };
+    let context = ToolExecutionContext {
+        containment_snapshot: Some(containment),
+        ..ToolExecutionContext::default()
+    };
+
+    let direct_report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "direct-repeat",
+            "repeat",
+            json!({ "text": "ok", "times": 1 }),
+        )],
+        &context,
+    );
+    let direct_action = direct_report
+        .permissioned_actions
+        .first()
+        .ok_or("missing direct permissioned action")?;
+    assert_safe_containment_snapshot(direct_action)?;
+
+    let catalog = bridge_catalog([("mcp_repeat", "Repeat deferred text", ["text"])]);
+    let bridge_report = dispatch_bridge_tool_call(
+        RuntimeToolCall::new(
+            "bridge-repeat",
+            "tool_call",
+            json!({ "name": "mcp_repeat", "arguments": { "text": "ha", "times": 2 } }),
+        ),
+        Some(&catalog),
+        &registry,
+        &executor,
+        &context,
+    );
+    let bridge_action = bridge_report
+        .permissioned_actions
+        .first()
+        .ok_or("missing bridge permissioned action")?;
+    assert_safe_containment_snapshot(bridge_action)?;
+    Ok(())
+}
+
+fn assert_safe_containment_snapshot(
+    action: &shacs_core::runtime::PermissionedAction,
+) -> Result<(), Box<dyn Error>> {
+    let snapshot = action
+        .containment_snapshot
+        .as_ref()
+        .ok_or("missing containment snapshot")?;
+    let serialized = serde_json::to_string(action)?;
+    if snapshot.contained != Some(true)
+        || serialized.contains("sk-container-secret")
+        || serialized.contains("sk-summary-secret")
+        || snapshot
+            .digest
+            .as_deref()
+            .is_some_and(|value| value.contains("sk-container-secret"))
+        || snapshot
+            .summary
+            .as_deref()
+            .is_some_and(|value| value.contains("sk-summary-secret"))
+    {
+        return Err(format!("unsafe containment snapshot in action: {serialized}").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn bridge_dispatcher_rejects_invalid_arguments_before_execution() -> Result<(), Box<dyn Error>> {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
@@ -1004,6 +1080,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         message_id: Some("msg-1".to_owned()),
         metadata: json!({ "thread": "alpha" }),
         session_key: Some("session-1".to_owned()),
+        containment_snapshot: None,
         in_cron_context: false,
         record_channel_delivery: true,
     };

@@ -427,6 +427,7 @@ impl<'a> AgentLoop<'a> {
                 .map(str::to_owned),
             metadata: Value::Object(message.metadata.clone()),
             session_key: Some(session_key.clone()),
+            containment_snapshot: None,
             in_cron_context: false,
             record_channel_delivery: self.config.record_channel_delivery,
         };

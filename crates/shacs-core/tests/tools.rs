@@ -1753,6 +1753,74 @@ fn exec_tool_restricts_working_dir_and_paths_to_workspace() -> Result<(), Box<dy
 }
 
 #[test]
+fn exec_tool_native_unknown_without_backend_enforces_workspace_scope() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let outside_file = outside.path().join("secret.txt");
+    std::fs::write(&outside_file, "secret")?;
+    let config = ExecConfig::new(PathContext::workspace(temp.path()));
+    if config.restrict_to_workspace || config.sandbox.is_some() {
+        return Err("test setup must exercise native unknown default config".into());
+    }
+    let tool = ExecTool::new(config);
+
+    let bad_cwd = tool
+        .execute(json_map(json!({
+            "command": "printf nope",
+            "working_dir": outside.path().to_string_lossy()
+        }))?)
+        .into_text();
+    if !bad_cwd.contains("working_dir is outside") {
+        return Err(
+            format!("native unknown outside working_dir was not blocked: {bad_cwd}").into(),
+        );
+    }
+
+    let traversal = tool
+        .execute(json_map(json!({ "command": "printf ../secret" }))?)
+        .into_text();
+    if !traversal.contains("path traversal") {
+        return Err(format!("native unknown path traversal was not blocked: {traversal}").into());
+    }
+
+    let absolute = tool
+        .execute(json_map(json!({
+            "command": format!("printf {}", outside_file.to_string_lossy())
+        }))?)
+        .into_text();
+    if !absolute.contains("path outside working dir") {
+        return Err(
+            format!("native unknown absolute outside path was not blocked: {absolute}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn exec_tool_unknown_sandbox_backend_does_not_execute_command() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("should-not-run");
+    let mut config = ExecConfig::new(PathContext::workspace(temp.path()));
+    config.sandbox = Some("unknown-backend".to_owned());
+    let tool = ExecTool::new(config);
+
+    let result = tool
+        .execute(json_map(json!({
+            "command": "touch should-not-run",
+            "timeout": 5
+        }))?)
+        .into_text();
+    if !result.contains("Unknown sandbox backend") {
+        return Err(format!("unknown sandbox backend did not fail closed: {result}").into());
+    }
+    if marker.exists() {
+        return Err("unknown sandbox backend fell back to the original command".into());
+    }
+    Ok(())
+}
+
+#[test]
 fn exec_tool_blocks_internal_urls_and_invalid_deny_regex() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let tool = ExecTool::with_workspace(temp.path());

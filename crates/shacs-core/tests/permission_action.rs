@@ -312,6 +312,32 @@ fn snapshot_digest_changes_when_permission_context_changes() -> Result<(), Box<d
 }
 
 #[test]
+fn snapshot_digest_changes_when_containment_context_changes() -> Result<(), Box<dyn Error>> {
+    let registry = registry_with_echo();
+    let default_action = normalize_runtime_tool_call(
+        &registry,
+        &RuntimeToolCall::new("call-1", "echo", json!({ "message": "hello" })),
+        input(),
+    );
+    let mut changed_input = input();
+    changed_input.containment_snapshot = Some(ContainmentSnapshotRef {
+        contained: Some(false),
+        digest: Some("container-b".to_owned()),
+        summary: Some("host".to_owned()),
+    });
+    let changed_action = normalize_runtime_tool_call(
+        &registry,
+        &RuntimeToolCall::new("call-1", "echo", json!({ "message": "hello" })),
+        changed_input,
+    );
+
+    if default_action.snapshot_digest == changed_action.snapshot_digest {
+        return Err("snapshot digest did not change with containment context".into());
+    }
+    Ok(())
+}
+
+#[test]
 fn deferred_bridge_call_normalizes_to_same_envelope_shape() -> Result<(), Box<dyn Error>> {
     let registry = registry_with_echo();
     let action = normalize_resolved_deferred_tool_call(

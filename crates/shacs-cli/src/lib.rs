@@ -773,6 +773,15 @@ pub struct RuntimeInspectReport {
     pub capabilities: Vec<RuntimeCapabilityReport>,
     pub sessions: RuntimeSessionInspect,
     pub lifecycle: RuntimeLifecycleInspect,
+    pub containment: RuntimeContainmentInspect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeContainmentInspect {
+    pub contained: Option<bool>,
+    pub backend: Option<String>,
+    pub summary: Option<String>,
+    pub digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2340,6 +2349,7 @@ fn runtime_inspect_inner(
         &bundle.context.data_dir,
     ))?;
     let compatibility = evaluate_runtime_compatibility(RUNTIME_DATA_SCHEMA_VERSION);
+    let containment = runtime_containment_inspect(&bundle);
 
     Ok(RuntimeInspectReport {
         config_path,
@@ -2362,7 +2372,37 @@ fn runtime_inspect_inner(
             stop_request,
             update_marker,
         },
+        containment,
     })
+}
+
+fn runtime_containment_inspect(bundle: &ConfigBundle) -> RuntimeContainmentInspect {
+    let backend = non_empty(Some(bundle.config.tools.exec.sandbox.as_str()))
+        .then(|| redact_string(bundle.config.tools.exec.sandbox.trim()));
+    let summary = Some(if backend.is_some() {
+        "exec sandbox backend configured; containment not observed".to_owned()
+    } else {
+        "exec sandbox backend not configured; containment not observed".to_owned()
+    });
+    let mut inspect = RuntimeContainmentInspect {
+        contained: None,
+        backend,
+        summary,
+        digest: None,
+    };
+    inspect.digest = Some(runtime_containment_digest(&inspect));
+    inspect
+}
+
+fn runtime_containment_digest(inspect: &RuntimeContainmentInspect) -> String {
+    let payload = json!({
+        "contained": inspect.contained,
+        "backend": &inspect.backend,
+        "summary": &inspect.summary,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(payload.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn inspect_generated_media(
@@ -2643,6 +2683,12 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
             },
             "providers": providers,
             "capabilities": capabilities,
+            "containment": {
+                "contained": report.containment.contained,
+                "backend": &report.containment.backend,
+                "summary": &report.containment.summary,
+                "digest": &report.containment.digest,
+            },
             "generated_media": generated_media,
             "sessions": {
                 "count": report.sessions.count,
@@ -12665,6 +12711,12 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
         lines.push(format!("Latest session: {latest_key} ({updated})"));
     }
     lines.push(format!(
+        "Runtime containment: contained={} backend={} snapshot_digest={}",
+        optional_bool_label(report.containment.contained),
+        report.containment.backend.as_deref().unwrap_or("none"),
+        report.containment.digest.as_deref().unwrap_or("none")
+    ));
+    lines.push(format!(
         "Generated image artifacts: {}",
         report.generated_media.len()
     ));
@@ -12722,6 +12774,14 @@ fn format_runtime_diagnostics(report: RuntimeDiagnosticsReport) -> String {
         }
     }
     output
+}
+
+fn optional_bool_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
 }
 
 fn format_runtime_update(outcome: RuntimeUpdateOutcome) -> String {
@@ -13131,6 +13191,14 @@ mod tests {
     use std::fs;
     use std::sync::{Arc, Mutex};
 
+    fn read_repo_text(relative_path: &str) -> Result<String, Box<dyn Error>> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(relative_path);
+        Ok(fs::read_to_string(path)?)
+    }
+
     #[test]
     fn parser_handles_global_and_command_config_paths() -> Result<(), Box<dyn Error>> {
         let parsed = parse_cli_args([
@@ -13151,6 +13219,44 @@ mod tests {
             return Err("expected status command".into());
         };
         assert_eq!(options.config_path, Some(PathBuf::from("/tmp/b.json")));
+        Ok(())
+    }
+
+    #[test]
+    fn dockerfile_runtime_stage_uses_non_root_user() -> Result<(), Box<dyn Error>> {
+        let dockerfile = read_repo_text("Dockerfile")?;
+        assert!(dockerfile.contains("FROM python:3.14-slim-bookworm AS runtime"));
+        assert!(dockerfile.contains("USER shacs"));
+        Ok(())
+    }
+
+    #[test]
+    fn docker_compose_defaults_do_not_mount_docker_socket() -> Result<(), Box<dyn Error>> {
+        let compose = read_repo_text("docker-compose.yml")?;
+        assert!(!compose.contains("/var/run/docker.sock"));
+        assert!(!compose.contains("docker.sock"));
+        Ok(())
+    }
+
+    #[test]
+    fn docker_compose_defaults_do_not_set_privileged_mode() -> Result<(), Box<dyn Error>> {
+        let compose = read_repo_text("docker-compose.yml")?;
+        assert!(!compose.contains("privileged: true"));
+        Ok(())
+    }
+
+    #[test]
+    fn docker_compose_defaults_do_not_use_host_network_mode() -> Result<(), Box<dyn Error>> {
+        let compose = read_repo_text("docker-compose.yml")?;
+        assert!(!compose.contains("network_mode: host"));
+        assert!(!compose.contains("network_mode: \"host\""));
+        Ok(())
+    }
+
+    #[test]
+    fn docker_compose_default_mount_remains_scoped_to_shacs_home() -> Result<(), Box<dyn Error>> {
+        let compose = read_repo_text("docker-compose.yml")?;
+        assert!(compose.contains("~/.shacs-bot:/home/shacs/.shacs-bot"));
         Ok(())
     }
 
@@ -16751,6 +16857,7 @@ mod tests {
         config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
         config.agents.defaults.provider = "openai_codex".to_owned();
         config.agents.defaults.model = "gpt-5.4".to_owned();
+        config.tools.exec.sandbox = "bwrap".to_owned();
         config
             .providers
             .insert("openai_codex".to_owned(), codex_provider_config());
@@ -16771,6 +16878,9 @@ mod tests {
         assert_eq!(report.model, "gpt-5.4");
         assert_eq!(report.sessions.count, 1);
         assert_eq!(report.sessions.latest_key.as_deref(), Some("cli:direct"));
+        assert_eq!(report.containment.contained, None);
+        assert_eq!(report.containment.backend.as_deref(), Some("bwrap"));
+        assert!(report.containment.digest.is_some());
         assert_eq!(report.lifecycle.binary_version, VERSION);
         assert_eq!(
             report.lifecycle.data_schema_version,
@@ -16790,6 +16900,7 @@ mod tests {
         assert!(output.contains("Binary version:"));
         assert!(output.contains("Update marker: none"));
         assert!(output.contains("Sessions: 1"));
+        assert!(output.contains("Runtime containment: contained=unknown backend=bwrap"));
         assert!(output.contains("Generated image artifacts: 0"));
         assert!(!output.contains("hello"));
         Ok(())
@@ -16805,6 +16916,7 @@ mod tests {
         config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
         config.agents.defaults.provider = "openai_codex".to_owned();
         config.agents.defaults.model = "gpt-5.4".to_owned();
+        config.tools.exec.sandbox = "bwrap sk-raw-secret".to_owned();
         config.providers.insert(
             "openai_codex".to_owned(),
             ProviderConfig {
@@ -16859,6 +16971,8 @@ mod tests {
         assert!(!output.contains("not real png"));
         assert!(output.contains("runtime diagnostics provider snapshot"));
         assert!(output.contains("runtime capability snapshot"));
+        assert!(output.contains("containment"));
+        assert!(output.contains("exec sandbox backend configured; containment not observed"));
         assert!(output.contains("[REDACTED]") || !output.contains("api_key"));
         assert!(!output.contains("sk-raw-secret"));
         assert!(!output.contains("raw-token"));

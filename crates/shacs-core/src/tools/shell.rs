@@ -177,8 +177,8 @@ impl ExecTool {
         };
         let cwd = std::fs::canonicalize(&cwd)
             .map_err(|_| "working_dir could not be resolved".to_owned())?;
-        if self.config.restrict_to_workspace {
-            let Some(workspace) = self.config.working_dir.as_ref() else {
+        if self.workspace_guard_enabled() {
+            let Some(workspace) = self.workspace_guard_root() else {
                 return Err("configured workspace is missing".to_owned());
             };
             let workspace = std::fs::canonicalize(workspace)
@@ -243,7 +243,7 @@ impl ExecTool {
                 "Error: Command blocked by safety guard (internal/private URL detected)".to_owned(),
             );
         }
-        if self.config.restrict_to_workspace {
+        if self.workspace_guard_enabled() {
             if lower.contains("../") || lower.contains("..\\") {
                 return Some(
                     "Error: Command blocked by safety guard (path traversal detected)".to_owned(),
@@ -269,6 +269,17 @@ impl ExecTool {
             }
         }
         None
+    }
+
+    fn workspace_guard_enabled(&self) -> bool {
+        self.config.restrict_to_workspace || self.config.sandbox.is_none()
+    }
+
+    fn workspace_guard_root(&self) -> Option<&PathBuf> {
+        self.config
+            .working_dir
+            .as_ref()
+            .or(self.config.path_context.workspace.as_ref())
     }
 }
 

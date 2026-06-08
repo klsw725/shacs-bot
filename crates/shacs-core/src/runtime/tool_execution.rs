@@ -1,6 +1,6 @@
 use crate::runtime::{
-    normalize_runtime_tool_call, PermissionModeSnapshot, PermissionedAction,
-    PermissionedActionInput, PermissionedActionOrigin,
+    normalize_runtime_tool_call, ContainmentSnapshotRef, PermissionModeSnapshot,
+    PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
 };
 use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
@@ -152,6 +152,8 @@ pub struct ToolExecutionContext {
     pub message_id: Option<String>,
     pub metadata: Value,
     pub session_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment_snapshot: Option<ContainmentSnapshotRef>,
     pub in_cron_context: bool,
     pub record_channel_delivery: bool,
 }
@@ -164,6 +166,7 @@ impl Default for ToolExecutionContext {
             message_id: None,
             metadata: Value::Object(Map::new()),
             session_key: None,
+            containment_snapshot: None,
             in_cron_context: false,
             record_channel_delivery: false,
         }
@@ -342,7 +345,7 @@ pub(crate) fn permissioned_action_input_from_context(
         turn_id,
         origin,
         permission_mode_snapshot: PermissionModeSnapshot::default(),
-        containment_snapshot: None,
+        containment_snapshot: context.containment_snapshot.clone(),
         intent_snapshot: None,
     }
 }
