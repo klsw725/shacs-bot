@@ -1663,43 +1663,20 @@ fn publish_runtime_notification(
     }
 }
 
-#[derive(Clone, Copy)]
-enum SkillNotificationUsage {
-    Active,
-    Selected,
-}
-
-impl SkillNotificationUsage {
-    fn metadata_value(self) -> &'static str {
-        match self {
-            Self::Active => "active_always",
-            Self::Selected => "selected",
-        }
-    }
-}
-
 fn skill_usage_notification_message(
     channel: &str,
     chat_id: &str,
     routing_metadata: &Map<String, Value>,
     reply_to: Option<&str>,
     skill_names: &[String],
-    usage: SkillNotificationUsage,
 ) -> Option<OutboundMessage> {
     if skill_names.is_empty() {
         return None;
     }
-    let content = match usage {
-        SkillNotificationUsage::Active if skill_names.len() == 1 => {
-            format!("Using active skill: {}", skill_names[0])
-        }
-        SkillNotificationUsage::Active => {
-            format!("Using active skills: {}", skill_names.join(", "))
-        }
-        SkillNotificationUsage::Selected if skill_names.len() == 1 => {
-            format!("Using skill: {}", skill_names[0])
-        }
-        SkillNotificationUsage::Selected => format!("Using skills: {}", skill_names.join(", ")),
+    let content = if skill_names.len() == 1 {
+        format!("Using skill: {}", skill_names[0])
+    } else {
+        format!("Using skills: {}", skill_names.join(", "))
     };
     let mut metadata = routing_metadata.clone();
     metadata.insert(
@@ -1707,7 +1684,7 @@ fn skill_usage_notification_message(
         json!({
             "kind": "skill",
             "phase": "start",
-            "usage": usage.metadata_value(),
+            "usage": "selected",
             "skill_names": skill_names,
         }),
     );
@@ -1888,7 +1865,6 @@ fn selected_skill_notification_callback(
             &routing_metadata,
             reply_to.as_deref(),
             std::slice::from_ref(&skill_name),
-            SkillNotificationUsage::Selected,
         ) {
             publish_runtime_notification(&bus, live_sink.as_ref(), notification);
         }
@@ -12030,26 +12006,9 @@ impl AgentLoopChatCompletionAdapter {
         })?;
         let bus = MessageBus::new();
         let outbound_bus = bus.clone();
-        let session_key = effective_external_session_key(&config, &message);
         let routing_metadata = stream_routing_metadata_from_inbound(&message);
         let reply_to = inbound_reply_to(&message);
-        let is_new_session = sessions
-            .load_existing(&session_key)
-            .map(|session| session.messages.is_empty())
-            .unwrap_or(true);
         let context_builder = self.context_builder();
-        if is_new_session && !shacs_command::is_builtin_command(&message.content) {
-            if let Some(notification) = skill_usage_notification_message(
-                &message.channel,
-                &message.chat_id,
-                &routing_metadata,
-                reply_to.as_deref(),
-                &context_builder.active_always_skill_names(),
-                SkillNotificationUsage::Active,
-            ) {
-                publish_runtime_notification(&bus, live_notification_sink.as_ref(), notification);
-            }
-        }
         let skill_callback_context = context_builder.clone();
         let skill_notification_callback = selected_skill_notification_callback(
             skill_callback_context,
@@ -18809,26 +18768,15 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![
-                WebSocketServerEvent::Message {
-                    chat_id: "chat-b".to_owned(),
-                    text: "Using active skills: memory, my".to_owned(),
-                    buttons: Vec::new(),
-                    button_prompt: None,
-                    media: Vec::new(),
-                    reply_to: None,
-                    kind: None,
-                },
-                WebSocketServerEvent::Message {
-                    chat_id: "chat-b".to_owned(),
-                    text: "agent ok".to_owned(),
-                    buttons: Vec::new(),
-                    button_prompt: None,
-                    media: Vec::new(),
-                    reply_to: None,
-                    kind: None,
-                },
-            ]
+            vec![WebSocketServerEvent::Message {
+                chat_id: "chat-b".to_owned(),
+                text: "agent ok".to_owned(),
+                buttons: Vec::new(),
+                button_prompt: None,
+                media: Vec::new(),
+                reply_to: None,
+                kind: None,
+            },]
         );
         let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
         assert_eq!(requests.len(), 1);
@@ -18993,16 +18941,11 @@ mod tests {
 
         assert!(matches!(
             &events[0],
-            WebSocketServerEvent::Message { chat_id, text, .. }
-                if chat_id == "chat-stream" && text == "Using active skills: memory, my"
-        ));
-        assert!(matches!(
-            &events[1],
             WebSocketServerEvent::Delta { chat_id, text, stream_id }
                 if chat_id == "chat-stream" && text == "hello" && stream_id.is_some()
         ));
         assert!(matches!(
-            &events[2],
+            &events[1],
             WebSocketServerEvent::StreamEnd { chat_id, stream_id }
                 if chat_id == "chat-stream" && stream_id.is_some()
         ));
@@ -19303,7 +19246,7 @@ mod tests {
             },
         )?;
 
-        assert_eq!(output, "Using active skills: memory, my\n\ndirect ok");
+        assert_eq!(output, "direct ok");
         let session_files = fs::read_dir(workspace.join("sessions"))?.count();
         assert_eq!(session_files, 1);
         let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
@@ -19929,38 +19872,32 @@ mod tests {
     }
 
     #[test]
-    fn skill_usage_notification_content_marks_active_and_selected_skills() {
+    fn skill_usage_notification_content_marks_selected_skills() {
         let routing = Map::new();
-        let active = skill_usage_notification_message(
-            "direct",
-            "chat-1",
-            &routing,
-            None,
-            &["memory".to_owned(), "my".to_owned()],
-            SkillNotificationUsage::Active,
-        )
-        .expect("active skill notification should be present");
-        assert_eq!(active.content, "Using active skills: memory, my");
-        assert_eq!(active.metadata["runtime_notification"]["kind"], "skill");
-        assert_eq!(
-            active.metadata["runtime_notification"]["usage"],
-            "active_always"
-        );
-
         let selected = skill_usage_notification_message(
             "direct",
             "chat-1",
             &routing,
             None,
             &["weather".to_owned()],
-            SkillNotificationUsage::Selected,
         )
         .expect("selected skill notification should be present");
         assert_eq!(selected.content, "Using skill: weather");
+        assert_eq!(selected.metadata["runtime_notification"]["kind"], "skill");
         assert_eq!(
             selected.metadata["runtime_notification"]["usage"],
             "selected"
         );
+
+        let multiple = skill_usage_notification_message(
+            "direct",
+            "chat-1",
+            &routing,
+            None,
+            &["weather".to_owned(), "github".to_owned()],
+        )
+        .expect("multiple selected skill notification should be present");
+        assert_eq!(multiple.content, "Using skills: weather, github");
     }
 
     #[test]
@@ -20218,7 +20155,7 @@ mod tests {
     }
 
     #[test]
-    fn external_active_skill_notification_publishes_before_tool_finishes(
+    fn external_active_skill_notification_is_not_published_before_tool_finishes(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
@@ -20284,25 +20221,20 @@ mod tests {
             )
         });
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut notification = None;
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let mut saw_skill_notification = false;
         while Instant::now() < deadline {
             if let Some(message) = runtime_bus.try_consume_outbound() {
                 if message.content.contains("always")
                     && message.metadata["runtime_notification"]["kind"] == "skill"
                 {
-                    notification = Some(message);
+                    saw_skill_notification = true;
                     break;
                 }
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let notification = notification.ok_or("missing live active skill usage notification")?;
-        assert_eq!(notification.channel, TELEGRAM_CHANNEL);
-        assert_eq!(
-            notification.metadata["runtime_notification"]["usage"],
-            "active_always"
-        );
+        assert!(!saw_skill_notification);
         assert!(!handle.is_finished());
 
         let (lock, cvar) = &*gate;
@@ -20317,7 +20249,7 @@ mod tests {
     }
 
     #[test]
-    fn process_inbound_with_outbound_publishes_active_skill_notification_once_for_new_session(
+    fn process_inbound_with_outbound_does_not_publish_active_skill_notification(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
@@ -20371,11 +20303,10 @@ mod tests {
             None,
             &[],
         )?;
-        assert!(first_outbound.iter().any(|message| message
-            .content
-            .starts_with("Using active skills: ")
-            && message.content.contains("always")
-            && message.metadata["runtime_notification"]["kind"] == "skill"));
+        assert!(!first_outbound
+            .iter()
+            .any(|message| message.content.contains("always")
+                && message.metadata["runtime_notification"]["kind"] == "skill"));
 
         let (_second_turn, second_outbound) = adapter.process_inbound_with_outbound(
             InboundMessage::new("direct", "user", "chat-1", "again"),
@@ -20405,7 +20336,7 @@ mod tests {
             None,
             &[],
         )?;
-        assert!(unknown_slash_outbound
+        assert!(!unknown_slash_outbound
             .iter()
             .any(|message| message.content.contains("always")
                 && message.metadata["runtime_notification"]["kind"] == "skill"));
