@@ -7159,17 +7159,6 @@ impl ExternalStreamPreviewStore {
         self.by_stream.get_mut(key)
     }
 
-    fn active_preview_mut(
-        &mut self,
-        message: &OutboundMessage,
-    ) -> Option<&mut ExternalStreamPreview> {
-        let key = self
-            .active_by_route
-            .get(&outbound_route_key(message))?
-            .clone();
-        self.by_stream.get_mut(&key)
-    }
-
     fn insert(&mut self, message: &OutboundMessage, stream_id: &str, remote_id: String) {
         let route_key = outbound_route_key(message);
         let key = Self::stream_key(message, stream_id);
@@ -7196,34 +7185,156 @@ fn external_stream_final_candidate(message: &OutboundMessage) -> bool {
         && metadata_string(&message.metadata, "stop_reason").is_some()
 }
 
-fn send_external_stream_preview_delta<F>(
+const DISCORD_EXTERNAL_MESSAGE_LIMIT: usize = 2000;
+const TELEGRAM_EXTERNAL_MESSAGE_LIMIT: usize = 4000;
+const SLACK_EXTERNAL_MESSAGE_LIMIT: usize = 39000;
+
+fn external_stream_preview_limit(channel: &str) -> Option<usize> {
+    match channel {
+        DISCORD_CHANNEL => Some(DISCORD_EXTERNAL_MESSAGE_LIMIT),
+        TELEGRAM_CHANNEL => Some(TELEGRAM_EXTERNAL_MESSAGE_LIMIT),
+        SLACK_CHANNEL => Some(SLACK_EXTERNAL_MESSAGE_LIMIT),
+        _ => None,
+    }
+}
+
+fn external_message_chunks(content: &str, max_chars: usize) -> Vec<String> {
+    if content.is_empty() {
+        return vec![String::new()];
+    }
+    if max_chars == 0 || content.chars().count() <= max_chars {
+        return vec![content.to_owned()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = content;
+    while !remaining.is_empty() {
+        if remaining.chars().count() <= max_chars {
+            chunks.push(remaining.to_owned());
+            break;
+        }
+
+        let cut_byte = byte_index_after_chars(remaining, max_chars);
+        let candidate = &remaining[..cut_byte];
+        let split = boundary_split_index(candidate).unwrap_or(cut_byte);
+        chunks.push(remaining[..split].to_owned());
+        remaining = remaining[split..].trim_start();
+    }
+    chunks
+}
+
+fn byte_index_after_chars(content: &str, max_chars: usize) -> usize {
+    content
+        .char_indices()
+        .nth(max_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(content.len())
+}
+
+fn boundary_split_index(candidate: &str) -> Option<usize> {
+    ["\n\n", "\n", " "]
+        .into_iter()
+        .find_map(|delimiter| candidate.rfind(delimiter).filter(|index| *index > 0))
+}
+
+fn send_split_external_preview<U, S>(
+    remote_id: &str,
+    text: &str,
+    max_chars: usize,
+    mut send_update: U,
+    mut send_new: S,
+) -> Result<(String, String), String>
+where
+    U: FnMut(&str, &str) -> Result<(), String>,
+    S: FnMut(&str) -> Result<String, String>,
+{
+    let chunks = external_message_chunks(text, max_chars);
+    let Some((first_chunk, overflow_chunks)) = chunks.split_first() else {
+        send_update(remote_id, "")?;
+        return Ok((remote_id.to_owned(), String::new()));
+    };
+
+    send_update(remote_id, first_chunk)?;
+    let mut active_remote_id = remote_id.to_owned();
+    let mut active_text = first_chunk.clone();
+    for chunk in overflow_chunks {
+        active_remote_id = send_new(chunk)?;
+        active_text = chunk.clone();
+    }
+    Ok((active_remote_id, active_text))
+}
+
+fn send_split_external_messages<S>(
+    text: &str,
+    max_chars: usize,
+    mut send_new: S,
+) -> Result<(String, String), String>
+where
+    S: FnMut(&str) -> Result<String, String>,
+{
+    let chunks = external_message_chunks(text, max_chars);
+    let mut active_remote_id = String::new();
+    let mut active_text = String::new();
+    for chunk in chunks {
+        active_remote_id = send_new(&chunk)?;
+        active_text = chunk;
+    }
+    Ok((active_remote_id, active_text))
+}
+
+fn send_external_stream_preview_delta<U, S>(
     preview: &mut ExternalStreamPreview,
     delta: &str,
-    mut send_update: F,
+    max_chars: usize,
+    send_update: U,
+    send_new: S,
 ) -> Result<(), String>
 where
-    F: FnMut(&str, &str) -> Result<(), String>,
+    U: FnMut(&str, &str) -> Result<(), String>,
+    S: FnMut(&str) -> Result<String, String>,
 {
     let updated_text = format!("{}{}", preview.text, delta);
-    send_update(&preview.remote_id, &updated_text)?;
-    preview.text = updated_text;
+    let (active_remote_id, active_text) = send_split_external_preview(
+        &preview.remote_id,
+        &updated_text,
+        max_chars,
+        send_update,
+        send_new,
+    )?;
+    preview.remote_id = active_remote_id;
+    preview.text = active_text;
     Ok(())
 }
 
-fn send_external_stream_preview_final<F>(
+fn send_external_stream_preview_final<U, S>(
     streams: &mut ExternalStreamPreviewStore,
     message: &OutboundMessage,
-    mut send_update: F,
+    max_chars: usize,
+    send_update: U,
+    send_new: S,
 ) -> Result<(), String>
 where
-    F: FnMut(&str, &str) -> Result<(), String>,
+    U: FnMut(&str, &str) -> Result<(), String>,
+    S: FnMut(&str) -> Result<String, String>,
 {
+    let key = streams
+        .active_by_route
+        .get(&outbound_route_key(message))
+        .cloned()
+        .ok_or_else(|| "external stream preview missing".to_owned())?;
     let remote_id = streams
-        .active_preview_mut(message)
+        .by_stream
+        .get(&key)
         .ok_or_else(|| "external stream preview missing".to_owned())?
         .remote_id
         .clone();
-    send_update(&remote_id, &message.content)?;
+    send_split_external_preview(
+        &remote_id,
+        &message.content,
+        max_chars,
+        send_update,
+        send_new,
+    )?;
     let _ = streams.finish(message);
     Ok(())
 }
@@ -7638,29 +7749,59 @@ fn send_telegram_message(
         let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
         let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
         if let Some(preview) = streams.get_mut(&key) {
-            send_external_stream_preview_delta(preview, &message.content, |remote_id, text| {
-                post_json(
-                    agent,
-                    &telegram_url(&config.token, "editMessageText"),
-                    None,
-                    telegram_message_body(&message, text, Some(remote_id), false),
-                )
-                .map(|_| ())
-            })?;
+            let limit = external_stream_preview_limit(&message.channel)
+                .unwrap_or(TELEGRAM_EXTERNAL_MESSAGE_LIMIT);
+            send_external_stream_preview_delta(
+                preview,
+                &message.content,
+                limit,
+                |remote_id, text| {
+                    post_json(
+                        agent,
+                        &telegram_url(&config.token, "editMessageText"),
+                        None,
+                        telegram_message_body(&message, text, Some(remote_id), false),
+                    )
+                    .map(|_| ())
+                },
+                |text| {
+                    let value = post_json(
+                        agent,
+                        &telegram_url(&config.token, "sendMessage"),
+                        None,
+                        telegram_message_body(&message, text, None, true),
+                    )?;
+                    value
+                        .get("result")
+                        .and_then(|result| result.get("message_id"))
+                        .and_then(json_id_string)
+                        .ok_or_else(|| {
+                            "Telegram sendMessage response missing message_id".to_owned()
+                        })
+                },
+            )?;
             return Ok(());
         }
-        let value = post_json(
-            agent,
-            &telegram_url(&config.token, "sendMessage"),
-            None,
-            telegram_message_body(&message, &message.content, None, true),
-        )?;
-        let remote_id = value
-            .get("result")
-            .and_then(|result| result.get("message_id"))
-            .and_then(json_id_string)
-            .ok_or_else(|| "Telegram sendMessage response missing message_id".to_owned())?;
+        let limit = external_stream_preview_limit(&message.channel)
+            .unwrap_or(TELEGRAM_EXTERNAL_MESSAGE_LIMIT);
+        let (remote_id, tail_text) =
+            send_split_external_messages(&message.content, limit, |text| {
+                let value = post_json(
+                    agent,
+                    &telegram_url(&config.token, "sendMessage"),
+                    None,
+                    telegram_message_body(&message, text, None, true),
+                )?;
+                value
+                    .get("result")
+                    .and_then(|result| result.get("message_id"))
+                    .and_then(json_id_string)
+                    .ok_or_else(|| "Telegram sendMessage response missing message_id".to_owned())
+            })?;
         streams.insert(&message, &stream_id, remote_id);
+        if let Some(preview) = streams.get_mut(&key) {
+            preview.text = tail_text;
+        }
         return Ok(());
     }
     if external_stream_final_candidate(&message)
@@ -7668,15 +7809,35 @@ fn send_telegram_message(
             .active_by_route
             .contains_key(&outbound_route_key(&message))
     {
-        send_external_stream_preview_final(streams, &message, |remote_id, text| {
-            post_json(
-                agent,
-                &telegram_url(&config.token, "editMessageText"),
-                None,
-                telegram_message_body(&message, text, Some(remote_id), false),
-            )
-            .map(|_| ())
-        })?;
+        let limit = external_stream_preview_limit(&message.channel)
+            .unwrap_or(TELEGRAM_EXTERNAL_MESSAGE_LIMIT);
+        send_external_stream_preview_final(
+            streams,
+            &message,
+            limit,
+            |remote_id, text| {
+                post_json(
+                    agent,
+                    &telegram_url(&config.token, "editMessageText"),
+                    None,
+                    telegram_message_body(&message, text, Some(remote_id), false),
+                )
+                .map(|_| ())
+            },
+            |text| {
+                let value = post_json(
+                    agent,
+                    &telegram_url(&config.token, "sendMessage"),
+                    None,
+                    telegram_message_body(&message, text, None, true),
+                )?;
+                value
+                    .get("result")
+                    .and_then(|result| result.get("message_id"))
+                    .and_then(json_id_string)
+                    .ok_or_else(|| "Telegram sendMessage response missing message_id".to_owned())
+            },
+        )?;
         return Ok(());
     }
     post_json(
@@ -8265,7 +8426,77 @@ fn send_discord_message(
         let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
         let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
         if let Some(preview) = streams.get_mut(&key) {
-            send_external_stream_preview_delta(preview, &message.content, |remote_id, text| {
+            let limit = external_stream_preview_limit(&message.channel)
+                .unwrap_or(DISCORD_EXTERNAL_MESSAGE_LIMIT);
+            send_external_stream_preview_delta(
+                preview,
+                &message.content,
+                limit,
+                |remote_id, text| {
+                    let edit_url = format!("{url}/{remote_id}");
+                    patch_json(
+                        agent,
+                        &edit_url,
+                        Some(discord_auth_header(&config.token)),
+                        discord_message_body(&message.chat_id, text, None),
+                    )
+                    .map(|_| ())
+                },
+                |text| {
+                    let value = post_json(
+                        agent,
+                        &url,
+                        Some(discord_auth_header(&config.token)),
+                        discord_message_body(&message.chat_id, text, message.reply_to.as_deref()),
+                    )?;
+                    value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| "Discord message response missing id".to_owned())
+                },
+            )?;
+            return Ok(());
+        }
+        let limit = external_stream_preview_limit(&message.channel)
+            .unwrap_or(DISCORD_EXTERNAL_MESSAGE_LIMIT);
+        let mut chunk_index = 0usize;
+        let (remote_id, tail_text) =
+            send_split_external_messages(&message.content, limit, |text| {
+                let reply_to = (chunk_index == 0)
+                    .then_some(message.reply_to.as_deref())
+                    .flatten();
+                chunk_index += 1;
+                let value = post_json(
+                    agent,
+                    &url,
+                    Some(discord_auth_header(&config.token)),
+                    discord_message_body(&message.chat_id, text, reply_to),
+                )?;
+                value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| "Discord message response missing id".to_owned())
+            })?;
+        streams.insert(&message, &stream_id, remote_id);
+        if let Some(preview) = streams.get_mut(&key) {
+            preview.text = tail_text;
+        }
+        return Ok(());
+    }
+    if external_stream_final_candidate(&message)
+        && streams
+            .active_by_route
+            .contains_key(&outbound_route_key(&message))
+    {
+        let limit = external_stream_preview_limit(&message.channel)
+            .unwrap_or(DISCORD_EXTERNAL_MESSAGE_LIMIT);
+        send_external_stream_preview_final(
+            streams,
+            &message,
+            limit,
+            |remote_id, text| {
                 let edit_url = format!("{url}/{remote_id}");
                 patch_json(
                     agent,
@@ -8274,42 +8505,21 @@ fn send_discord_message(
                     discord_message_body(&message.chat_id, text, None),
                 )
                 .map(|_| ())
-            })?;
-            return Ok(());
-        }
-        let value = post_json(
-            agent,
-            &url,
-            Some(discord_auth_header(&config.token)),
-            discord_message_body(
-                &message.chat_id,
-                &message.content,
-                message.reply_to.as_deref(),
-            ),
+            },
+            |text| {
+                let value = post_json(
+                    agent,
+                    &url,
+                    Some(discord_auth_header(&config.token)),
+                    discord_message_body(&message.chat_id, text, message.reply_to.as_deref()),
+                )?;
+                value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| "Discord message response missing id".to_owned())
+            },
         )?;
-        let remote_id = value
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| "Discord message response missing id".to_owned())?;
-        streams.insert(&message, &stream_id, remote_id);
-        return Ok(());
-    }
-    if external_stream_final_candidate(&message)
-        && streams
-            .active_by_route
-            .contains_key(&outbound_route_key(&message))
-    {
-        send_external_stream_preview_final(streams, &message, |remote_id, text| {
-            let edit_url = format!("{url}/{remote_id}");
-            patch_json(
-                agent,
-                &edit_url,
-                Some(discord_auth_header(&config.token)),
-                discord_message_body(&message.chat_id, text, None),
-            )
-            .map(|_| ())
-        })?;
         return Ok(());
     }
     for (index, chunk) in discord_message_chunks(&message.content)
@@ -8360,23 +8570,7 @@ fn discord_typing_url(channel_id: &str) -> String {
 }
 
 fn discord_message_chunks(content: &str) -> Vec<String> {
-    const DISCORD_LIMIT: usize = 2000;
-    if content.is_empty() {
-        return vec![String::new()];
-    }
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for ch in content.chars() {
-        if current.len() + ch.len_utf8() > DISCORD_LIMIT {
-            chunks.push(current);
-            current = String::new();
-        }
-        current.push(ch);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
+    external_message_chunks(content, DISCORD_EXTERNAL_MESSAGE_LIMIT)
 }
 
 fn discord_auth_header(token: &str) -> String {
@@ -8594,19 +8788,30 @@ fn send_slack_message(
         let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
         let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
         if let Some(preview) = streams.get_mut(&key) {
-            send_external_stream_preview_delta(preview, &message.content, |remote_id, text| {
-                slack_update_message(agent, config, &message.chat_id, remote_id, text)
-            })?;
+            let limit = external_stream_preview_limit(&message.channel)
+                .unwrap_or(SLACK_EXTERNAL_MESSAGE_LIMIT);
+            send_external_stream_preview_delta(
+                preview,
+                &message.content,
+                limit,
+                |remote_id, text| {
+                    slack_update_message(agent, config, &message.chat_id, remote_id, text)
+                },
+                |text| {
+                    slack_post_message(agent, config, &message.chat_id, text, thread_ts.as_deref())
+                },
+            )?;
             return Ok(());
         }
-        let ts = slack_post_message(
-            agent,
-            config,
-            &message.chat_id,
-            &message.content,
-            thread_ts.as_deref(),
-        )?;
+        let limit =
+            external_stream_preview_limit(&message.channel).unwrap_or(SLACK_EXTERNAL_MESSAGE_LIMIT);
+        let (ts, tail_text) = send_split_external_messages(&message.content, limit, |text| {
+            slack_post_message(agent, config, &message.chat_id, text, thread_ts.as_deref())
+        })?;
         streams.insert(&message, &stream_id, ts);
+        if let Some(preview) = streams.get_mut(&key) {
+            preview.text = tail_text;
+        }
         return Ok(());
     }
     if external_stream_final_candidate(&message)
@@ -8614,9 +8819,17 @@ fn send_slack_message(
             .active_by_route
             .contains_key(&outbound_route_key(&message))
     {
-        send_external_stream_preview_final(streams, &message, |remote_id, text| {
-            slack_update_message(agent, config, &message.chat_id, remote_id, text)
-        })?;
+        let limit =
+            external_stream_preview_limit(&message.channel).unwrap_or(SLACK_EXTERNAL_MESSAGE_LIMIT);
+        send_external_stream_preview_final(
+            streams,
+            &message,
+            limit,
+            |remote_id, text| {
+                slack_update_message(agent, config, &message.chat_id, remote_id, text)
+            },
+            |text| slack_post_message(agent, config, &message.chat_id, text, thread_ts.as_deref()),
+        )?;
         return Ok(());
     }
     slack_post_message(
@@ -15241,6 +15454,251 @@ mod tests {
     }
 
     #[test]
+    fn external_message_chunks_prefers_paragraph_boundary() {
+        assert_eq!(
+            external_message_chunks("alpha\n\nbeta gamma", 8),
+            vec!["alpha", "beta", "gamma"]
+        );
+    }
+
+    #[test]
+    fn external_message_chunks_prefers_newline_boundary() {
+        assert_eq!(
+            external_message_chunks("alpha\nbeta gamma", 10),
+            vec!["alpha", "beta gamma"]
+        );
+    }
+
+    #[test]
+    fn external_message_chunks_prefers_space_boundary() {
+        assert_eq!(
+            external_message_chunks("alpha beta gamma", 11),
+            vec!["alpha beta", "gamma"]
+        );
+    }
+
+    #[test]
+    fn external_message_chunks_hard_cuts_long_unbroken_text() {
+        assert_eq!(
+            external_message_chunks("abcdefghijk", 5),
+            vec!["abcde", "fghij", "k"]
+        );
+    }
+
+    #[test]
+    fn external_message_chunks_keeps_exact_limit_in_one_chunk() {
+        assert_eq!(external_message_chunks("abcde", 5), vec!["abcde"]);
+    }
+
+    #[test]
+    fn external_message_chunks_splits_long_words_by_character_count() {
+        assert_eq!(
+            external_message_chunks("aaaaaaaaaaaa", 5),
+            vec!["aaaaa", "aaaaa", "aa"]
+        );
+    }
+
+    #[test]
+    fn external_message_chunks_preserves_utf8_boundaries_for_cjk_and_emoji() {
+        let chunks = external_message_chunks("가나🙂다라🙂", 3);
+        assert_eq!(chunks, vec!["가나🙂", "다라🙂"]);
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 3));
+    }
+
+    #[test]
+    fn discord_message_chunks_use_character_count_boundaries() {
+        let content = format!("{} tail", "🙂".repeat(DISCORD_EXTERNAL_MESSAGE_LIMIT));
+        let chunks = discord_message_chunks(&content);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].chars().count(), DISCORD_EXTERNAL_MESSAGE_LIMIT);
+        assert_eq!(chunks[1], "tail");
+    }
+
+    #[test]
+    fn external_stream_preview_limits_only_streaming_external_platforms() {
+        assert_eq!(
+            external_stream_preview_limit(DISCORD_CHANNEL),
+            Some(DISCORD_EXTERNAL_MESSAGE_LIMIT)
+        );
+        assert_eq!(
+            external_stream_preview_limit(TELEGRAM_CHANNEL),
+            Some(TELEGRAM_EXTERNAL_MESSAGE_LIMIT)
+        );
+        assert_eq!(
+            external_stream_preview_limit(SLACK_CHANNEL),
+            Some(SLACK_EXTERNAL_MESSAGE_LIMIT)
+        );
+        assert_eq!(external_stream_preview_limit(WEBSOCKET_CHANNEL), None);
+        assert_eq!(external_stream_preview_limit(EMAIL_CHANNEL), None);
+        assert_eq!(external_stream_preview_limit(WHATSAPP_CHANNEL), None);
+    }
+
+    #[test]
+    fn external_stream_preview_delta_overflow_reanchors_to_tail() -> Result<(), Box<dyn Error>> {
+        let mut preview = ExternalStreamPreview {
+            remote_id: "remote-1".to_owned(),
+            text: "hello".to_owned(),
+        };
+        let operations = std::cell::RefCell::new(Vec::new());
+
+        send_external_stream_preview_delta(
+            &mut preview,
+            " world",
+            8,
+            |remote_id, text| {
+                operations
+                    .borrow_mut()
+                    .push(format!("edit:{remote_id}:{text}"));
+                Ok(())
+            },
+            |text| {
+                operations.borrow_mut().push(format!("send:{text}"));
+                Ok("remote-2".to_owned())
+            },
+        )?;
+
+        assert_eq!(
+            operations.into_inner(),
+            vec!["edit:remote-1:hello", "send:world"]
+        );
+        assert_eq!(preview.remote_id, "remote-2");
+        assert_eq!(preview.text, "world");
+        Ok(())
+    }
+
+    #[test]
+    fn external_stream_preview_final_overflow_sends_followups_and_clears_preview(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut streams = ExternalStreamPreviewStore::default();
+        let preview_message = stream_outbound_message(
+            DISCORD_CHANNEL,
+            "channel-1",
+            "stream-1",
+            "preview".to_owned(),
+            false,
+        );
+        let final_message = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "hello world again");
+        streams.insert(&preview_message, "stream-1", "remote-1".to_owned());
+        let key = ExternalStreamPreviewStore::stream_key(&preview_message, "stream-1");
+        let operations = std::cell::RefCell::new(Vec::new());
+        let mut next_remote_id = 2usize;
+
+        send_external_stream_preview_final(
+            &mut streams,
+            &final_message,
+            8,
+            |remote_id, text| {
+                operations
+                    .borrow_mut()
+                    .push(format!("edit:{remote_id}:{text}"));
+                Ok(())
+            },
+            |text| {
+                operations.borrow_mut().push(format!("send:{text}"));
+                let remote_id = format!("remote-{next_remote_id}");
+                next_remote_id += 1;
+                Ok(remote_id)
+            },
+        )?;
+
+        assert_eq!(
+            operations.into_inner(),
+            vec!["edit:remote-1:hello", "send:world", "send:again"]
+        );
+        assert!(!streams.by_stream.contains_key(&key));
+        Ok(())
+    }
+
+    #[test]
+    fn external_stream_preview_delta_overflow_failure_keeps_preview_state() {
+        let mut preview = ExternalStreamPreview {
+            remote_id: "remote-1".to_owned(),
+            text: "hello".to_owned(),
+        };
+        let operations = std::cell::RefCell::new(Vec::new());
+
+        let result = send_external_stream_preview_delta(
+            &mut preview,
+            " world",
+            8,
+            |remote_id, text| {
+                operations
+                    .borrow_mut()
+                    .push(format!("edit:{remote_id}:{text}"));
+                Ok(())
+            },
+            |text| {
+                operations.borrow_mut().push(format!("send:{text}"));
+                Err("send failed".to_owned())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            operations.into_inner(),
+            vec!["edit:remote-1:hello", "send:world"]
+        );
+        assert_eq!(preview.remote_id, "remote-1");
+        assert_eq!(preview.text, "hello");
+    }
+
+    #[test]
+    fn external_stream_preview_final_overflow_failure_keeps_preview_state(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut streams = ExternalStreamPreviewStore::default();
+        let preview_message = stream_outbound_message(
+            DISCORD_CHANNEL,
+            "channel-1",
+            "stream-1",
+            "preview".to_owned(),
+            false,
+        );
+        let final_message = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "hello world again");
+        streams.insert(&preview_message, "stream-1", "remote-1".to_owned());
+        let key = ExternalStreamPreviewStore::stream_key(&preview_message, "stream-1");
+        let operations = std::cell::RefCell::new(Vec::new());
+        let mut sends = 0usize;
+
+        let result = send_external_stream_preview_final(
+            &mut streams,
+            &final_message,
+            8,
+            |remote_id, text| {
+                operations
+                    .borrow_mut()
+                    .push(format!("edit:{remote_id}:{text}"));
+                Ok(())
+            },
+            |text| {
+                operations.borrow_mut().push(format!("send:{text}"));
+                sends += 1;
+                if sends == 1 {
+                    Ok("remote-2".to_owned())
+                } else {
+                    Err("send failed".to_owned())
+                }
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            operations.into_inner(),
+            vec!["edit:remote-1:hello", "send:world", "send:again"]
+        );
+        let preview = streams.by_stream.get(&key).ok_or("missing preview")?;
+        assert_eq!(preview.remote_id, "remote-1");
+        assert_eq!(preview.text, "preview");
+        assert_eq!(
+            streams
+                .active_by_route
+                .get(&outbound_route_key(&preview_message)),
+            Some(&key)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn discord_stream_preview_delta_retry_keeps_text_stable() -> Result<(), Box<dyn Error>> {
         let mut streams = ExternalStreamPreviewStore::default();
         let message = stream_outbound_message(
@@ -15257,13 +15715,18 @@ mod tests {
 
         {
             let preview = streams.get_mut(&key).ok_or("missing preview")?;
-            let result =
-                send_external_stream_preview_delta(preview, " world", |remote_id, text| {
+            let result = send_external_stream_preview_delta(
+                preview,
+                " world",
+                DISCORD_EXTERNAL_MESSAGE_LIMIT,
+                |remote_id, text| {
                     assert_eq!(remote_id, "remote-1");
                     observed_texts.push(text.to_owned());
                     attempts += 1;
                     Err("temporary patch failure".to_owned())
-                });
+                },
+                |_| Err("unexpected overflow send".to_owned()),
+            );
             assert!(result.is_err());
         }
 
@@ -15274,13 +15737,18 @@ mod tests {
 
         {
             let preview = streams.get_mut(&key).ok_or("missing preview")?;
-            let result =
-                send_external_stream_preview_delta(preview, " world", |remote_id, text| {
+            let result = send_external_stream_preview_delta(
+                preview,
+                " world",
+                DISCORD_EXTERNAL_MESSAGE_LIMIT,
+                |remote_id, text| {
                     assert_eq!(remote_id, "remote-1");
                     observed_texts.push(text.to_owned());
                     attempts += 1;
                     Ok(())
-                });
+                },
+                |_| Err("unexpected overflow send".to_owned()),
+            );
             assert!(result.is_ok());
         }
 
@@ -15310,23 +15778,33 @@ mod tests {
         let mut attempts = 0usize;
         let mut observed_texts = Vec::new();
 
-        let first =
-            send_external_stream_preview_final(&mut streams, &final_message, |remote_id, text| {
+        let first = send_external_stream_preview_final(
+            &mut streams,
+            &final_message,
+            DISCORD_EXTERNAL_MESSAGE_LIMIT,
+            |remote_id, text| {
                 assert_eq!(remote_id, "remote-1");
                 observed_texts.push(text.to_owned());
                 attempts += 1;
                 Err("temporary patch failure".to_owned())
-            });
+            },
+            |_| Err("unexpected overflow send".to_owned()),
+        );
         assert!(first.is_err());
         assert!(streams.by_stream.contains_key(&key));
 
-        let second =
-            send_external_stream_preview_final(&mut streams, &final_message, |remote_id, text| {
+        let second = send_external_stream_preview_final(
+            &mut streams,
+            &final_message,
+            DISCORD_EXTERNAL_MESSAGE_LIMIT,
+            |remote_id, text| {
                 assert_eq!(remote_id, "remote-1");
                 observed_texts.push(text.to_owned());
                 attempts += 1;
                 Ok(())
-            });
+            },
+            |_| Err("unexpected overflow send".to_owned()),
+        );
         assert!(second.is_ok());
         assert_eq!(attempts, 2);
         assert_eq!(observed_texts, vec!["final answer", "final answer"]);
@@ -15355,7 +15833,9 @@ mod tests {
         let notification = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "notification")
             .with_metadata(notification_metadata);
         assert!(!external_stream_final_candidate(&notification));
-        assert!(streams.active_preview_mut(&notification).is_some());
+        assert!(streams
+            .active_by_route
+            .contains_key(&outbound_route_key(&notification)));
 
         let mut subagent_metadata = Map::new();
         subagent_metadata.insert(
@@ -15369,7 +15849,9 @@ mod tests {
         )
         .with_metadata(subagent_metadata);
         assert!(!external_stream_final_candidate(&subagent_notification));
-        assert!(streams.active_preview_mut(&subagent_notification).is_some());
+        assert!(streams
+            .active_by_route
+            .contains_key(&outbound_route_key(&subagent_notification)));
 
         let mut final_metadata = Map::new();
         final_metadata.insert("session_key".to_owned(), json!("discord:channel-1"));
@@ -15377,11 +15859,17 @@ mod tests {
         let final_message = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "final answer")
             .with_metadata(final_metadata);
         assert!(external_stream_final_candidate(&final_message));
-        send_external_stream_preview_final(&mut streams, &final_message, |remote_id, text| {
-            assert_eq!(remote_id, "remote-1");
-            assert_eq!(text, "final answer");
-            Ok(())
-        })?;
+        send_external_stream_preview_final(
+            &mut streams,
+            &final_message,
+            DISCORD_EXTERNAL_MESSAGE_LIMIT,
+            |remote_id, text| {
+                assert_eq!(remote_id, "remote-1");
+                assert_eq!(text, "final answer");
+                Ok(())
+            },
+            |_| Err("unexpected overflow send".to_owned()),
+        )?;
         assert!(!streams.by_stream.contains_key(&key));
         Ok(())
     }
