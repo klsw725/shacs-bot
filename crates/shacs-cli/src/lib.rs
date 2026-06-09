@@ -7054,15 +7054,6 @@ fn provider_streaming_channel(channel: &str) -> bool {
     )
 }
 
-fn message_stream_id(message: &OutboundMessage) -> Option<String> {
-    message
-        .metadata
-        .get("_stream_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
 fn message_metadata_bool(message: &OutboundMessage, key: &str) -> bool {
     match message.metadata.get(key) {
         Some(Value::Bool(value)) => *value,
@@ -7092,18 +7083,6 @@ fn message_is_typing_indicator(message: &OutboundMessage) -> bool {
     message_metadata_bool(message, EXTERNAL_TYPING_INDICATOR_KEY)
 }
 
-#[derive(Debug, Default)]
-struct ExternalStreamPreviewStore {
-    by_stream: BTreeMap<String, ExternalStreamPreview>,
-    active_by_route: BTreeMap<String, String>,
-}
-
-#[derive(Debug)]
-struct ExternalStreamPreview {
-    remote_id: String,
-    text: String,
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct EmailSeenUidState {
     uid_validity: Option<u32>,
@@ -7126,53 +7105,9 @@ struct DiscordGatewaySessionContext<'a> {
     resume_state: &'a mut DiscordGatewayResumeState,
 }
 
-impl ExternalStreamPreviewStore {
-    fn stream_key(message: &OutboundMessage, stream_id: &str) -> String {
-        format!("{}\u{1f}{stream_id}", outbound_route_key(message))
-    }
-
-    fn get_mut(&mut self, key: &str) -> Option<&mut ExternalStreamPreview> {
-        self.by_stream.get_mut(key)
-    }
-
-    fn insert(&mut self, message: &OutboundMessage, stream_id: &str, remote_id: String) {
-        let route_key = outbound_route_key(message);
-        let key = Self::stream_key(message, stream_id);
-        self.active_by_route.insert(route_key, key.clone());
-        self.by_stream.insert(
-            key,
-            ExternalStreamPreview {
-                remote_id,
-                text: message.content.clone(),
-            },
-        );
-    }
-
-    fn finish(&mut self, message: &OutboundMessage) -> Option<ExternalStreamPreview> {
-        let key = self.active_by_route.remove(&outbound_route_key(message))?;
-        let mut preview = self.by_stream.remove(&key)?;
-        preview.text = message.content.clone();
-        Some(preview)
-    }
-}
-
-fn external_stream_final_candidate(message: &OutboundMessage) -> bool {
-    metadata_string(&message.metadata, "session_key").is_some()
-        && metadata_string(&message.metadata, "stop_reason").is_some()
-}
-
 const DISCORD_EXTERNAL_MESSAGE_LIMIT: usize = 2000;
 const TELEGRAM_EXTERNAL_MESSAGE_LIMIT: usize = 4000;
 const SLACK_EXTERNAL_MESSAGE_LIMIT: usize = 39000;
-
-fn external_stream_preview_limit(channel: &str) -> Option<usize> {
-    match channel {
-        DISCORD_CHANNEL => Some(DISCORD_EXTERNAL_MESSAGE_LIMIT),
-        TELEGRAM_CHANNEL => Some(TELEGRAM_EXTERNAL_MESSAGE_LIMIT),
-        SLACK_CHANNEL => Some(SLACK_EXTERNAL_MESSAGE_LIMIT),
-        _ => None,
-    }
-}
 
 fn external_message_chunks(content: &str, max_chars: usize) -> Vec<String> {
     if content.is_empty() {
@@ -7213,33 +7148,6 @@ fn boundary_split_index(candidate: &str) -> Option<usize> {
         .find_map(|delimiter| candidate.rfind(delimiter).filter(|index| *index > 0))
 }
 
-fn send_split_external_preview<U, S>(
-    remote_id: &str,
-    text: &str,
-    max_chars: usize,
-    mut send_update: U,
-    mut send_new: S,
-) -> Result<(String, String), String>
-where
-    U: FnMut(&str, &str) -> Result<(), String>,
-    S: FnMut(&str) -> Result<String, String>,
-{
-    let chunks = external_message_chunks(text, max_chars);
-    let Some((first_chunk, overflow_chunks)) = chunks.split_first() else {
-        send_update(remote_id, "")?;
-        return Ok((remote_id.to_owned(), String::new()));
-    };
-
-    send_update(remote_id, first_chunk)?;
-    let mut active_remote_id = remote_id.to_owned();
-    let mut active_text = first_chunk.clone();
-    for chunk in overflow_chunks {
-        active_remote_id = send_new(chunk)?;
-        active_text = chunk.clone();
-    }
-    Ok((active_remote_id, active_text))
-}
-
 fn send_split_external_messages<S>(
     text: &str,
     max_chars: usize,
@@ -7258,63 +7166,7 @@ where
     Ok((active_remote_id, active_text))
 }
 
-fn send_external_stream_preview_delta<U, S>(
-    preview: &mut ExternalStreamPreview,
-    delta: &str,
-    max_chars: usize,
-    send_update: U,
-    send_new: S,
-) -> Result<(), String>
-where
-    U: FnMut(&str, &str) -> Result<(), String>,
-    S: FnMut(&str) -> Result<String, String>,
-{
-    let updated_text = format!("{}{}", preview.text, delta);
-    let (active_remote_id, active_text) = send_split_external_preview(
-        &preview.remote_id,
-        &updated_text,
-        max_chars,
-        send_update,
-        send_new,
-    )?;
-    preview.remote_id = active_remote_id;
-    preview.text = active_text;
-    Ok(())
-}
-
-fn send_external_stream_preview_final<U, S>(
-    streams: &mut ExternalStreamPreviewStore,
-    message: &OutboundMessage,
-    max_chars: usize,
-    send_update: U,
-    send_new: S,
-) -> Result<(), String>
-where
-    U: FnMut(&str, &str) -> Result<(), String>,
-    S: FnMut(&str) -> Result<String, String>,
-{
-    let key = streams
-        .active_by_route
-        .get(&outbound_route_key(message))
-        .cloned()
-        .ok_or_else(|| "external stream preview missing".to_owned())?;
-    let remote_id = streams
-        .by_stream
-        .get(&key)
-        .ok_or_else(|| "external stream preview missing".to_owned())?
-        .remote_id
-        .clone();
-    send_split_external_preview(
-        &remote_id,
-        &message.content,
-        max_chars,
-        send_update,
-        send_new,
-    )?;
-    let _ = streams.finish(message);
-    Ok(())
-}
-
+#[cfg(test)]
 fn outbound_route_key(message: &OutboundMessage) -> String {
     let slack_thread = slack_outbound_thread_ts(message).unwrap_or_default();
     let telegram_thread =
@@ -7673,14 +7525,13 @@ fn run_telegram_transport(
     let agent = runtime_http_agent(Duration::from_secs(config.poll_timeout_seconds + 10));
     let metadata_path = transport_context.metadata_path("telegram");
     let mut offset = load_telegram_offset(&metadata_path);
-    let mut streams = ExternalStreamPreviewStore::default();
     while !stop.load(Ordering::SeqCst) {
         drain_outbound(
             &outbound_rx,
             transport_context.send_attempts,
             &stop,
             Some(&metadata_path),
-            |message| send_telegram_message(&agent, &config, &mut streams, message),
+            |message| send_telegram_message(&agent, &config, message),
         );
         let body = json!({
             "offset": offset,
@@ -7715,113 +7566,27 @@ fn run_telegram_transport(
 fn send_telegram_message(
     agent: &ureq::Agent,
     config: &TelegramRuntimeConfig,
-    streams: &mut ExternalStreamPreviewStore,
     message: OutboundMessage,
 ) -> Result<(), String> {
-    if message_is_stream_end(&message) {
+    if message_is_stream_delta(&message) || message_is_stream_end(&message) {
         return Ok(());
     }
-    if message_is_stream_delta(&message) {
-        let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
-        let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
-        if let Some(preview) = streams.get_mut(&key) {
-            let limit = external_stream_preview_limit(&message.channel)
-                .unwrap_or(TELEGRAM_EXTERNAL_MESSAGE_LIMIT);
-            send_external_stream_preview_delta(
-                preview,
-                &message.content,
-                limit,
-                |remote_id, text| {
-                    post_json(
-                        agent,
-                        &telegram_url(&config.token, "editMessageText"),
-                        None,
-                        telegram_message_body(&message, text, Some(remote_id), false),
-                    )
-                    .map(|_| ())
-                },
-                |text| {
-                    let value = post_json(
-                        agent,
-                        &telegram_url(&config.token, "sendMessage"),
-                        None,
-                        telegram_message_body(&message, text, None, true),
-                    )?;
-                    value
-                        .get("result")
-                        .and_then(|result| result.get("message_id"))
-                        .and_then(json_id_string)
-                        .ok_or_else(|| {
-                            "Telegram sendMessage response missing message_id".to_owned()
-                        })
-                },
-            )?;
-            return Ok(());
-        }
-        let limit = external_stream_preview_limit(&message.channel)
-            .unwrap_or(TELEGRAM_EXTERNAL_MESSAGE_LIMIT);
-        let (remote_id, tail_text) =
-            send_split_external_messages(&message.content, limit, |text| {
-                let value = post_json(
-                    agent,
-                    &telegram_url(&config.token, "sendMessage"),
-                    None,
-                    telegram_message_body(&message, text, None, true),
-                )?;
-                value
-                    .get("result")
-                    .and_then(|result| result.get("message_id"))
-                    .and_then(json_id_string)
-                    .ok_or_else(|| "Telegram sendMessage response missing message_id".to_owned())
-            })?;
-        streams.insert(&message, &stream_id, remote_id);
-        if let Some(preview) = streams.get_mut(&key) {
-            preview.text = tail_text;
-        }
-        return Ok(());
-    }
-    if external_stream_final_candidate(&message)
-        && streams
-            .active_by_route
-            .contains_key(&outbound_route_key(&message))
-    {
-        let limit = external_stream_preview_limit(&message.channel)
-            .unwrap_or(TELEGRAM_EXTERNAL_MESSAGE_LIMIT);
-        send_external_stream_preview_final(
-            streams,
-            &message,
-            limit,
-            |remote_id, text| {
-                post_json(
-                    agent,
-                    &telegram_url(&config.token, "editMessageText"),
-                    None,
-                    telegram_message_body(&message, text, Some(remote_id), false),
-                )
-                .map(|_| ())
-            },
-            |text| {
-                let value = post_json(
-                    agent,
-                    &telegram_url(&config.token, "sendMessage"),
-                    None,
-                    telegram_message_body(&message, text, None, true),
-                )?;
-                value
-                    .get("result")
-                    .and_then(|result| result.get("message_id"))
-                    .and_then(json_id_string)
-                    .ok_or_else(|| "Telegram sendMessage response missing message_id".to_owned())
-            },
+    let mut chunk_index = 0usize;
+    send_split_external_messages(&message.content, TELEGRAM_EXTERNAL_MESSAGE_LIMIT, |text| {
+        let include_reply = chunk_index == 0;
+        chunk_index += 1;
+        let value = post_json(
+            agent,
+            &telegram_url(&config.token, "sendMessage"),
+            None,
+            telegram_message_body(&message, text, None, include_reply),
         )?;
-        return Ok(());
-    }
-    post_json(
-        agent,
-        &telegram_url(&config.token, "sendMessage"),
-        None,
-        telegram_message_body(&message, &message.content, None, true),
-    )?;
+        value
+            .get("result")
+            .and_then(|result| result.get("message_id"))
+            .and_then(json_id_string)
+            .ok_or_else(|| "Telegram sendMessage response missing message_id".to_owned())
+    })?;
     Ok(())
 }
 
@@ -7943,14 +7708,13 @@ fn run_discord_rest_polling_transport(
     let agent = runtime_http_agent(Duration::from_secs(30));
     let metadata_path = transport_context.metadata_path("discord-rest");
     let mut last_ids = load_discord_last_ids(&metadata_path);
-    let mut streams = ExternalStreamPreviewStore::default();
     while !stop.load(Ordering::SeqCst) {
         drain_outbound(
             &outbound_rx,
             transport_context.send_attempts,
             &stop,
             Some(&metadata_path),
-            |message| send_discord_message(&agent, &config, &mut streams, message),
+            |message| send_discord_message(&agent, &config, message),
         );
         let DiscordChannelFilter::Only(channel_ids) = &config.channel_filter else {
             eprintln!("discord REST polling requires configured channel ids");
@@ -8037,7 +7801,6 @@ fn run_discord_gateway_session(
     let mut heartbeat_acknowledged = true;
     let mut bot_user_id = None::<String>;
     let mut recent_ids = RecentMessageIds::new(1024);
-    let mut streams = ExternalStreamPreviewStore::default();
 
     while !stop.load(Ordering::SeqCst) {
         drain_outbound(
@@ -8045,7 +7808,7 @@ fn run_discord_gateway_session(
             send_attempts,
             stop,
             Some(metadata_path),
-            |message| send_discord_message(agent, config, &mut streams, message),
+            |message| send_discord_message(agent, config, message),
         );
         if Instant::now() >= next_heartbeat {
             if !heartbeat_acknowledged {
@@ -8382,7 +8145,6 @@ fn poll_discord_channel(
 fn send_discord_message(
     agent: &ureq::Agent,
     config: &DiscordRuntimeConfig,
-    streams: &mut ExternalStreamPreviewStore,
     message: OutboundMessage,
 ) -> Result<(), String> {
     if message_is_typing_indicator(&message) {
@@ -8395,107 +8157,7 @@ fn send_discord_message(
         "https://discord.com/api/v10/channels/{}/messages",
         message.chat_id
     );
-    if message_is_stream_end(&message) {
-        return Ok(());
-    }
-    if message_is_stream_delta(&message) {
-        let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
-        let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
-        if let Some(preview) = streams.get_mut(&key) {
-            let limit = external_stream_preview_limit(&message.channel)
-                .unwrap_or(DISCORD_EXTERNAL_MESSAGE_LIMIT);
-            send_external_stream_preview_delta(
-                preview,
-                &message.content,
-                limit,
-                |remote_id, text| {
-                    let edit_url = format!("{url}/{remote_id}");
-                    patch_json(
-                        agent,
-                        &edit_url,
-                        Some(discord_auth_header(&config.token)),
-                        discord_message_body(&message.chat_id, text, None),
-                    )
-                    .map(|_| ())
-                },
-                |text| {
-                    let value = post_json(
-                        agent,
-                        &url,
-                        Some(discord_auth_header(&config.token)),
-                        discord_message_body(&message.chat_id, text, message.reply_to.as_deref()),
-                    )?;
-                    value
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .ok_or_else(|| "Discord message response missing id".to_owned())
-                },
-            )?;
-            return Ok(());
-        }
-        let limit = external_stream_preview_limit(&message.channel)
-            .unwrap_or(DISCORD_EXTERNAL_MESSAGE_LIMIT);
-        let mut chunk_index = 0usize;
-        let (remote_id, tail_text) =
-            send_split_external_messages(&message.content, limit, |text| {
-                let reply_to = (chunk_index == 0)
-                    .then_some(message.reply_to.as_deref())
-                    .flatten();
-                chunk_index += 1;
-                let value = post_json(
-                    agent,
-                    &url,
-                    Some(discord_auth_header(&config.token)),
-                    discord_message_body(&message.chat_id, text, reply_to),
-                )?;
-                value
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| "Discord message response missing id".to_owned())
-            })?;
-        streams.insert(&message, &stream_id, remote_id);
-        if let Some(preview) = streams.get_mut(&key) {
-            preview.text = tail_text;
-        }
-        return Ok(());
-    }
-    if external_stream_final_candidate(&message)
-        && streams
-            .active_by_route
-            .contains_key(&outbound_route_key(&message))
-    {
-        let limit = external_stream_preview_limit(&message.channel)
-            .unwrap_or(DISCORD_EXTERNAL_MESSAGE_LIMIT);
-        send_external_stream_preview_final(
-            streams,
-            &message,
-            limit,
-            |remote_id, text| {
-                let edit_url = format!("{url}/{remote_id}");
-                patch_json(
-                    agent,
-                    &edit_url,
-                    Some(discord_auth_header(&config.token)),
-                    discord_message_body(&message.chat_id, text, None),
-                )
-                .map(|_| ())
-            },
-            |text| {
-                let value = post_json(
-                    agent,
-                    &url,
-                    Some(discord_auth_header(&config.token)),
-                    discord_message_body(&message.chat_id, text, message.reply_to.as_deref()),
-                )?;
-                value
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| "Discord message response missing id".to_owned())
-            },
-        )?;
+    if message_is_stream_delta(&message) || message_is_stream_end(&message) {
         return Ok(());
     }
     for (index, chunk) in discord_message_chunks(&message.content)
@@ -8597,14 +8259,13 @@ fn run_slack_socket_mode_session(
     let url = open_slack_socket_mode_url(agent, &config.app_token)?;
     let (mut socket, _) = websocket_connect(url.as_str()).map_err(|error| error.to_string())?;
     set_websocket_timeouts(&mut socket, Duration::from_millis(500));
-    let mut streams = ExternalStreamPreviewStore::default();
     while !stop.load(Ordering::SeqCst) {
         drain_outbound(
             outbound_rx,
             send_attempts,
             stop,
             Some(metadata_path),
-            |message| send_slack_message(agent, config, &mut streams, message),
+            |message| send_slack_message(agent, config, message),
         );
         match socket.read() {
             Ok(message) => {
@@ -8750,71 +8411,18 @@ fn sender_allowed_for_rest(allowed_senders: &[String], sender_id: &str) -> bool 
 fn send_slack_message(
     agent: &ureq::Agent,
     config: &SlackRuntimeConfig,
-    streams: &mut ExternalStreamPreviewStore,
     message: OutboundMessage,
 ) -> Result<(), String> {
     if message_is_typing_indicator(&message) {
         return Ok(());
     }
     let thread_ts = slack_outbound_thread_ts(&message);
-    if message_is_stream_end(&message) {
+    if message_is_stream_delta(&message) || message_is_stream_end(&message) {
         return Ok(());
     }
-    if message_is_stream_delta(&message) {
-        let stream_id = message_stream_id(&message).unwrap_or_else(|| "default".to_owned());
-        let key = ExternalStreamPreviewStore::stream_key(&message, &stream_id);
-        if let Some(preview) = streams.get_mut(&key) {
-            let limit = external_stream_preview_limit(&message.channel)
-                .unwrap_or(SLACK_EXTERNAL_MESSAGE_LIMIT);
-            send_external_stream_preview_delta(
-                preview,
-                &message.content,
-                limit,
-                |remote_id, text| {
-                    slack_update_message(agent, config, &message.chat_id, remote_id, text)
-                },
-                |text| {
-                    slack_post_message(agent, config, &message.chat_id, text, thread_ts.as_deref())
-                },
-            )?;
-            return Ok(());
-        }
-        let limit =
-            external_stream_preview_limit(&message.channel).unwrap_or(SLACK_EXTERNAL_MESSAGE_LIMIT);
-        let (ts, tail_text) = send_split_external_messages(&message.content, limit, |text| {
-            slack_post_message(agent, config, &message.chat_id, text, thread_ts.as_deref())
-        })?;
-        streams.insert(&message, &stream_id, ts);
-        if let Some(preview) = streams.get_mut(&key) {
-            preview.text = tail_text;
-        }
-        return Ok(());
-    }
-    if external_stream_final_candidate(&message)
-        && streams
-            .active_by_route
-            .contains_key(&outbound_route_key(&message))
-    {
-        let limit =
-            external_stream_preview_limit(&message.channel).unwrap_or(SLACK_EXTERNAL_MESSAGE_LIMIT);
-        send_external_stream_preview_final(
-            streams,
-            &message,
-            limit,
-            |remote_id, text| {
-                slack_update_message(agent, config, &message.chat_id, remote_id, text)
-            },
-            |text| slack_post_message(agent, config, &message.chat_id, text, thread_ts.as_deref()),
-        )?;
-        return Ok(());
-    }
-    slack_post_message(
-        agent,
-        config,
-        &message.chat_id,
-        &message.content,
-        thread_ts.as_deref(),
-    )
+    send_split_external_messages(&message.content, SLACK_EXTERNAL_MESSAGE_LIMIT, |text| {
+        slack_post_message(agent, config, &message.chat_id, text, thread_ts.as_deref())
+    })
     .map(|_| ())
 }
 
@@ -8868,32 +8476,6 @@ fn slack_post_message_body(channel: &str, text: &str, thread_ts: Option<&str>) -
         body.insert("thread_ts".to_owned(), Value::String(thread_ts.to_owned()));
     }
     Value::Object(body)
-}
-
-fn slack_update_message(
-    agent: &ureq::Agent,
-    config: &SlackRuntimeConfig,
-    channel: &str,
-    ts: &str,
-    text: &str,
-) -> Result<(), String> {
-    let value = post_json(
-        agent,
-        "https://slack.com/api/chat.update",
-        Some(bearer_header(&config.bot_token)),
-        json!({"channel": channel, "ts": ts, "text": text}),
-    )?;
-    if value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        Ok(())
-    } else {
-        Err(format!(
-            "Slack API error: {}",
-            value
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        ))
-    }
 }
 
 fn run_email_transport(
@@ -9499,26 +9081,6 @@ fn post_empty(agent: &ureq::Agent, url: &str, authorization: Option<String>) -> 
         return Err(format!("HTTP {status}"));
     }
     Ok(())
-}
-
-fn patch_json(
-    agent: &ureq::Agent,
-    url: &str,
-    authorization: Option<String>,
-    body: Value,
-) -> Result<Value, String> {
-    let mut request = agent.patch(url).header("Content-Type", "application/json");
-    if let Some(authorization) = authorization {
-        request = request.header("Authorization", authorization);
-    }
-    let body = serde_json::to_string(&body).map_err(|error| error.to_string())?;
-    read_json_response(request.send(body).map_err(|error| {
-        format!(
-            "request to {} failed: {}",
-            redact_sensitive_url_text(url),
-            redact_sensitive_url_text(&error.to_string())
-        )
-    })?)
 }
 
 fn read_json_response(mut response: ureq::http::Response<ureq::Body>) -> Result<Value, String> {
@@ -15475,361 +15037,78 @@ mod tests {
     }
 
     #[test]
-    fn external_stream_preview_limits_only_streaming_external_platforms() {
-        assert_eq!(
-            external_stream_preview_limit(DISCORD_CHANNEL),
-            Some(DISCORD_EXTERNAL_MESSAGE_LIMIT)
-        );
-        assert_eq!(
-            external_stream_preview_limit(TELEGRAM_CHANNEL),
-            Some(TELEGRAM_EXTERNAL_MESSAGE_LIMIT)
-        );
-        assert_eq!(
-            external_stream_preview_limit(SLACK_CHANNEL),
-            Some(SLACK_EXTERNAL_MESSAGE_LIMIT)
-        );
-        assert_eq!(external_stream_preview_limit(WEBSOCKET_CHANNEL), None);
-        assert_eq!(external_stream_preview_limit(EMAIL_CHANNEL), None);
-        assert_eq!(external_stream_preview_limit(WHATSAPP_CHANNEL), None);
-    }
-
-    #[test]
-    fn external_stream_preview_delta_overflow_reanchors_to_tail() -> Result<(), Box<dyn Error>> {
-        let mut preview = ExternalStreamPreview {
-            remote_id: "remote-1".to_owned(),
-            text: "hello".to_owned(),
-        };
-        let operations = std::cell::RefCell::new(Vec::new());
-
-        send_external_stream_preview_delta(
-            &mut preview,
-            " world",
-            8,
-            |remote_id, text| {
-                operations
-                    .borrow_mut()
-                    .push(format!("edit:{remote_id}:{text}"));
-                Ok(())
-            },
-            |text| {
-                operations.borrow_mut().push(format!("send:{text}"));
-                Ok("remote-2".to_owned())
-            },
-        )?;
-
-        assert_eq!(
-            operations.into_inner(),
-            vec!["edit:remote-1:hello", "send:world"]
-        );
-        assert_eq!(preview.remote_id, "remote-2");
-        assert_eq!(preview.text, "world");
-        Ok(())
-    }
-
-    #[test]
-    fn external_stream_preview_final_overflow_sends_followups_and_clears_preview(
-    ) -> Result<(), Box<dyn Error>> {
-        let mut streams = ExternalStreamPreviewStore::default();
-        let preview_message = stream_outbound_message(
-            DISCORD_CHANNEL,
-            "channel-1",
-            "stream-1",
-            "preview".to_owned(),
-            false,
-        );
-        let final_message = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "hello world again");
-        streams.insert(&preview_message, "stream-1", "remote-1".to_owned());
-        let key = ExternalStreamPreviewStore::stream_key(&preview_message, "stream-1");
-        let operations = std::cell::RefCell::new(Vec::new());
-        let mut next_remote_id = 2usize;
-
-        send_external_stream_preview_final(
-            &mut streams,
-            &final_message,
-            8,
-            |remote_id, text| {
-                operations
-                    .borrow_mut()
-                    .push(format!("edit:{remote_id}:{text}"));
-                Ok(())
-            },
-            |text| {
-                operations.borrow_mut().push(format!("send:{text}"));
-                let remote_id = format!("remote-{next_remote_id}");
-                next_remote_id += 1;
-                Ok(remote_id)
-            },
-        )?;
-
-        assert_eq!(
-            operations.into_inner(),
-            vec!["edit:remote-1:hello", "send:world", "send:again"]
-        );
-        assert!(!streams.by_stream.contains_key(&key));
-        Ok(())
-    }
-
-    #[test]
-    fn external_stream_preview_delta_overflow_failure_keeps_preview_state() {
-        let mut preview = ExternalStreamPreview {
-            remote_id: "remote-1".to_owned(),
-            text: "hello".to_owned(),
-        };
-        let operations = std::cell::RefCell::new(Vec::new());
-
-        let result = send_external_stream_preview_delta(
-            &mut preview,
-            " world",
-            8,
-            |remote_id, text| {
-                operations
-                    .borrow_mut()
-                    .push(format!("edit:{remote_id}:{text}"));
-                Ok(())
-            },
-            |text| {
-                operations.borrow_mut().push(format!("send:{text}"));
-                Err("send failed".to_owned())
-            },
-        );
-
-        assert!(result.is_err());
-        assert_eq!(
-            operations.into_inner(),
-            vec!["edit:remote-1:hello", "send:world"]
-        );
-        assert_eq!(preview.remote_id, "remote-1");
-        assert_eq!(preview.text, "hello");
-    }
-
-    #[test]
-    fn external_stream_preview_final_overflow_failure_keeps_preview_state(
-    ) -> Result<(), Box<dyn Error>> {
-        let mut streams = ExternalStreamPreviewStore::default();
-        let preview_message = stream_outbound_message(
-            DISCORD_CHANNEL,
-            "channel-1",
-            "stream-1",
-            "preview".to_owned(),
-            false,
-        );
-        let final_message = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "hello world again");
-        streams.insert(&preview_message, "stream-1", "remote-1".to_owned());
-        let key = ExternalStreamPreviewStore::stream_key(&preview_message, "stream-1");
-        let operations = std::cell::RefCell::new(Vec::new());
-        let mut sends = 0usize;
-
-        let result = send_external_stream_preview_final(
-            &mut streams,
-            &final_message,
-            8,
-            |remote_id, text| {
-                operations
-                    .borrow_mut()
-                    .push(format!("edit:{remote_id}:{text}"));
-                Ok(())
-            },
-            |text| {
-                operations.borrow_mut().push(format!("send:{text}"));
-                sends += 1;
-                if sends == 1 {
-                    Ok("remote-2".to_owned())
-                } else {
-                    Err("send failed".to_owned())
-                }
-            },
-        );
-
-        assert!(result.is_err());
-        assert_eq!(
-            operations.into_inner(),
-            vec!["edit:remote-1:hello", "send:world", "send:again"]
-        );
-        let preview = streams.by_stream.get(&key).ok_or("missing preview")?;
-        assert_eq!(preview.remote_id, "remote-1");
-        assert_eq!(preview.text, "preview");
-        assert_eq!(
-            streams
-                .active_by_route
-                .get(&outbound_route_key(&preview_message)),
-            Some(&key)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn discord_stream_preview_delta_retry_keeps_text_stable() -> Result<(), Box<dyn Error>> {
-        let mut streams = ExternalStreamPreviewStore::default();
-        let message = stream_outbound_message(
-            DISCORD_CHANNEL,
-            "channel-1",
-            "stream-1",
-            "hello".to_owned(),
-            false,
-        );
-        streams.insert(&message, "stream-1", "remote-1".to_owned());
-        let key = ExternalStreamPreviewStore::stream_key(&message, "stream-1");
-        let mut attempts = 0usize;
-        let mut observed_texts = Vec::new();
-
-        {
-            let preview = streams.get_mut(&key).ok_or("missing preview")?;
-            let result = send_external_stream_preview_delta(
-                preview,
-                " world",
-                DISCORD_EXTERNAL_MESSAGE_LIMIT,
-                |remote_id, text| {
-                    assert_eq!(remote_id, "remote-1");
-                    observed_texts.push(text.to_owned());
-                    attempts += 1;
-                    Err("temporary patch failure".to_owned())
-                },
-                |_| Err("unexpected overflow send".to_owned()),
-            );
-            assert!(result.is_err());
-        }
-
-        assert_eq!(
-            streams.get_mut(&key).ok_or("missing preview")?.text,
-            "hello"
-        );
-
-        {
-            let preview = streams.get_mut(&key).ok_or("missing preview")?;
-            let result = send_external_stream_preview_delta(
-                preview,
-                " world",
-                DISCORD_EXTERNAL_MESSAGE_LIMIT,
-                |remote_id, text| {
-                    assert_eq!(remote_id, "remote-1");
-                    observed_texts.push(text.to_owned());
-                    attempts += 1;
-                    Ok(())
-                },
-                |_| Err("unexpected overflow send".to_owned()),
-            );
-            assert!(result.is_ok());
-        }
-
-        assert_eq!(attempts, 2);
-        assert_eq!(observed_texts, vec!["hello world", "hello world"]);
-        assert_eq!(
-            streams.get_mut(&key).ok_or("missing preview")?.text,
-            "hello world"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn discord_stream_preview_final_retry_keeps_preview_until_success() -> Result<(), Box<dyn Error>>
+    fn external_stream_deltas_are_final_only_for_external_transports() -> Result<(), Box<dyn Error>>
     {
-        let mut streams = ExternalStreamPreviewStore::default();
-        let preview_message = stream_outbound_message(
-            DISCORD_CHANNEL,
-            "channel-1",
-            "stream-1",
-            "preview".to_owned(),
-            false,
-        );
-        let final_message = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "final answer");
-        streams.insert(&preview_message, "stream-1", "remote-1".to_owned());
-        let key = ExternalStreamPreviewStore::stream_key(&preview_message, "stream-1");
-        let mut attempts = 0usize;
-        let mut observed_texts = Vec::new();
+        let agent = runtime_http_agent(Duration::from_millis(10));
+        let telegram = TelegramRuntimeConfig {
+            token: "telegram-token".to_owned(),
+            poll_timeout_seconds: 1,
+            poll_limit: 1,
+        };
+        let discord = DiscordRuntimeConfig {
+            token: "discord-token".to_owned(),
+            channel_filter: DiscordChannelFilter::AllVisible,
+            allowed_senders: Vec::new(),
+            group_policy: DiscordGroupPolicy::Open,
+            streaming: true,
+            poll_interval_seconds: 1,
+            transport: DiscordTransportMode::Gateway,
+        };
+        let slack = SlackRuntimeConfig {
+            app_token: "slack-app-token".to_owned(),
+            bot_token: "slack-token".to_owned(),
+            channel_ids: vec!["C123".to_owned()],
+            allowed_senders: Vec::new(),
+        };
 
-        let first = send_external_stream_preview_final(
-            &mut streams,
-            &final_message,
-            DISCORD_EXTERNAL_MESSAGE_LIMIT,
-            |remote_id, text| {
-                assert_eq!(remote_id, "remote-1");
-                observed_texts.push(text.to_owned());
-                attempts += 1;
-                Err("temporary patch failure".to_owned())
-            },
-            |_| Err("unexpected overflow send".to_owned()),
-        );
-        assert!(first.is_err());
-        assert!(streams.by_stream.contains_key(&key));
-
-        let second = send_external_stream_preview_final(
-            &mut streams,
-            &final_message,
-            DISCORD_EXTERNAL_MESSAGE_LIMIT,
-            |remote_id, text| {
-                assert_eq!(remote_id, "remote-1");
-                observed_texts.push(text.to_owned());
-                attempts += 1;
-                Ok(())
-            },
-            |_| Err("unexpected overflow send".to_owned()),
-        );
-        assert!(second.is_ok());
-        assert_eq!(attempts, 2);
-        assert_eq!(observed_texts, vec!["final answer", "final answer"]);
-        assert!(!streams.by_stream.contains_key(&key));
-        Ok(())
-    }
-
-    #[test]
-    fn external_stream_final_candidate_requires_final_markers() -> Result<(), Box<dyn Error>> {
-        let mut streams = ExternalStreamPreviewStore::default();
-        let preview_message = stream_outbound_message(
-            DISCORD_CHANNEL,
-            "channel-1",
-            "stream-1",
-            "preview".to_owned(),
-            false,
-        );
-        streams.insert(&preview_message, "stream-1", "remote-1".to_owned());
-        let key = ExternalStreamPreviewStore::stream_key(&preview_message, "stream-1");
-
-        let mut notification_metadata = Map::new();
-        notification_metadata.insert(
-            "runtime_notification".to_owned(),
-            json!({"kind": "skill", "phase": "start"}),
-        );
-        let notification = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "notification")
-            .with_metadata(notification_metadata);
-        assert!(!external_stream_final_candidate(&notification));
-        assert!(streams
-            .active_by_route
-            .contains_key(&outbound_route_key(&notification)));
-
-        let mut subagent_metadata = Map::new();
-        subagent_metadata.insert(
-            "runtime_notification".to_owned(),
-            json!({"kind": "subagent", "phase": "start"}),
-        );
-        let subagent_notification = OutboundMessage::new(
-            DISCORD_CHANNEL,
-            "channel-1",
-            "Subagent [summary] started (id: child-1). I'll notify you when it completes.",
-        )
-        .with_metadata(subagent_metadata);
-        assert!(!external_stream_final_candidate(&subagent_notification));
-        assert!(streams
-            .active_by_route
-            .contains_key(&outbound_route_key(&subagent_notification)));
-
-        let mut final_metadata = Map::new();
-        final_metadata.insert("session_key".to_owned(), json!("discord:channel-1"));
-        final_metadata.insert("stop_reason".to_owned(), json!("stop"));
-        let final_message = OutboundMessage::new(DISCORD_CHANNEL, "channel-1", "final answer")
-            .with_metadata(final_metadata);
-        assert!(external_stream_final_candidate(&final_message));
-        send_external_stream_preview_final(
-            &mut streams,
-            &final_message,
-            DISCORD_EXTERNAL_MESSAGE_LIMIT,
-            |remote_id, text| {
-                assert_eq!(remote_id, "remote-1");
-                assert_eq!(text, "final answer");
-                Ok(())
-            },
-            |_| Err("unexpected overflow send".to_owned()),
+        send_telegram_message(
+            &agent,
+            &telegram,
+            stream_outbound_message(
+                TELEGRAM_CHANNEL,
+                "chat-1",
+                "stream-1",
+                "delta".to_owned(),
+                false,
+            ),
         )?;
-        assert!(!streams.by_stream.contains_key(&key));
+        send_discord_message(
+            &agent,
+            &discord,
+            stream_outbound_message(
+                DISCORD_CHANNEL,
+                "channel-1",
+                "stream-1",
+                "delta".to_owned(),
+                false,
+            ),
+        )?;
+        send_slack_message(
+            &agent,
+            &slack,
+            stream_outbound_message(SLACK_CHANNEL, "C123", "stream-1", "delta".to_owned(), false),
+        )?;
+        send_telegram_message(
+            &agent,
+            &telegram,
+            stream_outbound_message(TELEGRAM_CHANNEL, "chat-1", "stream-1", String::new(), true),
+        )?;
+        send_discord_message(
+            &agent,
+            &discord,
+            stream_outbound_message(
+                DISCORD_CHANNEL,
+                "channel-1",
+                "stream-1",
+                String::new(),
+                true,
+            ),
+        )?;
+        send_slack_message(
+            &agent,
+            &slack,
+            stream_outbound_message(SLACK_CHANNEL, "C123", "stream-1", String::new(), true),
+        )?;
         Ok(())
     }
 
