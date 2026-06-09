@@ -1,6 +1,6 @@
 # zero-setup sandbox execution 아키텍처 명세
 
-Status: Draft. 이 문서는 `shacs-bot`의 sandbox 실행이 사용자 별도 세팅 없이 동작해야 한다는 제품 요구를 packaging과 runtime containment 계약으로 고정한다. 현재 구현이 이 요구를 이미 만족한다는 뜻은 아니다.
+Status: Active. 공식 Docker/Compose containment evidence는 opt-in smoke gate `./docs/scripts/spec023-compose-smoke.sh`로 연결되어 있다. 이 문서는 Docker/Compose runtime containment, native unknown fallback, exec fail-closed, MCP/subagent containment inheritance를 현재 구현 수준에 맞춰 고정하며, kernel-level isolation이나 provider credential이 필요한 full MCP child execution smoke를 주장하지 않는다.
 
 ## 문서 목적
 
@@ -77,8 +77,13 @@ Sandbox 실행의 기본 경로는 사용자가 별도의 보안 런타임을 �
 6. MCP stdio connector는 `McpServerSpec`의 command와 args를 정규화한 뒤 `Command::new(&command).args(&args)`로 child process를 직접 시작한다.
 7. MCP tools, resources, prompts는 `enabledTools` 기본값이 빈 배열인 default-deny opt-in이다.
 8. write/edit/exec 같은 side-effect tool surface는 CLI의 `--allow-side-effects` 또는 동등한 설정으로 등록 범위가 조절된다.
+9. `runtime inspect`와 `runtime diagnostics`는 runtime containment summary와 digest를 남긴다. Native host에서 인식 가능한 containment evidence가 없으면 unknown state를 보존한다.
+10. Unsafe privileged containment evidence는 `unsafe-privileged`로 분류되며, `bypass_permissions`는 native unknown과 unsafe privileged evidence 모두에서 default fallback으로 내려간다.
+11. `bwrap`는 packaged availability가 확인되지 않은 경우 optional hardening으로 분류된다. Setup failure와 unknown backend는 원래 command를 silent unsandboxed fallback으로 실행하지 않는다.
+12. MCP stdio와 subagent 경로에는 parent containment snapshot과 MCP default-deny를 보존하는 regression evidence가 있다.
+13. App install, enable, disable 경로는 현재 app process를 시작하지 않는다. 따라서 app process inheritance는 process supervisor가 boundary를 물려주는 방식이 아니라, app process를 시작하거나 host access를 넓히지 않는 현재 동작으로만 만족된다.
 
-이 사실들은 현 상태의 근거일 뿐이다. 특히 Dockerfile과 Compose가 존재하고 runtime user가 non-root라는 사실만으로 zero-setup sandbox execution이 완료됐다고 주장하면 안 된다.
+이 사실들은 현 상태의 근거일 뿐이다. 특히 Dockerfile과 Compose가 존재하고 runtime user가 non-root라는 사실만으로 zero-setup sandbox execution이 완료됐다고 주장하면 안 된다. 공식 Compose runtime evidence는 `./docs/scripts/spec023-compose-smoke.sh`로 검증한다. MCP stdio containment inheritance는 provider credential 없이 실행 가능한 core regression tests가 parent containment snapshot과 default-deny 계약을 다루며, Compose smoke는 공식 container runtime evidence와 기본 Compose 안전 속성을 담당한다. App install, enable, disable 경로는 현재 app process를 시작하지 않으므로 app process가 containment를 넓히는 경로도 현재는 없다.
 
 ---
 
@@ -177,7 +182,7 @@ App device로 등록된 MCP server에도 같은 규칙을 적용한다. App mani
 5. Docker socket mount는 기본값으로 금지한다.
 6. `privileged: true`와 privileged Docker-in-Docker은 기본값으로 금지한다.
 7. Host network mode는 기본 zero-setup sandbox path로 삼지 않는다.
-8. Compose smoke test는 `exec`와 MCP stdio child가 같은 container boundary 안에서 실행되는지 확인해야 한다.
+8. Compose smoke test는 공식 container runtime evidence와 기본 Compose 안전 속성을 확인해야 한다. Provider credential 없이 full MCP child execution smoke를 반복 가능하게 만들 수 없는 동안, MCP stdio containment inheritance는 core regression tests의 parent containment snapshot/default-deny evidence로 연결한다.
 
 Docker는 primary containment지만 완전한 permission waiver가 아니다. Permission gate, side-effect gate, protected target rule, diagnostics redaction은 Docker 안에서도 유지되어야 한다.
 
@@ -239,8 +244,9 @@ Containment와 permission은 역할이 다르다.
 1. 공식 Docker image는 non-root user로 실행된다.
 2. Compose path는 Docker socket 없이 시작된다.
 3. Compose path는 privileged mode 없이 시작된다.
-4. Compose path에서 `exec` happy path와 guarded bad input이 같은 container boundary 안에서 관측된다.
-5. Compose path에서 MCP stdio child가 parent runtime container 밖으로 나가지 않는다.
+4. Compose path에서 `runtime inspect`가 `Runtime containment: contained=true`와 official-container backend를 보고한다.
+5. Compose path에서 official package marker, container runtime evidence, no Docker socket inside the service가 관측된다.
+6. MCP stdio child inheritance는 provider credential 없는 core regression tests로 parent containment snapshot/default-deny 계약을 검증한다.
 
 ### Safety tests
 
@@ -278,3 +284,14 @@ Containment와 permission은 역할이 다르다.
 8. Permission/auto approval은 containment snapshot을 입력으로 소비하되, containment를 permission bypass로 쓰지 않는다.
 9. 016 release gate에 packaging smoke, integration, safety regression evidence가 연결된다.
 10. 문서와 diagnostics가 현재 구현을 과장하지 않고, zero-setup sandbox execution 완료 전에는 완료라고 말하지 않는다.
+
+현재 traceability는 다음처럼 해석한다.
+
+1. Criteria 1과 2는 `README.md`, `docs/USAGE.md`, Dockerfile, `docker-compose.yml`, `./docs/scripts/spec023-compose-smoke.sh`로 Docker/Compose primary path, `bwrap` optional hardening, official-container runtime evidence를 설명하고 검증한다.
+2. Criteria 3은 `runtime_containment_classifier_reports_native_unknown`와 `runtime_containment_snapshot_ref_preserves_unknown_state`로 native unknown classification과 digest 보존을 확인한다.
+3. Criteria 4와 5는 `exec_tool_native_unknown_without_backend_enforces_workspace_scope`, `exec_tool_unknown_sandbox_backend_does_not_execute_command`, `exec_tool_bwrap_sandbox_setup_failure_does_not_execute_original_command`로 native unknown scope narrowing과 sandbox setup fail-closed를 확인한다.
+4. Criteria 6은 `mcp_runtime_connects_registers_and_closes_servers`, `mcp_default_deny_excludes_disabled_capabilities_from_tool_search_bridge`, `subagent_permissioned_action_context_inherits_snapshots_and_origin`으로 MCP stdio, deferred MCP bridge, subagent inheritance를 확인한다. Provider credential 없이 full MCP child execution smoke는 반복 가능하지 않으므로 Compose smoke가 이 항목까지 과장하지 않는다. App process는 현재 inert라서 시작되지 않고 host access를 넓히지 않는 동작만 문서 증거로 남는다.
+5. Criteria 7은 `README.md`, `docs/USAGE.md`, `docker-compose.yml`, `./docs/scripts/spec023-compose-smoke.sh`의 default Compose path check가 Docker socket mount, `privileged: true`, host network를 기본값으로 쓰지 않는다는 config evidence로 연결된다.
+6. Criteria 8은 `runtime_containment_classifier_reports_unsafe_privileged_evidence`, `bypass_permissions_falls_back_for_native_unknown_containment`, `bypass_permissions_falls_back_for_unsafe_privileged`로 containment snapshot이 permission bypass로 바뀌지 않음을 확인한다.
+7. Criteria 9는 `docs/specs/016-verification-matrix-and-release-gates/prds/000-spec-coverage-and-release-readiness.md`의 Spec023 release evidence lane에 연결된다.
+8. Criteria 10은 `README.md`, `docs/USAGE.md`, 이 문서의 Active status, `./docs/scripts/spec023-compose-smoke.sh`, 그리고 `runtime inspect`/`runtime diagnostics` containment summary/digest 문구로 연결된다.

@@ -1,6 +1,7 @@
 use crate::runtime::{
-    AgentRunResult, AgentRunSpec, AgentRunner, CancellationToken, ContextBuilder, InboundMessage,
-    MessageBus, RuntimeCapabilityReport, RuntimeCapabilityStatus, ToolEvent, ToolStatus,
+    AgentRunResult, AgentRunSpec, AgentRunner, CancellationToken, ContainmentSnapshotRef,
+    ContextBuilder, InboundMessage, MessageBus, PermissionModeSnapshot, RuntimeCapabilityReport,
+    RuntimeCapabilityStatus, ToolEvent, ToolExecutionContext, ToolStatus,
 };
 use crate::tools::{
     EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool, PathContext,
@@ -267,6 +268,8 @@ pub struct SubagentExecutionConfig {
     pub model: String,
     pub settings: GenerationSettings,
     pub retry_mode: ProviderRetryMode,
+    pub containment_snapshot: Option<ContainmentSnapshotRef>,
+    pub permission_mode_snapshot: PermissionModeSnapshot,
     pub max_iterations: usize,
     pub max_tool_result_chars: usize,
     pub fail_on_tool_error: bool,
@@ -288,6 +291,8 @@ impl SubagentExecutionConfig {
             model: model.into(),
             settings: GenerationSettings::default(),
             retry_mode: ProviderRetryMode::Standard,
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
             max_iterations: 200,
             max_tool_result_chars: 20_000,
             fail_on_tool_error: true,
@@ -596,6 +601,21 @@ impl SubagentRuntime {
         spec.retry_mode = config.retry_mode;
         spec.max_iterations = config.max_iterations;
         spec.max_tool_result_chars = config.max_tool_result_chars;
+        spec.tool_context = ToolExecutionContext {
+            channel: envelope.origin_channel.clone(),
+            chat_id: envelope.origin_chat_id.clone(),
+            message_id: Some(envelope.parent_turn_id.clone()),
+            metadata: json!({
+                "subagent_task_id": envelope.child_task_id,
+                "spawn_effect_id": envelope.spawn_effect_id,
+                "parent_turn_id": envelope.parent_turn_id,
+            }),
+            session_key: Some(envelope.session_id.clone()),
+            containment_snapshot: config.containment_snapshot.clone(),
+            permission_mode_snapshot: config.permission_mode_snapshot.clone(),
+            in_cron_context: false,
+            record_channel_delivery: false,
+        };
         spec.max_iterations_message =
             Some("Task completed but no final response was generated.".to_owned());
         spec.fail_on_tool_error = config.fail_on_tool_error;

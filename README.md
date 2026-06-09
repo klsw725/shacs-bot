@@ -33,7 +33,7 @@ cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime stop --workspac
 cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime restart --workspace /tmp/shacs-ws
 ```
 
-문제 상황을 확인해야 할 때는 로컬 runtime diagnostics를 bundle로 저장할 수 있습니다. diagnostics 출력과 bundle은 secret, token 같은 민감한 값을 가립니다:
+문제 상황을 확인해야 할 때는 로컬 runtime diagnostics를 bundle로 저장할 수 있습니다. diagnostics 출력과 bundle은 secret, token 같은 민감한 값을 가리며, runtime containment summary/digest를 함께 보고합니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고됩니다:
 
 ```sh
 cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime diagnostics --bundle /tmp/shacs-diagnostics.zip --workspace /tmp/shacs-ws
@@ -71,7 +71,7 @@ cargo run --manifest-path crates/shacs-cli/Cargo.toml -- serve --workspace /tmp/
 curl http://127.0.0.1:8900/v1/diagnostics
 ```
 
-Docker Compose로 초기 설정과 장기 실행 서비스를 다룹니다:
+Docker Compose로 초기 설정과 장기 실행 서비스를 다룹니다. 이 경로가 현재 primary zero-setup containment path이며, 기본 Compose 설정은 Docker socket mount, privileged mode, host network를 사용하지 않습니다:
 
 ```sh
 export SHACS_UID=$(id -u)
@@ -82,7 +82,13 @@ vim ~/.shacs-bot/config.json
 docker compose up -d shacs-gateway
 ```
 
-Compose는 host의 `~/.shacs-bot`을 container의 `/home/shacs/.shacs-bot`에 mount합니다. Provider secret은 image에 넣지 말고 `onboard` 후 생성된 config/auth workflow 또는 `.env.example`을 참고한 shell environment로 제공하세요. 기본 UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. 로컬 OpenAI 호환 API만 띄우려면 provider 설정 후 `docker compose up -d shacs-api`와 `curl http://127.0.0.1:8900/health`를 사용하세요.
+공식 Compose containment smoke gate는 실제 Docker/Compose runtime에서 `runtime inspect`의 official-container evidence와 기본 Compose 안전 속성을 확인합니다. 이 검증은 opt-in이며 임시 host data directory를 사용하므로 사용자의 실제 `~/.shacs-bot`을 건드리지 않습니다:
+
+```sh
+./docs/scripts/spec023-compose-smoke.sh
+```
+
+Compose는 host의 `~/.shacs-bot`을 container의 `/home/shacs/.shacs-bot`에 mount합니다. Provider secret은 image에 넣지 말고 `onboard` 후 생성된 config/auth workflow 또는 `.env.example`을 참고한 shell environment로 제공하세요. 기본 UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. 로컬 OpenAI 호환 API만 띄우려면 provider 설정 후 `docker compose up -d shacs-api`와 `curl http://127.0.0.1:8900/health`를 사용하세요.
 
 스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 `config.json`의 top-level `env`에 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 별도로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. 빈 문자열은 `requires.env`를 만족하지 않습니다. Secret 값을 넣은 config 파일은 커밋하거나 공유하지 마세요.
 

@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 use shacs_core::runtime::{
-    dispatch_bridge_tool_call, RuntimeToolCall, RuntimeToolExecutor, ToolExecutionContext,
-    ToolSearchActivationReason, ToolSearchConfig, ToolSearchDiagnosticsSummary, ToolSearchMode,
-    ToolSearchRuntimeInput,
+    dispatch_bridge_tool_call, ContainmentSnapshotRef, RuntimeToolCall, RuntimeToolExecutor,
+    ToolExecutionContext, ToolSearchActivationReason, ToolSearchConfig,
+    ToolSearchDiagnosticsSummary, ToolSearchMode, ToolSearchRuntimeInput,
 };
 use shacs_core::tools::{
     ask_user_options_from_messages, ask_user_outbound, ask_user_tool_result_messages,
@@ -30,6 +30,8 @@ use std::time::Duration;
 
 #[cfg(unix)]
 use filetime::{set_file_mtime, FileTime};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 struct EchoTool;
 
@@ -1821,6 +1823,53 @@ fn exec_tool_unknown_sandbox_backend_does_not_execute_command() -> Result<(), Bo
 }
 
 #[test]
+#[cfg(unix)]
+fn exec_tool_bwrap_sandbox_setup_failure_does_not_execute_original_command(
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("should-not-run");
+    let fake_bin = temp.path().join("bin");
+    std::fs::create_dir(&fake_bin)?;
+    let fake_bwrap = fake_bin.join("bwrap");
+    std::fs::write(
+        &fake_bwrap,
+        "#!/bin/sh
+printf '%s\n' 'sandbox setup failed' >&2
+exit 1
+",
+    )?;
+    std::fs::set_permissions(&fake_bwrap, std::fs::Permissions::from_mode(0o755))?;
+
+    let mut config = ExecConfig::new(PathContext::workspace(temp.path()));
+    config.sandbox = Some("bwrap".to_owned());
+    config
+        .env
+        .insert("PATH".to_owned(), fake_bin.to_string_lossy().into_owned());
+    config.env.insert(
+        "HOME".to_owned(),
+        temp.path().to_string_lossy().into_owned(),
+    );
+    let tool = ExecTool::new(config);
+
+    let result = tool
+        .execute(json_map(json!({
+            "command": "touch should-not-run",
+            "timeout": 5
+        }))?)
+        .into_text();
+    if !result.contains("Exit code: 1") {
+        return Err(format!(
+            "sandbox setup failure did not surface as a command failure: {result}"
+        )
+        .into());
+    }
+    if marker.exists() {
+        return Err("sandbox setup failure fell back to the original command".into());
+    }
+    Ok(())
+}
+
+#[test]
 fn exec_tool_blocks_internal_urls_and_invalid_deny_regex() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let tool = ExecTool::with_workspace(temp.path());
@@ -3113,6 +3162,7 @@ fn mcp_server_spec_detects_transport_and_normalizes_stdio_command() -> Result<()
         headers: Vec::new(),
         timeout_seconds: 30,
         enabled_tools: vec!["*".to_owned()],
+        parent_containment_snapshot: None,
     };
     if stdio.transport_kind() != Some(McpTransportKind::Stdio)
         || stdio.normalized_stdio_command()
@@ -3131,6 +3181,7 @@ fn mcp_server_spec_detects_transport_and_normalizes_stdio_command() -> Result<()
         headers: Vec::new(),
         timeout_seconds: 30,
         enabled_tools: Vec::new(),
+        parent_containment_snapshot: None,
     };
     let http = McpServerSpec {
         url: Some("https://example.test/mcp".to_owned()),
@@ -3152,6 +3203,7 @@ fn mcp_server_spec_detects_transport_and_normalizes_stdio_command() -> Result<()
         headers: Vec::new(),
         timeout_seconds: 30,
         enabled_tools: Vec::new(),
+        parent_containment_snapshot: None,
     };
     let normalized = npx
         .normalized_stdio_command()
@@ -3187,6 +3239,9 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
             &self,
             spec: &McpServerSpec,
         ) -> Result<(Arc<dyn McpClient>, Vec<McpCapability>), String> {
+            if spec.name == "fail" {
+                return Err("connection failed".to_owned());
+            }
             let client: Arc<dyn McpClient> = Arc::new(|_operation: McpOperation| {
                 McpCallOutcome::Success(vec!["connected".to_owned()])
             });
@@ -3210,20 +3265,52 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
     });
     let runtime = McpRuntime::new(Some(connector));
     let mut registry = ToolRegistry::new();
-    let specs = vec![McpServerSpec {
-        name: "srv".to_owned(),
-        r#type: Some("stdio".to_owned()),
-        command: Some("server".to_owned()),
-        args: Vec::new(),
-        env: Vec::new(),
-        url: None,
-        headers: Vec::new(),
-        timeout_seconds: 11,
-        enabled_tools: vec!["*".to_owned()],
-    }];
+    let parent_containment_snapshot = ContainmentSnapshotRef {
+        contained: Some(true),
+        digest: Some("sha256:parent".to_owned()),
+        summary: Some("bounded parent containment evidence".to_owned()),
+    };
+    let specs = vec![
+        McpServerSpec {
+            name: "srv".to_owned(),
+            r#type: Some("stdio".to_owned()),
+            command: Some("server".to_owned()),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: None,
+            headers: Vec::new(),
+            timeout_seconds: 11,
+            enabled_tools: vec!["*".to_owned()],
+            parent_containment_snapshot: Some(parent_containment_snapshot.clone()),
+        },
+        McpServerSpec {
+            name: "deny".to_owned(),
+            r#type: Some("stdio".to_owned()),
+            command: Some("server".to_owned()),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: None,
+            headers: Vec::new(),
+            timeout_seconds: 11,
+            enabled_tools: Vec::new(),
+            parent_containment_snapshot: Some(parent_containment_snapshot.clone()),
+        },
+        McpServerSpec {
+            name: "fail".to_owned(),
+            r#type: Some("stdio".to_owned()),
+            command: Some("server".to_owned()),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: None,
+            headers: Vec::new(),
+            timeout_seconds: 11,
+            enabled_tools: vec!["*".to_owned()],
+            parent_containment_snapshot: Some(parent_containment_snapshot.clone()),
+        },
+    ];
 
     let reports = runtime.connect_and_register(&mut registry, &specs);
-    if reports.len() != 1
+    if reports.len() != 3
         || !reports[0].connected
         || reports[0].registered_count != 1
         || reports[0].error.is_some()
@@ -3231,13 +3318,30 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
     {
         return Err(format!("MCP runtime did not register capabilities: {reports:?}").into());
     }
+    if !reports[1].connected
+        || reports[1].registered_count != 0
+        || reports[1].error.is_some()
+        || !reports[1].unmatched_enabled_tools.is_empty()
+        || registry.has("mcp_deny_ping")
+    {
+        return Err(format!("MCP default-deny runtime report drifted: {reports:?}").into());
+    }
+    if reports[2].connected || reports[2].registered_count != 0 || reports[2].error.is_none() {
+        return Err(format!("MCP failure report drifted: {reports:?}").into());
+    }
+    for report in &reports {
+        if report.parent_containment_snapshot != Some(parent_containment_snapshot.clone()) {
+            return Err(format!("MCP report lost containment evidence: {reports:?}").into());
+        }
+    }
     let output = registry.execute("mcp_srv_ping", json!({})).into_text();
     if output != "connected" {
         return Err(format!("registered MCP tool did not route to client: {output}").into());
     }
     runtime.close();
     runtime.close();
-    if *closed.lock().map_err(|error| error.to_string())? != vec!["srv".to_owned()] {
+    let expected_closed = vec!["srv".to_owned(), "deny".to_owned()];
+    if *closed.lock().map_err(|error| error.to_string())? != expected_closed {
         return Err(format!("MCP runtime close was not idempotent: {closed:?}").into());
     }
     Ok(())

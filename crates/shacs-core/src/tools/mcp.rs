@@ -1,3 +1,4 @@
+use crate::runtime::ContainmentSnapshotRef;
 use crate::tools::{JsonMap, Tool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -83,6 +84,7 @@ pub struct McpServerSpec {
     pub headers: Vec<(String, String)>,
     pub timeout_seconds: u64,
     pub enabled_tools: Vec<String>,
+    pub parent_containment_snapshot: Option<ContainmentSnapshotRef>,
 }
 
 impl McpServerSpec {
@@ -140,6 +142,7 @@ pub struct McpServerConnectionReport {
     pub registered_count: usize,
     pub error: Option<String>,
     pub unmatched_enabled_tools: Vec<String>,
+    pub parent_containment_snapshot: Option<ContainmentSnapshotRef>,
 }
 
 pub trait McpConnector: Send + Sync {
@@ -388,6 +391,7 @@ impl McpRuntime {
                     registered_count: 0,
                     error: Some("no MCP connector configured".to_owned()),
                     unmatched_enabled_tools: Vec::new(),
+                    parent_containment_snapshot: spec.parent_containment_snapshot.clone(),
                 })
                 .collect();
         };
@@ -399,6 +403,7 @@ impl McpRuntime {
                     registered_count: 0,
                     error: Some("missing or unsupported MCP transport".to_owned()),
                     unmatched_enabled_tools: Vec::new(),
+                    parent_containment_snapshot: spec.parent_containment_snapshot.clone(),
                 });
                 continue;
             }
@@ -424,6 +429,7 @@ impl McpRuntime {
                         registered_count: report.registered_count,
                         error: None,
                         unmatched_enabled_tools: report.unmatched_enabled_tools,
+                        parent_containment_snapshot: spec.parent_containment_snapshot.clone(),
                     });
                 }
                 Err(error) => reports.push(McpServerConnectionReport {
@@ -432,6 +438,7 @@ impl McpRuntime {
                     registered_count: 0,
                     error: Some(error),
                     unmatched_enabled_tools: Vec::new(),
+                    parent_containment_snapshot: spec.parent_containment_snapshot.clone(),
                 }),
             }
         }

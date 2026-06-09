@@ -31,6 +31,7 @@ COPY --from=builder /app/crates/shacs-cli/target/release/shacs-bot /usr/local/bi
 
 USER shacs
 ENV HOME=/home/shacs
+ENV SHACS_RUNTIME_PACKAGE=shacs-bot-official-container
 WORKDIR /home/shacs
 
 EXPOSE 18790 8900 8765

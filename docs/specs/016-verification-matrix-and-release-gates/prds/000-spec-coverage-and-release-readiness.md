@@ -2,7 +2,7 @@
 
 ## 목표
 
-이 문서는 `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`의 하위 실행 문서다. 전체 spec 001~015와 017을 release 가능한 제품 수준까지 검증하기 위한 테스트 체계, coverage 운영 방식, gate 집행 절차를 실제 실행 문서로 정리한다.
+이 문서는 `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`의 하위 실행 문서다. 전체 spec 001~015, 017, 023을 release 가능한 제품 수준까지 검증하기 위한 테스트 체계, coverage 운영 방식, gate 집행 절차를 실제 실행 문서로 정리한다.
 
 이번 PRD의 목표는 "데모가 된다"와 "출시 가능하다"를 코드와 증거로 구분하는 것이다. 각 spec에 대해 어떤 자동 검증이 있어야 하는지, blocker가 무엇인지, release candidate가 어디서 멈춰야 하는지를 구현과 운영 절차 양쪽에서 고정한다.
 
@@ -10,7 +10,7 @@
 
 - 주관 spec: `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`
 - 상위 입력:
-- `docs/SYSTEM-FOUNDATION.md`
+  - `docs/SYSTEM-FOUNDATION.md`
   - `docs/specs/001-session-kernel/SPEC.md`
   - `docs/specs/002-command-event-effect/SPEC.md`
   - `docs/specs/003-provider-runtime/SPEC.md`
@@ -27,6 +27,7 @@
   - `docs/specs/014-observability-diagnostics-and-inspection/SPEC.md`
   - `docs/specs/015-packaging-process-lifecycle-and-upgrades/SPEC.md`
   - `docs/specs/017-app-operating-environment/SPEC.md`
+  - `docs/specs/023-zero-setup-sandbox-execution/SPEC.md`
 
 ## Dependency Cut
 
@@ -34,6 +35,7 @@
 - 009~015와 017은 각각의 domain test family를 제공해야 하며, 이 PRD는 이를 하나의 coverage matrix와 gate runner로 묶는다.
 - 014와 015의 diagnostics, packaging 증거는 release readiness 판단의 필수 입력이다.
 - 010의 safety와 redaction은 waiver 금지 대상이라 별도 blocker lane으로 취급한다.
+- 023의 zero-setup sandbox execution 증거는 containment diagnostics, native unknown fallback, unsafe privileged fallback, exec fail-closed 또는 scope narrowing, MCP and subagent inheritance를 실제 Cargo test 이름으로 연결한다. 공식 Docker/Compose runtime containment evidence는 opt-in smoke command `./docs/scripts/spec023-compose-smoke.sh`로 연결한다.
 
 ## 범위
 
@@ -71,6 +73,10 @@
 - `crates/shacs-core/tests/runtime_agent.rs`
 - `README.md`
 - `docs/USAGE.md`
+- Spec023 containment and permission evidence:
+  - `crates/shacs-cli/src/lib.rs` inline tests: `runtime_containment_classifier_reports_native_unknown`, `runtime_containment_snapshot_ref_preserves_unknown_state`, `runtime_containment_classifier_reports_official_container_marker`, `runtime_containment_classifier_reports_recognized_container_evidence`, `runtime_containment_classifier_reports_unsafe_privileged_evidence`, `bypass_permissions_falls_back_for_native_unknown_containment`, `bypass_permissions_falls_back_for_unsafe_privileged`
+  - `crates/shacs-core/tests/tools.rs`: `exec_tool_bwrap_sandbox_setup_failure_does_not_execute_original_command`, `exec_tool_native_unknown_without_backend_enforces_workspace_scope`, `exec_tool_unknown_sandbox_backend_does_not_execute_command`, `mcp_runtime_connects_registers_and_closes_servers`, `mcp_default_deny_excludes_disabled_capabilities_from_tool_search_bridge`
+  - `crates/shacs-core/tests/runtime_loop.rs`: `subagent_permissioned_action_context_inherits_snapshots_and_origin`
 
 ## TDD 계획
 
@@ -112,7 +118,22 @@
 - 문서 증거: release gate representative drift는 별도 runner가 추가될 때 해당 runner path와 함께 검증한다. 현재 slice는 manifest-path Cargo command 목록과 실제 inline/integration test names를 문서 증거로 유지한다.
 - 문서 증거: FullSpec evidence locator는 repo-relative executable evidence를 목표로 하며, 현재 문서는 존재하지 않는 runner/test file path를 evidence로 쓰지 않는다.
 - 통합 증거: verification family to spec mapping, release pipeline aggregation, evidence collection flow는 실제 Cargo command와 docs locator 일치성으로 관리한다.
-- 통합 테스트: 현재 slice에서는 `crates/shacs-cli/src/lib.rs` inline tests와 manifest-path cargo commands가 fresh workspace CLI 흐름을 검증한다. 별도 smoke test file이 추가되기 전까지는 inline tests와 실제 cargo command만 evidence locator로 쓴다.
+- 통합 테스트: 현재 slice에서는 `crates/shacs-cli/src/lib.rs` inline tests와 manifest-path cargo commands가 fresh workspace CLI 흐름을 검증한다. Docker/Compose runtime containment는 opt-in smoke script를 evidence locator로 쓴다.
+- Spec023 release evidence lane: 현재 lane은 실제 존재하는 Cargo test filter와 real Compose smoke command만 근거로 쓴다. App process supervisor는 아직 app process를 시작하지 않으므로 active inheritance evidence로 과장하지 않는다. Provider credential 없이 full MCP child execution smoke를 반복 가능하게 만들 수 없는 동안 MCP containment inheritance는 core tests가 담당하고, Compose smoke는 공식 container runtime evidence를 담당한다.
+  - `./docs/scripts/spec023-compose-smoke.sh`
+  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_classifier_reports_native_unknown`
+  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_snapshot_ref_preserves_unknown_state`
+  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_classifier_reports_official_container_marker`
+  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_classifier_reports_recognized_container_evidence`
+  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_classifier_reports_unsafe_privileged_evidence`
+  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml bypass_permissions_falls_back_for_native_unknown_containment`
+  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml bypass_permissions_falls_back_for_unsafe_privileged`
+  - `cargo test --manifest-path crates/shacs-core/Cargo.toml exec_tool_bwrap_sandbox_setup_failure_does_not_execute_original_command`
+  - `cargo test --manifest-path crates/shacs-core/Cargo.toml exec_tool_native_unknown_without_backend_enforces_workspace_scope`
+  - `cargo test --manifest-path crates/shacs-core/Cargo.toml exec_tool_unknown_sandbox_backend_does_not_execute_command`
+  - `cargo test --manifest-path crates/shacs-core/Cargo.toml mcp_runtime_connects_registers_and_closes_servers`
+  - `cargo test --manifest-path crates/shacs-core/Cargo.toml mcp_default_deny_excludes_disabled_capabilities_from_tool_search_bridge`
+  - `cargo test --manifest-path crates/shacs-core/Cargo.toml subagent_permissioned_action_context_inherits_snapshots_and_origin`
 - 패키징 및 smoke 테스트: fresh install, create session, input handling, approval surface, inspect, recover
 - 내구성 테스트: interrupted upgrade and recovery evidence must be covered before ready state
 - 문서 증거: spec coverage matrix, release checklist, blocker taxonomy, waiver template
@@ -137,6 +158,8 @@
    - core runtime loop/callback regression suite.
 7. `cargo test --manifest-path crates/shacs-cli/Cargo.toml --locked`
    - CLI와 그 manifest dependency graph의 regression suite를 실행한다.
+8. `cargo test --manifest-path crates/shacs-cli/Cargo.toml bypass_permissions_falls_back_for_unsafe_privileged`
+   - Spec023 unsafe privileged containment evidence가 permissive permission mode를 유지하지 못하게 하는 대표 안전 회귀 테스트다.
 
 별도 verification matrix crate/test가 추가되면 matrix 행, required family, release readiness decision, spec 문서 존재, repo-relative executable evidence locator, release-gate script representatives를 함께 확인해야 한다. 현재 문서는 존재하지 않는 test file path를 evidence로 쓰지 않고, 실제 Cargo로 실행 가능한 inline/integration tests만 근거로 삼는다.
 
@@ -149,8 +172,8 @@
 
 ## 종료 기준
 
-- spec 001~015와 017 모두에 required verification family가 매핑된다.
-- release gate 1~7이 자동 또는 반복 가능한 절차로 실행된다.
+- spec 001~015, 017, 023 모두에 required verification family가 매핑된다.
+- release gate 1~8이 자동 또는 반복 가능한 절차로 실행된다.
 - blocker와 waiver 금지 대상이 명시적 규칙과 테스트로 강제된다.
 - release candidate smoke test가 self-hosted 사용자 최소 흐름을 검증한다.
 - "full implementation"과 "demo behavior" 구분이 문구가 아니라 증거 체계로 작동한다.
@@ -159,7 +182,7 @@
 
 - 상태: manifest-path release gate evidence ready.
 - Spec016은 product spec matrix에 자기 자신을 product spec row로 추가하지 않는다.
-- product spec matrix 대상은 문서 계약대로 Spec001~Spec015이며, Spec016은 release gate/evidence locator/readiness separation을 검증하는 meta-verification layer로 닫는다.
+- product spec matrix 대상은 문서 계약대로 Spec001~Spec015이며, post-015 evidence lane은 Spec017과 Spec023의 실제 Cargo evidence locator를 별도 연결한다. Spec016은 release gate/evidence locator/readiness separation을 검증하는 meta-verification layer로 닫는다.
 - FullSpec evidence:
   - `crates/shacs-cli/src/lib.rs` inline tests
   - `crates/shacs-core/tests/runtime_loop.rs`

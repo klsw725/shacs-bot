@@ -1,9 +1,9 @@
 use serde_json::{json, Value};
 use shacs_core::runtime::{
     dispatch_bridge_tool_call, dispatch_bridge_tool_calls, ActionNormalizationError,
-    ActionNormalizationState, ContainmentSnapshotRef, PermissionedActionOrigin,
-    RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutor,
-    ToolExecutionContext,
+    ActionNormalizationState, ContainmentSnapshotRef, PermissionMode, PermissionModeSnapshot,
+    PermissionedActionOrigin, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
+    RuntimeToolExecutor, ToolExecutionContext,
 };
 use shacs_core::tools::{
     AskUserTool, CronTool, DeferredToolCatalog, DeferredToolCatalogEntry, JsonMap, MessageTool,
@@ -772,6 +772,11 @@ fn runtime_permission_actions_include_context_containment() -> Result<(), Box<dy
     };
     let context = ToolExecutionContext {
         containment_snapshot: Some(containment),
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("user_local_config".to_owned()),
+            scope_ref: Some("workspace".to_owned()),
+        },
         ..ToolExecutionContext::default()
     };
 
@@ -788,6 +793,7 @@ fn runtime_permission_actions_include_context_containment() -> Result<(), Box<dy
         .first()
         .ok_or("missing direct permissioned action")?;
     assert_safe_containment_snapshot(direct_action)?;
+    assert_non_default_permission_snapshot(direct_action)?;
 
     let catalog = bridge_catalog([("mcp_repeat", "Repeat deferred text", ["text"])]);
     let bridge_report = dispatch_bridge_tool_call(
@@ -806,6 +812,20 @@ fn runtime_permission_actions_include_context_containment() -> Result<(), Box<dy
         .first()
         .ok_or("missing bridge permissioned action")?;
     assert_safe_containment_snapshot(bridge_action)?;
+    assert_non_default_permission_snapshot(bridge_action)?;
+    Ok(())
+}
+
+fn assert_non_default_permission_snapshot(
+    action: &shacs_core::runtime::PermissionedAction,
+) -> Result<(), Box<dyn Error>> {
+    let snapshot = &action.permission_mode_snapshot;
+    if snapshot.mode != PermissionMode::Auto
+        || snapshot.source.as_deref() != Some("user_local_config")
+        || snapshot.scope_ref.as_deref() != Some("workspace")
+    {
+        return Err(format!("permission snapshot was not propagated: {action:?}").into());
+    }
     Ok(())
 }
 
@@ -1081,6 +1101,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         metadata: json!({ "thread": "alpha" }),
         session_key: Some("session-1".to_owned()),
         containment_snapshot: None,
+        permission_mode_snapshot: PermissionModeSnapshot::default(),
         in_cron_context: false,
         record_channel_delivery: true,
     };
