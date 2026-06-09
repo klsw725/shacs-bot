@@ -16,6 +16,7 @@ mod self_improvement;
 mod subagent;
 mod tool_execution;
 mod tool_search;
+mod workflow;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
@@ -127,6 +128,19 @@ pub use tool_search::{
     BridgeToolCall, BridgeToolExecutionReport, BridgeToolResult, BridgeUnderlyingMappingEvidence,
     ResolvedDeferredToolCall, ToolCallScopeError, ToolDescribeEvidence, ToolSearchActivationReason,
     ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
+};
+
+pub use workflow::{
+    admit_workflow_plan, build_workflow_checkpoint, decide_workflow_admission,
+    workflow_harness_plan_digest, workflow_prd000_release_evidence_checklist,
+    workflow_resume_decision, WorkflowAdmissionDecision, WorkflowAdmissionInput,
+    WorkflowBudgetPolicy, WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpoint,
+    WorkflowCheckpointInput, WorkflowCheckpointPolicy, WorkflowChildSpec, WorkflowContextPolicy,
+    WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy, WorkflowPattern,
+    WorkflowPermissionPolicy, WorkflowPrd000ReleaseEvidence, WorkflowPrd000ReleaseEvidenceBucket,
+    WorkflowPrd000ReleaseEvidenceChecklist, WorkflowQuarantinePolicy, WorkflowResumeDecision,
+    WorkflowResumePolicy, WorkflowRunRecord, WorkflowRunState, WorkflowStep, WorkflowStopCondition,
+    WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
 };
 
 pub type Dream<'a> = DreamProcessor<'a>;
