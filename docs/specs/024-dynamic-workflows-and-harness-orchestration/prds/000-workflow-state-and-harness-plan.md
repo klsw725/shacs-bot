@@ -2,7 +2,7 @@
 
 ## 목표
 
-Spec 023의 첫 구현 웨이브는 dynamic workflow를 실제 실행하기 전에 필요한 typed foundation을 닫는다. 이 PRD는 prototype이 아니라 이후 PRD들이 공유할 workflow identity, state, harness plan, admission, checkpoint/resume, release evidence contract를 Rust 타입과 테스트로 고정하는 것을 목표로 한다.
+Spec 024의 첫 구현 웨이브는 dynamic workflow를 실제 실행하기 전에 필요한 typed foundation을 닫는다. 이 PRD는 prototype이 아니라 이후 PRD들이 공유할 workflow identity, state, harness plan, admission, checkpoint/resume, release evidence contract를 Rust 타입과 테스트로 고정하는 것을 목표로 한다.
 
 ## 범위
 
@@ -40,5 +40,5 @@ Spec 023의 첫 구현 웨이브는 dynamic workflow를 실제 실행하기 전�
 - harness plan digest가 stable JSON digest로 계산된다.
 - admitted workflow record가 plan digest와 origin session/turn을 보존한다.
 - checkpoint resume decision이 terminal state, plan digest mismatch, missing resume point를 fail-closed로 처리한다.
-- release evidence checklist가 owner `023`과 redaction validity를 요구한다.
+- release evidence checklist가 owner `024`와 redaction validity를 요구한다.
 - `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`, `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`, `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow`를 통과한다.

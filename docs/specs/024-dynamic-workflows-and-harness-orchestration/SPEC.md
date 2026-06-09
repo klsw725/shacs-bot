@@ -596,7 +596,7 @@ Diagnostics는 release gate와 replay에서 destructive tool을 재실행하지 
 
 ## 완료 기준
 
-Spec 023의 closure는 다음이 모두 충족될 때만 선언할 수 있다.
+Spec 024의 closure는 다음이 모두 충족될 때만 선언할 수 있다.
 
 - Workflow run state와 harness plan이 typed Rust model로 존재한다.
 - Workflow admission이 regular loop, quick workflow, dynamic workflow, blocked, ask-user를 구분한다.
