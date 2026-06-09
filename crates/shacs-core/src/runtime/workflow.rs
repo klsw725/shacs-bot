@@ -497,7 +497,7 @@ pub fn workflow_prd000_release_evidence_checklist(
 }
 
 fn workflow_evidence_ref_valid(evidence_ref: &EvidenceRef) -> bool {
-    evidence_ref.owner_spec.as_deref() == Some("023")
+    evidence_ref.owner_spec.as_deref() == Some("024")
         && !evidence_ref.id.trim().is_empty()
         && !evidence_ref.digest.trim().is_empty()
         && matches!(
@@ -1047,8 +1047,8 @@ pub fn workflow_projection(
             heavy_commands: 0,
         });
     WorkflowProjection {
-        schema_label: "023WorkflowProjection".to_owned(),
-        schema_version: "023WorkflowProjection.v1".to_owned(),
+        schema_label: "024WorkflowProjection".to_owned(),
+        schema_version: "024WorkflowProjection.v1".to_owned(),
         workflow_id: run.workflow_id.clone(),
         objective_summary: plan.objective.clone(),
         pattern: plan.pattern,
@@ -1108,7 +1108,7 @@ pub fn workflow_diagnostics_manifest(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkflowSpec023ReleaseEvidenceBucket {
+pub enum WorkflowSpec024ReleaseEvidenceBucket {
     Prd000StateHarnessPlan,
     Prd001PatternChildGraph,
     Prd002VerifierReview,
@@ -1121,8 +1121,8 @@ pub enum WorkflowSpec023ReleaseEvidenceBucket {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkflowSpec023ReleaseEvidence {
-    pub bucket: WorkflowSpec023ReleaseEvidenceBucket,
+pub struct WorkflowSpec024ReleaseEvidence {
+    pub bucket: WorkflowSpec024ReleaseEvidenceBucket,
     #[serde(default)]
     pub test_names: Vec<String>,
     #[serde(default)]
@@ -1132,14 +1132,14 @@ pub struct WorkflowSpec023ReleaseEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowSpec023ReleaseEvidenceChecklist {
-    pub required_buckets: Vec<WorkflowSpec023ReleaseEvidenceBucket>,
-    pub covered_buckets: Vec<WorkflowSpec023ReleaseEvidenceBucket>,
-    pub missing_buckets: Vec<WorkflowSpec023ReleaseEvidenceBucket>,
+pub struct WorkflowSpec024ReleaseEvidenceChecklist {
+    pub required_buckets: Vec<WorkflowSpec024ReleaseEvidenceBucket>,
+    pub covered_buckets: Vec<WorkflowSpec024ReleaseEvidenceBucket>,
+    pub missing_buckets: Vec<WorkflowSpec024ReleaseEvidenceBucket>,
     pub passed: bool,
 }
 
-impl WorkflowSpec023ReleaseEvidenceBucket {
+impl WorkflowSpec024ReleaseEvidenceBucket {
     pub fn required_buckets() -> Vec<Self> {
         vec![
             Self::Prd000StateHarnessPlan,
@@ -1155,10 +1155,10 @@ impl WorkflowSpec023ReleaseEvidenceBucket {
     }
 }
 
-pub fn workflow_spec023_release_evidence_checklist(
-    evidence: &[WorkflowSpec023ReleaseEvidence],
-) -> WorkflowSpec023ReleaseEvidenceChecklist {
-    let required_buckets = WorkflowSpec023ReleaseEvidenceBucket::required_buckets();
+pub fn workflow_spec024_release_evidence_checklist(
+    evidence: &[WorkflowSpec024ReleaseEvidence],
+) -> WorkflowSpec024ReleaseEvidenceChecklist {
+    let required_buckets = WorkflowSpec024ReleaseEvidenceBucket::required_buckets();
     let covered = evidence
         .iter()
         .filter(|entry| {
@@ -1179,7 +1179,7 @@ pub fn workflow_spec023_release_evidence_checklist(
         .collect::<Vec<_>>();
     let passed = missing_buckets.is_empty();
 
-    WorkflowSpec023ReleaseEvidenceChecklist {
+    WorkflowSpec024ReleaseEvidenceChecklist {
         required_buckets,
         covered_buckets,
         missing_buckets,

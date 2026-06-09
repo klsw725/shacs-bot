@@ -6,7 +6,7 @@ use shacs_core::runtime::{
     workflow_permission_ceiling_decision, workflow_prd000_release_evidence_checklist,
     workflow_projection, workflow_quarantine_decision, workflow_ready_step_ids,
     workflow_recipe_readiness, workflow_resume_decision,
-    workflow_spec023_release_evidence_checklist, workflow_synthesis_outcome,
+    workflow_spec024_release_evidence_checklist, workflow_synthesis_outcome,
     workflow_verification_gate, workflow_worktree_decision, WorkflowAdmissionDecision,
     WorkflowAdmissionInput, WorkflowBarrierDecision, WorkflowBudgetDecision, WorkflowBudgetPolicy,
     WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowCheckpointPolicy,
@@ -15,7 +15,7 @@ use shacs_core::runtime::{
     WorkflowPermissionCeilingDecision, WorkflowPermissionPolicy, WorkflowPrd000ReleaseEvidence,
     WorkflowPrd000ReleaseEvidenceBucket, WorkflowQuarantineDecision, WorkflowQuarantinePolicy,
     WorkflowRecipe, WorkflowRecipeReadiness, WorkflowResumeDecision, WorkflowResumePolicy,
-    WorkflowRunState, WorkflowSpec023ReleaseEvidence, WorkflowSpec023ReleaseEvidenceBucket,
+    WorkflowRunState, WorkflowSpec024ReleaseEvidence, WorkflowSpec024ReleaseEvidenceBucket,
     WorkflowStep, WorkflowStepPrivilege, WorkflowStopCondition, WorkflowToolScopePolicy,
     WorkflowVerificationGate, WorkflowVerifierSpec, WorkflowVerifierVerdict,
     WorkflowVerifierVerdictKind, WorkflowWorktreeDecision, WorkflowWorktreePolicy,
@@ -238,7 +238,7 @@ fn workflow_prd000_release_evidence_requires_all_buckets_and_valid_owner_redacti
             bucket,
             test_names: vec![format!("test-{bucket:?}")],
             manual_qa_refs: Vec::new(),
-            evidence_refs: vec![evidence("ok", Some("023"), RedactionStatus::AlreadySafe)],
+            evidence_refs: vec![evidence("ok", Some("024"), RedactionStatus::AlreadySafe)],
         })
         .collect::<Vec<_>>();
     let checklist = workflow_prd000_release_evidence_checklist(&complete);
@@ -282,7 +282,7 @@ fn workflow_barrier_verifier_and_synthesis_fail_closed() {
         step_id: "extract-claims".to_owned(),
         status: WorkflowChildRunStatus::Completed,
         summary: "claims extracted".to_owned(),
-        evidence_refs: vec![evidence("child", Some("023"), RedactionStatus::AlreadySafe)],
+        evidence_refs: vec![evidence("child", Some("024"), RedactionStatus::AlreadySafe)],
     };
     assert_eq!(
         workflow_barrier_decision(&plan, std::slice::from_ref(&result)),
@@ -488,7 +488,7 @@ fn workflow_recipe_quarantine_and_permission_ceiling_preserve_safety_boundaries(
 }
 
 #[test]
-fn workflow_projection_diagnostics_and_spec023_release_gate_are_evidence_backed(
+fn workflow_projection_diagnostics_and_spec024_release_gate_are_evidence_backed(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let plan = sample_plan();
     let run = admit_workflow_plan(&plan, 100)?;
@@ -520,11 +520,11 @@ fn workflow_projection_diagnostics_and_spec023_release_gate_are_evidence_backed(
         Some(&checkpoint),
         &WorkflowVerificationGate::Passed,
         &[
-            evidence("projection", Some("023"), RedactionStatus::AlreadySafe),
+            evidence("projection", Some("024"), RedactionStatus::AlreadySafe),
             evidence("wrong-owner", Some("018"), RedactionStatus::AlreadySafe),
         ],
     );
-    assert_eq!(projection.schema_version, "023WorkflowProjection.v1");
+    assert_eq!(projection.schema_version, "024WorkflowProjection.v1");
     assert_eq!(projection.progress_count, 1);
     assert_eq!(projection.active_child_count, 1);
     assert_eq!(projection.verifier_status, "passed");
@@ -535,36 +535,36 @@ fn workflow_projection_diagnostics_and_spec023_release_gate_are_evidence_backed(
         &plan,
         vec!["stale-child".to_owned()],
         vec![
-            evidence("diag", Some("023"), RedactionStatus::Redacted),
-            evidence("unsafe", Some("023"), RedactionStatus::RedactionFailed),
+            evidence("diag", Some("024"), RedactionStatus::Redacted),
+            evidence("unsafe", Some("024"), RedactionStatus::RedactionFailed),
         ],
     )?;
     assert_eq!(manifest.workflow_id, "workflow-1");
     assert_eq!(manifest.stale_result_refs, vec!["stale-child".to_owned()]);
     assert_eq!(manifest.evidence_refs.len(), 1);
 
-    let complete = WorkflowSpec023ReleaseEvidenceBucket::required_buckets()
+    let complete = WorkflowSpec024ReleaseEvidenceBucket::required_buckets()
         .into_iter()
-        .map(|bucket| WorkflowSpec023ReleaseEvidence {
+        .map(|bucket| WorkflowSpec024ReleaseEvidence {
             bucket,
             test_names: vec![format!("test-{bucket:?}")],
             manual_qa_refs: Vec::new(),
             evidence_refs: vec![evidence(
                 "release",
-                Some("023"),
+                Some("024"),
                 RedactionStatus::AlreadySafe,
             )],
         })
         .collect::<Vec<_>>();
-    assert!(workflow_spec023_release_evidence_checklist(&complete).passed);
+    assert!(workflow_spec024_release_evidence_checklist(&complete).passed);
 
-    let incomplete = [WorkflowSpec023ReleaseEvidence {
-        bucket: WorkflowSpec023ReleaseEvidenceBucket::Prd001PatternChildGraph,
+    let incomplete = [WorkflowSpec024ReleaseEvidence {
+        bucket: WorkflowSpec024ReleaseEvidenceBucket::Prd001PatternChildGraph,
         test_names: vec!["workflow_barrier_verifier_and_synthesis_fail_closed".to_owned()],
         manual_qa_refs: Vec::new(),
         evidence_refs: vec![evidence("bad", Some("018"), RedactionStatus::AlreadySafe)],
     }];
-    assert!(!workflow_spec023_release_evidence_checklist(&incomplete).passed);
+    assert!(!workflow_spec024_release_evidence_checklist(&incomplete).passed);
 
     Ok(())
 }

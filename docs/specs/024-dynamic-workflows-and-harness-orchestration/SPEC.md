@@ -379,7 +379,7 @@ Workflow context policy는 다음을 만족해야 한다.
 4. Compaction 또는 resume 후에도 root objective와 constraints는 손실되면 안 된다.
 5. Child result는 root objective 대비 coverage와 deviations를 보고해야 한다.
 
-Context owner는 009다. 023은 workflow가 context slicing을 어떻게 소비하는지 정의한다.
+Context owner는 009다. 024는 workflow가 context slicing을 어떻게 소비하는지 정의한다.
 
 ---
 
