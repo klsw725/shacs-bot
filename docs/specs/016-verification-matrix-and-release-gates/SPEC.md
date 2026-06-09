@@ -143,6 +143,7 @@ demo behavior는 제한된 경로에서만 동작하거나, 실패/복구/경계
 목적:
 
 - 설치, start/stop, compatibility, migration, interrupted upgrade recovery 검증
+- 공식 Docker/Compose containment evidence는 opt-in smoke command `./docs/scripts/spec023-compose-smoke.sh`로 검증
 
 ### 7. 안전성 및 redaction 테스트
 

@@ -1,6 +1,6 @@
 use crate::runtime::{
-    normalize_runtime_tool_call, PermissionModeSnapshot, PermissionedAction,
-    PermissionedActionInput, PermissionedActionOrigin,
+    normalize_runtime_tool_call, ContainmentSnapshotRef, PermissionModeSnapshot,
+    PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
 };
 use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
@@ -152,6 +152,10 @@ pub struct ToolExecutionContext {
     pub message_id: Option<String>,
     pub metadata: Value,
     pub session_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment_snapshot: Option<ContainmentSnapshotRef>,
+    #[serde(default)]
+    pub permission_mode_snapshot: PermissionModeSnapshot,
     pub in_cron_context: bool,
     pub record_channel_delivery: bool,
 }
@@ -164,6 +168,8 @@ impl Default for ToolExecutionContext {
             message_id: None,
             metadata: Value::Object(Map::new()),
             session_key: None,
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
             in_cron_context: false,
             record_channel_delivery: false,
         }
@@ -326,7 +332,15 @@ pub(crate) fn permissioned_action_input_from_context(
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| format!("turn:{session_id}"));
-    let origin = if context.in_cron_context {
+    let subagent_id = context
+        .metadata
+        .get("subagent_task_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned);
+    let origin = if subagent_id.is_some() {
+        PermissionedActionOrigin::Subagent { subagent_id }
+    } else if context.in_cron_context {
         PermissionedActionOrigin::CronWake { job_id: None }
     } else if context.channel.trim().is_empty() {
         PermissionedActionOrigin::UserTurn
@@ -341,8 +355,8 @@ pub(crate) fn permissioned_action_input_from_context(
         session_id,
         turn_id,
         origin,
-        permission_mode_snapshot: PermissionModeSnapshot::default(),
-        containment_snapshot: None,
+        permission_mode_snapshot: context.permission_mode_snapshot.clone(),
+        containment_snapshot: context.containment_snapshot.clone(),
         intent_snapshot: None,
     }
 }

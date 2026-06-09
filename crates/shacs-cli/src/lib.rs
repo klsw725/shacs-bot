@@ -21,8 +21,8 @@ use shacs_channels::{
 use shacs_config::{
     config_context, default_config_path, ensure_runtime_dirs, load_auth_store,
     load_config_with_env, resolve_config_env_refs, save_auth_store_to_path, save_config_to_path,
-    ApiConfig, ConfigBundle, ConfigError, EnvSource, LoadOptions, ProcessEnv, ProviderAuth,
-    ProviderConfig,
+    ApiConfig, ConfigBundle, ConfigError, EnvSource, LoadOptions, PermissionActivationContext,
+    PermissionConfigSnapshot, PermissionModeSource, ProcessEnv, ProviderAuth, ProviderConfig,
 };
 use shacs_core::app::{AppError, AppId, AppLifecycleState, AppRegistryEntry, AppRegistryStore};
 use shacs_core::app_authoring::{
@@ -30,9 +30,10 @@ use shacs_core::app_authoring::{
 };
 use shacs_core::runtime::{
     AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
-    ContextBuilder, DreamLifecycle, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
-    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle,
-    MessageBus, ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
+    ContainmentSnapshotRef, ContextBuilder, DreamLifecycle, HeartbeatError, HeartbeatNotifier,
+    HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker,
+    InboundMessage, McpLifecycle, MessageBus, PermissionModeSnapshot,
+    ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
     RuntimeToolCall, Session, SessionHistoryOptions, SessionManager, SessionTurnLock,
     StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig,
     ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
@@ -773,6 +774,15 @@ pub struct RuntimeInspectReport {
     pub capabilities: Vec<RuntimeCapabilityReport>,
     pub sessions: RuntimeSessionInspect,
     pub lifecycle: RuntimeLifecycleInspect,
+    pub containment: RuntimeContainmentInspect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeContainmentInspect {
+    pub contained: Option<bool>,
+    pub backend: Option<String>,
+    pub summary: Option<String>,
+    pub digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2316,6 +2326,7 @@ fn runtime_inspect_inner(
         &bundle.context.data_dir,
     ))?;
     let compatibility = evaluate_runtime_compatibility(RUNTIME_DATA_SCHEMA_VERSION);
+    let containment = runtime_containment_inspect(&bundle);
 
     Ok(RuntimeInspectReport {
         config_path,
@@ -2338,7 +2349,277 @@ fn runtime_inspect_inner(
             stop_request,
             update_marker,
         },
+        containment,
     })
+}
+
+fn runtime_containment_inspect(bundle: &ConfigBundle) -> RuntimeContainmentInspect {
+    runtime_containment_classify(RuntimeContainmentEvidence::detect(bundle))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct RuntimeContainmentEvidence {
+    exec_sandbox_backend: Option<String>,
+    official_package_marker: bool,
+    container_markers: Vec<String>,
+    unsafe_markers: Vec<String>,
+}
+
+impl RuntimeContainmentEvidence {
+    fn detect(bundle: &ConfigBundle) -> Self {
+        let exec_sandbox_backend = non_empty(Some(bundle.config.tools.exec.sandbox.as_str()))
+            .then(|| redact_string(bundle.config.tools.exec.sandbox.trim()));
+        let mut evidence = Self {
+            exec_sandbox_backend,
+            official_package_marker: official_runtime_package_marker_observed(),
+            container_markers: runtime_container_markers(),
+            unsafe_markers: runtime_unsafe_markers(),
+        };
+        evidence.normalize();
+        evidence
+    }
+
+    fn normalize(&mut self) {
+        self.container_markers =
+            runtime_sorted_limited_markers(std::mem::take(&mut self.container_markers));
+        self.unsafe_markers =
+            runtime_sorted_limited_markers(std::mem::take(&mut self.unsafe_markers));
+    }
+
+    #[cfg(test)]
+    fn from_parts(
+        exec_sandbox_backend: Option<&str>,
+        official_package_marker: bool,
+        container_markers: &[&str],
+        unsafe_markers: &[&str],
+    ) -> Self {
+        let mut evidence = Self {
+            exec_sandbox_backend: exec_sandbox_backend.map(redact_string),
+            official_package_marker,
+            container_markers: container_markers
+                .iter()
+                .map(|marker| (*marker).to_owned())
+                .collect(),
+            unsafe_markers: unsafe_markers
+                .iter()
+                .map(|marker| (*marker).to_owned())
+                .collect(),
+        };
+        evidence.normalize();
+        evidence
+    }
+}
+
+fn runtime_containment_classify(evidence: RuntimeContainmentEvidence) -> RuntimeContainmentInspect {
+    let (contained, backend, summary) = if !evidence.unsafe_markers.is_empty() {
+        (
+            Some(false),
+            Some("unsafe-privileged".to_owned()),
+            format!(
+                "unsafe privileged runtime evidence observed ({}); containment not trusted",
+                evidence.unsafe_markers.join(", ")
+            ),
+        )
+    } else if evidence.official_package_marker && !evidence.container_markers.is_empty() {
+        (
+            Some(true),
+            Some(runtime_containment_backend("official-container", &evidence.exec_sandbox_backend)),
+            format!(
+                "official package marker and container runtime evidence observed ({}); kernel-level isolation not claimed",
+                evidence.container_markers.join(", ")
+            ),
+        )
+    } else if !evidence.container_markers.is_empty() {
+        (
+            Some(true),
+            Some(runtime_containment_backend("container", &evidence.exec_sandbox_backend)),
+            format!(
+                "recognized container runtime evidence observed ({}); kernel-level isolation not claimed",
+                evidence.container_markers.join(", ")
+            ),
+        )
+    } else if evidence.official_package_marker {
+        (
+            None,
+            Some(runtime_containment_backend("official-package", &evidence.exec_sandbox_backend)),
+            "official package marker observed without container runtime evidence; containment not observed".to_owned(),
+        )
+    } else if let Some(exec_sandbox_backend) = &evidence.exec_sandbox_backend {
+        (
+            None,
+            Some(exec_sandbox_backend.clone()),
+            "exec sandbox backend configured as optional hardening; runtime containment not observed".to_owned(),
+        )
+    } else {
+        (
+            None,
+            None,
+            "native runtime; containment not observed".to_owned(),
+        )
+    };
+
+    let mut inspect = RuntimeContainmentInspect {
+        contained,
+        backend,
+        summary: Some(summary),
+        digest: None,
+    };
+    inspect.digest = Some(runtime_containment_digest(&inspect));
+    inspect
+}
+
+fn runtime_containment_backend(kind: &str, exec_sandbox_backend: &Option<String>) -> String {
+    match exec_sandbox_backend {
+        Some(exec_sandbox_backend) => format!("{kind}+{exec_sandbox_backend}"),
+        None => kind.to_owned(),
+    }
+}
+
+fn official_runtime_package_marker_observed() -> bool {
+    std::env::var("SHACS_RUNTIME_PACKAGE")
+        .map(|value| value.trim() == "shacs-bot-official-container")
+        .unwrap_or(false)
+}
+
+fn runtime_container_markers() -> Vec<String> {
+    let mut markers = Vec::new();
+    if Path::new("/.dockerenv").exists() {
+        markers.push("dockerenv".to_owned());
+    }
+    if std::env::var("container").is_ok_and(|value| non_empty(Some(value.as_str()))) {
+        markers.push("container-env".to_owned());
+    }
+    if runtime_proc_file_has_any_marker(
+        "/proc/1/cgroup",
+        &["docker", "containerd", "kubepods", "podman", "lxc"],
+    ) || runtime_proc_file_has_any_marker(
+        "/proc/self/cgroup",
+        &["docker", "containerd", "kubepods", "podman", "lxc"],
+    ) {
+        markers.push("cgroup".to_owned());
+    }
+    runtime_sorted_limited_markers(markers)
+}
+
+fn runtime_unsafe_markers() -> Vec<String> {
+    let mut markers = Vec::new();
+    if runtime_privileged_env_observed() {
+        markers.push("privileged-env".to_owned());
+    }
+    let container_observed = Path::new("/.dockerenv").exists()
+        || std::env::var("container").is_ok_and(|value| non_empty(Some(value.as_str())))
+        || runtime_proc_file_has_any_marker(
+            "/proc/1/cgroup",
+            &["docker", "containerd", "kubepods", "podman", "lxc"],
+        );
+    if container_observed && Path::new("/var/run/docker.sock").exists() {
+        markers.push("docker-socket".to_owned());
+    }
+    if container_observed && runtime_effective_capability_enabled("/proc/self/status", 21) {
+        markers.push("cap-sys-admin".to_owned());
+    }
+    runtime_sorted_limited_markers(markers)
+}
+
+fn runtime_privileged_env_observed() -> bool {
+    ["SHACS_RUNTIME_PRIVILEGED", "SHACS_CONTAINER_PRIVILEGED"]
+        .iter()
+        .any(|name| {
+            std::env::var(name)
+                .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        })
+}
+
+fn runtime_proc_file_has_any_marker(path: &str, markers: &[&str]) -> bool {
+    let Ok(text) = runtime_read_bounded_file(path) else {
+        return false;
+    };
+    let lower = text.to_ascii_lowercase();
+    markers.iter().any(|marker| lower.contains(marker))
+}
+
+fn runtime_effective_capability_enabled(path: &str, capability_bit: u32) -> bool {
+    let Ok(text) = runtime_read_bounded_file(path) else {
+        return false;
+    };
+    text.lines().any(|line| {
+        line.strip_prefix("CapEff:")
+            .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+            .map(|mask| mask & (1_u64 << capability_bit) != 0)
+            .unwrap_or(false)
+    })
+}
+
+fn runtime_read_bounded_file(path: &str) -> io::Result<String> {
+    let file = fs::File::open(path)?;
+    let mut text = String::new();
+    file.take(4096).read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn runtime_sorted_limited_markers(markers: Vec<String>) -> Vec<String> {
+    markers
+        .into_iter()
+        .map(|marker| marker.chars().take(48).collect::<String>())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(8)
+        .collect()
+}
+
+fn runtime_containment_snapshot_ref(inspect: &RuntimeContainmentInspect) -> ContainmentSnapshotRef {
+    ContainmentSnapshotRef {
+        contained: inspect.contained,
+        digest: inspect.digest.clone(),
+        summary: inspect.summary.clone(),
+    }
+}
+
+fn runtime_containment_precondition_met(inspect: &RuntimeContainmentInspect) -> bool {
+    inspect.contained == Some(true)
+}
+
+fn agent_loop_permission_config_snapshot(
+    bundle: &ConfigBundle,
+    containment: &RuntimeContainmentInspect,
+) -> PermissionConfigSnapshot {
+    bundle.config.permissions.normalized_snapshot(
+        PermissionModeSource::UserLocalConfig,
+        PermissionActivationContext {
+            user_local_auto_opt_in: false,
+            containment_precondition_met: runtime_containment_precondition_met(containment),
+        },
+    )
+}
+
+fn runtime_permission_mode_snapshot(snapshot: &PermissionConfigSnapshot) -> PermissionModeSnapshot {
+    PermissionModeSnapshot {
+        mode: snapshot.mode,
+        source: Some(permission_mode_source_name(snapshot.source).to_owned()),
+        scope_ref: None,
+    }
+}
+
+fn permission_mode_source_name(source: PermissionModeSource) -> &'static str {
+    match source {
+        PermissionModeSource::UserLocalConfig => "user_local_config",
+        PermissionModeSource::WorkspaceConfig => "workspace_config",
+        PermissionModeSource::CliFlag => "cli_flag",
+        PermissionModeSource::LocalApiRequest => "local_api_request",
+        PermissionModeSource::SessionCommand => "session_command",
+        PermissionModeSource::DefaultFallback => "default_fallback",
+    }
+}
+
+fn runtime_containment_digest(inspect: &RuntimeContainmentInspect) -> String {
+    let payload = json!({
+        "contained": inspect.contained,
+        "backend": &inspect.backend,
+        "summary": &inspect.summary,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(payload.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn inspect_generated_media(
@@ -2619,6 +2900,12 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
             },
             "providers": providers,
             "capabilities": capabilities,
+            "containment": {
+                "contained": report.containment.contained,
+                "backend": &report.containment.backend,
+                "summary": &report.containment.summary,
+                "digest": &report.containment.digest,
+            },
             "generated_media": generated_media,
             "sessions": {
                 "count": report.sessions.count,
@@ -10866,6 +11153,8 @@ pub struct AgentLoopChatCompletionAdapter {
     exec_allowed_env_keys: Vec<String>,
     exec_env: BTreeMap<String, String>,
     tool_search: ToolSearchConfig,
+    containment_snapshot: Option<ContainmentSnapshotRef>,
+    permission_mode_snapshot: PermissionModeSnapshot,
 }
 
 impl AgentLoopChatCompletionAdapter {
@@ -10888,6 +11177,12 @@ impl AgentLoopChatCompletionAdapter {
             .then(|| bundle.config.tools.exec.sandbox.clone());
         let exec_path_append = non_empty(Some(bundle.config.tools.exec.path_append.as_str()))
             .then(|| bundle.config.tools.exec.path_append.clone());
+        let containment = runtime_containment_inspect(&bundle);
+        let permission_config_snapshot =
+            agent_loop_permission_config_snapshot(&bundle, &containment);
+        let containment_snapshot = Some(runtime_containment_snapshot_ref(&containment));
+        let permission_mode_snapshot =
+            runtime_permission_mode_snapshot(&permission_config_snapshot);
         let tooling = production_tool_registry(&bundle, allow_side_effect_tools)?;
         let provider_id = resolved.provider_id.clone();
         let resolved_model = resolved.model.clone();
@@ -10917,6 +11212,8 @@ impl AgentLoopChatCompletionAdapter {
             exec_allowed_env_keys: bundle.config.tools.exec.allowed_env_keys.clone(),
             exec_env: configured_exec_env(&bundle.config),
             tool_search: runtime_tool_search_config(&bundle.config.tools.tool_search),
+            containment_snapshot,
+            permission_mode_snapshot,
         })
     }
 
@@ -10957,6 +11254,8 @@ impl AgentLoopChatCompletionAdapter {
             .unified_session
             .then(|| "api:default".to_owned());
         config.concurrent_tools = true;
+        config.containment_snapshot = self.containment_snapshot.clone();
+        config.permission_mode_snapshot = self.permission_mode_snapshot.clone();
         config
     }
 
@@ -11678,6 +11977,8 @@ impl AgentLoopChatCompletionAdapter {
             SubagentExecutionConfig::new(&self.workspace, self.resolved_model.clone());
         subagent.settings = config.settings.clone();
         subagent.retry_mode = config.retry_mode;
+        subagent.containment_snapshot = config.containment_snapshot.clone();
+        subagent.permission_mode_snapshot = config.permission_mode_snapshot.clone();
         subagent.max_iterations = config.max_iterations;
         subagent.max_tool_result_chars = config.max_tool_result_chars;
         subagent.fail_on_tool_error = true;
@@ -12115,6 +12416,9 @@ fn render_image_generation_provider_error(error: ProviderError) -> String {
 }
 
 fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
+    let parent_containment_snapshot = Some(runtime_containment_snapshot_ref(
+        &runtime_containment_inspect(bundle),
+    ));
     bundle
         .config
         .tools
@@ -12138,6 +12442,7 @@ fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
                 .collect(),
             timeout_seconds: u64::from(config.tool_timeout),
             enabled_tools: config.enabled_tools.clone(),
+            parent_containment_snapshot: parent_containment_snapshot.clone(),
         })
         .collect()
 }
@@ -12399,6 +12704,12 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
         lines.push(format!("Latest session: {latest_key} ({updated})"));
     }
     lines.push(format!(
+        "Runtime containment: contained={} backend={} snapshot_digest={}",
+        optional_bool_label(report.containment.contained),
+        report.containment.backend.as_deref().unwrap_or("none"),
+        report.containment.digest.as_deref().unwrap_or("none")
+    ));
+    lines.push(format!(
         "Generated image artifacts: {}",
         report.generated_media.len()
     ));
@@ -12456,6 +12767,14 @@ fn format_runtime_diagnostics(report: RuntimeDiagnosticsReport) -> String {
         }
     }
     output
+}
+
+fn optional_bool_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
 }
 
 fn format_runtime_update(outcome: RuntimeUpdateOutcome) -> String {
@@ -12865,6 +13184,14 @@ mod tests {
     use std::fs;
     use std::sync::{Arc, Mutex};
 
+    fn read_repo_text(relative_path: &str) -> Result<String, Box<dyn Error>> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(relative_path);
+        Ok(fs::read_to_string(path)?)
+    }
+
     #[test]
     fn parser_handles_global_and_command_config_paths() -> Result<(), Box<dyn Error>> {
         let parsed = parse_cli_args([
@@ -12885,6 +13212,45 @@ mod tests {
             return Err("expected status command".into());
         };
         assert_eq!(options.config_path, Some(PathBuf::from("/tmp/b.json")));
+        Ok(())
+    }
+
+    #[test]
+    fn dockerfile_runtime_stage_uses_non_root_user() -> Result<(), Box<dyn Error>> {
+        let dockerfile = read_repo_text("Dockerfile")?;
+        assert!(dockerfile.contains("FROM python:3.14-slim-bookworm AS runtime"));
+        assert!(dockerfile.contains("USER shacs"));
+        assert!(dockerfile.contains("SHACS_RUNTIME_PACKAGE=shacs-bot-official-container"));
+        Ok(())
+    }
+
+    #[test]
+    fn docker_compose_defaults_do_not_mount_docker_socket() -> Result<(), Box<dyn Error>> {
+        let compose = read_repo_text("docker-compose.yml")?;
+        assert!(!compose.contains("/var/run/docker.sock"));
+        assert!(!compose.contains("docker.sock"));
+        Ok(())
+    }
+
+    #[test]
+    fn docker_compose_defaults_do_not_set_privileged_mode() -> Result<(), Box<dyn Error>> {
+        let compose = read_repo_text("docker-compose.yml")?;
+        assert!(!compose.contains("privileged: true"));
+        Ok(())
+    }
+
+    #[test]
+    fn docker_compose_defaults_do_not_use_host_network_mode() -> Result<(), Box<dyn Error>> {
+        let compose = read_repo_text("docker-compose.yml")?;
+        assert!(!compose.contains("network_mode: host"));
+        assert!(!compose.contains("network_mode: \"host\""));
+        Ok(())
+    }
+
+    #[test]
+    fn docker_compose_default_mount_remains_scoped_to_shacs_home() -> Result<(), Box<dyn Error>> {
+        let compose = read_repo_text("docker-compose.yml")?;
+        assert!(compose.contains("~/.shacs-bot:/home/shacs/.shacs-bot"));
         Ok(())
     }
 
@@ -14554,6 +14920,16 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: Some(ContainmentSnapshotRef {
+                contained: Some(true),
+                digest: Some("containment-digest".to_owned()),
+                summary: Some("workspace containment".to_owned()),
+            }),
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: shacs_config::PermissionMode::AcceptEdits,
+                source: Some("test-source".to_owned()),
+                scope_ref: Some("scope:test".to_owned()),
+            },
         };
 
         let error = adapter
@@ -15700,6 +16076,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let skills = adapter
@@ -15723,6 +16101,14 @@ mod tests {
             Some("/configured/bin")
         );
         assert_eq!(subagent.exec_allowed_env_keys, vec!["HOME".to_owned()]);
+        assert_eq!(
+            subagent.containment_snapshot,
+            adapter.loop_config().containment_snapshot
+        );
+        assert_eq!(
+            subagent.permission_mode_snapshot,
+            adapter.loop_config().permission_mode_snapshot
+        );
         assert_eq!(
             subagent
                 .exec_env
@@ -16477,6 +16863,7 @@ mod tests {
         config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
         config.agents.defaults.provider = "openai_codex".to_owned();
         config.agents.defaults.model = "gpt-5.4".to_owned();
+        config.tools.exec.sandbox = "bwrap".to_owned();
         config
             .providers
             .insert("openai_codex".to_owned(), codex_provider_config());
@@ -16497,6 +16884,14 @@ mod tests {
         assert_eq!(report.model, "gpt-5.4");
         assert_eq!(report.sessions.count, 1);
         assert_eq!(report.sessions.latest_key.as_deref(), Some("cli:direct"));
+        assert!(report.containment.digest.is_some());
+        assert!(report.containment.summary.is_some());
+        assert!(!report
+            .containment
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sandboxed"));
         assert_eq!(report.lifecycle.binary_version, VERSION);
         assert_eq!(
             report.lifecycle.data_schema_version,
@@ -16516,6 +16911,8 @@ mod tests {
         assert!(output.contains("Binary version:"));
         assert!(output.contains("Update marker: none"));
         assert!(output.contains("Sessions: 1"));
+        assert!(output.contains("Runtime containment: contained="));
+        assert!(output.contains("snapshot_digest="));
         assert!(output.contains("Generated image artifacts: 0"));
         assert!(!output.contains("hello"));
         Ok(())
@@ -16531,6 +16928,7 @@ mod tests {
         config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
         config.agents.defaults.provider = "openai_codex".to_owned();
         config.agents.defaults.model = "gpt-5.4".to_owned();
+        config.tools.exec.sandbox = "bwrap sk-raw-secret".to_owned();
         config.providers.insert(
             "openai_codex".to_owned(),
             ProviderConfig {
@@ -16585,10 +16983,181 @@ mod tests {
         assert!(!output.contains("not real png"));
         assert!(output.contains("runtime diagnostics provider snapshot"));
         assert!(output.contains("runtime capability snapshot"));
+        assert!(output.contains("containment"));
+        assert!(output.contains("summary"));
         assert!(output.contains("[REDACTED]") || !output.contains("api_key"));
         assert!(!output.contains("sk-raw-secret"));
         assert!(!output.contains("raw-token"));
         Ok(())
+    }
+
+    #[test]
+    fn runtime_containment_classifier_reports_native_unknown() {
+        let inspect = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            None,
+            false,
+            &[],
+            &[],
+        ));
+
+        assert_eq!(inspect.contained, None);
+        assert_eq!(inspect.backend, None);
+        assert_eq!(
+            inspect.summary.as_deref(),
+            Some("native runtime; containment not observed")
+        );
+        assert!(inspect.digest.is_some());
+    }
+
+    #[test]
+    fn runtime_containment_snapshot_ref_preserves_unknown_state() {
+        let inspect = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            None,
+            false,
+            &[],
+            &[],
+        ));
+        let snapshot = runtime_containment_snapshot_ref(&inspect);
+
+        assert_eq!(snapshot.contained, None);
+        assert_eq!(
+            snapshot.summary.as_deref(),
+            Some("native runtime; containment not observed")
+        );
+        assert!(snapshot.digest.is_some());
+    }
+
+    #[test]
+    fn bypass_permissions_falls_back_for_native_unknown_containment() -> Result<(), Box<dyn Error>>
+    {
+        let config: shacs_config::PermissionsConfig = serde_json::from_value(json!({
+            "mode": "bypass_permissions"
+        }))?;
+        let inspect = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            None,
+            false,
+            &[],
+            &[],
+        ));
+        let snapshot = config.normalized_snapshot(
+            PermissionModeSource::UserLocalConfig,
+            PermissionActivationContext {
+                user_local_auto_opt_in: false,
+                containment_precondition_met: runtime_containment_precondition_met(&inspect),
+            },
+        );
+        let runtime_snapshot = runtime_permission_mode_snapshot(&snapshot);
+
+        assert_eq!(snapshot.mode, shacs_config::PermissionMode::Default);
+        assert_eq!(snapshot.source, PermissionModeSource::DefaultFallback);
+        assert_eq!(
+            snapshot.diagnostics.safe_fallback_reason.as_deref(),
+            Some("bypass_permissions_requires_containment")
+        );
+        assert_eq!(runtime_snapshot.mode, shacs_config::PermissionMode::Default);
+        assert_eq!(runtime_snapshot.source.as_deref(), Some("default_fallback"));
+        Ok(())
+    }
+
+    #[test]
+    fn bypass_permissions_falls_back_for_unsafe_privileged() -> Result<(), Box<dyn Error>> {
+        let config: shacs_config::PermissionsConfig = serde_json::from_value(json!({
+            "mode": "bypass_permissions"
+        }))?;
+        let inspect = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            None,
+            true,
+            &["dockerenv"],
+            &["docker-socket", "privileged-env"],
+        ));
+        let snapshot = config.normalized_snapshot(
+            PermissionModeSource::UserLocalConfig,
+            PermissionActivationContext {
+                user_local_auto_opt_in: false,
+                containment_precondition_met: runtime_containment_precondition_met(&inspect),
+            },
+        );
+        let runtime_snapshot = runtime_permission_mode_snapshot(&snapshot);
+
+        assert_eq!(inspect.contained, Some(false));
+        assert_eq!(inspect.backend.as_deref(), Some("unsafe-privileged"));
+        assert_eq!(snapshot.mode, shacs_config::PermissionMode::Default);
+        assert_eq!(snapshot.source, PermissionModeSource::DefaultFallback);
+        assert_eq!(
+            snapshot.diagnostics.safe_fallback_reason.as_deref(),
+            Some("bypass_permissions_requires_containment")
+        );
+        assert_eq!(runtime_snapshot.mode, shacs_config::PermissionMode::Default);
+        assert_eq!(runtime_snapshot.source.as_deref(), Some("default_fallback"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_containment_classifier_reports_official_container_marker() {
+        let inspect = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            None,
+            true,
+            &["dockerenv"],
+            &[],
+        ));
+
+        assert_eq!(inspect.contained, Some(true));
+        assert_eq!(inspect.backend.as_deref(), Some("official-container"));
+        let summary = inspect.summary.as_deref().unwrap_or_default();
+        assert!(summary.contains("official package marker"));
+        assert!(summary.contains("dockerenv"));
+        assert!(!summary.contains("sandboxed"));
+    }
+
+    #[test]
+    fn runtime_containment_classifier_treats_bwrap_as_optional_hardening() {
+        let inspect = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            Some("bwrap"),
+            false,
+            &[],
+            &[],
+        ));
+
+        assert_eq!(inspect.contained, None);
+        assert_eq!(inspect.backend.as_deref(), Some("bwrap"));
+        assert_eq!(
+            inspect.summary.as_deref(),
+            Some("exec sandbox backend configured as optional hardening; runtime containment not observed")
+        );
+    }
+
+    #[test]
+    fn runtime_containment_classifier_reports_recognized_container_evidence() {
+        let inspect = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            Some("bwrap"),
+            false,
+            &["cgroup", "dockerenv"],
+            &[],
+        ));
+
+        assert_eq!(inspect.contained, Some(true));
+        assert_eq!(inspect.backend.as_deref(), Some("container+bwrap"));
+        let summary = inspect.summary.as_deref().unwrap_or_default();
+        assert!(summary.contains("recognized container runtime evidence"));
+        assert!(summary.contains("cgroup"));
+        assert!(summary.contains("dockerenv"));
+    }
+
+    #[test]
+    fn runtime_containment_classifier_reports_unsafe_privileged_evidence() {
+        let inspect = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            None,
+            true,
+            &["dockerenv"],
+            &["docker-socket", "privileged-env"],
+        ));
+
+        assert_eq!(inspect.contained, Some(false));
+        assert_eq!(inspect.backend.as_deref(), Some("unsafe-privileged"));
+        let summary = inspect.summary.as_deref().unwrap_or_default();
+        assert!(summary.contains("unsafe privileged runtime evidence"));
+        assert!(summary.contains("docker-socket"));
+        assert!(summary.contains("privileged-env"));
     }
 
     #[test]
@@ -17697,6 +18266,8 @@ mod tests {
             exec_env: BTreeMap::new(),
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         assert!(!adapter.runtime_verbose);
@@ -17739,6 +18310,16 @@ mod tests {
                 search_default_limit: 3,
                 max_search_limit: 9,
             },
+            containment_snapshot: Some(ContainmentSnapshotRef {
+                contained: Some(true),
+                digest: Some("contained-digest".to_owned()),
+                summary: Some("contained summary".to_owned()),
+            }),
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: shacs_config::PermissionMode::Auto,
+                source: Some("user_local_config".to_owned()),
+                scope_ref: None,
+            },
         };
 
         let config = adapter.loop_config();
@@ -17746,6 +18327,21 @@ mod tests {
         assert_eq!(config.tool_search.threshold_pct, 42);
         assert_eq!(config.tool_search.search_default_limit, 3);
         assert_eq!(config.tool_search.max_search_limit, 9);
+        assert_eq!(
+            config
+                .containment_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.contained),
+            Some(true)
+        );
+        assert_eq!(
+            config.permission_mode_snapshot.mode,
+            shacs_config::PermissionMode::Auto
+        );
+        assert_eq!(
+            config.permission_mode_snapshot.source.as_deref(),
+            Some("user_local_config")
+        );
     }
 
     #[test]
@@ -17965,6 +18561,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let paths = adapter.persist_media_data_urls(&["data:text/plain;base64,aGk=".to_owned()])?;
@@ -18032,6 +18630,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -18125,6 +18725,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let error = adapter
@@ -18206,6 +18808,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -18274,6 +18878,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
         let (event_tx, event_rx) = mpsc::channel();
         event_tx.send(ProviderEvent::TextDelta {
@@ -18354,6 +18960,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         assert_eq!(
@@ -18431,6 +19039,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let response = adapter.complete_chat(ChatCompletionInvocation {
@@ -18514,6 +19124,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let output = complete_direct_message(
@@ -18604,6 +19216,8 @@ mod tests {
             runtime_verbose: false,
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let output = complete_direct_message(
@@ -18674,6 +19288,8 @@ mod tests {
                 runtime_verbose: false,
 
                 tool_search: ToolSearchConfig::default(),
+                containment_snapshot: None,
+                permission_mode_snapshot: PermissionModeSnapshot::default(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: Vec::new(),
@@ -18752,6 +19368,8 @@ mod tests {
                 runtime_verbose: false,
 
                 tool_search: ToolSearchConfig::default(),
+                containment_snapshot: None,
+                permission_mode_snapshot: PermissionModeSnapshot::default(),
             },
             lifecycle_hooks: vec![hook],
             observability_hooks: Vec::new(),
@@ -18835,6 +19453,8 @@ mod tests {
                 runtime_verbose: false,
 
                 tool_search: ToolSearchConfig::default(),
+                containment_snapshot: None,
+                permission_mode_snapshot: PermissionModeSnapshot::default(),
             },
             lifecycle_hooks: vec![recording_hook, panic_hook],
             observability_hooks: Vec::new(),
@@ -18928,6 +19548,8 @@ mod tests {
                 runtime_verbose: false,
 
                 tool_search: ToolSearchConfig::default(),
+                containment_snapshot: None,
+                permission_mode_snapshot: PermissionModeSnapshot::default(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![panic_hook],
@@ -19121,6 +19743,8 @@ mod tests {
                 runtime_verbose: false,
 
                 tool_search: ToolSearchConfig::default(),
+                containment_snapshot: None,
+                permission_mode_snapshot: PermissionModeSnapshot::default(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![recording_hook],
@@ -19306,6 +19930,8 @@ mod tests {
             exec_env: BTreeMap::new(),
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let inbound = InboundMessage::new("direct", "user", "chat-1", "make artifact")
@@ -19376,6 +20002,8 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let inbound = InboundMessage::new("direct", "user", "chat-1", "make summary")
@@ -19488,6 +20116,8 @@ mod tests {
             exec_env: BTreeMap::new(),
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         });
         let runtime_bus = MessageBus::new();
         let turn_adapter = adapter.clone();
@@ -19574,6 +20204,8 @@ mod tests {
             exec_env: BTreeMap::new(),
 
             tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
         let (_first_turn, first_outbound) = adapter.process_inbound_with_outbound(

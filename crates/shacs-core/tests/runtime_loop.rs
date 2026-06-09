@@ -17,9 +17,10 @@ use shacs_core::runtime::{
     tool_search_prd005_release_evidence_checklist, ActiveLoopTask, AgentLoop,
     AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentRunSpec, AgentRunner,
     AutoCompact, AutomationSourceEvent, AutomationSourceEventKind, BridgeUnderlyingMappingEvidence,
-    CancellationToken, ChildResultEnvelope, ChildResultStatus, ContextBuilder, DreamLifecycle,
-    EvaluatorDecisionInput, GoalCompletionVerdict, InboundMessage, LedgerConsumptionStatus,
-    LoopTaskRegisterResult, McpLifecycle, MergeDecision, MessageBus, PersistentGoal,
+    CancellationToken, ChildResultEnvelope, ChildResultStatus, ContainmentSnapshotRef,
+    ContextBuilder, DreamLifecycle, EvaluatorDecisionInput, GoalCompletionVerdict, InboundMessage,
+    LedgerConsumptionStatus, LoopTaskRegisterResult, McpLifecycle, MergeDecision, MessageBus,
+    PermissionMode, PermissionModeSnapshot, PermissionedActionOrigin, PersistentGoal,
     PersistentGoalStatus, ProviderHotSwapResult, ProviderSelectionSnapshot,
     RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind,
     RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults, RuntimeReplayInput,
@@ -2688,6 +2689,75 @@ fn subagent_spawn_inherits_snapshot_contract() -> Result<(), Box<dyn Error>> {
         || outcome.envelope.parallelism_group != "session-1"
     {
         return Err(format!("subagent spawn snapshots drifted: {outcome:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_execution_config_defaults_to_empty_runtime_snapshots() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let config = SubagentExecutionConfig::new(workspace.path(), "test-model");
+
+    if config.containment_snapshot.is_some()
+        || config.permission_mode_snapshot != PermissionModeSnapshot::default()
+    {
+        return Err(format!("subagent config default snapshots drifted: {config:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Result<(), Box<dyn Error>>
+{
+    let workspace = tempfile::tempdir()?;
+    std::fs::write(workspace.path().join("note.txt"), "hello")?;
+    let config = SubagentExecutionConfig::new(workspace.path(), "test-model");
+    let registry = build_subagent_tool_registry(&config);
+    let containment_snapshot = ContainmentSnapshotRef {
+        contained: Some(true),
+        digest: Some("containment-digest".to_owned()),
+        summary: Some("workspace containment".to_owned()),
+    };
+    let permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::AcceptEdits,
+        source: Some("test-source".to_owned()),
+        scope_ref: Some("scope:test".to_owned()),
+    };
+    let context = ToolExecutionContext {
+        channel: "cli".to_owned(),
+        chat_id: "direct".to_owned(),
+        message_id: Some("turn:cli:direct".to_owned()),
+        metadata: json!({ "subagent_task_id": "child-1" }),
+        session_key: Some("cli:direct".to_owned()),
+        containment_snapshot: Some(containment_snapshot.clone()),
+        permission_mode_snapshot: permission_mode_snapshot.clone(),
+        in_cron_context: false,
+        record_channel_delivery: false,
+    };
+
+    let report = RuntimeToolExecutor::new(&registry).execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "read-1",
+            "read_file",
+            json!({ "path": "note.txt" }),
+        )],
+        &context,
+    );
+    let action = report
+        .permissioned_actions
+        .first()
+        .ok_or("missing permissioned action")?;
+
+    if action.containment_snapshot.as_ref() != Some(&containment_snapshot)
+        || action.permission_mode_snapshot != permission_mode_snapshot
+        || !matches!(
+            &action.origin,
+            PermissionedActionOrigin::Subagent {
+                subagent_id: Some(subagent_id),
+            } if subagent_id == "child-1"
+        )
+    {
+        return Err(format!("subagent permissioned action context drifted: {action:?}").into());
     }
     Ok(())
 }
