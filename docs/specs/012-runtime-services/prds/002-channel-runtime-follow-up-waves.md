@@ -40,7 +40,7 @@
 - `MessageBus`와 `ChannelManager` 경계를 통한 inbound/outbound dispatch.
 - process-local same-session follow-up queue.
 - runtime metadata JSON의 best-effort cursor, diagnostic, delivery hint.
-- progress projection 차이. WebSocket은 `delta`/`stream_end`와 final `message`, Telegram/Discord/Slack은 preview update, Email/WhatsApp은 final-only.
+- progress projection 차이. WebSocket은 `delta`/`stream_end`와 final `message`, Telegram/Discord/Slack/Email/WhatsApp external transport는 final-only이며 기존 message를 edit/update하지 않는다.
 - platform normalizer와 outbound helper의 session metadata, reply context, content contract 보존.
 - 남은 future durable runtime work 정리.
 
@@ -71,7 +71,7 @@
 - shared lock conflict가 있으면 external inbound는 deferred/pending 처리로 돌아가 이후 재시도된다.
 - runtime metadata JSON은 Telegram offset, Discord REST last id, Discord Gateway resume state, Email UIDVALIDITY/seen UID, outbound delivery status를 best-effort로 저장한다.
 - WebSocket progress는 coalesced `delta`, `stream_end`, final `message` event로 전달된다.
-- Telegram, Discord, Slack progress는 preview update로 전달된다. Email과 WhatsApp은 final-only다.
+- Telegram, Discord, Slack, Email, WhatsApp external transport는 final-only이며 기존 message를 edit/update하지 않는다.
 - platform normalizer와 outbound helper는 session metadata, reply context, content contract를 보존한다.
 
 ### partial 또는 formal-looking but incomplete

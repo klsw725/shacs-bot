@@ -60,7 +60,7 @@
 - command router는 priority, exact, prefix command를 분리한다. `/status`, `/stop`, `/restart` 계열 priority command는 active turn lock 앞에서 처리될 수 있고, exact/prefix command는 normal turn boundary를 따른다.
 - external inbound same-session follow-up은 `ExternalSessionTurnCoordinator`의 process-local pending queue를 통해 직렬화된다.
 - runner는 mid-turn injection을 iteration 사이에서 drain하고 cycle을 cap한다.
-- progress projection은 persistence truth가 아니다. `delta`, `stream_end`, preview update는 진행 표시이며 final answer가 authoritative output이다.
+- progress projection은 persistence truth가 아니다. WebSocket `delta`/`stream_end`는 진행 표시이며 external transport의 final answer가 authoritative output이다.
 
 ### partial 또는 formal-looking but incomplete
 

@@ -71,7 +71,7 @@
 - shared `SessionTurnLock`이 busy이면 external inbound는 deferred 상태로 남아 이후 처리된다.
 - `AgentLoopChatCompletionAdapter`는 API/WebSocket/chat completion과 external channel이 같은 session lock을 공유하게 한다.
 - runtime metadata JSON은 Telegram offset, Discord REST last id/Gateway resume state, Email UIDVALIDITY/seen UID, outbound delivery status를 best-effort로 저장한다.
-- WebSocket progress는 `delta`, `stream_end`, final `message`로 보인다. Telegram, Discord, Slack progress는 preview update로 보인다. Email과 WhatsApp은 final-only다.
+- WebSocket progress는 `delta`, `stream_end`, final `message`로 보인다. Telegram, Discord, Slack, Email, WhatsApp external transport는 final-only이며 기존 message를 edit/update하지 않는다.
 - platform normalizer는 provider payload를 session metadata와 content contract를 보존하는 inbound/outbound frame으로 바꾼다.
 
 ### partial 또는 formal-looking but incomplete

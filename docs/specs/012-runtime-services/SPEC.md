@@ -82,7 +82,7 @@
 5. `ExternalSessionTurnCoordinator`는 같은 session으로 들어온 external inbound를 process-local follow-up queue로 직렬화한다. shared `SessionTurnLock` 충돌은 durable recovery가 아니라 local pending과 retry 관찰로 다룬다.
 6. `AgentLoopChatCompletionAdapter`는 같은 `SessionTurnLock`을 공유해 API/WebSocket/chat completion과 external channel turn이 같은 session boundary를 넘지 않게 한다.
 7. runtime metadata JSON은 Telegram offset, Discord REST last id, Discord Gateway resume state, Email UIDVALIDITY/seen UID, outbound delivery status를 best-effort로 저장한다. 이것은 cursor, diagnostic, delivery hint이며 transactional metadata store가 아니다.
-8. WebSocket progress는 `delta`, `stream_end`, final `message`로 보인다. Telegram, Discord, Slack progress는 preview update로 보인다. Email과 WhatsApp은 final-only다. 어느 경우에도 final answer가 authoritative output이다.
+8. WebSocket progress는 `delta`, `stream_end`, final `message`로 보인다. Telegram, Discord, Slack, Email, WhatsApp external transport는 final-only이며 기존 message를 edit/update하지 않는다. 어느 경우에도 final answer가 authoritative output이다.
 9. `crates/shacs-channels/src/lib.rs`의 `LiveChannelWorkerKind`, `LiveChannelWorkerDescriptor`, `LiveChannelWorker`, `builtin_live_worker_descriptors`, `ChannelStatus`, `ChannelRetryPolicy`, `ChannelManager`는 adapter `start`/`stop`, outbound retry, stream delta dispatch, lifecycle error status를 관리한다.
 10. platform normalizer는 Slack, Discord, Telegram, Email, WhatsApp inbound를 session metadata와 content contract를 보존하는 형태로 정규화한다.
 11. `crates/shacs-core/src/runtime/lifecycle.rs`의 `RuntimeCapabilityReport`, `RuntimeCapabilityStatus`, `McpLifecycle`, `DreamLifecycle`는 MCP, Dream, Subagent 같은 runtime capability의 현재 상태를 보고하는 경계다.
