@@ -27,6 +27,9 @@ RUN apt-get update \
 COPY --from=node /usr/local/bin/ /usr/local/bin/
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 
+RUN npm install -g @steipete/summarize \
+    && npm cache clean --force
+
 COPY --from=builder /app/crates/shacs-cli/target/release/shacs-bot /usr/local/bin/shacs-bot
 
 USER shacs

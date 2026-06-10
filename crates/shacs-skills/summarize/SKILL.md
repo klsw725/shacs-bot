@@ -2,7 +2,7 @@
 name: summarize
 description: Summarize or extract text/transcripts from URLs, podcasts, and local files (great fallback for “transcribe this YouTube/video”).
 homepage: https://summarize.sh
-metadata: {"nanobot":{"emoji":"🧾","requires":{"bins":["summarize"]},"install":[{"id":"brew","kind":"brew","formula":"steipete/tap/summarize","bins":["summarize"],"label":"Install summarize (brew)"}]}}
+metadata: {"nanobot":{"emoji":"🧾","requires":{"bins":["summarize"]},"install":[{"id":"npm","kind":"npm","package":"@steipete/summarize","bins":["summarize"],"label":"Install summarize (npm)"},{"id":"brew","kind":"brew","formula":"summarize","bins":["summarize"],"label":"Install summarize (brew)"}]}}
 ---
 
 # Summarize
@@ -18,6 +18,12 @@ Use this skill immediately when the user asks any of:
 - “transcribe this YouTube/video” (best-effort transcript extraction; no `yt-dlp` needed)
 
 ## Quick start
+
+Install in Linux/container environments:
+
+```bash
+npm install -g @steipete/summarize
+```
 
 ```bash
 summarize "https://example.com" --model google/gemini-3-flash-preview
