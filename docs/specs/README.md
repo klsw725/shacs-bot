@@ -26,6 +26,7 @@
 - image generation / generated media 범위: `019-image-generation-and-generated-media/`가 provider image generation capability, `image_generate` tool, generated image artifact 저장 계약을 소유한다.
 - tool search / provider tool surface 범위: `020-tool-search-and-provider-tool-surface/`가 provider-visible tool schema progressive disclosure, deferred MCP catalog, bridge tool scope 계약을 소유한다.
 - zero-setup sandbox execution 범위: `023-zero-setup-sandbox-execution/`이 사용자가 별도 host sandbox runtime을 설치하지 않아도 동작해야 하는 공식 packaging/runtime containment 계약을 소유한다.
+- dynamic workflows / harness orchestration 범위: `024-dynamic-workflows-and-harness-orchestration/`가 작업별 하네스, workflow-backed subagent graph, verifier, worktree isolation, budget/resume 계약을 소유한다.
 
 ## 읽는 순서 권장
 
@@ -55,6 +56,7 @@
 21. `021-app-maker-and-app-authoring`
 22. `022-auto-approval-permissions`
 23. `023-zero-setup-sandbox-execution`
+24. `024-dynamic-workflows-and-harness-orchestration`
 
 ## 운영 원칙
 

@@ -1,0 +1,39 @@
+# PRD 002: verifier and adversarial review
+
+## 목표
+
+Verifier graph와 adversarial review 결과가 workflow success를 fail-closed로 제어하도록 runtime contract를 고정한다. Verifier는 장식 단계가 아니라, required verifier가 누락되거나 fail/uncertain verdict를 반환하면 synthesis success를 막는 release-critical gate다.
+
+## 범위
+
+- verifier verdict kind
+- verifier verdict target child binding
+- missing verifier detection
+- fail/uncertain verdict가 target child failure로 표면화되는 verification gate
+- merge policy의 `require_verifier_pass`와 synthesis integration
+
+## 비범위
+
+- verifier child 실행 방식
+- verifier prompt/rubric generation
+- external source lookup implementation
+- reviewer pool 또는 조직 승인 workflow
+
+## 구현 매핑
+
+- `crates/shacs-core/src/runtime/workflow.rs`
+  - `WorkflowVerifierVerdictKind`
+  - `WorkflowVerifierVerdict`
+  - `WorkflowVerificationGate`
+  - `workflow_verification_gate`
+  - `workflow_synthesis_outcome`
+- `crates/shacs-core/tests/runtime_workflow.rs`
+  - `workflow_barrier_verifier_and_synthesis_fail_closed`
+
+## 완료 기준
+
+- plan의 required verifier verdict가 없으면 verification gate는 blocked다.
+- verifier가 pass가 아닌 verdict를 반환하면 gate는 failed다.
+- failed gate는 target child id를 잃지 않는다.
+- `require_verifier_pass`가 true인 merge policy에서는 verifier pass 전 final success가 불가능하다.
+- verifier failure나 missing verifier를 completed child result로 덮어쓸 수 없다.

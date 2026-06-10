@@ -16,6 +16,7 @@ mod self_improvement;
 mod subagent;
 mod tool_execution;
 mod tool_search;
+mod workflow;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
@@ -127,6 +128,32 @@ pub use tool_search::{
     BridgeToolCall, BridgeToolExecutionReport, BridgeToolResult, BridgeUnderlyingMappingEvidence,
     ResolvedDeferredToolCall, ToolCallScopeError, ToolDescribeEvidence, ToolSearchActivationReason,
     ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
+};
+
+pub use workflow::{
+    admit_workflow_plan, build_workflow_checkpoint, decide_workflow_admission,
+    workflow_barrier_decision, workflow_budget_decision, workflow_diagnostics_manifest,
+    workflow_harness_plan_digest, workflow_model_route_snapshot,
+    workflow_permission_ceiling_decision, workflow_prd000_release_evidence_checklist,
+    workflow_projection, workflow_quarantine_decision, workflow_ready_step_ids,
+    workflow_recipe_readiness, workflow_resume_decision,
+    workflow_spec024_release_evidence_checklist, workflow_synthesis_outcome,
+    workflow_verification_gate, workflow_worktree_decision, WorkflowAdmissionDecision,
+    WorkflowAdmissionInput, WorkflowBarrierDecision, WorkflowBudgetDecision, WorkflowBudgetPolicy,
+    WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpoint, WorkflowCheckpointInput,
+    WorkflowCheckpointPolicy, WorkflowChildResult, WorkflowChildRunStatus, WorkflowChildSpec,
+    WorkflowContextPolicy, WorkflowDiagnosticsManifest, WorkflowHarnessPlan, WorkflowMergePolicy,
+    WorkflowModelRouteSnapshot, WorkflowModelRoutingPolicy, WorkflowPattern,
+    WorkflowPermissionCeilingDecision, WorkflowPermissionPolicy, WorkflowPrd000ReleaseEvidence,
+    WorkflowPrd000ReleaseEvidenceBucket, WorkflowPrd000ReleaseEvidenceChecklist,
+    WorkflowProjection, WorkflowQuarantineDecision, WorkflowQuarantinePolicy, WorkflowRecipe,
+    WorkflowRecipeReadiness, WorkflowResumeDecision, WorkflowResumePolicy, WorkflowRunRecord,
+    WorkflowRunState, WorkflowSpec024ReleaseEvidence, WorkflowSpec024ReleaseEvidenceBucket,
+    WorkflowSpec024ReleaseEvidenceChecklist, WorkflowStep, WorkflowStepPrivilege,
+    WorkflowStopCondition, WorkflowSynthesisOutcome, WorkflowToolScopePolicy,
+    WorkflowVerificationGate, WorkflowVerifierSpec, WorkflowVerifierVerdict,
+    WorkflowVerifierVerdictKind, WorkflowWorktreeDecision, WorkflowWorktreePolicy,
+    WorkflowWorktreeRequest,
 };
 
 pub type Dream<'a> = DreamProcessor<'a>;
