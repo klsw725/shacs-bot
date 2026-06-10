@@ -538,6 +538,16 @@ fn runtime_context_injects_memory_recent_history_skills_and_helpers() -> Result<
         context.skill_name_for_source_path("skills/disabled.md"),
         None
     );
+    assert_eq!(
+        context.skill_name_for_source_path("builtin_skills/cron/SKILL.md"),
+        Some("cron".to_owned())
+    );
+    assert_eq!(
+        ContextBuilder::new(workspace.path())
+            .with_disabled_skills(["cron".to_owned()])
+            .skill_name_for_source_path("builtin_skills/cron/SKILL.md"),
+        None
+    );
     assert_eq!(context.skill_name_for_source_path("missing/SKILL.md"), None);
     let system = context.build_system_prompt(Some("cli"));
     if !system.contains("# Memory")

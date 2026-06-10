@@ -316,14 +316,52 @@ impl ContextBuilder {
         } else {
             self.workspace.join(path)
         };
-        let candidate = fs::canonicalize(candidate).ok()?;
+        if !Self::path_within_workspace(&candidate, &self.workspace) {
+            return None;
+        }
+        let candidate_canonical = fs::canonicalize(&candidate).ok();
+        let candidate_normalized = Self::normalize_path_lexically(&candidate);
         self.load_skill_documents()
             .into_iter()
             .filter(|skill| skill.available)
             .find_map(|skill| {
-                let source_path = fs::canonicalize(skill.source_path).ok()?;
-                (source_path == candidate).then_some(skill.name)
+                if let (Some(candidate), Ok(source_path)) = (
+                    candidate_canonical.as_ref(),
+                    fs::canonicalize(&skill.source_path),
+                ) {
+                    if source_path == *candidate {
+                        return Some(skill.name);
+                    }
+                }
+                let source_path = Self::normalize_path_lexically(&skill.source_path);
+                (source_path == candidate_normalized).then_some(skill.name)
             })
+    }
+
+    fn path_within_workspace(path: &Path, workspace: &Path) -> bool {
+        match fs::canonicalize(path) {
+            Ok(path) => {
+                let workspace = fs::canonicalize(workspace)
+                    .unwrap_or_else(|_| Self::normalize_path_lexically(workspace));
+                path.starts_with(workspace)
+            }
+            Err(_) => Self::normalize_path_lexically(path)
+                .starts_with(Self::normalize_path_lexically(workspace)),
+        }
+    }
+
+    fn normalize_path_lexically(path: &Path) -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                component => normalized.push(component.as_os_str()),
+            }
+        }
+        normalized
     }
 
     fn build_skills_index(&self) -> Option<String> {
