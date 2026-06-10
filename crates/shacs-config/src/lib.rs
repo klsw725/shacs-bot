@@ -40,6 +40,9 @@ pub struct Config {
 
 impl Config {
     pub fn workspace_path(&self) -> PathBuf {
+        if self.agents.defaults.workspace.trim().is_empty() {
+            return default_workspace_path();
+        }
         expand_home(&self.agents.defaults.workspace)
     }
 }
@@ -856,8 +859,14 @@ pub fn load_config_with_env(
     if let Some(workspace) = &options.workspace_override {
         config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
     }
+    if config.agents.defaults.workspace.trim().is_empty() {
+        config.agents.defaults.workspace = default_workspace();
+    }
     if options.resolve_env {
         resolve_config_env_refs(&mut config, env)?;
+    }
+    if config.agents.defaults.workspace.trim().is_empty() {
+        config.agents.defaults.workspace = default_workspace();
     }
     let context = config_context(Some(config_path), Some(config.workspace_path()));
     Ok(ConfigBundle {
@@ -1363,6 +1372,38 @@ mod tests {
             default_config_path(),
             home_dir().join(".shacs-bot/config.json")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn blank_workspace_resolves_to_default_workspace() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = Config::default();
+        config.agents.defaults.workspace = String::new();
+        assert_eq!(config.workspace_path(), default_workspace_path());
+
+        config.agents.defaults.workspace = "  \t".to_owned();
+        assert_eq!(config.workspace_path(), default_workspace_path());
+
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&json!({
+                "agents": {"defaults": {"workspace": "   "}}
+            }))?,
+        )?;
+
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: true,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        assert_eq!(bundle.config.agents.defaults.workspace, default_workspace());
+        assert_eq!(bundle.context.workspace, default_workspace_path());
         Ok(())
     }
 
