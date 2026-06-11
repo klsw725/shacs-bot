@@ -33,6 +33,54 @@
 - `crates/shacs-core/tests/runtime_workflow.rs`
   - `workflow_projection_diagnostics_and_spec024_release_gate_are_evidence_backed`
 
+## SPEC 입력
+
+1. 주관 spec은 `docs/specs/024-dynamic-workflows-and-harness-orchestration/SPEC.md`다.
+2. rendering and command naming consume `docs/specs/013-user-interfaces-and-session-ux/SPEC.md`.
+3. diagnostics consume 014 and release gates consume 016.
+4. runtime evidence from PRD 000-009 is consumed but not redefined.
+
+## Dependency Cut
+
+1. Projection reads workflow state; it does not mutate session truth directly.
+2. UI rendering details belong to 013.
+3. Release gate cannot pass without verifier, budget, permission, replay evidence.
+4. hosted dashboard and SaaS admin console are 비범위다.
+
+## 데이터/상태 모델
+
+1. `WorkflowProjection`: run id, state, pattern, progress, blocked reason, resume action을 가진다.
+2. `WorkflowChildProjection`: child id, role, status, evidence digest를 가진다.
+3. `WorkflowVerifierProjection`: verifier id, verdict, evidence status를 가진다.
+4. `WorkflowReleaseGate`: PRD coverage bucket and pass/fail reason을 가진다.
+
+## 정상 시퀀스
+
+1. user requests workflow inspect/status.
+2. projection reads workflow run record and diagnostics evidence.
+3. CLI/TUI/API/channel show same state language.
+4. release gate validates PRD evidence buckets.
+
+## 실패 시퀀스
+
+1. projection missing evidence cannot show success.
+2. verifier failure is displayed as blocked/failed, not hidden.
+3. budget exhaustion is visible with reason.
+4. incomplete release evidence prevents closure claim.
+
+## 검증 관점
+
+1. projection snapshot covers running, blocked, failed, resume-needed, succeeded states.
+2. release gate fails without verifier/budget/replay evidence.
+3. channel/API/CLI projection consumes same data model.
+
+## Cargo 검증
+
+1. `cargo fmt --manifest-path crates/shacs-cli/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-cli/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-cli/Cargo.toml workflow_projection`
+4. core projection model을 건드렸다면 `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_projection`
+
 ## 완료 기준
 
 - projection은 workflow id, objective, pattern, state를 보존한다.
