@@ -1,6 +1,7 @@
 use crate::runtime::{ToolSearchMode, ToolSearchRuntimeInput};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 const BRIDGE_TOOL_NAMES: [&str; 3] = ["tool_search", "tool_describe", "tool_call"];
 
@@ -203,6 +204,14 @@ impl DeferredToolCatalog {
                 score,
             })
             .collect()
+    }
+
+    pub fn source_kind_counts(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for entry in &self.entries {
+            *counts.entry(entry.source_kind.clone()).or_insert(0) += 1;
+        }
+        counts
     }
 }
 

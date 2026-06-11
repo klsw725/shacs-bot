@@ -12,6 +12,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use shacs_utils::evaluator::{EvidenceKind, EvidenceRef, RedactionStatus};
 use shacs_utils::redaction::redact_string;
+use std::collections::BTreeMap;
 use std::fmt;
 
 const TOOL_SEARCH: &str = "tool_search";
@@ -39,6 +40,8 @@ pub struct ToolSearchDiagnosticsSummary {
     pub reason: ToolSearchActivationReason,
     pub visible_count: usize,
     pub deferred_count: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub deferred_source_counts: BTreeMap<String, usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_digest: Option<String>,
 }
@@ -72,6 +75,11 @@ impl ToolSearchDiagnosticsSummary {
             .catalog
             .as_ref()
             .map(|catalog| catalog.scope_digest.clone());
+        let deferred_source_counts = assembly
+            .catalog
+            .as_ref()
+            .map(|catalog| catalog.source_kind_counts())
+            .unwrap_or_default();
 
         Self {
             mode: tool_search_mode_label(runtime.config.enabled).to_owned(),
@@ -79,6 +87,7 @@ impl ToolSearchDiagnosticsSummary {
             reason,
             visible_count: assembly.provider_tools.len(),
             deferred_count,
+            deferred_source_counts,
             scope_digest,
         }
     }

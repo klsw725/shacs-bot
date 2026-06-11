@@ -293,6 +293,7 @@ fn tool_search_diagnostics_summary_reports_activation_reason_families() -> Resul
     if forced_summary.reason != ToolSearchActivationReason::ForcedOn
         || !forced_summary.activated
         || forced_summary.deferred_count != 1
+        || forced_summary.deferred_source_counts.get("mcp_tool") != Some(&1)
         || !forced_summary
             .scope_digest
             .as_deref()
@@ -315,6 +316,7 @@ fn tool_search_diagnostics_summary_reports_activation_reason_families() -> Resul
         ToolSearchDiagnosticsSummary::from_assembly(threshold_runtime, &threshold);
     if threshold_summary.reason != ToolSearchActivationReason::Threshold
         || threshold_summary.activated
+        || !threshold_summary.deferred_source_counts.is_empty()
     {
         return Err(format!("threshold diagnostics summary drifted: {threshold_summary:?}").into());
     }
@@ -327,6 +329,7 @@ fn tool_search_diagnostics_summary_reports_activation_reason_families() -> Resul
     let unknown_summary = ToolSearchDiagnosticsSummary::from_assembly(unknown_runtime, &unknown);
     if unknown_summary.reason != ToolSearchActivationReason::UnknownContextWindow
         || unknown_summary.activated
+        || !unknown_summary.deferred_source_counts.is_empty()
     {
         return Err(format!("unknown diagnostics summary drifted: {unknown_summary:?}").into());
     }
@@ -340,6 +343,7 @@ fn tool_search_diagnostics_summary_reports_activation_reason_families() -> Resul
         ToolSearchDiagnosticsSummary::from_assembly(no_deferred_runtime, &no_deferred);
     if no_deferred_summary.reason != ToolSearchActivationReason::NoDeferrableTools
         || no_deferred_summary.activated
+        || !no_deferred_summary.deferred_source_counts.is_empty()
     {
         return Err(
             format!("no-deferrable diagnostics summary drifted: {no_deferred_summary:?}").into(),
@@ -358,6 +362,7 @@ fn tool_search_diagnostics_summary_reports_activation_reason_families() -> Resul
         ToolSearchDiagnosticsSummary::from_assembly(collision_runtime, &collision);
     if collision_summary.reason != ToolSearchActivationReason::BridgeCollision
         || collision_summary.activated
+        || !collision_summary.deferred_source_counts.is_empty()
     {
         return Err(format!("collision diagnostics summary drifted: {collision_summary:?}").into());
     }
