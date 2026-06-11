@@ -30,7 +30,7 @@ Status: Draft. 이 문서는 prototype 계획서가 아니라 `shacs-bot`이 작
 
 기존 spec과의 관계는 다음과 같다.
 
-| spec | 023이 소비하는 것 | 023이 소유하는 것 |
+| spec | 024가 소비하는 것 | 024가 소유하는 것 |
 |---|---|---|
 | 001 session kernel | 한 턴의 truth, terminal state, recovery input | workflow state가 session turn에 붙는 방식과 workflow terminal criteria |
 | 002 command/event/effect | 상태 변경과 외부 실행 분리 | workflow command/effect/event 의미와 barrier/synthesis event |
@@ -591,6 +591,8 @@ Diagnostics는 release gate와 replay에서 destructive tool을 재실행하지 
 7. `prds/006-quarantine-and-permission-ceilings.md`: untrusted input quarantine, high-privilege separation, Tool Search child scope, approval integration.
 8. `prds/007-resume-replay-and-diagnostics.md`: checkpoint resume, stale/late child results, replay evidence, diagnostics bundle.
 9. `prds/008-user-facing-projection-and-release-gates.md`: CLI/TUI/local API/channel projection, release evidence checklist, documentation updates.
+10. `prds/009-runtime-execution-wiring-and-monitoring.md`: MainOrchestrator/AgentRunner wiring, child task execution handoff, progress monitoring, interruption propagation, closure evidence.
+11. `prds/010-sequential-implementation-plan.md`: PRD 000-009의 dependency-ordered 구현 순서와 wave별 gate.
 
 ---
 
@@ -610,7 +612,8 @@ Spec 024의 closure는 다음이 모두 충족될 때만 선언할 수 있다.
 - Saved workflow recipe가 skill로 제공될 수 있고, skill이 permission을 얻지 못한다는 테스트가 있다.
 - CLI/TUI/local API/channel projection이 workflow progress, verifier, budget, blocked/resume state를 일관되게 표시한다.
 - Diagnostics/replay가 harness plan, child graph, verifier verdict, merge decision, stale result를 redacted evidence로 남긴다.
-- Rust 검증은 관련 crate 기준 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`를 통과한다.
+- Runtime execution wiring이 workflow admission부터 child execution, progress event, interrupt propagation, final synthesis까지 실제 경로로 연결된다.
+- Rust 검증은 관련 crate 기준 `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`, `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`, `cargo test --manifest-path crates/shacs-core/Cargo.toml`처럼 범위를 명시해 통과한다.
 - 문서와 사용자 가이드는 dynamic workflows를 prototype 또는 provider-native beta로 과장하지 않는다.
 
 ---
