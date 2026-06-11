@@ -1,6 +1,6 @@
 # tool search and provider tool surface 아키텍처 명세
 
-Status: Draft. 이 문서는 Hermes-style Tool Search를 구현하기 전에 provider-visible tool surface, deferred tool catalog, bridge tool scope 계약을 고정한다.
+Status: Closed for 020-owned Tool Search scope. Spec 025 owns future plugin manifest/tool implementation; 020 only preserves the Tool Search boundary those plugin tools must consume.
 
 ## 문서 목적
 
@@ -28,6 +28,7 @@ Status: Draft. 이 문서는 Hermes-style Tool Search를 구현하기 전에 pro
 - 011은 subagent tool registry 제한을 소유한다. 020은 child runner의 deferred catalog가 child에게 부여된 tool surface를 넘지 않아야 한다고 요구한다.
 - 014는 diagnostics와 inspect surface를 소유한다. 020은 Tool Search activation, deferred count, bridge unwrap observability에 필요한 evidence만 요구한다.
 - 018은 memory/session search evidence, trajectory/replay, evaluation ledger를 소유한다. 020의 tool catalog search는 agent tool schema disclosure를 위한 별도 검색이며 018의 memory evidence를 대체하지 않는다. bridge와 underlying tool mapping은 018의 replay/ledger evidence가 destructive tool replay 없이 해석할 수 있어야 한다.
+- 025는 user-extensible hooks/plugins와 plugin-provided tool surface를 소유한다. 020은 future enabled plugin tool이 core tool로 승격되지 않고 deferrable catalog 후보가 되어야 한다는 boundary만 고정하며, plugin manifest/discovery/runtime 구현 증거는 025가 소유한다.
 
 따라서 이 문서는 Anthropic 전용 Tool Search beta, 원격 tool marketplace, 조직 관리자 승인 workflow, public plugin ranking service를 다루지 않는다.
 
@@ -182,6 +183,8 @@ surface assembly 실패는 전체 tool schema pass-through로 fail-open할 수 �
 4. `prds/003-agent-runner-provider-request-live-wiring.md`: `AgentRunner` provider request 연결, assembled `ProviderRequest.tools`, per-iteration catalog scope, bridge routing.
 5. `prds/004-mcp-default-deny-and-subagent-scope-regression.md`: MCP `enabledTools` default-deny, raw/wrapped allow-list, disabled capability 부재, child registry-only catalog.
 6. `prds/005-diagnostics-trajectory-replay-and-release-evidence-integration.md`: activation diagnostics, bridge-to-underlying evidence, `tools_used`, replay safety, release gate evidence.
+7. `prds/006-user-facing-configuration-plugin-tools-and-closure.md`: user-facing Tool Search config/diagnostics evidence, 025 plugin-provided tool boundary handoff, closure evidence.
+8. `prds/007-sequential-implementation-plan.md`: PRD 000-006의 구현/검증 순서, 020 closure gate, Spec 025 handoff.
 
 ---
 
@@ -196,3 +199,5 @@ surface assembly 실패는 전체 tool schema pass-through로 fail-open할 수 �
 - subagent child registry에서 out-of-scope parent tool이 검색 또는 호출되지 않는다.
 - diagnostics와 tool events가 activation, deferred count, underlying tool name을 추적할 수 있다.
 - docs와 tests가 provider-native beta 지원을 구현 완료처럼 과장하지 않는다.
+- 025에서 enabled될 plugin-provided tool은 core tool로 취급되지 않고 Tool Search deferrable 후보로 통합되어야 한다는 boundary가 문서화되어 있다.
+- 사용자-facing config/diagnostics evidence가 Tool Search activation, pass-through, deferred count, source kind count를 설명한다.
