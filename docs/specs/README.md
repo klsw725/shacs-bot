@@ -27,6 +27,8 @@
 - tool search / provider tool surface 범위: `020-tool-search-and-provider-tool-surface/`가 provider-visible tool schema progressive disclosure, deferred MCP catalog, bridge tool scope 계약을 소유한다.
 - zero-setup sandbox execution 범위: `023-zero-setup-sandbox-execution/`이 사용자가 별도 host sandbox runtime을 설치하지 않아도 동작해야 하는 공식 packaging/runtime containment 계약을 소유한다.
 - dynamic workflows / harness orchestration 범위: `024-dynamic-workflows-and-harness-orchestration/`가 작업별 하네스, workflow-backed subagent graph, verifier, worktree isolation, budget/resume 계약을 소유한다.
+- user-extensible hooks / plugins 범위: `025-user-extensible-hooks-and-plugins/`가 사용자가 opt-in하는 plugin manifest, hook event, plugin-provided tool/skill/command, extension diagnostics 계약을 소유한다.
+- context files / inline references 범위: `026-context-files-and-inline-references/`가 workspace context file discovery와 user message inline `@` reference resolution 계약을 소유한다.
 
 ## 읽는 순서 권장
 
@@ -57,6 +59,8 @@
 22. `022-auto-approval-permissions`
 23. `023-zero-setup-sandbox-execution`
 24. `024-dynamic-workflows-and-harness-orchestration`
+25. `025-user-extensible-hooks-and-plugins`
+26. `026-context-files-and-inline-references`
 
 ## 운영 원칙
 
