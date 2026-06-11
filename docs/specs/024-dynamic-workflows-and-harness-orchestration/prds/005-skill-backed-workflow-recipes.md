@@ -28,6 +28,53 @@ Workflow recipe를 skill-backed reusable harness input으로 저장하고 검사
 - `crates/shacs-core/tests/runtime_workflow.rs`
   - `workflow_recipe_quarantine_and_permission_ceiling_preserve_safety_boundaries`
 
+## SPEC 입력
+
+1. 주관 spec은 `docs/specs/024-dynamic-workflows-and-harness-orchestration/SPEC.md`다.
+2. skill discovery/read-only contract는 `docs/specs/005-skill-system/SPEC.md`를 소비한다.
+3. permission boundary는 010/022를 소비한다.
+4. diagnostics and inspect surface는 014를 소비한다.
+
+## Dependency Cut
+
+1. PRD 000 harness plan schema가 선행되어야 한다.
+2. Recipe는 plan 생성을 돕는 metadata이며 executable workflow code가 아니다.
+3. Skill은 permission을 얻거나 높일 수 없다.
+4. remote marketplace 또는 signed public registry는 비범위다.
+
+## 데이터/상태 모델
+
+1. `WorkflowRecipeMetadata`: name, pattern, required inputs, suggested verifier, digest를 가진다.
+2. `SkillBackedWorkflowRecipe`: source skill id, body digest, recipe metadata, validation status를 가진다.
+3. `WorkflowRecipeConflict`: duplicate name, malformed metadata, incompatible pattern을 구분한다.
+4. `SavedWorkflowInspectView`: recipe source, digest, last validation error를 가진다.
+
+## 정상 시퀀스
+
+1. skill registry가 workflow recipe metadata를 발견한다.
+2. recipe validator가 pattern과 required fields를 확인한다.
+3. valid recipe는 admission helper의 plan candidate로 사용된다.
+4. inspect surface는 recipe source와 digest를 보여준다.
+
+## 실패 시퀀스
+
+1. malformed recipe는 blocked diagnostic으로 남고 실행되지 않는다.
+2. conflict는 silent override가 아니라 conflict diagnostic이 된다.
+3. recipe가 permission grant를 요구하면 거부한다.
+4. recipe body는 executable code로 실행되지 않는다.
+
+## 검증 관점
+
+1. malformed recipe가 blocked diagnostic이 되는지 확인한다.
+2. duplicate recipe conflict가 silent override되지 않는지 확인한다.
+3. recipe가 permission ceiling을 높일 수 없는 regression을 둔다.
+
+## Cargo 검증
+
+1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_recipe`
+
 ## 완료 기준
 
 - recipe id, source ref, prompt template ref가 비어 있으면 malformed다.
