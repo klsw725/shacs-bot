@@ -30,6 +30,52 @@ Verifier graph와 adversarial review 결과가 workflow success를 fail-closed�
 - `crates/shacs-core/tests/runtime_workflow.rs`
   - `workflow_barrier_verifier_and_synthesis_fail_closed`
 
+## SPEC 입력
+
+1. 주관 spec은 `docs/specs/024-dynamic-workflows-and-harness-orchestration/SPEC.md`다.
+2. PRD 001의 child graph와 synthesis outcome을 소비한다.
+3. subagent execution boundary는 011을 소비한다.
+4. diagnostics/evidence는 014/018을 소비한다.
+
+## Dependency Cut
+
+1. Verifier는 child graph와 분리된 independent review node다.
+2. Verifier verdict 없이 required verification workflow를 success로 닫으면 안 된다.
+3. Verifier는 session truth를 직접 수정하지 않는다.
+4. 비용만 쓰는 장식 review 단계는 비목표다.
+
+## 데이터/상태 모델
+
+1. `WorkflowVerifierNode`: target child/output, rubric, required evidence, timeout/budget snapshot을 가진다.
+2. `VerifierVerdict`: pass, fail, inconclusive, timed_out를 구분한다.
+3. `VerifierRubric`: goal match, constraints, tests, safety, documentation checks를 가진다.
+4. `VerifierEvidence`: independent observation refs와 redaction status를 가진다.
+
+## 정상 시퀀스
+
+1. child output이 verifier input으로 전달된다.
+2. verifier가 별도 context와 rubric으로 실행된다.
+3. verdict와 evidence가 workflow event로 기록된다.
+4. synthesis가 verifier pass를 확인한 뒤 final success를 허용한다.
+
+## 실패 시퀀스
+
+1. verifier fail/inconclusive/timeout은 final success를 막는다.
+2. verifier가 child evidence를 그대로 복사만 하면 independent evidence 부족으로 blocked된다.
+3. stale verifier result는 synthesis에 섞이지 않는다.
+
+## 검증 관점
+
+1. verifier failure가 final success를 막는 test를 먼저 둔다.
+2. timeout/inconclusive verdict가 blocked로 표시되는지 확인한다.
+3. independent evidence requirement를 snapshot으로 검증한다.
+
+## Cargo 검증
+
+1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_verifier`
+
 ## 완료 기준
 
 - plan의 required verifier verdict가 없으면 verification gate는 blocked다.
