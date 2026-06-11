@@ -32,9 +32,9 @@ pub use context::{add_assistant_message, add_tool_result, ContextBuildRequest, C
 pub use diagnostics_release::{
     build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
     evaluate_spec018_release_gate, tool_search_prd005_release_evidence_checklist,
-    RuntimeSpec018DiagnosticsManifestInput, RuntimeSpec018LedgerInspectInput,
-    RuntimeSpec018ReleaseGateInput, ToolSearchReleaseEvidence, ToolSearchReleaseEvidenceBucket,
-    ToolSearchReleaseEvidenceChecklist,
+    tool_search_prd006_release_evidence_checklist, RuntimeSpec018DiagnosticsManifestInput,
+    RuntimeSpec018LedgerInspectInput, RuntimeSpec018ReleaseGateInput, ToolSearchReleaseEvidence,
+    ToolSearchReleaseEvidenceBucket, ToolSearchReleaseEvidenceChecklist,
 };
 pub use goal::{
     apply_completion_verdict, build_goal_completion_evaluation_request, clear_goal,

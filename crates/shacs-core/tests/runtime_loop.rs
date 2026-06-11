@@ -14,15 +14,15 @@ use shacs_core::runtime::{
     runtime_memory_evidence_request, runtime_skill_list_disclosure,
     runtime_skill_reference_evidence, runtime_skill_view_disclosure,
     runtime_spec018_channel_projection, runtime_spec018_local_api_projection,
-    tool_search_prd005_release_evidence_checklist, ActiveLoopTask, AgentLoop,
-    AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentRunSpec, AgentRunner,
-    AutoCompact, AutomationSourceEvent, AutomationSourceEventKind, BridgeUnderlyingMappingEvidence,
-    CancellationToken, ChildResultEnvelope, ChildResultStatus, ContainmentSnapshotRef,
-    ContextBuilder, DreamLifecycle, EvaluatorDecisionInput, GoalCompletionVerdict, InboundMessage,
-    LedgerConsumptionStatus, LoopTaskRegisterResult, McpLifecycle, MergeDecision, MessageBus,
-    PermissionMode, PermissionModeSnapshot, PermissionedActionOrigin, PersistentGoal,
-    PersistentGoalStatus, ProviderHotSwapResult, ProviderSelectionSnapshot,
-    RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind,
+    tool_search_prd005_release_evidence_checklist, tool_search_prd006_release_evidence_checklist,
+    ActiveLoopTask, AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError,
+    AgentRunSpec, AgentRunner, AutoCompact, AutomationSourceEvent, AutomationSourceEventKind,
+    BridgeUnderlyingMappingEvidence, CancellationToken, ChildResultEnvelope, ChildResultStatus,
+    ContainmentSnapshotRef, ContextBuilder, DreamLifecycle, EvaluatorDecisionInput,
+    GoalCompletionVerdict, InboundMessage, LedgerConsumptionStatus, LoopTaskRegisterResult,
+    McpLifecycle, MergeDecision, MessageBus, PermissionMode, PermissionModeSnapshot,
+    PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus, ProviderHotSwapResult,
+    ProviderSelectionSnapshot, RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind,
     RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults, RuntimeReplayInput,
     RuntimeSelectedAction, RuntimeSpec018DiagnosticsManifestInput,
     RuntimeSpec018LedgerInspectInput, RuntimeSpec018ProjectionInput,
@@ -1408,6 +1408,48 @@ fn tool_search_prd005_release_evidence_checklist_requires_all_buckets() {
     assert!(!redaction_failed
         .covered_buckets
         .contains(&ToolSearchReleaseEvidenceBucket::Diagnostics));
+}
+
+#[test]
+fn tool_search_prd006_release_evidence_requires_user_facing_bucket_only() {
+    let mut evidence = ToolSearchReleaseEvidenceBucket::required_prd005_buckets()
+        .into_iter()
+        .map(|bucket| ToolSearchReleaseEvidence {
+            bucket,
+            test_names: vec![format!("{bucket:?}_test")],
+            manual_qa_refs: Vec::new(),
+            evidence_refs: vec![prd005_evidence_ref(
+                &format!("{bucket:?}"),
+                RedactionStatus::Redacted,
+            )],
+        })
+        .collect::<Vec<_>>();
+
+    let prd005_only = tool_search_prd006_release_evidence_checklist(&evidence);
+    assert!(!prd005_only.passed);
+    assert_eq!(
+        prd005_only.missing_buckets,
+        vec![ToolSearchReleaseEvidenceBucket::UserFacingConfig]
+    );
+
+    evidence.push(ToolSearchReleaseEvidence {
+        bucket: ToolSearchReleaseEvidenceBucket::UserFacingConfig,
+        test_names: vec![
+            "runtime_runner_tool_search_activation_diagnostics_are_observable".to_owned(),
+        ],
+        manual_qa_refs: Vec::new(),
+        evidence_refs: vec![prd005_evidence_ref(
+            "user-facing-config",
+            RedactionStatus::Redacted,
+        )],
+    });
+
+    let complete = tool_search_prd006_release_evidence_checklist(&evidence);
+    assert!(complete.passed);
+    assert_eq!(complete.required_buckets.len(), 9);
+    assert!(!complete
+        .required_buckets
+        .contains(&ToolSearchReleaseEvidenceBucket::PluginToolIntegration));
 }
 
 #[test]

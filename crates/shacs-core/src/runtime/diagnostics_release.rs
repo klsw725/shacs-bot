@@ -19,6 +19,8 @@ pub enum ToolSearchReleaseEvidenceBucket {
     SubagentScope,
     ReplaySafety,
     Diagnostics,
+    UserFacingConfig,
+    PluginToolIntegration,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,16 +53,37 @@ impl ToolSearchReleaseEvidenceBucket {
             Self::Diagnostics,
         ]
     }
+
+    pub fn required_prd006_buckets() -> Vec<Self> {
+        let mut buckets = Self::required_prd005_buckets();
+        buckets.push(Self::UserFacingConfig);
+        buckets
+    }
 }
 
 pub fn tool_search_prd005_release_evidence_checklist(
     evidence: &[ToolSearchReleaseEvidence],
 ) -> ToolSearchReleaseEvidenceChecklist {
     let required_buckets = ToolSearchReleaseEvidenceBucket::required_prd005_buckets();
+    tool_search_release_evidence_checklist(evidence, required_buckets)
+}
+
+pub fn tool_search_prd006_release_evidence_checklist(
+    evidence: &[ToolSearchReleaseEvidence],
+) -> ToolSearchReleaseEvidenceChecklist {
+    let required_buckets = ToolSearchReleaseEvidenceBucket::required_prd006_buckets();
+    tool_search_release_evidence_checklist(evidence, required_buckets)
+}
+
+fn tool_search_release_evidence_checklist(
+    evidence: &[ToolSearchReleaseEvidence],
+    required_buckets: Vec<ToolSearchReleaseEvidenceBucket>,
+) -> ToolSearchReleaseEvidenceChecklist {
     let covered = evidence
         .iter()
         .filter(|entry| {
             (!entry.test_names.is_empty() || !entry.manual_qa_refs.is_empty())
+                && !tool_search_release_evidence_is_blocker(entry)
                 && entry
                     .evidence_refs
                     .iter()
@@ -86,6 +109,26 @@ pub fn tool_search_prd005_release_evidence_checklist(
         missing_buckets,
         passed,
     }
+}
+
+fn tool_search_release_evidence_is_blocker(entry: &ToolSearchReleaseEvidence) -> bool {
+    entry
+        .test_names
+        .iter()
+        .chain(entry.manual_qa_refs.iter())
+        .any(|label| tool_search_release_label_is_blocker(label))
+        || entry.evidence_refs.iter().any(|evidence_ref| {
+            tool_search_release_label_is_blocker(&evidence_ref.id)
+                || tool_search_release_label_is_blocker(&evidence_ref.summary)
+        })
+}
+
+fn tool_search_release_label_is_blocker(label: &str) -> bool {
+    let label = label.to_ascii_lowercase();
+    label.contains("blocked-on")
+        || label.contains("blocked_on")
+        || label.contains("blocked on")
+        || label.contains("blocker")
 }
 
 pub struct RuntimeSpec018DiagnosticsManifestInput<'a> {
