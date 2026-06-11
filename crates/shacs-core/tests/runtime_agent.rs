@@ -1405,6 +1405,8 @@ fn runtime_runner_tool_search_activation_diagnostics_are_observable() -> Result<
         || activation["reason"] != "forced_on"
         || activation["visible_count"] != 4
         || activation["deferred_count"] != 1
+        || activation["deferred_source_counts"]["mcp_tool"] != 1
+        || !event.detail.contains("reason=forced_on")
         || !activation["scope_digest"]
             .as_str()
             .unwrap_or_default()

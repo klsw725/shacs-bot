@@ -1,6 +1,6 @@
 use crate::runtime::tool_search::{
-    BridgeUnderlyingMappingEvidence, ToolDescribeEvidence, ToolSearchDiagnosticsSummary,
-    ToolSearchQueryEvidence,
+    BridgeUnderlyingMappingEvidence, ToolDescribeEvidence, ToolSearchActivationReason,
+    ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
 };
 use crate::runtime::{
     dispatch_bridge_tool_calls, CancellationToken, ResolvedDeferredToolCall,
@@ -1532,12 +1532,27 @@ fn tool_search_activation_event(summary: ToolSearchDiagnosticsSummary) -> ToolEv
         name: "tool_search_activation".to_owned(),
         status: ToolStatus::Ok,
         detail: format!(
-            "Tool Search mode={} activated={} visible={} deferred={}",
-            summary.mode, summary.activated, summary.visible_count, summary.deferred_count
+            "Tool Search mode={} activated={} reason={} visible={} deferred={}",
+            summary.mode,
+            summary.activated,
+            tool_search_activation_reason_label(&summary.reason),
+            summary.visible_count,
+            summary.deferred_count
         ),
         call_id: None,
         arguments: None,
         result: Some(serde_json::json!({ "activation": summary })),
+    }
+}
+
+fn tool_search_activation_reason_label(reason: &ToolSearchActivationReason) -> &'static str {
+    match reason {
+        ToolSearchActivationReason::Off => "off",
+        ToolSearchActivationReason::Threshold => "threshold",
+        ToolSearchActivationReason::ForcedOn => "forced_on",
+        ToolSearchActivationReason::NoDeferrableTools => "no_deferrable_tools",
+        ToolSearchActivationReason::BridgeCollision => "bridge_collision",
+        ToolSearchActivationReason::UnknownContextWindow => "unknown_context_window",
     }
 }
 
