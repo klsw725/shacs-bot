@@ -38,14 +38,7 @@ use shacs_core::tools::{
     SpawnRequest, SpawnTool, Tool, ToolParameters, ToolRegistry, ToolResult,
     ToolSurfaceAssemblyInput,
 };
-use shacs_providers::{
-    GenerationSettings, LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest,
-    ToolCallRequest,
-};
-use shacs_skills::{
-    SkillDescriptor, SkillRegistry, SkillRegistryEntry, SkillRegistryStatus, SkillSourceKind,
-};
-use shacs_utils::evaluator::{
+use shacs_eval::evaluator::{
     spec018_acknowledgement_is_user_decision, spec018_evidence_ref_has_owner_and_redaction,
     spec018_ledger_inspect_links_runtime_projection_and_diagnostics,
     spec018_manifest_includes_all_evidence_categories, spec018_manifest_redaction_is_valid,
@@ -70,6 +63,13 @@ use shacs_utils::evaluator::{
     Spec018SkippedEvidence, Spec018SkippedEvidenceClassification,
     Spec018VerificationProjectionItem, Spec018VerificationResultKind, SuggestedNextAction,
     TaskOutcomeClass, TrajectoryRecord, TrajectoryStats, VerdictKind,
+};
+use shacs_providers::{
+    GenerationSettings, LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest,
+    ToolCallRequest,
+};
+use shacs_skills::{
+    SkillDescriptor, SkillRegistry, SkillRegistryEntry, SkillRegistryStatus, SkillSourceKind,
 };
 use shacs_utils::gitstore::{GitCliStore, GitStore};
 use std::collections::{BTreeMap, VecDeque};
@@ -685,7 +685,7 @@ fn runtime_spec018_projection_keeps_schema_metadata_and_redacted_evidence_only(
     let projection = build_spec018_projection(RuntimeSpec018ProjectionInput {
         generated_at_ms: 42,
         session_id: "session-018",
-        goal_summaries: &[shacs_utils::evaluator::Spec018GoalSummary {
+        goal_summaries: &[shacs_eval::evaluator::Spec018GoalSummary {
             goal_id: "goal-018".to_owned(),
             summary: format!("ship the runtime projection with {raw_secret}"),
             status: spec018_status(
@@ -935,8 +935,8 @@ fn runtime_spec018_channel_projection_filters_hidden_items_and_keeps_visible_sta
         RedactionStatus::RedactionFailed,
     );
     let unsafe_projection = Spec018Projection {
-        schema_label: shacs_utils::evaluator::SPEC018_PROJECTION_SCHEMA_LABEL.to_owned(),
-        schema_version: shacs_utils::evaluator::SPEC018_PROJECTION_SCHEMA_VERSION.to_owned(),
+        schema_label: shacs_eval::evaluator::SPEC018_PROJECTION_SCHEMA_LABEL.to_owned(),
+        schema_version: shacs_eval::evaluator::SPEC018_PROJECTION_SCHEMA_VERSION.to_owned(),
         generated_at_ms: 42,
         session_id: "session-018".to_owned(),
         goal_summaries: vec![],
@@ -987,11 +987,11 @@ fn runtime_spec018_local_api_projection_sanitizes_unsanitized_nested_refs(
         RedactionStatus::RedactionFailed,
     );
     let projection = Spec018Projection {
-        schema_label: shacs_utils::evaluator::SPEC018_PROJECTION_SCHEMA_LABEL.to_owned(),
-        schema_version: shacs_utils::evaluator::SPEC018_PROJECTION_SCHEMA_VERSION.to_owned(),
+        schema_label: shacs_eval::evaluator::SPEC018_PROJECTION_SCHEMA_LABEL.to_owned(),
+        schema_version: shacs_eval::evaluator::SPEC018_PROJECTION_SCHEMA_VERSION.to_owned(),
         generated_at_ms: 42,
         session_id: "session-018".to_owned(),
-        goal_summaries: vec![shacs_utils::evaluator::Spec018GoalSummary {
+        goal_summaries: vec![shacs_eval::evaluator::Spec018GoalSummary {
             goal_id: "goal-local-api".to_owned(),
             summary: "local api projection".to_owned(),
             status: Spec018ProjectionStatus {
@@ -5042,7 +5042,7 @@ fn prd010_skill_list_view_and_reference_use_progressive_disclosure() -> Result<(
 #[test]
 fn prd010_authored_skill_requires_dry_run_and_approval_before_active() -> Result<(), Box<dyn Error>>
 {
-    let mut lifecycle = shacs_utils::evaluator::authored_skill_lifecycle_draft(
+    let mut lifecycle = shacs_eval::evaluator::authored_skill_lifecycle_draft(
         "authored-prd010",
         vec![runtime_eval_evidence()],
     );
@@ -5282,16 +5282,16 @@ fn prd011_expired_approval_blocks_apply_readiness() -> Result<(), Box<dyn Error>
 
 #[test]
 fn prd011_app_task_can_create_but_not_approve_apply_or_rollback() -> Result<(), Box<dyn Error>> {
-    if !shacs_utils::evaluator::app_task_improvement_authority(
+    if !shacs_eval::evaluator::app_task_improvement_authority(
         &ImprovementActorAuthority::AppTask,
         &ImprovementAuthorityAction::CreateProposal,
-    ) || shacs_utils::evaluator::app_task_improvement_authority(
+    ) || shacs_eval::evaluator::app_task_improvement_authority(
         &ImprovementActorAuthority::AppTask,
         &ImprovementAuthorityAction::Approve,
-    ) || shacs_utils::evaluator::app_task_improvement_authority(
+    ) || shacs_eval::evaluator::app_task_improvement_authority(
         &ImprovementActorAuthority::AppTask,
         &ImprovementAuthorityAction::Apply,
-    ) || shacs_utils::evaluator::app_task_improvement_authority(
+    ) || shacs_eval::evaluator::app_task_improvement_authority(
         &ImprovementActorAuthority::AppTask,
         &ImprovementAuthorityAction::Rollback,
     ) {
@@ -5311,7 +5311,7 @@ fn prd011_mcp_exposure_default_deny_and_scope_only_widening() -> Result<(), Box<
         None,
         20,
     );
-    if shacs_utils::evaluator::mcp_exposure_can_widen(&no_approval) {
+    if shacs_eval::evaluator::mcp_exposure_can_widen(&no_approval) {
         return Err("mcp exposure widened without approval".into());
     }
 
@@ -5324,7 +5324,7 @@ fn prd011_mcp_exposure_default_deny_and_scope_only_widening() -> Result<(), Box<
         Some(&wildcard_approval),
         20,
     );
-    if shacs_utils::evaluator::mcp_exposure_can_widen(&wildcard) {
+    if shacs_eval::evaluator::mcp_exposure_can_widen(&wildcard) {
         return Err("wildcard scope must not widen without explicit matching approval".into());
     }
 
@@ -5337,7 +5337,7 @@ fn prd011_mcp_exposure_default_deny_and_scope_only_widening() -> Result<(), Box<
         Some(&broad_kind_approval),
         20,
     );
-    if shacs_utils::evaluator::mcp_exposure_can_widen(&broad) || broad.approval_ref.is_some() {
+    if shacs_eval::evaluator::mcp_exposure_can_widen(&broad) || broad.approval_ref.is_some() {
         return Err("target kind approval must not widen a specific MCP target_ref".into());
     }
 
@@ -5350,7 +5350,7 @@ fn prd011_mcp_exposure_default_deny_and_scope_only_widening() -> Result<(), Box<
         Some(&exact_approval),
         20,
     );
-    if !shacs_utils::evaluator::mcp_exposure_can_widen(&exact)
+    if !shacs_eval::evaluator::mcp_exposure_can_widen(&exact)
         || exact.approval_ref.as_ref() != Some(&exact_approval.decision_ref)
     {
         return Err(format!("exact approved scope should widen only itself: {exact:?}").into());
@@ -5364,7 +5364,7 @@ fn prd011_mcp_exposure_default_deny_and_scope_only_widening() -> Result<(), Box<
         Some(&exact_approval),
         101,
     );
-    if shacs_utils::evaluator::mcp_exposure_can_widen(&expired) || expired.approval_ref.is_some() {
+    if shacs_eval::evaluator::mcp_exposure_can_widen(&expired) || expired.approval_ref.is_some() {
         return Err("expired exact approval must not widen MCP exposure".into());
     }
     Ok(())
@@ -5408,7 +5408,7 @@ fn prd011_apply_verify_and_rollback_records_preserve_lineage() -> Result<(), Box
         prd011_evidence(EvidenceKind::ImprovementApplyRecord, "apply-outcome"),
     )?;
     if apply_record.action_ref != owner_apply_ref
-        || apply_record.input_digest != shacs_utils::evaluator::stable_sha256_digest(&apply_input)?
+        || apply_record.input_digest != shacs_eval::evaluator::stable_sha256_digest(&apply_input)?
         || runtime_improvement_status_after_apply_record()
             != ImprovementProposalStatus::AppliedUnverified
     {

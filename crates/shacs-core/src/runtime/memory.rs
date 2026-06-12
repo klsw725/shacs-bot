@@ -5,6 +5,9 @@ use crate::tools::{
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use shacs_eval::evaluator::{
+    stable_sha256_digest, EvidenceKind, EvidenceRef, MemoryEvidenceOmittedReason, RedactionStatus,
+};
 use shacs_providers::{
     chat_with_retry, GenerationSettings, ProviderClient, ProviderRequest, ProviderRetryMode,
 };
@@ -12,9 +15,6 @@ use shacs_session::{Session, SessionManager};
 use shacs_templates::{
     render_agent_template, render_workspace_template, template_variables, AgentTemplate,
     WorkspaceTemplate,
-};
-use shacs_utils::evaluator::{
-    stable_sha256_digest, EvidenceKind, EvidenceRef, MemoryEvidenceOmittedReason, RedactionStatus,
 };
 use shacs_utils::gitstore::{GitCliStore, GitStore};
 use shacs_utils::text::{strip_think, truncate_text};

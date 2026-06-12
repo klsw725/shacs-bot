@@ -16,7 +16,6 @@ mod self_improvement;
 mod subagent;
 mod tool_execution;
 mod tool_search;
-mod workflow;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
@@ -130,7 +129,7 @@ pub use tool_search::{
     ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
 };
 
-pub use workflow::{
+pub use shacs_workflow::{
     admit_workflow_plan, build_workflow_checkpoint, decide_workflow_admission,
     workflow_barrier_decision, workflow_budget_decision, workflow_diagnostics_manifest,
     workflow_harness_plan_digest, workflow_model_route_snapshot,

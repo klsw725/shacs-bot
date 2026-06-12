@@ -1,9 +1,7 @@
 use crate::runtime::memory::MemoryStore;
 use serde_json::json;
-use shacs_session::{Session, SessionManager};
-use shacs_skills::{SkillRegistry, SkillRegistryEntry, SkillSourceKind};
-use shacs_utils::evaluator::stable_sha256_digest;
-use shacs_utils::evaluator::{
+use shacs_eval::evaluator::stable_sha256_digest;
+use shacs_eval::evaluator::{
     authored_skill_can_become_active, build_bounded_memory_evidence_set, curator_proposal,
     frozen_session_search_snapshot, skill_list_disclosure, skill_reference_disclosure,
     skill_view_disclosure, AuthoredSkillLifecycle, BoundedMemoryEvidenceSetInput,
@@ -11,6 +9,8 @@ use shacs_utils::evaluator::{
     EvidenceRef, FrozenSessionSearchSnapshot, MemoryEvidenceBudget, MemoryEvidenceRequest,
     MemoryEvidenceSet, RedactionStatus, SkillDisclosureRecord,
 };
+use shacs_session::{Session, SessionManager};
+use shacs_skills::{SkillRegistry, SkillRegistryEntry, SkillSourceKind};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use shacs_utils::evaluator::{
+use shacs_eval::evaluator::{
     spec018_evidence_ref_has_owner_and_redaction, spec018_release_gate_outcome, EvidenceRef,
     RedactionStatus, Spec018DiagnosticsEvidenceManifest, Spec018DiagnosticsRedactionSummary,
     Spec018LedgerInspectQuery, Spec018LedgerInspectResult, Spec018ReleaseBlocker,
@@ -274,7 +274,7 @@ pub fn evaluate_spec018_release_gate(
 
 fn release_gate_synthetic_ref(id: &str) -> EvidenceRef {
     EvidenceRef {
-        kind: shacs_utils::evaluator::EvidenceKind::DiagnosticRecord,
+        kind: shacs_eval::evaluator::EvidenceKind::DiagnosticRecord,
         id: id.to_owned(),
         digest: id.to_owned(),
         summary: "release gate synthetic diagnostics evidence".to_owned(),

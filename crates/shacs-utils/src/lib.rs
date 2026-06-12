@@ -1,6 +1,5 @@
 pub mod diagnostics;
 pub mod document;
-pub mod evaluator;
 pub mod gitstore;
 pub mod media_decode;
 pub mod path;

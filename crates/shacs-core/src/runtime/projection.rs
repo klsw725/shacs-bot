@@ -1,4 +1,4 @@
-use shacs_utils::evaluator::{
+use shacs_eval::evaluator::{
     spec018_approval_item_channel_visible, spec018_channel_event_kind_for_status,
     spec018_evidence_refs_are_redacted, Spec018ApprovalProjectionItem,
     Spec018AutomationDeliveryStatus, Spec018BlockedProjectionItem, Spec018EvaluatorDecisionSummary,
@@ -237,13 +237,13 @@ pub fn runtime_spec018_channel_projection(projection: &Spec018Projection) -> Spe
     }
 }
 
-fn sanitize_refs(refs: &mut Vec<shacs_utils::evaluator::EvidenceRef>) {
+fn sanitize_refs(refs: &mut Vec<shacs_eval::evaluator::EvidenceRef>) {
     refs.retain(|evidence_ref| {
         spec018_evidence_refs_are_redacted(std::slice::from_ref(evidence_ref))
     });
 }
 
-fn sanitize_status(status: &mut shacs_utils::evaluator::Spec018ProjectionStatus) {
+fn sanitize_status(status: &mut shacs_eval::evaluator::Spec018ProjectionStatus) {
     if let Some(user_action_hint) = status.user_action_hint.as_mut() {
         *user_action_hint = redact_string(user_action_hint);
     }
@@ -288,12 +288,12 @@ fn sanitize_blocked(item: &Spec018BlockedProjectionItem) -> Spec018BlockedProjec
     item.user_action_hint = redact_string(&item.user_action_hint);
     sanitize_refs(&mut item.evidence_refs);
     if !spec018_evidence_refs_are_redacted(std::slice::from_ref(&item.diagnostics_ref)) {
-        item.diagnostics_ref = shacs_utils::evaluator::EvidenceRef {
-            kind: shacs_utils::evaluator::EvidenceKind::DiagnosticRecord,
+        item.diagnostics_ref = shacs_eval::evaluator::EvidenceRef {
+            kind: shacs_eval::evaluator::EvidenceKind::DiagnosticRecord,
             id: "redacted-diagnostics-ref".to_owned(),
             digest: "redacted-diagnostics-ref".to_owned(),
             summary: "diagnostics ref redacted from projection".to_owned(),
-            redaction_status: shacs_utils::evaluator::RedactionStatus::Redacted,
+            redaction_status: shacs_eval::evaluator::RedactionStatus::Redacted,
             owner_spec: Some("018".to_owned()),
             locator: None,
             retention_hint: Some("projection".to_owned()),
@@ -342,7 +342,7 @@ fn collect_projection_evidence_refs(
     verification_summaries: &[Spec018VerificationProjectionItem],
     replay_summaries: &[Spec018ReplayRegressionSummary],
     recent_evaluator_decision_summaries: &[Spec018EvaluatorDecisionSummary],
-) -> Vec<shacs_utils::evaluator::EvidenceRef> {
+) -> Vec<shacs_eval::evaluator::EvidenceRef> {
     goal_summaries
         .iter()
         .flat_map(|item| {

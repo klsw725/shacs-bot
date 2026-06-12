@@ -881,6 +881,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shacs-eval"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "shacs-utils",
+]
+
+[[package]]
 name = "shacs-heartbeat"
 version = "0.1.0"
 dependencies = [
@@ -888,8 +898,8 @@ dependencies = [
  "chrono-tz",
  "serde",
  "serde_json",
+ "shacs-eval",
  "shacs-providers",
- "shacs-utils",
  "tempfile",
 ]
 

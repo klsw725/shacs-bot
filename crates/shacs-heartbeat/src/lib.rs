@@ -2,11 +2,11 @@ use chrono::Utc;
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use shacs_eval::evaluator::{
+    build_evaluator_messages, evaluate_notification_tool_schema, parse_notification_decision,
+};
 use shacs_providers::{
     GenerationSettings, LlmResponse, ProviderClient, ProviderError, ProviderRequest,
-};
-use shacs_utils::evaluator::{
-    build_evaluator_messages, evaluate_notification_tool_schema, parse_notification_decision,
 };
 use std::fmt;
 use std::fs;

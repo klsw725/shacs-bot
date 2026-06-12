@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use shacs_session::Session;
-use shacs_utils::evaluator::{
+use shacs_eval::evaluator::{
     EvaluationTriggerSource, EvaluatorKind, EvaluatorRequestEnvelope, EvidenceRef,
     FrozenEvaluationSnapshot, RedactionStatus, SuggestedNextAction, TaskOutcomeClass,
 };
+use shacs_session::Session;
 
 pub const PERSISTENT_GOAL_METADATA_KEY: &str = "persistent_goal";
 pub const DEFAULT_GOAL_TURN_BUDGET: u32 = 8;

@@ -1,4 +1,4 @@
-use shacs_utils::evaluator::{
+use shacs_eval::evaluator::{
     default_mcp_exposure_projection, failed_improvement_verification_next_action,
     improvement_proposal_can_affect_runtime, stable_sha256_digest,
     validate_improvement_apply_readiness, ApprovalDecisionKind, ApprovalRequestStatus,

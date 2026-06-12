@@ -1,4 +1,4 @@
-use shacs_utils::evaluator::{
+use shacs_eval::evaluator::{
     compare_replay_dataset_item, AuxiliaryJudgeRoute, EvidenceKind, EvidenceRef, RedactionStatus,
     ReplayCaseResult, ReplayComparisonSeverity, ReplayComparisonStatus, ReplayDatasetItem,
     ReplayRunRecord, ReplayRunStatus, ReplayToolOutcomePolicy,

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use shacs_utils::evaluator::{
+use shacs_eval::evaluator::{
     automation_run_idempotency_key, automation_run_state_projection_status,
     AutomationDeliveryRecord, AutomationExecutionMode, AutomationRecursionGuard,
     AutomationRunRequest, AutomationRunState, AutomationRunStateRecord, AutomationRunTriggerKind,
