@@ -29,9 +29,9 @@ Spec 024의 첫 구현 웨이브는 dynamic workflow를 실제 실행하기 전�
 
 ## 구현 매핑
 
-- `crates/shacs-core/src/runtime/workflow.rs`: typed workflow foundation과 helper 함수
+- `crates/shacs-workflow/src/lib.rs`: typed workflow foundation과 helper 함수
 - `crates/shacs-core/src/runtime/mod.rs`: public runtime exports
-- `crates/shacs-core/tests/runtime_workflow.rs`: admission, digest, checkpoint/resume, release evidence tests
+- `crates/shacs-workflow/tests/workflow.rs`: admission, digest, checkpoint/resume, release evidence tests
 
 ## SPEC 입력
 
@@ -74,9 +74,9 @@ Spec 024의 첫 구현 웨이브는 dynamic workflow를 실제 실행하기 전�
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_state`
+1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_state`
 
 ## 완료 기준
 
@@ -86,4 +86,4 @@ Spec 024의 첫 구현 웨이브는 dynamic workflow를 실제 실행하기 전�
 - admitted workflow record가 plan digest와 origin session/turn을 보존한다.
 - checkpoint resume decision이 terminal state, plan digest mismatch, missing resume point를 fail-closed로 처리한다.
 - release evidence checklist가 owner `024`와 redaction validity를 요구한다.
-- `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`, `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`, `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow`를 통과한다.
+- `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`, `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`, `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow`를 통과한다.

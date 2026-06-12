@@ -22,7 +22,7 @@ Spec 024의 workflow pattern과 child graph contract를 runtime이 소비할 수
 
 ## 구현 매핑
 
-- `crates/shacs-core/src/runtime/workflow.rs`
+- `crates/shacs-workflow/src/lib.rs`
   - `WorkflowChildRunStatus`
   - `WorkflowChildResult`
   - `WorkflowBarrierDecision`
@@ -30,7 +30,7 @@ Spec 024의 workflow pattern과 child graph contract를 runtime이 소비할 수
   - `workflow_ready_step_ids`
   - `workflow_barrier_decision`
   - `workflow_synthesis_outcome`
-- `crates/shacs-core/tests/runtime_workflow.rs`
+- `crates/shacs-workflow/tests/workflow.rs`
   - `workflow_barrier_verifier_and_synthesis_fail_closed`
 
 ## SPEC 입력
@@ -74,9 +74,9 @@ Spec 024의 workflow pattern과 child graph contract를 runtime이 소비할 수
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_barrier`
+1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_barrier`
 
 ## 완료 기준
 

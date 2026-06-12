@@ -23,11 +23,11 @@ Workflow interruption, stale child result, replay/debugging이 destructive re-ex
 
 ## 구현 매핑
 
-- `crates/shacs-core/src/runtime/workflow.rs`
+- `crates/shacs-workflow/src/lib.rs`
   - `WorkflowDiagnosticsManifest`
   - `workflow_diagnostics_manifest`
   - existing `WorkflowCheckpoint` and `workflow_resume_decision`
-- `crates/shacs-core/tests/runtime_workflow.rs`
+- `crates/shacs-workflow/tests/workflow.rs`
   - `workflow_checkpoint_resume_requires_matching_plan_digest_and_nonterminal_state`
   - `workflow_projection_diagnostics_and_spec024_release_gate_are_evidence_backed`
 
@@ -74,9 +74,9 @@ Workflow interruption, stale child result, replay/debugging이 destructive re-ex
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_resume`
+1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_resume`
 
 ## 완료 기준
 

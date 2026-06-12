@@ -21,13 +21,13 @@ Verifier graph와 adversarial review 결과가 workflow success를 fail-closed�
 
 ## 구현 매핑
 
-- `crates/shacs-core/src/runtime/workflow.rs`
+- `crates/shacs-workflow/src/lib.rs`
   - `WorkflowVerifierVerdictKind`
   - `WorkflowVerifierVerdict`
   - `WorkflowVerificationGate`
   - `workflow_verification_gate`
   - `workflow_synthesis_outcome`
-- `crates/shacs-core/tests/runtime_workflow.rs`
+- `crates/shacs-workflow/tests/workflow.rs`
   - `workflow_barrier_verifier_and_synthesis_fail_closed`
 
 ## SPEC 입력
@@ -72,9 +72,9 @@ Verifier graph와 adversarial review 결과가 workflow success를 fail-closed�
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_verifier`
+1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_verifier`
 
 ## 완료 기준
 

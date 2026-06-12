@@ -21,12 +21,12 @@ Workflow가 비용과 intelligence routing을 숨기지 않도록 budget/model s
 
 ## 구현 매핑
 
-- `crates/shacs-core/src/runtime/workflow.rs`
+- `crates/shacs-workflow/src/lib.rs`
   - `WorkflowBudgetDecision`
   - `workflow_budget_decision`
   - `WorkflowModelRouteSnapshot`
   - `workflow_model_route_snapshot`
-- `crates/shacs-core/tests/runtime_workflow.rs`
+- `crates/shacs-workflow/tests/workflow.rs`
   - `workflow_worktree_budget_and_model_routing_contracts_are_explicit`
 
 ## SPEC 입력
@@ -72,9 +72,9 @@ Workflow가 비용과 intelligence routing을 숨기지 않도록 budget/model s
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_budget`
+1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_budget`
 
 ## 완료 기준
 

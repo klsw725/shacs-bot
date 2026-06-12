@@ -50,10 +50,10 @@ Dynamic workflow spec closure를 위해 남은 runtime execution wiring gap을 �
 
 | Requirement | Likely crate/module | Test perspective |
 |---|---|---|
-| admission to execution branch | `crates/shacs-core/src/runtime/runner.rs`, `runtime/workflow.rs` | dynamic workflow smoke enters branch |
-| child handoff and progress | `crates/shacs-core/src/runtime/subagent.rs`, `runtime/workflow.rs` | child progress event emitted |
+| admission to execution branch | `crates/shacs-core/src/runtime/runner.rs`, `crates/shacs-workflow/src/lib.rs` | dynamic workflow smoke enters branch |
+| child handoff and progress | `crates/shacs-core/src/runtime/subagent.rs`, `crates/shacs-workflow/src/lib.rs` | child progress event emitted |
 | interrupt propagation | `crates/shacs-core/src/runtime/runner.rs`, cancellation registry | stop marker cancels workflow and child |
-| synthesis and verifier gate | `crates/shacs-core/src/runtime/workflow.rs` | verifier failure blocks final success |
+| synthesis and verifier gate | `crates/shacs-workflow/src/lib.rs` | verifier failure blocks final success |
 
 ## 데이터/상태 모델
 

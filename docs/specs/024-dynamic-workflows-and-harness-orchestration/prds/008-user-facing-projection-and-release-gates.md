@@ -23,14 +23,14 @@
 
 ## 구현 매핑
 
-- `crates/shacs-core/src/runtime/workflow.rs`
+- `crates/shacs-workflow/src/lib.rs`
   - `WorkflowProjection`
   - `workflow_projection`
   - `WorkflowSpec024ReleaseEvidenceBucket`
   - `WorkflowSpec024ReleaseEvidence`
   - `WorkflowSpec024ReleaseEvidenceChecklist`
   - `workflow_spec024_release_evidence_checklist`
-- `crates/shacs-core/tests/runtime_workflow.rs`
+- `crates/shacs-workflow/tests/workflow.rs`
   - `workflow_projection_diagnostics_and_spec024_release_gate_are_evidence_backed`
 
 ## SPEC 입력
@@ -79,7 +79,7 @@
 1. `cargo fmt --manifest-path crates/shacs-cli/Cargo.toml -- --check`
 2. `cargo clippy --manifest-path crates/shacs-cli/Cargo.toml --all-targets -- -D warnings`
 3. `cargo test --manifest-path crates/shacs-cli/Cargo.toml workflow_projection`
-4. core projection model을 건드렸다면 `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_projection`
+4. workflow projection model을 건드렸다면 `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_projection`
 
 ## 완료 기준
 

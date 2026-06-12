@@ -89,7 +89,7 @@ reference는 질문을 돕는 지도다. 최종 설계의 source of truth는 num
 - MCP default-deny, skills registry, channel workers, local API, diagnostics는 노출, projection, 관측의 기반이다.
 - 010, 012, 013, 014, 017은 safety, runtime, interface, diagnostics, app operating environment의 주요 하위 경계를 이미 고정한다.
 
-구현 상태: PRD 000-014는 Rust 계약과 runtime helper 기준으로 구현되어 있으며, 018 closure는 아래 영역들이 `crates/shacs-utils`와 `crates/shacs-core`의 포맷, clippy, 관련 테스트를 통과할 때 완료로 판정한다. 이 문서가 정의한 final goal은 하나의 core evaluator가 아니라 다음 영역들이 하나의 제품 계약으로 연결되는 것이다.
+구현 상태: PRD 000-014는 Rust 계약과 runtime helper 기준으로 구현되어 있으며, 018 closure는 아래 영역들이 `crates/shacs-eval`, `crates/shacs-utils`, `crates/shacs-core`의 포맷, clippy, 관련 테스트를 통과할 때 완료로 판정한다. 이 문서가 정의한 final goal은 하나의 core evaluator가 아니라 다음 영역들이 하나의 제품 계약으로 연결되는 것이다.
 
 1. persistent goal과 `/goal` 같은 목표 lifecycle의 formal model.
 2. judge verdict `done`, `continue`, `blocked`와 turn budget, pause, resume, clear의 공식 상태.

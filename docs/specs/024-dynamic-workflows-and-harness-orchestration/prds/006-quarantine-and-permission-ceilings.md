@@ -22,13 +22,13 @@ Untrusted input을 읽은 workflow child와 privileged action 수행자를 분�
 
 ## 구현 매핑
 
-- `crates/shacs-core/src/runtime/workflow.rs`
+- `crates/shacs-workflow/src/lib.rs`
   - `WorkflowStepPrivilege`
   - `WorkflowQuarantineDecision`
   - `workflow_quarantine_decision`
   - `WorkflowPermissionCeilingDecision`
   - `workflow_permission_ceiling_decision`
-- `crates/shacs-core/tests/runtime_workflow.rs`
+- `crates/shacs-workflow/tests/workflow.rs`
   - `workflow_recipe_quarantine_and_permission_ceiling_preserve_safety_boundaries`
 
 ## SPEC 입력
@@ -74,9 +74,9 @@ Untrusted input을 읽은 workflow child와 privileged action 수행자를 분�
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_permission`
+1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_permission`
 
 ## 완료 기준
 

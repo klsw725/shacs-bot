@@ -22,11 +22,11 @@ Write-capable workflow child가 main worktree를 조용히 오염시키지 않�
 
 ## 구현 매핑
 
-- `crates/shacs-core/src/runtime/workflow.rs`
+- `crates/shacs-workflow/src/lib.rs`
   - `WorkflowWorktreeRequest`
   - `WorkflowWorktreeDecision`
   - `workflow_worktree_decision`
-- `crates/shacs-core/tests/runtime_workflow.rs`
+- `crates/shacs-workflow/tests/workflow.rs`
   - `workflow_worktree_budget_and_model_routing_contracts_are_explicit`
 
 ## SPEC 입력
@@ -73,9 +73,9 @@ Write-capable workflow child가 main worktree를 조용히 오염시키지 않�
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_worktree`
+1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
+2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_worktree`
 
 ## 완료 기준
 

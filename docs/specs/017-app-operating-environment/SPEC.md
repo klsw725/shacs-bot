@@ -36,8 +36,8 @@
 
 구현 evidence는 다음 repo-relative 경로에 남아 있다.
 
-- `crates/shacs-core/src/app.rs`: manifest validation, registry store, lifecycle state, process snapshot, task ledger entry redaction과 persistence의 core 타입과 동작
-- `crates/shacs-core/tests/app_environment.rs`: manifest, registry, process projection, ledger baseline 회귀 테스트
+- `crates/shacs-app/src/app.rs`: manifest validation, registry store, lifecycle state, process snapshot, task ledger entry redaction과 persistence의 core 타입과 동작
+- `crates/shacs-app/tests/app_environment.rs`: manifest, registry, process projection, ledger baseline 회귀 테스트
 - `crates/shacs-cli/src/lib.rs`: `apps install/list/inspect/show/enable/disable/uninstall` command surface와 parser evidence
 
 이 baseline에서도 app install은 실제 app process 실행, supervisor start, MCP server 내부 구현, secret vault backend 구현, permission grant 확정을 만들지 않는다. `AppProcessSnapshot`은 session truth owner가 아니라 기존 session/runtime 상태에서 읽는 projection이다.

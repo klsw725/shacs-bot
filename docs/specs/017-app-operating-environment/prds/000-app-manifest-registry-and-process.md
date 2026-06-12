@@ -63,7 +63,7 @@
 
 - Spec 017의 app operating environment 중 local app bundle baseline은 구현되어 closure 상태다.
 - 완료 범위는 `AppManifest`, `AppRegistry`, `AppRegistryEntry`, `AppLifecycleState`, `AppProcessSnapshot`, `TaskLedgerEntry`의 core 타입과 저장 의미다.
-- 구현 evidence는 `crates/shacs-core/src/app.rs`, `crates/shacs-core/tests/app_environment.rs`, `crates/shacs-cli/src/lib.rs`의 apps command surface에 있다.
+- 구현 evidence는 `crates/shacs-app/src/app.rs`, `crates/shacs-app/tests/app_environment.rs`, `crates/shacs-cli/src/lib.rs`의 apps command surface에 있다.
 - 이 closure는 local app manifest/registry/process projection/task ledger baseline 완료를 뜻한다. remote marketplace, dynamic plugin ABI, 실제 app process 실행, MCP server 내부, secret vault backend, SaaS/admin/fleet workflow, visual UI design 완료를 뜻하지 않는다.
 
 ### 현재 구현 계약
@@ -116,9 +116,9 @@
 
 ## Verification Evidence
 
-- 구현 evidence는 `crates/shacs-core/src/app.rs`의 core module, `crates/shacs-core/tests/app_environment.rs`의 app environment tests, `crates/shacs-cli/src/lib.rs`의 apps command parser와 command surface다.
+- 구현 evidence는 `crates/shacs-app/src/app.rs`의 core module, `crates/shacs-app/tests/app_environment.rs`의 app environment tests, `crates/shacs-cli/src/lib.rs`의 apps command parser와 command surface다.
 - executable evidence는 존재하지 않는 경로가 아니라 Cargo로 실행 가능한 test와 command여야 한다.
-- 최소 command evidence는 `cargo test --manifest-path crates/shacs-core/Cargo.toml --test app_environment`와 `cargo test --manifest-path crates/shacs-cli/Cargo.toml`로 연결한다.
+- 최소 command evidence는 `cargo test --manifest-path crates/shacs-app/Cargo.toml --test app_environment`와 `cargo test --manifest-path crates/shacs-cli/Cargo.toml`로 연결한다.
 - 이 evidence는 local baseline closure만 뒷받침한다. FullSpec 승격이나 전체 AI Operating System 완성 evidence로 쓰지 않는다.
 
 ## Open Risks
