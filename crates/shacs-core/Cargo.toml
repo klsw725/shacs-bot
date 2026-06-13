@@ -21,6 +21,8 @@ shacs-config = { path = "../shacs-config" }
 shacs-eval = { path = "../shacs-eval" }
 shacs-heartbeat = { path = "../shacs-heartbeat" }
 shacs-providers = { path = "../shacs-providers" }
+shacs-projection = { path = "../shacs-projection" }
+shacs-redaction = { path = "../shacs-redaction" }
 shacs-security = { path = "../shacs-security" }
 shacs-session = { path = "../shacs-session" }
 shacs-skills = { path = "../shacs-skills" }

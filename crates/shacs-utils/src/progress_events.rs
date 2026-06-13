@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::redaction::{redact_string, redact_value};
+use shacs_redaction::{redact_string, redact_value};
 
 const TOOL_PROGRESS_QUERY_MAX_CHARS: usize = 120;
 

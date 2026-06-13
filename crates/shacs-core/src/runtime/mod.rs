@@ -2,14 +2,12 @@ mod agent_loop;
 mod autocompact;
 mod automation;
 mod context;
-mod diagnostics_release;
 mod goal;
 mod lifecycle;
 mod loop_control;
 mod memory;
 mod memory_skill_curator;
 mod permission_action;
-mod projection;
 mod replay;
 mod runner;
 mod self_improvement;
@@ -28,13 +26,6 @@ pub use automation::{
     SubagentMergeState,
 };
 pub use context::{add_assistant_message, add_tool_result, ContextBuildRequest, ContextBuilder};
-pub use diagnostics_release::{
-    build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
-    evaluate_spec018_release_gate, tool_search_prd005_release_evidence_checklist,
-    tool_search_prd006_release_evidence_checklist, RuntimeSpec018DiagnosticsManifestInput,
-    RuntimeSpec018LedgerInspectInput, RuntimeSpec018ReleaseGateInput, ToolSearchReleaseEvidence,
-    ToolSearchReleaseEvidenceBucket, ToolSearchReleaseEvidenceChecklist,
-};
 pub use goal::{
     apply_completion_verdict, build_goal_completion_evaluation_request, clear_goal,
     consume_evaluator_decision, continuation_decision, create_persistent_goal,
@@ -81,10 +72,6 @@ pub use permission_action::{
     PermissionMode, PermissionModeSnapshot, PermissionedAction, PermissionedActionInput,
     PermissionedActionOrigin, SafetyCapability, TargetRef,
 };
-pub use projection::{
-    build_spec018_projection, runtime_spec018_channel_projection,
-    runtime_spec018_local_api_projection, RuntimeSpec018ProjectionInput,
-};
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub use runner::{
     AgentHook, AgentHookContext, AgentRunResult, AgentRunSpec, AgentRunner, CompositeHook,
@@ -105,6 +92,15 @@ pub use shacs_heartbeat::{
     HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService,
     HeartbeatStartResult, HeartbeatTaskExecutor, HeartbeatTickOutcome, HeartbeatWorker,
     ProviderNotificationEvaluator, HEARTBEAT_FILE_NAME, HEARTBEAT_TOOL_NAME,
+};
+pub use shacs_projection::{
+    build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
+    build_spec018_projection, evaluate_spec018_release_gate, runtime_spec018_channel_projection,
+    runtime_spec018_local_api_projection, tool_search_prd005_release_evidence_checklist,
+    tool_search_prd006_release_evidence_checklist, RuntimeSpec018DiagnosticsManifestInput,
+    RuntimeSpec018LedgerInspectInput, RuntimeSpec018ProjectionInput,
+    RuntimeSpec018ReleaseGateInput, ToolSearchReleaseEvidence, ToolSearchReleaseEvidenceBucket,
+    ToolSearchReleaseEvidenceChecklist,
 };
 pub use shacs_providers::{GenerationSettings, ProviderClient, ProviderRetryMode};
 pub use shacs_session::{

@@ -6,7 +6,7 @@ use shacs_eval::evaluator::{
     Spec018VerificationProjectionItem, SPEC018_PROJECTION_SCHEMA_LABEL,
     SPEC018_PROJECTION_SCHEMA_VERSION,
 };
-use shacs_utils::redaction::redact_string;
+use shacs_redaction::redact_string;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeSpec018ProjectionInput<'a> {

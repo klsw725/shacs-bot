@@ -50,6 +50,7 @@ use shacs_providers::{
     resolve_provider_client, AgentDefaults, LlmResponse, ProviderClient, ProviderError,
     ProviderEvent, ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
 };
+use shacs_redaction::redact_string;
 use shacs_skills::{
     discover_skill_registry, sync_builtin_skills, SkillRegistryEntry, SkillRegistryOptions,
     SkillRegistryStatus,
@@ -66,7 +67,6 @@ use shacs_utils::progress_events::{
     build_tool_progress_start_payload, project_tool_progress_arguments, ProgressEventStatus,
     ToolProgressEvent, ToolProgressPayload,
 };
-use shacs_utils::redaction::redact_string;
 use shacs_utils::text::safe_filename;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;

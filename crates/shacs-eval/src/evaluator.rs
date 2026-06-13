@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use shacs_utils::redaction::{redact_string, redact_value};
+use shacs_redaction::{redact_string, redact_value};
 
 pub const EVALUATE_NOTIFICATION_TOOL: &str = "evaluate_notification";
 
@@ -4301,7 +4301,7 @@ fn redacted_evidence_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shacs_utils::redaction::REDACTED;
+    use shacs_redaction::REDACTED;
 
     fn automation_trigger_ref(idempotency_key: &str) -> AutomationTriggerRef {
         AutomationTriggerRef {

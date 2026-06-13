@@ -894,7 +894,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "shacs-utils",
+ "shacs-redaction",
 ]
 
 [[package]]
@@ -949,7 +949,9 @@ dependencies = [
  "shacs-cron",
  "shacs-eval",
  "shacs-heartbeat",
+ "shacs-projection",
  "shacs-providers",
+ "shacs-redaction",
  "shacs-security",
  "shacs-session",
  "shacs-skills",
@@ -977,7 +979,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "shacs-utils",
+ "shacs-redaction",
 ]
 
 [[package]]
@@ -993,6 +995,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "shacs-projection"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "shacs-eval",
+ "shacs-redaction",
+]
+
+[[package]]
 name = "shacs-providers"
 version = "0.1.0"
 dependencies = [
@@ -1004,6 +1015,13 @@ dependencies = [
  "sha2",
  "shacs-config",
  "ureq",
+]
+
+[[package]]
+name = "shacs-redaction"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -1048,6 +1066,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shacs-redaction",
  "ureq",
  "zip",
 ]

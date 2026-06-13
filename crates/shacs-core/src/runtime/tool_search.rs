@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use shacs_eval::evaluator::{EvidenceKind, EvidenceRef, RedactionStatus};
-use shacs_utils::redaction::redact_string;
+use shacs_redaction::redact_string;
 use std::collections::BTreeMap;
 use std::fmt;
 

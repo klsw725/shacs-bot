@@ -1,7 +1,7 @@
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use shacs_utils::redaction::{is_sensitive_key, redact_value, REDACTED};
+use shacs_redaction::{is_sensitive_key, redact_value, REDACTED};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};

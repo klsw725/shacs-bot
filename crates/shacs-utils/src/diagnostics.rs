@@ -1,7 +1,7 @@
-use crate::redaction::{redact_value, REDACTED};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use shacs_redaction::{redact_value, REDACTED};
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -274,7 +274,7 @@ pub fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redaction::REDACTED;
+    use shacs_redaction::REDACTED;
     use std::io::Read;
 
     #[test]

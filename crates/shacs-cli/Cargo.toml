@@ -11,6 +11,7 @@ shacs-command = { path = "../shacs-command" }
 shacs-config = { path = "../shacs-config" }
 shacs-core = { path = "../shacs-core" }
 shacs-providers = { path = "../shacs-providers" }
+shacs-redaction = { path = "../shacs-redaction" }
 shacs-skills = { path = "../shacs-skills" }
 shacs-templates = { path = "../shacs-templates" }
 shacs-utils = { path = "../shacs-utils" }

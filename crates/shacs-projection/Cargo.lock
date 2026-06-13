@@ -157,6 +157,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shacs-projection"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "shacs-eval",
+ "shacs-redaction",
+]
+
+[[package]]
 name = "shacs-redaction"
 version = "0.1.0"
 dependencies = [

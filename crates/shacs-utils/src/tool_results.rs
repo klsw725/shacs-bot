@@ -4,8 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::redaction::{redact_string, redact_value};
 use crate::text::{safe_filename, stringify_text_blocks, truncate_text};
+use shacs_redaction::{redact_string, redact_value};
 
 pub const TOOL_RESULTS_DIR: &str = ".nanobot/tool-results";
 pub const TOOL_RESULT_PREVIEW_CHARS: usize = 1_200;
@@ -328,8 +328,8 @@ mod tests {
         let stored =
             fs::read_to_string(root.join(TOOL_RESULTS_DIR).join("default").join("call.txt"))
                 .map_err(|error| error.to_string())?;
-        assert!(stored.contains(crate::redaction::REDACTED));
-        assert!(reference.contains(crate::redaction::REDACTED));
+        assert!(stored.contains(shacs_redaction::REDACTED));
+        assert!(reference.contains(shacs_redaction::REDACTED));
         assert!(!stored.contains("sk-secret-token"));
         assert!(!reference.contains("sk-secret-token"));
         Ok(())
@@ -353,8 +353,8 @@ mod tests {
             fs::read_to_string(root.join(TOOL_RESULTS_DIR).join("default").join("call.txt"))
                 .map_err(|error| error.to_string())?;
         assert!(stored.contains("before"));
-        assert!(stored.contains(crate::redaction::REDACTED));
-        assert!(reference.contains(crate::redaction::REDACTED));
+        assert!(stored.contains(shacs_redaction::REDACTED));
+        assert!(reference.contains(shacs_redaction::REDACTED));
         assert!(!stored.contains("plain-secret"));
         assert!(!reference.contains("plain-secret"));
         Ok(())
@@ -424,8 +424,8 @@ mod tests {
                 .join("call.json"),
         )
         .map_err(|error| error.to_string())?;
-        assert!(stored.contains(crate::redaction::REDACTED));
-        assert!(reference.contains(crate::redaction::REDACTED));
+        assert!(stored.contains(shacs_redaction::REDACTED));
+        assert!(reference.contains(shacs_redaction::REDACTED));
         assert!(!stored.contains("ghp_secret_token"));
         assert!(!reference.contains("ghp_secret_token"));
         Ok(())
@@ -457,8 +457,8 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
         assert!(stored.contains("safe output"));
-        assert!(stored.contains(crate::redaction::REDACTED));
-        assert!(reference.contains(crate::redaction::REDACTED));
+        assert!(stored.contains(shacs_redaction::REDACTED));
+        assert!(reference.contains(shacs_redaction::REDACTED));
         assert!(!stored.contains("plain-secret"));
         assert!(!reference.contains("plain-secret"));
         Ok(())
@@ -472,7 +472,7 @@ mod tests {
         let result = maybe_persist_text_tool_result(None, None, "call", secret, 64)
             .ok_or_else(|| "missing fallback".to_owned())?;
         assert!(result.contains("api_key"));
-        assert!(result.contains(crate::redaction::REDACTED));
+        assert!(result.contains(shacs_redaction::REDACTED));
         assert!(result.contains("after"));
         assert!(!result.contains("plain-secret"));
         Ok(())
@@ -506,7 +506,7 @@ mod tests {
             .as_str()
             .ok_or_else(|| "fallback was not string".to_owned())?;
         assert!(result.contains("safe output"));
-        assert!(result.contains(crate::redaction::REDACTED));
+        assert!(result.contains(shacs_redaction::REDACTED));
         assert!(!result.contains("plain-secret"));
         assert_eq!(
             fs::read_to_string(outside).map_err(|error| error.to_string())?,
@@ -542,7 +542,7 @@ mod tests {
         )
         .ok_or_else(|| "missing fail-closed fallback".to_owned())?;
         assert!(result.contains("before Authorization: Bearer"));
-        assert!(result.contains(crate::redaction::REDACTED));
+        assert!(result.contains(shacs_redaction::REDACTED));
         assert!(result.contains("after"));
         assert!(!result.contains("ghp_secret_token"));
         assert_eq!(
