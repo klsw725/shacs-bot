@@ -21,10 +21,10 @@
 3. `cargo test --manifest-path crates/shacs-utils/Cargo.toml progress_events` 통과: 3 passed.
 4. `cargo test --manifest-path crates/shacs-cli/Cargo.toml tool_observability_projects_bridge_arguments_for_start_and_pending_finish` 통과.
 5. `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_verbose_preview_helpers_redact_before_truncating` 통과.
-6. `cargo test --manifest-path crates/shacs-core/Cargo.toml tool_search_prd005_release_evidence_checklist_requires_all_buckets` 통과.
+6. `cargo test --manifest-path crates/shacs-projection/Cargo.toml tool_search_prd005_release_evidence_checklist_requires_all_buckets` 통과.
 7. `cargo test --manifest-path crates/shacs-core/Cargo.toml bridge_underlying_mapping_evidence_ref_is_safe_for_trajectory_tool_refs` 통과.
 8. `cargo test --manifest-path crates/shacs-core/Cargo.toml core_bridge_tool_events_serialize_safe_for_subagent_progress` 통과.
-9. `cargo test --manifest-path crates/shacs-core/Cargo.toml` 통과: lib 16, app_environment 11, runtime 17, runtime_agent 49, runtime_loop 105, tools 75, doctest 0.
+9. `cargo test --manifest-path crates/shacs-core/Cargo.toml` 통과: lib 16, app_environment 11, runtime 18, runtime_agent 49, runtime_loop 103, runtime_workflow 1, tools 78, doctest 0.
 10. `lsp_diagnostics` 확인: PRD 005 관련 Rust 변경 파일에서 diagnostics 없음.
 
 ## 목표

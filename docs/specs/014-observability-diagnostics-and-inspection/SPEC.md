@@ -65,7 +65,7 @@
 - API는 `crates/shacs-api/src/lib.rs`에서 `/health`, `/v1/diagnostics`, 로컬 session diagnostics query를 제공한다. `/health`는 기본 alive check이며 readiness나 dependency degraded 상태까지 표현하지 않는다.
 - provider/tool 진행 상황은 callback plumbing과 `crates/shacs-utils/src/progress_events.rs`의 `ToolProgressEvent`, payload helper로 전달된다.
 - runtime은 `crates/shacs-core/src/runtime/runner.rs`, `crates/shacs-core/src/runtime/agent_loop.rs`, `crates/shacs-core/tests/runtime_loop.rs`, `crates/shacs-core/tests/runtime_agent.rs`에서 checkpoint와 `pending_user_turn` 성격의 marker를 검증한다.
-- shared redaction은 `crates/shacs-utils/src/redaction.rs`에서 diagnostics snapshot과 bundle serialization 전에 재귀 적용된다. 기존 scoped redaction은 `crates/shacs-core/src/tools/self_tool.rs`, `crates/shacs-core/tests/tools.rs`, `crates/shacs-config/src/lib.rs`, `crates/shacs-cron/src/lib.rs`, session diagnostics metadata 경로에서 유지된다.
+- shared redaction은 `crates/shacs-redaction/src/lib.rs`에서 diagnostics snapshot과 bundle serialization 전에 재귀 적용된다. 기존 scoped redaction은 `crates/shacs-core/src/tools/self_tool.rs`, `crates/shacs-core/tests/tools.rs`, `crates/shacs-config/src/lib.rs`, `crates/shacs-cron/src/lib.rs`, session diagnostics metadata 경로에서 유지된다.
 
 ### 부분 구현 또는 future gap
 

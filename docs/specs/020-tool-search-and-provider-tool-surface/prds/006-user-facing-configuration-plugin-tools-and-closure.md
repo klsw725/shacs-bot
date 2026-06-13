@@ -109,13 +109,13 @@ Tool Search의 남은 closure gap인 user-facing config/diagnostics evidence와 
 1. `crates/shacs-core/src/tools/tool_search.rs`의 `DeferredToolCatalog`가 deferred catalog entry의 `source_kind`별 count를 계산한다.
 2. `crates/shacs-core/src/runtime/tool_search.rs`의 `ToolSearchDiagnosticsSummary`가 `deferred_source_counts`를 포함한다.
 3. `crates/shacs-core/src/runtime/runner.rs`의 `tool_search_activation` event detail/result가 activation reason과 source-kind summary를 runtime diagnostics evidence로 관찰 가능하게 만든다.
-4. `crates/shacs-core/src/runtime/diagnostics_release.rs`에 PRD 006용 release checklist를 추가해 `UserFacingConfig` bucket을 요구한다.
+4. `crates/shacs-projection/src/diagnostics_release.rs`에 PRD 006용 release checklist를 추가해 `UserFacingConfig` bucket을 요구한다.
 
 검증 증거:
 
 1. `crates/shacs-core/tests/tools.rs`는 activation reason family와 `mcp_tool` source-kind count를 검증한다.
 2. `crates/shacs-core/tests/runtime_agent.rs`는 runtime activation diagnostics event가 `deferred_source_counts`를 노출하는지 검증한다.
-3. `crates/shacs-core/tests/runtime_loop.rs`는 PRD 006 release checklist가 PRD 000-005 evidence만으로 pass하지 않고 user-facing config evidence를 추가로 요구하는지 검증한다.
+3. `crates/shacs-projection/tests/projection.rs`는 PRD 006 release checklist가 PRD 000-005 evidence만으로 pass하지 않고 user-facing config evidence를 추가로 요구하는지 검증한다.
 
 Spec 025 handoff:
 
