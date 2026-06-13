@@ -62,7 +62,7 @@ shacs-bot runtime inspect --workspace /tmp/ws
 shacs-bot runtime diagnostics --bundle /tmp/shacs-diagnostics.zip --workspace /tmp/ws
 ```
 
-`runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, ownership status, stop request marker, update marker, runtime capability 요약, runtime containment summary/digest, session 개수와 최신 session metadata를 보고합니다. `runtime diagnostics` bundle에도 containment summary/digest가 redacted diagnostics field로 포함됩니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고되며, sandboxed라고 주장하지 않습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
+`runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, ownership status, stop request marker, update marker, runtime capability 요약, containment contained/backend/snapshot digest, session 개수와 최신 session metadata를 보고합니다. `runtime diagnostics` bundle에는 containment summary/digest가 redacted diagnostics field로 포함됩니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고되며, sandboxed라고 주장하지 않습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
 
 공식 로컬 lifecycle 명령으로 foreground channel runtime을 시작하거나 실행 중인 owner에게 종료/재시작을 요청합니다:
 
@@ -366,7 +366,7 @@ docker compose up -d shacs-gateway          # start channel runtime
 
 `shacs-gateway`는 container 안에서 `shacs-bot run --websocket-host 0.0.0.0 --allow-remote`를 실행하고 host loopback의 WebSocket port `8765`에만 publish합니다. 이 Compose path는 Docker socket mount, `privileged: true`, host network를 기본값으로 쓰지 않습니다. `run --verbose`를 붙이면 preview-only runtime logs가 stderr에 남고, Compose에서는 `docker compose logs -f shacs-gateway`로 확인할 수 있습니다. Provider 설정이 없으면 runtime은 `provider not found: auto`로 시작하지 않으므로, 먼저 `config.json` 또는 `auth.json` workflow로 provider를 설정하세요.
 
-Spec023의 공식 Compose smoke gate는 opt-in으로 실행합니다. 이 명령은 임시 host data directory를 mount한 Compose service에서 `runtime inspect`를 실행해 `Runtime containment: contained=true`와 `backend=official-container` evidence를 확인하고, 기본 `docker-compose.yml`이 Docker socket, `privileged: true`, host network를 쓰지 않는지도 검사합니다:
+Spec023의 공식 Compose smoke gate는 opt-in으로 실행합니다. 이 명령은 임시 Compose service와 data directory로 `runtime inspect`의 official-container runtime evidence를 확인하고, 별도로 기본 `docker-compose.yml`이 Docker socket, `privileged: true`, host network를 쓰지 않는지도 검사합니다:
 
 ```sh
 ./docs/scripts/spec023-compose-smoke.sh

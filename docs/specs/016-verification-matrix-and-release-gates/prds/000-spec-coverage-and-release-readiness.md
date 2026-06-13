@@ -119,7 +119,7 @@
 - 문서 증거: FullSpec evidence locator는 repo-relative executable evidence를 목표로 하며, 현재 문서는 존재하지 않는 runner/test file path를 evidence로 쓰지 않는다.
 - 통합 증거: verification family to spec mapping, release pipeline aggregation, evidence collection flow는 실제 Cargo command와 docs locator 일치성으로 관리한다.
 - 통합 테스트: 현재 slice에서는 `crates/shacs-cli/src/lib.rs` inline tests와 manifest-path cargo commands가 fresh workspace CLI 흐름을 검증한다. Docker/Compose runtime containment는 opt-in smoke script를 evidence locator로 쓴다.
-- Spec023 release evidence lane: 현재 lane은 실제 존재하는 Cargo test filter와 real Compose smoke command만 근거로 쓴다. App process supervisor는 아직 app process를 시작하지 않으므로 active inheritance evidence로 과장하지 않는다. Provider credential 없이 full MCP child execution smoke를 반복 가능하게 만들 수 없는 동안 MCP containment inheritance는 core tests가 담당하고, Compose smoke는 공식 container runtime evidence를 담당한다.
+- Spec023 release evidence lane: 현재 lane은 실제 존재하는 Cargo test filter와 real Compose smoke command만 근거로 쓴다. App process supervisor는 아직 app process를 시작하지 않으므로 active inheritance evidence로 과장하지 않는다. Compose smoke는 official-container runtime evidence와 기본 Compose static safety를 담당한다. Provider credential 없이 full MCP child execution smoke를 반복 가능하게 만들 수 없는 동안 MCP containment inheritance는 core test snapshot/default-deny evidence가 담당한다.
   - `./docs/scripts/spec023-compose-smoke.sh`
   - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_classifier_reports_native_unknown`
   - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_snapshot_ref_preserves_unknown_state`
