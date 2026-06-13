@@ -1,6 +1,6 @@
 # auto approval permissions 아키텍처 명세
 
-Status: Draft. 이 문서는 `shacs-bot`의 최종 permission mode와 auto approval 계약을 고정한다. 현재 구현에 이 기능이 존재한다는 뜻이 아니다.
+Status: Draft, partially implemented. 이 문서는 `shacs-bot`의 최종 permission mode와 auto approval 계약을 고정한다. 현재 구현은 permission mode/capability taxonomy와 permissioned action normalization slice까지만 닫혔다.
 
 ## 문서 목적
 
@@ -46,7 +46,7 @@ Auto approval이 하지 않는 일:
 4. Docker 안이라는 이유만으로 모든 `exec`를 자동 승인하지 않는다.
 5. secret read, external delivery, persistent automation, app install, self modification을 조용히 승인하지 않는다.
 6. 사용자에게 보이지 않는 장기 권한 grant를 만들지 않는다.
-7. 현재 구현된 기능이라고 주장하지 않는다.
+7. 부분 구현된 normalization slice를 전체 auto approval 완성으로 주장하지 않는다.
 
 ---
 
@@ -110,26 +110,32 @@ Auto approval이 하지 않는 일:
 
 ## 현재 구현 상태
 
-현재 저장소는 formal auto approval engine이 완성된 상태가 아니다.
+현재 저장소는 Spec 022 일부만 구현했다. Full auto approval engine은 아직 완성된 상태가 아니다.
 
 현재 구현으로 인정할 수 있는 것은 다음이다.
 
-1. `--allow-side-effects` 또는 동등한 설정으로 write/edit/exec 같은 side-effect tool 등록 범위를 조절한다.
-2. filesystem, shell, web, MCP, self tool, diagnostics에 분산 guard가 있다.
-3. `ask_user`는 tool interrupt와 resume mechanism이다.
-4. `ask_user`는 formal effect approval gate가 아니다.
-5. subagent는 제한된 tool registry와 execution config를 받는다.
+1. `PermissionMode`, `PermissionModeSource`, `SafetyCapability`, `AutoApprovalConfig`와 safe config normalization이 구현됐다.
+2. `PermissionedAction`, `PermissionedActionOrigin`, action digest, argument digest, snapshot digest, redacted argument representation이 구현됐다.
+3. Direct runtime tool call과 deferred bridge normalization이 구현됐다.
+4. `ask_user`는 tool interrupt와 resume mechanism으로 남아 있으며 formal approval과 구분된다.
 
-이 문서가 요구하는 최종 상태는 다음이 추가되어야 달성된다.
+구현 증거는 다음 경로에 있다.
 
-1. 공식 `PermissionMode` 타입.
-2. 공식 capability taxonomy.
-3. `PermissionedAction` envelope.
-4. action digest 기반 approval correlation.
-5. auto approval evaluator.
-6. stale, expired, mismatched approval rejection.
-7. audit record와 diagnostics projection.
-8. subagent와 background runtime에 대한 inherited permission ceiling.
+1. `crates/shacs-config/src/permissions.rs`
+2. `crates/shacs-core/src/runtime/permission_action.rs`
+3. `crates/shacs-core/tests/permission_action.rs`
+4. `crates/shacs-core/tests/runtime.rs`
+
+남은 open work는 다음이다.
+
+1. Static protected target decision policy. 문서상 닫힌 것으로 보지 않는다.
+2. Runtime policy decision table.
+3. Auto evaluator.
+4. Formal approval request, cache, correlation.
+5. User-facing approval prompt.
+6. Audit diagnostics.
+7. Replay.
+8. Full contract matrix.
 
 ---
 

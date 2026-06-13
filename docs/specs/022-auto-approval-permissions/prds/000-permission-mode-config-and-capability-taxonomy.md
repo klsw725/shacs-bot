@@ -1,5 +1,7 @@
 # PRD 000. permission mode config and capability taxonomy
 
+Status: Implemented. 이 PRD는 permission mode config와 capability taxonomy slice만 닫는다. Full auto approval은 아직 open이다.
+
 ## 목표
 
 이 문서는 `docs/specs/022-auto-approval-permissions/SPEC.md`의 첫 구현 PRD다.
@@ -10,13 +12,24 @@
 
 구현자는 이 PRD만으로 user-local 설정과 workspace 설정이 permission mode를 어떻게 만들 수 있는지, 어떤 capability 이름이 후속 gate에서 쓰이는지 확인할 수 있어야 한다.
 
+## 구현 상태와 증거
+
+현재 구현된 범위는 다음이다.
+
+1. `PermissionMode`, `PermissionModeSource`, `SafetyCapability`, `AutoApprovalConfig`가 정의됐다.
+2. Safe config normalization과 activation source constraints가 구현됐다.
+
+증거 경로는 다음이다.
+
+1. `crates/shacs-config/src/permissions.rs`
+
 ## SPEC 입력
 
 1. 주관 spec은 `docs/specs/022-auto-approval-permissions/SPEC.md`다.
 2. config 저장과 user-local/workspace boundary는 `docs/specs/008-configuration-profiles-and-runtime-layout/SPEC.md`를 따른다.
 3. host safety와 permission primitive 의미는 `docs/specs/010-host-safety-permissions-and-secrets/SPEC.md`를 따른다.
 4. orchestrator authority는 `docs/specs/007-main-orchestrator-policy/SPEC.md`를 따른다.
-5. 이 PRD는 current implementation 완료를 선언하지 않는다.
+5. 이 PRD는 구현 완료된 slice다. Spec 022 전체 완료 선언은 아니다.
 
 ## Dependency Cut
 

@@ -1,5 +1,7 @@
 # PRD 001. permissioned action normalization and decision gate
 
+Status: Partially implemented. Permissioned action normalization과 digest slice는 구현됐다. Runtime allow/ask/deny policy gate와 formal approval correlation은 아직 open이다.
+
 ## 목표
 
 이 문서는 provider tool call, bridge tool call, deferred MCP tool call을 실행 직전 `PermissionedAction`으로 정규화하는 기준을 정의한다.
@@ -7,6 +9,21 @@
 목표는 tool runtime 앞에 단일 decision gate가 소비할 action envelope와 digest를 만드는 것이다.
 
 이 단계는 decision을 최종 실행에 연결하지 않는다. 실제 `allow | ask | deny` 합성은 후속 PRD가 소유한다.
+
+## 구현 상태와 증거
+
+현재 구현된 범위는 다음이다.
+
+1. `PermissionedAction`, `PermissionedActionOrigin`이 정의됐다.
+2. Action digest, argument digest, snapshot digest, redacted argument representation이 구현됐다.
+3. Direct runtime tool call과 deferred bridge normalization이 구현됐다.
+4. `ask_user`는 formal approval이 아니라 별도 user interruption 경로로 남아 있다.
+
+증거 경로는 다음이다.
+
+1. `crates/shacs-core/src/runtime/permission_action.rs`
+2. `crates/shacs-core/tests/permission_action.rs`
+3. `crates/shacs-core/tests/runtime.rs`
 
 ## SPEC 입력
 
