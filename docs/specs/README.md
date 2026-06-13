@@ -13,6 +13,7 @@
 - 기본 성격은 self-hosted / personal-use assistant runtime이다.
 - 장기 도착점은 사용자가 설치한 AI app을 실행, 관찰, 복구하는 개인용 AI Operating System이다. 이 최종 상위 계약은 `017-app-operating-environment/`가 소유한다.
 - App Maker / app authoring 범위는 사용자가 app 초안, 제안, 설치 handoff를 만드는 경험이며 `021-app-maker-and-app-authoring/`가 소유한다.
+- 021 구현 상태: PRD 000의 `apps init` authoring draft baseline은 구현되었고, 전체 App Maker / AI-assisted proposal / install handoff는 open 상태다.
 - 공식 인터페이스 표면은 CLI, TUI, local API다.
 - provider/auth family는 **OpenAI-compatible**, **Anthropic auth**, **Codex auth(OpenAI auth style)** 세 종류만 지원 대상으로 본다.
 - 외부 채널은 **Slack**, **Discord**, **Telegram**, **Email**, **WhatsApp bridge** 다섯 가지면 충분하다고 본다.
@@ -24,7 +25,10 @@
 - evaluation/automation/self-improvement 범위: `018-evaluation-automation-and-self-improvement/`가 goal evaluator, capability evaluator, task outcome evaluator, scheduled automation, 자기 개선, checkpoint/rollback, replay, diagnostics의 통합 최종 계약을 소유한다.
 - 018 구현 상태: `018-evaluation-automation-and-self-improvement/prds/000-014`는 Rust contract/runtime helper 기준으로 구현되었고, `crates/shacs-eval`, `crates/shacs-utils`, `crates/shacs-core`의 포맷, clippy, 관련 테스트 및 QA/목표/코드/보안/문서 재리뷰를 통과해 closed 상태다.
 - image generation / generated media 범위: `019-image-generation-and-generated-media/`가 provider image generation capability, `image_generate` tool, generated image artifact 저장 계약을 소유한다.
+- 019 구현 상태: PRD 000/001은 구현되었고, PRD 002 provider expansion / Codex Responses는 open 상태다.
 - tool search / provider tool surface 범위: `020-tool-search-and-provider-tool-surface/`가 provider-visible tool schema progressive disclosure, deferred MCP catalog, bridge tool scope 계약을 소유한다.
+- auto-approval / permissions 범위: `022-auto-approval-permissions/`가 permission mode, capability taxonomy, approval correlation, runtime policy/audit/replay 계약을 소유한다.
+- 022 구현 상태: PRD 000/001의 permission mode / capability taxonomy와 permissioned action normalization은 구현되었고, auto evaluator, formal approval correlation, runtime policy/audit/replay는 open 상태다.
 - zero-setup sandbox execution 범위: `023-zero-setup-sandbox-execution/`이 사용자가 별도 host sandbox runtime을 설치하지 않아도 동작해야 하는 공식 packaging/runtime containment 계약을 소유한다.
 - dynamic workflows / harness orchestration 범위: `024-dynamic-workflows-and-harness-orchestration/`가 작업별 하네스, workflow-backed subagent graph, verifier, worktree isolation, budget/resume 계약을 소유한다.
 - user-extensible hooks / plugins 범위: `025-user-extensible-hooks-and-plugins/`가 사용자가 opt-in하는 plugin manifest, hook event, plugin-provided tool/skill/command, extension diagnostics 계약을 소유한다.
