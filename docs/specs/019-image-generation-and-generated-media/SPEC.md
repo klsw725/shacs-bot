@@ -117,6 +117,16 @@ Responses API의 `tools: [{ "type": "image_generation" }]`는 agentic multi-turn
 
 ---
 
+## 현재 구현 상태
+
+2026-06-13 기준 PRD 000과 PRD 001은 구현됐다. PRD 002는 열려 있다.
+
+- PRD 000 provider capability baseline은 구현됐다. 근거는 `crates/shacs-providers/src/clients/image_generation.rs`, `crates/shacs-providers/src/clients/mod.rs`, `crates/shacs-providers/src/registry.rs`, `crates/shacs-providers/src/error.rs`, `crates/shacs-providers/tests/image_generation.rs`다.
+- PRD 001 `image_generate` tool과 local media artifact 저장은 구현됐다. `image_generate`는 side-effect gate와 config gate를 통과할 때만 노출되고, `ImageGenerationClient`를 호출하며, 생성 결과를 local media 아래 artifact로 저장한다. tool result는 raw bytes나 base64가 아니라 artifact refs와 metadata를 반환한다.
+- 이 상태는 Codex Responses image generation, provider expansion, edit/mask/variation, streaming partial image, remote gallery, UI viewer가 구현됐다는 뜻이 아니다. 해당 범위는 PRD 002와 후속 문서가 계속 소유한다.
+
+---
+
 ## 완료 기준
 
 - `shacs-providers`가 `ImageGenerationClient`와 OpenAI baseline implementation을 제공한다.
