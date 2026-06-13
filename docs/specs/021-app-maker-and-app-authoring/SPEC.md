@@ -1,6 +1,6 @@
 # App Maker와 app authoring 아키텍처 명세
 
-Status: Draft. 이 문서는 App Maker 전체 구현 전에 app 작성, 검토, 제안, 설치 인계의 owner contract를 고정한다. 현재 CLI에 `apps init`이 존재한다는 뜻이 아니다.
+Status: Draft. PRD 000의 안전한 `apps init` authoring draft baseline은 구현됐다. 이 문서는 App Maker 전체의 app 작성, 검토, 제안, 설치 인계 owner contract를 계속 열린 상태로 고정한다.
 
 ## 문서 목적
 이 문서는 `docs/SYSTEM-FOUNDATION.md`와 numbered spec set 전체를 바탕으로 `shacs-bot`의 App Maker 경계를 정의한다.
@@ -9,7 +9,7 @@ Status: Draft. 이 문서는 App Maker 전체 구현 전에 app 작성, 검토, 
 2. 사용자가 직접 설치하고 운영하는 개인용 런타임 관점에서 안전한 app 초안 작성 흐름을 정의한다.
 3. AI assisted authoring이 manifest, skill, device, tool, service 선언 후보를 만들 수 있지만 실행 권한을 얻지 못한다는 점을 명확히 한다.
 4. 작성 결과가 018의 proposal, approval, checkpoint, apply, verify 흐름을 거쳐야만 설치 가능한 bundle로 넘어간다는 계약을 세운다.
-5. future Rust 구현에서 draft, candidate, validation report, authoring proposal, receipt, install handoff 타입과 테스트를 도출할 수 있게 한다.
+5. 구현된 PRD 000 baseline과 이후 App Maker 절편에서 draft, candidate, validation report, authoring proposal, receipt, install handoff 타입과 테스트를 도출할 수 있게 한다.
 App Maker가 편해질수록 권한 경계가 흐려질 위험이 커진다. 이 문서는 무엇을 만들 수 있는지보다 무엇을 자동으로 하면 안 되는지를 먼저 고정한다.
 
 ---
@@ -70,7 +70,7 @@ App Maker는 app을 실행하는 곳이 아니라, app 변경을 설명 가능�
 4. validation report와 dry-run 의미.
 5. authoring proposal과 authoring receipt 형식 요구.
 6. install handoff의 의미와 금지 행동.
-7. CLI `apps init` 목표 의미, AI assisted authoring proposal, edit/review loop, validation/dry-run, explicit install handoff.
+7. CLI `apps init` baseline 의미, AI assisted authoring proposal, edit/review loop, validation/dry-run, explicit install handoff.
 8. future local API와 TUI projection 의미.
 9. 상태 모델, 불변식, 금지 패턴, Rust checkpoint, 검증 관점.
 이 문서는 다음을 정의하지 않는다.
@@ -86,13 +86,28 @@ App Maker는 app을 실행하는 곳이 아니라, app 변경을 설명 가능�
 ---
 
 ## 현재 구현 상태
-현재 저장소의 app CLI baseline은 017에 설명된 `apps install/list/inspect/show/enable/disable/uninstall` 범위로 읽어야 한다.
-이 문서는 `apps init`, AI assisted authoring, authoring proposal store, authoring receipt, install handoff가 현재 구현됐다고 주장하지 않는다. 이 이름들은 full App Maker 구현을 위한 설계 어휘다.
-현재 구현에 대한 안전한 해석:
-1. app bundle과 manifest baseline은 017의 현재 구현 상태를 따른다.
-2. improvement proposal과 checkpoint/apply/verify 흐름은 018의 구현 상태를 따른다.
-3. host safety와 permission은 010의 current local baseline과 future formal model 구분을 따른다.
-4. App Maker 자체는 아직 별도 owner 구현으로 닫힌 상태가 아니다.
+현재 저장소에는 PRD 000의 안전한 `apps init` authoring draft baseline이 구현되어 있다.
+구현된 절편:
+1. `apps init <app-id>` parser와 CLI command.
+2. app id validation.
+3. data dir 아래 authoring draft store.
+4. scaffold plan, manifest candidate, README candidate 생성.
+5. idempotency, conflict, path safety 처리.
+6. installed app registry mutation 없음.
+구현 증거:
+1. `crates/shacs-app/src/app_authoring.rs`
+2. `crates/shacs-app/tests/app_authoring.rs`
+3. `crates/shacs-cli/src/lib.rs`
+4. `crates/shacs-core/tests/app_compat.rs`
+이 baseline은 app을 install, enable, start하지 않는다. permission grant를 생성하지 않고, tool/service를 등록하지 않고, secret을 읽지 않고, installed app registry를 변경하지 않는다.
+아직 열린 범위:
+1. AI assisted authoring.
+2. authoring proposal store.
+3. baseline을 넘는 validation report.
+4. authoring receipt.
+5. approval/apply integration과 install handoff.
+6. local API와 TUI projection.
+따라서 full Spec 021과 full App Maker는 아직 닫힌 상태가 아니다. app bundle과 manifest baseline은 017, improvement proposal과 checkpoint/apply/verify는 018, host safety와 permission은 010의 구현 상태를 따른다.
 
 ---
 
@@ -133,11 +148,11 @@ install handoff는 승인되고 checkpoint/apply/verify 흐름을 통과한 auth
 ## 사용자 흐름
 
 ### 1. `apps init` 목표 흐름
-`apps init`은 future CLI 목표 명령이다. 현재 존재한다고 주장하지 않는다.
+`apps init`의 PRD 000 baseline은 현재 CLI에 있다. 이 명령은 authoring draft와 최소 candidate만 만들며 full App Maker 흐름을 닫지 않는다.
 ```text
 shacs-bot apps init <app-id> --workspace <path>
 ```
-예상 단계는 draft 생성, scaffold plan 제안, 사용자 검토, manifest candidate와 기본 README 또는 skill draft 작성, validation report 생성, review loop 또는 authoring proposal 생성이다.
+구현된 baseline 단계는 draft 생성, scaffold plan 작성, manifest candidate와 README candidate 작성, idempotency/conflict/path safety 확인이다. AI assisted authoring, baseline을 넘는 validation report, review loop, authoring proposal 생성은 아직 열린 범위다.
 금지:
 1. app install 처리.
 2. generated manifest의 permission 승인.
@@ -344,7 +359,7 @@ installed app selected for edit
 ---
 
 ## Rust 구현 체크포인트 이름
-full App Maker 구현은 아래 이름을 직접 도출할 수 있어야 한다. 현재 구현됐다는 뜻이 아니다.
+full App Maker 구현은 아래 이름을 직접 도출할 수 있어야 한다. 이 목록 전체가 현재 구현됐다는 뜻은 아니다.
 Core types:
 ```text
 AppAuthoringDraft

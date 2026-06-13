@@ -22,7 +22,7 @@
 8. skill draft의 문서 형식과 active injection 경계는 `docs/specs/005-skill-system/SPEC.md`를 따른다.
 9. CLI projection과 future TUI, local API 표시 의미는 `docs/specs/013-user-interfaces-and-session-ux/SPEC.md`를 따른다.
 10. 검증 기준과 release evidence 분류는 `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`를 따른다.
-11. 현재 CLI에는 `apps init`이 없으며, 공개 app CLI baseline은 install, list, inspect, show, enable, disable, uninstall로 읽는다.
+11. 현재 CLI에는 PRD 000의 안전한 `apps init` authoring draft baseline이 있다. 공개 app runtime CLI baseline은 install, list, inspect, show, enable, disable, uninstall로 따로 읽는다.
 
 ## Dependency Cut
 
@@ -39,7 +39,7 @@
 
 ## 범위
 
-1. `apps init <app-id>` CLI surface를 future 구현 대상으로 정의한다.
+1. `apps init <app-id>` CLI surface의 구현된 baseline을 정의한다.
 2. `<app-id>`를 검증하고 normalized app id를 draft identity의 일부로 쓴다.
 3. draft store 또는 staging area 아래에 새 authoring draft directory를 만든다.
 4. 최소 파일 후보를 생성한다.
@@ -61,7 +61,7 @@
 8. device, tool, service runtime registration 또는 exposure.
 9. 기존 installed app edit flow.
 10. TUI widget, local API endpoint, remote marketplace, 조직 관리자 승인, fleet rollout.
-11. 사용자용 USAGE/README command 문서 변경. spec index 링크를 영구 제외한다는 뜻은 아니며, 첫 Rust 구현 절편은 CLI command가 생기기 전까지 USAGE/README command docs를 요구하지 않는다.
+11. 사용자용 USAGE/README command 문서 변경. spec index나 상태 문서는 필요할 때 갱신할 수 있지만, PRD 000 baseline closure가 README/USAGE command guide 수정을 요구하지는 않는다.
 
 ## 구현 요구사항
 
@@ -149,7 +149,7 @@
 
 ## 완료 기준
 
-1. `apps init <app-id>` 구현 계획이 authoring draft 생성으로만 닫혀 있다.
+1. `apps init <app-id>` 구현이 authoring draft 생성으로만 닫혀 있다.
 2. 생성 대상은 authoring draft 또는 staging area이며 installed app bundle과 registry를 바꾸지 않는다.
 3. 최소 후보 파일은 draft metadata, scaffold plan, manifest candidate, README candidate, optional skill draft placeholder로 제한된다.
 4. device, tool, service 정보는 포함되더라도 정적 declaration candidate이며 실행, 등록, 노출을 만들지 않는다.
@@ -157,36 +157,34 @@
 6. safe path, app id validation, conflict, idempotency, redaction, control character handling 기준이 구현자가 바로 테스트로 옮길 수 있게 정의되어 있다.
 7. install handoff preview는 future 또는 non-goal로 고정되어 첫 절편이 017 install을 우회하지 않는다.
 8. 005, 008, 010, 013, 014, 016, 017, 018, 020 owner boundary가 약해지지 않는다.
-9. 이 PRD는 구현 완료를 주장하지 않으며, full App Maker나 AI assisted proposal flow를 요구하지 않는다.
+9. PRD 000 baseline은 구현됐지만, full App Maker나 AI assisted proposal flow는 완료로 주장하지 않는다.
 
-## Future Rust 구현 웨이브
+## 구현 상태
 
-### Wave 1. CLI와 command model
+Status: Implemented for PRD 000 baseline only.
 
-1. `apps init <app-id>` parser를 추가한다.
-2. parser output을 `CreateAppAuthoringDraft` 계열 command로만 연결한다.
-3. install, enable, start, approve, inject, register command와 같은 enum variant로 섞지 않는다.
+구현된 절편:
+1. `apps init <app-id>` parser와 CLI command.
+2. app id validation.
+3. data dir 아래 authoring draft store.
+4. scaffold plan, manifest candidate, README candidate 생성.
+5. idempotency, conflict, path safety 처리.
+6. installed app registry mutation 없음.
 
-### Wave 2. App id와 path guard
+구현 증거:
+1. `crates/shacs-app/src/app_authoring.rs`
+2. `crates/shacs-app/tests/app_authoring.rs`
+3. `crates/shacs-cli/src/lib.rs`
+4. `crates/shacs-core/tests/app_compat.rs`
 
-1. `AppIdCandidate` validator를 추가한다.
-2. authoring draft base path 계산과 canonical boundary check를 추가한다.
-3. symlink escape, absolute path override, 값 `.` 또는 `..`, slash, backslash를 회귀 테스트로 고정한다.
+이 baseline은 app을 install, enable, start하지 않는다. permission grant를 생성하지 않고, tool/service를 등록하지 않고, secret을 읽지 않고, installed app registry를 변경하지 않는다.
 
-### Wave 3. Draft store와 scaffold writer
+아직 열린 범위:
+1. AI assisted proposal flow.
+2. 자연어 intent 기반 manifest와 skill 자동 확장.
+3. 018 authoring proposal, approval, checkpoint, apply, verify 실제 연결.
+4. 017 install handoff.
+5. baseline을 넘는 validation report와 receipt.
+6. TUI widget과 local API endpoint.
 
-1. `AppAuthoringDraft`, `AppScaffoldPlan`, `AppScaffoldFileCandidate` 타입을 추가한다.
-2. `draft.json`, `scaffold-plan.json`, manifest candidate, README candidate writer를 추가한다.
-3. same content idempotency와 different content conflict를 digest로 판정한다.
-
-### Wave 4. Static candidate safety
-
-1. manifest candidate의 permission, secret, device, tool, service 값을 request candidate로만 표현한다.
-2. fake executor, fake registry, fake skill registry, fake grant store를 써서 호출이 없음을 검증한다.
-3. generated output redaction과 control character scrub을 CLI summary와 diagnostics에 적용한다.
-
-### Wave 5. Future handoff seam
-
-1. install handoff preview 타입 이름과 출력 문구를 non-goal로 고정한다.
-2. 018 proposal flow와 017 install flow로 넘길 future seam만 남긴다.
-3. 이 wave에서도 install, enable, start, approval, registry mutation을 구현하지 않는다.
+따라서 이 PRD는 `apps init` authoring baseline만 닫는다. full Spec 021과 full App Maker는 계속 open이다.
