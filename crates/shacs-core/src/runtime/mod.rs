@@ -2,6 +2,12 @@ mod agent_loop;
 mod autocompact;
 mod automation;
 mod context;
+mod context_diagnostics;
+mod context_files;
+mod context_handoff;
+mod context_refs;
+mod context_resolvers;
+mod context_safety;
 mod file_context;
 mod goal;
 mod lifecycle;
@@ -33,6 +39,37 @@ pub use automation::{
     SubagentMergeState,
 };
 pub use context::{add_assistant_message, add_tool_result, ContextBuildRequest, ContextBuilder};
+pub use context_diagnostics::{
+    build_context_diagnostics_summary, ContextArtifactDiagnosticEntry,
+    ContextArtifactDiagnosticsSummary, ContextBudgetDiagnosticEntry,
+    ContextBudgetDiagnosticsSummary, ContextDiagnosticsCount, ContextDiagnosticsInput,
+    ContextDiagnosticsSummary, ContextFileDiagnosticEntry, ContextFileDiagnosticsSummary,
+    ContextProviderBlockDiagnosticEntry, ContextReferenceDiagnosticEntry,
+    ContextReferenceDiagnosticsSummary, ContextReferenceParseDiagnosticEntry,
+    ContextReplayDiagnosticEntry, ContextSafetyDiagnosticEntry, ContextSafetyDiagnosticsSummary,
+};
+pub use context_files::{
+    discover_context_files, ContextFileDigest, ContextFileDiscovery, ContextFileDiscoveryOptions,
+    ContextFileProjection, ContextFileReadStatus, ContextFileSource,
+    DEFAULT_CONTEXT_FILE_MAX_BYTES, DEFAULT_CONTEXT_FILE_NAMES,
+};
+pub use context_handoff::{
+    build_context_provider_handoff, ContextArtifactPriority, ContextBudgetDecision,
+    ContextBudgetEvidence, ContextBudgetInput, ContextProviderHandoff, ProviderContextBlock,
+    DEFAULT_CONTEXT_HANDOFF_BUDGET_BYTES,
+};
+pub use context_refs::{
+    parse_context_references, ContextPermissionEvidence, ContextPermissionStatus,
+    ContextRedactionStatus, ContextReferenceKind, ContextReferenceParse, ContextReferenceSpan,
+    ContextResolutionState, ContextTruncationStatus, ReferenceParseDiagnostic,
+    ReferenceParseDiagnosticKind, ResolvedContextArtifact,
+};
+pub use context_resolvers::{resolve_context_reference, ContextReferenceResolverConfig};
+pub use context_safety::{
+    apply_context_safety_gate, context_trust_label_name, protected_context_path_reason,
+    replay_context_artifact_from_evidence, trust_label_for_kind, ContextPermissionDecision,
+    ContextReplayEvidence, ContextSafetyDiagnostic, ContextSafetyReport, ContextTrustLabel,
+};
 pub use file_context::{
     AudioAnalysisPolicy, AudioContextAnalysis, AudioContextAnalyzer, AudioContextError,
     AudioContextRequest, TranscriptionAudioAnalyzer, VideoAnalysisPolicy, VideoComponentFailure,
