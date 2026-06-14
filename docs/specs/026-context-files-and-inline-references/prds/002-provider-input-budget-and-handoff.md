@@ -94,3 +94,13 @@ Context files와 inline references가 provider context budget을 공유할 때�
 
 - Budget test가 explicit reference 우선순위와 auto context truncation을 검증한다.
 - Provider input snapshot evidence가 artifact source와 skipped reason을 표시한다.
+
+## 구현 상태
+
+Status: Implemented for PRD 002 typed budget and handoff boundary. Agent runner injection, replay persistence, and user-facing projection remain open in later PRDs.
+
+Evidence:
+
+- `crates/shacs-core/src/runtime/context_handoff.rs` builds typed provider context blocks from resolved inline artifacts and discovered context files without rewriting the original session message.
+- Explicit inline references are ordered before context files, context files are consumed nearest-first, safety-denied artifacts are skipped, and budget overflow produces truncation/skipped evidence.
+- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_budget` passes with explicit-reference precedence, nearest context ordering, truncation evidence, skipped safety evidence, and source/trust/truncation label coverage.

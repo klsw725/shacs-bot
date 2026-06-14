@@ -95,3 +95,14 @@ Context files와 inline references가 local permission, secret redaction, replay
 
 - Secret redaction, protected path denial, replay no-refetch regression이 존재한다.
 - Diagnostics bundle은 raw secret과 oversized content를 저장하지 않는다.
+
+## 구현 상태
+
+Status: Implemented for PRD 004 runtime safety boundary. Full CLI/TUI/API projection and release gate wiring remain open in PRD 005.
+
+Evidence:
+
+- `crates/shacs-core/src/runtime/context_safety.rs` adds a shared safety gate for resolved artifacts, redacts secret-like content before provider handoff, emits user-facing diagnostics, labels trust, and records replay evidence with a no-live-refetch marker.
+- `crates/shacs-core/src/runtime/context_resolvers.rs` denies protected file targets such as `.env` and SSH/private-key paths before reading content.
+- `crates/shacs-core/src/runtime/context_handoff.rs` consumes trust labels from the safety model, including `external_untrusted` for URL artifacts and `workspace_user_authored` for context files.
+- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_safety` passes with secret redaction, protected path recognition, external URL trust labeling, and replay no-refetch coverage.
