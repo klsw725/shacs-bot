@@ -95,3 +95,13 @@ Workspace context file을 deterministic하게 발견하고 provider input orderi
 
 - Root, nested directory, duplicate filename, symlink, oversized file case가 테스트된다.
 - Diagnostics가 included/skipped/truncated reason을 표시한다.
+
+## 구현 상태
+
+Status: Implemented for PRD 001 discovery/order boundary only. Provider input formatting, resolver behavior, budget handoff, replay, and user-facing CLI/API projection remain open in later PRDs.
+
+Evidence:
+
+- `crates/shacs-core/src/runtime/context_files.rs` adds default context filename discovery, root-to-current directory ordering, configured extra context files, workspace-boundary denial, truncation evidence, digest and token estimate fields.
+- Public runtime exports are available through `crates/shacs-core/src/runtime/mod.rs`.
+- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_file` passes with root/nested ordering, duplicate filename, symlink outside workspace, oversized file, configured extra, and missing-file coverage.

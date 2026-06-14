@@ -95,3 +95,13 @@ User message 안의 inline `@` reference를 안정적으로 파싱하고, provid
 
 - Parser unit test가 escape, code block, adjacent punctuation, URL, git revision, missing target case를 포함한다.
 - Artifact model은 009 context assembly에 넘길 수 있는 typed boundary를 가진다.
+
+## 구현 상태
+
+Status: Implemented for PRD 000 parser/model boundary only. Spec 026 remains open for discovery, resolver, budget, permission/redaction, and UX PRDs.
+
+Evidence:
+
+- `crates/shacs-core/src/runtime/context_refs.rs` adds side-effect-free inline `@` parsing with escaped `\@`, fenced code skip, ambiguous email/handle diagnostics, kind classification, and parsed artifact shells.
+- Public runtime exports are available through `crates/shacs-core/src/runtime/mod.rs`.
+- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_reference_parse` passes with coverage for escape, fenced code, email/handle ignored, adjacent punctuation, bare URL, `@url:`, `@git:<rev>`, `@git:<rev>:<path>`, `@diff`, `@staged`, and missing/malformed targets.
