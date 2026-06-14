@@ -16,9 +16,11 @@ use shacs_eval::evaluator::{
 };
 use shacs_projection::{
     build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
-    build_spec018_projection, evaluate_spec018_release_gate, runtime_spec018_channel_projection,
+    build_spec018_projection, context_prd005_release_evidence_checklist,
+    evaluate_spec018_release_gate, runtime_spec018_channel_projection,
     runtime_spec018_local_api_projection, tool_search_prd005_release_evidence_checklist,
-    tool_search_prd006_release_evidence_checklist, RuntimeSpec018DiagnosticsManifestInput,
+    tool_search_prd006_release_evidence_checklist, ContextReleaseEvidence,
+    ContextReleaseEvidenceBucket, RuntimeSpec018DiagnosticsManifestInput,
     RuntimeSpec018LedgerInspectInput, RuntimeSpec018ProjectionInput,
     RuntimeSpec018ReleaseGateInput, ToolSearchReleaseEvidence, ToolSearchReleaseEvidenceBucket,
 };
@@ -50,6 +52,19 @@ fn prd005_evidence_ref(id: &str, redaction_status: RedactionStatus) -> EvidenceR
         redaction_status,
         owner_spec: Some("020".to_owned()),
         locator: Some(format!("prd005://{id}")),
+        retention_hint: Some("release_evidence".to_owned()),
+    }
+}
+
+fn spec026_evidence_ref(id: &str, redaction_status: RedactionStatus) -> EvidenceRef {
+    EvidenceRef {
+        kind: EvidenceKind::DiagnosticRecord,
+        id: id.to_owned(),
+        digest: format!("digest-{id}"),
+        summary: format!("summary-{id}"),
+        redaction_status,
+        owner_spec: Some("026".to_owned()),
+        locator: Some(format!("spec026://{id}")),
         retention_hint: Some("release_evidence".to_owned()),
     }
 }
@@ -886,6 +901,84 @@ fn tool_search_prd005_release_evidence_checklist_requires_all_buckets() {
     assert!(!redaction_failed
         .covered_buckets
         .contains(&ToolSearchReleaseEvidenceBucket::Diagnostics));
+}
+
+#[test]
+fn context_prd005_release_evidence_checklist_requires_all_buckets_and_valid_refs() {
+    let evidence = [
+        (
+            ContextReleaseEvidenceBucket::Parser,
+            "context_reference_parse_preserves_source_message",
+        ),
+        (
+            ContextReleaseEvidenceBucket::Discovery,
+            "context_file_discovery_orders_root_to_current_directory",
+        ),
+        (
+            ContextReleaseEvidenceBucket::Resolver,
+            "context_resolver_reads_file_as_artifact",
+        ),
+        (
+            ContextReleaseEvidenceBucket::Budget,
+            "context_budget_explicit_reference_precedes_context_files",
+        ),
+        (
+            ContextReleaseEvidenceBucket::Safety,
+            "context_safety_redacts_secret_before_provider_handoff",
+        ),
+        (
+            ContextReleaseEvidenceBucket::Replay,
+            "context_safety_replay_uses_recorded_evidence_without_live_refetch",
+        ),
+        (
+            ContextReleaseEvidenceBucket::Docs,
+            "context_docs_describe_reference_syntax_limits_and_safety",
+        ),
+    ]
+    .into_iter()
+    .map(|(bucket, test_name)| ContextReleaseEvidence {
+        bucket,
+        test_names: vec![test_name.to_owned()],
+        manual_qa_refs: Vec::new(),
+        evidence_refs: vec![spec026_evidence_ref(test_name, RedactionStatus::Redacted)],
+    })
+    .collect::<Vec<_>>();
+
+    let passing = context_prd005_release_evidence_checklist(&evidence);
+    assert!(passing.passed);
+    assert_eq!(passing.required_buckets.len(), 7);
+    assert_eq!(passing.covered_buckets.len(), 7);
+
+    let incomplete = context_prd005_release_evidence_checklist(&evidence[..evidence.len() - 1]);
+    assert!(!incomplete.passed);
+    assert_eq!(
+        incomplete.missing_buckets,
+        vec![ContextReleaseEvidenceBucket::Docs]
+    );
+
+    let wrong_owner_ref = prd005_evidence_ref("wrong-owner", RedactionStatus::Redacted);
+    let wrong_owner = context_prd005_release_evidence_checklist(&[ContextReleaseEvidence {
+        bucket: ContextReleaseEvidenceBucket::Parser,
+        test_names: vec!["wrong_owner".to_owned()],
+        manual_qa_refs: Vec::new(),
+        evidence_refs: vec![wrong_owner_ref],
+    }]);
+    assert!(!wrong_owner
+        .covered_buckets
+        .contains(&ContextReleaseEvidenceBucket::Parser));
+
+    let redaction_failed = context_prd005_release_evidence_checklist(&[ContextReleaseEvidence {
+        bucket: ContextReleaseEvidenceBucket::Docs,
+        test_names: Vec::new(),
+        manual_qa_refs: vec!["manual-docs-evidence".to_owned()],
+        evidence_refs: vec![spec026_evidence_ref(
+            "redaction-failed",
+            RedactionStatus::RedactionFailed,
+        )],
+    }]);
+    assert!(!redaction_failed
+        .covered_buckets
+        .contains(&ContextReleaseEvidenceBucket::Docs));
 }
 
 #[test]

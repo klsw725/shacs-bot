@@ -23,9 +23,30 @@ pub enum ToolSearchReleaseEvidenceBucket {
     PluginToolIntegration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextReleaseEvidenceBucket {
+    Parser,
+    Discovery,
+    Resolver,
+    Budget,
+    Safety,
+    Replay,
+    Docs,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSearchReleaseEvidence {
     pub bucket: ToolSearchReleaseEvidenceBucket,
+    pub test_names: Vec<String>,
+    pub manual_qa_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextReleaseEvidence {
+    pub bucket: ContextReleaseEvidenceBucket,
     pub test_names: Vec<String>,
     pub manual_qa_refs: Vec<String>,
     #[serde(default)]
@@ -37,6 +58,14 @@ pub struct ToolSearchReleaseEvidenceChecklist {
     pub required_buckets: Vec<ToolSearchReleaseEvidenceBucket>,
     pub covered_buckets: Vec<ToolSearchReleaseEvidenceBucket>,
     pub missing_buckets: Vec<ToolSearchReleaseEvidenceBucket>,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextReleaseEvidenceChecklist {
+    pub required_buckets: Vec<ContextReleaseEvidenceBucket>,
+    pub covered_buckets: Vec<ContextReleaseEvidenceBucket>,
+    pub missing_buckets: Vec<ContextReleaseEvidenceBucket>,
     pub passed: bool,
 }
 
@@ -61,6 +90,20 @@ impl ToolSearchReleaseEvidenceBucket {
     }
 }
 
+impl ContextReleaseEvidenceBucket {
+    pub fn required_prd005_buckets() -> Vec<Self> {
+        vec![
+            Self::Parser,
+            Self::Discovery,
+            Self::Resolver,
+            Self::Budget,
+            Self::Safety,
+            Self::Replay,
+            Self::Docs,
+        ]
+    }
+}
+
 pub fn tool_search_prd005_release_evidence_checklist(
     evidence: &[ToolSearchReleaseEvidence],
 ) -> ToolSearchReleaseEvidenceChecklist {
@@ -73,6 +116,42 @@ pub fn tool_search_prd006_release_evidence_checklist(
 ) -> ToolSearchReleaseEvidenceChecklist {
     let required_buckets = ToolSearchReleaseEvidenceBucket::required_prd006_buckets();
     tool_search_release_evidence_checklist(evidence, required_buckets)
+}
+
+pub fn context_prd005_release_evidence_checklist(
+    evidence: &[ContextReleaseEvidence],
+) -> ContextReleaseEvidenceChecklist {
+    let required_buckets = ContextReleaseEvidenceBucket::required_prd005_buckets();
+    let covered = evidence
+        .iter()
+        .filter(|entry| {
+            (!entry.test_names.is_empty() || !entry.manual_qa_refs.is_empty())
+                && !context_release_evidence_is_blocker(entry)
+                && entry
+                    .evidence_refs
+                    .iter()
+                    .any(context_evidence_ref_is_valid)
+        })
+        .map(|entry| entry.bucket)
+        .collect::<BTreeSet<_>>();
+    let covered_buckets = required_buckets
+        .iter()
+        .copied()
+        .filter(|bucket| covered.contains(bucket))
+        .collect::<Vec<_>>();
+    let missing_buckets = required_buckets
+        .iter()
+        .copied()
+        .filter(|bucket| !covered.contains(bucket))
+        .collect::<Vec<_>>();
+    let passed = missing_buckets.is_empty();
+
+    ContextReleaseEvidenceChecklist {
+        required_buckets,
+        covered_buckets,
+        missing_buckets,
+        passed,
+    }
 }
 
 fn tool_search_release_evidence_checklist(
@@ -121,6 +200,23 @@ fn tool_search_release_evidence_is_blocker(entry: &ToolSearchReleaseEvidence) ->
             tool_search_release_label_is_blocker(&evidence_ref.id)
                 || tool_search_release_label_is_blocker(&evidence_ref.summary)
         })
+}
+
+fn context_release_evidence_is_blocker(entry: &ContextReleaseEvidence) -> bool {
+    entry
+        .test_names
+        .iter()
+        .chain(entry.manual_qa_refs.iter())
+        .any(|label| tool_search_release_label_is_blocker(label))
+        || entry.evidence_refs.iter().any(|evidence_ref| {
+            tool_search_release_label_is_blocker(&evidence_ref.id)
+                || tool_search_release_label_is_blocker(&evidence_ref.summary)
+        })
+}
+
+fn context_evidence_ref_is_valid(evidence_ref: &EvidenceRef) -> bool {
+    evidence_ref.owner_spec.as_deref() == Some("026")
+        && spec018_evidence_ref_has_owner_and_redaction(evidence_ref)
 }
 
 fn tool_search_release_label_is_blocker(label: &str) -> bool {
