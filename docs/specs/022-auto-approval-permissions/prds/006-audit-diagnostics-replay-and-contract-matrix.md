@@ -1,5 +1,13 @@
 # PRD 006. audit, diagnostics, replay, and contract matrix
 
+## 구현 상태
+
+Status: Implemented.
+
+구현 증거는 `crates/shacs-core/src/runtime/permission_audit.rs`, `crates/shacs-core/src/runtime/permission_replay.rs`, `crates/shacs-core/src/runtime/permission_policy.rs`, `crates/shacs-core/tests/permission_policy.rs`, `crates/shacs-core/tests/runtime_loop.rs`다. 대표 테스트는 `minimal_audit_record_is_redacted_and_has_decision_evidence`, `permission_audit_diagnostics_count_decisions_and_failure_reasons`, `permission_replay_invariants_are_fail_closed_for_old_denies`, `permission_contract_matrix_declares_required_release_evidence_buckets`, `replay_runner_executes_selected_cases_only_and_never_dispatches_live_tools`다.
+
+이 closure는 redacted typed audit record, diagnostics summary, replay invariant, release evidence bucket을 닫는다. Physical storage backend, diagnostics UI layout, provider-specific trace format은 이 PRD가 구현했다고 주장하지 않는다.
+
 ## 목표
 
 이 문서는 Spec 022의 permission decision을 audit, diagnostics, replay, contract matrix로 닫는 최종 PRD다.
