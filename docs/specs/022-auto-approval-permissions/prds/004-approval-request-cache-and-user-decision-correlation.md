@@ -1,5 +1,13 @@
 # PRD 004. approval request cache and user decision correlation
 
+## 구현 상태
+
+Status: Implemented.
+
+구현 증거는 `crates/shacs-core/src/runtime/permission_approval.rs`, `crates/shacs-core/src/runtime/permission_policy.rs`, `crates/shacs-core/src/runtime/tool_execution.rs`, `crates/shacs-core/src/runtime/tool_search.rs`, `crates/shacs-core/tests/permission_policy.rs`, `crates/shacs-core/tests/runtime.rs`다. 대표 테스트는 `approval_correlation_rejects_mismatched_expired_inspect_only_and_consumed`, `runtime_ask_user_skips_later_denied_tool_without_permission_message`, `bridge_ask_user_skips_later_denied_tool_without_permission_message`다.
+
+이 closure는 typed approval request/decision correlation과 `ask` permission outcome의 non-execution 처리를 닫는다. TUI widget, channel별 button UI, hidden grant store 구현을 주장하지 않는다.
+
 ## 목표
 
 이 문서는 `ask` decision을 사용자에게 보여 주고, 사용자의 decision을 action digest와 snapshot digest에 묶어 안전하게 소비하는 기준을 정의한다.
