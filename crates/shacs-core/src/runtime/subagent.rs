@@ -1,7 +1,8 @@
 use crate::runtime::{
     AgentRunResult, AgentRunSpec, AgentRunner, CancellationToken, ContainmentSnapshotRef,
-    ContextBuilder, InboundMessage, MessageBus, PermissionModeSnapshot, PermissionRuleInput,
-    RuntimeCapabilityReport, RuntimeCapabilityStatus, ToolEvent, ToolExecutionContext, ToolStatus,
+    ContextBuilder, InboundMessage, MessageBus, PermissionCeilingSnapshot, PermissionModeSnapshot,
+    PermissionRuleInput, RuntimeCapabilityReport, RuntimeCapabilityStatus, ToolEvent,
+    ToolExecutionContext, ToolStatus,
 };
 use crate::tools::{
     EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool, PathContext,
@@ -271,6 +272,7 @@ pub struct SubagentExecutionConfig {
     pub containment_snapshot: Option<ContainmentSnapshotRef>,
     pub permission_mode_snapshot: PermissionModeSnapshot,
     pub permission_rule_input: PermissionRuleInput,
+    pub permission_ceiling_snapshot: Option<PermissionCeilingSnapshot>,
     pub max_iterations: usize,
     pub max_tool_result_chars: usize,
     pub fail_on_tool_error: bool,
@@ -295,6 +297,7 @@ impl SubagentExecutionConfig {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             permission_rule_input: PermissionRuleInput::default(),
+            permission_ceiling_snapshot: None,
             max_iterations: 200,
             max_tool_result_chars: 20_000,
             fail_on_tool_error: true,
@@ -616,9 +619,11 @@ impl SubagentRuntime {
             containment_snapshot: config.containment_snapshot.clone(),
             permission_mode_snapshot: config.permission_mode_snapshot.clone(),
             permission_rule_input: config.permission_rule_input.clone(),
+            permission_ceiling_snapshot: config.permission_ceiling_snapshot.clone(),
+            permission_evaluator: None,
+            permission_interactive: false,
             in_cron_context: false,
             record_channel_delivery: false,
-            ..ToolExecutionContext::default()
         };
         spec.max_iterations_message =
             Some("Task completed but no final response was generated.".to_owned());

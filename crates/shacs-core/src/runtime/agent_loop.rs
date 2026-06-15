@@ -4,13 +4,14 @@ use crate::runtime::{
 };
 use crate::runtime::{
     AgentHook, AgentRunSpec, AgentRunner, AutoCompact, AutoCompactArchiveOutcome,
-    ContainmentSnapshotRef, ContextBuildRequest, ContextBuilder, DreamProcessor, DreamRunOutcome,
-    GoalMetadataError, InboundMessage, LoopTaskCancelResult, LoopTaskRegistry,
-    MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage, PermissionModeSnapshot,
-    PermissionRuleInput, PersistentGoal, PersistentGoalStatus, ProviderArchiveConsolidator,
-    ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt, Session, SessionHistoryOptions,
-    SessionManager, SessionTurnAcquireError, SessionTurnLock, TokenConsolidationConfig,
-    ToolEventCallback, ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
+    AutoEvaluatorVerdict, ContainmentSnapshotRef, ContextBuildRequest, ContextBuilder,
+    DreamProcessor, DreamRunOutcome, GoalMetadataError, InboundMessage, LoopTaskCancelResult,
+    LoopTaskRegistry, MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage,
+    PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionRuleInput, PersistentGoal,
+    PersistentGoalStatus, ProviderArchiveConsolidator, ProviderEventCallback, RuntimeContextTools,
+    RuntimeInterrupt, Session, SessionHistoryOptions, SessionManager, SessionTurnAcquireError,
+    SessionTurnLock, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
+    DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, pending_ask_user_id, MessageSender,
@@ -60,6 +61,9 @@ pub struct AgentLoopConfig {
     pub containment_snapshot: Option<ContainmentSnapshotRef>,
     pub permission_mode_snapshot: PermissionModeSnapshot,
     pub permission_rule_input: PermissionRuleInput,
+    pub permission_ceiling_snapshot: Option<PermissionCeilingSnapshot>,
+    pub permission_evaluator: Option<AutoEvaluatorVerdict>,
+    pub permission_interactive: bool,
 }
 
 impl AgentLoopConfig {
@@ -84,6 +88,9 @@ impl AgentLoopConfig {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             permission_rule_input: PermissionRuleInput::default(),
+            permission_ceiling_snapshot: None,
+            permission_evaluator: None,
+            permission_interactive: false,
         }
     }
 }
@@ -437,9 +444,11 @@ impl<'a> AgentLoop<'a> {
             containment_snapshot: self.config.containment_snapshot.clone(),
             permission_mode_snapshot: self.config.permission_mode_snapshot.clone(),
             permission_rule_input: self.config.permission_rule_input.clone(),
+            permission_ceiling_snapshot: self.config.permission_ceiling_snapshot.clone(),
+            permission_evaluator: self.config.permission_evaluator.clone(),
+            permission_interactive: self.config.permission_interactive,
             in_cron_context: false,
             record_channel_delivery: self.config.record_channel_delivery,
-            ..ToolExecutionContext::default()
         };
         spec.context_tools = self.context_tools.clone();
         spec.cancellation_token = self.task_registry.cancellation_token(&session_key);
