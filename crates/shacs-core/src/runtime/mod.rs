@@ -9,6 +9,12 @@ mod loop_control;
 mod memory;
 mod memory_skill_curator;
 mod permission_action;
+mod permission_approval;
+mod permission_audit;
+mod permission_ceiling;
+mod permission_policy;
+mod permission_replay;
+mod permission_rules;
 mod replay;
 mod runner;
 mod self_improvement;
@@ -78,6 +84,38 @@ pub use permission_action::{
     ActionNormalizationState, ContainmentSnapshotRef, IntentSnapshotRef, PermissionDecisionInput,
     PermissionMode, PermissionModeSnapshot, PermissionedAction, PermissionedActionInput,
     PermissionedActionOrigin, SafetyCapability, TargetRef,
+};
+pub use permission_approval::{
+    correlate_approval, ApprovalActor, ApprovalCacheEntry, ApprovalCorrelation,
+    ApprovalCorrelationError, ApprovalDecision, ApprovalDecisionKind, ApprovalRequest,
+};
+pub use permission_audit::{
+    build_permission_audit_record, build_permission_diagnostics_summary,
+    permission_prd005_006_contract_cases, permission_release_evidence_complete,
+    required_permission_release_evidence_buckets, PermissionAuditRecord, PermissionContractCase,
+    PermissionDiagnosticsSummary, PermissionReleaseEvidence, PermissionReleaseEvidenceBucket,
+};
+pub use permission_ceiling::{
+    app_declaration_grants_permission, boundary_origin_from_action, ceiling_for_origin,
+    evaluate_inherited_ceiling, late_result_permission_disposition, AppDeclarationPermissionInput,
+    BoundaryPermissionViolation, CeilingEvaluation, InheritedPermissionContext,
+    LateResultPermissionDisposition, LateResultPermissionInput, PermissionCeilingSnapshot,
+    RuntimeBoundaryOrigin,
+};
+pub use permission_policy::{
+    decide_permission, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, EvaluatorConfidence,
+    EvaluatorScopeMatch, PermissionPolicyDecision, PermissionPolicyDecisionKind,
+    PermissionPolicyInput, PermissionPolicyReason, PromptInjectionSignal,
+};
+pub use permission_replay::{
+    evaluate_permission_replay, PermissionReplayInput, PermissionReplayInvariant,
+    PermissionReplayOutcome, PermissionReplayViolation,
+};
+pub use permission_rules::{
+    classify_permission_action, evaluate_static_rules, CapabilityClassification,
+    ContainerNetworkMode, ContainerRuntimeKind, DockerContainmentSnapshot, PermissionRuleInput,
+    ProcExecSummary, ProtectedTargetClass, RuleDiagnostics, StaticRuleDecision,
+    StaticRuleDecisionKind, StaticRuleReason, TargetClassification, PERMISSION_STATIC_RULE_VERSION,
 };
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub use runner::{
