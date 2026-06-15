@@ -7,10 +7,10 @@ use crate::runtime::{
     ContainmentSnapshotRef, ContextBuildRequest, ContextBuilder, DreamProcessor, DreamRunOutcome,
     GoalMetadataError, InboundMessage, LoopTaskCancelResult, LoopTaskRegistry,
     MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage, PermissionModeSnapshot,
-    PersistentGoal, PersistentGoalStatus, ProviderArchiveConsolidator, ProviderEventCallback,
-    RuntimeContextTools, RuntimeInterrupt, Session, SessionHistoryOptions, SessionManager,
-    SessionTurnAcquireError, SessionTurnLock, TokenConsolidationConfig, ToolEventCallback,
-    ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
+    PermissionRuleInput, PersistentGoal, PersistentGoalStatus, ProviderArchiveConsolidator,
+    ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt, Session, SessionHistoryOptions,
+    SessionManager, SessionTurnAcquireError, SessionTurnLock, TokenConsolidationConfig,
+    ToolEventCallback, ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, pending_ask_user_id, MessageSender,
@@ -59,6 +59,7 @@ pub struct AgentLoopConfig {
     pub record_channel_delivery: bool,
     pub containment_snapshot: Option<ContainmentSnapshotRef>,
     pub permission_mode_snapshot: PermissionModeSnapshot,
+    pub permission_rule_input: PermissionRuleInput,
 }
 
 impl AgentLoopConfig {
@@ -82,6 +83,7 @@ impl AgentLoopConfig {
             record_channel_delivery: true,
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            permission_rule_input: PermissionRuleInput::default(),
         }
     }
 }
@@ -434,8 +436,10 @@ impl<'a> AgentLoop<'a> {
             session_key: Some(session_key.clone()),
             containment_snapshot: self.config.containment_snapshot.clone(),
             permission_mode_snapshot: self.config.permission_mode_snapshot.clone(),
+            permission_rule_input: self.config.permission_rule_input.clone(),
             in_cron_context: false,
             record_channel_delivery: self.config.record_channel_delivery,
+            ..ToolExecutionContext::default()
         };
         spec.context_tools = self.context_tools.clone();
         spec.cancellation_token = self.task_registry.cancellation_token(&session_key);

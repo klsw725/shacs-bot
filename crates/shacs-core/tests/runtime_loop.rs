@@ -14,17 +14,19 @@ use shacs_core::runtime::{
     runtime_spec018_local_api_projection, ActiveLoopTask, AgentLoop, AgentLoopCommandResult,
     AgentLoopConfig, AgentLoopError, AgentRunSpec, AgentRunner, AutoCompact, AutomationSourceEvent,
     AutomationSourceEventKind, BridgeUnderlyingMappingEvidence, CancellationToken,
-    ChildResultEnvelope, ChildResultStatus, ContainmentSnapshotRef, ContextBuilder, DreamLifecycle,
+    ChildResultEnvelope, ChildResultStatus, ContainerNetworkMode, ContainerRuntimeKind,
+    ContainmentSnapshotRef, ContextBuilder, DockerContainmentSnapshot, DreamLifecycle,
     EvaluatorDecisionInput, GoalCompletionVerdict, InboundMessage, LedgerConsumptionStatus,
     LoopTaskRegisterResult, McpLifecycle, MergeDecision, MessageBus, PermissionMode,
-    PermissionModeSnapshot, PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus,
-    ProviderHotSwapResult, ProviderSelectionSnapshot, RuntimeCapabilityStatus, RuntimeContextTools,
-    RuntimeDecisionKind, RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults,
-    RuntimeReplayInput, RuntimeSelectedAction, RuntimeSpec018ProjectionInput, RuntimeToolCall,
-    RuntimeToolExecutor, Session, SessionManager, SessionTurnAcquireError, SessionTurnLock,
-    StaticProviderSelector, SubagentExecutionConfig, SubagentMergeState, SubagentProgressUpdate,
-    SubagentRuntime, SubagentRuntimeConfig, ToolEvent, ToolExecutionContext, ToolSearchConfig,
-    ToolSearchMode, ToolSearchRuntimeInput, ToolStatus, PERSISTENT_GOAL_METADATA_KEY,
+    PermissionModeSnapshot, PermissionRuleInput, PermissionedActionOrigin, PersistentGoal,
+    PersistentGoalStatus, ProcExecSummary, ProviderHotSwapResult, ProviderSelectionSnapshot,
+    RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind,
+    RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults, RuntimeReplayInput,
+    RuntimeSelectedAction, RuntimeSpec018ProjectionInput, RuntimeToolCall, RuntimeToolExecutor,
+    Session, SessionManager, SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector,
+    SubagentExecutionConfig, SubagentMergeState, SubagentProgressUpdate, SubagentRuntime,
+    SubagentRuntimeConfig, ToolEvent, ToolExecutionContext, ToolSearchConfig, ToolSearchMode,
+    ToolSearchRuntimeInput, ToolStatus, PERSISTENT_GOAL_METADATA_KEY,
 };
 use shacs_core::tools::{
     assemble_tool_surface, ActivationState, AskUserTool, JsonMap, MessageTool, SchemaFragment,
@@ -57,6 +59,42 @@ use shacs_utils::gitstore::{GitCliStore, GitStore};
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
+
+fn safe_tool_loop_config(workspace: &std::path::Path) -> AgentLoopConfig {
+    let mut config = AgentLoopConfig::new(workspace, "test-model");
+    config.containment_snapshot = Some(ContainmentSnapshotRef {
+        contained: Some(true),
+        digest: Some("test-contained".to_owned()),
+        summary: Some("non-privileged test containment".to_owned()),
+    });
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::BypassPermissions,
+        source: Some("runtime_loop_test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_rule_input = PermissionRuleInput {
+        containment: DockerContainmentSnapshot {
+            contained: Some(true),
+            runtime: ContainerRuntimeKind::Docker,
+            root_user: Some(false),
+            privileged: Some(false),
+            host_mounts_summary: Vec::new(),
+            network_mode: ContainerNetworkMode::None,
+            digest: Some("test-contained".to_owned()),
+            summary: Some("non-privileged test containment".to_owned()),
+        },
+        protected_targets: Vec::new(),
+        proc_exec_summary: Some(ProcExecSummary {
+            command_family: "runtime-loop-test".to_owned(),
+            target_refs: Vec::new(),
+            destructive: false,
+            network: false,
+            secret_exposure: false,
+            summary_available: true,
+        }),
+    };
+    config
+}
 
 fn runtime_eval_evidence() -> EvidenceRef {
     EvidenceRef {
@@ -1887,6 +1925,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         permission_mode_snapshot: permission_mode_snapshot.clone(),
         in_cron_context: false,
         record_channel_delivery: false,
+        ..ToolExecutionContext::default()
     };
 
     let report = RuntimeToolExecutor::new(&registry).execute_tool_calls(
@@ -3199,7 +3238,7 @@ fn loop_preserves_channel_chat_and_session_key_in_tool_context() -> Result<(), B
         ContextBuilder::new(workspace.path()),
         &registry,
         &client,
-        AgentLoopConfig::new(workspace.path(), "test-model"),
+        safe_tool_loop_config(workspace.path()),
     )
     .with_context_tools(RuntimeContextTools::new().with_spawn(spawn_tool));
     let mut inbound = InboundMessage::new("telegram", "user-1", "chat-1", "go");
@@ -3317,7 +3356,7 @@ fn loop_message_tool_delivery_suppresses_final_and_blocks_cross_target(
         ContextBuilder::new(workspace.path()),
         &registry,
         &client,
-        AgentLoopConfig::new(workspace.path(), "test-model"),
+        safe_tool_loop_config(workspace.path()),
     )
     .with_message_tool_delivery(message_tool);
 
@@ -3377,7 +3416,7 @@ fn loop_message_tool_delivery_suppresses_final_and_blocks_cross_target(
         ContextBuilder::new(workspace.path()),
         &multi_registry,
         &multi_client,
-        AgentLoopConfig::new(workspace.path(), "test-model"),
+        safe_tool_loop_config(workspace.path()),
     )
     .with_context_tools(RuntimeContextTools::new().with_spawn(spawn_tool))
     .with_message_tool_delivery(multi_tool);
@@ -3427,7 +3466,7 @@ fn loop_message_tool_delivery_suppresses_final_and_blocks_cross_target(
         ContextBuilder::new(workspace.path()),
         &guarded_registry,
         &guarded_client,
-        AgentLoopConfig::new(workspace.path(), "test-model"),
+        safe_tool_loop_config(workspace.path()),
     )
     .with_message_tool_delivery(guarded_tool);
     guarded_loop.process_message(InboundMessage::new("telegram", "user-1", "chat-1", "go"))?;
@@ -3476,7 +3515,7 @@ fn loop_message_tool_delivery_media_validation_allows_media_roots_and_rejects_ou
                 ..LlmResponse::default()
             },
         ]);
-        let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+        let mut config = safe_tool_loop_config(workspace.path());
         config.media_roots = vec![media_root.path().to_path_buf()];
         let mut loop_runtime = AgentLoop::new(
             bus.clone(),
