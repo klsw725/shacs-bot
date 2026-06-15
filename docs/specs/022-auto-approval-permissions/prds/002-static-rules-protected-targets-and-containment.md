@@ -1,5 +1,13 @@
 # PRD 002. static rules, protected targets, and containment
 
+## 구현 상태
+
+Status: Implemented.
+
+구현 증거는 `crates/shacs-core/src/runtime/permission_rules.rs`, `crates/shacs-core/src/runtime/permission_policy.rs`, `crates/shacs-core/src/runtime/permission_ceiling.rs`, `crates/shacs-core/tests/permission_policy.rs`다. 대표 테스트는 `protected_targets_fail_closed_before_policy_allow`, `unknown_target_and_invalid_action_are_never_allowable`, `unknown_containment_blocks_proc_exec_auto_and_bypass`, `secret_read_and_raw_auth_export_are_denied`다.
+
+이 closure는 Docker containment evidence와 command rule 판단을 닫는다. Per-command sandbox backend 구현을 뜻하지 않는다.
+
 ## 목표
 
 이 문서는 `PermissionedAction`에 적용할 capability classification, static deny rule, protected target rule, Docker containment snapshot 기준을 정의한다.
