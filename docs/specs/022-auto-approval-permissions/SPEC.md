@@ -1,6 +1,6 @@
 # auto approval permissions 아키텍처 명세
 
-Status: Draft, partially implemented. 이 문서는 `shacs-bot`의 최종 permission mode와 auto approval 계약을 고정한다. 현재 구현은 permission mode/capability taxonomy와 permissioned action normalization slice까지만 닫혔다.
+Status: Implemented and closed for PRDs 000-006. 이 문서는 `shacs-bot`의 최종 permission mode와 auto approval 계약을 고정하며, 현재 구현에서 typed helper, runtime policy gate, audit, diagnostics, replay evidence까지 구현 증거가 연결됐다.
 
 ## 문서 목적
 
@@ -13,7 +13,7 @@ Status: Draft, partially implemented. 이 문서는 `shacs-bot`의 최종 permis
 3. Docker 중심 운영을 primary containment로 인정하되, `proc_exec` permission 판단 자체를 없애지 않는다.
 4. `plan`, `default`, `accept_edits`, `auto`, `dont_ask`, `bypass_permissions` mode의 최종 의미를 구분한다.
 5. LLM 또는 classifier 판단 실패, 낮은 확신, prompt injection 의심, scope 불일치가 자동 실행으로 이어지지 않게 한다.
-6. future Rust 구현에서 permission snapshot, approval request, action digest, evaluator verdict, audit record, stale decision rejection 타입과 테스트를 도출할 수 있게 한다.
+6. Rust 구현에서 permission snapshot, approval request, action digest, evaluator verdict, audit record, stale decision rejection 타입과 테스트를 확인할 수 있게 한다.
 
 핵심 문장:
 
@@ -46,7 +46,7 @@ Auto approval이 하지 않는 일:
 4. Docker 안이라는 이유만으로 모든 `exec`를 자동 승인하지 않는다.
 5. secret read, external delivery, persistent automation, app install, self modification을 조용히 승인하지 않는다.
 6. 사용자에게 보이지 않는 장기 권한 grant를 만들지 않는다.
-7. 부분 구현된 normalization slice를 전체 auto approval 완성으로 주장하지 않는다.
+7. 구현된 runtime gate와 typed helper를 TUI widget, channel별 button UI, storage backend, provider-specific trace 구현으로 과장하지 않는다.
 
 ---
 
@@ -104,38 +104,42 @@ Auto approval이 하지 않는 일:
 4. Provider별 tool call wire format.
 5. Secret vault backend.
 6. 원격 운영 콘솔과 다중 사용자 권한 관리.
-7. 구현 PRD. 이 문서는 owner spec이고 PRD를 만들지 않는다.
+7. PRD별 세부 일정. 이 문서는 owner spec이고 실행 문서는 `prds/`가 소유한다.
 
 ---
 
-## 현재 구현 상태
+## 구현 상태
 
-현재 저장소는 Spec 022 일부만 구현했다. Full auto approval engine은 아직 완성된 상태가 아니다.
-
-현재 구현으로 인정할 수 있는 것은 다음이다.
-
-1. `PermissionMode`, `PermissionModeSource`, `SafetyCapability`, `AutoApprovalConfig`와 safe config normalization이 구현됐다.
-2. `PermissionedAction`, `PermissionedActionOrigin`, action digest, argument digest, snapshot digest, redacted argument representation이 구현됐다.
-3. Direct runtime tool call과 deferred bridge normalization이 구현됐다.
-4. `ask_user`는 tool interrupt와 resume mechanism으로 남아 있으며 formal approval과 구분된다.
+Spec 022의 PRD 000-006은 현재 구현에서 implemented, closed 상태다. 닫힌 범위는 permission mode와 capability taxonomy, permissioned action normalization, static rule과 protected target 판정, runtime policy decision table, formal approval correlation, runtime boundary ceiling, audit diagnostics, replay invariant, contract matrix다.
 
 구현 증거는 다음 경로에 있다.
 
 1. `crates/shacs-config/src/permissions.rs`
 2. `crates/shacs-core/src/runtime/permission_action.rs`
-3. `crates/shacs-core/tests/permission_action.rs`
-4. `crates/shacs-core/tests/runtime.rs`
+3. `crates/shacs-core/src/runtime/permission_rules.rs`
+4. `crates/shacs-core/src/runtime/permission_policy.rs`
+5. `crates/shacs-core/src/runtime/permission_approval.rs`
+6. `crates/shacs-core/src/runtime/permission_ceiling.rs`
+7. `crates/shacs-core/src/runtime/permission_audit.rs`
+8. `crates/shacs-core/src/runtime/permission_replay.rs`
+9. `crates/shacs-core/src/runtime/tool_execution.rs`
+10. `crates/shacs-core/src/runtime/tool_search.rs`
+11. `crates/shacs-core/tests/permission_policy.rs`
+12. `crates/shacs-core/tests/runtime.rs`
+13. `crates/shacs-core/tests/runtime_loop.rs`
 
-남은 open work는 다음이다.
+대표 테스트 증거는 다음이다.
 
-1. Static protected target decision policy. 문서상 닫힌 것으로 보지 않는다.
-2. Runtime policy decision table.
-3. Auto evaluator.
-4. Formal approval request, cache, correlation.
-5. User-facing approval prompt.
-6. Audit diagnostics.
-7. Replay.
-8. Full contract matrix.
+1. `permission_policy.rs`: `protected_targets_fail_closed_before_policy_allow`, `unknown_containment_blocks_proc_exec_auto_and_bypass`, `approval_correlation_rejects_mismatched_expired_inspect_only_and_consumed`, `evaluator_uncertainty_and_prompt_injection_never_allow`, `permission_audit_diagnostics_count_decisions_and_failure_reasons`, `permission_replay_invariants_are_fail_closed_for_old_denies`, `permission_contract_matrix_declares_required_release_evidence_buckets`.
+2. `runtime.rs`: `runtime_denies_direct_proc_exec_without_executing_tool`, `bridge_denies_deferred_proc_exec_without_executing_underlying_tool`, `runtime_ask_user_skips_later_denied_tool_without_permission_message`, `bridge_ask_user_skips_later_denied_tool_without_permission_message`.
+3. `runtime_loop.rs`: `subagent_permissioned_action_context_inherits_snapshots_and_origin`, `replay_runner_executes_selected_cases_only_and_never_dispatches_live_tools`.
+
+구현 closure가 의미하지 않는 것은 다음이다.
+
+1. TUI widget이나 channel별 approval button UI가 완성됐다는 뜻이 아니다.
+2. Audit persistence storage backend나 diagnostics bundle layout을 Spec 022가 구현했다는 뜻이 아니다.
+3. Provider-specific trace format을 구현했다는 뜻이 아니다.
+4. Docker primary containment를 넘어서는 per-command sandbox backend를 구현했다는 뜻이 아니다.
 
 ---
 
