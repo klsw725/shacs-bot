@@ -1,6 +1,6 @@
 # PRD 000. permission mode config and capability taxonomy
 
-Status: Implemented. 이 PRD는 permission mode config와 capability taxonomy slice만 닫는다. Full auto approval은 아직 open이다.
+Status: Implemented. 이 PRD는 permission mode config와 capability taxonomy slice를 닫았고, Spec 022 전체 closure는 PRD 006까지의 runtime gate, audit, replay 증거와 함께 닫혔다.
 
 ## 목표
 
@@ -29,7 +29,7 @@ Status: Implemented. 이 PRD는 permission mode config와 capability taxonomy sl
 2. config 저장과 user-local/workspace boundary는 `docs/specs/008-configuration-profiles-and-runtime-layout/SPEC.md`를 따른다.
 3. host safety와 permission primitive 의미는 `docs/specs/010-host-safety-permissions-and-secrets/SPEC.md`를 따른다.
 4. orchestrator authority는 `docs/specs/007-main-orchestrator-policy/SPEC.md`를 따른다.
-5. 이 PRD는 구현 완료된 slice다. Spec 022 전체 완료 선언은 아니다.
+5. 이 PRD는 구현 완료된 slice이며, Spec 022 전체 완료 선언은 PRD 006까지의 통합 증거와 함께 판단한다.
 
 ## Dependency Cut
 
