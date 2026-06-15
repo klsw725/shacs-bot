@@ -12646,6 +12646,7 @@ impl AgentLoopChatCompletionAdapter {
         subagent.retry_mode = config.retry_mode;
         subagent.containment_snapshot = config.containment_snapshot.clone();
         subagent.permission_mode_snapshot = config.permission_mode_snapshot.clone();
+        subagent.permission_ceiling_snapshot = config.permission_ceiling_snapshot.clone();
         subagent.max_iterations = config.max_iterations;
         subagent.max_tool_result_chars = config.max_tool_result_chars;
         subagent.fail_on_tool_error = true;
@@ -14156,7 +14157,11 @@ mod tests {
     use shacs_config::{
         load_auth_store, save_auth_store_to_path, save_config_to_path, AuthStore, Config,
     };
-    use shacs_core::runtime::{ChildResultEnvelope, ChildResultStatus, Session};
+    use shacs_core::runtime::{
+        ChildResultEnvelope, ChildResultStatus, ContainerNetworkMode, ContainerRuntimeKind,
+        DockerContainmentSnapshot, PermissionCeilingSnapshot, PermissionMode, PermissionRuleInput,
+        ProcExecSummary, RuntimeBoundaryOrigin, SafetyCapability, Session,
+    };
     use shacs_core::tools::{JsonMap, Tool, ToolResult};
     use shacs_providers::{
         GenerationSettings, ProviderClient, ProviderEvent, ProviderRequest, ToolCallRequest,
@@ -17688,7 +17693,17 @@ mod tests {
             );
         }
 
-        let subagent = adapter.subagent_execution_config(&adapter.loop_config());
+        let mut loop_config = adapter.loop_config();
+        loop_config.permission_ceiling_snapshot = Some(PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::Auto,
+            capability_ceiling: vec![SafetyCapability::FsRead],
+            approved_scope_refs: vec!["scope:test".to_owned()],
+            origin: RuntimeBoundaryOrigin::LocalApi {
+                request_id: Some("request-1".to_owned()),
+            },
+        });
+
+        let subagent = adapter.subagent_execution_config(&loop_config);
         assert_eq!(subagent.exec_timeout_seconds, 123);
         assert_eq!(subagent.exec_sandbox.as_deref(), Some("sandboxed"));
         assert_eq!(
@@ -17702,7 +17717,11 @@ mod tests {
         );
         assert_eq!(
             subagent.permission_mode_snapshot,
-            adapter.loop_config().permission_mode_snapshot
+            loop_config.permission_mode_snapshot
+        );
+        assert_eq!(
+            subagent.permission_ceiling_snapshot,
+            loop_config.permission_ceiling_snapshot
         );
         assert_eq!(
             subagent
@@ -21144,6 +21163,8 @@ mod tests {
             Arc::new(|_| panic!("observability hook panic should be isolated"));
         let mut arguments = Map::new();
         arguments.insert("path".to_owned(), json!("README.md"));
+        let mut tools = ToolRegistry::new();
+        tools.register(ErrorArtifactTool);
         let bot = ShacsBot {
             adapter: AgentLoopChatCompletionAdapter {
                 configured_model: "openai/gpt-5".to_owned(),
@@ -21161,7 +21182,7 @@ mod tests {
                         content: Some("checking file".to_owned()),
                         tool_calls: vec![ToolCallRequest::new(
                             "call-1",
-                            "missing_tool",
+                            "error_artifact",
                             arguments.clone(),
                         )],
                         finish_reason: "tool_calls".to_owned(),
@@ -21180,7 +21201,7 @@ mod tests {
                 retry_mode: ProviderRetryMode::Standard,
                 workspace,
                 media_dir,
-                tools: ToolRegistry::new(),
+                tools,
                 message_tool: None,
                 _mcp_runtime: None,
                 _mcp_reports: Vec::new(),
@@ -21213,7 +21234,7 @@ mod tests {
             vec![recording_hook],
         )?;
 
-        assert_eq!(result.tools_used, vec!["missing_tool"]);
+        assert_eq!(result.tools_used, vec!["error_artifact"]);
         let events = events.lock().map_err(|_| "events lock poisoned")?;
         assert!(events.iter().any(|event| match event {
             ShacsBotObservabilityEvent::Provider { event } => matches!(
@@ -21226,7 +21247,7 @@ mod tests {
             ShacsBotObservabilityEvent::Tool {
                 event,
                 payload: Some(payload),
-            } if event.name == "missing_tool" && payload.phase == "start" => Some(payload),
+            } if event.name == "error_artifact" && payload.phase == "start" => Some(payload),
             _ => None,
         });
         let Some(start) = start else {
@@ -21238,7 +21259,7 @@ mod tests {
             ShacsBotObservabilityEvent::Tool {
                 event,
                 payload: Some(payload),
-            } if event.name == "missing_tool" && payload.phase == "error" => Some(payload),
+            } if event.name == "error_artifact" && payload.phase == "error" => Some(payload),
             _ => None,
         });
         let Some(finish) = finish else {
@@ -21248,7 +21269,7 @@ mod tests {
         assert!(finish
             .error
             .as_deref()
-            .is_some_and(|error| error.contains("missing_tool") && error.contains("not found")));
+            .is_some_and(|error| error.contains("intentional artifact failure")));
         Ok(())
     }
 
@@ -21655,7 +21676,10 @@ mod tests {
             exec_env: BTreeMap::new(),
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
-            permission_mode_snapshot: PermissionModeSnapshot::default(),
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: shacs_config::PermissionMode::BypassPermissions,
+                ..PermissionModeSnapshot::default()
+            },
         };
 
         let inbound = InboundMessage::new("direct", "user", "chat-1", "make summary")
@@ -21664,9 +21688,32 @@ mod tests {
                 ("thread_id".to_owned(), json!("thread-1")),
                 ("slack".to_owned(), json!({"thread_ts": "171.1"})),
             ]));
+        let mut loop_config = adapter.loop_config();
+        loop_config.permission_rule_input = PermissionRuleInput {
+            containment: DockerContainmentSnapshot {
+                contained: Some(true),
+                runtime: ContainerRuntimeKind::Docker,
+                root_user: Some(false),
+                privileged: Some(false),
+                host_mounts_summary: Vec::new(),
+                network_mode: ContainerNetworkMode::None,
+                digest: Some("test-contained".to_owned()),
+                summary: Some("non-privileged test containment".to_owned()),
+            },
+            protected_targets: Vec::new(),
+            proc_exec_summary: Some(ProcExecSummary {
+                command_family: "spawn".to_owned(),
+                target_refs: Vec::new(),
+                destructive: false,
+                network: false,
+                secret_exposure: false,
+                summary_available: true,
+            }),
+        };
+
         let (_turn, outbound) = adapter.process_inbound_with_outbound_inner(
             inbound,
-            adapter.loop_config(),
+            loop_config,
             None,
             &[],
             None,
@@ -22400,6 +22447,8 @@ mod tests {
 
     struct JsonArtifactTool;
 
+    struct ErrorArtifactTool;
+
     impl Tool for JsonArtifactTool {
         fn name(&self) -> &str {
             "json_artifact"
@@ -22427,6 +22476,32 @@ mod tests {
                 "files": ["artifact.txt"],
                 "embeds": [{"type": "text"}]
             }))
+        }
+    }
+
+    impl Tool for ErrorArtifactTool {
+        fn name(&self) -> &str {
+            "error_artifact"
+        }
+
+        fn description(&self) -> &str {
+            "Return an error artifact payload"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            })
+        }
+
+        fn read_only(&self) -> bool {
+            true
+        }
+
+        fn execute(&self, _params: JsonMap) -> ToolResult {
+            ToolResult::Text("Error: intentional artifact failure".to_owned())
         }
     }
 
