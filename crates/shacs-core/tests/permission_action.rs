@@ -13,6 +13,8 @@ use std::error::Error;
 
 struct EchoTool;
 
+struct ReadOnlyCustomTool;
+
 struct PathTool(&'static str);
 
 impl Tool for EchoTool {
@@ -37,6 +39,28 @@ impl Tool for EchoTool {
             None => String::new(),
         };
         ToolResult::Text(message)
+    }
+}
+
+impl Tool for ReadOnlyCustomTool {
+    fn name(&self) -> &str {
+        "custom_lookup"
+    }
+
+    fn description(&self) -> &str {
+        "Look up custom data."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new().to_json_schema()
+    }
+
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        ToolResult::Text("ok".to_owned())
     }
 }
 
@@ -115,6 +139,24 @@ fn direct_tool_call_normalizes_to_permissioned_action() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn registered_read_only_custom_tool_normalizes_to_fs_read() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(ReadOnlyCustomTool);
+    let action = normalize_runtime_tool_call(
+        &registry,
+        &RuntimeToolCall::new("call-custom", "custom_lookup", json!({})),
+        input(),
+    );
+
+    if action.normalization_state != ActionNormalizationState::Ready
+        || action.capabilities != vec![PermissionedSafetyCapability::FsRead]
+    {
+        return Err(format!("read-only custom tool was not fs_read: {action:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn missing_id_fallback_is_stable_across_object_key_order() -> Result<(), Box<dyn Error>> {
     let registry = registry_with_echo();
     let first = normalize_runtime_tool_call(
@@ -176,6 +218,38 @@ fn action_digest_captures_target_refs_and_capability_set() -> Result<(), Box<dyn
             format!("action digest did not capture target/capability material: {read_action:?} {write_action:?} {other_target:?}")
                 .into(),
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn deferred_mcp_tool_maps_to_proc_exec_capability() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(PathTool("mcp_echo_lookup"));
+    let action = normalize_runtime_tool_call(
+        &registry,
+        &RuntimeToolCall::new("mcp-1", "mcp_echo_lookup", json!({ "path": "query" })),
+        input(),
+    );
+
+    if action.capabilities != vec![PermissionedSafetyCapability::ProcExec] {
+        return Err(format!("MCP tool capability drifted: {action:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn mcp_ask_user_maps_to_proc_exec_capability() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(PathTool("mcp_ask_user"));
+    let action = normalize_runtime_tool_call(
+        &registry,
+        &RuntimeToolCall::new("mcp-ask-1", "mcp_ask_user", json!({ "path": "question" })),
+        input(),
+    );
+
+    if action.capabilities != vec![PermissionedSafetyCapability::ProcExec] {
+        return Err(format!("mcp_ask_user capability drifted: {action:?}").into());
     }
     Ok(())
 }
