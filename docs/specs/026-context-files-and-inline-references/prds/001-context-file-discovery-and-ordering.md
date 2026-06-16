@@ -98,10 +98,10 @@ Workspace context file을 deterministic하게 발견하고 provider input orderi
 
 ## 구현 상태
 
-Status: Implemented for PRD 001 discovery/order boundary only. Provider input formatting, resolver behavior, budget handoff, replay, and user-facing CLI/API projection remain open in later PRDs.
+Status: Implemented for PRD 001 core discovery/order boundary. Live runtime handoff consumes default workspace/current-directory discovery after excluding workspace-root files already consumed by legacy system bootstrap, including symlink aliases; runtime config wiring for extra context file paths is outside this closure.
 
 Evidence:
 
-- `crates/shacs-core/src/runtime/context_files.rs` adds default context filename discovery, root-to-current directory ordering, configured extra context files, workspace-boundary denial, truncation evidence, digest and token estimate fields.
+- `crates/shacs-core/src/runtime/context_files.rs` adds default context filename discovery, root-to-current directory ordering, configured extra context file support at the core discovery API, workspace-boundary/protected-target denial, truncation evidence, digest and token estimate fields.
 - Public runtime exports are available through `crates/shacs-core/src/runtime/mod.rs`.
-- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_file` passes with root/nested ordering, duplicate filename, symlink outside workspace, oversized file, configured extra, and missing-file coverage.
+- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_file` passes with root/nested ordering, duplicate filename, symlink outside workspace, protected symlink target, oversized file, configured extra, and missing-file coverage.
