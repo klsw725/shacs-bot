@@ -98,7 +98,7 @@ User message 안의 inline `@` reference를 안정적으로 파싱하고, provid
 
 ## 구현 상태
 
-Status: Implemented for PRD 000 parser/model boundary only. Spec 026 remains open for discovery, resolver, budget, permission/redaction, and UX PRDs.
+Status: Implemented for PRD 000 parser/model boundary. Later Spec 026 PRDs and live runtime handoff are also implemented.
 
 Evidence:
 

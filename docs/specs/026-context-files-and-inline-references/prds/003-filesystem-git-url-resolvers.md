@@ -99,10 +99,10 @@
 
 ## 구현 상태
 
-Status: Implemented for PRD 003 read-only resolver boundary. Provider budget handoff, replay evidence, redaction pipeline integration, and user-facing CLI/API projection remain open in later PRDs.
+Status: Implemented for PRD 003 read-only resolver boundary. Provider budget handoff, replay evidence, redaction pipeline integration, user-facing projection, and live runtime handoff are also implemented.
 
 Evidence:
 
 - `crates/shacs-core/src/runtime/context_resolvers.rs` resolves parsed file, folder, diff, staged, git, and HTTPS URL references into `ResolvedContextArtifact` records without mutating user messages or working tree state.
-- Filesystem references are constrained to the workspace; folder output is bounded; URL references require explicit network enablement and HTTPS, content-type, redirect, and size gates.
-- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_resolver` passes with outside-workspace file denial, folder limit, file artifact, missing git revision, disabled network, oversized URL, and external-content labeling coverage.
+- Filesystem references are constrained to the workspace; folder output is bounded; `@diff`/`@staged` disable ext-diff and textconv; URL references require explicit network enablement and HTTPS, content-type, redirect, and size gates.
+- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_resolver` passes with outside-workspace file denial, folder limit, file artifact, missing git revision, disabled network, oversized URL, external-content labeling, and git textconv bypass coverage.

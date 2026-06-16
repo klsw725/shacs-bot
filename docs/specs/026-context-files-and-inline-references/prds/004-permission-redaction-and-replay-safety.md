@@ -98,11 +98,11 @@ Context files와 inline references가 local permission, secret redaction, replay
 
 ## 구현 상태
 
-Status: Implemented for PRD 004 runtime safety boundary. Full CLI/TUI/API projection and release gate wiring remain open in PRD 005.
+Status: Implemented for PRD 004 runtime safety boundary. PRD 005 projection/release evidence and live runtime handoff are also implemented.
 
 Evidence:
 
 - `crates/shacs-core/src/runtime/context_safety.rs` adds a shared safety gate for resolved artifacts, redacts secret-like content before provider handoff, emits user-facing diagnostics, labels trust, and records replay evidence with a no-live-refetch marker.
-- `crates/shacs-core/src/runtime/context_resolvers.rs` denies protected file targets such as `.env` and SSH/private-key paths before reading content.
+- `crates/shacs-core/src/runtime/context_resolvers.rs` denies protected file targets such as `.env` and SSH/private-key paths before reading content; `context_files.rs` also denies context-file symlinks whose canonical target is protected; `context.rs` applies the same canonical workspace/protected-target gate to legacy bootstrap files before they enter the system prompt.
 - `crates/shacs-core/src/runtime/context_handoff.rs` consumes trust labels from the safety model, including `external_untrusted` for URL artifacts and `workspace_user_authored` for context files.
-- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_safety` passes with secret redaction, protected path recognition, external URL trust labeling, and replay no-refetch coverage.
+- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_safety` passes with secret redaction, protected path recognition, external URL trust labeling, and replay no-refetch coverage. `cargo test --manifest-path crates/shacs-core/Cargo.toml bootstrap_files_skip` covers bootstrap symlinks to protected or outside-workspace targets.
