@@ -2,6 +2,7 @@ use crate::runtime::tool_search::{
     BridgeUnderlyingMappingEvidence, ToolDescribeEvidence, ToolSearchActivationReason,
     ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
 };
+use crate::runtime::ContextProviderHandoff;
 use crate::runtime::{
     dispatch_bridge_tool_calls, CancellationToken, ResolvedDeferredToolCall,
     RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
@@ -174,6 +175,7 @@ pub struct AgentRunSpec<'a> {
     pub tool_search: ToolSearchConfig,
     pub context_window_tokens: Option<usize>,
     pub context_block_limit: Option<usize>,
+    pub context_provider_handoff: Option<ContextProviderHandoff>,
     pub tool_event_callback: Option<ToolEventCallback>,
     pub provider_event_callback: Option<ProviderEventCallback>,
     pub retry_wait_callback: Option<RetryWaitCallback>,
@@ -210,6 +212,7 @@ impl<'a> AgentRunSpec<'a> {
             tool_search: ToolSearchConfig::default(),
             context_window_tokens: None,
             context_block_limit: None,
+            context_provider_handoff: None,
             tool_event_callback: None,
             provider_event_callback: None,
             retry_wait_callback: None,
@@ -1257,7 +1260,44 @@ fn govern_messages_for_model(spec: &AgentRunSpec<'_>, messages: &[Value]) -> Vec
     governed = microcompact(&governed);
     governed = snip_history(spec, &governed);
     governed = drop_orphan_tool_results(&governed);
-    backfill_missing_tool_results(&governed)
+    governed = backfill_missing_tool_results(&governed);
+    inject_provider_context(spec, governed)
+}
+
+fn inject_provider_context(spec: &AgentRunSpec<'_>, mut messages: Vec<Value>) -> Vec<Value> {
+    let Some(message) = provider_context_message(spec) else {
+        return messages;
+    };
+    let insert_at = messages
+        .iter()
+        .position(|message| message.get("role").and_then(Value::as_str) != Some("system"))
+        .unwrap_or(messages.len());
+    messages.insert(insert_at, message);
+    messages
+}
+
+fn provider_context_message(spec: &AgentRunSpec<'_>) -> Option<Value> {
+    let handoff = spec.context_provider_handoff.as_ref()?;
+    let content = provider_context_content(handoff)?;
+    Some(serde_json::json!({
+        "role": "user",
+        "content": content,
+    }))
+}
+
+fn provider_context_content(handoff: &ContextProviderHandoff) -> Option<String> {
+    if handoff.blocks.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Provider Context - user supplied, lower priority than system instructions]\n{}\n[/Provider Context]\n",
+        handoff
+            .blocks
+            .iter()
+            .map(|block| block.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    ))
 }
 
 fn drop_orphan_tool_results(messages: &[Value]) -> Vec<Value> {
@@ -1382,7 +1422,12 @@ fn snip_history(spec: &AgentRunSpec<'_>, messages: &[Value]) -> Vec<Value> {
     let budget = spec.context_block_limit.unwrap_or_else(|| {
         context_window_tokens.saturating_sub(spec.settings.max_tokens as usize + SNIP_SAFETY_BUFFER)
     });
-    if budget == 0 || estimate_messages_tokens(messages) <= budget {
+    let provider_context_tokens = provider_context_message(spec)
+        .as_ref()
+        .map(estimate_message_tokens)
+        .unwrap_or(0);
+    let effective_budget = budget.saturating_sub(provider_context_tokens);
+    if budget == 0 || estimate_messages_tokens(messages) <= effective_budget {
         return messages.to_vec();
     }
     let system_messages = messages
@@ -1396,7 +1441,7 @@ fn snip_history(spec: &AgentRunSpec<'_>, messages: &[Value]) -> Vec<Value> {
         .cloned()
         .collect::<Vec<_>>();
     let system_tokens = estimate_messages_tokens(&system_messages);
-    let remaining_budget = budget.saturating_sub(system_tokens).max(128);
+    let remaining_budget = effective_budget.saturating_sub(system_tokens).max(1);
     let mut kept = Vec::new();
     let mut used = 0;
     for message in non_system.iter().rev() {
@@ -1852,6 +1897,7 @@ fn interrupt_name(interrupt: &RuntimeInterrupt) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::ProviderContextBlock;
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::{Arc, Mutex};
@@ -1891,6 +1937,36 @@ mod tests {
 
     impl ProviderClient for QueueProviderClient {
         fn chat(&self, _request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+            self.responses
+                .lock()
+                .expect("response queue lock")
+                .pop_front()
+                .ok_or_else(|| ProviderError::Api {
+                    status: None,
+                    message: "missing queued response".to_owned(),
+                    retryable: false,
+                    headers: BTreeMap::new(),
+                    body: None,
+                })
+        }
+
+        fn chat_stream(
+            &self,
+            request: ProviderRequest,
+            _on_event: &mut dyn FnMut(ProviderEvent),
+        ) -> Result<LlmResponse, ProviderError> {
+            self.chat(request)
+        }
+    }
+
+    struct CapturingProviderClient {
+        responses: Mutex<VecDeque<LlmResponse>>,
+        requests: Mutex<Vec<ProviderRequest>>,
+    }
+
+    impl ProviderClient for CapturingProviderClient {
+        fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+            self.requests.lock().expect("requests lock").push(request);
             self.responses
                 .lock()
                 .expect("response queue lock")
@@ -1999,6 +2075,181 @@ mod tests {
                 "hook:finalize:final answer",
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_runner_injects_context_only_into_provider_request(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![LlmResponse {
+                content: Some("ok".to_owned()),
+                ..LlmResponse::default()
+            }])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let tools = ToolRegistry::new();
+        let mut spec = AgentRunSpec::new(
+            vec![
+                json!({"role": "system", "content": "runtime instructions"}),
+                json!({"role": "user", "content": "read @note.txt"}),
+            ],
+            &tools,
+            &client,
+            "model",
+        );
+        spec.context_provider_handoff = Some(ContextProviderHandoff {
+            blocks: vec![ProviderContextBlock {
+                source_label: "inline:note.txt".to_owned(),
+                trust_label: "workspace_file".to_owned(),
+                truncation_label: None,
+                content: "[Context Artifact]\nSource: inline:note.txt\n\nprovider-only note\n[/Context Artifact]".to_owned(),
+                digest: Some("digest".to_owned()),
+                byte_count: 82,
+                token_estimate: Some(8),
+            }],
+            evidence: Vec::new(),
+            used_context_bytes: 82,
+            budget_bytes: 128,
+        });
+
+        let result = AgentRunner::new().run(spec)?;
+
+        let requests = client.requests.lock().expect("requests lock");
+        assert_eq!(
+            requests[0].messages[0],
+            json!({"role": "system", "content": "runtime instructions"})
+        );
+        let provider_content = requests[0].messages[1]
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert_eq!(requests[0].messages[1]["role"], "user");
+        assert!(provider_content.contains("provider-only note"));
+        assert!(provider_content.ends_with("[/Provider Context]\n"));
+        assert_eq!(
+            requests[0].messages[2],
+            json!({"role": "user", "content": "read @note.txt"})
+        );
+        assert!(result
+            .messages
+            .iter()
+            .all(|message| !message.to_string().contains("provider-only note")));
+        assert_eq!(
+            result.messages[1],
+            json!({"role": "user", "content": "read @note.txt"})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_runner_accounts_provider_context_when_snipping_history(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![LlmResponse {
+                content: Some("ok".to_owned()),
+                ..LlmResponse::default()
+            }])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let tools = ToolRegistry::new();
+        let old_filler = "old-history ".repeat(400);
+        let mut spec = AgentRunSpec::new(
+            vec![
+                json!({"role": "system", "content": "runtime instructions"}),
+                json!({"role": "user", "content": old_filler}),
+                json!({"role": "assistant", "content": "old answer"}),
+                json!({"role": "user", "content": "current request"}),
+            ],
+            &tools,
+            &client,
+            "model",
+        );
+        spec.context_window_tokens = Some(512);
+        spec.context_block_limit = Some(80);
+        spec.context_provider_handoff = Some(ContextProviderHandoff {
+            blocks: vec![ProviderContextBlock {
+                source_label: "inline:note.txt".to_owned(),
+                trust_label: "workspace_file".to_owned(),
+                truncation_label: None,
+                content: "[Context Artifact]\nprovider context body\n[/Context Artifact]"
+                    .to_owned(),
+                digest: None,
+                byte_count: 58,
+                token_estimate: Some(6),
+            }],
+            evidence: Vec::new(),
+            used_context_bytes: 58,
+            budget_bytes: 128,
+        });
+
+        let result = AgentRunner::new().run(spec)?;
+
+        assert_eq!(result.final_content.as_deref(), Some("ok"));
+        let requests = client.requests.lock().expect("requests lock");
+        let provider_text = requests[0]
+            .messages
+            .iter()
+            .filter_map(|message| message.get("content").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(provider_text.contains("provider context body"));
+        assert!(provider_text.contains("current request"));
+        assert!(!provider_text.contains("old-history"));
+        assert!(estimate_messages_tokens(&requests[0].messages) <= 100);
+        Ok(())
+    }
+
+    #[test]
+    fn finalization_retry_request_preserves_provider_context(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                blank_response(),
+                blank_response(),
+                LlmResponse {
+                    content: Some("final".to_owned()),
+                    ..LlmResponse::default()
+                },
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let tools = ToolRegistry::new();
+        let mut spec = AgentRunSpec::new(
+            vec![json!({"role": "user", "content": "read @note.txt"})],
+            &tools,
+            &client,
+            "model",
+        );
+        spec.max_iterations = 2;
+        spec.context_provider_handoff = Some(ContextProviderHandoff {
+            blocks: vec![ProviderContextBlock {
+                source_label: "inline:note.txt".to_owned(),
+                trust_label: "workspace_file".to_owned(),
+                truncation_label: None,
+                content: "[Context Artifact]\nretry-visible note\n[/Context Artifact]".to_owned(),
+                digest: None,
+                byte_count: 58,
+                token_estimate: Some(6),
+            }],
+            evidence: Vec::new(),
+            used_context_bytes: 58,
+            budget_bytes: 128,
+        });
+
+        let result = AgentRunner::new().run(spec)?;
+
+        assert_eq!(result.final_content.as_deref(), Some("final"));
+        let requests = client.requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 3);
+        for request in requests.iter() {
+            let provider_content = request.messages[0]
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert_eq!(request.messages[0]["role"], "user");
+            assert!(provider_content.contains("retry-visible note"));
+        }
         Ok(())
     }
 }
