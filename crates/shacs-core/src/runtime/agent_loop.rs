@@ -1,17 +1,22 @@
 use crate::runtime::{
+    apply_context_safety_gate, build_context_provider_handoff, discover_context_files,
+    parse_context_references, resolve_context_reference,
+};
+use crate::runtime::{
     clear_goal, create_persistent_goal, mark_goal_blocked, mark_goal_done, pause_goal,
     persistent_goal_from_session, remove_persistent_goal, resume_goal, store_persistent_goal,
 };
 use crate::runtime::{
     AgentHook, AgentRunSpec, AgentRunner, AutoCompact, AutoCompactArchiveOutcome,
-    AutoEvaluatorVerdict, ContainmentSnapshotRef, ContextBuildRequest, ContextBuilder,
-    DreamProcessor, DreamRunOutcome, GoalMetadataError, InboundMessage, LoopTaskCancelResult,
-    LoopTaskRegistry, MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage,
-    PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionRuleInput, PersistentGoal,
-    PersistentGoalStatus, ProviderArchiveConsolidator, ProviderEventCallback, RuntimeContextTools,
-    RuntimeInterrupt, Session, SessionHistoryOptions, SessionManager, SessionTurnAcquireError,
-    SessionTurnLock, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
-    DEFAULT_GOAL_TURN_BUDGET,
+    AutoEvaluatorVerdict, ContainmentSnapshotRef, ContextBudgetInput, ContextBuildRequest,
+    ContextBuilder, ContextFileDiscoveryOptions, ContextFileProjection, ContextProviderHandoff,
+    ContextReferenceResolverConfig, DreamProcessor, DreamRunOutcome, GoalMetadataError,
+    InboundMessage, LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore,
+    MessageBus, OutboundMessage, PermissionCeilingSnapshot, PermissionModeSnapshot,
+    PermissionRuleInput, PersistentGoal, PersistentGoalStatus, ProviderArchiveConsolidator,
+    ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt, Session, SessionHistoryOptions,
+    SessionManager, SessionTurnAcquireError, SessionTurnLock, TokenConsolidationConfig,
+    ToolEventCallback, ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, pending_ask_user_id, MessageSender,
@@ -37,6 +42,8 @@ const INTERRUPTED_PLACEHOLDER: &str =
     "[Assistant reply unavailable because the previous turn was interrupted.]";
 const PENDING_TOOL_PLACEHOLDER: &str = "[Tool result unavailable — call was interrupted or lost]";
 const MAX_INJECTIONS_PER_TURN: usize = 3;
+const SYSTEM_BOOTSTRAP_CONTEXT_FILE_NAMES: [&str; 4] =
+    ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
 
 type MessageDeliveryTarget = Arc<Mutex<Option<(String, String)>>>;
 
@@ -373,33 +380,48 @@ impl<'a> AgentLoop<'a> {
         }
 
         let pending_ask_id = pending_ask_user_id(&session.messages);
-        let initial_messages = if let Some(tool_call_id) = pending_ask_id {
-            append_ask_user_resume(&mut session, &tool_call_id, &message.content);
-            let history = session.get_history_with_options(self.config.history_options);
-            let mut messages = vec![json!({
-                "role": "system",
-                "content": self.context_builder.build_system_prompt(Some(&message.channel)),
-            })];
-            messages.extend(history);
-            messages
-        } else {
-            self.maybe_consolidate_session_by_tokens(&mut session)?;
-            let history = session.get_history_with_options(self.config.history_options);
-            let initial_messages = self.context_builder.build_messages(ContextBuildRequest {
-                history,
-                current_message: &message.content,
-                media: &message.media,
-                channel: Some(&message.channel),
-                chat_id: Some(&message.chat_id),
-                current_role: "user",
-                session_summary: session_summary.as_deref(),
-            });
-            append_user_turn(&mut session, &message);
-            session
-                .metadata
-                .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
-            initial_messages
-        };
+        let (initial_messages, context_provider_handoff) =
+            if let Some(tool_call_id) = pending_ask_id {
+                append_ask_user_resume(&mut session, &tool_call_id, &message.content);
+                let history = session.get_history_with_options(self.config.history_options);
+                let mut messages = vec![json!({
+                    "role": "system",
+                    "content": self.context_builder.build_system_prompt(Some(&message.channel)),
+                })];
+                messages.extend(history);
+                let context_provider_handoff = build_live_context_provider_handoff(
+                    &self.config.workspace,
+                    &message.content,
+                    &messages,
+                    current_working_directory(),
+                    live_context_budget_bytes(self.config.context_block_limit),
+                );
+                (messages, Some(context_provider_handoff))
+            } else {
+                self.maybe_consolidate_session_by_tokens(&mut session)?;
+                let history = session.get_history_with_options(self.config.history_options);
+                let initial_messages = self.context_builder.build_messages(ContextBuildRequest {
+                    history,
+                    current_message: &message.content,
+                    media: &message.media,
+                    channel: Some(&message.channel),
+                    chat_id: Some(&message.chat_id),
+                    current_role: "user",
+                    session_summary: session_summary.as_deref(),
+                });
+                let context_provider_handoff = build_live_context_provider_handoff(
+                    &self.config.workspace,
+                    &message.content,
+                    &initial_messages,
+                    current_working_directory(),
+                    live_context_budget_bytes(self.config.context_block_limit),
+                );
+                append_user_turn(&mut session, &message);
+                session
+                    .metadata
+                    .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
+                (initial_messages, Some(context_provider_handoff))
+            };
         self.sessions.save(&session)?;
 
         let _delivery_target_guard = self.message_delivery_target.as_ref().map(|target| {
@@ -429,6 +451,7 @@ impl<'a> AgentLoop<'a> {
         spec.tool_search = self.config.tool_search;
         spec.context_window_tokens = self.config.context_window_tokens;
         spec.context_block_limit = self.config.context_block_limit;
+        spec.context_provider_handoff = context_provider_handoff;
         spec.concurrent_tools = self.config.concurrent_tools;
         spec.fail_on_tool_error = self.config.fail_on_tool_error;
         spec.tool_context = ToolExecutionContext {
@@ -966,6 +989,73 @@ fn append_user_turn(session: &mut Session, message: &InboundMessage) {
         );
     }
     session.add_message("user", message.content.clone(), extra);
+}
+
+fn build_live_context_provider_handoff(
+    workspace: &Path,
+    current_message: &str,
+    initial_messages: &[Value],
+    current_dir: Option<PathBuf>,
+    max_context_bytes: Option<usize>,
+) -> ContextProviderHandoff {
+    let parsed = parse_context_references(current_message);
+    let resolver_config = ContextReferenceResolverConfig::new(workspace);
+    let resolved = parsed
+        .references
+        .iter()
+        .map(|reference| resolve_context_reference(reference, &resolver_config))
+        .collect::<Vec<_>>();
+    let safety = apply_context_safety_gate(&resolved);
+    let context_files = discover_context_files(
+        workspace,
+        ContextFileDiscoveryOptions {
+            current_dir,
+            ..ContextFileDiscoveryOptions::default()
+        },
+    );
+    let context_file_entries = live_provider_context_files(workspace, context_files.entries);
+    build_context_provider_handoff(
+        &safety.artifacts,
+        &context_file_entries,
+        ContextBudgetInput {
+            reserved_user_message_bytes: current_message.len(),
+            reserved_runtime_instruction_bytes: runtime_instruction_bytes(initial_messages),
+            max_context_bytes,
+        },
+    )
+}
+
+fn live_provider_context_files(
+    _workspace: &Path,
+    entries: Vec<ContextFileProjection>,
+) -> Vec<ContextFileProjection> {
+    entries
+        .into_iter()
+        .filter(|entry| !is_workspace_root_bootstrap_context_file(entry))
+        .collect()
+}
+
+fn is_workspace_root_bootstrap_context_file(entry: &ContextFileProjection) -> bool {
+    entry.source == crate::runtime::ContextFileSource::DefaultCandidate
+        && entry.source_directory_depth == 0
+        && SYSTEM_BOOTSTRAP_CONTEXT_FILE_NAMES.contains(&entry.filename.as_str())
+}
+
+fn current_working_directory() -> Option<PathBuf> {
+    std::env::current_dir().ok()
+}
+
+fn live_context_budget_bytes(context_block_limit_tokens: Option<usize>) -> Option<usize> {
+    context_block_limit_tokens.map(|tokens| tokens.saturating_mul(4))
+}
+
+fn runtime_instruction_bytes(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+        .filter_map(|message| message.get("content").and_then(Value::as_str))
+        .map(str::len)
+        .sum()
 }
 
 fn mid_turn_injection_callback(
@@ -1533,4 +1623,280 @@ fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn now_iso() -> String {
     Local::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shacs_providers::{LlmResponse, ProviderEvent, ProviderRequest};
+    use std::collections::{BTreeMap, VecDeque};
+    use std::fs;
+
+    struct CapturingProviderClient {
+        responses: Mutex<VecDeque<LlmResponse>>,
+        requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    }
+
+    impl ProviderClient for CapturingProviderClient {
+        fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+            self.requests.lock().expect("requests lock").push(request);
+            self.responses
+                .lock()
+                .expect("response queue lock")
+                .pop_front()
+                .ok_or_else(|| ProviderError::Api {
+                    status: None,
+                    message: "missing queued response".to_owned(),
+                    retryable: false,
+                    headers: BTreeMap::new(),
+                    body: None,
+                })
+        }
+
+        fn chat_stream(
+            &self,
+            request: ProviderRequest,
+            _on_event: &mut dyn FnMut(ProviderEvent),
+        ) -> Result<LlmResponse, ProviderError> {
+            self.chat(request)
+        }
+    }
+
+    fn provider_context_text(messages: &[Value]) -> &str {
+        messages
+            .iter()
+            .find_map(|message| {
+                let content = message.get("content").and_then(Value::as_str)?;
+                content.contains("[Provider Context").then_some(content)
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn live_context_handoff_uses_current_directory_for_context_files(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let nested = workspace.path().join("nested");
+        fs::create_dir_all(&nested)?;
+        fs::write(workspace.path().join("AGENTS.md"), "bootstrap-system-body")?;
+        fs::write(workspace.path().join(".shacs.md"), "root-context-body")?;
+        fs::write(nested.join("AGENTS.md"), "nested-context-body")?;
+
+        let handoff = build_live_context_provider_handoff(
+            workspace.path(),
+            "plain request",
+            &[json!({"role": "system", "content": "runtime instructions"})],
+            Some(nested),
+            None,
+        );
+        let provider_text = handoff
+            .blocks
+            .iter()
+            .map(|block| block.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(provider_text.contains("root-context-body"));
+        assert!(provider_text.contains("nested-context-body"));
+        assert!(!provider_text.contains("bootstrap-system-body"));
+        Ok(())
+    }
+
+    #[test]
+    fn live_context_handoff_excludes_workspace_bootstrap_files_from_provider_context(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        fs::write(workspace.path().join("AGENTS.md"), "bootstrap-agents-body")?;
+        fs::write(workspace.path().join(".shacs.md"), "provider-context-body")?;
+
+        let handoff = build_live_context_provider_handoff(
+            workspace.path(),
+            "plain request",
+            &[json!({"role": "system", "content": "bootstrap-agents-body"})],
+            Some(workspace.path().to_path_buf()),
+            None,
+        );
+        let provider_text = handoff
+            .blocks
+            .iter()
+            .map(|block| block.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(provider_text.contains("provider-context-body"));
+        assert!(!provider_text.contains("bootstrap-agents-body"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_context_handoff_excludes_workspace_bootstrap_symlink_alias(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let docs = workspace.path().join("docs");
+        fs::create_dir_all(&docs)?;
+        fs::write(docs.join("rules.md"), "aliased-bootstrap-body")?;
+        fs::write(workspace.path().join(".shacs.md"), "provider-context-body")?;
+        std::os::unix::fs::symlink(docs.join("rules.md"), workspace.path().join("AGENTS.md"))?;
+
+        let handoff = build_live_context_provider_handoff(
+            workspace.path(),
+            "plain request",
+            &[json!({"role": "system", "content": "aliased-bootstrap-body"})],
+            Some(workspace.path().to_path_buf()),
+            None,
+        );
+        let provider_text = handoff
+            .blocks
+            .iter()
+            .map(|block| block.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(provider_text.contains("provider-context-body"));
+        assert!(!provider_text.contains("aliased-bootstrap-body"));
+        Ok(())
+    }
+
+    #[test]
+    fn live_context_handoff_uses_configured_budget() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        fs::write(workspace.path().join("note.txt"), "inline-note-body")?;
+
+        let handoff = build_live_context_provider_handoff(
+            workspace.path(),
+            "read @note.txt",
+            &[json!({"role": "system", "content": "runtime instructions"})],
+            Some(workspace.path().to_path_buf()),
+            live_context_budget_bytes(Some(1)),
+        );
+
+        assert_eq!(live_context_budget_bytes(Some(1)), Some(4));
+        assert_eq!(handoff.budget_bytes, 4);
+        assert!(handoff.blocks.is_empty());
+        assert!(handoff.used_context_bytes <= 4);
+        Ok(())
+    }
+
+    #[test]
+    fn process_message_builds_live_context_handoff_without_persisting_context_blocks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        fs::write(workspace.path().join("note.txt"), "inline-note-body")?;
+        fs::write(workspace.path().join("AGENTS.md"), "bootstrap-system-body")?;
+        fs::write(workspace.path().join(".shacs.md"), "workspace-context-body")?;
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![LlmResponse {
+                content: Some("answer".to_owned()),
+                ..LlmResponse::default()
+            }])),
+            requests: captured_requests.clone(),
+        };
+        let tools = ToolRegistry::new();
+        let sessions = SessionManager::new(workspace.path())?;
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            sessions,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "model"),
+        );
+        let message = InboundMessage::new("direct", "user", "direct", "please read @note.txt");
+
+        let outcome = loop_runtime.process_message(message)?;
+
+        assert_eq!(outcome.final_content.as_deref(), Some("answer"));
+        let requests = captured_requests.lock().expect("requests lock");
+        let provider_messages = &requests[0].messages;
+        let provider_text = provider_context_text(provider_messages);
+        assert!(provider_text.contains("inline:note.txt"));
+        assert!(provider_text.contains("inline-note-body"));
+        assert!(provider_text.contains("context-file:"));
+        assert!(provider_text.contains("workspace-context-body"));
+        assert!(!provider_text.contains("bootstrap-system-body"));
+
+        let session = loop_runtime
+            .session_manager_mut()
+            .get_or_create("direct:direct");
+        let session_text = session
+            .messages
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(session_text.contains("please read @note.txt"));
+        assert!(!session_text.contains("inline-note-body"));
+        assert!(!session_text.contains("workspace-context-body"));
+        assert!(!session_text.contains("[Provider Context"));
+        Ok(())
+    }
+
+    #[test]
+    fn process_message_builds_live_context_handoff_for_ask_user_resume_without_persisting_context_blocks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        fs::write(workspace.path().join("note.txt"), "resume-inline-body")?;
+        fs::write(workspace.path().join("AGENTS.md"), "resume-bootstrap-body")?;
+        fs::write(workspace.path().join(".shacs.md"), "resume-context-body")?;
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![LlmResponse {
+                content: Some("resumed answer".to_owned()),
+                ..LlmResponse::default()
+            }])),
+            requests: captured_requests.clone(),
+        };
+        let tools = ToolRegistry::new();
+        let mut sessions = SessionManager::new(workspace.path())?;
+        let mut session = Session::new("direct:direct");
+        session.messages.push(json!({
+            "role": "assistant",
+            "content": "need input",
+            "tool_calls": [{
+                "id": "ask-1",
+                "type": "function",
+                "function": {
+                    "name": "ask_user",
+                    "arguments": "{\"question\":\"Which note?\"}"
+                }
+            }]
+        }));
+        sessions.save(&session)?;
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            sessions,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "model"),
+        );
+        let message = InboundMessage::new("direct", "user", "direct", "resume with @note.txt");
+
+        let outcome = loop_runtime.process_message(message)?;
+
+        assert_eq!(outcome.final_content.as_deref(), Some("resumed answer"));
+        let requests = captured_requests.lock().expect("requests lock");
+        let provider_text = provider_context_text(&requests[0].messages);
+        assert!(provider_text.contains("inline:note.txt"));
+        assert!(provider_text.contains("resume-inline-body"));
+        assert!(provider_text.contains("resume-context-body"));
+        assert!(!provider_text.contains("resume-bootstrap-body"));
+
+        let session = loop_runtime
+            .session_manager_mut()
+            .get_or_create("direct:direct");
+        let session_text = session
+            .messages
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(session_text.contains("resume with @note.txt"));
+        assert!(!session_text.contains("resume-inline-body"));
+        assert!(!session_text.contains("resume-context-body"));
+        assert!(!session_text.contains("[Provider Context"));
+        Ok(())
+    }
 }
