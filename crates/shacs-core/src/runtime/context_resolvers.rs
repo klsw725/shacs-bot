@@ -68,13 +68,13 @@ pub fn resolve_context_reference(
         ContextReferenceKind::Diff => resolve_git_command_reference(
             reference,
             config,
-            &["diff", "--no-ext-diff", "--"],
+            &["diff", "--no-ext-diff", "--no-textconv", "--"],
             "working tree diff",
         ),
         ContextReferenceKind::Staged => resolve_git_command_reference(
             reference,
             config,
-            &["diff", "--cached", "--no-ext-diff", "--"],
+            &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--"],
             "staged diff",
         ),
         ContextReferenceKind::Git => resolve_git_object_reference(reference, config),
@@ -737,6 +737,86 @@ mod tests {
             ContextPermissionStatus::Denied
         );
         assert!(!workspace.path().join("context-leak").exists());
+        Ok(())
+    }
+
+    fn run_git(workspace: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(args)
+            .status()?;
+        assert!(status.success(), "git command failed: {args:?}");
+        Ok(())
+    }
+
+    fn commit_git_baseline(workspace: &Path) -> Result<(), Box<dyn Error>> {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["-c", "user.name=Context Test"])
+            .args(["-c", "user.email=context-test@example.invalid"])
+            .args(["commit", "-m", "baseline"])
+            .status()?;
+        assert!(status.success(), "git baseline commit failed");
+        Ok(())
+    }
+
+    fn write_textconv_script(workspace: &Path) -> Result<String, Box<dyn Error>> {
+        let script = workspace.join("textconv.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'TEXTCONV_SENTINEL\\n'\ncat \"$1\"\n",
+        )?;
+        Ok(format!("sh {}", script.to_string_lossy()))
+    }
+
+    fn configure_textconv_repo(workspace: &Path) -> Result<(), Box<dyn Error>> {
+        run_git(workspace, &["init"])?;
+        fs::write(workspace.join(".gitattributes"), "*.ctx diff=sentinel\n")?;
+        fs::write(workspace.join("note.ctx"), "old content\n")?;
+        let textconv = write_textconv_script(workspace)?;
+        run_git(workspace, &["config", "diff.sentinel.textconv", &textconv])?;
+        run_git(workspace, &["add", ".gitattributes", "note.ctx"])?;
+        commit_git_baseline(workspace)
+    }
+
+    #[test]
+    fn context_resolver_git_diff_disables_textconv() -> Result<(), Box<dyn Error>> {
+        let workspace = tempfile::tempdir()?;
+        configure_textconv_repo(workspace.path())?;
+        fs::write(workspace.path().join("note.ctx"), "new content\n")?;
+        let reference = first_reference("read @diff");
+
+        let artifact = resolve_context_reference(
+            &reference,
+            &ContextReferenceResolverConfig::new(workspace.path()),
+        );
+        let content = artifact.content.as_deref().unwrap_or_default();
+
+        assert_eq!(artifact.state, ContextResolutionState::Resolved);
+        assert!(content.contains("new content"));
+        assert!(!content.contains("TEXTCONV_SENTINEL"));
+        Ok(())
+    }
+
+    #[test]
+    fn context_resolver_git_staged_disables_textconv() -> Result<(), Box<dyn Error>> {
+        let workspace = tempfile::tempdir()?;
+        configure_textconv_repo(workspace.path())?;
+        fs::write(workspace.path().join("note.ctx"), "staged content\n")?;
+        run_git(workspace.path(), &["add", "note.ctx"])?;
+        let reference = first_reference("read @staged");
+
+        let artifact = resolve_context_reference(
+            &reference,
+            &ContextReferenceResolverConfig::new(workspace.path()),
+        );
+        let content = artifact.content.as_deref().unwrap_or_default();
+
+        assert_eq!(artifact.state, ContextResolutionState::Resolved);
+        assert!(content.contains("staged content"));
+        assert!(!content.contains("TEXTCONV_SENTINEL"));
         Ok(())
     }
 

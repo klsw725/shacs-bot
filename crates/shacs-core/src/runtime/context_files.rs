@@ -1,3 +1,4 @@
+use super::context_safety::protected_context_path_reason;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -199,6 +200,19 @@ fn read_context_file(
         return entry;
     }
 
+    if let Some(reason) = protected_context_path_reason(&canonical) {
+        let mut entry = projection(
+            order,
+            canonical,
+            filename,
+            source,
+            source_directory_depth,
+            ContextFileReadStatus::DeniedBoundary,
+        );
+        entry.reason = Some(reason.to_owned());
+        return entry;
+    }
+
     let Ok(metadata) = fs::metadata(&canonical) else {
         let mut entry = projection(
             order,
@@ -383,6 +397,32 @@ mod tests {
             discovery.entries[0].status,
             ContextFileReadStatus::DeniedBoundary
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_file_discovery_denies_protected_symlink_target_inside_workspace(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace = tempfile::tempdir()?;
+        let env_file = workspace.path().join(".env");
+        fs::write(&env_file, "SECRET_TOKEN=raw")?;
+        std::os::unix::fs::symlink(&env_file, workspace.path().join("AGENTS.md"))?;
+
+        let discovery =
+            discover_context_files(workspace.path(), ContextFileDiscoveryOptions::default());
+
+        assert_eq!(discovery.entries.len(), 1);
+        assert_eq!(
+            discovery.entries[0].status,
+            ContextFileReadStatus::DeniedBoundary
+        );
+        assert!(discovery.entries[0].content.is_none());
+        assert!(discovery.entries[0]
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("protected"));
         Ok(())
     }
 
