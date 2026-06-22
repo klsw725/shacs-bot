@@ -833,7 +833,7 @@ fn session_message_to_history(mut message: Value, include_timestamps: bool) -> O
                     .iter()
                     .filter_map(Value::as_str)
                     .filter(|path| !path.is_empty())
-                    .map(|path| format!("[image: {path}]"))
+                    .map(|_| "[attachment omitted from history]".to_owned())
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !breadcrumbs.is_empty() {
