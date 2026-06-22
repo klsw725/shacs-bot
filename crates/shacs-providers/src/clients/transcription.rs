@@ -4,11 +4,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_TRANSCRIPTION_RESPONSE_BYTES: usize = 1024 * 1024;
+const SYNTHETIC_AUDIO_FILENAME: &str = "audio-upload.bin";
 const OPENAI_TRANSCRIPTION_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const GROQ_TRANSCRIPTION_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const TRANSCRIPTION_PATH: &str = "/audio/transcriptions";
@@ -115,9 +118,12 @@ impl AudioTranscriptionHttpTransport for UreqAudioTranscriptionHttpTransport {
         let mut response = http_request.send(request.body).map_err(map_ureq_error)?;
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
-        let body = response
+        let mut body = String::new();
+        response
             .body_mut()
-            .read_to_string()
+            .as_reader()
+            .take((MAX_TRANSCRIPTION_RESPONSE_BYTES + 1) as u64)
+            .read_to_string(&mut body)
             .map_err(|error| ProviderError::Api {
                 status: Some(status),
                 message: error.to_string(),
@@ -125,6 +131,15 @@ impl AudioTranscriptionHttpTransport for UreqAudioTranscriptionHttpTransport {
                 headers: headers.clone(),
                 body: None,
             })?;
+        if body.len() > MAX_TRANSCRIPTION_RESPONSE_BYTES {
+            return Err(ProviderError::Api {
+                status: Some(status),
+                message: "transcription provider response exceeded size limit".to_owned(),
+                retryable: false,
+                headers,
+                body: None,
+            });
+        }
         Ok(AudioTranscriptionHttpResponse {
             status,
             headers,
@@ -309,6 +324,15 @@ pub fn resolve_transcription_api_url(
 pub fn parse_transcription_response(
     response: AudioTranscriptionHttpResponse,
 ) -> Result<String, ProviderError> {
+    if response.body.len() > MAX_TRANSCRIPTION_RESPONSE_BYTES {
+        return Err(api_error(
+            Some(response.status),
+            "transcription provider response exceeded size limit",
+            false,
+            response.headers,
+            None,
+        ));
+    }
     if (200..300).contains(&response.status) {
         if response.body.trim().is_empty() {
             return Ok(String::new());
@@ -355,17 +379,12 @@ where
             None,
         )
     })?;
-    let file_name = request
-        .file_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("audio");
     let model = request.model.as_deref().unwrap_or(default_model);
     let language = request.language.as_deref().or(client_language);
     let parts = build_audio_transcription_request(
         api_url,
         api_key,
-        file_name,
+        SYNTHETIC_AUDIO_FILENAME,
         &file_bytes,
         model,
         language,

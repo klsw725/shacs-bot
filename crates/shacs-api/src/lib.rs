@@ -230,6 +230,14 @@ pub trait ChatCompletionAdapter {
         Ok(data_urls.to_vec())
     }
 
+    fn persist_media_data_urls_for_session(
+        &self,
+        _session_key: &str,
+        data_urls: &[String],
+    ) -> Result<Vec<String>, ApiError> {
+        self.persist_media_data_urls(data_urls)
+    }
+
     fn persist_uploaded_file(
         &self,
         _filename: Option<&str>,
@@ -238,6 +246,15 @@ pub trait ChatCompletionAdapter {
         Err(ApiError::unsupported_media(
             "multipart file persistence is not configured for this adapter",
         ))
+    }
+
+    fn persist_uploaded_file_for_session(
+        &self,
+        _session_key: &str,
+        filename: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<String, ApiError> {
+        self.persist_uploaded_file(filename, bytes)
     }
 
     fn session_workspace(&self) -> Option<PathBuf> {
@@ -1455,7 +1472,8 @@ fn chat_completion_invocation_with_uploads(
 ) -> Result<ChatCompletionInvocation, ApiError> {
     let validated = validate_chat_completion_request(request, configured_model)?;
     let provider_request = provider_request_from_validated(request, &validated)?;
-    let mut media_paths = adapter.persist_media_data_urls(&validated.media_data_urls)?;
+    let mut media_paths = adapter
+        .persist_media_data_urls_for_session(&validated.session_key, &validated.media_data_urls)?;
     for file in uploaded_files {
         if file.bytes.len() > MAX_MEDIA_BYTES {
             return Err(ApiError::payload_too_large(format!(
@@ -1463,7 +1481,11 @@ fn chat_completion_invocation_with_uploads(
                 MAX_MEDIA_BYTES
             )));
         }
-        media_paths.push(adapter.persist_uploaded_file(file.filename.as_deref(), &file.bytes)?);
+        media_paths.push(adapter.persist_uploaded_file_for_session(
+            &validated.session_key,
+            file.filename.as_deref(),
+            &file.bytes,
+        )?);
     }
     Ok(ChatCompletionInvocation {
         provider_request,
@@ -1714,7 +1736,12 @@ fn handle_chat_completion_request(
 }
 
 fn provider_message_content(validated: &ValidatedChatRequest) -> Value {
-    if validated.media_data_urls.is_empty() {
+    let image_data_urls = validated
+        .media_data_urls
+        .iter()
+        .filter(|url| is_image_data_url(url))
+        .collect::<Vec<_>>();
+    if image_data_urls.is_empty() {
         return Value::String(validated.content.clone());
     }
 
@@ -1722,10 +1749,23 @@ fn provider_message_content(validated: &ValidatedChatRequest) -> Value {
     if !validated.content.is_empty() {
         parts.push(json!({"type": "text", "text": validated.content}));
     }
-    for url in &validated.media_data_urls {
+    for url in image_data_urls {
         parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
     }
     Value::Array(parts)
+}
+
+fn is_image_data_url(url: &str) -> bool {
+    let Some((header, _)) = url.split_once(',') else {
+        return false;
+    };
+    let Some(media_type) = header.strip_prefix("data:") else {
+        return false;
+    };
+    media_type
+        .split(';')
+        .next()
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("image/"))
 }
 
 fn flatten_content(content: &ApiMessageContent) -> Result<(String, Vec<String>), ApiError> {
@@ -2136,12 +2176,16 @@ mod tests {
         let request = parse_chat_completion_request(&json!({
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": "describe"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "image_url", "image_url": {"url": "data:video/mp4;base64,BBBB"}}
             ]}]
         }))?;
         let validated = validate_chat_completion_request(&request, "model")?;
         assert_eq!(validated.content, "describe");
-        assert_eq!(validated.media_data_urls, ["data:image/png;base64,AAAA"]);
+        assert_eq!(
+            validated.media_data_urls,
+            ["data:image/png;base64,AAAA", "data:video/mp4;base64,BBBB"]
+        );
         let provider_request = provider_request_from_chat_request(&request, "model")?;
         assert_eq!(provider_request.messages[0]["content"][0]["type"], "text");
         assert_eq!(
@@ -2152,6 +2196,8 @@ mod tests {
             provider_request.messages[0]["content"][1]["image_url"]["url"],
             "data:image/png;base64,AAAA"
         );
+        let provider_content = provider_request.messages[0]["content"].to_string();
+        assert!(!provider_content.contains("data:video/mp4"));
 
         let request = parse_chat_completion_request(&json!({
             "messages": [{"role": "user", "content": [
@@ -2161,6 +2207,28 @@ mod tests {
         let error = validate_chat_completion_request(&request, "model").unwrap_err();
         assert_eq!(error.status, 400);
         assert!(error.message.contains("remote image"));
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_non_image_data_urls_without_forwarding_them_as_images(
+    ) -> Result<(), Box<dyn Error>> {
+        let request = parse_chat_completion_request(&json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "analyze"},
+                {"type": "image_url", "image_url": {"url": "data:audio/mpeg;base64,AAAA"}},
+                {"type": "image_url", "image_url": {"url": "data:video/mp4;base64,BBBB"}}
+            ]}]
+        }))?;
+
+        let validated = validate_chat_completion_request(&request, "model")?;
+        assert_eq!(
+            validated.media_data_urls,
+            ["data:audio/mpeg;base64,AAAA", "data:video/mp4;base64,BBBB"]
+        );
+        let provider_request = provider_request_from_chat_request(&request, "model")?;
+        assert_eq!(provider_request.messages[0]["content"], "analyze");
+
         Ok(())
     }
 

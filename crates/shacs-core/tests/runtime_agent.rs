@@ -1,11 +1,13 @@
 use serde_json::{json, Map, Value};
 use shacs_core::runtime::{
     pick_consolidation_boundary, AgentHook, AgentHookContext, AgentRunSpec, AgentRunner,
-    CompositeHook, ContextBuildRequest, ContextBuilder, Dream, DreamProcessor, InboundMessage,
-    MemoryGitBoundary, MemoryLineAge, MemoryStore, MessageBus, MessageBusError, OutboundMessage,
+    AudioContextAnalysis, AudioContextAnalyzer, AudioContextRequest, CompositeHook,
+    ContextBuildRequest, ContextBuilder, Dream, DreamProcessor, InboundMessage, MemoryGitBoundary,
+    MemoryLineAge, MemoryStore, MessageBus, MessageBusError, OutboundMessage,
     ProviderArchiveConsolidator, ProviderMemoryConsolidator, Session, SessionHistoryOptions,
     SessionManager, SkillsLoader, StreamDeltaCoalescer, SubagentManager, TokenConsolidationConfig,
-    ToolSearchConfig, ToolSearchMode,
+    ToolSearchConfig, ToolSearchMode, VideoContextAnalysis, VideoContextAnalyzer,
+    VideoContextRequest, VideoMetadata,
 };
 use shacs_core::tools::{
     AskUserTool, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters, ToolRegistry,
@@ -270,10 +272,9 @@ fn runtime_session_options_repair_legacy_and_lifecycle_helpers() -> Result<(), B
         return Err(format!("token trimming should preserve a user boundary: {history:?}").into());
     }
     let full_history = session.get_history_with_options(SessionHistoryOptions::default());
-    if !full_history[0]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("[image: pic.png]")
+    let history_content = full_history[0]["content"].as_str().unwrap_or_default();
+    if !history_content.contains("[attachment omitted from history]")
+        || history_content.contains("pic.png")
     {
         return Err(format!("media breadcrumb missing: {full_history:?}").into());
     }
@@ -411,6 +412,333 @@ fn runtime_context_builds_system_runtime_and_media_messages() -> Result<(), Box<
             .contains("+09:00")
     {
         return Err(format!("context messages drifted: {messages:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_context_routes_media_root_stored_attachments_and_keeps_workspace_images(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    std::fs::write(workspace.path().join("AGENTS.md"), "Be useful")?;
+
+    let media_root = tempfile::tempdir()?;
+    let attachments = media_root.path().join("attachments/cli");
+    std::fs::create_dir_all(&attachments)?;
+
+    let stored_image = attachments.join("att-1-image.png");
+    std::fs::write(&stored_image, b"\x89PNG\r\n\x1a\nrest")?;
+    let stored_text = attachments.join("att-2-note.txt");
+    std::fs::write(&stored_text, "stored text")?;
+    let stored_binary = attachments.join("att-3-blob.bin");
+    std::fs::write(&stored_binary, [0xff, 0x00, 0x01])?;
+    let stored_audio = attachments.join("att-4-sound.mp3");
+    std::fs::write(&stored_audio, b"ID3")?;
+
+    let workspace_image = workspace.path().join("workspace.png");
+    std::fs::write(&workspace_image, b"\x89PNG\r\n\x1a\nrest")?;
+    let outside_root = tempfile::tempdir()?;
+    let outside_image = outside_root.path().join("outside.png");
+    std::fs::write(&outside_image, b"\x89PNG\r\n\x1a\nrest")?;
+
+    let context =
+        ContextBuilder::new(workspace.path()).with_media_roots([media_root.path().to_path_buf()]);
+    let media = vec![
+        stored_image.to_string_lossy().to_string(),
+        stored_text.to_string_lossy().to_string(),
+        stored_binary.to_string_lossy().to_string(),
+        stored_audio.to_string_lossy().to_string(),
+        workspace_image.to_string_lossy().to_string(),
+        outside_image.to_string_lossy().to_string(),
+    ];
+    let messages = context.build_messages(ContextBuildRequest {
+        history: vec![],
+        current_message: "current",
+        media: &media,
+        channel: Some("cli"),
+        chat_id: Some("direct"),
+        current_role: "user",
+        session_summary: None,
+    });
+
+    let blocks = messages[1]["content"]
+        .as_array()
+        .ok_or("missing routed content blocks")?;
+    if blocks.len() != 8
+        || !blocks[0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[Runtime Context")
+        || blocks[1]["type"] != "image_url"
+        || !blocks[1]["image_url"]["url"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("data:image/png;base64,")
+        || !blocks[2]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[attachment:included_text]")
+        || blocks[3]["text"] != "stored text"
+        || !blocks[4]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[attachment:unsupported]")
+        || !blocks[5]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[attachment:unsupported]")
+        || !blocks[5]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("audio analyzer is not configured")
+        || blocks[6]["type"] != "image_url"
+        || !blocks[6]["_meta"]["path"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("workspace.png")
+        || blocks[7]["text"] != "current"
+    {
+        return Err(format!("media routing drifted: {messages:?}").into());
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct RuntimeAudioAnalyzer;
+
+impl AudioContextAnalyzer for RuntimeAudioAnalyzer {
+    fn analyze(
+        &self,
+        request: AudioContextRequest,
+    ) -> Result<AudioContextAnalysis, shacs_core::runtime::AudioContextError> {
+        if request.detected_mime != "audio/mpeg" {
+            return Err(shacs_core::runtime::AudioContextError::Unsupported(
+                "unsupported test mime".to_owned(),
+            ));
+        }
+        Ok(AudioContextAnalysis {
+            transcript: Some("runtime transcript".to_owned()),
+            summary: None,
+            language: Some("en".to_owned()),
+            truncated: false,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct RuntimeVideoAnalyzer;
+
+impl VideoContextAnalyzer for RuntimeVideoAnalyzer {
+    fn analyze(
+        &self,
+        request: VideoContextRequest,
+    ) -> Result<VideoContextAnalysis, shacs_core::runtime::VideoContextError> {
+        if request.detected_mime != "video/mp4" {
+            return Err(shacs_core::runtime::VideoContextError::Unsupported(
+                "unsupported test video mime".to_owned(),
+            ));
+        }
+        Ok(VideoContextAnalysis {
+            metadata: Some(VideoMetadata {
+                duration_seconds: request.duration_seconds,
+                container: Some("mp4".to_owned()),
+                video_codec: Some("h264".to_owned()),
+                audio_codec: None,
+                width: Some(640),
+                height: Some(360),
+                audio_track_available: false,
+                subtitle_tracks: Vec::new(),
+            }),
+            subtitles: None,
+            scene_summary: Some("runtime video scene".to_owned()),
+            keyframe_summary: None,
+            extracted_audio_path: None,
+            extracted_audio_mime: None,
+            extracted_audio_byte_length: None,
+            extracted_audio_duration_seconds: None,
+            component_failures: Vec::new(),
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn runtime_context_routes_stored_audio_with_injected_analyzer() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let media_root = tempfile::tempdir()?;
+    let attachments = media_root.path().join("attachments/cli");
+    std::fs::create_dir_all(&attachments)?;
+    let stored_audio = attachments.join("att-voice.mp3");
+    std::fs::write(&stored_audio, b"ID3")?;
+    let context = ContextBuilder::new(workspace.path())
+        .with_media_roots([media_root.path().to_path_buf()])
+        .with_audio_analyzer(Arc::new(RuntimeAudioAnalyzer));
+    let media = vec![stored_audio.to_string_lossy().to_string()];
+    let messages = context.build_messages(ContextBuildRequest {
+        current_message: "current",
+        media: &media,
+        channel: Some("cli"),
+        chat_id: Some("direct"),
+        ..ContextBuildRequest::new("current")
+    });
+    let blocks = messages[1]["content"]
+        .as_array()
+        .ok_or("missing routed content blocks")?;
+    if blocks.len() != 4
+        || !blocks[1]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[attachment:included_text]")
+        || !blocks[2]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[Attachment content warning]")
+        || !blocks[2]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[Audio transcript]\nruntime transcript")
+        || blocks[3]["text"] != "current"
+    {
+        return Err(format!("audio analyzer routing drifted: {messages:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_context_routes_stored_video_with_injected_analyzer() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let media_root = tempfile::tempdir()?;
+    let attachments = media_root.path().join("attachments/cli");
+    std::fs::create_dir_all(&attachments)?;
+    let stored_video = attachments.join("att-clip.mp4");
+    std::fs::write(&stored_video, mp4_video_bytes_for_runtime(6))?;
+    let context = ContextBuilder::new(workspace.path())
+        .with_media_roots([media_root.path().to_path_buf()])
+        .with_video_analyzer(Arc::new(RuntimeVideoAnalyzer));
+    let media = vec![stored_video.to_string_lossy().to_string()];
+    let messages = context.build_messages(ContextBuildRequest {
+        current_message: "current",
+        media: &media,
+        channel: Some("cli"),
+        chat_id: Some("direct"),
+        ..ContextBuildRequest::new("current")
+    });
+    let blocks = messages[1]["content"]
+        .as_array()
+        .ok_or("missing routed content blocks")?;
+    if blocks.len() != 4
+        || !blocks[1]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[attachment:included_text]")
+        || !blocks[2]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[Video metadata]")
+        || !blocks[2]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[Video scene summary]\nruntime video scene")
+        || blocks[3]["text"] != "current"
+    {
+        return Err(format!("video analyzer routing drifted: {messages:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_context_routes_stored_video_missing_analyzer_as_unsupported(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let media_root = tempfile::tempdir()?;
+    let attachments = media_root.path().join("attachments/cli");
+    std::fs::create_dir_all(&attachments)?;
+    let stored_video = attachments.join("att-clip.mp4");
+    std::fs::write(&stored_video, mp4_video_bytes_for_runtime(6))?;
+    let context =
+        ContextBuilder::new(workspace.path()).with_media_roots([media_root.path().to_path_buf()]);
+    let media = vec![stored_video.to_string_lossy().to_string()];
+    let messages = context.build_messages(ContextBuildRequest {
+        current_message: "current",
+        media: &media,
+        channel: Some("cli"),
+        chat_id: Some("direct"),
+        ..ContextBuildRequest::new("current")
+    });
+    let blocks = messages[1]["content"]
+        .as_array()
+        .ok_or("missing routed content blocks")?;
+    if blocks.len() != 3
+        || !blocks[1]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[attachment:unsupported]")
+        || !blocks[1]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("video analyzer is not configured")
+        || blocks[1]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("deferred")
+        || blocks[2]["text"] != "current"
+    {
+        return Err(format!("missing video analyzer routing drifted: {messages:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_context_gates_native_image_blocks_by_capability() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let media_root = tempfile::tempdir()?;
+    let attachments = media_root.path().join("attachments/cli");
+    std::fs::create_dir_all(&attachments)?;
+
+    let stored_image = attachments.join("att-1-image.png");
+    std::fs::write(&stored_image, b"\x89PNG\r\n\x1a\nrest")?;
+    let workspace_image = workspace.path().join("workspace.png");
+    std::fs::write(&workspace_image, b"\x89PNG\r\n\x1a\nrest")?;
+
+    let context = ContextBuilder::new(workspace.path())
+        .with_media_roots([media_root.path().to_path_buf()])
+        .with_native_image_input_supported(false);
+    let media = vec![
+        stored_image.to_string_lossy().to_string(),
+        workspace_image.to_string_lossy().to_string(),
+    ];
+    let messages = context.build_messages(ContextBuildRequest {
+        current_message: "current",
+        media: &media,
+        channel: Some("cli"),
+        chat_id: Some("direct"),
+        ..ContextBuildRequest::new("current")
+    });
+
+    let blocks = messages[1]["content"]
+        .as_array()
+        .ok_or("missing routed content blocks")?;
+    if blocks.iter().any(|block| block["type"] == "image_url")
+        || !blocks.iter().any(|block| {
+            block["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("att-1-image.png")
+        })
+        || !blocks.iter().any(|block| {
+            block["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("workspace.png")
+        })
+        || !blocks.iter().any(|block| {
+            block["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("native image input is not supported")
+        })
+    {
+        return Err(format!("native image capability gate drifted: {messages:?}").into());
     }
     Ok(())
 }
@@ -3051,6 +3379,28 @@ fn provider_tool_name(tool: &Value) -> Option<&str> {
         .and_then(|function| function.get("name"))
         .and_then(Value::as_str)
         .or_else(|| tool.get("name").and_then(Value::as_str))
+}
+
+fn mp4_video_bytes_for_runtime(duration_seconds: u64) -> Vec<u8> {
+    let mut bytes = mp4_box_for_runtime(b"ftyp", b"isom\0\0\0\0mp42");
+    let mut mvhd = Vec::new();
+    mvhd.extend_from_slice(&[0, 0, 0, 0]);
+    mvhd.extend_from_slice(&0u32.to_be_bytes());
+    mvhd.extend_from_slice(&0u32.to_be_bytes());
+    mvhd.extend_from_slice(&1u32.to_be_bytes());
+    mvhd.extend_from_slice(&(duration_seconds as u32).to_be_bytes());
+    let mvhd = mp4_box_for_runtime(b"mvhd", &mvhd);
+    bytes.extend_from_slice(&mp4_box_for_runtime(b"moov", &mvhd));
+    bytes
+}
+
+fn mp4_box_for_runtime(name: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let size = (8 + payload.len()) as u32;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&size.to_be_bytes());
+    bytes.extend_from_slice(name);
+    bytes.extend_from_slice(payload);
+    bytes
 }
 
 struct MockProvider {

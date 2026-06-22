@@ -1435,9 +1435,9 @@ fn media_marker(path: &str) -> String {
         || lower.ends_with(".gif")
         || lower.ends_with(".webp")
     {
-        format!("[image: {path}]")
+        "[image attachment]".to_owned()
     } else {
-        format!("[file: {path}]")
+        "[file attachment]".to_owned()
     }
 }
 
@@ -1606,7 +1606,9 @@ mod tests {
         assert_eq!(inbound.sender_id, "15551234567");
         assert_eq!(inbound.chat_id, "abc@lid.whatsapp.net");
         assert!(inbound.content.contains("hello"));
-        assert!(inbound.content.contains("[image: /tmp/photo.jpg]"));
+        assert!(inbound.content.contains("[image attachment]"));
+        assert!(!inbound.content.contains("/tmp/photo.jpg"));
+        assert_eq!(inbound.media, vec!["/tmp/photo.jpg"]);
         assert_eq!(inbound.metadata["message_id"], json!("msg-1"));
         Ok(())
     }

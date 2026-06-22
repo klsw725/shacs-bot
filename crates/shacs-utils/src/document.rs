@@ -7,6 +7,7 @@ use crate::text::detect_image_mime;
 
 pub const MAX_TEXT_LENGTH: usize = 200_000;
 pub const MAX_EXTRACT_FILE_SIZE: u64 = 50 * 1024 * 1024;
+const MAX_OFFICE_ZIP_DECOMPRESSED_BYTES: usize = 4 * 1024 * 1024;
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "pdf", "docx", "xlsx", "pptx", "txt", "md", "csv", "json", "xml", "html", "htm", "log", "yaml",
@@ -236,18 +237,40 @@ fn read_zip_text_entries(
     let reader = Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(reader).map_err(|error| error.to_string())?;
     let mut entries = Vec::new();
+    let mut decompressed_bytes = 0usize;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|error| error.to_string())?;
         let name = file.name().to_owned();
         if !include(&name) {
             continue;
         }
-        let mut text = String::new();
-        file.read_to_string(&mut text)
-            .map_err(|error| error.to_string())?;
+        let remaining = MAX_OFFICE_ZIP_DECOMPRESSED_BYTES.saturating_sub(decompressed_bytes);
+        let text = read_zip_text_entry_bounded(&mut file, remaining)?;
+        decompressed_bytes = decompressed_bytes.saturating_add(text.len());
         entries.push(text);
     }
     Ok(entries)
+}
+
+fn read_zip_text_entry_bounded(
+    reader: &mut impl Read,
+    remaining_bytes: usize,
+) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len().saturating_add(read) > remaining_bytes {
+            return Err("office zip text extraction exceeded decompressed byte limit".to_owned());
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    String::from_utf8(bytes).map_err(|error| error.to_string())
 }
 
 fn xml_text(xml: &str) -> String {
@@ -386,5 +409,34 @@ mod tests {
             xml_text("<w:t>Hello &amp; goodbye</w:t><w:t>Office</w:t>"),
             "Hello & goodbye Office"
         );
+    }
+
+    #[test]
+    fn rejects_office_zip_entries_over_decompressed_byte_limit() -> Result<(), String> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let root = std::env::temp_dir().join(format!(
+            "shacs-utils-document-zip-cap-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let path = root.join("large.docx");
+        let file = fs::File::create(&path).map_err(|error| error.to_string())?;
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("word/document.xml", SimpleFileOptions::default())
+            .map_err(|error| error.to_string())?;
+        archive
+            .write_all("a".repeat(MAX_OFFICE_ZIP_DECOMPRESSED_BYTES + 1).as_bytes())
+            .map_err(|error| error.to_string())?;
+        archive.finish().map_err(|error| error.to_string())?;
+
+        let error = extract_text(&path, MAX_TEXT_LENGTH).expect_err("large office zip should fail");
+        assert!(error.contains("decompressed byte limit"));
+        Ok(())
     }
 }

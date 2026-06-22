@@ -56,18 +56,22 @@ use shacs_skills::{
     SkillRegistryStatus,
 };
 use shacs_templates::sync_workspace_templates;
+use shacs_utils::attachments::{
+    normalize_channel_attachment_data_url, AttachmentIntakeService, AttachmentIntakeStatus,
+    AttachmentLimitPolicy, ChannelAttachmentAdapterFailureReason, ChannelAttachmentIntakeRequest,
+    DEFAULT_MAX_ATTACHMENTS_PER_MESSAGE, DEFAULT_MAX_BYTES_PER_TURN,
+};
 use shacs_utils::diagnostics::{
     write_diagnostics_bundle, CrashEvidence, DiagnosticsBundleManifest, DiagnosticsKind,
     DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot, OperationalLogRecord,
     RecoveryEvidence, TraceRecord, TraceStatus,
 };
-use shacs_utils::media_decode::{save_base64_data_url, MediaDecodeError, DEFAULT_MAX_BYTES};
+use shacs_utils::media_decode::DEFAULT_MAX_BYTES;
 use shacs_utils::progress_events::{
     build_tool_event_start_payload, build_tool_progress_finish_payload,
     build_tool_progress_start_payload, project_tool_progress_arguments, ProgressEventStatus,
     ToolProgressEvent, ToolProgressPayload,
 };
-use shacs_utils::text::safe_filename;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs;
@@ -6213,6 +6217,40 @@ fn base64_url_no_pad(bytes: &[u8]) -> String {
     output
 }
 
+fn base64_standard(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let chunk = ((bytes[index] as u32) << 16)
+            | ((bytes[index + 1] as u32) << 8)
+            | bytes[index + 2] as u32;
+        output.push(TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+        output.push(TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+        output.push(TABLE[((chunk >> 6) & 0x3f) as usize] as char);
+        output.push(TABLE[(chunk & 0x3f) as usize] as char);
+        index += 3;
+    }
+    match bytes.len() - index {
+        1 => {
+            let chunk = (bytes[index] as u32) << 16;
+            output.push(TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+            output.push(TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+            output.push('=');
+            output.push('=');
+        }
+        2 => {
+            let chunk = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8);
+            output.push(TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+            output.push(TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+            output.push(TABLE[((chunk >> 6) & 0x3f) as usize] as char);
+            output.push('=');
+        }
+        _ => {}
+    }
+    output
+}
+
 fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
     let mut bits = 0_u32;
     let mut bit_count = 0_u8;
@@ -7358,6 +7396,23 @@ fn metadata_string(metadata: &Map<String, Value>, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn websocket_media_names(metadata: &Map<String, Value>) -> Vec<Option<String>> {
+    metadata
+        .get("media_names")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn message_is_stream_delta(message: &OutboundMessage) -> bool {
     message_metadata_bool(message, "_stream_delta")
 }
@@ -7838,7 +7893,9 @@ fn run_telegram_transport(
                         if let Some(update_id) = update.get("update_id").and_then(Value::as_i64) {
                             offset = offset.max(update_id + 1);
                         }
-                        if let Some(inbound) = telegram_update_to_inbound(update) {
+                        if let Some(inbound) =
+                            telegram_update_to_inbound_with_download(&agent, &config.token, update)
+                        {
                             inbound_bus.publish_inbound(inbound);
                         }
                     }
@@ -7910,10 +7967,15 @@ fn telegram_update_to_inbound(update: &Value) -> Option<InboundMessage> {
     let message = update
         .get("message")
         .or_else(|| update.get("edited_message"))?;
+    let media = telegram_message_media(message);
     let content = message
         .get("text")
         .or_else(|| message.get("caption"))
-        .and_then(Value::as_str)?;
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if content.trim().is_empty() && media.is_empty() {
+        return None;
+    }
     let chat_id = json_id_string(message.get("chat")?.get("id")?)?;
     let sender_id = message
         .get("from")
@@ -7933,10 +7995,151 @@ fn telegram_update_to_inbound(update: &Value) -> Option<InboundMessage> {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             message_thread_id: message.get("message_thread_id").and_then(json_id_string),
-            media: Vec::new(),
+            media,
         }
         .into_message(),
     )
+}
+
+fn telegram_update_to_inbound_with_download(
+    agent: &ureq::Agent,
+    token: &str,
+    update: &Value,
+) -> Option<InboundMessage> {
+    let message = update
+        .get("message")
+        .or_else(|| update.get("edited_message"))?;
+    let mut inbound = telegram_update_to_inbound(update)?;
+    inbound.media = telegram_message_media_data_urls(agent, token, message);
+    Some(inbound)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TelegramAttachmentRef {
+    kind: &'static str,
+    file_id: String,
+    mime: Option<String>,
+    filename: Option<String>,
+    size: Option<u64>,
+}
+
+fn telegram_message_media(message: &Value) -> Vec<String> {
+    telegram_message_attachment_refs(message)
+        .into_iter()
+        .map(|attachment| telegram_attachment_handle(&attachment))
+        .collect()
+}
+
+fn telegram_message_attachment_refs(message: &Value) -> Vec<TelegramAttachmentRef> {
+    let mut attachments = Vec::new();
+    if let Some(photo) = message
+        .get("photo")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .max_by_key(|item| item.get("file_size").and_then(Value::as_u64).unwrap_or(0))
+        })
+    {
+        if let Some(attachment) = telegram_file_attachment_ref("photo", photo, None) {
+            attachments.push(attachment);
+        }
+    }
+    for kind in ["document", "audio", "video"] {
+        if let Some(part) = message.get(kind) {
+            if let Some(attachment) = telegram_file_attachment_ref(
+                kind,
+                part,
+                part.get("file_name").and_then(Value::as_str),
+            ) {
+                attachments.push(attachment);
+            }
+        }
+    }
+    attachments
+}
+
+fn telegram_file_attachment_ref(
+    kind: &'static str,
+    part: &Value,
+    filename: Option<&str>,
+) -> Option<TelegramAttachmentRef> {
+    Some(TelegramAttachmentRef {
+        kind,
+        file_id: part.get("file_id").and_then(Value::as_str)?.to_owned(),
+        mime: part
+            .get("mime_type")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        filename: filename.map(str::to_owned),
+        size: part.get("file_size").and_then(Value::as_u64),
+    })
+}
+
+fn telegram_attachment_handle(attachment: &TelegramAttachmentRef) -> String {
+    platform_media_handle(
+        "telegram",
+        attachment.kind,
+        Some(&attachment.file_id),
+        attachment.mime.as_deref(),
+        attachment.filename.as_deref(),
+        attachment.size,
+    )
+}
+
+fn telegram_message_media_data_urls(
+    agent: &ureq::Agent,
+    token: &str,
+    message: &Value,
+) -> Vec<String> {
+    telegram_message_attachment_refs(message)
+        .into_iter()
+        .map(|attachment| {
+            telegram_attachment_data_url(agent, token, &attachment)
+                .unwrap_or_else(|_| telegram_attachment_handle(&attachment))
+        })
+        .collect()
+}
+
+fn telegram_attachment_data_url(
+    agent: &ureq::Agent,
+    token: &str,
+    attachment: &TelegramAttachmentRef,
+) -> Result<String, String> {
+    if attachment
+        .size
+        .is_some_and(|size| size > shacs_api::MAX_MEDIA_BYTES as u64)
+    {
+        return Err("telegram attachment exceeds storage limit".to_owned());
+    }
+    let file = post_json(
+        agent,
+        &telegram_url(token, "getFile"),
+        None,
+        json!({ "file_id": attachment.file_id }),
+    )?;
+    let file_path = file
+        .get("result")
+        .and_then(|result| result.get("file_path"))
+        .and_then(Value::as_str)
+        .filter(|path| telegram_file_path_is_safe(path))
+        .ok_or_else(|| "Telegram getFile response missing safe file_path".to_owned())?;
+    let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
+    let (bytes, response_mime) = get_binary(agent, &url, None)?;
+    let mime = attachment
+        .mime
+        .as_deref()
+        .or(response_mime.as_deref())
+        .unwrap_or("application/octet-stream");
+    Ok(data_url_with_optional_name(
+        mime,
+        attachment.filename.as_deref(),
+        &bytes,
+    ))
+}
+
+fn telegram_file_path_is_safe(path: &str) -> bool {
+    !path.is_empty() && !path.starts_with('/') && !path.contains("..") && !path.contains('\\')
 }
 
 fn telegram_url(token: &str, method: &str) -> String {
@@ -8148,12 +8351,15 @@ fn run_discord_gateway_session(
                         return Err("gateway invalid session".to_owned());
                     }
                     Some(0) => handle_discord_gateway_dispatch(
-                        config,
-                        inbound_bus,
-                        &mut recent_ids,
-                        &mut bot_user_id,
-                        resume_state,
-                        metadata_path,
+                        DiscordGatewayDispatchContext {
+                            config,
+                            agent,
+                            inbound_bus,
+                            recent_ids: &mut recent_ids,
+                            bot_user_id: &mut bot_user_id,
+                            resume_state,
+                            metadata_path,
+                        },
                         &value,
                     ),
                     _ => {}
@@ -8213,44 +8419,58 @@ fn identify_discord_gateway(
     send_websocket_json(socket, discord_gateway_identify_payload(token))
 }
 
-fn handle_discord_gateway_dispatch(
-    config: &DiscordRuntimeConfig,
-    inbound_bus: &MessageBus,
-    recent_ids: &mut RecentMessageIds,
-    bot_user_id: &mut Option<String>,
-    resume_state: &mut DiscordGatewayResumeState,
-    metadata_path: &Path,
-    value: &Value,
-) {
+struct DiscordGatewayDispatchContext<'a> {
+    config: &'a DiscordRuntimeConfig,
+    agent: &'a ureq::Agent,
+    inbound_bus: &'a MessageBus,
+    recent_ids: &'a mut RecentMessageIds,
+    bot_user_id: &'a mut Option<String>,
+    resume_state: &'a mut DiscordGatewayResumeState,
+    metadata_path: &'a Path,
+}
+
+fn handle_discord_gateway_dispatch(context: DiscordGatewayDispatchContext<'_>, value: &Value) {
     match value.get("t").and_then(Value::as_str) {
         Some("READY") => {
             let data = value.get("d");
-            *bot_user_id = data
+            *context.bot_user_id = data
                 .and_then(|data| data.get("user"))
                 .and_then(|user| user.get("id"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            resume_state.bot_user_id = bot_user_id.clone();
-            resume_state.session_id = data
+            context.resume_state.bot_user_id = context.bot_user_id.clone();
+            context.resume_state.session_id = data
                 .and_then(|data| data.get("session_id"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            resume_state.resume_gateway_url = data
+            context.resume_state.resume_gateway_url = data
                 .and_then(|data| data.get("resume_gateway_url"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            save_discord_gateway_resume_state(metadata_path, resume_state, &config.token);
+            save_discord_gateway_resume_state(
+                context.metadata_path,
+                context.resume_state,
+                &context.config.token,
+            );
         }
         Some("MESSAGE_CREATE") => {
             let Some(data) = value.get("d") else {
                 return;
             };
-            if let Some(inbound) =
-                discord_gateway_message_to_inbound(config, bot_user_id.as_deref(), recent_ids, data)
-            {
-                inbound_bus.publish_inbound(inbound);
+            if let Some(inbound) = discord_gateway_message_to_inbound_with_download(
+                context.config,
+                context.agent,
+                context.bot_user_id.as_deref(),
+                context.recent_ids,
+                data,
+            ) {
+                context.inbound_bus.publish_inbound(inbound);
             }
-            save_discord_gateway_resume_state(metadata_path, resume_state, &config.token);
+            save_discord_gateway_resume_state(
+                context.metadata_path,
+                context.resume_state,
+                &context.config.token,
+            );
         }
         _ => {}
     }
@@ -8298,11 +8518,16 @@ fn discord_gateway_message_to_inbound(
     if guild_id.is_some() && config.group_policy == DiscordGroupPolicy::Mention && !mentioned {
         return None;
     }
-    let mut content = item.get("content").and_then(Value::as_str)?.to_owned();
+    let attachments = discord_attachment_media(item);
+    let mut content = item
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     if let Some(bot) = bot_user_id {
         content = strip_discord_bot_mention(&content, bot).to_owned();
     }
-    if content.trim().is_empty() {
+    if content.trim().is_empty() && attachments.is_empty() {
         return None;
     }
     Some(
@@ -8317,10 +8542,22 @@ fn discord_gateway_message_to_inbound(
                 .get("thread_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            attachments: Vec::new(),
+            attachments,
         }
         .into_message(),
     )
+}
+
+fn discord_gateway_message_to_inbound_with_download(
+    config: &DiscordRuntimeConfig,
+    agent: &ureq::Agent,
+    bot_user_id: Option<&str>,
+    recent_ids: &mut RecentMessageIds,
+    item: &Value,
+) -> Option<InboundMessage> {
+    let mut inbound = discord_gateway_message_to_inbound(config, bot_user_id, recent_ids, item)?;
+    inbound.media = discord_attachment_data_urls(agent, item);
+    Some(inbound)
 }
 
 fn discord_channel_allowed(
@@ -8390,43 +8627,55 @@ fn poll_discord_channel(
         {
             continue;
         }
-        let Some(content) = item
-            .get("content")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let sender_id = item
-            .get("author")
-            .and_then(|author| author.get("id"))
-            .and_then(Value::as_str)
-            .unwrap_or("discord-user")
-            .to_owned();
-        if !sender_allowed_for_rest(&config.allowed_senders, &sender_id) {
-            continue;
+        if let Some(message) = discord_rest_message_to_inbound(agent, config, channel_id, item) {
+            messages.push(message);
         }
-        messages.push(
-            DiscordInbound {
-                sender_id,
-                channel_id: channel_id.to_owned(),
-                content: content.to_owned(),
-                message_id: item.get("id").and_then(Value::as_str).map(str::to_owned),
-                guild_id: item
-                    .get("guild_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                parent_channel_id: None,
-                thread_id: item
-                    .get("thread_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                attachments: Vec::new(),
-            }
-            .into_message(),
-        );
     }
     Ok((messages, newest))
+}
+
+fn discord_rest_message_to_inbound(
+    agent: &ureq::Agent,
+    config: &DiscordRuntimeConfig,
+    channel_id: &str,
+    item: &Value,
+) -> Option<InboundMessage> {
+    let content = item
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let attachment_media = discord_attachment_media(item);
+    if content.trim().is_empty() && attachment_media.is_empty() {
+        return None;
+    }
+    let sender_id = item
+        .get("author")
+        .and_then(|author| author.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("discord-user")
+        .to_owned();
+    if !sender_allowed_for_rest(&config.allowed_senders, &sender_id) {
+        return None;
+    }
+    Some(
+        DiscordInbound {
+            sender_id,
+            channel_id: channel_id.to_owned(),
+            content: content.trim().to_owned(),
+            message_id: item.get("id").and_then(Value::as_str).map(str::to_owned),
+            guild_id: item
+                .get("guild_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            parent_channel_id: None,
+            thread_id: item
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            attachments: discord_attachment_data_urls(agent, item),
+        }
+        .into_message(),
+    )
 }
 
 fn send_discord_message(
@@ -8564,7 +8813,9 @@ fn run_slack_socket_mode_session(
                 if let Some(ack) = slack_socket_ack_frame(&envelope) {
                     send_websocket_json(&mut socket, ack)?;
                 }
-                if let Some(inbound) = slack_socket_envelope_to_inbound(config, &envelope) {
+                if let Some(inbound) =
+                    slack_socket_envelope_to_inbound_with_download(config, agent, &envelope)
+                {
                     inbound_bus.publish_inbound(inbound);
                 }
             }
@@ -8622,7 +8873,8 @@ fn slack_socket_envelope_to_inbound(
         Some("message") | Some("app_mention") => {}
         _ => return None,
     }
-    if event.get("subtype").is_some() || event.get("bot_id").is_some() {
+    let subtype = event.get("subtype").and_then(Value::as_str);
+    if (subtype.is_some() && subtype != Some("file_share")) || event.get("bot_id").is_some() {
         return None;
     }
     let user_id = event.get("user").and_then(Value::as_str)?.to_owned();
@@ -8639,11 +8891,16 @@ fn slack_socket_envelope_to_inbound(
     if !slack_channel_allowed(&config.channel_ids, &channel_id) {
         return None;
     }
+    let files = slack_file_media(event);
     let content = event
         .get("text")
         .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())?
+        .unwrap_or_default()
+        .trim()
         .to_owned();
+    if content.is_empty() && files.is_empty() {
+        return None;
+    }
     Some(
         SlackInbound {
             user_id,
@@ -8658,10 +8915,194 @@ fn slack_socket_envelope_to_inbound(
                 .get("channel_type")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            files: Vec::new(),
+            files,
         }
         .into_message(),
     )
+}
+
+fn slack_socket_envelope_to_inbound_with_download(
+    config: &SlackRuntimeConfig,
+    agent: &ureq::Agent,
+    envelope: &Value,
+) -> Option<InboundMessage> {
+    let event = envelope.get("payload")?.get("event")?;
+    let mut inbound = slack_socket_envelope_to_inbound(config, envelope)?;
+    inbound.media = slack_file_data_urls(agent, &config.bot_token, event);
+    Some(inbound)
+}
+
+fn discord_attachment_media(item: &Value) -> Vec<String> {
+    item.get("attachments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|attachment| {
+            let url = attachment.get("url").and_then(Value::as_str)?;
+            Some(platform_media_handle(
+                "discord",
+                "attachment",
+                Some(url),
+                attachment.get("content_type").and_then(Value::as_str),
+                attachment.get("filename").and_then(Value::as_str),
+                attachment.get("size").and_then(Value::as_u64),
+            ))
+        })
+        .collect()
+}
+
+fn discord_attachment_data_urls(agent: &ureq::Agent, item: &Value) -> Vec<String> {
+    item.get("attachments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|attachment| {
+            let url = attachment.get("url").and_then(Value::as_str)?;
+            let fallback = platform_media_handle(
+                "discord",
+                "attachment",
+                Some(url),
+                attachment.get("content_type").and_then(Value::as_str),
+                attachment.get("filename").and_then(Value::as_str),
+                attachment.get("size").and_then(Value::as_u64),
+            );
+            Some(discord_attachment_data_url(agent, attachment).unwrap_or(fallback))
+        })
+        .collect()
+}
+
+fn slack_file_media(event: &Value) -> Vec<String> {
+    event
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            let url = file
+                .get("url_private_download")
+                .or_else(|| file.get("url_private"))
+                .and_then(Value::as_str)?;
+            let name = file
+                .get("name")
+                .or_else(|| file.get("title"))
+                .and_then(Value::as_str);
+            Some(platform_media_handle(
+                "slack",
+                "file",
+                Some(url),
+                file.get("mimetype").and_then(Value::as_str),
+                name,
+                file.get("size").and_then(Value::as_u64),
+            ))
+        })
+        .collect()
+}
+
+fn slack_file_data_urls(agent: &ureq::Agent, bot_token: &str, event: &Value) -> Vec<String> {
+    event
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            let url = file
+                .get("url_private_download")
+                .or_else(|| file.get("url_private"))
+                .and_then(Value::as_str)?;
+            let name = file
+                .get("name")
+                .or_else(|| file.get("title"))
+                .and_then(Value::as_str);
+            let fallback = platform_media_handle(
+                "slack",
+                "file",
+                Some(url),
+                file.get("mimetype").and_then(Value::as_str),
+                name,
+                file.get("size").and_then(Value::as_u64),
+            );
+            Some(slack_file_data_url(agent, bot_token, file).unwrap_or(fallback))
+        })
+        .collect()
+}
+
+fn discord_attachment_data_url(agent: &ureq::Agent, attachment: &Value) -> Result<String, String> {
+    let url = attachment
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| {
+            platform_attachment_url_allowed(url, &["cdn.discordapp.com", "media.discordapp.net"])
+        })
+        .ok_or_else(|| "Discord attachment URL is not allowed".to_owned())?;
+    let declared_size = attachment.get("size").and_then(Value::as_u64);
+    if declared_size.is_some_and(|size| size > shacs_api::MAX_MEDIA_BYTES as u64) {
+        return Err("Discord attachment exceeds storage limit".to_owned());
+    }
+    let (bytes, response_mime) = get_binary(agent, url, None)?;
+    let mime = attachment
+        .get("content_type")
+        .and_then(Value::as_str)
+        .or(response_mime.as_deref())
+        .unwrap_or("application/octet-stream");
+    Ok(data_url_with_optional_name(
+        mime,
+        attachment.get("filename").and_then(Value::as_str),
+        &bytes,
+    ))
+}
+
+fn slack_file_data_url(
+    agent: &ureq::Agent,
+    bot_token: &str,
+    file: &Value,
+) -> Result<String, String> {
+    let url = file
+        .get("url_private_download")
+        .or_else(|| file.get("url_private"))
+        .and_then(Value::as_str)
+        .filter(|url| platform_attachment_url_allowed(url, &["files.slack.com", "slack-files.com"]))
+        .ok_or_else(|| "Slack file URL is not allowed".to_owned())?;
+    let declared_size = file.get("size").and_then(Value::as_u64);
+    if declared_size.is_some_and(|size| size > shacs_api::MAX_MEDIA_BYTES as u64) {
+        return Err("Slack file exceeds storage limit".to_owned());
+    }
+    let (bytes, response_mime) = get_binary(agent, url, Some(bearer_header(bot_token)))?;
+    let name = file
+        .get("name")
+        .or_else(|| file.get("title"))
+        .and_then(Value::as_str);
+    let mime = file
+        .get("mimetype")
+        .and_then(Value::as_str)
+        .or(response_mime.as_deref())
+        .unwrap_or("application/octet-stream");
+    Ok(data_url_with_optional_name(mime, name, &bytes))
+}
+
+fn platform_media_handle(
+    platform: &str,
+    kind: &str,
+    opaque_id: Option<&str>,
+    mime: Option<&str>,
+    filename: Option<&str>,
+    size: Option<u64>,
+) -> String {
+    let id_hash = opaque_id
+        .map(short_stable_hash)
+        .unwrap_or_else(|| "none".to_owned());
+    let mime = mime
+        .map(|value| base64_url_no_pad(value.as_bytes()))
+        .unwrap_or_default();
+    let filename = filename
+        .map(|value| base64_url_no_pad(value.as_bytes()))
+        .unwrap_or_default();
+    let size = size.map(|value| value.to_string()).unwrap_or_default();
+    format!("shacs-{platform}-{kind}:{id_hash}:{mime}:{filename}:{size}")
+}
+
+fn short_stable_hash(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    base64_url_no_pad(&digest[..12])
 }
 
 fn slack_envelope_bot_user_ids(envelope: &Value) -> Vec<String> {
@@ -8929,7 +9370,15 @@ fn poll_email_inbox(
             let Some(body) = fetch.body() else {
                 continue;
             };
-            let parsed = parse_email_body(body, uid.clone())?;
+            if body.len() > shacs_api::MAX_REQUEST_BODY_BYTES {
+                remember_seen_email_uid(
+                    &mut seen_state.seen_uids,
+                    &mut seen_state.seen_uid_order,
+                    uid.clone(),
+                );
+                continue;
+            }
+            let mut parsed = parse_email_body(body, uid.clone())?;
             if email_should_skip_inbound(runtime, config, &parsed) {
                 remember_seen_email_uid(
                     &mut seen_state.seen_uids,
@@ -8938,6 +9387,7 @@ fn poll_email_inbox(
                 );
                 continue;
             }
+            parsed.inbound.attachments = email_attachment_data_urls_from_body(body)?;
             remember_seen_email_uid(
                 &mut seen_state.seen_uids,
                 &mut seen_state.seen_uid_order,
@@ -9029,6 +9479,87 @@ fn parse_email_body(body: &[u8], uid: String) -> Result<ParsedEmailInbound, Stri
         },
         authentication_results,
     })
+}
+
+fn email_attachment_data_urls_from_body(body: &[u8]) -> Result<Vec<String>, String> {
+    if body.len() > shacs_api::MAX_REQUEST_BODY_BYTES {
+        return Err(format!(
+            "email message exceeds {} bytes",
+            shacs_api::MAX_REQUEST_BODY_BYTES
+        ));
+    }
+    let parsed = mailparse::parse_mail(body).map_err(|error| error.to_string())?;
+    email_attachment_data_urls(&parsed)
+}
+
+fn email_attachment_data_urls(parsed: &mailparse::ParsedMail<'_>) -> Result<Vec<String>, String> {
+    let mut attachments = Vec::new();
+    collect_email_attachment_data_urls(parsed, &mut attachments)?;
+    Ok(attachments)
+}
+
+fn collect_email_attachment_data_urls(
+    parsed: &mailparse::ParsedMail<'_>,
+    attachments: &mut Vec<String>,
+) -> Result<(), String> {
+    for part in &parsed.subparts {
+        collect_email_attachment_data_urls(part, attachments)?;
+    }
+    if parsed.subparts.is_empty() && email_part_is_attachment(parsed) {
+        let bytes = parsed.get_body_raw().map_err(|error| error.to_string())?;
+        let mime = parsed.ctype.mimetype.as_str();
+        let filename = email_part_filename(parsed);
+        attachments.push(email_attachment_data_url(
+            mime,
+            filename.as_deref(),
+            &bytes,
+        )?);
+    }
+    Ok(())
+}
+
+fn email_attachment_data_url(
+    mime: &str,
+    filename: Option<&str>,
+    bytes: &[u8],
+) -> Result<String, String> {
+    if bytes.len() > shacs_api::MAX_MEDIA_BYTES {
+        return Err(format!(
+            "email attachment exceeds {} bytes",
+            shacs_api::MAX_MEDIA_BYTES
+        ));
+    }
+    Ok(data_url_with_optional_name(mime, filename, bytes))
+}
+
+fn email_part_is_attachment(parsed: &mailparse::ParsedMail<'_>) -> bool {
+    let disposition = parsed.get_content_disposition();
+    matches!(
+        disposition.disposition,
+        mailparse::DispositionType::Attachment
+    ) || disposition.params.contains_key("filename")
+        || parsed.ctype.params.contains_key("name")
+}
+
+fn email_part_filename(parsed: &mailparse::ParsedMail<'_>) -> Option<String> {
+    let disposition = parsed.get_content_disposition();
+    disposition
+        .params
+        .get("filename")
+        .or_else(|| parsed.ctype.params.get("name"))
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned())
+}
+
+fn data_url_with_optional_name(mime: &str, filename: Option<&str>, bytes: &[u8]) -> String {
+    let encoded = base64_standard(bytes);
+    match filename {
+        Some(filename) => format!(
+            "data:{mime};name={};base64,{encoded}",
+            base64_url_no_pad(filename.as_bytes())
+        ),
+        None => format!("data:{mime};base64,{encoded}"),
+    }
 }
 
 fn email_address_from_header(value: &str) -> String {
@@ -9383,6 +9914,97 @@ fn read_json_response(mut response: ureq::http::Response<ureq::Body>) -> Result<
         return Ok(Value::Null);
     }
     serde_json::from_str(&body).map_err(|error| error.to_string())
+}
+
+fn get_binary(
+    agent: &ureq::Agent,
+    url: &str,
+    authorization: Option<String>,
+) -> Result<(Vec<u8>, Option<String>), String> {
+    let mut request = agent.get(url).config().max_redirects(0).build();
+    if let Some(authorization) = authorization {
+        request = request.header("Authorization", authorization);
+    }
+    let mut response = request.call().map_err(|error| {
+        format!(
+            "request to {} failed: {}",
+            redact_sensitive_url_text(url),
+            redact_sensitive_url_text(&error.to_string())
+        )
+    })?;
+    let status = response.status().as_u16();
+    if (300..400).contains(&status) {
+        return Err(format!(
+            "attachment download redirect rejected with HTTP {status}"
+        ));
+    }
+    if status >= 400 {
+        return Err(format!("HTTP {status}"));
+    }
+    if let Some(content_length) = response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        if content_length > shacs_api::MAX_MEDIA_BYTES as u64 {
+            return Err(format!(
+                "downloaded attachment exceeds {} bytes",
+                shacs_api::MAX_MEDIA_BYTES
+            ));
+        }
+    }
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let bytes = read_capped_binary_body(response.body_mut().as_reader()).map_err(|error| {
+        format!(
+            "response from {} could not be read: {}",
+            redact_sensitive_url_text(url),
+            redact_sensitive_url_text(&error.to_string())
+        )
+    })?;
+    Ok((bytes, content_type))
+}
+
+fn read_capped_binary_body(mut reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(shacs_api::MAX_MEDIA_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > shacs_api::MAX_MEDIA_BYTES {
+        return Err(format!(
+            "downloaded attachment exceeds {} bytes",
+            shacs_api::MAX_MEDIA_BYTES
+        ));
+    }
+    Ok(bytes)
+}
+
+fn platform_attachment_url_allowed(url: &str, allowed_hosts: &[&str]) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest
+        .split_once('/')
+        .map(|(authority, _)| authority)
+        .unwrap_or(rest);
+    if authority.contains('@') {
+        return false;
+    }
+    let host = authority
+        .split_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(authority)
+        .to_ascii_lowercase();
+    allowed_hosts.iter().any(|allowed| host == *allowed)
 }
 
 fn bearer_header(token: &str) -> String {
@@ -11119,6 +11741,36 @@ fn normalize_websocket_path(path: String) -> Result<String, CliError> {
     }
 }
 
+fn provider_backend_supports_native_image_input(backend: &str) -> bool {
+    matches!(backend, "openai_compat" | "azure_openai" | "anthropic")
+}
+
+fn provider_model_supports_native_image_input(backend: &str, model: &str) -> bool {
+    provider_backend_supports_native_image_input(backend)
+        && model_name_has_native_image_evidence(model)
+}
+
+fn model_name_has_native_image_evidence(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    [
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-5",
+        "o3",
+        "o4",
+        "claude-3",
+        "claude-4",
+        "gemini",
+        "gemma",
+        "glm-4v",
+        "qwen-vl",
+        "vision",
+        "multimodal",
+    ]
+    .iter()
+    .any(|needle| model.contains(needle))
+}
+
 fn validate_serve_security(options: &ServeOptions, addr: SocketAddr) -> Result<(), CliError> {
     if !addr.ip().is_loopback() && !options.allow_remote {
         return Err(CliError::InvalidArguments(
@@ -11133,6 +11785,7 @@ pub struct AgentLoopChatCompletionAdapter {
     provider_id: String,
     defaults: AgentDefaults,
     resolved_model: String,
+    native_image_input_supported: bool,
     client: Arc<dyn ProviderClient>,
     retry_mode: ProviderRetryMode,
     workspace: PathBuf,
@@ -11185,6 +11838,10 @@ impl AgentLoopChatCompletionAdapter {
             runtime_permission_mode_snapshot(&permission_config_snapshot);
         let tooling = production_tool_registry(&bundle, allow_side_effect_tools)?;
         let provider_id = resolved.provider_id.clone();
+        let native_image_input_supported =
+            registry.find_by_name(&provider_id).is_some_and(|spec| {
+                provider_model_supports_native_image_input(spec.backend, &resolved.model)
+            });
         let resolved_model = resolved.model.clone();
         let client: Arc<dyn ProviderClient> = Arc::from(resolved.client);
         Ok(Self {
@@ -11192,6 +11849,7 @@ impl AgentLoopChatCompletionAdapter {
             provider_id,
             defaults,
             resolved_model,
+            native_image_input_supported,
             client,
             retry_mode,
             workspace: bundle.context.workspace,
@@ -11261,6 +11919,7 @@ impl AgentLoopChatCompletionAdapter {
 
     fn context_builder(&self) -> ContextBuilder {
         let mut extra_roots = Vec::new();
+        let media_root = self.media_dir.parent().map(Path::to_path_buf);
         if let Some(data_dir) = self
             .media_dir
             .parent()
@@ -11272,6 +11931,8 @@ impl AgentLoopChatCompletionAdapter {
             .with_timezone(self.defaults.timezone.clone())
             .with_disabled_skills(self.defaults.disabled_skills.clone())
             .with_skill_roots(extra_roots)
+            .with_media_roots(media_root)
+            .with_native_image_input_supported(self.native_image_input_supported)
             .with_configured_env(self.exec_env.clone())
     }
 
@@ -11409,8 +12070,13 @@ impl AgentLoopChatCompletionAdapter {
             WebSocketInboundAction::Message(mut inbound) => {
                 let session_key = inbound.session_key();
                 let chat_id = inbound.chat_id.clone();
-                let media_paths =
-                    <Self as ChatCompletionAdapter>::persist_media_data_urls(self, &inbound.media)?;
+                let media_names = websocket_media_names(&inbound.metadata);
+                let media_paths = self.persist_media_data_urls_with_context(
+                    &session_key,
+                    WEBSOCKET_CHANNEL,
+                    &inbound.media,
+                    &media_names,
+                )?;
                 inbound.media = media_paths;
                 inbound.session_key_override = Some(session_key);
                 let stream_id = format!("{chat_id}:{}", now_millis());
@@ -11538,7 +12204,7 @@ impl AgentLoopChatCompletionAdapter {
 
     fn process_external_inbound_with_streaming(
         &self,
-        inbound: InboundMessage,
+        mut inbound: InboundMessage,
         config: AgentLoopConfig,
         runtime_bus: &MessageBus,
     ) -> Result<
@@ -11549,6 +12215,7 @@ impl AgentLoopChatCompletionAdapter {
         ),
         ApiError,
     > {
+        inbound = self.normalize_external_inbound_media(inbound, &config)?;
         let channel = inbound.channel.clone();
         let chat_id = inbound.chat_id.clone();
         let session_key = self.external_effective_session_key(&inbound);
@@ -12002,6 +12669,240 @@ impl AgentLoopChatCompletionAdapter {
             .map_err(|error| HeartbeatError::Execute(error.to_string()))?;
         Ok(turn.final_content.unwrap_or_default())
     }
+
+    fn attachment_media_root(&self) -> Result<PathBuf, ApiError> {
+        self.media_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| ApiError::internal("media directory must have a parent attachment root"))
+    }
+
+    fn intake_api_attachments(
+        &self,
+        requests: Vec<ChannelAttachmentIntakeRequest>,
+        source_label: &str,
+    ) -> Result<Vec<String>, ApiError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let media_root = self.attachment_media_root()?;
+        let policy = AttachmentLimitPolicy {
+            max_attachments_per_message: DEFAULT_MAX_ATTACHMENTS_PER_MESSAGE,
+            max_bytes_per_file: shacs_api::MAX_MEDIA_BYTES as u64,
+            max_bytes_per_turn: DEFAULT_MAX_BYTES_PER_TURN,
+        };
+        let service = AttachmentIntakeService::new(&media_root, policy);
+        let batch = service.intake(requests).map_err(|error| {
+            ApiError::internal(format!("{source_label} could not be saved: {error}"))
+        })?;
+        let mut paths = Vec::with_capacity(batch.items.len());
+        for item in batch.items {
+            match item.intake_status {
+                AttachmentIntakeStatus::Stored => {
+                    let relative = item.media_root_relative_path.ok_or_else(|| {
+                        ApiError::internal(format!("{source_label} storage path is missing"))
+                    })?;
+                    let absolute = media_root.join(relative).canonicalize().map_err(|error| {
+                        ApiError::internal(format!(
+                            "{source_label} stored path could not be resolved: {error}"
+                        ))
+                    })?;
+                    paths.push(absolute.to_string_lossy().to_string());
+                }
+                AttachmentIntakeStatus::Blocked | AttachmentIntakeStatus::Skipped => {
+                    return Err(api_error_from_attachment_intake_status(
+                        source_label,
+                        item.diagnostic_reason.as_deref(),
+                    ));
+                }
+            }
+        }
+        Ok(paths)
+    }
+}
+
+fn api_error_from_attachment_adapter_failure(
+    index: usize,
+    reason: ChannelAttachmentAdapterFailureReason,
+    message: String,
+) -> ApiError {
+    match reason {
+        ChannelAttachmentAdapterFailureReason::PayloadTooLargeBeforeStorage => {
+            ApiError::payload_too_large(format!("media data URL {index} exceeds storage limits"))
+        }
+        ChannelAttachmentAdapterFailureReason::UnsupportedDataUrlMimeType => {
+            ApiError::unsupported_media(message)
+        }
+        ChannelAttachmentAdapterFailureReason::MalformedDataUrl => {
+            ApiError::unsupported_media("media URL must be a valid base64 data URL")
+        }
+        ChannelAttachmentAdapterFailureReason::MissingCredential
+        | ChannelAttachmentAdapterFailureReason::PlatformDownloadFailed
+        | ChannelAttachmentAdapterFailureReason::MimePartDecodeFailed => {
+            ApiError::internal("media attachment could not be normalized")
+        }
+    }
+}
+
+fn api_error_from_attachment_intake_status(source_label: &str, reason: Option<&str>) -> ApiError {
+    match reason {
+        Some("file_size_exceeded") => {
+            ApiError::payload_too_large(format!("{source_label} exceeds storage limits"))
+        }
+        Some("attachment_count_exceeded") | Some("turn_byte_limit_exceeded") => {
+            ApiError::payload_too_large(format!("{source_label} exceeds request storage limits"))
+        }
+        Some(reason) => ApiError::internal(format!("{source_label} could not be saved: {reason}")),
+        None => ApiError::internal(format!("{source_label} could not be saved")),
+    }
+}
+
+fn append_external_attachment_projections(
+    metadata: &mut Map<String, Value>,
+    projections: Vec<Value>,
+) {
+    const KEY: &str = "external_attachment_projections";
+    match metadata.get_mut(KEY) {
+        Some(Value::Array(existing)) => existing.extend(projections),
+        _ => {
+            metadata.insert(KEY.to_owned(), Value::Array(projections));
+        }
+    }
+}
+
+fn external_attachment_projection_failure(
+    item_index: usize,
+    source_kind: &str,
+    reason: &str,
+    display_name: Option<String>,
+) -> Value {
+    let mut projection = Map::new();
+    projection.insert("item_index".to_owned(), json!(item_index));
+    projection.insert("source_kind".to_owned(), json!(source_kind));
+    projection.insert("status".to_owned(), json!("failed"));
+    projection.insert("reason".to_owned(), json!(reason));
+    if let Some(display_name) = display_name {
+        projection.insert("display_name".to_owned(), json!(display_name));
+    }
+    Value::Object(projection)
+}
+
+fn external_attachment_failure_reason(
+    reason: ChannelAttachmentAdapterFailureReason,
+) -> &'static str {
+    match reason {
+        ChannelAttachmentAdapterFailureReason::MalformedDataUrl => "malformed_data_url",
+        ChannelAttachmentAdapterFailureReason::UnsupportedDataUrlMimeType => {
+            "unsupported_data_url_mime_type"
+        }
+        ChannelAttachmentAdapterFailureReason::PayloadTooLargeBeforeStorage => {
+            "payload_too_large_before_storage"
+        }
+        ChannelAttachmentAdapterFailureReason::MissingCredential => "missing_credential",
+        ChannelAttachmentAdapterFailureReason::PlatformDownloadFailed => "platform_download_failed",
+        ChannelAttachmentAdapterFailureReason::MimePartDecodeFailed => "mime_part_decode_failed",
+    }
+}
+
+fn split_named_data_url(media: &str) -> (String, Option<String>) {
+    let Some((header, payload)) = media.split_once(',') else {
+        return (media.to_owned(), None);
+    };
+    let Some(header_body) = header.strip_prefix("data:") else {
+        return (media.to_owned(), None);
+    };
+    let mut name = None;
+    let mut kept_parts = Vec::new();
+    for part in header_body.split(';') {
+        if let Some(encoded_name) = part.strip_prefix("name=") {
+            name = base64_url_decode(encoded_name).and_then(|bytes| String::from_utf8(bytes).ok());
+        } else {
+            kept_parts.push(part);
+        }
+    }
+    if name.is_none() {
+        return (media.to_owned(), None);
+    }
+    (format!("data:{},{payload}", kept_parts.join(";")), name)
+}
+
+fn platform_media_projection(item_index: usize, media: &str) -> Option<Value> {
+    let (prefix, rest) = media.split_once(':')?;
+    let prefix_body = prefix.strip_prefix("shacs-")?;
+    let (platform, kind) = prefix_body.split_once('-')?;
+    let mut parts = rest.split(':');
+    let handle_hash = parts.next().filter(|value| !value.is_empty())?;
+    let declared_mime = parts.next().and_then(decode_optional_base64_url_string);
+    let display_name = parts.next().and_then(decode_optional_base64_url_string);
+    let declared_byte_length = parts.next().and_then(|value| value.parse::<u64>().ok());
+
+    let mut projection = Map::new();
+    projection.insert("item_index".to_owned(), json!(item_index));
+    projection.insert("source_kind".to_owned(), json!("platform_download"));
+    projection.insert("status".to_owned(), json!("failed"));
+    projection.insert("reason".to_owned(), json!("platform_download_failed"));
+    projection.insert("platform".to_owned(), json!(platform));
+    projection.insert("platform_kind".to_owned(), json!(kind));
+    projection.insert("handle_hash".to_owned(), json!(handle_hash));
+    if let Some(display_name) = display_name {
+        projection.insert(
+            "display_name".to_owned(),
+            json!(redact_string(&display_name)),
+        );
+    }
+    if let Some(declared_mime) = declared_mime {
+        projection.insert("declared_mime".to_owned(), json!(declared_mime));
+    }
+    if let Some(declared_byte_length) = declared_byte_length {
+        projection.insert(
+            "declared_byte_length".to_owned(),
+            json!(declared_byte_length),
+        );
+    }
+    Some(Value::Object(projection))
+}
+
+fn decode_optional_base64_url_string(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    base64_url_decode(value).and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+fn external_media_source_kind(media: &str) -> &'static str {
+    let lower = media.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        "platform_download"
+    } else if lower.starts_with("file:")
+        || Path::new(media).is_absolute()
+        || media.contains('/')
+        || media.contains('\\')
+    {
+        "local_multipart"
+    } else {
+        "bridge_media_handle"
+    }
+}
+
+fn external_media_display_basename(media: &str) -> Option<String> {
+    let without_fragment = media
+        .split_once('#')
+        .map(|(before, _)| before)
+        .unwrap_or(media);
+    let without_query = without_fragment
+        .split_once('?')
+        .map(|(before, _)| before)
+        .unwrap_or(without_fragment);
+    let trimmed = without_query.trim_end_matches(['/', '\\']);
+    if trimmed == media && !media.contains('/') && !media.contains('\\') {
+        return None;
+    }
+    let basename = trimmed.rsplit(['/', '\\']).next()?.trim();
+    if basename.is_empty() {
+        return None;
+    }
+    let redacted = redact_string(basename);
+    Some(redacted.chars().take(80).collect())
 }
 
 fn replay_token_budget(context_window_tokens: usize, max_output_tokens: usize) -> usize {
@@ -12104,38 +13005,15 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
     }
 
     fn persist_media_data_urls(&self, data_urls: &[String]) -> Result<Vec<String>, ApiError> {
-        let mut paths = Vec::new();
-        for data_url in data_urls {
-            match save_base64_data_url(data_url, &self.media_dir, Some(DEFAULT_MAX_BYTES)) {
-                Ok(Some(path)) => paths.push(path),
-                Ok(None) => {
-                    return Err(ApiError::unsupported_media(
-                        "media URL must be a valid base64 data URL",
-                    ))
-                }
-                Err(MediaDecodeError::FileSizeExceeded { limit }) => {
-                    return Err(ApiError::payload_too_large(format!(
-                        "media data URL exceeds {limit} bytes"
-                    )))
-                }
-                Err(MediaDecodeError::Malformed) => {
-                    return Err(ApiError::unsupported_media(
-                        "media URL must be a valid base64 data URL",
-                    ))
-                }
-                Err(MediaDecodeError::UnsupportedType { mime_type }) => {
-                    return Err(ApiError::unsupported_media(format!(
-                        "media data URL type is not supported: {mime_type}"
-                    )))
-                }
-                Err(MediaDecodeError::Io(error)) => {
-                    return Err(ApiError::internal(format!(
-                        "media data URL could not be saved: {error}"
-                    )))
-                }
-            }
-        }
-        Ok(paths)
+        self.persist_media_data_urls_with_context("api:default", "api", data_urls, &[])
+    }
+
+    fn persist_media_data_urls_for_session(
+        &self,
+        session_key: &str,
+        data_urls: &[String],
+    ) -> Result<Vec<String>, ApiError> {
+        self.persist_media_data_urls_with_context(session_key, "api", data_urls, &[])
     }
 
     fn session_workspace(&self) -> Option<PathBuf> {
@@ -12147,25 +13025,16 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         filename: Option<&str>,
         bytes: &[u8],
     ) -> Result<String, ApiError> {
-        if bytes.len() > shacs_api::MAX_MEDIA_BYTES {
-            return Err(ApiError::payload_too_large(format!(
-                "uploaded file exceeds {} bytes",
-                shacs_api::MAX_MEDIA_BYTES
-            )));
-        }
-        fs::create_dir_all(&self.media_dir).map_err(|error| {
-            ApiError::internal(format!("media directory could not be created: {error}"))
-        })?;
-        let stem = unique_upload_stem();
-        let name = filename
-            .map(safe_filename)
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "upload.bin".to_owned());
-        let path = self.media_dir.join(format!("{stem}-{name}"));
-        fs::write(&path, bytes).map_err(|error| {
-            ApiError::internal(format!("uploaded file could not be saved: {error}"))
-        })?;
-        Ok(path.to_string_lossy().to_string())
+        self.persist_uploaded_file_for_session("api:default", filename, bytes)
+    }
+
+    fn persist_uploaded_file_for_session(
+        &self,
+        session_key: &str,
+        filename: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<String, ApiError> {
+        self.persist_uploaded_file_with_context(session_key, "api", filename, bytes)
     }
 
     fn process_websocket_frame(
@@ -12190,6 +13059,128 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         on_event: &mut dyn FnMut(WebSocketServerEvent),
     ) -> Result<(), ApiError> {
         self.process_websocket_frame_events(frame, client_id, default_chat_id, on_event)
+    }
+}
+
+impl AgentLoopChatCompletionAdapter {
+    fn normalize_external_inbound_media(
+        &self,
+        mut inbound: InboundMessage,
+        config: &AgentLoopConfig,
+    ) -> Result<InboundMessage, ApiError> {
+        if inbound.media.is_empty() {
+            return Ok(inbound);
+        }
+
+        let session_key = effective_external_session_key(config, &inbound);
+        let channel = inbound.channel.clone();
+        let mut data_urls = Vec::new();
+        let mut data_url_names = Vec::new();
+        let mut projections = Vec::new();
+
+        for (index, media) in inbound.media.iter().enumerate() {
+            if media.starts_with("data:") {
+                let (data_url, name) = split_named_data_url(media);
+                let normalized = normalize_channel_attachment_data_url(
+                    &session_key,
+                    &channel,
+                    name.clone(),
+                    name.clone(),
+                    &data_url,
+                    DEFAULT_MAX_BYTES as u64,
+                );
+                if let Some(failure) = normalized.failures.into_iter().next() {
+                    projections.push(external_attachment_projection_failure(
+                        index,
+                        "data_url",
+                        external_attachment_failure_reason(failure.diagnostic.reason),
+                        None,
+                    ));
+                } else {
+                    data_urls.push(data_url);
+                    data_url_names.push(name);
+                }
+                continue;
+            }
+
+            projections.push(platform_media_projection(index, media).unwrap_or_else(|| {
+                external_attachment_projection_failure(
+                    index,
+                    external_media_source_kind(media),
+                    "unsupported_external_media",
+                    external_media_display_basename(media),
+                )
+            }));
+        }
+
+        let stored_media = self.persist_media_data_urls_with_context(
+            &session_key,
+            &channel,
+            &data_urls,
+            &data_url_names,
+        )?;
+        inbound.media = stored_media;
+        inbound.session_key_override = Some(session_key);
+        if !projections.is_empty() {
+            append_external_attachment_projections(&mut inbound.metadata, projections);
+        }
+        Ok(inbound)
+    }
+
+    fn persist_media_data_urls_with_context(
+        &self,
+        session_key: &str,
+        channel: &str,
+        data_urls: &[String],
+        names: &[Option<String>],
+    ) -> Result<Vec<String>, ApiError> {
+        let mut requests = Vec::with_capacity(data_urls.len());
+        for (index, data_url) in data_urls.iter().enumerate() {
+            let name = names.get(index).cloned().flatten();
+            let normalized = normalize_channel_attachment_data_url(
+                session_key,
+                channel,
+                name.clone(),
+                name,
+                data_url,
+                DEFAULT_MAX_BYTES as u64,
+            );
+            if let Some(failure) = normalized.failures.into_iter().next() {
+                return Err(api_error_from_attachment_adapter_failure(
+                    index,
+                    failure.diagnostic.reason,
+                    failure.diagnostic.message,
+                ));
+            }
+            requests.extend(normalized.requests);
+        }
+        self.intake_api_attachments(requests, "media data URL")
+    }
+
+    fn persist_uploaded_file_with_context(
+        &self,
+        session_key: &str,
+        channel: &str,
+        filename: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<String, ApiError> {
+        if bytes.len() > shacs_api::MAX_MEDIA_BYTES {
+            return Err(ApiError::payload_too_large(format!(
+                "uploaded file exceeds {} bytes",
+                shacs_api::MAX_MEDIA_BYTES
+            )));
+        }
+        let request = ChannelAttachmentIntakeRequest::from_bytes(
+            session_key,
+            channel,
+            filename.map(str::to_owned),
+            None,
+            bytes.to_vec(),
+        );
+        let mut paths = self.intake_api_attachments(vec![request], "uploaded file")?;
+        paths
+            .pop()
+            .ok_or_else(|| ApiError::internal("uploaded file was not stored"))
     }
 }
 
@@ -12445,14 +13436,6 @@ fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
             parent_containment_snapshot: parent_containment_snapshot.clone(),
         })
         .collect()
-}
-
-fn unique_upload_stem() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("{:012x}", nanos & 0xffffffffffff)
 }
 
 pub struct ProviderChatCompletionAdapter {
@@ -13190,6 +14173,38 @@ mod tests {
             .join("..")
             .join(relative_path);
         Ok(fs::read_to_string(path)?)
+    }
+
+    #[test]
+    fn native_image_input_gate_requires_backend_and_model_evidence() {
+        assert!(!provider_model_supports_native_image_input(
+            "local_text_backend",
+            "gpt-4o"
+        ));
+        assert!(!provider_model_supports_native_image_input(
+            "openai_compat",
+            "gpt-3.5-turbo"
+        ));
+        assert!(!provider_model_supports_native_image_input(
+            "azure_openai",
+            "text-davinci-003"
+        ));
+        assert!(!provider_model_supports_native_image_input(
+            "anthropic",
+            "claude-2"
+        ));
+        assert!(provider_model_supports_native_image_input(
+            "openai_compat",
+            "openai/gpt-4o-mini"
+        ));
+        assert!(provider_model_supports_native_image_input(
+            "anthropic",
+            "claude-3-5-sonnet-latest"
+        ));
+        assert!(provider_model_supports_native_image_input(
+            "openai_compat",
+            "google/gemini-2.5-pro"
+        ));
     }
 
     #[test]
@@ -14483,6 +15498,79 @@ mod tests {
     }
 
     #[test]
+    fn slack_socket_envelope_to_inbound_extracts_event_files_metadata() -> Result<(), Box<dyn Error>>
+    {
+        let config = SlackRuntimeConfig {
+            app_token: "xapp-token".to_owned(),
+            bot_token: "xoxb-token".to_owned(),
+            channel_ids: vec!["C123".to_owned()],
+            allowed_senders: vec!["U123".to_owned()],
+        };
+        let envelope = json!({
+            "payload": {
+                "event": {
+                    "type": "message",
+                    "user": "U123",
+                    "channel": "C123",
+                    "text": "see attached https://ignored.example/raw.png",
+                    "ts": "1710000000.000100",
+                    "files": [{
+                        "url_private_download": "https://files.slack.com/files-pri/T1-F1/report.png?pub_secret=secret",
+                        "mimetype": "image/png",
+                        "name": "report.png",
+                        "size": 1234
+                    }]
+                }
+            }
+        });
+
+        let inbound = slack_socket_envelope_to_inbound(&config, &envelope)
+            .ok_or("slack file event was not normalized")?;
+
+        assert_eq!(inbound.media.len(), 1);
+        assert!(inbound.media[0].starts_with("shacs-slack-file:"));
+        assert!(!inbound.media[0].contains("pub_secret"));
+        assert!(!inbound.media[0].contains("files.slack.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn slack_socket_envelope_preserves_file_share_without_text() -> Result<(), Box<dyn Error>> {
+        let config = SlackRuntimeConfig {
+            app_token: "xapp-token".to_owned(),
+            bot_token: "xoxb-token".to_owned(),
+            channel_ids: vec!["C123".to_owned()],
+            allowed_senders: vec!["U123".to_owned()],
+        };
+        let envelope = json!({
+            "payload": {
+                "event": {
+                    "type": "message",
+                    "subtype": "file_share",
+                    "user": "U123",
+                    "channel": "C123",
+                    "text": "",
+                    "ts": "1710000000.000100",
+                    "files": [{
+                        "url_private_download": "https://files.slack.com/files-pri/T1-F1/report.png?pub_secret=secret",
+                        "mimetype": "image/png",
+                        "name": "report.png",
+                        "size": 1234
+                    }]
+                }
+            }
+        });
+
+        let inbound = slack_socket_envelope_to_inbound(&config, &envelope)
+            .ok_or("slack file-only event was not normalized")?;
+
+        assert_eq!(inbound.content, "");
+        assert_eq!(inbound.media.len(), 1);
+        assert!(inbound.media[0].starts_with("shacs-slack-file:"));
+        Ok(())
+    }
+
+    #[test]
     fn whatsapp_websocket_helper_serializes_and_normalizes_bridge_values(
     ) -> Result<(), Box<dyn Error>> {
         assert_eq!(
@@ -14667,7 +15755,117 @@ mod tests {
             &restricted_sender_message,
         )
         .is_none());
+
+        let attachment_only_config = DiscordRuntimeConfig {
+            group_policy: DiscordGroupPolicy::Open,
+            ..restricted_sender_config
+        };
+        let attachment_only = json!({
+            "id": "m8",
+            "channel_id": "dm1",
+            "content": "",
+            "author": {"id": "user-1", "bot": false},
+            "mentions": [],
+            "attachments": [{
+                "url": "https://cdn.discordapp.com/attachments/c1/a1/photo.png?ex=signed",
+                "content_type": "image/png",
+                "filename": "photo.png",
+                "size": 42
+            }]
+        });
+        let inbound = discord_gateway_message_to_inbound(
+            &attachment_only_config,
+            Some("bot-1"),
+            &mut RecentMessageIds::new(16),
+            &attachment_only,
+        )
+        .ok_or("discord attachment-only message was not normalized")?;
+        assert_eq!(inbound.content, "");
+        assert_eq!(inbound.media.len(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn discord_gateway_and_rest_payload_attachment_extraction_preserves_metadata(
+    ) -> Result<(), Box<dyn Error>> {
+        let config = DiscordRuntimeConfig {
+            token: "token".to_owned(),
+            channel_filter: DiscordChannelFilter::AllVisible,
+            allowed_senders: vec!["user-1".to_owned()],
+            group_policy: DiscordGroupPolicy::Open,
+            streaming: true,
+            poll_interval_seconds: 5,
+            transport: DiscordTransportMode::Gateway,
+        };
+        let event = json!({
+            "id": "m-attach-1",
+            "channel_id": "c1",
+            "content": "attached https://ignored.example/text-url.png",
+            "author": {"id": "user-1", "bot": false},
+            "mentions": [],
+            "attachments": [{
+                "url": "https://cdn.discordapp.com/attachments/c1/a1/photo.png?ex=signed",
+                "content_type": "image/png",
+                "filename": "photo.png",
+                "size": 42
+            }]
+        });
+
+        let inbound = discord_gateway_message_to_inbound(
+            &config,
+            Some("bot-1"),
+            &mut RecentMessageIds::new(16),
+            &event,
+        )
+        .ok_or("discord gateway message was not normalized")?;
+        assert_eq!(inbound.media.len(), 1);
+        assert!(inbound.media[0].starts_with("shacs-discord-attachment:"));
+        assert!(!inbound.media[0].contains("cdn.discordapp.com"));
+        assert!(!inbound.media[0].contains("ex=signed"));
+
+        let rest_media = discord_attachment_media(&event);
+        assert_eq!(rest_media, inbound.media);
+
+        let rest_attachment_only = json!({
+            "id": "m-rest-attach-only",
+            "channel_id": "c1",
+            "content": "",
+            "author": {"id": "user-1", "bot": false},
+            "attachments": [{
+                "url": "https://unlisted.example/attachment.png?secret=token",
+                "content_type": "image/png",
+                "filename": "rest-photo.png",
+                "size": 7
+            }]
+        });
+        let agent = runtime_http_agent(Duration::from_secs(1));
+        let inbound = discord_rest_message_to_inbound(&agent, &config, "c1", &rest_attachment_only)
+            .ok_or("discord REST attachment-only message was not normalized")?;
+        assert_eq!(inbound.content, "");
+        assert_eq!(inbound.media.len(), 1);
+        assert!(inbound.media[0].starts_with("shacs-discord-attachment:"));
+        assert!(!inbound.media[0].contains("secret=token"));
+        Ok(())
+    }
+
+    #[test]
+    fn platform_attachment_url_allowlist_rejects_userinfo_and_unlisted_hosts() {
+        assert!(platform_attachment_url_allowed(
+            "https://cdn.discordapp.com/attachments/c1/a1/photo.png?ex=signed",
+            &["cdn.discordapp.com", "media.discordapp.net"],
+        ));
+        assert!(!platform_attachment_url_allowed(
+            "http://cdn.discordapp.com/attachments/c1/a1/photo.png",
+            &["cdn.discordapp.com"],
+        ));
+        assert!(!platform_attachment_url_allowed(
+            "https://cdn.discordapp.com@evil.example/attachments/c1/a1/photo.png",
+            &["cdn.discordapp.com"],
+        ));
+        assert!(!platform_attachment_url_allowed(
+            "https://evil.example/attachments/c1/a1/photo.png",
+            &["cdn.discordapp.com"],
+        ));
     }
 
     #[test]
@@ -14896,6 +16094,7 @@ mod tests {
             provider_id: "openai".to_owned(),
             defaults: AgentDefaults::default(),
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse::default(),
@@ -14942,6 +16141,246 @@ mod tests {
             .ok_or("expected session busy error")?;
         assert_eq!(error.status, 409);
         assert_eq!(error.error_type, "session_busy");
+        Ok(())
+    }
+
+    #[test]
+    fn external_inline_data_url_is_stored_under_channel_attachments() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_root = root.path().join("data").join("media");
+        fs::create_dir_all(&workspace)?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let adapter = external_media_test_adapter(root.path(), captured.clone())?;
+        let inbound = InboundMessage::new(DISCORD_CHANNEL, "u1", "chat-1", "hello").with_media([
+            "data:text/plain;base64,aGk=".to_owned(),
+            "data:audio/mpeg;base64,SUQz".to_owned(),
+        ]);
+
+        adapter.process_external_inbound_with_streaming(
+            inbound,
+            adapter.loop_config(),
+            &MessageBus::new(),
+        )?;
+
+        let attachment_dir = media_root.join("attachments").join(DISCORD_CHANNEL);
+        let stored_files = fs::read_dir(&attachment_dir)?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(stored_files.len(), 2);
+        let stored_contents = stored_files
+            .iter()
+            .map(|entry| fs::read(entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(stored_contents.iter().any(|content| content == b"hi"));
+        assert!(stored_contents.iter().any(|content| content == b"ID3"));
+        let attachment_dir = attachment_dir.canonicalize()?;
+        let session = SessionManager::new(&workspace)?
+            .load_existing("discord:chat-1")
+            .ok_or("discord session missing")?;
+        let user_message = session
+            .messages
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .ok_or("user message missing")?;
+        let media = user_message["media"]
+            .as_array()
+            .ok_or("stored media missing")?;
+        assert_eq!(media.len(), 2);
+        assert!(media.iter().all(|path| path
+            .as_str()
+            .is_some_and(|path| Path::new(path).starts_with(&attachment_dir))));
+        let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
+        let request_json = serde_json::to_string(&requests[0].messages)?;
+        assert!(!request_json.contains("data:text/plain"));
+        assert!(!request_json.contains("data:audio/mpeg"));
+        assert!(request_json.contains("[attachment:included_text]"));
+        assert!(request_json.contains("[attachment:unsupported]"));
+        assert!(request_json.contains("audio analyzer is not configured"));
+        assert!(request_json.contains("hi"));
+        for stored_file in &stored_files {
+            assert!(!request_json.contains(&stored_file.path().to_string_lossy().to_string()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn adapter_context_builder_routes_stored_images_as_notes_when_native_image_input_is_unsupported(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let media_root = root.path().join("data").join("media");
+        let attachments = media_root.join("attachments").join("api");
+        fs::create_dir_all(&attachments)?;
+        let image = attachments.join("stored.png");
+        fs::write(&image, b"\x89PNG\r\n\x1a\nrest")?;
+        let mut adapter =
+            external_media_test_adapter(root.path(), Arc::new(Mutex::new(Vec::new())))?;
+        adapter.native_image_input_supported = false;
+        let media = vec![image.to_string_lossy().to_string()];
+
+        let messages =
+            adapter
+                .context_builder()
+                .build_messages(shacs_core::runtime::ContextBuildRequest {
+                    history: Vec::new(),
+                    current_message: "describe image",
+                    media: &media,
+                    channel: Some("api"),
+                    chat_id: Some("default"),
+                    current_role: "user",
+                    session_summary: None,
+                });
+        let request_json = serde_json::to_string(&messages)?;
+
+        assert!(request_json.contains("[attachment:unsupported]"));
+        assert!(request_json.contains("native image input is not supported by provider/model"));
+        assert!(!request_json.contains("image_url"));
+        assert!(!request_json.contains("data:image/png"));
+        Ok(())
+    }
+
+    #[test]
+    fn external_non_data_media_records_safe_projection_failure() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let adapter = external_media_test_adapter(root.path(), captured.clone())?;
+        let signed_url = "https://files.example.test/private/report.png?token=secret";
+        let local_path = "/Users/alice/private/photo.jpg";
+        let inbound = InboundMessage::new(SLACK_CHANNEL, "u1", "chat-1", "hello")
+            .with_media([signed_url.to_owned(), local_path.to_owned()]);
+
+        adapter.process_external_inbound_with_streaming(
+            inbound,
+            adapter.loop_config(),
+            &MessageBus::new(),
+        )?;
+
+        let session = SessionManager::new(&workspace)?
+            .load_existing("slack:chat-1")
+            .ok_or("slack session missing")?;
+        let user_message = session
+            .messages
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .ok_or("user message missing")?;
+        assert!(user_message.get("media").is_none());
+        let projections = user_message["metadata"]["external_attachment_projections"]
+            .as_array()
+            .ok_or("projection metadata missing")?;
+        assert_eq!(projections.len(), 2);
+        assert_eq!(projections[0]["source_kind"], json!("platform_download"));
+        assert_eq!(
+            projections[0]["reason"],
+            json!("unsupported_external_media")
+        );
+        assert_eq!(projections[0]["display_name"], json!("report.png"));
+        assert_eq!(projections[1]["source_kind"], json!("local_multipart"));
+        assert_eq!(projections[1]["display_name"], json!("photo.jpg"));
+        let safe_session = serde_json::to_string(&session.messages)?;
+        assert!(!safe_session.contains("token=secret"));
+        assert!(!safe_session.contains("/Users/alice"));
+        let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
+        let request_text = serde_json::to_string(&requests[0].messages)?;
+        assert!(!request_text.contains(signed_url));
+        assert!(!request_text.contains(local_path));
+        Ok(())
+    }
+
+    #[test]
+    fn external_platform_handles_record_safe_projection_metadata() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let adapter = external_media_test_adapter(root.path(), captured.clone())?;
+        let raw_url = "https://cdn.discordapp.com/attachments/c1/a1/photo.png?token=secret";
+        let media = platform_media_handle(
+            "discord",
+            "attachment",
+            Some(raw_url),
+            Some("image/png"),
+            Some("photo.png"),
+            Some(42),
+        );
+        let inbound =
+            InboundMessage::new(DISCORD_CHANNEL, "u1", "chat-1", "hello").with_media([media]);
+
+        adapter.process_external_inbound_with_streaming(
+            inbound,
+            adapter.loop_config(),
+            &MessageBus::new(),
+        )?;
+
+        let session = SessionManager::new(&workspace)?
+            .load_existing("discord:chat-1")
+            .ok_or("discord session missing")?;
+        let serialized = serde_json::to_string(&session.messages)?;
+        assert!(!serialized.contains(raw_url));
+        assert!(!serialized.contains("token=secret"));
+        assert!(serialized.contains("photo.png"));
+        assert!(serialized.contains("image/png"));
+        assert!(serialized.contains("declared_byte_length"));
+        let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
+        assert!(!serde_json::to_string(&requests[0].messages)?.contains(raw_url));
+        Ok(())
+    }
+
+    #[test]
+    fn external_malformed_data_url_records_failure_without_raw_media() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let adapter = external_media_test_adapter(root.path(), captured.clone())?;
+        let inbound = InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "hello")
+            .with_media(["data:text/plain;base64,%%%".to_owned()]);
+
+        adapter.process_external_inbound_with_streaming(
+            inbound,
+            adapter.loop_config(),
+            &MessageBus::new(),
+        )?;
+
+        let session = SessionManager::new(&workspace)?
+            .load_existing("telegram:chat-1")
+            .ok_or("telegram session missing")?;
+        let user_message = session
+            .messages
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .ok_or("user message missing")?;
+        assert!(user_message.get("media").is_none());
+        let projections = user_message["metadata"]["external_attachment_projections"]
+            .as_array()
+            .ok_or("projection metadata missing")?;
+        assert_eq!(projections[0]["source_kind"], json!("data_url"));
+        assert_eq!(projections[0]["reason"], json!("malformed_data_url"));
+        let serialized = serde_json::to_string(&session.messages)?;
+        assert!(!serialized.contains("%%%"));
+        let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
+        assert!(!serde_json::to_string(&requests[0].messages)?.contains("%%%"));
+        Ok(())
+    }
+
+    #[test]
+    fn external_text_only_message_is_unchanged_by_media_normalization() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        fs::create_dir_all(root.path().join("workspace"))?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let adapter = external_media_test_adapter(root.path(), captured)?;
+        let mut metadata = Map::new();
+        metadata.insert("message_id".to_owned(), json!("m1"));
+        let inbound = InboundMessage::new(EMAIL_CHANNEL, "u1", "chat-1", "hello")
+            .with_metadata(metadata)
+            .with_session_key_override("email:custom");
+
+        let normalized =
+            adapter.normalize_external_inbound_media(inbound.clone(), &adapter.loop_config())?;
+
+        assert_eq!(normalized, inbound);
         Ok(())
     }
 
@@ -15177,6 +16616,161 @@ mod tests {
             worker_config_state(&plugins, &imap_descriptor),
             WorkerConfigState::Unsupported(detail) if detail.contains("TLS")
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn telegram_update_to_inbound_extracts_photo_document_audio_video_metadata(
+    ) -> Result<(), Box<dyn Error>> {
+        let update = json!({
+            "message": {
+                "message_id": 10,
+                "chat": {"id": 20},
+                "from": {"id": 30, "username": "alice"},
+                "caption": "attachments",
+                "photo": [
+                    {"file_id": "photo-small", "file_unique_id": "p-small", "file_size": 10},
+                    {"file_id": "photo-large/opaque", "file_unique_id": "p-large", "file_size": 100}
+                ],
+                "document": {"file_id": "doc-id", "file_name": "doc.pdf", "mime_type": "application/pdf", "file_size": 200},
+                "audio": {"file_id": "audio-id", "file_name": "song.mp3", "mime_type": "audio/mpeg", "file_size": 300},
+                "video": {"file_id": "video-id", "file_name": "clip.mp4", "mime_type": "video/mp4", "file_size": 400}
+            }
+        });
+
+        let inbound =
+            telegram_update_to_inbound(&update).ok_or("telegram update was not normalized")?;
+
+        assert_eq!(inbound.media.len(), 4);
+        assert!(inbound
+            .media
+            .iter()
+            .any(|media| media.starts_with("shacs-telegram-photo:")));
+        assert!(inbound
+            .media
+            .iter()
+            .any(|media| media.starts_with("shacs-telegram-document:")));
+        assert!(inbound
+            .media
+            .iter()
+            .any(|media| media.starts_with("shacs-telegram-audio:")));
+        assert!(inbound
+            .media
+            .iter()
+            .any(|media| media.starts_with("shacs-telegram-video:")));
+        assert!(inbound
+            .media
+            .iter()
+            .all(|media| !media.contains("photo-large/opaque")));
+
+        let attachment_only = json!({
+            "message": {
+                "message_id": 11,
+                "chat": {"id": 20},
+                "from": {"id": 30, "username": "alice"},
+                "photo": [
+                    {"file_id": "photo-only", "file_unique_id": "p-only", "file_size": 10}
+                ]
+            }
+        });
+        let inbound = telegram_update_to_inbound(&attachment_only)
+            .ok_or("telegram media-only update was not normalized")?;
+        assert_eq!(inbound.content, "");
+        assert_eq!(inbound.media.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_email_body_extracts_mime_attachment_bytes_as_inline_media(
+    ) -> Result<(), Box<dyn Error>> {
+        let raw = b"From: Alice <alice@example.com>\r\nSubject: Attachment\r\nContent-Type: multipart/mixed; boundary=frontier\r\n\r\n--frontier\r\nContent-Type: text/plain\r\n\r\nBody text\r\n--frontier\r\nContent-Type: text/plain; name=note.txt\r\nContent-Disposition: attachment; filename=note.txt\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=\r\n--frontier--\r\n";
+        let mut parsed = parse_email_body(raw, "44".to_owned())?;
+        assert!(parsed.inbound.attachments.is_empty());
+        parsed.inbound.attachments = email_attachment_data_urls_from_body(raw)?;
+
+        assert_eq!(parsed.inbound.attachments.len(), 1);
+        assert!(
+            parsed.inbound.attachments[0].starts_with("data:text/plain;name=bm90ZS50eHQ;base64,")
+        );
+        assert!(parsed.inbound.attachments[0].ends_with("aGVsbG8="));
+
+        let root = tempfile::tempdir()?;
+        fs::create_dir_all(root.path().join("workspace"))?;
+        let adapter = external_media_test_adapter(root.path(), Arc::new(Mutex::new(Vec::new())))?;
+        let normalized = adapter.normalize_external_inbound_media(
+            parsed.inbound.into_message(),
+            &adapter.loop_config(),
+        )?;
+        assert_eq!(normalized.media.len(), 1);
+        assert!(Path::new(&normalized.media[0]).exists());
+        assert_eq!(fs::read(&normalized.media[0])?, b"hello");
+        Ok(())
+    }
+
+    #[test]
+    fn attachment_caps_reject_oversized_reads_and_fixed_count_limits() -> Result<(), Box<dyn Error>>
+    {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: https://cdn.discordapp.com/attachments/c1/a1/photo.png\r\nContent-Length: 0\r\n\r\n",
+                );
+            }
+        });
+        let agent = runtime_http_agent(Duration::from_secs(2));
+        let error = get_binary(&agent, &format!("http://{address}/redirect"), None)
+            .expect_err("attachment redirects must not be followed");
+        handle
+            .join()
+            .map_err(|_| "redirect server thread panicked")?;
+        assert!(error.contains("redirect rejected"));
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let declared_length = shacs_api::MAX_MEDIA_BYTES + 1;
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {declared_length}\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        let error = get_binary(&agent, &format!("http://{address}/oversized"), None)
+            .expect_err("oversized content-length must fail before body read");
+        handle
+            .join()
+            .map_err(|_| "content-length server thread panicked")?;
+        assert!(error.contains("downloaded attachment exceeds"));
+
+        let oversized = std::io::repeat(0).take(shacs_api::MAX_MEDIA_BYTES as u64 + 1);
+        let error = read_capped_binary_body(oversized).expect_err("oversized body must fail");
+        assert!(error.contains("downloaded attachment exceeds"));
+
+        let bytes = vec![0_u8; shacs_api::MAX_MEDIA_BYTES + 1];
+        let error = email_attachment_data_url("application/octet-stream", None, &bytes)
+            .expect_err("oversized email attachment must fail");
+        assert!(error.contains("email attachment exceeds"));
+
+        let root = tempfile::tempdir()?;
+        let adapter = external_media_test_adapter(root.path(), Arc::new(Mutex::new(Vec::new())))?;
+        let requests = (0..=DEFAULT_MAX_ATTACHMENTS_PER_MESSAGE)
+            .map(|index| {
+                ChannelAttachmentIntakeRequest::from_bytes(
+                    "session".to_owned(),
+                    "api".to_owned(),
+                    Some(format!("{index}.txt")),
+                    Some("text/plain".to_owned()),
+                    b"x".to_vec(),
+                )
+            })
+            .collect();
+        let error = adapter
+            .intake_api_attachments(requests, "test attachment")
+            .expect_err("fixed attachment count cap must reject item 11");
+        assert_eq!(error.status, 413);
         Ok(())
     }
 
@@ -16049,6 +17643,7 @@ mod tests {
             provider_id: "openai".to_owned(),
             defaults: AgentDefaults::default(),
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse::default(),
@@ -18242,6 +19837,7 @@ mod tests {
             provider_id: "openai".to_owned(),
             defaults: AgentDefaults::default(),
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse::default(),
@@ -18282,6 +19878,7 @@ mod tests {
             provider_id: "openai".to_owned(),
             defaults: AgentDefaults::default(),
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse::default(),
@@ -18530,6 +20127,7 @@ mod tests {
     fn agent_loop_adapter_persists_data_urls_to_api_media_dir() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
+        let media_root = root.path().join("data").join("media");
         let media_dir = root.path().join("data").join("media").join("api");
         fs::create_dir_all(&workspace)?;
         let adapter = AgentLoopChatCompletionAdapter {
@@ -18537,6 +20135,7 @@ mod tests {
             provider_id: "openai".to_owned(),
             defaults: AgentDefaults::default(),
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse::default(),
@@ -18565,17 +20164,46 @@ mod tests {
             permission_mode_snapshot: PermissionModeSnapshot::default(),
         };
 
-        let paths = adapter.persist_media_data_urls(&["data:text/plain;base64,aGk=".to_owned()])?;
+        let paths = adapter.persist_media_data_urls(&[
+            "data:text/plain;base64,aGk=".to_owned(),
+            "data:audio/mpeg;base64,SUQz".to_owned(),
+        ])?;
 
-        assert_eq!(paths.len(), 1);
-        assert!(PathBuf::from(&paths[0]).starts_with(&media_dir));
-        assert_eq!(fs::read_to_string(&paths[0])?, "hi");
+        assert_eq!(paths.len(), 2);
+        let attachment_dir = media_root.join("attachments").join("api").canonicalize()?;
+        let stored_paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert!(stored_paths
+            .iter()
+            .all(|stored_path| stored_path.is_absolute()
+                && stored_path.starts_with(&attachment_dir)
+                && !stored_path.starts_with(&media_dir)));
+        assert!(stored_paths.iter().any(|stored_path| stored_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with("-upload.bin"))));
+        let stored_contents = stored_paths
+            .iter()
+            .map(fs::read)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(stored_contents.iter().any(|content| content == b"hi"));
+        assert!(stored_contents.iter().any(|content| content == b"ID3"));
+
+        let upload_path = adapter.persist_uploaded_file(Some("note.txt"), b"uploaded")?;
+        let upload_path = PathBuf::from(upload_path);
+        assert!(upload_path.is_absolute());
+        assert!(upload_path.starts_with(&attachment_dir));
+        assert!(upload_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with("-note.txt")));
+        assert_eq!(fs::read_to_string(upload_path)?, "uploaded");
 
         let error = adapter
             .persist_media_data_urls(&["data:text/plain;base64,%%%".to_owned()])
             .expect_err("malformed data URL should fail");
         assert_eq!(error.status, 415);
         assert_eq!(error.error_type, "unsupported_media_type");
+        assert!(!error.message.contains("%%%"));
 
         let error = adapter
             .persist_media_data_urls(&["data:application/x-sh;base64,aGk=".to_owned()])
@@ -18590,6 +20218,7 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
+        let media_root = root.path().join("data").join("media");
         let media_dir = root.path().join("data").join("media").join("api");
         fs::create_dir_all(&workspace)?;
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -18602,6 +20231,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: captured.clone(),
                 response: LlmResponse {
@@ -18659,17 +20289,22 @@ mod tests {
         );
         let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
         assert_eq!(requests.len(), 1);
-        assert!(requests[0].messages.iter().any(|message| {
-            message
-                .get("content")
-                .and_then(Value::as_str)
-                .is_some_and(|content| {
-                    content.contains("Channel: websocket")
-                        && content.contains("Chat ID: chat-b")
-                        && content.contains("hello from websocket")
-                })
-        }));
-        assert_eq!(fs::read_dir(&media_dir)?.count(), 1);
+        let request_json = serde_json::to_string(&requests[0].messages)?;
+        assert!(request_json.contains("Channel: websocket"));
+        assert!(request_json.contains("Chat ID: chat-b"));
+        assert!(request_json.contains("hello from websocket"));
+        assert!(request_json.contains("[attachment:included_text]"));
+        assert!(request_json.contains("hi"));
+        let attachment_dir = media_root.join("attachments").join("websocket");
+        let stored_files = fs::read_dir(&attachment_dir)?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(stored_files.len(), 1);
+        assert!(stored_files[0]
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with("-a.txt")));
+        assert_eq!(fs::read_to_string(stored_files[0].path())?, "hi");
+        assert!(fs::read_dir(&media_dir).is_err());
         let session = SessionManager::new(&workspace)?
             .load_existing("websocket:chat-b")
             .ok_or("websocket session missing")?;
@@ -18685,6 +20320,7 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
+        let media_root = root.path().join("data").join("media");
         let media_dir = root.path().join("data").join("media").join("api");
         fs::create_dir_all(&workspace)?;
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -18697,6 +20333,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: captured.clone(),
                 response: LlmResponse {
@@ -18744,6 +20381,8 @@ mod tests {
 
         assert_eq!(error.status, 415);
         assert_eq!(error.error_type, "unsupported_media_type");
+        assert!(!error.message.contains("%%%"));
+        assert!(fs::read_dir(media_root.join("attachments").join("websocket")).is_err());
         assert!(fs::read_dir(&media_dir).is_err());
         assert!(captured
             .lock()
@@ -18768,6 +20407,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(StreamingProviderClient {
                 captured: captured.clone(),
                 response: LlmResponse {
@@ -18854,6 +20494,7 @@ mod tests {
             provider_id: "openai".to_owned(),
             defaults: AgentDefaults::default(),
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse::default(),
@@ -18936,6 +20577,7 @@ mod tests {
             provider_id: "openai".to_owned(),
             defaults: AgentDefaults::default(),
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: captured.clone(),
                 response: LlmResponse::default(),
@@ -19011,6 +20653,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: captured.clone(),
                 response: LlmResponse {
@@ -19096,6 +20739,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: captured.clone(),
                 response: LlmResponse {
@@ -19177,6 +20821,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(SequentialProviderClient {
                 captured: captured.clone(),
                 responses: Mutex::new(VecDeque::from([
@@ -19260,6 +20905,7 @@ mod tests {
                     ..AgentDefaults::default()
                 },
                 resolved_model: "gpt-5".to_owned(),
+                native_image_input_supported: true,
                 client: Arc::new(FakeProviderClient {
                     captured: captured.clone(),
                     response: LlmResponse {
@@ -19340,6 +20986,7 @@ mod tests {
                     ..AgentDefaults::default()
                 },
                 resolved_model: "gpt-5".to_owned(),
+                native_image_input_supported: true,
                 client: Arc::new(FakeProviderClient {
                     captured: Arc::new(Mutex::new(Vec::new())),
                     response: LlmResponse {
@@ -19425,6 +21072,7 @@ mod tests {
                     ..AgentDefaults::default()
                 },
                 resolved_model: "gpt-5".to_owned(),
+                native_image_input_supported: true,
                 client: Arc::new(FakeProviderClient {
                     captured: Arc::new(Mutex::new(Vec::new())),
                     response: LlmResponse {
@@ -19506,6 +21154,7 @@ mod tests {
                     ..AgentDefaults::default()
                 },
                 resolved_model: "gpt-5".to_owned(),
+                native_image_input_supported: true,
                 client: Arc::new(StreamingProviderClient {
                     captured: Arc::new(Mutex::new(Vec::new())),
                     response: LlmResponse {
@@ -19706,6 +21355,7 @@ mod tests {
                     ..AgentDefaults::default()
                 },
                 resolved_model: "gpt-5".to_owned(),
+                native_image_input_supported: true,
                 client: Arc::new(StreamingProviderClient {
                     captured: Arc::new(Mutex::new(Vec::new())),
                     response: LlmResponse {
@@ -19898,6 +21548,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse {
@@ -19975,6 +21626,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse {
@@ -20084,6 +21736,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse {
@@ -20177,6 +21830,7 @@ mod tests {
                 ..AgentDefaults::default()
             },
             resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
             client: Arc::new(FakeProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
                 response: LlmResponse {
@@ -20678,6 +22332,54 @@ mod tests {
         };
         assert_eq!(outcome.created_files, ["AGENTS.md"]);
         assert_eq!(outcome.created_dirs, ["skills"]);
+    }
+
+    fn external_media_test_adapter(
+        root: &Path,
+        captured: Arc<Mutex<Vec<ProviderRequest>>>,
+    ) -> Result<AgentLoopChatCompletionAdapter, Box<dyn Error>> {
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        Ok(AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 1,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
+            client: Arc::new(FakeProviderClient {
+                captured,
+                response: LlmResponse {
+                    content: Some("ok".to_owned()),
+                    finish_reason: "stop".to_owned(),
+                    ..LlmResponse::default()
+                },
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir: root.join("data").join("media").join("api"),
+            tools: ToolRegistry::new(),
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: false,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            runtime_verbose: false,
+            tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
+        })
     }
 
     struct FakeProviderClient {

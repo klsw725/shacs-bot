@@ -462,8 +462,14 @@ fn whatsapp_bridge_normalizes_auth_dedupe_group_policy_media_and_outbound_frames
     assert_eq!(inbound.channel, WHATSAPP_CHANNEL);
     assert_eq!(inbound.sender_id, "+8210");
     assert_eq!(inbound.chat_id, "120@g.us");
-    assert!(inbound.content.contains("[image: /tmp/photo.jpg]"));
-    assert!(inbound.content.contains("[file: /tmp/doc.pdf]"));
+    assert!(inbound.content.contains("[image attachment]"));
+    assert!(inbound.content.contains("[file attachment]"));
+    assert!(!inbound.content.contains("/tmp/photo.jpg"));
+    assert!(!inbound.content.contains("/tmp/doc.pdf"));
+    assert_eq!(
+        inbound.media,
+        vec!["/tmp/photo.jpg".to_owned(), "/tmp/doc.pdf".to_owned()]
+    );
     assert_eq!(inbound.metadata["phone"], "+8210");
 
     let duplicate = normalize_whatsapp_bridge_message(

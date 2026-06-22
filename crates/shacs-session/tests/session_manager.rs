@@ -38,7 +38,11 @@ fn session_manager_saves_loads_metadata_and_history() -> Result<(), Box<dyn Erro
         || !history[1]["content"]
             .as_str()
             .unwrap_or_default()
-            .contains("[image: image.png]")
+            .contains("[attachment omitted from history]")
+        || history[1]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("image.png")
     {
         return Err(format!(
             "session persistence/history drifted: loaded={loaded:?} history={history:?}"
