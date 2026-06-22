@@ -73,6 +73,14 @@ fn is_supported_data_url_mime_type(mime_type: &str) -> bool {
             | "text/plain"
             | "application/json"
             | "application/pdf"
+            | "audio/mpeg"
+            | "audio/mp3"
+            | "audio/wav"
+            | "audio/ogg"
+            | "audio/mp4"
+            | "video/mp4"
+            | "video/webm"
+            | "video/quicktime"
     )
 }
 
@@ -85,6 +93,13 @@ fn guess_extension(mime_type: &str) -> &'static str {
         "text/plain" => ".txt",
         "application/json" => ".json",
         "application/pdf" => ".pdf",
+        "audio/mpeg" | "audio/mp3" => ".mp3",
+        "audio/wav" => ".wav",
+        "audio/ogg" => ".ogg",
+        "audio/mp4" => ".m4a",
+        "video/mp4" => ".mp4",
+        "video/webm" => ".webm",
+        "video/quicktime" => ".mov",
         _ => ".bin",
     }
 }
@@ -124,6 +139,24 @@ mod tests {
             save_base64_data_url("data:image/png;base64,aGk=", &dir, Some(1)),
             Err(MediaDecodeError::FileSizeExceeded { limit: 1 })
         );
+    }
+
+    #[test]
+    fn saves_video_data_urls_with_video_extensions() {
+        let dir = tempfile_dir();
+        let cases = [
+            ("data:video/mp4;base64,aGk=", ".mp4"),
+            ("data:video/webm;base64,aGk=", ".webm"),
+            ("data:video/quicktime;base64,aGk=", ".mov"),
+        ];
+
+        for (data_url, extension) in cases {
+            let saved = save_base64_data_url(data_url, &dir, None)
+                .expect("decode ok")
+                .expect("saved path");
+            assert!(saved.ends_with(extension), "saved path: {saved}");
+            assert_eq!(fs::read(saved).expect("read saved"), b"hi");
+        }
     }
 
     fn tempfile_dir() -> std::path::PathBuf {
