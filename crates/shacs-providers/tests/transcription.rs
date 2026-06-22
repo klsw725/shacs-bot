@@ -107,6 +107,13 @@ fn groq_transcription_client_posts_file_and_returns_text() -> Result<(), Box<dyn
     let parts = captured.first().ok_or("missing transcription request")?;
     let body = String::from_utf8_lossy(&parts.body);
     if text != "안녕하세요"
+        || !body.contains("name=\"file\"; filename=\"audio-upload.bin\"")
+        || body.contains(
+            audio_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+        )
         || !body.contains("name=\"model\"\r\n\r\nwhisper-large-v3")
         || !body.contains("name=\"language\"\r\n\r\nko")
         || !body.contains("short greeting")
@@ -138,6 +145,25 @@ fn parse_transcription_error_preserves_retryability_and_message() -> Result<(), 
             && retryable
             && headers.get("retry-after").map(String::as_str) == Some("2") => {}
         other => return Err(format!("unexpected transcription error: {other:?}").into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn parse_transcription_response_rejects_oversized_body() -> Result<(), Box<dyn Error>> {
+    let error = match parse_transcription_response(AudioTranscriptionHttpResponse {
+        status: 200,
+        headers: BTreeMap::new(),
+        body: "a".repeat(1024 * 1024 + 1),
+    }) {
+        Ok(value) => return Err(format!("expected oversized error, got {value:?}").into()),
+        Err(error) => error,
+    };
+    match error {
+        ProviderError::Api { message, body, .. }
+            if message == "transcription provider response exceeded size limit"
+                && body.is_none() => {}
+        other => return Err(format!("unexpected oversized response error: {other:?}").into()),
     }
     Ok(())
 }
