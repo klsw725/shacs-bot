@@ -1,9 +1,11 @@
 use serde_json::{json, Value};
 use shacs_core::runtime::{
     dispatch_bridge_tool_call, dispatch_bridge_tool_calls, ActionNormalizationError,
-    ActionNormalizationState, ContainmentSnapshotRef, PermissionMode, PermissionModeSnapshot,
-    PermissionedActionOrigin, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
-    RuntimeToolExecutor, ToolExecutionContext,
+    ActionNormalizationState, ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef,
+    DockerContainmentSnapshot, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
+    PermissionRuleInput, PermissionedActionOrigin, ProcExecSummary, RuntimeBoundaryOrigin,
+    RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutor, SafetyCapability,
+    ToolExecutionContext,
 };
 use shacs_core::tools::{
     AskUserTool, CronTool, DeferredToolCatalog, DeferredToolCatalogEntry, JsonMap, MessageTool,
@@ -72,11 +74,37 @@ impl Tool for CountingTool {
     }
 }
 
+struct ProcExecCountingTool {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Tool for ProcExecCountingTool {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn description(&self) -> &str {
+        "Count proc exec attempts."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("command", StringSchema::new("Command"))
+            .required(["command"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "executed".into()
+    }
+}
+
 struct JsonTool;
 
 impl Tool for JsonTool {
     fn name(&self) -> &str {
-        "json_tool"
+        "mcp_json_tool"
     }
 
     fn description(&self) -> &str {
@@ -96,7 +124,7 @@ struct ErrorTool;
 
 impl Tool for ErrorTool {
     fn name(&self) -> &str {
-        "error_tool"
+        "mcp_error_tool"
     }
 
     fn description(&self) -> &str {
@@ -121,6 +149,11 @@ struct DelayTool {
 }
 
 struct NamedRepeatTool(&'static str);
+
+struct NamedCountingTool {
+    name: &'static str,
+    calls: Arc<AtomicUsize>,
+}
 
 impl Tool for NamedRepeatTool {
     fn name(&self) -> &str {
@@ -149,6 +182,25 @@ impl Tool for NamedRepeatTool {
             .unwrap_or_default();
         let times = params.get("times").and_then(Value::as_u64).unwrap_or(1);
         ToolResult::Text(text.repeat(times as usize))
+    }
+}
+
+impl Tool for NamedCountingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Count executions."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new().to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "counted".into()
     }
 }
 
@@ -227,6 +279,79 @@ impl Tool for DelayTool {
     }
 }
 
+fn confirmed_containment_ref() -> ContainmentSnapshotRef {
+    ContainmentSnapshotRef {
+        contained: Some(true),
+        digest: Some("test-contained".to_owned()),
+        summary: Some("non-privileged test containment".to_owned()),
+    }
+}
+
+fn confirmed_containment() -> DockerContainmentSnapshot {
+    DockerContainmentSnapshot {
+        contained: Some(true),
+        runtime: ContainerRuntimeKind::Docker,
+        root_user: Some(false),
+        privileged: Some(false),
+        host_mounts_summary: Vec::new(),
+        network_mode: ContainerNetworkMode::None,
+        digest: Some("test-contained".to_owned()),
+        summary: Some("non-privileged test containment".to_owned()),
+    }
+}
+
+fn safe_proc_exec_rule_input() -> PermissionRuleInput {
+    PermissionRuleInput {
+        containment: confirmed_containment(),
+        protected_targets: Vec::new(),
+        proc_exec_summary: Some(ProcExecSummary {
+            command_family: "test".to_owned(),
+            target_refs: Vec::new(),
+            destructive: false,
+            network: false,
+            secret_exposure: false,
+            summary_available: true,
+        }),
+    }
+}
+
+fn safe_mcp_tool_context() -> ToolExecutionContext {
+    ToolExecutionContext {
+        containment_snapshot: Some(confirmed_containment_ref()),
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("runtime_test".to_owned()),
+            scope_ref: None,
+        },
+        permission_rule_input: safe_proc_exec_rule_input(),
+        ..ToolExecutionContext::default()
+    }
+}
+
+fn permissive_local_tool_context() -> ToolExecutionContext {
+    ToolExecutionContext {
+        containment_snapshot: Some(confirmed_containment_ref()),
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("runtime_test".to_owned()),
+            scope_ref: None,
+        },
+        permission_rule_input: safe_proc_exec_rule_input(),
+        ..ToolExecutionContext::default()
+    }
+}
+
+fn restrictive_read_only_ceiling() -> PermissionCeilingSnapshot {
+    PermissionCeilingSnapshot {
+        parent_mode: PermissionMode::Default,
+        capability_ceiling: vec![SafetyCapability::FsRead],
+        approved_scope_refs: Vec::new(),
+        origin: RuntimeBoundaryOrigin::Subagent {
+            subagent_id: Some("child-1".to_owned()),
+        },
+    }
+}
+
 fn record_max(target: &AtomicUsize, value: usize) {
     let mut observed = target.load(Ordering::SeqCst);
     while observed < value {
@@ -238,18 +363,242 @@ fn record_max(target: &AtomicUsize, value: usize) {
 }
 
 #[test]
+fn runtime_denies_direct_proc_exec_without_executing_tool() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        ..ToolExecutionContext::default()
+    };
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-call",
+            "exec",
+            json!({ "command": "cargo test" }),
+        )],
+        &context,
+    );
+
+    let message = report
+        .messages
+        .first()
+        .ok_or("missing permission message")?;
+    if calls.load(Ordering::SeqCst) != 0
+        || report.interrupt.is_some()
+        || message.tool_call_id != "exec-call"
+        || message.name != "exec"
+        || !(message.content.contains("Permission denied")
+            || message.content.contains("Permission approval required"))
+    {
+        return Err(format!(
+            "direct proc_exec should be blocked before execution: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_enforces_inherited_ceiling_before_direct_tool_execution() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let mut context = safe_mcp_tool_context();
+    context.permission_ceiling_snapshot = Some(restrictive_read_only_ceiling());
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-call",
+            "exec",
+            json!({ "command": "cargo test" }),
+        )],
+        &context,
+    );
+
+    let message = report
+        .messages
+        .first()
+        .ok_or("missing inherited ceiling denial")?;
+    if calls.load(Ordering::SeqCst) != 0
+        || message.tool_call_id != "exec-call"
+        || !message.content.contains("CeilingViolation")
+        || !report
+            .permissioned_actions
+            .first()
+            .is_some_and(|action| action.tool_name == "exec")
+    {
+        return Err(format!(
+            "inherited ceiling did not block direct exec: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn bridge_denies_deferred_proc_exec_without_executing_underlying_tool() -> Result<(), Box<dyn Error>>
+{
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let exec_schema = registry
+        .definitions()
+        .into_iter()
+        .next()
+        .ok_or("missing exec schema")?;
+    let catalog = DeferredToolCatalog::new(
+        vec![DeferredToolCatalogEntry {
+            name: "exec".to_owned(),
+            description: "Deferred proc exec".to_owned(),
+            parameter_names: vec!["command".to_owned()],
+            full_schema: exec_schema,
+            source_kind: "parent_only".to_owned(),
+            source_name: "runtime".to_owned(),
+        }],
+        2,
+        4,
+    );
+
+    let report = dispatch_bridge_tool_call(
+        RuntimeToolCall::new(
+            "bridge-exec",
+            "tool_call",
+            json!({ "name": "exec", "arguments": { "command": "cargo test" } }),
+        ),
+        Some(&catalog),
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+    );
+
+    let messages = report.messages();
+    let message = messages
+        .first()
+        .ok_or("missing bridge permission message")?;
+    if calls.load(Ordering::SeqCst) != 0
+        || report.interrupt.is_some()
+        || message.tool_call_id != "bridge-exec"
+        || message.name != "tool_call"
+        || !(message.content.contains("Permission denied")
+            || message.content.contains("Permission approval required"))
+        || report
+            .permissioned_actions
+            .first()
+            .map(|action| &action.origin)
+            .is_none()
+    {
+        return Err(format!(
+            "deferred proc_exec should be blocked before execution: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    match &report.permissioned_actions[0].origin {
+        PermissionedActionOrigin::DeferredBridge { bridge_name, .. }
+            if bridge_name == "tool_call" => {}
+        other => return Err(format!("deferred policy evaluated wrong origin: {other:?}").into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_enforces_inherited_ceiling_before_deferred_tool_execution() -> Result<(), Box<dyn Error>>
+{
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let exec_schema = registry
+        .definitions()
+        .into_iter()
+        .next()
+        .ok_or("missing exec schema")?;
+    let catalog = DeferredToolCatalog::new(
+        vec![DeferredToolCatalogEntry {
+            name: "exec".to_owned(),
+            description: "Deferred proc exec".to_owned(),
+            parameter_names: vec!["command".to_owned()],
+            full_schema: exec_schema,
+            source_kind: "parent_only".to_owned(),
+            source_name: "runtime".to_owned(),
+        }],
+        2,
+        4,
+    );
+    let mut context = safe_mcp_tool_context();
+    context.permission_ceiling_snapshot = Some(restrictive_read_only_ceiling());
+
+    let report = dispatch_bridge_tool_call(
+        RuntimeToolCall::new(
+            "bridge-exec",
+            "tool_call",
+            json!({ "name": "exec", "arguments": { "command": "cargo test" } }),
+        ),
+        Some(&catalog),
+        &registry,
+        &executor,
+        &context,
+    );
+
+    let message = report
+        .messages()
+        .first()
+        .ok_or("missing deferred inherited ceiling denial")?
+        .clone();
+    if calls.load(Ordering::SeqCst) != 0
+        || message.tool_call_id != "bridge-exec"
+        || !message.content.contains("CeilingViolation")
+        || !report
+            .permissioned_actions
+            .first()
+            .is_some_and(|action| action.tool_name == "exec")
+    {
+        return Err(format!(
+            "inherited ceiling did not block deferred exec: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn runtime_executes_tool_calls_and_maps_result_messages() -> Result<(), Box<dyn Error>> {
     let mut registry = ToolRegistry::new();
-    registry.register(RepeatTool);
+    registry.register(NamedRepeatTool("mcp_repeat"));
     registry.register(JsonTool);
 
     let executor = RuntimeToolExecutor::new(&registry);
+    let context = permissive_local_tool_context();
     let report = executor.execute_tool_calls(
         vec![
-            RuntimeToolCall::new("call_repeat", "repeat", json!({ "text": 42, "times": "2" })),
-            RuntimeToolCall::new("call_json", "json_tool", json!({})),
+            RuntimeToolCall::new(
+                "call_repeat",
+                "mcp_repeat",
+                json!({ "text": 42, "times": "2" }),
+            ),
+            RuntimeToolCall::new("call_json", "mcp_json_tool", json!({})),
         ],
-        &ToolExecutionContext::default(),
+        &context,
     );
 
     if report.interrupt.is_some() || !report.skipped_tool_calls.is_empty() {
@@ -262,7 +611,7 @@ fn runtime_executes_tool_calls_and_maps_result_messages() -> Result<(), Box<dyn 
             != json!({
                 "role": "tool",
                 "tool_call_id": "call_json",
-                "name": "json_tool",
+                "name": "mcp_json_tool",
                 "content": "{\"ok\":true}"
             })
     {
@@ -309,30 +658,28 @@ fn runtime_assistant_tool_call_message_uses_openai_argument_string() -> Result<(
 fn runtime_returns_tool_errors_without_stopping_batch() -> Result<(), Box<dyn Error>> {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
-    registry.register(CountingTool {
+    registry.register(NamedCountingTool {
+        name: "mcp_count",
         calls: calls.clone(),
     });
 
     let executor = RuntimeToolExecutor::new(&registry);
+    let context = permissive_local_tool_context();
     let report = executor.execute_tool_calls(
         vec![
             RuntimeToolCall::new("missing", "missing_tool", json!({})),
-            RuntimeToolCall::new("count", "count", json!({})),
+            RuntimeToolCall::new("count", "mcp_count", json!({})),
         ],
-        &ToolExecutionContext::default(),
+        &context,
     );
 
     if report.messages.len() != 2
-        || !report.messages[0]
-            .content
-            .contains("Error: Tool 'missing_tool' not found")
-        || !report.messages[0]
-            .content
-            .contains("[Analyze the error above and try a different approach.]")
+        || !report.messages[0].content.contains("Permission denied")
+        || !report.messages[0].content.contains("StaticDeny")
         || report.messages[1].content != "counted"
         || calls.load(Ordering::SeqCst) != 1
     {
-        return Err(format!("runtime did not preserve tool error behavior: {report:?}").into());
+        return Err(format!("runtime did not preserve fail-closed behavior: {report:?}").into());
     }
     if report.permissioned_actions.len() != 2
         || report.permissioned_actions[0].tool_name != "missing_tool"
@@ -343,7 +690,7 @@ fn runtime_returns_tool_errors_without_stopping_batch() -> Result<(), Box<dyn Er
             .contains(&ActionNormalizationError::UnknownTool {
                 tool_name: "missing_tool".to_owned(),
             })
-        || report.permissioned_actions[1].tool_name != "count"
+        || report.permissioned_actions[1].tool_name != "mcp_count"
         || report.permissioned_actions[1].normalization_state != ActionNormalizationState::Ready
     {
         return Err(format!("runtime did not report pre-execution actions: {report:?}").into());
@@ -357,9 +704,10 @@ fn runtime_appends_retry_hint_to_executed_tool_errors() -> Result<(), Box<dyn Er
     registry.register(ErrorTool);
 
     let executor = RuntimeToolExecutor::new(&registry);
+    let context = permissive_local_tool_context();
     let report = executor.execute_tool_calls(
-        vec![RuntimeToolCall::new("error", "error_tool", json!({}))],
-        &ToolExecutionContext::default(),
+        vec![RuntimeToolCall::new("error", "mcp_error_tool", json!({}))],
+        &context,
     );
 
     if report.messages.len() != 1
@@ -378,25 +726,26 @@ fn runtime_batches_only_concurrency_safe_tools_when_enabled() -> Result<(), Box<
     let sequential_calls = Arc::new(AtomicUsize::new(0));
     let mut sequential_registry = ToolRegistry::new();
     sequential_registry.register(DelayTool::new(
-        "safe_a",
+        "mcp_safe_a",
         true,
         sequential_active.clone(),
         sequential_max.clone(),
         sequential_calls.clone(),
     ));
     sequential_registry.register(DelayTool::new(
-        "safe_b",
+        "mcp_safe_b",
         true,
         sequential_active,
         sequential_max.clone(),
         sequential_calls.clone(),
     ));
+    let context = permissive_local_tool_context();
     let sequential = RuntimeToolExecutor::new(&sequential_registry).execute_tool_calls(
         vec![
-            RuntimeToolCall::new("safe-a", "safe_a", json!({})),
-            RuntimeToolCall::new("safe-b", "safe_b", json!({})),
+            RuntimeToolCall::new("safe-a", "mcp_safe_a", json!({})),
+            RuntimeToolCall::new("safe-b", "mcp_safe_b", json!({})),
         ],
-        &ToolExecutionContext::default(),
+        &context,
     );
     if sequential.messages.len() != 2
         || sequential_max.load(Ordering::SeqCst) != 1
@@ -410,28 +759,28 @@ fn runtime_batches_only_concurrency_safe_tools_when_enabled() -> Result<(), Box<
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register(DelayTool::new(
-        "safe_a",
+        "mcp_safe_a",
         true,
         active.clone(),
         max_active.clone(),
         calls.clone(),
     ));
     registry.register(DelayTool::new(
-        "safe_b",
+        "mcp_safe_b",
         true,
         active.clone(),
         max_active.clone(),
         calls.clone(),
     ));
     registry.register(DelayTool::new(
-        "unsafe_tool",
+        "mcp_unsafe_tool",
         false,
         active.clone(),
         max_active.clone(),
         calls.clone(),
     ));
     registry.register(DelayTool::new(
-        "safe_c",
+        "mcp_safe_c",
         true,
         active,
         max_active.clone(),
@@ -440,19 +789,19 @@ fn runtime_batches_only_concurrency_safe_tools_when_enabled() -> Result<(), Box<
 
     let report = RuntimeToolExecutor::new(&registry).execute_tool_calls_concurrent(
         vec![
-            RuntimeToolCall::new("safe-a", "safe_a", json!({})),
-            RuntimeToolCall::new("safe-b", "safe_b", json!({})),
-            RuntimeToolCall::new("unsafe", "unsafe_tool", json!({})),
-            RuntimeToolCall::new("safe-c", "safe_c", json!({})),
+            RuntimeToolCall::new("safe-a", "mcp_safe_a", json!({})),
+            RuntimeToolCall::new("safe-b", "mcp_safe_b", json!({})),
+            RuntimeToolCall::new("unsafe", "mcp_unsafe_tool", json!({})),
+            RuntimeToolCall::new("safe-c", "mcp_safe_c", json!({})),
         ],
-        &ToolExecutionContext::default(),
+        &context,
     );
     let contents = report
         .messages
         .iter()
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>();
-    if contents != ["safe_a", "safe_b", "unsafe_tool", "safe_c"]
+    if contents != ["mcp_safe_a", "mcp_safe_b", "mcp_unsafe_tool", "mcp_safe_c"]
         || max_active.load(Ordering::SeqCst) != 2
         || calls.load(Ordering::SeqCst) != 4
     {
@@ -470,7 +819,7 @@ fn runtime_concurrent_execution_preserves_ask_user_interrupt_boundary() -> Resul
     let after_calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register(DelayTool::new(
-        "safe_before",
+        "mcp_safe_before",
         true,
         active.clone(),
         max_active.clone(),
@@ -478,24 +827,25 @@ fn runtime_concurrent_execution_preserves_ask_user_interrupt_boundary() -> Resul
     ));
     registry.register(AskUserTool::new());
     registry.register(DelayTool::new(
-        "safe_after",
+        "mcp_safe_after",
         true,
         active,
         max_active,
         after_calls.clone(),
     ));
 
+    let context = permissive_local_tool_context();
     let report = RuntimeToolExecutor::new(&registry).execute_tool_calls_concurrent(
         vec![
-            RuntimeToolCall::new("before", "safe_before", json!({})),
+            RuntimeToolCall::new("before", "mcp_safe_before", json!({})),
             RuntimeToolCall::new(
                 "ask",
                 "ask_user",
                 json!({ "question": "Continue?", "options": ["Yes", "No"] }),
             ),
-            RuntimeToolCall::new("after", "safe_after", json!({})),
+            RuntimeToolCall::new("after", "mcp_safe_after", json!({})),
         ],
-        &ToolExecutionContext::default(),
+        &context,
     );
     if report.messages.len() != 1
         || report.messages[0].tool_call_id != "before"
@@ -553,6 +903,49 @@ fn runtime_preserves_ask_user_interrupt_and_skips_later_tools() -> Result<(), Bo
         {
             Ok(())
         }
+        other => Err(format!("unexpected ask_user interrupt: {other:?}").into()),
+    }
+}
+
+#[test]
+fn runtime_ask_user_skips_later_denied_tool_without_permission_message(
+) -> Result<(), Box<dyn Error>> {
+    let exec_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(AskUserTool::new());
+    registry.register(ProcExecCountingTool {
+        calls: exec_calls.clone(),
+    });
+
+    let report = RuntimeToolExecutor::new(&registry).execute_tool_calls(
+        vec![
+            RuntimeToolCall::new(
+                "ask",
+                "ask_user",
+                json!({ "question": "Continue?", "options": ["Yes", "No"] }),
+            ),
+            RuntimeToolCall::new("exec-after", "exec", json!({ "command": "cargo test" })),
+        ],
+        &ToolExecutionContext::default(),
+    );
+
+    if !report.messages.is_empty()
+        || report.skipped_tool_calls.len() != 1
+        || report.skipped_tool_calls[0].id != "exec-after"
+        || report.skipped_tool_calls[0].name != "exec"
+        || exec_calls.load(Ordering::SeqCst) != 0
+        || report
+            .permissioned_actions
+            .iter()
+            .any(|action| action.tool_name == "exec")
+    {
+        return Err(format!(
+            "ask_user should skip later denied tool without pre-emitting permission message: {report:?}"
+        )
+        .into());
+    }
+    match report.interrupt {
+        Some(RuntimeInterrupt::AskUser { tool_call_id, .. }) if tool_call_id == "ask" => Ok(()),
         other => Err(format!("unexpected ask_user interrupt: {other:?}").into()),
     }
 }
@@ -698,6 +1091,7 @@ fn bridge_dispatcher_accepts_object_and_json_string_arguments() -> Result<(), Bo
     registry.register(NamedRepeatTool("mcp_repeat"));
     let executor = RuntimeToolExecutor::new(&registry);
     let catalog = bridge_catalog([("mcp_repeat", "Repeat deferred text", ["text"])]);
+    let context = safe_mcp_tool_context();
     let report = dispatch_bridge_tool_calls(
         vec![
             RuntimeToolCall::new(
@@ -714,7 +1108,7 @@ fn bridge_dispatcher_accepts_object_and_json_string_arguments() -> Result<(), Bo
         Some(&catalog),
         &registry,
         &executor,
-        &ToolExecutionContext::default(),
+        &context,
         false,
     );
 
@@ -910,17 +1304,116 @@ fn bridge_dispatcher_preserves_underlying_validation_error_shape() -> Result<(),
     let message = messages.first().ok_or("missing validation error message")?;
     if message.tool_call_id != "invalid-repeat"
         || message.name != "tool_call"
-        || !message
-            .content
-            .contains("Error: Invalid parameters for tool 'mcp_repeat'")
-        || !message.content.contains("missing required text")
-        || !message
-            .content
-            .contains("[Analyze the error above and try a different approach.]")
+        || !message.content.contains("Permission denied")
+        || !message.content.contains("StaticDeny")
+        || !report.permissioned_actions.first().is_some_and(|action| {
+            action
+                .normalization_errors
+                .iter()
+                .any(|error| matches!(error, ActionNormalizationError::InvalidArguments { .. }))
+        })
     {
-        return Err(format!("validation error shape drifted: {report:?}").into());
+        return Err(format!("validation denial shape drifted: {report:?}").into());
     }
     Ok(())
+}
+
+#[test]
+fn bridge_ask_user_skips_later_denied_tool_without_permission_message() -> Result<(), Box<dyn Error>>
+{
+    let exec_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(DeferredAskTool);
+    registry.register(ProcExecCountingTool {
+        calls: exec_calls.clone(),
+    });
+    let exec_schema = registry
+        .definitions()
+        .into_iter()
+        .find(|schema| {
+            schema
+                .get("function")
+                .and_then(Value::as_object)
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                == Some("exec")
+        })
+        .ok_or("missing exec schema")?;
+    let catalog = DeferredToolCatalog::new(
+        vec![
+            DeferredToolCatalogEntry {
+                name: "mcp_ask_user".to_owned(),
+                description: "Ask deferred question".to_owned(),
+                parameter_names: vec!["question".to_owned()],
+                full_schema: registry
+                    .definitions()
+                    .into_iter()
+                    .find(|schema| {
+                        schema
+                            .get("function")
+                            .and_then(Value::as_object)
+                            .and_then(|function| function.get("name"))
+                            .and_then(Value::as_str)
+                            == Some("mcp_ask_user")
+                    })
+                    .ok_or("missing mcp_ask_user schema")?,
+                source_kind: "mcp_tool".to_owned(),
+                source_name: "ask".to_owned(),
+            },
+            DeferredToolCatalogEntry {
+                name: "exec".to_owned(),
+                description: "Deferred proc exec".to_owned(),
+                parameter_names: vec!["command".to_owned()],
+                full_schema: exec_schema,
+                source_kind: "parent_only".to_owned(),
+                source_name: "runtime".to_owned(),
+            },
+        ],
+        2,
+        4,
+    );
+
+    let report = dispatch_bridge_tool_calls(
+        vec![
+            RuntimeToolCall::new(
+                "ask-bridge",
+                "tool_call",
+                json!({ "name": "mcp_ask_user", "arguments": { "question": "Continue?" } }),
+            ),
+            RuntimeToolCall::new(
+                "exec-bridge",
+                "tool_call",
+                json!({ "name": "exec", "arguments": { "command": "cargo test" } }),
+            ),
+        ],
+        Some(&catalog),
+        &registry,
+        &RuntimeToolExecutor::new(&registry),
+        &safe_mcp_tool_context(),
+        false,
+    );
+
+    if !report.messages().is_empty()
+        || report.skipped_tool_calls.len() != 1
+        || report.skipped_tool_calls[0].id != "exec-bridge"
+        || report.skipped_tool_calls[0].name != "tool_call"
+        || exec_calls.load(Ordering::SeqCst) != 0
+        || report
+            .permissioned_actions
+            .iter()
+            .any(|action| action.tool_name == "exec")
+    {
+        return Err(format!(
+            "bridge ask_user should skip later denied tool without permission message: {report:?}"
+        )
+        .into());
+    }
+    match report.interrupt {
+        Some(RuntimeInterrupt::AskUser {
+            tool_call_id, name, ..
+        }) if tool_call_id == "ask-bridge" && name == "mcp_ask_user" => Ok(()),
+        other => Err(format!("unexpected bridge ask_user interrupt: {other:?}").into()),
+    }
 }
 
 #[test]
@@ -951,7 +1444,7 @@ fn bridge_dispatcher_propagates_ask_user_interrupt() -> Result<(), Box<dyn Error
         Some(&catalog),
         &registry,
         &executor,
-        &ToolExecutionContext::default(),
+        &safe_mcp_tool_context(),
         false,
     );
     if !report.messages().is_empty()
@@ -979,6 +1472,47 @@ fn bridge_dispatcher_propagates_ask_user_interrupt() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn bridge_mcp_ask_user_requires_proc_exec_permission_before_interrupt() -> Result<(), Box<dyn Error>>
+{
+    let mut registry = ToolRegistry::new();
+    registry.register(DeferredAskTool);
+    let executor = RuntimeToolExecutor::new(&registry);
+    let catalog = bridge_catalog([("mcp_ask_user", "Ask deferred question", ["question"])]);
+    let report = dispatch_bridge_tool_call(
+        RuntimeToolCall::new(
+            "ask-bridge",
+            "tool_call",
+            json!({ "name": "mcp_ask_user", "arguments": { "question": "Continue?" } }),
+        ),
+        Some(&catalog),
+        &registry,
+        &executor,
+        &ToolExecutionContext::default(),
+    );
+    let messages = report.messages();
+    let message = messages.first().ok_or("missing permission denial")?;
+    let action = report
+        .permissioned_actions
+        .first()
+        .ok_or("missing permissioned action")?;
+
+    if report.interrupt.is_some()
+        || message.tool_call_id != "ask-bridge"
+        || message.name != "tool_call"
+        || !message.content.contains("Permission denied")
+        || !message.content.contains("StaticAskRequired")
+        || action.tool_name != "mcp_ask_user"
+        || action.capabilities != vec![shacs_core::runtime::SafetyCapability::ProcExec]
+    {
+        return Err(format!(
+            "mcp_ask_user reached interrupt without proc_exec permission: {report:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn bridge_dispatcher_concurrency_uses_underlying_tool_metadata() -> Result<(), Box<dyn Error>> {
     let active = Arc::new(AtomicUsize::new(0));
     let max_active = Arc::new(AtomicUsize::new(0));
@@ -1003,6 +1537,7 @@ fn bridge_dispatcher_concurrency_uses_underlying_tool_metadata() -> Result<(), B
         ("mcp_safe_a", "Safe deferred A", ["unused"]),
         ("mcp_safe_b", "Safe deferred B", ["unused"]),
     ]);
+    let context = safe_mcp_tool_context();
     let report = dispatch_bridge_tool_calls(
         vec![
             RuntimeToolCall::new(
@@ -1019,7 +1554,7 @@ fn bridge_dispatcher_concurrency_uses_underlying_tool_metadata() -> Result<(), B
         Some(&catalog),
         &registry,
         &executor,
-        &ToolExecutionContext::default(),
+        &context,
         true,
     );
     let contents = report
@@ -1100,8 +1635,16 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         message_id: Some("msg-1".to_owned()),
         metadata: json!({ "thread": "alpha" }),
         session_key: Some("session-1".to_owned()),
-        containment_snapshot: None,
-        permission_mode_snapshot: PermissionModeSnapshot::default(),
+        containment_snapshot: Some(confirmed_containment_ref()),
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_rule_input: safe_proc_exec_rule_input(),
+        permission_ceiling_snapshot: None,
+        permission_evaluator: None,
+        permission_interactive: false,
         in_cron_context: false,
         record_channel_delivery: true,
     };
@@ -1151,7 +1694,16 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
             "spawn",
             json!({ "task": "default context" }),
         )],
-        &ToolExecutionContext::default(),
+        &ToolExecutionContext {
+            containment_snapshot: Some(confirmed_containment_ref()),
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: PermissionMode::BypassPermissions,
+                source: Some("test".to_owned()),
+                scope_ref: None,
+            },
+            permission_rule_input: safe_proc_exec_rule_input(),
+            ..ToolExecutionContext::default()
+        },
     );
     let spawned = spawned.lock().map_err(|error| error.to_string())?;
     let Some(default_request) = spawned.get(1) else {
@@ -1187,6 +1739,16 @@ fn runtime_restores_cron_context_guard_after_execution() -> Result<(), Box<dyn E
             channel: "cli".to_owned(),
             chat_id: "direct".to_owned(),
             session_key: Some("cli:direct".to_owned()),
+            containment_snapshot: Some(confirmed_containment_ref()),
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: PermissionMode::BypassPermissions,
+                source: Some("test".to_owned()),
+                scope_ref: None,
+            },
+            permission_rule_input: PermissionRuleInput {
+                containment: confirmed_containment(),
+                ..PermissionRuleInput::default()
+            },
             ..ToolExecutionContext::default()
         },
     );

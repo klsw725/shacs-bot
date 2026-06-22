@@ -1,5 +1,13 @@
 # PRD 003. auto evaluator and mode policy
 
+## 구현 상태
+
+Status: Implemented.
+
+구현 증거는 `crates/shacs-core/src/runtime/permission_policy.rs`, `crates/shacs-core/src/runtime/permission_rules.rs`, `crates/shacs-core/src/runtime/tool_execution.rs`, `crates/shacs-core/src/runtime/tool_search.rs`, `crates/shacs-core/tests/permission_policy.rs`, `crates/shacs-core/tests/runtime.rs`다. 대표 테스트는 `evaluator_uncertainty_and_prompt_injection_never_allow`, `runtime_denies_direct_proc_exec_without_executing_tool`, `bridge_denies_deferred_proc_exec_without_executing_underlying_tool`다.
+
+이 closure는 evaluator verdict를 권한 확정자가 아닌 advisory signal로 소비하는 policy table과 runtime handoff gate를 닫는다. Evaluator provider routing이나 provider-specific trace 구현을 주장하지 않는다.
+
 ## 목표
 
 이 문서는 permission mode, static rule, protected target, auto evaluator verdict를 합성해 최종 `allow | ask | deny` decision을 만드는 runtime policy 기준을 정의한다.

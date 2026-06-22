@@ -2,12 +2,14 @@ use serde_json::{json, Map, Value};
 use shacs_core::runtime::{
     pick_consolidation_boundary, AgentHook, AgentHookContext, AgentRunSpec, AgentRunner,
     AudioContextAnalysis, AudioContextAnalyzer, AudioContextRequest, CompositeHook,
-    ContextBuildRequest, ContextBuilder, Dream, DreamProcessor, InboundMessage, MemoryGitBoundary,
-    MemoryLineAge, MemoryStore, MessageBus, MessageBusError, OutboundMessage,
+    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBuildRequest,
+    ContextBuilder, DockerContainmentSnapshot, Dream, DreamProcessor, InboundMessage,
+    MemoryGitBoundary, MemoryLineAge, MemoryStore, MessageBus, MessageBusError, OutboundMessage,
+    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, ProcExecSummary,
     ProviderArchiveConsolidator, ProviderMemoryConsolidator, Session, SessionHistoryOptions,
     SessionManager, SkillsLoader, StreamDeltaCoalescer, SubagentManager, TokenConsolidationConfig,
-    ToolSearchConfig, ToolSearchMode, VideoContextAnalysis, VideoContextAnalyzer,
-    VideoContextRequest, VideoMetadata,
+    ToolExecutionContext, ToolSearchConfig, ToolSearchMode, VideoContextAnalysis,
+    VideoContextAnalyzer, VideoContextRequest, VideoMetadata,
 };
 use shacs_core::tools::{
     AskUserTool, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters, ToolRegistry,
@@ -1545,12 +1547,12 @@ fn runtime_context_rejects_media_symlink_to_outside_workspace() -> Result<(), Bo
 #[test]
 fn runtime_runner_executes_tool_loop_and_accumulates_usage() -> Result<(), Box<dyn Error>> {
     let mut registry = ToolRegistry::new();
-    registry.register(RepeatTool);
+    registry.register(NamedRepeatTool("web_search"));
     let client = MockProvider::new(vec![
         LlmResponse {
             tool_calls: vec![ToolCallRequest::new(
                 "call_1",
-                "repeat",
+                "web_search",
                 Map::from_iter([("text".to_owned(), json!("ha"))]),
             )],
             finish_reason: "tool_calls".to_owned(),
@@ -1582,6 +1584,7 @@ fn runtime_runner_executes_tool_loop_and_accumulates_usage() -> Result<(), Box<d
         max_search_limit: 1,
     };
     spec.context_window_tokens = Some(8_192);
+    spec.tool_context = safe_mcp_tool_context();
     assert_eq!(
         spec.tool_search_runtime_input().context_window_tokens,
         Some(8_192)
@@ -1595,7 +1598,7 @@ fn runtime_runner_executes_tool_loop_and_accumulates_usage() -> Result<(), Box<d
 
     if result.stop_reason != "completed"
         || result.final_content.as_deref() != Some("done")
-        || result.tools_used != ["repeat"]
+        || result.tools_used != ["web_search"]
         || result.usage.get("prompt_tokens") != Some(&2)
         || result.usage.get("completion_tokens") != Some(&3)
         || result.messages[1]["tool_calls"][0]["function"]["arguments"] != "{\"text\":\"ha\"}"
@@ -1682,6 +1685,7 @@ fn runtime_runner_tool_search_activation_hides_mcp_and_adds_bridge_tools(
         "test-model",
     );
     spec.tool_search = activated_tool_search_config();
+    spec.tool_context = safe_mcp_tool_context();
 
     let result = AgentRunner::new().run(spec)?;
     let requests = client.requests.lock().map_err(|error| error.to_string())?;
@@ -1715,6 +1719,7 @@ fn runtime_runner_tool_search_activation_diagnostics_are_observable() -> Result<
         "test-model",
     );
     spec.tool_search = activated_tool_search_config();
+    spec.tool_context = safe_mcp_tool_context();
 
     let result = AgentRunner::new().run(spec)?;
     let event = result
@@ -1806,6 +1811,7 @@ fn runtime_runner_bridge_events_use_redacted_bounded_evidence() -> Result<(), Bo
     );
     spec.tool_search = activated_tool_search_config();
     spec.max_iterations = 6;
+    spec.tool_context = safe_mcp_tool_context();
 
     let result = AgentRunner::new().run(spec)?;
     let search_event = result
@@ -1924,6 +1930,7 @@ fn runtime_runner_bridge_search_describe_call_roundtrip_completes_turn(
     );
     spec.tool_search = activated_tool_search_config();
     spec.max_iterations = 6;
+    spec.tool_context = safe_mcp_tool_context();
 
     let result = AgentRunner::new().run(spec)?;
     if result.stop_reason != "completed"
@@ -1955,13 +1962,13 @@ fn runtime_runner_bridge_search_describe_call_roundtrip_completes_turn(
 fn runtime_runner_direct_visible_tool_still_executes_with_tool_search_active(
 ) -> Result<(), Box<dyn Error>> {
     let mut registry = ToolRegistry::new();
-    registry.register(RepeatTool);
+    registry.register(NamedRepeatTool("web_search"));
     registry.register(McpEchoTool);
     let client = MockProvider::new(vec![
         LlmResponse {
             tool_calls: vec![ToolCallRequest::new(
                 "direct-repeat",
-                "repeat",
+                "web_search",
                 Map::from_iter([("text".to_owned(), json!("ha"))]),
             )],
             finish_reason: "tool_calls".to_owned(),
@@ -1979,16 +1986,17 @@ fn runtime_runner_direct_visible_tool_still_executes_with_tool_search_active(
         "test-model",
     );
     spec.tool_search = activated_tool_search_config();
+    spec.tool_context = safe_mcp_tool_context();
 
     let result = AgentRunner::new().run(spec)?;
     let requests = client.requests.lock().map_err(|error| error.to_string())?;
     let names = provider_tool_names(requests.first().ok_or("missing provider request")?)?;
     if result.final_content.as_deref() != Some("done")
-        || result.tools_used != ["repeat"]
+        || result.tools_used != ["web_search"]
         || result.messages[2]["tool_call_id"] != "direct-repeat"
-        || result.messages[2]["name"] != "repeat"
+        || result.messages[2]["name"] != "web_search"
         || result.messages[2]["content"] != "haha"
-        || names != ["repeat", "tool_search", "tool_describe", "tool_call"]
+        || names != ["web_search", "tool_search", "tool_describe", "tool_call"]
     {
         return Err(
             format!("direct visible tool path drifted: result={result:?} names={names:?}").into(),
@@ -2119,16 +2127,16 @@ fn runtime_runner_honors_concurrent_tools_flag() -> Result<(), Box<dyn Error>> {
     let max_active = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register(SafeDelayTool::new(
-        "safe_a",
+        "read_file",
         active.clone(),
         max_active.clone(),
     ));
-    registry.register(SafeDelayTool::new("safe_b", active, max_active.clone()));
+    registry.register(SafeDelayTool::new("list_dir", active, max_active.clone()));
     let client = MockProvider::new(vec![
         LlmResponse {
             tool_calls: vec![
-                ToolCallRequest::new("safe-a", "safe_a", Map::new()),
-                ToolCallRequest::new("safe-b", "safe_b", Map::new()),
+                ToolCallRequest::new("safe-a", "read_file", Map::new()),
+                ToolCallRequest::new("safe-b", "list_dir", Map::new()),
             ],
             finish_reason: "tool_calls".to_owned(),
             ..LlmResponse::default()
@@ -2145,12 +2153,13 @@ fn runtime_runner_honors_concurrent_tools_flag() -> Result<(), Box<dyn Error>> {
         "test-model",
     );
     spec.concurrent_tools = true;
+    spec.tool_context = safe_mcp_tool_context();
 
     let result = AgentRunner::new().run(spec)?;
     if result.stop_reason != "completed"
         || result.final_content.as_deref() != Some("done")
-        || result.messages[2]["content"] != "safe_a"
-        || result.messages[3]["content"] != "safe_b"
+        || result.messages[2]["content"] != "read_file"
+        || result.messages[3]["content"] != "list_dir"
         || max_active.load(Ordering::SeqCst) != 2
     {
         return Err(format!("runner did not batch safe tools: {result:?}").into());
@@ -2517,7 +2526,7 @@ fn runtime_runner_checkpoint_uses_normalized_tool_results() -> Result<(), Box<dy
         LlmResponse {
             tool_calls: vec![ToolCallRequest::new(
                 "large-checkpoint",
-                "large_tool",
+                "mcp_large_tool",
                 Map::new(),
             )],
             finish_reason: "tool_calls".to_owned(),
@@ -2539,6 +2548,7 @@ fn runtime_runner_checkpoint_uses_normalized_tool_results() -> Result<(), Box<dy
     spec.workspace = Some(workspace.path().to_path_buf());
     spec.session_key = Some("cli:checkpoint-large".to_owned());
     spec.max_tool_result_chars = 32;
+    spec.tool_context = safe_mcp_tool_context();
     spec.checkpoint_callback = Some(Arc::new(move |checkpoint| {
         if let Ok(mut checkpoints) = checkpoints.lock() {
             checkpoints.push(checkpoint.clone());
@@ -2613,7 +2623,7 @@ fn runtime_runner_prioritizes_fatal_tool_error_before_ask_user() -> Result<(), B
     registry.register(AskUserTool::new());
     let client = MockProvider::new(vec![LlmResponse {
         tool_calls: vec![
-            ToolCallRequest::new("err", "error_tool", Map::new()),
+            ToolCallRequest::new("err", "mcp_error_tool", Map::new()),
             ToolCallRequest::new(
                 "ask",
                 "ask_user",
@@ -2630,6 +2640,7 @@ fn runtime_runner_prioritizes_fatal_tool_error_before_ask_user() -> Result<(), B
         "test",
     );
     spec.fail_on_tool_error = true;
+    spec.tool_context = safe_mcp_tool_context();
 
     let result = AgentRunner::new().run(spec)?;
     if result.stop_reason != "tool_error"
@@ -2735,7 +2746,7 @@ fn runtime_runner_handles_error_empty_length_and_tool_result_governance(
     registry.register(EmptyTool);
 
     let error_client = MockProvider::new(vec![LlmResponse {
-        tool_calls: vec![ToolCallRequest::new("err", "error_tool", Map::new())],
+        tool_calls: vec![ToolCallRequest::new("err", "mcp_error_tool", Map::new())],
         finish_reason: "tool_calls".to_owned(),
         ..LlmResponse::default()
     }]);
@@ -2746,12 +2757,13 @@ fn runtime_runner_handles_error_empty_length_and_tool_result_governance(
         "test",
     );
     error_spec.fail_on_tool_error = true;
+    error_spec.tool_context = safe_mcp_tool_context();
     let error_result = AgentRunner::new().run(error_spec)?;
     if error_result.stop_reason != "tool_error"
         || !error_result
             .tool_events
             .iter()
-            .any(|event| event.name == "error_tool")
+            .any(|event| event.name == "mcp_error_tool")
     {
         return Err(format!("fail_on_tool_error drifted: {error_result:?}").into());
     }
@@ -2759,7 +2771,7 @@ fn runtime_runner_handles_error_empty_length_and_tool_result_governance(
     let workspace = tempfile::tempdir()?;
     let large_client = MockProvider::new(vec![
         LlmResponse {
-            tool_calls: vec![ToolCallRequest::new("large", "large_tool", Map::new())],
+            tool_calls: vec![ToolCallRequest::new("large", "mcp_large_tool", Map::new())],
             finish_reason: "tool_calls".to_owned(),
             ..LlmResponse::default()
         },
@@ -2777,6 +2789,7 @@ fn runtime_runner_handles_error_empty_length_and_tool_result_governance(
     large_spec.workspace = Some(workspace.path().to_path_buf());
     large_spec.session_key = Some("cli:direct".to_owned());
     large_spec.max_tool_result_chars = 32;
+    large_spec.tool_context = safe_mcp_tool_context();
     let large_result = AgentRunner::new().run(large_spec)?;
     let tool_results_dir = workspace.path().join(".nanobot/tool-results");
     let persisted = std::fs::read_dir(&tool_results_dir)?
@@ -2795,7 +2808,7 @@ fn runtime_runner_handles_error_empty_length_and_tool_result_governance(
 
     let empty_tool_client = MockProvider::new(vec![
         LlmResponse {
-            tool_calls: vec![ToolCallRequest::new("empty", "empty_tool", Map::new())],
+            tool_calls: vec![ToolCallRequest::new("empty", "mcp_empty_tool", Map::new())],
             finish_reason: "tool_calls".to_owned(),
             ..LlmResponse::default()
         },
@@ -2804,13 +2817,15 @@ fn runtime_runner_handles_error_empty_length_and_tool_result_governance(
             ..LlmResponse::default()
         },
     ]);
-    let empty_tool_result = AgentRunner::new().run(AgentRunSpec::new(
+    let mut empty_tool_spec = AgentRunSpec::new(
         vec![json!({"role": "user", "content": "go"})],
         &registry,
         &empty_tool_client,
         "test",
-    ))?;
-    if empty_tool_result.messages[2]["content"] != "(empty_tool completed with no output)" {
+    );
+    empty_tool_spec.tool_context = safe_mcp_tool_context();
+    let empty_tool_result = AgentRunner::new().run(empty_tool_spec)?;
+    if empty_tool_result.messages[2]["content"] != "(mcp_empty_tool completed with no output)" {
         return Err(format!("empty tool marker drifted: {empty_tool_result:?}").into());
     }
 
@@ -2932,7 +2947,7 @@ fn runtime_runner_rejects_symlinked_tool_result_directory() -> Result<(), Box<dy
     symlink(outside.path(), workspace.path().join(".nanobot"))?;
     let client = MockProvider::new(vec![
         LlmResponse {
-            tool_calls: vec![ToolCallRequest::new("large", "large_tool", Map::new())],
+            tool_calls: vec![ToolCallRequest::new("large", "mcp_large_tool", Map::new())],
             finish_reason: "tool_calls".to_owned(),
             ..LlmResponse::default()
         },
@@ -2950,6 +2965,7 @@ fn runtime_runner_rejects_symlinked_tool_result_directory() -> Result<(), Box<dy
     spec.workspace = Some(workspace.path().to_path_buf());
     spec.session_key = Some("cli:direct".to_owned());
     spec.max_tool_result_chars = 32;
+    spec.tool_context = safe_mcp_tool_context();
     let result = AgentRunner::new().run(spec)?;
     if result.messages[2]["content"]
         .as_str()
@@ -2966,9 +2982,36 @@ fn runtime_runner_rejects_symlinked_tool_result_directory() -> Result<(), Box<dy
 
 struct RepeatTool;
 
+struct NamedRepeatTool(&'static str);
+
 impl Tool for RepeatTool {
     fn name(&self) -> &str {
         "repeat"
+    }
+
+    fn description(&self) -> &str {
+        "Repeat text."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("text", StringSchema::new("Text"))
+            .required(["text"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, params: JsonMap) -> ToolResult {
+        let text = params
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        ToolResult::Text(text.repeat(2))
+    }
+}
+
+impl Tool for NamedRepeatTool {
+    fn name(&self) -> &str {
+        self.0
     }
 
     fn description(&self) -> &str {
@@ -3051,7 +3094,7 @@ struct ErrorTool;
 
 impl Tool for ErrorTool {
     fn name(&self) -> &str {
-        "error_tool"
+        "mcp_error_tool"
     }
 
     fn description(&self) -> &str {
@@ -3071,7 +3114,7 @@ struct LargeTool;
 
 impl Tool for LargeTool {
     fn name(&self) -> &str {
-        "large_tool"
+        "mcp_large_tool"
     }
 
     fn description(&self) -> &str {
@@ -3120,7 +3163,7 @@ struct SwitchingMcpTool {
 
 impl Tool for EmptyTool {
     fn name(&self) -> &str {
-        "empty_tool"
+        "mcp_empty_tool"
     }
 
     fn description(&self) -> &str {
@@ -3357,6 +3400,43 @@ fn activated_tool_search_config() -> ToolSearchConfig {
         threshold_pct: 0,
         search_default_limit: 2,
         max_search_limit: 4,
+    }
+}
+
+fn safe_mcp_tool_context() -> ToolExecutionContext {
+    ToolExecutionContext {
+        containment_snapshot: Some(ContainmentSnapshotRef {
+            contained: Some(true),
+            digest: Some("test-contained".to_owned()),
+            summary: Some("non-privileged test containment".to_owned()),
+        }),
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("runtime_agent_test".to_owned()),
+            scope_ref: None,
+        },
+        permission_rule_input: PermissionRuleInput {
+            containment: DockerContainmentSnapshot {
+                contained: Some(true),
+                runtime: ContainerRuntimeKind::Docker,
+                root_user: Some(false),
+                privileged: Some(false),
+                host_mounts_summary: Vec::new(),
+                network_mode: ContainerNetworkMode::None,
+                digest: Some("test-contained".to_owned()),
+                summary: Some("non-privileged test containment".to_owned()),
+            },
+            protected_targets: Vec::new(),
+            proc_exec_summary: Some(ProcExecSummary {
+                command_family: "mcp-test".to_owned(),
+                target_refs: Vec::new(),
+                destructive: false,
+                network: false,
+                secret_exposure: false,
+                summary_available: true,
+            }),
+        },
+        ..ToolExecutionContext::default()
     }
 }
 

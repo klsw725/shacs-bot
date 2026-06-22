@@ -1,4 +1,7 @@
-use crate::runtime::tool_execution::permissioned_action_input_from_context;
+use crate::runtime::tool_execution::{
+    permission_block_message, permission_decision_for_action,
+    permissioned_action_input_from_context,
+};
 use crate::runtime::{
     normalize_resolved_deferred_tool_call, PermissionedAction, RuntimeInterrupt, RuntimeToolCall,
     RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext,
@@ -576,30 +579,90 @@ fn flush_pending(
     if pending.is_empty() {
         return false;
     }
-    let tool_calls = pending
+    let all_pending = pending.clone();
+    let mut executable_pending = Vec::new();
+    for entry in pending.iter() {
+        let action = normalize_resolved_deferred_tool_call(
+            executor.registry(),
+            &entry.resolved_call,
+            permissioned_action_input_from_context(context),
+        );
+        let decision = permission_decision_for_action(&action, context);
+        report.permissioned_actions.push(action);
+        report.resolved_calls.push(entry.resolved_call.clone());
+        if !decision.can_handoff_to_tool_runtime {
+            if flush_executable_pending(
+                &mut executable_pending,
+                &all_pending,
+                report,
+                executor,
+                context,
+                concurrent_tools,
+            ) {
+                pending.clear();
+                return true;
+            }
+            report.push_resolved_message(
+                permission_block_message(
+                    &entry.resolved_call.original_call_id,
+                    &entry.bridge_call.bridge_name,
+                    &decision,
+                ),
+                entry.resolved_call.clone(),
+            );
+            continue;
+        }
+        executable_pending.push(entry.clone());
+        if (!concurrent_tools
+            || !can_bridge_batch_concurrently(executor.registry(), &entry.resolved_call))
+            && flush_executable_pending(
+                &mut executable_pending,
+                &all_pending,
+                report,
+                executor,
+                context,
+                concurrent_tools,
+            )
+        {
+            pending.clear();
+            return true;
+        }
+    }
+    let interrupted = flush_executable_pending(
+        &mut executable_pending,
+        &all_pending,
+        report,
+        executor,
+        context,
+        concurrent_tools,
+    );
+    pending.clear();
+    interrupted
+}
+
+fn flush_executable_pending(
+    executable_pending: &mut Vec<PendingResolvedCall>,
+    all_pending: &[PendingResolvedCall],
+    report: &mut BridgeToolExecutionReport,
+    executor: &RuntimeToolExecutor<'_>,
+    context: &ToolExecutionContext,
+    concurrent_tools: bool,
+) -> bool {
+    if executable_pending.is_empty() {
+        return false;
+    }
+    let tool_calls = executable_pending
         .iter()
         .map(|entry| entry.resolved_call.to_runtime_call())
         .collect::<Vec<_>>();
-    report
-        .permissioned_actions
-        .extend(pending.iter().map(|entry| {
-            normalize_resolved_deferred_tool_call(
-                executor.registry(),
-                &entry.resolved_call,
-                permissioned_action_input_from_context(context),
-            )
-        }));
     let runtime_report = if concurrent_tools {
         executor.execute_tool_calls_concurrent(tool_calls, context)
     } else {
         executor.execute_tool_calls(tool_calls, context)
     };
-
-    report
-        .resolved_calls
-        .extend(pending.iter().map(|entry| entry.resolved_call.clone()));
     for message in runtime_report.messages {
-        let Some(pending_call) = pending_call_by_id(pending, &message.tool_call_id) else {
+        let Some(pending_call) = pending_call_by_id(executable_pending, &message.tool_call_id)
+        else {
             report.push_message(message);
             continue;
         };
@@ -612,8 +675,26 @@ fn flush_pending(
             pending_call.resolved_call.clone(),
         );
     }
+    if let Some(interrupt) = runtime_report.interrupt {
+        let interrupt_id = match &interrupt {
+            RuntimeInterrupt::AskUser { tool_call_id, .. } => tool_call_id.as_str(),
+        };
+        if let Some(position) = all_pending
+            .iter()
+            .position(|entry| entry.resolved_call.original_call_id == interrupt_id)
+        {
+            report.skipped_tool_calls.extend(
+                all_pending[position + 1..]
+                    .iter()
+                    .map(|entry| entry.bridge_call.to_runtime_call()),
+            );
+        }
+        report.interrupt = Some(interrupt);
+        executable_pending.clear();
+        return true;
+    }
     for skipped in runtime_report.skipped_tool_calls {
-        if let Some(pending_call) = pending_call_by_id(pending, &skipped.id) {
+        if let Some(pending_call) = pending_call_by_id(executable_pending, &skipped.id) {
             report
                 .skipped_tool_calls
                 .push(pending_call.bridge_call.to_runtime_call());
@@ -621,9 +702,17 @@ fn flush_pending(
             report.skipped_tool_calls.push(skipped);
         }
     }
-    report.interrupt = runtime_report.interrupt;
-    pending.clear();
-    report.interrupt.is_some()
+    executable_pending.clear();
+    false
+}
+
+fn can_bridge_batch_concurrently(
+    registry: &ToolRegistry,
+    resolved_call: &ResolvedDeferredToolCall,
+) -> bool {
+    registry
+        .get(&resolved_call.underlying_name)
+        .is_some_and(|tool| tool.concurrency_safe())
 }
 
 fn pending_call_by_id<'a>(

@@ -1,6 +1,9 @@
 use crate::runtime::{
-    normalize_runtime_tool_call, ContainmentSnapshotRef, PermissionModeSnapshot,
-    PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
+    decide_permission, evaluate_static_rules, normalize_runtime_tool_call, AutoEvaluatorVerdict,
+    ContainmentSnapshotRef, InheritedPermissionContext, PermissionCeilingSnapshot,
+    PermissionModeSnapshot, PermissionPolicyDecision, PermissionPolicyDecisionKind,
+    PermissionPolicyInput, PermissionRuleInput, PermissionedAction, PermissionedActionInput,
+    PermissionedActionOrigin,
 };
 use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
@@ -156,6 +159,14 @@ pub struct ToolExecutionContext {
     pub containment_snapshot: Option<ContainmentSnapshotRef>,
     #[serde(default)]
     pub permission_mode_snapshot: PermissionModeSnapshot,
+    #[serde(default)]
+    pub permission_rule_input: PermissionRuleInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_ceiling_snapshot: Option<PermissionCeilingSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_evaluator: Option<AutoEvaluatorVerdict>,
+    #[serde(default)]
+    pub permission_interactive: bool,
     pub in_cron_context: bool,
     pub record_channel_delivery: bool,
 }
@@ -170,6 +181,10 @@ impl Default for ToolExecutionContext {
             session_key: None,
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            permission_rule_input: PermissionRuleInput::default(),
+            permission_ceiling_snapshot: None,
+            permission_evaluator: None,
+            permission_interactive: false,
             in_cron_context: false,
             record_channel_delivery: false,
         }
@@ -256,50 +271,72 @@ impl<'a> RuntimeToolExecutor<'a> {
         let _guard = AppliedToolContext::apply(&self.context_tools, context);
         let mut messages = Vec::new();
         let all_calls = tool_calls.clone();
-        let permissioned_actions = all_calls
-            .iter()
-            .map(|call| {
-                normalize_runtime_tool_call(
-                    self.registry,
-                    call,
-                    permissioned_action_input_from_context(context),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut pending_batch = Vec::new();
+        let mut permissioned_actions = Vec::new();
 
-        for batch in partition_tool_batches(self.registry, tool_calls, concurrent_tools) {
-            let results = if concurrent_tools && batch.len() > 1 {
-                execute_concurrent_batch(self.registry, &batch)
-            } else {
-                execute_sequential_batch(self.registry, &batch)
-            };
-            for result in results {
-                match result.outcome {
-                    ToolResult::AskUserInterrupt { question, options } => {
-                        return RuntimeToolExecutionReport {
-                            messages,
-                            interrupt: Some(RuntimeInterrupt::AskUser {
-                                tool_call_id: result.call.id,
-                                name: result.call.name,
-                                question,
-                                options,
-                            }),
-                            skipped_tool_calls: all_calls[result.original_index + 1..].to_vec(),
-                            permissioned_actions,
-                        };
-                    }
-                    ToolResult::Text(content) => messages.push(RuntimeToolMessage {
-                        tool_call_id: result.call.id,
-                        name: result.call.name,
-                        content: append_error_hint(content),
-                    }),
-                    ToolResult::Json(value) => messages.push(RuntimeToolMessage {
-                        tool_call_id: result.call.id,
-                        name: result.call.name,
-                        content: value.to_string(),
-                    }),
+        for (original_index, call) in tool_calls.into_iter().enumerate() {
+            let action = normalize_runtime_tool_call(
+                self.registry,
+                &call,
+                permissioned_action_input_from_context(context),
+            );
+            let decision = permission_decision_for_action(&action, context);
+            permissioned_actions.push(action);
+            if !decision.can_handoff_to_tool_runtime {
+                if let Some(report) = flush_allowed_batch(
+                    self.registry,
+                    &mut pending_batch,
+                    concurrent_tools,
+                    &mut messages,
+                    &all_calls,
+                    &permissioned_actions,
+                ) {
+                    return report;
                 }
+                messages.push(permission_block_message(&call.id, &call.name, &decision));
+                continue;
             }
+
+            let entry = IndexedToolCall {
+                original_index,
+                call,
+            };
+            if concurrent_tools && can_batch_concurrently(self.registry, &entry.call) {
+                pending_batch.push(entry);
+                continue;
+            }
+            if let Some(report) = flush_allowed_batch(
+                self.registry,
+                &mut pending_batch,
+                concurrent_tools,
+                &mut messages,
+                &all_calls,
+                &permissioned_actions,
+            ) {
+                return report;
+            }
+            pending_batch.push(entry);
+            if let Some(report) = flush_allowed_batch(
+                self.registry,
+                &mut pending_batch,
+                concurrent_tools,
+                &mut messages,
+                &all_calls,
+                &permissioned_actions,
+            ) {
+                return report;
+            }
+        }
+
+        if let Some(report) = flush_allowed_batch(
+            self.registry,
+            &mut pending_batch,
+            concurrent_tools,
+            &mut messages,
+            &all_calls,
+            &permissioned_actions,
+        ) {
+            return report;
         }
 
         RuntimeToolExecutionReport {
@@ -361,6 +398,56 @@ pub(crate) fn permissioned_action_input_from_context(
     }
 }
 
+pub(crate) fn permission_decision_for_action(
+    action: &PermissionedAction,
+    context: &ToolExecutionContext,
+) -> PermissionPolicyDecision {
+    let static_rule_decision = evaluate_static_rules(action, &context.permission_rule_input);
+    decide_permission(PermissionPolicyInput {
+        action: action.clone(),
+        static_rule_decision,
+        evaluator: context.permission_evaluator.clone(),
+        approval: None,
+        inherited_context: inherited_context_for_action(action, context),
+        interactive: context.permission_interactive,
+    })
+}
+
+fn inherited_context_for_action(
+    action: &PermissionedAction,
+    context: &ToolExecutionContext,
+) -> Option<InheritedPermissionContext> {
+    context
+        .permission_ceiling_snapshot
+        .clone()
+        .map(|ceiling| InheritedPermissionContext {
+            ceiling,
+            requested_mode: action.permission_mode_snapshot.mode,
+            requested_capabilities: action.capabilities.clone(),
+            per_action_evaluation_required: true,
+        })
+}
+
+pub(crate) fn permission_block_message(
+    tool_call_id: &str,
+    name: &str,
+    decision: &PermissionPolicyDecision,
+) -> RuntimeToolMessage {
+    let label = match decision.kind {
+        PermissionPolicyDecisionKind::Allow => "Permission allowed",
+        PermissionPolicyDecisionKind::Ask => "Permission approval required",
+        PermissionPolicyDecisionKind::Deny => "Permission denied",
+    };
+    RuntimeToolMessage {
+        tool_call_id: tool_call_id.to_owned(),
+        name: name.to_owned(),
+        content: format!(
+            "{label}: tool call was not executed (reason: {:?}).",
+            decision.reason
+        ),
+    }
+}
+
 fn non_empty_or(value: &str, fallback: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -382,50 +469,57 @@ struct ToolCallOutcome {
     outcome: ToolResult,
 }
 
-fn partition_tool_batches(
+fn flush_allowed_batch(
     registry: &ToolRegistry,
-    tool_calls: Vec<RuntimeToolCall>,
+    batch: &mut Vec<IndexedToolCall>,
     concurrent_tools: bool,
-) -> Vec<Vec<IndexedToolCall>> {
-    if !concurrent_tools {
-        return tool_calls
-            .into_iter()
-            .enumerate()
-            .map(|(original_index, call)| {
-                vec![IndexedToolCall {
-                    original_index,
-                    call,
-                }]
-            })
-            .collect();
+    messages: &mut Vec<RuntimeToolMessage>,
+    all_calls: &[RuntimeToolCall],
+    permissioned_actions: &[PermissionedAction],
+) -> Option<RuntimeToolExecutionReport> {
+    if batch.is_empty() {
+        return None;
     }
+    let results = if concurrent_tools && batch.len() > 1 {
+        execute_concurrent_batch(registry, batch)
+    } else {
+        execute_sequential_batch(registry, batch)
+    };
+    batch.clear();
+    for result in results {
+        match result.outcome {
+            ToolResult::AskUserInterrupt { question, options } => {
+                return Some(RuntimeToolExecutionReport {
+                    messages: std::mem::take(messages),
+                    interrupt: Some(RuntimeInterrupt::AskUser {
+                        tool_call_id: result.call.id,
+                        name: result.call.name,
+                        question,
+                        options,
+                    }),
+                    skipped_tool_calls: all_calls[result.original_index + 1..].to_vec(),
+                    permissioned_actions: permissioned_actions.to_vec(),
+                });
+            }
+            ToolResult::Text(content) => messages.push(RuntimeToolMessage {
+                tool_call_id: result.call.id,
+                name: result.call.name,
+                content: append_error_hint(content),
+            }),
+            ToolResult::Json(value) => messages.push(RuntimeToolMessage {
+                tool_call_id: result.call.id,
+                name: result.call.name,
+                content: value.to_string(),
+            }),
+        }
+    }
+    None
+}
 
-    let mut batches = Vec::new();
-    let mut current = Vec::new();
-    for (original_index, call) in tool_calls.into_iter().enumerate() {
-        let can_batch = registry
-            .get(&call.name)
-            .is_some_and(|tool| tool.concurrency_safe());
-        if can_batch {
-            current.push(IndexedToolCall {
-                original_index,
-                call,
-            });
-            continue;
-        }
-        if !current.is_empty() {
-            batches.push(current);
-            current = Vec::new();
-        }
-        batches.push(vec![IndexedToolCall {
-            original_index,
-            call,
-        }]);
-    }
-    if !current.is_empty() {
-        batches.push(current);
-    }
-    batches
+fn can_batch_concurrently(registry: &ToolRegistry, call: &RuntimeToolCall) -> bool {
+    registry
+        .get(&call.name)
+        .is_some_and(|tool| tool.concurrency_safe())
 }
 
 fn execute_sequential_batch(

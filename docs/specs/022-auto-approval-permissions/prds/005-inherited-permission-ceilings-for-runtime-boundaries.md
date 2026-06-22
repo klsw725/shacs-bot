@@ -1,5 +1,13 @@
 # PRD 005. inherited permission ceilings for runtime boundaries
 
+## 구현 상태
+
+Status: Implemented.
+
+구현 증거는 `crates/shacs-core/src/runtime/permission_ceiling.rs`, `crates/shacs-core/src/runtime/permission_action.rs`, `crates/shacs-core/src/runtime/tool_execution.rs`, `crates/shacs-core/src/runtime/tool_search.rs`, `crates/shacs-core/tests/permission_policy.rs`, `crates/shacs-core/tests/runtime_loop.rs`다. 대표 테스트는 `inherited_ceiling_cannot_widen_mode_or_capabilities`, `late_results_from_closed_superseded_or_stale_turns_are_not_executable`, `app_declaration_only_and_deferred_gate_bypass_do_not_grant_approval`, `subagent_permissioned_action_context_inherits_snapshots_and_origin`다.
+
+이 closure는 runtime boundary의 permission ceiling과 stale decision reuse rejection을 닫는다. App process 실행, MCP server process 구현, scheduler backend 구현을 주장하지 않는다.
+
 ## 목표
 
 이 문서는 subagent, cron/background run, local API, channel inbound, app task, MCP/deferred tool call이 parent 또는 session permission ceiling을 넓히지 못하게 하는 기준을 정의한다.

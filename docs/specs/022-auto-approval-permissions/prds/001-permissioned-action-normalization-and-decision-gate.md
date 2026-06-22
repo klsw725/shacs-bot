@@ -1,6 +1,6 @@
 # PRD 001. permissioned action normalization and decision gate
 
-Status: Partially implemented. Permissioned action normalization과 digest slice는 구현됐다. Runtime allow/ask/deny policy gate와 formal approval correlation은 아직 open이다.
+Status: Implemented. Permissioned action normalization, digest, direct runtime gate, deferred bridge gate, ask/deny non-execution outcome 연결이 구현됐다.
 
 ## 목표
 
@@ -8,7 +8,7 @@ Status: Partially implemented. Permissioned action normalization과 digest slice
 
 목표는 tool runtime 앞에 단일 decision gate가 소비할 action envelope와 digest를 만드는 것이다.
 
-이 단계는 decision을 최종 실행에 연결하지 않는다. 실제 `allow | ask | deny` 합성은 후속 PRD가 소유한다.
+이 PRD 자체의 초점은 실행 직전 action envelope와 digest다. 최종 `allow | ask | deny` 합성은 PRD 003, formal approval correlation은 PRD 004, runtime 연결은 `tool_execution.rs`와 `tool_search.rs`의 gate가 소비한다.
 
 ## 구현 상태와 증거
 
@@ -17,13 +17,18 @@ Status: Partially implemented. Permissioned action normalization과 digest slice
 1. `PermissionedAction`, `PermissionedActionOrigin`이 정의됐다.
 2. Action digest, argument digest, snapshot digest, redacted argument representation이 구현됐다.
 3. Direct runtime tool call과 deferred bridge normalization이 구현됐다.
-4. `ask_user`는 formal approval이 아니라 별도 user interruption 경로로 남아 있다.
+4. Provider tool execution path가 policy decision을 소비해 `allow`만 실행하고, `ask`와 `deny`는 실행하지 않은 permission outcome으로 반환한다.
+5. `ask_user`는 formal approval이 아니라 별도 user interruption 경로로 남아 있다.
 
 증거 경로는 다음이다.
 
 1. `crates/shacs-core/src/runtime/permission_action.rs`
-2. `crates/shacs-core/tests/permission_action.rs`
-3. `crates/shacs-core/tests/runtime.rs`
+2. `crates/shacs-core/src/runtime/tool_execution.rs`
+3. `crates/shacs-core/src/runtime/tool_search.rs`
+4. `crates/shacs-core/tests/permission_action.rs`
+5. `crates/shacs-core/tests/runtime.rs`
+
+대표 테스트 증거는 `runtime_denies_direct_proc_exec_without_executing_tool`, `bridge_denies_deferred_proc_exec_without_executing_underlying_tool`, `runtime_ask_user_skips_later_denied_tool_without_permission_message`, `bridge_ask_user_skips_later_denied_tool_without_permission_message`다.
 
 ## SPEC 입력
 
@@ -90,7 +95,7 @@ Status: Partially implemented. Permissioned action normalization과 digest slice
 4. Redacted argument digest와 snapshot digest를 계산한다.
 5. Action origin과 target refs를 기록한다.
 6. Decision gate가 action을 후속 policy에 넘길 수 있다.
-7. 이 PRD 단계에서는 실제 tool 실행 behavior가 아직 바뀌지 않는다.
+7. 이 PRD의 envelope와 digest는 runtime policy gate가 소비하며, 최종 실행 여부는 gate decision이 결정한다.
 
 ## 실패 시퀀스
 

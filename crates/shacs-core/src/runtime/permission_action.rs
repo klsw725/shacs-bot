@@ -190,6 +190,12 @@ fn normalize_tool_candidate(
     let redacted_arguments = checked_redacted_arguments(arguments, &mut normalization_errors);
     let argument_digest = digest_json(&redacted_arguments);
     let mut capabilities = infer_capabilities(tool_name);
+    if capabilities.is_empty()
+        && tool_name != "ask_user"
+        && registry.get(tool_name).is_some_and(|tool| tool.read_only())
+    {
+        capabilities.push(SafetyCapability::FsRead);
+    }
     capabilities.sort_by_key(|capability| capability_label(*capability));
     capabilities.dedup();
     let target_refs = target_refs_from_arguments(&redacted_arguments);
@@ -375,8 +381,8 @@ fn infer_capabilities(tool_name: &str) -> Vec<SafetyCapability> {
         "spawn" => vec![SafetyCapability::ProcExec],
         "my" | "self" => vec![SafetyCapability::RuntimeConfigWrite],
         "image_generate" => vec![SafetyCapability::NetOutbound],
+        name if name.starts_with("mcp_") => vec![SafetyCapability::ProcExec],
         "ask_user" => Vec::new(),
-        name if name.starts_with("mcp_") => Vec::new(),
         _ => Vec::new(),
     }
 }
