@@ -55,7 +55,7 @@
 2. 저장 경로는 config data dir 아래 runtime media root의 attachment subtree에만 만들어야 한다.
 3. filesystem path 구성에는 `sanitized_filename` 또는 generated attachment id만 사용해야 한다. `original_filename`은 표시용 metadata로만 유지한다.
 4. 파일명 정규화는 path separator, absolute path, `..`, control character, reserved device name, 지나치게 긴 이름, extension spoofing 위험을 제거하거나 안전한 대체 이름으로 바꿔야 한다.
-5. 임시 파일 생성, 최종 rename, readback metadata 확인은 모두 media root containment를 통과해야 한다.
+5. 파일 생성과 readback metadata 확인은 모두 media root containment를 통과해야 하며, 기존 파일을 덮어쓰면 안 된다.
 6. symlink를 따라 저장하거나 읽으면 안 된다. parent directory도 media root 안에 있고 symlink가 아니어야 한다.
 7. digest는 저장된 bytes 기준 sha256으로 계산하고 stored record에 남겨야 한다.
 8. MIME routing 기준은 detected MIME이어야 한다. declared MIME과 detected MIME이 다르면 mismatch metadata와 diagnostic reason을 남긴다.
@@ -68,21 +68,21 @@
 ## 데이터/상태 모델
 
 1. `ChannelAttachmentIntakeRequest`: session key, turn id, channel, external message id, source display name, original filename, declared MIME, declared byte length, content source, received at.
-2. `StoredAttachment`: attachment id, session key, channel, source display name, original filename, sanitized filename, media root relative path, declared MIME, detected MIME, byte length, sha256, content family, intake status, diagnostic reason, created at.
+2. `StoredAttachment`: attachment id, session key, channel, source display name, original filename, sanitized filename, media root relative path, declared MIME, detected MIME, MIME detection source, MIME mismatch flag, byte length, sha256, content family, intake status, diagnostic reason, created at.
 3. `AttachmentIntakeStatus`: stored, blocked, skipped.
 4. `AttachmentHandoffStatus`: pending, included native, included text, truncated, unsupported, extraction failed, blocked.
 5. `AttachmentLimitPolicy`: max attachment count per message, max bytes per file, max bytes per turn.
 6. `MimeDetectionMetadata`: declared MIME, detected MIME, detection source, mismatch flag, confidence family.
-7. `AttachmentDiagnosticSummary`: attachment id, display name, redacted relative path, byte length, detected MIME, status, reason.
+7. `AttachmentDiagnosticSummary`: attachment id, redacted display name, redacted relative path, byte length, detected MIME, MIME detection source, MIME mismatch flag, status, reason.
 
 ## 정상 시퀀스
 
 1. caller가 channel neutral `ChannelAttachmentIntakeRequest` 목록을 전달한다.
 2. intake service가 message attachment count cap과 turn total byte budget을 확인한다.
 3. 각 item의 original filename을 표시용 값으로 보존하고 sanitized filename 또는 attachment id 기반 저장 이름을 만든다.
-4. bytes를 media root 아래 임시 파일에 쓰며 per file cap을 적용한다.
+4. bytes를 media root 아래 attachment target에 exclusive create 방식으로 쓰며 per file cap을 적용한다.
 5. 저장된 bytes의 sha256과 byte length를 계산한다.
-6. declared MIME과 detected MIME을 기록하고 detected MIME 기준 content family를 정한다.
+6. declared MIME, detected MIME, detection source, mismatch flag를 기록하고 detected MIME 기준 content family를 정한다.
 7. 최종 path가 media root containment를 통과하면 stored attachment record를 만든다.
 8. result는 stored item과 skipped 또는 blocked item을 모두 포함해서 caller에게 반환한다.
 
@@ -100,16 +100,16 @@
 1. original filename에 path traversal과 control character가 있어도 저장 path가 media root 밖으로 나가지 않는지 확인한다.
 2. symlink parent와 symlink target을 통해 media root를 벗어나려는 입력이 blocked 되는지 확인한다.
 3. sha256과 byte length가 저장된 bytes 기준으로 안정적으로 기록되는지 확인한다.
-4. declared MIME과 detected MIME mismatch가 routing metadata와 diagnostics에 남는지 확인한다.
+4. declared MIME과 detected MIME mismatch, detection source가 routing metadata와 diagnostics에 남는지 확인한다.
 5. file size, attachment count, total turn byte cap 초과가 silent drop되지 않는지 확인한다.
 6. diagnostics에 absolute host path, signed URL, bearer token, raw oversized content가 들어가지 않는지 확인한다.
 7. generated media artifact와 inbound stored attachment의 provenance가 구분되는지 확인한다.
 
 ## 현재 구현 상태
 
-2026-06-17 현재 이 PRD 전체는 구현 완료 상태가 아니다. 현재 `shacs-bot`에는 일부 upload/data URL media path를 저장하거나 provider image context로 전달하는 경로가 있지만, channel neutral stored attachment model, media root containment, filename sanitization, digest, MIME detection metadata, size와 count cap, no silent drop status model이 하나의 공통 attachment intake 계약으로 닫혔다고 볼 수 없다.
+2026-06-17 현재 PRD 000의 공통 stored attachment intake 계약은 `shacs-utils::attachments`에 구현되어 있다. 구현된 범위는 channel neutral `ChannelAttachmentIntakeRequest`, `StoredAttachment`, media root relative path 저장, filename sanitization, sha256 digest, MIME detection metadata, size/count/turn byte cap, blocked/skipped/stored status, redacted diagnostic summary다.
 
-이미지 media path 일부 지원은 이 PRD의 전체 저장 계약을 대체하지 않는다. 특히 일반 파일, PDF, Office 문서, unsupported binary, audio, video가 같은 safe storage record를 거쳐 후속 routing으로 들어간다고 주장하면 안 된다.
+다만 이 구현은 bytes가 이미 runtime에 들어온 뒤의 공통 저장 경계다. Slack, Discord, Telegram, Email, WhatsApp bridge, WebSocket, local API별 다운로드와 payload 정규화는 PRD 001 범위이며, image/document/audio/video file context routing은 PRD 002부터 PRD 004 범위다.
 
 ## 완료 기준
 

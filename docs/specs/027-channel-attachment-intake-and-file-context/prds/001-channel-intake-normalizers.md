@@ -103,9 +103,9 @@
 
 ## 현재 구현 상태
 
-2026-06-17 현재 이 PRD 전체는 구현 완료 상태가 아니다. 현재 `shacs-bot`에는 일부 upload/data URL media path를 저장하거나 image media path를 provider context로 전달하는 경로가 있지만, Slack, Discord, Telegram, Email, WhatsApp bridge, WebSocket, local API adapter가 공통 `ChannelAttachmentIntakeRequest`로 bytes와 metadata를 정규화한다고 볼 evidence는 없다.
+2026-06-22 현재 이 PRD의 v1 channel intake normalization 범위는 구현되어 있다. WebSocket/local API data URL media와 upload bytes, Email MIME attachment part, Slack file event, Discord attachment payload, Telegram photo/document/audio/video payload는 PRD 000의 stored attachment intake 경로로 연결된다. WhatsApp bridge media는 message content에 raw path marker를 넣지 않고 media list로만 넘긴다.
 
-현재 구현을 PDF, 문서, audio, video production turn 분석 지원으로 해석하면 안 된다. 문서 utility나 이미지 media path 일부 지원은 channel attachment normalizer 완성을 뜻하지 않는다.
+Slack과 Discord는 channel event 안의 platform attachment URL만 다운로드 대상으로 인정하고, Telegram은 bot API `file_id` 기반 fetch만 attachment source로 인정한다. Raw host path, message text 안의 임의 URL, malformed data URL, failed platform download는 safe projection failure로 남으며 token, signed URL, raw response body는 session/provider context에 남기지 않는다. Content extraction은 여전히 이 PRD가 아니라 PRD 002부터 PRD 004의 책임이며, text/PDF/Office bounded extraction은 PRD 002, audio/video bounded analysis는 PRD 003/004가 소유한다.
 
 ## 완료 기준
 

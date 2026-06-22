@@ -116,9 +116,9 @@
 
 ## 현재 구현 상태
 
-2026-06-17 현재 이 PRD 전체는 구현 완료 상태가 아니다. 현재 `shacs-bot`에 video attachment가 공통 channel intake, safe stored attachment, duration cap, subtitle extraction, audio track transcription, keyframe 또는 scene summary, user facing projection을 거쳐 production turn context에 들어간다고 볼 evidence는 없다.
+2026-06-19 현재 이 PRD는 최소 capability-based runtime route가 구현된 상태다. Video attachment는 common intake, safe stored attachment, detected video family를 통과한 뒤 더 이상 deferred-only note로 끝나지 않는다. Runtime에 `VideoContextAnalyzer`가 주입된 경우 byte/duration cap을 먼저 적용하고, analyzer가 반환한 bounded metadata, subtitles, scene/keyframe summary, component failure status를 untrusted attachment-derived context artifact로 투영한다. Analyzer가 extracted audio track path/reference를 반환하면 PRD 003의 `AudioContextAnalyzer`를 `AudioContextRequest`로 호출해 audio transcript/summary 경로를 재사용한다.
 
-이미지 media path 일부 지원과 문서 utility는 video analysis 구현 evidence가 아니다. 현재 상태에서 video metadata 분석, subtitle extraction, audio track transcription, keyframe, scene summary, inspect projection을 production 지원으로 주장하면 안 된다.
+이 구현은 보수적인 capability hook이다. 기본 ffmpeg, 외부 binary requirement, built-in full codec parser, frame extraction engine, video-specific local API/inspect projection 완성, native outbound video delivery를 제공한다고 주장하지 않는다. Analyzer가 없으면 `video analyzer is not configured` unsupported note를 남기며, analyzer가 반환하지 않은 metadata/subtitle/keyframe/audio-track support를 runtime 기본 기능으로 광고하면 안 된다.
 
 ## 완료 기준
 

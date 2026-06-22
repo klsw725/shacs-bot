@@ -1,6 +1,6 @@
 # channel attachment intake and file context 아키텍처 명세
 
-Status: Draft. 이 문서는 채널로 들어온 사용자 첨부 파일을 안전하게 받아 저장하고, provider 입력에 파일 문맥으로 넘기는 owner boundary를 고정한다.
+Status: Implemented (v1 closure). 이 문서는 채널로 들어온 사용자 첨부 파일을 안전하게 받아 저장하고, provider 입력에 파일 문맥으로 넘기는 owner boundary를 고정한다.
 
 ## 문서 목적
 
@@ -53,7 +53,7 @@ Attachment는 message text와 다르다. Message text는 session user content의
 
 ### stored attachment
 
-Stored attachment는 media root 아래 안전하게 저장되고 digest와 검증 메타데이터를 가진 attachment record다. 이 record는 raw channel payload가 아니며 provider input도 아니다. Runtime은 stored attachment를 기준으로 파일 종류를 판정하고, 추출 또는 provider handoff를 수행한다.
+Stored attachment는 media root 아래 안전하게 저장되고 digest와 검증 메타데이터를 가진 attachment record다. 이 record는 raw channel payload가 아니며 provider input도 아니다. Runtime은 stored attachment record 또는 그 record에서 파생된 media-root-contained stored path reference를 기준으로 파일 종류를 판정하고, 추출 또는 provider handoff를 수행한다. 어떤 형태로 handoff되더라도 readback 단계에서는 media root containment와 symlink guard를 다시 통과해야 한다.
 
 Stored attachment의 최소 의미 필드는 다음과 같다.
 
@@ -200,11 +200,11 @@ v1은 첨부 파일 intake와 runtime context handoff를 닫는 데 집중한다
 
 ## 현재 구현 상태
 
-2026-06-17 현재 이 spec 전체는 구현 완료 상태가 아니다. 현재 `shacs-bot`에는 일부 upload/data URL media path를 저장하거나 전달하는 경로가 있고, `crates/shacs-core/src/runtime/context.rs`의 `build_user_content`는 image media path를 provider context의 image URL block으로 넣을 수 있다. 그러나 같은 경로에서 non-image media path는 공통 production turn context로 분석되거나 추출되어 들어가지 않고 건너뛰어진다.
+2026-06-22 현재 이 spec은 v1 완료 기준으로 구현되어 있다. PRD 000부터 PRD 004까지의 범위에서 common stored attachment intake, channel intake normalization, image/document/unsupported-binary file context routing, audio analyzer capability handoff, video analyzer capability handoff가 연결되어 있다. `crates/shacs-core/src/runtime/context.rs`의 `ContextBuilder`는 configured media root 아래 stored attachment reference를 file context routing layer로 넘기고, 기존 workspace image media path의 image URL block 동작은 기본값으로 유지한다.
 
-`crates/shacs-utils/src/document.rs`에는 text, PDF, Office 계열 문서 추출 helper가 존재한다. 이 helper의 존재는 PDF나 일반 문서 업로드가 채널 첨부 파일로 들어와 common production turn context에 연결됐다는 뜻이 아니다. 현재 상태를 정확히 말하면, 문서 추출에 쓸 수 있는 utility는 있지만 channel attachment intake, safe stored attachment contract, runtime file context routing, user-facing projection이 하나의 제품 경로로 닫히지 않았다.
+`crates/shacs-utils/src/document.rs`의 text, PDF, Office 계열 문서 추출 helper는 PRD 002 routing에서 bounded text/document extraction으로 연결되어 있다. 추출은 best effort이며 OCR, full layout parsing, macro execution, embedded object recursion, archive recursion을 완료 기능으로 선언하지 않는다. Provider/model native image input capability가 없거나 extraction이 실패하거나 unsupported binary가 들어오면 note-only artifact로 남긴다.
 
-따라서 현 구현을 이렇게 해석한다. 이미지는 일부 media path에서 provider image context로 들어갈 수 있다. 일반 파일, PDF, Office 문서, unsupported binary, audio, video는 v1 spec이 요구하는 공통 attachment intake와 file context routing으로 완료됐다고 볼 수 없다. 특히 audio/video의 bounded transcription, summary, metadata, subtitle, keyframe 또는 scene context extraction은 현재 완료 구현으로 주장하지 않는다. 이 문서는 그 gap을 닫기 위한 Draft owner contract다.
+따라서 현 구현을 이렇게 해석한다. Slack/Discord/Telegram은 인증된 channel event가 제공한 platform attachment source만 다운로드 대상으로 삼고, Email MIME part와 WebSocket/local API data URL 또는 upload bytes는 같은 stored attachment intake 경로로 들어간다. WhatsApp bridge media는 bridge가 준 media list를 raw content에 노출하지 않고 media 경로로만 넘긴다. 이미지, 텍스트, PDF, Office 문서, unsupported binary는 PRD 002 범위의 stored attachment routing으로 닫혔다. Audio는 PRD 003 범위에서 analyzer가 주입되면 bounded transcript 또는 summary artifact로 라우팅되고, analyzer missing, unsupported codec, analyzer failure는 user-visible note로 남는다. Video는 PRD 004 최소 범위에서 deferred-only 동작을 벗어나 capability-based analyzer route로 들어간다. Runtime에 video analyzer가 주입된 경우에만 byte/duration cap 이후 bounded metadata, subtitle, scene/keyframe summary, PRD 003 audio analyzer 재사용 결과를 context artifact 후보로 만들며, analyzer missing은 unsupported note로 표시한다. 기본 ffmpeg, built-in full codec support, native outbound video delivery, video-specific inspect/local API projection 완성, 임의 URL 다운로드는 완료 기능으로 주장하지 않는다.
 
 ## 완료 기준
 

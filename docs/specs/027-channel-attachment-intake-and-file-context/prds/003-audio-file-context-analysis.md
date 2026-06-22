@@ -109,9 +109,9 @@
 
 ## 현재 구현 상태
 
-2026-06-17 현재 이 PRD 전체는 구현 완료 상태가 아니다. 현재 `shacs-bot`에 audio attachment가 공통 channel intake, safe stored attachment, duration cap, analyzer capability, bounded transcription 또는 summary artifact를 거쳐 production turn context에 들어간다고 볼 evidence는 없다.
+2026-06-19 현재 이 PRD는 stored audio routing과 analyzer capability abstraction 기준으로 구현되어 있다. Audio attachment는 common intake, safe stored attachment, detected audio family를 거친 뒤 analyzer가 주입되어 있으면 bounded transcript 또는 summary text artifact로 라우팅된다. Analyzer 실행 전 WAV와 단순 MP4/M4A duration metadata는 bounded parser로 확인해 duration cap을 적용하며, duration을 알 수 없는 형식은 policy가 허용할 때만 analyzer로 전달된다. Analyzer가 없으면 analyzer missing unsupported note가 남고, analyzer가 unsupported 또는 failed를 반환하면 attachment-level unsupported 또는 extraction_failed note로 남는다. Core runtime은 `AudioContextAnalyzer` trait와 기존 provider `TranscriptionClient`를 감싸는 analyzer adapter를 제공한다.
 
-이미지 media path 일부 지원과 문서 utility는 audio analysis 구현 evidence가 아니다. 현재 상태에서 audio 파일 전사, 요약, codec 처리, duration 제한을 production 지원으로 주장하면 안 된다.
+구현된 범위는 typed `AudioContextAnalyzer` capability, WAV/단순 MP4/M4A duration cap, context-budget 기반 transcript/summary/language bounding, truncation evidence, untrusted transcript/summary marker다. Full codec metadata reader, diarization, segment model, language detection 완성, 또는 기본 config에서 항상 활성화되는 remote transcription provider를 완료 기능으로 주장하지 않는다. Video 파일에서 분리된 audio track orchestration은 PRD 004 범위로 남는다.
 
 ## 완료 기준
 

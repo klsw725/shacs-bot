@@ -53,7 +53,7 @@
 
 ## 구현 요구사항
 
-1. routing 입력은 PRD 000의 stored attachment record여야 한다. Channel raw payload나 absolute host path를 직접 받으면 안 된다.
+1. routing 입력은 PRD 000의 stored attachment record 또는 그 record에서 파생되어 configured media root 안에서 다시 검증되는 stored attachment reference여야 한다. Channel raw payload나 arbitrary host path를 직접 받으면 안 된다.
 2. routing 기준은 detected MIME과 content family여야 한다. declared MIME은 mismatch 설명에만 쓴다.
 3. 이미지 family는 provider와 model이 native image input을 지원할 때만 native image block으로 들어간다.
 4. provider가 native image input을 지원하지 않으면 image note only artifact를 만들고 이미지를 분석한 것처럼 provider에게 말하지 않는다.
@@ -68,7 +68,7 @@
 
 ## 데이터/상태 모델
 
-1. `FileContextRoutingInput`: stored attachment, provider capability snapshot, context budget, runtime policy.
+1. `FileContextRoutingInput`: stored attachment 또는 media-root-contained stored attachment reference, provider capability snapshot, context budget, runtime policy.
 2. `FileContextArtifact`: attachment id, artifact kind, display name, detected MIME, content family, status, body, metadata, truncation.
 3. `ArtifactKind`: native image, extracted text, document text, note only, deferred media.
 4. `ExtractionStatus`: included native, included text, truncated, unsupported, extraction failed, deferred.
@@ -77,7 +77,7 @@
 
 ## 정상 시퀀스
 
-1. runtime이 stored attachment 목록과 provider capability snapshot을 routing service에 전달한다.
+1. runtime이 stored attachment 목록 또는 session media에 남은 stored attachment reference와 provider capability snapshot을 routing service에 전달한다.
 2. routing service가 detected MIME 기준으로 image, text, document, audio, video, binary family를 나눈다.
 3. image family는 native image input capability를 확인하고 가능하면 native image artifact를 만든다.
 4. text family는 bounded text extraction을 수행하고 truncation metadata를 붙인다.
@@ -108,13 +108,13 @@
 
 ## 현재 구현 상태
 
-2026-06-17 현재 이 PRD 전체는 구현 완료 상태가 아니다. 현재 `crates/shacs-core/src/runtime/context.rs`의 `build_user_content`는 일부 image media path를 provider context의 image URL block으로 넣을 수 있다. 그러나 이것은 PRD 000과 PRD 001의 공통 stored attachment intake가 완료됐다는 뜻이 아니며, non image media path가 production turn에서 공통 file context routing으로 분석된다는 뜻도 아니다.
+2026-06-18 현재 이 PRD는 stored attachment routing 기준으로 구현 완료 상태다. `crates/shacs-core/src/runtime/context.rs`의 `ContextBuilder`는 configured media root를 받아 session media에 남은 `attachments/<channel>/...` stored attachment reference를 `crates/shacs-core/src/runtime/file_context.rs`의 routing layer로 넘긴다. Routing layer는 해당 reference를 media root 안에서 다시 검증한 뒤 artifact를 만들며, typed `StoredAttachment` record 전체가 session history에 직렬화되어야 한다고 요구하지 않는다. 기존 workspace image media path의 image URL block 동작은 기본값으로 유지된다.
 
-`crates/shacs-utils/src/document.rs`에는 text, PDF, Office 계열 문서 추출 helper가 존재한다. 이 helper는 문서 업로드가 channel attachment intake와 safe stored attachment 계약을 거쳐 provider context로 연결됐다는 evidence가 아니다. 현재 PDF, 일반 문서, audio, video 분석을 production turn 지원으로 주장하면 안 된다.
+구현된 routing은 image family를 provider/model native image capability가 있을 때만 native image URL input으로 넣고, capability가 없으면 note only artifact로 남긴다. text/PDF/Office 계열은 bounded text extraction, truncation status, 또는 `extraction_failed` note로 표현하며 Office ZIP text entry decompression에는 byte cap을 둔다. unsupported binary는 contents 없이 metadata note만 남기며, original symlink leaf는 canonical routing 전에 blocked note로 거부한다. audio/video는 이 PRD에서 분석하지 않고 `deferred` note로만 남긴다. PRD 003의 audio analysis와 PRD 004의 video analysis/projection은 여전히 별도 범위다.
 
 ## 완료 기준
 
-1. stored attachment만 routing input으로 받는다.
+1. stored attachment 또는 media-root-contained stored attachment reference만 routing input으로 받는다.
 2. image native input은 provider capability가 있을 때만 생성된다.
 3. text extraction은 bounded excerpt와 truncation evidence를 만든다.
 4. PDF와 Office extraction은 best effort text만 수행하고 실패 status를 남긴다.
