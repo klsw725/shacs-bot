@@ -1,6 +1,6 @@
 # context files and inline references 아키텍처 명세
 
-Status: Draft. Hermes의 context files와 inline `@` reference 제품 의미론을 `shacs-bot`의 Rust self-hosted runtime에 맞게 재해석해, context assembly 이후 단계의 user-controlled context injection owner boundary를 고정한다.
+Status: Implemented for live runtime closure. Hermes의 context files와 inline `@` reference 제품 의미론을 `shacs-bot`의 Rust self-hosted runtime에 맞게 재해석해, context assembly 이후 단계의 user-controlled context injection owner boundary를 고정한다.
 
 ## 문서 목적
 
@@ -223,3 +223,9 @@ context refs resolve <message>
 - Diagnostics와 replay가 live refetch 없이 resolved evidence를 해석한다.
 - UI/API projection은 included/skipped/truncated/denied reason을 보여준다.
 - 문서는 context references를 long-term memory, vector search, hosted connector로 과장하지 않는다.
+
+## 구현 Evidence
+
+- `crates/shacs-core/src/runtime/agent_loop.rs`는 일반 user turn에서 현재 메시지의 inline `@` reference와 workspace/current-directory context files를 resolver, safety gate, budget handoff에 태워 `ContextProviderHandoff`를 만들되, 기존 system prompt bootstrap으로 이미 소비되는 workspace-root bootstrap files는 provider context에 중복 주입하지 않는다.
+- `crates/shacs-core/src/runtime/runner.rs`는 handoff block을 provider 요청 메시지에만 ephemeral user-context로 주입해 system prompt 권한으로 승격하지 않고, `AgentRunResult.messages`와 session 원문 메시지에는 저장하지 않는다.
+- 집중 회귀 테스트는 provider가 context block을 받는지, current-directory context file과 configured live budget이 live handoff에 적용되는지, workspace-root bootstrap files와 symlink alias가 provider context에 중복되지 않는지, legacy bootstrap symlink가 protected/outside target을 system prompt로 읽지 않는지, `ask_user` resume/finalization retry에도 같은 context가 들어가는지, session/result message에 context block이 남지 않는지 검증한다.

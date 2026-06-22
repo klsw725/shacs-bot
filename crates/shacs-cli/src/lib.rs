@@ -29,14 +29,18 @@ use shacs_core::app_authoring::{
     AppAuthoringError, AppAuthoringInitOutcome, AppAuthoringInitReport, AppAuthoringStore,
 };
 use shacs_core::runtime::{
-    AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
-    ContainmentSnapshotRef, ContextBuilder, DreamLifecycle, HeartbeatError, HeartbeatNotifier,
-    HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker,
-    InboundMessage, McpLifecycle, MessageBus, PermissionModeSnapshot,
-    ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
-    RuntimeToolCall, Session, SessionHistoryOptions, SessionManager, SessionTurnLock,
-    StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig,
-    ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
+    apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
+    discover_context_files, parse_context_references, resolve_context_reference, AgentHook,
+    AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
+    ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput,
+    ContextDiagnosticsSummary, ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions,
+    ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig, DreamLifecycle,
+    HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService,
+    HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle, MessageBus,
+    PermissionModeSnapshot, ProviderNotificationEvaluator, RuntimeCapabilityReport,
+    RuntimeCapabilityStatus, RuntimeToolCall, Session, SessionHistoryOptions, SessionManager,
+    SessionTurnLock, StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent,
+    ToolSearchConfig, ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -138,6 +142,7 @@ pub enum CliCommand {
     Skills(SkillsCommand),
     Apps(AppsCommand),
     Channels(ChannelsCommand),
+    Context(ContextCommand),
     Ask(AskOptions),
     Run(RunOptions),
     Serve(ServeOptions),
@@ -233,6 +238,24 @@ pub enum ChannelsCommand {
     Status(ChannelsStatusOptions),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextCommand {
+    Files(ContextFilesCommand),
+    Refs(ContextRefsCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextFilesCommand {
+    List(ContextFilesOptions),
+    Inspect(ContextFilesOptions),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextRefsCommand {
+    Parse(ContextRefsParseOptions),
+    Resolve(ContextRefsResolveOptions),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChannelsListOptions {
     pub config_path: Option<PathBuf>,
@@ -243,6 +266,25 @@ pub struct ChannelsListOptions {
 pub struct ChannelsStatusOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContextFilesOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContextRefsParseOptions {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContextRefsResolveOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub message: String,
+    pub network_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1937,6 +1979,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Skills(command) => run_skills_command(command),
         CliCommand::Apps(command) => run_apps_command(command),
         CliCommand::Channels(command) => run_channels_command(command),
+        CliCommand::Context(command) => run_context_command(command),
         CliCommand::Ask(options) => ask(options),
         CliCommand::Run(options) => run_runtime(options),
         CliCommand::Serve(options) => serve(options),
@@ -1975,6 +2018,7 @@ where
         "skills" | "skill" => parse_skills(parser, global_config),
         "apps" | "app" => parse_apps(parser, global_config),
         "channels" | "channel" => parse_channels(parser, global_config),
+        "context" => parse_context(parser, global_config),
         "ask" => parse_ask(parser, global_config, false),
         "agent" => parse_ask(parser, global_config, true),
         "run" => parse_run(parser, global_config),
@@ -3870,6 +3914,110 @@ fn run_channels_command(command: ChannelsCommand) -> Result<String, CliError> {
     }
 }
 
+fn run_context_command(command: ContextCommand) -> Result<String, CliError> {
+    match command {
+        ContextCommand::Files(ContextFilesCommand::List(options)) => context_files_report(options)
+            .map(|report| format_context_files_report("context files list", report)),
+        ContextCommand::Files(ContextFilesCommand::Inspect(options)) => {
+            context_files_report(options)
+                .map(|report| format_context_files_report("context files inspect", report))
+        }
+        ContextCommand::Refs(ContextRefsCommand::Parse(options)) => {
+            context_refs_parse(options).map(format_context_refs_parse_report)
+        }
+        ContextCommand::Refs(ContextRefsCommand::Resolve(options)) => {
+            context_refs_resolve(options).map(format_context_refs_resolve_report)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFilesCliReport {
+    pub workspace: PathBuf,
+    pub summary: ContextFileDiagnosticsSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextRefsParseCliReport {
+    pub summary: Option<ContextReferenceDiagnosticsSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextRefsResolveCliReport {
+    pub workspace: PathBuf,
+    pub summary: ContextDiagnosticsSummary,
+}
+
+pub fn context_files_report(
+    options: ContextFilesOptions,
+) -> Result<ContextFilesCliReport, CliError> {
+    let workspace = load_session_workspace(options.config_path, options.workspace_override)?;
+    let discovery = discover_context_files(&workspace, ContextFileDiscoveryOptions::default());
+    let summary = build_context_diagnostics_summary(ContextDiagnosticsInput {
+        reference_parse: None,
+        context_files: &discovery.entries,
+        resolved_artifacts: &[],
+        safety_report: None,
+        provider_handoff: None,
+    })
+    .context_files;
+    Ok(ContextFilesCliReport { workspace, summary })
+}
+
+pub fn context_refs_parse(
+    options: ContextRefsParseOptions,
+) -> Result<ContextRefsParseCliReport, CliError> {
+    if options.message.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "context refs parse requires a message".to_owned(),
+        ));
+    }
+    let parse = parse_context_references(&options.message);
+    let summary = build_context_diagnostics_summary(ContextDiagnosticsInput {
+        reference_parse: Some(&parse),
+        context_files: &[],
+        resolved_artifacts: &[],
+        safety_report: None,
+        provider_handoff: None,
+    })
+    .references;
+    Ok(ContextRefsParseCliReport { summary })
+}
+
+pub fn context_refs_resolve(
+    options: ContextRefsResolveOptions,
+) -> Result<ContextRefsResolveCliReport, CliError> {
+    if options.message.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "context refs resolve requires a message".to_owned(),
+        ));
+    }
+    let workspace = load_session_workspace(options.config_path, options.workspace_override)?;
+    let parse = parse_context_references(&options.message);
+    let discovery = discover_context_files(&workspace, ContextFileDiscoveryOptions::default());
+    let resolver_config = ContextReferenceResolverConfig::new(&workspace)
+        .with_network_enabled(options.network_enabled);
+    let resolved = parse
+        .references
+        .iter()
+        .map(|reference| resolve_context_reference(reference, &resolver_config))
+        .collect::<Vec<_>>();
+    let safety = apply_context_safety_gate(&resolved);
+    let handoff = build_context_provider_handoff(
+        &safety.artifacts,
+        &discovery.entries,
+        ContextBudgetInput::default(),
+    );
+    let summary = build_context_diagnostics_summary(ContextDiagnosticsInput {
+        reference_parse: Some(&parse),
+        context_files: &discovery.entries,
+        resolved_artifacts: &safety.artifacts,
+        safety_report: Some(&safety),
+        provider_handoff: Some(&handoff),
+    });
+    Ok(ContextRefsResolveCliReport { workspace, summary })
+}
+
 pub fn channels_list(options: ChannelsListOptions) -> Result<ChannelsReport, CliError> {
     load_channels_report(options.config_path, options.workspace_override)
 }
@@ -5147,6 +5295,121 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
             "Unknown configured plugins: {}",
             report.unknown_plugins.join(", ")
         ));
+    }
+    lines.join("\n")
+}
+
+pub fn format_context_files_report(title: &str, report: ContextFilesCliReport) -> String {
+    let summary = report.summary;
+    let mut lines = vec![
+        title.to_owned(),
+        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Context files: {}", summary.total_count),
+        format!("Included: {}", summary.included_count),
+        format!("Skipped: {}", summary.skipped_count),
+        format!("Truncated: {}", summary.truncated_count),
+        format!("Denied: {}", summary.denied_count),
+    ];
+    for entry in summary.entries {
+        let reason = entry
+            .reason
+            .as_deref()
+            .map(|reason| format!(" reason={reason}"))
+            .unwrap_or_default();
+        let digest = entry
+            .digest
+            .as_deref()
+            .map(|digest| format!(" digest={digest}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- order={} status={:?} path={} bytes={:?} tokens={:?}{digest}{reason}",
+            entry.order, entry.status, entry.source_label, entry.byte_count, entry.token_estimate
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn format_context_refs_parse_report(report: ContextRefsParseCliReport) -> String {
+    let Some(summary) = report.summary else {
+        return "context refs parse\nReferences: 0".to_owned();
+    };
+    let mut lines = vec![
+        "context refs parse".to_owned(),
+        format!("References: {}", summary.reference_count),
+        format!("Parse diagnostics: {}", summary.diagnostic_count),
+    ];
+    for reference in summary.references {
+        lines.push(format!(
+            "- span={}..{} kind={:?} target={}",
+            reference.start, reference.end, reference.kind, reference.source_label
+        ));
+    }
+    for diagnostic in summary.diagnostics {
+        lines.push(format!(
+            "- diagnostic span={}..{} kind={} message={}",
+            diagnostic.start, diagnostic.end, diagnostic.kind, diagnostic.message
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn format_context_refs_resolve_report(report: ContextRefsResolveCliReport) -> String {
+    let summary = report.summary;
+    let mut lines = vec![
+        "context refs resolve".to_owned(),
+        format!("Workspace: {}", display_path(&report.workspace)),
+        format!(
+            "References: {}",
+            summary
+                .references
+                .as_ref()
+                .map_or(0, |refs| refs.reference_count)
+        ),
+        format!("Artifacts: {}", summary.artifacts.total_count),
+        format!("Resolved: {}", summary.artifacts.resolved_count),
+        format!("Skipped: {}", summary.artifacts.skipped_count),
+        format!("Denied: {}", summary.artifacts.denied_count),
+        format!("Failed: {}", summary.artifacts.failed_count),
+        format!("Redacted: {}", summary.artifacts.redacted_count),
+        format!("Truncated: {}", summary.artifacts.truncated_count),
+    ];
+    if let Some(budget) = summary.budget.as_ref() {
+        lines.push(format!(
+            "Budget bytes: {}/{}",
+            budget.used_context_bytes, budget.budget_bytes
+        ));
+        lines.push(format!(
+            "Budget decisions: included={} skipped={} truncated={}",
+            budget.included_count, budget.skipped_count, budget.truncated_count
+        ));
+    }
+    for artifact in summary.artifacts.entries {
+        let reason = artifact
+            .permission_evidence
+            .as_deref()
+            .map(|reason| format!(" reason={reason}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- artifact kind={:?} state={:?} source={} redaction={:?} truncation={:?} permission={}{reason}",
+            artifact.kind,
+            artifact.state,
+            artifact.source_label,
+            artifact.redaction_status,
+            artifact.truncation_status,
+            artifact.permission_status
+        ));
+    }
+    if let Some(safety) = summary.safety.as_ref() {
+        for diagnostic in &safety.diagnostics {
+            lines.push(format!(
+                "- safety source={} decision={:?} trust={:?} redaction={:?} message={}",
+                diagnostic.source_label,
+                diagnostic.permission_decision,
+                diagnostic.trust_label,
+                diagnostic.redaction_status,
+                diagnostic.message
+            ));
+        }
     }
     lines.join("\n")
 }
@@ -10164,6 +10427,7 @@ pub fn help_text() -> String {
         "  skills    List and inspect local skill registry entries",
         "  apps      Init authoring drafts; install, list, inspect, enable, disable, or uninstall local app bundles",
         "  channels  List channel registry/config status",
+        "  context   Inspect context files and dry-run inline @ references",
         "  ask       Send one message through the local AgentLoop",
         "  run       Start selected channel runtime workers",
         "  serve     Start the local OpenAI-compatible HTTP API",
@@ -10820,6 +11084,172 @@ fn parse_channels_status(
         }
     }
     Ok(CliCommand::Channels(ChannelsCommand::Status(options)))
+}
+
+fn parse_context(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let Some(scope) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "context requires `files` or `refs`".to_owned(),
+        ));
+    };
+    match scope.as_str() {
+        "files" | "file" => parse_context_files(parser, global_config),
+        "refs" | "ref" | "references" => parse_context_refs(parser, global_config),
+        "--help" | "-h" => Ok(CliCommand::Help),
+        other => Err(CliError::InvalidArguments(format!(
+            "unknown context subcommand `{other}`"
+        ))),
+    }
+}
+
+fn parse_context_files(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "context files requires `list` or `inspect`".to_owned(),
+        ));
+    };
+    let command = match action.as_str() {
+        "list" | "ls" => {
+            ContextFilesCommand::List(parse_context_files_options(parser, global_config, "list")?)
+        }
+        "inspect" => ContextFilesCommand::Inspect(parse_context_files_options(
+            parser,
+            global_config,
+            "inspect",
+        )?),
+        "--help" | "-h" => return Ok(CliCommand::Help),
+        other => {
+            return Err(CliError::InvalidArguments(format!(
+                "unknown context files action `{other}`"
+            )))
+        }
+    };
+    Ok(CliCommand::Context(ContextCommand::Files(command)))
+}
+
+fn parse_context_files_options(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    action: &str,
+) -> Result<ContextFilesOptions, CliError> {
+    let mut options = ContextFilesOptions {
+        config_path: global_config,
+        workspace_override: None,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => {
+                return Err(CliError::InvalidArguments(
+                    "help requested after action".to_owned(),
+                ))
+            }
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown context files {action} argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn parse_context_refs(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "context refs requires `parse` or `resolve`".to_owned(),
+        ));
+    };
+    let command = match action.as_str() {
+        "parse" => ContextRefsCommand::Parse(parse_context_refs_parse(parser)?),
+        "resolve" => {
+            ContextRefsCommand::Resolve(parse_context_refs_resolve(parser, global_config)?)
+        }
+        "--help" | "-h" => return Ok(CliCommand::Help),
+        other => {
+            return Err(CliError::InvalidArguments(format!(
+                "unknown context refs action `{other}`"
+            )))
+        }
+    };
+    Ok(CliCommand::Context(ContextCommand::Refs(command)))
+}
+
+fn parse_context_refs_parse(mut parser: ArgParser) -> Result<ContextRefsParseOptions, CliError> {
+    let mut options = ContextRefsParseOptions::default();
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--message" | "-m" => options.message = take_value(&mut parser, &arg)?,
+            "--help" | "-h" => {
+                return Err(CliError::InvalidArguments(
+                    "help requested after action".to_owned(),
+                ))
+            }
+            other if options.message.is_empty() => options.message = other.to_owned(),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown context refs parse argument `{other}`"
+                )))
+            }
+        }
+    }
+    if options.message.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "context refs parse requires --message <text> or a message argument".to_owned(),
+        ));
+    }
+    Ok(options)
+}
+
+fn parse_context_refs_resolve(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<ContextRefsResolveOptions, CliError> {
+    let mut options = ContextRefsResolveOptions {
+        config_path: global_config,
+        workspace_override: None,
+        message: String::new(),
+        network_enabled: false,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--message" | "-m" => options.message = take_value(&mut parser, &arg)?,
+            "--network" => options.network_enabled = true,
+            "--help" | "-h" => {
+                return Err(CliError::InvalidArguments(
+                    "help requested after action".to_owned(),
+                ))
+            }
+            other if options.message.is_empty() => options.message = other.to_owned(),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown context refs resolve argument `{other}`"
+                )))
+            }
+        }
+    }
+    if options.message.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "context refs resolve requires --message <text> or a message argument".to_owned(),
+        ));
+    }
+    Ok(options)
 }
 
 fn parse_session_list(
@@ -14854,6 +15284,150 @@ mod tests {
             .map(|error| error.to_string())
             .unwrap_or_default();
         assert!(error.contains("channels requires `list` or `status`"));
+        Ok(())
+    }
+
+    #[test]
+    fn parser_handles_context_command_surface() -> Result<(), Box<dyn Error>> {
+        let parsed = parse_cli_args([
+            "--config",
+            "/tmp/a.json",
+            "context",
+            "files",
+            "list",
+            "--workspace",
+            "/tmp/workspace",
+        ])?;
+        let CliCommand::Context(ContextCommand::Files(ContextFilesCommand::List(options))) = parsed
+        else {
+            return Err("expected context files list command".into());
+        };
+        assert_eq!(options.config_path, Some(PathBuf::from("/tmp/a.json")));
+        assert_eq!(
+            options.workspace_override,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+
+        let parsed = parse_cli_args(["context", "refs", "parse", "read @src/lib.rs"])?;
+        let CliCommand::Context(ContextCommand::Refs(ContextRefsCommand::Parse(options))) = parsed
+        else {
+            return Err("expected context refs parse command".into());
+        };
+        assert_eq!(options.message, "read @src/lib.rs");
+
+        let parsed = parse_cli_args([
+            "context",
+            "refs",
+            "resolve",
+            "--message",
+            "read @src/lib.rs",
+            "--network",
+        ])?;
+        let CliCommand::Context(ContextCommand::Refs(ContextRefsCommand::Resolve(options))) =
+            parsed
+        else {
+            return Err("expected context refs resolve command".into());
+        };
+        assert_eq!(options.message, "read @src/lib.rs");
+        assert!(options.network_enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn context_refs_parse_dry_run_reports_span_kind_target_without_source_read(
+    ) -> Result<(), Box<dyn Error>> {
+        let report = context_refs_parse(ContextRefsParseOptions {
+            message: "read @missing-file.md".to_owned(),
+        })?;
+        let output = format_context_refs_parse_report(report);
+
+        assert!(output.contains("context refs parse"));
+        assert!(output.contains("References: 1"));
+        assert!(output.contains("kind=File"));
+        assert!(output.contains("target=missing-file.md"));
+        Ok(())
+    }
+
+    #[test]
+    fn context_files_list_inspect_reports_status_without_content() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        fs::write(
+            workspace.join("AGENTS.md"),
+            "OPENAI_API_KEY=sk-context-file-secret",
+        )?;
+        let config_path = root.path().join("config.json");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+
+        let report = context_files_report(ContextFilesOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+        let output = format_context_files_report("context files inspect", report);
+
+        assert!(output.contains("Context files: 1"));
+        assert!(output.contains("status=Included"));
+        assert!(output.contains("digest="));
+        assert!(!output.contains("sk-context-file-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn context_refs_resolve_dry_run_reports_permission_redaction_budget_status_without_content(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        fs::write(
+            workspace.join("secret.txt"),
+            "OPENAI_API_KEY=sk-context-resolve-secret visible text",
+        )?;
+        let config_path = root.path().join("config.json");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+
+        let report = context_refs_resolve(ContextRefsResolveOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            message: "read @secret.txt".to_owned(),
+            network_enabled: false,
+        })?;
+        let output = format_context_refs_resolve_report(report);
+
+        assert!(output.contains("context refs resolve"));
+        assert!(output.contains("Resolved: 1"));
+        assert!(output.contains("Redacted: 1"));
+        assert!(output.contains("Budget bytes:"));
+        assert!(!output.contains("sk-context-resolve-secret"));
+        assert!(!output.contains("visible text"));
+        Ok(())
+    }
+
+    #[test]
+    fn context_docs_describe_reference_syntax_limits_and_safety() -> Result<(), Box<dyn Error>> {
+        let usage = read_repo_text("docs/USAGE.md")?;
+
+        for expected in [
+            "shacs-bot context files list",
+            "shacs-bot context refs parse",
+            "@path",
+            "@folder/",
+            "@diff",
+            "@staged",
+            "@git:<rev>",
+            "@url:https://...",
+            "shared context budget",
+            "Protected target",
+            "external_untrusted",
+            "redaction pass",
+            "replay",
+        ] {
+            assert!(usage.contains(expected), "missing docs phrase: {expected}");
+        }
         Ok(())
     }
 

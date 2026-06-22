@@ -94,3 +94,16 @@ Context files와 inline references가 provider context budget을 공유할 때�
 
 - Budget test가 explicit reference 우선순위와 auto context truncation을 검증한다.
 - Provider input snapshot evidence가 artifact source와 skipped reason을 표시한다.
+
+## 구현 상태
+
+Status: Implemented for PRD 002 typed budget, handoff boundary, and live AgentRunner provider-only injection. Replay evidence, user-facing projection, and release evidence are also implemented in later Spec 026 PRDs.
+
+Evidence:
+
+- `crates/shacs-core/src/runtime/context_handoff.rs` builds typed provider context blocks from resolved inline artifacts and discovered context files without rewriting the original session message.
+- `crates/shacs-core/src/runtime/agent_loop.rs` builds `ContextProviderHandoff` for normal user turns and `ask_user` resume turns from the current message and workspace/current-directory context files using the parser, resolver, safety gate, and configured live context budget, while excluding workspace-root bootstrap files already loaded into the legacy system prompt.
+- `crates/shacs-core/src/runtime/runner.rs` injects the handoff as provider-only lower-priority user context before model requests, including finalization retry requests, without mutating runtime/session messages or adding system authority.
+- Explicit inline references are ordered before context files, context files are consumed nearest-first, safety-denied artifacts are skipped, and budget overflow produces truncation/skipped evidence.
+- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_budget` passes with explicit-reference precedence, nearest context ordering, truncation evidence, skipped safety evidence, and source/trust/truncation label coverage.
+- Individual `cargo test --manifest-path crates/shacs-core/Cargo.toml <filter>` runs for `agent_runner_injects_context_only_into_provider_request`, `finalization_retry_request_preserves_provider_context`, `live_context_handoff_uses_current_directory_for_context_files`, `live_context_handoff_excludes_workspace_bootstrap_files_from_provider_context`, `live_context_handoff_excludes_workspace_bootstrap_symlink_alias`, `live_context_handoff_uses_configured_budget`, `process_message_builds_live_context_handoff_without_persisting_context_blocks`, and `process_message_builds_live_context_handoff_for_ask_user_resume_without_persisting_context_blocks` cover provider visibility, current-directory discovery, workspace-root bootstrap de-duplication including symlink aliases, configured live budget, `ask_user` resume, lower-priority provider context role, and non-persistence.

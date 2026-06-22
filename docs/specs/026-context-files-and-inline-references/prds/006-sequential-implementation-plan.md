@@ -158,3 +158,13 @@ Spec 026의 context files와 inline `@` references를 구현 가능한 순서로
 - Resolved artifact는 provider input handoff 전에 permission, redaction, budget gate를 통과한다.
 - Diagnostics/replay는 live refetch 없이 included/skipped/truncated/denied reason을 설명한다.
 - 관련 Rust 변경은 해당 crate 기준 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`를 통과한다.
+
+## 구현 상태
+
+Status: Implemented for live runtime closure.
+
+Evidence:
+
+- Normal user turns and `ask_user` resume turns now build a `ContextProviderHandoff` from inline references and workspace/current-directory context files before `AgentRunSpec` execution, excluding workspace-root bootstrap files and symlink aliases already consumed by the legacy system prompt to avoid dual authority.
+- Agent runner provider requests receive context blocks ephemerally as lower-priority user context, while `AgentRunResult.messages` and persisted session messages retain the original user text with `@` references and no injected context block.
+- Targeted tests cover live loop handoff, current-directory context file discovery, protected symlink targets, provider-only injection, finalization retry injection, `ask_user` resume injection, and configured live context budget behavior.

@@ -64,6 +64,19 @@ shacs-bot runtime diagnostics --bundle /tmp/shacs-diagnostics.zip --workspace /t
 
 `runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, ownership status, stop request marker, update marker, runtime capability 요약, containment contained/backend/snapshot digest, session 개수와 최신 session metadata를 보고합니다. `runtime diagnostics` bundle에는 containment summary/digest가 redacted diagnostics field로 포함됩니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고되며, sandboxed라고 주장하지 않습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
 
+Workspace context file과 inline `@` reference가 어떻게 해석되는지 dry-run으로 확인합니다:
+
+```sh
+shacs-bot context files list --workspace /tmp/ws
+shacs-bot context files inspect --workspace /tmp/ws
+shacs-bot context refs parse "read @src/lib.rs and @diff"
+shacs-bot context refs resolve --workspace /tmp/ws --message "read @src/lib.rs"
+```
+
+`context files list/inspect`는 `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.shacs.md`, `.shacs-bot.md` 같은 workspace context file 후보의 path, ordering, included/skipped/truncated/denied status, digest, byte/token estimate만 보여주며 raw file content는 출력하지 않습니다. `context refs parse`는 source를 읽지 않고 message 안의 token span, kind, normalized target, parse diagnostic만 표시합니다. 지원되는 reference syntax는 `@path`, `@folder/`, `@diff`, `@staged`, `@git:<rev>`, `@git:<rev>:<path>`, `@url:https://...`, `@https://...`입니다. `context refs resolve`는 read-only resolver, permission/redaction safety gate, shared context budget handoff를 통과한 status를 보여줍니다. 파일/URL body와 provider context block content는 diagnostics에 저장하지 않고 digest와 redacted summary만 사용합니다.
+
+Context limits는 bounded file bytes, folder entry limit, URL byte limit, provider handoff의 shared context budget으로 적용됩니다. Protected target(`.env`, SSH/private key path 등)은 content를 읽기 전에 denied evidence로 처리되고, URL reference는 명시적으로 network가 enabled된 resolve 경로가 아니면 skipped diagnostic이 됩니다. External URL content는 `external_untrusted` trust label로 표시되며 prompt-injection 방어상 instruction이 아니라 data로 취급됩니다. Secret-like content는 diagnostics와 provider handoff 전에 redaction pass를 통과하고, replay는 live URL fetch나 mutable git state 재실행 대신 recorded digest/excerpt/evidence를 사용합니다.
+
 공식 로컬 lifecycle 명령으로 foreground channel runtime을 시작하거나 실행 중인 owner에게 종료/재시작을 요청합니다:
 
 ```sh

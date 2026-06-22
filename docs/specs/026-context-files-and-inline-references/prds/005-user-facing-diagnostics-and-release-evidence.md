@@ -94,3 +94,15 @@
 
 - 사용자는 왜 `@file` 또는 context file이 provider input에 포함되지 않았는지 알 수 있다.
 - Release evidence가 owner `026` refs와 관련 regression을 요구한다.
+
+## 구현 상태
+
+Status: Implemented for PRD 005 CLI/core/projection/docs boundary.
+
+Evidence:
+
+- `crates/shacs-core/src/runtime/context_diagnostics.rs` adds redaction-safe context diagnostics summaries for parse results, context files, resolved artifacts, safety/replay evidence, and budget handoff evidence without raw content fields.
+- `crates/shacs-cli/src/lib.rs` adds `context files list`, `context files inspect`, `context refs parse`, and `context refs resolve` dry-run commands. Parse uses no source reads; resolve uses read-only resolver, safety gate, and budget summary.
+- `crates/shacs-projection/src/diagnostics_release.rs` adds Spec 026 PRD 005 release evidence buckets for parser, discovery, resolver, budget, safety, replay, and docs, requiring owner `026` redaction-safe evidence refs.
+- `docs/USAGE.md` documents supported syntax, limits, safety behavior, and replay/no-live-refetch behavior.
+- Targeted verification passed: `cargo test --manifest-path crates/shacs-core/Cargo.toml context_diagnostics`, `cargo test --manifest-path crates/shacs-projection/Cargo.toml context_prd005_release_evidence`, and `cargo test --manifest-path crates/shacs-cli/Cargo.toml context_refs_parse context_files context_refs_resolve parser_handles_context_command_surface context_docs_describe_reference_syntax_limits_and_safety` as individual filters.

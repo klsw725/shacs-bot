@@ -96,3 +96,13 @@
 
 - Resolver tests가 outside-workspace path, folder limit, missing git rev, disabled network, oversized URL을 포함한다.
 - 모든 resolver output은 digest와 redaction status를 가진다.
+
+## 구현 상태
+
+Status: Implemented for PRD 003 read-only resolver boundary. Provider budget handoff, replay evidence, redaction pipeline integration, user-facing projection, and live runtime handoff are also implemented.
+
+Evidence:
+
+- `crates/shacs-core/src/runtime/context_resolvers.rs` resolves parsed file, folder, diff, staged, git, and HTTPS URL references into `ResolvedContextArtifact` records without mutating user messages or working tree state.
+- Filesystem references are constrained to the workspace; folder output is bounded; `@diff`/`@staged` disable ext-diff and textconv; URL references require explicit network enablement and HTTPS, content-type, redirect, and size gates.
+- `cargo test --manifest-path crates/shacs-core/Cargo.toml context_resolver` passes with outside-workspace file denial, folder limit, file artifact, missing git revision, disabled network, oversized URL, external-content labeling, and git textconv bypass coverage.

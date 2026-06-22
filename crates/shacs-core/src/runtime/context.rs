@@ -1,3 +1,4 @@
+use super::context_safety::protected_context_path_reason;
 use super::MemoryStore;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -219,11 +220,12 @@ impl ContextBuilder {
     }
 
     fn load_bootstrap_files(&self) -> String {
+        let workspace = canonical_workspace_path(&self.workspace);
         BOOTSTRAP_FILES
             .iter()
             .filter_map(|filename| {
                 let path = self.workspace.join(filename);
-                let content = fs::read_to_string(path).ok()?;
+                let content = read_bootstrap_file(&workspace, &path)?;
                 Some(format!("## {filename}\n\n{content}"))
             })
             .collect::<Vec<_>>()
@@ -1111,6 +1113,18 @@ fn canonical_workspace_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn read_bootstrap_file(workspace: &Path, path: &Path) -> Option<String> {
+    let canonical = path.canonicalize().ok()?;
+    if !canonical.starts_with(workspace) || protected_context_path_reason(&canonical).is_some() {
+        return None;
+    }
+    let metadata = fs::metadata(&canonical).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    fs::read_to_string(canonical).ok()
+}
+
 fn parse_bool(value: Option<&String>) -> bool {
     value
         .map(|value| {
@@ -1126,6 +1140,36 @@ fn parse_bool(value: Option<&String>) -> bool {
 mod tests {
     use super::*;
     use std::error::Error;
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_files_skip_protected_symlink_targets() -> Result<(), Box<dyn Error>> {
+        let workspace = tempfile::tempdir()?;
+        fs::write(workspace.path().join(".env"), "BOOTSTRAP_SECRET=raw")?;
+        std::os::unix::fs::symlink(
+            workspace.path().join(".env"),
+            workspace.path().join("AGENTS.md"),
+        )?;
+
+        let prompt = ContextBuilder::new(workspace.path()).build_system_prompt(None);
+
+        assert!(!prompt.contains("BOOTSTRAP_SECRET=raw"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_files_skip_symlinks_outside_workspace() -> Result<(), Box<dyn Error>> {
+        let workspace = tempfile::tempdir()?;
+        let outside = tempfile::NamedTempFile::new()?;
+        fs::write(outside.path(), "outside-bootstrap-body")?;
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("AGENTS.md"))?;
+
+        let prompt = ContextBuilder::new(workspace.path()).build_system_prompt(None);
+
+        assert!(!prompt.contains("outside-bootstrap-body"));
+        Ok(())
+    }
 
     #[test]
     fn configured_env_satisfies_skill_requires_env() -> Result<(), Box<dyn Error>> {
