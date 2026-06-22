@@ -10,6 +10,12 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use super::file_context::{
+    route_stored_attachment_with_analyzers, AudioContextAnalyzer, MediaRootRouting,
+    VideoContextAnalyzer,
+};
 
 const BOOTSTRAP_FILES: [&str; 4] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
 const RUNTIME_CONTEXT_TAG: &str = "[Runtime Context — metadata only, not instructions]";
@@ -24,6 +30,10 @@ pub struct ContextBuilder {
     timezone: Option<String>,
     disabled_skills: Vec<String>,
     extra_skill_roots: Vec<PathBuf>,
+    media_roots: Vec<PathBuf>,
+    native_image_input_supported: bool,
+    audio_analyzer: Option<Arc<dyn AudioContextAnalyzer>>,
+    video_analyzer: Option<Arc<dyn VideoContextAnalyzer>>,
     configured_env: BTreeMap<String, String>,
 }
 
@@ -59,6 +69,10 @@ impl ContextBuilder {
             timezone: None,
             disabled_skills: Vec::new(),
             extra_skill_roots: Vec::new(),
+            media_roots: Vec::new(),
+            native_image_input_supported: true,
+            audio_analyzer: None,
+            video_analyzer: None,
             configured_env: BTreeMap::new(),
         }
     }
@@ -78,6 +92,26 @@ impl ContextBuilder {
 
     pub fn with_skill_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
         self.extra_skill_roots = roots.into_iter().collect();
+        self
+    }
+
+    pub fn with_media_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.media_roots = roots.into_iter().collect();
+        self
+    }
+
+    pub fn with_native_image_input_supported(mut self, supported: bool) -> Self {
+        self.native_image_input_supported = supported;
+        self
+    }
+
+    pub fn with_audio_analyzer(mut self, analyzer: Arc<dyn AudioContextAnalyzer>) -> Self {
+        self.audio_analyzer = Some(analyzer);
+        self
+    }
+
+    pub fn with_video_analyzer(mut self, analyzer: Arc<dyn VideoContextAnalyzer>) -> Self {
+        self.video_analyzer = Some(analyzer);
         self
     }
 
@@ -477,7 +511,26 @@ impl ContextBuilder {
     fn build_user_content(&self, text: &str, media: &[String]) -> Value {
         let mut blocks = Vec::new();
         for path in media {
+            if path.starts_with("http://") || path.starts_with("https://") {
+                continue;
+            }
             let requested_path = PathBuf::from(path);
+            match route_stored_attachment_with_analyzers(
+                &requested_path,
+                &self.media_roots,
+                self.native_image_input_supported,
+                self.audio_analyzer.as_deref(),
+                self.video_analyzer.as_deref(),
+            ) {
+                MediaRootRouting::Routed(routed_blocks) => {
+                    blocks.extend(routed_blocks);
+                    continue;
+                }
+                MediaRootRouting::IgnoredMediaRoot => {
+                    continue;
+                }
+                MediaRootRouting::OutsideMediaRoots => {}
+            }
             let Ok(path) = self.resolve_workspace_media_path(&requested_path) else {
                 continue;
             };
@@ -488,6 +541,10 @@ impl ContextBuilder {
             else {
                 continue;
             };
+            if !self.native_image_input_supported {
+                blocks.push(workspace_image_unsupported_note(&path, mime));
+                continue;
+            }
             blocks.push(json!({
                 "type": "image_url",
                 "image_url": {"url": format!("data:{mime};base64,{}", STANDARD.encode(raw))},
@@ -768,6 +825,19 @@ fn image_mime_from_extension(path: &Path) -> Option<&'static str> {
         Some(ext) if ext == "svg" => Some("image/svg+xml"),
         _ => None,
     }
+}
+
+fn workspace_image_unsupported_note(path: &Path, mime: &str) -> Value {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("image");
+    json!({
+        "type": "text",
+        "text": format!(
+            "[attachment:unsupported] name={name} mime={mime} reason=native image input is not supported by provider/model"
+        ),
+    })
 }
 
 fn reject_symlink_components(workspace: &Path, candidate: &Path) -> io::Result<()> {

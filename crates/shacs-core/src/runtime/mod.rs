@@ -2,6 +2,7 @@ mod agent_loop;
 mod autocompact;
 mod automation;
 mod context;
+mod file_context;
 mod goal;
 mod lifecycle;
 mod loop_control;
@@ -26,6 +27,12 @@ pub use automation::{
     SubagentMergeState,
 };
 pub use context::{add_assistant_message, add_tool_result, ContextBuildRequest, ContextBuilder};
+pub use file_context::{
+    AudioAnalysisPolicy, AudioContextAnalysis, AudioContextAnalyzer, AudioContextError,
+    AudioContextRequest, TranscriptionAudioAnalyzer, VideoAnalysisPolicy, VideoComponentFailure,
+    VideoContextAnalysis, VideoContextAnalyzer, VideoContextError, VideoContextRequest,
+    VideoMetadata,
+};
 pub use goal::{
     apply_completion_verdict, build_goal_completion_evaluation_request, clear_goal,
     consume_evaluator_decision, continuation_decision, create_persistent_goal,
