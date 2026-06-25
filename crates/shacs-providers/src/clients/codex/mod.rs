@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_CODEX_API_BASE: &str = "https://chatgpt.com/backend-api";
 const DEFAULT_ORIGINATOR: &str = "shacs-bot";
 
