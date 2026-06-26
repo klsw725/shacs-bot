@@ -1,6 +1,6 @@
 # user-extensible hooks and plugins 아키텍처 명세
 
-Status: Draft. Hermes의 hooks/plugins 제품 의미론을 `shacs-bot`의 Rust self-hosted runtime에 맞게 재해석해, 사용자 확장 표면 구현 전 owner boundary를 고정한다.
+Status: Foundation plus initial diagnostics-only hook runtime slice complete; full Spec 25 remains open. Hermes의 hooks/plugins 제품 의미론을 `shacs-bot`의 Rust self-hosted runtime에 맞게 재해석해 owner boundary를 고정했고, 현재 구현은 `plugin.json`/`plugin.toml` manifest discovery, descriptor-only projection, safety diagnostics, management CLI, enabled plugin hook의 diagnostics-only runtime dispatch까지 닫았다. Live tool/command/MCP/skill execution과 behavior-affecting hook 적용은 아직 완료 기준에 남아 있다.
 
 ## 문서 목적
 
@@ -50,6 +50,30 @@ Hermes reference에서 가져올 것은 다음 제품 의미론이다.
 - CLI/TUI/local API projection과 구현 PRD 분할.
 
 이 문서는 dynamic library loading, general-purpose scripting engine, public marketplace, organization admin policy rollout, new provider family expansion, third-party plugin code의 완전 sandbox implementation을 정의하지 않는다.
+
+---
+
+## Implemented Foundation Boundary
+
+현재 구현 완료 범위는 사용자가 plugin 상태와 선언 surface를 안전하게 관찰하고 config activation gate를 조작할 수 있는 foundation, 그리고 enabled plugin hook을 agent runtime에서 diagnostics-only로 dispatch하는 첫 executable slice다. 이 범위는 전체 Spec 25 완료가 아니라 behavior-affecting plugin system을 열기 전의 안전한 기반이다.
+
+- `plugin.json` discovery, digest, state projection은 지원한다.
+- `plugin.toml`은 `plugin.json`과 같은 discovery/config gate를 통과하며, TOML manifest는 snake_case 필드 이름을 기본으로 받는다.
+- Hook은 event catalog, output validation, timeout/error diagnostics를 제공하며, enabled plugin의 typed hook entrypoint는 agent runtime에서 diagnostics-only로 dispatch될 수 있다.
+- Plugin tool, command, skill, MCP declaration은 descriptor-only metadata로만 projection된다.
+- Plugin command-backed process execution, MCP server startup, dynamic library/WASM/Python/scripting runtime은 구현하지 않았다.
+- Runtime hook dispatch output은 redacted evidence와 digest로만 남기며 tool calls, model content, permissions, provider-visible tools, commands, skills, MCP server를 mutate하지 않는다.
+- `disabled`, `blocked`, `not_enabled`, untrusted workspace-local plugin은 active tool/skill/hook/command/MCP surface를 만들지 않는다.
+- `plugins list/inspect/doctor/enable/disable`과 `hooks list/inspect` CLI는 redaction-safe projection을 제공한다. `enable`/`disable`은 config만 수정하며 running session/toolset을 mutate하지 않는다.
+- Replay는 plugin live dispatch를 허용하지 않고 recorded/redacted evidence만 해석하는 경계를 유지한다.
+
+Full Spec 25 완료까지 남은 핵심 범위:
+
+- 제한된 behavior-affecting hook output의 실제 runtime 적용.
+- Command-backed plugin tool execution과 MCP-backed handler startup.
+- Plugin-provided skill activation과 plugin command router integration.
+- Execution env allow-list materialization, output limit, redaction evidence의 end-to-end 적용.
+- Behavior-affecting hook/tool/command/MCP/skill execution wiring beyond diagnostics-only hook dispatch.
 
 ---
 
@@ -230,14 +254,14 @@ hooks inspect <plugin-or-hook>
 
 ---
 
-## 완료 기준
+## 전체 완료 기준
 
 - Plugin discovery와 activation state가 config와 workspace trust gate를 따른다.
 - Broken plugin, missing env, unsafe path는 runtime 전체를 실패시키지 않고 blocked diagnostics로 남는다.
-- Hook dispatch는 observer-only 기본값과 제한된 veto/transform event를 구분한다.
+- Hook catalog와 output validation은 observer-only 기본값과 제한된 veto/transform event를 구분하고, live callback dispatch가 timeout/error isolation을 통과한다.
 - Hook failure와 timeout은 runtime을 crash시키지 않는다.
-- Plugin tool은 기존 tool runtime, permission, Tool Search scope를 우회하지 않는다.
+- Plugin tool descriptor와 live handler execution은 기존 tool runtime, permission, Tool Search scope를 우회하지 않는다.
 - Plugin-provided skill은 read-only이고 permission을 얻지 못한다.
-- UI/API projection은 loaded/blocked/missing-env/hook-error 상태를 redaction-safe하게 보여준다.
+- CLI projection은 loaded/blocked/missing-env/hook metadata 상태를 redaction-safe하게 보여준다. TUI/local API projection은 후속 slice다.
 - Replay와 diagnostics는 destructive plugin command를 실제 재실행하지 않고 evidence만 해석한다.
 - 문서는 Python plugin loader, public marketplace, organization governance를 구현 완료처럼 주장하지 않는다.
