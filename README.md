@@ -25,6 +25,14 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- status
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime inspect --workspace /tmp/shacs-ws
 ```
 
+Plugin과 hook manifest 상태는 descriptor-only management surface로 확인합니다. `plugin.json`과 `plugin.toml` manifest를 discovery/config gate까지 지원하지만, 이는 plugin foundation이며 full live plugin execution은 아직 아닙니다. 이 명령들은 plugin command, hook callback, MCP server, process를 실행하지 않으며, `enable`/`disable`은 config만 수정하고 다음 session/reload에 적용된다고 보고합니다. Enabled plugin의 typed hook entrypoint는 agent runtime에서 diagnostics-only로 dispatch될 수 있지만, hook output은 command/tool/provider behavior를 바꾸지 않습니다:
+
+```sh
+cargo run --manifest-path crates/shacs-cli/Cargo.toml -- plugins list --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/shacs-cli/Cargo.toml -- plugins doctor --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/shacs-cli/Cargo.toml -- hooks list --workspace /tmp/shacs-ws
+```
+
 공식 로컬 runtime lifecycle 진입점은 `runtime start/stop/restart`입니다. `runtime start`는 channel runtime foreground 경로를 실행하며, `runtime stop`과 `runtime restart`는 실행 중인 로컬 owner가 관찰할 stop-request marker를 기록합니다:
 
 ```sh
