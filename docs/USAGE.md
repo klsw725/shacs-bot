@@ -77,6 +77,26 @@ shacs-bot context refs resolve --workspace /tmp/ws --message "read @src/lib.rs"
 
 Context limits는 bounded file bytes, folder entry limit, URL byte limit, provider handoff의 shared context budget으로 적용됩니다. Protected target(`.env`, SSH/private key path 등)은 content를 읽기 전에 denied evidence로 처리되고, URL reference는 명시적으로 network가 enabled된 resolve 경로가 아니면 skipped diagnostic이 됩니다. External URL content는 `external_untrusted` trust label로 표시되며 prompt-injection 방어상 instruction이 아니라 data로 취급됩니다. Secret-like content는 diagnostics와 provider handoff 전에 redaction pass를 통과하고, replay는 live URL fetch나 mutable git state 재실행 대신 recorded digest/excerpt/evidence를 사용합니다.
 
+## Plugins and hooks
+
+User-local plugin manifests can be inspected through a descriptor-only management surface. This is the implemented plugin foundation, not the full live plugin execution system:
+
+```sh
+shacs-bot plugins list
+shacs-bot plugins inspect <name>
+shacs-bot plugins doctor
+shacs-bot plugins enable <name>
+shacs-bot plugins disable <name>
+shacs-bot hooks list
+shacs-bot hooks inspect <plugin-or-hook>
+```
+
+`plugins list`, `plugins inspect`, `plugins doctor`, `hooks list`, and `hooks inspect` read config and discovered manifests only. They do not run plugin commands, dispatch hook callbacks, register provider-visible tools, start MCP servers, or execute plugin processes. `plugins enable` and `plugins disable` mutate only `plugins.enabled`/`plugins.disabled` in the selected config file and report next-session/reload semantics; they do not mutate the running session prompt or toolset.
+
+During agent turns, enabled plugin hook entrypoints may run through the runtime hook adapter for diagnostics-only dispatch. This initial live hook slice records redacted output/error/timeout evidence and does not apply hook output to tool calls, model content, permissions, provider-visible tools, commands, skills, or MCP servers.
+
+Currently supported manifests are `plugin.json` and `plugin.toml` files under the config data directory's `plugins/<name>/` root or the workspace-local `.shacs-bot/plugins/<name>/` root. Workspace-local plugins still require an explicit trusted workspace gate before they can become enabled. Output shows secret reference names and presence metadata only, never raw secret values.
+
 공식 로컬 lifecycle 명령으로 foreground channel runtime을 시작하거나 실행 중인 owner에게 종료/재시작을 요청합니다:
 
 ```sh
@@ -409,10 +429,6 @@ docker compose down
 
 Provider secret은 로컬 config/environment workflow로 제공하세요. Image 안에 secret을 bake하지 마세요. 기본 container UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. Docker containment는 permission mode나 side-effect gate를 없애는 근거가 아니며, unsafe privileged evidence가 보이면 permissive permission mode는 safe fallback으로 내려갑니다. Permission denied가 계속 나면 host에서 `sudo chown -R 1000:1000 ~/.shacs-bot`로 ownership을 맞추거나 Podman의 `--userns=keep-id` 같은 실행 user 전략을 사용하세요.
 
-## 예약된 명령
+## 아직 남은 명령 범위
 
-다음 command name은 예약되어 있지만 현재 Rust CLI에는 아직 구현되어 있지 않습니다:
-
-- `plugins`
-
-TUI command, 구현된 Codex login 외의 provider OAuth flow, ClawHub install/update wrapper, gateway supervision은 이후 migration slice로 남아 있습니다. 위에서 구현된 것으로 명시하지 않은 command는 사용할 수 있는 기능으로 취급하지 마세요.
+`plugins`와 `hooks`는 위의 plugin/hook 섹션에 설명된 descriptor-only 관리 명령으로 구현되어 있습니다. TUI command, 구현된 Codex login 외의 provider OAuth flow, ClawHub install/update wrapper, gateway supervision은 이후 migration slice로 남아 있습니다. 위에서 구현된 것으로 명시하지 않은 command는 사용할 수 있는 기능으로 취급하지 마세요.
