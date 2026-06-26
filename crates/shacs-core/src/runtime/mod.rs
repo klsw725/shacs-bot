@@ -21,6 +21,10 @@ mod permission_ceiling;
 mod permission_policy;
 mod permission_replay;
 mod permission_rules;
+mod plugin_discovery;
+mod plugin_hooks;
+mod plugin_runtime;
+mod plugin_surface;
 mod replay;
 mod runner;
 mod self_improvement;
@@ -153,6 +157,36 @@ pub use permission_rules::{
     ContainerNetworkMode, ContainerRuntimeKind, DockerContainmentSnapshot, PermissionRuleInput,
     ProcExecSummary, ProtectedTargetClass, RuleDiagnostics, StaticRuleDecision,
     StaticRuleDecisionKind, StaticRuleReason, TargetClassification, PERMISSION_STATIC_RULE_VERSION,
+};
+pub use plugin_discovery::{
+    discover_plugins, DiscoveredPlugin, PluginBlockReason, PluginDiscovery, PluginDiscoveryError,
+    PluginManifest, PluginManifestSource, PluginState,
+};
+pub use plugin_hooks::{
+    plugin_hook_catalog, plugin_hook_error_diagnostic, plugin_hook_output_policy,
+    plugin_hook_timeout_diagnostic, summarize_plugin_hook_dispatch, validate_plugin_hook_output,
+    PluginHookCallbackResult, PluginHookCatalog, PluginHookCatalogEntry, PluginHookDispatchAttempt,
+    PluginHookDispatchEffect, PluginHookDispatchRecord, PluginHookDispatchStatus,
+    PluginHookDispatchSummary, PluginHookErrorDiagnostic, PluginHookEvent,
+    PluginHookOutputEvidence, PluginHookOutputPolicy, PluginHookOutputValidation,
+    PluginHookTimeoutDiagnostic,
+};
+pub use plugin_runtime::{
+    build_plugin_runtime_snapshot, PluginExecutableCommand, PluginHookCommandExecutor,
+    PluginHookCommandInvocation, PluginHookDispatchMode, PluginHookDispatchSink,
+    PluginRuntimeDiagnostic, PluginRuntimeHook, PluginRuntimeHookAgentHook, PluginRuntimePlugin,
+    PluginRuntimeSnapshot, ProcessPluginHookCommandExecutor,
+};
+pub use plugin_surface::{
+    build_plugin_surface_projection, evaluate_plugin_permission_ceiling,
+    plugin_spec025_evidence_ref, plugin_spec025_release_evidence_checklist,
+    plugin_surface_diagnostic, reject_plugin_replay_live_dispatch,
+    required_spec025_release_evidence_buckets, PluginCommandDescriptor, PluginDescriptor,
+    PluginHookDescriptor, PluginMcpDescriptor, PluginPermissionCeilingDecision,
+    PluginPermissionCeilingRequest, PluginReplayRejection, PluginSecretRef, PluginSecretRefKind,
+    PluginSkillDescriptor, PluginSpec025ReleaseEvidence, PluginSpec025ReleaseEvidenceBucket,
+    PluginSpec025ReleaseEvidenceChecklist, PluginSurfaceDiagnostic, PluginSurfaceProjection,
+    PluginToolDescriptor,
 };
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub use runner::{
