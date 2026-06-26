@@ -30,17 +30,21 @@ use shacs_core::app_authoring::{
 };
 use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
-    discover_context_files, parse_context_references, resolve_context_reference, AgentHook,
-    AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
+    build_plugin_runtime_snapshot, build_plugin_surface_projection, discover_context_files,
+    discover_plugins, parse_context_references, plugin_hook_catalog, resolve_context_reference,
+    AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
     ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput,
     ContextDiagnosticsSummary, ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions,
-    ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig, DreamLifecycle,
-    HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService,
-    HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle, MessageBus,
-    PermissionModeSnapshot, ProviderNotificationEvaluator, RuntimeCapabilityReport,
-    RuntimeCapabilityStatus, RuntimeToolCall, Session, SessionHistoryOptions, SessionManager,
-    SessionTurnLock, StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent,
-    ToolSearchConfig, ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
+    ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig, DiscoveredPlugin,
+    DreamLifecycle, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
+    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle,
+    MessageBus, PermissionModeSnapshot, PluginDiscoveryError, PluginHookCatalog,
+    PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
+    PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState, PluginSurfaceProjection,
+    ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
+    RuntimeToolCall, Session, SessionHistoryOptions, SessionManager, SessionTurnLock,
+    StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig,
+    ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -141,6 +145,8 @@ pub enum CliCommand {
     Session(SessionCommand),
     Skills(SkillsCommand),
     Apps(AppsCommand),
+    Plugins(PluginsCommand),
+    Hooks(HooksCommand),
     Channels(ChannelsCommand),
     Context(ContextCommand),
     Ask(AskOptions),
@@ -233,6 +239,21 @@ pub enum AppsCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginsCommand {
+    List(PluginsListOptions),
+    Inspect(PluginsInspectOptions),
+    Doctor(PluginsListOptions),
+    Enable(PluginsMutateOptions),
+    Disable(PluginsMutateOptions),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HooksCommand {
+    List(HooksListOptions),
+    Inspect(HooksInspectOptions),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelsCommand {
     List(ChannelsListOptions),
     Status(ChannelsStatusOptions),
@@ -319,6 +340,39 @@ pub struct AppsIdOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
     pub app_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginsListOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginsInspectOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginsMutateOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HooksListOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HooksInspectOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub filter: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -853,6 +907,56 @@ pub struct RuntimeDiagnosticsReport {
     pub bundle_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginProjectionReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub data_dir: PathBuf,
+    pub plugins: Vec<DiscoveredPlugin>,
+    pub projection: PluginSurfaceProjection,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginInspectReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub plugin: DiscoveredPlugin,
+    pub projection: PluginSurfaceProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginMutationReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub plugin_name: String,
+    pub action: PluginMutationAction,
+    pub changed: bool,
+    pub next_session_notice: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginMutationAction {
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookProjectionReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub catalog: PluginHookCatalog,
+    pub plugin_hooks: Vec<PluginHookDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookInspectReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub filter: String,
+    pub catalog: PluginHookCatalog,
+    pub plugin_hooks: Vec<PluginHookDescriptor>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeLifecycleInspect {
     pub binary_version: String,
@@ -1342,6 +1446,12 @@ impl From<ProviderError> for CliError {
     }
 }
 
+impl From<PluginDiscoveryError> for CliError {
+    fn from(error: PluginDiscoveryError) -> Self {
+        Self::InvalidArguments(error.to_string())
+    }
+}
+
 pub fn version() -> &'static str {
     VERSION
 }
@@ -1712,6 +1822,10 @@ fn publish_runtime_notification(
     live_sink: Option<&RuntimeNotificationSink>,
     message: OutboundMessage,
 ) {
+    if is_plugin_hook_runtime_notification(&message) {
+        bus.publish_outbound(message);
+        return;
+    }
     if let Some(sink) = live_sink {
         sink(message);
     } else {
@@ -1776,6 +1890,61 @@ fn subagent_start_notification_message(
     message
 }
 
+fn plugin_hook_dispatch_notification_message(
+    channel: &str,
+    chat_id: &str,
+    routing_metadata: &Map<String, Value>,
+    reply_to: Option<&str>,
+    summary: &PluginHookDispatchSummary,
+) -> OutboundMessage {
+    let mut metadata = routing_metadata.clone();
+    let summary = match serde_json::to_value(summary) {
+        Ok(summary) => summary,
+        Err(error) => json!({
+            "serialization_error": redact_string(&error.to_string()),
+        }),
+    };
+    metadata.insert(
+        "runtime_notification".to_owned(),
+        json!({
+            "kind": "plugin_hook",
+            "phase": "dispatch",
+            "visible": false,
+            "summary": summary,
+        }),
+    );
+    let mut message = OutboundMessage::new(
+        channel,
+        chat_id,
+        "Plugin hook diagnostics recorded".to_owned(),
+    )
+    .with_metadata(metadata);
+    if let Some(reply_to) = reply_to {
+        message.reply_to = Some(reply_to.to_owned());
+    }
+    message
+}
+
+fn plugin_hook_dispatch_notification_sink(
+    bus: MessageBus,
+    live_sink: Option<RuntimeNotificationSink>,
+    channel: String,
+    chat_id: String,
+    routing_metadata: Map<String, Value>,
+    reply_to: Option<String>,
+) -> PluginHookDispatchSink {
+    Arc::new(move |summary| {
+        let notification = plugin_hook_dispatch_notification_message(
+            &channel,
+            &chat_id,
+            &routing_metadata,
+            reply_to.as_deref(),
+            &summary,
+        );
+        publish_runtime_notification(&bus, live_sink.as_ref(), notification);
+    })
+}
+
 fn is_skill_runtime_notification(message: &shacs_channels::OutboundMessage) -> bool {
     message
         .metadata
@@ -1795,6 +1964,20 @@ fn is_visible_runtime_notification(message: &shacs_channels::OutboundMessage) ->
                 .and_then(Value::as_str),
             Some("subagent")
         )
+}
+
+fn is_plugin_hook_runtime_notification(message: &shacs_channels::OutboundMessage) -> bool {
+    message
+        .metadata
+        .get("runtime_notification")
+        .and_then(|value| value.get("kind"))
+        .and_then(Value::as_str)
+        == Some("plugin_hook")
+}
+
+fn should_dispatch_runtime_outbound(message: &shacs_channels::OutboundMessage) -> bool {
+    !message.metadata.contains_key("runtime_notification")
+        || is_visible_runtime_notification(message)
 }
 
 fn runtime_usage_value(response: &LlmResponse, key: &str) -> u64 {
@@ -1978,6 +2161,8 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Session(command) => run_session_command(command),
         CliCommand::Skills(command) => run_skills_command(command),
         CliCommand::Apps(command) => run_apps_command(command),
+        CliCommand::Plugins(command) => run_plugins_command(command),
+        CliCommand::Hooks(command) => run_hooks_command(command),
         CliCommand::Channels(command) => run_channels_command(command),
         CliCommand::Context(command) => run_context_command(command),
         CliCommand::Ask(options) => ask(options),
@@ -2017,6 +2202,8 @@ where
         "session" | "sessions" => parse_session(parser, global_config),
         "skills" | "skill" => parse_skills(parser, global_config),
         "apps" | "app" => parse_apps(parser, global_config),
+        "plugins" | "plugin" => parse_plugins(parser, global_config),
+        "hooks" | "hook" => parse_hooks(parser, global_config),
         "channels" | "channel" => parse_channels(parser, global_config),
         "context" => parse_context(parser, global_config),
         "ask" => parse_ask(parser, global_config, false),
@@ -2027,10 +2214,6 @@ where
         "gateway" => parse_gateway(parser, global_config),
         "web" => parse_web(parser, global_config),
         "provider" => parse_provider(parser, global_config),
-        "plugins" => Ok(CliCommand::Unsupported(UnsupportedCommand {
-            name: command,
-            reason: "command surface is reserved for a later runtime/channel slice".to_owned(),
-        })),
         other => Err(CliError::InvalidArguments(format!(
             "unknown command `{other}`"
         ))),
@@ -3907,6 +4090,23 @@ fn run_apps_command(command: AppsCommand) -> Result<String, CliError> {
     }
 }
 
+fn run_plugins_command(command: PluginsCommand) -> Result<String, CliError> {
+    match command {
+        PluginsCommand::List(options) => plugins_list(options).map(format_plugins_list),
+        PluginsCommand::Inspect(options) => plugins_inspect(options).map(format_plugins_inspect),
+        PluginsCommand::Doctor(options) => plugins_doctor(options).map(format_plugins_doctor),
+        PluginsCommand::Enable(options) => plugins_enable(options).map(format_plugin_mutation),
+        PluginsCommand::Disable(options) => plugins_disable(options).map(format_plugin_mutation),
+    }
+}
+
+fn run_hooks_command(command: HooksCommand) -> Result<String, CliError> {
+    match command {
+        HooksCommand::List(options) => hooks_list(options).map(format_hooks_list),
+        HooksCommand::Inspect(options) => hooks_inspect(options).map(format_hooks_inspect),
+    }
+}
+
 fn run_channels_command(command: ChannelsCommand) -> Result<String, CliError> {
     match command {
         ChannelsCommand::List(options) => channels_list(options).map(format_channels_list),
@@ -4177,6 +4377,347 @@ fn apps_store(
         bundle.context.workspace,
         AppRegistryStore::new(bundle.context.data_dir),
     ))
+}
+
+pub fn plugins_list(options: PluginsListOptions) -> Result<PluginProjectionReport, CliError> {
+    load_plugin_projection(options.config_path, options.workspace_override)
+}
+
+pub fn plugins_doctor(options: PluginsListOptions) -> Result<PluginProjectionReport, CliError> {
+    load_plugin_projection(options.config_path, options.workspace_override)
+}
+
+pub fn plugins_inspect(options: PluginsInspectOptions) -> Result<PluginInspectReport, CliError> {
+    if options.name.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "plugins inspect requires a plugin name".to_owned(),
+        ));
+    }
+    let report = load_plugin_projection(options.config_path, options.workspace_override)?;
+    let plugin = find_discovered_plugin(&report.plugins, &options.name)
+        .cloned()
+        .ok_or_else(|| CliError::InvalidArguments(format!("unknown plugin `{}`", options.name)))?;
+    Ok(PluginInspectReport {
+        config_path: report.config_path,
+        workspace: report.workspace,
+        plugin,
+        projection: report.projection,
+    })
+}
+
+pub fn plugins_enable(options: PluginsMutateOptions) -> Result<PluginMutationReport, CliError> {
+    mutate_plugin_config(options, PluginMutationAction::Enabled)
+}
+
+pub fn plugins_disable(options: PluginsMutateOptions) -> Result<PluginMutationReport, CliError> {
+    mutate_plugin_config(options, PluginMutationAction::Disabled)
+}
+
+pub fn hooks_list(options: HooksListOptions) -> Result<HookProjectionReport, CliError> {
+    let report = load_plugin_projection(options.config_path, options.workspace_override)?;
+    Ok(HookProjectionReport {
+        config_path: report.config_path,
+        workspace: report.workspace,
+        catalog: plugin_hook_catalog(),
+        plugin_hooks: report.projection.hooks,
+    })
+}
+
+pub fn hooks_inspect(options: HooksInspectOptions) -> Result<HookInspectReport, CliError> {
+    if options.filter.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "hooks inspect requires a filter".to_owned(),
+        ));
+    }
+    let report = load_plugin_projection(options.config_path, options.workspace_override)?;
+    let filter = options.filter.trim().to_owned();
+    let plugin_hooks = report
+        .projection
+        .hooks
+        .into_iter()
+        .filter(|hook| hook.plugin_id == filter || hook.event == filter)
+        .collect::<Vec<_>>();
+    let catalog = PluginHookCatalog {
+        entries: plugin_hook_catalog()
+            .entries
+            .into_iter()
+            .filter(|entry| entry.event.as_str() == filter)
+            .collect(),
+    };
+    Ok(HookInspectReport {
+        config_path: report.config_path,
+        workspace: report.workspace,
+        filter,
+        catalog,
+        plugin_hooks,
+    })
+}
+
+fn load_plugin_projection(
+    config_path: Option<PathBuf>,
+    workspace_override: Option<PathBuf>,
+) -> Result<PluginProjectionReport, CliError> {
+    let config_path = config_path.unwrap_or_else(default_config_path);
+    let bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )?;
+    let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
+    let projection = build_plugin_surface_projection(&discovery.plugins);
+    Ok(PluginProjectionReport {
+        config_path,
+        workspace: bundle.context.workspace,
+        data_dir: bundle.context.data_dir,
+        plugins: discovery.plugins,
+        projection,
+    })
+}
+
+fn mutate_plugin_config(
+    options: PluginsMutateOptions,
+    action: PluginMutationAction,
+) -> Result<PluginMutationReport, CliError> {
+    if options.name.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "plugin enable/disable requires a plugin name".to_owned(),
+        ));
+    }
+    let name = options.name.trim().to_owned();
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    let mut bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: options.workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )?;
+    let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
+    let discovered = find_discovered_plugin(&discovery.plugins, &name).is_some();
+    let configured = plugin_config_contains(&bundle.config.plugins.enabled, &name)
+        || plugin_config_contains(&bundle.config.plugins.disabled, &name);
+    if !(discovered || action == PluginMutationAction::Disabled && configured) {
+        return Err(CliError::InvalidArguments(format!(
+            "unknown plugin `{name}`"
+        )));
+    }
+
+    match action {
+        PluginMutationAction::Enabled => {
+            let mut candidate = bundle.config.clone();
+            remove_string_value(&mut candidate.plugins.disabled, &name);
+            push_unique_string(&mut candidate.plugins.enabled, name.clone());
+            let candidate_discovery = discover_plugins(&candidate, &bundle.context, &ProcessEnv)?;
+            let candidate_plugin = find_discovered_plugin(&candidate_discovery.plugins, &name)
+                .ok_or_else(|| CliError::InvalidArguments(format!("unknown plugin `{name}`")))?;
+            if candidate_plugin.state == PluginState::Blocked {
+                return Err(CliError::InvalidArguments(format!(
+                    "plugin `{name}` is blocked and was not enabled: {}",
+                    plugin_block_summary(candidate_plugin)
+                )));
+            }
+            let was_enabled = bundle
+                .config
+                .plugins
+                .enabled
+                .iter()
+                .any(|value| value == &name)
+                && !bundle
+                    .config
+                    .plugins
+                    .disabled
+                    .iter()
+                    .any(|value| value == &name);
+            remove_string_value(&mut bundle.config.plugins.disabled, &name);
+            push_unique_string(&mut bundle.config.plugins.enabled, name.clone());
+            patch_plugin_gate_config(&config_path, &name, PluginGateMutation::EnableDiscovered)?;
+            Ok(plugin_mutation_report(
+                config_path,
+                bundle.context.workspace,
+                name,
+                action,
+                !was_enabled,
+            ))
+        }
+        PluginMutationAction::Disabled => {
+            let was_disabled = bundle
+                .config
+                .plugins
+                .disabled
+                .iter()
+                .any(|value| value == &name);
+            remove_string_value(&mut bundle.config.plugins.enabled, &name);
+            if discovered {
+                push_unique_string(&mut bundle.config.plugins.disabled, name.clone());
+                patch_plugin_gate_config(
+                    &config_path,
+                    &name,
+                    PluginGateMutation::DisableDiscovered,
+                )?;
+            } else {
+                remove_string_value(&mut bundle.config.plugins.disabled, &name);
+                patch_plugin_gate_config(&config_path, &name, PluginGateMutation::RemoveStale)?;
+            }
+            Ok(plugin_mutation_report(
+                config_path,
+                bundle.context.workspace,
+                name,
+                action,
+                if discovered {
+                    !was_disabled
+                } else {
+                    configured
+                },
+            ))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginGateMutation {
+    EnableDiscovered,
+    DisableDiscovered,
+    RemoveStale,
+}
+
+fn patch_plugin_gate_config(
+    path: &Path,
+    name: &str,
+    mutation: PluginGateMutation,
+) -> Result<(), CliError> {
+    let mut value = read_config_value_for_patch(path)?;
+    let root = value.as_object_mut().ok_or_else(|| {
+        CliError::InvalidArguments("config root must be a JSON object".to_owned())
+    })?;
+    let plugins = root
+        .entry("plugins".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let plugins = plugins.as_object_mut().ok_or_else(|| {
+        CliError::InvalidArguments("config `plugins` must be a JSON object".to_owned())
+    })?;
+
+    let mut enabled = plugin_gate_array(plugins.remove("enabled"));
+    let mut disabled = plugin_gate_array(plugins.remove("disabled"));
+    match mutation {
+        PluginGateMutation::EnableDiscovered => {
+            remove_string_value(&mut disabled, name);
+            push_unique_string(&mut enabled, name.to_owned());
+        }
+        PluginGateMutation::DisableDiscovered => {
+            remove_string_value(&mut enabled, name);
+            push_unique_string(&mut disabled, name.to_owned());
+        }
+        PluginGateMutation::RemoveStale => {
+            remove_string_value(&mut enabled, name);
+            remove_string_value(&mut disabled, name);
+        }
+    }
+
+    if enabled.is_empty() {
+        plugins.remove("enabled");
+    } else {
+        plugins.insert("enabled".to_owned(), json!(enabled));
+    }
+    if disabled.is_empty() {
+        plugins.remove("disabled");
+    } else {
+        plugins.insert("disabled".to_owned(), json!(disabled));
+    }
+    if plugins.is_empty() {
+        root.remove("plugins");
+    }
+    write_config_value_for_patch(path, &value)?;
+    Ok(())
+}
+
+fn read_config_value_for_patch(path: &Path) -> Result<Value, CliError> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|error| CliError::InvalidArguments(format!("invalid config JSON: {error}"))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Value::Object(Map::new())),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_config_value_for_patch(path: &Path, value: &Value) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|error| CliError::InvalidArguments(format!("invalid config JSON: {error}")))?;
+    fs::write(path, format!("{text}\n"))?;
+    Ok(())
+}
+
+fn plugin_gate_array(value: Option<Value>) -> Vec<String> {
+    value
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn find_discovered_plugin<'a>(
+    plugins: &'a [DiscoveredPlugin],
+    name: &str,
+) -> Option<&'a DiscoveredPlugin> {
+    plugins.iter().find(|plugin| plugin.id == name)
+}
+
+fn plugin_config_contains(values: &[String], name: &str) -> bool {
+    values.iter().any(|value| value == name)
+}
+
+fn remove_string_value(values: &mut Vec<String>, name: &str) {
+    values.retain(|value| value != name);
+}
+
+fn push_unique_string(values: &mut Vec<String>, name: String) {
+    if !values.iter().any(|value| value == &name) {
+        values.push(name);
+    }
+    values.sort();
+}
+
+fn plugin_mutation_report(
+    config_path: PathBuf,
+    workspace: PathBuf,
+    plugin_name: String,
+    action: PluginMutationAction,
+    changed: bool,
+) -> PluginMutationReport {
+    PluginMutationReport {
+        config_path,
+        workspace,
+        plugin_name,
+        action,
+        changed,
+        next_session_notice:
+            "Changes apply on the next session or runtime reload; no plugin code was executed."
+                .to_owned(),
+    }
+}
+
+fn plugin_block_summary(plugin: &DiscoveredPlugin) -> String {
+    if !plugin.block_reasons.is_empty() {
+        return plugin
+            .block_reasons
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    if !plugin.diagnostics.is_empty() {
+        return plugin.diagnostics.join("; ");
+    }
+    "blocked".to_owned()
 }
 
 pub fn skills_list(options: SkillsListOptions) -> Result<SkillsListReport, CliError> {
@@ -5214,6 +5755,238 @@ pub fn format_apps_uninstall(report: AppsUninstallReport) -> String {
         format!("Registry: {}", display_path(&report.registry_path)),
     ]
     .join("\n")
+}
+
+pub fn format_plugins_list(report: PluginProjectionReport) -> String {
+    let mut lines = plugin_projection_header("Plugins", &report);
+    if report.plugins.is_empty() {
+        lines.push("No plugins discovered.".to_owned());
+        return lines.join("\n");
+    }
+    for descriptor in &report.projection.plugins {
+        lines.push(format!(
+            "- {} [{}] source={} declared={} projected={} execution=disabled",
+            descriptor.id,
+            descriptor.state,
+            descriptor.source,
+            descriptor.declared_surface_count,
+            descriptor.active_surface_count
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn format_plugins_inspect(report: PluginInspectReport) -> String {
+    let plugin = report.plugin;
+    let descriptor = report
+        .projection
+        .plugins
+        .iter()
+        .find(|descriptor| descriptor.id == plugin.id);
+    let mut lines = vec![
+        format!("Plugin: {}", plugin.id),
+        "Boundary: descriptor-only projection; no hooks, MCP, tools, commands, or processes were executed".to_owned(),
+        format!("Config: {}", display_path(&report.config_path)),
+        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("State: {}", plugin.state.as_str()),
+        format!("Source: {}", plugin.source.as_str()),
+        format!("Manifest: {}", display_path(&plugin.manifest_path)),
+    ];
+    if let Some(digest) = plugin.digest.as_deref() {
+        lines.push(format!("Digest: {digest}"));
+    }
+    if let Some(manifest) = plugin.manifest.as_ref() {
+        lines.push(format!("Version: {}", manifest.version));
+        if let Some(description) = manifest.description.as_deref() {
+            lines.push(format!("Description: {description}"));
+        }
+    }
+    if let Some(descriptor) = descriptor {
+        lines.push(format!(
+            "Surfaces: declared={} projected={} execution=disabled",
+            descriptor.declared_surface_count, descriptor.active_surface_count
+        ));
+        if !descriptor.secret_refs.is_empty() {
+            lines.push("Secret refs: names only, values redacted".to_owned());
+            for secret in &descriptor.secret_refs {
+                lines.push(format!(
+                    "- {:?}: {} present={}",
+                    secret.kind, secret.name, secret.present
+                ));
+            }
+        }
+    }
+    let plugin_tools = report
+        .projection
+        .tools
+        .iter()
+        .filter(|item| item.plugin_id == plugin.id)
+        .map(|item| format!("tool:{} execution={}", item.name, item.execution_enabled));
+    let plugin_hooks = report
+        .projection
+        .hooks
+        .iter()
+        .filter(|item| item.plugin_id == plugin.id)
+        .map(|item| format!("hook:{} execution={}", item.event, item.execution_enabled));
+    let plugin_skills = report
+        .projection
+        .skills
+        .iter()
+        .filter(|item| item.plugin_id == plugin.id)
+        .map(|item| format!("skill:{} execution={}", item.name, item.execution_enabled));
+    let plugin_commands = report
+        .projection
+        .commands
+        .iter()
+        .filter(|item| item.plugin_id == plugin.id)
+        .map(|item| format!("command:{} execution={}", item.name, item.execution_enabled));
+    let plugin_mcp = report
+        .projection
+        .mcp
+        .iter()
+        .filter(|item| item.plugin_id == plugin.id)
+        .map(|item| format!("mcp:{} execution={}", item.name, item.execution_enabled));
+    let surfaces = plugin_tools
+        .chain(plugin_hooks)
+        .chain(plugin_skills)
+        .chain(plugin_commands)
+        .chain(plugin_mcp)
+        .collect::<Vec<_>>();
+    if !surfaces.is_empty() {
+        lines.push(format!("Projected surfaces: {}", surfaces.join(", ")));
+    }
+    if !plugin.block_reasons.is_empty() {
+        lines.push(format!(
+            "Block reasons: {}",
+            plugin
+                .block_reasons
+                .iter()
+                .map(|reason| reason.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !plugin.diagnostics.is_empty() {
+        lines.push(format!("Diagnostics: {}", plugin.diagnostics.join("; ")));
+    }
+    lines.join("\n")
+}
+
+pub fn format_plugins_doctor(report: PluginProjectionReport) -> String {
+    let mut lines = plugin_projection_header("Plugin doctor", &report);
+    lines.push("Boundary: descriptor-only checks; no live plugin execution, hook dispatch, MCP startup, tool registration, or process execution".to_owned());
+    let blocked = report
+        .plugins
+        .iter()
+        .filter(|plugin| plugin.state == PluginState::Blocked)
+        .count();
+    lines.push(format!("Discovered plugins: {}", report.plugins.len()));
+    lines.push(format!("Blocked plugins: {blocked}"));
+    lines.push(format!(
+        "Projection diagnostics: {}",
+        report.projection.diagnostics.len()
+    ));
+    for plugin in report.plugins {
+        if plugin.state == PluginState::Blocked || !plugin.diagnostics.is_empty() {
+            lines.push(format!(
+                "- {} [{}]: {}",
+                plugin.id,
+                plugin.state.as_str(),
+                plugin_block_summary(&plugin)
+            ));
+        }
+    }
+    for diagnostic in report.projection.diagnostics {
+        lines.push(format!(
+            "- projection {} {}: {}",
+            diagnostic.plugin_id, diagnostic.code, diagnostic.message
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn format_plugin_mutation(report: PluginMutationReport) -> String {
+    let action = match report.action {
+        PluginMutationAction::Enabled => "enabled",
+        PluginMutationAction::Disabled => "disabled",
+    };
+    [
+        format!("Plugin: {}", report.plugin_name),
+        format!("Action: {action}"),
+        format!("Changed: {}", yes_no_label(report.changed)),
+        format!("Config: {}", display_path(&report.config_path)),
+        format!("Workspace: {}", display_path(&report.workspace)),
+        report.next_session_notice,
+    ]
+    .join("\n")
+}
+
+pub fn format_hooks_list(report: HookProjectionReport) -> String {
+    let mut lines = vec![
+        "Hooks".to_owned(),
+        "Boundary: descriptor-only metadata; no hook dispatch or plugin process execution"
+            .to_owned(),
+        format!("Config: {}", display_path(&report.config_path)),
+        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Catalog events: {}", report.catalog.entries.len()),
+        format!("Plugin hook descriptors: {}", report.plugin_hooks.len()),
+    ];
+    for entry in report.catalog.entries {
+        lines.push(format!(
+            "- catalog {} policy={:?} timeout_ms={} permission_approval={}",
+            entry.event.as_str(),
+            entry.output_policy,
+            entry.timeout_ms,
+            entry.can_request_permission_approval
+        ));
+    }
+    for hook in report.plugin_hooks {
+        lines.push(format!(
+            "- plugin {} event={} execution={}",
+            hook.plugin_id, hook.event, hook.execution_enabled
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn format_hooks_inspect(report: HookInspectReport) -> String {
+    let mut lines = vec![
+        format!("Hook filter: {}", report.filter),
+        "Boundary: descriptor-only metadata; no hook dispatch or plugin process execution"
+            .to_owned(),
+        format!("Config: {}", display_path(&report.config_path)),
+        format!("Workspace: {}", display_path(&report.workspace)),
+    ];
+    if report.catalog.entries.is_empty() && report.plugin_hooks.is_empty() {
+        lines.push("No matching hook metadata found.".to_owned());
+        return lines.join("\n");
+    }
+    for entry in report.catalog.entries {
+        lines.push(format!(
+            "Catalog: {} policy={:?} timeout_ms={} permission_approval={}",
+            entry.event.as_str(),
+            entry.output_policy,
+            entry.timeout_ms,
+            entry.can_request_permission_approval
+        ));
+    }
+    for hook in report.plugin_hooks {
+        lines.push(format!(
+            "Plugin hook: {} event={} execution={}",
+            hook.plugin_id, hook.event, hook.execution_enabled
+        ));
+    }
+    lines.join("\n")
+}
+
+fn plugin_projection_header(title: &str, report: &PluginProjectionReport) -> Vec<String> {
+    vec![
+        title.to_owned(),
+        "Boundary: descriptor-only projection; execution is disabled".to_owned(),
+        format!("Config: {}", display_path(&report.config_path)),
+        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Data dir: {}", display_path(&report.data_dir)),
+    ]
 }
 
 fn app_lifecycle_label(state: &AppLifecycleState) -> &'static str {
@@ -7317,6 +8090,9 @@ fn drain_runtime_outbound(runtime_bus: &MessageBus, channels: &mut ChannelManage
     let mut drained = false;
     while let Some(message) = runtime_bus.try_consume_outbound() {
         drained = true;
+        if !should_dispatch_runtime_outbound(&message) {
+            continue;
+        }
         if let Err(error) = channels.dispatch_outbound(message) {
             let statuses = channels
                 .status_report()
@@ -10426,6 +11202,8 @@ pub fn help_text() -> String {
         "  session   Manage local session files",
         "  skills    List and inspect local skill registry entries",
         "  apps      Init authoring drafts; install, list, inspect, enable, disable, or uninstall local app bundles",
+        "  plugins   List, inspect, doctor, enable, or disable descriptor-only plugins",
+        "  hooks     List and inspect descriptor-only plugin hook metadata",
         "  channels  List channel registry/config status",
         "  context   Inspect context files and dry-run inline @ references",
         "  ask       Send one message through the local AgentLoop",
@@ -10436,11 +11214,10 @@ pub fn help_text() -> String {
         "  web       Start the Web UI, API, and WebSocket on one port",
         "  agent     Alias for one-shot direct AgentLoop messages with -m/--message",
         "  provider  Manage provider auth; generic import-key, Codex login/import-token, and Copilot import-token are available",
-        "  plugins   Reserved for a later plugin slice",
         "",
         "Options:",
         "  -c, --config <path>   Use an explicit config file",
-        "  -w, --workspace <path> Override workspace for ask/agent/serve",
+        "  -w, --workspace <path> Override workspace for runtime, projection, app, context, channel, ask/agent/serve commands",
         "  -m, --message <text> Direct message for agent",
         "      --bind <addr>     Serve API on host:port",
         "      --host <ip>       Override API host for serve",
@@ -11015,6 +11792,233 @@ fn parse_apps_id_options(
         )));
     }
     Ok(Some(options))
+}
+
+fn parse_plugins(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "plugins requires `list`, `inspect`, `doctor`, `enable`, or `disable`".to_owned(),
+        ));
+    };
+    match action.as_str() {
+        "list" | "ls" => Ok(CliCommand::Plugins(PluginsCommand::List(
+            parse_plugins_list_options(parser, global_config, "list")?,
+        ))),
+        "inspect" | "show" => parse_plugins_inspect(parser, global_config),
+        "doctor" | "diagnose" => Ok(CliCommand::Plugins(PluginsCommand::Doctor(
+            parse_plugins_list_options(parser, global_config, "doctor")?,
+        ))),
+        "enable" => parse_plugins_mutate(parser, global_config, "enable"),
+        "disable" => parse_plugins_mutate(parser, global_config, "disable"),
+        "--help" | "-h" => Ok(CliCommand::Help),
+        other => Err(CliError::InvalidArguments(format!(
+            "unknown plugins subcommand `{other}`"
+        ))),
+    }
+}
+
+fn parse_plugins_list_options(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    action: &str,
+) -> Result<PluginsListOptions, CliError> {
+    let mut options = PluginsListOptions {
+        config_path: global_config,
+        workspace_override: None,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => {
+                return Err(CliError::InvalidArguments(
+                    "help requested after action".to_owned(),
+                ))
+            }
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown plugins {action} argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn parse_plugins_inspect(
+    parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let options = parse_plugins_name_options(parser, global_config, "inspect")?;
+    Ok(CliCommand::Plugins(PluginsCommand::Inspect(
+        PluginsInspectOptions {
+            config_path: options.config_path,
+            workspace_override: options.workspace_override,
+            name: options.name,
+        },
+    )))
+}
+
+fn parse_plugins_mutate(
+    parser: ArgParser,
+    global_config: Option<PathBuf>,
+    action: &str,
+) -> Result<CliCommand, CliError> {
+    let options = parse_plugins_name_options(parser, global_config, action)?;
+    let options = PluginsMutateOptions {
+        config_path: options.config_path,
+        workspace_override: options.workspace_override,
+        name: options.name,
+    };
+    match action {
+        "enable" => Ok(CliCommand::Plugins(PluginsCommand::Enable(options))),
+        _ => Ok(CliCommand::Plugins(PluginsCommand::Disable(options))),
+    }
+}
+
+fn parse_plugins_name_options(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    action: &str,
+) -> Result<PluginsInspectOptions, CliError> {
+    let mut options = PluginsInspectOptions {
+        config_path: global_config,
+        workspace_override: None,
+        name: String::new(),
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => {
+                return Err(CliError::InvalidArguments(
+                    "help requested after action".to_owned(),
+                ))
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown plugins {action} argument `{other}`"
+                )))
+            }
+            other => {
+                if !options.name.is_empty() {
+                    return Err(CliError::InvalidArguments(format!(
+                        "plugins {action} accepts exactly one plugin name"
+                    )));
+                }
+                options.name = other.to_owned();
+            }
+        }
+    }
+    if options.name.trim().is_empty() {
+        return Err(CliError::InvalidArguments(format!(
+            "plugins {action} requires a plugin name"
+        )));
+    }
+    Ok(options)
+}
+
+fn parse_hooks(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "hooks requires `list` or `inspect <filter>`".to_owned(),
+        ));
+    };
+    match action.as_str() {
+        "list" | "ls" => Ok(CliCommand::Hooks(HooksCommand::List(parse_hooks_list(
+            parser,
+            global_config,
+        )?))),
+        "inspect" | "show" => Ok(CliCommand::Hooks(HooksCommand::Inspect(
+            parse_hooks_inspect(parser, global_config)?,
+        ))),
+        "--help" | "-h" => Ok(CliCommand::Help),
+        other => Err(CliError::InvalidArguments(format!(
+            "unknown hooks subcommand `{other}`"
+        ))),
+    }
+}
+
+fn parse_hooks_list(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<HooksListOptions, CliError> {
+    let mut options = HooksListOptions {
+        config_path: global_config,
+        workspace_override: None,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => {
+                return Err(CliError::InvalidArguments(
+                    "help requested after action".to_owned(),
+                ))
+            }
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown hooks list argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn parse_hooks_inspect(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<HooksInspectOptions, CliError> {
+    let mut options = HooksInspectOptions {
+        config_path: global_config,
+        workspace_override: None,
+        filter: String::new(),
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => {
+                return Err(CliError::InvalidArguments(
+                    "help requested after action".to_owned(),
+                ))
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown hooks inspect argument `{other}`"
+                )))
+            }
+            other => {
+                if !options.filter.is_empty() {
+                    return Err(CliError::InvalidArguments(
+                        "hooks inspect accepts exactly one filter".to_owned(),
+                    ));
+                }
+                options.filter = other.to_owned();
+            }
+        }
+    }
+    if options.filter.trim().is_empty() {
+        return Err(CliError::InvalidArguments(
+            "hooks inspect requires a filter".to_owned(),
+        ));
+    }
+    Ok(options)
 }
 
 fn parse_channels(
@@ -12238,6 +13242,7 @@ pub struct AgentLoopChatCompletionAdapter {
     tool_search: ToolSearchConfig,
     containment_snapshot: Option<ContainmentSnapshotRef>,
     permission_mode_snapshot: PermissionModeSnapshot,
+    plugin_runtime_snapshot: PluginRuntimeSnapshot,
 }
 
 impl AgentLoopChatCompletionAdapter {
@@ -12266,6 +13271,8 @@ impl AgentLoopChatCompletionAdapter {
         let containment_snapshot = Some(runtime_containment_snapshot_ref(&containment));
         let permission_mode_snapshot =
             runtime_permission_mode_snapshot(&permission_config_snapshot);
+        let plugin_discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
+        let plugin_runtime_snapshot = build_plugin_runtime_snapshot(&plugin_discovery.plugins);
         let tooling = production_tool_registry(&bundle, allow_side_effect_tools)?;
         let provider_id = resolved.provider_id.clone();
         let native_image_input_supported =
@@ -12302,6 +13309,7 @@ impl AgentLoopChatCompletionAdapter {
             tool_search: runtime_tool_search_config(&bundle.config.tools.tool_search),
             containment_snapshot,
             permission_mode_snapshot,
+            plugin_runtime_snapshot,
         })
     }
 
@@ -12523,6 +13531,7 @@ impl AgentLoopChatCompletionAdapter {
                 for message in outbound
                     .into_iter()
                     .filter(|message| message.channel == WEBSOCKET_CHANNEL)
+                    .filter(should_dispatch_runtime_outbound)
                 {
                     if let Err(error) = manager.dispatch_outbound(message) {
                         emit(WebSocketServerEvent::Error {
@@ -12988,6 +13997,14 @@ impl AgentLoopChatCompletionAdapter {
         let notification_chat_id = message.chat_id.clone();
         let notification_metadata = routing_metadata.clone();
         let notification_reply_to = reply_to.clone();
+        let plugin_notification_sink = plugin_hook_dispatch_notification_sink(
+            outbound_bus.clone(),
+            live_notification_sink.clone(),
+            message.channel.clone(),
+            message.chat_id.clone(),
+            routing_metadata.clone(),
+            reply_to.clone(),
+        );
         let spawn_tool = SpawnTool::new(Arc::new(move |request| {
             spawner_runtime
                 .spawn_and_run_background(request, subagent_client.clone(), spawn_config.clone())
@@ -13043,6 +14060,21 @@ impl AgentLoopChatCompletionAdapter {
             if let Some(callback) = observability_tool_callback(observability_hooks, pending) {
                 tool_event_callbacks.push(callback);
             }
+        }
+        if self
+            .plugin_runtime_snapshot
+            .plugins
+            .iter()
+            .any(|plugin| !plugin.hooks.is_empty())
+        {
+            let plugin_hook: Arc<dyn AgentHook> = Arc::new(
+                PluginRuntimeHookAgentHook::new(self.plugin_runtime_snapshot.clone())
+                    .with_sink(plugin_notification_sink),
+            );
+            agent_hook = Some(match agent_hook {
+                Some(existing) => Arc::new(CompositeHook::new(vec![existing, plugin_hook])),
+                None => plugin_hook,
+            });
         }
         if let Some(callback) = combine_tool_event_callbacks(tool_event_callbacks) {
             loop_runtime = loop_runtime.with_tool_event_callback(callback);
@@ -14590,6 +15622,8 @@ mod tests {
     use shacs_core::runtime::{
         ChildResultEnvelope, ChildResultStatus, ContainerNetworkMode, ContainerRuntimeKind,
         DockerContainmentSnapshot, PermissionCeilingSnapshot, PermissionMode, PermissionRuleInput,
+        PluginExecutableCommand, PluginHookCallbackResult, PluginHookDispatchAttempt,
+        PluginHookEvent, PluginManifestSource, PluginRuntimeHook, PluginRuntimePlugin,
         ProcExecSummary, RuntimeBoundaryOrigin, SafetyCapability, Session,
     };
     use shacs_core::tools::{JsonMap, Tool, ToolResult};
@@ -14600,6 +15634,8 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::error::Error;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex};
 
     fn read_repo_text(relative_path: &str) -> Result<String, Box<dyn Error>> {
@@ -14663,6 +15699,307 @@ mod tests {
         };
         assert_eq!(options.config_path, Some(PathBuf::from("/tmp/b.json")));
         Ok(())
+    }
+
+    fn spec025_write_plugin_fixture(
+        root: &Path,
+        dir: &str,
+        name: &str,
+        requires_env: &[&str],
+    ) -> Result<(), Box<dyn Error>> {
+        let plugin_dir = root.join("plugins").join(dir);
+        fs::create_dir_all(&plugin_dir)?;
+        fs::write(
+            plugin_dir.join("plugin.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "name": name,
+                "version": "0.1.0",
+                "description": "Spec 025 test plugin",
+                "requiresEnv": requires_env,
+                "requiresConfig": ["SPEC025_CONFIG_SECRET"],
+                "surfaces": {
+                    "tools": ["demo_tool"],
+                    "hooks": ["llm:before"],
+                    "skills": ["demo_skill"],
+                    "commands": ["demo_command"],
+                    "mcp": ["demo_mcp"]
+                },
+                "entrypoints": {
+                    "tools": {"demo_tool": {"description": "Demo tool"}},
+                    "commands": {"demo_command": {"backend": "descriptor"}},
+                    "mcp": {"demo_mcp": {"backend": "descriptor"}}
+                }
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn spec025_config_fixture() -> Result<(tempfile::TempDir, PathBuf, PathBuf), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        config.env.insert(
+            "SPEC025_CONFIG_SECRET".to_owned(),
+            "RAW_CONFIG_SECRET".to_owned(),
+        );
+        save_config_to_path(&config, &config_path)?;
+        spec025_write_plugin_fixture(root.path(), "demo", "demo-plugin", &[])?;
+        Ok((root, config_path, workspace))
+    }
+
+    #[test]
+    fn spec025_parser_accepts_plugin_and_hook_projection_commands() -> Result<(), Box<dyn Error>> {
+        assert!(matches!(
+            parse_cli_args(["plugin", "list", "-c", "/tmp/config.json"])?,
+            CliCommand::Plugins(PluginsCommand::List(_))
+        ));
+        assert!(matches!(
+            parse_cli_args(["plugins", "inspect", "demo-plugin", "-w", "/tmp/ws"])?,
+            CliCommand::Plugins(PluginsCommand::Inspect(_))
+        ));
+        assert!(matches!(
+            parse_cli_args(["plugins", "doctor"])?,
+            CliCommand::Plugins(PluginsCommand::Doctor(_))
+        ));
+        assert!(matches!(
+            parse_cli_args(["plugins", "enable", "demo-plugin"])?,
+            CliCommand::Plugins(PluginsCommand::Enable(_))
+        ));
+        assert!(matches!(
+            parse_cli_args(["plugins", "disable", "demo-plugin"])?,
+            CliCommand::Plugins(PluginsCommand::Disable(_))
+        ));
+        assert!(matches!(
+            parse_cli_args(["hook", "list"])?,
+            CliCommand::Hooks(HooksCommand::List(_))
+        ));
+        assert!(matches!(
+            parse_cli_args(["hooks", "inspect", "llm:before"])?,
+            CliCommand::Hooks(HooksCommand::Inspect(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn spec025_plugins_list_inspect_doctor_render_state_without_raw_secrets(
+    ) -> Result<(), Box<dyn Error>> {
+        let (_root, config_path, workspace) = spec025_config_fixture()?;
+        let list = run_command(CliCommand::Plugins(PluginsCommand::List(
+            PluginsListOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(workspace.clone()),
+            },
+        )))?;
+        assert!(list.contains("descriptor-only projection"));
+        assert!(list.contains("demo-plugin [not_enabled]"));
+        assert!(!list.contains("RAW_CONFIG_SECRET"));
+
+        let inspect = run_command(CliCommand::Plugins(PluginsCommand::Inspect(
+            PluginsInspectOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(workspace.clone()),
+                name: "demo-plugin".to_owned(),
+            },
+        )))?;
+        assert!(inspect.contains("no hooks, MCP, tools, commands, or processes were executed"));
+        assert!(inspect.contains("SPEC025_CONFIG_SECRET"));
+        assert!(!inspect.contains("RAW_CONFIG_SECRET"));
+
+        let doctor = run_command(CliCommand::Plugins(PluginsCommand::Doctor(
+            PluginsListOptions {
+                config_path: Some(config_path),
+                workspace_override: Some(workspace),
+            },
+        )))?;
+        assert!(doctor.contains("no live plugin execution"));
+        assert!(!doctor.contains("RAW_CONFIG_SECRET"));
+        Ok(())
+    }
+
+    #[test]
+    fn spec025_enable_disable_mutate_config_only_and_report_next_session(
+    ) -> Result<(), Box<dyn Error>> {
+        let (_root, config_path, workspace) = spec025_config_fixture()?;
+        let enable = run_command(CliCommand::Plugins(PluginsCommand::Enable(
+            PluginsMutateOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(workspace.clone()),
+                name: "demo-plugin".to_owned(),
+            },
+        )))?;
+        assert!(enable.contains("Action: enabled"));
+        assert!(enable.contains("next session or runtime reload"));
+        assert!(enable.contains("no plugin code was executed"));
+        let saved: Config = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(saved.plugins.enabled, ["demo-plugin"]);
+        assert!(saved.plugins.disabled.is_empty());
+
+        let disable = run_command(CliCommand::Plugins(PluginsCommand::Disable(
+            PluginsMutateOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(workspace),
+                name: "demo-plugin".to_owned(),
+            },
+        )))?;
+        assert!(disable.contains("Action: disabled"));
+        assert!(disable.contains("next session or runtime reload"));
+        let saved: Config = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+        assert!(saved.plugins.enabled.is_empty());
+        assert_eq!(saved.plugins.disabled, ["demo-plugin"]);
+        Ok(())
+    }
+
+    #[test]
+    fn spec025_plugin_mutation_patches_only_raw_plugin_gates() -> Result<(), Box<dyn Error>> {
+        let (root, config_path, workspace) = spec025_config_fixture()?;
+        fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&json!({
+                "agents": {"defaults": {"workspace": workspace.to_string_lossy()}},
+                "env": {"SPEC025_CONFIG_SECRET": "RAW_CONFIG_SECRET"},
+                "plugins": {
+                    "enabled": ["other-plugin"],
+                    "disabled": ["demo-plugin", "stale-plugin"],
+                    "trustedWorkspaces": ["/tmp/trusted"],
+                    "unknownPluginField": {"kept": true}
+                },
+                "unknownTopLevel": {"kept": true}
+            }))?,
+        )?;
+        spec025_write_plugin_fixture(root.path(), "other", "other-plugin", &[])?;
+
+        let report = plugins_enable(PluginsMutateOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(workspace),
+            name: "demo-plugin".to_owned(),
+        })?;
+        assert!(report.changed);
+
+        let saved: Value = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+        assert_eq!(saved["unknownTopLevel"], json!({"kept": true}));
+        assert_eq!(
+            saved["plugins"]["unknownPluginField"],
+            json!({"kept": true})
+        );
+        assert_eq!(
+            saved["plugins"]["trustedWorkspaces"],
+            json!(["/tmp/trusted"])
+        );
+        assert_eq!(
+            saved["plugins"]["enabled"],
+            json!(["demo-plugin", "other-plugin"])
+        );
+        assert_eq!(saved["plugins"]["disabled"], json!(["stale-plugin"]));
+        Ok(())
+    }
+
+    #[test]
+    fn spec025_disable_removes_stale_configured_plugin_without_manifest(
+    ) -> Result<(), Box<dyn Error>> {
+        let (_root, config_path, workspace) = spec025_config_fixture()?;
+        fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&json!({
+                "agents": {"defaults": {"workspace": workspace.to_string_lossy()}},
+                "plugins": {
+                    "enabled": ["stale-plugin"],
+                    "disabled": ["stale-plugin"],
+                    "unknownPluginField": true
+                }
+            }))?,
+        )?;
+
+        let report = plugins_disable(PluginsMutateOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(workspace.clone()),
+            name: "stale-plugin".to_owned(),
+        })?;
+        assert!(report.changed);
+
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
+        assert!(saved["plugins"].get("enabled").is_none());
+        assert!(saved["plugins"].get("disabled").is_none());
+        assert_eq!(saved["plugins"]["unknownPluginField"], json!(true));
+
+        let unknown = plugins_disable(PluginsMutateOptions {
+            config_path: Some(config_path),
+            workspace_override: Some(workspace),
+            name: "never-configured".to_owned(),
+        });
+        assert!(unknown.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn spec025_enable_rejects_unknown_or_blocked_without_config_write() -> Result<(), Box<dyn Error>>
+    {
+        let (root, config_path, workspace) = spec025_config_fixture()?;
+        spec025_write_plugin_fixture(root.path(), "blocked", "blocked-plugin", &["MISSING_ENV"])?;
+        let before = fs::read_to_string(&config_path)?;
+        let unknown = run_command(CliCommand::Plugins(PluginsCommand::Enable(
+            PluginsMutateOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(workspace.clone()),
+                name: "missing-plugin".to_owned(),
+            },
+        )));
+        assert!(unknown.is_err());
+        assert_eq!(fs::read_to_string(&config_path)?, before);
+
+        let blocked = run_command(CliCommand::Plugins(PluginsCommand::Enable(
+            PluginsMutateOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(workspace),
+                name: "blocked-plugin".to_owned(),
+            },
+        )));
+        assert!(blocked
+            .err()
+            .map(|error| error.to_string().contains("blocked"))
+            .unwrap_or(false));
+        assert_eq!(fs::read_to_string(config_path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn spec025_hooks_list_inspect_render_metadata_without_dispatch() -> Result<(), Box<dyn Error>> {
+        let (_root, config_path, workspace) = spec025_config_fixture()?;
+        let _enabled = plugins_enable(PluginsMutateOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(workspace.clone()),
+            name: "demo-plugin".to_owned(),
+        })?;
+
+        let list = run_command(CliCommand::Hooks(HooksCommand::List(HooksListOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(workspace.clone()),
+        })))?;
+        assert!(list.contains("no hook dispatch or plugin process execution"));
+        assert!(list.contains("catalog llm:before"));
+        assert!(list.contains("plugin demo-plugin event=llm:before execution=false"));
+
+        let inspect = run_command(CliCommand::Hooks(HooksCommand::Inspect(
+            HooksInspectOptions {
+                config_path: Some(config_path),
+                workspace_override: Some(workspace),
+                filter: "llm:before".to_owned(),
+            },
+        )))?;
+        assert!(inspect.contains("Catalog: llm:before"));
+        assert!(inspect.contains("Plugin hook: demo-plugin event=llm:before execution=false"));
+        Ok(())
+    }
+
+    #[test]
+    fn spec025_help_lists_plugins_and_hooks_as_implemented_commands() {
+        let help = help_text();
+        assert!(help.contains("plugins   List, inspect, doctor, enable, or disable"));
+        assert!(help.contains("hooks     List and inspect descriptor-only"));
+        assert!(!help.contains("Reserved for a later plugin slice"));
     }
 
     #[test]
@@ -16708,6 +18045,7 @@ mod tests {
                 source: Some("test-source".to_owned()),
                 scope_ref: Some("scope:test".to_owned()),
             },
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let error = adapter
@@ -18252,6 +19590,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let skills = adapter
@@ -20302,18 +21641,17 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_runtime_commands_are_reserved_not_silently_accepted(
-    ) -> Result<(), Box<dyn Error>> {
+    fn runtime_commands_are_implemented_or_explicitly_rejected() -> Result<(), Box<dyn Error>> {
         assert!(matches!(
             parse_cli_args(["channels", "status"]),
             Ok(CliCommand::Channels(ChannelsCommand::Status(_)))
         ));
-        let parsed = parse_cli_args(["plugins"])?;
-        let CliCommand::Unsupported(command) = parsed else {
-            return Err("expected unsupported plugins marker".into());
-        };
-        assert_eq!(command.name, "plugins");
-        assert!(command.reason.contains("later"));
+        assert!(matches!(
+            parse_cli_args(["plugins", "list"]),
+            Ok(CliCommand::Plugins(PluginsCommand::List(_)))
+        ));
+        let plugins_error = parse_cli_args(["plugins"]).unwrap_err().to_string();
+        assert!(plugins_error.contains("plugins requires"));
         assert!(matches!(
             parse_cli_args(["gateway"]),
             Ok(CliCommand::Gateway(_))
@@ -20457,6 +21795,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         assert!(!adapter.runtime_verbose);
@@ -20510,6 +21849,7 @@ mod tests {
                 source: Some("user_local_config".to_owned()),
                 scope_ref: None,
             },
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let config = adapter.loop_config();
@@ -20755,6 +22095,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let paths = adapter.persist_media_data_urls(&[
@@ -20855,6 +22196,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -20957,6 +22299,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let error = adapter
@@ -21043,6 +22386,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -21114,6 +22458,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
         let (event_tx, event_rx) = mpsc::channel();
         event_tx.send(ProviderEvent::TextDelta {
@@ -21197,6 +22542,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         assert_eq!(
@@ -21277,6 +22623,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let response = adapter.complete_chat(ChatCompletionInvocation {
@@ -21363,6 +22710,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let output = complete_direct_message(
@@ -21380,6 +22728,127 @@ mod tests {
         let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].model, "gpt-5");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spec025_plugin_runtime_hook_executes_during_direct_agent_loop() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        let plugin_root = root.path().join("plugins").join("observer");
+        let bin_dir = plugin_root.join("bin");
+        fs::create_dir_all(&workspace)?;
+        fs::create_dir_all(&bin_dir)?;
+        let marker_path = root.path().join("hook-marker.json");
+        let hook_path = bin_dir.join("observe");
+        fs::write(
+            &hook_path,
+            "#!/bin/sh\nprintf '{\"event\":\"llm:after\",\"plugin_id\":\"observer\"}' > \"$1\"\nprintf '{\"diagnostic\":{\"message\":\"observed\"}}'\n",
+        )?;
+        let mut permissions = fs::metadata(&hook_path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook_path, permissions)?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 1,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
+            client: Arc::new(FakeProviderClient {
+                captured: captured.clone(),
+                response: LlmResponse {
+                    content: Some("direct ok".to_owned()),
+                    finish_reason: "stop".to_owned(),
+                    ..LlmResponse::default()
+                },
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            media_dir,
+            tools: ToolRegistry::new(),
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: true,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            runtime_verbose: false,
+            tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot {
+                plugins: vec![PluginRuntimePlugin {
+                    id: "observer".to_owned(),
+                    root: plugin_root,
+                    manifest_digest: Some("sha256:test".to_owned()),
+                    source: PluginManifestSource::UserData,
+                    hooks: vec![PluginRuntimeHook {
+                        plugin_id: "observer".to_owned(),
+                        event: PluginHookEvent::LlmAfter,
+                        event_name: "llm:after".to_owned(),
+                        command: PluginExecutableCommand {
+                            command_path: hook_path,
+                            args: vec![marker_path.to_string_lossy().to_string()],
+                            timeout_ms: 1_000,
+                        },
+                    }],
+                }],
+                diagnostics: Vec::new(),
+            },
+        };
+
+        let inbound = InboundMessage::new("cli", "user", "direct", "hello")
+            .with_session_key_override("plugin-hook");
+        let (turn, outbound) =
+            adapter.process_inbound_with_outbound(inbound, adapter.loop_config(), None, &[])?;
+        let output =
+            render_direct_turn_content(turn.final_content.unwrap_or_default(), outbound.clone());
+
+        assert_eq!(output, "direct ok");
+        let marker = fs::read_to_string(marker_path)?;
+        assert!(marker.contains("\"event\":\"llm:after\""), "{marker}");
+        assert!(marker.contains("\"plugin_id\":\"observer\""), "{marker}");
+        let notification = outbound.iter().find(|message| {
+            message
+                .metadata
+                .get("runtime_notification")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str)
+                == Some("plugin_hook")
+        });
+        let Some(notification) = notification else {
+            return Err("missing plugin hook dispatch diagnostic notification".into());
+        };
+        assert!(!is_visible_runtime_notification(notification));
+        assert_eq!(notification.content, "Plugin hook diagnostics recorded");
+        let summary = notification
+            .metadata
+            .get("runtime_notification")
+            .and_then(|value| value.get("summary"))
+            .ok_or("missing plugin hook summary")?;
+        assert_eq!(summary.get("event"), Some(&json!("llm:after")));
+        assert_eq!(summary.get("dispatch_count"), Some(&json!(1)));
+        assert_eq!(summary.get("success_count"), Some(&json!(1)));
+        assert_eq!(summary.get("observed_count"), Some(&json!(1)));
+        assert_eq!(
+            captured.lock().map_err(|_| "captured lock poisoned")?.len(),
+            1
+        );
         Ok(())
     }
 
@@ -21456,6 +22925,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let output = complete_direct_message(
@@ -21529,6 +22999,7 @@ mod tests {
                 tool_search: ToolSearchConfig::default(),
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
+                plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: Vec::new(),
@@ -21610,6 +23081,7 @@ mod tests {
                 tool_search: ToolSearchConfig::default(),
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
+                plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
             },
             lifecycle_hooks: vec![hook],
             observability_hooks: Vec::new(),
@@ -21696,6 +23168,7 @@ mod tests {
                 tool_search: ToolSearchConfig::default(),
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
+                plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
             },
             lifecycle_hooks: vec![recording_hook, panic_hook],
             observability_hooks: Vec::new(),
@@ -21794,6 +23267,7 @@ mod tests {
                 tool_search: ToolSearchConfig::default(),
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
+                plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![panic_hook],
@@ -21990,6 +23464,7 @@ mod tests {
                 tool_search: ToolSearchConfig::default(),
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
+                plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![recording_hook],
@@ -22098,6 +23573,40 @@ mod tests {
     }
 
     #[test]
+    fn plugin_hook_dispatch_notification_is_retained_but_not_live_visible() {
+        let summary = shacs_core::runtime::summarize_plugin_hook_dispatch(
+            PluginHookEvent::LlmAfter,
+            vec![PluginHookDispatchAttempt {
+                plugin_id: "observer".to_owned(),
+                event: PluginHookEvent::LlmAfter,
+                timeout_ms: 1_000,
+                result: PluginHookCallbackResult::Output(json!({
+                    "diagnostic": {"message": "observed"}
+                })),
+            }],
+        );
+        let notification = plugin_hook_dispatch_notification_message(
+            "direct",
+            "chat-1",
+            &Map::new(),
+            None,
+            &summary,
+        );
+
+        assert_eq!(notification.content, "Plugin hook diagnostics recorded");
+        assert_eq!(
+            notification.metadata["runtime_notification"]["kind"],
+            "plugin_hook"
+        );
+        assert_eq!(
+            notification.metadata["runtime_notification"]["summary"]["event"],
+            "llm:after"
+        );
+        assert!(!is_visible_runtime_notification(&notification));
+        assert!(!should_dispatch_runtime_outbound(&notification));
+    }
+
+    #[test]
     fn direct_render_includes_subagent_runtime_notifications_but_not_tools() {
         let mut subagent_metadata = Map::new();
         subagent_metadata.insert(
@@ -22178,6 +23687,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let inbound = InboundMessage::new("direct", "user", "chat-1", "make artifact")
@@ -22254,6 +23764,7 @@ mod tests {
                 mode: shacs_config::PermissionMode::BypassPermissions,
                 ..PermissionModeSnapshot::default()
             },
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let inbound = InboundMessage::new("direct", "user", "chat-1", "make summary")
@@ -22392,6 +23903,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         });
         let runtime_bus = MessageBus::new();
         let turn_adapter = adapter.clone();
@@ -22481,6 +23993,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         };
 
         let (_first_turn, first_outbound) = adapter.process_inbound_with_outbound(
@@ -23000,6 +24513,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
         })
     }
 
