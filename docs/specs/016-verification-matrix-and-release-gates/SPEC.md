@@ -110,9 +110,9 @@ demo behavior는 제한된 경로에서만 동작하거나, 실패/복구/경계
 
 초기 Rust 기준:
 
-- 현재 저장소의 crate manifest 기준 `cargo fmt --manifest-path crates/shacs-cli/Cargo.toml -- --check`
-- 현재 저장소의 crate manifest 기준 `cargo clippy --manifest-path crates/shacs-cli/Cargo.toml --all-targets -- -D warnings`
-- `cargo test`와 별개인 빌드/타입 단계는 `cargo --manifest-path crates/shacs-core/Cargo.toml ...`처럼 실제 crate manifest를 명시 실행
+- 현재 저장소의 Rust workspace manifest 기준 `cargo fmt --manifest-path crates/Cargo.toml --all -- --check`
+- 현재 저장소의 Rust workspace manifest 기준 `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings`
+- `cargo test`와 별개인 빌드/타입 단계는 `cargo --manifest-path crates/Cargo.toml ...`에 `--workspace` 또는 `-p <package>`를 명시 실행
 
 ### 2. 단위 테스트
 
@@ -161,7 +161,7 @@ demo behavior는 제한된 경로에서만 동작하거나, 실패/복구/경계
 
 ## spec별 verification matrix
 
-현재 저장소의 Rust 검증 명령은 실제 crate manifest를 가리키는 `cargo --manifest-path crates/shacs-core/Cargo.toml ...` 형태로 명시 실행할 수 있어야 한다. 루트 `Cargo.toml` workspace가 추가되기 전까지 루트 workspace 범위 명령은 release evidence locator로 쓰지 않는다.
+현재 저장소의 Rust 검증 명령은 Rust workspace manifest를 가리키는 `cargo --manifest-path crates/Cargo.toml ...` 형태로 명시 실행할 수 있어야 한다. 전체 범위는 `--workspace`, 개별 crate 범위는 `-p <package>`로 release evidence locator를 분명히 한다.
 
 ### 001. session kernel
 

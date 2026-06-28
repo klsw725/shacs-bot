@@ -613,7 +613,7 @@ Spec 024의 closure는 다음이 모두 충족될 때만 선언할 수 있다.
 - CLI/TUI/local API/channel projection이 workflow progress, verifier, budget, blocked/resume state를 일관되게 표시한다.
 - Diagnostics/replay가 harness plan, child graph, verifier verdict, merge decision, stale result를 redacted evidence로 남긴다.
 - Runtime execution wiring이 workflow admission부터 child execution, progress event, interrupt propagation, final synthesis까지 실제 경로로 연결된다.
-- Rust 검증은 관련 crate 기준 `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`, `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`, `cargo test --manifest-path crates/shacs-core/Cargo.toml`처럼 범위를 명시해 통과한다.
+- Rust 검증은 관련 범위 기준 `cargo fmt --manifest-path crates/Cargo.toml --all -- --check`, `cargo clippy --manifest-path crates/Cargo.toml -p shacs-core --all-targets -- -D warnings`, `cargo test --manifest-path crates/Cargo.toml -p shacs-core`처럼 workspace manifest와 범위를 명시해 통과한다.
 - 문서와 사용자 가이드는 dynamic workflows를 prototype 또는 provider-native beta로 과장하지 않는다.
 
 ---

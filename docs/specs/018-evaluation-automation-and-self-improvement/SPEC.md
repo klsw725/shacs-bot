@@ -644,10 +644,10 @@ completion evaluator selects aux judge model
 기본 Rust gate:
 
 ```sh
-cargo fmt --check
-cargo check --workspace --locked
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --locked
+cargo fmt --manifest-path crates/Cargo.toml --all -- --check
+cargo check --manifest-path crates/Cargo.toml --workspace --locked
+cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings
+cargo test --manifest-path crates/Cargo.toml --workspace --locked
 ```
 
 필수 테스트 관점:

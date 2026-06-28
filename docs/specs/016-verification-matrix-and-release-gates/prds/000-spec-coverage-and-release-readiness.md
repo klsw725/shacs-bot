@@ -121,44 +121,44 @@
 - 통합 테스트: 현재 slice에서는 `crates/shacs-cli/src/lib.rs` inline tests와 manifest-path cargo commands가 fresh workspace CLI 흐름을 검증한다. Docker/Compose runtime containment는 opt-in smoke script를 evidence locator로 쓴다.
 - Spec023 release evidence lane: 현재 lane은 실제 존재하는 Cargo test filter와 real Compose smoke command만 근거로 쓰며, Spec 023 closed status를 현재 evidence scope에서 뒷받침한다. App process supervisor는 아직 app process를 시작하지 않으므로 active inheritance evidence로 과장하지 않는다. Compose smoke는 official-container runtime evidence와 기본 Compose static safety를 담당한다. Provider credential 없이 full MCP child execution smoke를 반복 가능하게 만들 수 없는 동안 MCP containment inheritance는 core test snapshot/default-deny evidence가 담당한다.
   - `./docs/scripts/spec023-compose-smoke.sh`
-  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_classifier_reports_native_unknown`
-  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_snapshot_ref_preserves_unknown_state`
-  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_classifier_reports_official_container_marker`
-  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_classifier_reports_recognized_container_evidence`
-  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_containment_classifier_reports_unsafe_privileged_evidence`
-  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml bypass_permissions_falls_back_for_native_unknown_containment`
-  - `cargo test --manifest-path crates/shacs-cli/Cargo.toml bypass_permissions_falls_back_for_unsafe_privileged`
-  - `cargo test --manifest-path crates/shacs-core/Cargo.toml exec_tool_bwrap_sandbox_setup_failure_does_not_execute_original_command`
-  - `cargo test --manifest-path crates/shacs-core/Cargo.toml exec_tool_native_unknown_without_backend_enforces_workspace_scope`
-  - `cargo test --manifest-path crates/shacs-core/Cargo.toml exec_tool_unknown_sandbox_backend_does_not_execute_command`
-  - `cargo test --manifest-path crates/shacs-core/Cargo.toml mcp_runtime_connects_registers_and_closes_servers`
-  - `cargo test --manifest-path crates/shacs-core/Cargo.toml mcp_default_deny_excludes_disabled_capabilities_from_tool_search_bridge`
-  - `cargo test --manifest-path crates/shacs-core/Cargo.toml subagent_permissioned_action_context_inherits_snapshots_and_origin`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-cli runtime_containment_classifier_reports_native_unknown`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-cli runtime_containment_snapshot_ref_preserves_unknown_state`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-cli runtime_containment_classifier_reports_official_container_marker`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-cli runtime_containment_classifier_reports_recognized_container_evidence`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-cli runtime_containment_classifier_reports_unsafe_privileged_evidence`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-cli bypass_permissions_falls_back_for_native_unknown_containment`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-cli bypass_permissions_falls_back_for_unsafe_privileged`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-core exec_tool_bwrap_sandbox_setup_failure_does_not_execute_original_command`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-core exec_tool_native_unknown_without_backend_enforces_workspace_scope`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-core exec_tool_unknown_sandbox_backend_does_not_execute_command`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-core mcp_runtime_connects_registers_and_closes_servers`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-core mcp_default_deny_excludes_disabled_capabilities_from_tool_search_bridge`
+  - `cargo test --manifest-path crates/Cargo.toml -p shacs-core subagent_permissioned_action_context_inherits_snapshots_and_origin`
 - 패키징 및 smoke 테스트: fresh install, create session, input handling, approval surface, inspect, recover
 - 내구성 테스트: interrupted upgrade and recovery evidence must be covered before ready state
 - 문서 증거: spec coverage matrix, release checklist, blocker taxonomy, waiver template
 
 ## Release gate runner
 
-로컬 release gate는 현재 slice에서 Cargo 하위 명령을 실제 crate manifest path 기준으로 직접 실행한다. 별도 runner script나 루트 workspace manifest가 추가되면 이 표를 그 실행 경로와 동기화한다.
+로컬 release gate는 현재 slice에서 Cargo 하위 명령을 `crates/Cargo.toml` Rust workspace manifest 기준으로 직접 실행한다. 별도 runner script가 추가되면 이 표를 그 실행 경로와 동기화한다.
 
 대표 명령은 첫 실패에서 중단해 실행하며, 각 단계는 구현된 제품 범위의 shipping release gate 증거를 대표한다. 이 명령들의 통과는 full-spec completion 판정 그 자체가 아니며, 문서화된 evidence locator와 함께 해석한다.
 
-1. `cargo fmt --manifest-path crates/shacs-cli/Cargo.toml -- --check`
+1. `cargo fmt --manifest-path crates/Cargo.toml --all -- --check`
    - 정적 형식 검증. 포맷 drift가 있으면 release 후보가 아니다.
-2. `cargo check --manifest-path crates/shacs-cli/Cargo.toml --all-targets --locked`
+2. `cargo check --manifest-path crates/Cargo.toml -p shacs-cli --all-targets --locked`
    - CLI crate가 의존하는 runtime/API/channel/config 경계의 compile/type boundary를 검증한다.
-3. `cargo clippy --manifest-path crates/shacs-cli/Cargo.toml --all-targets --locked -- -D warnings`
+3. `cargo clippy --manifest-path crates/Cargo.toml -p shacs-cli --all-targets --locked -- -D warnings`
    - warning-free lint gate. 경고를 release blocker로 취급한다.
-4. `cargo test --manifest-path crates/shacs-cli/Cargo.toml runtime_update`
+4. `cargo test --manifest-path crates/Cargo.toml -p shacs-cli runtime_update`
    - packaging/update/recover marker 대표 테스트.
-5. `cargo test --manifest-path crates/shacs-cli/Cargo.toml programmatic_facade`
+5. `cargo test --manifest-path crates/Cargo.toml -p shacs-cli programmatic_facade`
    - SDK facade lifecycle/observability 대표 테스트.
-6. `cargo test --manifest-path crates/shacs-core/Cargo.toml --test runtime_loop`
+6. `cargo test --manifest-path crates/Cargo.toml -p shacs-core --test runtime_loop`
    - core runtime loop/callback regression suite.
-7. `cargo test --manifest-path crates/shacs-cli/Cargo.toml --locked`
+7. `cargo test --manifest-path crates/Cargo.toml -p shacs-cli --locked`
    - CLI와 그 manifest dependency graph의 regression suite를 실행한다.
-8. `cargo test --manifest-path crates/shacs-cli/Cargo.toml bypass_permissions_falls_back_for_unsafe_privileged`
+8. `cargo test --manifest-path crates/Cargo.toml -p shacs-cli bypass_permissions_falls_back_for_unsafe_privileged`
    - Spec023 unsafe privileged containment evidence가 permissive permission mode를 유지하지 못하게 하는 대표 안전 회귀 테스트다.
 
 별도 verification matrix crate/test가 추가되면 matrix 행, required family, release readiness decision, spec 문서 존재, repo-relative executable evidence locator, release-gate script representatives를 함께 확인해야 한다. 현재 문서는 존재하지 않는 test file path를 evidence로 쓰지 않고, 실제 Cargo로 실행 가능한 inline/integration tests만 근거로 삼는다.
