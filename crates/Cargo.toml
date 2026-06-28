@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "shacs-api",
+    "shacs-app",
+    "shacs-bus",
+    "shacs-channels",
+    "shacs-cli",
+    "shacs-command",
+    "shacs-config",
+    "shacs-core",
+    "shacs-cron",
+    "shacs-eval",
+    "shacs-heartbeat",
+    "shacs-projection",
+    "shacs-providers",
+    "shacs-redaction",
+    "shacs-security",
+    "shacs-session",
+    "shacs-skills",
+    "shacs-templates",
+    "shacs-utils",
+    "shacs-web",
+    "shacs-workflow",
+]
+resolver = "2"
