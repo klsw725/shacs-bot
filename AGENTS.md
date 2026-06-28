@@ -18,20 +18,20 @@
 - **Rust는 `cargo`로만 다룬다**. 빌드/실행/테스트/체크를 다른 언어용 도구로 우회하지 말 것. 빠른 검증은 `cargo check`, 빌드는 `cargo build`, 배포용 빌드는 `cargo build --release`, 테스트는 `cargo test`를 기본으로 본다.
 - **포맷/린트는 Cargo 하위 명령 기준**. 포맷은 `cargo fmt`, 린트는 `cargo clippy`를 사용한다. 검증 단계에서는 가능하면 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`까지 확인할 것.
 - **Rust toolchain component를 전제로 생각하지 말 것**. `rustfmt`, `clippy`가 없다면 `rustup component add rustfmt clippy`가 먼저다.
-- **레포 루트 추측 실행 금지**. Rust 프로젝트가 하위 디렉터리에 있으면 `cargo --manifest-path path/to/Cargo.toml ...` 형태로 명시 실행하라.
-- **`crates/`는 Rust 작업 공간 후보 디렉터리**. 단일 프로그램이면 독립 crate로 시작하고, 여러 Rust crate를 함께 관리할 때만 workspace로 승격하는 쪽을 기본으로 본다.
+- **레포 루트 추측 실행 금지**. Rust workspace는 `crates/Cargo.toml`이므로 저장소 루트에서 `cargo --manifest-path crates/Cargo.toml ...` 형태로 명시 실행하라.
+- **`crates/`는 Rust workspace root**다. 하위 `shacs-*` 디렉터리는 workspace member crate이며, 루트 저장소에는 Cargo workspace manifest를 두지 않는다.
 
 ## 프로젝트 구조 지뢰
 
 - **Rust crate가 하나면 workspace를 서두르지 말 것**. 루트 workspace는 여러 crate를 함께 묶어야 할 때만 도입하라. 단일 바이너리 단계에서 과한 workspace 설계는 피한다.
 - **workspace를 도입하면 루트 규칙이 생긴다**. 공용 `Cargo.lock`, 공용 `target/`, 루트 기준 명령 적용 범위를 함께 고려해야 한다. 필요하면 `default-members`까지 명시할 것.
 - **경로 의존성(path dependency) 추가 시 workspace 편입 범위를 확인할 것**. crate 위치를 대충 잡으면 나중에 의도치 않게 workspace 범위가 꼬일 수 있다.
-- **현재 저장소 구조 메모**: 현재 레포는 workspace 루트이며, 주 Rust crate는 `crates/shacs-core/Cargo.toml`이다. Rust 검증/빌드 명령은 `--workspace` 또는 `--manifest-path crates/shacs-core/Cargo.toml` 기준으로 실행하라.
+- **현재 저장소 구조 메모**: Rust workspace root는 `crates/Cargo.toml`이다. 주 binary package는 `shacs-cli`, core runtime package는 `shacs-core`이며, Rust 검증/빌드 명령은 `--manifest-path crates/Cargo.toml`에 `--workspace` 또는 `-p <package>`를 붙여 실행하라.
 
 ## 산출물/재현성 지뢰
 
 - **`Cargo.lock`은 프로그램이라면 버전 관리에 포함하는 쪽을 기본으로 본다**. manifest를 바꾸지 않았는데 lockfile만 덮어쓰지 말 것. 수동 편집도 금지.
-- **빌드 산출물은 Cargo 기본 위치를 따른다**. `target/`을 소스처럼 다루지 말고, 필요 이상으로 다른 언어 산출물과 섞지 말 것.
+- **빌드 산출물은 Cargo 기본 위치를 따른다**. workspace target directory는 `crates/target/`이다. `target/`을 소스처럼 다루지 말고, 필요 이상으로 다른 언어 산출물과 섞지 말 것.
 - **재현성이 필요하면 toolchain을 명시할 것**. 최소 지원 버전은 `Cargo.toml`의 `rust-version`, 저장소 차원 고정이 필요하면 `rust-toolchain.toml`을 사용한다.
 - **자동화/CI성 명령은 가능하면 `--locked`를 우선 고려**. 의도치 않은 lockfile 갱신을 막는다.
 
@@ -43,8 +43,8 @@
 
 ## 검증 기준
 
-- **Rust 변경의 기본 검증 순서**는 `cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → `cargo test`다.
-- **workspace면 검증 범위를 명시**. 필요 시 `--workspace` 또는 `--manifest-path`를 붙여 어느 crate를 검증하는지 분명히 하라.
+- **Rust 변경의 기본 검증 순서**는 `cargo fmt --manifest-path crates/Cargo.toml --all -- --check` → `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings` → `cargo test --manifest-path crates/Cargo.toml --workspace`다.
+- **검증 범위를 명시**. 전체 workspace면 `--workspace`, 특정 crate면 `-p <package>`를 붙여 어느 crate를 검증하는지 분명히 하라.
 - **사용자가 요청하지 않은 언어/서브프로젝트까지 한꺼번에 건드리지 말 것**. Rust를 건드렸다고 해서 다른 툴체인까지 리팩토링하지 않는다.
 
 ## 코딩 행동 지침
