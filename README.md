@@ -6,63 +6,63 @@
 
 ## 빠른 시작
 
-현재 저장소는 crate별 Cargo manifest를 기준으로 실행합니다. 저장소 루트에서 `--manifest-path crates/shacs-cli/Cargo.toml`을 붙여 명령을 실행하세요.
+현재 저장소의 Rust workspace는 `crates/Cargo.toml`입니다. 저장소 루트에서 workspace manifest와 package를 명시해 명령을 실행하세요.
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- --help
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- --help
 ```
 
 설정 파일과 workspace template을 생성하거나 갱신합니다. `onboard`는 built-in channel별 기본 config stub도 생성하며, 기존 channel 값과 secret/env placeholder는 보존하고 누락된 기본 key만 병합합니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- onboard --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- onboard --workspace /tmp/shacs-ws
 ```
 
 설정과 runtime 상태를 확인합니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- status
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime inspect --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- status
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime inspect --workspace /tmp/shacs-ws
 ```
 
 공식 로컬 runtime lifecycle 진입점은 `runtime start/stop/restart`입니다. `runtime start`는 channel runtime foreground 경로를 실행하며, `runtime stop`과 `runtime restart`는 실행 중인 로컬 owner가 관찰할 stop-request marker를 기록합니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime start --workspace /tmp/shacs-ws
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime stop --workspace /tmp/shacs-ws
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime restart --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime start --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime stop --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime restart --workspace /tmp/shacs-ws
 ```
 
 문제 상황을 확인해야 할 때는 로컬 runtime diagnostics를 bundle로 저장할 수 있습니다. diagnostics 출력과 bundle은 secret, token 같은 민감한 값을 가리며, runtime containment summary/digest를 함께 보고합니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고됩니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime diagnostics --bundle /tmp/shacs-diagnostics.zip --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime diagnostics --bundle /tmp/shacs-diagnostics.zip --workspace /tmp/shacs-ws
 ```
 
 소스 checkout/Cargo 기반 update는 binary rebuild/replacement와 runtime marker 기록을 분리합니다. 새 binary를 준비한 뒤 local runtime upgrade evidence를 남기거나 중단 marker를 정리하려면 다음 명령을 사용합니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- --version
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime update --target-version <current-shacs-bot-version> --workspace /tmp/shacs-ws
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- runtime recover --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- --version
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime update --target-version <current-shacs-bot-version> --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime recover --workspace /tmp/shacs-ws
 ```
 
 로컬 agent turn을 한 번 실행합니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- ask "hello" --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- ask "hello" --workspace /tmp/shacs-ws
 ```
 
 선택된 channel runtime worker를 시작합니다. 새 lifecycle workflow에서는 `runtime start`를 우선 사용하고, `run`은 같은 foreground channel runtime의 기존 호환 진입점입니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- run --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- run --workspace /tmp/shacs-ws
 ```
 
 로컬 OpenAI 호환 HTTP API를 시작합니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- serve --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- serve --workspace /tmp/shacs-ws
 ```
 
 실행 중인 로컬 API에서도 diagnostics를 확인할 수 있습니다. 응답은 민감한 값을 가린 형태입니다:
@@ -95,8 +95,8 @@ Compose는 host의 `~/.shacs-bot`을 container의 `/home/shacs/.shacs-bot`에 mo
 CLI binary를 빌드해서 실행합니다:
 
 ```sh
-cargo build --manifest-path crates/shacs-cli/Cargo.toml
-./crates/shacs-cli/target/debug/shacs-bot --help
+cargo build --manifest-path crates/Cargo.toml -p shacs-cli
+./crates/target/debug/shacs-bot --help
 ```
 
 ## 채널
@@ -115,30 +115,30 @@ cargo build --manifest-path crates/shacs-cli/Cargo.toml
 Channel 설정과 worker 상태를 확인합니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- channels list
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- channels status --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- channels list
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- channels status --workspace /tmp/shacs-ws
 ```
 
 Channel config는 원본 nanobot과 같은 `channels.<name>` 형태를 우선합니다. 예를 들어 `channels.sendMemoryHints`는 status에서 memory hint 설정으로 표시되고, `channels.sendMaxRetries`는 `ChannelManager` dispatch/enqueue와 실제 transport send의 총 시도 횟수로 적용됩니다. 값은 최소 1회, 최대 10회로 제한됩니다. WebSocket과 외부 transport outbound는 `ChannelManager` dispatch 정책을 통과하며, 외부 transport inbound/outbound는 runtime `MessageBus` 경계를 사용합니다. 외부 runtime은 Nanobot처럼 같은 session key의 turn을 직렬화하고 진행 중 들어온 같은 session 메시지를 in-memory pending follow-up queue에 보관해 현재 turn 뒤에 이어서 처리합니다. 이 pending follow-up queue는 process 재시작 후 복구되는 durable queue가 아닙니다. Built-in slash command는 command router에서 priority/exact/prefix 경계로 분류되며, `/status`, `/stop`, `/restart` priority command만 active session turn 중에도 먼저 처리됩니다. 일반 turn과 exact/prefix command는 같은 process-local session turn lock을 공유합니다. `channels.sendProgress`가 enabled이면 WebSocket channel은 provider text deltas를 coalesce한 `delta` event와 `stream_end` event를 보낸 뒤 최종 `message` event를 유지합니다. Telegram/Discord/Slack external transport는 provider progress delta를 보내지 않고 최종 assistant answer만 새 message로 전송하며 기존 message를 edit/update하지 않습니다. WebSocket event delivery는 bounded queue로 socket writer에 넘겨져 느린 client에 대해 backpressure를 적용합니다. Telegram topic, Slack thread, Discord thread, Email subject/reply context는 outbound reply metadata로 이어집니다. Telegram offset, Discord REST last message id, Discord Gateway resume state, Email IMAP seen UID + UIDVALIDITY hint, outbound delivery pending/sent/failed/processed status는 runtime metadata JSON으로 best-effort 보존됩니다. 이 metadata는 durable queue나 exactly-once delivery 보장이 아닙니다. Email은 `consentGranted: true`와 inbound `allowFrom`/`allowedSenders`가 있어야 IMAP polling을 시작하며, `smtpUsername`/`smtpPassword`, `imapUsername`/`imapPassword`, `fromAddress` alias를 함께 받습니다. IMAP polling은 현재 TLS만 지원하고, inbound Email은 기본적으로 `Authentication-Results`의 `spf=pass`/`dkim=pass`를 확인합니다.
 
 ## 검증
 
-Cargo 명령은 manifest path를 명시해서 실행합니다:
+Cargo 명령은 `crates/Cargo.toml` workspace manifest를 명시해서 실행합니다:
 
 ```sh
-cargo fmt --manifest-path crates/shacs-cli/Cargo.toml -- --check
-cargo clippy --manifest-path crates/shacs-cli/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path crates/shacs-cli/Cargo.toml
-cargo build --manifest-path crates/shacs-cli/Cargo.toml
+cargo fmt --manifest-path crates/Cargo.toml --all -- --check
+cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings
+cargo test --manifest-path crates/Cargo.toml --workspace
+cargo build --manifest-path crates/Cargo.toml -p shacs-cli
 ```
 
 Channel crate를 수정한 경우:
 
 ```sh
-cargo fmt --manifest-path crates/shacs-channels/Cargo.toml -- --check
-cargo clippy --manifest-path crates/shacs-channels/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path crates/shacs-channels/Cargo.toml
-cargo build --manifest-path crates/shacs-channels/Cargo.toml
+cargo fmt --manifest-path crates/Cargo.toml -p shacs-channels -- --check
+cargo clippy --manifest-path crates/Cargo.toml -p shacs-channels --all-targets -- -D warnings
+cargo test --manifest-path crates/Cargo.toml -p shacs-channels
+cargo build --manifest-path crates/Cargo.toml -p shacs-channels
 ```
 
 ## 추가 문서

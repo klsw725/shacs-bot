@@ -9,13 +9,13 @@
 저장소 루트에서 실행합니다:
 
 ```sh
-cargo build --manifest-path crates/shacs-cli/Cargo.toml --locked
+cargo build --manifest-path crates/Cargo.toml -p shacs-cli --locked
 ```
 
-아래 예시는 `shacs-bot` binary가 `PATH`에 있다고 가정합니다. 소스 checkout에서 바로 실행할 때는 필요하면 명령 앞에 `cargo run --manifest-path crates/shacs-cli/Cargo.toml --`를 붙이세요:
+아래 예시는 `shacs-bot` binary가 `PATH`에 있다고 가정합니다. 소스 checkout에서 바로 실행할 때는 필요하면 명령 앞에 `cargo run --manifest-path crates/Cargo.toml -p shacs-cli --`를 붙이세요:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- status
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- status
 ```
 
 ## 설정
