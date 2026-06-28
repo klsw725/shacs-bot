@@ -134,6 +134,7 @@ pub struct SkillRegistryOptions {
     pub workspace: PathBuf,
     pub user_skills_dir: Option<PathBuf>,
     pub plugin_roots: Vec<PathBuf>,
+    pub plugin_roots_enabled: bool,
     pub include_virtual_builtins: bool,
 }
 
@@ -143,6 +144,7 @@ impl SkillRegistryOptions {
             workspace: workspace.into(),
             user_skills_dir: None,
             plugin_roots: Vec::new(),
+            plugin_roots_enabled: false,
             include_virtual_builtins: true,
         }
     }
@@ -231,8 +233,10 @@ pub fn discover_skill_registry(options: SkillRegistryOptions) -> io::Result<Skil
         SkillSourceKind::WorkspaceLocal,
         &mut builder,
     )?;
-    for root in options.plugin_roots {
-        discover_root(&root, SkillSourceKind::PluginProvided, &mut builder)?;
+    if options.plugin_roots_enabled {
+        for root in options.plugin_roots {
+            discover_root(&root, SkillSourceKind::PluginProvided, &mut builder)?;
+        }
     }
 
     Ok(builder.finish())
@@ -923,6 +927,7 @@ mod tests {
         let mut options = SkillRegistryOptions::new(workspace.path());
         options.user_skills_dir = Some(user.path().join("skills"));
         options.plugin_roots = vec![plugin.path().to_path_buf()];
+        options.plugin_roots_enabled = true;
         let registry = discover_skill_registry(options)?;
         let entries = registry
             .entries
@@ -961,6 +966,7 @@ mod tests {
 
         let mut options = SkillRegistryOptions::new(workspace.path());
         options.plugin_roots = vec![plugin_a.path().to_path_buf(), plugin_b.path().to_path_buf()];
+        options.plugin_roots_enabled = true;
         let registry = discover_skill_registry(options)?;
         let entries = registry
             .entries
@@ -977,6 +983,20 @@ mod tests {
             .active_entries()
             .into_iter()
             .any(|entry| entry.descriptor.name == name));
+        Ok(())
+    }
+
+    #[test]
+    fn registry_ignores_plugin_roots_by_default() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let plugin = tempfile::tempdir()?;
+        write_test_skill(plugin.path(), "plugin-probe", "plugin")?;
+
+        let mut options = SkillRegistryOptions::new(workspace.path());
+        options.plugin_roots = vec![plugin.path().to_path_buf()];
+        let registry = discover_skill_registry(options)?;
+
+        assert!(registry.find("plugin-probe").is_none());
         Ok(())
     }
 

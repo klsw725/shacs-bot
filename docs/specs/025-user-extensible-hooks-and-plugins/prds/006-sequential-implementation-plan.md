@@ -6,6 +6,8 @@ Spec 025의 user-extensible hooks/plugins를 안전한 순서로 구현할 수 �
 
 이 PRD는 public marketplace, in-process dynamic plugin ABI, organization governance를 추가하지 않는다.
 
+현재 구현 상태: foundation과 Wave 3의 diagnostics-only hook runtime slice는 완료됐지만 PRD 000-005 전체가 끝난 것은 아니다. 완료된 범위는 manifest discovery, config gates, descriptor-only projection, diagnostics, management CLI, enabled plugin hook의 diagnostics-only runtime dispatch다. Behavior-affecting hook 적용과 tool/command/skill/MCP execution 연결은 아래 순서대로 계속 남아 있으며, full Spec 25 closure는 이 remaining work를 끝낸 뒤에만 선언한다.
+
 ## Dependency Cut
 
 1. 008은 plugin config path와 profile/runtime layout을 제공한다.
@@ -167,7 +169,35 @@ Spec 025의 user-extensible hooks/plugins를 안전한 순서로 구현할 수 �
 - 사용자가 어떤 plugin/hook이 왜 load되지 않았는지 알 수 있어야 한다.
 - release evidence 없이 enabled executable plugin surface를 supported라고 표시하면 안 된다.
 
-## 전체 완료 기준
+## 구현 상태와 전체 완료 기준
+
+### Foundation Closure Matrix
+
+현재 완료된 foundation은 executable surface 연결 전까지의 안전 기반이다. 아래 bucket은 `spec025_` regression과 문서 경계로 닫혔지만, 이것만으로 PRD 000-005 전체 완료를 의미하지 않는다.
+
+| bucket | 구현 증거 | 대표 테스트 |
+|---|---|---|
+| Discovery/config gates | `Config.plugins`, `discover_plugins`, workspace trust, `plugin.json`/`plugin.toml` parse gates | `spec025_plugin_manifest_not_enabled_by_default_from_user_data_root`, `spec025_plugin_manifest_config_enabled_and_disabled_wins`, `spec025_workspace_local_enabled_plugin_requires_trusted_workspace`, `spec025_toml_manifest_uses_same_discovery_and_ref_gates` |
+| Hook catalog/output validation | hook catalog, approval-denying validation, redacted diagnostics | `spec025_hook_catalog_policies_are_descriptor_only`, `spec025_tool_before_cannot_approve_permissions`, `spec025_observer_only_hooks_ignore_outputs`, `spec025_hook_diagnostics_are_redacted` |
+| Diagnostics-only hook runtime | typed hook entrypoint snapshot, no-shell process execution, replay rejection, non-mutating runtime adapter | `spec025_s3_live_diagnostics_dispatch_executes_matching_hooks_and_records_summary`, `spec025_s3_process_executor_runs_argv_without_shell_and_parses_json_stdout`, `spec025_plugin_runtime_hook_executes_during_direct_agent_loop` |
+| Tool descriptors/Tool Search metadata | plugin tools projected as deferrable/provider-hidden descriptors only | `spec025_descriptor_only_enabled_plugin_surfaces_are_active_but_not_executable`, `spec025_plugin_tool_search_metadata_is_deferrable_and_provider_hidden` |
+| Skill/command descriptors/conflicts | plugin skill namespace and command conflict diagnostics without active injection | `spec025_builtin_command_conflict_is_diagnostic_only`, `spec025_plugin_skill_namespace_uses_plugin_prefix` |
+| Safety/replay/redaction | permission ceiling, secret ref metadata only, replay live-dispatch rejection | `spec025_permission_ceiling_rejects_widening_and_allows_declared_scope`, `spec025_secret_refs_expose_names_and_presence_without_raw_values`, `spec025_surface_diagnostics_and_replay_rejection_are_redacted` |
+| Management projection | plugin/hook CLI projection and config-only enable/disable | `spec025_parser_accepts_plugin_and_hook_projection_commands`, `spec025_plugins_list_inspect_doctor_render_state_without_raw_secrets`, `spec025_enable_disable_mutate_config_only_and_report_next_session`, `spec025_hooks_list_inspect_render_metadata_without_dispatch` |
+| Docs | SPEC/USAGE/README state foundation boundary and remaining full-spec execution work | 문서 review와 verification 결과 |
+
+### Remaining Full-Spec Work
+
+Full Spec 25 closure 전에 남은 범위:
+
+- Behavior-affecting hook output application beyond diagnostics-only dispatch.
+- Live command-backed plugin tool execution.
+- Live MCP startup from plugin manifests.
+- Plugin command router execution.
+- Live plugin execution wiring beyond descriptor projection.
+- Provider-visible executable plugin tools.
+
+### Full Completion Criteria
 
 - Discovery와 execution이 분리되어 있고 새 plugin 기본 상태는 `not_enabled`다.
 - Hook dispatch는 observer-only와 제한 behavior-affecting event를 구분한다.

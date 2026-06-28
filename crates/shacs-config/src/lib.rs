@@ -34,6 +34,8 @@ pub struct Config {
     pub gateway: GatewayConfig,
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_default")]
     pub permissions: PermissionsConfig,
+    #[serde(default, skip_serializing_if = "PluginsConfig::is_default")]
+    pub plugins: PluginsConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
 }
@@ -170,6 +172,31 @@ impl ProviderConfig {
 }
 
 pub type ProvidersConfig = BTreeMap<String, ProviderConfig>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginsConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_workspaces: Vec<String>,
+}
+
+impl PluginsConfig {
+    pub fn is_default(&self) -> bool {
+        self.enabled.is_empty() && self.disabled.is_empty() && self.trusted_workspaces.is_empty()
+    }
+
+    pub fn trusts_workspace(&self, workspace: &Path) -> bool {
+        let workspace = path_normalized(workspace);
+        self.trusted_workspaces.iter().any(|candidate| {
+            let candidate = candidate.trim();
+            !candidate.is_empty() && path_normalized(&expand_home(candidate)) == workspace
+        })
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AuthStore {
@@ -1540,6 +1567,36 @@ mod tests {
         }))
         .map_err(|error| error.to_string())?;
         assert_eq!(config.tools.tool_search, ToolSearchConfig::default());
+        Ok(())
+    }
+
+    #[test]
+    fn plugins_config_defaults_to_inert_empty_gates() -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::default();
+        assert!(config.plugins.enabled.is_empty());
+        assert!(config.plugins.disabled.is_empty());
+        assert!(config.plugins.trusted_workspaces.is_empty());
+        assert!(!serde_json::to_value(&config)?
+            .to_string()
+            .contains("plugins"));
+        Ok(())
+    }
+
+    #[test]
+    fn plugins_config_deserializes_manifest_discovery_gates() -> Result<(), String> {
+        let config: Config = serde_json::from_value(json!({
+            "plugins": {
+                "enabled": ["daily-review"],
+                "disabled": ["unsafe-local"],
+                "trustedWorkspaces": ["/tmp/workspace"]
+            }
+        }))
+        .map_err(|error| error.to_string())?;
+        assert_eq!(config.plugins.enabled, ["daily-review"]);
+        assert_eq!(config.plugins.disabled, ["unsafe-local"]);
+        assert_eq!(config.plugins.trusted_workspaces, ["/tmp/workspace"]);
+        assert!(config.plugins.trusts_workspace(Path::new("/tmp/workspace")));
+        assert!(!config.plugins.trusts_workspace(Path::new("/tmp/other")));
         Ok(())
     }
 

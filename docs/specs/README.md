@@ -32,7 +32,7 @@
 - zero-setup sandbox execution 범위: `023-zero-setup-sandbox-execution/`이 사용자가 별도 host sandbox runtime을 설치하지 않아도 동작해야 하는 공식 packaging/runtime containment 계약을 소유한다.
 - 023 구현 상태: 현재 Docker/Compose containment evidence, native unknown handling, exec safety, MCP/subagent evidence 범위에서 closed 상태다. Kernel-level isolation, full MCP child execution smoke, active app process inheritance, auto approval completion은 이 closure 범위 밖이다.
 - dynamic workflows / harness orchestration 범위: `024-dynamic-workflows-and-harness-orchestration/`가 작업별 하네스, workflow-backed subagent graph, verifier, worktree isolation, budget/resume 계약을 소유한다.
-- user-extensible hooks / plugins 범위: `025-user-extensible-hooks-and-plugins/`가 사용자가 opt-in하는 plugin manifest, hook event, plugin-provided tool/skill/command, extension diagnostics 계약을 소유한다.
+- user-extensible hooks / plugins 범위: `025-user-extensible-hooks-and-plugins/`가 사용자가 opt-in하는 plugin manifest, hook event, plugin-provided tool/skill/command, extension diagnostics 계약을 소유한다. 현재 구현은 `plugin.json`/`plugin.toml` manifest discovery, descriptor projection, safety diagnostics, plugin/hook management CLI, enabled plugin hook의 diagnostics-only runtime dispatch까지 complete 상태이며, full Spec 25 closure에는 behavior-affecting hook 적용과 live plugin tool/command/MCP/skill execution이 아직 남아 있다.
 - context files / inline references 범위: `026-context-files-and-inline-references/`가 workspace context file discovery와 user message inline `@` reference resolution 계약을 소유한다.
 - channel attachment intake / file context 범위: `027-channel-attachment-intake-and-file-context/`가 Slack, Discord, Telegram, Email, WhatsApp bridge, WebSocket/local API의 inbound attachment intake, safe stored attachment contract, provider input file-context handoff 계약을 소유한다.
 
