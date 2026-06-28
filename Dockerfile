@@ -8,7 +8,7 @@ RUN apt-get update \
 
 COPY crates ./crates
 
-RUN cargo build --manifest-path crates/shacs-cli/Cargo.toml --release --locked
+RUN cargo build --manifest-path crates/Cargo.toml -p shacs-cli --release --locked
 
 FROM node:24-bookworm-slim AS node
 
@@ -30,7 +30,7 @@ COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN npm install -g @steipete/summarize \
     && npm cache clean --force
 
-COPY --from=builder /app/crates/shacs-cli/target/release/shacs-bot /usr/local/bin/shacs-bot
+COPY --from=builder /app/crates/target/release/shacs-bot /usr/local/bin/shacs-bot
 
 USER shacs
 ENV HOME=/home/shacs
