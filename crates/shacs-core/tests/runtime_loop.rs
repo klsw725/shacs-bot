@@ -58,7 +58,102 @@ use shacs_skills::{
 use shacs_utils::gitstore::{GitCliStore, GitStore};
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+struct ProcExecCountingTool {
+    calls: Arc<AtomicUsize>,
+}
+
+struct NamedProcExecCountingTool {
+    name: &'static str,
+    calls: Arc<AtomicUsize>,
+}
+
+struct ApprovalMetadataProbeTool {
+    workspace: PathBuf,
+    session_key: &'static str,
+    calls: Arc<AtomicUsize>,
+    observed_status: Arc<Mutex<Option<String>>>,
+}
+
+impl Tool for ProcExecCountingTool {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn description(&self) -> &str {
+        "Count proc exec attempts."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("command", shacs_core::tools::StringSchema::new("Command"))
+            .required(["command"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "exec-output".into()
+    }
+}
+
+impl Tool for NamedProcExecCountingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Count named proc exec attempts."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("command", shacs_core::tools::StringSchema::new("Command"))
+            .required(["command"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "exec-output".into()
+    }
+}
+
+impl Tool for ApprovalMetadataProbeTool {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn description(&self) -> &str {
+        "Probe approval metadata while counting proc exec attempts."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("command", shacs_core::tools::StringSchema::new("Command"))
+            .required(["command"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let observed = SessionManager::new(&self.workspace)
+            .ok()
+            .and_then(|manager| manager.read_session_file(self.session_key))
+            .and_then(|raw| {
+                raw["metadata"]["pending_permission_approval"]["status"]
+                    .as_str()
+                    .map(str::to_owned)
+            });
+        if let Ok(mut status) = self.observed_status.lock() {
+            *status = observed;
+        }
+        "exec-output".into()
+    }
+}
 
 fn runtime_eval_evidence() -> EvidenceRef {
     EvidenceRef {
@@ -142,6 +237,19 @@ fn safe_bypass_agent_loop_config(workspace: impl Into<std::path::PathBuf>) -> Ag
     config.permission_rule_input = confirmed_non_privileged_permission_input();
     config.permission_interactive = false;
     config
+}
+
+fn inbound_with_message_id(
+    channel: &str,
+    sender_id: &str,
+    chat_id: &str,
+    content: &str,
+    message_id: &str,
+) -> InboundMessage {
+    InboundMessage::new(channel, sender_id, chat_id, content).with_metadata(Map::from_iter([(
+        "message_id".to_owned(),
+        json!(message_id),
+    )]))
 }
 
 fn replay_tool_policy(recorded: bool, safe_mock_schema: Option<&str>) -> ReplayToolOutcomePolicy {
@@ -1083,6 +1191,229 @@ fn loop_invalid_history_and_help_publish_without_provider_call() -> Result<(), B
 }
 
 #[test]
+fn loop_permission_wizard_saves_default_and_auto_without_provider_call(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let saved_modes = Arc::new(Mutex::new(Vec::new()));
+    let callback_modes = saved_modes.clone();
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_setter = Some(Arc::new(move |mode| {
+        callback_modes
+            .lock()
+            .map_err(|error| error.to_string())?
+            .push(mode);
+        Ok(PermissionModeSnapshot {
+            mode,
+            source: Some("runtime_loop_test".to_owned()),
+            scope_ref: None,
+        })
+    }));
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let start = loop_runtime.process_direct("/permission", Some("cli:permission"))?;
+    assert_eq!(start.command, Some(AgentLoopCommandResult::Permission));
+    let start_outbound = bus
+        .consume_outbound()
+        .ok_or("missing permission outbound")?;
+    assert!(start_outbound.content.contains("default"));
+    assert!(start_outbound.content.contains("auto"));
+    assert!(start_outbound.content.contains("bypass_permissions"));
+    let saved_default = loop_runtime.process_direct("default", Some("cli:permission"))?;
+    assert_eq!(saved_default.stop_reason, "permission_saved");
+    let _ = bus
+        .consume_outbound()
+        .ok_or("missing saved default outbound")?;
+
+    loop_runtime.process_direct("/permission", Some("cli:permission"))?;
+    let _ = bus
+        .consume_outbound()
+        .ok_or("missing second permission outbound")?;
+    let saved_auto = loop_runtime.process_direct("auto", Some("cli:permission"))?;
+    assert_eq!(saved_auto.stop_reason, "permission_saved");
+    let auto_outbound = bus
+        .consume_outbound()
+        .ok_or("missing saved auto outbound")?;
+    assert!(auto_outbound.content.contains("saved and applied"));
+    assert!(!auto_outbound.content.contains("Restart"));
+
+    let modes = saved_modes
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    assert_eq!(modes, vec![PermissionMode::Default, PermissionMode::Auto]);
+    assert!(client
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?
+        .is_empty());
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:permission")
+        .ok_or("missing permission session")?;
+    assert!(raw["metadata"].get("pending_permission_wizard").is_none());
+    Ok(())
+}
+
+#[test]
+fn loop_permission_wizard_requires_bypass_confirmation_and_supports_cancel(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let saved_modes = Arc::new(Mutex::new(Vec::new()));
+    let callback_modes = saved_modes.clone();
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_setter = Some(Arc::new(move |mode| {
+        callback_modes
+            .lock()
+            .map_err(|error| error.to_string())?
+            .push(mode);
+        Ok(PermissionModeSnapshot {
+            mode,
+            source: Some("runtime_loop_test".to_owned()),
+            scope_ref: None,
+        })
+    }));
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    loop_runtime.process_direct("/permission", Some("cli:permission-bypass"))?;
+    let _ = bus
+        .consume_outbound()
+        .ok_or("missing permission outbound")?;
+    let bypass_prompt =
+        loop_runtime.process_direct("bypass_permissions", Some("cli:permission-bypass"))?;
+    assert_eq!(bypass_prompt.stop_reason, "permission_confirm_bypass");
+    let _ = bus
+        .consume_outbound()
+        .ok_or("missing bypass prompt outbound")?;
+    assert!(saved_modes
+        .lock()
+        .map_err(|error| error.to_string())?
+        .is_empty());
+
+    let repeated =
+        loop_runtime.process_direct("bypass_permissions", Some("cli:permission-bypass"))?;
+    assert_eq!(repeated.stop_reason, "permission_confirm_bypass");
+    let _ = bus
+        .consume_outbound()
+        .ok_or("missing repeated bypass outbound")?;
+    assert!(saved_modes
+        .lock()
+        .map_err(|error| error.to_string())?
+        .is_empty());
+
+    let saved =
+        loop_runtime.process_direct("confirm bypass_permissions", Some("cli:permission-bypass"))?;
+    assert_eq!(saved.stop_reason, "permission_saved");
+    let _ = bus
+        .consume_outbound()
+        .ok_or("missing bypass saved outbound")?;
+    assert_eq!(
+        saved_modes
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone(),
+        vec![PermissionMode::BypassPermissions]
+    );
+
+    loop_runtime.process_direct("/permission", Some("cli:permission-bypass"))?;
+    let _ = bus
+        .consume_outbound()
+        .ok_or("missing cancel start outbound")?;
+    let cancelled = loop_runtime.process_direct("cancel", Some("cli:permission-bypass"))?;
+    assert_eq!(cancelled.stop_reason, "permission_cancelled");
+    let _ = bus.consume_outbound().ok_or("missing cancel outbound")?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:permission-bypass")
+        .ok_or("missing permission session")?;
+    assert!(raw["metadata"].get("pending_permission_wizard").is_none());
+    Ok(())
+}
+
+#[test]
+fn loop_permission_wizard_rejects_different_sender() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let saved_modes = Arc::new(Mutex::new(Vec::new()));
+    let callback_modes = saved_modes.clone();
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_setter = Some(Arc::new(move |mode| {
+        callback_modes
+            .lock()
+            .map_err(|error| error.to_string())?
+            .push(mode);
+        Ok(PermissionModeSnapshot {
+            mode,
+            source: Some("runtime_loop_test".to_owned()),
+            scope_ref: None,
+        })
+    }));
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let mut original = InboundMessage::new("telegram", "alice", "chat-1", "/permission");
+    original.session_key_override = Some("telegram:shared".to_owned());
+    loop_runtime.process_message(original)?;
+    let _ = bus
+        .consume_outbound()
+        .ok_or("missing permission outbound")?;
+
+    let mut intruder = InboundMessage::new("telegram", "bob", "chat-1", "auto");
+    intruder.session_key_override = Some("telegram:shared".to_owned());
+    let rejected = loop_runtime.process_message(intruder)?;
+    assert_eq!(rejected.stop_reason, "permission_pending");
+    let rejected_outbound = bus.consume_outbound().ok_or("missing rejected outbound")?;
+    assert!(rejected_outbound.content.contains("original requester"));
+    assert!(saved_modes
+        .lock()
+        .map_err(|error| error.to_string())?
+        .is_empty());
+
+    let mut owner = InboundMessage::new("telegram", "alice", "chat-1", "auto");
+    owner.session_key_override = Some("telegram:shared".to_owned());
+    let saved = loop_runtime.process_message(owner)?;
+    assert_eq!(saved.stop_reason, "permission_saved");
+    let _ = bus
+        .consume_outbound()
+        .ok_or("missing owner saved outbound")?;
+    assert_eq!(
+        saved_modes
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone(),
+        vec![PermissionMode::Auto]
+    );
+    Ok(())
+}
+
+#[test]
 fn loop_goal_lifecycle_persists_metadata_without_provider_call() -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
     let bus = MessageBus::new();
@@ -1932,6 +2263,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         permission_ceiling_snapshot: None,
         permission_evaluator: None,
         permission_interactive: false,
+        permission_approval_cache: None,
         in_cron_context: false,
         record_channel_delivery: false,
     };
@@ -2704,6 +3036,585 @@ fn loop_ask_user_interrupt_publishes_buttons_and_resumes_as_tool_result(
         || last_message["content"] != "Yes"
     {
         return Err(format!("ask resume request suffix drifted: {resume_request:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_executes_pending_tool_and_resumes() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-1",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("resumed after exec".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:approval"))?;
+    if first.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!(
+            "permission approval did not pause before exec: {first:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+    if !approval_outbound
+        .content
+        .contains("Permission approval required")
+        || !approval_outbound.content.contains("1. approve")
+    {
+        return Err(format!(
+            "approval outbound was not rendered for chat approval: {approval_outbound:?}"
+        )
+        .into());
+    }
+
+    let second = loop_runtime.process_direct("1", Some("discord:approval"))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || second.final_content.as_deref() != Some("resumed after exec")
+    {
+        return Err(format!(
+            "approval did not execute pending exec and resume: {second:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:approval")
+        .ok_or("missing approval session")?;
+    if !raw["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|message| {
+            message["role"] == "tool"
+                && message["name"] == "exec"
+                && message["tool_call_id"] == "exec-1"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("exec-output"))
+        })
+    {
+        return Err(format!("approved exec result was not persisted: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_persists_executing_state_before_tool_runs() -> Result<(), Box<dyn Error>>
+{
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_status = Arc::new(Mutex::new(None));
+    let mut registry = ToolRegistry::new();
+    registry.register(ApprovalMetadataProbeTool {
+        workspace: workspace.path().to_path_buf(),
+        session_key: "discord:approval-executing",
+        calls: calls.clone(),
+        observed_status: observed_status.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-executing",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("resumed after executing marker".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:approval-executing"))?;
+    if first.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!("permission approval did not pause: {first:?}").into());
+    }
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+
+    let second = loop_runtime.process_direct("approve", Some("discord:approval-executing"))?;
+    let observed = observed_status
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    if calls.load(Ordering::SeqCst) != 1
+        || observed.as_deref() != Some("executing")
+        || second.final_content.as_deref() != Some("resumed after executing marker")
+    {
+        return Err(format!(
+            "approval execution marker was not durable before tool run: {second:?} observed={observed:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:approval-executing")
+        .ok_or("missing approval session")?;
+    if raw["metadata"].get("pending_permission_approval").is_some() {
+        return Err(format!("completed approval left pending metadata: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_uses_original_context_when_reply_message_id_changes(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-channel",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("resumed after channel approval".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-1",
+        "start",
+        "discord-msg-1",
+    ))?;
+    if first.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!("channel approval did not pause: {first:?}").into());
+    }
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+
+    let second = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-1",
+        "approve",
+        "discord-msg-2",
+    ))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || second.final_content.as_deref() != Some("resumed after channel approval")
+    {
+        return Err(format!(
+            "approval reply with new message_id did not execute original action: {second:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_rejects_different_sender_in_same_session() -> Result<(), Box<dyn Error>>
+{
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![LlmResponse {
+        finish_reason: "tool_calls".to_owned(),
+        tool_calls: vec![ToolCallRequest::new(
+            "exec-sender",
+            "exec",
+            Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+        )],
+        ..LlmResponse::default()
+    }]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-1",
+        "start",
+        "sender-msg-1",
+    ))?;
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+
+    let reply = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-2",
+        "chat-1",
+        "approve",
+        "sender-msg-2",
+    ))?;
+    if calls.load(Ordering::SeqCst) != 0
+        || reply.stop_reason != "permission_approval_pending"
+        || !reply
+            .final_content
+            .as_deref()
+            .is_some_and(|content| content.contains("Approval pending"))
+    {
+        return Err(format!(
+            "different sender should not approve pending tool: {reply:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:chat-1")
+        .ok_or("missing sender approval session")?;
+    if raw["metadata"].get("pending_permission_approval").is_none() {
+        return Err(format!("sender mismatch cleared pending approval: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_resumes_deferred_tool_search_bridge_with_bridge_mapping(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(NamedProcExecCountingTool {
+        name: "mcp_exec",
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "bridge-exec",
+                "tool_call",
+                Map::from_iter([
+                    ("name".to_owned(), json!("mcp_exec")),
+                    ("arguments".to_owned(), json!({ "command": "cargo test" })),
+                ]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("resumed after bridge exec".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    config.tool_search = ToolSearchConfig {
+        enabled: ToolSearchMode::On,
+        threshold_pct: 10,
+        search_default_limit: 5,
+        max_search_limit: 20,
+    };
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-bridge",
+        "start",
+        "bridge-msg-1",
+    ))?;
+    if first.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!("bridge approval did not pause: {first:?}").into());
+    }
+    let _approval_outbound = bus
+        .consume_outbound()
+        .ok_or("missing bridge approval outbound")?;
+
+    let second = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-bridge",
+        "approve",
+        "bridge-msg-2",
+    ))?;
+    let raw_after_approval = loop_runtime
+        .session_manager()
+        .read_session_file("discord:chat-bridge")
+        .ok_or("missing bridge session after approval")?;
+    if calls.load(Ordering::SeqCst) != 1
+        || second.final_content.as_deref() != Some("resumed after bridge exec")
+    {
+        return Err(format!(
+            "bridge approval did not execute and resume: {second:?} calls={} raw={raw_after_approval:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let raw = raw_after_approval;
+    if !raw["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|message| {
+            message["role"] == "tool"
+                && message["tool_call_id"] == "bridge-exec"
+                && message["name"] == "tool_call"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("exec-output"))
+        })
+    {
+        return Err(format!("bridge result mapping was not persisted: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_denial_cancels_without_execution() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![LlmResponse {
+        finish_reason: "tool_calls".to_owned(),
+        tool_calls: vec![ToolCallRequest::new(
+            "exec-deny",
+            "exec",
+            Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+        )],
+        ..LlmResponse::default()
+    }]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:approval-deny"))?;
+    if first.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!("permission approval did not pause before deny: {first:?}").into());
+    }
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+
+    let second = loop_runtime.process_direct("2", Some("discord:approval-deny"))?;
+    if calls.load(Ordering::SeqCst) != 0
+        || second.stop_reason != "permission_denied_by_user"
+        || second.final_content.as_deref() != Some("Tool execution cancelled.")
+    {
+        return Err(format!(
+            "denial should cancel without exec: {second:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    if requests.len() != 1 {
+        return Err(format!("denial should not call provider again: {requests:?}").into());
+    }
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:approval-deny")
+        .ok_or("missing deny session")?;
+    if raw["metadata"].get("pending_permission_approval").is_some()
+        || !raw["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|message| {
+                message["role"] == "tool"
+                    && message["name"] == "exec"
+                    && message["tool_call_id"] == "exec-deny"
+                    && message["content"] == "Permission denied by user."
+            })
+    {
+        return Err(format!("denial did not persist cancellation cleanly: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_unknown_reply_keeps_pending() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-unknown",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("resumed after unknown".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:approval-unknown"))?;
+    if first.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!("permission approval did not pause before unknown: {first:?}").into());
+    }
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+
+    let unknown = loop_runtime.process_direct("maybe", Some("discord:approval-unknown"))?;
+    if calls.load(Ordering::SeqCst) != 0
+        || unknown.stop_reason != "permission_approval_pending"
+        || !unknown
+            .final_content
+            .as_deref()
+            .is_some_and(|content| content.contains("Approval pending"))
+    {
+        return Err(format!(
+            "unknown reply should keep approval pending: {unknown:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let _pending_outbound = bus.consume_outbound().ok_or("missing pending outbound")?;
+    let pending_raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:approval-unknown")
+        .ok_or("missing unknown session")?;
+    if pending_raw["metadata"]
+        .get("pending_permission_approval")
+        .is_none()
+    {
+        return Err(format!("unknown reply cleared pending approval: {pending_raw:?}").into());
+    }
+
+    let approved = loop_runtime.process_direct("approve", Some("discord:approval-unknown"))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || approved.final_content.as_deref() != Some("resumed after unknown")
+    {
+        return Err(format!(
+            "approval after unknown did not execute and resume: {approved:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
     }
     Ok(())
 }

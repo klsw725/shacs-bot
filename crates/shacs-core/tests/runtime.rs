@@ -1,11 +1,12 @@
 use serde_json::{json, Value};
 use shacs_core::runtime::{
     dispatch_bridge_tool_call, dispatch_bridge_tool_calls, ActionNormalizationError,
-    ActionNormalizationState, ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef,
-    DockerContainmentSnapshot, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
-    PermissionRuleInput, PermissionedActionOrigin, ProcExecSummary, RuntimeBoundaryOrigin,
-    RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutor, SafetyCapability,
-    ToolExecutionContext,
+    ActionNormalizationState, ApprovalActor, ApprovalCacheEntry, ApprovalCorrelationError,
+    ApprovalDecision, ApprovalDecisionKind, ContainerNetworkMode, ContainerRuntimeKind,
+    ContainmentSnapshotRef, DockerContainmentSnapshot, PermissionCeilingSnapshot, PermissionMode,
+    PermissionModeSnapshot, PermissionRuleInput, PermissionedActionOrigin, ProcExecSummary,
+    RuntimeBoundaryOrigin, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
+    RuntimeToolExecutor, SafetyCapability, ToolExecutionContext,
 };
 use shacs_core::tools::{
     AskUserTool, CronTool, DeferredToolCatalog, DeferredToolCatalogEntry, JsonMap, MessageTool,
@@ -401,6 +402,297 @@ fn runtime_denies_direct_proc_exec_without_executing_tool() -> Result<(), Box<dy
     {
         return Err(format!(
             "direct proc_exec should be blocked before execution: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_asks_before_interactive_proc_exec_without_executing_tool() -> Result<(), Box<dyn Error>>
+{
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-call",
+            "exec",
+            json!({ "command": "cargo test" }),
+        )],
+        &context,
+    );
+
+    match &report.interrupt {
+        Some(RuntimeInterrupt::PermissionApproval {
+            approval_request_id,
+            approval_request,
+            tool_call,
+            question,
+            options,
+        }) if calls.load(Ordering::SeqCst) == 0
+            && approval_request_id.starts_with("approval_")
+            && approval_request.approval_request_id.as_str() == approval_request_id.as_str()
+            && tool_call.id == "exec-call"
+            && tool_call.name == "exec"
+            && question.contains("Permission approval required")
+            && question.contains("Risk: Run tool `exec`")
+            && question.contains("Target: command=\"cargo test\"")
+            && question.contains("Scope: cli:direct")
+            && question.contains("Expires at (unix ms):")
+            && question.contains("Arguments: `{")
+            && options.as_slice() == ["approve", "deny"] => Ok(()),
+        other => Err(format!(
+            "interactive proc_exec should ask before execution: interrupt={other:?} report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into()),
+    }
+}
+
+#[test]
+fn bridge_permission_ask_interrupts_before_exec_without_executing() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let catalog = bridge_catalog([("exec", "Deferred proc exec", ["command"])]);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_rule_input: PermissionRuleInput {
+            containment: confirmed_containment(),
+            protected_targets: Vec::new(),
+            proc_exec_summary: None,
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+
+    let report = dispatch_bridge_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-bridge",
+            "tool_call",
+            json!({ "name": "exec", "arguments": { "command": "cargo test" } }),
+        )],
+        Some(&catalog),
+        &registry,
+        &RuntimeToolExecutor::new(&registry),
+        &context,
+        false,
+    );
+
+    match &report.interrupt {
+        Some(RuntimeInterrupt::PermissionApproval {
+            approval_request_id,
+            approval_request,
+            tool_call,
+            question,
+            ..
+        }) if calls.load(Ordering::SeqCst) == 0
+            && report.messages().is_empty()
+            && approval_request_id.starts_with("approval_")
+            && approval_request.approval_request_id.as_str() == approval_request_id.as_str()
+            && tool_call.id == "exec-bridge"
+            && tool_call.name == "tool_call"
+            && question.contains("Permission approval required")
+            && question.contains("Risk: Run tool `exec`")
+            && question.contains("Target: command=\"cargo test\"")
+            && question.contains("Scope: cli:direct")
+            && question.contains("Expires at (unix ms):") => Ok(()),
+        other => Err(format!(
+            "bridge exec should ask before execution: interrupt={other:?} report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into()),
+    }
+}
+
+#[test]
+fn runtime_executes_proc_exec_after_permission_approval() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+    let approval_report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-call",
+            "exec",
+            json!({ "command": "cargo test" }),
+        )],
+        &context,
+    );
+    let approval_request = match approval_report.interrupt {
+        Some(RuntimeInterrupt::PermissionApproval {
+            approval_request, ..
+        }) => approval_request,
+        other => {
+            return Err(format!("missing approval request before execution: {other:?}").into())
+        }
+    };
+    let approved_at = approval_request.expires_at_unix_ms.saturating_sub(1);
+    let approval_decision = ApprovalDecision {
+        approval_request_id: approval_request.approval_request_id.clone(),
+        action_digest: approval_request.action_digest.clone(),
+        snapshot_digest: approval_request.snapshot_digest.clone(),
+        decision: ApprovalDecisionKind::Approved,
+        approved_scope: approval_request.requested_scope.clone(),
+        actor: ApprovalActor::LocalUser,
+        decided_at_unix_ms: approved_at,
+        consumed: false,
+    };
+    let approved_context = ToolExecutionContext {
+        permission_approval_cache: Some(ApprovalCacheEntry {
+            request: *approval_request,
+            decision: approval_decision,
+        }),
+        ..context
+    };
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-call",
+            "exec",
+            json!({ "command": "cargo test" }),
+        )],
+        &approved_context,
+    );
+
+    let message = report.messages.first().ok_or("missing exec result")?;
+    if calls.load(Ordering::SeqCst) != 1
+        || report.interrupt.is_some()
+        || message.tool_call_id != "exec-call"
+        || message.name != "exec"
+        || !message.content.contains("executed")
+    {
+        return Err(format!(
+            "approved proc_exec was not executed: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_rejects_permission_approval_cache_with_mismatched_decision() -> Result<(), Box<dyn Error>>
+{
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+    let approval_report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-call",
+            "exec",
+            json!({ "command": "cargo test" }),
+        )],
+        &context,
+    );
+    let approval_request = match approval_report.interrupt {
+        Some(RuntimeInterrupt::PermissionApproval {
+            approval_request, ..
+        }) => approval_request,
+        other => {
+            return Err(format!("missing approval request before execution: {other:?}").into())
+        }
+    };
+    let approved_at = approval_request.expires_at_unix_ms.saturating_sub(1);
+    let approval_decision = ApprovalDecision {
+        approval_request_id: approval_request.approval_request_id.clone(),
+        action_digest: "different-action".to_owned(),
+        snapshot_digest: approval_request.snapshot_digest.clone(),
+        decision: ApprovalDecisionKind::Approved,
+        approved_scope: approval_request.requested_scope.clone(),
+        actor: ApprovalActor::LocalUser,
+        decided_at_unix_ms: approved_at,
+        consumed: false,
+    };
+    let approved_context = ToolExecutionContext {
+        permission_approval_cache: Some(ApprovalCacheEntry {
+            request: *approval_request,
+            decision: approval_decision,
+        }),
+        ..context
+    };
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-call",
+            "exec",
+            json!({ "command": "cargo test" }),
+        )],
+        &approved_context,
+    );
+
+    let message = report.messages.first().ok_or("missing denial result")?;
+    if calls.load(Ordering::SeqCst) != 0
+        || report.interrupt.is_some()
+        || !message.content.contains("Permission denied")
+        || !report
+            .permissioned_actions
+            .first()
+            .is_some_and(|action| action.tool_name == "exec")
+        || !matches!(
+            shacs_core::runtime::correlate_approval(
+                &approved_context
+                    .permission_approval_cache
+                    .as_ref()
+                    .ok_or("missing approval cache")?
+                    .request,
+                &approved_context
+                    .permission_approval_cache
+                    .as_ref()
+                    .ok_or("missing approval cache")?
+                    .decision,
+                approved_at,
+            )
+            .error,
+            Some(ApprovalCorrelationError::ActionMismatch)
+        )
+    {
+        return Err(format!(
+            "mismatched cached approval should not execute: report={report:?} calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());
@@ -1645,6 +1937,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         permission_ceiling_snapshot: None,
         permission_evaluator: None,
         permission_interactive: false,
+        permission_approval_cache: None,
         in_cron_context: false,
         record_channel_delivery: true,
     };

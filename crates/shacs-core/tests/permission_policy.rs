@@ -413,6 +413,14 @@ fn approval_correlation_rejects_mismatched_expired_inspect_only_and_consumed(
             ApprovalCorrelationError::SnapshotMismatch,
             500,
         ),
+        (
+            ApprovalDecision {
+                approved_scope: "other".to_owned(),
+                ..base.clone()
+            },
+            ApprovalCorrelationError::ScopeMismatch,
+            500,
+        ),
         (base.clone(), ApprovalCorrelationError::Expired, 1_001),
         (
             ApprovalDecision {
@@ -442,6 +450,41 @@ fn approval_correlation_rejects_mismatched_expired_inspect_only_and_consumed(
     let accepted = correlate_approval(&request, &base, 500);
     if !accepted.is_approved() || accepted.approval_ref.as_deref() != Some("approval-1") {
         return Err(format!("valid approval was not accepted: {accepted:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn approved_correlation_allows_static_ask_required_proc_exec() -> Result<(), Box<dyn Error>> {
+    let exec = action(
+        PermissionMode::Auto,
+        "exec",
+        vec![SafetyCapability::ProcExec],
+        vec![target(json!("cargo test"))],
+    );
+    let rules = evaluate_static_rules(
+        &exec,
+        &PermissionRuleInput {
+            containment: safe_containment(),
+            protected_targets: Vec::new(),
+            proc_exec_summary: None,
+        },
+    );
+    let mut input = policy_input(exec, rules.clone());
+    input.interactive = false;
+    input.approval = Some(ApprovalCorrelation::approved("approval-1".to_owned()));
+    let decision = decide_permission(input);
+
+    if rules.kind != StaticRuleDecisionKind::AskRequired
+        || decision.kind != PermissionPolicyDecisionKind::Allow
+        || decision.reason != PermissionPolicyReason::ApprovalAccepted
+        || decision.approval_ref.as_deref() != Some("approval-1")
+        || !decision.can_handoff_to_tool_runtime
+    {
+        return Err(format!(
+            "approved ask-required proc_exec was not allowed: {rules:?} {decision:?}"
+        )
+        .into());
     }
     Ok(())
 }
