@@ -38,7 +38,7 @@ use shacs_core::runtime::{
     ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig, DiscoveredPlugin,
     DreamLifecycle, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
     HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle,
-    MessageBus, PermissionModeSnapshot, PluginDiscoveryError, PluginHookCatalog,
+    MessageBus, PermissionMode, PermissionModeSnapshot, PluginDiscoveryError, PluginHookCatalog,
     PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
     PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState, PluginSurfaceProjection,
     ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
@@ -2423,7 +2423,7 @@ pub fn onboard(options: OnboardOptions) -> Result<OnboardOutcome, CliError> {
     }
     inject_builtin_channel_defaults(&mut bundle.config.channels.plugins);
 
-    save_config_to_path(&bundle.config, &config_path)?;
+    save_onboard_config_to_path(&bundle.config, &config_path)?;
     let context = config_context(
         Some(config_path.clone()),
         Some(bundle.config.workspace_path()),
@@ -2459,6 +2459,28 @@ fn inject_builtin_channel_defaults(plugins: &mut BTreeMap<String, Value>) {
     }
 }
 
+fn save_onboard_config_to_path(config: &shacs_config::Config, path: &Path) -> Result<(), CliError> {
+    let mut value = serde_json::to_value(config)
+        .map_err(|error| CliError::InvalidArguments(format!("invalid config JSON: {error}")))?;
+    merge_missing_json_defaults(&mut value, onboard_config_defaults());
+    write_config_value_for_patch(path, &value)
+}
+
+fn onboard_config_defaults() -> Value {
+    json!({
+        "permissions": {
+            "mode": "default",
+            "autoApproval": {
+                "enabled": false,
+                "requireDockerContainmentForExec": true,
+                "allowWorkspaceEdits": true,
+                "allowProcExecVerification": false,
+                "protectedTargets": []
+            }
+        }
+    })
+}
+
 fn merge_missing_json_defaults(existing: &mut Value, default_value: Value) {
     if let (Value::Object(existing), Value::Object(defaults)) = (existing, default_value) {
         for (key, default_child) in defaults {
@@ -2470,6 +2492,32 @@ fn merge_missing_json_defaults(existing: &mut Value, default_value: Value) {
             }
         }
     }
+}
+
+fn patch_permission_mode_config(path: &Path, mode: PermissionMode) -> Result<(), CliError> {
+    let mut value = read_config_value_for_patch(path)?;
+    if !value.is_object() {
+        return Err(CliError::InvalidArguments(
+            "config JSON root must be an object".to_owned(),
+        ));
+    }
+    let Some(root) = value.as_object_mut() else {
+        return Err(CliError::InvalidArguments(
+            "config JSON root must be an object".to_owned(),
+        ));
+    };
+    let permissions = root
+        .entry("permissions".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !permissions.is_object() {
+        return Err(CliError::InvalidArguments(
+            "config `permissions` must be a JSON object".to_owned(),
+        ));
+    }
+    if let Some(permissions) = permissions.as_object_mut() {
+        permissions.insert("mode".to_owned(), json!(mode.as_str()));
+    }
+    write_config_value_for_patch(path, &value)
 }
 
 pub fn status(options: StatusOptions) -> Result<StatusReport, CliError> {
@@ -2829,6 +2877,59 @@ fn runtime_permission_mode_snapshot(snapshot: &PermissionConfigSnapshot) -> Perm
         source: Some(permission_mode_source_name(snapshot.source).to_owned()),
         scope_ref: None,
     }
+}
+
+fn default_permission_mode_snapshot() -> PermissionModeSnapshot {
+    PermissionModeSnapshot {
+        mode: PermissionMode::Default,
+        source: Some(permission_mode_source_name(PermissionModeSource::DefaultFallback).to_owned()),
+        scope_ref: None,
+    }
+}
+
+fn reload_failure_permission_mode_snapshot(
+    previous: &PermissionModeSnapshot,
+) -> PermissionModeSnapshot {
+    let source = (previous.mode == PermissionMode::Default)
+        .then_some(previous.source.as_deref())
+        .flatten()
+        .filter(|source| {
+            *source == permission_mode_source_name(PermissionModeSource::DefaultFallback)
+        })
+        .unwrap_or_else(|| permission_mode_source_name(PermissionModeSource::DefaultFallback));
+    let mut snapshot = default_permission_mode_snapshot();
+    snapshot.source = Some(source.to_owned());
+    snapshot
+}
+
+fn permission_mode_snapshot_from_config_path(
+    path: &Path,
+    containment_precondition_met: bool,
+) -> Result<PermissionModeSnapshot, CliError> {
+    let value = read_config_value_for_patch(path)?;
+    let root = value.as_object().ok_or_else(|| {
+        CliError::InvalidArguments("config JSON root must be an object".to_owned())
+    })?;
+    let permissions = root
+        .get("permissions")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let permissions = serde_json::from_value::<shacs_config::PermissionsConfig>(permissions)
+        .map_err(|error| {
+            CliError::InvalidArguments(format!("invalid permissions config: {error}"))
+        })?;
+    let snapshot = permissions.normalized_snapshot(
+        PermissionModeSource::UserLocalConfig,
+        PermissionActivationContext {
+            user_local_auto_opt_in: false,
+            containment_precondition_met,
+        },
+    );
+    Ok(runtime_permission_mode_snapshot(&snapshot))
+}
+
+fn permission_containment_precondition_met(snapshot: &Option<ContainmentSnapshotRef>) -> bool {
+    snapshot.as_ref().and_then(|snapshot| snapshot.contained) == Some(true)
 }
 
 fn permission_mode_source_name(source: PermissionModeSource) -> &'static str {
@@ -3561,6 +3662,13 @@ fn classify_runtime_ownership_marker(
             reason: "owner pid is not alive".to_owned(),
         };
     }
+    if owner_process_started_after_marker(&marker, Path::new("/proc")) {
+        return RuntimeOwnershipStatus {
+            state: RuntimeOwnershipState::Stale,
+            marker: Some(marker),
+            reason: "owner pid was reused after marker creation".to_owned(),
+        };
+    }
     if now_ms.saturating_sub(marker.updated_at_ms) > RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS {
         return RuntimeOwnershipStatus {
             state: RuntimeOwnershipState::Stale,
@@ -3701,10 +3809,19 @@ fn remove_stale_runtime_ownership_marker(data_dir: &Path, now_ms: u64) -> Result
 }
 
 fn pid_is_alive(pid: u32) -> bool {
+    pid_is_alive_with(pid, Path::new("/proc"), Path::new("kill"))
+}
+
+fn pid_is_alive_with(pid: u32, proc_root: &Path, kill_command: &Path) -> bool {
     if pid == std::process::id() {
         return true;
     }
-    Command::new("kill")
+
+    if let Some(alive) = pid_is_alive_in_procfs(pid, proc_root) {
+        return alive;
+    }
+
+    Command::new(kill_command)
         .arg("-0")
         .arg(pid.to_string())
         .stdin(Stdio::null())
@@ -3713,6 +3830,62 @@ fn pid_is_alive(pid: u32) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn pid_is_alive_in_procfs(pid: u32, proc_root: &Path) -> Option<bool> {
+    if !proc_root.exists() {
+        return None;
+    }
+    match fs::metadata(proc_root.join(pid.to_string())) {
+        Ok(_) => Some(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+fn owner_process_started_after_marker(marker: &RuntimeOwnershipMarker, proc_root: &Path) -> bool {
+    let Some(ticks_per_second) = clock_ticks_per_second() else {
+        return false;
+    };
+    owner_process_started_after_marker_with_ticks(marker, proc_root, ticks_per_second)
+}
+
+fn owner_process_started_after_marker_with_ticks(
+    marker: &RuntimeOwnershipMarker,
+    proc_root: &Path,
+    ticks_per_second: u64,
+) -> bool {
+    let Some(process_started_at_ms) =
+        procfs_process_started_at_ms(marker.pid, proc_root, ticks_per_second)
+    else {
+        return false;
+    };
+    marker.started_at_ms.saturating_add(5_000) < process_started_at_ms
+}
+
+fn clock_ticks_per_second() -> Option<u64> {
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    u64::try_from(ticks).ok().filter(|ticks| *ticks > 0)
+}
+
+fn procfs_process_started_at_ms(pid: u32, proc_root: &Path, ticks_per_second: u64) -> Option<u64> {
+    let boot_time_seconds = procfs_boot_time_seconds(proc_root)?;
+    let stat = fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
+    let after_comm = stat.rsplit_once(") ")?.1;
+    let start_ticks = after_comm.split_whitespace().nth(19)?.parse::<u64>().ok()?;
+    Some(
+        boot_time_seconds
+            .saturating_mul(1_000)
+            .saturating_add(start_ticks.saturating_mul(1_000) / ticks_per_second),
+    )
+}
+
+fn procfs_boot_time_seconds(proc_root: &Path) -> Option<u64> {
+    let stat = fs::read_to_string(proc_root.join("stat")).ok()?;
+    stat.lines().find_map(|line| {
+        let seconds = line.strip_prefix("btime ")?;
+        seconds.trim().parse::<u64>().ok()
+    })
 }
 
 struct RuntimeOwnershipLease {
@@ -13223,6 +13396,7 @@ pub struct AgentLoopChatCompletionAdapter {
     client: Arc<dyn ProviderClient>,
     retry_mode: ProviderRetryMode,
     workspace: PathBuf,
+    config_path: PathBuf,
     media_dir: PathBuf,
     tools: ToolRegistry,
     message_tool: Option<MessageTool>,
@@ -13290,6 +13464,7 @@ impl AgentLoopChatCompletionAdapter {
             client,
             retry_mode,
             workspace: bundle.context.workspace,
+            config_path: bundle.context.config_path,
             media_dir,
             tools: tooling.registry,
             message_tool: tooling.message_tool,
@@ -13351,8 +13526,24 @@ impl AgentLoopChatCompletionAdapter {
             .then(|| "api:default".to_owned());
         config.concurrent_tools = true;
         config.containment_snapshot = self.containment_snapshot.clone();
-        config.permission_mode_snapshot = self.permission_mode_snapshot.clone();
+        config.permission_mode_snapshot = self.current_permission_mode_snapshot();
+        let config_path = self.config_path.clone();
+        let containment_precondition_met =
+            permission_containment_precondition_met(&self.containment_snapshot);
+        config.permission_mode_setter = Some(Arc::new(move |mode| {
+            patch_permission_mode_config(&config_path, mode).map_err(|error| error.to_string())?;
+            permission_mode_snapshot_from_config_path(&config_path, containment_precondition_met)
+                .map_err(|error| error.to_string())
+        }));
         config
+    }
+
+    fn current_permission_mode_snapshot(&self) -> PermissionModeSnapshot {
+        permission_mode_snapshot_from_config_path(
+            &self.config_path,
+            permission_containment_precondition_met(&self.containment_snapshot),
+        )
+        .unwrap_or_else(|_| reload_failure_permission_mode_snapshot(&self.permission_mode_snapshot))
     }
 
     fn context_builder(&self) -> ContextBuilder {
@@ -13518,12 +13709,10 @@ impl AgentLoopChatCompletionAdapter {
                 inbound.media = media_paths;
                 inbound.session_key_override = Some(session_key);
                 let stream_id = format!("{chat_id}:{}", now_millis());
+                let mut config = self.loop_config();
+                config.permission_interactive = true;
                 let (_, outbound) = self.process_websocket_inbound_with_streaming(
-                    inbound,
-                    self.loop_config(),
-                    &chat_id,
-                    &stream_id,
-                    emit,
+                    inbound, config, &chat_id, &stream_id, emit,
                 )?;
                 let sink = WebSocketEventSink::default();
                 let mut manager =
@@ -13644,7 +13833,7 @@ impl AgentLoopChatCompletionAdapter {
     fn process_external_inbound_with_streaming(
         &self,
         mut inbound: InboundMessage,
-        config: AgentLoopConfig,
+        mut config: AgentLoopConfig,
         runtime_bus: &MessageBus,
     ) -> Result<
         (
@@ -13654,6 +13843,7 @@ impl AgentLoopChatCompletionAdapter {
         ),
         ApiError,
     > {
+        config.permission_interactive = true;
         inbound = self.normalize_external_inbound_media(inbound, &config)?;
         let channel = inbound.channel.clone();
         let chat_id = inbound.chat_id.clone();
@@ -18017,6 +18207,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -19567,6 +19762,7 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace: workspace.clone(),
+            config_path: root.path().join("config.json"),
             media_dir,
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -19918,6 +20114,27 @@ mod tests {
         }
         assert_eq!(channels[WEBSOCKET_CHANNEL]["enabled"], json!(true));
         assert_eq!(channels[EMAIL_CHANNEL]["consentGranted"], json!(false));
+        assert_eq!(saved_json["permissions"]["mode"], json!("default"));
+        assert_eq!(
+            saved_json["permissions"]["autoApproval"]["enabled"],
+            json!(false)
+        );
+        assert_eq!(
+            saved_json["permissions"]["autoApproval"]["requireDockerContainmentForExec"],
+            json!(true)
+        );
+        assert_eq!(
+            saved_json["permissions"]["autoApproval"]["allowWorkspaceEdits"],
+            json!(true)
+        );
+        assert_eq!(
+            saved_json["permissions"]["autoApproval"]["allowProcExecVerification"],
+            json!(false)
+        );
+        assert_eq!(
+            saved_json["permissions"]["autoApproval"]["protectedTargets"],
+            json!([])
+        );
         Ok(())
     }
 
@@ -19969,6 +20186,278 @@ mod tests {
         assert_eq!(channels[EMAIL_CHANNEL]["smtp"]["port"], json!(587));
         assert!(channels.contains_key(WEBSOCKET_CHANNEL));
         assert!(channels.contains_key(WHATSAPP_CHANNEL));
+        assert_eq!(saved["permissions"]["mode"], json!("default"));
+        assert_eq!(
+            saved["permissions"]["autoApproval"]["enabled"],
+            json!(false)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn onboard_merges_missing_permission_defaults_without_overwriting_existing_values(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config_value = serde_json::to_value(Config::default())?;
+        config_value["agents"]["defaults"]["workspace"] = json!(workspace.to_string_lossy());
+        config_value["permissions"] = json!({
+            "mode": "auto",
+            "autoApproval": {
+                "enabled": true,
+                "protectedTargets": ["~/.ssh"]
+            }
+        });
+        write_config_value_for_patch(&config_path, &config_value)?;
+
+        onboard(OnboardOptions {
+            config_path: Some(config_path.clone()),
+            workspace: None,
+            wizard: false,
+        })?;
+
+        let saved: Value = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+        assert_eq!(saved["permissions"]["mode"], json!("auto"));
+        assert_eq!(saved["permissions"]["autoApproval"]["enabled"], json!(true));
+        assert_eq!(
+            saved["permissions"]["autoApproval"]["protectedTargets"],
+            json!(["~/.ssh"])
+        );
+        assert_eq!(
+            saved["permissions"]["autoApproval"]["requireDockerContainmentForExec"],
+            json!(true)
+        );
+        assert_eq!(
+            saved["permissions"]["autoApproval"]["allowWorkspaceEdits"],
+            json!(true)
+        );
+        assert_eq!(
+            saved["permissions"]["autoApproval"]["allowProcExecVerification"],
+            json!(false)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn permission_mode_patch_preserves_unrelated_config_without_adding_permission_defaults(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        write_config_value_for_patch(
+            &config_path,
+            &json!({
+                "providers": {
+                    "openrouter": {
+                        "apiKey": "${OPENROUTER_API_KEY}",
+                        "baseUrl": "https://example.invalid"
+                    }
+                },
+                "permissions": {
+                    "autoApproval": {
+                        "enabled": true,
+                        "protectedTargets": ["~/.ssh"]
+                    }
+                },
+                "customSecret": "${CUSTOM_SECRET}"
+            }),
+        )?;
+
+        patch_permission_mode_config(&config_path, PermissionMode::Auto)?;
+
+        let saved: Value = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+        assert_eq!(saved["permissions"]["mode"], json!("auto"));
+        assert_eq!(saved["permissions"]["autoApproval"]["enabled"], json!(true));
+        assert_eq!(
+            saved["permissions"]["autoApproval"]["protectedTargets"],
+            json!(["~/.ssh"])
+        );
+        assert!(saved["permissions"]["autoApproval"]
+            .get("requireDockerContainmentForExec")
+            .is_none());
+        assert!(saved["permissions"]["autoApproval"]
+            .get("allowWorkspaceEdits")
+            .is_none());
+        assert!(saved["permissions"]["autoApproval"]
+            .get("allowProcExecVerification")
+            .is_none());
+        assert_eq!(
+            saved["providers"]["openrouter"]["apiKey"],
+            json!("${OPENROUTER_API_KEY}")
+        );
+        assert_eq!(saved["customSecret"], json!("${CUSTOM_SECRET}"));
+        Ok(())
+    }
+
+    #[test]
+    fn permission_mode_patch_creates_mode_only_permissions_block() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        write_config_value_for_patch(&config_path, &json!({ "agents": { "defaults": {} } }))?;
+
+        patch_permission_mode_config(&config_path, PermissionMode::Default)?;
+
+        let saved: Value = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+        assert_eq!(saved["permissions"]["mode"], json!("default"));
+        assert!(saved["permissions"].get("autoApproval").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn adapter_permission_mode_setter_updates_next_loop_config_snapshot(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let config_path = root.path().join("config.json");
+        fs::create_dir_all(&workspace)?;
+        write_config_value_for_patch(
+            &config_path,
+            &json!({
+                "agents": {
+                    "defaults": {
+                        "workspace": workspace.to_string_lossy()
+                    }
+                },
+                "permissions": {
+                    "mode": "default"
+                }
+            }),
+        )?;
+
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults::default(),
+            resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse::default(),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            config_path: config_path.clone(),
+            media_dir: root.path().join("data").join("media").join("api"),
+            tools: ToolRegistry::new(),
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: false,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            tool_search: ToolSearchConfig::default(),
+            containment_snapshot: Some(ContainmentSnapshotRef {
+                contained: Some(true),
+                digest: Some("test-contained".to_owned()),
+                summary: Some("test containment".to_owned()),
+            }),
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: PermissionMode::Default,
+                source: Some("test-initial".to_owned()),
+                scope_ref: None,
+            },
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+        };
+
+        let initial_config = adapter.loop_config();
+        assert_eq!(
+            initial_config.permission_mode_snapshot.mode,
+            PermissionMode::Default
+        );
+        let setter = initial_config
+            .permission_mode_setter
+            .as_ref()
+            .ok_or("missing permission mode setter")?;
+        let applied = setter(PermissionMode::Auto).map_err(|error| error.to_string())?;
+
+        assert_eq!(applied.mode, PermissionMode::Auto);
+        assert_eq!(
+            adapter.loop_config().permission_mode_snapshot.mode,
+            PermissionMode::Auto
+        );
+        let saved: Value = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+        assert_eq!(saved["permissions"]["mode"], json!("auto"));
+        assert!(saved["permissions"].get("autoApproval").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn adapter_permission_snapshot_reload_failures_fall_back_to_default(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let make_adapter = |config_path: PathBuf,
+                            initial_mode: PermissionMode|
+         -> AgentLoopChatCompletionAdapter {
+            AgentLoopChatCompletionAdapter {
+                configured_model: "openai/gpt-5".to_owned(),
+                provider_id: "openai".to_owned(),
+                defaults: AgentDefaults::default(),
+                resolved_model: "gpt-5".to_owned(),
+                native_image_input_supported: true,
+                client: Arc::new(FakeProviderClient {
+                    captured: Arc::new(Mutex::new(Vec::new())),
+                    response: LlmResponse::default(),
+                }),
+                retry_mode: ProviderRetryMode::Standard,
+                workspace: workspace.clone(),
+                config_path,
+                media_dir: root.path().join("data").join("media").join("api"),
+                tools: ToolRegistry::new(),
+                message_tool: None,
+                _mcp_runtime: None,
+                _mcp_reports: Vec::new(),
+                allow_side_effect_tools: false,
+                send_progress: false,
+                send_tool_hints: false,
+                send_max_retries: 0,
+                runtime_verbose: false,
+                session_turn_lock: SessionTurnLock::new(),
+                exec_timeout_seconds: 60,
+                exec_sandbox: None,
+                exec_path_append: None,
+                exec_allowed_env_keys: Vec::new(),
+                exec_env: BTreeMap::new(),
+                tool_search: ToolSearchConfig::default(),
+                containment_snapshot: Some(ContainmentSnapshotRef {
+                    contained: Some(true),
+                    digest: Some("test-contained".to_owned()),
+                    summary: Some("test containment".to_owned()),
+                }),
+                permission_mode_snapshot: PermissionModeSnapshot {
+                    mode: initial_mode,
+                    source: Some("test-initial".to_owned()),
+                    scope_ref: None,
+                },
+                plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            }
+        };
+
+        let missing = make_adapter(
+            root.path().join("missing-config.json"),
+            PermissionMode::Auto,
+        )
+        .loop_config()
+        .permission_mode_snapshot;
+        assert_eq!(missing.mode, PermissionMode::Default);
+        assert_eq!(missing.source.as_deref(), Some("default_fallback"));
+
+        let invalid_path = root.path().join("invalid-config.json");
+        fs::write(&invalid_path, "{")?;
+        let invalid = make_adapter(invalid_path, PermissionMode::BypassPermissions)
+            .loop_config()
+            .permission_mode_snapshot;
+        assert_eq!(invalid.mode, PermissionMode::Default);
+        assert_eq!(invalid.source.as_deref(), Some("default_fallback"));
         Ok(())
     }
 
@@ -20927,6 +21416,66 @@ mod tests {
     }
 
     #[test]
+    fn pid_liveness_uses_procfs_when_external_kill_is_missing() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let proc_root = root.path().join("proc");
+        let live_pid = 42_u32;
+        fs::create_dir_all(proc_root.join(live_pid.to_string()))?;
+        let missing_kill = root.path().join("missing-kill");
+
+        assert!(pid_is_alive_with(live_pid, &proc_root, &missing_kill));
+        assert!(!pid_is_alive_with(43, &proc_root, &missing_kill));
+        Ok(())
+    }
+
+    #[test]
+    fn procfs_start_time_marks_reused_pid_marker_stale() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let proc_root = root.path().join("proc");
+        let pid = 42_u32;
+        let pid_root = proc_root.join(pid.to_string());
+        fs::create_dir_all(&pid_root)?;
+        fs::write(proc_root.join("stat"), "cpu 0 0 0 0\nbtime 1000\n")?;
+        let mut proc_stat_fields = vec!["S".to_owned()];
+        proc_stat_fields.extend((0..18).map(|_| "0".to_owned()));
+        proc_stat_fields.push("500".to_owned());
+        fs::write(
+            pid_root.join("stat"),
+            format!("42 (shacs-bot) {}", proc_stat_fields.join(" ")),
+        )?;
+        let marker = RuntimeOwnershipMarker {
+            pid,
+            started_at_ms: 1_004_000,
+            updated_at_ms: 1_004_000,
+            binary_version: VERSION.to_owned(),
+            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
+            mode: "run".to_owned(),
+            config_path: "/tmp/config.json".to_owned(),
+            workspace: "/tmp/workspace".to_owned(),
+        };
+
+        assert_eq!(
+            procfs_process_started_at_ms(pid, &proc_root, 100),
+            Some(1_005_000)
+        );
+        assert!(!owner_process_started_after_marker_with_ticks(
+            &marker, &proc_root, 100
+        ));
+
+        let stale_marker = RuntimeOwnershipMarker {
+            started_at_ms: 999_999,
+            updated_at_ms: 999_999,
+            ..marker
+        };
+        assert!(owner_process_started_after_marker_with_ticks(
+            &stale_marker,
+            &proc_root,
+            100
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn runtime_active_ownership_blocks_start_admission() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
@@ -21775,6 +22324,7 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace: PathBuf::from("/tmp/workspace"),
+            config_path: PathBuf::from("/tmp/config.json"),
             media_dir: PathBuf::from("/tmp/data/media/api"),
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -21804,7 +22354,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_loop_adapter_loop_config_carries_tool_search_config() {
+    fn agent_loop_adapter_loop_config_carries_tool_search_config() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let config_path = root.path().join("config.json");
+        fs::create_dir_all(&workspace)?;
+        write_config_value_for_patch(
+            &config_path,
+            &json!({
+                "permissions": {
+                    "mode": "auto"
+                }
+            }),
+        )?;
         let adapter = AgentLoopChatCompletionAdapter {
             configured_model: "openai/gpt-5".to_owned(),
             provider_id: "openai".to_owned(),
@@ -21816,8 +22378,9 @@ mod tests {
                 response: LlmResponse::default(),
             }),
             retry_mode: ProviderRetryMode::Standard,
-            workspace: PathBuf::from("/tmp/workspace"),
-            media_dir: PathBuf::from("/tmp/data/media/api"),
+            workspace,
+            config_path,
+            media_dir: root.path().join("data").join("media").join("api"),
             tools: ToolRegistry::new(),
             message_tool: None,
             _mcp_runtime: None,
@@ -21872,6 +22435,8 @@ mod tests {
             config.permission_mode_snapshot.source.as_deref(),
             Some("user_local_config")
         );
+        assert!(!config.permission_interactive);
+        Ok(())
     }
 
     #[test]
@@ -22075,6 +22640,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir: media_dir.clone(),
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -22176,6 +22746,7 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace: workspace.clone(),
+            config_path: root.path().join("config.json"),
             media_dir: media_dir.clone(),
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -22279,6 +22850,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir: media_dir.clone(),
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -22366,6 +22942,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -22438,6 +23019,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -22522,6 +23108,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -22603,6 +23194,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -22690,6 +23286,7 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace: workspace.clone(),
+            config_path: root.path().join("config.json"),
             media_dir,
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -22772,6 +23369,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -22905,6 +23507,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools,
             message_tool: None,
@@ -22979,6 +23586,7 @@ mod tests {
                 }),
                 retry_mode: ProviderRetryMode::Standard,
                 workspace: workspace.clone(),
+                config_path: root.path().join("config.json"),
                 media_dir,
                 tools: ToolRegistry::new(),
                 message_tool: None,
@@ -23061,6 +23669,11 @@ mod tests {
                 }),
                 retry_mode: ProviderRetryMode::Standard,
                 workspace,
+                config_path: media_dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("config.json"),
                 media_dir,
                 tools: ToolRegistry::new(),
                 message_tool: None,
@@ -23148,6 +23761,11 @@ mod tests {
                 }),
                 retry_mode: ProviderRetryMode::Standard,
                 workspace,
+                config_path: media_dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("config.json"),
                 media_dir,
                 tools: ToolRegistry::new(),
                 message_tool: None,
@@ -23247,6 +23865,11 @@ mod tests {
                 }),
                 retry_mode: ProviderRetryMode::Standard,
                 workspace,
+                config_path: media_dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("config.json"),
                 media_dir,
                 tools,
                 message_tool: None,
@@ -23444,6 +24067,11 @@ mod tests {
                 }),
                 retry_mode: ProviderRetryMode::Standard,
                 workspace,
+                config_path: media_dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("config.json"),
                 media_dir,
                 tools,
                 message_tool: None,
@@ -23667,6 +24295,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools,
             message_tool: None,
@@ -23716,7 +24349,16 @@ mod tests {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
         let media_dir = root.path().join("data").join("media").join("api");
+        let config_path = root.path().join("spawn-config.json");
         fs::create_dir_all(&workspace)?;
+        write_config_value_for_patch(
+            &config_path,
+            &json!({
+                "permissions": {
+                    "mode": "bypass_permissions"
+                }
+            }),
+        )?;
         let mut arguments = Map::new();
         arguments.insert("task".to_owned(), json!("draft the summary"));
         arguments.insert("label".to_owned(), json!("summary"));
@@ -23742,6 +24384,7 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path,
             media_dir,
             tools,
             message_tool: None,
@@ -23759,7 +24402,11 @@ mod tests {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             tool_search: ToolSearchConfig::default(),
-            containment_snapshot: None,
+            containment_snapshot: Some(ContainmentSnapshotRef {
+                contained: Some(true),
+                digest: Some("test-contained".to_owned()),
+                summary: Some("test containment".to_owned()),
+            }),
             permission_mode_snapshot: PermissionModeSnapshot {
                 mode: shacs_config::PermissionMode::BypassPermissions,
                 ..PermissionModeSnapshot::default()
@@ -23883,6 +24530,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools,
             message_tool: None,
@@ -23973,6 +24625,11 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: media_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .join("config.json"),
             media_dir,
             tools: ToolRegistry::new(),
             message_tool: None,
@@ -24494,6 +25151,7 @@ mod tests {
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace,
+            config_path: root.join("config.json"),
             media_dir: root.join("data").join("media").join("api"),
             tools: ToolRegistry::new(),
             message_tool: None,
