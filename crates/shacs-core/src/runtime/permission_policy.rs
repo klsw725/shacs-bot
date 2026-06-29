@@ -135,10 +135,7 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
                 None,
             );
         }
-        StaticRuleDecisionKind::AskRequired => {
-            return ask_or_deny(input.interactive, PermissionPolicyReason::StaticAskRequired);
-        }
-        StaticRuleDecisionKind::AllowCandidate => {}
+        StaticRuleDecisionKind::AskRequired | StaticRuleDecisionKind::AllowCandidate => {}
     }
 
     if input.action.tool_name == "ask_user" && input.action.capabilities.is_empty() {
@@ -177,6 +174,10 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
             None,
             approval.error,
         );
+    }
+
+    if input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired {
+        return ask_or_deny(input.interactive, PermissionPolicyReason::StaticAskRequired);
     }
 
     match input.action.permission_mode_snapshot.mode {

@@ -1211,6 +1211,7 @@ fn pending_interrupt_tool_call(
 ) -> Vec<RuntimeToolCall> {
     let tool_call_id = match interrupt {
         RuntimeInterrupt::AskUser { tool_call_id, .. } => tool_call_id,
+        RuntimeInterrupt::PermissionApproval { tool_call, .. } => return vec![tool_call.clone()],
     };
     calls
         .iter()
@@ -1885,12 +1886,14 @@ fn accumulate_usage(target: &mut BTreeMap<String, u64>, usage: &BTreeMap<String,
 fn interrupt_text(interrupt: &RuntimeInterrupt) -> Option<String> {
     match interrupt {
         RuntimeInterrupt::AskUser { question, .. } => Some(question.clone()),
+        RuntimeInterrupt::PermissionApproval { question, .. } => Some(question.clone()),
     }
 }
 
 fn interrupt_name(interrupt: &RuntimeInterrupt) -> String {
     match interrupt {
         RuntimeInterrupt::AskUser { name, .. } => name.clone(),
+        RuntimeInterrupt::PermissionApproval { tool_call, .. } => tool_call.name.clone(),
     }
 }
 

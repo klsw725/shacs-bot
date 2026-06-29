@@ -34,7 +34,7 @@ mod tool_search;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
-    AgentLoopRunSummary, AgentLoopTurnResult,
+    AgentLoopRunSummary, AgentLoopTurnResult, PermissionModeSetter,
 };
 pub use autocompact::{AutoCompact, AutoCompactArchiveOutcome, RECENT_SUFFIX_MESSAGES};
 pub use automation::{

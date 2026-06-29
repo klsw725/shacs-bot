@@ -1,16 +1,19 @@
 use crate::runtime::{
-    decide_permission, evaluate_static_rules, normalize_runtime_tool_call, AutoEvaluatorVerdict,
-    ContainmentSnapshotRef, InheritedPermissionContext, PermissionCeilingSnapshot,
-    PermissionModeSnapshot, PermissionPolicyDecision, PermissionPolicyDecisionKind,
-    PermissionPolicyInput, PermissionRuleInput, PermissionedAction, PermissionedActionInput,
-    PermissionedActionOrigin,
+    correlate_approval, decide_permission, evaluate_static_rules, normalize_runtime_tool_call,
+    ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError, ApprovalDecisionKind,
+    ApprovalRequest, AutoEvaluatorVerdict, ContainmentSnapshotRef, InheritedPermissionContext,
+    PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionPolicyDecision,
+    PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionRuleInput, PermissionedAction,
+    PermissionedActionInput, PermissionedActionOrigin,
 };
 use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const ERROR_HINT: &str = "\n\n[Analyze the error above and try a different approach.]";
+const PERMISSION_APPROVAL_TTL_MS: u64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeToolCall {
@@ -118,11 +121,18 @@ impl RuntimeAssistantToolCallMessage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RuntimeInterrupt {
     AskUser {
         tool_call_id: String,
         name: String,
+        question: String,
+        options: Vec<String>,
+    },
+    PermissionApproval {
+        approval_request_id: String,
+        approval_request: Box<ApprovalRequest>,
+        tool_call: RuntimeToolCall,
         question: String,
         options: Vec<String>,
     },
@@ -167,6 +177,8 @@ pub struct ToolExecutionContext {
     pub permission_evaluator: Option<AutoEvaluatorVerdict>,
     #[serde(default)]
     pub permission_interactive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_approval_cache: Option<ApprovalCacheEntry>,
     pub in_cron_context: bool,
     pub record_channel_delivery: bool,
 }
@@ -185,6 +197,7 @@ impl Default for ToolExecutionContext {
             permission_ceiling_snapshot: None,
             permission_evaluator: None,
             permission_interactive: false,
+            permission_approval_cache: None,
             in_cron_context: false,
             record_channel_delivery: false,
         }
@@ -281,7 +294,7 @@ impl<'a> RuntimeToolExecutor<'a> {
                 permissioned_action_input_from_context(context),
             );
             let decision = permission_decision_for_action(&action, context);
-            permissioned_actions.push(action);
+            permissioned_actions.push(action.clone());
             if !decision.can_handoff_to_tool_runtime {
                 if let Some(report) = flush_allowed_batch(
                     self.registry,
@@ -292,6 +305,14 @@ impl<'a> RuntimeToolExecutor<'a> {
                     &permissioned_actions,
                 ) {
                     return report;
+                }
+                if decision.kind == PermissionPolicyDecisionKind::Ask {
+                    return RuntimeToolExecutionReport {
+                        messages,
+                        interrupt: Some(permission_approval_interrupt(call, &action)),
+                        skipped_tool_calls: all_calls[original_index + 1..].to_vec(),
+                        permissioned_actions,
+                    };
                 }
                 messages.push(permission_block_message(&call.id, &call.name, &decision));
                 continue;
@@ -407,10 +428,98 @@ pub(crate) fn permission_decision_for_action(
         action: action.clone(),
         static_rule_decision,
         evaluator: context.permission_evaluator.clone(),
-        approval: None,
+        approval: permission_approval_for_action(action, context),
         inherited_context: inherited_context_for_action(action, context),
         interactive: context.permission_interactive,
     })
+}
+
+pub(crate) fn permission_approval_interrupt(
+    call: RuntimeToolCall,
+    action: &PermissionedAction,
+) -> RuntimeInterrupt {
+    let now = now_unix_ms();
+    let approval_request_id = format!(
+        "approval_{}",
+        action.action_id.chars().take(16).collect::<String>()
+    );
+    let expires_at_unix_ms = now.saturating_add(PERMISSION_APPROVAL_TTL_MS);
+    let risk_summary = format!("Run tool `{}`", action.tool_name);
+    let approval_request = ApprovalRequest {
+        approval_request_id: approval_request_id.clone(),
+        action_digest: action.action_digest.clone(),
+        snapshot_digest: action.snapshot_digest.clone(),
+        requested_scope: action.session_id.clone(),
+        risk_summary: risk_summary.clone(),
+        allowed_decisions: vec![ApprovalDecisionKind::Approved, ApprovalDecisionKind::Denied],
+        expires_at_unix_ms,
+    };
+    let arguments = action.redacted_arguments.to_string();
+    let target_summary = approval_target_summary(action);
+    RuntimeInterrupt::PermissionApproval {
+        approval_request_id: approval_request_id.clone(),
+        approval_request: Box::new(approval_request),
+        tool_call: call,
+        question: format!(
+            "Permission approval required before running tool `{}`.\n\nRisk: {}\nTarget: {}\nScope: {}\nExpires at (unix ms): {}\nArguments: `{}`\n\nReply with `1` or `approve` to run it, or `2` or `deny` to cancel.\n\nApproval id: `{}`",
+            action.tool_name,
+            risk_summary,
+            target_summary,
+            action.session_id,
+            expires_at_unix_ms,
+            arguments,
+            approval_request_id
+        ),
+        options: vec!["approve".to_owned(), "deny".to_owned()],
+    }
+}
+
+fn approval_target_summary(action: &PermissionedAction) -> String {
+    if action.target_refs.is_empty() {
+        return "none".to_owned();
+    }
+    action
+        .target_refs
+        .iter()
+        .map(|target| format!("{}={}", target.kind, target.redacted_value))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn permission_approval_for_action(
+    action: &PermissionedAction,
+    context: &ToolExecutionContext,
+) -> Option<ApprovalCorrelation> {
+    if let Some(entry) = &context.permission_approval_cache {
+        let correlation = correlate_approval(&entry.request, &entry.decision, now_unix_ms());
+        if !correlation.is_approved() {
+            return Some(correlation);
+        }
+        if entry.request.action_digest != action.action_digest {
+            return Some(ApprovalCorrelation::rejected(
+                ApprovalCorrelationError::ActionMismatch,
+            ));
+        }
+        if entry.request.snapshot_digest != action.snapshot_digest {
+            return Some(ApprovalCorrelation::rejected(
+                ApprovalCorrelationError::SnapshotMismatch,
+            ));
+        }
+        if entry.request.requested_scope != action.session_id {
+            return Some(ApprovalCorrelation::rejected(
+                ApprovalCorrelationError::ScopeMismatch,
+            ));
+        }
+        return Some(correlation);
+    }
+    None
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn inherited_context_for_action(

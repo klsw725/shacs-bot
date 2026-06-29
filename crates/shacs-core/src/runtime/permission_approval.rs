@@ -49,6 +49,7 @@ pub enum ApprovalCorrelationError {
     RequestMismatch,
     ActionMismatch,
     SnapshotMismatch,
+    ScopeMismatch,
     Expired,
     Consumed,
     InspectOnly,
@@ -95,6 +96,9 @@ pub fn correlate_approval(
     }
     if request.snapshot_digest != decision.snapshot_digest {
         return ApprovalCorrelation::rejected(ApprovalCorrelationError::SnapshotMismatch);
+    }
+    if request.requested_scope != decision.approved_scope {
+        return ApprovalCorrelation::rejected(ApprovalCorrelationError::ScopeMismatch);
     }
     if now_unix_ms > request.expires_at_unix_ms
         || decision.decided_at_unix_ms > request.expires_at_unix_ms

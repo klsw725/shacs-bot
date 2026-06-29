@@ -1,26 +1,28 @@
 use crate::runtime::{
     apply_context_safety_gate, build_context_provider_handoff, discover_context_files,
-    parse_context_references, resolve_context_reference,
+    dispatch_bridge_tool_calls, parse_context_references, resolve_context_reference,
 };
 use crate::runtime::{
     clear_goal, create_persistent_goal, mark_goal_blocked, mark_goal_done, pause_goal,
     persistent_goal_from_session, remove_persistent_goal, resume_goal, store_persistent_goal,
 };
 use crate::runtime::{
-    AgentHook, AgentRunSpec, AgentRunner, AutoCompact, AutoCompactArchiveOutcome,
+    AgentHook, AgentRunSpec, AgentRunner, ApprovalActor, ApprovalCacheEntry, ApprovalDecision,
+    ApprovalDecisionKind, ApprovalRequest, AutoCompact, AutoCompactArchiveOutcome,
     AutoEvaluatorVerdict, ContainmentSnapshotRef, ContextBudgetInput, ContextBuildRequest,
     ContextBuilder, ContextFileDiscoveryOptions, ContextFileProjection, ContextProviderHandoff,
     ContextReferenceResolverConfig, DreamProcessor, DreamRunOutcome, GoalMetadataError,
     InboundMessage, LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore,
-    MessageBus, OutboundMessage, PermissionCeilingSnapshot, PermissionModeSnapshot,
+    MessageBus, OutboundMessage, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
     PermissionRuleInput, PersistentGoal, PersistentGoalStatus, ProviderArchiveConsolidator,
-    ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt, Session, SessionHistoryOptions,
-    SessionManager, SessionTurnAcquireError, SessionTurnLock, TokenConsolidationConfig,
-    ToolEventCallback, ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
+    ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
+    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
+    SessionHistoryOptions, SessionManager, SessionTurnAcquireError, SessionTurnLock,
+    TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
-    ask_user_options_from_messages, ask_user_outbound, pending_ask_user_id, MessageSender,
-    MessageTool, ToolRegistry,
+    ask_user_options_from_messages, ask_user_outbound, assemble_tool_surface, bridge_tool_names,
+    pending_ask_user_id, MessageSender, MessageTool, ToolRegistry, ToolSurfaceAssemblyInput,
 };
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -35,9 +37,12 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 const RUNTIME_CHECKPOINT_KEY: &str = "runtime_checkpoint";
+const PENDING_PERMISSION_APPROVAL_KEY: &str = "pending_permission_approval";
+const PENDING_PERMISSION_WIZARD_KEY: &str = "pending_permission_wizard";
 const INTERRUPTED_PLACEHOLDER: &str =
     "[Assistant reply unavailable because the previous turn was interrupted.]";
 const PENDING_TOOL_PLACEHOLDER: &str = "[Tool result unavailable — call was interrupted or lost]";
@@ -46,8 +51,55 @@ const SYSTEM_BOOTSTRAP_CONTEXT_FILE_NAMES: [&str; 4] =
     ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
 
 type MessageDeliveryTarget = Arc<Mutex<Option<(String, String)>>>;
+pub type PermissionModeSetter =
+    Arc<dyn Fn(PermissionMode) -> Result<PermissionModeSnapshot, String> + Send + Sync>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingPermissionWizard {
+    session_key: String,
+    channel: String,
+    chat_id: String,
+    sender_id: String,
+    stage: PendingPermissionWizardStage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingPermissionWizardStage {
+    ChooseMode,
+    ConfirmBypass,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingPermissionApproval {
+    approval_request_id: String,
+    approval_request: ApprovalRequest,
+    tool_call: RuntimeToolCall,
+    tool_context: ToolExecutionContext,
+    session_key: String,
+    channel: String,
+    chat_id: String,
+    sender_id: String,
+    #[serde(default)]
+    status: PendingPermissionApprovalStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingPermissionApprovalStatus {
+    #[default]
+    Pending,
+    Executing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionApprovalReply {
+    Approve,
+    Deny,
+    Unknown,
+}
+
+#[derive(Clone)]
 pub struct AgentLoopConfig {
     pub workspace: PathBuf,
     pub media_roots: Vec<PathBuf>,
@@ -71,6 +123,7 @@ pub struct AgentLoopConfig {
     pub permission_ceiling_snapshot: Option<PermissionCeilingSnapshot>,
     pub permission_evaluator: Option<AutoEvaluatorVerdict>,
     pub permission_interactive: bool,
+    pub permission_mode_setter: Option<PermissionModeSetter>,
 }
 
 impl AgentLoopConfig {
@@ -98,6 +151,7 @@ impl AgentLoopConfig {
             permission_ceiling_snapshot: None,
             permission_evaluator: None,
             permission_interactive: false,
+            permission_mode_setter: None,
         }
     }
 }
@@ -114,6 +168,7 @@ pub enum AgentLoopCommandResult {
     Dream,
     DreamLog,
     DreamRestore,
+    Permission,
     Help,
 }
 
@@ -359,6 +414,10 @@ impl<'a> AgentLoop<'a> {
             return self.handle_loop_command(route.command, &message, session, true);
         }
 
+        if pending_permission_wizard(&session).is_some() {
+            return self.handle_pending_permission_wizard(&message, session, &session_key);
+        }
+
         if self.stopped {
             let content = "Stopped. Use /new to start a fresh session or send /status for state.";
             return self.publish_command_response(
@@ -379,49 +438,136 @@ impl<'a> AgentLoop<'a> {
             session_summary = prepared.1;
         }
 
+        let pending_permission_approval = pending_permission_approval(&session);
         let pending_ask_id = pending_ask_user_id(&session.messages);
-        let (initial_messages, context_provider_handoff) =
-            if let Some(tool_call_id) = pending_ask_id {
-                append_ask_user_resume(&mut session, &tool_call_id, &message.content);
-                let history = session.get_history_with_options(self.config.history_options);
-                let mut messages = vec![json!({
-                    "role": "system",
-                    "content": self.context_builder.build_system_prompt(Some(&message.channel)),
-                })];
-                messages.extend(history);
-                let context_provider_handoff = build_live_context_provider_handoff(
-                    &self.config.workspace,
-                    &message.content,
-                    &messages,
-                    current_working_directory(),
-                    live_context_budget_bytes(self.config.context_block_limit),
+        let (initial_messages, context_provider_handoff) = if let Some(approval) =
+            pending_permission_approval
+        {
+            if approval.status == PendingPermissionApprovalStatus::Executing {
+                return self.publish_command_response(
+                    &message,
+                    session,
+                    "Permission approval is already executing. Wait for the tool result or start a new session if recovery is required.",
+                    None,
+                    "permission_approval_executing",
+                    true,
                 );
-                (messages, Some(context_provider_handoff))
-            } else {
-                self.maybe_consolidate_session_by_tokens(&mut session)?;
-                let history = session.get_history_with_options(self.config.history_options);
-                let initial_messages = self.context_builder.build_messages(ContextBuildRequest {
-                    history,
-                    current_message: &message.content,
-                    media: &message.media,
-                    channel: Some(&message.channel),
-                    chat_id: Some(&message.chat_id),
-                    current_role: "user",
-                    session_summary: session_summary.as_deref(),
-                });
-                let context_provider_handoff = build_live_context_provider_handoff(
-                    &self.config.workspace,
-                    &message.content,
-                    &initial_messages,
-                    current_working_directory(),
-                    live_context_budget_bytes(self.config.context_block_limit),
+            }
+            if !permission_approval_reply_matches_request(&approval, &message, &session_key) {
+                return self.publish_command_response(
+                    &message,
+                    session,
+                    "Approval pending. Only the original requester in the original channel can approve or deny this tool call.",
+                    None,
+                    "permission_approval_pending",
+                    true,
                 );
-                append_user_turn(&mut session, &message);
-                session
-                    .metadata
-                    .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
-                (initial_messages, Some(context_provider_handoff))
-            };
+            }
+            match parse_permission_approval_reply(&message.content) {
+                PermissionApprovalReply::Approve => {
+                    let decision = approval_decision(&approval, ApprovalDecisionKind::Approved);
+                    let mut executing_approval = approval.clone();
+                    executing_approval.status = PendingPermissionApprovalStatus::Executing;
+                    set_pending_permission_approval(&mut session, &executing_approval);
+                    self.sessions.save(&session)?;
+                    let report = self.execute_approved_permission_tool(
+                        &approval,
+                        ApprovalCacheEntry {
+                            request: approval.approval_request.clone(),
+                            decision,
+                        },
+                    );
+                    for tool_message in report.messages {
+                        append_session_message(&mut session, tool_message.to_json());
+                    }
+                    session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+                    let history = session.get_history_with_options(self.config.history_options);
+                    let mut messages = vec![json!({
+                        "role": "system",
+                        "content": self.context_builder.build_system_prompt(Some(&message.channel)),
+                    })];
+                    messages.extend(history);
+                    let context_provider_handoff = build_live_context_provider_handoff(
+                        &self.config.workspace,
+                        &message.content,
+                        &messages,
+                        current_working_directory(),
+                        live_context_budget_bytes(self.config.context_block_limit),
+                    );
+                    (messages, Some(context_provider_handoff))
+                }
+                PermissionApprovalReply::Deny => {
+                    append_session_message(
+                        &mut session,
+                        RuntimeToolMessage {
+                            tool_call_id: approval.tool_call.id,
+                            name: approval.tool_call.name,
+                            content: "Permission denied by user.".to_owned(),
+                        }
+                        .to_json(),
+                    );
+                    session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+                    return self.publish_command_response(
+                        &message,
+                        session,
+                        "Tool execution cancelled.",
+                        None,
+                        "permission_denied_by_user",
+                        true,
+                    );
+                }
+                PermissionApprovalReply::Unknown => {
+                    return self.publish_command_response(
+                            &message,
+                            session,
+                            "Approval pending. Reply with `1` or `approve` to run it, or `2` or `deny` to cancel.",
+                            None,
+                            "permission_approval_pending",
+                            true,
+                        );
+                }
+            }
+        } else if let Some(tool_call_id) = pending_ask_id {
+            append_ask_user_resume(&mut session, &tool_call_id, &message.content);
+            let history = session.get_history_with_options(self.config.history_options);
+            let mut messages = vec![json!({
+                "role": "system",
+                "content": self.context_builder.build_system_prompt(Some(&message.channel)),
+            })];
+            messages.extend(history);
+            let context_provider_handoff = build_live_context_provider_handoff(
+                &self.config.workspace,
+                &message.content,
+                &messages,
+                current_working_directory(),
+                live_context_budget_bytes(self.config.context_block_limit),
+            );
+            (messages, Some(context_provider_handoff))
+        } else {
+            self.maybe_consolidate_session_by_tokens(&mut session)?;
+            let history = session.get_history_with_options(self.config.history_options);
+            let initial_messages = self.context_builder.build_messages(ContextBuildRequest {
+                history,
+                current_message: &message.content,
+                media: &message.media,
+                channel: Some(&message.channel),
+                chat_id: Some(&message.chat_id),
+                current_role: "user",
+                session_summary: session_summary.as_deref(),
+            });
+            let context_provider_handoff = build_live_context_provider_handoff(
+                &self.config.workspace,
+                &message.content,
+                &initial_messages,
+                current_working_directory(),
+                live_context_budget_bytes(self.config.context_block_limit),
+            );
+            append_user_turn(&mut session, &message);
+            session
+                .metadata
+                .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
+            (initial_messages, Some(context_provider_handoff))
+        };
         self.sessions.save(&session)?;
 
         let _delivery_target_guard = self.message_delivery_target.as_ref().map(|target| {
@@ -435,6 +581,26 @@ impl<'a> AgentLoop<'a> {
         let checkpoint_capture = checkpoint_session.clone();
         let checkpoint_manager = Arc::new(Mutex::new(self.sessions.clone()));
         let checkpoint_manager_capture = checkpoint_manager.clone();
+        let tool_context = ToolExecutionContext {
+            channel: message.channel.clone(),
+            chat_id: message.chat_id.clone(),
+            message_id: message
+                .metadata
+                .get("message_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            metadata: Value::Object(message.metadata.clone()),
+            session_key: Some(session_key.clone()),
+            containment_snapshot: self.config.containment_snapshot.clone(),
+            permission_mode_snapshot: self.config.permission_mode_snapshot.clone(),
+            permission_rule_input: self.config.permission_rule_input.clone(),
+            permission_ceiling_snapshot: self.config.permission_ceiling_snapshot.clone(),
+            permission_evaluator: self.config.permission_evaluator.clone(),
+            permission_interactive: self.config.permission_interactive,
+            permission_approval_cache: None,
+            in_cron_context: false,
+            record_channel_delivery: self.config.record_channel_delivery,
+        };
         let mut spec = AgentRunSpec::new(
             initial_messages.clone(),
             self.tools,
@@ -454,25 +620,7 @@ impl<'a> AgentLoop<'a> {
         spec.context_provider_handoff = context_provider_handoff;
         spec.concurrent_tools = self.config.concurrent_tools;
         spec.fail_on_tool_error = self.config.fail_on_tool_error;
-        spec.tool_context = ToolExecutionContext {
-            channel: message.channel.clone(),
-            chat_id: message.chat_id.clone(),
-            message_id: message
-                .metadata
-                .get("message_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            metadata: Value::Object(message.metadata.clone()),
-            session_key: Some(session_key.clone()),
-            containment_snapshot: self.config.containment_snapshot.clone(),
-            permission_mode_snapshot: self.config.permission_mode_snapshot.clone(),
-            permission_rule_input: self.config.permission_rule_input.clone(),
-            permission_ceiling_snapshot: self.config.permission_ceiling_snapshot.clone(),
-            permission_evaluator: self.config.permission_evaluator.clone(),
-            permission_interactive: self.config.permission_interactive,
-            in_cron_context: false,
-            record_channel_delivery: self.config.record_channel_delivery,
-        };
+        spec.tool_context = tool_context.clone();
         spec.context_tools = self.context_tools.clone();
         spec.cancellation_token = self.task_registry.cancellation_token(&session_key);
         spec.tool_event_callback = self.tool_event_callback.clone();
@@ -514,6 +662,13 @@ impl<'a> AgentLoop<'a> {
         };
         append_new_runner_messages(&mut session, &initial_messages, &run_result.messages);
         clear_runtime_markers(&mut session);
+        store_pending_permission_approval(
+            &mut session,
+            &run_result.interrupt,
+            &tool_context,
+            &message,
+            &session_key,
+        );
         self.sessions.save(&session)?;
 
         let (outbound_count, ask_user_options) =
@@ -705,6 +860,24 @@ impl<'a> AgentLoop<'a> {
                     save_session,
                 )
             }
+            LoopCommand::Permission => {
+                let wizard = PendingPermissionWizard {
+                    session_key: session.key.clone(),
+                    channel: message.channel.clone(),
+                    chat_id: message.chat_id.clone(),
+                    sender_id: message.sender_id.clone(),
+                    stage: PendingPermissionWizardStage::ChooseMode,
+                };
+                set_pending_permission_wizard(&mut session, &wizard);
+                self.publish_command_response(
+                    message,
+                    session,
+                    permission_wizard_choices_text(),
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission",
+                    save_session,
+                )
+            }
             LoopCommand::Help => self.publish_command_response(
                 message,
                 session,
@@ -714,6 +887,131 @@ impl<'a> AgentLoop<'a> {
                 save_session,
             ),
         }
+    }
+
+    fn handle_pending_permission_wizard(
+        &mut self,
+        message: &InboundMessage,
+        mut session: Session,
+        session_key: &str,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        let Some(mut wizard) = pending_permission_wizard(&session) else {
+            return self.publish_command_response(
+                message,
+                session,
+                permission_wizard_choices_text(),
+                Some(AgentLoopCommandResult::Permission),
+                "permission",
+                true,
+            );
+        };
+        if !permission_wizard_reply_matches_request(&wizard, message, session_key) {
+            return self.publish_command_response(
+                message,
+                session,
+                "Permission mode change pending. Only the original requester in the original channel can complete it.",
+                Some(AgentLoopCommandResult::Permission),
+                "permission_pending",
+                true,
+            );
+        }
+
+        let normalized = message.content.trim().to_ascii_lowercase();
+        match (wizard.stage, normalized.as_str()) {
+            (_, "cancel") => {
+                session.metadata.remove(PENDING_PERMISSION_WIZARD_KEY);
+                self.publish_command_response(
+                    message,
+                    session,
+                    "Permission mode change cancelled.",
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission_cancelled",
+                    true,
+                )
+            }
+            (PendingPermissionWizardStage::ChooseMode, "default") => {
+                self.save_permission_mode_and_respond(message, session, PermissionMode::Default)
+            }
+            (PendingPermissionWizardStage::ChooseMode, "auto") => {
+                self.save_permission_mode_and_respond(message, session, PermissionMode::Auto)
+            }
+            (PendingPermissionWizardStage::ChooseMode, "bypass_permissions") => {
+                wizard.stage = PendingPermissionWizardStage::ConfirmBypass;
+                set_pending_permission_wizard(&mut session, &wizard);
+                self.publish_command_response(
+                    message,
+                    session,
+                    "bypass_permissions disables permission prompts for this local config. Reply with exact `confirm bypass_permissions` to save it, or `cancel` to stop.",
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission_confirm_bypass",
+                    true,
+                )
+            }
+            (PendingPermissionWizardStage::ConfirmBypass, "confirm bypass_permissions") => self
+                .save_permission_mode_and_respond(
+                    message,
+                    session,
+                    PermissionMode::BypassPermissions,
+                ),
+            (PendingPermissionWizardStage::ConfirmBypass, "bypass_permissions") => self
+                .publish_command_response(
+                    message,
+                    session,
+                    "Reply with exact `confirm bypass_permissions` to save bypass_permissions, or `cancel` to stop.",
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission_confirm_bypass",
+                    true,
+                ),
+            _ => self.publish_command_response(
+                message,
+                session,
+                permission_wizard_choices_text(),
+                Some(AgentLoopCommandResult::Permission),
+                "permission_pending",
+                true,
+            ),
+        }
+    }
+
+    fn save_permission_mode_and_respond(
+        &mut self,
+        message: &InboundMessage,
+        mut session: Session,
+        mode: PermissionMode,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        let Some(setter) = self.config.permission_mode_setter.as_ref() else {
+            return self.publish_command_response(
+                message,
+                session,
+                "Permission mode saving is not available in this runtime.",
+                Some(AgentLoopCommandResult::Permission),
+                "permission_unavailable",
+                true,
+            );
+        };
+        let applied_snapshot = setter(mode).map_err(AgentLoopError::PermissionModeSave)?;
+        self.config.permission_mode_snapshot = applied_snapshot.clone();
+        session.metadata.remove(PENDING_PERMISSION_WIZARD_KEY);
+        let content = if applied_snapshot.mode == mode {
+            format!(
+                "Permission mode `{}` saved and applied for subsequent turns.",
+                mode.as_str()
+            )
+        } else {
+            format!(
+                "Permission mode `{}` saved. Active permission mode is `{}` for subsequent turns.",
+                mode.as_str(),
+                applied_snapshot.mode.as_str()
+            )
+        };
+        self.publish_command_response(
+            message,
+            session,
+            &content,
+            Some(AgentLoopCommandResult::Permission),
+            "permission_saved",
+            true,
+        )
     }
 
     fn publish_command_response(
@@ -781,6 +1079,20 @@ impl<'a> AgentLoop<'a> {
             ));
             count += 1;
             ask_options = options;
+        } else if let Some(RuntimeInterrupt::PermissionApproval {
+            question, options, ..
+        }) = &result.interrupt
+        {
+            let (content, buttons) = ask_user_outbound(Some(question), options, &message.channel);
+            self.bus.publish_outbound(outbound_for(
+                message,
+                session_key,
+                content.unwrap_or_else(|| question.clone()),
+                buttons,
+                "permission_approval",
+            ));
+            count += 1;
+            ask_options = options.clone();
         } else if !message_sent_in_turn {
             if let Some(content) = result
                 .final_content
@@ -815,6 +1127,36 @@ impl<'a> AgentLoop<'a> {
         ));
         1
     }
+
+    fn execute_approved_permission_tool(
+        &self,
+        approval: &PendingPermissionApproval,
+        approval_cache: ApprovalCacheEntry,
+    ) -> RuntimeToolExecutionReport {
+        let executor =
+            RuntimeToolExecutor::with_context_tools(self.tools, self.context_tools.clone());
+        let mut context = approval.tool_context.clone();
+        context.permission_approval_cache = Some(approval_cache);
+        if bridge_tool_names().contains(&approval.tool_call.name.as_str()) {
+            let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
+                definitions: self.tools.definitions(),
+                runtime: crate::runtime::ToolSearchRuntimeInput {
+                    config: self.config.tool_search,
+                    context_window_tokens: self.config.context_window_tokens,
+                },
+            });
+            return dispatch_bridge_tool_calls(
+                vec![approval.tool_call.clone()],
+                tool_surface.catalog.as_ref(),
+                self.tools,
+                &executor,
+                &context,
+                self.config.concurrent_tools,
+            )
+            .into_runtime_report();
+        }
+        executor.execute_tool_calls(vec![approval.tool_call.clone()], &context)
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -830,6 +1172,7 @@ pub enum AgentLoopError {
     Session(std::io::Error),
     Memory(MemoryConsolidationError),
     GoalMetadata(GoalMetadataError),
+    PermissionModeSave(String),
     DuplicateActiveTurn { session_key: String },
 }
 
@@ -839,6 +1182,9 @@ impl fmt::Display for AgentLoopError {
             Self::Session(error) => write!(formatter, "session persistence failed: {error}"),
             Self::Memory(error) => write!(formatter, "memory consolidation failed: {error}"),
             Self::GoalMetadata(error) => write!(formatter, "goal metadata failed: {error}"),
+            Self::PermissionModeSave(error) => {
+                write!(formatter, "permission mode save failed: {error}")
+            }
             Self::DuplicateActiveTurn { session_key } => {
                 write!(
                     formatter,
@@ -1130,6 +1476,136 @@ fn append_new_runner_messages(
 fn clear_runtime_markers(session: &mut Session) {
     session.metadata.remove(PENDING_USER_TURN_KEY);
     session.metadata.remove(RUNTIME_CHECKPOINT_KEY);
+    session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+    session.metadata.remove(PENDING_PERMISSION_WIZARD_KEY);
+}
+
+fn permission_wizard_choices_text() -> &'static str {
+    "Choose permissions.mode: `default`, `auto`, `bypass_permissions`, or `cancel`."
+}
+
+fn set_pending_permission_wizard(session: &mut Session, wizard: &PendingPermissionWizard) {
+    if let Ok(value) = serde_json::to_value(wizard) {
+        session
+            .metadata
+            .insert(PENDING_PERMISSION_WIZARD_KEY.to_owned(), value);
+    }
+}
+
+fn pending_permission_wizard(session: &Session) -> Option<PendingPermissionWizard> {
+    session
+        .metadata
+        .get(PENDING_PERMISSION_WIZARD_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn permission_wizard_reply_matches_request(
+    wizard: &PendingPermissionWizard,
+    message: &InboundMessage,
+    session_key: &str,
+) -> bool {
+    wizard.session_key == session_key
+        && wizard.channel == message.channel
+        && wizard.chat_id == message.chat_id
+        && wizard.sender_id == message.sender_id
+}
+
+fn store_pending_permission_approval(
+    session: &mut Session,
+    interrupt: &Option<RuntimeInterrupt>,
+    tool_context: &ToolExecutionContext,
+    message: &InboundMessage,
+    session_key: &str,
+) {
+    let Some(RuntimeInterrupt::PermissionApproval {
+        approval_request_id,
+        approval_request,
+        tool_call,
+        ..
+    }) = interrupt
+    else {
+        return;
+    };
+    if let Ok(value) = serde_json::to_value(PendingPermissionApproval {
+        approval_request_id: approval_request_id.clone(),
+        approval_request: approval_request.as_ref().clone(),
+        tool_call: tool_call.clone(),
+        tool_context: tool_context.clone(),
+        session_key: session_key.to_owned(),
+        channel: message.channel.clone(),
+        chat_id: message.chat_id.clone(),
+        sender_id: message.sender_id.clone(),
+        status: PendingPermissionApprovalStatus::Pending,
+    }) {
+        set_pending_permission_approval_value(session, value);
+    }
+}
+
+fn set_pending_permission_approval(session: &mut Session, approval: &PendingPermissionApproval) {
+    if let Ok(value) = serde_json::to_value(approval) {
+        set_pending_permission_approval_value(session, value);
+    }
+}
+
+fn set_pending_permission_approval_value(session: &mut Session, value: Value) {
+    session
+        .metadata
+        .insert(PENDING_PERMISSION_APPROVAL_KEY.to_owned(), value);
+}
+
+fn pending_permission_approval(session: &Session) -> Option<PendingPermissionApproval> {
+    session
+        .metadata
+        .get(PENDING_PERMISSION_APPROVAL_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn permission_approval_reply_matches_request(
+    approval: &PendingPermissionApproval,
+    message: &InboundMessage,
+    session_key: &str,
+) -> bool {
+    approval.session_key == session_key
+        && approval.channel == message.channel
+        && approval.chat_id == message.chat_id
+        && approval.sender_id == message.sender_id
+}
+
+fn approval_decision(
+    approval: &PendingPermissionApproval,
+    decision: ApprovalDecisionKind,
+) -> ApprovalDecision {
+    ApprovalDecision {
+        approval_request_id: approval.approval_request.approval_request_id.clone(),
+        action_digest: approval.approval_request.action_digest.clone(),
+        snapshot_digest: approval.approval_request.snapshot_digest.clone(),
+        decision,
+        approved_scope: approval.approval_request.requested_scope.clone(),
+        actor: ApprovalActor::LocalUser,
+        decided_at_unix_ms: now_unix_ms(),
+        consumed: false,
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn parse_permission_approval_reply(content: &str) -> PermissionApprovalReply {
+    let normalized = content.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "y" | "yes" | "approve" | "approved" | "allow" | "run" | "go" | "진행"
+        | "진행해줘" | "승인" | "허용" => PermissionApprovalReply::Approve,
+        "2" | "n" | "no" | "deny" | "denied" | "cancel" | "stop" | "취소" | "거절" => {
+            PermissionApprovalReply::Deny
+        }
+        _ => PermissionApprovalReply::Unknown,
+    }
 }
 
 fn handle_goal_command(

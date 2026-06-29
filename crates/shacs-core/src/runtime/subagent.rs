@@ -622,6 +622,7 @@ impl SubagentRuntime {
             permission_ceiling_snapshot: config.permission_ceiling_snapshot.clone(),
             permission_evaluator: None,
             permission_interactive: false,
+            permission_approval_cache: None,
             in_cron_context: false,
             record_channel_delivery: false,
         };

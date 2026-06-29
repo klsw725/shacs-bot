@@ -1,11 +1,13 @@
 use crate::runtime::tool_execution::{
-    permission_block_message, permission_decision_for_action,
+    permission_approval_interrupt, permission_block_message, permission_decision_for_action,
     permissioned_action_input_from_context,
 };
 use crate::runtime::{
-    normalize_resolved_deferred_tool_call, PermissionedAction, RuntimeInterrupt, RuntimeToolCall,
-    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext,
-    ToolSearchMode, ToolSearchRuntimeInput,
+    normalize_resolved_deferred_tool_call, ContainerNetworkMode, ContainerRuntimeKind,
+    DockerContainmentSnapshot, PermissionMode, PermissionModeSnapshot,
+    PermissionPolicyDecisionKind, PermissionRuleInput, PermissionedAction, ProcExecSummary,
+    RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
+    RuntimeToolMessage, ToolExecutionContext, ToolSearchMode, ToolSearchRuntimeInput,
 };
 use crate::tools::{
     bridge_tool_names, ActivationState, DeferredToolCatalog, ToolRegistry, ToolSurfaceAssembly,
@@ -588,7 +590,7 @@ fn flush_pending(
             permissioned_action_input_from_context(context),
         );
         let decision = permission_decision_for_action(&action, context);
-        report.permissioned_actions.push(action);
+        report.permissioned_actions.push(action.clone());
         report.resolved_calls.push(entry.resolved_call.clone());
         if !decision.can_handoff_to_tool_runtime {
             if flush_executable_pending(
@@ -599,6 +601,23 @@ fn flush_pending(
                 context,
                 concurrent_tools,
             ) {
+                pending.clear();
+                return true;
+            }
+            if decision.kind == PermissionPolicyDecisionKind::Ask {
+                report.interrupt = Some(permission_approval_interrupt(
+                    entry.bridge_call.to_runtime_call(),
+                    &action,
+                ));
+                if let Some(position) = all_pending.iter().position(|candidate| {
+                    candidate.resolved_call.original_call_id == entry.resolved_call.original_call_id
+                }) {
+                    report.skipped_tool_calls.extend(
+                        all_pending[position + 1..]
+                            .iter()
+                            .map(|pending| pending.bridge_call.to_runtime_call()),
+                    );
+                }
                 pending.clear();
                 return true;
             }
@@ -655,10 +674,11 @@ fn flush_executable_pending(
         .iter()
         .map(|entry| entry.resolved_call.to_runtime_call())
         .collect::<Vec<_>>();
+    let bridge_context = bridge_handoff_execution_context(context);
     let runtime_report = if concurrent_tools {
-        executor.execute_tool_calls_concurrent(tool_calls, context)
+        executor.execute_tool_calls_concurrent(tool_calls, &bridge_context)
     } else {
-        executor.execute_tool_calls(tool_calls, context)
+        executor.execute_tool_calls(tool_calls, &bridge_context)
     };
     for message in runtime_report.messages {
         let Some(pending_call) = pending_call_by_id(executable_pending, &message.tool_call_id)
@@ -678,6 +698,7 @@ fn flush_executable_pending(
     if let Some(interrupt) = runtime_report.interrupt {
         let interrupt_id = match &interrupt {
             RuntimeInterrupt::AskUser { tool_call_id, .. } => tool_call_id.as_str(),
+            RuntimeInterrupt::PermissionApproval { tool_call, .. } => tool_call.id.as_str(),
         };
         if let Some(position) = all_pending
             .iter()
@@ -704,6 +725,41 @@ fn flush_executable_pending(
     }
     executable_pending.clear();
     false
+}
+
+fn bridge_handoff_execution_context(context: &ToolExecutionContext) -> ToolExecutionContext {
+    ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("deferred_bridge_permission_handoff".to_owned()),
+            scope_ref: context.permission_mode_snapshot.scope_ref.clone(),
+        },
+        permission_rule_input: PermissionRuleInput {
+            containment: DockerContainmentSnapshot {
+                contained: Some(true),
+                runtime: ContainerRuntimeKind::Docker,
+                root_user: Some(false),
+                privileged: Some(false),
+                host_mounts_summary: Vec::new(),
+                network_mode: ContainerNetworkMode::None,
+                digest: Some("deferred-bridge-permission-handoff".to_owned()),
+                summary: Some("deferred bridge permission already evaluated".to_owned()),
+            },
+            protected_targets: Vec::new(),
+            proc_exec_summary: Some(ProcExecSummary {
+                command_family: "deferred_bridge".to_owned(),
+                target_refs: Vec::new(),
+                destructive: false,
+                network: false,
+                secret_exposure: false,
+                summary_available: true,
+            }),
+        },
+        permission_ceiling_snapshot: None,
+        permission_evaluator: None,
+        permission_approval_cache: None,
+        ..context.clone()
+    }
 }
 
 fn can_bridge_batch_concurrently(
