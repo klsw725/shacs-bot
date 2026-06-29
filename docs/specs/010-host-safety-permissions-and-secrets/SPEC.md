@@ -37,7 +37,7 @@
 1. `SafetyCapability`, `PermissionMode`, `SafetySnapshot`, `SecretRef`, `RedactedValue`, `ApprovalRequest`, `ApprovalDecision` 타입이 완성되어 있다는 주장.
 2. `fs_read`, `fs_write`, `proc_exec`, `net_outbound`, `secret_read`를 하나의 formal evaluator가 판정한다는 주장.
 3. `plan`, `default`, `auto` permission mode 결정표가 runtime 전체에 적용된다는 주장.
-4. effect 단위 approval request와 response correlation, stale approval rejection, denied execution 표준 outcome이 완성되었다는 주장.
+4. Spec 022가 소유하는 formal approval engine까지 이 문서가 완료 선언한다는 주장.
 5. context, compaction, provider, tool, event를 모두 통과하는 통합 redaction pipeline이 있다는 주장.
 
 ## 현재 구현 요약
@@ -96,22 +96,16 @@ future work는 이 분산 매핑을 하나의 capability evaluator로 연결하�
 
 ## Permission mode와 approval의 현재 상태
 
-`plan`, `default`, `auto` permission mode 결정표는 아직 현재 runtime 전체에 적용되는 완성 기능이 아니다. 따라서 현재 문서에서는 이 mode들을 future permission model의 목표로 둔다.
+`plan`, `default`, `auto` permission mode와 approval correlation의 formal 계약은 Spec 022가 소유한다. Spec 010은 host safety/local baseline 문서로 남으며, permission engine 완료 여부를 이 문서에서 중복 판정하지 않는다.
 
 현재 구현에서 확인되는 것은 다음이다.
 
 1. filesystem, shell, network, secret surface가 각자 위험 입력을 차단한다.
 2. `ask_user`는 사용자에게 질문하고 실행을 중단하거나 재개하는 interruption mechanism이다.
-3. `ask_user`는 Spec 010의 formal effect approval gate가 아니다.
-4. `ask_user` 테스트는 interruption과 later tool skip, button resume 동작의 근거이며, approval request와 decision correlation의 근거가 아니다.
+3. `ask_user`는 formal effect approval gate가 아니며, formal permission approval은 `PermissionApproval` interrupt와 Spec 022의 approval correlation 계약이 담당한다.
+4. `ask_user` 테스트는 interruption과 later tool skip, button resume 동작의 근거이며, approval request와 decision correlation의 근거는 Spec 022 구현/테스트에서 확인한다.
 
-future permission work는 다음을 포함한다.
-
-1. `ApprovalRequest`와 `ApprovalDecision` 타입.
-2. effect 후보와 approval response의 correlation.
-3. stale 또는 expired approval rejection.
-4. denied execution의 표준 outcome.
-5. `plan`, `default`, `auto` permission mode decision table.
+Spec 010 관점의 남은 permission work는 host safety baseline을 유지하면서 Spec 022의 permission engine을 소비하는 경계를 문서 간 일관성 있게 유지하는 것이다.
 
 ## Redaction과 secret handling의 현재 상태
 
@@ -208,17 +202,13 @@ Ask, interruption, inheritance:
 
 다음 항목은 현재 local baseline blocker가 아니라 future formal host safety와 permission work다.
 
-1. `SafetyCapability`, `PermissionMode`, `SafetySnapshot`, `SecretRef`, `RedactedValue`, `ApprovalRequest`, `ApprovalDecision` 타입 도입.
-2. `fs_read`, `fs_write`, `proc_exec`, `net_outbound`, `secret_read`에 대한 formal capability evaluator.
-3. `plan`, `default`, `auto` permission mode decision table.
-4. effect level approval request와 response correlation.
-5. stale 또는 expired approval rejection.
-6. denied execution standard outcome.
-7. subagent와 service reentry를 위한 inherited `SafetySnapshot`.
-8. unified context, compaction, provider, tool, event redaction pipeline.
-9. raw secret value와 secret reference의 type level separation.
-10. structured argv process envelope.
-11. browser automation과 web browsing permission control tests.
+1. `SafetySnapshot`, `SecretRef`, `RedactedValue` type level separation.
+2. `fs_read`, `fs_write`, `proc_exec`, `net_outbound`, `secret_read`에 대한 formal capability evaluator의 Spec 010 소비 경계 정리.
+3. subagent와 service reentry를 위한 inherited `SafetySnapshot`.
+4. unified context, compaction, provider, tool, event redaction pipeline.
+5. raw secret value와 secret reference의 type level separation.
+6. structured argv process envelope.
+7. browser automation과 web browsing permission control tests.
 
 ## 명시적 비범위
 
