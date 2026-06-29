@@ -43,7 +43,7 @@ Config 문자열 값은 load 시 `${ENV_NAME}` 형태의 environment variable re
 
 스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. 빈 문자열은 `requires.env`를 만족하지 않습니다. Secret 값을 넣은 config 파일은 커밋하거나 공유하지 마세요.
 
-`permissions.mode`는 provider tool 실행 경로가 소비하는 permission policy gate 설정입니다. Rust runtime은 `default`, `plan`, `accept_edits`, `auto`, `dont_ask`, `bypass_permissions` 값을 파싱해 safe fallback/diagnostics를 만들고, provider tool call과 deferred bridge call을 실행 직전 permission mode snapshot과 policy decision에 통과시킵니다. `allow`만 실제 tool 실행으로 이어지며, `ask`와 `deny`는 실행하지 않은 permission outcome으로 provider-visible tool result에 남습니다. `ask_user`는 여전히 별도 user interruption tool이며 formal approval decision으로 해석되지 않습니다. `auto`는 user-local opt-in이나 명시적 실행 source 없이 workspace config만으로 활성화되지 않고, `bypass_permissions`는 격리 precondition이 충족된 명시적 opt-in일 때만 normalized snapshot에서 유지됩니다.
+`permissions.mode`는 provider tool 실행 경로가 소비하는 permission policy gate 설정입니다. Rust runtime은 `default`, `plan`, `accept_edits`, `auto`, `dont_ask`, `bypass_permissions` 값을 파싱해 safe fallback/diagnostics를 만들고, provider tool call과 deferred bridge call을 실행 직전 permission mode snapshot과 policy decision에 통과시킵니다. `allow`만 즉시 tool 실행으로 이어지고, `deny`는 실행하지 않은 permission outcome으로 provider-visible tool result에 남습니다. `ask`는 channel runtime에서 사용자에게 승인 질문을 보내며, 사용자가 `1`/`approve`로 승인하면 같은 pending tool call만 승인된 컨텍스트로 실행한 뒤 turn을 이어갑니다. `2`/`deny` 또는 `cancel`은 실행하지 않고 취소합니다. `ask_user`는 여전히 별도 user interruption tool이며 formal approval decision으로 해석되지 않습니다. `auto`는 user-local opt-in이나 명시적 실행 source 없이 workspace config만으로 활성화되지 않고, `bypass_permissions`는 격리 precondition이 충족된 명시적 opt-in일 때만 normalized snapshot에서 유지됩니다.
 
 현재 config와 provider field를 확인합니다:
 
@@ -244,13 +244,14 @@ Provider 호출 전에 built-in slash command는 로컬에서 처리됩니다:
 - `/new`: 현재 session을 비우고 새로 시작합니다.
 - `/stop`: 등록된 active task에 cancellation을 요청합니다.
 - `/restart`: 로컬 restart 요청을 acknowledge합니다. Rust CLI는 현재 process를 in-place로 교체하지 않습니다.
+- `/permission`: `permissions.mode`를 `default`, `auto`, `bypass_permissions` 중 하나로 저장하는 대화형 wizard를 시작합니다. `bypass_permissions`는 먼저 선택한 뒤 정확히 `confirm bypass_permissions`로 한 번 더 확인해야 저장되며, 저장된 값은 이후 turn의 permission snapshot에 반영됩니다. `cancel`은 진행 중인 wizard를 취소합니다.
 - `/history [n]`: 최근 visible user/assistant message를 보여줍니다. 기본값은 10, 최대값은 50입니다.
 - `/dream`: 설정된 Dream memory consolidation을 한 번 실행합니다.
 - `/dream-log [sha]`: 최신 memory commit diff 또는 선택한 commit diff를 보여줍니다.
 - `/dream-restore [sha]`: 복원 가능한 memory version 목록을 보여주거나 선택한 commit 이전 상태로 tracked memory file을 되돌립니다.
 - `/help`: slash command 목록을 보여줍니다.
 
-Command router는 priority, exact, prefix 경계를 분리합니다. `/status`, `/stop`, `/restart`는 priority command라서 같은 session의 active turn이 있어도 provider 호출 전에 처리됩니다. `/new`, `/help`, `/dream` 같은 exact command와 `/history 25`, `/dream-log <sha>`, `/dream-restore <sha>` 같은 prefix command는 일반 user turn과 같은 process-local session turn lock을 공유합니다. Prefix로 등록되지 않은 command는 정확히 일치할 때만 command로 처리됩니다. 예를 들어 `/status now`는 `/status` command가 아니라 일반 user message로 처리됩니다.
+Command router는 priority, exact, prefix 경계를 분리합니다. `/status`, `/stop`, `/restart`는 priority command라서 같은 session의 active turn이 있어도 provider 호출 전에 처리됩니다. `/new`, `/permission`, `/help`, `/dream` 같은 exact command와 `/history 25`, `/dream-log <sha>`, `/dream-restore <sha>` 같은 prefix command는 일반 user turn과 같은 process-local session turn lock을 공유합니다. Prefix로 등록되지 않은 command는 정확히 일치할 때만 command로 처리됩니다. 예를 들어 `/status now`는 `/status` command가 아니라 일반 user message로 처리됩니다.
 
 `ask` message가 `-`로 시작하면 option과 구분하기 위해 `--`를 사용하세요. 예: `shacs-bot ask -- "-starts-with-dash"`.
 
@@ -377,7 +378,7 @@ shacs-bot run --websocket-host 127.0.0.1 --websocket-port 8765 --workspace /tmp/
 최소 외부 channel config key:
 
 - `channels.telegram`: `enabled`, `botToken`/`bot_token`/`token`, optional `pollTimeoutSeconds`, `pollLimit`.
-- `channels.discord`: `enabled`, `botToken`/`bot_token`/`token`, optional `allowFrom`, `allowChannels`, `groupPolicy`(`mention`/`open`), `streaming`(기본 true). `allowChannels`가 비어 있거나 `["*"]`이면 봇이 볼 수 있는 모든 채널을 허용합니다. Gateway worker는 현재 일반 메시지/DM 응답과 best-effort Gateway resume metadata를 다루며, approval routing과 restart auto-replay는 후속 확장 범위입니다.
+- `channels.discord`: `enabled`, `botToken`/`bot_token`/`token`, optional `allowFrom`, `allowChannels`, `groupPolicy`(`mention`/`open`), `streaming`(기본 true). `allowChannels`가 비어 있거나 `["*"]`이면 봇이 볼 수 있는 모든 채널을 허용합니다. Gateway worker는 현재 일반 메시지/DM 응답, permission approval prompt/reply, best-effort Gateway resume metadata를 다룹니다. restart auto-replay는 후속 확장 범위입니다.
 - `channels.slack`: `enabled`, `appToken`/`app_token`, `botToken`/`bot_token`/`token`, optional `channelIds`/`allowedChannelIds`/`allowChannels` 또는 `defaultChannelId`.
 - `channels.email`: `enabled`, `consentGranted: true`, inbound 허용 목록 `allowFrom`/`allowedSenders`가 필요합니다. `channels.email.smtp`: `host`/`smtpHost`, `port`, `from`/`fromAddress`, optional `username`/`smtpUsername`, `password`/`smtpPassword`, `security`, `timeoutSeconds`; `channels.email.imap`: `host`/`imapHost`, `port`, `username`/`imapUsername`, `password`/`imapPassword`, optional `mailbox`, `markSeen`(기본 true), `pollIntervalSeconds`, `timeoutSeconds`, `security`. 현재 IMAP polling은 TLS(`security: "tls"`)만 시작하며, inbound Email은 `Authentication-Results` header의 `spf=pass`/`dkim=pass`를 기본 확인합니다(`verifySpf`/`verifyDkim`로 비활성화 가능).
 - `channels.whatsapp`: `enabled`, `bridgeUrl`(WebSocket URL; 기존 `http://`/`https://` 값은 같은 host/path의 `ws://`/`wss://`로 호환 변환), optional `bridgeToken`, `groupPolicy`, `allowlist.allowedSenders`.
