@@ -51,6 +51,10 @@ fn prefix_dispatch_preserves_original_raw_and_args_case() -> Result<(), Box<dyn 
 fn loop_command_parser_matches_builtin_router_semantics() {
     assert_eq!(parse_loop_command("/status now"), None);
     assert_eq!(parse_loop_command(" /new "), Some(LoopCommand::New));
+    assert_eq!(
+        parse_loop_command(" /permission "),
+        Some(LoopCommand::Permission)
+    );
     assert_eq!(parse_loop_command("/stop please"), None);
     assert_eq!(parse_loop_command("/restart"), Some(LoopCommand::Restart));
     assert_eq!(parse_loop_command("/dream"), Some(LoopCommand::Dream));
@@ -170,6 +174,8 @@ fn builtin_command_detection_and_help_cover_registered_commands() {
     assert!(is_builtin_command("/dream-restore abc"));
     assert!(is_builtin_command("/goal ship PRD 001"));
     assert!(is_builtin_command("/status"));
+    assert!(is_builtin_command("/permission"));
+    assert!(!is_builtin_command("/permission auto"));
     assert!(!is_builtin_command("/status now"));
     assert!(!is_builtin_command("hello"));
 
@@ -179,6 +185,7 @@ fn builtin_command_detection_and_help_cover_registered_commands() {
         "/stop",
         "/restart",
         "/status",
+        "/permission",
         "/goal",
         "/history",
         "/dream",
@@ -188,4 +195,6 @@ fn builtin_command_detection_and_help_cover_registered_commands() {
     ] {
         assert!(help.contains(command), "help text missing {command}");
     }
+    assert!(help.contains("subsequent turns"));
+    assert!(!help.contains("requires restart"));
 }
