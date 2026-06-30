@@ -2264,6 +2264,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         permission_evaluator: None,
         permission_interactive: false,
         permission_approval_cache: None,
+        permission_session_approval_cache: Vec::new(),
         in_cron_context: false,
         record_channel_delivery: false,
     };
@@ -3093,6 +3094,7 @@ fn loop_permission_approval_executes_pending_tool_and_resumes() -> Result<(), Bo
         .content
         .contains("Permission approval required")
         || !approval_outbound.content.contains("1. approve")
+        || !approval_outbound.content.contains("3. approve_session")
     {
         return Err(format!(
             "approval outbound was not rendered for chat approval: {approval_outbound:?}"
@@ -3128,6 +3130,392 @@ fn loop_permission_approval_executes_pending_tool_and_resumes() -> Result<(), Bo
         })
     {
         return Err(format!("approved exec result was not persisted: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_session_option_reuses_same_session_match() -> Result<(), Box<dyn Error>>
+{
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-1",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("approved for session".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-2",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("reused session approval".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-3",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo clippy"))]),
+            )],
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:approval-session"))?;
+    assert_eq!(first.stop_reason, "ask_user");
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+    let approved = loop_runtime.process_direct("3", Some("discord:approval-session"))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || approved.final_content.as_deref() != Some("approved for session")
+    {
+        return Err(format!(
+            "session approval did not approve the pending tool: {approved:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let _approved_outbound = bus.consume_outbound().ok_or("missing approved outbound")?;
+
+    let reused = loop_runtime.process_direct("again", Some("discord:approval-session"))?;
+    if calls.load(Ordering::SeqCst) != 2
+        || reused.final_content.as_deref() != Some("reused session approval")
+        || reused.stop_reason == "ask_user"
+    {
+        return Err(format!(
+            "matching session approval was not reused: {reused:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:approval-session")
+        .ok_or("missing session approval session")?;
+    if raw["metadata"]["session_permission_approvals"]
+        .as_array()
+        .map(Vec::len)
+        != Some(1)
+        || raw["metadata"]["session_permission_approvals"][0]["session_key"]
+            != "discord:approval-session"
+        || !raw["metadata"]["session_permission_approvals"][0]["approval_context_digest"]
+            .is_string()
+        || raw["metadata"]["session_permission_approvals"][0]["approval"]["decision"]["decision"]
+            != "approved_for_session"
+    {
+        return Err(format!("session approval metadata drifted: {raw:?}").into());
+    }
+
+    let _reused_outbound = bus.consume_outbound().ok_or("missing reused outbound")?;
+    let different_action =
+        loop_runtime.process_direct("different action", Some("discord:approval-session"))?;
+    if different_action.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 2 {
+        return Err(format!(
+            "session approval reused a different action: {different_action:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_session_option_reuses_channel_message_id_change(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-channel-1",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("approved channel session".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-channel-2",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("reused channel session approval".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-session",
+        "start",
+        "channel-msg-1",
+    ))?;
+    assert_eq!(first.stop_reason, "ask_user");
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+
+    let approved = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-session",
+        "approve_session",
+        "channel-msg-2",
+    ))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || approved.final_content.as_deref() != Some("approved channel session")
+    {
+        return Err(format!("channel session approval failed: {approved:?}").into());
+    }
+    let _approved_outbound = bus.consume_outbound().ok_or("missing approved outbound")?;
+
+    let reused = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-session",
+        "again",
+        "channel-msg-3",
+    ))?;
+    if calls.load(Ordering::SeqCst) != 2
+        || reused.final_content.as_deref() != Some("reused channel session approval")
+        || reused.stop_reason == "ask_user"
+    {
+        return Err(format!(
+            "channel message id change prevented session approval reuse: {reused:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_session_option_does_not_cross_sessions() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-a",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("approved in first session".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-b",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:approval-a"))?;
+    assert_eq!(first.stop_reason, "ask_user");
+    let _approval_outbound = bus
+        .consume_outbound()
+        .ok_or("missing first approval outbound")?;
+    let approved = loop_runtime.process_direct("approve_session", Some("discord:approval-a"))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || approved.final_content.as_deref() != Some("approved in first session")
+    {
+        return Err(format!("first session approval failed: {approved:?}").into());
+    }
+    let _approved_outbound = bus.consume_outbound().ok_or("missing approved outbound")?;
+
+    let second_session = loop_runtime.process_direct("same action", Some("discord:approval-b"))?;
+    if second_session.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 1 {
+        return Err(format!(
+            "session approval crossed sessions: {second_session:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let outbound = bus
+        .consume_outbound()
+        .ok_or("missing second session approval outbound")?;
+    if !outbound.content.contains("Permission approval required") {
+        return Err(format!("second session did not ask for approval: {outbound:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_session_option_clears_on_new_session() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-before-new",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("approved before new".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-after-new",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:approval-new"))?;
+    assert_eq!(first.stop_reason, "ask_user");
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+    let approved = loop_runtime.process_direct("approve_session", Some("discord:approval-new"))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || approved.final_content.as_deref() != Some("approved before new")
+    {
+        return Err(format!("session approval before /new failed: {approved:?}").into());
+    }
+    let _approved_outbound = bus.consume_outbound().ok_or("missing approved outbound")?;
+
+    let reset = loop_runtime.process_direct("/new", Some("discord:approval-new"))?;
+    if reset.command != Some(AgentLoopCommandResult::NewSession)
+        || reset.final_content.as_deref() != Some("Started a new session.")
+    {
+        return Err(format!("/new did not reset the session: {reset:?}").into());
+    }
+    let _reset_outbound = bus.consume_outbound().ok_or("missing reset outbound")?;
+
+    let after_new = loop_runtime.process_direct("after new", Some("discord:approval-new"))?;
+    if after_new.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 1 {
+        return Err(format!(
+            "session approval survived /new: {after_new:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:approval-new")
+        .ok_or("missing reset approval session")?;
+    if raw["metadata"]
+        .get("session_permission_approvals")
+        .is_some()
+    {
+        return Err(format!("/new left session approvals in metadata: {raw:?}").into());
     }
     Ok(())
 }

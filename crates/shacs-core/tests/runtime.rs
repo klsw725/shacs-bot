@@ -455,7 +455,7 @@ fn runtime_asks_before_interactive_proc_exec_without_executing_tool() -> Result<
             && question.contains("Scope: cli:direct")
             && question.contains("Expires at (unix ms):")
             && question.contains("Arguments: `{")
-            && options.as_slice() == ["approve", "deny"] => Ok(()),
+            && options.as_slice() == ["approve", "deny", "approve_session"] => Ok(()),
         other => Err(format!(
             "interactive proc_exec should ask before execution: interrupt={other:?} report={report:?} calls={}",
             calls.load(Ordering::SeqCst)
@@ -1938,6 +1938,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         permission_evaluator: None,
         permission_interactive: false,
         permission_approval_cache: None,
+        permission_session_approval_cache: Vec::new(),
         in_cron_context: false,
         record_channel_delivery: true,
     };
