@@ -58,7 +58,7 @@ Dynamic workflow spec closure를 위해 남은 runtime execution wiring gap을 �
 ## 데이터/상태 모델
 
 1. `WorkflowExecutionHandle`: run id, parent session key, child handles, cancellation token, budget snapshot을 가진다.
-2. `WorkflowProgressEvent`: admitted, child_started, child_completed, verifier_completed, synthesis_started, blocked, completed를 구분한다.
+2. `WorkflowProgressEvent`: admitted, child_started, child_completed, verifier_completed, synthesizing, terminal을 구분하고 terminal event의 state로 completed, failed, blocked, cancelled를 표시한다.
 3. `WorkflowExecutionOutcome`: succeeded, failed, blocked, cancelled, resume_required를 가진다.
 4. `WorkflowRuntimeDiagnostic`: handoff, interrupt, child result, verifier, synthesis evidence refs를 가진다.
 
@@ -85,9 +85,9 @@ Dynamic workflow spec closure를 위해 남은 runtime execution wiring gap을 �
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-core/Cargo.toml workflow_runtime`
+1. `cargo fmt --manifest-path crates/Cargo.toml --all -- --check`
+2. `cargo clippy --manifest-path crates/Cargo.toml -p shacs-core --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/Cargo.toml -p shacs-core workflow`
 
 ## 완료 기준
 
@@ -95,3 +95,12 @@ Dynamic workflow spec closure를 위해 남은 runtime execution wiring gap을 �
 - Interrupt propagation regression이 workflow와 child를 모두 관찰한다.
 - Diagnostics/replay evidence만으로 workflow 실행 흐름을 설명할 수 있다.
 - 문서와 사용자 가이드는 runtime wiring이 prototype stub가 아니라 실제 supported path인지, 또는 아직 Draft gap인지 명확히 표시한다.
+
+## 구현 메모
+
+- `crates/shacs-core/src/runtime/workflow.rs`는 provider 호출 없이 기존 `shacs-workflow` contract helper를 소비하는 read-only runtime smoke path를 제공한다.
+- `crates/shacs-core/tests/runtime_workflow.rs`는 `admitted`, `child_started`, `child_completed`, `verifier_completed`, `synthesizing`, `terminal` event와 verifier fail/missing fail-closed, read-only child registry, child/verifier provenance fail-closed, parent session truth isolation을 검증한다.
+- Admission branch smoke는 `decide_workflow_admission`의 dynamic decision이 read-only runtime workflow path로 들어가고, non-dynamic decision은 regular loop로 남는 것을 검증한다.
+- Interrupt propagation smoke는 workflow execution handle의 cancellation token과 child id set이 cancel event 및 `cancelled` terminal state로 반영되는 것을 검증한다.
+- Diagnostics/replay smoke는 harness/child/verifier graph digest, event phase, terminal state, verifier status를 live 재실행 없이 설명하며 `replay_live_actions_allowed = false`를 검증한다.
+- 이 메모는 Wave 3 / PRD 009의 deterministic runtime closure evidence다. Provider-backed live subagent execution, write-capable worktree merge, UI projection은 PRD 009 read-only closure 범위가 아니라 후속 wave 또는 다른 PRD가 소유한다.
