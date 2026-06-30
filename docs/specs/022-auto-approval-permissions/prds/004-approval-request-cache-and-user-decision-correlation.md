@@ -4,7 +4,7 @@
 
 Status: Implemented.
 
-구현 증거는 `crates/shacs-core/src/runtime/permission_approval.rs`, `crates/shacs-core/src/runtime/permission_policy.rs`, `crates/shacs-core/src/runtime/tool_execution.rs`, `crates/shacs-core/src/runtime/tool_search.rs`, `crates/shacs-core/tests/permission_policy.rs`, `crates/shacs-core/tests/runtime.rs`다. 대표 테스트는 `approval_correlation_rejects_mismatched_expired_inspect_only_and_consumed`, `runtime_ask_user_skips_later_denied_tool_without_permission_message`, `bridge_ask_user_skips_later_denied_tool_without_permission_message`다.
+구현 증거는 `crates/shacs-core/src/runtime/permission_approval.rs`, `crates/shacs-core/src/runtime/permission_policy.rs`, `crates/shacs-core/src/runtime/tool_execution.rs`, `crates/shacs-core/src/runtime/tool_search.rs`, `crates/shacs-core/tests/permission_policy.rs`, `crates/shacs-core/tests/runtime.rs`, `crates/shacs-core/tests/runtime_loop.rs`다. 대표 테스트는 `approval_correlation_rejects_mismatched_expired_inspect_only_and_consumed`, `runtime_ask_user_skips_later_denied_tool_without_permission_message`, `bridge_ask_user_skips_later_denied_tool_without_permission_message`, `loop_permission_approval_session_option_reuses_same_session_match`, `loop_permission_approval_session_option_does_not_cross_sessions`, `loop_permission_approval_session_option_clears_on_new_session`다.
 
 이 closure는 typed approval request/decision correlation과 `ask` permission outcome의 non-execution 처리를 닫는다. TUI widget, channel별 button UI, hidden grant store 구현을 주장하지 않는다.
 
@@ -66,18 +66,19 @@ Status: Implemented.
 
 1. `ApprovalRequest`: request id, action digest, snapshot digest, requested scope, risk summary, allowed decisions, expires at.
 2. `ApprovalDecision`: request id, decision, approved scope, actor, decided at.
-3. `ApprovalDecisionKind`: approved, denied, inspect only.
+3. `ApprovalDecisionKind`: approved, approved for session, denied, inspect only.
 4. `ApprovalCacheEntry`: request ref, approved scope, expiration, consumed state.
-5. `UserFacingPermissionStatus`: allowed automatically, waiting for approval, denied by policy, denied by scope, denied by protected target, evaluator unavailable, containment unknown.
-6. `ApprovalCorrelationError`: request mismatch, action mismatch, snapshot mismatch, expired, consumed, inspect only.
+5. `SessionApprovalCacheEntry`: session key, session-stable approval context digest, approval cache entry. Runtime session metadata에만 저장되며 config/global grant store가 아니다.
+6. `UserFacingPermissionStatus`: allowed automatically, waiting for approval, denied by policy, denied by scope, denied by protected target, evaluator unavailable, containment unknown.
+7. `ApprovalCorrelationError`: request mismatch, action mismatch, snapshot mismatch, expired, consumed, inspect only.
 
 ## 정상 시퀀스
 
 1. Runtime policy가 action을 `ask`로 결정한다.
 2. Approval request를 만들고 risk summary를 사용자에게 보여 준다.
-3. 사용자가 approved를 선택한다.
+3. 사용자가 approved 또는 approved for session을 선택한다.
 4. Runtime이 request id, action digest, snapshot digest, expiration을 검증한다.
-5. 검증이 통과하면 해당 action 또는 approved scope 안에서 decision을 소비한다.
+5. 검증이 통과하면 해당 action 또는 approved scope 안에서 decision을 소비한다. Approved for session은 같은 session key, action digest, session-stable approval context digest, requested scope가 모두 일치하는 후속 action에만 재사용된다.
 6. Tool runtime handoff는 새 final allow decision을 통해서만 일어난다.
 
 ## 실패 시퀀스
@@ -99,6 +100,7 @@ Status: Implemented.
 5. Message acknowledgement가 approval로 해석되지 않는지 확인한다.
 6. `ask_user` resume만으로 formal approval이 되지 않는지 확인한다.
 7. Approval prompt가 필수 summary와 expiration을 포함하는지 확인한다.
+8. Approved for session cache가 다른 session key, 다른 action digest, 다른 approval context digest, 다른 requested scope, `/new` 이후 session에 재사용되지 않는지 확인한다.
 
 ## 완료 기준
 
@@ -107,3 +109,4 @@ Status: Implemented.
 3. User-facing approval 상태가 013 projection에서 소비 가능하다.
 4. `ask_user`, acknowledgement, inspect-only decision이 approval과 분리된다.
 5. Hidden long-lived grant 없이 scoped approval만 소비된다.
+6. Approved for session은 session metadata 안에서만 유지되고, `/new`가 시작한 새 session에는 남지 않는다.
