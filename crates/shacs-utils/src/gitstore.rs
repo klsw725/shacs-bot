@@ -219,7 +219,7 @@ impl GitStore for GitCliStore {
             return Ok(false);
         }
         fs::create_dir_all(&self.workspace).map_err(|error| error.to_string())?;
-        self.run_git(&["init"])?;
+        self.run_git(&["init", "--template="])?;
         self.merge_gitignore()?;
         self.ensure_tracked_files_exist()?;
         self.stage_tracked_files(true)?;
@@ -416,7 +416,10 @@ fn current_unix_days() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn no_git_store_is_safe_noop() {
@@ -521,8 +524,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("shacs-utils-git-{}-{nanos}", std::process::id()));
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "shacs-utils-git-{}-{nanos}-{counter}",
+            std::process::id()
+        ));
         if path.exists() {
             fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
         }
