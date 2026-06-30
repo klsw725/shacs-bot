@@ -27,6 +27,7 @@ pub struct ApprovalDecision {
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecisionKind {
     Approved,
+    ApprovedForSession,
     Denied,
     InspectOnly,
 }
@@ -41,6 +42,13 @@ pub enum ApprovalActor {
 pub struct ApprovalCacheEntry {
     pub request: ApprovalRequest,
     pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionApprovalCacheEntry {
+    pub session_key: String,
+    pub approval_context_digest: String,
+    pub approval: ApprovalCacheEntry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +120,7 @@ pub fn correlate_approval(
         return ApprovalCorrelation::rejected(ApprovalCorrelationError::DecisionNotAllowed);
     }
     match decision.decision {
-        ApprovalDecisionKind::Approved => {
+        ApprovalDecisionKind::Approved | ApprovalDecisionKind::ApprovedForSession => {
             ApprovalCorrelation::approved(request.approval_request_id.clone())
         }
         ApprovalDecisionKind::Denied => {

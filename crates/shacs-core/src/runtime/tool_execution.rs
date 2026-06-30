@@ -4,11 +4,12 @@ use crate::runtime::{
     ApprovalRequest, AutoEvaluatorVerdict, ContainmentSnapshotRef, InheritedPermissionContext,
     PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionPolicyDecision,
     PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionRuleInput, PermissionedAction,
-    PermissionedActionInput, PermissionedActionOrigin,
+    PermissionedActionInput, PermissionedActionOrigin, SessionApprovalCacheEntry,
 };
 use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -179,6 +180,8 @@ pub struct ToolExecutionContext {
     pub permission_interactive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_approval_cache: Option<ApprovalCacheEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_session_approval_cache: Vec<SessionApprovalCacheEntry>,
     pub in_cron_context: bool,
     pub record_channel_delivery: bool,
 }
@@ -198,6 +201,7 @@ impl Default for ToolExecutionContext {
             permission_evaluator: None,
             permission_interactive: false,
             permission_approval_cache: None,
+            permission_session_approval_cache: Vec::new(),
             in_cron_context: false,
             record_channel_delivery: false,
         }
@@ -434,6 +438,48 @@ pub(crate) fn permission_decision_for_action(
     })
 }
 
+pub(crate) fn session_approval_context_digest(action: &PermissionedAction) -> String {
+    digest_json(&json!({
+        "permission_mode_snapshot": &action.permission_mode_snapshot,
+        "containment_snapshot": &action.containment_snapshot,
+        "intent_snapshot": &action.intent_snapshot,
+        "session_id": &action.session_id,
+        "origin": stable_session_approval_origin(&action.origin),
+    }))
+}
+
+fn stable_session_approval_origin(origin: &PermissionedActionOrigin) -> Value {
+    match origin {
+        PermissionedActionOrigin::UserTurn => json!({ "kind": "user_turn" }),
+        PermissionedActionOrigin::Subagent { subagent_id } => {
+            json!({ "kind": "subagent", "subagent_id": subagent_id })
+        }
+        PermissionedActionOrigin::CronWake { job_id } => {
+            json!({ "kind": "cron_wake", "job_id": job_id })
+        }
+        PermissionedActionOrigin::AppTask { app_id, task_id } => {
+            json!({ "kind": "app_task", "app_id": app_id, "task_id": task_id })
+        }
+        PermissionedActionOrigin::LocalApi { request_id } => {
+            json!({ "kind": "local_api", "request_id": request_id })
+        }
+        PermissionedActionOrigin::ChannelInbound { channel, .. } => {
+            json!({ "kind": "channel_inbound", "channel": channel })
+        }
+        PermissionedActionOrigin::DeferredBridge {
+            bridge_name,
+            scope_digest,
+            parent_origin,
+            ..
+        } => json!({
+            "kind": "deferred_bridge",
+            "bridge_name": bridge_name,
+            "scope_digest": scope_digest,
+            "parent_origin": stable_session_approval_origin(parent_origin),
+        }),
+    }
+}
+
 pub(crate) fn permission_approval_interrupt(
     call: RuntimeToolCall,
     action: &PermissionedAction,
@@ -451,7 +497,11 @@ pub(crate) fn permission_approval_interrupt(
         snapshot_digest: action.snapshot_digest.clone(),
         requested_scope: action.session_id.clone(),
         risk_summary: risk_summary.clone(),
-        allowed_decisions: vec![ApprovalDecisionKind::Approved, ApprovalDecisionKind::Denied],
+        allowed_decisions: vec![
+            ApprovalDecisionKind::Approved,
+            ApprovalDecisionKind::ApprovedForSession,
+            ApprovalDecisionKind::Denied,
+        ],
         expires_at_unix_ms,
     };
     let arguments = action.redacted_arguments.to_string();
@@ -461,7 +511,7 @@ pub(crate) fn permission_approval_interrupt(
         approval_request: Box::new(approval_request),
         tool_call: call,
         question: format!(
-            "Permission approval required before running tool `{}`.\n\nRisk: {}\nTarget: {}\nScope: {}\nExpires at (unix ms): {}\nArguments: `{}`\n\nReply with `1` or `approve` to run it, or `2` or `deny` to cancel.\n\nApproval id: `{}`",
+            "Permission approval required before running tool `{}`.\n\nRisk: {}\nTarget: {}\nScope: {}\nExpires at (unix ms): {}\nArguments: `{}`\n\nReply with `1` or `approve` to run it once, `3` or `approve_session` to approve matching actions in this session, or `2` or `deny` to cancel.\n\nApproval id: `{}`",
             action.tool_name,
             risk_summary,
             target_summary,
@@ -470,7 +520,11 @@ pub(crate) fn permission_approval_interrupt(
             arguments,
             approval_request_id
         ),
-        options: vec!["approve".to_owned(), "deny".to_owned()],
+        options: vec![
+            "approve".to_owned(),
+            "deny".to_owned(),
+            "approve_session".to_owned(),
+        ],
     }
 }
 
@@ -491,28 +545,78 @@ fn permission_approval_for_action(
     context: &ToolExecutionContext,
 ) -> Option<ApprovalCorrelation> {
     if let Some(entry) = &context.permission_approval_cache {
-        let correlation = correlate_approval(&entry.request, &entry.decision, now_unix_ms());
-        if !correlation.is_approved() {
+        return Some(approval_cache_correlation(entry, action));
+    }
+    for entry in &context.permission_session_approval_cache {
+        let Some(session_key) = context.session_key.as_deref() else {
+            continue;
+        };
+        if entry.session_key != session_key {
+            continue;
+        }
+        if entry.approval.decision.decision != ApprovalDecisionKind::ApprovedForSession {
+            continue;
+        }
+        let correlation = session_approval_cache_correlation(entry, action);
+        if let Some(correlation) = correlation {
             return Some(correlation);
         }
-        if entry.request.action_digest != action.action_digest {
-            return Some(ApprovalCorrelation::rejected(
-                ApprovalCorrelationError::ActionMismatch,
-            ));
-        }
-        if entry.request.snapshot_digest != action.snapshot_digest {
-            return Some(ApprovalCorrelation::rejected(
-                ApprovalCorrelationError::SnapshotMismatch,
-            ));
-        }
-        if entry.request.requested_scope != action.session_id {
-            return Some(ApprovalCorrelation::rejected(
-                ApprovalCorrelationError::ScopeMismatch,
-            ));
-        }
-        return Some(correlation);
     }
     None
+}
+
+fn session_approval_cache_correlation(
+    entry: &SessionApprovalCacheEntry,
+    action: &PermissionedAction,
+) -> Option<ApprovalCorrelation> {
+    let approval = &entry.approval;
+    if approval.request.action_digest != action.action_digest {
+        return None;
+    }
+    if approval.request.requested_scope != action.session_id {
+        return None;
+    }
+    if entry.approval_context_digest != session_approval_context_digest(action) {
+        return None;
+    }
+    if approval.request.approval_request_id != approval.decision.approval_request_id
+        || approval.request.action_digest != approval.decision.action_digest
+        || approval.request.snapshot_digest != approval.decision.snapshot_digest
+        || approval.request.requested_scope != approval.decision.approved_scope
+        || approval.decision.consumed
+        || !approval
+            .request
+            .allowed_decisions
+            .contains(&approval.decision.decision)
+        || approval.decision.decision != ApprovalDecisionKind::ApprovedForSession
+        || now_unix_ms() > approval.request.expires_at_unix_ms
+        || approval.decision.decided_at_unix_ms > approval.request.expires_at_unix_ms
+    {
+        return None;
+    }
+    Some(ApprovalCorrelation::approved(
+        approval.request.approval_request_id.clone(),
+    ))
+}
+
+fn approval_cache_correlation(
+    entry: &ApprovalCacheEntry,
+    action: &PermissionedAction,
+) -> ApprovalCorrelation {
+    let correlation = correlate_approval(&entry.request, &entry.decision, now_unix_ms());
+    if !correlation.is_approved() {
+        return correlation;
+    }
+    if entry.request.action_digest != action.action_digest {
+        return ApprovalCorrelation::rejected(ApprovalCorrelationError::ActionMismatch);
+    }
+    if entry.request.snapshot_digest != action.snapshot_digest {
+        return ApprovalCorrelation::rejected(ApprovalCorrelationError::SnapshotMismatch);
+    }
+    if entry.request.requested_scope != action.session_id {
+        return ApprovalCorrelation::rejected(ApprovalCorrelationError::ScopeMismatch);
+    }
+    correlation
 }
 
 fn now_unix_ms() -> u64 {
@@ -520,6 +624,12 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
+}
+
+fn digest_json(value: &Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn inherited_context_for_action(

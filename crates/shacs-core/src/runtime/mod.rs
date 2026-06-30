@@ -129,6 +129,7 @@ pub use permission_action::{
 pub use permission_approval::{
     correlate_approval, ApprovalActor, ApprovalCacheEntry, ApprovalCorrelation,
     ApprovalCorrelationError, ApprovalDecision, ApprovalDecisionKind, ApprovalRequest,
+    SessionApprovalCacheEntry,
 };
 pub use permission_audit::{
     build_permission_audit_record, build_permission_diagnostics_summary,

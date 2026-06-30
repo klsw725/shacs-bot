@@ -623,6 +623,7 @@ impl SubagentRuntime {
             permission_evaluator: None,
             permission_interactive: false,
             permission_approval_cache: None,
+            permission_session_approval_cache: Vec::new(),
             in_cron_context: false,
             record_channel_delivery: false,
         };

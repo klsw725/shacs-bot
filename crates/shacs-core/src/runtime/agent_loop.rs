@@ -1,3 +1,4 @@
+use crate::runtime::tool_execution::session_approval_context_digest;
 use crate::runtime::{
     apply_context_safety_gate, build_context_provider_handoff, discover_context_files,
     dispatch_bridge_tool_calls, parse_context_references, resolve_context_reference,
@@ -14,11 +15,12 @@ use crate::runtime::{
     ContextReferenceResolverConfig, DreamProcessor, DreamRunOutcome, GoalMetadataError,
     InboundMessage, LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore,
     MessageBus, OutboundMessage, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
-    PermissionRuleInput, PersistentGoal, PersistentGoalStatus, ProviderArchiveConsolidator,
-    ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
-    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
-    SessionHistoryOptions, SessionManager, SessionTurnAcquireError, SessionTurnLock,
-    TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
+    PermissionRuleInput, PermissionedAction, PersistentGoal, PersistentGoalStatus,
+    ProviderArchiveConsolidator, ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt,
+    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
+    SessionApprovalCacheEntry, SessionHistoryOptions, SessionManager, SessionTurnAcquireError,
+    SessionTurnLock, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
+    DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, assemble_tool_surface, bridge_tool_names,
@@ -42,6 +44,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 const RUNTIME_CHECKPOINT_KEY: &str = "runtime_checkpoint";
 const PENDING_PERMISSION_APPROVAL_KEY: &str = "pending_permission_approval";
+const SESSION_PERMISSION_APPROVALS_KEY: &str = "session_permission_approvals";
+const SESSION_PERMISSION_APPROVAL_LIMIT: usize = 32;
 const PENDING_PERMISSION_WIZARD_KEY: &str = "pending_permission_wizard";
 const INTERRUPTED_PLACEHOLDER: &str =
     "[Assistant reply unavailable because the previous turn was interrupted.]";
@@ -95,6 +99,7 @@ enum PendingPermissionApprovalStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermissionApprovalReply {
     Approve,
+    ApproveSession,
     Deny,
     Unknown,
 }
@@ -464,23 +469,42 @@ impl<'a> AgentLoop<'a> {
                 );
             }
             match parse_permission_approval_reply(&message.content) {
-                PermissionApprovalReply::Approve => {
-                    let decision = approval_decision(&approval, ApprovalDecisionKind::Approved);
+                PermissionApprovalReply::Approve | PermissionApprovalReply::ApproveSession => {
+                    let session_scoped = matches!(
+                        parse_permission_approval_reply(&message.content),
+                        PermissionApprovalReply::ApproveSession
+                    );
+                    let decision = approval_decision(
+                        &approval,
+                        if session_scoped {
+                            ApprovalDecisionKind::ApprovedForSession
+                        } else {
+                            ApprovalDecisionKind::Approved
+                        },
+                    );
+                    let approval_cache = ApprovalCacheEntry {
+                        request: approval.approval_request.clone(),
+                        decision,
+                    };
                     let mut executing_approval = approval.clone();
                     executing_approval.status = PendingPermissionApprovalStatus::Executing;
                     set_pending_permission_approval(&mut session, &executing_approval);
                     self.sessions.save(&session)?;
-                    let report = self.execute_approved_permission_tool(
-                        &approval,
-                        ApprovalCacheEntry {
-                            request: approval.approval_request.clone(),
-                            decision,
-                        },
-                    );
+                    let report =
+                        self.execute_approved_permission_tool(&approval, approval_cache.clone());
+                    let approved_action = report.permissioned_actions.first().cloned();
                     for tool_message in report.messages {
                         append_session_message(&mut session, tool_message.to_json());
                     }
                     session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+                    if let (true, Some(action)) = (session_scoped, approved_action) {
+                        store_session_permission_approval(
+                            &mut session,
+                            &session_key,
+                            approval_cache,
+                            &action,
+                        );
+                    }
                     let history = session.get_history_with_options(self.config.history_options);
                     let mut messages = vec![json!({
                         "role": "system",
@@ -520,7 +544,7 @@ impl<'a> AgentLoop<'a> {
                     return self.publish_command_response(
                             &message,
                             session,
-                            "Approval pending. Reply with `1` or `approve` to run it, or `2` or `deny` to cancel.",
+                            "Approval pending. Reply with `1` or `approve` to run it once, `3` or `approve_session` to approve matching actions in this session, or `2` or `deny` to cancel.",
                             None,
                             "permission_approval_pending",
                             true,
@@ -598,6 +622,7 @@ impl<'a> AgentLoop<'a> {
             permission_evaluator: self.config.permission_evaluator.clone(),
             permission_interactive: self.config.permission_interactive,
             permission_approval_cache: None,
+            permission_session_approval_cache: session_permission_approvals(&session),
             in_cron_context: false,
             record_channel_delivery: self.config.record_channel_delivery,
         };
@@ -750,6 +775,7 @@ impl<'a> AgentLoop<'a> {
                 let _ = self.task_registry.cancel(&session.key);
                 session.clear();
                 clear_runtime_markers(&mut session);
+                session.metadata.remove(SESSION_PERMISSION_APPROVALS_KEY);
                 remove_persistent_goal(&mut session);
                 self.publish_command_response(
                     message,
@@ -1137,6 +1163,7 @@ impl<'a> AgentLoop<'a> {
             RuntimeToolExecutor::with_context_tools(self.tools, self.context_tools.clone());
         let mut context = approval.tool_context.clone();
         context.permission_approval_cache = Some(approval_cache);
+        context.permission_session_approval_cache = Vec::new();
         if bridge_tool_names().contains(&approval.tool_call.name.as_str()) {
             let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
                 definitions: self.tools.definitions(),
@@ -1562,6 +1589,48 @@ fn pending_permission_approval(session: &Session) -> Option<PendingPermissionApp
         .and_then(|value| serde_json::from_value(value).ok())
 }
 
+fn session_permission_approvals(session: &Session) -> Vec<SessionApprovalCacheEntry> {
+    session
+        .metadata
+        .get(SESSION_PERMISSION_APPROVALS_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+fn store_session_permission_approval(
+    session: &mut Session,
+    session_key: &str,
+    approval: ApprovalCacheEntry,
+    action: &PermissionedAction,
+) {
+    let now = now_unix_ms();
+    let approval_context_digest = session_approval_context_digest(action);
+    let mut approvals = session_permission_approvals(session)
+        .into_iter()
+        .filter(|entry| entry.approval.request.expires_at_unix_ms >= now)
+        .filter(|entry| {
+            !(entry.session_key == session_key
+                && entry.approval.request.action_digest == action.action_digest
+                && entry.approval.request.requested_scope == action.session_id
+                && entry.approval_context_digest == approval_context_digest)
+        })
+        .collect::<Vec<_>>();
+    approvals.push(SessionApprovalCacheEntry {
+        session_key: session_key.to_owned(),
+        approval_context_digest,
+        approval,
+    });
+    if approvals.len() > SESSION_PERMISSION_APPROVAL_LIMIT {
+        approvals.drain(0..approvals.len() - SESSION_PERMISSION_APPROVAL_LIMIT);
+    }
+    if let Ok(value) = serde_json::to_value(approvals) {
+        session
+            .metadata
+            .insert(SESSION_PERMISSION_APPROVALS_KEY.to_owned(), value);
+    }
+}
+
 fn permission_approval_reply_matches_request(
     approval: &PendingPermissionApproval,
     message: &InboundMessage,
@@ -1601,6 +1670,7 @@ fn parse_permission_approval_reply(content: &str) -> PermissionApprovalReply {
     match normalized.as_str() {
         "1" | "y" | "yes" | "approve" | "approved" | "allow" | "run" | "go" | "진행"
         | "진행해줘" | "승인" | "허용" => PermissionApprovalReply::Approve,
+        "3" | "approve_session" | "approve-session" => PermissionApprovalReply::ApproveSession,
         "2" | "n" | "no" | "deny" | "denied" | "cancel" | "stop" | "취소" | "거절" => {
             PermissionApprovalReply::Deny
         }
