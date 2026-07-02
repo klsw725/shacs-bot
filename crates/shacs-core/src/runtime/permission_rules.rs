@@ -374,7 +374,7 @@ fn classify_target_value(
     value: &str,
     configured_targets: &[String],
 ) -> Option<ProtectedTargetClass> {
-    let normalized = value.replace('\\', "/").to_ascii_lowercase();
+    let normalized = normalize_target_path(value);
     let path_parts = normalized.split('/').collect::<Vec<_>>();
     if normalized == ".git" || normalized.starts_with(".git/") || path_parts.contains(&".git") {
         return Some(ProtectedTargetClass::GitState);
@@ -415,6 +415,36 @@ fn classify_target_value(
 }
 
 fn target_matches(normalized: &str, configured: &str) -> bool {
-    let configured = configured.replace('\\', "/").to_ascii_lowercase();
-    normalized == configured || normalized.starts_with(&format!("{configured}/"))
+    let configured = normalize_target_path(configured);
+    if configured.is_empty() {
+        return false;
+    }
+    normalized == configured
+        || normalized.starts_with(&format!("{configured}/"))
+        || (!configured.starts_with('/')
+            && (normalized.ends_with(&format!("/{configured}"))
+                || normalized.contains(&format!("/{configured}/"))))
+}
+
+fn normalize_target_path(value: &str) -> String {
+    let replaced = value.replace('\\', "/").to_ascii_lowercase();
+    let absolute = replaced.starts_with('/');
+    let mut parts = Vec::new();
+    for part in replaced.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if !parts.is_empty() {
+                    parts.pop();
+                }
+            }
+            part => parts.push(part),
+        }
+    }
+    let joined = parts.join("/");
+    if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    }
 }

@@ -217,6 +217,47 @@ fn redacted_blank_and_non_string_targets_fail_closed_as_unknown() -> Result<(), 
 }
 
 #[test]
+fn custom_protected_targets_match_lexical_path_variants() -> Result<(), Box<dyn Error>> {
+    for value in [
+        json!("src/lib.rs"),
+        json!("./src/lib.rs"),
+        json!("src/../src/lib.rs"),
+        json!("/workspace/src/lib.rs"),
+    ] {
+        let protected = action(
+            PermissionMode::Auto,
+            "write_file",
+            vec![SafetyCapability::FsWrite],
+            vec![target(value.clone())],
+        );
+        let rules = evaluate_static_rules(
+            &protected,
+            &PermissionRuleInput {
+                containment: safe_containment(),
+                protected_targets: vec!["src".to_owned()],
+                proc_exec_summary: None,
+            },
+        );
+        let decision = decide_permission(policy_input(protected, rules.clone()));
+
+        if rules.kind != StaticRuleDecisionKind::Deny
+            || rules.reason != StaticRuleReason::ProtectedTarget
+            || !rules
+                .diagnostics
+                .protected_targets
+                .contains(&ProtectedTargetClass::CustomProtectedTarget)
+            || decision.kind != PermissionPolicyDecisionKind::Deny
+        {
+            return Err(format!(
+                "custom protected target variant was not denied: target={value:?} rules={rules:?} decision={decision:?}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn empty_capability_sets_do_not_receive_mode_baseline_allow() -> Result<(), Box<dyn Error>> {
     for mode in [
         PermissionMode::Plan,
