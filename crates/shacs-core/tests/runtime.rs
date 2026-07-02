@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use shacs_config::AutoApprovalConfig;
 use shacs_core::runtime::{
     dispatch_bridge_tool_call, dispatch_bridge_tool_calls, ActionNormalizationError,
     ActionNormalizationState, ApprovalActor, ApprovalCacheEntry, ApprovalCorrelationError,
@@ -72,6 +73,33 @@ impl Tool for CountingTool {
     fn execute(&self, _params: JsonMap) -> ToolResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
         "counted".into()
+    }
+}
+
+struct WriteFileCountingTool {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Tool for WriteFileCountingTool {
+    fn name(&self) -> &str {
+        "write_file"
+    }
+
+    fn description(&self) -> &str {
+        "Write a file."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("path", StringSchema::new("Path"))
+            .property("content", StringSchema::new("Content"))
+            .required(["path", "content"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "written".into()
     }
 }
 
@@ -462,6 +490,149 @@ fn runtime_asks_before_interactive_proc_exec_without_executing_tool() -> Result<
         )
         .into()),
     }
+}
+
+#[test]
+fn runtime_auto_approval_executes_safe_workspace_edit_without_evaluator(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(WriteFileCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_auto_approval: AutoApprovalConfig {
+            enabled: true,
+            allow_workspace_edits: true,
+            ..AutoApprovalConfig::default()
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "write-call",
+            "write_file",
+            json!({ "path": "src/lib.rs", "content": "ok" }),
+        )],
+        &context,
+    );
+
+    if calls.load(Ordering::SeqCst) != 1
+        || report.interrupt.is_some()
+        || report.messages.len() != 1
+        || report.messages[0].content != "written"
+    {
+        return Err(format!(
+            "auto-approved workspace edit did not execute: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_auto_approval_does_not_widen_disallowed_workspace_edits() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(WriteFileCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_auto_approval: AutoApprovalConfig {
+            enabled: true,
+            allow_workspace_edits: false,
+            ..AutoApprovalConfig::default()
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "write-call",
+            "write_file",
+            json!({ "path": "src/lib.rs", "content": "ok" }),
+        )],
+        &context,
+    );
+
+    if calls.load(Ordering::SeqCst) != 0
+        || !matches!(
+            report.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+    {
+        return Err(format!(
+            "disallowed workspace edit should require approval: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_auto_approval_respects_configured_protected_targets() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(WriteFileCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_auto_approval: AutoApprovalConfig {
+            enabled: true,
+            allow_workspace_edits: true,
+            protected_targets: vec!["src".to_owned()],
+            ..AutoApprovalConfig::default()
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "write-call",
+            "write_file",
+            json!({ "path": "src/lib.rs", "content": "ok" }),
+        )],
+        &context,
+    );
+
+    if calls.load(Ordering::SeqCst) != 0
+        || report.interrupt.is_some()
+        || !report
+            .messages
+            .first()
+            .is_some_and(|message| message.content.contains("Permission denied"))
+    {
+        return Err(format!(
+            "protected target should be denied before auto approval: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[test]
@@ -1934,6 +2105,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
             scope_ref: None,
         },
         permission_rule_input: safe_proc_exec_rule_input(),
+        permission_auto_approval: AutoApprovalConfig::default(),
         permission_ceiling_snapshot: None,
         permission_evaluator: None,
         permission_interactive: false,

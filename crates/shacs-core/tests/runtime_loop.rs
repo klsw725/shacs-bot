@@ -1,4 +1,5 @@
 use serde_json::{json, Map, Value};
+use shacs_config::AutoApprovalConfig;
 use shacs_core::runtime::{
     app_provided_skill_reference_evidence, authored_skill_ready_for_active_registry,
     bridge_underlying_mapping_evidence_ref, build_runtime_memory_evidence,
@@ -2260,6 +2261,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         containment_snapshot: Some(containment_snapshot.clone()),
         permission_mode_snapshot: permission_mode_snapshot.clone(),
         permission_rule_input: Default::default(),
+        permission_auto_approval: AutoApprovalConfig::default(),
         permission_ceiling_snapshot: None,
         permission_evaluator: None,
         permission_interactive: false,

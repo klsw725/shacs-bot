@@ -1,15 +1,18 @@
 use crate::runtime::{
     correlate_approval, decide_permission, evaluate_static_rules, normalize_runtime_tool_call,
     ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError, ApprovalDecisionKind,
-    ApprovalRequest, AutoEvaluatorVerdict, ContainmentSnapshotRef, InheritedPermissionContext,
-    PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionPolicyDecision,
+    ApprovalRequest, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, ContainmentSnapshotRef,
+    EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
+    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionPolicyDecision,
     PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionRuleInput, PermissionedAction,
-    PermissionedActionInput, PermissionedActionOrigin, SessionApprovalCacheEntry,
+    PermissionedActionInput, PermissionedActionOrigin, SafetyCapability, SessionApprovalCacheEntry,
+    StaticRuleDecision, StaticRuleDecisionKind,
 };
 use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use shacs_config::AutoApprovalConfig;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -172,6 +175,8 @@ pub struct ToolExecutionContext {
     pub permission_mode_snapshot: PermissionModeSnapshot,
     #[serde(default)]
     pub permission_rule_input: PermissionRuleInput,
+    #[serde(default)]
+    pub permission_auto_approval: AutoApprovalConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_ceiling_snapshot: Option<PermissionCeilingSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +202,7 @@ impl Default for ToolExecutionContext {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             permission_rule_input: PermissionRuleInput::default(),
+            permission_auto_approval: AutoApprovalConfig::default(),
             permission_ceiling_snapshot: None,
             permission_evaluator: None,
             permission_interactive: false,
@@ -427,15 +433,86 @@ pub(crate) fn permission_decision_for_action(
     action: &PermissionedAction,
     context: &ToolExecutionContext,
 ) -> PermissionPolicyDecision {
-    let static_rule_decision = evaluate_static_rules(action, &context.permission_rule_input);
+    let rule_input = effective_permission_rule_input(context);
+    let static_rule_decision = evaluate_static_rules(action, &rule_input);
+    let evaluator = context
+        .permission_evaluator
+        .clone()
+        .or_else(|| auto_approval_evaluator_for_action(action, &static_rule_decision, context));
     decide_permission(PermissionPolicyInput {
         action: action.clone(),
         static_rule_decision,
-        evaluator: context.permission_evaluator.clone(),
+        evaluator,
         approval: permission_approval_for_action(action, context),
         inherited_context: inherited_context_for_action(action, context),
         interactive: context.permission_interactive,
     })
+}
+
+fn effective_permission_rule_input(context: &ToolExecutionContext) -> PermissionRuleInput {
+    let mut input = context.permission_rule_input.clone();
+    for protected_target in &context.permission_auto_approval.protected_targets {
+        if !input.protected_targets.contains(protected_target) {
+            input.protected_targets.push(protected_target.clone());
+        }
+    }
+    input
+}
+
+fn auto_approval_evaluator_for_action(
+    action: &PermissionedAction,
+    static_rule_decision: &StaticRuleDecision,
+    context: &ToolExecutionContext,
+) -> Option<AutoEvaluatorVerdict> {
+    let config = &context.permission_auto_approval;
+    if !config.enabled
+        || action.permission_mode_snapshot.mode != PermissionMode::Auto
+        || static_rule_decision.kind != StaticRuleDecisionKind::AllowCandidate
+        || !auto_approval_allows_capabilities(action, config, context)
+    {
+        return None;
+    }
+
+    Some(AutoEvaluatorVerdict {
+        verdict: AutoEvaluatorVerdictKind::AllowCandidate,
+        confidence: EvaluatorConfidence::High,
+        scope_match: EvaluatorScopeMatch::Requested,
+        risk_summary: "allowed by local autoApproval static rules".to_owned(),
+        evidence_refs: vec!["permissions.autoApproval".to_owned()],
+        expires_at_unix_ms: now_unix_ms().saturating_add(PERMISSION_APPROVAL_TTL_MS),
+        evaluator_ref: Some("local-auto-approval".to_owned()),
+        prompt_injection_signals: Vec::new(),
+    })
+}
+
+fn auto_approval_allows_capabilities(
+    action: &PermissionedAction,
+    config: &AutoApprovalConfig,
+    context: &ToolExecutionContext,
+) -> bool {
+    !action.capabilities.is_empty()
+        && action
+            .capabilities
+            .iter()
+            .all(|capability| match capability {
+                SafetyCapability::FsRead => true,
+                SafetyCapability::FsWrite => config.allow_workspace_edits,
+                SafetyCapability::ProcExec => {
+                    config.allow_proc_exec_verification
+                        && (!config.require_docker_containment_for_exec
+                            || context
+                                .permission_rule_input
+                                .containment
+                                .confirmed_non_privileged())
+                }
+                SafetyCapability::NetOutbound
+                | SafetyCapability::SecretRead
+                | SafetyCapability::ExternalDelivery
+                | SafetyCapability::AutomationSchedule
+                | SafetyCapability::AppInstall
+                | SafetyCapability::RuntimeConfigWrite
+                | SafetyCapability::SelfModification => false,
+            })
 }
 
 pub(crate) fn session_approval_context_digest(action: &PermissionedAction) -> String {

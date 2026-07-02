@@ -11,6 +11,7 @@ use crate::tools::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use shacs_config::AutoApprovalConfig;
 use shacs_providers::{GenerationSettings, ProviderClient, ProviderRetryMode};
 use shacs_templates::{render_agent_template, template_variables, AgentTemplate};
 use std::collections::{BTreeMap, BTreeSet};
@@ -619,6 +620,7 @@ impl SubagentRuntime {
             containment_snapshot: config.containment_snapshot.clone(),
             permission_mode_snapshot: config.permission_mode_snapshot.clone(),
             permission_rule_input: config.permission_rule_input.clone(),
+            permission_auto_approval: AutoApprovalConfig::default(),
             permission_ceiling_snapshot: config.permission_ceiling_snapshot.clone(),
             permission_evaluator: None,
             permission_interactive: false,
