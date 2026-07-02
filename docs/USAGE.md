@@ -244,7 +244,7 @@ Provider 호출 전에 built-in slash command는 로컬에서 처리됩니다:
 - `/new`: 현재 session을 비우고 새로 시작합니다.
 - `/stop`: 등록된 active task에 cancellation을 요청합니다.
 - `/restart`: 로컬 restart 요청을 acknowledge합니다. Rust CLI는 현재 process를 in-place로 교체하지 않습니다.
-- `/permission`: `permissions.mode`를 `default`, `auto`, `bypass_permissions` 중 하나로 저장하는 대화형 wizard를 시작합니다. `bypass_permissions`는 먼저 선택한 뒤 정확히 `confirm bypass_permissions`로 한 번 더 확인해야 저장되며, 저장된 값은 이후 turn의 permission snapshot에 반영됩니다. `cancel`은 진행 중인 wizard를 취소합니다.
+- `/permission`: `permissions.mode`를 `default`, `auto`, `bypass_permissions` 중 하나로 저장하는 대화형 wizard를 시작합니다. `auto`를 선택하면 `permissions.autoApproval.enabled`도 함께 `true`로 저장되어 정적 안전 규칙을 통과한 workspace edit 같은 낮은 위험 action을 자동 승인할 수 있습니다. 기존 config에 `permissions.mode: "auto"`만 있고 `autoApproval.enabled`가 없으면 자동 승인은 켜진 것으로 보지 않습니다. `bypass_permissions`는 먼저 선택한 뒤 정확히 `confirm bypass_permissions`로 한 번 더 확인해야 저장되며, 저장된 값은 이후 turn의 permission snapshot에 반영됩니다. `cancel`은 진행 중인 wizard를 취소합니다.
 - `/history [n]`: 최근 visible user/assistant message를 보여줍니다. 기본값은 10, 최대값은 50입니다.
 - `/dream`: 설정된 Dream memory consolidation을 한 번 실행합니다.
 - `/dream-log [sha]`: 최신 memory commit diff 또는 선택한 commit diff를 보여줍니다.

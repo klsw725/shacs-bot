@@ -2516,6 +2516,19 @@ fn patch_permission_mode_config(path: &Path, mode: PermissionMode) -> Result<(),
     }
     if let Some(permissions) = permissions.as_object_mut() {
         permissions.insert("mode".to_owned(), json!(mode.as_str()));
+        if mode == PermissionMode::Auto {
+            let auto_approval = permissions
+                .entry("autoApproval".to_owned())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !auto_approval.is_object() {
+                return Err(CliError::InvalidArguments(
+                    "config `permissions.autoApproval` must be a JSON object".to_owned(),
+                ));
+            }
+            if let Some(auto_approval) = auto_approval.as_object_mut() {
+                auto_approval.insert("enabled".to_owned(), json!(true));
+            }
+        }
     }
     write_config_value_for_patch(path, &value)
 }
@@ -2879,33 +2892,28 @@ fn runtime_permission_mode_snapshot(snapshot: &PermissionConfigSnapshot) -> Perm
     }
 }
 
-fn default_permission_mode_snapshot() -> PermissionModeSnapshot {
-    PermissionModeSnapshot {
-        mode: PermissionMode::Default,
-        source: Some(permission_mode_source_name(PermissionModeSource::DefaultFallback).to_owned()),
-        scope_ref: None,
-    }
-}
-
-fn reload_failure_permission_mode_snapshot(
-    previous: &PermissionModeSnapshot,
-) -> PermissionModeSnapshot {
-    let source = (previous.mode == PermissionMode::Default)
-        .then_some(previous.source.as_deref())
-        .flatten()
-        .filter(|source| {
-            *source == permission_mode_source_name(PermissionModeSource::DefaultFallback)
-        })
-        .unwrap_or_else(|| permission_mode_source_name(PermissionModeSource::DefaultFallback));
-    let mut snapshot = default_permission_mode_snapshot();
-    snapshot.source = Some(source.to_owned());
-    snapshot
+fn reload_failure_permission_config_snapshot(
+    _previous: &PermissionModeSnapshot,
+) -> PermissionConfigSnapshot {
+    shacs_config::PermissionsConfig::default().normalized_snapshot(
+        PermissionModeSource::DefaultFallback,
+        PermissionActivationContext::default(),
+    )
 }
 
 fn permission_mode_snapshot_from_config_path(
     path: &Path,
     containment_precondition_met: bool,
 ) -> Result<PermissionModeSnapshot, CliError> {
+    Ok(runtime_permission_mode_snapshot(
+        &permission_config_snapshot_from_config_path(path, containment_precondition_met)?,
+    ))
+}
+
+fn permission_config_snapshot_from_config_path(
+    path: &Path,
+    containment_precondition_met: bool,
+) -> Result<PermissionConfigSnapshot, CliError> {
     let value = read_config_value_for_patch(path)?;
     let root = value.as_object().ok_or_else(|| {
         CliError::InvalidArguments("config JSON root must be an object".to_owned())
@@ -2925,7 +2933,7 @@ fn permission_mode_snapshot_from_config_path(
             containment_precondition_met,
         },
     );
-    Ok(runtime_permission_mode_snapshot(&snapshot))
+    Ok(snapshot)
 }
 
 fn permission_containment_precondition_met(snapshot: &Option<ContainmentSnapshotRef>) -> bool {
@@ -13526,7 +13534,12 @@ impl AgentLoopChatCompletionAdapter {
             .then(|| "api:default".to_owned());
         config.concurrent_tools = true;
         config.containment_snapshot = self.containment_snapshot.clone();
-        config.permission_mode_snapshot = self.current_permission_mode_snapshot();
+        let permission_config_snapshot = self.current_permission_config_snapshot();
+        config.permission_mode_snapshot =
+            runtime_permission_mode_snapshot(&permission_config_snapshot);
+        config.permission_auto_approval = permission_config_snapshot.auto_approval;
+        config.permission_rule_input.protected_targets =
+            config.permission_auto_approval.protected_targets.clone();
         let config_path = self.config_path.clone();
         let containment_precondition_met =
             permission_containment_precondition_met(&self.containment_snapshot);
@@ -13538,12 +13551,14 @@ impl AgentLoopChatCompletionAdapter {
         config
     }
 
-    fn current_permission_mode_snapshot(&self) -> PermissionModeSnapshot {
-        permission_mode_snapshot_from_config_path(
+    fn current_permission_config_snapshot(&self) -> PermissionConfigSnapshot {
+        permission_config_snapshot_from_config_path(
             &self.config_path,
             permission_containment_precondition_met(&self.containment_snapshot),
         )
-        .unwrap_or_else(|_| reload_failure_permission_mode_snapshot(&self.permission_mode_snapshot))
+        .unwrap_or_else(|_| {
+            reload_failure_permission_config_snapshot(&self.permission_mode_snapshot)
+        })
     }
 
     fn context_builder(&self) -> ContextBuilder {
@@ -14298,6 +14313,7 @@ impl AgentLoopChatCompletionAdapter {
         subagent.retry_mode = config.retry_mode;
         subagent.containment_snapshot = config.containment_snapshot.clone();
         subagent.permission_mode_snapshot = config.permission_mode_snapshot.clone();
+        subagent.permission_rule_input = config.permission_rule_input.clone();
         subagent.permission_ceiling_snapshot = config.permission_ceiling_snapshot.clone();
         subagent.max_iterations = config.max_iterations;
         subagent.max_tool_result_chars = config.max_tool_result_chars;
@@ -19803,6 +19819,7 @@ mod tests {
         }
 
         let mut loop_config = adapter.loop_config();
+        loop_config.permission_rule_input.protected_targets = vec!["secrets".to_owned()];
         loop_config.permission_ceiling_snapshot = Some(PermissionCeilingSnapshot {
             parent_mode: PermissionMode::Auto,
             capability_ceiling: vec![SafetyCapability::FsRead],
@@ -19831,6 +19848,10 @@ mod tests {
         assert_eq!(
             subagent.permission_ceiling_snapshot,
             loop_config.permission_ceiling_snapshot
+        );
+        assert_eq!(
+            subagent.permission_rule_input.protected_targets,
+            vec!["secrets".to_owned()]
         );
         assert_eq!(
             subagent
@@ -20304,6 +20325,44 @@ mod tests {
     }
 
     #[test]
+    fn permission_mode_patch_enables_auto_approval_for_auto_mode() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        write_config_value_for_patch(&config_path, &json!({ "agents": { "defaults": {} } }))?;
+
+        patch_permission_mode_config(&config_path, PermissionMode::Auto)?;
+
+        let saved: Value = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+        assert_eq!(saved["permissions"]["mode"], json!("auto"));
+        assert_eq!(saved["permissions"]["autoApproval"]["enabled"], json!(true));
+        Ok(())
+    }
+
+    #[test]
+    fn bare_auto_mode_snapshot_does_not_enable_auto_approval_without_explicit_config(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        write_config_value_for_patch(&config_path, &json!({ "permissions": { "mode": "auto" } }))?;
+
+        let bare = permission_config_snapshot_from_config_path(&config_path, true)?;
+        assert!(!bare.auto_approval.enabled);
+
+        write_config_value_for_patch(
+            &config_path,
+            &json!({
+                "permissions": {
+                    "mode": "auto",
+                    "autoApproval": { "enabled": false }
+                }
+            }),
+        )?;
+        let explicit = permission_config_snapshot_from_config_path(&config_path, true)?;
+        assert!(!explicit.auto_approval.enabled);
+        Ok(())
+    }
+
+    #[test]
     fn adapter_permission_mode_setter_updates_next_loop_config_snapshot(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -20319,7 +20378,11 @@ mod tests {
                     }
                 },
                 "permissions": {
-                    "mode": "default"
+                    "mode": "default",
+                    "autoApproval": {
+                        "enabled": true,
+                        "protectedTargets": ["secrets"]
+                    }
                 }
             }),
         )?;
@@ -20372,6 +20435,11 @@ mod tests {
             initial_config.permission_mode_snapshot.mode,
             PermissionMode::Default
         );
+        assert!(initial_config.permission_auto_approval.enabled);
+        assert_eq!(
+            initial_config.permission_rule_input.protected_targets,
+            vec!["secrets".to_owned()]
+        );
         let setter = initial_config
             .permission_mode_setter
             .as_ref()
@@ -20385,7 +20453,11 @@ mod tests {
         );
         let saved: Value = serde_json::from_str(&fs::read_to_string(config_path)?)?;
         assert_eq!(saved["permissions"]["mode"], json!("auto"));
-        assert!(saved["permissions"].get("autoApproval").is_none());
+        assert_eq!(saved["permissions"]["autoApproval"]["enabled"], json!(true));
+        assert_eq!(
+            saved["permissions"]["autoApproval"]["protectedTargets"],
+            json!(["secrets"])
+        );
         Ok(())
     }
 
