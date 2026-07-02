@@ -31,6 +31,7 @@ mod self_improvement;
 mod subagent;
 mod tool_execution;
 mod tool_search;
+mod workflow;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
@@ -240,6 +241,14 @@ pub use tool_search::{
     BridgeToolCall, BridgeToolExecutionReport, BridgeToolResult, BridgeUnderlyingMappingEvidence,
     ResolvedDeferredToolCall, ToolCallScopeError, ToolDescribeEvidence, ToolSearchActivationReason,
     ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
+};
+pub use workflow::{
+    cancel_runtime_workflow, read_only_child_tool_names, run_read_only_runtime_workflow,
+    run_runtime_workflow_admission_branch, runtime_workflow_diagnostics,
+    runtime_workflow_execution_handle, RuntimeWorkflowAdmissionBranchInput,
+    RuntimeWorkflowAdmissionBranchOutcome, RuntimeWorkflowDiagnostics, RuntimeWorkflowEvent,
+    RuntimeWorkflowExecutionHandle, RuntimeWorkflowInput, RuntimeWorkflowInterruptOutcome,
+    RuntimeWorkflowOutcome,
 };
 
 pub use shacs_workflow::{
