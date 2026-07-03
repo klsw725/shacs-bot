@@ -269,10 +269,13 @@ impl PermissionsConfig {
         }
         diagnostics.normalized_mode = mode;
 
+        let mut auto_approval = self.auto_approval.clone();
+        auto_approval.enabled = mode == PermissionMode::Auto;
+
         PermissionConfigSnapshot {
             mode,
             source: snapshot_source,
-            auto_approval: self.auto_approval.clone(),
+            auto_approval,
             baseline_candidate_capabilities: mode.baseline_candidate_capabilities().to_vec(),
             diagnostics,
             generated_at_unix_ms: generated_at_unix_ms(),
@@ -496,12 +499,20 @@ mod tests {
     fn workspace_auto_requires_user_local_opt_in() -> Result<(), String> {
         let config: PermissionsConfig =
             serde_json::from_value(json!({"mode": "auto"})).map_err(|error| error.to_string())?;
+        let user_local = config.normalized_snapshot(
+            PermissionModeSource::UserLocalConfig,
+            PermissionActivationContext::default(),
+        );
+        assert_eq!(user_local.mode, PermissionMode::Auto);
+        assert!(user_local.auto_approval.enabled);
+
         let rejected = config.normalized_snapshot(
             PermissionModeSource::WorkspaceConfig,
             PermissionActivationContext::default(),
         );
         assert_eq!(rejected.mode, PermissionMode::Default);
         assert_eq!(rejected.source, PermissionModeSource::DefaultFallback);
+        assert!(!rejected.auto_approval.enabled);
         assert_eq!(
             rejected.diagnostics.rejected_source,
             Some(PermissionModeSource::WorkspaceConfig)
@@ -516,6 +527,7 @@ mod tests {
         );
         assert_eq!(accepted.mode, PermissionMode::Auto);
         assert_eq!(accepted.source, PermissionModeSource::WorkspaceConfig);
+        assert!(accepted.auto_approval.enabled);
         Ok(())
     }
 
