@@ -20339,14 +20339,14 @@ mod tests {
     }
 
     #[test]
-    fn bare_auto_mode_snapshot_does_not_enable_auto_approval_without_explicit_config(
-    ) -> Result<(), Box<dyn Error>> {
+    fn bare_auto_mode_snapshot_enables_auto_approval_from_mode() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
         write_config_value_for_patch(&config_path, &json!({ "permissions": { "mode": "auto" } }))?;
 
         let bare = permission_config_snapshot_from_config_path(&config_path, true)?;
-        assert!(!bare.auto_approval.enabled);
+        assert_eq!(bare.mode, PermissionMode::Auto);
+        assert!(bare.auto_approval.enabled);
 
         write_config_value_for_patch(
             &config_path,
@@ -20358,7 +20358,8 @@ mod tests {
             }),
         )?;
         let explicit = permission_config_snapshot_from_config_path(&config_path, true)?;
-        assert!(!explicit.auto_approval.enabled);
+        assert_eq!(explicit.mode, PermissionMode::Auto);
+        assert!(explicit.auto_approval.enabled);
         Ok(())
     }
 
@@ -20435,7 +20436,7 @@ mod tests {
             initial_config.permission_mode_snapshot.mode,
             PermissionMode::Default
         );
-        assert!(initial_config.permission_auto_approval.enabled);
+        assert!(!initial_config.permission_auto_approval.enabled);
         assert_eq!(
             initial_config.permission_rule_input.protected_targets,
             vec!["secrets".to_owned()]
@@ -20451,6 +20452,7 @@ mod tests {
             adapter.loop_config().permission_mode_snapshot.mode,
             PermissionMode::Auto
         );
+        assert!(adapter.loop_config().permission_auto_approval.enabled);
         let saved: Value = serde_json::from_str(&fs::read_to_string(config_path)?)?;
         assert_eq!(saved["permissions"]["mode"], json!("auto"));
         assert_eq!(saved["permissions"]["autoApproval"]["enabled"], json!(true));
