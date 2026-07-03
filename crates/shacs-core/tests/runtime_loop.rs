@@ -21,7 +21,7 @@ use shacs_core::runtime::{
     LoopTaskRegisterResult, McpLifecycle, MergeDecision, MessageBus, PermissionMode,
     PermissionModeSnapshot, PermissionRuleInput, PermissionedActionOrigin, PersistentGoal,
     PersistentGoalStatus, ProcExecSummary, ProviderHotSwapResult, ProviderSelectionSnapshot,
-    RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind,
+    RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind, RuntimeInterrupt,
     RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults, RuntimeReplayInput,
     RuntimeSelectedAction, RuntimeSpec018ProjectionInput, RuntimeToolCall, RuntimeToolExecutor,
     Session, SessionManager, SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector,
@@ -69,6 +69,14 @@ struct ProcExecCountingTool {
 
 struct NamedProcExecCountingTool {
     name: &'static str,
+    calls: Arc<AtomicUsize>,
+}
+
+struct WriteFileCountingTool {
+    calls: Arc<AtomicUsize>,
+}
+
+struct MessageCountingTool {
     calls: Arc<AtomicUsize>,
 }
 
@@ -120,6 +128,52 @@ impl Tool for NamedProcExecCountingTool {
     fn execute(&self, _params: JsonMap) -> ToolResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
         "exec-output".into()
+    }
+}
+
+impl Tool for WriteFileCountingTool {
+    fn name(&self) -> &str {
+        "write_file"
+    }
+
+    fn description(&self) -> &str {
+        "Count workspace file writes."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("path", shacs_core::tools::StringSchema::new("Path"))
+            .property("content", shacs_core::tools::StringSchema::new("Content"))
+            .required(["path", "content"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "written".into()
+    }
+}
+
+impl Tool for MessageCountingTool {
+    fn name(&self) -> &str {
+        "message"
+    }
+
+    fn description(&self) -> &str {
+        "Count external message deliveries."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("target", shacs_core::tools::StringSchema::new("Target"))
+            .property("content", shacs_core::tools::StringSchema::new("Content"))
+            .required(["target", "content"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "sent".into()
     }
 }
 
@@ -2663,6 +2717,533 @@ fn core_bridge_tool_events_serialize_safe_for_subagent_progress() -> Result<(), 
         return Err(format!("missing bridge ToolEvents in progress payload: {serialized}").into());
     }
     Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_preserves_local_workspace_edit_fast_path_without_classifier_request(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(WriteFileCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "write-local-fast-path",
+            "write_file",
+            json!({ "path": "src/lib.rs", "content": "ok" }),
+        ))?,
+        LlmResponse {
+            content: Some("local fast path completed".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let classifier = MockProvider::new(Vec::new());
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_workspace_edits: true,
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    let main_requests = client.requests.lock().map_err(|error| error.to_string())?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 1
+        || result.final_content.as_deref() != Some("local fast path completed")
+        || main_requests.len() != 2
+        || !classifier_requests.is_empty()
+    {
+        return Err(format!(
+            "local auto-approval should execute without classifier: result={result:?} calls={} main_requests={main_requests:?} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_allows_unresolved_static_allow_candidate(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-classified-allow",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ))?,
+        LlmResponse {
+            content: Some("classifier allowed exec".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "allow_candidate",
+        "high",
+        "requested",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 1
+        || result.final_content.as_deref() != Some("classifier allowed exec")
+        || classifier_requests.len() != 1
+        || classifier_requests[0].model != "test-model"
+        || !classifier_requests[0]
+            .messages
+            .iter()
+            .any(|message| message.to_string().contains("exec"))
+    {
+        return Err(format!(
+            "classifier allow verdict should stage evaluator approval before execution: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_requires_user_intent_before_allowing() -> Result<(), Box<dyn Error>>
+{
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classifier-no-intent",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "allow_candidate",
+        "high",
+        "requested",
+    )]);
+    let mut spec =
+        classifier_agent_run_spec_with_messages(Vec::new(), &registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || !classifier_requests.is_empty()
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+        || result.stop_reason != "ask_user"
+    {
+        return Err(format!(
+            "classifier should require user intent before allowing execution: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_unsafe_capability_skips_classifier_and_execution(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(MessageCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "message-classifier-high-allow",
+            "message",
+            json!({ "target": "user", "content": "hello" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "allow_candidate",
+        "high",
+        "requested",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || !classifier_requests.is_empty()
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+        || result.stop_reason != "ask_user"
+    {
+        return Err(format!(
+            "unsafe classifier capability should remain approval-gated: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_provider_error_interrupts_without_executing_in_interactive_mode(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classifier-error",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(Vec::new());
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || classifier_requests.len() != 1
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+        || result.stop_reason != "ask_user"
+    {
+        return Err(format!(
+            "classifier provider error should fall back to approval interrupt without execution: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_uncertain_verdict_interrupts_without_executing_in_interactive_mode(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classifier-uncertain",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "allow_candidate",
+        "low",
+        "requested",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || classifier_requests.len() != 1
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+        || result.stop_reason != "ask_user"
+    {
+        return Err(format!(
+            "low-confidence classifier verdict should ask instead of executing: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_malformed_verdict_interrupts_without_executing_in_interactive_mode(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classifier-malformed",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![LlmResponse {
+        content: Some("not json".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || classifier_requests.len() != 1
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+        || result.stop_reason != "ask_user"
+    {
+        return Err(format!(
+            "malformed classifier verdict should ask instead of executing: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_prompt_injection_signal_interrupts_without_executing(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classifier-injection-signal",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![LlmResponse {
+        content: Some(
+            json!({
+                "verdict": "allow_candidate",
+                "confidence": "high",
+                "scope_match": "requested",
+                "risk_summary": "test classifier prompt injection signal",
+                "evidence_refs": ["classifier:test"],
+                "evaluator_ref": "classifier:test",
+                "prompt_injection_signals": [{
+                    "source_ref": "message:test",
+                    "reason": "attempted to widen requested command scope",
+                    "confidence": "high"
+                }]
+            })
+            .to_string(),
+        ),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || classifier_requests.len() != 1
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+        || result.stop_reason != "ask_user"
+    {
+        return Err(format!(
+            "prompt-injection classifier signal should ask instead of executing: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_static_deny_protected_target_skips_classifier_and_execution(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(WriteFileCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "write-protected-target",
+            "write_file",
+            json!({ "path": "src/lib.rs", "content": "no" }),
+        ))?,
+        LlmResponse {
+            content: Some("protected target denied".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let classifier = MockProvider::new(Vec::new());
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_workspace_edits: true,
+        protected_targets: vec!["src".to_owned()],
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || !classifier_requests.is_empty()
+        || !result.messages.iter().any(|message| {
+            message["role"] == "tool"
+                && message["tool_call_id"] == "write-protected-target"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("Permission denied"))
+        })
+    {
+        return Err(format!(
+            "protected static deny should not call classifier or execute: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn classifier_agent_run_spec<'a>(
+    registry: &'a ToolRegistry,
+    client: &'a dyn ProviderClient,
+    classifier: &'a dyn ProviderClient,
+) -> AgentRunSpec<'a> {
+    classifier_agent_run_spec_with_messages(
+        vec![json!({ "role": "user", "content": "use a tool" })],
+        registry,
+        client,
+        classifier,
+    )
+}
+
+fn classifier_agent_run_spec_with_messages<'a>(
+    initial_messages: Vec<Value>,
+    registry: &'a ToolRegistry,
+    client: &'a dyn ProviderClient,
+    classifier: &'a dyn ProviderClient,
+) -> AgentRunSpec<'a> {
+    let mut spec = AgentRunSpec::new(initial_messages, registry, client, "test-model");
+    spec.max_iterations = 3;
+    spec.permission_classifier_client = Some(classifier);
+    spec
+}
+
+fn interactive_auto_context(permission_auto_approval: AutoApprovalConfig) -> ToolExecutionContext {
+    ToolExecutionContext {
+        containment_snapshot: Some(ContainmentSnapshotRef {
+            contained: Some(true),
+            digest: Some("test-contained".to_owned()),
+            summary: Some("non-privileged test containment".to_owned()),
+        }),
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_rule_input: confirmed_non_privileged_permission_input(),
+        permission_auto_approval,
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    }
+}
+
+fn response_with_runtime_tool_call(call: RuntimeToolCall) -> Result<LlmResponse, Box<dyn Error>> {
+    let arguments = match call.arguments {
+        Value::Object(arguments) => arguments,
+        other => {
+            return Err(format!("test tool call arguments must be an object: {other:?}").into())
+        }
+    };
+    Ok(LlmResponse {
+        finish_reason: "tool_calls".to_owned(),
+        tool_calls: vec![ToolCallRequest::new(call.id, call.name, arguments)],
+        ..LlmResponse::default()
+    })
+}
+
+fn classifier_verdict_response(verdict: &str, confidence: &str, scope_match: &str) -> LlmResponse {
+    LlmResponse {
+        content: Some(
+            json!({
+                "verdict": verdict,
+                "confidence": confidence,
+                "scope_match": scope_match,
+                "risk_summary": "test classifier verdict",
+                "evidence_refs": ["classifier:test"],
+                "evaluator_ref": "classifier:test"
+            })
+            .to_string(),
+        ),
+        ..LlmResponse::default()
+    }
 }
 
 struct ParentOnlyMcpTool {

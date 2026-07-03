@@ -636,6 +636,7 @@ impl<'a> AgentLoop<'a> {
             self.client,
             self.config.model.clone(),
         );
+        spec.permission_classifier_client = Some(self.client);
         spec.settings = self.config.settings.clone();
         spec.retry_mode = self.config.retry_mode;
         spec.max_iterations = self.config.max_iterations;
