@@ -81,7 +81,7 @@ Status: Implemented. 이 PRD는 permission mode config와 capability taxonomy sl
 1. `PermissionMode`: active run의 unmatched action 처리 mode.
 2. `PermissionModeSource`: `UserLocalConfig`, `WorkspaceConfig`, `CliFlag`, `LocalApiRequest`, `SessionCommand`, `DefaultFallback`.
 3. `PermissionConfigSnapshot`: mode, source, auto approval options, protected target summary, generated at.
-4. `AutoApprovalConfig`: enabled, require docker containment for exec, allow workspace edits, allow proc exec verification, protected targets.
+4. `AutoApprovalConfig`: `permissions.mode: "auto"`에서 파생되는 enabled state와 require docker containment for exec, allow workspace edits, allow proc exec verification, protected targets.
 5. `SafetyCapability`: canonical capability enum.
 6. `PermissionConfigDiagnostics`: normalized mode, rejected source, malformed fields, safe fallback reason.
 

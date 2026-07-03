@@ -1,6 +1,6 @@
 # auto approval permissions 아키텍처 명세
 
-Status: Implemented and closed for PRDs 000-006. 이 문서는 `shacs-bot`의 최종 permission mode와 auto approval 계약을 고정하며, 현재 구현에서 typed helper, runtime policy gate, audit, diagnostics, replay evidence까지 구현 증거가 연결됐다.
+Status: Implemented and closed for PRDs 000-006, with guarded direct classifier-backed auto mode landed and bridge classifier routing still open. 이 문서는 `shacs-bot`의 permission mode와 auto approval 계약을 고정하며, 현재 구현에서 typed helper, runtime policy gate, audit, diagnostics, replay evidence까지 구현 증거가 연결됐다. 현재 `/permission auto` runtime 실행 경로는 local static auto-approval fast path를 먼저 쓰고, direct tool action 중 current user message와 classifier capability ceiling으로 평가 가능한 action에는 provider-backed classifier fallback을 적용한다. Deferred bridge tool classifier routing과 별도 classifier model 설정은 아직 구현 완료 범위가 아니다.
 
 ## 문서 목적
 
@@ -32,7 +32,7 @@ Auto approval이 하는 일:
 1. provider가 요청한 tool call을 `PermissionedAction`으로 정규화한다.
 2. action kind, target, argument digest, session intent, permission mode, Docker containment state를 frozen snapshot으로 묶는다.
 3. 정적 deny rule과 protected target rule을 먼저 적용한다.
-4. 필요한 경우 별도 evaluator 또는 classifier가 action이 사용자 요청 범위 안에 있는지 평가한다.
+4. 필요한 경우 별도 evaluator 또는 classifier가 action이 사용자 요청 범위 안에 있는지 평가한다. 현재 구현은 local static evaluator verdict를 합성하는 fast path를 먼저 적용하고, direct tool action 중 current user message와 classifier capability ceiling으로 평가 가능한 action에 대해서만 provider-backed classifier fallback을 호출한다. Deferred bridge tool classifier routing은 후속 구현 범위다.
 5. verdict를 `allow`, `ask`, `deny` 중 하나로 내리고 audit record를 남긴다.
 6. `allow`일 때만 tool runtime으로 action을 넘긴다.
 7. `ask`일 때는 사용자에게 risk summary와 선택지를 보여 준다.
@@ -110,7 +110,7 @@ Auto approval이 하지 않는 일:
 
 ## 구현 상태
 
-Spec 022의 PRD 000-006은 현재 구현에서 implemented, closed 상태다. 닫힌 범위는 permission mode와 capability taxonomy, permissioned action normalization, static rule과 protected target 판정, runtime policy decision table, formal approval correlation, runtime boundary ceiling, audit diagnostics, replay invariant, contract matrix다.
+Spec 022의 PRD 000-006은 현재 구현에서 implemented, closed 상태다. 닫힌 범위는 permission mode와 capability taxonomy, permissioned action normalization, static rule과 protected target 판정, runtime policy decision table, formal approval correlation, runtime boundary ceiling, audit diagnostics, replay invariant, contract matrix다. 이 closure는 evaluator verdict를 소비하는 policy와 local auto-approval fast path를 닫고, eligible direct tool action의 guarded provider-backed classifier fallback까지 포함한다. Deferred bridge tool classifier routing과 별도 classifier model 설정은 아직 남아 있다.
 
 구현 증거는 다음 경로에 있다.
 
@@ -140,6 +140,7 @@ Spec 022의 PRD 000-006은 현재 구현에서 implemented, closed 상태다. �
 2. Audit persistence storage backend나 diagnostics bundle layout을 Spec 022가 구현했다는 뜻이 아니다.
 3. Provider-specific trace format을 구현했다는 뜻이 아니다.
 4. Docker primary containment를 넘어서는 per-command sandbox backend를 구현했다는 뜻이 아니다.
+5. Deferred bridge tool까지 포함한 완전한 Claude Code식 classifier coverage, 별도 classifier model 설정, classifier 비용/지연 회계, classifier denial fallback counter가 구현됐다는 뜻이 아니다.
 
 ---
 
@@ -530,12 +531,11 @@ Denied outcome은 provider에 tool error로만 숨기지 않고 diagnostics와 a
 ```json
 {
   "permissions": {
-    "defaultMode": "default",
+    "mode": "default",
     "autoApproval": {
-      "enabled": false,
       "requireDockerContainmentForExec": true,
       "allowWorkspaceEdits": true,
-      "allowProcExecVerification": true,
+      "allowProcExecVerification": false,
       "protectedTargets": [".git", ".shacs-bot/auth.json"]
     }
   }
@@ -547,8 +547,9 @@ Config rules:
 1. Workspace config는 `auto`를 제안할 수 있지만 user-local opt-in 없이 켤 수 없다.
 2. Workspace config는 protected target을 줄일 수 없다.
 3. User-local config는 자신을 더 제한할 수 있다.
-4. `bypass_permissions`는 explicit runtime flag 또는 user-local opt-in이 필요하다.
-5. Malformed config는 permission widening이 아니라 safe default로 돌아간다.
+4. User-local `permissions.mode: "auto"`는 auto approval opt-in이며, `permissions.autoApproval`은 세부 옵션을 조정한다.
+5. `bypass_permissions`는 explicit runtime flag 또는 user-local opt-in이 필요하다.
+6. Malformed config는 permission widening이 아니라 safe default로 돌아간다.
 
 ---
 
