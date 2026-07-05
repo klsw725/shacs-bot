@@ -6,7 +6,7 @@ Status: Implemented.
 
 구현 증거는 `crates/shacs-core/src/runtime/permission_audit.rs`, `crates/shacs-core/src/runtime/permission_replay.rs`, `crates/shacs-core/src/runtime/permission_policy.rs`, `crates/shacs-core/tests/permission_policy.rs`, `crates/shacs-core/tests/runtime_loop.rs`다. 대표 테스트는 `minimal_audit_record_is_redacted_and_has_decision_evidence`, `permission_audit_diagnostics_count_decisions_and_failure_reasons`, `permission_replay_invariants_are_fail_closed_for_old_denies`, `permission_contract_matrix_declares_required_release_evidence_buckets`, `replay_runner_executes_selected_cases_only_and_never_dispatches_live_tools`다.
 
-이 closure는 redacted typed audit record, diagnostics summary, replay invariant, release evidence bucket을 닫는다. Physical storage backend, diagnostics UI layout, provider-specific trace format은 이 PRD가 구현했다고 주장하지 않는다.
+이 closure는 redacted typed audit record, diagnostics summary, replay invariant, release evidence bucket을 닫는다. Physical storage backend, diagnostics UI layout, provider-specific trace format은 이 PRD가 구현했다고 주장하지 않는다. PRD 007의 recent classifier denial summary는 이 PRD의 redaction 기준을 소비한다.
 
 ## 목표
 
@@ -63,6 +63,7 @@ Status: Implemented.
 10. 더 느슨한 rule replay는 old deny를 자동 allow로 바꾸면 안 된다.
 11. Contract matrix는 Spec 022의 mode, capability, evaluator, approval, inheritance, audit cases를 모두 포함해야 한다.
 12. Release evidence는 docs, unit, integration, diagnostics, redaction, replay buckets로 나뉘어야 한다.
+13. Recent classifier denial summary는 audit보다 좁은 inspect surface이며, raw command, raw arguments, raw prompt, raw classifier response, env/config/secret/host path를 저장하면 안 된다.
 
 ## 데이터/상태 모델
 
@@ -102,6 +103,7 @@ Status: Implemented.
 7. Stricter rule replay가 old allow를 deny로 바꿀 수 있는지 확인한다.
 8. Looser rule replay가 old deny를 automatic allow로 바꾸지 않는지 확인한다.
 9. Spec 022 contract matrix의 모든 필수 row가 테스트로 연결되는지 확인한다.
+10. Recent classifier denial summary가 redaction 기준을 위반하지 않는지 확인한다.
 
 ## 완료 기준
 

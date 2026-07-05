@@ -62,7 +62,7 @@ Docker는 primary containment로 인정하지만, `proc_exec` permission check�
 6. `proc_exec` action은 Docker 안에서도 command summary와 dangerous command classification을 가져야 한다.
 7. Command summary를 만들 수 없으면 `proc_exec`는 allow 후보가 되면 안 된다.
 8. Docker snapshot은 contained, runtime, root user, privileged, host mounts summary, network mode를 표현해야 한다.
-9. Docker snapshot이 unknown이면 `auto` mode의 `proc_exec` 자동 승인 범위는 좁아져야 한다.
+9. Docker snapshot이 unknown이면 `auto` mode의 `proc_exec` 자동 승인 범위는 좁아져야 한다. Direct classifier-backed `proc_exec` permission trust는 summary 문자열이 아니라 structured `official-container` backend evidence, non-root runtime, unsafe marker 부재를 함께 확인해야 한다.
 10. `bypass_permissions`는 confirmed containment 없이는 활성화되면 안 된다.
 11. Root 또는 privileged container에서 `bypass_permissions` activation은 deny 또는 explicit circuit breaker로 접어야 한다.
 12. Exec sandbox backend 부재는 실패가 아니지만 command rule과 audit 부재는 실패다.
@@ -82,7 +82,7 @@ Docker는 primary containment로 인정하지만, `proc_exec` permission check�
 2. Capability classifier가 action capability set을 계산한다.
 3. Target classifier가 protected target 여부를 계산한다.
 4. `proc_exec`이면 command summary를 만든다.
-5. Docker containment snapshot을 action snapshot에 연결한다.
+5. Docker containment snapshot을 action snapshot에 연결한다. Generic container 또는 summary-only official-looking text는 permission-rule trust를 만들지 않고, structured official backend evidence가 없으면 unknown으로 접는다.
 6. Static deny와 protected target rule을 적용한다.
 7. Rule layer가 evaluator 호출 가능 여부 또는 즉시 ask/deny 필요 여부를 반환한다.
 
@@ -99,7 +99,7 @@ Docker는 primary containment로 인정하지만, `proc_exec` permission check�
 
 1. Protected target write가 evaluator allow 없이 ask/deny로 접히는지 확인한다.
 2. Auth store raw read가 deny되는지 확인한다.
-3. Docker snapshot unknown인 `proc_exec`가 auto allow되지 않는지 확인한다.
+3. Docker snapshot unknown이거나 summary-only official-looking evidence만 있는 `proc_exec`가 auto allow되지 않는지 확인한다.
 4. `bypass_permissions`가 containment unknown에서 활성화되지 않는지 확인한다.
 5. Root 또는 privileged container에서 bypass activation이 거부되는지 확인한다.
 6. Command summary 실패가 allow로 이어지지 않는지 확인한다.

@@ -1,6 +1,6 @@
 # auto approval permissions 아키텍처 명세
 
-Status: Implemented and closed for PRDs 000-006, with guarded direct classifier-backed auto mode landed and bridge classifier routing still open. 이 문서는 `shacs-bot`의 permission mode와 auto approval 계약을 고정하며, 현재 구현에서 typed helper, runtime policy gate, audit, diagnostics, replay evidence까지 구현 증거가 연결됐다. 현재 `/permission auto` runtime 실행 경로는 local static auto-approval fast path를 먼저 쓰고, direct tool action 중 current user message와 classifier capability ceiling으로 평가 가능한 action에는 provider-backed classifier fallback을 적용한다. Deferred bridge tool classifier routing과 별도 classifier model 설정은 아직 구현 완료 범위가 아니다.
+Status: Implemented and closed for PRDs 000-006, with guarded direct classifier-backed auto mode landed. PRD 007 recent denial visibility, process-local exact one-shot retry, and deferred bridge classifier routing are implemented. 이 문서는 `shacs-bot`의 permission mode와 auto approval 계약을 고정하며, 현재 구현에서 typed helper, runtime policy gate, audit, diagnostics, replay evidence까지 구현 증거가 연결됐다. 현재 `/permission auto` runtime 실행 경로는 local static auto-approval fast path를 먼저 쓰고, direct tool action 및 resolved deferred bridge `tool_call` 중 current user message와 classifier capability ceiling으로 평가 가능한 action에는 provider-backed classifier fallback을 적용한다. 별도 classifier model 설정은 아직 구현 완료 범위가 아니다.
 
 ## 문서 목적
 
@@ -14,6 +14,7 @@ Status: Implemented and closed for PRDs 000-006, with guarded direct classifier-
 4. `plan`, `default`, `accept_edits`, `auto`, `dont_ask`, `bypass_permissions` mode의 최종 의미를 구분한다.
 5. LLM 또는 classifier 판단 실패, 낮은 확신, prompt injection 의심, scope 불일치가 자동 실행으로 이어지지 않게 한다.
 6. Rust 구현에서 permission snapshot, approval request, action digest, evaluator verdict, audit record, stale decision rejection 타입과 테스트를 확인할 수 있게 한다.
+7. Classifier가 `deny_candidate`를 낸 최근 action을 사용자가 redacted summary로 확인하고, formal approval correlation을 거친 exact one-shot retry만 허용하는 후속 계약을 정의한다.
 
 핵심 문장:
 
@@ -32,11 +33,12 @@ Auto approval이 하는 일:
 1. provider가 요청한 tool call을 `PermissionedAction`으로 정규화한다.
 2. action kind, target, argument digest, session intent, permission mode, Docker containment state를 frozen snapshot으로 묶는다.
 3. 정적 deny rule과 protected target rule을 먼저 적용한다.
-4. 필요한 경우 별도 evaluator 또는 classifier가 action이 사용자 요청 범위 안에 있는지 평가한다. 현재 구현은 local static evaluator verdict를 합성하는 fast path를 먼저 적용하고, direct tool action 중 current user message와 classifier capability ceiling으로 평가 가능한 action에 대해서만 provider-backed classifier fallback을 호출한다. Deferred bridge tool classifier routing은 후속 구현 범위다.
+4. 필요한 경우 별도 evaluator 또는 classifier가 action이 사용자 요청 범위 안에 있는지 평가한다. 현재 구현은 local static evaluator verdict를 합성하는 fast path를 먼저 적용하고, direct tool action 및 resolved deferred bridge `tool_call` 중 current user message와 classifier capability ceiling으로 평가 가능한 action에 provider-backed classifier fallback을 호출한다.
 5. verdict를 `allow`, `ask`, `deny` 중 하나로 내리고 audit record를 남긴다.
 6. `allow`일 때만 tool runtime으로 action을 넘긴다.
 7. `ask`일 때는 사용자에게 risk summary와 선택지를 보여 준다.
 8. `deny`일 때는 denied outcome을 provider와 user-facing projection에 남긴다.
+9. Classifier-origin `deny_candidate`는 bounded recent denial list에 sanitized summary로 남겨 사용자가 나중에 검토할 수 있게 한다.
 
 Auto approval이 하지 않는 일:
 
@@ -47,6 +49,7 @@ Auto approval이 하지 않는 일:
 5. secret read, external delivery, persistent automation, app install, self modification을 조용히 승인하지 않는다.
 6. 사용자에게 보이지 않는 장기 권한 grant를 만들지 않는다.
 7. 구현된 runtime gate와 typed helper를 TUI widget, channel별 button UI, storage backend, provider-specific trace 구현으로 과장하지 않는다.
+8. Recent denial retry를 raw command replay, hidden allow rule, persistent permission widening으로 만들지 않는다.
 
 ---
 
@@ -95,6 +98,7 @@ Auto approval이 하지 않는 일:
 7. Subagent, app, MCP, deferred tool call의 permission ceiling.
 8. 사용자에게 물어야 하는 경우와 자동으로 거절해야 하는 경우.
 9. Audit, diagnostics, replay, contract test matrix.
+10. Classifier-origin recent denial visibility와 exact one-shot approve/retry parity.
 
 이 문서는 다음을 정의하지 않는다.
 
@@ -105,12 +109,13 @@ Auto approval이 하지 않는 일:
 5. Secret vault backend.
 6. 원격 운영 콘솔과 다중 사용자 권한 관리.
 7. PRD별 세부 일정. 이 문서는 owner spec이고 실행 문서는 `prds/`가 소유한다.
+8. Persisted executable retry payload. Recent denial summary는 남길 수 있지만 실행 가능한 retry payload는 process-local이어야 한다.
 
 ---
 
 ## 구현 상태
 
-Spec 022의 PRD 000-006은 현재 구현에서 implemented, closed 상태다. 닫힌 범위는 permission mode와 capability taxonomy, permissioned action normalization, static rule과 protected target 판정, runtime policy decision table, formal approval correlation, runtime boundary ceiling, audit diagnostics, replay invariant, contract matrix다. 이 closure는 evaluator verdict를 소비하는 policy와 local auto-approval fast path를 닫고, eligible direct tool action의 guarded provider-backed classifier fallback까지 포함한다. Deferred bridge tool classifier routing과 별도 classifier model 설정은 아직 남아 있다.
+Spec 022의 PRD 000-006은 현재 구현에서 implemented, closed 상태다. 닫힌 범위는 permission mode와 capability taxonomy, permissioned action normalization, static rule과 protected target 판정, runtime policy decision table, formal approval correlation, runtime boundary ceiling, audit diagnostics, replay invariant, contract matrix다. 이 closure는 evaluator verdict를 소비하는 policy와 local auto-approval fast path를 닫고, eligible direct tool action의 guarded provider-backed classifier fallback까지 포함한다. PRD 007은 classifier-origin denial의 bounded digest-only sanitized visibility, `/permission recent`, process-local exact one-shot retry token, formal approval retry execution, and resolved deferred bridge `tool_call` classifier routing까지 구현됐다. 별도 classifier model 설정은 아직 남아 있다.
 
 구현 증거는 다음 경로에 있다.
 
@@ -140,7 +145,7 @@ Spec 022의 PRD 000-006은 현재 구현에서 implemented, closed 상태다. �
 2. Audit persistence storage backend나 diagnostics bundle layout을 Spec 022가 구현했다는 뜻이 아니다.
 3. Provider-specific trace format을 구현했다는 뜻이 아니다.
 4. Docker primary containment를 넘어서는 per-command sandbox backend를 구현했다는 뜻이 아니다.
-5. Deferred bridge tool까지 포함한 완전한 Claude Code식 classifier coverage, 별도 classifier model 설정, classifier 비용/지연 회계, classifier denial fallback counter가 구현됐다는 뜻이 아니다.
+5. Resolved deferred bridge `tool_call` classifier routing은 구현됐지만, 모든 deferred bridge tool family를 포함한 완전한 Claude Code식 classifier coverage, 별도 classifier model 설정, classifier 비용/지연 회계, classifier denial fallback counter가 구현됐다는 뜻은 아니다.
 
 ---
 
@@ -223,7 +228,7 @@ Action이 사용자의 요청 범위와 active scope 안에 있는지 평가하�
 `bypass_permissions`는 다음 조건을 모두 만족할 때만 사용할 수 있다.
 
 1. 사용자가 명시 flag 또는 user-local config로 켠다.
-2. runtime이 Docker 또는 동등한 recognized containment 안에 있다고 확인한다.
+2. runtime이 Docker 또는 동등한 recognized containment 안에 있다고 확인한다. `proc_exec` permission-rule trust는 더 좁게, 공식 package/Compose 경로의 `official-container` backend evidence와 non-root, non-privileged 실행 조건을 확인해야 한다.
 3. runtime이 root 또는 host privileged mode로 실행 중이면 거절한다.
 4. protected target circuit breaker는 여전히 남긴다.
 
@@ -283,7 +288,7 @@ Evaluator input은 다음을 포함해야 한다.
 
 Evaluator output은 다음을 포함해야 한다.
 
-1. `verdict`: `allow_candidate`, `ask_user`, `deny_candidate`, `insufficient_context`.
+1. `verdict`: `allow_candidate`, `ask_user`, `deny_candidate`. Context 부족, parse 실패, provider 오류, enum 외 값은 allow가 아니라 fail-closed `ask` 또는 `deny`로 접는다.
 2. `confidence`: bounded score 또는 enum.
 3. `scope_match`: requested, adjacent, unrelated, hostile 중 하나.
 4. `risk_summary`: 사용자에게 보여 줄 수 있는 짧은 설명.
@@ -302,6 +307,8 @@ Evaluator는 다음 경우 반드시 `allow_candidate`를 내면 안 된다.
 8. `proc_exec` command summary를 안전하게 분해할 수 없다.
 
 Evaluator verdict는 최종 permission decision이 아니다. Runtime policy가 mode, static rule, protected target, approval cache를 합성해 최종 decision을 만든다.
+
+현재 provider-backed classifier fallback은 strict JSON object contract를 따른다. Exact JSON object 또는 전체 fenced JSON block만 verdict payload로 인정하며, prose 안에 섞인 JSON, nested verdict object, alias field는 allow 후보로 쓰지 않는다. Classifier가 반환한 `evaluator_ref` 같은 provenance 문자열은 diagnostic source가 될 수 없고, runtime은 classifier-backed diagnostic source를 고정된 `permission_classifier`로만 기록한다.
 
 ---
 
@@ -331,6 +338,8 @@ Docker snapshot은 최소한 다음을 표현해야 한다.
 6. `network_mode`: none, bridge, host, unknown 중 하나.
 
 `auto` mode에서 Docker snapshot이 unknown이면 `proc_exec`의 자동 승인 범위를 좁혀야 한다. `bypass_permissions`는 Docker snapshot이 contained로 확인되지 않으면 사용할 수 없다.
+
+Permission rule의 `proc_exec` containment trust는 summary 문자열 추론으로 만들지 않는다. 현재 구현에서 direct classifier-backed `proc_exec` 자동 승인은 structured backend가 `official-container` 계열이고, runtime이 non-root이며, unsafe marker가 없다는 관찰 증거가 있을 때만 containment를 confirmed non-privileged로 소비한다. Generic Docker/devcontainer evidence나 summary-only official-looking text는 mode activation의 참고 evidence일 수는 있지만, 이 permission-rule trust 조건을 대체하지 않는다.
 
 ---
 

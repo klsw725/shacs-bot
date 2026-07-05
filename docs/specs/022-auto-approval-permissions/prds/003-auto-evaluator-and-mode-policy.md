@@ -2,11 +2,11 @@
 
 ## 구현 상태
 
-Status: Partially implemented. Policy consumption, local static auto-approval fast path, and guarded direct provider-backed classifier fallback are implemented; deferred bridge classifier routing is open.
+Status: Partially implemented. Policy consumption, local static auto-approval fast path, guarded direct provider-backed classifier fallback, and resolved deferred bridge classifier routing are implemented; separate classifier model configuration remains open.
 
 구현 증거는 `crates/shacs-core/src/runtime/permission_policy.rs`, `crates/shacs-core/src/runtime/permission_rules.rs`, `crates/shacs-core/src/runtime/tool_execution.rs`, `crates/shacs-core/src/runtime/tool_search.rs`, `crates/shacs-core/tests/permission_policy.rs`, `crates/shacs-core/tests/runtime.rs`다. 대표 테스트는 `evaluator_uncertainty_and_prompt_injection_never_allow`, `runtime_denies_direct_proc_exec_without_executing_tool`, `bridge_denies_deferred_proc_exec_without_executing_underlying_tool`다.
 
-이 closure는 evaluator verdict를 권한 확정자가 아닌 advisory signal로 소비하는 policy table과 runtime handoff gate를 닫는다. 현재 `/permission auto`는 local static rule과 capability allowlist로 `local-auto-approval` verdict를 먼저 합성하고, local fast path로 해결되지 않은 direct tool action 중 current user message와 classifier capability ceiling으로 평가 가능한 action에는 provider-backed classifier verdict를 staging한다. Deferred bridge tool classifier routing, 별도 classifier model 설정, provider-specific trace 구현은 아직 닫히지 않았다.
+이 closure는 evaluator verdict를 권한 확정자가 아닌 advisory signal로 소비하는 policy table과 runtime handoff gate를 닫는다. 현재 `/permission auto`는 local static rule과 capability allowlist로 `local-auto-approval` verdict를 먼저 합성하고, local fast path로 해결되지 않은 direct tool action 및 resolved deferred bridge `tool_call` 중 current user message와 classifier capability ceiling으로 평가 가능한 action에는 provider-backed classifier verdict를 staging한다. 별도 classifier model 설정과 provider-specific trace 구현은 아직 닫히지 않았다.
 
 ## 목표
 
@@ -41,6 +41,7 @@ Status: Partially implemented. Policy consumption, local static auto-approval fa
 6. `allow | ask | deny` final decision shape.
 7. Tool runtime handoff rule.
 8. Local static auto-approval fast path.
+9. Classifier-origin denial을 PRD 007 recent denial surface로 넘길 수 있는 final decision provenance.
 
 ## 범위 제외
 
@@ -54,10 +55,10 @@ Status: Partially implemented. Policy consumption, local static auto-approval fa
 
 1. Runtime policy는 static deny, protected target, permission mode baseline, explicit allow/ask rule, evaluator verdict, approval state를 순서대로 합성해야 한다.
 2. `deny`는 항상 `allow`보다 우선해야 한다.
-3. Evaluator는 `allow_candidate`, `ask_user`, `deny_candidate`, `insufficient_context` 중 하나를 반환해야 한다.
+3. Evaluator는 `allow_candidate`, `ask_user`, `deny_candidate` 중 하나를 반환해야 한다. Context 부족, parse 실패, provider 오류, enum 외 값은 allow가 아니라 fail-closed `ask` 또는 `deny`로 접는다.
 4. Evaluator output은 confidence, scope match, risk summary, evidence refs, expiration을 포함해야 한다.
 5. Evaluator `allow_candidate`는 최종 allow가 아니다.
-6. Runtime policy는 protected target, denied mode, stale snapshot, insufficient context를 evaluator allow보다 우선해야 한다.
+6. Runtime policy는 protected target, denied mode, stale snapshot, classifier failure 또는 uncertainty를 evaluator allow보다 우선해야 한다.
 7. Evaluator timeout, parse failure, low confidence, prompt injection suspicion은 자동 allow로 이어지면 안 된다.
 8. `Plan` mode는 write, exec, delivery, schedule을 deny 또는 ask가 아니라 실행 불가로 접어야 한다.
 9. `Default` mode는 low-risk read와 명시 allow rule 외 side effect를 ask로 보낸다.
@@ -66,6 +67,7 @@ Status: Partially implemented. Policy consumption, local static auto-approval fa
 12. `DontAsk` mode는 unresolved ask를 deny로 바꾼다.
 13. `BypassPermissions` mode도 circuit breaker target과 containment precondition을 우회하지 않는다.
 14. Final decision이 `allow`일 때만 tool runtime으로 action을 넘겨야 한다.
+15. Classifier-origin `deny_candidate` final decision은 retryable permission grant가 아니라 PRD 007의 sanitized recent denial 후보일 뿐이다. Static deny, protected target, parser failure, provider error, low confidence, scope mismatch는 retryable recent denial 후보가 아니다.
 
 ## 데이터/상태 모델
 
@@ -103,6 +105,7 @@ Status: Partially implemented. Policy consumption, local static auto-approval fa
 5. `AcceptEdits`가 `proc_exec`를 mode만으로 allow하지 않는지 확인한다.
 6. `Auto` mode가 evaluator 없이 side effect를 silent allow하지 않는지 확인한다.
 7. `allow` decision만 tool runtime handoff를 만드는지 확인한다.
+8. Classifier-origin deny와 non-classifier deny가 provenance로 구분되어 PRD 007이 retryable 후보를 좁힐 수 있는지 확인한다.
 
 ## 완료 기준
 

@@ -6,7 +6,7 @@ Status: Implemented.
 
 구현 증거는 `crates/shacs-core/src/runtime/permission_approval.rs`, `crates/shacs-core/src/runtime/permission_policy.rs`, `crates/shacs-core/src/runtime/tool_execution.rs`, `crates/shacs-core/src/runtime/tool_search.rs`, `crates/shacs-core/tests/permission_policy.rs`, `crates/shacs-core/tests/runtime.rs`, `crates/shacs-core/tests/runtime_loop.rs`다. 대표 테스트는 `approval_correlation_rejects_mismatched_expired_inspect_only_and_consumed`, `runtime_ask_user_skips_later_denied_tool_without_permission_message`, `bridge_ask_user_skips_later_denied_tool_without_permission_message`, `loop_permission_approval_session_option_reuses_same_session_match`, `loop_permission_approval_session_option_does_not_cross_sessions`, `loop_permission_approval_session_option_clears_on_new_session`다.
 
-이 closure는 typed approval request/decision correlation과 `ask` permission outcome의 non-execution 처리를 닫는다. TUI widget, channel별 button UI, hidden grant store 구현을 주장하지 않는다.
+이 closure는 typed approval request/decision correlation과 `ask` permission outcome의 non-execution 처리를 닫는다. TUI widget, channel별 button UI, hidden grant store 구현을 주장하지 않는다. PRD 007의 recent classifier denial retry는 이 correlation을 소비해야 하며 별도 bypass approval path를 만들 수 없다.
 
 ## 목표
 
@@ -38,6 +38,7 @@ Status: Implemented.
 5. User-facing approval prompt content.
 6. Approval cache scope와 expiration.
 7. Interactive/non-interactive fallback.
+8. Recent classifier denial retry approval이 기존 request/decision correlation을 재사용해야 한다는 소비 규칙.
 
 ## 범위 제외
 
@@ -61,6 +62,7 @@ Status: Implemented.
 10. Non-interactive `DontAsk` flow는 approval prompt를 만들지 않고 deny로 접어야 한다.
 11. Auto-approved action도 user-facing summary에서 숨기면 안 된다.
 12. Approval cache는 사용자에게 보이지 않는 장기 권한 grant를 만들면 안 된다.
+13. Recent denial retry approval은 exact action one-shot scope만 허용하며, hidden allow rule이나 session-wide widening으로 바뀌면 안 된다.
 
 ## 데이터/상태 모델
 
