@@ -11,7 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::openai_compatible::{
     build_headers, build_responses_request, parse_openai_responses_response,
     parse_openai_responses_stream, OpenAiCompatibleRequestParts, OpenAiHttpResponse,
-    OpenAiHttpStreamResponse, OpenAiHttpTransport, UreqOpenAiHttpTransport,
+    OpenAiHttpStreamResponse, OpenAiHttpTransport, OpenAiResponsesStreamState,
+    UreqOpenAiHttpTransport,
 };
 
 const STREAMING_NOT_IMPLEMENTED: &str = "OpenAI-compatible streaming transport is not implemented";
@@ -77,8 +78,17 @@ where
             true,
             &self.session_affinity,
         );
-        match self.transport.post_json_stream(parts) {
-            Ok(response) => parse_azure_stream_response(response, on_event),
+        let mut stream = OpenAiResponsesStreamState::default();
+        match self.transport.post_json_stream_frames(parts, &mut |frame| {
+            stream.process_frame_text(frame, on_event)
+        }) {
+            Ok(response) => {
+                if (200..300).contains(&response.status) {
+                    stream.finish(on_event)
+                } else {
+                    parse_azure_stream_response(response, on_event)
+                }
+            }
             Err(error) if error.to_string().contains(STREAMING_NOT_IMPLEMENTED) => {
                 self.chat(request)
             }

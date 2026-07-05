@@ -3,11 +3,18 @@ use shacs_providers::{
     build_azure_openai_headers, build_azure_openai_responses_request,
     resolve_azure_openai_api_base, AzureOpenAiClient, GenerationSettings,
     OpenAiCompatibleRequestParts, OpenAiHttpResponse, ProviderClient, ProviderConfig,
-    ProviderEvent, ProviderRequest,
+    ProviderEvent, ProviderRequest, UreqOpenAiHttpTransport,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+type RequestCaptureHandle = thread::JoinHandle<Result<String, String>>;
 
 #[test]
 fn azure_openai_base_url_targets_openai_v1_responses() -> Result<(), Box<dyn Error>> {
@@ -212,6 +219,124 @@ fn azure_openai_streaming_uses_responses_sse_events() -> Result<(), Box<dyn Erro
         );
     }
     Ok(())
+}
+
+#[test]
+fn azure_openai_client_emits_stream_delta_before_response_eof() -> Result<(), Box<dyn Error>> {
+    let (base_url, request_handle) = serve_slow_sse_response(
+        vec![
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"early\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+            "data: [DONE]\n\n",
+        ],
+        Duration::from_millis(500),
+    )?;
+    let client = AzureOpenAiClient::with_session_affinity(
+        ProviderConfig::default(),
+        UreqOpenAiHttpTransport::with_timeout(base_url, Duration::from_secs(2)),
+        "affinity-test",
+    );
+    let (event_tx, event_rx) = mpsc::channel();
+    let client_handle = thread::spawn(move || {
+        client
+            .chat_stream(
+                ProviderRequest {
+                    model: "deployment-a".to_owned(),
+                    messages: vec![json!({"role": "user", "content": "hi"})],
+                    tools: Vec::new(),
+                    settings: GenerationSettings::default(),
+                    tool_choice: None,
+                },
+                &mut |event| {
+                    let _ = event_tx.send(event);
+                },
+            )
+            .map_err(|error| error.to_string())
+    });
+    let first_event = event_rx.recv_timeout(Duration::from_millis(250))?;
+    if first_event
+        != (ProviderEvent::TextDelta {
+            text: "early".to_owned(),
+        })
+    {
+        return Err(format!("first Azure event should be early delta: {first_event:?}").into());
+    }
+    let response = client_handle
+        .join()
+        .map_err(|_| "client stream thread panicked")??;
+    let raw_request = request_handle
+        .join()
+        .map_err(|_| "request capture thread panicked")??;
+    if response.content.as_deref() != Some("early done")
+        || !raw_request.starts_with("POST /openai/v1/responses HTTP/1.1")
+    {
+        return Err(format!(
+            "Azure client stream result drifted: request={raw_request:?} response={response:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn serve_slow_sse_response(
+    frames: Vec<&'static str>,
+    delay: Duration,
+) -> Result<(String, RequestCaptureHandle), Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+        let request = read_http_request(&mut stream)?;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .map_err(|error| error.to_string())?;
+        for frame in frames {
+            stream
+                .write_all(frame.as_bytes())
+                .and_then(|_| stream.flush())
+                .map_err(|error| error.to_string())?;
+            thread::sleep(delay);
+        }
+        Ok(request)
+    });
+    Ok((format!("http://{address}/openai/v1/"), handle))
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<String, String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    loop {
+        let mut chunk = [0; 512];
+        let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if http_request_complete(&bytes)? {
+            break;
+        }
+    }
+    String::from_utf8(bytes).map_err(|error| error.to_string())
+}
+
+fn http_request_complete(bytes: &[u8]) -> Result<bool, String> {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Ok(false);
+    };
+    let header_text =
+        String::from_utf8(bytes[..header_end].to_vec()).map_err(|error| error.to_string())?;
+    let content_length = header_text
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    Ok(bytes.len() >= header_end + 4 + content_length)
 }
 
 struct AzureStreamTransport;
