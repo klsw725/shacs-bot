@@ -2067,6 +2067,14 @@ fn observability_tool_callback(
     }))
 }
 
+fn runtime_verbose_tool_event_callback() -> RuntimeToolEventCallback {
+    Arc::new(move |event: &ToolEvent| {
+        if event.name == "permission_auto_approval" {
+            eprintln!("Permission auto approval {}", event.detail);
+        }
+    })
+}
+
 fn selected_skill_notification_callback(
     context_builder: ContextBuilder,
     bus: MessageBus,
@@ -14309,6 +14317,9 @@ impl AgentLoopChatCompletionAdapter {
             .runtime_verbose
             .then(|| Arc::new(RuntimeVerboseLogHook) as Arc<dyn AgentHook>);
         let mut tool_event_callbacks = vec![skill_notification_callback];
+        if self.runtime_verbose {
+            tool_event_callbacks.push(runtime_verbose_tool_event_callback());
+        }
         if !observability_hooks.is_empty() {
             let pending = Arc::new(Mutex::new(BTreeMap::new()));
             let observability_hook: Arc<dyn AgentHook> = Arc::new(ObservabilityToolStartHook::new(
