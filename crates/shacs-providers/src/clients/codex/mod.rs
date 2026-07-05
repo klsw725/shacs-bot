@@ -1,4 +1,7 @@
-use crate::clients::openai_compatible::{build_responses_request, parse_openai_responses_stream};
+use crate::clients::openai_compatible::{
+    build_responses_request, parse_openai_responses_stream, OpenAiResponsesStreamState,
+};
+use crate::clients::sse::{read_sse_frame_texts, split_sse_frame_texts};
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
 use crate::provider::{ProviderClient, ProviderEvent, ProviderRequest};
@@ -33,6 +36,22 @@ pub trait CodexHttpTransport: Send + Sync {
         &self,
         request: CodexRequestParts,
     ) -> Result<CodexHttpStreamResponse, ProviderError>;
+
+    fn post_json_stream_frames(
+        &self,
+        request: CodexRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+    ) -> Result<CodexHttpStreamResponse, ProviderError> {
+        let response = self.post_json_stream(request)?;
+        if (200..300).contains(&response.status) {
+            for frame in split_sse_frame_texts(&response.body) {
+                if on_frame(&frame)? {
+                    break;
+                }
+            }
+        }
+        Ok(response)
+    }
 }
 
 impl<F> CodexHttpTransport for F
@@ -62,7 +81,8 @@ impl UreqCodexHttpTransport {
         Self {
             base_url: base_url.into(),
             agent: ureq::Agent::config_builder()
-                .timeout_global(Some(timeout))
+                .timeout_connect(Some(timeout))
+                .timeout_recv_body(Some(timeout))
                 .http_status_as_error(false)
                 .build()
                 .new_agent(),
@@ -95,16 +115,80 @@ impl CodexHttpTransport for UreqCodexHttpTransport {
         let mut response = http_request.send(body).map_err(map_ureq_error)?;
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
-        let body = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|error| ProviderError::Api {
-                status: Some(status),
-                message: error.to_string(),
-                retryable: false,
-                headers: headers.clone(),
-                body: None,
-            })?;
+        let body = if (200..300).contains(&status) {
+            read_sse_frame_texts(
+                response.body_mut().as_reader(),
+                |_| Ok(false),
+                |error| ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                },
+            )?
+        } else {
+            response
+                .body_mut()
+                .read_to_string()
+                .map_err(|error| ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                })?
+        };
+        Ok(CodexHttpStreamResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    fn post_json_stream_frames(
+        &self,
+        request: CodexRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+    ) -> Result<CodexHttpStreamResponse, ProviderError> {
+        let url = join_base_and_path(&self.base_url, &request.path)?;
+        let mut http_request = self
+            .agent
+            .post(&url)
+            .header("Accept", "text/event-stream")
+            .content_type("application/json");
+        for (key, value) in &request.headers {
+            if key.eq_ignore_ascii_case("accept") || key.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
+            http_request = http_request.header(key, value);
+        }
+        let body = serde_json::to_string(&request.body).map_err(|error| api_error(None, error))?;
+        let mut response = http_request.send(body).map_err(map_ureq_error)?;
+        let status = response.status().as_u16();
+        let headers = response_headers(response.headers());
+        let body = if (200..300).contains(&status) {
+            read_sse_frame_texts(response.body_mut().as_reader(), on_frame, |error| {
+                ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                }
+            })?
+        } else {
+            response
+                .body_mut()
+                .read_to_string()
+                .map_err(|error| ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                })?
+        };
         Ok(CodexHttpStreamResponse {
             status,
             headers,
@@ -151,8 +235,17 @@ where
         on_event: &mut dyn FnMut(ProviderEvent),
     ) -> Result<LlmResponse, ProviderError> {
         let parts = build_codex_responses_request(&request, &self.config);
-        let response = self.transport.post_json_stream(parts)?;
-        parse_codex_stream_http_response(response, on_event)
+        let mut stream = OpenAiResponsesStreamState::default();
+        let response = self
+            .transport
+            .post_json_stream_frames(parts, &mut |frame| {
+                stream.process_frame_text(frame, on_event)
+            })?;
+        if (200..300).contains(&response.status) {
+            stream.finish(on_event)
+        } else {
+            parse_codex_stream_http_response(response, on_event)
+        }
     }
 }
 
