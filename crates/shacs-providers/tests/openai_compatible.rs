@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -1297,6 +1298,95 @@ fn ureq_transport_posts_stream_request_and_preserves_sse_body() -> Result<(), Bo
 }
 
 #[test]
+fn ureq_stream_transport_uses_idle_timeout_not_global_wall_clock() -> Result<(), Box<dyn Error>> {
+    let (base_url, request_handle) = serve_slow_sse_response(
+        vec![
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ],
+        Duration::from_millis(110),
+    )?;
+    let transport = UreqOpenAiHttpTransport::with_timeout(base_url, Duration::from_millis(250));
+    let response = transport.post_json_stream(OpenAiCompatibleRequestParts {
+        path: "/chat/completions".to_owned(),
+        headers: BTreeMap::new(),
+        body: json!({"stream": true}),
+    })?;
+    let raw_request = request_handle
+        .join()
+        .map_err(|_| "request capture thread panicked")??;
+    if !raw_request.starts_with("POST /v1/chat/completions HTTP/1.1")
+        || response.status != 200
+        || !response.body.contains("\"content\":\"he\"")
+        || !response.body.contains("\"content\":\"llo\"")
+        || !response.body.contains("data: [DONE]")
+    {
+        return Err(format!(
+            "stream transport should survive total duration beyond timeout when chunks keep arriving: request={raw_request:?} response={response:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn openai_client_emits_stream_delta_before_response_eof() -> Result<(), Box<dyn Error>> {
+    let (base_url, request_handle) = serve_slow_sse_response(
+        vec![
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"early\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" done\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ],
+        Duration::from_millis(500),
+    )?;
+    let client = OpenAiCompatibleClient::new(
+        ProviderConfig::default(),
+        UreqOpenAiHttpTransport::with_timeout(base_url, Duration::from_secs(2)),
+    );
+    let (event_tx, event_rx) = mpsc::channel();
+    let client_handle = thread::spawn(move || {
+        client
+            .chat_stream(
+                ProviderRequest {
+                    model: "gpt-4.1".to_owned(),
+                    messages: vec![json!({"role": "user", "content": "hi"})],
+                    tools: Vec::new(),
+                    settings: GenerationSettings::default(),
+                    tool_choice: None,
+                },
+                &mut |event| {
+                    let _ = event_tx.send(event);
+                },
+            )
+            .map_err(|error| error.to_string())
+    });
+    let first_event = event_rx.recv_timeout(Duration::from_millis(250))?;
+    if first_event
+        != (ProviderEvent::TextDelta {
+            text: "early".to_owned(),
+        })
+    {
+        return Err(format!("first event should be early delta: {first_event:?}").into());
+    }
+    let response = client_handle
+        .join()
+        .map_err(|_| "client stream thread panicked")??;
+    let raw_request = request_handle
+        .join()
+        .map_err(|_| "request capture thread panicked")??;
+    if response.content.as_deref() != Some("early done")
+        || !raw_request.starts_with("POST /v1/chat/completions HTTP/1.1")
+    {
+        return Err(format!(
+            "client stream result drifted: request={raw_request:?} response={response:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn openai_compatible_factory_prefers_config_api_base_over_spec_default(
 ) -> Result<(), Box<dyn Error>> {
     let spec = find_by_name("openai").ok_or("openai spec missing")?;
@@ -1395,6 +1485,32 @@ fn serve_one_response(
         stream
             .write_all(response.as_bytes())
             .map_err(|error| error.to_string())?;
+        Ok(request)
+    });
+    Ok((format!("http://{address}/v1/"), handle))
+}
+
+fn serve_slow_sse_response(
+    frames: Vec<&'static str>,
+    delay: Duration,
+) -> Result<(String, RequestCaptureHandle), Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+        let request = read_http_request(&mut stream)?;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .map_err(|error| error.to_string())?;
+        for frame in frames {
+            stream
+                .write_all(frame.as_bytes())
+                .and_then(|_| stream.flush())
+                .map_err(|error| error.to_string())?;
+            thread::sleep(delay);
+        }
         Ok(request)
     });
     Ok((format!("http://{address}/v1/"), handle))

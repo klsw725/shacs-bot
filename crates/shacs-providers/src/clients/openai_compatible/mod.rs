@@ -1,3 +1,4 @@
+use super::sse::{read_sse_frame_texts, split_sse_frame_texts};
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
 use crate::provider::{ProviderClient, ProviderEvent, ProviderRequest};
@@ -70,6 +71,22 @@ pub trait OpenAiHttpTransport: Send + Sync {
             body: None,
         })
     }
+
+    fn post_json_stream_frames(
+        &self,
+        request: OpenAiCompatibleRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+    ) -> Result<OpenAiHttpStreamResponse, ProviderError> {
+        let response = self.post_json_stream(request)?;
+        if (200..300).contains(&response.status) {
+            for frame in split_sse_frame_texts(&response.body) {
+                if on_frame(&frame)? {
+                    break;
+                }
+            }
+        }
+        Ok(response)
+    }
 }
 
 impl<F> OpenAiHttpTransport for F
@@ -88,6 +105,7 @@ where
 pub struct UreqOpenAiHttpTransport {
     base_url: String,
     agent: ureq::Agent,
+    stream_agent: ureq::Agent,
 }
 
 impl UreqOpenAiHttpTransport {
@@ -100,6 +118,12 @@ impl UreqOpenAiHttpTransport {
             base_url: base_url.into(),
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(timeout))
+                .http_status_as_error(false)
+                .build()
+                .new_agent(),
+            stream_agent: ureq::Agent::config_builder()
+                .timeout_connect(Some(timeout))
+                .timeout_recv_body(Some(timeout))
                 .http_status_as_error(false)
                 .build()
                 .new_agent(),
@@ -153,7 +177,7 @@ impl OpenAiHttpTransport for UreqOpenAiHttpTransport {
     ) -> Result<OpenAiHttpStreamResponse, ProviderError> {
         let url = join_base_and_path(&self.base_url, &request.path)?;
         let mut http_request = self
-            .agent
+            .stream_agent
             .post(&url)
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json");
@@ -164,16 +188,77 @@ impl OpenAiHttpTransport for UreqOpenAiHttpTransport {
         let mut response = http_request.send(body).map_err(map_ureq_error)?;
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
-        let body = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|error| ProviderError::Api {
-                status: Some(status),
-                message: error.to_string(),
-                retryable: false,
-                headers: headers.clone(),
-                body: None,
-            })?;
+        let body = if (200..300).contains(&status) {
+            read_sse_frame_texts(
+                response.body_mut().as_reader(),
+                |_| Ok(false),
+                |error| ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                },
+            )?
+        } else {
+            response
+                .body_mut()
+                .read_to_string()
+                .map_err(|error| ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                })?
+        };
+        Ok(OpenAiHttpStreamResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    fn post_json_stream_frames(
+        &self,
+        request: OpenAiCompatibleRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+    ) -> Result<OpenAiHttpStreamResponse, ProviderError> {
+        let url = join_base_and_path(&self.base_url, &request.path)?;
+        let mut http_request = self
+            .stream_agent
+            .post(&url)
+            .header("Accept", "text/event-stream")
+            .header("Content-Type", "application/json");
+        for (key, value) in &request.headers {
+            http_request = http_request.header(key, value);
+        }
+        let body = serde_json::to_string(&request.body).map_err(|error| api_error(None, error))?;
+        let mut response = http_request.send(body).map_err(map_ureq_error)?;
+        let status = response.status().as_u16();
+        let headers = response_headers(response.headers());
+        let body = if (200..300).contains(&status) {
+            read_sse_frame_texts(response.body_mut().as_reader(), on_frame, |error| {
+                ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                }
+            })?
+        } else {
+            response
+                .body_mut()
+                .read_to_string()
+                .map_err(|error| ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                })?
+        };
         Ok(OpenAiHttpStreamResponse {
             status,
             headers,
@@ -387,9 +472,16 @@ where
         if self.should_use_responses_api(&request) {
             let responses_request = normalize_request_for_provider(&request, self.spec.as_ref());
             let parts = build_responses_request(&responses_request, &self.config, true);
-            match self.transport.post_json_stream(parts) {
+            let mut stream = OpenAiResponsesStreamState::default();
+            match self.transport.post_json_stream_frames(parts, &mut |frame| {
+                stream.process_frame_text(frame, on_event)
+            }) {
                 Ok(response) => {
-                    let parsed = parse_responses_stream_http_response(response, on_event)?;
+                    let parsed = if (200..300).contains(&response.status) {
+                        stream.finish(on_event)?
+                    } else {
+                        parse_responses_stream_http_response(response, on_event)?
+                    };
                     if parsed.finish_reason != "error"
                         || !should_fallback_from_responses_response(&parsed)
                     {
@@ -402,13 +494,17 @@ where
         }
         let parts =
             build_provider_chat_completions_stream_request(&request, &self.config, self.spec);
-        match self.transport.post_json_stream(parts) {
+        let mut stream = ChatCompletionsStreamState::default();
+        match self.transport.post_json_stream_frames(parts, &mut |frame| {
+            stream.process_frame_text(frame, on_event)
+        }) {
             Ok(response) => {
-                return parse_chat_completions_stream_http_response_with_spec(
-                    response,
-                    on_event,
-                    self.spec.as_ref(),
-                )
+                let parsed = if (200..300).contains(&response.status) {
+                    stream.finish(on_event)?
+                } else {
+                    parse_chat_completions_stream_http_response(response, on_event)?
+                };
+                return Ok(apply_reasoning_as_content(parsed, self.spec.as_ref()));
             }
             Err(error) if !is_streaming_transport_unsupported(&error) => return Err(error),
             Err(_) => {}
@@ -1614,101 +1710,17 @@ fn parse_chat_completions_stream_http_response(
     })
 }
 
-fn parse_chat_completions_stream_http_response_with_spec(
-    response: OpenAiHttpStreamResponse,
-    on_event: &mut dyn FnMut(ProviderEvent),
-    spec: Option<&ProviderSpec>,
-) -> Result<LlmResponse, ProviderError> {
-    parse_chat_completions_stream_http_response(response, on_event)
-        .map(|response| apply_reasoning_as_content(response, spec))
-}
-
 pub fn parse_chat_completions_stream(
     body: &str,
     on_event: &mut dyn FnMut(ProviderEvent),
 ) -> Result<LlmResponse, ProviderError> {
-    let mut content = String::new();
-    let mut reasoning_content = String::new();
-    let mut usage = BTreeMap::new();
-    let mut finish_reason = None;
-    let mut tool_buffers = BTreeMap::<(u64, u64), StreamToolCallBuffer>::new();
+    let mut stream = ChatCompletionsStreamState::default();
     for frame in parse_sse_frames(body) {
-        if frame.data.trim() == "[DONE]" {
+        if stream.process_frame(frame, on_event)? {
             break;
         }
-        let value = parse_sse_json(&frame.data)?;
-        if frame.event.as_deref() == Some("error") || value.get("error").is_some() {
-            return Ok(parse_error_stream_value(&value));
-        }
-        let Some(choices) = value.get("choices").and_then(Value::as_array) else {
-            if let Some(frame_usage) = value.get("usage") {
-                usage = parse_usage(Some(frame_usage));
-            }
-            continue;
-        };
-        if choices.is_empty() {
-            if let Some(frame_usage) = value.get("usage") {
-                usage = parse_usage(Some(frame_usage));
-            }
-            continue;
-        }
-        for choice in choices.iter().filter_map(Value::as_object) {
-            let choice_index = choice.get("index").and_then(Value::as_u64).unwrap_or(0);
-            if let Some(delta) = choice.get("delta").and_then(Value::as_object) {
-                if let Some(text) = delta.get("content").and_then(Value::as_str) {
-                    if !text.is_empty() {
-                        content.push_str(text);
-                        on_event(ProviderEvent::TextDelta {
-                            text: text.to_owned(),
-                        });
-                    }
-                }
-                if let Some(reasoning) = delta
-                    .get("reasoning_content")
-                    .or_else(|| delta.get("reasoning"))
-                    .and_then(Value::as_str)
-                {
-                    if !reasoning.is_empty() {
-                        reasoning_content.push_str(reasoning);
-                        on_event(ProviderEvent::ReasoningDelta {
-                            text: reasoning.to_owned(),
-                        });
-                    }
-                }
-                if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                    merge_chat_stream_tool_calls(choice_index, calls, &mut tool_buffers, on_event);
-                }
-            }
-            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-                finish_reason = Some(reason.to_owned());
-            }
-        }
-        if let Some(frame_usage) = value.get("usage") {
-            usage = parse_usage(Some(frame_usage));
-        }
     }
-    let tool_calls = finalize_stream_tool_calls(tool_buffers)?;
-    for call in &tool_calls {
-        on_event(ProviderEvent::ToolCallReady {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            input: Value::Object(call.arguments.clone()),
-        });
-    }
-    let finish_reason =
-        normalize_chat_finish_reason(finish_reason.as_deref(), !tool_calls.is_empty());
-    on_event(ProviderEvent::Finish {
-        usage: serde_json::to_value(&usage).unwrap_or(Value::Null),
-        reason: finish_reason.clone(),
-    });
-    Ok(LlmResponse {
-        content: (!content.is_empty()).then_some(content),
-        tool_calls,
-        finish_reason,
-        usage,
-        reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
-        ..LlmResponse::default()
-    })
+    stream.finish(on_event)
 }
 
 fn parse_responses_http_response(
@@ -1783,14 +1795,181 @@ pub fn parse_openai_responses_stream(
     body: &str,
     on_event: &mut dyn FnMut(ProviderEvent),
 ) -> Result<LlmResponse, ProviderError> {
-    let mut content = String::new();
-    let mut reasoning_content = String::new();
-    let mut finish_reason = "stop".to_owned();
-    let mut usage = BTreeMap::new();
-    let mut tool_buffers = BTreeMap::<String, StreamToolCallBuffer>::new();
+    let mut stream = OpenAiResponsesStreamState::default();
     for frame in parse_sse_frames(body) {
-        if frame.data.trim() == "[DONE]" {
+        if stream.process_frame(frame, on_event)? {
             break;
+        }
+    }
+    stream.finish(on_event)
+}
+
+#[derive(Debug, Default)]
+struct ChatCompletionsStreamState {
+    content: String,
+    reasoning_content: String,
+    usage: BTreeMap<String, u64>,
+    finish_reason: Option<String>,
+    tool_buffers: BTreeMap<(u64, u64), StreamToolCallBuffer>,
+    terminal_response: Option<LlmResponse>,
+    done: bool,
+}
+
+impl ChatCompletionsStreamState {
+    fn process_frame_text(
+        &mut self,
+        frame_text: &str,
+        on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<bool, ProviderError> {
+        for frame in parse_sse_frames(frame_text) {
+            if self.process_frame(frame, on_event)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn process_frame(
+        &mut self,
+        frame: SseFrame,
+        on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<bool, ProviderError> {
+        if self.done {
+            return Ok(true);
+        }
+        if frame.data.trim() == "[DONE]" {
+            self.done = true;
+            return Ok(true);
+        }
+        let value = parse_sse_json(&frame.data)?;
+        if frame.event.as_deref() == Some("error") || value.get("error").is_some() {
+            self.terminal_response = Some(parse_error_stream_value(&value));
+            self.done = true;
+            return Ok(true);
+        }
+        let Some(choices) = value.get("choices").and_then(Value::as_array) else {
+            if let Some(frame_usage) = value.get("usage") {
+                self.usage = parse_usage(Some(frame_usage));
+            }
+            return Ok(false);
+        };
+        if choices.is_empty() {
+            if let Some(frame_usage) = value.get("usage") {
+                self.usage = parse_usage(Some(frame_usage));
+            }
+            return Ok(false);
+        }
+        for choice in choices.iter().filter_map(Value::as_object) {
+            let choice_index = choice.get("index").and_then(Value::as_u64).unwrap_or(0);
+            if let Some(delta) = choice.get("delta").and_then(Value::as_object) {
+                if let Some(text) = delta.get("content").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        self.content.push_str(text);
+                        on_event(ProviderEvent::TextDelta {
+                            text: text.to_owned(),
+                        });
+                    }
+                }
+                if let Some(reasoning) = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(Value::as_str)
+                {
+                    if !reasoning.is_empty() {
+                        self.reasoning_content.push_str(reasoning);
+                        on_event(ProviderEvent::ReasoningDelta {
+                            text: reasoning.to_owned(),
+                        });
+                    }
+                }
+                if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                    merge_chat_stream_tool_calls(
+                        choice_index,
+                        calls,
+                        &mut self.tool_buffers,
+                        on_event,
+                    );
+                }
+            }
+            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                self.finish_reason = Some(reason.to_owned());
+            }
+        }
+        if let Some(frame_usage) = value.get("usage") {
+            self.usage = parse_usage(Some(frame_usage));
+        }
+        Ok(false)
+    }
+
+    fn finish(self, on_event: &mut dyn FnMut(ProviderEvent)) -> Result<LlmResponse, ProviderError> {
+        if let Some(response) = self.terminal_response {
+            return Ok(response);
+        }
+        let tool_calls = finalize_stream_tool_calls(self.tool_buffers)?;
+        for call in &tool_calls {
+            on_event(ProviderEvent::ToolCallReady {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: Value::Object(call.arguments.clone()),
+            });
+        }
+        let finish_reason =
+            normalize_chat_finish_reason(self.finish_reason.as_deref(), !tool_calls.is_empty());
+        on_event(ProviderEvent::Finish {
+            usage: serde_json::to_value(&self.usage).unwrap_or(Value::Null),
+            reason: finish_reason.clone(),
+        });
+        Ok(LlmResponse {
+            content: (!self.content.is_empty()).then_some(self.content),
+            tool_calls,
+            finish_reason,
+            usage: self.usage,
+            reasoning_content: (!self.reasoning_content.is_empty())
+                .then_some(self.reasoning_content),
+            ..LlmResponse::default()
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct OpenAiResponsesStreamState {
+    content: String,
+    reasoning_content: String,
+    finish_reason: String,
+    usage: BTreeMap<String, u64>,
+    tool_buffers: BTreeMap<String, StreamToolCallBuffer>,
+    terminal_response: Option<LlmResponse>,
+    done: bool,
+}
+
+impl OpenAiResponsesStreamState {
+    pub(crate) fn process_frame_text(
+        &mut self,
+        frame_text: &str,
+        on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<bool, ProviderError> {
+        if self.finish_reason.is_empty() {
+            self.finish_reason = "stop".to_owned();
+        }
+        for frame in parse_sse_frames(frame_text) {
+            if self.process_frame(frame, on_event)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn process_frame(
+        &mut self,
+        frame: SseFrame,
+        on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<bool, ProviderError> {
+        if self.done {
+            return Ok(true);
+        }
+        if frame.data.trim() == "[DONE]" {
+            self.done = true;
+            return Ok(true);
         }
         let value = parse_sse_json(&frame.data)?;
         let event_type = value
@@ -1798,7 +1977,11 @@ pub fn parse_openai_responses_stream(
             .and_then(Value::as_str)
             .or(frame.event.as_deref());
         match event_type {
-            Some("error" | "response.failed") => return Ok(parse_error_stream_value(&value)),
+            Some("error" | "response.failed") => {
+                self.terminal_response = Some(parse_error_stream_value(&value));
+                self.done = true;
+                return Ok(true);
+            }
             Some("response.output_item.added") => {
                 if let Some(item) = value.get("item").and_then(Value::as_object) {
                     if item.get("type").and_then(Value::as_str) == Some("function_call") {
@@ -1807,7 +1990,7 @@ pub fn parse_openai_responses_stream(
                             .and_then(Value::as_str)
                             .unwrap_or("call_0")
                             .to_owned();
-                        let buffer = tool_buffers.entry(call_id.clone()).or_default();
+                        let buffer = self.tool_buffers.entry(call_id.clone()).or_default();
                         buffer.id = item
                             .get("id")
                             .and_then(Value::as_str)
@@ -1836,7 +2019,7 @@ pub fn parse_openai_responses_stream(
                     .and_then(Value::as_str)
                     .filter(|delta| !delta.is_empty())
                 {
-                    content.push_str(delta);
+                    self.content.push_str(delta);
                     on_event(ProviderEvent::TextDelta {
                         text: delta.to_owned(),
                     });
@@ -1848,7 +2031,7 @@ pub fn parse_openai_responses_stream(
                     .and_then(Value::as_str)
                     .filter(|delta| !delta.is_empty())
                 {
-                    reasoning_content.push_str(delta);
+                    self.reasoning_content.push_str(delta);
                     on_event(ProviderEvent::ReasoningDelta {
                         text: delta.to_owned(),
                     });
@@ -1866,7 +2049,7 @@ pub fn parse_openai_responses_stream(
                     .unwrap_or_default();
                 if !delta.is_empty() {
                     let event_id = {
-                        let buffer = tool_buffers.entry(call_id.clone()).or_default();
+                        let buffer = self.tool_buffers.entry(call_id.clone()).or_default();
                         buffer.arguments.push_str(delta);
                         responses_stream_event_tool_id(&call_id, buffer)
                     };
@@ -1878,7 +2061,7 @@ pub fn parse_openai_responses_stream(
             }
             Some("response.function_call_arguments.done") => {
                 if let Some(call_id) = value.get("call_id").and_then(Value::as_str) {
-                    if let Some(buffer) = tool_buffers.get_mut(call_id) {
+                    if let Some(buffer) = self.tool_buffers.get_mut(call_id) {
                         buffer.arguments = value
                             .get("arguments")
                             .and_then(Value::as_str)
@@ -1895,7 +2078,7 @@ pub fn parse_openai_responses_stream(
                             .and_then(Value::as_str)
                             .unwrap_or("call_0")
                             .to_owned();
-                        let buffer = tool_buffers.entry(call_id).or_default();
+                        let buffer = self.tool_buffers.entry(call_id).or_default();
                         if buffer.id.is_empty() {
                             buffer.id = item
                                 .get("id")
@@ -1922,37 +2105,51 @@ pub fn parse_openai_responses_stream(
             }
             Some("response.completed" | "response.incomplete") => {
                 if let Some(response) = value.get("response").and_then(Value::as_object) {
-                    finish_reason = finish_reason_from_openai_responses(
+                    self.finish_reason = finish_reason_from_openai_responses(
                         response.get("status").and_then(Value::as_str),
                     )
                     .to_owned();
-                    usage = parse_responses_usage(response.get("usage"));
-                    collect_responses_output_reasoning(response, &mut reasoning_content);
+                    self.usage = parse_responses_usage(response.get("usage"));
+                    collect_responses_output_reasoning(response, &mut self.reasoning_content);
                 }
             }
             _ => {}
         }
+        Ok(false)
     }
-    let tool_calls = finalize_responses_stream_tool_calls(tool_buffers)?;
-    for call in &tool_calls {
-        on_event(ProviderEvent::ToolCallReady {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            input: Value::Object(call.arguments.clone()),
+
+    pub(crate) fn finish(
+        mut self,
+        on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        if self.finish_reason.is_empty() {
+            self.finish_reason = "stop".to_owned();
+        }
+        if let Some(response) = self.terminal_response {
+            return Ok(response);
+        }
+        let tool_calls = finalize_responses_stream_tool_calls(self.tool_buffers)?;
+        for call in &tool_calls {
+            on_event(ProviderEvent::ToolCallReady {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: Value::Object(call.arguments.clone()),
+            });
+        }
+        on_event(ProviderEvent::Finish {
+            usage: serde_json::to_value(&self.usage).unwrap_or(Value::Null),
+            reason: self.finish_reason.clone(),
         });
+        Ok(LlmResponse {
+            content: (!self.content.is_empty()).then_some(self.content),
+            tool_calls,
+            finish_reason: self.finish_reason,
+            usage: self.usage,
+            reasoning_content: (!self.reasoning_content.is_empty())
+                .then_some(self.reasoning_content),
+            ..LlmResponse::default()
+        })
     }
-    on_event(ProviderEvent::Finish {
-        usage: serde_json::to_value(&usage).unwrap_or(Value::Null),
-        reason: finish_reason.clone(),
-    });
-    Ok(LlmResponse {
-        content: (!content.is_empty()).then_some(content),
-        tool_calls,
-        finish_reason,
-        usage,
-        reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
-        ..LlmResponse::default()
-    })
 }
 
 #[derive(Debug, Clone, Default)]
