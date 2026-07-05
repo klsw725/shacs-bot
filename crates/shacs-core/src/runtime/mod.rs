@@ -19,6 +19,7 @@ mod permission_approval;
 mod permission_audit;
 mod permission_ceiling;
 mod permission_policy;
+mod permission_recent_denials;
 mod permission_replay;
 mod permission_rules;
 mod plugin_discovery;
@@ -149,6 +150,11 @@ pub use permission_policy::{
     decide_permission, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, EvaluatorConfidence,
     EvaluatorScopeMatch, PermissionPolicyDecision, PermissionPolicyDecisionKind,
     PermissionPolicyInput, PermissionPolicyReason, PromptInjectionSignal,
+};
+pub use permission_recent_denials::{
+    recent_auto_mode_denial_from_classifier_decision, RecentAutoModeDenial,
+    RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError,
+    RecentAutoModeRetryTokenStore, RECENT_AUTO_MODE_DENIAL_LIMIT,
 };
 pub use permission_replay::{
     evaluate_permission_replay, PermissionReplayInput, PermissionReplayInvariant,
