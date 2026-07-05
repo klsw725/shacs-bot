@@ -375,6 +375,37 @@ fn unknown_containment_blocks_proc_exec_auto_and_bypass() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn unknown_network_mode_does_not_block_non_network_proc_exec() -> Result<(), Box<dyn Error>> {
+    let exec = action(
+        PermissionMode::Auto,
+        "exec",
+        vec![SafetyCapability::ProcExec],
+        vec![target(json!("cargo test"))],
+    );
+    let mut containment = safe_containment();
+    containment.network_mode = ContainerNetworkMode::Unknown;
+
+    let rules = evaluate_static_rules(
+        &exec,
+        &PermissionRuleInput {
+            containment,
+            protected_targets: Vec::new(),
+            proc_exec_summary: Some(proc_summary()),
+        },
+    );
+
+    if rules.kind != StaticRuleDecisionKind::AllowCandidate
+        || rules.reason != StaticRuleReason::NoStaticMatch
+    {
+        return Err(format!(
+            "unknown network mode should not block non-network proc exec when containment is non-privileged: {rules:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn secret_read_and_raw_auth_export_are_denied() -> Result<(), Box<dyn Error>> {
     let secret = action(
         PermissionMode::Auto,

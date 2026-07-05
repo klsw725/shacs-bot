@@ -314,12 +314,12 @@ pub fn evaluate_static_rules(
                 diagnostics,
             );
         }
-        if input.containment.is_unknown() {
+        if !input.containment.confirmed_non_privileged() {
             diagnostics
                 .matched_rules
                 .push("containment_unknown".to_owned());
             diagnostics.containment_warning =
-                Some("proc_exec containment is incomplete".to_owned());
+                Some("proc_exec requires non-privileged containment".to_owned());
             return static_decision(
                 StaticRuleDecisionKind::AskRequired,
                 StaticRuleReason::ContainmentUnknown,

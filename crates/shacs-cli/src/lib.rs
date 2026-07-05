@@ -33,12 +33,13 @@ use shacs_core::runtime::{
     build_plugin_runtime_snapshot, build_plugin_surface_projection, discover_context_files,
     discover_plugins, parse_context_references, plugin_hook_catalog, resolve_context_reference,
     AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
-    ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput,
-    ContextDiagnosticsSummary, ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions,
-    ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig, DiscoveredPlugin,
-    DreamLifecycle, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
-    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle,
-    MessageBus, PermissionMode, PermissionModeSnapshot, PluginDiscoveryError, PluginHookCatalog,
+    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput,
+    ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
+    ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
+    ContextReferenceResolverConfig, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
+    HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService,
+    HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle, MessageBus,
+    PermissionMode, PermissionModeSnapshot, PluginDiscoveryError, PluginHookCatalog,
     PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
     PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState, PluginSurfaceProjection,
     ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
@@ -2866,6 +2867,59 @@ fn runtime_containment_snapshot_ref(inspect: &RuntimeContainmentInspect) -> Cont
         digest: inspect.digest.clone(),
         summary: inspect.summary.clone(),
     }
+}
+
+fn runtime_permission_rule_containment_from_snapshot(
+    snapshot: Option<&ContainmentSnapshotRef>,
+) -> DockerContainmentSnapshot {
+    runtime_permission_rule_containment_from_snapshot_with_observed(
+        snapshot,
+        runtime_root_user_observed(),
+        runtime_unsafe_markers().is_empty(),
+    )
+}
+
+fn runtime_permission_rule_containment_from_snapshot_with_observed(
+    snapshot: Option<&ContainmentSnapshotRef>,
+    root_user: Option<bool>,
+    no_unsafe_markers: bool,
+) -> DockerContainmentSnapshot {
+    let Some(snapshot) = snapshot else {
+        return DockerContainmentSnapshot::unknown();
+    };
+    let official_backend = snapshot
+        .backend
+        .as_deref()
+        .and_then(|backend| backend.split('+').next())
+        == Some("official-container");
+    if snapshot.contained != Some(true) || !official_backend {
+        return DockerContainmentSnapshot::unknown();
+    }
+    if root_user != Some(false) || !no_unsafe_markers {
+        return DockerContainmentSnapshot::unknown();
+    }
+
+    DockerContainmentSnapshot {
+        contained: Some(true),
+        runtime: ContainerRuntimeKind::Docker,
+        root_user: Some(false),
+        privileged: Some(false),
+        host_mounts_summary: Vec::new(),
+        network_mode: ContainerNetworkMode::Unknown,
+        digest: snapshot.digest.clone(),
+        summary: snapshot.summary.clone(),
+    }
+}
+
+fn runtime_root_user_observed() -> Option<bool> {
+    runtime_read_bounded_file("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                let uid = line.strip_prefix("Uid:")?.split_whitespace().next()?;
+                uid.parse::<u32>().ok().map(|uid| uid == 0)
+            })
+        })
 }
 
 fn runtime_containment_precondition_met(inspect: &RuntimeContainmentInspect) -> bool {
@@ -13539,6 +13593,8 @@ impl AgentLoopChatCompletionAdapter {
         config.permission_mode_snapshot =
             runtime_permission_mode_snapshot(&permission_config_snapshot);
         config.permission_auto_approval = permission_config_snapshot.auto_approval;
+        config.permission_rule_input.containment =
+            runtime_permission_rule_containment_from_snapshot(self.containment_snapshot.as_ref());
         config.permission_rule_input.protected_targets =
             config.permission_auto_approval.protected_targets.clone();
         let config_path = self.config_path.clone();
@@ -21201,6 +21257,73 @@ mod tests {
         assert!(summary.contains("official package marker"));
         assert!(summary.contains("dockerenv"));
         assert!(!summary.contains("sandboxed"));
+    }
+
+    #[test]
+    fn runtime_permission_rule_containment_trusts_only_official_container_snapshot() {
+        let official = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            None,
+            true,
+            &["dockerenv"],
+            &[],
+        ));
+        let official_snapshot = runtime_containment_snapshot_ref(&official);
+        let rule_snapshot = runtime_permission_rule_containment_from_snapshot_with_observed(
+            Some(&official_snapshot),
+            Some(false),
+            true,
+        );
+
+        assert!(rule_snapshot.confirmed_non_privileged());
+        assert_eq!(rule_snapshot.runtime, ContainerRuntimeKind::Docker);
+        assert_eq!(rule_snapshot.network_mode, ContainerNetworkMode::Unknown);
+
+        let root_rule_snapshot = runtime_permission_rule_containment_from_snapshot_with_observed(
+            Some(&official_snapshot),
+            Some(true),
+            true,
+        );
+        assert!(!root_rule_snapshot.confirmed_non_privileged());
+
+        let unsafe_rule_snapshot = runtime_permission_rule_containment_from_snapshot_with_observed(
+            Some(&official_snapshot),
+            Some(false),
+            false,
+        );
+        assert!(!unsafe_rule_snapshot.confirmed_non_privileged());
+
+        let generic = runtime_containment_classify(RuntimeContainmentEvidence::from_parts(
+            None,
+            false,
+            &["dockerenv"],
+            &[],
+        ));
+        let generic_snapshot = runtime_containment_snapshot_ref(&generic);
+        let generic_rule_snapshot = runtime_permission_rule_containment_from_snapshot_with_observed(
+            Some(&generic_snapshot),
+            Some(false),
+            true,
+        );
+
+        assert!(generic_rule_snapshot.is_unknown());
+        assert!(!generic_rule_snapshot.confirmed_non_privileged());
+
+        let summary_only_snapshot = ContainmentSnapshotRef {
+            contained: Some(true),
+            backend: None,
+            digest: Some("summary-only".to_owned()),
+            summary: Some(
+                "official package marker and container runtime evidence observed".to_owned(),
+            ),
+        };
+        let summary_only_rule_snapshot =
+            runtime_permission_rule_containment_from_snapshot_with_observed(
+                Some(&summary_only_snapshot),
+                Some(false),
+                true,
+            );
+        assert!(summary_only_rule_snapshot.is_unknown());
+        assert!(!summary_only_rule_snapshot.confirmed_non_privileged());
     }
 
     #[test]
