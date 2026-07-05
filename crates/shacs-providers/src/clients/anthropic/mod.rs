@@ -1,3 +1,4 @@
+use super::sse::{read_sse_frame_texts, split_sse_frame_texts};
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
 use crate::provider::{ProviderClient, ProviderEvent, ProviderRequest};
@@ -48,6 +49,22 @@ pub trait AnthropicHttpTransport: Send + Sync {
             "Anthropic streaming transport is not implemented",
         ))
     }
+
+    fn post_json_stream_frames(
+        &self,
+        request: AnthropicRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+    ) -> Result<AnthropicHttpStreamResponse, ProviderError> {
+        let response = self.post_json_stream(request)?;
+        if (200..300).contains(&response.status) {
+            for frame in split_sse_frame_texts(&response.body) {
+                if on_frame(&frame)? {
+                    break;
+                }
+            }
+        }
+        Ok(response)
+    }
 }
 
 impl<F> AnthropicHttpTransport for F
@@ -66,6 +83,7 @@ where
 pub struct UreqAnthropicHttpTransport {
     base_url: String,
     agent: ureq::Agent,
+    stream_agent: ureq::Agent,
 }
 
 impl UreqAnthropicHttpTransport {
@@ -78,6 +96,12 @@ impl UreqAnthropicHttpTransport {
             base_url: base_url.into(),
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(timeout))
+                .http_status_as_error(false)
+                .build()
+                .new_agent(),
+            stream_agent: ureq::Agent::config_builder()
+                .timeout_connect(Some(timeout))
+                .timeout_recv_body(Some(timeout))
                 .http_status_as_error(false)
                 .build()
                 .new_agent(),
@@ -131,7 +155,7 @@ impl AnthropicHttpTransport for UreqAnthropicHttpTransport {
     ) -> Result<AnthropicHttpStreamResponse, ProviderError> {
         let url = join_base_and_path(&self.base_url, &request.path)?;
         let mut http_request = self
-            .agent
+            .stream_agent
             .post(&url)
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json");
@@ -142,16 +166,77 @@ impl AnthropicHttpTransport for UreqAnthropicHttpTransport {
         let mut response = http_request.send(body).map_err(map_ureq_error)?;
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
-        let body = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|error| ProviderError::Api {
-                status: Some(status),
-                message: error.to_string(),
-                retryable: false,
-                headers: headers.clone(),
-                body: None,
-            })?;
+        let body = if (200..300).contains(&status) {
+            read_sse_frame_texts(
+                response.body_mut().as_reader(),
+                |_| Ok(false),
+                |error| ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                },
+            )?
+        } else {
+            response
+                .body_mut()
+                .read_to_string()
+                .map_err(|error| ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                })?
+        };
+        Ok(AnthropicHttpStreamResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    fn post_json_stream_frames(
+        &self,
+        request: AnthropicRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+    ) -> Result<AnthropicHttpStreamResponse, ProviderError> {
+        let url = join_base_and_path(&self.base_url, &request.path)?;
+        let mut http_request = self
+            .stream_agent
+            .post(&url)
+            .header("Accept", "text/event-stream")
+            .header("Content-Type", "application/json");
+        for (key, value) in &request.headers {
+            http_request = http_request.header(key, value);
+        }
+        let body = serde_json::to_string(&request.body).map_err(|error| api_error(None, error))?;
+        let mut response = http_request.send(body).map_err(map_ureq_error)?;
+        let status = response.status().as_u16();
+        let headers = response_headers(response.headers());
+        let body = if (200..300).contains(&status) {
+            read_sse_frame_texts(response.body_mut().as_reader(), on_frame, |error| {
+                ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                }
+            })?
+        } else {
+            response
+                .body_mut()
+                .read_to_string()
+                .map_err(|error| ProviderError::Api {
+                    status: Some(status),
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: headers.clone(),
+                    body: None,
+                })?
+        };
         Ok(AnthropicHttpStreamResponse {
             status,
             headers,
@@ -199,8 +284,17 @@ where
         on_event: &mut dyn FnMut(ProviderEvent),
     ) -> Result<LlmResponse, ProviderError> {
         let parts = build_anthropic_messages_request(&request, &self.config, true);
-        match self.transport.post_json_stream(parts) {
-            Ok(response) => parse_anthropic_stream_http_response(response, on_event),
+        let mut stream = AnthropicStreamState::default();
+        match self.transport.post_json_stream_frames(parts, &mut |frame| {
+            stream.process_frame_text(frame, on_event)
+        }) {
+            Ok(response) => {
+                if (200..300).contains(&response.status) {
+                    stream.finish(on_event)
+                } else {
+                    parse_anthropic_stream_http_response(response, on_event)
+                }
+            }
             Err(error) if !is_streaming_transport_unsupported(&error) => Err(error),
             Err(_) => {
                 let response = self.chat(request)?;
@@ -415,12 +509,48 @@ pub fn parse_anthropic_stream(
     body: &str,
     on_event: &mut dyn FnMut(ProviderEvent),
 ) -> Result<LlmResponse, ProviderError> {
-    let mut text = String::new();
-    let mut usage = BTreeMap::new();
-    let mut stop_reason = None;
-    let mut tools = BTreeMap::<u64, StreamToolBuffer>::new();
-    let mut thinking = BTreeMap::<u64, StreamThinkingBuffer>::new();
+    let mut stream = AnthropicStreamState::default();
     for frame in parse_sse_frames(body) {
+        if stream.process_frame(frame, on_event)? {
+            break;
+        }
+    }
+    stream.finish(on_event)
+}
+
+#[derive(Debug, Default)]
+struct AnthropicStreamState {
+    text: String,
+    usage: BTreeMap<String, u64>,
+    stop_reason: Option<String>,
+    tools: BTreeMap<u64, StreamToolBuffer>,
+    thinking: BTreeMap<u64, StreamThinkingBuffer>,
+    terminal_response: Option<LlmResponse>,
+    done: bool,
+}
+
+impl AnthropicStreamState {
+    fn process_frame_text(
+        &mut self,
+        frame_text: &str,
+        on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<bool, ProviderError> {
+        for frame in parse_sse_frames(frame_text) {
+            if self.process_frame(frame, on_event)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn process_frame(
+        &mut self,
+        frame: SseFrame,
+        on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<bool, ProviderError> {
+        if self.done {
+            return Ok(true);
+        }
         let value = parse_sse_json(&frame.data)?;
         let event_type = frame
             .event
@@ -428,17 +558,19 @@ pub fn parse_anthropic_stream(
             .or_else(|| value.get("type").and_then(Value::as_str));
         match event_type {
             Some("error") => {
-                return Ok(parse_anthropic_error_response(
+                self.terminal_response = Some(parse_anthropic_error_response(
                     value.get("error").unwrap_or(&value),
                     value.as_object().unwrap_or(&Map::new()),
-                ))
+                ));
+                self.done = true;
+                return Ok(true);
             }
             Some("message_start") => {
                 if let Some(frame_usage) = value
                     .get("message")
                     .and_then(|message| message.get("usage"))
                 {
-                    merge_usage(&mut usage, parse_anthropic_usage(Some(frame_usage)));
+                    merge_usage(&mut self.usage, parse_anthropic_usage(Some(frame_usage)));
                 }
             }
             Some("content_block_start") => {
@@ -446,7 +578,7 @@ pub fn parse_anthropic_stream(
                 if let Some(block) = value.get("content_block").and_then(Value::as_object) {
                     match block.get("type").and_then(Value::as_str) {
                         Some("tool_use") => {
-                            let buffer = tools.entry(index).or_default();
+                            let buffer = self.tools.entry(index).or_default();
                             buffer.id = block
                                 .get("id")
                                 .and_then(Value::as_str)
@@ -463,7 +595,7 @@ pub fn parse_anthropic_stream(
                             });
                         }
                         Some("thinking") => {
-                            let buffer = thinking.entry(index).or_default();
+                            let buffer = self.thinking.entry(index).or_default();
                             if let Some(value) = block.get("thinking").and_then(Value::as_str) {
                                 buffer.thinking.push_str(value);
                             }
@@ -478,7 +610,7 @@ pub fn parse_anthropic_stream(
             Some("content_block_delta") => {
                 let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
                 let Some(delta) = value.get("delta").and_then(Value::as_object) else {
-                    continue;
+                    return Ok(false);
                 };
                 match delta.get("type").and_then(Value::as_str) {
                     Some("text_delta") => {
@@ -487,7 +619,7 @@ pub fn parse_anthropic_stream(
                             .and_then(Value::as_str)
                             .filter(|piece| !piece.is_empty())
                         {
-                            text.push_str(piece);
+                            self.text.push_str(piece);
                             on_event(ProviderEvent::TextDelta {
                                 text: piece.to_owned(),
                             });
@@ -499,7 +631,11 @@ pub fn parse_anthropic_stream(
                             .and_then(Value::as_str)
                             .filter(|piece| !piece.is_empty())
                         {
-                            thinking.entry(index).or_default().thinking.push_str(piece);
+                            self.thinking
+                                .entry(index)
+                                .or_default()
+                                .thinking
+                                .push_str(piece);
                             on_event(ProviderEvent::ReasoningDelta {
                                 text: piece.to_owned(),
                             });
@@ -507,7 +643,7 @@ pub fn parse_anthropic_stream(
                     }
                     Some("signature_delta") => {
                         if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
-                            thinking.entry(index).or_default().signature =
+                            self.thinking.entry(index).or_default().signature =
                                 Some(signature.to_owned());
                         }
                     }
@@ -517,7 +653,7 @@ pub fn parse_anthropic_stream(
                             .and_then(Value::as_str)
                             .filter(|piece| !piece.is_empty())
                         {
-                            let buffer = tools.entry(index).or_default();
+                            let buffer = self.tools.entry(index).or_default();
                             buffer.arguments.push_str(piece);
                             on_event(ProviderEvent::ToolCallDelta {
                                 id: buffer.id.clone(),
@@ -531,38 +667,48 @@ pub fn parse_anthropic_stream(
             Some("message_delta") => {
                 if let Some(delta) = value.get("delta").and_then(Value::as_object) {
                     if let Some(reason) = delta.get("stop_reason").and_then(Value::as_str) {
-                        stop_reason = Some(reason.to_owned());
+                        self.stop_reason = Some(reason.to_owned());
                     }
                 }
                 if let Some(frame_usage) = value.get("usage") {
-                    merge_usage(&mut usage, parse_anthropic_usage(Some(frame_usage)));
+                    merge_usage(&mut self.usage, parse_anthropic_usage(Some(frame_usage)));
                 }
             }
-            Some("message_stop") => break,
+            Some("message_stop") => {
+                self.done = true;
+                return Ok(true);
+            }
             _ => {}
         }
+        Ok(false)
     }
-    let tool_calls = finalize_stream_tools(tools)?;
-    for call in &tool_calls {
-        on_event(ProviderEvent::ToolCallReady {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            input: Value::Object(call.arguments.clone()),
+
+    fn finish(self, on_event: &mut dyn FnMut(ProviderEvent)) -> Result<LlmResponse, ProviderError> {
+        if let Some(response) = self.terminal_response {
+            return Ok(response);
+        }
+        let tool_calls = finalize_stream_tools(self.tools)?;
+        for call in &tool_calls {
+            on_event(ProviderEvent::ToolCallReady {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: Value::Object(call.arguments.clone()),
+            });
+        }
+        let finish_reason = anthropic_finish_reason(self.stop_reason.as_deref());
+        on_event(ProviderEvent::Finish {
+            usage: serde_json::to_value(&self.usage).unwrap_or(Value::Null),
+            reason: finish_reason.clone(),
         });
+        Ok(LlmResponse {
+            content: (!self.text.is_empty()).then_some(self.text),
+            tool_calls,
+            finish_reason,
+            usage: self.usage,
+            thinking_blocks: finalize_stream_thinking(self.thinking),
+            ..LlmResponse::default()
+        })
     }
-    let finish_reason = anthropic_finish_reason(stop_reason.as_deref());
-    on_event(ProviderEvent::Finish {
-        usage: serde_json::to_value(&usage).unwrap_or(Value::Null),
-        reason: finish_reason.clone(),
-    });
-    Ok(LlmResponse {
-        content: (!text.is_empty()).then_some(text),
-        tool_calls,
-        finish_reason,
-        usage,
-        thinking_blocks: finalize_stream_thinking(thinking),
-        ..LlmResponse::default()
-    })
 }
 
 fn convert_messages_to_anthropic(messages: &[Value]) -> (Option<Value>, Vec<Value>) {

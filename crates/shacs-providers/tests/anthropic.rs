@@ -2,12 +2,17 @@ use serde_json::{json, Value};
 use shacs_providers::{
     anthropic_client_from_config, build_anthropic_headers, build_anthropic_messages_request,
     find_by_name, parse_anthropic_response, parse_anthropic_stream, AnthropicClient,
-    AnthropicHttpResponse, AnthropicRequestParts, GenerationSettings, ProviderClient,
-    ProviderConfig, ProviderEvent, ProviderRequest,
+    AnthropicHttpResponse, AnthropicHttpTransport, AnthropicRequestParts, GenerationSettings,
+    ProviderClient, ProviderConfig, ProviderEvent, ProviderRequest, UreqAnthropicHttpTransport,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
 use std::time::{Duration, SystemTime};
+
+type RequestCaptureHandle = thread::JoinHandle<Result<String, String>>;
 
 #[test]
 fn anthropic_builder_converts_messages_tools_thinking_and_cache() -> Result<(), Box<dyn Error>> {
@@ -263,6 +268,41 @@ fn anthropic_client_posts_request_and_maps_error_metadata() -> Result<(), Box<dy
 }
 
 #[test]
+fn anthropic_ureq_stream_transport_uses_idle_timeout_not_global_wall_clock(
+) -> Result<(), Box<dyn Error>> {
+    let (base_url, request_handle) = serve_slow_sse_response(
+        vec![
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"he\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"llo\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ],
+        Duration::from_millis(90),
+    )?;
+    let transport = UreqAnthropicHttpTransport::with_timeout(base_url, Duration::from_millis(250));
+    let response = transport.post_json_stream(AnthropicRequestParts {
+        path: "/v1/messages".to_owned(),
+        headers: BTreeMap::new(),
+        body: json!({"stream": true}),
+    })?;
+    let raw_request = request_handle
+        .join()
+        .map_err(|_| "request capture thread panicked")??;
+    if !raw_request.starts_with("POST /v1/messages HTTP/1.1")
+        || response.status != 200
+        || !response.body.contains("\"text\":\"he\"")
+        || !response.body.contains("\"text\":\"llo\"")
+        || !response.body.contains("message_stop")
+    {
+        return Err(format!(
+            "Anthropic stream transport should use idle timeout semantics: request={raw_request:?} response={response:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn anthropic_factory_builds_anthropic_client_and_rejects_wrong_backend(
 ) -> Result<(), Box<dyn Error>> {
     let anthropic = find_by_name("anthropic").ok_or("anthropic spec missing")?;
@@ -293,4 +333,64 @@ fn provider_request() -> ProviderRequest {
         settings: GenerationSettings::default(),
         tool_choice: None,
     }
+}
+
+fn serve_slow_sse_response(
+    frames: Vec<&'static str>,
+    delay: Duration,
+) -> Result<(String, RequestCaptureHandle), Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+        let request = read_http_request(&mut stream)?;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .map_err(|error| error.to_string())?;
+        for frame in frames {
+            stream
+                .write_all(frame.as_bytes())
+                .and_then(|_| stream.flush())
+                .map_err(|error| error.to_string())?;
+            thread::sleep(delay);
+        }
+        Ok(request)
+    });
+    Ok((format!("http://{address}"), handle))
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<String, String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    loop {
+        let mut chunk = [0; 512];
+        let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if http_request_complete(&bytes)? {
+            break;
+        }
+    }
+    String::from_utf8(bytes).map_err(|error| error.to_string())
+}
+
+fn http_request_complete(bytes: &[u8]) -> Result<bool, String> {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Ok(false);
+    };
+    let header_text =
+        String::from_utf8(bytes[..header_end].to_vec()).map_err(|error| error.to_string())?;
+    let content_length = header_text
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    Ok(bytes.len() >= header_end + 4 + content_length)
 }
