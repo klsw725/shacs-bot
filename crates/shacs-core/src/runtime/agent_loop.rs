@@ -1,7 +1,8 @@
 use crate::runtime::tool_execution::session_approval_context_digest;
 use crate::runtime::{
-    apply_context_safety_gate, build_context_provider_handoff, discover_context_files,
-    dispatch_bridge_tool_calls, parse_context_references, resolve_context_reference,
+    apply_context_safety_gate, build_context_provider_handoff, correlate_approval,
+    discover_context_files, dispatch_bridge_tool_calls, parse_context_references,
+    resolve_context_reference,
 };
 use crate::runtime::{
     clear_goal, create_persistent_goal, mark_goal_blocked, mark_goal_done, pause_goal,
@@ -16,8 +17,10 @@ use crate::runtime::{
     InboundMessage, LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore,
     MessageBus, OutboundMessage, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
     PermissionRuleInput, PermissionedAction, PersistentGoal, PersistentGoalStatus,
-    ProviderArchiveConsolidator, ProviderEventCallback, RuntimeContextTools, RuntimeInterrupt,
-    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
+    ProviderArchiveConsolidator, ProviderEventCallback, RecentAutoModeDenial,
+    RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError,
+    RecentAutoModeRetryTokenStore, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
+    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
     SessionApprovalCacheEntry, SessionHistoryOptions, SessionManager, SessionTurnAcquireError,
     SessionTurnLock, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
     DEFAULT_GOAL_TURN_BUDGET,
@@ -29,9 +32,10 @@ use crate::tools::{
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use shacs_command::{
     build_help_text, is_builtin_command, parse_loop_command_route, CommandKind, GoalCommandArgs,
-    HistoryCommandArgs, LoopCommand,
+    HistoryCommandArgs, LoopCommand, PermissionCommandArgs,
 };
 use shacs_config::AutoApprovalConfig;
 use shacs_providers::{GenerationSettings, ProviderClient, ProviderError, ProviderRetryMode};
@@ -45,9 +49,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 const RUNTIME_CHECKPOINT_KEY: &str = "runtime_checkpoint";
 const PENDING_PERMISSION_APPROVAL_KEY: &str = "pending_permission_approval";
+const PENDING_RECENT_RETRY_APPROVAL_KEY: &str = "pending_recent_retry_approval";
 const SESSION_PERMISSION_APPROVALS_KEY: &str = "session_permission_approvals";
 const SESSION_PERMISSION_APPROVAL_LIMIT: usize = 32;
 const PENDING_PERMISSION_WIZARD_KEY: &str = "pending_permission_wizard";
+const RECENT_AUTO_MODE_DENIALS_KEY: &str = "recent_auto_mode_denials";
 const INTERRUPTED_PLACEHOLDER: &str =
     "[Assistant reply unavailable because the previous turn was interrupted.]";
 const PENDING_TOOL_PLACEHOLDER: &str = "[Tool result unavailable — call was interrupted or lost]";
@@ -85,6 +91,20 @@ struct PendingPermissionApproval {
     channel: String,
     chat_id: String,
     sender_id: String,
+    #[serde(default)]
+    status: PendingPermissionApprovalStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingRecentRetryApproval {
+    denial_id: String,
+    approval_request_id: String,
+    action_digest: String,
+    argument_digest: String,
+    snapshot_digest: String,
+    tool_name: String,
+    expires_at_unix_ms: u64,
+    requester_digest: String,
     #[serde(default)]
     status: PendingPermissionApprovalStatus,
 }
@@ -211,6 +231,7 @@ pub struct AgentLoop<'a> {
     tool_event_callback: Option<ToolEventCallback>,
     provider_event_callback: Option<ProviderEventCallback>,
     agent_hook: Option<Arc<dyn AgentHook>>,
+    recent_retry_tokens: RecentAutoModeRetryTokenStore,
     stopped: bool,
 }
 
@@ -239,6 +260,7 @@ impl<'a> AgentLoop<'a> {
             tool_event_callback: None,
             provider_event_callback: None,
             agent_hook: None,
+            recent_retry_tokens: RecentAutoModeRetryTokenStore::default(),
             stopped: false,
         }
     }
@@ -446,11 +468,148 @@ impl<'a> AgentLoop<'a> {
             session_summary = prepared.1;
         }
 
+        let pending_recent_retry_approval = pending_recent_retry_approval(&session);
         let pending_permission_approval = pending_permission_approval(&session);
         let pending_ask_id = pending_ask_user_id(&session.messages);
         let (initial_messages, context_provider_handoff) = if let Some(approval) =
-            pending_permission_approval
+            pending_recent_retry_approval
         {
+            if approval.status == PendingPermissionApprovalStatus::Executing {
+                return self.publish_command_response(
+                    &message,
+                    session,
+                    "Recent retry approval is already executing. Wait for the tool result or start a new session if recovery is required.",
+                    None,
+                    "permission_recent_retry_executing",
+                    true,
+                );
+            }
+            if !recent_retry_approval_reply_matches_request(&approval, &message, &session_key) {
+                return self.publish_command_response(
+                    &message,
+                    session,
+                    "Recent retry approval pending. Only the original requester in the original channel can approve or deny this tool call.",
+                    None,
+                    "permission_recent_retry_pending",
+                    true,
+                );
+            }
+            match parse_permission_approval_reply(&message.content) {
+                PermissionApprovalReply::Approve => {
+                    let token_result = self.recent_retry_tokens.consume(
+                        &approval.denial_id,
+                        &approval.action_digest,
+                        &approval.argument_digest,
+                        &approval.snapshot_digest,
+                        now_unix_ms(),
+                    );
+                    let token = match token_result {
+                        Ok(token) => token,
+                        Err(error) => {
+                            session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                            return self.publish_command_response(
+                                &message,
+                                session,
+                                &recent_retry_closed_message(error),
+                                None,
+                                "permission_recent_retry_closed",
+                                true,
+                            );
+                        }
+                    };
+                    let approval_request = recent_retry_approval_request_from_pending(
+                        &approval,
+                        token
+                            .tool_context()
+                            .session_key
+                            .as_deref()
+                            .unwrap_or(&session.key),
+                    );
+                    let decision = recent_retry_approval_decision(
+                        &approval_request,
+                        ApprovalDecisionKind::Approved,
+                    );
+                    let approval_cache = ApprovalCacheEntry {
+                        request: approval_request,
+                        decision,
+                    };
+                    if !correlate_approval(
+                        &approval_cache.request,
+                        &approval_cache.decision,
+                        now_unix_ms(),
+                    )
+                    .is_approved()
+                    {
+                        session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                        return self.publish_command_response(
+                            &message,
+                            session,
+                            "Recent retry approval failed closed; the action was not run. Request the action again if still needed.",
+                            None,
+                            "permission_recent_retry_closed",
+                            true,
+                        );
+                    }
+                    let mut executing_approval = approval.clone();
+                    executing_approval.status = PendingPermissionApprovalStatus::Executing;
+                    set_pending_recent_retry_approval(&mut session, &executing_approval);
+                    self.sessions.save(&session)?;
+                    let report = self.execute_approved_permission_payload(&token, approval_cache);
+                    for tool_message in report.messages {
+                        append_session_message(&mut session, tool_message.to_json());
+                    }
+                    session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                    let history = session.get_history_with_options(self.config.history_options);
+                    let mut messages = vec![json!({
+                        "role": "system",
+                        "content": self.context_builder.build_system_prompt(Some(&message.channel)),
+                    })];
+                    messages.extend(history);
+                    let context_provider_handoff = build_live_context_provider_handoff(
+                        &self.config.workspace,
+                        &message.content,
+                        &messages,
+                        current_working_directory(),
+                        live_context_budget_bytes(self.config.context_block_limit),
+                    );
+                    (messages, Some(context_provider_handoff))
+                }
+                PermissionApprovalReply::ApproveSession => {
+                    self.recent_retry_tokens.invalidate(&approval.denial_id);
+                    session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                    return self.publish_command_response(
+                        &message,
+                        session,
+                        "Recent retry supports only one-shot `approve`; `approve_session` is rejected and the action was not run.",
+                        None,
+                        "permission_recent_retry_rejected",
+                        true,
+                    );
+                }
+                PermissionApprovalReply::Deny => {
+                    self.recent_retry_tokens.invalidate(&approval.denial_id);
+                    session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                    return self.publish_command_response(
+                        &message,
+                        session,
+                        "Recent retry cancelled. The denied action was not run.",
+                        None,
+                        "permission_recent_retry_denied",
+                        true,
+                    );
+                }
+                PermissionApprovalReply::Unknown => {
+                    return self.publish_command_response(
+                        &message,
+                        session,
+                        "Recent retry approval pending. Reply with `1` or `approve` to run the exact denied action once, or `2`/`deny` to cancel. `approve_session` is not available for recent retry.",
+                        None,
+                        "permission_recent_retry_pending",
+                        true,
+                    );
+                }
+            }
+        } else if let Some(approval) = pending_permission_approval {
             if approval.status == PendingPermissionApprovalStatus::Executing {
                 return self.publish_command_response(
                     &message,
@@ -691,6 +850,9 @@ impl<'a> AgentLoop<'a> {
             }
         };
         append_new_runner_messages(&mut session, &initial_messages, &run_result.messages);
+        self.recent_retry_tokens
+            .extend(run_result.recent_auto_mode_retry_tokens.clone());
+        store_recent_auto_mode_denials(&mut session, run_result.recent_auto_mode_denials.clone());
         clear_runtime_markers(&mut session);
         store_pending_permission_approval(
             &mut session,
@@ -891,7 +1053,7 @@ impl<'a> AgentLoop<'a> {
                     save_session,
                 )
             }
-            LoopCommand::Permission => {
+            LoopCommand::Permission(PermissionCommandArgs::ModeWizard) => {
                 let wizard = PendingPermissionWizard {
                     session_key: session.key.clone(),
                     channel: message.channel.clone(),
@@ -909,6 +1071,32 @@ impl<'a> AgentLoop<'a> {
                     save_session,
                 )
             }
+            LoopCommand::Permission(PermissionCommandArgs::Recent) => {
+                let content = format_recent_auto_mode_denials(
+                    &session,
+                    &self.recent_retry_tokens,
+                    now_unix_ms(),
+                );
+                self.publish_command_response(
+                    message,
+                    session,
+                    &content,
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission_recent",
+                    save_session,
+                )
+            }
+            LoopCommand::Permission(PermissionCommandArgs::RecentRetry(denial_id)) => self
+                .handle_permission_recent_retry_command(message, session, &denial_id, save_session),
+            LoopCommand::Permission(PermissionCommandArgs::Invalid) => self
+                .publish_command_response(
+                message,
+                session,
+                "Usage: /permission, /permission recent, or /permission recent retry <denial_id>.",
+                Some(AgentLoopCommandResult::Permission),
+                "permission_usage",
+                save_session,
+            ),
             LoopCommand::Help => self.publish_command_response(
                 message,
                 session,
@@ -1045,6 +1233,123 @@ impl<'a> AgentLoop<'a> {
         )
     }
 
+    fn handle_permission_recent_retry_command(
+        &mut self,
+        message: &InboundMessage,
+        mut session: Session,
+        denial_id: &str,
+        save_session: bool,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        if !self.config.permission_interactive {
+            return self.publish_command_response(
+                message,
+                session,
+                "Recent retry requires an interactive permission channel. The denied action was not run.",
+                Some(AgentLoopCommandResult::Permission),
+                "permission_recent_retry_non_interactive",
+                save_session,
+            );
+        }
+        if pending_recent_retry_approval(&session).is_some() {
+            return self.publish_command_response(
+                message,
+                session,
+                "Recent retry approval is already pending. Reply to the existing approval with `approve` or `deny` before starting another recent retry.",
+                Some(AgentLoopCommandResult::Permission),
+                "permission_recent_retry_pending",
+                save_session,
+            );
+        }
+        if pending_permission_approval(&session).is_some() {
+            return self.publish_command_response(
+                message,
+                session,
+                "A permission approval is already pending. Reply to the existing approval with `approve`, `approve_session`, or `deny` before starting a recent retry.",
+                Some(AgentLoopCommandResult::Permission),
+                "permission_approval_pending",
+                save_session,
+            );
+        }
+        let Some(denial) = recent_auto_mode_denials(&session)
+            .into_iter()
+            .find(|candidate| candidate.denial_id == denial_id)
+        else {
+            return self.publish_command_response(
+                message,
+                session,
+                "No matching recent denial was found. The denied action was not run; request the action again if still needed.",
+                Some(AgentLoopCommandResult::Permission),
+                "permission_recent_retry_missing_denial",
+                save_session,
+            );
+        };
+        if !denial.retryable {
+            return self.publish_command_response(
+                message,
+                session,
+                "Recent retry is unavailable for this classifier denial because it was not a high-confidence requested-scope denial. The denied action was not run; request the action again if still needed.",
+                Some(AgentLoopCommandResult::Permission),
+                "permission_recent_retry_unavailable",
+                save_session,
+            );
+        }
+        let token = match self.recent_retry_tokens.peek(denial_id, now_unix_ms()) {
+            Ok(token) => token,
+            Err(error) => {
+                if !matches!(error, RecentAutoModeRetryTokenConsumeError::Missing) {
+                    self.recent_retry_tokens.invalidate(denial_id);
+                }
+                return self.publish_command_response(
+                    message,
+                    session,
+                    &recent_retry_closed_message(error),
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission_recent_retry_closed",
+                    save_session,
+                );
+            }
+        };
+        if token.action_digest() != denial.action_digest
+            || token.argument_digest() != denial.argument_digest
+            || token.snapshot_digest() != denial.snapshot_digest
+        {
+            self.recent_retry_tokens.invalidate(denial_id);
+            return self.publish_command_response(
+                message,
+                session,
+                "Recent retry token no longer matches the denial metadata. The denied action was not run; request the action again if still needed.",
+                Some(AgentLoopCommandResult::Permission),
+                "permission_recent_retry_closed",
+                save_session,
+            );
+        }
+        let approval_request_id = recent_retry_approval_request_id(&denial.denial_id);
+        let pending = PendingRecentRetryApproval {
+            denial_id: denial.denial_id.clone(),
+            approval_request_id: approval_request_id.clone(),
+            action_digest: denial.action_digest.clone(),
+            argument_digest: denial.argument_digest.clone(),
+            snapshot_digest: denial.snapshot_digest.clone(),
+            tool_name: denial.tool_name.clone(),
+            expires_at_unix_ms: token.expires_at_unix_ms(),
+            requester_digest: recent_retry_requester_digest(message, &session.key),
+            status: PendingPermissionApprovalStatus::Pending,
+        };
+        set_pending_recent_retry_approval(&mut session, &pending);
+        let content = format!(
+            "Recent retry approval required for denial `{}`. Reply with `1` or `approve` to run the exact denied `{}` action once, or `2`/`deny` to cancel. `approve_session` is not available for recent retry. Approval id: `{}`",
+            denial.denial_id, denial.tool_name, approval_request_id
+        );
+        self.publish_command_response(
+            message,
+            session,
+            &content,
+            Some(AgentLoopCommandResult::Permission),
+            "permission_recent_retry_pending",
+            save_session,
+        )
+    }
+
     fn publish_command_response(
         &mut self,
         message: &InboundMessage,
@@ -1164,12 +1469,37 @@ impl<'a> AgentLoop<'a> {
         approval: &PendingPermissionApproval,
         approval_cache: ApprovalCacheEntry,
     ) -> RuntimeToolExecutionReport {
+        self.execute_approved_permission_call(
+            approval.tool_call.clone(),
+            approval.tool_context.clone(),
+            approval_cache,
+        )
+    }
+
+    fn execute_approved_permission_payload(
+        &self,
+        token: &RecentAutoModeRetryToken,
+        approval_cache: ApprovalCacheEntry,
+    ) -> RuntimeToolExecutionReport {
+        self.execute_approved_permission_call(
+            token.tool_call().clone(),
+            token.tool_context().clone(),
+            approval_cache,
+        )
+    }
+
+    fn execute_approved_permission_call(
+        &self,
+        tool_call: RuntimeToolCall,
+        tool_context: ToolExecutionContext,
+        approval_cache: ApprovalCacheEntry,
+    ) -> RuntimeToolExecutionReport {
         let executor =
             RuntimeToolExecutor::with_context_tools(self.tools, self.context_tools.clone());
-        let mut context = approval.tool_context.clone();
+        let mut context = tool_context;
         context.permission_approval_cache = Some(approval_cache);
         context.permission_session_approval_cache = Vec::new();
-        if bridge_tool_names().contains(&approval.tool_call.name.as_str()) {
+        if bridge_tool_names().contains(&tool_call.name.as_str()) {
             let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
                 definitions: self.tools.definitions(),
                 runtime: crate::runtime::ToolSearchRuntimeInput {
@@ -1178,7 +1508,7 @@ impl<'a> AgentLoop<'a> {
                 },
             });
             return dispatch_bridge_tool_calls(
-                vec![approval.tool_call.clone()],
+                vec![tool_call],
                 tool_surface.catalog.as_ref(),
                 self.tools,
                 &executor,
@@ -1187,7 +1517,7 @@ impl<'a> AgentLoop<'a> {
             )
             .into_runtime_report();
         }
-        executor.execute_tool_calls(vec![approval.tool_call.clone()], &context)
+        executor.execute_tool_calls(vec![tool_call], &context)
     }
 }
 
@@ -1509,11 +1839,84 @@ fn clear_runtime_markers(session: &mut Session) {
     session.metadata.remove(PENDING_USER_TURN_KEY);
     session.metadata.remove(RUNTIME_CHECKPOINT_KEY);
     session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+    session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
     session.metadata.remove(PENDING_PERMISSION_WIZARD_KEY);
 }
 
 fn permission_wizard_choices_text() -> &'static str {
-    "Choose permissions.mode: `default`, `auto`, `bypass_permissions`, or `cancel`."
+    "Choose permissions.mode: `default`, `auto`, `bypass_permissions`, or `cancel`. Use `/permission recent` to inspect recent auto-mode classifier denials."
+}
+
+fn store_recent_auto_mode_denials(session: &mut Session, denials: Vec<RecentAutoModeDenial>) {
+    if denials.is_empty() {
+        return;
+    }
+    let mut store = RecentAutoModeDenialStore::from_denials(recent_auto_mode_denials(session));
+    let mut denials = denials.into_iter().enumerate().collect::<Vec<_>>();
+    denials.sort_by(|(left_index, left), (right_index, right)| {
+        right
+            .created_at_unix_ms
+            .cmp(&left.created_at_unix_ms)
+            .then_with(|| right_index.cmp(left_index))
+    });
+    let denials = denials
+        .into_iter()
+        .map(|(_, denial)| denial)
+        .collect::<Vec<_>>();
+    store.extend_newest_first(denials);
+    if let Ok(value) = serde_json::to_value(store.into_vec()) {
+        session
+            .metadata
+            .insert(RECENT_AUTO_MODE_DENIALS_KEY.to_owned(), value);
+    }
+}
+
+fn recent_auto_mode_denials(session: &Session) -> Vec<RecentAutoModeDenial> {
+    session
+        .metadata
+        .get(RECENT_AUTO_MODE_DENIALS_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<RecentAutoModeDenial>>(value).ok())
+        .unwrap_or_default()
+}
+
+fn format_recent_auto_mode_denials(
+    session: &Session,
+    retry_tokens: &RecentAutoModeRetryTokenStore,
+    now_unix_ms: u64,
+) -> String {
+    let denials = recent_auto_mode_denials(session);
+    if denials.is_empty() {
+        return "No recent auto-mode classifier denials.".to_owned();
+    }
+    let mut lines = vec!["Recent auto-mode classifier denials:".to_owned()];
+    for denial in denials.iter().take(20) {
+        let action_digest = denial.action_digest.chars().take(12).collect::<String>();
+        let snapshot_digest = denial.snapshot_digest.chars().take(12).collect::<String>();
+        let capabilities = denial
+            .capabilities
+            .iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        lines.push(format!(
+            "- id={} tool={} capabilities=[{}] verdict={:?} confidence={:?} scope={:?} action={} snapshot={} retry_state={}",
+            denial.denial_id,
+            denial.tool_name,
+            capabilities,
+            denial.classifier_verdict,
+            denial.classifier_confidence,
+            denial.classifier_scope_match,
+            action_digest,
+            snapshot_digest,
+            if retry_tokens.is_available(&denial.denial_id, now_unix_ms) {
+                "available"
+            } else {
+                "unavailable"
+            },
+        ));
+    }
+    lines.join("\n")
 }
 
 fn set_pending_permission_wizard(session: &mut Session, wizard: &PendingPermissionWizard) {
@@ -1594,6 +1997,22 @@ fn pending_permission_approval(session: &Session) -> Option<PendingPermissionApp
         .and_then(|value| serde_json::from_value(value).ok())
 }
 
+fn set_pending_recent_retry_approval(session: &mut Session, approval: &PendingRecentRetryApproval) {
+    if let Ok(value) = serde_json::to_value(approval) {
+        session
+            .metadata
+            .insert(PENDING_RECENT_RETRY_APPROVAL_KEY.to_owned(), value);
+    }
+}
+
+fn pending_recent_retry_approval(session: &Session) -> Option<PendingRecentRetryApproval> {
+    session
+        .metadata
+        .get(PENDING_RECENT_RETRY_APPROVAL_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
 fn session_permission_approvals(session: &Session) -> Vec<SessionApprovalCacheEntry> {
     session
         .metadata
@@ -1647,6 +2066,14 @@ fn permission_approval_reply_matches_request(
         && approval.sender_id == message.sender_id
 }
 
+fn recent_retry_approval_reply_matches_request(
+    approval: &PendingRecentRetryApproval,
+    message: &InboundMessage,
+    session_key: &str,
+) -> bool {
+    approval.requester_digest == recent_retry_requester_digest(message, session_key)
+}
+
 fn approval_decision(
     approval: &PendingPermissionApproval,
     decision: ApprovalDecisionKind,
@@ -1661,6 +2088,70 @@ fn approval_decision(
         decided_at_unix_ms: now_unix_ms(),
         consumed: false,
     }
+}
+
+fn recent_retry_approval_decision(
+    approval_request: &ApprovalRequest,
+    decision: ApprovalDecisionKind,
+) -> ApprovalDecision {
+    ApprovalDecision {
+        approval_request_id: approval_request.approval_request_id.clone(),
+        action_digest: approval_request.action_digest.clone(),
+        snapshot_digest: approval_request.snapshot_digest.clone(),
+        decision,
+        approved_scope: approval_request.requested_scope.clone(),
+        actor: ApprovalActor::LocalUser,
+        decided_at_unix_ms: now_unix_ms(),
+        consumed: false,
+    }
+}
+
+fn recent_retry_approval_request_id(denial_id: &str) -> String {
+    format!("recent_retry_{denial_id}")
+}
+
+fn recent_retry_approval_request_from_pending(
+    approval: &PendingRecentRetryApproval,
+    requested_scope: &str,
+) -> ApprovalRequest {
+    ApprovalRequest {
+        approval_request_id: approval.approval_request_id.clone(),
+        action_digest: approval.action_digest.clone(),
+        snapshot_digest: approval.snapshot_digest.clone(),
+        requested_scope: requested_scope.to_owned(),
+        risk_summary: format!("Run exact recent denied tool `{}` once", approval.tool_name),
+        allowed_decisions: vec![ApprovalDecisionKind::Approved, ApprovalDecisionKind::Denied],
+        expires_at_unix_ms: approval.expires_at_unix_ms,
+    }
+}
+
+fn recent_retry_requester_digest(message: &InboundMessage, session_key: &str) -> String {
+    digest_json(&json!({
+        "session_key": session_key,
+        "channel": &message.channel,
+        "chat_id": &message.chat_id,
+        "sender_id": &message.sender_id,
+    }))
+}
+
+fn digest_json(value: &Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn recent_retry_closed_message(error: RecentAutoModeRetryTokenConsumeError) -> String {
+    let reason = match error {
+        RecentAutoModeRetryTokenConsumeError::Missing => "process-local retry token is missing",
+        RecentAutoModeRetryTokenConsumeError::Expired => "process-local retry token expired",
+        RecentAutoModeRetryTokenConsumeError::Consumed => {
+            "process-local retry token was already consumed"
+        }
+        RecentAutoModeRetryTokenConsumeError::Mismatched => {
+            "process-local retry token did not match the denial metadata"
+        }
+    };
+    format!("Recent retry failed closed because the {reason}. The denied action was not run; request the action again if still needed.")
 }
 
 fn now_unix_ms() -> u64 {
@@ -2179,6 +2670,9 @@ fn now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{
+        AutoEvaluatorVerdictKind, EvaluatorConfidence, EvaluatorScopeMatch, PermissionPolicyReason,
+    };
     use shacs_providers::{LlmResponse, ProviderEvent, ProviderRequest};
     use std::collections::{BTreeMap, VecDeque};
     use std::fs;
@@ -2221,6 +2715,45 @@ mod tests {
                 content.contains("[Provider Context").then_some(content)
             })
             .unwrap_or_default()
+    }
+
+    fn test_recent_denial(label: &str, created_at_unix_ms: u64) -> RecentAutoModeDenial {
+        RecentAutoModeDenial {
+            denial_id: format!("auto_denial_{label}"),
+            created_at_unix_ms,
+            session_digest: "session-digest".to_owned(),
+            turn_digest: format!("turn-digest-{label}"),
+            tool_name: "exec".to_owned(),
+            capabilities: vec![shacs_config::SafetyCapability::ProcExec],
+            target_summary: vec!["target:test".to_owned()],
+            action_digest: format!("action-{label}"),
+            argument_digest: format!("argument-{label}"),
+            snapshot_digest: format!("snapshot-{label}"),
+            decision_reason: PermissionPolicyReason::EvaluatorUncertain,
+            classifier_verdict: AutoEvaluatorVerdictKind::DenyCandidate,
+            classifier_confidence: EvaluatorConfidence::High,
+            classifier_scope_match: EvaluatorScopeMatch::Requested,
+            retryable: true,
+        }
+    }
+
+    #[test]
+    fn store_recent_auto_mode_denials_orders_same_timestamp_by_collection_recency() {
+        let mut session = Session::new("cli:recent-order");
+
+        store_recent_auto_mode_denials(
+            &mut session,
+            vec![
+                test_recent_denial("older", 10),
+                test_recent_denial("newer", 10),
+            ],
+        );
+
+        let ids = recent_auto_mode_denials(&session)
+            .into_iter()
+            .map(|denial| denial.denial_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["auto_denial_newer", "auto_denial_older"]);
     }
 
     #[test]

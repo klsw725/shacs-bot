@@ -3,11 +3,12 @@ use crate::runtime::tool_execution::{
     permissioned_action_input_from_context,
 };
 use crate::runtime::{
-    normalize_resolved_deferred_tool_call, ContainerNetworkMode, ContainerRuntimeKind,
-    DockerContainmentSnapshot, PermissionMode, PermissionModeSnapshot,
-    PermissionPolicyDecisionKind, PermissionRuleInput, PermissionedAction, ProcExecSummary,
-    RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
-    RuntimeToolMessage, ToolExecutionContext, ToolSearchMode, ToolSearchRuntimeInput,
+    normalize_resolved_deferred_tool_call, recent_auto_mode_denial_from_classifier_decision,
+    ContainerNetworkMode, ContainerRuntimeKind, DockerContainmentSnapshot, PermissionMode,
+    PermissionModeSnapshot, PermissionPolicyDecisionKind, PermissionRuleInput, PermissionedAction,
+    ProcExecSummary, RecentAutoModeDenial, RecentAutoModeRetryToken, RuntimeInterrupt,
+    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage,
+    ToolExecutionContext, ToolSearchMode, ToolSearchRuntimeInput,
 };
 use crate::tools::{
     bridge_tool_names, ActivationState, DeferredToolCatalog, ToolRegistry, ToolSurfaceAssembly,
@@ -19,6 +20,7 @@ use shacs_eval::evaluator::{EvidenceKind, EvidenceRef, RedactionStatus};
 use shacs_redaction::redact_string;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const TOOL_SEARCH: &str = "tool_search";
 const TOOL_DESCRIBE: &str = "tool_describe";
@@ -236,6 +238,10 @@ pub struct BridgeToolExecutionReport {
     pub resolved_calls: Vec<ResolvedDeferredToolCall>,
     #[serde(default)]
     pub permissioned_actions: Vec<PermissionedAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_auto_mode_denials: Vec<RecentAutoModeDenial>,
+    #[serde(skip, default)]
+    pub recent_auto_mode_retry_tokens: Vec<RecentAutoModeRetryToken>,
 }
 
 impl BridgeToolExecutionReport {
@@ -256,6 +262,8 @@ impl BridgeToolExecutionReport {
             interrupt: self.interrupt,
             skipped_tool_calls: self.skipped_tool_calls,
             permissioned_actions: self.permissioned_actions,
+            recent_auto_mode_denials: self.recent_auto_mode_denials,
+            recent_auto_mode_retry_tokens: self.recent_auto_mode_retry_tokens,
         }
     }
 
@@ -266,6 +274,8 @@ impl BridgeToolExecutionReport {
             skipped_tool_calls: Vec::new(),
             resolved_calls: Vec::new(),
             permissioned_actions: Vec::new(),
+            recent_auto_mode_denials: Vec::new(),
+            recent_auto_mode_retry_tokens: Vec::new(),
         }
     }
 
@@ -358,6 +368,29 @@ pub fn dispatch_bridge_tool_calls(
     context: &ToolExecutionContext,
     concurrent_tools: bool,
 ) -> BridgeToolExecutionReport {
+    dispatch_bridge_tool_calls_with_context_resolver(
+        calls,
+        catalog,
+        registry,
+        executor,
+        context,
+        concurrent_tools,
+        None,
+    )
+}
+
+pub(crate) type BridgePermissionContextResolver<'a> =
+    dyn Fn(&ResolvedDeferredToolCall, &ToolExecutionContext) -> ToolExecutionContext + 'a;
+
+pub(crate) fn dispatch_bridge_tool_calls_with_context_resolver(
+    calls: Vec<RuntimeToolCall>,
+    catalog: Option<&DeferredToolCatalog>,
+    registry: &ToolRegistry,
+    executor: &RuntimeToolExecutor<'_>,
+    context: &ToolExecutionContext,
+    concurrent_tools: bool,
+    context_resolver: Option<&BridgePermissionContextResolver<'_>>,
+) -> BridgeToolExecutionReport {
     let bridge_calls = calls
         .iter()
         .map(BridgeToolCall::from_runtime)
@@ -374,6 +407,7 @@ pub fn dispatch_bridge_tool_calls(
                     executor,
                     context,
                     concurrent_tools,
+                    context_resolver,
                 ) {
                     report.skipped_tool_calls.extend(
                         bridge_calls[index..]
@@ -388,6 +422,7 @@ pub fn dispatch_bridge_tool_calls(
                 pending.push(PendingResolvedCall {
                     bridge_call: bridge_call.clone(),
                     resolved_call,
+                    execution_context: None,
                 });
             }
             BridgeAction::Error(error) => {
@@ -397,6 +432,7 @@ pub fn dispatch_bridge_tool_calls(
                     executor,
                     context,
                     concurrent_tools,
+                    context_resolver,
                 ) {
                     report.skipped_tool_calls.extend(
                         bridge_calls[index..]
@@ -416,6 +452,7 @@ pub fn dispatch_bridge_tool_calls(
         executor,
         context,
         concurrent_tools,
+        context_resolver,
     );
     report
 }
@@ -424,6 +461,7 @@ pub fn dispatch_bridge_tool_calls(
 struct PendingResolvedCall {
     bridge_call: BridgeToolCall,
     resolved_call: ResolvedDeferredToolCall,
+    execution_context: Option<ToolExecutionContext>,
 }
 
 enum BridgeAction {
@@ -577,21 +615,46 @@ fn flush_pending(
     executor: &RuntimeToolExecutor<'_>,
     context: &ToolExecutionContext,
     concurrent_tools: bool,
+    context_resolver: Option<&BridgePermissionContextResolver<'_>>,
 ) -> bool {
     if pending.is_empty() {
         return false;
     }
     let all_pending = pending.clone();
     let mut executable_pending = Vec::new();
-    for entry in pending.iter() {
+    for entry in pending.iter_mut() {
+        let resolved_context =
+            context_resolver.map(|resolver| resolver(&entry.resolved_call, context));
+        entry.execution_context = resolved_context.clone();
+        let entry_context = resolved_context.as_ref().unwrap_or(context);
         let action = normalize_resolved_deferred_tool_call(
             executor.registry(),
             &entry.resolved_call,
-            permissioned_action_input_from_context(context),
+            permissioned_action_input_from_context(entry_context),
         );
-        let decision = permission_decision_for_action(&action, context);
+        let decision = permission_decision_for_action(&action, entry_context);
         report.permissioned_actions.push(action.clone());
         report.resolved_calls.push(entry.resolved_call.clone());
+        if let Some(evaluator) = entry_context.permission_evaluator.as_ref() {
+            if let Some(denial) = recent_auto_mode_denial_from_classifier_decision(
+                &action,
+                &decision,
+                evaluator,
+                now_unix_ms(),
+            ) {
+                if denial.retryable {
+                    report
+                        .recent_auto_mode_retry_tokens
+                        .push(RecentAutoModeRetryToken::new(
+                            &denial,
+                            entry.bridge_call.to_runtime_call(),
+                            entry_context.clone(),
+                            evaluator.expires_at_unix_ms,
+                        ));
+                }
+                report.recent_auto_mode_denials.push(denial);
+            }
+        }
         if !decision.can_handoff_to_tool_runtime {
             if flush_executable_pending(
                 &mut executable_pending,
@@ -670,16 +733,8 @@ fn flush_executable_pending(
     if executable_pending.is_empty() {
         return false;
     }
-    let tool_calls = executable_pending
-        .iter()
-        .map(|entry| entry.resolved_call.to_runtime_call())
-        .collect::<Vec<_>>();
-    let bridge_context = bridge_handoff_execution_context(context);
-    let runtime_report = if concurrent_tools {
-        executor.execute_tool_calls_concurrent(tool_calls, &bridge_context)
-    } else {
-        executor.execute_tool_calls(tool_calls, &bridge_context)
-    };
+    let runtime_report =
+        bridge_runtime_report(executable_pending, executor, context, concurrent_tools);
     for message in runtime_report.messages {
         let Some(pending_call) = pending_call_by_id(executable_pending, &message.tool_call_id)
         else {
@@ -725,6 +780,80 @@ fn flush_executable_pending(
     }
     executable_pending.clear();
     false
+}
+
+fn bridge_runtime_report(
+    executable_pending: &[PendingResolvedCall],
+    executor: &RuntimeToolExecutor<'_>,
+    context: &ToolExecutionContext,
+    concurrent_tools: bool,
+) -> RuntimeToolExecutionReport {
+    if executable_pending
+        .iter()
+        .any(|entry| entry.execution_context.is_some())
+    {
+        return execute_bridge_pending_with_individual_contexts(
+            executable_pending,
+            executor,
+            context,
+        );
+    }
+    let tool_calls = executable_pending
+        .iter()
+        .map(|entry| entry.resolved_call.to_runtime_call())
+        .collect::<Vec<_>>();
+    let bridge_context = bridge_handoff_execution_context(context);
+    if concurrent_tools {
+        executor.execute_tool_calls_concurrent(tool_calls, &bridge_context)
+    } else {
+        executor.execute_tool_calls(tool_calls, &bridge_context)
+    }
+}
+
+fn execute_bridge_pending_with_individual_contexts(
+    executable_pending: &[PendingResolvedCall],
+    executor: &RuntimeToolExecutor<'_>,
+    default_context: &ToolExecutionContext,
+) -> RuntimeToolExecutionReport {
+    let mut messages = Vec::new();
+    let mut skipped_tool_calls = Vec::new();
+    let mut permissioned_actions = Vec::new();
+    let mut recent_auto_mode_denials = Vec::new();
+    let mut recent_auto_mode_retry_tokens = Vec::new();
+    for (index, entry) in executable_pending.iter().enumerate() {
+        let source_context = entry.execution_context.as_ref().unwrap_or(default_context);
+        let bridge_context = bridge_handoff_execution_context(source_context);
+        let mut report = executor
+            .execute_tool_calls(vec![entry.resolved_call.to_runtime_call()], &bridge_context);
+        messages.append(&mut report.messages);
+        permissioned_actions.append(&mut report.permissioned_actions);
+        recent_auto_mode_denials.append(&mut report.recent_auto_mode_denials);
+        recent_auto_mode_retry_tokens.append(&mut report.recent_auto_mode_retry_tokens);
+        if let Some(interrupt) = report.interrupt {
+            skipped_tool_calls.extend(
+                executable_pending[index + 1..]
+                    .iter()
+                    .map(|pending| pending.resolved_call.to_runtime_call()),
+            );
+            return RuntimeToolExecutionReport {
+                messages,
+                interrupt: Some(interrupt),
+                skipped_tool_calls,
+                permissioned_actions,
+                recent_auto_mode_denials,
+                recent_auto_mode_retry_tokens,
+            };
+        }
+        skipped_tool_calls.append(&mut report.skipped_tool_calls);
+    }
+    RuntimeToolExecutionReport {
+        messages,
+        interrupt: None,
+        skipped_tool_calls,
+        permissioned_actions,
+        recent_auto_mode_denials,
+        recent_auto_mode_retry_tokens,
+    }
 }
 
 fn bridge_handoff_execution_context(context: &ToolExecutionContext) -> ToolExecutionContext {
@@ -778,6 +907,13 @@ fn pending_call_by_id<'a>(
     pending
         .iter()
         .find(|entry| entry.resolved_call.original_call_id == tool_call_id)
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn object_arguments(call: &BridgeToolCall) -> Result<&Map<String, Value>, ToolCallScopeError> {

@@ -12,22 +12,25 @@ use shacs_core::runtime::{
     runtime_improvement_status_after_apply_record, runtime_improvement_verification_record,
     runtime_mcp_exposure_projection, runtime_memory_evidence_request,
     runtime_skill_list_disclosure, runtime_skill_reference_evidence, runtime_skill_view_disclosure,
-    runtime_spec018_local_api_projection, ActiveLoopTask, AgentLoop, AgentLoopCommandResult,
-    AgentLoopConfig, AgentLoopError, AgentRunSpec, AgentRunner, AutoCompact, AutomationSourceEvent,
-    AutomationSourceEventKind, BridgeUnderlyingMappingEvidence, CancellationToken,
-    ChildResultEnvelope, ChildResultStatus, ContainerNetworkMode, ContainerRuntimeKind,
-    ContainmentSnapshotRef, ContextBuilder, DockerContainmentSnapshot, DreamLifecycle,
-    EvaluatorDecisionInput, GoalCompletionVerdict, InboundMessage, LedgerConsumptionStatus,
+    runtime_spec018_local_api_projection, ActiveLoopTask, AgentHook, AgentHookContext, AgentLoop,
+    AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentRunSpec, AgentRunner,
+    AutoCompact, AutoEvaluatorVerdictKind, AutomationSourceEvent, AutomationSourceEventKind,
+    BridgeUnderlyingMappingEvidence, CancellationToken, ChildResultEnvelope, ChildResultStatus,
+    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBuilder,
+    DockerContainmentSnapshot, DreamLifecycle, EvaluatorConfidence, EvaluatorDecisionInput,
+    EvaluatorScopeMatch, GoalCompletionVerdict, InboundMessage, LedgerConsumptionStatus,
     LoopTaskRegisterResult, McpLifecycle, MergeDecision, MessageBus, PermissionMode,
-    PermissionModeSnapshot, PermissionRuleInput, PermissionedActionOrigin, PersistentGoal,
-    PersistentGoalStatus, ProcExecSummary, ProviderHotSwapResult, ProviderSelectionSnapshot,
-    RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind, RuntimeInterrupt,
-    RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults, RuntimeReplayInput,
-    RuntimeSelectedAction, RuntimeSpec018ProjectionInput, RuntimeToolCall, RuntimeToolExecutor,
-    Session, SessionManager, SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector,
-    SubagentExecutionConfig, SubagentMergeState, SubagentProgressUpdate, SubagentRuntime,
-    SubagentRuntimeConfig, ToolEvent, ToolExecutionContext, ToolSearchConfig, ToolSearchMode,
-    ToolSearchRuntimeInput, ToolStatus, PERSISTENT_GOAL_METADATA_KEY,
+    PermissionModeSnapshot, PermissionPolicyReason, PermissionRuleInput, PermissionedActionOrigin,
+    PersistentGoal, PersistentGoalStatus, ProcExecSummary, ProviderHotSwapResult,
+    ProviderSelectionSnapshot, RecentAutoModeDenial, RecentAutoModeDenialStore,
+    RecentAutoModeRetryToken, RecentAutoModeRetryTokenStore, RuntimeCapabilityStatus,
+    RuntimeContextTools, RuntimeDecisionKind, RuntimeInterrupt, RuntimeMemoryEvidenceRequestInput,
+    RuntimePolicyGateResults, RuntimeReplayInput, RuntimeSelectedAction,
+    RuntimeSpec018ProjectionInput, RuntimeToolCall, RuntimeToolExecutor, Session, SessionManager,
+    SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector, SubagentExecutionConfig,
+    SubagentMergeState, SubagentProgressUpdate, SubagentRuntime, SubagentRuntimeConfig, ToolEvent,
+    ToolExecutionContext, ToolSearchConfig, ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
+    PERSISTENT_GOAL_METADATA_KEY, RECENT_AUTO_MODE_DENIAL_LIMIT,
 };
 use shacs_core::tools::{
     assemble_tool_surface, ActivationState, AskUserTool, JsonMap, MessageTool, SchemaFragment,
@@ -85,6 +88,32 @@ struct ApprovalMetadataProbeTool {
     session_key: &'static str,
     calls: Arc<AtomicUsize>,
     observed_status: Arc<Mutex<Option<String>>>,
+}
+
+struct CheckpointMetadataProbeTool {
+    workspace: PathBuf,
+    session_key: &'static str,
+    calls: Arc<AtomicUsize>,
+    observed_checkpoint: Arc<Mutex<Option<String>>>,
+}
+
+struct ToolObservabilityCaptureHook {
+    observed: Arc<Mutex<Vec<String>>>,
+}
+
+impl AgentHook for ToolObservabilityCaptureHook {
+    fn after_response(&self, _context: &AgentHookContext, response: &LlmResponse) {
+        if let Ok(mut observed) = self.observed.lock() {
+            observed.push(serde_json::to_string(response).unwrap_or_default());
+        }
+    }
+
+    fn before_execute_tools(&self, context: &AgentHookContext, calls: &[RuntimeToolCall]) {
+        if let Ok(mut observed) = self.observed.lock() {
+            observed.push(serde_json::to_string(&context.messages).unwrap_or_default());
+            observed.extend(calls.iter().map(|call| call.arguments.to_string()));
+        }
+    }
 }
 
 impl Tool for ProcExecCountingTool {
@@ -205,6 +234,36 @@ impl Tool for ApprovalMetadataProbeTool {
             });
         if let Ok(mut status) = self.observed_status.lock() {
             *status = observed;
+        }
+        "exec-output".into()
+    }
+}
+
+impl Tool for CheckpointMetadataProbeTool {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn description(&self) -> &str {
+        "Probe checkpoint metadata while counting proc exec attempts."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("command", shacs_core::tools::StringSchema::new("Command"))
+            .required(["command"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let observed = SessionManager::new(&self.workspace)
+            .ok()
+            .and_then(|manager| manager.read_session_file(self.session_key))
+            .and_then(|raw| raw["metadata"].get("runtime_checkpoint").cloned())
+            .map(|checkpoint| checkpoint.to_string());
+        if let Ok(mut checkpoint) = self.observed_checkpoint.lock() {
+            *checkpoint = observed;
         }
         "exec-output".into()
     }
@@ -2793,11 +2852,14 @@ fn agent_runner_auto_classifier_allows_unresolved_static_allow_candidate(
         "requested",
     )]);
     let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
-    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+    let mut context = interactive_auto_context(AutoApprovalConfig {
         enabled: true,
         allow_proc_exec_verification: false,
         ..AutoApprovalConfig::default()
     });
+    context.session_key = Some("/Users/example/.shacs-bot/sessions/raw-session.json".to_owned());
+    context.message_id = Some("/tmp/shacs/raw-turn.json".to_owned());
+    spec.tool_context = context;
 
     let result = AgentRunner::new().run(spec)?;
     let classifier_requests = classifier
@@ -2815,6 +2877,1530 @@ fn agent_runner_auto_classifier_allows_unresolved_static_allow_candidate(
     {
         return Err(format!(
             "classifier allow verdict should stage evaluator approval before execution: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_records_recent_denial_without_raw_command(
+) -> Result<(), Box<dyn Error>> {
+    const RAW_COMMAND: &str = "RAW_EVENT_COMMAND_SECRET";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = StreamMockProvider::new(
+        vec![
+            response_with_runtime_tool_call(RuntimeToolCall::new(
+                "exec-classified-deny-record",
+                "exec",
+                json!({ "command": RAW_COMMAND }),
+            ))?,
+            LlmResponse {
+                content: Some("classifier denied exec".to_owned()),
+                ..LlmResponse::default()
+            },
+        ],
+        vec![
+            ProviderEvent::ToolCallStart {
+                id: "exec-classified-deny-record".to_owned(),
+                name: "exec".to_owned(),
+            },
+            ProviderEvent::ToolCallDelta {
+                id: "exec-classified-deny-record".to_owned(),
+                delta: format!(r#"{{"command":"{RAW_COMMAND}"}}"#),
+            },
+            ProviderEvent::ToolCallReady {
+                id: "exec-classified-deny-record".to_owned(),
+                name: "exec".to_owned(),
+                input: json!({ "command": RAW_COMMAND }),
+            },
+        ],
+    );
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "deny_candidate",
+        "high",
+        "unrelated",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    let mut context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    context.session_key = Some("/Users/example/.shacs-bot/sessions/raw-session.json".to_owned());
+    context.message_id = Some("/tmp/shacs/raw-turn.json".to_owned());
+    spec.tool_context = context;
+    let observed_hook_arguments = Arc::new(Mutex::new(Vec::<String>::new()));
+    spec.agent_hook = Some(Arc::new(ToolObservabilityCaptureHook {
+        observed: observed_hook_arguments.clone(),
+    }));
+    let observed_events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_events_capture = observed_events.clone();
+    spec.tool_event_callback = Some(Arc::new(move |event| {
+        if let Ok(mut observed) = observed_events_capture.lock() {
+            observed.push(serde_json::to_string(event).unwrap_or_default());
+        }
+    }));
+    let observed_provider_events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_provider_events_capture = observed_provider_events.clone();
+    spec.provider_event_callback = Some(Arc::new(move |event| {
+        if let Ok(mut observed) = observed_provider_events_capture.lock() {
+            observed.push(format!("{event:?}"));
+        }
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let hook_text = observed_hook_arguments
+        .lock()
+        .map_err(|error| error.to_string())?
+        .join("\n");
+    let event_text = observed_events
+        .lock()
+        .map_err(|error| error.to_string())?
+        .join("\n");
+    let provider_event_text = observed_provider_events
+        .lock()
+        .map_err(|error| error.to_string())?
+        .join("\n");
+    if calls.load(Ordering::SeqCst) != 0 || result.recent_auto_mode_denials.len() != 1 {
+        return Err(format!(
+            "classifier deny should record one recent denial without executing: result={result:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let denial = &result.recent_auto_mode_denials[0];
+    let serialized = serde_json::to_string(denial)?;
+    if denial.tool_name != "exec"
+        || denial.retryable
+        || !result.recent_auto_mode_retry_tokens.is_empty()
+        || !denial.denial_id.starts_with("auto_denial_")
+        || serialized.contains(RAW_COMMAND)
+        || serialized.contains("command")
+        || serialized.contains("classifier:test")
+        || serialized.contains("raw-session")
+        || serialized.contains("raw-turn")
+        || serialized.contains("/Users/example")
+        || serialized.contains("/tmp/shacs")
+        || hook_text.contains(RAW_COMMAND)
+        || hook_text.contains("command")
+        || event_text.contains(RAW_COMMAND)
+        || event_text.contains("command")
+        || provider_event_text.contains(RAW_COMMAND)
+        || provider_event_text.contains("command")
+        || !hook_text.contains("redacted")
+        || !event_text.contains("redacted")
+        || !provider_event_text.contains("redacted")
+    {
+        return Err(format!(
+            "recent denial observability was not sanitized: denial={serialized} hook={hook_text} events={event_text} provider_events={provider_event_text}"
+        )
+        .into());
+    }
+    if denial.session_digest.len() != 64 || denial.turn_digest.len() != 64 {
+        return Err(
+            format!("recent denial id digests should be full sha256 hex: {serialized}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_bridge_classifier_denial_records_recent_visibility() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(NamedProcExecCountingTool {
+        name: "mcp_exec",
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "bridge-classified-deny-record",
+            "tool_call",
+            json!({ "name": "mcp_exec", "arguments": { "command": "cargo test" } }),
+        ))?,
+        LlmResponse {
+            content: Some("bridge classifier denied exec".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "deny_candidate",
+        "high",
+        "requested",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_search = ToolSearchConfig {
+        enabled: ToolSearchMode::On,
+        threshold_pct: 10,
+        search_default_limit: 5,
+        max_search_limit: 20,
+    };
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+
+    let result = AgentRunner::new().run(spec)?;
+    if calls.load(Ordering::SeqCst) != 0
+        || result.recent_auto_mode_denials.len() != 1
+        || result.recent_auto_mode_retry_tokens.len() != 1
+        || result.recent_auto_mode_denials[0].tool_name != "mcp_exec"
+    {
+        return Err(format!(
+            "bridge classifier denial did not record visibility/token without executing: result={result:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_cancelled_after_classifier_denial_preserves_recent_denials(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classified-deny-then-cancel",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "deny_candidate",
+        "high",
+        "requested",
+    )]);
+    let cancellation = CancellationToken::new();
+    let cancellation_for_event = cancellation.clone();
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    spec.cancellation_token = Some(cancellation);
+    spec.tool_event_callback = Some(Arc::new(move |event| {
+        if event.name == "exec" {
+            cancellation_for_event.cancel();
+        }
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    if result.stop_reason != "cancelled"
+        || calls.load(Ordering::SeqCst) != 0
+        || result.recent_auto_mode_denials.len() != 1
+    {
+        return Err(format!(
+            "cancelled run should preserve accumulated recent denials without executing: result={result:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_shows_sanitized_classifier_denials() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-loop-classified-deny-record",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ))?,
+        classifier_verdict_response("deny_candidate", "high", "unrelated"),
+        LlmResponse {
+            content: Some("classifier denied loop exec".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    config.permission_rule_input = confirmed_non_privileged_permission_input();
+    config.containment_snapshot = Some(ContainmentSnapshotRef {
+        contained: Some(true),
+        backend: Some("official-container".to_owned()),
+        digest: Some("test-contained".to_owned()),
+        summary: Some("non-privileged test containment".to_owned()),
+    });
+    config.permission_auto_approval = AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    };
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("run the tests", Some("cli:recent-denials"))?;
+    if calls.load(Ordering::SeqCst) != 0
+        || first.final_content.as_deref() != Some("classifier denied loop exec")
+    {
+        return Err(format!(
+            "classifier denial turn should not execute and should resume: {first:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+
+    let recent = loop_runtime.process_direct("/permission recent", Some("cli:recent-denials"))?;
+    let content = recent.final_content.unwrap_or_default();
+    if !content.contains("Recent auto-mode classifier denials")
+        || !content.contains("auto_denial_")
+        || !content.contains("tool=exec")
+        || !content.contains("retry_state=unavailable")
+        || content.contains("cargo test")
+        || content.contains("command")
+        || content.contains("classifier:test")
+    {
+        return Err(format!("recent denial output was not sanitized: {content}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_shows_token_availability_not_blanket_retryable(
+) -> Result<(), Box<dyn Error>> {
+    let (mut loop_runtime, calls, _workspace) = recent_retry_loop(true)?;
+    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-state"))?;
+
+    let recent =
+        loop_runtime.process_direct("/permission recent", Some("cli:recent-retry-state"))?;
+    let content = recent.final_content.unwrap_or_default();
+    if calls.load(Ordering::SeqCst) != 0
+        || !content.contains("retry_state=available")
+        || content.contains("retryable=true")
+    {
+        return Err(format!("recent output did not show token availability: {content}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_retry_creates_formal_approval_without_raw_payload_metadata(
+) -> Result<(), Box<dyn Error>> {
+    let (mut loop_runtime, _calls, workspace) = recent_retry_loop(true)?;
+    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-meta"))?;
+    let denial_id = recent_denial_id_from_output(
+        &loop_runtime
+            .process_direct("/permission recent", Some("cli:recent-retry-meta"))?
+            .final_content
+            .unwrap_or_default(),
+    )?;
+
+    let retry = loop_runtime.process_direct(
+        format!("/permission recent retry {denial_id}"),
+        Some("cli:recent-retry-meta"),
+    )?;
+    let raw = SessionManager::new(workspace.path())?
+        .read_session_file("cli:recent-retry-meta")
+        .ok_or("missing recent retry metadata session")?;
+    let metadata = raw["metadata"].to_string();
+    if retry.stop_reason != "permission_recent_retry_pending"
+        || !metadata.contains("pending_recent_retry_approval")
+        || metadata.contains("cargo test")
+        || metadata.contains("command")
+        || metadata.contains("tool_call")
+        || metadata.contains("tool_context")
+    {
+        return Err(format!("recent retry persisted unsafe metadata: {metadata}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_retry_approval_executes_once_through_existing_permission_path(
+) -> Result<(), Box<dyn Error>> {
+    let (mut loop_runtime, calls, _workspace) = recent_retry_loop(true)?;
+    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-approve"))?;
+    let denial_id = recent_denial_id_from_output(
+        &loop_runtime
+            .process_direct("/permission recent", Some("cli:recent-retry-approve"))?
+            .final_content
+            .unwrap_or_default(),
+    )?;
+    loop_runtime.process_direct(
+        format!("/permission recent retry {denial_id}"),
+        Some("cli:recent-retry-approve"),
+    )?;
+
+    let approved = loop_runtime.process_direct("approve", Some("cli:recent-retry-approve"))?;
+    if calls.load(Ordering::SeqCst) != 1 || approved.stop_reason == "permission_recent_retry_closed"
+    {
+        return Err(format!(
+            "recent retry approval did not execute once: {approved:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_retry_rejects_approve_session_without_execution(
+) -> Result<(), Box<dyn Error>> {
+    let (mut loop_runtime, calls, _workspace) = recent_retry_loop(true)?;
+    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-session"))?;
+    let denial_id = recent_denial_id_from_output(
+        &loop_runtime
+            .process_direct("/permission recent", Some("cli:recent-retry-session"))?
+            .final_content
+            .unwrap_or_default(),
+    )?;
+    loop_runtime.process_direct(
+        format!("/permission recent retry {denial_id}"),
+        Some("cli:recent-retry-session"),
+    )?;
+    let reply = loop_runtime.process_direct("approve_session", Some("cli:recent-retry-session"))?;
+    if calls.load(Ordering::SeqCst) != 0 || reply.stop_reason != "permission_recent_retry_rejected"
+    {
+        return Err(format!("approve_session did not fail closed: {reply:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_retry_missing_token_fails_closed() -> Result<(), Box<dyn Error>> {
+    let (mut loop_runtime, calls, workspace) = recent_retry_loop(true)?;
+    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-missing"))?;
+    let denial_id = recent_denial_id_from_output(
+        &loop_runtime
+            .process_direct("/permission recent", Some("cli:recent-retry-missing"))?
+            .final_content
+            .unwrap_or_default(),
+    )?;
+    drop(loop_runtime);
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(Vec::new());
+    let mut config = recent_retry_config(workspace.path(), true);
+    config.permission_auto_approval.enabled = true;
+    let mut restarted = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+    let retry = restarted.process_direct(
+        format!("/permission recent retry {denial_id}"),
+        Some("cli:recent-retry-missing"),
+    )?;
+    if calls.load(Ordering::SeqCst) != 0 || retry.stop_reason != "permission_recent_retry_closed" {
+        return Err(format!("missing token did not fail closed: {retry:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_retry_non_interactive_fails_closed_without_pending_approval(
+) -> Result<(), Box<dyn Error>> {
+    let (mut loop_runtime, calls, workspace) = recent_retry_loop(true)?;
+    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-noninteractive"))?;
+    let denial_id = recent_denial_id_from_output(
+        &loop_runtime
+            .process_direct(
+                "/permission recent",
+                Some("cli:recent-retry-noninteractive"),
+            )?
+            .final_content
+            .unwrap_or_default(),
+    )?;
+    drop(loop_runtime);
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(Vec::new());
+    let config = recent_retry_config(workspace.path(), false);
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+    let retry = loop_runtime.process_direct(
+        format!("/permission recent retry {denial_id}"),
+        Some("cli:recent-retry-noninteractive"),
+    )?;
+    let raw = SessionManager::new(workspace.path())?
+        .read_session_file("cli:recent-retry-noninteractive")
+        .ok_or("missing non-interactive retry session")?;
+    if calls.load(Ordering::SeqCst) != 0
+        || retry.stop_reason != "permission_recent_retry_non_interactive"
+        || raw["metadata"]
+            .get("pending_recent_retry_approval")
+            .is_some()
+    {
+        return Err(format!("non-interactive retry did not fail closed: {retry:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_retry_does_not_overwrite_pending_permission_approval(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-retry-overwrite-denial",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ))?,
+        classifier_verdict_response("deny_candidate", "high", "requested"),
+        LlmResponse {
+            content: Some("classifier denied retry overwrite fixture".to_owned()),
+            ..LlmResponse::default()
+        },
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-existing-approval",
+            "exec",
+            json!({ "command": "pwd; true" }),
+        ))?,
+        classifier_verdict_response("ask_user", "medium", "adjacent"),
+        LlmResponse {
+            content: Some("resumed existing approval".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        recent_retry_config(workspace.path(), true),
+    );
+
+    loop_runtime.process_direct("run the tests", Some("cli:retry-overwrite-permission"))?;
+    let denial_id = recent_denial_id_from_output(
+        &loop_runtime
+            .process_direct("/permission recent", Some("cli:retry-overwrite-permission"))?
+            .final_content
+            .unwrap_or_default(),
+    )?;
+    let pending =
+        loop_runtime.process_direct("needs approval", Some("cli:retry-overwrite-permission"))?;
+    if pending.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!("fixture did not create pending approval: {pending:?}").into());
+    }
+
+    let retry = loop_runtime.process_direct(
+        format!("/permission recent retry {denial_id}"),
+        Some("cli:retry-overwrite-permission"),
+    )?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:retry-overwrite-permission")
+        .ok_or("missing retry overwrite session")?;
+    if retry.stop_reason != "permission_approval_pending"
+        || raw["metadata"].get("pending_permission_approval").is_none()
+        || raw["metadata"]
+            .get("pending_recent_retry_approval")
+            .is_some()
+    {
+        return Err(format!(
+            "recent retry overwrote or disturbed pending permission approval: retry={retry:?} raw={raw:?}"
+        )
+        .into());
+    }
+
+    let approved =
+        loop_runtime.process_direct("approve", Some("cli:retry-overwrite-permission"))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || approved.final_content.as_deref() != Some("resumed existing approval")
+    {
+        return Err(format!(
+            "original pending approval was not preserved: approved={approved:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_retry_does_not_overwrite_pending_recent_retry_approval(
+) -> Result<(), Box<dyn Error>> {
+    let (mut loop_runtime, calls, _workspace) = recent_retry_loop(true)?;
+    loop_runtime.process_direct("run the tests", Some("cli:retry-overwrite-recent"))?;
+    let denial_id = recent_denial_id_from_output(
+        &loop_runtime
+            .process_direct("/permission recent", Some("cli:retry-overwrite-recent"))?
+            .final_content
+            .unwrap_or_default(),
+    )?;
+    let first = loop_runtime.process_direct(
+        format!("/permission recent retry {denial_id}"),
+        Some("cli:retry-overwrite-recent"),
+    )?;
+    let second = loop_runtime.process_direct(
+        format!("/permission recent retry {denial_id}"),
+        Some("cli:retry-overwrite-recent"),
+    )?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:retry-overwrite-recent")
+        .ok_or("missing pending recent retry session")?;
+    if first.stop_reason != "permission_recent_retry_pending"
+        || second.stop_reason != "permission_recent_retry_pending"
+        || calls.load(Ordering::SeqCst) != 0
+        || raw["metadata"]
+            .get("pending_recent_retry_approval")
+            .is_none()
+        || raw["metadata"].get("pending_permission_approval").is_some()
+    {
+        return Err(format!(
+            "recent retry command disturbed existing recent retry approval: first={first:?} second={second:?} raw={raw:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+
+    let approved = loop_runtime.process_direct("approve", Some("cli:retry-overwrite-recent"))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || approved.final_content.as_deref() != Some("recent retry completed")
+    {
+        return Err(format!(
+            "existing recent retry approval was not preserved: approved={approved:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn recent_auto_mode_denial_store_caps_at_twenty_newest_records() -> Result<(), Box<dyn Error>> {
+    let mut store = RecentAutoModeDenialStore::default();
+    for index in 0..25 {
+        store.push_front(RecentAutoModeDenial {
+            denial_id: format!("auto_denial_{index}"),
+            created_at_unix_ms: index,
+            session_digest: "session-digest".to_owned(),
+            turn_digest: format!("turn-digest-{index}"),
+            tool_name: "exec".to_owned(),
+            capabilities: vec![shacs_config::SafetyCapability::ProcExec],
+            target_summary: vec![format!("target:{index}")],
+            action_digest: format!("action-{index}"),
+            argument_digest: format!("argument-{index}"),
+            snapshot_digest: format!("snapshot-{index}"),
+            decision_reason: PermissionPolicyReason::EvaluatorUncertain,
+            classifier_verdict: AutoEvaluatorVerdictKind::DenyCandidate,
+            classifier_confidence: EvaluatorConfidence::High,
+            classifier_scope_match: EvaluatorScopeMatch::Unrelated,
+            retryable: true,
+        });
+    }
+
+    if store.as_slice().len() != RECENT_AUTO_MODE_DENIAL_LIMIT
+        || store
+            .as_slice()
+            .first()
+            .map(|denial| denial.denial_id.as_str())
+            != Some("auto_denial_24")
+        || store
+            .as_slice()
+            .last()
+            .map(|denial| denial.denial_id.as_str())
+            != Some("auto_denial_5")
+    {
+        return Err(format!("recent denial store did not keep newest 20: {store:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn recent_auto_mode_denial_store_extend_keeps_newest_first_input_order(
+) -> Result<(), Box<dyn Error>> {
+    let mut store = RecentAutoModeDenialStore::default();
+    store.extend_newest_first(
+        ["newest", "older"]
+            .into_iter()
+            .map(|id| RecentAutoModeDenial {
+                denial_id: format!("auto_denial_{id}"),
+                created_at_unix_ms: 1,
+                session_digest: "session-digest".to_owned(),
+                turn_digest: format!("turn-digest-{id}"),
+                tool_name: "exec".to_owned(),
+                capabilities: vec![shacs_config::SafetyCapability::ProcExec],
+                target_summary: vec!["target:test".to_owned()],
+                action_digest: format!("action-{id}"),
+                argument_digest: format!("argument-{id}"),
+                snapshot_digest: format!("snapshot-{id}"),
+                decision_reason: PermissionPolicyReason::EvaluatorUncertain,
+                classifier_verdict: AutoEvaluatorVerdictKind::DenyCandidate,
+                classifier_confidence: EvaluatorConfidence::High,
+                classifier_scope_match: EvaluatorScopeMatch::Unrelated,
+                retryable: true,
+            }),
+    );
+
+    let ids = store
+        .as_slice()
+        .iter()
+        .map(|denial| denial.denial_id.as_str())
+        .collect::<Vec<_>>();
+    if ids != ["auto_denial_newest", "auto_denial_older"] {
+        return Err(format!("extend_newest_first reordered input: {ids:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn recent_auto_mode_retry_token_store_consumes_one_shot() -> Result<(), Box<dyn Error>> {
+    let denial = sample_recent_denial("one-shot");
+    let token = RecentAutoModeRetryToken::new(
+        &denial,
+        RuntimeToolCall::new("call-1", "exec", json!({ "command": "cargo test" })),
+        interactive_auto_context(AutoApprovalConfig::default()),
+        10,
+    );
+    let mut store = RecentAutoModeRetryTokenStore::default();
+    store.insert(token);
+
+    let consumed = store
+        .consume(
+            &denial.denial_id,
+            &denial.action_digest,
+            &denial.argument_digest,
+            &denial.snapshot_digest,
+            5,
+        )
+        .map_err(|error| format!("unexpected consume error: {error:?}"))?;
+    if consumed.denial_id() != denial.denial_id || store.is_available(&denial.denial_id, 5) {
+        return Err("retry token was not consumed exactly once".into());
+    }
+    if store
+        .consume(
+            &denial.denial_id,
+            &denial.action_digest,
+            &denial.argument_digest,
+            &denial.snapshot_digest,
+            5,
+        )
+        .is_ok()
+    {
+        return Err("consumed retry token was reusable".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn recent_auto_mode_retry_token_store_rejects_expired_and_mismatched_once(
+) -> Result<(), Box<dyn Error>> {
+    let expired_denial = sample_recent_denial("expired");
+    let expired_token = RecentAutoModeRetryToken::new(
+        &expired_denial,
+        RuntimeToolCall::new("call-expired", "exec", json!({ "command": "cargo test" })),
+        interactive_auto_context(AutoApprovalConfig::default()),
+        10,
+    );
+    let mismatched_denial = sample_recent_denial("mismatched");
+    let mismatched_token = RecentAutoModeRetryToken::new(
+        &mismatched_denial,
+        RuntimeToolCall::new(
+            "call-mismatched",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+        interactive_auto_context(AutoApprovalConfig::default()),
+        100,
+    );
+    let mut store = RecentAutoModeRetryTokenStore::default();
+    store.insert(expired_token);
+    store.insert(mismatched_token);
+
+    if store.consume(
+        &expired_denial.denial_id,
+        &expired_denial.action_digest,
+        &expired_denial.argument_digest,
+        &expired_denial.snapshot_digest,
+        11,
+    ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Expired)
+        || store.consume(
+            &expired_denial.denial_id,
+            &expired_denial.action_digest,
+            &expired_denial.argument_digest,
+            &expired_denial.snapshot_digest,
+            11,
+        ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Consumed)
+    {
+        return Err("expired token was not terminally consumed".into());
+    }
+
+    if store.consume(
+        &mismatched_denial.denial_id,
+        "different-action",
+        &mismatched_denial.argument_digest,
+        &mismatched_denial.snapshot_digest,
+        20,
+    ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Mismatched)
+        || store.consume(
+            &mismatched_denial.denial_id,
+            &mismatched_denial.action_digest,
+            &mismatched_denial.argument_digest,
+            &mismatched_denial.snapshot_digest,
+            20,
+        ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Consumed)
+    {
+        return Err("mismatched token was not terminally consumed".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn recent_auto_mode_retry_token_debug_redacts_raw_payload() -> Result<(), Box<dyn Error>> {
+    let denial = sample_recent_denial("debug-redacts");
+    let mut context = interactive_auto_context(AutoApprovalConfig::default());
+    context.metadata = json!({ "secret": "RAW_CONTEXT_SECRET" });
+    let token = RecentAutoModeRetryToken::new(
+        &denial,
+        RuntimeToolCall::new("call-1", "exec", json!({ "command": "RAW_COMMAND_SECRET" })),
+        context,
+        10,
+    );
+    let debug = format!("{token:?}");
+    if debug.contains("RAW_COMMAND_SECRET")
+        || debug.contains("RAW_CONTEXT_SECRET")
+        || debug.contains("command")
+    {
+        return Err(format!("retry token debug leaked raw payload: {debug}").into());
+    }
+    Ok(())
+}
+
+fn sample_recent_denial(label: &str) -> RecentAutoModeDenial {
+    RecentAutoModeDenial {
+        denial_id: format!("auto_denial_{label}"),
+        created_at_unix_ms: 1,
+        session_digest: "session-digest".to_owned(),
+        turn_digest: "turn-digest".to_owned(),
+        tool_name: "exec".to_owned(),
+        capabilities: vec![shacs_config::SafetyCapability::ProcExec],
+        target_summary: vec!["target:test".to_owned()],
+        action_digest: format!("action-{label}"),
+        argument_digest: format!("argument-{label}"),
+        snapshot_digest: format!("snapshot-{label}"),
+        decision_reason: PermissionPolicyReason::EvaluatorUncertain,
+        classifier_verdict: AutoEvaluatorVerdictKind::DenyCandidate,
+        classifier_confidence: EvaluatorConfidence::High,
+        classifier_scope_match: EvaluatorScopeMatch::Unrelated,
+        retryable: true,
+    }
+}
+
+fn recent_retry_loop(
+    interactive: bool,
+) -> Result<(AgentLoop<'static>, Arc<AtomicUsize>, tempfile::TempDir), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let registry = Box::leak(Box::new(registry));
+    let client = Box::leak(Box::new(MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-loop-recent-retry",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ))?,
+        classifier_verdict_response("deny_candidate", "high", "requested"),
+        LlmResponse {
+            content: Some("classifier denied loop exec".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("recent retry completed".to_owned()),
+            ..LlmResponse::default()
+        },
+    ])));
+    let config = recent_retry_config(workspace.path(), interactive);
+    let loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        registry,
+        client,
+        config,
+    );
+    Ok((loop_runtime, calls, workspace))
+}
+
+fn recent_retry_config(workspace: &std::path::Path, interactive: bool) -> AgentLoopConfig {
+    let mut config = AgentLoopConfig::new(workspace, "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = interactive;
+    config.permission_rule_input = confirmed_non_privileged_permission_input();
+    config.containment_snapshot = Some(ContainmentSnapshotRef {
+        contained: Some(true),
+        backend: Some("official-container".to_owned()),
+        digest: Some("test-contained".to_owned()),
+        summary: Some("non-privileged test containment".to_owned()),
+    });
+    config.permission_auto_approval = AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    };
+    config
+}
+
+fn recent_denial_id_from_output(content: &str) -> Result<String, Box<dyn Error>> {
+    content
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("id=").map(str::to_owned))
+        .ok_or_else(|| format!("missing denial id in recent output: {content}").into())
+}
+
+#[test]
+fn agent_runner_auto_classifier_summarizes_simple_contained_exec_before_classifier(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-classified-pwd",
+            "exec",
+            json!({ "command": "pwd" }),
+        ))?,
+        LlmResponse {
+            content: Some("classifier allowed pwd".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "allow_candidate",
+        "high",
+        "requested",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    let mut context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    context.permission_rule_input.proc_exec_summary = None;
+    spec.tool_context = context;
+    let diagnostic_details = Arc::new(Mutex::new(Vec::<String>::new()));
+    let diagnostic_details_capture = diagnostic_details.clone();
+    spec.tool_event_callback = Some(Arc::new(move |event| {
+        if event.name == "permission_auto_approval" {
+            if let Ok(mut details) = diagnostic_details_capture.lock() {
+                details.push(event.detail.clone());
+            }
+        }
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let classifier_prompt = classifier_requests
+        .first()
+        .map(|request| {
+            request
+                .messages
+                .iter()
+                .filter_map(|message| message.get("content").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let diagnostic_details = diagnostic_details
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let diagnostic_text = diagnostic_details.join("\n");
+    if calls.load(Ordering::SeqCst) != 1
+        || result.final_content.as_deref() != Some("classifier allowed pwd")
+        || classifier_requests.len() != 1
+        || !classifier_prompt.contains("confidence must be \"high\"")
+        || !classifier_prompt.contains("scope_match must be \"requested\"")
+        || !diagnostic_text.contains("\"evaluator_source\":\"permission_classifier\"")
+        || diagnostic_text.contains("classifier:test")
+        || diagnostic_text.contains("evaluator_ref")
+    {
+        return Err(format!(
+            "simple contained exec should reach classifier with redacted diagnostics despite missing proc exec summary: result={result:?} calls={} classifier_requests={classifier_requests:?} diagnostic_details={diagnostic_details:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_diagnostic_source_ignores_spoofed_evaluator_ref(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-classifier-spoof-source",
+            "exec",
+            json!({ "command": "pwd" }),
+        ))?,
+        LlmResponse {
+            content: Some("classifier allowed spoof source test".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let classifier = MockProvider::new(vec![LlmResponse {
+        content: Some(
+            json!({
+                "verdict": "allow_candidate",
+                "confidence": "high",
+                "scope_match": "requested",
+                "risk_summary": "test spoofed evaluator source",
+                "evidence_refs": ["classifier:test"],
+                "evaluator_ref": "local-auto-approval"
+            })
+            .to_string(),
+        ),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    let mut context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    context.permission_rule_input.proc_exec_summary = None;
+    spec.tool_context = context;
+    let diagnostic_details = Arc::new(Mutex::new(Vec::<String>::new()));
+    let diagnostic_details_capture = diagnostic_details.clone();
+    spec.tool_event_callback = Some(Arc::new(move |event| {
+        if event.name == "permission_auto_approval" {
+            if let Ok(mut details) = diagnostic_details_capture.lock() {
+                details.push(event.detail.clone());
+            }
+        }
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let diagnostic_text = diagnostic_details
+        .lock()
+        .map_err(|error| error.to_string())?
+        .join("\n");
+    if calls.load(Ordering::SeqCst) != 1
+        || result.final_content.as_deref() != Some("classifier allowed spoof source test")
+        || !diagnostic_text.contains("\"evaluator_source\":\"permission_classifier\"")
+        || diagnostic_text.contains("local_auto_approval")
+        || diagnostic_text.contains("local-auto-approval")
+    {
+        return Err(format!(
+            "classifier-controlled evaluator_ref should not spoof diagnostic source: result={result:?} calls={} diagnostics={diagnostic_text}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_accepts_fenced_json_verdict() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-classified-fenced",
+            "exec",
+            json!({ "command": "pwd" }),
+        ))?,
+        LlmResponse {
+            content: Some("classifier allowed fenced json".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let classifier = MockProvider::new(vec![LlmResponse {
+        content: Some(format!(
+            "```json\n{}\n```",
+            json!({
+                "verdict": "allow_candidate",
+                "confidence": "high",
+                "scope_match": "requested",
+                "risk_summary": "test fenced classifier verdict",
+                "evidence_refs": ["classifier:test"],
+                "evaluator_ref": "classifier:test"
+            })
+        )),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    let mut context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    context.permission_rule_input.proc_exec_summary = None;
+    spec.tool_context = context;
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 1
+        || result.final_content.as_deref() != Some("classifier allowed fenced json")
+        || classifier_requests.len() != 1
+    {
+        return Err(format!(
+            "fenced classifier JSON should parse and allow requested exec: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_keeps_prose_wrapped_json_verdict_approval_gated(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classified-prose-json",
+            "exec",
+            json!({ "command": "pwd" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![LlmResponse {
+        content: Some(format!(
+            "The action is in scope.\n{}\nNo further concerns.",
+            json!({
+                "verdict": "allow_candidate",
+                "confidence": "high",
+                "scope_match": "requested",
+                "risk_summary": "test prose wrapped classifier verdict",
+                "evidence_refs": ["classifier:test"],
+                "evaluator_ref": "classifier:test"
+            })
+        )),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    let mut context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    context.permission_rule_input.proc_exec_summary = None;
+    spec.tool_context = context;
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || classifier_requests.len() != 1
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+    {
+        return Err(format!(
+            "prose-wrapped classifier JSON should fail closed instead of allowing exec: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_keeps_nested_json_verdict_approval_gated(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classified-nested",
+            "exec",
+            json!({ "command": "pwd" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![LlmResponse {
+        content: Some(
+            json!({
+                "classification": {
+                    "verdict": "allow_candidate",
+                    "confidence": "high",
+                    "scope_match": "requested",
+                    "risk_summary": "test nested classifier verdict",
+                    "evidence_refs": ["classifier:test"],
+                    "evaluator_ref": "classifier:test"
+                }
+            })
+            .to_string(),
+        ),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    let mut context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    context.permission_rule_input.proc_exec_summary = None;
+    spec.tool_context = context;
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || classifier_requests.len() != 1
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+    {
+        return Err(format!(
+            "nested classifier JSON should fail closed instead of allowing exec: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_keeps_alias_json_verdict_approval_gated(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new("exec-classified-alias", "exec", json!({ "command": "pwd" })),
+    )?]);
+    let classifier = MockProvider::new(vec![LlmResponse {
+        content: Some(
+            json!({
+                "allow": true,
+                "confidence": "high",
+                "scope": "in_scope",
+                "reason": "test alias classifier verdict",
+                "evidence": ["classifier:test"],
+                "evaluator": "classifier:test"
+            })
+            .to_string(),
+        ),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    let mut context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    context.permission_rule_input.proc_exec_summary = None;
+    spec.tool_context = context;
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || classifier_requests.len() != 1
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+    {
+        return Err(format!(
+            "alias classifier JSON should fail closed instead of allowing exec: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_allows_only_exact_proc_exec_verification_commands(
+) -> Result<(), Box<dyn Error>> {
+    for command in [
+        "pwd",
+        "cargo check",
+        "cargo test",
+        "cargo clippy",
+        "cargo build",
+        "cargo fmt --check",
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(ProcExecCountingTool {
+            calls: calls.clone(),
+        });
+        let client = MockProvider::new(vec![
+            response_with_runtime_tool_call(RuntimeToolCall::new(
+                "exec-exact-verification",
+                "exec",
+                json!({ "command": command }),
+            ))?,
+            LlmResponse {
+                content: Some("classifier allowed exact verification command".to_owned()),
+                ..LlmResponse::default()
+            },
+        ]);
+        let classifier = MockProvider::new(vec![classifier_verdict_response(
+            "allow_candidate",
+            "high",
+            "requested",
+        )]);
+        let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+        let mut context = interactive_auto_context(AutoApprovalConfig {
+            enabled: true,
+            allow_proc_exec_verification: false,
+            ..AutoApprovalConfig::default()
+        });
+        context.permission_rule_input.proc_exec_summary = None;
+        spec.tool_context = context;
+
+        let result = AgentRunner::new().run(spec)?;
+        let classifier_requests = classifier
+            .requests
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if calls.load(Ordering::SeqCst) != 1
+            || classifier_requests.len() != 1
+            || result.final_content.as_deref()
+                != Some("classifier allowed exact verification command")
+        {
+            return Err(format!(
+                "exact verification command should reach classifier and execute: command={command:?} result={result:?} calls={} classifier_requests={classifier_requests:?}",
+                calls.load(Ordering::SeqCst)
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_keeps_non_exact_proc_exec_commands_approval_gated(
+) -> Result<(), Box<dyn Error>> {
+    let overlong_padded_pwd = format!("{}pwd", " ".repeat(201));
+    for command in [
+        "",
+        "   ",
+        "pwd; true",
+        "pwd\ntrue",
+        "cargo test | cat",
+        overlong_padded_pwd.as_str(),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(ProcExecCountingTool {
+            calls: calls.clone(),
+        });
+        let client = MockProvider::new(vec![
+            response_with_runtime_tool_call(RuntimeToolCall::new(
+                "exec-non-exact-verification",
+                "exec",
+                json!({ "command": command }),
+            ))?,
+            LlmResponse {
+                content: Some("non-exact command blocked".to_owned()),
+                ..LlmResponse::default()
+            },
+        ]);
+        let classifier = MockProvider::new(vec![classifier_verdict_response(
+            "allow_candidate",
+            "high",
+            "requested",
+        )]);
+        let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+        let mut context = interactive_auto_context(AutoApprovalConfig {
+            enabled: true,
+            allow_proc_exec_verification: false,
+            ..AutoApprovalConfig::default()
+        });
+        context.permission_rule_input.proc_exec_summary = None;
+        spec.tool_context = context;
+
+        let result = AgentRunner::new().run(spec)?;
+        let classifier_requests = classifier
+            .requests
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if calls.load(Ordering::SeqCst) != 0
+            || !classifier_requests.is_empty()
+            || (result.final_content.as_deref() != Some("non-exact command blocked")
+                && !matches!(
+                    result.interrupt,
+                    Some(RuntimeInterrupt::PermissionApproval { .. })
+                ))
+        {
+            return Err(format!(
+                "non-exact proc exec command should stay approval-gated without classifier: command={command:?} result={result:?} calls={} classifier_requests={classifier_requests:?}",
+                calls.load(Ordering::SeqCst)
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_keeps_unsummarized_exec_approval_gated(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-unsummarized",
+            "exec",
+            json!({ "command": "rm -rf target" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "allow_candidate",
+        "high",
+        "requested",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    let mut context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    context.permission_rule_input.proc_exec_summary = None;
+    spec.tool_context = context;
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || !classifier_requests.is_empty()
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+    {
+        return Err(format!(
+            "unsummarized exec should remain approval-gated without classifier: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_auto_classifier_keeps_cargo_with_untrusted_options_approval_gated(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-cargo-config",
+            "exec",
+            json!({ "command": "cargo test --config build.rustc-wrapper=/bin/false" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "allow_candidate",
+        "high",
+        "requested",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    let mut context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    context.permission_rule_input.proc_exec_summary = None;
+    spec.tool_context = context;
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || !classifier_requests.is_empty()
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+    {
+        return Err(format!(
+            "cargo commands with untrusted options should remain approval-gated without classifier: result={result:?} calls={} classifier_requests={classifier_requests:?}",
             calls.load(Ordering::SeqCst)
         )
         .into());
@@ -4700,6 +6286,71 @@ fn loop_runtime_checkpoint_materializes_placeholders_and_clears_metadata(
             .contains("interrupted or lost")
     {
         return Err(format!("checkpoint materialization drifted: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_runtime_checkpoint_redacts_pending_tool_arguments_while_tool_runs(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_checkpoint = Arc::new(Mutex::new(None));
+    let mut registry = ToolRegistry::new();
+    registry.register(CheckpointMetadataProbeTool {
+        workspace: workspace.path().to_path_buf(),
+        session_key: "cli:checkpoint-redaction",
+        calls: calls.clone(),
+        observed_checkpoint: observed_checkpoint.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-checkpoint-redaction",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("RAW_CHECKPOINT_COMMAND_SECRET"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("checkpoint redaction complete".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        safe_bypass_agent_loop_config(workspace.path()),
+    );
+
+    let result =
+        loop_runtime.process_direct("run checkpoint probe", Some("cli:checkpoint-redaction"))?;
+    let observed = observed_checkpoint
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone()
+        .ok_or("checkpoint probe did not observe checkpoint metadata")?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:checkpoint-redaction")
+        .ok_or("missing checkpoint redaction session")?;
+    if calls.load(Ordering::SeqCst) != 1
+        || result.final_content.as_deref() != Some("checkpoint redaction complete")
+        || raw["metadata"].get("runtime_checkpoint").is_some()
+        || observed.contains("RAW_CHECKPOINT_COMMAND_SECRET")
+        || observed.contains("\\\"command\\\"")
+        || !observed.contains("<redacted>")
+    {
+        return Err(format!(
+            "runtime checkpoint persisted raw tool arguments: result={result:?} observed={observed} raw={raw:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
     }
     Ok(())
 }

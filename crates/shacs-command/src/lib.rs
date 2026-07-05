@@ -35,7 +35,7 @@ impl CommandId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandKind {
     Priority,
@@ -150,6 +150,7 @@ impl CommandRouter {
         for command in [
             CommandId::History,
             CommandId::Goal,
+            CommandId::Permission,
             CommandId::DreamLog,
             CommandId::DreamRestore,
         ] {
@@ -238,7 +239,7 @@ pub enum LoopCommand {
     Status,
     New,
     Stop,
-    Permission,
+    Permission(PermissionCommandArgs),
     Goal(GoalCommandArgs),
     History(HistoryCommandArgs),
     Dream,
@@ -247,10 +248,19 @@ pub enum LoopCommand {
     Help,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryCommandArgs {
     Count(usize),
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionCommandArgs {
+    ModeWizard,
+    Recent,
+    RecentRetry(String),
     Invalid,
 }
 
@@ -287,7 +297,7 @@ fn loop_command_from_parsed(parsed: ParsedCommand) -> Option<RoutedLoopCommand> 
         CommandId::Status => Some(LoopCommand::Status),
         _ if parsed.kind == CommandKind::Priority => None,
         CommandId::New => Some(LoopCommand::New),
-        CommandId::Permission => Some(LoopCommand::Permission),
+        CommandId::Permission => Some(LoopCommand::Permission(parse_permission_args(&parsed.args))),
         CommandId::Goal => Some(LoopCommand::Goal(parse_goal_args(&parsed.args))),
         CommandId::History => Some(LoopCommand::History(parse_history_args(&parsed.args))),
         CommandId::Dream => Some(LoopCommand::Dream),
@@ -346,6 +356,30 @@ fn parse_history_args(args: &str) -> HistoryCommandArgs {
     }
 }
 
+fn parse_permission_args(args: &str) -> PermissionCommandArgs {
+    let rest = args.trim();
+    if rest.is_empty() {
+        return PermissionCommandArgs::ModeWizard;
+    }
+    if rest.eq_ignore_ascii_case("recent") {
+        PermissionCommandArgs::Recent
+    } else if let Some((first, after_first)) = split_first_token(rest) {
+        if !first.eq_ignore_ascii_case("recent") {
+            return PermissionCommandArgs::Invalid;
+        }
+        let Some((second, denial_id)) = split_first_token(after_first) else {
+            return PermissionCommandArgs::Invalid;
+        };
+        if second.eq_ignore_ascii_case("retry") && denial_id.split_whitespace().count() == 1 {
+            PermissionCommandArgs::RecentRetry(denial_id.to_owned())
+        } else {
+            PermissionCommandArgs::Invalid
+        }
+    } else {
+        PermissionCommandArgs::Invalid
+    }
+}
+
 fn parse_optional_sha(args: &str) -> Option<String> {
     args.split_whitespace().next().map(str::to_owned)
 }
@@ -389,6 +423,8 @@ pub fn build_help_text() -> String {
         "/restart — Restart the bot",
         "/status — Show bot status",
         "/permission — Change permissions.mode for subsequent turns",
+        "/permission recent — Show recent auto-mode classifier denials",
+        "/permission recent retry <denial_id> — Request one-shot approval for a recent denial while the process-local retry token is available",
         "/goal [status|pause|resume|clear|done|blocked <reason>|<text>] — Manage the persistent goal",
         "/history [n] — Show the last N conversation messages (default 10)",
         "/dream — Manually trigger Dream consolidation",

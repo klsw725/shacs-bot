@@ -1,7 +1,7 @@
 use shacs_command::{
     build_help_text, is_builtin_command, normalize_channel_command, parse_loop_command,
     parse_loop_command_route, CommandId, CommandKind, CommandRouter, GoalCommandArgs,
-    HistoryCommandArgs, LoopCommand,
+    HistoryCommandArgs, LoopCommand, PermissionCommandArgs,
 };
 use std::error::Error;
 
@@ -53,7 +53,21 @@ fn loop_command_parser_matches_builtin_router_semantics() {
     assert_eq!(parse_loop_command(" /new "), Some(LoopCommand::New));
     assert_eq!(
         parse_loop_command(" /permission "),
-        Some(LoopCommand::Permission)
+        Some(LoopCommand::Permission(PermissionCommandArgs::ModeWizard))
+    );
+    assert_eq!(
+        parse_loop_command("/permission recent"),
+        Some(LoopCommand::Permission(PermissionCommandArgs::Recent))
+    );
+    assert_eq!(
+        parse_loop_command("/permission recent retry auto_denial_abc123"),
+        Some(LoopCommand::Permission(PermissionCommandArgs::RecentRetry(
+            "auto_denial_abc123".to_owned()
+        )))
+    );
+    assert_eq!(
+        parse_loop_command("/permission auto"),
+        Some(LoopCommand::Permission(PermissionCommandArgs::Invalid))
     );
     assert_eq!(parse_loop_command("/stop please"), None);
     assert_eq!(parse_loop_command("/restart"), Some(LoopCommand::Restart));
@@ -126,6 +140,24 @@ fn loop_command_parser_matches_builtin_router_semantics() {
 }
 
 #[test]
+fn permission_recent_retry_command_parses_denial_id() {
+    assert_eq!(
+        parse_loop_command("/permission recent retry auto_denial_deadbeef"),
+        Some(LoopCommand::Permission(PermissionCommandArgs::RecentRetry(
+            "auto_denial_deadbeef".to_owned()
+        )))
+    );
+}
+
+#[test]
+fn permission_recent_retry_rejects_missing_denial_id() {
+    assert_eq!(
+        parse_loop_command("/permission recent retry"),
+        Some(LoopCommand::Permission(PermissionCommandArgs::Invalid))
+    );
+}
+
+#[test]
 fn loop_command_route_preserves_priority_exact_and_prefix_boundary() -> Result<(), Box<dyn Error>> {
     let priority = parse_loop_command_route(" /status ").ok_or("missing status route")?;
     assert_eq!(priority.command, LoopCommand::Status);
@@ -175,7 +207,8 @@ fn builtin_command_detection_and_help_cover_registered_commands() {
     assert!(is_builtin_command("/goal ship PRD 001"));
     assert!(is_builtin_command("/status"));
     assert!(is_builtin_command("/permission"));
-    assert!(!is_builtin_command("/permission auto"));
+    assert!(is_builtin_command("/permission recent"));
+    assert!(is_builtin_command("/permission auto"));
     assert!(!is_builtin_command("/status now"));
     assert!(!is_builtin_command("hello"));
 

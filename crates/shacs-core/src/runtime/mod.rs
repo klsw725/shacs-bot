@@ -242,6 +242,7 @@ pub use tool_execution::{
     RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
     RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext,
 };
+pub(crate) use tool_search::dispatch_bridge_tool_calls_with_context_resolver;
 pub use tool_search::{
     bridge_underlying_mapping_evidence_ref, dispatch_bridge_tool_call, dispatch_bridge_tool_calls,
     BridgeToolCall, BridgeToolExecutionReport, BridgeToolResult, BridgeUnderlyingMappingEvidence,

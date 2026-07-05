@@ -5,8 +5,9 @@ use crate::runtime::{
     EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
     PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionPolicyDecision,
     PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionRuleInput, PermissionedAction,
-    PermissionedActionInput, PermissionedActionOrigin, SafetyCapability, SessionApprovalCacheEntry,
-    StaticRuleDecision, StaticRuleDecisionKind,
+    PermissionedActionInput, PermissionedActionOrigin, ProcExecSummary, RecentAutoModeDenial,
+    RecentAutoModeRetryToken, SafetyCapability, SessionApprovalCacheEntry, StaticRuleDecision,
+    StaticRuleDecisionKind,
 };
 use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
@@ -149,6 +150,10 @@ pub struct RuntimeToolExecutionReport {
     pub skipped_tool_calls: Vec<RuntimeToolCall>,
     #[serde(default)]
     pub permissioned_actions: Vec<PermissionedAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_auto_mode_denials: Vec<RecentAutoModeDenial>,
+    #[serde(skip, default)]
+    pub recent_auto_mode_retry_tokens: Vec<RecentAutoModeRetryToken>,
 }
 
 impl RuntimeToolExecutionReport {
@@ -158,6 +163,8 @@ impl RuntimeToolExecutionReport {
             interrupt: None,
             skipped_tool_calls: Vec::new(),
             permissioned_actions: Vec::new(),
+            recent_auto_mode_denials: Vec::new(),
+            recent_auto_mode_retry_tokens: Vec::new(),
         }
     }
 }
@@ -322,6 +329,8 @@ impl<'a> RuntimeToolExecutor<'a> {
                         interrupt: Some(permission_approval_interrupt(call, &action)),
                         skipped_tool_calls: all_calls[original_index + 1..].to_vec(),
                         permissioned_actions,
+                        recent_auto_mode_denials: Vec::new(),
+                        recent_auto_mode_retry_tokens: Vec::new(),
                     };
                 }
                 messages.push(permission_block_message(&call.id, &call.name, &decision));
@@ -375,6 +384,8 @@ impl<'a> RuntimeToolExecutor<'a> {
             interrupt: None,
             skipped_tool_calls: Vec::new(),
             permissioned_actions,
+            recent_auto_mode_denials: Vec::new(),
+            recent_auto_mode_retry_tokens: Vec::new(),
         }
     }
 }
@@ -433,12 +444,11 @@ pub(crate) fn permission_decision_for_action(
     action: &PermissionedAction,
     context: &ToolExecutionContext,
 ) -> PermissionPolicyDecision {
-    let rule_input = effective_permission_rule_input(context);
+    let rule_input = effective_permission_rule_input(action, context);
     let static_rule_decision = evaluate_static_rules(action, &rule_input);
-    let evaluator = context
-        .permission_evaluator
-        .clone()
-        .or_else(|| auto_approval_evaluator_for_action(action, &static_rule_decision, context));
+    let evaluator = context.permission_evaluator.clone().or_else(|| {
+        auto_approval_evaluator_for_action(action, &static_rule_decision, &rule_input, context)
+    });
     decide_permission(PermissionPolicyInput {
         action: action.clone(),
         static_rule_decision,
@@ -449,26 +459,90 @@ pub(crate) fn permission_decision_for_action(
     })
 }
 
-fn effective_permission_rule_input(context: &ToolExecutionContext) -> PermissionRuleInput {
+pub(crate) fn effective_permission_rule_input(
+    action: &PermissionedAction,
+    context: &ToolExecutionContext,
+) -> PermissionRuleInput {
     let mut input = context.permission_rule_input.clone();
     for protected_target in &context.permission_auto_approval.protected_targets {
         if !input.protected_targets.contains(protected_target) {
             input.protected_targets.push(protected_target.clone());
         }
     }
+    if input.proc_exec_summary.is_none()
+        && action.capabilities.contains(&SafetyCapability::ProcExec)
+    {
+        input.proc_exec_summary = proc_exec_summary_for_action(action);
+    }
     input
+}
+
+fn proc_exec_summary_for_action(action: &PermissionedAction) -> Option<ProcExecSummary> {
+    if action.tool_name != "exec" {
+        return None;
+    }
+    let command = action
+        .redacted_arguments
+        .get("command")
+        .and_then(Value::as_str)?;
+    let tokens = simple_verification_command_tokens(command)?;
+    let family = proc_exec_command_family(&tokens)?;
+    Some(ProcExecSummary {
+        command_family: family,
+        target_refs: Vec::new(),
+        destructive: false,
+        network: false,
+        secret_exposure: false,
+        summary_available: true,
+    })
+}
+
+fn simple_verification_command_tokens(command: &str) -> Option<Vec<&str>> {
+    if command.is_empty()
+        || command.len() > 200
+        || command.chars().any(|character| {
+            matches!(
+                character,
+                '\n' | '\r' | ';' | '&' | '|' | '<' | '>' | '`' | '$' | '(' | ')'
+            )
+        })
+    {
+        return None;
+    }
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    (!tokens.is_empty()).then_some(tokens)
+}
+
+fn proc_exec_command_family(tokens: &[&str]) -> Option<String> {
+    match tokens.first().copied()? {
+        "pwd" if tokens.len() == 1 => Some("pwd".to_owned()),
+        "cargo" => cargo_verification_family(tokens),
+        _ => None,
+    }
+}
+
+fn cargo_verification_family(tokens: &[&str]) -> Option<String> {
+    let subcommand = tokens.get(1).copied()?;
+    let allowed = matches!(tokens, ["cargo", "check" | "test" | "clippy" | "build"])
+        || matches!(tokens, ["cargo", "fmt", "--check"]);
+    allowed.then(|| format!("cargo {subcommand}"))
 }
 
 fn auto_approval_evaluator_for_action(
     action: &PermissionedAction,
     static_rule_decision: &StaticRuleDecision,
+    rule_input: &PermissionRuleInput,
     context: &ToolExecutionContext,
 ) -> Option<AutoEvaluatorVerdict> {
     let config = &context.permission_auto_approval;
     if !config.enabled
         || action.permission_mode_snapshot.mode != PermissionMode::Auto
         || static_rule_decision.kind != StaticRuleDecisionKind::AllowCandidate
-        || !auto_approval_allows_capabilities(action, config, context)
+        || !auto_approval_allows_capabilities(action, config, rule_input)
     {
         return None;
     }
@@ -488,7 +562,7 @@ fn auto_approval_evaluator_for_action(
 fn auto_approval_allows_capabilities(
     action: &PermissionedAction,
     config: &AutoApprovalConfig,
-    context: &ToolExecutionContext,
+    rule_input: &PermissionRuleInput,
 ) -> bool {
     !action.capabilities.is_empty()
         && action
@@ -500,10 +574,7 @@ fn auto_approval_allows_capabilities(
                 SafetyCapability::ProcExec => {
                     config.allow_proc_exec_verification
                         && (!config.require_docker_containment_for_exec
-                            || context
-                                .permission_rule_input
-                                .containment
-                                .confirmed_non_privileged())
+                            || rule_input.containment.confirmed_non_privileged())
                 }
                 SafetyCapability::NetOutbound
                 | SafetyCapability::SecretRead
@@ -795,6 +866,8 @@ fn flush_allowed_batch(
                     }),
                     skipped_tool_calls: all_calls[result.original_index + 1..].to_vec(),
                     permissioned_actions: permissioned_actions.to_vec(),
+                    recent_auto_mode_denials: Vec::new(),
+                    recent_auto_mode_retry_tokens: Vec::new(),
                 });
             }
             ToolResult::Text(content) => messages.push(RuntimeToolMessage {
