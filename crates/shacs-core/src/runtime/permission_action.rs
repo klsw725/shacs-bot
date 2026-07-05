@@ -29,6 +29,8 @@ impl Default for PermissionModeSnapshot {
 pub struct ContainmentSnapshotRef {
     pub contained: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -287,6 +289,7 @@ fn sanitize_permission_snapshot(snapshot: PermissionModeSnapshot) -> PermissionM
 fn sanitize_containment_snapshot(snapshot: ContainmentSnapshotRef) -> ContainmentSnapshotRef {
     ContainmentSnapshotRef {
         contained: snapshot.contained,
+        backend: snapshot.backend.map(|value| redact_string(&value)),
         digest: snapshot.digest.map(|value| redact_string(&value)),
         summary: snapshot.summary.map(|value| redact_string(&value)),
     }

@@ -281,6 +281,7 @@ fn safe_bypass_agent_loop_config(workspace: impl Into<std::path::PathBuf>) -> Ag
     let mut config = AgentLoopConfig::new(workspace, "test-model");
     config.containment_snapshot = Some(ContainmentSnapshotRef {
         contained: Some(true),
+        backend: None,
         digest: Some("test-contained".to_owned()),
         summary: Some("non-privileged test containment".to_owned()),
     });
@@ -2298,6 +2299,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
     let registry = build_subagent_tool_registry(&config);
     let containment_snapshot = ContainmentSnapshotRef {
         contained: Some(true),
+        backend: None,
         digest: Some("containment-digest".to_owned()),
         summary: Some("workspace containment".to_owned()),
     };
@@ -3200,6 +3202,7 @@ fn interactive_auto_context(permission_auto_approval: AutoApprovalConfig) -> Too
     ToolExecutionContext {
         containment_snapshot: Some(ContainmentSnapshotRef {
             contained: Some(true),
+            backend: None,
             digest: Some("test-contained".to_owned()),
             summary: Some("non-privileged test containment".to_owned()),
         }),

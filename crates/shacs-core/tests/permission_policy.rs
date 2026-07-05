@@ -635,6 +635,7 @@ fn minimal_audit_record_is_redacted_and_has_decision_evidence() -> Result<(), Bo
     action.redacted_arguments = json!({"token": "[REDACTED]"});
     action.containment_snapshot = Some(shacs_core::runtime::ContainmentSnapshotRef {
         contained: Some(true),
+        backend: None,
         digest: Some("container".to_owned()),
         summary: Some("docker".to_owned()),
     });

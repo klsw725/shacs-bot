@@ -3407,6 +3407,7 @@ fn safe_mcp_tool_context() -> ToolExecutionContext {
     ToolExecutionContext {
         containment_snapshot: Some(ContainmentSnapshotRef {
             contained: Some(true),
+            backend: None,
             digest: Some("test-contained".to_owned()),
             summary: Some("non-privileged test containment".to_owned()),
         }),

@@ -3272,6 +3272,7 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
     let mut registry = ToolRegistry::new();
     let parent_containment_snapshot = ContainmentSnapshotRef {
         contained: Some(true),
+        backend: None,
         digest: Some("sha256:parent".to_owned()),
         summary: Some("bounded parent containment evidence".to_owned()),
     };

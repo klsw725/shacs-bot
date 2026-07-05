@@ -311,6 +311,7 @@ impl Tool for DelayTool {
 fn confirmed_containment_ref() -> ContainmentSnapshotRef {
     ContainmentSnapshotRef {
         contained: Some(true),
+        backend: None,
         digest: Some("test-contained".to_owned()),
         summary: Some("non-privileged test containment".to_owned()),
     }
@@ -1624,6 +1625,7 @@ fn runtime_permission_actions_include_context_containment() -> Result<(), Box<dy
     let executor = RuntimeToolExecutor::new(&registry);
     let containment = ContainmentSnapshotRef {
         contained: Some(true),
+        backend: Some("backend token=sk-backend-secret".to_owned()),
         digest: Some("container token=sk-container-secret".to_owned()),
         summary: Some("sandbox bearer sk-summary-secret".to_owned()),
     };

@@ -107,6 +107,7 @@ fn input() -> PermissionedActionInput {
         },
         containment_snapshot: Some(ContainmentSnapshotRef {
             contained: Some(true),
+            backend: None,
             digest: Some("container-a".to_owned()),
             summary: Some("docker".to_owned()),
         }),
@@ -339,6 +340,7 @@ fn snapshot_and_origin_material_do_not_expose_raw_secret() -> Result<(), Box<dyn
             },
             containment_snapshot: Some(ContainmentSnapshotRef {
                 contained: Some(true),
+                backend: Some("backend token=sk-backend-secret".to_owned()),
                 digest: Some("container token=sk-container-secret".to_owned()),
                 summary: Some("summary bearer sk-summary-secret".to_owned()),
             }),
@@ -353,6 +355,7 @@ fn snapshot_and_origin_material_do_not_expose_raw_secret() -> Result<(), Box<dyn
         "sk-request-secret",
         "sk-source-secret",
         "sk-scope-secret",
+        "sk-backend-secret",
         "sk-container-secret",
         "sk-summary-secret",
     ] {
@@ -396,6 +399,7 @@ fn snapshot_digest_changes_when_containment_context_changes() -> Result<(), Box<
     let mut changed_input = input();
     changed_input.containment_snapshot = Some(ContainmentSnapshotRef {
         contained: Some(false),
+        backend: None,
         digest: Some("container-b".to_owned()),
         summary: Some("host".to_owned()),
     });

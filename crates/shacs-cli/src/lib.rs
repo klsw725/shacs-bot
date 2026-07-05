@@ -2862,6 +2862,7 @@ fn runtime_sorted_limited_markers(markers: Vec<String>) -> Vec<String> {
 fn runtime_containment_snapshot_ref(inspect: &RuntimeContainmentInspect) -> ContainmentSnapshotRef {
     ContainmentSnapshotRef {
         contained: inspect.contained,
+        backend: inspect.backend.clone(),
         digest: inspect.digest.clone(),
         summary: inspect.summary.clone(),
     }
@@ -18248,6 +18249,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: Some(ContainmentSnapshotRef {
                 contained: Some(true),
+                backend: None,
                 digest: Some("containment-digest".to_owned()),
                 summary: Some("workspace containment".to_owned()),
             }),
@@ -20420,6 +20422,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: Some(ContainmentSnapshotRef {
                 contained: Some(true),
+                backend: None,
                 digest: Some("test-contained".to_owned()),
                 summary: Some("test containment".to_owned()),
             }),
@@ -20504,6 +20507,7 @@ mod tests {
                 tool_search: ToolSearchConfig::default(),
                 containment_snapshot: Some(ContainmentSnapshotRef {
                     contained: Some(true),
+                    backend: None,
                     digest: Some("test-contained".to_owned()),
                     summary: Some("test containment".to_owned()),
                 }),
@@ -22478,6 +22482,7 @@ mod tests {
             },
             containment_snapshot: Some(ContainmentSnapshotRef {
                 contained: Some(true),
+                backend: None,
                 digest: Some("contained-digest".to_owned()),
                 summary: Some("contained summary".to_owned()),
             }),
@@ -24478,6 +24483,7 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: Some(ContainmentSnapshotRef {
                 contained: Some(true),
+                backend: None,
                 digest: Some("test-contained".to_owned()),
                 summary: Some("test containment".to_owned()),
             }),
