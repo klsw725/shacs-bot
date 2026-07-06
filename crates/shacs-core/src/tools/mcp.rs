@@ -80,6 +80,7 @@ pub struct McpServerSpec {
     pub command: Option<String>,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    pub clear_env: bool,
     pub url: Option<String>,
     pub headers: Vec<(String, String)>,
     pub timeout_seconds: u64,
@@ -179,8 +180,12 @@ impl McpConnector for StdioMcpConnector {
         let (command, args) = spec
             .normalized_stdio_command()
             .ok_or_else(|| format!("MCP server `{}` requires a stdio command", spec.name))?;
-        let mut child = Command::new(&command)
-            .args(&args)
+        let mut command_builder = Command::new(&command);
+        command_builder.args(&args);
+        if spec.clear_env {
+            command_builder.env_clear();
+        }
+        let mut child = command_builder
             .envs(spec.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1169,6 +1174,9 @@ mod tests {
     use super::*;
     use std::io::{BufReader, Cursor};
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     #[test]
     fn stdio_mcp_framing_round_trips_json_rpc_messages() {
         let message = json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}});
@@ -1228,5 +1236,64 @@ mod tests {
         assert_eq!(prompts[0].arguments[0].name, "topic");
         assert!(prompts[0].arguments[0].required);
         assert_eq!(prompts[0].timeout_seconds, 9);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdio_mcp_connector_clear_env_removes_parent_env_but_keeps_configured_env() {
+        let tempdir = tempfile::tempdir().expect("temporary MCP server root");
+        let server_path = tempdir.path().join("server");
+        let leak_marker = tempdir.path().join("leaked-home");
+        let allowed_marker = tempdir.path().join("allowed-env");
+        std::fs::write(
+            &server_path,
+            format!(
+                "#!/bin/sh\n\
+if [ -n \"$HOME\" ]; then printf leaked > {}; fi\n\
+if [ \"$SHACS_ALLOWED\" = \"1\" ]; then printf allowed > {}; fi\n\
+frame() {{ body=$1; printf 'Content-Length: %s\\r\\n\\r\\n%s' \"${{#body}}\" \"$body\"; }}\n\
+frame '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"test\",\"version\":\"1\"}}}}}}'\n\
+frame '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":[]}}}}'\n\
+frame '{{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{\"resources\":[]}}}}'\n\
+frame '{{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{{\"prompts\":[]}}}}'\n\
+sleep 1\n",
+                shell_quote_path(&leak_marker),
+                shell_quote_path(&allowed_marker)
+            ),
+        )
+        .expect("write MCP test server");
+        let mut permissions = std::fs::metadata(&server_path)
+            .expect("MCP test server metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&server_path, permissions)
+            .expect("make MCP test server executable");
+
+        let spec = McpServerSpec {
+            name: "clear-env".to_owned(),
+            r#type: Some("stdio".to_owned()),
+            command: Some(server_path.to_string_lossy().into_owned()),
+            args: Vec::new(),
+            env: vec![("SHACS_ALLOWED".to_owned(), "1".to_owned())],
+            clear_env: true,
+            url: None,
+            headers: Vec::new(),
+            timeout_seconds: 5,
+            enabled_tools: Vec::new(),
+            parent_containment_snapshot: None,
+        };
+
+        let connector = StdioMcpConnector::new();
+        let (_client, capabilities) = connector.connect(&spec).expect("connect MCP test server");
+
+        assert!(capabilities.is_empty());
+        assert!(!leak_marker.exists());
+        assert!(allowed_marker.exists());
+        connector.close("clear-env");
+    }
+
+    #[cfg(unix)]
+    fn shell_quote_path(path: &std::path::Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
     }
 }
