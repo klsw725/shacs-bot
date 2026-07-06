@@ -1,11 +1,16 @@
 use crate::runtime::{
     plugin_hook_catalog, summarize_plugin_hook_dispatch, AgentHook, AgentHookContext,
     DiscoveredPlugin, PluginHookCallbackResult, PluginHookDispatchAttempt,
-    PluginHookDispatchSummary, PluginHookEvent, PluginManifestSource, PluginState, RuntimeToolCall,
+    PluginHookDispatchEffect, PluginHookDispatchStatus, PluginHookDispatchSummary, PluginHookEvent,
+    PluginManifestSource, PluginState, RuntimeToolCall, RuntimeToolMessage,
 };
+use crate::tools::{JsonMap, Tool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
+use shacs_command::{
+    is_builtin_command_name, PluginCommandRoute, PluginCommandRouter, PluginCommandSpec,
+};
 use shacs_providers::LlmResponse;
 use shacs_redaction::redact_string;
 use std::cmp::Ordering;
@@ -28,12 +33,14 @@ const MAX_HOOK_STDIO_READS_PER_TICK: usize = 4;
 const MAX_CONTEXT_PREVIEW_CHARS: usize = 240;
 const HOOK_CLEANUP_WAIT_GRACE: Duration = Duration::from_millis(200);
 const HOOK_STDIO_DRAIN_GRACE: Duration = Duration::from_millis(50);
+const TOOL_BLOCK_ERROR_HINT: &str = "\n\n[Analyze the error above and try a different approach.]";
 
 pub type PluginHookDispatchSink = Arc<dyn Fn(PluginHookDispatchSummary) + Send + Sync>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRuntimeSnapshot {
     pub plugins: Vec<PluginRuntimePlugin>,
+    pub commands: Vec<PluginRuntimeCommand>,
     pub diagnostics: Vec<PluginRuntimeDiagnostic>,
 }
 
@@ -61,6 +68,25 @@ pub struct PluginExecutableCommand {
     pub timeout_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginRuntimeTool {
+    pub plugin_id: String,
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    pub command: PluginExecutableCommand,
+    pub working_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRuntimeCommand {
+    pub plugin_id: String,
+    pub name: String,
+    pub description: String,
+    pub command: PluginExecutableCommand,
+    pub working_dir: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRuntimeDiagnostic {
     pub plugin_id: String,
@@ -86,6 +112,42 @@ pub struct PluginHookCommandInvocation {
     pub stdin_payload: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginCommandToolInvocation {
+    pub plugin_id: String,
+    pub tool_name: String,
+    pub command: PluginExecutableCommand,
+    pub working_dir: PathBuf,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginCommandInvocation {
+    pub plugin_id: String,
+    pub command_name: String,
+    pub command: PluginExecutableCommand,
+    pub working_dir: PathBuf,
+    pub raw: String,
+    pub args: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginCommandExecution {
+    pub plugin_id: String,
+    pub command_name: String,
+    pub output: ToolResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginCommandDispatchError {
+    NotFound,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginCommandDispatcher {
+    commands: Vec<PluginRuntimeCommand>,
+}
+
 struct PendingHookStdin {
     stdin: ChildStdin,
     payload: Vec<u8>,
@@ -107,6 +169,290 @@ pub struct ProcessPluginHookCommandExecutor;
 impl PluginHookCommandExecutor for ProcessPluginHookCommandExecutor {
     fn execute(&self, invocation: &PluginHookCommandInvocation) -> PluginHookCallbackResult {
         execute_process_plugin_hook(invocation)
+    }
+}
+
+impl Tool for PluginRuntimeTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn parameters(&self) -> Value {
+        self.parameters.clone()
+    }
+
+    fn execute(&self, params: JsonMap) -> ToolResult {
+        execute_process_plugin_tool(&PluginCommandToolInvocation {
+            plugin_id: self.plugin_id.clone(),
+            tool_name: self.name.clone(),
+            command: self.command.clone(),
+            working_dir: self.working_dir.clone(),
+            arguments: Value::Object(params),
+        })
+    }
+
+    fn to_schema(&self) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+                "x-shacs-source-kind": "plugin_tool",
+                "x-shacs-plugin-id": self.plugin_id,
+            }
+        })
+    }
+}
+
+pub fn register_plugin_runtime_tools(
+    registry: &mut ToolRegistry,
+    plugins: &[DiscoveredPlugin],
+) -> Vec<PluginRuntimeDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for tool in plugin_runtime_tools(plugins, &mut diagnostics) {
+        if registry.has(tool.name()) {
+            diagnostics.push(diagnostic(
+                &tool.plugin_id,
+                Some(tool.name()),
+                "tool_name_conflict",
+                &format!(
+                    "plugin tool `{}` conflicts with an existing tool and was not registered",
+                    tool.name()
+                ),
+            ));
+            continue;
+        }
+        registry.register(tool);
+    }
+    diagnostics
+}
+
+pub fn plugin_runtime_tools(
+    plugins: &[DiscoveredPlugin],
+    diagnostics: &mut Vec<PluginRuntimeDiagnostic>,
+) -> Vec<PluginRuntimeTool> {
+    let mut tools = Vec::new();
+    for plugin in plugins
+        .iter()
+        .filter(|plugin| plugin.state == PluginState::Enabled)
+    {
+        let Some(manifest) = &plugin.manifest else {
+            continue;
+        };
+        let declared_tools = names_from_surface(&manifest.surfaces, "tools")
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if declared_tools.is_empty() {
+            continue;
+        }
+        let Some(entrypoints) = manifest.entrypoints.get("tools").and_then(Value::as_object) else {
+            for name in declared_tools {
+                diagnostics.push(diagnostic(
+                    &plugin.id,
+                    Some(&name),
+                    "missing_tool_entrypoint",
+                    &format!("declared plugin tool `{name}` has no command entrypoint"),
+                ));
+            }
+            continue;
+        };
+        for name in declared_tools {
+            let Some(entrypoint) = entrypoints.get(&name) else {
+                diagnostics.push(diagnostic(
+                    &plugin.id,
+                    Some(&name),
+                    "missing_tool_entrypoint",
+                    &format!("declared plugin tool `{name}` has no command entrypoint"),
+                ));
+                continue;
+            };
+            let Ok(command) = parse_hook_command(plugin, &name, entrypoint) else {
+                diagnostics.push(diagnostic(
+                    &plugin.id,
+                    Some(&name),
+                    "invalid_tool_entrypoint",
+                    &format!("plugin tool `{name}` command entrypoint is invalid"),
+                ));
+                continue;
+            };
+            tools.push(PluginRuntimeTool {
+                plugin_id: plugin.id.clone(),
+                name: name.clone(),
+                description: entrypoint
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&name)
+                    .to_owned(),
+                parameters: entrypoint
+                    .get("parameters")
+                    .or_else(|| entrypoint.get("schema"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
+                working_dir: command
+                    .command_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| plugin.root.clone()),
+                command,
+            });
+        }
+    }
+    tools.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+    });
+    tools
+}
+
+pub fn plugin_runtime_commands(
+    plugins: &[DiscoveredPlugin],
+    diagnostics: &mut Vec<PluginRuntimeDiagnostic>,
+) -> Vec<PluginRuntimeCommand> {
+    let mut commands = Vec::new();
+    for plugin in plugins
+        .iter()
+        .filter(|plugin| plugin.state == PluginState::Enabled)
+    {
+        let Some(manifest) = &plugin.manifest else {
+            continue;
+        };
+        let declared_commands = names_from_surface(&manifest.surfaces, "commands")
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if declared_commands.is_empty() {
+            continue;
+        }
+        let Some(entrypoints) = manifest
+            .entrypoints
+            .get("commands")
+            .and_then(Value::as_object)
+        else {
+            for name in declared_commands {
+                diagnostics.push(diagnostic(
+                    &plugin.id,
+                    Some(&name),
+                    "missing_command_entrypoint",
+                    &format!("declared plugin command `{name}` has no command entrypoint"),
+                ));
+            }
+            continue;
+        };
+        for name in declared_commands {
+            if is_builtin_command_name(&name) {
+                diagnostics.push(diagnostic(
+                    &plugin.id,
+                    Some(&name),
+                    "builtin_command_conflict",
+                    &format!("plugin command `{name}` conflicts with a builtin command"),
+                ));
+                continue;
+            }
+            let Some(entrypoint) = entrypoints.get(&name) else {
+                diagnostics.push(diagnostic(
+                    &plugin.id,
+                    Some(&name),
+                    "missing_command_entrypoint",
+                    &format!("declared plugin command `{name}` has no command entrypoint"),
+                ));
+                continue;
+            };
+            let Ok(command) = parse_hook_command(plugin, &name, entrypoint) else {
+                diagnostics.push(diagnostic(
+                    &plugin.id,
+                    Some(&name),
+                    "invalid_command_entrypoint",
+                    &format!("plugin command `{name}` command entrypoint is invalid"),
+                ));
+                continue;
+            };
+            commands.push(PluginRuntimeCommand {
+                plugin_id: plugin.id.clone(),
+                name: name.clone(),
+                description: entrypoint
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&name)
+                    .to_owned(),
+                working_dir: command
+                    .command_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| plugin.root.clone()),
+                command,
+            });
+        }
+    }
+    commands.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+    });
+    commands
+}
+
+impl PluginCommandDispatcher {
+    pub fn new(commands: Vec<PluginRuntimeCommand>) -> Self {
+        Self { commands }
+    }
+
+    pub fn from_plugins(
+        plugins: &[DiscoveredPlugin],
+        diagnostics: &mut Vec<PluginRuntimeDiagnostic>,
+    ) -> Self {
+        Self::new(plugin_runtime_commands(plugins, diagnostics))
+    }
+
+    pub fn dispatch_text(
+        &self,
+        text: &str,
+    ) -> Result<PluginCommandExecution, PluginCommandDispatchError> {
+        let route = self
+            .router()
+            .dispatch(text)
+            .ok_or(PluginCommandDispatchError::NotFound)?;
+        self.dispatch_route(&route)
+    }
+
+    pub fn dispatch_route(
+        &self,
+        route: &PluginCommandRoute,
+    ) -> Result<PluginCommandExecution, PluginCommandDispatchError> {
+        let command = self
+            .commands
+            .iter()
+            .find(|command| command.plugin_id == route.plugin_id && command.name == route.name)
+            .ok_or(PluginCommandDispatchError::NotFound)?;
+        let output = execute_process_plugin_command(&PluginCommandInvocation {
+            plugin_id: command.plugin_id.clone(),
+            command_name: command.name.clone(),
+            command: command.command.clone(),
+            working_dir: command.working_dir.clone(),
+            raw: route.raw.clone(),
+            args: route.args.clone(),
+        });
+        Ok(PluginCommandExecution {
+            plugin_id: command.plugin_id.clone(),
+            command_name: command.name.clone(),
+            output,
+        })
+    }
+
+    pub fn router(&self) -> PluginCommandRouter {
+        PluginCommandRouter::new(
+            self.commands.iter().map(|command| {
+                PluginCommandSpec::new(command.plugin_id.clone(), command.name.clone())
+            }),
+        )
+    }
+
+    pub fn commands(&self) -> &[PluginRuntimeCommand] {
+        &self.commands
     }
 }
 
@@ -167,6 +513,37 @@ impl PluginRuntimeHookAgentHook {
         )
     }
 
+    pub fn blocked_tool_messages(
+        &self,
+        context: &AgentHookContext,
+        calls: &[RuntimeToolCall],
+    ) -> Vec<RuntimeToolMessage> {
+        let Some(summary) = self.dispatch_tool_before(context, calls) else {
+            return Vec::new();
+        };
+        let Some(blocking_record) = summary.records.iter().find(|record| {
+            record.status == PluginHookDispatchStatus::Succeeded
+                && record.effect == Some(PluginHookDispatchEffect::Blocked)
+        }) else {
+            return Vec::new();
+        };
+        calls
+            .iter()
+            .map(|call| RuntimeToolMessage {
+                tool_call_id: call.id.clone(),
+                name: call.name.clone(),
+                content: plugin_tool_block_content(
+                    &blocking_record.plugin_id,
+                    call,
+                    blocking_record
+                        .output_evidence
+                        .as_ref()
+                        .map(|evidence| evidence.redacted_preview.as_str()),
+                ),
+            })
+            .collect()
+    }
+
     fn dispatch_event(
         &self,
         event: PluginHookEvent,
@@ -210,14 +587,41 @@ impl AgentHook for PluginRuntimeHookAgentHook {
         let _ = self.dispatch_tool_before(context, calls);
     }
 
+    fn block_tool_calls(
+        &self,
+        context: &AgentHookContext,
+        calls: &[RuntimeToolCall],
+    ) -> Vec<RuntimeToolMessage> {
+        self.blocked_tool_messages(context, calls)
+    }
+
     fn after_response(&self, context: &AgentHookContext, response: &LlmResponse) {
         let _ = self.dispatch_llm_after(context, response);
     }
 }
 
+fn plugin_tool_block_content(
+    plugin_id: &str,
+    call: &RuntimeToolCall,
+    detail: Option<&str>,
+) -> String {
+    let mut content = format!(
+        "Error: Tool `{}` blocked by plugin hook `{}` for event `tool:before`.{}",
+        call.name, plugin_id, TOOL_BLOCK_ERROR_HINT
+    );
+    if let Some(detail) = detail.filter(|detail| !detail.trim().is_empty()) {
+        content = format!(
+            "Error: Tool `{}` blocked by plugin hook `{}` for event `tool:before`: {}{}",
+            call.name, plugin_id, detail, TOOL_BLOCK_ERROR_HINT
+        );
+    }
+    content
+}
+
 pub fn build_plugin_runtime_snapshot(plugins: &[DiscoveredPlugin]) -> PluginRuntimeSnapshot {
     let mut snapshot = PluginRuntimeSnapshot {
         plugins: Vec::new(),
+        commands: Vec::new(),
         diagnostics: Vec::new(),
     };
 
@@ -307,6 +711,10 @@ pub fn build_plugin_runtime_snapshot(plugins: &[DiscoveredPlugin]) -> PluginRunt
         runtime_plugin.hooks.sort_by(compare_hooks);
         snapshot.plugins.push(runtime_plugin);
     }
+
+    let mut command_diagnostics = Vec::new();
+    snapshot.commands = plugin_runtime_commands(plugins, &mut command_diagnostics);
+    snapshot.diagnostics.extend(command_diagnostics);
 
     snapshot.plugins.sort_by(|left, right| {
         left.id
@@ -474,6 +882,350 @@ fn execute_process_plugin_hook(
             PluginHookCallbackResult::Error(message)
         }
     }
+}
+
+fn execute_process_plugin_tool(invocation: &PluginCommandToolInvocation) -> ToolResult {
+    let stdin_payload = json!({
+        "plugin_id": invocation.plugin_id,
+        "tool": invocation.tool_name,
+        "arguments": invocation.arguments,
+    });
+    let payload = match serde_json::to_vec(&stdin_payload) {
+        Ok(payload) if payload.len() <= MAX_HOOK_STDIO_BYTES => payload,
+        Ok(_) => {
+            return ToolResult::Text(format!(
+                "Error: plugin tool `{}` arguments exceed {} byte stdin limit",
+                invocation.tool_name, MAX_HOOK_STDIO_BYTES
+            ));
+        }
+        Err(error) => {
+            return ToolResult::Text(format!(
+                "Error: plugin tool `{}` arguments could not be serialized: {error}",
+                invocation.tool_name
+            ));
+        }
+    };
+    let mut command = Command::new(&invocation.command.command_path);
+    command
+        .args(&invocation.command.args)
+        .current_dir(&invocation.working_dir)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return ToolResult::Text(format!(
+                "Error: plugin tool `{}` process spawn failed: {error}",
+                invocation.tool_name
+            ));
+        }
+    };
+    let deadline = Instant::now() + Duration::from_millis(invocation.command.timeout_ms);
+    let mut stdout = match pending_hook_stdout(&mut child) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            cleanup_plugin_hook_child(&mut child);
+            return ToolResult::Text(format!(
+                "Error: plugin tool `{}` stdout setup failed: {error}",
+                invocation.tool_name
+            ));
+        }
+    };
+    let mut stderr = match pending_hook_stderr(&mut child) {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            cleanup_plugin_hook_child(&mut child);
+            return ToolResult::Text(format!(
+                "Error: plugin tool `{}` stderr setup failed: {error}",
+                invocation.tool_name
+            ));
+        }
+    };
+    let (mut pending_stdin, mut stdin_write_error) = pending_hook_stdin(&mut child, payload);
+    loop {
+        if stdin_write_error.is_none() {
+            stdin_write_error = drive_pending_stdin(&mut pending_stdin);
+        }
+        drain_pending_output(&mut stdout);
+        drain_pending_output(&mut stderr);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if stdin_write_error.is_none() {
+                    stdin_write_error = pending_stdin_incomplete_note(&pending_stdin);
+                }
+                drop(pending_stdin);
+                drain_pending_outputs_until(
+                    &mut stdout,
+                    &mut stderr,
+                    Instant::now() + HOOK_STDIO_DRAIN_GRACE,
+                );
+                cleanup_plugin_hook_child_group(child.id());
+                let stdout_bytes = take_pending_output(stdout);
+                let stderr_bytes = take_pending_output(stderr);
+                if !status.success() {
+                    return ToolResult::Text(plugin_tool_process_error(
+                        &invocation.tool_name,
+                        &format!("process exited with status {status}"),
+                        &stdout_bytes,
+                        &stderr_bytes,
+                        stdin_write_error.as_deref(),
+                    ));
+                }
+                if let Some(error) = stdin_write_error.as_deref() {
+                    return ToolResult::Text(plugin_tool_process_error(
+                        &invocation.tool_name,
+                        error,
+                        &stdout_bytes,
+                        &stderr_bytes,
+                        Some(error),
+                    ));
+                }
+                return plugin_tool_output(&stdout_bytes);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    if stdin_write_error.is_none() {
+                        stdin_write_error = pending_stdin_incomplete_note(&pending_stdin);
+                    }
+                    drop(pending_stdin);
+                    cleanup_plugin_hook_child(&mut child);
+                    drain_pending_outputs_until(
+                        &mut stdout,
+                        &mut stderr,
+                        Instant::now() + HOOK_STDIO_DRAIN_GRACE,
+                    );
+                    let stdout_bytes = take_pending_output(stdout);
+                    let stderr_bytes = take_pending_output(stderr);
+                    return ToolResult::Text(plugin_tool_process_error(
+                        &invocation.tool_name,
+                        &format!(
+                            "command timed out after {}ms",
+                            invocation.command.timeout_ms
+                        ),
+                        &stdout_bytes,
+                        &stderr_bytes,
+                        stdin_write_error.as_deref(),
+                    ));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                if stdin_write_error.is_none() {
+                    stdin_write_error = pending_stdin_incomplete_note(&pending_stdin);
+                }
+                drop(pending_stdin);
+                cleanup_plugin_hook_child(&mut child);
+                let stdout_bytes = take_pending_output(stdout);
+                let stderr_bytes = take_pending_output(stderr);
+                return ToolResult::Text(plugin_tool_process_error(
+                    &invocation.tool_name,
+                    &format!("process wait failed: {error}"),
+                    &stdout_bytes,
+                    &stderr_bytes,
+                    stdin_write_error.as_deref(),
+                ));
+            }
+        }
+    }
+}
+
+fn execute_process_plugin_command(invocation: &PluginCommandInvocation) -> ToolResult {
+    let stdin_payload = json!({
+        "plugin_id": invocation.plugin_id,
+        "command": invocation.command_name,
+        "raw": invocation.raw,
+        "args": invocation.args,
+    });
+    let payload = match serde_json::to_vec(&stdin_payload) {
+        Ok(payload) if payload.len() <= MAX_HOOK_STDIO_BYTES => payload,
+        Ok(_) => {
+            return ToolResult::Text(format!(
+                "Error: plugin command `{}` input exceeds {} byte stdin limit",
+                invocation.command_name, MAX_HOOK_STDIO_BYTES
+            ));
+        }
+        Err(error) => {
+            return ToolResult::Text(format!(
+                "Error: plugin command `{}` input could not be serialized: {error}",
+                invocation.command_name
+            ));
+        }
+    };
+    let mut command = Command::new(&invocation.command.command_path);
+    command
+        .args(&invocation.command.args)
+        .current_dir(&invocation.working_dir)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return ToolResult::Text(format!(
+                "Error: plugin command `{}` process spawn failed: {error}",
+                invocation.command_name
+            ));
+        }
+    };
+    let deadline = Instant::now() + Duration::from_millis(invocation.command.timeout_ms);
+    let mut stdout = match pending_hook_stdout(&mut child) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            cleanup_plugin_hook_child(&mut child);
+            return ToolResult::Text(format!(
+                "Error: plugin command `{}` stdout setup failed: {error}",
+                invocation.command_name
+            ));
+        }
+    };
+    let mut stderr = match pending_hook_stderr(&mut child) {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            cleanup_plugin_hook_child(&mut child);
+            return ToolResult::Text(format!(
+                "Error: plugin command `{}` stderr setup failed: {error}",
+                invocation.command_name
+            ));
+        }
+    };
+    let (mut pending_stdin, mut stdin_write_error) = pending_hook_stdin(&mut child, payload);
+    loop {
+        if stdin_write_error.is_none() {
+            stdin_write_error = drive_pending_stdin(&mut pending_stdin);
+        }
+        drain_pending_output(&mut stdout);
+        drain_pending_output(&mut stderr);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if stdin_write_error.is_none() {
+                    stdin_write_error = pending_stdin_incomplete_note(&pending_stdin);
+                }
+                drop(pending_stdin);
+                drain_pending_outputs_until(
+                    &mut stdout,
+                    &mut stderr,
+                    Instant::now() + HOOK_STDIO_DRAIN_GRACE,
+                );
+                cleanup_plugin_hook_child_group(child.id());
+                let stdout_bytes = take_pending_output(stdout);
+                let stderr_bytes = take_pending_output(stderr);
+                if !status.success() {
+                    return ToolResult::Text(plugin_command_process_error(
+                        &invocation.command_name,
+                        &format!("process exited with status {status}"),
+                        &stdout_bytes,
+                        &stderr_bytes,
+                        stdin_write_error.as_deref(),
+                    ));
+                }
+                if let Some(error) = stdin_write_error.as_deref() {
+                    return ToolResult::Text(plugin_command_process_error(
+                        &invocation.command_name,
+                        error,
+                        &stdout_bytes,
+                        &stderr_bytes,
+                        Some(error),
+                    ));
+                }
+                return plugin_tool_output(&stdout_bytes);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    if stdin_write_error.is_none() {
+                        stdin_write_error = pending_stdin_incomplete_note(&pending_stdin);
+                    }
+                    drop(pending_stdin);
+                    cleanup_plugin_hook_child(&mut child);
+                    drain_pending_outputs_until(
+                        &mut stdout,
+                        &mut stderr,
+                        Instant::now() + HOOK_STDIO_DRAIN_GRACE,
+                    );
+                    let stdout_bytes = take_pending_output(stdout);
+                    let stderr_bytes = take_pending_output(stderr);
+                    return ToolResult::Text(plugin_command_process_error(
+                        &invocation.command_name,
+                        &format!(
+                            "command timed out after {}ms",
+                            invocation.command.timeout_ms
+                        ),
+                        &stdout_bytes,
+                        &stderr_bytes,
+                        stdin_write_error.as_deref(),
+                    ));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                if stdin_write_error.is_none() {
+                    stdin_write_error = pending_stdin_incomplete_note(&pending_stdin);
+                }
+                drop(pending_stdin);
+                cleanup_plugin_hook_child(&mut child);
+                let stdout_bytes = take_pending_output(stdout);
+                let stderr_bytes = take_pending_output(stderr);
+                return ToolResult::Text(plugin_command_process_error(
+                    &invocation.command_name,
+                    &format!("process wait failed: {error}"),
+                    &stdout_bytes,
+                    &stderr_bytes,
+                    stdin_write_error.as_deref(),
+                ));
+            }
+        }
+    }
+}
+
+fn plugin_tool_output(stdout: &[u8]) -> ToolResult {
+    match serde_json::from_slice::<Value>(stdout) {
+        Ok(value) => ToolResult::Json(value),
+        Err(_) => ToolResult::Text(redact_string(&String::from_utf8_lossy(stdout))),
+    }
+}
+
+fn plugin_tool_process_error(
+    tool_name: &str,
+    detail: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+    stdin_error: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "Error: plugin tool `{tool_name}` {detail}; stdout: {}; stderr: {}",
+        redacted_bounded_bytes(stdout),
+        redacted_bounded_bytes(stderr)
+    );
+    if let Some(error) = stdin_error {
+        message.push_str(&format!("; stdin write: {error}"));
+    }
+    message
+}
+
+fn plugin_command_process_error(
+    command_name: &str,
+    detail: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+    stdin_error: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "Error: plugin command `{command_name}` {detail}; stdout: {}; stderr: {}",
+        redacted_bounded_bytes(stdout),
+        redacted_bounded_bytes(stderr)
+    );
+    if let Some(error) = stdin_error {
+        message.push_str(&format!("; stdin write: {error}"));
+    }
+    message
 }
 
 fn pending_hook_stdout(

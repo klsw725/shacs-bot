@@ -180,10 +180,13 @@ pub use plugin_hooks::{
     PluginHookTimeoutDiagnostic,
 };
 pub use plugin_runtime::{
-    build_plugin_runtime_snapshot, PluginExecutableCommand, PluginHookCommandExecutor,
-    PluginHookCommandInvocation, PluginHookDispatchMode, PluginHookDispatchSink,
-    PluginRuntimeDiagnostic, PluginRuntimeHook, PluginRuntimeHookAgentHook, PluginRuntimePlugin,
-    PluginRuntimeSnapshot, ProcessPluginHookCommandExecutor,
+    build_plugin_runtime_snapshot, plugin_runtime_commands, plugin_runtime_tools,
+    register_plugin_runtime_tools, PluginCommandDispatchError, PluginCommandDispatcher,
+    PluginCommandExecution, PluginCommandInvocation, PluginCommandToolInvocation,
+    PluginExecutableCommand, PluginHookCommandExecutor, PluginHookCommandInvocation,
+    PluginHookDispatchMode, PluginHookDispatchSink, PluginRuntimeCommand, PluginRuntimeDiagnostic,
+    PluginRuntimeHook, PluginRuntimeHookAgentHook, PluginRuntimePlugin, PluginRuntimeSnapshot,
+    PluginRuntimeTool, ProcessPluginHookCommandExecutor,
 };
 pub use plugin_surface::{
     build_plugin_surface_projection, evaluate_plugin_permission_ceiling,

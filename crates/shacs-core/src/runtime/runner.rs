@@ -89,6 +89,15 @@ pub trait AgentHook: Send + Sync {
 
     fn before_execute_tools(&self, _context: &AgentHookContext, _calls: &[RuntimeToolCall]) {}
 
+    fn block_tool_calls(
+        &self,
+        context: &AgentHookContext,
+        calls: &[RuntimeToolCall],
+    ) -> Vec<RuntimeToolMessage> {
+        self.before_execute_tools(context, calls);
+        Vec::new()
+    }
+
     fn after_response(&self, _context: &AgentHookContext, _response: &LlmResponse) {}
 
     fn after_iteration(&self, _context: &AgentHookContext) {}
@@ -145,6 +154,18 @@ impl AgentHook for CompositeHook {
         for hook in &self.hooks {
             invoke_hook_lifecycle(|| hook.before_execute_tools(context, calls));
         }
+    }
+
+    fn block_tool_calls(
+        &self,
+        context: &AgentHookContext,
+        calls: &[RuntimeToolCall],
+    ) -> Vec<RuntimeToolMessage> {
+        let mut messages = Vec::new();
+        for hook in &self.hooks {
+            messages.extend(invoke_hook_block_tool_calls(hook.as_ref(), context, calls));
+        }
+        messages
     }
 
     fn after_response(&self, context: &AgentHookContext, response: &LlmResponse) {
@@ -437,7 +458,7 @@ impl AgentRunner {
                     runtime_calls.clone(),
                 );
 
-                let (executable_calls, throttled_messages, throttled_events) =
+                let (mut executable_calls, throttled_messages, throttled_events) =
                     apply_external_lookup_throttle(runtime_calls, &mut external_lookup_counts);
                 emit_events(&spec, &throttled_events);
                 tool_events.extend(throttled_events);
@@ -480,11 +501,24 @@ impl AgentRunner {
                         recent_auto_mode_retry_tokens,
                     ));
                 }
-                invoke_agent_hook_before_execute_tools(
+                let blocked_tool_messages = invoke_agent_hook_before_execute_tools(
                     &spec,
                     &hook_context(iteration, &messages),
                     &observable_tool_calls(&executable_calls),
                 );
+                let blocked_tool_call_ids = blocked_tool_messages
+                    .iter()
+                    .map(|message| message.tool_call_id.clone())
+                    .collect::<HashSet<_>>();
+                for blocked_message in blocked_tool_messages {
+                    let message = normalize_tool_message(&spec, blocked_message);
+                    completed_tool_results.push(message.to_json());
+                    completed_tool_messages.push(message.clone());
+                    messages.push(message.to_json());
+                }
+                if !blocked_tool_call_ids.is_empty() {
+                    executable_calls.retain(|call| !blocked_tool_call_ids.contains(&call.id));
+                }
                 let report = execute_tool_dispatch(
                     executable_calls,
                     current_catalog.as_ref(),
@@ -1862,6 +1896,14 @@ fn invoke_hook_finalize(
     }
 }
 
+fn invoke_hook_block_tool_calls(
+    hook: &dyn AgentHook,
+    context: &AgentHookContext,
+    calls: &[RuntimeToolCall],
+) -> Vec<RuntimeToolMessage> {
+    catch_unwind(AssertUnwindSafe(|| hook.block_tool_calls(context, calls))).unwrap_or_default()
+}
+
 fn invoke_agent_hook_before_iteration(spec: &AgentRunSpec<'_>, context: &AgentHookContext) {
     if let Some(hook) = &spec.agent_hook {
         invoke_hook_lifecycle(|| hook.before_iteration(context));
@@ -1872,9 +1914,11 @@ fn invoke_agent_hook_before_execute_tools(
     spec: &AgentRunSpec<'_>,
     context: &AgentHookContext,
     calls: &[RuntimeToolCall],
-) {
+) -> Vec<RuntimeToolMessage> {
     if let Some(hook) = &spec.agent_hook {
-        invoke_hook_lifecycle(|| hook.before_execute_tools(context, calls));
+        invoke_hook_block_tool_calls(hook.as_ref(), context, calls)
+    } else {
+        Vec::new()
     }
 }
 

@@ -17,13 +17,13 @@ use crate::runtime::{
     InboundMessage, LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore,
     MessageBus, OutboundMessage, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
     PermissionRuleInput, PermissionedAction, PersistentGoal, PersistentGoalStatus,
-    ProviderArchiveConsolidator, ProviderEventCallback, RecentAutoModeDenial,
-    RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError,
-    RecentAutoModeRetryTokenStore, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
-    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
-    SessionApprovalCacheEntry, SessionHistoryOptions, SessionManager, SessionTurnAcquireError,
-    SessionTurnLock, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
-    DEFAULT_GOAL_TURN_BUDGET,
+    PluginCommandDispatcher, ProviderArchiveConsolidator, ProviderEventCallback,
+    RecentAutoModeDenial, RecentAutoModeDenialStore, RecentAutoModeRetryToken,
+    RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenStore, RuntimeContextTools,
+    RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
+    RuntimeToolMessage, Session, SessionApprovalCacheEntry, SessionHistoryOptions, SessionManager,
+    SessionTurnAcquireError, SessionTurnLock, TokenConsolidationConfig, ToolEventCallback,
+    ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, assemble_tool_surface, bridge_tool_names,
@@ -198,6 +198,7 @@ pub enum AgentLoopCommandResult {
     DreamRestore,
     Permission,
     Help,
+    PluginCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,6 +232,7 @@ pub struct AgentLoop<'a> {
     tool_event_callback: Option<ToolEventCallback>,
     provider_event_callback: Option<ProviderEventCallback>,
     agent_hook: Option<Arc<dyn AgentHook>>,
+    plugin_command_dispatcher: Option<PluginCommandDispatcher>,
     recent_retry_tokens: RecentAutoModeRetryTokenStore,
     stopped: bool,
 }
@@ -260,6 +262,7 @@ impl<'a> AgentLoop<'a> {
             tool_event_callback: None,
             provider_event_callback: None,
             agent_hook: None,
+            plugin_command_dispatcher: None,
             recent_retry_tokens: RecentAutoModeRetryTokenStore::default(),
             stopped: false,
         }
@@ -282,6 +285,11 @@ impl<'a> AgentLoop<'a> {
 
     pub fn with_agent_hook(mut self, hook: Arc<dyn AgentHook>) -> Self {
         self.agent_hook = Some(hook);
+        self
+    }
+
+    pub fn with_plugin_command_dispatcher(mut self, dispatcher: PluginCommandDispatcher) -> Self {
+        self.plugin_command_dispatcher = Some(dispatcher);
         self
     }
 
@@ -730,6 +738,9 @@ impl<'a> AgentLoop<'a> {
             );
             (messages, Some(context_provider_handoff))
         } else {
+            if let Some(result) = self.try_plugin_command(&message, &session)? {
+                return Ok(result);
+            }
             self.maybe_consolidate_session_by_tokens(&mut session)?;
             let history = session.get_history_with_options(self.config.history_options);
             let initial_messages = self.context_builder.build_messages(ContextBuildRequest {
@@ -1106,6 +1117,31 @@ impl<'a> AgentLoop<'a> {
                 save_session,
             ),
         }
+    }
+
+    fn try_plugin_command(
+        &mut self,
+        message: &InboundMessage,
+        session: &Session,
+    ) -> Result<Option<AgentLoopTurnResult>, AgentLoopError> {
+        let Some(dispatcher) = &self.plugin_command_dispatcher else {
+            return Ok(None);
+        };
+        let Ok(execution) = dispatcher.dispatch_text(&message.content) else {
+            return Ok(None);
+        };
+        let stop_reason = format!(
+            "plugin_command:{}:{}",
+            execution.plugin_id, execution.command_name
+        );
+        Ok(Some(self.publish_command_response(
+            message,
+            session.clone(),
+            &execution.output.into_text(),
+            Some(AgentLoopCommandResult::PluginCommand),
+            &stop_reason,
+            true,
+        )?))
     }
 
     fn handle_pending_permission_wizard(
