@@ -25,7 +25,7 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- status
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime inspect --workspace /tmp/shacs-ws
 ```
 
-Plugin과 hook manifest 상태는 descriptor-only management surface로 확인합니다. `plugin.json`과 `plugin.toml` manifest를 discovery/config gate까지 지원하지만, 이는 plugin foundation이며 full live plugin execution은 아직 아닙니다. 이 명령들은 plugin command, hook callback, MCP server, process를 실행하지 않으며, `enable`/`disable`은 config만 수정하고 다음 session/reload에 적용된다고 보고합니다. Enabled plugin의 typed hook entrypoint는 direct agent-loop path에서 diagnostics-only로 dispatch될 수 있지만, runtime-wide hook wiring과 hook output의 command/tool/provider behavior 변경은 아직 아닙니다:
+Plugin과 hook manifest 상태는 management surface로 확인합니다. `plugin.json`과 `plugin.toml` manifest discovery/config gate를 지원하며, `plugins`/`hooks` inspect 계열 명령은 plugin command, hook callback, MCP server, process를 실행하지 않습니다. `enable`/`disable`은 config만 수정하고 다음 session/reload에 적용된다고 보고합니다. Agent runtime에서 enabled plugin의 typed hook entrypoint는 redacted diagnostics로 dispatch될 수 있고, 현재 behavior-affecting 소비 범위는 `tool:before`의 block-only 결과를 도구 실행 직전 normalized tool error로 반환하는 것뿐입니다. 이 block은 permission approval/allow/grant를 만들 수 없습니다. Enabled plugin의 command-backed tool은 기존 tool registry/executor 경계로 등록되고, plugin MCP declaration은 production MCP startup 경로에만 투영되며, plugin-provided skill은 read-only skill root로 agent context에 포함됩니다. Enabled plugin command는 builtin `CommandId`를 확장하지 않는 별도 plugin command router/dispatcher 경계에서만 실행됩니다:
 
 ```sh
 cargo run --manifest-path crates/shacs-cli/Cargo.toml -- plugins list --workspace /tmp/shacs-ws
