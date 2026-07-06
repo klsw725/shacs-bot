@@ -6,7 +6,7 @@ Spec 025의 user-extensible hooks/plugins를 안전한 순서로 구현할 수 �
 
 이 PRD는 public marketplace, in-process dynamic plugin ABI, organization governance를 추가하지 않는다.
 
-현재 구현 상태: foundation과 narrow diagnostics-only hook runtime slice는 완료됐지만 PRD 000-005 전체가 끝난 것은 아니다. 완료된 범위는 manifest discovery, config gates, descriptor-only projection, diagnostics, management CLI, and direct agent-loop diagnostics-only dispatch for enabled typed hook entrypoints다. `runtime:start`, `session:start`, `tool:after`, `subagent:end` 같은 live runtime-wide wiring, behavior-affecting hook 적용, tool/command/skill/MCP execution 연결은 아래 순서대로 계속 남아 있으며, full Spec 25 closure는 이 remaining work를 끝낸 뒤에만 선언한다.
+현재 구현 상태: self-hosted/local manifest scope는 완료됐다. 완료된 범위는 manifest discovery, config gates, descriptor projection, diagnostics, management CLI, bounded enabled plugin hook dispatch, `tool:before` block-only 적용, command-backed plugin tool execution, production-only plugin MCP startup, plugin-provided read-only skill roots, standalone plugin command router/dispatcher execution, replay live-dispatch rejection이다.
 
 ## Dependency Cut
 
@@ -173,30 +173,26 @@ Spec 025의 user-extensible hooks/plugins를 안전한 순서로 구현할 수 �
 
 ### Foundation Closure Matrix
 
-현재 완료된 foundation은 executable surface 연결 전까지의 안전 기반이다. 아래 bucket은 `spec025_` regression과 문서 경계로 닫혔지만, 이것만으로 PRD 000-005 전체 완료를 의미하지 않는다.
+현재 완료된 self-hosted/local manifest scope는 executable plugin surface를 owner boundary 안에서만 열고, 검증된 hook/tool/MCP/skill 경계와 descriptor projection을 지원한다. 아래 bucket은 `spec025_` regression과 문서 경계로 닫혔다.
 
 | bucket | 구현 증거 | 대표 테스트 |
 |---|---|---|
 | Discovery/config gates | `Config.plugins`, `discover_plugins`, workspace trust, `plugin.json`/`plugin.toml` parse gates | `spec025_plugin_manifest_not_enabled_by_default_from_user_data_root`, `spec025_plugin_manifest_config_enabled_and_disabled_wins`, `spec025_workspace_local_enabled_plugin_requires_trusted_workspace`, `spec025_toml_manifest_uses_same_discovery_and_ref_gates` |
 | Hook catalog/output validation | hook catalog, approval-denying validation, redacted diagnostics | `spec025_hook_catalog_policies_are_descriptor_only`, `spec025_tool_before_cannot_approve_permissions`, `spec025_observer_only_hooks_ignore_outputs`, `spec025_hook_diagnostics_are_redacted` |
-| Diagnostics-only hook runtime | typed hook entrypoint snapshot, no-shell process execution, replay rejection, non-mutating direct agent-loop runtime adapter | `spec025_s3_live_diagnostics_dispatch_executes_matching_hooks_and_records_summary`, `spec025_s3_process_executor_runs_argv_without_shell_and_parses_json_stdout`, `spec025_plugin_runtime_hook_executes_during_direct_agent_loop` |
-| Tool descriptors/Tool Search metadata | plugin tools projected as deferrable/provider-hidden descriptors only | `spec025_descriptor_only_enabled_plugin_surfaces_are_active_but_not_executable`, `spec025_plugin_tool_search_metadata_is_deferrable_and_provider_hidden` |
-| Skill/command descriptors/conflicts | plugin skill namespace and command conflict diagnostics without active injection | `spec025_builtin_command_conflict_is_diagnostic_only`, `spec025_plugin_skill_namespace_uses_plugin_prefix` |
+| Diagnostics-only hook runtime | typed hook entrypoint snapshot, no-shell process execution, replay rejection, non-mutating runtime adapter | `spec025_s3_live_diagnostics_dispatch_executes_matching_hooks_and_records_summary`, `spec025_s3_process_executor_runs_argv_without_shell_and_parses_json_stdout`, `spec025_plugin_runtime_hook_executes_during_direct_agent_loop` |
+| `tool:before` block-only runtime | first valid block skips tool execution as normalized tool error without permission approval; replay does not apply live block | `spec025_tool_before_block_skips_tool_without_permission_approval`, `spec025_replay_mode_does_not_apply_tool_before_blocks` |
+| Plugin tool runtime/Tool Search metadata | command-backed plugin tools registered through `ToolRegistry`, executed with bounded JSON stdin/stdout, and marked as deferrable plugin tools | `spec025_command_backed_plugin_tool_registers_and_executes_without_shell_env`, `production_tool_registry_wires_enabled_plugin_tools` |
+| Plugin MCP production startup | enabled plugin MCP declarations are mapped to production `McpServerSpec`; inspect/doctor remains non-starting | `production_mcp_specs_include_enabled_plugin_declarations` |
+| Plugin skill roots/command dispatch | enabled plugin skills are read-only `PluginProvided` roots; enabled plugin commands route through separate plugin command dispatch without builtin override | `enabled_plugin_skills_are_available_to_context_and_registry`, `plugin_command_router_routes_without_extending_builtin_command_ids`, `plugin_command_router_excludes_builtin_conflicts`, `spec025_plugin_command_dispatcher_routes_and_executes_without_shell_env` |
 | Safety/replay/redaction | permission ceiling, secret ref metadata only, replay live-dispatch rejection | `spec025_permission_ceiling_rejects_widening_and_allows_declared_scope`, `spec025_secret_refs_expose_names_and_presence_without_raw_values`, `spec025_surface_diagnostics_and_replay_rejection_are_redacted` |
 | Management projection | plugin/hook CLI projection and config-only enable/disable | `spec025_parser_accepts_plugin_and_hook_projection_commands`, `spec025_plugins_list_inspect_doctor_render_state_without_raw_secrets`, `spec025_enable_disable_mutate_config_only_and_report_next_session`, `spec025_hooks_list_inspect_render_metadata_without_dispatch` |
-| Docs | SPEC/USAGE/README state foundation boundary and remaining full-spec execution work | 문서 review와 verification 결과 |
+| Docs | SPEC/USAGE/README state the closed self-hosted/local manifest scope and explicit future-expansion exclusions | 문서 review와 verification 결과 |
 
-### Remaining Full-Spec Work
+### Deliberate Future Expansion Outside This Closure
 
-Full Spec 25 closure 전에 남은 범위:
+이 self-hosted/local manifest closure에서 의도적으로 열지 않은 범위:
 
-- Live runtime wiring for `runtime:start`, `session:start`, `tool:after`, `subagent:end` beyond the current direct agent-loop diagnostics-only slice.
-- Behavior-affecting hook output application beyond diagnostics-only dispatch.
-- Live command-backed plugin tool execution.
-- Live MCP startup from plugin manifests.
-- Plugin command router execution.
-- Live plugin execution wiring beyond descriptor projection.
-- Provider-visible executable plugin tools.
+- Behavior-affecting hook output beyond `tool:before` block-only.
 
 ### Full Completion Criteria
 
