@@ -31,21 +31,22 @@ use shacs_core::app_authoring::{
 use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
     build_plugin_runtime_snapshot, build_plugin_surface_projection, discover_context_files,
-    discover_plugins, parse_context_references, plugin_hook_catalog, resolve_context_reference,
-    AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
-    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput,
-    ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
-    ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
-    ContextReferenceResolverConfig, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
-    HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService,
-    HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle, MessageBus,
-    PermissionMode, PermissionModeSnapshot, PluginDiscoveryError, PluginHookCatalog,
-    PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
-    PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState, PluginSurfaceProjection,
-    ProviderNotificationEvaluator, RuntimeCapabilityReport, RuntimeCapabilityStatus,
-    RuntimeToolCall, Session, SessionHistoryOptions, SessionManager, SessionTurnLock,
-    StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig,
-    ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
+    discover_plugins, parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
+    resolve_context_reference, AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig,
+    AgentLoopTurnResult, CompositeHook, ContainerNetworkMode, ContainerRuntimeKind,
+    ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput,
+    ContextDiagnosticsSummary, ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions,
+    ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig, DiscoveredPlugin,
+    DockerContainmentSnapshot, DreamLifecycle, HeartbeatError, HeartbeatNotifier,
+    HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker,
+    InboundMessage, McpLifecycle, MessageBus, PermissionMode, PermissionModeSnapshot,
+    PluginCommandDispatcher, PluginDiscoveryError, PluginHookCatalog, PluginHookDescriptor,
+    PluginHookDispatchSink, PluginHookDispatchSummary, PluginRuntimeHookAgentHook,
+    PluginRuntimeSnapshot, PluginState, PluginSurfaceProjection, ProviderNotificationEvaluator,
+    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, Session,
+    SessionHistoryOptions, SessionManager, SessionTurnLock, StreamDeltaCoalescer,
+    SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig, ToolSearchMode,
+    ToolStatus, HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -5029,6 +5030,9 @@ fn load_skill_registry(
     )?;
     let mut options = SkillRegistryOptions::new(bundle.context.workspace.clone());
     options.user_skills_dir = Some(bundle.context.data_dir.join("skills"));
+    let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
+    options.plugin_roots = enabled_plugin_skill_roots(&discovery.plugins);
+    options.plugin_roots_enabled = true;
     let registry = discover_skill_registry(options)?;
     Ok((config_path, bundle.context.workspace, registry.entries))
 }
@@ -6029,7 +6033,7 @@ pub fn format_plugins_inspect(report: PluginInspectReport) -> String {
         .find(|descriptor| descriptor.id == plugin.id);
     let mut lines = vec![
         format!("Plugin: {}", plugin.id),
-        "Boundary: descriptor-only projection; no hooks, MCP, tools, commands, or processes were executed".to_owned(),
+        "Boundary: management projection only; no hooks, MCP, tools, commands, or processes were executed".to_owned(),
         format!("Config: {}", display_path(&report.config_path)),
         format!("Workspace: {}", display_path(&report.workspace)),
         format!("State: {}", plugin.state.as_str()),
@@ -6118,7 +6122,7 @@ pub fn format_plugins_inspect(report: PluginInspectReport) -> String {
 
 pub fn format_plugins_doctor(report: PluginProjectionReport) -> String {
     let mut lines = plugin_projection_header("Plugin doctor", &report);
-    lines.push("Boundary: descriptor-only checks; no live plugin execution, hook dispatch, MCP startup, tool registration, or process execution".to_owned());
+    lines.push("Boundary: management checks only; no live plugin execution, hook dispatch, MCP startup, tool registration, or process execution".to_owned());
     let blocked = report
         .plugins
         .iter()
@@ -6168,8 +6172,7 @@ pub fn format_plugin_mutation(report: PluginMutationReport) -> String {
 pub fn format_hooks_list(report: HookProjectionReport) -> String {
     let mut lines = vec![
         "Hooks".to_owned(),
-        "Boundary: descriptor-only metadata; no hook dispatch or plugin process execution"
-            .to_owned(),
+        "Boundary: hook metadata only; no hook dispatch or plugin process execution".to_owned(),
         format!("Config: {}", display_path(&report.config_path)),
         format!("Workspace: {}", display_path(&report.workspace)),
         format!("Catalog events: {}", report.catalog.entries.len()),
@@ -6196,8 +6199,7 @@ pub fn format_hooks_list(report: HookProjectionReport) -> String {
 pub fn format_hooks_inspect(report: HookInspectReport) -> String {
     let mut lines = vec![
         format!("Hook filter: {}", report.filter),
-        "Boundary: descriptor-only metadata; no hook dispatch or plugin process execution"
-            .to_owned(),
+        "Boundary: hook metadata only; no hook dispatch or plugin process execution".to_owned(),
         format!("Config: {}", display_path(&report.config_path)),
         format!("Workspace: {}", display_path(&report.workspace)),
     ];
@@ -6226,7 +6228,8 @@ pub fn format_hooks_inspect(report: HookInspectReport) -> String {
 fn plugin_projection_header(title: &str, report: &PluginProjectionReport) -> Vec<String> {
     vec![
         title.to_owned(),
-        "Boundary: descriptor-only projection; execution is disabled".to_owned(),
+        "Boundary: management projection only; this command does not execute plugin surfaces"
+            .to_owned(),
         format!("Config: {}", display_path(&report.config_path)),
         format!("Workspace: {}", display_path(&report.workspace)),
         format!("Data dir: {}", display_path(&report.data_dir)),
@@ -11446,8 +11449,8 @@ pub fn help_text() -> String {
         "  session   Manage local session files",
         "  skills    List and inspect local skill registry entries",
         "  apps      Init authoring drafts; install, list, inspect, enable, disable, or uninstall local app bundles",
-        "  plugins   List, inspect, doctor, enable, or disable descriptor-only plugins",
-        "  hooks     List and inspect descriptor-only plugin hook metadata",
+        "  plugins   List, inspect, doctor, enable, or disable plugin state and surfaces",
+        "  hooks     List and inspect plugin hook metadata",
         "  channels  List channel registry/config status",
         "  context   Inspect context files and dry-run inline @ references",
         "  ask       Send one message through the local AgentLoop",
@@ -13488,6 +13491,7 @@ pub struct AgentLoopChatCompletionAdapter {
     containment_snapshot: Option<ContainmentSnapshotRef>,
     permission_mode_snapshot: PermissionModeSnapshot,
     plugin_runtime_snapshot: PluginRuntimeSnapshot,
+    plugin_skill_roots: Vec<PathBuf>,
 }
 
 impl AgentLoopChatCompletionAdapter {
@@ -13518,6 +13522,7 @@ impl AgentLoopChatCompletionAdapter {
             runtime_permission_mode_snapshot(&permission_config_snapshot);
         let plugin_discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
         let plugin_runtime_snapshot = build_plugin_runtime_snapshot(&plugin_discovery.plugins);
+        let plugin_skill_roots = enabled_plugin_skill_roots(&plugin_discovery.plugins);
         let tooling = production_tool_registry(&bundle, allow_side_effect_tools)?;
         let provider_id = resolved.provider_id.clone();
         let native_image_input_supported =
@@ -13556,6 +13561,7 @@ impl AgentLoopChatCompletionAdapter {
             containment_snapshot,
             permission_mode_snapshot,
             plugin_runtime_snapshot,
+            plugin_skill_roots,
         })
     }
 
@@ -13636,6 +13642,7 @@ impl AgentLoopChatCompletionAdapter {
         {
             extra_roots.push(data_dir.join("skills"));
         }
+        extra_roots.extend(self.plugin_skill_roots.clone());
         ContextBuilder::new(&self.workspace)
             .with_timezone(self.defaults.timezone.clone())
             .with_disabled_skills(self.defaults.disabled_skills.clone())
@@ -14306,6 +14313,11 @@ impl AgentLoopChatCompletionAdapter {
         )
         .with_context_tools(shacs_core::runtime::RuntimeContextTools::new().with_spawn(spawn_tool))
         .with_session_turn_lock(self.session_turn_lock.clone());
+        if !self.plugin_runtime_snapshot.commands.is_empty() {
+            loop_runtime = loop_runtime.with_plugin_command_dispatcher(
+                PluginCommandDispatcher::new(self.plugin_runtime_snapshot.commands.clone()),
+            );
+        }
         if let Some(message_tool) = &self.message_tool {
             loop_runtime = loop_runtime.with_message_tool_delivery(message_tool.clone());
         }
@@ -15077,7 +15089,25 @@ fn production_tool_registry(
         Arc::new(Mutex::new(SelfRuntimeState::new())),
         allow_side_effect_tools && bundle.config.tools.my.allow_set,
     ));
-    let specs = mcp_server_specs(bundle);
+    let plugin_discovery = if allow_side_effect_tools {
+        Some(discover_plugins(
+            &bundle.config,
+            &bundle.context,
+            &ProcessEnv,
+        )?)
+    } else {
+        None
+    };
+    if let Some(discovery) = &plugin_discovery {
+        let _diagnostics = register_plugin_runtime_tools(&mut registry, &discovery.plugins);
+    }
+    let specs = production_mcp_server_specs(
+        bundle,
+        plugin_discovery
+            .as_ref()
+            .map(|discovery| discovery.plugins.as_slice())
+            .unwrap_or(&[]),
+    );
     let (mcp_runtime, mcp_reports) = if specs.is_empty() {
         (None, Vec::new())
     } else {
@@ -15162,6 +15192,7 @@ fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
+            clear_env: false,
             url: non_empty(Some(config.url.as_str())).then(|| config.url.clone()),
             headers: config
                 .headers
@@ -15173,6 +15204,180 @@ fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
             parent_containment_snapshot: parent_containment_snapshot.clone(),
         })
         .collect()
+}
+
+fn production_mcp_server_specs(
+    bundle: &ConfigBundle,
+    plugins: &[DiscoveredPlugin],
+) -> Vec<McpServerSpec> {
+    let mut specs = mcp_server_specs(bundle);
+    specs.extend(plugin_mcp_server_specs(bundle, plugins));
+    specs
+}
+
+fn plugin_mcp_server_specs(
+    bundle: &ConfigBundle,
+    plugins: &[DiscoveredPlugin],
+) -> Vec<McpServerSpec> {
+    let parent_containment_snapshot = Some(runtime_containment_snapshot_ref(
+        &runtime_containment_inspect(bundle),
+    ));
+    let mut specs = Vec::new();
+    for plugin in plugins
+        .iter()
+        .filter(|plugin| plugin.state == PluginState::Enabled)
+    {
+        let Some(manifest) = &plugin.manifest else {
+            continue;
+        };
+        let declared = plugin_surface_names(&manifest.surfaces, "mcp");
+        if declared.is_empty() {
+            continue;
+        }
+        let Some(entrypoints) = manifest.entrypoints.get("mcp").and_then(Value::as_object) else {
+            continue;
+        };
+        for name in declared {
+            let Some(entrypoint) = entrypoints.get(&name).and_then(Value::as_object) else {
+                continue;
+            };
+            specs.push(McpServerSpec {
+                name: format!(
+                    "plugin_{}_{}",
+                    safe_mcp_name_part(&plugin.id),
+                    safe_mcp_name_part(&name)
+                ),
+                r#type: entrypoint
+                    .get("type")
+                    .or_else(|| entrypoint.get("transport"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                command: entrypoint
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .and_then(|command| plugin_relative_command(&plugin.root, command)),
+                args: string_array_field(entrypoint, "args"),
+                env: string_map_field(entrypoint, "env"),
+                clear_env: true,
+                url: entrypoint
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_owned),
+                headers: string_map_field(entrypoint, "headers"),
+                timeout_seconds: entrypoint
+                    .get("toolTimeout")
+                    .or_else(|| entrypoint.get("timeoutSeconds"))
+                    .or_else(|| entrypoint.get("timeout"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(30),
+                enabled_tools: string_array_field(entrypoint, "enabledTools"),
+                parent_containment_snapshot: parent_containment_snapshot.clone(),
+            });
+        }
+    }
+    specs.sort_by(|left, right| left.name.cmp(&right.name));
+    specs
+}
+
+fn enabled_plugin_skill_roots(plugins: &[DiscoveredPlugin]) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for plugin in plugins
+        .iter()
+        .filter(|plugin| plugin.state == PluginState::Enabled)
+    {
+        let Some(manifest) = &plugin.manifest else {
+            continue;
+        };
+        if plugin_surface_names(&manifest.surfaces, "skills").is_empty() {
+            continue;
+        }
+        roots.push(plugin.root.join("skills"));
+    }
+    roots.sort();
+    roots
+}
+
+fn plugin_surface_names(surfaces: &Value, key: &str) -> Vec<String> {
+    match surfaces.get(key) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Some(Value::Object(object)) => object.keys().cloned().collect(),
+        Some(Value::String(name)) if !name.trim().is_empty() => vec![name.trim().to_owned()],
+        _ => Vec::new(),
+    }
+}
+
+fn string_array_field(object: &Map<String, Value>, key: &str) -> Vec<String> {
+    object
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn string_map_field(object: &Map<String, Value>, key: &str) -> Vec<(String, String)> {
+    object
+        .get(key)
+        .and_then(Value::as_object)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|value| (key.clone(), value.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn plugin_relative_command(root: &Path, command: &str) -> Option<String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() || trimmed.contains('\\') {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return None;
+    }
+    if path.components().any(
+        |component| !matches!(component, std::path::Component::Normal(part) if !part.is_empty()),
+    ) {
+        return None;
+    }
+    Some(root.join(path).to_string_lossy().to_string())
+}
+
+fn safe_mcp_name_part(value: &str) -> String {
+    let normalized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let trimmed = normalized.trim_matches('_');
+    if trimmed.is_empty() {
+        "unknown".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 pub struct ProviderChatCompletionAdapter {
@@ -16068,7 +16273,7 @@ mod tests {
                 workspace_override: Some(workspace.clone()),
             },
         )))?;
-        assert!(list.contains("descriptor-only projection"));
+        assert!(list.contains("management projection only"));
         assert!(list.contains("demo-plugin [not_enabled]"));
         assert!(!list.contains("RAW_CONFIG_SECRET"));
 
@@ -16272,7 +16477,7 @@ mod tests {
     fn spec025_help_lists_plugins_and_hooks_as_implemented_commands() {
         let help = help_text();
         assert!(help.contains("plugins   List, inspect, doctor, enable, or disable"));
-        assert!(help.contains("hooks     List and inspect descriptor-only"));
+        assert!(help.contains("hooks     List and inspect plugin hook metadata"));
         assert!(!help.contains("Reserved for a later plugin slice"));
     }
 
@@ -18326,6 +18531,7 @@ mod tests {
                 scope_ref: Some("scope:test".to_owned()),
             },
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let error = adapter
@@ -19824,6 +20030,72 @@ mod tests {
     }
 
     #[test]
+    fn production_mcp_specs_include_enabled_plugin_declarations() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let data_dir = root.path().join("data");
+        let plugin_dir = data_dir.join("plugins").join("mcp-plugin");
+        fs::create_dir_all(plugin_dir.join("bin"))?;
+        fs::create_dir_all(&workspace)?;
+        fs::write(plugin_dir.join("bin").join("server"), "#!/bin/sh\n")?;
+        fs::write(
+            plugin_dir.join("plugin.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "name": "mcp-plugin",
+                "version": "0.1.0",
+                "surfaces": {"mcp": ["docs"]},
+                "entrypoints": {"mcp": {"docs": {
+                    "type": "stdio",
+                    "command": "bin/server",
+                    "args": ["--stdio"],
+                    "env": {"PLUGIN_MCP_ENV": "configured"},
+                    "toolTimeout": 9,
+                    "enabledTools": ["search_docs"]
+                }}}
+            }))?,
+        )?;
+        let mut config = shacs_config::Config::default();
+        config.plugins.enabled.push("mcp-plugin".to_owned());
+        let bundle = ConfigBundle {
+            config,
+            context: shacs_config::ConfigContext {
+                config_path: root.path().join("config.json"),
+                data_dir,
+                workspace,
+            },
+            migrations: Vec::new(),
+        };
+        let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
+
+        assert!(mcp_server_specs(&bundle).is_empty());
+        let specs = production_mcp_server_specs(&bundle, &discovery.plugins);
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "plugin_mcp_plugin_docs");
+        assert_eq!(specs[0].r#type.as_deref(), Some("stdio"));
+        assert_eq!(
+            specs[0].command.as_deref(),
+            Some(
+                plugin_dir
+                    .join("bin")
+                    .join("server")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(specs[0].args, vec!["--stdio".to_owned()]);
+        assert_eq!(
+            specs[0].env,
+            vec![("PLUGIN_MCP_ENV".to_owned(), "configured".to_owned())]
+        );
+        assert!(specs[0].clear_env);
+        assert_eq!(specs[0].timeout_seconds, 9);
+        assert_eq!(specs[0].enabled_tools, vec!["search_docs".to_owned()]);
+        Ok(())
+    }
+
+    #[test]
     fn adapter_wires_exec_env_to_context_and_subagents() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
@@ -19872,6 +20144,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let skills = adapter
@@ -19933,6 +20206,98 @@ mod tests {
     }
 
     #[test]
+    fn enabled_plugin_skills_are_available_to_context_and_registry() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let data_dir = root.path().join("data");
+        let media_dir = data_dir.join("media").join("api");
+        let plugin_root = data_dir.join("plugins").join("skill-plugin");
+        let skill_dir = plugin_root.join("skills").join("plugin-skill");
+        fs::create_dir_all(&workspace)?;
+        fs::create_dir_all(&media_dir)?;
+        fs::create_dir_all(&skill_dir)?;
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: plugin-skill\ndescription: Plugin provided skill\n---\nUse plugin skill.\n",
+        )?;
+        fs::write(
+            plugin_root.join("plugin.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "name": "skill-plugin",
+                "version": "0.1.0",
+                "surfaces": {"skills": ["plugin-skill"]}
+            }))?,
+        )?;
+        let mut config = shacs_config::Config::default();
+        config.plugins.enabled.push("skill-plugin".to_owned());
+        let bundle = ConfigBundle {
+            config,
+            context: shacs_config::ConfigContext {
+                config_path: root.path().join("config.json"),
+                data_dir,
+                workspace: workspace.clone(),
+            },
+            migrations: Vec::new(),
+        };
+        let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
+        let plugin_skill_roots = enabled_plugin_skill_roots(&discovery.plugins);
+        let mut options = SkillRegistryOptions::new(workspace.clone());
+        options.plugin_roots = plugin_skill_roots.clone();
+        options.plugin_roots_enabled = true;
+        let registry = discover_skill_registry(options)?;
+        let entry = registry
+            .find("plugin-skill")
+            .ok_or("plugin skill missing")?;
+        assert_eq!(
+            entry.descriptor.source_kind,
+            shacs_skills::SkillSourceKind::PluginProvided
+        );
+
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults::default(),
+            resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse::default(),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            config_path: bundle.context.config_path,
+            media_dir,
+            tools: ToolRegistry::new(),
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: true,
+            send_progress: false,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            runtime_verbose: false,
+            tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots,
+        };
+        let skills = adapter
+            .context_builder()
+            .build_skills_summary(&BTreeSet::new());
+        assert!(skills.contains("plugin-skill"));
+        assert!(skills.contains("Plugin provided skill"));
+        Ok(())
+    }
+
+    #[test]
     fn production_tool_registry_wires_exec_env() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
@@ -19972,6 +20337,63 @@ mod tests {
         if !result.contains("configured|exec") || !result.contains("Exit code: 0") {
             return Err(format!("production registry exec env was not wired: {result}").into());
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_tool_registry_wires_enabled_plugin_tools() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let data_dir = root.path().join("data");
+        let plugin_dir = data_dir.join("plugins").join("tool-plugin");
+        let bin_dir = plugin_dir.join("bin");
+        fs::create_dir_all(&bin_dir)?;
+        fs::create_dir_all(&workspace)?;
+        let tool_path = bin_dir.join("tool");
+        fs::write(
+            &tool_path,
+            "#!/bin/sh\ncat >/dev/null\nprintf '{\"ok\":true,\"source\":\"plugin\"}'\n",
+        )?;
+        let mut permissions = fs::metadata(&tool_path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tool_path, permissions)?;
+        fs::write(
+            plugin_dir.join("plugin.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "name": "tool-plugin",
+                "version": "0.1.0",
+                "surfaces": {"tools": ["plugin_probe"]},
+                "entrypoints": {"tools": {"plugin_probe": {
+                    "command": "bin/tool",
+                    "description": "Probe plugin tool",
+                    "parameters": {"type": "object", "properties": {"input": {"type": "string"}}}
+                }}}
+            }))?,
+        )?;
+        let mut config = shacs_config::Config::default();
+        config.plugins.enabled.push("tool-plugin".to_owned());
+        let bundle = ConfigBundle {
+            config,
+            context: shacs_config::ConfigContext {
+                config_path: root.path().join("config.json"),
+                data_dir,
+                workspace,
+            },
+            migrations: Vec::new(),
+        };
+
+        let tooling = production_tool_registry(&bundle, true)?;
+        assert!(tooling.registry.has("plugin_probe"));
+        let result = tooling
+            .registry
+            .execute("plugin_probe", json!({"input": "hello"}))
+            .into_text();
+        assert!(result.contains("plugin"));
+        assert!(!production_tool_registry(&bundle, false)?
+            .registry
+            .has("plugin_probe"));
         Ok(())
     }
 
@@ -20499,6 +20921,7 @@ mod tests {
                 scope_ref: None,
             },
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let initial_config = adapter.loop_config();
@@ -20584,6 +21007,7 @@ mod tests {
                     scope_ref: None,
                 },
                 plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+                plugin_skill_roots: Vec::new(),
             }
         };
 
@@ -22558,6 +22982,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         assert!(!adapter.runtime_verbose);
@@ -22626,6 +23051,7 @@ mod tests {
                 scope_ref: None,
             },
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let config = adapter.loop_config();
@@ -22879,6 +23305,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let paths = adapter.persist_media_data_urls(&[
@@ -22981,6 +23408,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -23089,6 +23517,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let error = adapter
@@ -23181,6 +23610,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let events = adapter.process_websocket_frame(
@@ -23258,6 +23688,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
         let (event_tx, event_rx) = mpsc::channel();
         event_tx.send(ProviderEvent::TextDelta {
@@ -23347,6 +23778,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         assert_eq!(
@@ -23433,6 +23865,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let response = adapter.complete_chat(ChatCompletionInvocation {
@@ -23521,6 +23954,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let output = complete_direct_message(
@@ -23623,8 +24057,10 @@ mod tests {
                         },
                     }],
                 }],
+                commands: Vec::new(),
                 diagnostics: Vec::new(),
             },
+            plugin_skill_roots: Vec::new(),
         };
 
         let inbound = InboundMessage::new("cli", "user", "direct", "hello")
@@ -23746,6 +24182,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let output = complete_direct_message(
@@ -23821,6 +24258,7 @@ mod tests {
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
                 plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+                plugin_skill_roots: Vec::new(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: Vec::new(),
@@ -23908,6 +24346,7 @@ mod tests {
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
                 plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+                plugin_skill_roots: Vec::new(),
             },
             lifecycle_hooks: vec![hook],
             observability_hooks: Vec::new(),
@@ -24000,6 +24439,7 @@ mod tests {
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
                 plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+                plugin_skill_roots: Vec::new(),
             },
             lifecycle_hooks: vec![recording_hook, panic_hook],
             observability_hooks: Vec::new(),
@@ -24104,6 +24544,7 @@ mod tests {
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
                 plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+                plugin_skill_roots: Vec::new(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![panic_hook],
@@ -24306,6 +24747,7 @@ mod tests {
                 containment_snapshot: None,
                 permission_mode_snapshot: PermissionModeSnapshot::default(),
                 plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+                plugin_skill_roots: Vec::new(),
             },
             lifecycle_hooks: Vec::new(),
             observability_hooks: vec![recording_hook],
@@ -24534,6 +24976,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let inbound = InboundMessage::new("direct", "user", "chat-1", "make artifact")
@@ -24626,6 +25069,7 @@ mod tests {
                 ..PermissionModeSnapshot::default()
             },
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let inbound = InboundMessage::new("direct", "user", "chat-1", "make summary")
@@ -24770,6 +25214,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         });
         let runtime_bus = MessageBus::new();
         let turn_adapter = adapter.clone();
@@ -24865,6 +25310,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         };
 
         let (_first_turn, first_outbound) = adapter.process_inbound_with_outbound(
@@ -25386,6 +25832,7 @@ mod tests {
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
         })
     }
 
