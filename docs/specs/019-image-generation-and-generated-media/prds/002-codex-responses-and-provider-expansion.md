@@ -91,3 +91,9 @@
 - stream 또는 URL output provider의 결과가 local generated media artifact로 저장된다.
 - provider expansion regression fixture가 release gate에 연결된다.
 - `image_generate` tool schema는 provider-specific raw API에 종속되지 않고 유지된다.
+
+## 현재 구현 상태
+
+2026-07-06 기준 OpenRouter image generation provider slice는 구현됐다. `OpenRouterImageGenerationClient`는 OpenRouter chat completions image contract를 사용하고, parser는 data URL image output을 decoded image result로 변환하며 remote URL output은 persisted artifact로 과장하지 않고 malformed provider output으로 거절한다. Resolver는 configured OpenRouter model and default image model mapping을 제공한다.
+
+아직 열린 범위는 Codex Responses `image_generation` event parsing, image edit/input/mask/variation, streaming partial image handling, remote URL output provider download/persist policy, provider expansion release fixture completion이다.

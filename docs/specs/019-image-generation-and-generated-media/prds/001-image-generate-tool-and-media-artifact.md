@@ -103,8 +103,8 @@
 
 ## 현재 구현 상태
 
-2026-06-13 기준 PRD 001은 구현됐다. 근거는 `crates/shacs-core/src/tools/image_generation.rs`, `crates/shacs-cli/src/lib.rs`, `crates/shacs-core/tests/tools.rs`다.
+2026-06-13 기준 PRD 001은 구현됐다. 근거는 `crates/shacs-core/src/tools/image_generation.rs`, production registry wiring in `crates/shacs-cli/src/lib.rs`, and `crates/shacs-core/tests/tools.rs` image generation coverage다.
 
-`image_generate`는 side-effect gate와 config gate를 통과할 때만 등록된다. tool 실행은 `ImageGenerationClient`를 호출하고, 생성 결과를 local media 아래 artifact로 저장하며, raw bytes나 base64 대신 artifact refs와 metadata를 반환한다.
+`image_generate`는 side-effect gate와 config gate를 통과할 때만 등록된다. tool 실행은 `ImageGenerationClient`를 호출하고, 생성 결과를 local media 아래 artifact로 저장하며, raw bytes, base64, or remote URL 대신 `artifacts[]` entries with `mediaRef`, `path`, `metadataRef`, and metadata summaries를 반환한다.
 
 이 상태는 Codex Responses image generation, provider expansion, edit/mask/variation, streaming partial image, remote gallery, UI viewer가 구현됐다는 뜻이 아니다. 해당 범위는 PRD 002와 후속 문서가 계속 소유한다.

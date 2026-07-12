@@ -1,6 +1,6 @@
 # image generation and generated media 아키텍처 명세
 
-Status: Draft. 이 문서는 이미지 생성 구현 전에 owner boundary, provider capability, tool surface, generated media artifact 계약을 고정한다.
+Status: PRD 000 and PRD 001 implemented, PRD 002 partially implemented for OpenRouter provider expansion. Codex Responses image generation, image edit, streaming partial images, and remote URL provider output remain open.
 
 ## 문서 목적
 
@@ -119,11 +119,12 @@ Responses API의 `tools: [{ "type": "image_generation" }]`는 agentic multi-turn
 
 ## 현재 구현 상태
 
-2026-06-13 기준 PRD 000과 PRD 001은 구현됐다. PRD 002는 열려 있다.
+2026-07-06 기준 PRD 000과 PRD 001은 구현됐다. PRD 002는 OpenRouter image generation provider slice만 구현됐고 나머지는 열려 있다.
 
 - PRD 000 provider capability baseline은 구현됐다. 근거는 `crates/shacs-providers/src/clients/image_generation.rs`, `crates/shacs-providers/src/clients/mod.rs`, `crates/shacs-providers/src/registry.rs`, `crates/shacs-providers/src/error.rs`, `crates/shacs-providers/tests/image_generation.rs`다.
-- PRD 001 `image_generate` tool과 local media artifact 저장은 구현됐다. `image_generate`는 side-effect gate와 config gate를 통과할 때만 노출되고, `ImageGenerationClient`를 호출하며, 생성 결과를 local media 아래 artifact로 저장한다. tool result는 raw bytes나 base64가 아니라 artifact refs와 metadata를 반환한다.
-- 이 상태는 Codex Responses image generation, provider expansion, edit/mask/variation, streaming partial image, remote gallery, UI viewer가 구현됐다는 뜻이 아니다. 해당 범위는 PRD 002와 후속 문서가 계속 소유한다.
+- PRD 001 `image_generate` tool과 local media artifact 저장은 구현됐다. `image_generate`는 side-effect gate와 config gate를 통과할 때만 노출되고, `ImageGenerationClient`를 호출하며, 생성 결과를 local media 아래 artifact로 저장한다. tool result는 raw bytes, base64, remote URL이 아니라 `artifacts[]` entries with `mediaRef`, `path`, `metadataRef`, and metadata summaries를 반환한다. 근거는 `crates/shacs-core/src/tools/image_generation.rs`, production registry wiring in `crates/shacs-cli/src/lib.rs`, and `crates/shacs-core/tests/tools.rs` image generation coverage다.
+- PRD 002 중 OpenRouter image generation provider slice는 구현됐다. 근거는 `OpenRouterImageGenerationClient`, `build_openrouter_image_generation_request`, `parse_openrouter_image_generation_response`, resolver/model mapping, remote URL rejection, and OpenRouter regression tests in `crates/shacs-providers/src/clients/image_generation.rs` and `crates/shacs-providers/tests/image_generation.rs`다.
+- 이 상태는 Codex Responses image generation, image edit/mask/variation, streaming partial image, remote URL output provider persistence, remote gallery, UI viewer가 구현됐다는 뜻이 아니다. 해당 범위는 PRD 002와 후속 문서가 계속 소유한다.
 
 ---
 

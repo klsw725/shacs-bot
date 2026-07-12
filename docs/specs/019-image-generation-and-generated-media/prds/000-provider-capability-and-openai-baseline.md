@@ -100,7 +100,7 @@
 - `crates/shacs-providers/src/error.rs`
 - `crates/shacs-providers/tests/image_generation.rs`
 
-이 closure는 `image_generate` tool, generated media artifact 저장, Codex Responses image generation, edit/mask/variation support를 구현했다는 뜻이 아니다. 해당 범위는 PRD 001과 PRD 002가 계속 소유한다.
+이 closure는 `image_generate` tool 또는 generated media artifact 저장까지 구현했다는 뜻은 아니다. 해당 범위는 PRD 001이 소유했고, 이후 구현됐다. Codex Responses image generation, edit/mask/variation support, streaming output은 PRD 002와 후속 문서가 계속 소유한다.
 
 ## 완료 기준
 
