@@ -107,3 +107,7 @@
 - 016 release gate가 018 coverage entries와 blocker evidence를 평가할 수 있다.
 - evaluator, automation, memory, self improvement, replay, projection의 end to end trace가 diagnostics에서 이어진다.
 - spec 018의 남은 runtime, product, diagnostics, release integration closure 기준이 빠짐없이 문서화된다.
+
+## 현재 구현 상태
+
+현재 구현은 diagnostics/release-gate helper contract와 evidence bucket 모델을 고정한 범위다. Full live product closure를 뜻하지 않으며, evaluator, automation, self-improvement, replay, projection, diagnostics가 실제 AgentLoop/service/channel/API/TUI surface에서 end-to-end로 소비되는 runtime wiring과 repository-stored QA/security/docs re-review artifact는 아직 남은 범위다.

@@ -1,6 +1,6 @@
 # evaluation, automation, and self-improvement 아키텍처 명세
 
-Status: Closed. PRD 000-014 구현, Rust 검증, QA/목표/코드/보안/문서 재리뷰를 통과해 018 final product contract 기준 closure를 완료했다.
+Status: Closed for Rust contract/runtime-helper and release-gate helper scope. This status does not claim full live end-to-end product integration, nor does it rely on repository-stored QA/security/docs re-review artifacts.
 
 ## 문서 목적
 
@@ -12,7 +12,7 @@ Status: Closed. PRD 000-014 구현, Rust 검증, QA/목표/코드/보안/문서 
 - scheduling, heartbeat, cron, subagent, app task, channel delivery가 같은 자동화 의미론을 소비하도록 묶는다.
 - 사용자가 허용한 범위 안에서 제안, 승인, checkpoint, 적용, 검증, 기록, rollback으로 이어지는 자기 개선 흐름을 정의한다.
 - evaluator가 조언자라는 점과 `MainOrchestrator`가 여전히 session truth, permission, tool execution의 권한자라는 점을 고정한다.
-- future Rust 구현에서 goal evaluator, safety evaluator, task outcome evaluator, automation ledger, replay dataset, UI projection, 진단 테스트를 도출할 수 있게 한다.
+- Rust contract와 후속 live integration 작업에서 goal evaluator, safety evaluator, task outcome evaluator, automation ledger, replay dataset, UI projection, 진단 테스트를 도출할 수 있게 한다.
 
 이 문서는 MVP 계획서가 아니다. 최종 제품에서 필요한 모든 평가와 자동화 도메인을 한 번에 다루되, 이미 다른 numbered spec이 소유한 개념을 다시 소유하지 않는다. 018은 통합 계약을 소유하고, 하위 spec은 각자의 primitive와 projection을 계속 소유한다.
 
@@ -89,17 +89,24 @@ reference는 질문을 돕는 지도다. 최종 설계의 source of truth는 num
 - MCP default-deny, skills registry, channel workers, local API, diagnostics는 노출, projection, 관측의 기반이다.
 - 010, 012, 013, 014, 017은 safety, runtime, interface, diagnostics, app operating environment의 주요 하위 경계를 이미 고정한다.
 
-구현 상태: PRD 000-014는 Rust 계약과 runtime helper 기준으로 구현되어 있으며, 018 closure는 아래 영역들이 `crates/shacs-eval`, `crates/shacs-utils`, `crates/shacs-core`의 포맷, clippy, 관련 테스트를 통과할 때 완료로 판정한다. 이 문서가 정의한 final goal은 하나의 core evaluator가 아니라 다음 영역들이 하나의 제품 계약으로 연결되는 것이다.
+현재 구현 상태: PRD 000-014는 Rust contract, runtime helper, projection helper, release-gate helper 기준으로 구현되어 있다. 주요 근거는 `crates/shacs-eval`, `crates/shacs-core`, `crates/shacs-projection`의 typed model, pure helper, runtime adapter, projection/release helper, and related tests다. 이 closure는 아래 제품 의미론을 코드 계약으로 고정했다는 뜻이며, 모든 live runtime surface가 이미 하나의 end-to-end 제품 흐름으로 연결됐다는 뜻은 아니다.
 
 1. persistent goal과 `/goal` 같은 목표 lifecycle의 formal model.
 2. judge verdict `done`, `continue`, `blocked`와 turn budget, pause, resume, clear의 공식 상태.
 3. formal capability decision input, approval correlation, stale 또는 expired approval rejection.
 4. task outcome evaluator가 `notify`, `suppress`, `continue`, `escalate`, `verify`, `rollback`을 일관되게 반환하는 계약.
-5. durable scheduled automation과 runtime 재시작 뒤 복구되는 job 상태.
-6. memory search, skill disclosure, curator, 자기 개선 approval/checkpoint/apply/verify/rollback, MCP exposure, replay runner, projection, diagnostics release gate의 runtime integration.
+5. scheduled automation lifecycle, trigger normalization, run-state/idempotency/recursion guard 계약.
+6. memory search, skill disclosure, curator, 자기 개선 approval/checkpoint/apply/verify/rollback, MCP exposure, replay runner, projection, diagnostics release gate의 helper-level integration.
 7. offline trajectory와 replay dataset으로 local quality regression을 검증하는 표준.
 
-따라서 018의 완료 의미는 하나의 core evaluator를 추가하는 것이 아니다. 목표 평가, 안전 평가, 결과 평가, 자동화, 자기 개선, rollback, memory, skills, provider routing, MCP exposure, replay, UI projection, diagnostics가 하나의 final product contract로 연결되는 것이다.
+따라서 018의 현재 완료 의미는 하나의 core evaluator를 추가했다는 뜻도, 최종 제품 흐름 전체가 live로 닫혔다는 뜻도 아니다. 목표 평가, 안전 평가, 결과 평가, 자동화, 자기 개선, rollback, memory, skills, provider routing, MCP exposure, replay, UI projection, diagnostics가 하나의 설명 가능한 제품 계약으로 연결되도록 Rust contract와 helper surface를 고정했다는 뜻이다.
+
+Full live product closure 전에 남은 대표 범위:
+
+- evaluator, automation, self-improvement, replay, projection, diagnostics가 실제 AgentLoop/service/channel/API/TUI surface에서 end-to-end로 소비되는 live wiring.
+- PRD 000-014 각각을 직접 추적하는 release coverage entry와 dedicated release runner/evidence artifact.
+- `BlockedApproval`, `MissingRedactionEvidence`, duplicate/superseded consumption 같은 release blocker 및 ledger edge-case regression 보강.
+- QA/goal/code/security/docs review 결과를 저장소 안에서 재현 가능한 artifact로 남기는 review evidence workflow.
 
 ---
 
@@ -639,7 +646,7 @@ completion evaluator selects aux judge model
 
 ## verification and test perspective
 
-이 문서는 markdown spec 작성이며 Rust 구현 검증을 수행하지 않는다. future Rust 구현에서는 016의 release gate를 소비해 다음 gate를 통과해야 한다.
+이 문서는 현재 Rust contract/runtime-helper closure의 검증 관점을 기록한다. Full live product closure를 선언하려면 016의 release gate를 소비해 다음 gate와 018-specific coverage evidence를 통과해야 한다.
 
 기본 Rust gate:
 
