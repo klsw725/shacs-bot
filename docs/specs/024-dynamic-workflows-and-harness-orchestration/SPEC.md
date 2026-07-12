@@ -1,6 +1,6 @@
 # dynamic workflows and harness orchestration 아키텍처 명세
 
-Status: Draft. 이 문서는 prototype 계획서가 아니라 `shacs-bot`이 작업별 동적 하네스를 완성형 제품 계약으로 제공하기 위해 필요한 최종 owner boundary를 고정한다.
+Status: Typed workflow foundation and read-only runtime smoke implemented; full dynamic workflow product remains open. Live production agent-loop dynamic workflow, live subagent spawn, git worktree merge, skill recipe discovery, full budget enforcement, and API/TUI/channel projection are not closed yet.
 
 ## 문서 목적
 
@@ -593,6 +593,16 @@ Diagnostics는 release gate와 replay에서 destructive tool을 재실행하지 
 9. `prds/008-user-facing-projection-and-release-gates.md`: CLI/TUI/local API/channel projection, release evidence checklist, documentation updates.
 10. `prds/009-runtime-execution-wiring-and-monitoring.md`: MainOrchestrator/AgentRunner wiring, child task execution handoff, progress monitoring, interruption propagation, closure evidence.
 11. `prds/010-sequential-implementation-plan.md`: PRD 000-009의 dependency-ordered 구현 순서와 wave별 gate.
+
+---
+
+## 현재 구현 상태
+
+2026-07-06 기준 `shacs-workflow` crate에는 workflow state, harness plan, admission, checkpoint/resume, child graph, barrier, verifier gate, worktree decision, budget/model route snapshot, recipe readiness, quarantine/permission ceiling, diagnostics manifest, projection helper, and Spec 024 release evidence helper가 구현되어 있다. `crates/shacs-core/src/runtime/workflow.rs`는 provider 호출 없이 이 contract helper를 소비하는 read-only runtime workflow smoke path를 제공한다.
+
+현재 구현된 runtime smoke는 dynamic admission branch가 read-only workflow path로 들어가는지, monitorable events, verifier fail-closed, child/verifier provenance fail-closed, parent session truth isolation, read-only child registry, cancellation handle, diagnostics/replay summary를 검증한다. 이는 deterministic foundation evidence다.
+
+아직 열린 범위는 live production `AgentLoop`에서 dynamic workflow를 실제 turn execution path로 선택하는 wiring, live subagent spawn execution, write-capable git worktree creation/merge handoff, skill-backed recipe discovery integration, 실제 provider/token budget enforcement, and CLI/TUI/local API/channel projection이다.
 
 ---
 
