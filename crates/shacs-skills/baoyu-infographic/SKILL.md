@@ -214,10 +214,10 @@ Save the assembled prompt to `prompts/infographic.md` using `write_file`.
 
 Use the `image_generate` tool with the assembled prompt from Step 5.
 
-- Map aspect ratio to image_generate's format: `16:9` → `landscape`, `9:16` → `portrait`, `1:1` → `square`
-- For custom ratios, pick the closest named aspect
+- `image_generate` accepts `prompt` plus optional `size`, `quality`, `format`, `background`, and `count`. It does not accept reference images or an `aspect_ratio` parameter.
+- Keep the desired aspect in the prompt text. Use optional `size` only when a provider-supported size string is known.
 - On failure, auto-retry once
-- Save the resulting image URL/path to the output directory
+- Use the returned local media artifact JSON. Read `artifacts[]` entries such as `mediaRef`, `path`, and `metadataRef`; copy from `path` if the workflow needs a specific output filename. Do not move or rename the runtime artifact because `mediaRef` and `metadataRef` refer to it. Do not curl a URL.
 
 ### Step 7: Output Summary
 
@@ -237,4 +237,4 @@ Report: topic, layout, style, aspect, language, output path, files created.
 2. **Strip secrets** — always scan source content for API keys, tokens, or credentials before including in any output file.
 3. **One message per section** — each infographic section should convey one clear concept. Overloading sections reduces readability.
 4. **Style consistency** — the style definition from the references file must be applied consistently across the entire infographic. Don't mix styles.
-5. **image_generate aspect ratios** — the tool only supports `landscape`, `portrait`, and `square`. Custom ratios like `3:4` should map to the nearest option (portrait in that case).
+5. **image_generate artifacts**: the tool returns local media artifacts, not remote image URLs. Use returned `path` or `mediaRef`, and keep custom aspect intent in the prompt unless a provider-supported `size` is known.
