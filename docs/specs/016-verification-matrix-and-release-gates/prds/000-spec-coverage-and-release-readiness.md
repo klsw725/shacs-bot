@@ -65,6 +65,7 @@
 
 - full-spec promotion은 각 required family별 실행 가능한 evidence locator가 명시되어야 하며, script 통과만으로 승격되지 않는다.
 - 새 spec 또는 테스트 파일 변경 시 coverage matrix, evidence locator policy, release gate 대표 테스트가 함께 갱신되지 않으면 traceability drift가 생길 수 있다.
+- 현재 slice는 manifest-path Cargo command와 실제 test/script locator를 release evidence로 정리하는 meta-verification layer다. 016 전용 release runner, blocker/waiver classifier, demo-vs-full 자동 판정기는 별도 구현이 추가되기 전까지 완료 기능으로 주장하지 않는다.
 
 ### 로컬 근거
 
@@ -114,7 +115,7 @@
 
 ## Verification Evidence
 
-- 문서 증거: gate decision table, blocker classification, waiver prohibition, matrix completeness는 이 PRD와 SPEC의 release gate 규칙으로 유지한다.
+- 문서 증거: gate decision table, blocker classification, waiver prohibition, matrix completeness는 이 PRD와 SPEC의 release gate 규칙으로 유지한다. 이를 실행하는 dedicated 016 runner가 추가되면 그 runner path와 regression evidence를 별도로 연결해야 한다.
 - 문서 증거: release gate representative drift는 별도 runner가 추가될 때 해당 runner path와 함께 검증한다. 현재 slice는 manifest-path Cargo command 목록과 실제 inline/integration test names를 문서 증거로 유지한다.
 - 문서 증거: FullSpec evidence locator는 repo-relative executable evidence를 목표로 하며, 현재 문서는 존재하지 않는 runner/test file path를 evidence로 쓰지 않는다.
 - 통합 증거: verification family to spec mapping, release pipeline aggregation, evidence collection flow는 실제 Cargo command와 docs locator 일치성으로 관리한다.
@@ -134,8 +135,8 @@
   - `cargo test --manifest-path crates/Cargo.toml -p shacs-core mcp_runtime_connects_registers_and_closes_servers`
   - `cargo test --manifest-path crates/Cargo.toml -p shacs-core mcp_default_deny_excludes_disabled_capabilities_from_tool_search_bridge`
   - `cargo test --manifest-path crates/Cargo.toml -p shacs-core subagent_permissioned_action_context_inherits_snapshots_and_origin`
-- 패키징 및 smoke 테스트: fresh install, create session, input handling, approval surface, inspect, recover
-- 내구성 테스트: interrupted upgrade and recovery evidence must be covered before ready state
+- 패키징 및 smoke 테스트: fresh install, create session, input handling, approval surface, inspect, recover는 full release candidate readiness 전에 별도 evidence로 닫혀야 한다.
+- 내구성 테스트: interrupted upgrade and recovery evidence must be covered before ready state. 현재 manifest-path evidence-ready 상태 자체가 이 full release candidate smoke를 완료했다는 뜻은 아니다.
 - 문서 증거: spec coverage matrix, release checklist, blocker taxonomy, waiver template
 
 ## Release gate runner
@@ -167,7 +168,7 @@
 
 - spec와 테스트 이름이 느슨하게 연결되면 coverage 공백이 숨어 있을 수 있다. 현재 locator policy는 repo-relative executable evidence를 강제한다.
 - smoke test가 너무 얕으면 demo behavior를 full implementation처럼 오인할 수 있다. 현재 release gate는 smoke를 독립 단계로 두고 workspace regression과 matrix를 함께 실행한다.
-- waiver 운영이 느슨해지면 blocker가 문서상으로만 사라질 수 있다. 현재 모든 `BlockerKind`는 waiver 표시와 관계없이 release를 차단한다.
+- waiver 운영이 느슨해지면 blocker가 문서상으로만 사라질 수 있다. 현재 문서 계약은 blocker를 waiver 표시와 관계없이 release 차단 대상으로 다루지만, dedicated blocker classifier가 추가되기 전까지는 이를 코드 구현 완료로 주장하지 않는다.
 - 참고 메모: SPEC와 PRD 사이의 용어와 템플릿 형식이 부분적으로 섞여 있어, traceability가 약하면 같은 결함이 coverage matrix에서 다른 이름으로 중복되거나 누락될 수 있다.
 
 ## 종료 기준
