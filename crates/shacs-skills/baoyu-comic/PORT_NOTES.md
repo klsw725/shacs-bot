@@ -12,7 +12,7 @@ Ported from [JimLiu/baoyu-skills](https://github.com/JimLiu/baoyu-skills) v1.56.
 | Trigger | Slash commands / CLI flags | Natural language skill matching |
 | User config | EXTEND.md file (project/user/XDG paths) | Removed — not part of Hermes infra |
 | User prompts | `AskUserQuestion` (batched) | `clarify` tool (one question at a time) |
-| Image generation | baoyu-imagine (Bun/TypeScript, supports `--ref`) | `image_generate` — **prompt-only**, returns a URL; no reference image input; agent must download the URL to the output directory |
+| Image generation | baoyu-imagine (Bun/TypeScript, supports `--ref`) | `image_generate`: **prompt-only**, no reference image input, returns local media artifact JSON with `artifacts[]` entries such as `mediaRef`, `path`, and `metadataRef`; agents use returned `path`/`mediaRef` instead of curling a URL |
 | PDF assembly | `scripts/merge-to-pdf.ts` (Bun + `pdf-lib`) | Removed — the PDF merge step is out of scope for this port; pages are delivered as PNGs only |
 | Platform support | Linux/macOS/Windows/WSL/PowerShell | Linux/macOS only |
 | File operations | Generic instructions | shacs-bot file tools (`write_file`, `read_file`) |
@@ -30,12 +30,12 @@ Ported from [JimLiu/baoyu-skills](https://github.com/JimLiu/baoyu-skills) v1.56.
 
 ### Image generation strategy changes
 
-`image_generate`'s schema accepts only `prompt` and `aspect_ratio` (`landscape` | `portrait` | `square`). Upstream's reference-image flow (`--ref characters.png` for character consistency, plus user-supplied refs for style/palette/scene) does not map to this tool, so the workflow was restructured:
+`image_generate` accepts `prompt` plus optional `size`, `quality`, `format`, `background`, and `count`. It does not accept reference images or `aspect_ratio`. Upstream's reference-image flow (`--ref characters.png` for character consistency, plus user-supplied refs for style/palette/scene) does not map to this tool, so the workflow was restructured:
 
 - **Character sheet PNG** is still generated for multi-page comics, but it is repositioned as a **human-facing review artifact** (for visual verification) and a reference for later regenerations / manual prompt edits. Page prompts themselves are built from the **text descriptions** in `characters/characters.md` (embedded inline during Step 5). `image_generate` never sees the PNG as a visual input.
 - **User-supplied reference images** are reduced to `style` / `palette` / `scene` trait extraction — traits are embedded in the prompt body; the image files themselves are kept only for provenance under `refs/`.
 - **Page prompts** now mandate that character descriptions are embedded inline (copied from `characters/characters.md`) — this is the only mechanism left to enforce cross-page character consistency.
-- **Download step** — after every `image_generate` call, the returned URL is fetched to disk (e.g., `curl -fsSL "<url>" -o <target>.png`) and verified before the workflow advances.
+- **Artifact step**: after every `image_generate` call, the returned artifact `path` or `mediaRef` is used. If a workflow-specific filename is required, copy the local file at `path` to the target name and verify the copy before the workflow advances; do not move or rename the runtime artifact.
 
 ### SKILL.md reductions
 

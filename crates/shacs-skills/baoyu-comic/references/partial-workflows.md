@@ -86,8 +86,8 @@ Regenerate specific pages only.
 
 **Workflow**:
 1. Read existing prompts for specified pages
-2. Regenerate images only for those pages via `image_generate`
-3. Download each returned URL and overwrite the existing PNG
+2. Regenerate images only for those pages via `image_generate`.
+3. Use each returned artifact `path` or `mediaRef`; if the workflow needs the existing PNG path, copy from `path` and overwrite the target PNG. Do not move or rename the runtime artifact because `mediaRef` and `metadataRef` refer to it.
 
 **Prerequisites** (must exist):
 - `prompts/NN-{cover|page}-[slug].md` for specified pages

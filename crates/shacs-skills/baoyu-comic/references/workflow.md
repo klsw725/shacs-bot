@@ -308,21 +308,15 @@ options:
 
 ## Step 7: Generate Images
 
-With confirmed prompts from Step 5/6, use the `image_generate` tool. The tool accepts only `prompt` and `aspect_ratio` (`landscape` | `portrait` | `square`) and **returns a URL** — it does not accept reference images and does not write local files. Every invocation must be followed by a download step.
+With confirmed prompts from Step 5/6, use the `image_generate` tool. The tool accepts `prompt` plus optional `size`, `quality`, `format`, `background`, and `count`. It does not accept reference images or an `aspect_ratio` parameter. The result is local media artifact JSON with `artifacts[]` entries such as `mediaRef`, `path`, and `metadataRef`.
 
-**Aspect ratio mapping** — map the storyboard's `aspect_ratio` to the tool's enum:
+**Artifact procedure** after every successful `image_generate` call:
 
-| Storyboard ratio | `image_generate` format |
-|------------------|-------------------------|
-| `3:4`, `9:16`, `2:3` | `portrait` |
-| `4:3`, `16:9`, `3:2` | `landscape` |
-| `1:1` | `square` |
-
-**Download procedure** (run after every successful `image_generate` call):
-
-1. Extract the `url` field from the tool result
-2. Fetch it to disk, e.g. `curl -fsSL "<url>" -o comic/{slug}/<target>.png`
-3. Verify the file is non-empty (`test -s <target>.png`); on failure, retry the generation once
+1. Extract the relevant `artifacts[]` entry from the tool result.
+2. Use `path` as the local source file, or keep `mediaRef` as the durable runtime reference.
+3. If the workflow needs a comic-specific filename, copy from `path` to `comic/{slug}/<target>.png`. Do not move or rename the runtime artifact because `mediaRef` and `metadataRef` refer to it.
+4. Verify the target file is non-empty; on failure, retry the generation once.
+5. Do not curl a returned URL. The tool does not return a remote image URL.
 
 ### 7.1 Generate Character Reference Sheet (conditional)
 
@@ -339,10 +333,10 @@ Character sheet is recommended for multi-page comics with recurring characters, 
 **When generating**:
 1. Use Reference Sheet Prompt from `characters/characters.md`
 2. **Backup rule**: If `characters/characters.png` exists, rename to `characters/characters-backup-YYYYMMDD-HHMMSS.png`
-3. Call `image_generate` with `landscape` format
-4. Download the returned URL → save to `characters/characters.png`
+3. Call `image_generate` with the reference sheet prompt. Use optional `size` only when a provider-supported landscape size is known.
+4. Copy the returned artifact `path` to `characters/characters.png`. Do not move or rename the runtime artifact because `mediaRef` and `metadataRef` refer to it.
 
-**Important**: the downloaded sheet is a **human-facing review artifact** (so the user can visually verify character design) and a reference for later regenerations or manual prompt edits. It does **not** drive Step 7.2 — page prompts were already written in Step 5 from the text descriptions in `characters/characters.md`. `image_generate` cannot accept images as visual input, so the text is the sole cross-page consistency mechanism.
+**Important**: the generated sheet is a **human-facing review artifact** (so the user can visually verify character design) and a reference for later regenerations or manual prompt edits. It does **not** drive Step 7.2 — page prompts were already written in Step 5 from the text descriptions in `characters/characters.md`. `image_generate` cannot accept images as visual input, so the text is the sole cross-page consistency mechanism.
 
 ### 7.2 Generate Comic Pages
 
@@ -368,8 +362,8 @@ Character sheet is recommended for multi-page comics with recurring characters, 
 **For each page (cover + pages)**:
 1. Read prompt from `prompts/NN-{cover|page}-[slug].md`
 2. **Backup rule**: If image file exists, rename to `NN-{cover|page}-[slug]-backup-YYYYMMDD-HHMMSS.png`
-3. Call `image_generate` with the prompt text and mapped aspect ratio
-4. Download the returned URL → save to `NN-{cover|page}-[slug].png`
+3. Call `image_generate` with the prompt text. Use optional `size` only when a provider-supported size is known.
+4. Copy the returned artifact `path` to `NN-{cover|page}-[slug].png`. Do not move or rename the runtime artifact because `mediaRef` and `metadataRef` refer to it.
 5. Report progress after each generation: "Generated X/N: [page title]"
 
 ---
