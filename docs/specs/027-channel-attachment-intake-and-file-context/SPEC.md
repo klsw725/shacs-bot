@@ -1,6 +1,6 @@
 # channel attachment intake and file context 아키텍처 명세
 
-Status: Implemented (v1 closure). 이 문서는 채널로 들어온 사용자 첨부 파일을 안전하게 받아 저장하고, provider 입력에 파일 문맥으로 넘기는 owner boundary를 고정한다.
+Status: Implemented for v1 storage, routing, and analyzer handoff. Video-specific local API/inspect/channel status projection remains limited/open. 이 문서는 채널로 들어온 사용자 첨부 파일을 안전하게 받아 저장하고, provider 입력에 파일 문맥으로 넘기는 owner boundary를 고정한다.
 
 ## 문서 목적
 
@@ -204,7 +204,7 @@ v1은 첨부 파일 intake와 runtime context handoff를 닫는 데 집중한다
 
 `crates/shacs-utils/src/document.rs`의 text, PDF, Office 계열 문서 추출 helper는 PRD 002 routing에서 bounded text/document extraction으로 연결되어 있다. 추출은 best effort이며 OCR, full layout parsing, macro execution, embedded object recursion, archive recursion을 완료 기능으로 선언하지 않는다. Provider/model native image input capability가 없거나 extraction이 실패하거나 unsupported binary가 들어오면 note-only artifact로 남긴다.
 
-따라서 현 구현을 이렇게 해석한다. Slack/Discord/Telegram은 인증된 channel event가 제공한 platform attachment source만 다운로드 대상으로 삼고, Email MIME part와 WebSocket/local API data URL 또는 upload bytes는 같은 stored attachment intake 경로로 들어간다. WhatsApp bridge media는 bridge가 준 media list를 raw content에 노출하지 않고 media 경로로만 넘긴다. 이미지, 텍스트, PDF, Office 문서, unsupported binary는 PRD 002 범위의 stored attachment routing으로 닫혔다. Audio는 PRD 003 범위에서 analyzer가 주입되면 bounded transcript 또는 summary artifact로 라우팅되고, analyzer missing, unsupported codec, analyzer failure는 user-visible note로 남는다. Video는 PRD 004 최소 범위에서 deferred-only 동작을 벗어나 capability-based analyzer route로 들어간다. Runtime에 video analyzer가 주입된 경우에만 byte/duration cap 이후 bounded metadata, subtitle, scene/keyframe summary, PRD 003 audio analyzer 재사용 결과를 context artifact 후보로 만들며, analyzer missing은 unsupported note로 표시한다. 기본 ffmpeg, built-in full codec support, native outbound video delivery, video-specific inspect/local API projection 완성, 임의 URL 다운로드는 완료 기능으로 주장하지 않는다.
+따라서 현 구현을 이렇게 해석한다. Slack/Discord/Telegram은 인증된 channel event가 제공한 platform attachment source만 다운로드 대상으로 삼고, Email MIME part와 WebSocket/local API data URL 또는 upload bytes는 같은 stored attachment intake 경로로 들어간다. WhatsApp bridge media는 bridge가 준 media list를 raw content에 노출하지 않고 media 경로로만 넘긴다. 이미지, 텍스트, PDF, Office 문서, unsupported binary는 PRD 002 범위의 stored attachment routing으로 닫혔다. Audio는 PRD 003 범위에서 analyzer가 주입되면 bounded transcript 또는 summary artifact로 라우팅되고, analyzer missing, unsupported codec, analyzer failure는 user-visible note로 남는다. Video는 PRD 004 최소 범위에서 deferred-only 동작을 벗어나 capability-based analyzer route로 들어간다. Runtime에 video analyzer가 주입된 경우에만 byte/duration cap 이후 bounded metadata, subtitle, scene/keyframe summary, PRD 003 audio analyzer 재사용 결과를 context artifact 후보로 만들며, analyzer missing은 unsupported note로 표시한다. 이 closure는 storage, routing, analyzer handoff를 닫은 것이며 video-specific local API/inspect/channel status projection은 아직 제한적이다. 기본 ffmpeg, built-in full codec support, native outbound video delivery, video-specific inspect/local API projection 완성, 임의 URL 다운로드는 완료 기능으로 주장하지 않는다.
 
 ## 완료 기준
 

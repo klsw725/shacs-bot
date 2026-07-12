@@ -118,15 +118,17 @@
 
 2026-06-19 현재 이 PRD는 최소 capability-based runtime route가 구현된 상태다. Video attachment는 common intake, safe stored attachment, detected video family를 통과한 뒤 더 이상 deferred-only note로 끝나지 않는다. Runtime에 `VideoContextAnalyzer`가 주입된 경우 byte/duration cap을 먼저 적용하고, analyzer가 반환한 bounded metadata, subtitles, scene/keyframe summary, component failure status를 untrusted attachment-derived context artifact로 투영한다. Analyzer가 extracted audio track path/reference를 반환하면 PRD 003의 `AudioContextAnalyzer`를 `AudioContextRequest`로 호출해 audio transcript/summary 경로를 재사용한다.
 
-이 구현은 보수적인 capability hook이다. 기본 ffmpeg, 외부 binary requirement, built-in full codec parser, frame extraction engine, video-specific local API/inspect projection 완성, native outbound video delivery를 제공한다고 주장하지 않는다. Analyzer가 없으면 `video analyzer is not configured` unsupported note를 남기며, analyzer가 반환하지 않은 metadata/subtitle/keyframe/audio-track support를 runtime 기본 기능으로 광고하면 안 된다.
+이 구현은 보수적인 capability hook이다. Storage, routing, and analyzer handoff는 존재하지만 video-specific local API/inspect/channel status projection은 제한적이며 open 상태다. 기본 ffmpeg, 외부 binary requirement, built-in full codec parser, frame extraction engine, video-specific local API/inspect projection 완성, native outbound video delivery를 제공한다고 주장하지 않는다. Analyzer가 없으면 `video analyzer is not configured` unsupported note를 남기며, analyzer가 반환하지 않은 metadata/subtitle/keyframe/audio-track support를 runtime 기본 기능으로 광고하면 안 된다.
 
 ## 완료 기준
 
+현재 구현 완료 기준은 storage, routing, analyzer handoff에 한정된다. 아래 criteria 중 video-specific local API/inspect/channel status projection은 target contract로 남아 있으며, 구현 완료로 주장하지 않는다.
+
 1. video stored attachment가 detected MIME 기준으로 video analysis route에 들어간다.
 2. byte cap과 duration cap이 subtitle, audio, keyframe analyzer 실행 전에 적용된다.
-3. metadata와 duration이 video context artifact와 inspect projection에 남는다.
+3. metadata와 duration이 video context artifact에 남는다. Inspect projection 완성은 open 상태다.
 4. subtitle track이 있으면 bounded extraction이 수행되고 없으면 unavailable reason이 남는다.
 5. audio track transcription은 PRD 003 analyzer capability를 소비한다.
 6. keyframe 또는 scene summary가 bounded artifact로 생성되거나 component failure로 기록된다.
-7. channel reply, local API response, inspect surface가 included, skipped, unsupported, extraction failed, truncated status를 구분한다.
+7. channel reply, local API response, inspect surface가 included, skipped, unsupported, extraction failed, truncated status를 구분하는 projection 완성은 open 상태다.
 8. native outbound file delivery가 scope 밖으로 유지된다.
