@@ -162,9 +162,9 @@ For each illustration:
 
 For each prompt file:
 
-1. Call `image_generate(prompt=..., aspect_ratio=...)`. `image_generate` returns a JSON result containing an image URL; it does NOT write to disk and does NOT accept an output path.
-2. Map the prompt's `ASPECT` to `image_generate`'s enum: `16:9` → `landscape`, `9:16` → `portrait`, `1:1` → `square`. Custom ratios → nearest named aspect.
-3. Download the returned URL to `{output-dir}/NN-{type}-{slug}.png` via `exec` (e.g. `curl -sSL -o "{output-dir}/NN-{type}-{slug}.png" "{url}"`).
+1. Call `image_generate(prompt=...)`. Optional parameters are `size`, `quality`, `format`, `background`, and `count`; use only provider-supported values. The tool does not accept `aspect_ratio`, reference images, or an output path.
+2. Read the returned local media artifact JSON. Use an entry from `artifacts[]`, especially `path`, `mediaRef`, and `metadataRef`.
+3. If the article needs a specific image filename, copy the local file from `path` to `{output-dir}/NN-{type}-{slug}.png`. Do not move or rename the runtime artifact because `mediaRef` and `metadataRef` refer to it. Do not curl a URL.
 4. On generation failure, auto-retry once.
 
 Note: the underlying image-generation backend is user-configured (default: FAL FLUX 2 Klein 9B) and is NOT agent-selectable via `image_generate`. Do not write model names into prompts expecting them to route.
@@ -205,6 +205,6 @@ Images: X/N generated
 2. **Strip secrets** — scan source content for API keys, tokens, or credentials before including in any output file.
 3. **Don't illustrate metaphors literally** — visualize the underlying concept.
 4. **Prompt files are mandatory** — no image generation without a saved prompt file. The file is what lets you regenerate or switch backends later.
-5. **`image_generate` aspect ratios** — the tool supports `landscape`, `portrait`, and `square`. Custom ratios map to the nearest option.
-6. **`image_generate` returns a URL, not a local file** — always download via `exec` (`curl`) before inserting local image paths into the article.
+5. **`image_generate` parameters**: accepted parameters are `prompt`, optional `size`, `quality`, `format`, `background`, and `count`. Keep custom aspect intent in the prompt unless you know a provider-supported `size` value.
+6. **`image_generate` returns local artifacts**: use returned `path` or `mediaRef` before inserting image references into the article. Do not download a remote URL.
 7. **No backend selection from the agent** — `image_generate` uses whatever model the user configured (default: FAL FLUX 2 Klein 9B). Don't write `"use <model> to generate this"` into prompts expecting it to route.

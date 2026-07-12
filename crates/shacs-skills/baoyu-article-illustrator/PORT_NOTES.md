@@ -14,11 +14,11 @@ Ported from [JimLiu/baoyu-skills](https://github.com/JimLiu/baoyu-skills) v1.57.
 | Trigger | `/baoyu-article-illustrator` slash command + CLI flags | Natural language skill matching |
 | User config | EXTEND.md (project/user/XDG paths) + first-time-setup | Removed — not part of Hermes infra |
 | User prompts | `AskUserQuestion` (batched, multi-question) | `clarify` tool (one question at a time) |
-| Image generation | `baoyu-imagine` (Bun/TypeScript, multi-provider, accepts `--ref`, writes to local path) | `image_generate` (returns URL only; agent downloads via `terminal`/`curl`) |
+| Image generation | `baoyu-imagine` (Bun/TypeScript, multi-provider, accepts `--ref`, writes to local path) | `image_generate` (prompt-only, no reference image input, returns local media artifact JSON with `artifacts[]` entries such as `mediaRef`, `path`, and `metadataRef`; agent uses returned `path`/`mediaRef`) |
 | Backend selection | User picks provider via CLI flags | Not agent-selectable — `image_generate` uses the user-configured FAL model. Removed hardcoded "nano banana pro" line from `prompts/system.md`. |
 | Reference images | Passed to backend via `--ref`, copied via shell | image analysis from the current shacs-bot runtime when configured extracts a textual description (binary never touched by `write_file`/`read_file`); description is embedded in prompts. Optional `terminal cp` for a local record. |
 | Platform support | Linux/macOS/Windows/WSL/PowerShell | Linux/macOS only |
-| File operations | Bash commands | shacs-bot file tools: `write_file`/`read_file` for text, `terminal` for binaries and URL downloads, image analysis from the current shacs-bot runtime when configured for reading images |
+| File operations | Bash commands | shacs-bot file tools: `write_file`/`read_file` for text, `terminal` for local binary copy operations, image analysis from the current shacs-bot runtime when configured for reading images |
 | Watermark | Driven by EXTEND.md `watermark.enabled` | Optional — user asks for it per-article |
 | Output directory | EXTEND.md `default_output_dir` (imgs-subdir / same-dir / illustrations-subdir / independent) | Defaults based on input type; user overrides in request |
 

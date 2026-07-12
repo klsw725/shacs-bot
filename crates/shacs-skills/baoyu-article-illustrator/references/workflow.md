@@ -8,20 +8,20 @@ If the user provides reference images (local path or URL), the goal is to produc
 
 | Task | Tool | Notes |
 |------|------|-------|
-| Analyze a reference image | image analysis from the current shacs-bot runtime when configured | Accepts URL or local path. Ask for style, palette, composition, subject. |
+| Analyze a reference image | configured image-analysis capability in the current shacs-bot runtime | Accepts URL or local path. Ask for style, palette, composition, subject. |
 | Write the text description | `write_file` | Sidecar `.md` files only — never try to `write_file` a PNG/JPG. |
 | (Optional) Keep a local copy of the binary | `terminal` | `cp "$src" "{output-dir}/references/NN-ref-{slug}.{ext}"` — purely for the record; the skill itself doesn't read the binary. |
 
 | Input Type | Action |
 |------------|--------|
-| Image file path provided | image analysis from the current shacs-bot runtime when configured → write sidecar `.md`. Optional `terminal cp` for a local record. |
-| Image URL provided | image analysis from the current shacs-bot runtime when configured with the URL → write sidecar `.md`. |
+| Image file path provided | use the configured image-analysis capability → write sidecar `.md`. Optional `terminal cp` for a local record. |
+| Image URL provided | use the configured image-analysis capability with the URL → write sidecar `.md`. |
 | Image in conversation (no path, no URL) | Ask via `clarify` for a path or URL, or for a verbal description. |
 | User can't provide either | Extract style/palette verbally from the user → write `references/extracted-style.md`. Do NOT add `references:` to prompt frontmatter. |
 
 **Procedure** (when a path/URL is available):
 
-1. Call `image analysis from the current shacs-bot runtime when configured(image_url=..., question="Describe the style, color palette (with hex approximations), composition, and subject so this can be used as a style/palette reference for another illustration.")`.
+1. Use the configured image-analysis capability with `image_url=...` and ask: "Describe the style, color palette (with hex approximations), composition, and subject so this can be used as a style/palette reference for another illustration."
 2. Write `{output-dir}/references/NN-ref-{slug}.md` via `write_file` with the description.
 3. (Optional) Run `terminal` with `cp` (or `curl -sSL -o ...` for URLs) to keep a local binary copy. Not required by the skill.
 4. Mark the reference in the outline with usage `direct` / `style` / `palette`. In Step 5.1 the description gets appended to the prompt body.
@@ -34,7 +34,7 @@ source: "<original path or URL>"
 local_copy: "NN-ref-{slug}.png"   # omit if no copy made
 usage_hint: style                 # direct | style | palette
 ---
-[image analysis from the current shacs-bot runtime when configured description — colors, style, composition, subject]
+[image-analysis description from the configured runtime capability — colors, style, composition, subject]
 ```
 
 ---
@@ -87,7 +87,7 @@ Save analysis to `{output-dir}/analysis.md` using `write_file`.
 
 ### 2.5 Plan Reference Image Usage (if analyzed in Step 1)
 
-For each reference image (use the image analysis from the current shacs-bot runtime when configured description from Step 1):
+For each reference image, use the sidecar description produced by the configured image-analysis capability in Step 1:
 
 | Analysis | Description |
 |----------|-------------|
@@ -103,7 +103,7 @@ For each reference image (use the image analysis from the current shacs-bot runt
 | `style` | Extract visual style characteristics only | Append style traits to prompt body |
 | `palette` | Extract color scheme only | Append extracted hex colors to prompt body |
 
-Note: `image_generate` does not accept reference-image inputs under any usage type. Everything is mediated through the image analysis from the current shacs-bot runtime when configured description.
+Note: `image_generate` does not accept reference-image inputs under any usage type. Everything is mediated through the sidecar text description produced by the configured image-analysis capability.
 
 ---
 
@@ -266,7 +266,7 @@ For each illustration in the outline:
 
 ### 5.1 Process References (if analyzed in Step 1)
 
-Read the image analysis from the current shacs-bot runtime when configured description from the sidecar `references/NN-ref-{slug}.md` (via `read_file`) and embed it in the prompt body. `image_generate` never receives the binary.
+Read the image-analysis sidecar `references/NN-ref-{slug}.md` (via `read_file`) and embed its text description in the prompt body. `image_generate` never receives the binary.
 
 | Usage | Action |
 |-------|--------|
@@ -278,21 +278,17 @@ Read the image analysis from the current shacs-bot runtime when configured descr
 
 ## Step 6: Generate Images
 
-`image_generate` returns a JSON blob with a URL (`{"success": true, "image": "<url>"}`). It does NOT save a local file, does NOT accept an output path, and does NOT let the agent pick a backend/model. Treat the URL as a temporary artifact and download it explicitly.
+`image_generate` returns local media artifact JSON with an `artifacts[]` array. Entries include fields such as `mediaRef`, `path`, and `metadataRef`. It does not accept reference image input, an `aspect_ratio` parameter, or an output path, and it does not let the agent pick a backend/model.
 
 For each prompt file:
 
 1. Read the prompt file (via `read_file`) and extract the assembled prompt
-2. Map the prompt's `ASPECT` to `image_generate`'s enum: `16:9` → `landscape`, `9:16` → `portrait`, `1:1` → `square`. Custom ratios → nearest named aspect.
-3. Call `image_generate(prompt=<assembled>, aspect_ratio=<enum>)` and extract the `image` URL from the returned JSON.
+2. Keep the prompt's `ASPECT` value in the prompt text. Use optional `size` only when a provider-supported size string is known.
+3. Call `image_generate(prompt=<assembled>)` and extract the relevant artifact from `artifacts[]`.
 4. **Backup rule**: If `{output-dir}/NN-{type}-{slug}.png` already exists, rename it via `terminal` (`mv "{output-dir}/NN-{type}-{slug}.png" "{output-dir}/NN-{type}-{slug}-backup-YYYYMMDD-HHMMSS.png"`) before writing.
-5. Download the URL via `terminal`:
-   ```bash
-   curl -sSL -o "{output-dir}/NN-{type}-{slug}.png" "{image_url}"
-   ```
-   If `curl` is unavailable, fall back to `wget -qO "{output-dir}/NN-{type}-{slug}.png" "{image_url}"`.
+5. Copy the returned artifact `path` to `{output-dir}/NN-{type}-{slug}.png` when a specific article-relative filename is needed. Do not move or rename the runtime artifact because `mediaRef` and `metadataRef` refer to it.
 6. Verify the file exists and has non-zero size (`terminal`: `test -s "{path}" && echo ok`).
-7. On generation failure, retry `image_generate` once. On download failure, retry `curl` once with a longer timeout. Then log and continue.
+7. On generation failure, retry `image_generate` once. If copying the local artifact fails, retry that file operation once. Then log and continue.
 8. After each generation, report "Generated X/N".
 
 ---
