@@ -71,9 +71,10 @@ shacs-bot context files list --workspace /tmp/ws
 shacs-bot context files inspect --workspace /tmp/ws
 shacs-bot context refs parse "read @src/lib.rs and @diff"
 shacs-bot context refs resolve --workspace /tmp/ws --message "read @src/lib.rs"
+shacs-bot context refs resolve --workspace /tmp/ws --network --message "read @url:https://example.com"
 ```
 
-`context files list/inspect`는 `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.shacs.md`, `.shacs-bot.md` 같은 workspace context file 후보의 path, ordering, included/skipped/truncated/denied status, digest, byte/token estimate만 보여주며 raw file content는 출력하지 않습니다. `context refs parse`는 source를 읽지 않고 message 안의 token span, kind, normalized target, parse diagnostic만 표시합니다. 지원되는 reference syntax는 `@path`, `@folder/`, `@diff`, `@staged`, `@git:<rev>`, `@git:<rev>:<path>`, `@url:https://...`, `@https://...`입니다. `context refs resolve`는 read-only resolver, permission/redaction safety gate, shared context budget handoff를 통과한 status를 보여줍니다. 파일/URL body와 provider context block content는 diagnostics에 저장하지 않고 digest와 redacted summary만 사용합니다.
+`context files list/inspect`는 `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.shacs.md`, `.shacs-bot.md` 같은 workspace context file 후보의 path, ordering, included/skipped/truncated/denied status, digest, byte/token estimate만 보여주며 raw file content는 출력하지 않습니다. `context refs parse`는 source를 읽지 않고 message 안의 token span, kind, normalized target, parse diagnostic만 표시합니다. 지원되는 reference syntax는 `@path`, `@folder/`, `@diff`, `@staged`, `@git:<rev>`, `@git:<rev>:<path>`, `@url:https://...`, `@https://...`입니다. `context refs resolve`는 read-only resolver, permission/redaction safety gate, shared context budget handoff를 통과한 status를 보여줍니다. URL reference resolution은 `--network`를 명시한 resolve 경로에서만 fetch됩니다. 파일/URL body와 provider context block content는 diagnostics에 저장하지 않고 digest와 redacted summary만 사용합니다.
 
 Context limits는 bounded file bytes, folder entry limit, URL byte limit, provider handoff의 shared context budget으로 적용됩니다. Protected target(`.env`, SSH/private key path 등)은 content를 읽기 전에 denied evidence로 처리되고, URL reference는 명시적으로 network가 enabled된 resolve 경로가 아니면 skipped diagnostic이 됩니다. External URL content는 `external_untrusted` trust label로 표시되며 prompt-injection 방어상 instruction이 아니라 data로 취급됩니다. Secret-like content는 diagnostics와 provider handoff 전에 redaction pass를 통과하고, replay는 live URL fetch나 mutable git state 재실행 대신 recorded digest/excerpt/evidence를 사용합니다.
 
@@ -93,7 +94,7 @@ shacs-bot hooks inspect <plugin-or-hook>
 
 `plugins list`, `plugins inspect`, `plugins doctor`, `hooks list`, and `hooks inspect` read config and discovered manifests only. They do not run plugin commands, dispatch hook callbacks, register provider-visible tools, start MCP servers, or execute plugin processes. `plugins enable` and `plugins disable` mutate only `plugins.enabled`/`plugins.disabled` in the selected config file and report next-session/reload semantics; they do not mutate the running session prompt or toolset.
 
-During agent turns, enabled plugin hook entrypoints may run through the runtime hook adapter for diagnostics-only dispatch. This initial live hook slice records redacted output/error/timeout evidence and does not apply hook output to tool calls, model content, permissions, provider-visible tools, commands, skills, or MCP servers.
+During direct agent-loop turns, enabled typed plugin hook entrypoints may run through the runtime hook adapter for diagnostics-only dispatch. This initial live hook slice records redacted output/error/timeout evidence and does not apply hook output to tool calls, model content, permissions, provider-visible tools, commands, skills, or MCP servers. Runtime-wide event wiring such as `runtime:start`, `session:start`, `tool:after`, and `subagent:end` remains outside this implemented slice.
 
 Currently supported manifests are `plugin.json` and `plugin.toml` files under the config data directory's `plugins/<name>/` root or the workspace-local `.shacs-bot/plugins/<name>/` root. Workspace-local plugins still require an explicit trusted workspace gate before they can become enabled. Output shows secret reference names and presence metadata only, never raw secret values.
 
@@ -125,6 +126,15 @@ shacs-bot runtime recover --workspace /tmp/ws
 ```
 
 `runtime recover`는 marker가 없으면 no-op으로 보고하고, partial migration marker와 active ownership은 세션 truth나 실행 중인 owner를 추측으로 고치지 않기 위해 차단합니다. 완료/중단 update marker 또는 stale ownership marker를 지운 뒤에는 다시 `runtime inspect`로 marker가 없는 상태를 확인할 수 있습니다.
+
+Gateway preset과 Web UI server도 구현되어 있습니다:
+
+```sh
+shacs-bot gateway --workspace /tmp/ws --port 8900 --verbose
+shacs-bot web --workspace /tmp/ws --gateway-port 8900 --websocket-host 127.0.0.1 --websocket-port 8765 --verbose
+```
+
+`gateway`는 config, workspace, resolved gateway URL을 출력하는 preset/inspection command입니다. `web`은 local Web UI server를 foreground로 시작하고, 같은 local API/chat adapter와 WebSocket path를 사용합니다. `--verbose`는 raw prompt나 full payload가 아니라 input/response/tool/usage preview만 stderr에 출력합니다.
 
 Rust programmatic facade(`ShacsBot`/`Nanobot`)는 lifecycle hook과 별도로 observability hook을 제공합니다. Observability hook은 provider stream event와 tool start/finish progress payload를 in-process callback으로 그대로 전달하므로, tool arguments나 provider delta에 민감한 내용이 포함될 수 있습니다. Hook 구현자는 필요한 경우 직접 redaction 후 저장/로그 처리해야 하며, hook panic은 runtime을 중단하지 않고 redacted event kind만 stderr에 남깁니다.
 
@@ -244,7 +254,9 @@ Provider 호출 전에 built-in slash command는 로컬에서 처리됩니다:
 - `/new`: 현재 session을 비우고 새로 시작합니다.
 - `/stop`: 등록된 active task에 cancellation을 요청합니다.
 - `/restart`: 로컬 restart 요청을 acknowledge합니다. Rust CLI는 현재 process를 in-place로 교체하지 않습니다.
+- `/goal [status|pause|resume|clear|done|blocked <reason>|<text>]`: 현재 session의 persistent goal metadata를 설정하거나 상태를 바꿉니다. 새 목표를 설정하려면 기존 active goal을 먼저 `/goal clear`로 정리해야 합니다.
 - `/permission`: `permissions.mode`를 `default`, `auto`, `bypass_permissions` 중 하나로 저장하는 대화형 wizard를 시작합니다. 현재 `auto`를 선택하면 `permissions.mode: "auto"`가 저장되고, 런타임은 이를 auto approval opt-in으로 해석해 정적 안전 규칙과 local capability allowlist를 통과한 낮은 위험 action을 먼저 자동 승인합니다. `permissions.autoApproval`은 protected target과 exec containment 같은 세부 옵션을 조정하는 블록입니다. 이 local fast path로 해결되지 않은 direct tool action과 resolved deferred bridge tool action 중 current user message로 scope 판단이 가능하고 classifier capability ceiling을 통과한 action은 같은 provider/model을 사용하는 auto-mode classifier 평가를 거쳐 high-confidence requested-scope allow일 때만 실행됩니다. `proc_exec`가 command summary unavailable 또는 containment unknown으로 `ask`가 된 경우는 classifier allow 대상이 아니며 approval prompt로 남습니다. Classifier 오류, 낮은 confidence, scope 불일치, parse failure, user scope 부재, classifier ceiling 밖 capability는 interactive session에서는 permission prompt로, non-interactive 경로에서는 deny로 접힙니다. `bypass_permissions`는 먼저 선택한 뒤 정확히 `confirm bypass_permissions`로 한 번 더 확인해야 저장되며, 저장된 값은 이후 turn의 permission snapshot에 반영됩니다. `cancel`은 진행 중인 wizard를 취소합니다.
+- `/permission recent`: 최근 auto-mode classifier denial을 sanitized summary로 보여줍니다. `/permission recent retry <denial_id>`는 interactive channel에서 같은 denied action을 한 번 실행하기 위한 formal approval을 만들며, raw payload를 session metadata에 저장하지 않습니다.
 - `/history [n]`: 최근 visible user/assistant message를 보여줍니다. 기본값은 10, 최대값은 50입니다.
 - `/dream`: 설정된 Dream memory consolidation을 한 번 실행합니다.
 - `/dream-log [sha]`: 최신 memory commit diff 또는 선택한 commit diff를 보여줍니다.
@@ -259,6 +271,7 @@ Command router는 priority, exact, prefix 경계를 분리합니다. `/status`, 
 
 - `--config <path>` / `-c <path>`
 - `--workspace <path>` / `-w <path>`
+- `--message <text>` / `-m <text>`: `agent` direct-message alias에서 message를 전달합니다. `ask`는 positional message도 받습니다.
 - `--session <id>` / `-s <id>`: 기본값은 `cli:direct`입니다. `:`가 없는 값은 `cli:<id>`로 저장됩니다.
 - `--temperature <number>`
 - `--max-tokens <positive integer>`
@@ -307,6 +320,15 @@ shacs-bot provider codex import-token --token-env CODEX_TOKEN --account-id acct_
 
 Codex `import-token`은 fallback으로 유지됩니다. Provider 선택/config metadata는 `config.json`에 쓰지만 bearer token은 config 옆 `auth.json`에만 저장합니다. Auth file은 provider-keyed OAuth entry를 사용하며 `type`, `access`, optional `refresh`, optional `expires`, optional `accountId` 같은 field를 가집니다. Unix에서는 secret-file permission으로 작성됩니다. Command output은 path와 status만 출력하며 token은 출력하지 않습니다. 기본적으로 import는 configured model을 `gpt-5.4`로 선택합니다. Auth만 저장하고 provider/model 선택을 바꾸지 않으려면 `--no-select`를 사용하세요.
 
+Copilot provider bearer token도 같은 import-token 형식으로 가져올 수 있습니다:
+
+```sh
+printf '%s' "$COPILOT_TOKEN" | shacs-bot provider copilot import-token --token-stdin
+shacs-bot provider copilot import-token --token-env COPILOT_TOKEN
+```
+
+Copilot import도 token은 config 옆 `auth.json`에 저장하고 command output에 raw token을 표시하지 않습니다.
+
 Generic provider API key는 아래처럼 `import-key`로 가져옵니다:
 
 ```sh
@@ -347,9 +369,17 @@ shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 
 - `GET /health`
 - `GET /v1/models`
+- `GET /v1/diagnostics`
+- `GET /v1/sessions`
+- `GET /v1/sessions/{session}`
+- `GET /v1/sessions/{session}/history`
+- `GET /v1/sessions/{session}/diagnostics`
 - `POST /v1/chat/completions`
+- `GET /ws` 또는 configured WebSocket path when the server is started with WebSocket support
 
 `POST /v1/chat/completions`는 단일 user message, optional `session_id`, optional `temperature`, optional `max_tokens`, JSON text 또는 data-URL image content part, multipart upload, non-stream response, `stream=true` Server-Sent Events를 받습니다. Remote image URL은 거부합니다. Data URL과 uploaded file은 runtime media directory의 `attachments/api/` subtree 아래에 저장되며, 파일당 10 MiB 제한이 있습니다. 저장된 attachment는 provider/model이 native image input을 지원한다고 확인되는 경우 image block으로 라우팅되고, text/PDF/Office 계열은 가능한 경우 text note와 추출 텍스트로 라우팅됩니다. Provider나 model이 image input을 지원하지 않는 경우 image attachment는 raw 경로를 노출하지 않는 unsupported note로 전달됩니다. Audio attachment는 지원되는 analyzer가 runtime에 주입된 경우 bounded transcript 또는 summary text artifact로 라우팅되고, analyzer가 없거나 지원되지 않으면 내용을 들은 것처럼 처리하지 않고 unsupported 또는 extraction_failed note로 남습니다. Video attachment도 같은 capability-based 방식입니다. Runtime에 video analyzer가 주입된 경우에만 byte/duration cap 이후 bounded metadata, subtitle excerpt, scene/keyframe summary, PRD 003 audio analyzer를 재사용한 audio-track transcript/summary 후보를 만들고, analyzer가 없으면 deferred가 아니라 `video analyzer is not configured` unsupported note로 남깁니다. 기본 ffmpeg, built-in codec parser, native outbound video delivery는 제공하지 않습니다.
+
+`GET /v1/diagnostics`는 redacted runtime diagnostics snapshot을 반환합니다. `/v1/sessions` family는 configured workspace의 session list, detail, filtered message history, diagnostics를 raw session file이나 provider payload 없이 조회하는 read-only surface입니다. Filtered history에는 user/assistant message content가 포함될 수 있으므로 로컬 API bind 범위와 로그 보관 정책을 그에 맞게 다루세요. `/ws`는 JSON `message` frame을 local `AgentLoop`로 전달하고 `delta`, `stream_end`, final `message`, attach/ready/error event를 반환하는 WebSocket bridge입니다.
 
 같은 session key의 API request는 CLI/channel runtime과 같은 process-local `SessionTurnLock`으로 직렬화됩니다. `--timeout`은 HTTP wait timeout을 제어합니다. Timeout response가 반환되어도 in-flight turn은 blocking `AgentLoop` 작업이 끝날 때까지 해당 session lock을 계속 소유합니다.
 
@@ -398,7 +428,7 @@ vim ~/.shacs-bot/config.json                # add API keys or provider config
 docker compose up -d shacs-gateway          # start channel runtime
 ```
 
-`shacs-gateway`는 container 안에서 `shacs-bot run --websocket-host 0.0.0.0 --allow-remote`를 실행하고 host loopback의 WebSocket port `8765`에만 publish합니다. 이 Compose path는 Docker socket mount, `privileged: true`, host network를 기본값으로 쓰지 않습니다. `run --verbose`를 붙이면 preview-only runtime logs가 stderr에 남고, Compose에서는 `docker compose logs -f shacs-gateway`로 확인할 수 있습니다. Provider 설정이 없으면 runtime은 `provider not found: auto`로 시작하지 않으므로, 먼저 `config.json` 또는 `auth.json` workflow로 provider를 설정하세요.
+`shacs-gateway`는 container 안에서 `shacs-bot run --websocket-host 0.0.0.0 --allow-remote --verbose --workspace /home/shacs/.shacs-bot/workspace --allow-side-effects`를 실행하고 host loopback의 WebSocket port `8765`에만 publish합니다. 이 Compose path는 Docker socket mount, `privileged: true`, host network를 기본값으로 쓰지 않습니다. Preview-only runtime logs는 `docker compose logs -f shacs-gateway`로 확인할 수 있습니다. Provider 설정이 없으면 runtime은 `provider not found: auto`로 시작하지 않으므로, 먼저 `config.json` 또는 `auth.json` workflow로 provider를 설정하세요.
 
 Spec023의 공식 Compose smoke gate는 opt-in으로 실행합니다. 이 명령은 임시 Compose service와 data directory로 `runtime inspect`의 official-container runtime evidence를 확인하고, 별도로 기본 `docker-compose.yml`이 Docker socket, `privileged: true`, host network를 쓰지 않는지도 검사합니다:
 
@@ -432,4 +462,4 @@ Provider secret은 로컬 config/environment workflow로 제공하세요. Image 
 
 ## 아직 남은 명령 범위
 
-`plugins`와 `hooks`는 위의 plugin/hook 섹션에 설명된 descriptor-only 관리 명령으로 구현되어 있습니다. TUI command, 구현된 Codex login 외의 provider OAuth flow, ClawHub install/update wrapper, gateway supervision은 이후 migration slice로 남아 있습니다. 위에서 구현된 것으로 명시하지 않은 command는 사용할 수 있는 기능으로 취급하지 마세요.
+`plugins`와 `hooks`는 위의 plugin/hook 섹션에 설명된 descriptor-only 관리 명령으로 구현되어 있습니다. `gateway`와 `web` command도 위에 설명한 현재 범위로 구현되어 있습니다. TUI command, 구현된 Codex login 외의 provider OAuth flow, ClawHub install/update wrapper, background service supervision은 이후 migration slice로 남아 있습니다.
