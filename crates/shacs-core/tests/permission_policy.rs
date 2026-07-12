@@ -562,6 +562,44 @@ fn approved_correlation_allows_static_ask_required_proc_exec() -> Result<(), Box
 }
 
 #[test]
+fn evaluator_cannot_allow_unsummarized_proc_exec() -> Result<(), Box<dyn Error>> {
+    let exec = action(
+        PermissionMode::Auto,
+        "exec",
+        vec![SafetyCapability::ProcExec],
+        vec![target(json!("python3 - <<'PY'"))],
+    );
+    let rules = evaluate_static_rules(
+        &exec,
+        &PermissionRuleInput {
+            containment: safe_containment(),
+            protected_targets: Vec::new(),
+            proc_exec_summary: None,
+        },
+    );
+    let mut input = policy_input(exec, rules.clone());
+    input.evaluator = Some(evaluator(
+        AutoEvaluatorVerdictKind::AllowCandidate,
+        EvaluatorConfidence::High,
+    ));
+
+    let decision = decide_permission(input);
+
+    if rules.kind != StaticRuleDecisionKind::AskRequired
+        || rules.reason != StaticRuleReason::ProcExecSummaryUnavailable
+        || decision.kind != PermissionPolicyDecisionKind::Ask
+        || decision.reason != PermissionPolicyReason::StaticAskRequired
+        || decision.can_handoff_to_tool_runtime
+    {
+        return Err(format!(
+            "unsummarized proc_exec consumed evaluator allow: {rules:?} {decision:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_uncertainty_and_prompt_injection_never_allow() -> Result<(), Box<dyn Error>> {
     let exec = action(
         PermissionMode::Auto,

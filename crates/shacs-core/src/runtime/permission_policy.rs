@@ -176,7 +176,14 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
         );
     }
 
-    if input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired {
+    if input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired
+        && (input.action.permission_mode_snapshot.mode != PermissionMode::Auto
+            || input.evaluator.is_none()
+            || matches!(
+                input.static_rule_decision.reason,
+                StaticRuleReason::ContainmentUnknown | StaticRuleReason::ProcExecSummaryUnavailable
+            ))
+    {
         return ask_or_deny(input.interactive, PermissionPolicyReason::StaticAskRequired);
     }
 
