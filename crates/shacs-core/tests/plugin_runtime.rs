@@ -1,16 +1,25 @@
-use serde_json::json;
+use serde_json::{json, Map};
 use shacs_core::runtime::{
-    build_plugin_runtime_snapshot, build_plugin_surface_projection, AgentHook, AgentHookContext,
-    DiscoveredPlugin, PluginBlockReason, PluginExecutableCommand, PluginHookCallbackResult,
-    PluginHookCommandExecutor, PluginHookCommandInvocation, PluginHookDispatchMode,
-    PluginHookDispatchStatus, PluginHookEvent, PluginManifest, PluginManifestSource,
-    PluginRuntimeHook, PluginRuntimeHookAgentHook, PluginRuntimePlugin, PluginRuntimeSnapshot,
-    PluginState, ProcessPluginHookCommandExecutor, RuntimeToolCall,
+    build_plugin_runtime_snapshot, build_plugin_surface_projection, plugin_runtime_commands,
+    register_plugin_runtime_tools, AgentHook, AgentHookContext, AgentLoop, AgentLoopCommandResult,
+    AgentLoopConfig, ContextBuilder, DiscoveredPlugin, MessageBus, PermissionMode,
+    PermissionModeSnapshot, PluginBlockReason, PluginCommandDispatcher, PluginExecutableCommand,
+    PluginHookCallbackResult, PluginHookCommandExecutor, PluginHookCommandInvocation,
+    PluginHookDispatchMode, PluginHookDispatchStatus, PluginHookEvent, PluginManifest,
+    PluginManifestSource, PluginRuntimeHook, PluginRuntimeHookAgentHook, PluginRuntimePlugin,
+    PluginRuntimeSnapshot, PluginState, ProcessPluginHookCommandExecutor, RuntimeToolCall,
+    SessionManager,
 };
-use shacs_providers::LlmResponse;
+use shacs_core::tools::{
+    AskUserTool, JsonMap, SchemaFragment, Tool, ToolParameters, ToolRegistry, ToolResult,
+};
+use shacs_providers::{
+    LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest, ToolCallRequest,
+};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 static PROCESS_EXECUTOR_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -330,6 +339,7 @@ fn spec025_s3_process_executor_runs_argv_without_shell_and_parses_json_stdout() 
                 },
             }],
         }],
+        commands: Vec::new(),
         diagnostics: Vec::new(),
     };
     let hook = PluginRuntimeHookAgentHook::with_executor(
@@ -585,6 +595,454 @@ fn spec025_s3_replay_mode_rejects_live_dispatch_without_executor_invocation() {
 }
 
 #[test]
+fn spec025_replay_mode_does_not_apply_tool_before_blocks() {
+    let plugin = enabled_plugin(
+        "replay-block",
+        json!({"hooks": ["tool:before"]}),
+        json!({"hooks": {"tool:before": {"command": "bin/tool"}}}),
+    );
+    let snapshot = build_plugin_runtime_snapshot(&[plugin]);
+    let executor = Arc::new(FakeExecutor::new(PluginHookCallbackResult::Output(json!({
+        "block": {"reason": "should not apply"}
+    }))));
+    let hook = PluginRuntimeHookAgentHook::with_executor(
+        snapshot,
+        PluginHookDispatchMode::Replay,
+        executor.clone(),
+    );
+    let context = AgentHookContext {
+        iteration: 0,
+        messages: Vec::new(),
+    };
+    let calls = vec![RuntimeToolCall::new("call-1", "read_file", json!({}))];
+
+    let blocked = hook.blocked_tool_messages(&context, &calls);
+
+    assert_eq!(executor.count(), 0);
+    assert!(blocked.is_empty());
+}
+
+#[test]
+fn spec025_tool_before_block_skips_tool_without_permission_approval() {
+    let plugin = enabled_plugin(
+        "blocker",
+        json!({"hooks": ["tool:before"]}),
+        json!({"hooks": {"tool:before": {"command": "bin/block"}}}),
+    );
+    let snapshot = build_plugin_runtime_snapshot(&[plugin]);
+    let executor = Arc::new(FakeExecutor::new(PluginHookCallbackResult::Output(json!({
+        "block": {"reason": "policy denied"}
+    }))));
+    let hook = Arc::new(PluginRuntimeHookAgentHook::with_executor(
+        snapshot,
+        PluginHookDispatchMode::LiveDiagnostics,
+        executor.clone(),
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(PanicTool);
+    let runner = shacs_core::runtime::AgentRunner::new();
+    let client = QueueProviderClient::new(vec![
+        Ok(LlmResponse {
+            content: Some("call tool".to_owned()),
+            tool_calls: vec![ToolCallRequest {
+                id: "call-1".to_owned(),
+                name: "panic_tool".to_owned(),
+                arguments: serde_json::Map::new(),
+                extra_content: None,
+                provider_specific_fields: None,
+                function_provider_specific_fields: None,
+            }],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        }),
+        Ok(LlmResponse {
+            content: Some("blocked handled".to_owned()),
+            finish_reason: "stop".to_owned(),
+            ..LlmResponse::default()
+        }),
+    ]);
+    let mut spec = shacs_core::runtime::AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "run"})],
+        &registry,
+        &client,
+        "fake-model",
+    );
+    spec.max_iterations = 2;
+    spec.agent_hook = Some(hook);
+
+    let result = runner
+        .run(spec)
+        .unwrap_or_else(|error| panic!("agent run failed: {error}"));
+
+    assert_eq!(executor.count(), 1);
+    assert!(result.interrupt.is_none());
+    let tool_message = result
+        .messages
+        .iter()
+        .find(|message| message.get("role").and_then(serde_json::Value::as_str) == Some("tool"))
+        .unwrap_or_else(|| panic!("missing blocked tool message: {:?}", result.messages));
+    let content = tool_message
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(content.contains("Error: Tool `panic_tool` blocked by plugin hook `blocker`"));
+    assert!(content.contains("policy denied"));
+}
+
+#[cfg(unix)]
+#[test]
+fn spec025_command_backed_plugin_tool_registers_and_executes_without_shell_env() {
+    let _guard = process_executor_test_guard();
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+    let bin_dir = tempdir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+    let tool_path = bin_dir.join("tool");
+    fs::write(
+        &tool_path,
+        "#!/bin/sh\nif [ -n \"$HOME\" ]; then printf 'env leaked'; exit 2; fi\ncat >/dev/null\nprintf '{\"ok\":true,\"message\":\"plugin tool ran\"}'\n",
+    )
+    .unwrap_or_else(|error| panic!("failed to write tool script: {error}"));
+    make_executable(&tool_path);
+    let plugin = plugin_with_root(
+        "tool-plugin",
+        tempdir.path().to_path_buf(),
+        json!({"tools": ["plugin_tool_probe"]}),
+        json!({"tools": {"plugin_tool_probe": {
+            "command": "bin/tool",
+            "description": "Probe plugin tool",
+            "parameters": {"type": "object", "properties": {"input": {"type": "string"}}}
+        }}}),
+    );
+    let mut registry = ToolRegistry::new();
+
+    let diagnostics = register_plugin_runtime_tools(&mut registry, &[plugin]);
+    let output = registry
+        .execute("plugin_tool_probe", json!({"input": "hello"}))
+        .into_text();
+    let definitions = registry.definitions();
+
+    assert!(diagnostics.is_empty());
+    assert!(registry.has("plugin_tool_probe"));
+    assert!(output.contains("plugin tool ran"));
+    assert!(definitions.iter().any(|definition| {
+        definition
+            .get("function")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|function| function.get("x-shacs-source-kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some("plugin_tool")
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn spec025_plugin_tool_name_conflict_does_not_override_existing_tool() {
+    let _guard = process_executor_test_guard();
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+    let bin_dir = tempdir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+    let marker_path = tempdir.path().join("plugin-tool-ran");
+    let tool_path = bin_dir.join("tool");
+    fs::write(
+        &tool_path,
+        format!(
+            "#!/bin/sh\nprintf ran > {}\nprintf '{{\"ok\":true,\"message\":\"plugin tool ran\"}}'\n",
+            shell_quote(marker_path.to_string_lossy().as_ref())
+        ),
+    )
+    .unwrap_or_else(|error| panic!("failed to write tool script: {error}"));
+    make_executable(&tool_path);
+    let plugin = plugin_with_root(
+        "tool-plugin",
+        tempdir.path().to_path_buf(),
+        json!({"tools": ["exec"]}),
+        json!({"tools": {"exec": {
+            "command": "bin/tool",
+            "description": "Conflicting plugin tool",
+            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}
+        }}}),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(CountingExecTool {
+        calls: calls.clone(),
+    });
+
+    let diagnostics = register_plugin_runtime_tools(&mut registry, &[plugin]);
+    let output = registry
+        .execute("exec", json!({"command": "cargo test"}))
+        .into_text();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(output, "exec-output");
+    assert!(!marker_path.exists());
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "tool_name_conflict"
+            && diagnostic.plugin_id == "tool-plugin"
+            && diagnostic.event.as_deref() == Some("exec")
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn spec025_plugin_command_dispatcher_routes_and_executes_without_shell_env() {
+    let _guard = process_executor_test_guard();
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+    let bin_dir = tempdir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+    let command_path = bin_dir.join("review");
+    fs::write(
+        &command_path,
+        "#!/bin/sh\nif [ -n \"$HOME\" ]; then printf 'env leaked'; exit 2; fi\ninput=$(cat)\ncase \"$input\" in *'\"args\":\"today\"'*) printf '{\"ok\":true,\"message\":\"plugin command ran\"}' ;; *) printf 'bad stdin'; exit 3 ;; esac\n",
+    )
+    .unwrap_or_else(|error| panic!("failed to write command script: {error}"));
+    make_executable(&command_path);
+    let enabled = plugin_with_root(
+        "command-plugin",
+        tempdir.path().to_path_buf(),
+        json!({"commands": ["review", "status"]}),
+        json!({"commands": {
+            "review": {"command": "bin/review", "description": "Run review"},
+            "status": {"command": "bin/review"}
+        }}),
+    );
+    let disabled = plugin_with_state("disabled-command", PluginState::Disabled);
+    let mut diagnostics = Vec::new();
+
+    let commands = plugin_runtime_commands(&[enabled, disabled], &mut diagnostics);
+    let dispatcher = PluginCommandDispatcher::new(commands);
+    let execution = dispatcher
+        .dispatch_text("/review today")
+        .unwrap_or_else(|error| panic!("plugin command dispatch failed: {error:?}"));
+    let output = execution.output.into_text();
+
+    assert_eq!(dispatcher.commands().len(), 1);
+    assert_eq!(execution.plugin_id, "command-plugin");
+    assert_eq!(execution.command_name, "review");
+    assert!(output.contains("plugin command ran"));
+    assert!(dispatcher.dispatch_text("/status").is_err());
+    assert!(dispatcher.dispatch_text("/disabled-command").is_err());
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "builtin_command_conflict"
+            && diagnostic.event.as_deref() == Some("status")
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn spec025_agent_loop_executes_enabled_plugin_commands_without_provider_call() {
+    let _guard = process_executor_test_guard();
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir(&workspace)
+        .unwrap_or_else(|error| panic!("failed to create workspace: {error}"));
+    let bin_dir = tempdir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+    let command_path = bin_dir.join("review");
+    fs::write(
+        &command_path,
+        "#!/bin/sh\nif [ -n \"$HOME\" ]; then printf 'env leaked'; exit 2; fi\ninput=$(cat)\ncase \"$input\" in *'\"args\":\"today\"'*) printf '{\"ok\":true,\"message\":\"agent loop plugin command ran\"}' ;; *) printf 'bad stdin'; exit 3 ;; esac\n",
+    )
+    .unwrap_or_else(|error| panic!("failed to write command script: {error}"));
+    make_executable(&command_path);
+    let plugin = plugin_with_root(
+        "agent-command-plugin",
+        tempdir.path().to_path_buf(),
+        json!({"commands": ["review", "status"]}),
+        json!({"commands": {
+            "review": {"command": "bin/review", "description": "Run review"},
+            "status": {"command": "bin/review"}
+        }}),
+    );
+    let snapshot = build_plugin_runtime_snapshot(&[plugin]);
+    let registry = ToolRegistry::new();
+    let client = PanicProviderClient;
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(&workspace)
+            .unwrap_or_else(|error| panic!("failed to create session manager: {error}")),
+        ContextBuilder::new(&workspace),
+        &registry,
+        &client,
+        AgentLoopConfig::new(&workspace, "test-model"),
+    )
+    .with_plugin_command_dispatcher(PluginCommandDispatcher::new(snapshot.commands));
+
+    let result = loop_runtime
+        .process_direct("/review today", Some("plugin-command"))
+        .unwrap_or_else(|error| panic!("plugin command turn failed: {error}"));
+    let output = result.final_content.unwrap_or_default();
+
+    assert_eq!(result.command, Some(AgentLoopCommandResult::PluginCommand));
+    assert!(output.contains("agent loop plugin command ran"));
+    let status = loop_runtime
+        .process_direct("/status", Some("plugin-command"))
+        .unwrap_or_else(|error| panic!("builtin status command failed: {error}"));
+    assert_eq!(status.command, Some(AgentLoopCommandResult::Status));
+}
+
+#[cfg(unix)]
+#[test]
+fn spec025_agent_loop_does_not_run_plugin_command_while_ask_user_is_pending() {
+    let _guard = process_executor_test_guard();
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir(&workspace)
+        .unwrap_or_else(|error| panic!("failed to create workspace: {error}"));
+    let bin_dir = tempdir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+    let marker_path = tempdir.path().join("plugin-command-ran");
+    let command_path = bin_dir.join("review");
+    fs::write(
+        &command_path,
+        format!(
+            "#!/bin/sh\nprintf ran > {}\nprintf '{{\"ok\":true,\"message\":\"plugin command ran\"}}'\n",
+            shell_quote(marker_path.to_string_lossy().as_ref())
+        ),
+    )
+    .unwrap_or_else(|error| panic!("failed to write command script: {error}"));
+    make_executable(&command_path);
+    let plugin = plugin_with_root(
+        "agent-command-plugin",
+        tempdir.path().to_path_buf(),
+        json!({"commands": ["review"]}),
+        json!({"commands": {
+            "review": {"command": "bin/review", "description": "Run review"}
+        }}),
+    );
+    let snapshot = build_plugin_runtime_snapshot(&[plugin]);
+    let mut registry = ToolRegistry::new();
+    registry.register(AskUserTool::new());
+    let client = QueueProviderClient::new(vec![
+        Ok(LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "ask-1",
+                "ask_user",
+                Map::from_iter([
+                    ("question".to_owned(), json!("Continue?")),
+                    ("options".to_owned(), json!(["Yes", "No"])),
+                ]),
+            )],
+            ..LlmResponse::default()
+        }),
+        Ok(LlmResponse {
+            content: Some("resumed after plugin-looking answer".to_owned()),
+            ..LlmResponse::default()
+        }),
+    ]);
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(&workspace)
+            .unwrap_or_else(|error| panic!("failed to create session manager: {error}")),
+        ContextBuilder::new(&workspace),
+        &registry,
+        &client,
+        AgentLoopConfig::new(&workspace, "test-model"),
+    )
+    .with_plugin_command_dispatcher(PluginCommandDispatcher::new(snapshot.commands));
+
+    let first = loop_runtime
+        .process_direct("start", Some("plugin-command-pending-ask"))
+        .unwrap_or_else(|error| panic!("ask_user turn failed: {error}"));
+    let second = loop_runtime
+        .process_direct("/review today", Some("plugin-command-pending-ask"))
+        .unwrap_or_else(|error| panic!("ask_user resume turn failed: {error}"));
+
+    assert_eq!(first.stop_reason, "ask_user");
+    assert_eq!(first.ask_user_options, ["Yes", "No"]);
+    assert_ne!(second.command, Some(AgentLoopCommandResult::PluginCommand));
+    assert_eq!(
+        second.final_content.as_deref(),
+        Some("resumed after plugin-looking answer")
+    );
+    assert!(!marker_path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn spec025_agent_loop_does_not_run_plugin_command_while_permission_approval_is_pending() {
+    let _guard = process_executor_test_guard();
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir(&workspace)
+        .unwrap_or_else(|error| panic!("failed to create workspace: {error}"));
+    let bin_dir = tempdir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+    let marker_path = tempdir.path().join("plugin-command-ran");
+    let command_path = bin_dir.join("review");
+    fs::write(
+        &command_path,
+        format!(
+            "#!/bin/sh\nprintf ran > {}\nprintf '{{\"ok\":true,\"message\":\"plugin command ran\"}}'\n",
+            shell_quote(marker_path.to_string_lossy().as_ref())
+        ),
+    )
+    .unwrap_or_else(|error| panic!("failed to write command script: {error}"));
+    make_executable(&command_path);
+    let plugin = plugin_with_root(
+        "agent-command-plugin",
+        tempdir.path().to_path_buf(),
+        json!({"commands": ["review"]}),
+        json!({"commands": {
+            "review": {"command": "bin/review", "description": "Run review"}
+        }}),
+    );
+    let snapshot = build_plugin_runtime_snapshot(&[plugin]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(CountingExecTool {
+        calls: calls.clone(),
+    });
+    let client = QueueProviderClient::new(vec![Ok(LlmResponse {
+        finish_reason: "tool_calls".to_owned(),
+        tool_calls: vec![ToolCallRequest::new(
+            "exec-1",
+            "exec",
+            Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+        )],
+        ..LlmResponse::default()
+    })]);
+    let mut config = AgentLoopConfig::new(&workspace, "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(&workspace)
+            .unwrap_or_else(|error| panic!("failed to create session manager: {error}")),
+        ContextBuilder::new(&workspace),
+        &registry,
+        &client,
+        config,
+    )
+    .with_plugin_command_dispatcher(PluginCommandDispatcher::new(snapshot.commands));
+
+    let first = loop_runtime
+        .process_direct("start", Some("plugin-command-pending-approval"))
+        .unwrap_or_else(|error| panic!("approval turn failed: {error}"));
+    let second = loop_runtime
+        .process_direct("/review today", Some("plugin-command-pending-approval"))
+        .unwrap_or_else(|error| panic!("pending approval reply failed: {error}"));
+
+    assert_eq!(first.stop_reason, "ask_user");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_ne!(second.command, Some(AgentLoopCommandResult::PluginCommand));
+    assert_eq!(second.stop_reason, "permission_approval_pending");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(!marker_path.exists());
+}
+
+#[test]
 fn spec025_s3_descriptor_projection_stays_non_executable_after_live_hook_adapter() {
     let plugin = enabled_plugin(
         "descriptor-only",
@@ -603,6 +1061,100 @@ fn spec025_s3_descriptor_projection_stays_non_executable_after_live_hook_adapter
 struct FakeExecutor {
     result: PluginHookCallbackResult,
     invocations: Arc<Mutex<Vec<PluginHookCommandInvocation>>>,
+}
+
+struct PanicTool;
+
+struct CountingExecTool {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Tool for PanicTool {
+    fn name(&self) -> &str {
+        "panic_tool"
+    }
+
+    fn description(&self) -> &str {
+        "Panics if executed."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        ToolParameters::new().to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        panic!("panic_tool should have been blocked before execution")
+    }
+}
+
+impl Tool for CountingExecTool {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn description(&self) -> &str {
+        "Count exec attempts."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        ToolParameters::new()
+            .property("command", shacs_core::tools::StringSchema::new("Command"))
+            .required(["command"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "exec-output".into()
+    }
+}
+
+struct QueueProviderClient {
+    responses: Mutex<Vec<Result<LlmResponse, ProviderError>>>,
+}
+
+struct PanicProviderClient;
+
+impl ProviderClient for PanicProviderClient {
+    fn chat(&self, _request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+        panic!("provider should not be called for plugin commands")
+    }
+
+    fn chat_stream(
+        &self,
+        request: ProviderRequest,
+        _on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat(request)
+    }
+}
+
+impl QueueProviderClient {
+    fn new(mut responses: Vec<Result<LlmResponse, ProviderError>>) -> Self {
+        responses.reverse();
+        Self {
+            responses: Mutex::new(responses),
+        }
+    }
+}
+
+impl ProviderClient for QueueProviderClient {
+    fn chat(&self, _request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+        match self.responses.lock() {
+            Ok(mut responses) => responses
+                .pop()
+                .unwrap_or_else(|| Ok(LlmResponse::default())),
+            Err(error) => panic!("provider response lock poisoned: {error}"),
+        }
+    }
+
+    fn chat_stream(
+        &self,
+        request: ProviderRequest,
+        _on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat(request)
+    }
 }
 
 impl FakeExecutor {
@@ -696,6 +1248,7 @@ fn process_snapshot(
                 },
             }],
         }],
+        commands: Vec::new(),
         diagnostics: Vec::new(),
     }
 }
@@ -757,4 +1310,16 @@ fn enabled_plugin(
         block_reasons: Vec::new(),
         diagnostics: Vec::new(),
     }
+}
+
+fn plugin_with_root(
+    id: &str,
+    root: PathBuf,
+    surfaces: serde_json::Value,
+    entrypoints: serde_json::Value,
+) -> DiscoveredPlugin {
+    let mut plugin = enabled_plugin(id, surfaces, entrypoints);
+    plugin.root = root.clone();
+    plugin.manifest_path = root.join("plugin.json");
+    plugin
 }

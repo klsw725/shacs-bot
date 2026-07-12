@@ -80,7 +80,7 @@ Context limits는 bounded file bytes, folder entry limit, URL byte limit, provid
 
 ## Plugins and hooks
 
-User-local plugin manifests can be inspected through a descriptor-only management surface. This is the implemented plugin foundation, not the full live plugin execution system:
+User-local plugin manifests can be inspected through the plugin management surface. The supported local-manifest scope is opt-in discovery, redaction-safe projection, bounded hook command dispatch, command-backed plugin tools through the normal tool registry, production-only plugin MCP startup, plugin-provided read-only skill roots, explicit plugin command router/dispatcher execution, and one behavior-affecting hook boundary: `tool:before` may return block-only output that is consumed as a normalized tool error immediately before tool execution.
 
 ```sh
 shacs-bot plugins list
@@ -92,9 +92,9 @@ shacs-bot hooks list
 shacs-bot hooks inspect <plugin-or-hook>
 ```
 
-`plugins list`, `plugins inspect`, `plugins doctor`, `hooks list`, and `hooks inspect` read config and discovered manifests only. They do not run plugin commands, dispatch hook callbacks, register provider-visible tools, start MCP servers, or execute plugin processes. `plugins enable` and `plugins disable` mutate only `plugins.enabled`/`plugins.disabled` in the selected config file and report next-session/reload semantics; they do not mutate the running session prompt or toolset.
+`plugins list`, `plugins inspect`, `plugins doctor`, `hooks list`, and `hooks inspect` read config and discovered manifests only. They do not run plugin commands, dispatch hook callbacks, register provider-visible plugin tools, start plugin MCP servers, or execute plugin processes. `plugins enable` and `plugins disable` mutate only `plugins.enabled`/`plugins.disabled` in the selected config file and report next-session/reload semantics; they do not mutate the currently running session prompt or toolset.
 
-During direct agent-loop turns, enabled typed plugin hook entrypoints may run through the runtime hook adapter for diagnostics-only dispatch. This initial live hook slice records redacted output/error/timeout evidence and does not apply hook output to tool calls, model content, permissions, provider-visible tools, commands, skills, or MCP servers. Runtime-wide event wiring such as `runtime:start`, `session:start`, `tool:after`, and `subagent:end` remains outside this implemented slice.
+During agent turns, enabled plugin hook entrypoints may run through the runtime hook adapter with no shell, cleared environment, bounded stdio, timeout/kill, JSON stdin, and redacted diagnostics. Observer hook output is recorded only as redacted evidence. `tool:before` block output is the only supported behavior-affecting hook output: the first valid block in deterministic plugin/hook order skips the affected tool call and returns a normalized tool error. Hook output that asks to approve, allow, or grant permissions is rejected and never creates permission approval. Enabled plugin tools are command-backed tools registered through the existing tool runtime; enabled plugin MCP declarations are added only to the production MCP startup path; enabled plugin skills are read-only skill roots consumed by the skill registry/context builder. Enabled plugin commands route through a separate plugin command router and safe dispatcher, not through builtin `CommandId`, and builtin command conflicts are excluded rather than overridden.
 
 Currently supported manifests are `plugin.json` and `plugin.toml` files under the config data directory's `plugins/<name>/` root or the workspace-local `.shacs-bot/plugins/<name>/` root. Workspace-local plugins still require an explicit trusted workspace gate before they can become enabled. Output shows secret reference names and presence metadata only, never raw secret values.
 
@@ -462,4 +462,4 @@ Provider secret은 로컬 config/environment workflow로 제공하세요. Image 
 
 ## 아직 남은 명령 범위
 
-`plugins`와 `hooks`는 위의 plugin/hook 섹션에 설명된 descriptor-only 관리 명령으로 구현되어 있습니다. `gateway`와 `web` command도 위에 설명한 현재 범위로 구현되어 있습니다. TUI command, 구현된 Codex login 외의 provider OAuth flow, ClawHub install/update wrapper, background service supervision은 이후 migration slice로 남아 있습니다.
+`plugins`와 `hooks`는 위의 plugin/hook 섹션에 설명된 관리 명령으로 구현되어 있습니다. Inspect/doctor 계열은 실행하지 않고, agent turn에서의 live hook 소비는 `tool:before` block-only 경계로 제한됩니다. Plugin command는 standalone dispatcher 경계에서만 실행되며 running session store를 직접 mutate하지 않습니다. TUI command, 구현된 Codex login 외의 provider OAuth flow, ClawHub install/update wrapper, gateway supervision은 이후 migration slice로 남아 있습니다. 위에서 구현된 것으로 명시하지 않은 command는 사용할 수 있는 기능으로 취급하지 마세요.

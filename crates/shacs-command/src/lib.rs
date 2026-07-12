@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +57,26 @@ pub struct ParsedCommand {
 pub struct RoutedLoopCommand {
     pub command: LoopCommand,
     pub parsed: ParsedCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCommandSpec {
+    pub plugin_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCommandRoute {
+    pub plugin_id: String,
+    pub name: String,
+    pub matched: String,
+    pub raw: String,
+    pub args: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PluginCommandRouter {
+    routes: BTreeMap<String, PluginCommandSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +252,53 @@ impl CommandRouter {
     }
 }
 
+impl PluginCommandSpec {
+    pub fn new(plugin_id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            name: name.into(),
+        }
+    }
+
+    fn route_key(&self) -> Option<String> {
+        plugin_command_route_key(&self.name)
+    }
+}
+
+impl PluginCommandRouter {
+    pub fn new(specs: impl IntoIterator<Item = PluginCommandSpec>) -> Self {
+        let mut routes = BTreeMap::new();
+        for spec in specs {
+            let Some(route_key) = spec.route_key() else {
+                continue;
+            };
+            if is_builtin_command_key(&route_key) {
+                continue;
+            }
+            routes.entry(route_key).or_insert(spec);
+        }
+        Self { routes }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+
+    pub fn dispatch(&self, text: &str) -> Option<PluginCommandRoute> {
+        let raw = text.trim();
+        let (token, args) = split_first_token(raw)?;
+        let route_key = plugin_command_route_key(token)?;
+        let spec = self.routes.get(&route_key)?;
+        Some(PluginCommandRoute {
+            plugin_id: spec.plugin_id.clone(),
+            name: spec.name.clone(),
+            matched: route_key,
+            raw: raw.to_owned(),
+            args: args.to_owned(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopCommand {
@@ -388,6 +455,10 @@ pub fn is_builtin_command(content: &str) -> bool {
     CommandRouter::builtin().is_known_command(content)
 }
 
+pub fn is_builtin_command_name(name: &str) -> bool {
+    plugin_command_route_key(name).is_some_and(|key| is_builtin_command_key(&key))
+}
+
 pub fn normalize_channel_command(content: &str, bot_name: Option<&str>) -> String {
     let trimmed = content.trim();
     let Some((first, rest)) = split_first_token(trimmed) else {
@@ -460,6 +531,27 @@ fn command_from_exact(raw: &str) -> Option<CommandId> {
         "/help" => Some(CommandId::Help),
         _ => None,
     }
+}
+
+fn is_builtin_command_key(key: &str) -> bool {
+    command_from_exact(key).is_some()
+}
+
+fn plugin_command_route_key(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let command = if trimmed.starts_with('/') {
+        trimmed.to_owned()
+    } else {
+        format!("/{trimmed}")
+    };
+    let command = command.to_ascii_lowercase();
+    if command == "/" || command[1..].contains('/') {
+        return None;
+    }
+    Some(command)
 }
 
 fn split_first_token(content: &str) -> Option<(&str, &str)> {

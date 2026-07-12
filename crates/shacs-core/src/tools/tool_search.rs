@@ -261,13 +261,19 @@ fn estimate_deferrable_schema_tokens(definitions: &[Value]) -> usize {
 
 fn is_deferrable(definition: &Value) -> bool {
     schema_name(definition).is_some_and(|name| name.starts_with("mcp_"))
+        || definition
+            .get("function")
+            .and_then(Value::as_object)
+            .and_then(|function| function.get("x-shacs-source-kind"))
+            .and_then(Value::as_str)
+            == Some("plugin_tool")
 }
 
 fn catalog_entry(definition: &Value) -> DeferredToolCatalogEntry {
     let name = schema_name(definition).unwrap_or_default();
     let description = schema_description(definition).unwrap_or_default();
     let parameter_names = parameter_names(definition);
-    let (source_kind, source_name) = source_from_name(&name);
+    let (source_kind, source_name) = source_from_definition(definition, &name);
     DeferredToolCatalogEntry {
         name,
         description,
@@ -311,6 +317,10 @@ fn parameter_names(definition: &Value) -> Vec<String> {
 }
 
 fn source_from_name(name: &str) -> (String, String) {
+    if let Some(rest) = name.strip_prefix("plugin_") {
+        let source_name = rest.split('_').next().unwrap_or("unknown").to_owned();
+        return ("plugin_tool".to_owned(), source_name);
+    }
     let Some(rest) = name.strip_prefix("mcp_") else {
         return ("unknown".to_owned(), "unknown".to_owned());
     };
@@ -322,6 +332,22 @@ fn source_from_name(name: &str) -> (String, String) {
     }
     let source_name = rest.split('_').next().unwrap_or("unknown").to_owned();
     ("mcp_tool".to_owned(), source_name)
+}
+
+fn source_from_definition(definition: &Value, name: &str) -> (String, String) {
+    let function = definition.get("function").and_then(Value::as_object);
+    if function
+        .and_then(|function| function.get("x-shacs-source-kind"))
+        .and_then(Value::as_str)
+        == Some("plugin_tool")
+    {
+        let plugin_id = function
+            .and_then(|function| function.get("x-shacs-plugin-id"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return ("plugin_tool".to_owned(), plugin_id.to_owned());
+    }
+    source_from_name(name)
 }
 
 fn scope_digest(entries: &[DeferredToolCatalogEntry]) -> String {

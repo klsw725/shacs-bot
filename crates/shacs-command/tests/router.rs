@@ -1,7 +1,8 @@
 use shacs_command::{
-    build_help_text, is_builtin_command, normalize_channel_command, parse_loop_command,
-    parse_loop_command_route, CommandId, CommandKind, CommandRouter, GoalCommandArgs,
-    HistoryCommandArgs, LoopCommand, PermissionCommandArgs,
+    build_help_text, is_builtin_command, is_builtin_command_name, normalize_channel_command,
+    parse_loop_command, parse_loop_command_route, CommandId, CommandKind, CommandRouter,
+    GoalCommandArgs, HistoryCommandArgs, LoopCommand, PermissionCommandArgs, PluginCommandRouter,
+    PluginCommandSpec,
 };
 use std::error::Error;
 
@@ -230,4 +231,41 @@ fn builtin_command_detection_and_help_cover_registered_commands() {
     }
     assert!(help.contains("subsequent turns"));
     assert!(!help.contains("requires restart"));
+}
+
+#[test]
+fn plugin_command_router_routes_without_extending_builtin_command_ids() -> Result<(), Box<dyn Error>>
+{
+    let router = PluginCommandRouter::new([
+        PluginCommandSpec::new("review-plugin", "review"),
+        PluginCommandSpec::new("daily-plugin", "/daily"),
+    ]);
+
+    let review = router
+        .dispatch("  /Review today  ")
+        .ok_or("missing plugin review route")?;
+    assert_eq!(review.plugin_id, "review-plugin");
+    assert_eq!(review.name, "review");
+    assert_eq!(review.matched, "/review");
+    assert_eq!(review.raw, "/Review today");
+    assert_eq!(review.args, "today");
+    assert_eq!(parse_loop_command("/review today"), None);
+    assert!(router.dispatch("hello").is_none());
+    Ok(())
+}
+
+#[test]
+fn plugin_command_router_excludes_builtin_conflicts() {
+    let router = PluginCommandRouter::new([
+        PluginCommandSpec::new("bad-plugin", "status"),
+        PluginCommandSpec::new("ok-plugin", "triage"),
+    ]);
+
+    assert!(is_builtin_command_name("status"));
+    assert!(is_builtin_command_name("/help"));
+    assert!(router.dispatch("/status").is_none());
+    assert_eq!(
+        router.dispatch("/triage bug").map(|route| route.plugin_id),
+        Some("ok-plugin".to_owned())
+    );
 }

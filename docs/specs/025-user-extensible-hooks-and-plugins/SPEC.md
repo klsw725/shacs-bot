@@ -1,6 +1,6 @@
 # user-extensible hooks and plugins 아키텍처 명세
 
-Status: Foundation plus narrow diagnostics-only hook runtime slice complete; full Spec 25 remains open. Hermes의 hooks/plugins 제품 의미론을 `shacs-bot`의 Rust self-hosted runtime에 맞게 재해석해 owner boundary를 고정했고, 현재 구현은 `plugin.json`/`plugin.toml` manifest discovery, descriptor-only projection, safety diagnostics, management CLI, and direct agent-loop diagnostics-only dispatch for enabled typed hook entrypoints까지 닫았다. Live runtime wiring for `runtime:start`, `session:start`, `tool:after`, `subagent:end` across all runtime surfaces, live tool/command/MCP/skill execution, and behavior-affecting hook 적용은 아직 완료 기준에 남아 있다.
+Status: Closed for the self-hosted/local manifest scope with explicit supported boundaries. Hermes의 hooks/plugins 제품 의미론을 `shacs-bot`의 Rust self-hosted runtime에 맞게 재해석해 owner boundary를 고정했고, 현재 구현은 `plugin.json`/`plugin.toml` manifest discovery, descriptor projection, safety diagnostics, management CLI, bounded enabled-plugin hook dispatch, `tool:before` block-only 적용, command-backed plugin tool registration/execution, production-only plugin MCP startup, plugin-provided read-only skill roots, standalone plugin command router/dispatcher execution, replay live-dispatch rejection까지 닫았다.
 
 ## 문서 목적
 
@@ -55,25 +55,26 @@ Hermes reference에서 가져올 것은 다음 제품 의미론이다.
 
 ## Implemented Foundation Boundary
 
-현재 구현 완료 범위는 사용자가 plugin 상태와 선언 surface를 안전하게 관찰하고 config activation gate를 조작할 수 있는 foundation, 그리고 enabled plugin의 typed hook entrypoint를 direct agent-loop path에서 diagnostics-only로 dispatch하는 첫 executable slice다. 이 범위는 전체 Spec 25 완료가 아니라 behavior-affecting plugin system을 열기 전의 안전한 기반이다.
+현재 구현 완료 범위는 사용자가 plugin 상태와 선언 surface를 안전하게 관찰하고 config activation gate를 조작할 수 있는 foundation, enabled plugin hook을 agent runtime에서 bounded/redacted command boundary로 dispatch하는 executable slice, `tool:before` block-only 결과를 도구 실행 직전 normalized tool error로 소비하는 제한 behavior-affecting slice, enabled plugin tool/MCP/skill/command를 기존 owner boundary로만 연결하는 live slice다.
 
 - `plugin.json` discovery, digest, state projection은 지원한다.
 - `plugin.toml`은 `plugin.json`과 같은 discovery/config gate를 통과하며, TOML manifest는 snake_case 필드 이름을 기본으로 받는다.
-- Hook은 event catalog, output validation, timeout/error diagnostics를 제공한다. 현재 live dispatch coverage는 enabled plugin의 typed hook entrypoint를 direct agent-loop diagnostics-only path에서 실행하는 범위로 제한된다.
-- Plugin tool, command, skill, MCP declaration은 descriptor-only metadata로만 projection된다.
-- Plugin command-backed process execution, MCP server startup, dynamic library/WASM/Python/scripting runtime은 구현하지 않았다.
-- Runtime hook dispatch output은 redacted evidence와 digest로만 남기며 tool calls, model content, permissions, provider-visible tools, commands, skills, MCP server를 mutate하지 않는다.
+- Hook은 event catalog, output validation, timeout/error diagnostics를 제공하며, enabled plugin의 typed hook entrypoint는 agent runtime에서 bounded process command로 dispatch될 수 있다.
+- `tool:before` block-only output은 첫 valid block을 deterministic plugin/hook order로 선택해 해당 도구 호출을 실행하지 않고 normalized tool error를 반환한다. Hook output은 permission approval, allow, grant를 만들 수 없다.
+- Observer hook output은 redacted evidence와 digest로만 남기며 model content, permissions, provider-visible tools, commands, skills, MCP server를 mutate하지 않는다.
+- Enabled plugin tool은 command-backed process boundary로 실행되며 기존 `ToolRegistry`, runtime tool executor, permission/redaction/replay 경계를 우회하지 않는다.
+- Enabled plugin MCP declaration은 production MCP startup path에만 `McpServerSpec`으로 투영된다. `plugins`/`hooks` inspect/doctor 계열은 MCP server를 시작하지 않는다.
+- Enabled plugin skill은 read-only plugin skill root로 skill registry/context builder에 들어가며 permission이나 tool visibility를 얻지 않는다.
+- Enabled plugin command는 builtin `CommandId`를 확장하지 않는 별도 plugin command router에서 route되고 safe dispatcher가 command-backed process boundary로 실행한다. Builtin command conflict는 diagnostic/exclusion으로 처리하며 `/status`, `/stop`, `/restart`, `/help` 같은 builtin을 override하지 않는다.
+- Dynamic library/WASM/Python/scripting runtime은 구현하지 않았다.
 - `disabled`, `blocked`, `not_enabled`, untrusted workspace-local plugin은 active tool/skill/hook/command/MCP surface를 만들지 않는다.
 - `plugins list/inspect/doctor/enable/disable`과 `hooks list/inspect` CLI는 redaction-safe projection을 제공한다. `hooks inspect`는 descriptor and diagnostics summary surface이며, runtime dispatch summary는 별도로 기록된 evidence가 있을 때만 볼 수 있다. `enable`/`disable`은 config만 수정하며 running session/toolset을 mutate하지 않는다.
 - Replay는 plugin live dispatch를 허용하지 않고 recorded/redacted evidence만 해석하는 경계를 유지한다.
 
-Full Spec 25 완료까지 남은 핵심 범위:
+이 closure 밖의 deliberate non-goals / future expansion:
 
-- 제한된 behavior-affecting hook output의 실제 runtime 적용.
-- Command-backed plugin tool execution과 MCP-backed handler startup.
-- Plugin-provided skill activation과 plugin command router integration.
-- Execution env allow-list materialization, output limit, redaction evidence의 end-to-end 적용.
-- Behavior-affecting hook/tool/command/MCP/skill execution wiring beyond diagnostics-only hook dispatch.
+- Plugin command가 running session store를 직접 mutate하는 권한.
+- Dynamic library/WASM/Python/scripting loader, public marketplace, hosted registry, organization/fleet governance.
 
 ---
 
@@ -170,7 +171,7 @@ Manifest 규칙:
 Hook return rule:
 
 1. 대부분 hook은 observer-only다.
-2. `tool:before` block은 tool error로 provider에 반환될 수 있지만, permission allow를 만들 수 없다.
+2. `tool:before` block은 tool error로 provider에 반환될 수 있지만, permission approval/allow/grant를 만들 수 없다. 동일 batch에서 여러 hook이 block을 반환하면 plugin/hook 정렬 순서상 첫 valid block이 결정적으로 적용된다.
 3. `llm:before` injection은 system prompt를 바꾸지 않고 현재 user message 옆에 ephemeral context로만 붙는다.
 4. `command:before`와 `channel:inbound` rewrite/skip은 MainOrchestrator 또는 command router가 다시 검증해야 한다.
 5. Hook이 panic, timeout, invalid output을 만들면 해당 hook만 실패 처리하고 runtime은 계속된다.
@@ -182,13 +183,13 @@ Hook return rule:
 Plugin tool은 core tool이 아니다.
 
 1. Tool schema는 plugin manifest 또는 plugin-owned schema file에서 온다.
-2. Handler는 초기 구현에서 command-backed process, MCP server, 또는 runtime이 아는 safe adapter를 통해 실행한다.
+2. Command-backed handler는 bounded JSON args와 bounded JSON/text result contract로 실행되며 기존 tool runtime, permission, replay, redaction boundary를 통과해야 한다.
 3. Handler output은 004의 `ToolResult`/normalized tool message 경계를 통과한다.
 4. Plugin tool은 010/022 permission ceiling을 높일 수 없다.
 5. Plugin tool은 기본적으로 020 Tool Search의 deferrable candidate다.
 6. Unknown, disabled, blocked plugin tool은 provider-visible schema에 나타나면 안 된다.
 
-Plugin command는 user command surface다. Command는 세션 상태를 직접 바꾸지 않고 command router 또는 MainOrchestrator로 재진입해야 한다.
+Plugin command는 user command surface다. Command는 builtin `CommandId`에 들어가지 않고 별도 plugin route object로 dispatch되며, 세션 상태를 직접 바꾸지 않는다.
 
 Plugin skill은 005의 Markdown skill이다.
 
