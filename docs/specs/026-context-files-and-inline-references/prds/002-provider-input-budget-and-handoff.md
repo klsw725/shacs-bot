@@ -97,7 +97,7 @@ Context files와 inline references가 provider context budget을 공유할 때�
 
 ## 구현 상태
 
-Status: Implemented for PRD 002 typed budget, handoff boundary, and live AgentRunner provider-only injection. Replay evidence, user-facing projection, and release evidence are also implemented in later Spec 026 PRDs.
+Status: Implemented for PRD 002 typed budget, handoff boundary, and live AgentRunner provider-only injection. Replay evidence, CLI/core diagnostics, and release evidence are also implemented in later Spec 026 PRDs. TUI/local API projection remains future unless a later owner wires it.
 
 Evidence:
 

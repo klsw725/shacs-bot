@@ -99,7 +99,7 @@
 
 ## 구현 상태
 
-Status: Implemented for PRD 003 read-only resolver boundary. Provider budget handoff, replay evidence, redaction pipeline integration, user-facing projection, and live runtime handoff are also implemented.
+Status: Implemented for PRD 003 read-only resolver boundary. Provider budget handoff, replay evidence, redaction pipeline integration, CLI/core diagnostics, and live runtime handoff are also implemented. TUI/local API projection remains future unless a later owner wires it.
 
 Evidence:
 

@@ -161,10 +161,10 @@ Spec 026의 context files와 inline `@` references를 구현 가능한 순서로
 
 ## 구현 상태
 
-Status: Implemented for live runtime closure.
+Status: Implemented for CLI/core diagnostics and live provider handoff. TUI/local API projection remains future unless a later owner wires it.
 
 Evidence:
 
-- Normal user turns and `ask_user` resume turns now build a `ContextProviderHandoff` from inline references and workspace/current-directory context files before `AgentRunSpec` execution, excluding workspace-root bootstrap files and symlink aliases already consumed by the legacy system prompt to avoid dual authority.
+- Normal user turns and `ask_user` resume turns now build a `ContextProviderHandoff` from inline references and default workspace/current-directory context files before `AgentRunSpec` execution, excluding workspace-root bootstrap files and symlink aliases already consumed by the legacy system prompt to avoid dual authority. Core discovery supports configured extra context files, but explicit config-provided extra context file wiring in the live agent loop is outside this closure.
 - Agent runner provider requests receive context blocks ephemerally as lower-priority user context, while `AgentRunResult.messages` and persisted session messages retain the original user text with `@` references and no injected context block.
-- Targeted tests cover live loop handoff, current-directory context file discovery, protected symlink targets, provider-only injection, finalization retry injection, `ask_user` resume injection, and configured live context budget behavior.
+- Targeted tests cover live loop handoff, current-directory default context file discovery, protected symlink targets, provider-only injection, finalization retry injection, `ask_user` resume injection, and configured live context budget behavior.

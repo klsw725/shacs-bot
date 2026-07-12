@@ -2,7 +2,7 @@
 
 ## 목표
 
-사용자가 context files와 inline references의 포함/스킵/절단 이유를 확인할 수 있는 CLI/TUI/local API projection과 release evidence gate를 고정한다.
+사용자가 context files와 inline references의 포함/스킵/절단 이유를 확인할 수 있는 CLI/core diagnostics projection과 release evidence gate를 고정한다. TUI/local API projection은 같은 data contract를 소비해야 하는 target surface지만 현재 구현 완료 범위에는 포함하지 않는다.
 
 ## 범위
 
@@ -30,7 +30,7 @@
 ## SPEC 입력
 
 1. 주관 spec은 `docs/specs/026-context-files-and-inline-references/SPEC.md`다.
-2. CLI/TUI/local API projection은 `docs/specs/013-user-interfaces-and-session-ux/SPEC.md`를 소비한다.
+2. CLI/core diagnostics projection은 `docs/specs/013-user-interfaces-and-session-ux/SPEC.md`의 user-facing semantics를 소비한다. TUI/local API rendering/wiring은 후속 surface owner가 닫는다.
 3. diagnostics bundle은 `docs/specs/014-observability-diagnostics-and-inspection/SPEC.md`를 소비한다.
 4. release gates는 `docs/specs/016-verification-matrix-and-release-gates/SPEC.md`를 소비한다.
 5. user docs는 context assembly owner 009를 대체하지 않고 026 syntax/safety만 설명한다.
@@ -47,7 +47,7 @@
 
 | Requirement | Likely crate/module | Test perspective |
 |---|---|---|
-| context files list/inspect | `crates/shacs-cli/src/lib.rs`, `crates/shacs-api/src/lib.rs` | included/skipped/truncated projection |
+| context files list/inspect | `crates/shacs-cli/src/lib.rs` | included/skipped/truncated CLI diagnostics projection |
 | refs parse dry-run | `crates/shacs-cli/src/lib.rs` | no source read |
 | refs resolve dry-run | `crates/shacs-cli/src/lib.rs`, `crates/shacs-core/src/runtime/context_refs.rs` | permission/redaction/budget status |
 | release evidence | `docs/scripts` or existing release gate tests | parser/discovery/resolver/safety/docs coverage |
@@ -97,12 +97,12 @@
 
 ## 구현 상태
 
-Status: Implemented for PRD 005 CLI/core/projection/docs boundary.
+Status: Implemented for PRD 005 CLI/core diagnostics/docs boundary. TUI/local API projection remains future unless a later owner wires it.
 
 Evidence:
 
 - `crates/shacs-core/src/runtime/context_diagnostics.rs` adds redaction-safe context diagnostics summaries for parse results, context files, resolved artifacts, safety/replay evidence, and budget handoff evidence without raw content fields.
 - `crates/shacs-cli/src/lib.rs` adds `context files list`, `context files inspect`, `context refs parse`, and `context refs resolve` dry-run commands. Parse uses no source reads; resolve uses read-only resolver, safety gate, and budget summary.
-- `crates/shacs-projection/src/diagnostics_release.rs` adds Spec 026 PRD 005 release evidence buckets for parser, discovery, resolver, budget, safety, replay, and docs, requiring owner `026` redaction-safe evidence refs.
+- `crates/shacs-projection/src/diagnostics_release.rs` adds Spec 026 PRD 005 release evidence buckets for parser, discovery, resolver, budget, safety, replay, and docs, requiring owner `026` redaction-safe evidence refs. This is release evidence evaluation, not a TUI/local API runtime projection.
 - `docs/USAGE.md` documents supported syntax, limits, safety behavior, and replay/no-live-refetch behavior.
 - Targeted verification passed: `cargo test --manifest-path crates/shacs-core/Cargo.toml context_diagnostics`, `cargo test --manifest-path crates/shacs-projection/Cargo.toml context_prd005_release_evidence`, and `cargo test --manifest-path crates/shacs-cli/Cargo.toml context_refs_parse context_files context_refs_resolve parser_handles_context_command_surface context_docs_describe_reference_syntax_limits_and_safety` as individual filters.
