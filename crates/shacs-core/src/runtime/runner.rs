@@ -1098,10 +1098,7 @@ fn tool_context_with_classifier_verdict(
         permissioned_action_input_from_context(&context),
     );
     let decision = permission_decision_for_action(&action, &context);
-    if decision.kind != PermissionPolicyDecisionKind::Ask
-        || decision.reason != PermissionPolicyReason::EvaluatorUnavailable
-        || action.permission_mode_snapshot.mode != PermissionMode::Auto
-    {
+    if !classifier_reviewable_policy_decision(&decision, &action) {
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
@@ -1184,10 +1181,7 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
         permissioned_action_input_from_context(&context),
     );
     let decision = permission_decision_for_action(&action, &context);
-    if decision.kind != PermissionPolicyDecisionKind::Ask
-        || decision.reason != PermissionPolicyReason::EvaluatorUnavailable
-        || action.permission_mode_snapshot.mode != PermissionMode::Auto
-    {
+    if !classifier_reviewable_policy_decision(&decision, &action) {
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
@@ -1363,6 +1357,25 @@ fn classifier_eligible_action(action: &PermissionedAction, context: &ToolExecuti
                 | SafetyCapability::RuntimeConfigWrite
                 | SafetyCapability::SelfModification => false,
             })
+}
+
+fn classifier_reviewable_policy_decision(
+    decision: &PermissionPolicyDecision,
+    action: &PermissionedAction,
+) -> bool {
+    if decision.reason == PermissionPolicyReason::StaticAskRequired
+        && action.capabilities.contains(&SafetyCapability::ProcExec)
+    {
+        return false;
+    }
+
+    action.permission_mode_snapshot.mode == PermissionMode::Auto
+        && decision.kind == PermissionPolicyDecisionKind::Ask
+        && matches!(
+            decision.reason,
+            PermissionPolicyReason::EvaluatorUnavailable
+                | PermissionPolicyReason::StaticAskRequired
+        )
 }
 
 fn classify_auto_permission_action(

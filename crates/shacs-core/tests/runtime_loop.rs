@@ -4271,11 +4271,7 @@ fn agent_runner_auto_classifier_keeps_non_exact_proc_exec_commands_approval_gate
                 ..LlmResponse::default()
             },
         ]);
-        let classifier = MockProvider::new(vec![classifier_verdict_response(
-            "allow_candidate",
-            "high",
-            "requested",
-        )]);
+        let classifier = MockProvider::new(Vec::new());
         let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
         let mut context = interactive_auto_context(AutoApprovalConfig {
             enabled: true,
@@ -4320,7 +4316,7 @@ fn agent_runner_auto_classifier_keeps_unsummarized_exec_approval_gated(
         RuntimeToolCall::new(
             "exec-unsummarized",
             "exec",
-            json!({ "command": "rm -rf target" }),
+            json!({ "command": "rm .git/config" }),
         ),
     )?]);
     let classifier = MockProvider::new(vec![classifier_verdict_response(
@@ -4374,9 +4370,7 @@ fn agent_runner_auto_classifier_keeps_cargo_with_untrusted_options_approval_gate
         ),
     )?]);
     let classifier = MockProvider::new(vec![classifier_verdict_response(
-        "allow_candidate",
-        "high",
-        "requested",
+        "ask_user", "medium", "adjacent",
     )]);
     let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
     let mut context = interactive_auto_context(AutoApprovalConfig {
