@@ -132,6 +132,10 @@ fn session_ux_projection_hides_raw_values_but_preserves_query_semantics(
         "runtime_checkpoint".to_owned(),
         json!({ "phase": "awaiting_tools", "raw": "hidden" }),
     );
+    session.metadata.insert(
+        "runtime_diagnostics".to_owned(),
+        json!({ "refs": ["workflow://diag-safe", "", "workflow://diag-safe"], "raw": "sk-hidden" }),
+    );
     session.add_message("user", "hello secret", Map::new());
     session.add_message("assistant", "world", Map::new());
     manager.save(&session)?;
@@ -154,12 +158,14 @@ fn session_ux_projection_hides_raw_values_but_preserves_query_semantics(
 
     if summaries.len() != 1
         || summaries[0].key != "cli:ux"
-        || detail.metadata_keys != ["api_token", "runtime_checkpoint"]
-        || detail.recovery_markers != ["runtime_checkpoint"]
+        || detail.metadata_keys != ["api_token", "runtime_checkpoint", "runtime_diagnostics"]
+        || detail.recovery_markers != ["runtime_checkpoint", "runtime_diagnostics"]
         || detail.checkpoint_phase.as_deref() != Some("awaiting_tools")
+        || detail.diagnostics_refs != ["workflow://diag-safe"]
         || detail.message_count != 2
         || detail.last_consolidated != 0
         || diagnostics.legal_start != 0
+        || diagnostics.diagnostics_refs != ["workflow://diag-safe"]
         || history.history.len() != 2
         || history.history[0]["content"] != "hello secret"
     {
@@ -172,6 +178,7 @@ fn session_ux_projection_hides_raw_values_but_preserves_query_semantics(
     let detail_json = serde_json::to_value(&detail)?;
     if detail_json.to_string().contains("secret-value")
         || detail_json.to_string().contains("hidden")
+        || detail_json.to_string().contains("sk-hidden")
         || detail_json.get("messages").is_some()
     {
         return Err(format!("UX detail exposed raw values: {detail_json}").into());

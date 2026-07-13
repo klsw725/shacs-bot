@@ -218,6 +218,7 @@ pub struct SessionUxDetail {
     pub last_consolidated: usize,
     pub recovery_markers: Vec<String>,
     pub checkpoint_phase: Option<String>,
+    pub diagnostics_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,6 +231,7 @@ pub struct SessionUxDiagnostics {
     pub metadata_keys: Vec<String>,
     pub recovery_markers: Vec<String>,
     pub checkpoint_phase: Option<String>,
+    pub diagnostics_refs: Vec<String>,
     pub legal_start: usize,
 }
 
@@ -521,6 +523,7 @@ impl SessionManager {
                 metadata_keys: Vec::new(),
                 recovery_markers: Vec::new(),
                 checkpoint_phase: None,
+                diagnostics_refs: Vec::new(),
                 legal_start: 0,
             }
         }
@@ -730,7 +733,7 @@ fn session_payload(session: &Session) -> Value {
 }
 
 fn session_ux_detail_from_session(session: Session, path: PathBuf) -> SessionUxDetail {
-    let (metadata_keys, recovery_markers, checkpoint_phase) =
+    let (metadata_keys, recovery_markers, checkpoint_phase, diagnostics_refs) =
         session_ux_metadata(&session.metadata);
     SessionUxDetail {
         key: session.key,
@@ -742,11 +745,12 @@ fn session_ux_detail_from_session(session: Session, path: PathBuf) -> SessionUxD
         last_consolidated: session.last_consolidated,
         recovery_markers,
         checkpoint_phase,
+        diagnostics_refs,
     }
 }
 
 fn session_ux_diagnostics_from_session(session: Session, path: PathBuf) -> SessionUxDiagnostics {
-    let (metadata_keys, recovery_markers, checkpoint_phase) =
+    let (metadata_keys, recovery_markers, checkpoint_phase, diagnostics_refs) =
         session_ux_metadata(&session.metadata);
     let legal_start = find_legal_message_start(&session.messages);
     SessionUxDiagnostics {
@@ -758,13 +762,14 @@ fn session_ux_diagnostics_from_session(session: Session, path: PathBuf) -> Sessi
         metadata_keys,
         recovery_markers,
         checkpoint_phase,
+        diagnostics_refs,
         legal_start,
     }
 }
 
 fn session_ux_metadata(
     metadata: &Map<String, Value>,
-) -> (Vec<String>, Vec<String>, Option<String>) {
+) -> (Vec<String>, Vec<String>, Option<String>, Vec<String>) {
     let mut metadata_keys = metadata.keys().cloned().collect::<Vec<_>>();
     metadata_keys.sort();
     let mut recovery_markers = Vec::new();
@@ -777,12 +782,48 @@ fn session_ux_metadata(
     if metadata.contains_key("_last_summary") {
         recovery_markers.push("_last_summary".to_owned());
     }
+    let diagnostics_refs = session_diagnostics_refs(metadata);
+    if !diagnostics_refs.is_empty() {
+        recovery_markers.push("runtime_diagnostics".to_owned());
+    }
     let checkpoint_phase = metadata
         .get("runtime_checkpoint")
         .and_then(|checkpoint| checkpoint.get("phase"))
         .and_then(Value::as_str)
         .map(str::to_owned);
-    (metadata_keys, recovery_markers, checkpoint_phase)
+    (
+        metadata_keys,
+        recovery_markers,
+        checkpoint_phase,
+        diagnostics_refs,
+    )
+}
+
+fn session_diagnostics_refs(metadata: &Map<String, Value>) -> Vec<String> {
+    let mut refs = Vec::new();
+    collect_string_refs(metadata.get("diagnostics_refs"), &mut refs);
+    collect_string_refs(
+        metadata
+            .get("runtime_diagnostics")
+            .and_then(|diagnostics| diagnostics.get("refs")),
+        &mut refs,
+    );
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn collect_string_refs(value: Option<&Value>, refs: &mut Vec<String>) {
+    if let Some(values) = value.and_then(Value::as_array) {
+        refs.extend(
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+        );
+    }
 }
 
 fn validate_regular_session_paths(paths: &[PathBuf]) -> std::io::Result<()> {
