@@ -45,14 +45,14 @@ Config 문자열 값은 load 시 `${ENV_NAME}` 형태의 environment variable re
 
 `permissions.mode`는 provider tool 실행 경로가 소비하는 permission policy gate 설정입니다. Rust runtime은 `default`, `plan`, `accept_edits`, `auto`, `dont_ask`, `bypass_permissions` 값을 파싱해 safe fallback/diagnostics를 만들고, provider tool call과 deferred bridge call을 실행 직전 permission mode snapshot과 policy decision에 통과시킵니다. `allow`만 즉시 tool 실행으로 이어지고, `deny`는 실행하지 않은 permission outcome으로 provider-visible tool result에 남습니다. `ask`는 channel runtime에서 사용자에게 승인 질문을 보내며, 사용자가 `1`/`approve`로 승인하면 같은 pending tool call만 승인된 컨텍스트로 실행한 뒤 turn을 이어갑니다. `3`/`approve_session`은 현재 session에서 session key, action digest, permission context, requested scope가 모두 같은 후속 action만 재사용 승인합니다. `2`/`deny` 또는 `cancel`은 실행하지 않고 취소합니다. `ask_user`는 여전히 별도 user interruption tool이며 formal approval decision으로 해석되지 않습니다. `auto`는 user-local opt-in이나 명시적 실행 source 없이 workspace config만으로 활성화되지 않고, `bypass_permissions`는 격리 precondition이 충족된 명시적 opt-in일 때만 normalized snapshot에서 유지됩니다.
 
-현재 config와 provider field를 확인합니다:
+현재 config, provider field, workflow recipe discovery 상태를 확인합니다:
 
 ```sh
 shacs-bot status
 shacs-bot status --config /tmp/shacs-config.json
 ```
 
-`status`는 plain text를 출력합니다. JSON envelope를 출력하지 않고, config migration을 disk에 다시 쓰지도 않습니다.
+`status`는 plain text를 출력합니다. JSON envelope를 출력하지 않고, config migration을 disk에 다시 쓰지도 않습니다. Workflow recipe count는 skill metadata에서 발견한 read-only recipe 후보를 요약하며, recipe가 권한 grant나 실행 코드를 추가했다는 뜻이 아닙니다.
 
 Secret이나 session message 본문을 읽지 않고 로컬 runtime/workspace 상태를 확인합니다:
 
@@ -62,7 +62,7 @@ shacs-bot runtime inspect --workspace /tmp/ws
 shacs-bot runtime diagnostics --bundle /tmp/shacs-diagnostics.zip --workspace /tmp/ws
 ```
 
-`runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, ownership status, stop request marker, update marker, runtime capability 요약, containment contained/backend/snapshot digest, session 개수와 최신 session metadata를 보고합니다. `runtime diagnostics` bundle에는 containment summary/digest가 redacted diagnostics field로 포함됩니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고되며, sandboxed라고 주장하지 않습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
+`runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, ownership status, stop request marker, update marker, runtime capability 요약, containment contained/backend/snapshot digest, session 개수와 최신 session metadata, workflow recipe discovery count를 보고합니다. `runtime diagnostics` bundle에는 containment summary/digest가 redacted diagnostics field로 포함됩니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고되며, sandboxed라고 주장하지 않습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
 
 Workspace context file과 inline `@` reference가 어떻게 해석되는지 dry-run으로 확인합니다:
 
@@ -209,7 +209,14 @@ shacs-bot skills show skill-creator
 shacs-bot skills show clawhub --workspace /tmp/ws
 ```
 
-`skills list`는 `onboard`가 `builtin_skills/`를 materialize하기 전에도 embedded active built-in skill을 포함합니다. Deferred built-in skill은 reference-only source로 보관되며 `onboard`, `skills list`, `skills show`에는 나오지 않습니다. Workspace skill은 built-in skill을 shadow할 수 있습니다. Shadowed, conflicted, malformed 같은 비활성 diagnostic까지 보려면 `skills list --all`을 사용하세요. `skills show`는 source, status, body hash, requirements, install metadata, diagnostics를 출력합니다. ClawHub search/install/update 명령은 이후 slice로 남아 있습니다.
+Skill-backed workflow recipe 후보를 검사합니다:
+
+```sh
+shacs-bot skills recipes
+shacs-bot skills recipes --all --workspace /tmp/ws
+```
+
+`skills list`는 `onboard`가 `builtin_skills/`를 materialize하기 전에도 embedded active built-in skill을 포함합니다. Deferred built-in skill은 reference-only source로 보관되며 `onboard`, `skills list`, `skills show`에는 나오지 않습니다. Workspace skill은 built-in skill을 shadow할 수 있습니다. Shadowed, conflicted, malformed 같은 비활성 diagnostic까지 보려면 `skills list --all`을 사용하세요. `skills show`는 source, status, body hash, requirements, install metadata, diagnostics를 출력하고, 해당 skill이 workflow recipe metadata를 갖고 있으면 recipe summary도 함께 보여줍니다. `skills recipes`는 active and ready recipe만 기본 표시하고, malformed/conflicted source까지 보려면 `--all`을 사용합니다. Recipe metadata는 `workflow.recipe.id`, `workflow.recipe.pattern`, `workflow.recipe.prompt_template_ref` 같은 skill frontmatter 또는 `metadata.shacs.workflow_recipe` JSON에서 읽는 read-only harness input이며, permission grant, hidden tool access, plugin code 실행 권한을 만들지 않습니다. ClawHub search/install/update 명령은 이후 slice로 남아 있습니다.
 
 ## 앱
 
@@ -370,6 +377,7 @@ shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 - `GET /health`
 - `GET /v1/models`
 - `GET /v1/diagnostics`
+- `GET /v1/workflows/recipes`
 - `GET /v1/sessions`
 - `GET /v1/sessions/{session}`
 - `GET /v1/sessions/{session}/history`
@@ -379,7 +387,7 @@ shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 
 `POST /v1/chat/completions`는 단일 user message, optional `session_id`, optional `temperature`, optional `max_tokens`, JSON text 또는 data-URL image content part, multipart upload, non-stream response, `stream=true` Server-Sent Events를 받습니다. Remote image URL은 거부합니다. Data URL과 uploaded file은 runtime media directory의 `attachments/api/` subtree 아래에 저장되며, 파일당 10 MiB 제한이 있습니다. 저장된 attachment는 provider/model이 native image input을 지원한다고 확인되는 경우 image block으로 라우팅되고, text/PDF/Office 계열은 가능한 경우 text note와 추출 텍스트로 라우팅됩니다. Provider나 model이 image input을 지원하지 않는 경우 image attachment는 raw 경로를 노출하지 않는 unsupported note로 전달됩니다. Audio attachment는 지원되는 analyzer가 runtime에 주입된 경우 bounded transcript 또는 summary text artifact로 라우팅되고, analyzer가 없거나 지원되지 않으면 내용을 들은 것처럼 처리하지 않고 unsupported 또는 extraction_failed note로 남습니다. Video attachment도 같은 capability-based 방식입니다. Runtime에 video analyzer가 주입된 경우에만 byte/duration cap 이후 bounded metadata, subtitle excerpt, scene/keyframe summary, PRD 003 audio analyzer를 재사용한 audio-track transcript/summary 후보를 만들고, analyzer가 없으면 deferred가 아니라 `video analyzer is not configured` unsupported note로 남깁니다. 기본 ffmpeg, built-in codec parser, native outbound video delivery는 제공하지 않습니다.
 
-`GET /v1/diagnostics`는 redacted runtime diagnostics snapshot을 반환합니다. `/v1/sessions` family는 configured workspace의 session list, detail, filtered message history, diagnostics를 raw session file이나 provider payload 없이 조회하는 read-only surface입니다. Filtered history에는 user/assistant message content가 포함될 수 있으므로 로컬 API bind 범위와 로그 보관 정책을 그에 맞게 다루세요. `/ws`는 JSON `message` frame을 local `AgentLoop`로 전달하고 `delta`, `stream_end`, final `message`, attach/ready/error event를 반환하는 WebSocket bridge입니다.
+`GET /v1/diagnostics`는 redacted runtime diagnostics snapshot을 반환합니다. `GET /v1/workflows/recipes`는 CLI `skills recipes`와 같은 `024WorkflowRecipeProjection.v1` read-only projection을 반환합니다. `/v1/sessions` family는 configured workspace의 session list, detail, filtered message history, diagnostics를 raw session file이나 provider payload 없이 조회하는 read-only surface입니다. Filtered history에는 user/assistant message content가 포함될 수 있으므로 로컬 API bind 범위와 로그 보관 정책을 그에 맞게 다루세요. `/ws`는 JSON `message` frame을 local `AgentLoop`로 전달하고 `delta`, `stream_end`, final `message`, attach/ready/error event를 반환하는 WebSocket bridge입니다.
 
 같은 session key의 API request는 CLI/channel runtime과 같은 process-local `SessionTurnLock`으로 직렬화됩니다. `--timeout`은 HTTP wait timeout을 제어합니다. Timeout response가 반환되어도 in-flight turn은 blocking `AgentLoop` 작업이 끝날 때까지 해당 session lock을 계속 소유합니다.
 
