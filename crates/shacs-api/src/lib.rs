@@ -34,6 +34,7 @@ pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const MODELS_PATH: &str = "/v1/models";
 pub const SESSIONS_PATH: &str = "/v1/sessions";
 pub const DIAGNOSTICS_PATH: &str = "/v1/diagnostics";
+pub const WORKFLOW_RECIPES_PATH: &str = "/v1/workflows/recipes";
 pub const HEALTH_PATH: &str = "/health";
 pub const WEBSOCKET_PATH: &str = "/ws";
 pub const JSON_CONTENT_TYPE: &str = "application/json";
@@ -273,6 +274,10 @@ pub trait ChatCompletionAdapter {
         snapshot
     }
 
+    fn workflow_recipes_projection(&self) -> Option<Value> {
+        None
+    }
+
     fn process_websocket_frame(
         &self,
         _frame: Value,
@@ -354,6 +359,7 @@ pub fn api_router_with_timeout_and_websocket_path(
         .route(HEALTH_PATH, any(axum_dispatch))
         .route(MODELS_PATH, any(axum_dispatch))
         .route(DIAGNOSTICS_PATH, any(axum_dispatch))
+        .route(WORKFLOW_RECIPES_PATH, any(axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(axum_dispatch))
         .route(websocket_path, any(websocket_upgrade_axum))
         .fallback(axum_dispatch)
@@ -391,6 +397,7 @@ pub fn web_ui_router_with_timeout_and_websocket_path(
         .route(HEALTH_PATH, any(webui_axum_dispatch))
         .route(MODELS_PATH, any(webui_axum_dispatch))
         .route(DIAGNOSTICS_PATH, any(webui_axum_dispatch))
+        .route(WORKFLOW_RECIPES_PATH, any(webui_axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(webui_axum_dispatch))
         .route(websocket_path, any(webui_websocket_upgrade_axum))
         .fallback(webui_static_or_api_fallback)
@@ -677,6 +684,12 @@ pub fn handle_api_request(
         (ApiMethod::Get, DIAGNOSTICS_PATH) => {
             json_response(200, adapter.diagnostics_snapshot().redacted_value())
         }
+        (ApiMethod::Get, WORKFLOW_RECIPES_PATH) => match adapter.workflow_recipes_projection() {
+            Some(projection) => json_response(200, projection),
+            None => error_response(ApiError::not_found(
+                "workflow recipe projection is not configured",
+            )),
+        },
         (ApiMethod::Get, path) if path == SESSIONS_PATH || path.starts_with("/v1/sessions/") => {
             handle_session_query_request(path, adapter)
         }
@@ -686,6 +699,7 @@ pub fn handle_api_request(
         (_, HEALTH_PATH)
         | (_, MODELS_PATH)
         | (_, DIAGNOSTICS_PATH)
+        | (_, WORKFLOW_RECIPES_PATH)
         | (_, CHAT_COMPLETIONS_PATH)
         | (_, SESSIONS_PATH) => error_response(ApiError::method_not_allowed(
             "method is not supported for this endpoint",
@@ -788,6 +802,7 @@ fn handle_session_diagnostics_query(
             metadata_keys: Vec::new(),
             recovery_markers: Vec::new(),
             checkpoint_phase: None,
+            diagnostics_refs: Vec::new(),
             legal_start: 0,
         }),
     )
@@ -1976,6 +1991,7 @@ mod tests {
         captured: Mutex<Vec<ChatCompletionInvocation>>,
         websocket_frames: Mutex<Vec<Value>>,
         session_workspace: Option<PathBuf>,
+        workflow_recipes_projection: Option<Value>,
     }
 
     struct SlowAdapter {
@@ -2022,6 +2038,7 @@ mod tests {
                 captured: Mutex::new(Vec::new()),
                 websocket_frames: Mutex::new(Vec::new()),
                 session_workspace: None,
+                workflow_recipes_projection: None,
             }
         }
 
@@ -2032,6 +2049,11 @@ mod tests {
 
         fn with_stream_events(mut self, events: Vec<ProviderEvent>) -> Self {
             self.stream_events = events;
+            self
+        }
+
+        fn with_workflow_recipes_projection(mut self, projection: Value) -> Self {
+            self.workflow_recipes_projection = Some(projection);
             self
         }
 
@@ -2124,6 +2146,10 @@ mod tests {
                 "config_path": "/tmp/shacs/config.json",
             });
             snapshot
+        }
+
+        fn workflow_recipes_projection(&self) -> Option<Value> {
+            self.workflow_recipes_projection.clone()
         }
 
         fn process_websocket_frame(
@@ -2321,6 +2347,32 @@ mod tests {
         assert_eq!(response.body["runtime"]["api_key"], "[REDACTED]");
         let serialized = serde_json::to_string(&response.body).unwrap_or_default();
         assert!(!serialized.contains("sk-raw-secret"));
+        assert_eq!(adapter.call_count(), 0);
+        assert_eq!(adapter.websocket_frame_count(), 0);
+    }
+
+    #[test]
+    fn workflow_recipe_projection_route_uses_adapter_projection() {
+        let adapter = FakeAdapter::new("gpt-5", text_response("unused"))
+            .with_workflow_recipes_projection(json!({
+                "schema_label": "024WorkflowRecipeProjection",
+                "schema_version": "024WorkflowRecipeProjection.v1",
+                "object": "list",
+                "data": [{
+                    "recipe_id": "review-loop",
+                    "readiness": "ready",
+                    "pattern": "loop_until_done"
+                }]
+            }));
+
+        let response = handle_api_request(ApiHttpRequest::get(WORKFLOW_RECIPES_PATH), &adapter);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body["schema_version"],
+            "024WorkflowRecipeProjection.v1"
+        );
+        assert_eq!(response.body["data"][0]["recipe_id"], "review-loop");
         assert_eq!(adapter.call_count(), 0);
         assert_eq!(adapter.websocket_frame_count(), 0);
     }
