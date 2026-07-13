@@ -62,8 +62,8 @@ use shacs_providers::{
 };
 use shacs_redaction::redact_string;
 use shacs_skills::{
-    discover_skill_registry, sync_builtin_skills, SkillRegistryEntry, SkillRegistryOptions,
-    SkillRegistryStatus,
+    discover_skill_registry, discover_workflow_recipes, sync_builtin_skills,
+    SkillBackedWorkflowRecipe, SkillRegistryEntry, SkillRegistryOptions, SkillRegistryStatus,
 };
 use shacs_templates::sync_workspace_templates;
 use shacs_utils::attachments::{
@@ -82,6 +82,7 @@ use shacs_utils::progress_events::{
     build_tool_progress_start_payload, project_tool_progress_arguments, ProgressEventStatus,
     ToolProgressEvent, ToolProgressPayload,
 };
+use shacs_workflow::{WorkflowPattern, WorkflowRecipeReadiness};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs;
@@ -227,6 +228,7 @@ pub enum SessionCommand {
 pub enum SkillsCommand {
     List(SkillsListOptions),
     Show(SkillsShowOptions),
+    Recipes(SkillsRecipesOptions),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,6 +391,13 @@ pub struct SkillsShowOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkillsRecipesOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub all: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -853,6 +862,8 @@ pub struct StatusReport {
     pub model: String,
     pub provider: String,
     pub providers: Vec<ProviderStatus>,
+    pub workflow_recipe_count: usize,
+    pub malformed_workflow_recipe_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -877,6 +888,7 @@ pub struct RuntimeInspectReport {
     pub sessions: RuntimeSessionInspect,
     pub lifecycle: RuntimeLifecycleInspect,
     pub containment: RuntimeContainmentInspect,
+    pub workflow_recipes: Vec<SkillBackedWorkflowRecipe>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1110,6 +1122,15 @@ pub struct SkillsShowReport {
     pub config_path: PathBuf,
     pub workspace: PathBuf,
     pub entry: SkillRegistryEntry,
+    pub workflow_recipes: Vec<SkillBackedWorkflowRecipe>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillsRecipesReport {
+    pub config_path: PathBuf,
+    pub workspace: PathBuf,
+    pub recipes: Vec<SkillBackedWorkflowRecipe>,
+    pub all: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2556,6 +2577,15 @@ pub fn status(options: StatusOptions) -> Result<StatusReport, CliError> {
         &ProcessEnv,
     )?;
     apply_api_key_auth_overlay(&mut bundle)?;
+    let workflow_recipes = workflow_recipes_for_bundle(&bundle)?;
+    let malformed_workflow_recipe_count = workflow_recipes
+        .iter()
+        .filter(|recipe| matches!(recipe.readiness, WorkflowRecipeReadiness::Malformed { .. }))
+        .count();
+    let workflow_recipe_count = workflow_recipes
+        .iter()
+        .filter(|recipe| matches!(recipe.readiness, WorkflowRecipeReadiness::Ready))
+        .count();
     let workspace = bundle.context.workspace;
     let workspace_exists = workspace.exists();
     let mut providers = bundle
@@ -2578,6 +2608,8 @@ pub fn status(options: StatusOptions) -> Result<StatusReport, CliError> {
         model: bundle.config.agents.defaults.model,
         provider: bundle.config.agents.defaults.provider,
         providers,
+        workflow_recipe_count,
+        malformed_workflow_recipe_count,
     })
 }
 
@@ -2629,6 +2661,7 @@ fn runtime_inspect_inner(
     ))?;
     let compatibility = evaluate_runtime_compatibility(RUNTIME_DATA_SCHEMA_VERSION);
     let containment = runtime_containment_inspect(&bundle);
+    let workflow_recipes = workflow_recipes_for_bundle(&bundle)?;
 
     Ok(RuntimeInspectReport {
         config_path,
@@ -2652,6 +2685,7 @@ fn runtime_inspect_inner(
             update_marker,
         },
         containment,
+        workflow_recipes,
     })
 }
 
@@ -4320,6 +4354,7 @@ fn run_skills_command(command: SkillsCommand) -> Result<String, CliError> {
     match command {
         SkillsCommand::List(options) => skills_list(options).map(format_skills_list),
         SkillsCommand::Show(options) => skills_show(options).map(format_skills_show),
+        SkillsCommand::Recipes(options) => skills_recipes(options).map(format_skills_recipes),
     }
 }
 
@@ -5007,10 +5042,36 @@ pub fn skills_show(options: SkillsShowOptions) -> Result<SkillsShowReport, CliEr
         .ok_or_else(|| {
             CliError::InvalidArguments(format!("unknown skill `{}`", options.name.trim()))
         })?;
+    let registry = shacs_skills::SkillRegistry {
+        entries: entries.clone(),
+    };
+    let workflow_recipes = discover_workflow_recipes(&registry)
+        .into_iter()
+        .filter(|recipe| recipe.skill_name == entry.descriptor.name)
+        .collect();
     Ok(SkillsShowReport {
         config_path,
         workspace,
         entry,
+        workflow_recipes,
+    })
+}
+
+pub fn skills_recipes(options: SkillsRecipesOptions) -> Result<SkillsRecipesReport, CliError> {
+    let (config_path, workspace, entries) = load_skill_registry(
+        options.config_path.clone(),
+        options.workspace_override.clone(),
+    )?;
+    let registry = shacs_skills::SkillRegistry { entries };
+    let mut recipes = discover_workflow_recipes(&registry);
+    if !options.all {
+        recipes.retain(|recipe| matches!(recipe.readiness, WorkflowRecipeReadiness::Ready));
+    }
+    Ok(SkillsRecipesReport {
+        config_path,
+        workspace,
+        recipes,
+        all: options.all,
     })
 }
 
@@ -5035,6 +5096,18 @@ fn load_skill_registry(
     options.plugin_roots_enabled = true;
     let registry = discover_skill_registry(options)?;
     Ok((config_path, bundle.context.workspace, registry.entries))
+}
+
+fn workflow_recipes_for_bundle(
+    bundle: &ConfigBundle,
+) -> Result<Vec<SkillBackedWorkflowRecipe>, CliError> {
+    let mut options = SkillRegistryOptions::new(bundle.context.workspace.clone());
+    options.user_skills_dir = Some(bundle.context.data_dir.join("skills"));
+    let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
+    options.plugin_roots = enabled_plugin_skill_roots(&discovery.plugins);
+    options.plugin_roots_enabled = true;
+    let registry = discover_skill_registry(options)?;
+    Ok(discover_workflow_recipes(&registry))
 }
 
 fn load_channels_report(
@@ -5883,7 +5956,120 @@ pub fn format_skills_show(report: SkillsShowReport) -> String {
     if !entry.diagnostics.is_empty() {
         lines.push(format!("Diagnostics: {}", entry.diagnostics.join("; ")));
     }
+    if !report.workflow_recipes.is_empty() {
+        lines.push("Workflow recipes:".to_owned());
+        for recipe in report.workflow_recipes {
+            lines.push(format_workflow_recipe_line(&recipe));
+        }
+    }
     lines.join("\n")
+}
+
+pub fn format_skills_recipes(report: SkillsRecipesReport) -> String {
+    let mut lines = vec![
+        "Workflow recipes".to_owned(),
+        format!("Config: {}", report.config_path.display()),
+        format!("Workspace: {}", report.workspace.display()),
+    ];
+    if report.recipes.is_empty() {
+        lines.push("No workflow recipes found.".to_owned());
+        return lines.join("\n");
+    }
+    for recipe in report.recipes {
+        let status = if report.all {
+            format!(" [{}]", workflow_recipe_readiness_label(&recipe.readiness))
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "- {}{} ({}) from {}",
+            recipe.recipe.recipe_id,
+            status,
+            workflow_pattern_label(recipe.recipe.pattern),
+            recipe.skill_name
+        ));
+        lines.push(format!("  source: {}", recipe.recipe.source_ref));
+        lines.push(format!(
+            "  prompt_template: {}",
+            recipe.recipe.prompt_template_ref
+        ));
+        if !recipe.diagnostics.is_empty() && report.all {
+            lines.push(format!("  diagnostics: {}", recipe.diagnostics.join("; ")));
+        }
+    }
+    lines.join("\n")
+}
+
+fn format_workflow_recipe_line(recipe: &SkillBackedWorkflowRecipe) -> String {
+    format!(
+        "  - {} [{}] {} prompt_template={}",
+        recipe.recipe.recipe_id,
+        workflow_recipe_readiness_label(&recipe.readiness),
+        workflow_pattern_label(recipe.recipe.pattern),
+        recipe.recipe.prompt_template_ref
+    )
+}
+
+fn workflow_recipe_readiness_label(readiness: &WorkflowRecipeReadiness) -> &'static str {
+    match readiness {
+        WorkflowRecipeReadiness::Ready => "ready",
+        WorkflowRecipeReadiness::Malformed { .. } => "malformed",
+    }
+}
+
+fn workflow_pattern_label(pattern: WorkflowPattern) -> &'static str {
+    match pattern {
+        WorkflowPattern::ClassifyAndAct => "classify_and_act",
+        WorkflowPattern::FanOutAndSynthesize => "fan_out_and_synthesize",
+        WorkflowPattern::AdversarialVerification => "adversarial_verification",
+        WorkflowPattern::GenerateAndFilter => "generate_and_filter",
+        WorkflowPattern::Tournament => "tournament",
+        WorkflowPattern::LoopUntilDone => "loop_until_done",
+        WorkflowPattern::WorkflowSequence => "workflow_sequence",
+        WorkflowPattern::Hybrid => "hybrid",
+    }
+}
+
+fn workflow_recipes_projection_value(recipes: &[SkillBackedWorkflowRecipe]) -> Value {
+    json!({
+        "schema_label": "024WorkflowRecipeProjection",
+        "schema_version": "024WorkflowRecipeProjection.v1",
+        "object": "list",
+        "data": recipes.iter().map(workflow_recipe_projection_item).collect::<Vec<_>>(),
+    })
+}
+
+fn adapter_user_skills_dir(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .map(|path| path.join("skills"))
+        .unwrap_or_else(|| PathBuf::from("skills"))
+}
+
+fn workflow_recipe_projection_item(recipe: &SkillBackedWorkflowRecipe) -> Value {
+    let readiness = workflow_recipe_readiness_label(&recipe.readiness);
+    let reasons = match &recipe.readiness {
+        WorkflowRecipeReadiness::Ready => Vec::new(),
+        WorkflowRecipeReadiness::Malformed { reasons } => reasons.clone(),
+    };
+    json!({
+        "recipe_id": recipe.recipe.recipe_id,
+        "skill_name": recipe.skill_name,
+        "skill_status": recipe.skill_status.label(),
+        "source_kind": recipe.source_kind.label(),
+        "source_ref": recipe.recipe.source_ref,
+        "body_hash": recipe.body_hash,
+        "pattern": workflow_pattern_label(recipe.recipe.pattern),
+        "prompt_template_ref": recipe.recipe.prompt_template_ref,
+        "rubric_ref": recipe.recipe.rubric_ref,
+        "output_schema_ref": recipe.recipe.output_schema_ref,
+        "suggested_budget_tokens": recipe.recipe.suggested_budget_tokens,
+        "suggested_tool_scope_ref": recipe.recipe.suggested_tool_scope_ref,
+        "safety_notes": recipe.recipe.safety_notes,
+        "readiness": readiness,
+        "readiness_reasons": reasons,
+        "diagnostics": recipe.diagnostics,
+    })
 }
 
 pub fn format_apps_list(report: AppsListReport) -> String {
@@ -11444,10 +11630,10 @@ pub fn help_text() -> String {
         "",
         "Commands:",
         "  onboard   Create or refresh config and workspace templates",
-        "  status    Show config, workspace, model, and provider status",
+        "  status    Show config, workspace, model, provider, and workflow recipe status",
         "  runtime   Start, stop, restart, inspect, diagnose, update, or recover local runtime state",
         "  session   Manage local session files",
-        "  skills    List and inspect local skill registry entries",
+        "  skills    List skills, inspect entries, and discover workflow recipes",
         "  apps      Init authoring drafts; install, list, inspect, enable, disable, or uninstall local app bundles",
         "  plugins   List, inspect, doctor, enable, or disable plugin state and surfaces",
         "  hooks     List and inspect plugin hook metadata",
@@ -11759,12 +11945,13 @@ fn parse_skills(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "skills requires `list` or `show <name>`".to_owned(),
+            "skills requires `list`, `show <name>`, or `recipes`".to_owned(),
         ));
     };
     match action.as_str() {
         "list" | "ls" => parse_skills_list(parser, global_config),
         "show" | "inspect" => parse_skills_show(parser, global_config),
+        "recipes" | "recipe" => parse_skills_recipes(parser, global_config),
         "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(CliError::InvalidArguments(format!(
             "unknown skills subcommand `{other}`"
@@ -11837,6 +12024,33 @@ fn parse_skills_show(
         ));
     }
     Ok(CliCommand::Skills(SkillsCommand::Show(options)))
+}
+
+fn parse_skills_recipes(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = SkillsRecipesOptions {
+        config_path: global_config,
+        workspace_override: None,
+        all: false,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--all" => options.all = true,
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown skills recipes argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(CliCommand::Skills(SkillsCommand::Recipes(options)))
 }
 
 fn parse_apps(
@@ -13539,8 +13753,8 @@ impl AgentLoopChatCompletionAdapter {
             native_image_input_supported,
             client,
             retry_mode,
-            workspace: bundle.context.workspace,
-            config_path: bundle.context.config_path,
+            workspace: bundle.context.workspace.clone(),
+            config_path: bundle.context.config_path.clone(),
             media_dir,
             tools: tooling.registry,
             message_tool: tooling.message_tool,
@@ -14769,6 +14983,16 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         Some(self.workspace.clone())
     }
 
+    fn workflow_recipes_projection(&self) -> Option<Value> {
+        let mut options = SkillRegistryOptions::new(self.workspace.clone());
+        options.user_skills_dir = Some(adapter_user_skills_dir(&self.config_path));
+        options.plugin_roots = self.plugin_skill_roots.clone();
+        options.plugin_roots_enabled = true;
+        discover_skill_registry(options).ok().map(|registry| {
+            workflow_recipes_projection_value(&discover_workflow_recipes(&registry))
+        })
+    }
+
     fn persist_uploaded_file(
         &self,
         filename: Option<&str>,
@@ -15549,6 +15773,10 @@ fn format_status_report(report: StatusReport) -> String {
         ),
         format!("Model: {}", report.model),
         format!("Provider: {}", report.provider),
+        format!(
+            "Workflow recipes: {} ready, {} malformed",
+            report.workflow_recipe_count, report.malformed_workflow_recipe_count
+        ),
     ];
     if report.providers.is_empty() {
         lines.push("Configured providers: none".to_owned());
@@ -15594,6 +15822,7 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
             report.lifecycle.ownership.reason
         ),
         format!("Sessions: {}", report.sessions.count),
+        format!("Workflow recipes: {}", report.workflow_recipes.len()),
     ];
     if let Some(marker) = &report.lifecycle.ownership.marker {
         lines.push(format!(
@@ -21201,6 +21430,58 @@ mod tests {
         let output = format_skills_show(show);
         assert!(output.contains("Skill: test-driven-development"));
         assert!(output.contains("virtual-builtin"));
+        Ok(())
+    }
+
+    #[test]
+    fn skills_recipes_status_and_projection_surface_workflow_recipe_metadata(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let skill_dir = workspace.join("skills/spec-review");
+        fs::create_dir_all(&skill_dir)?;
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: spec-review\nworkflow.recipe.id: spec-review-loop\nworkflow.recipe.pattern: loop_until_done\nworkflow.recipe.prompt_template_ref: prompts/spec-review.md\n---\nReview until the spec is closed.",
+        )?;
+
+        let config_arg = config_path.to_string_lossy().to_string();
+        let parsed = parse_cli_args(["skills", "recipes", "--config", config_arg.as_str()])?;
+        assert!(matches!(
+            parsed,
+            CliCommand::Skills(SkillsCommand::Recipes(_))
+        ));
+
+        let recipes = skills_recipes(SkillsRecipesOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            all: false,
+        })?;
+        assert_eq!(recipes.recipes.len(), 1);
+        let output = format_skills_recipes(recipes.clone());
+        assert!(output.contains("spec-review-loop"));
+        assert!(output.contains("loop_until_done"));
+
+        let status = status(StatusOptions {
+            config_path: Some(config_path),
+        })?;
+        assert_eq!(status.workflow_recipe_count, 1);
+        assert_eq!(status.malformed_workflow_recipe_count, 0);
+
+        let projection = workflow_recipes_projection_value(&recipes.recipes);
+        assert_eq!(
+            projection["schema_version"],
+            json!("024WorkflowRecipeProjection.v1")
+        );
+        assert_eq!(
+            projection["data"][0]["recipe_id"],
+            json!("spec-review-loop")
+        );
+        assert_eq!(projection["data"][0]["readiness"], json!("ready"));
         Ok(())
     }
 
