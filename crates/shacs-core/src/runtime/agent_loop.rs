@@ -5,6 +5,10 @@ use crate::runtime::{
     resolve_context_reference,
 };
 use crate::runtime::{
+    build_workflow_checkpoint, decide_workflow_admission, run_live_runtime_workflow,
+    runtime_workflow_diagnostics, RuntimeWorkflowLiveInput,
+};
+use crate::runtime::{
     clear_goal, create_persistent_goal, mark_goal_blocked, mark_goal_done, pause_goal,
     persistent_goal_from_session, remove_persistent_goal, resume_goal, store_persistent_goal,
 };
@@ -22,8 +26,10 @@ use crate::runtime::{
     RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenStore, RuntimeContextTools,
     RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
     RuntimeToolMessage, Session, SessionApprovalCacheEntry, SessionHistoryOptions, SessionManager,
-    SessionTurnAcquireError, SessionTurnLock, TokenConsolidationConfig, ToolEventCallback,
-    ToolExecutionContext, DEFAULT_GOAL_TURN_BUDGET,
+    SessionTurnAcquireError, SessionTurnLock, SubagentExecutionConfig, SubagentRuntime,
+    TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext, WorkflowAdmissionDecision,
+    WorkflowAdmissionInput, WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowChildRunStatus,
+    WorkflowHarnessPlan, WorkflowRunState, WorkflowWorktreePolicy, DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, assemble_tool_surface, bridge_tool_names,
@@ -742,6 +748,11 @@ impl<'a> AgentLoop<'a> {
                 return Ok(result);
             }
             self.maybe_consolidate_session_by_tokens(&mut session)?;
+            if let Some(result) =
+                self.try_live_workflow_turn(&message, &mut session, &session_key)?
+            {
+                return Ok(result);
+            }
             let history = session.get_history_with_options(self.config.history_options);
             let initial_messages = self.context_builder.build_messages(ContextBuildRequest {
                 history,
@@ -918,6 +929,210 @@ impl<'a> AgentLoop<'a> {
             Some(&session_summary),
         )?;
         Ok(())
+    }
+
+    fn try_live_workflow_turn(
+        &mut self,
+        message: &InboundMessage,
+        session: &mut Session,
+        session_key: &str,
+    ) -> Result<Option<AgentLoopTurnResult>, AgentLoopError> {
+        let Some((admission, mut plan)) = workflow_request_from_metadata(&message.metadata)? else {
+            return Ok(None);
+        };
+
+        match decide_workflow_admission(&admission) {
+            WorkflowAdmissionDecision::UseRegularLoop => Ok(None),
+            WorkflowAdmissionDecision::AskUserForScope { question } => {
+                Ok(Some(self.publish_command_response(
+                    message,
+                    session.clone(),
+                    &question,
+                    None,
+                    "workflow_ask_user",
+                    true,
+                )?))
+            }
+            WorkflowAdmissionDecision::BlockedByPolicy { reasons } => {
+                let content = format!("Workflow blocked: {}", reasons.join("; "));
+                Ok(Some(self.publish_command_response(
+                    message,
+                    session.clone(),
+                    &content,
+                    None,
+                    "workflow_blocked",
+                    true,
+                )?))
+            }
+            WorkflowAdmissionDecision::UseQuickWorkflow { .. }
+            | WorkflowAdmissionDecision::UseDynamicWorkflow { .. } => {
+                if admission.requires_write_isolation && live_plan_missing_write_isolation(&plan) {
+                    return Ok(Some(self.publish_command_response(
+                        message,
+                        session.clone(),
+                        "Workflow blocked: write isolation required but the live plan is read-only",
+                        None,
+                        "workflow_blocked",
+                        true,
+                    )?));
+                }
+                plan.origin_session_id = session_key.to_owned();
+                append_user_turn(session, message);
+                session
+                    .metadata
+                    .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
+                self.sessions.save(session)?;
+
+                let subagent_runtime = SubagentRuntime::new();
+                let outcome = match run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+                    plan: plan.clone(),
+                    subagent_runtime: &subagent_runtime,
+                    provider_client: self.client,
+                    execution_config: self.workflow_subagent_execution_config(&plan),
+                    admitted_at_ms: now_unix_ms(),
+                }) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let final_content = format!("Workflow failed: {error}");
+                        session.add_message("assistant", final_content.clone(), Map::new());
+                        clear_runtime_markers(session);
+                        self.sessions.save(session)?;
+                        self.bus.publish_outbound(outbound_for(
+                            message,
+                            session_key,
+                            final_content.clone(),
+                            Vec::new(),
+                            "workflow_failed",
+                        ));
+                        return Ok(Some(AgentLoopTurnResult {
+                            session_key: session_key.to_owned(),
+                            final_content: Some(final_content),
+                            stop_reason: "workflow_failed".to_owned(),
+                            tools_used: Vec::new(),
+                            outbound_count: 1,
+                            had_injections: false,
+                            command: None,
+                            ask_user_options: Vec::new(),
+                            message_tool_delivery_configured: self.context_tools.message.is_some(),
+                        }));
+                    }
+                };
+                let recorded_at_ms = now_unix_ms();
+                let diagnostics = runtime_workflow_diagnostics(&plan, &outcome)
+                    .map_err(|error| AgentLoopError::Workflow(error.to_string()))?;
+                let diagnostics_ref = format!(
+                    "workflow-diagnostics:{}:{}",
+                    diagnostics.manifest.workflow_id, diagnostics.manifest.harness_plan_digest
+                );
+                let checkpoint = build_workflow_checkpoint(
+                    &plan,
+                    &outcome.run,
+                    WorkflowCheckpointInput {
+                        state: outcome.run.state,
+                        completed_steps: outcome
+                            .child_results
+                            .iter()
+                            .filter(|result| result.status == WorkflowChildRunStatus::Completed)
+                            .map(|result| result.step_id.clone())
+                            .filter(|step_id| !step_id.is_empty())
+                            .collect(),
+                        active_children: Vec::new(),
+                        pending_barriers: Vec::new(),
+                        budget_usage: WorkflowBudgetUsage {
+                            known_tokens: 0,
+                            estimated_tokens: 0,
+                            child_runs: outcome.child_results.len() as u32,
+                            verifier_runs: plan.verifier_graph.len() as u32,
+                            heavy_commands: 0,
+                        },
+                        worktree_refs: Vec::new(),
+                        evidence_refs: outcome
+                            .synthesis_outcome
+                            .evidence_refs
+                            .iter()
+                            .map(|evidence_ref| evidence_ref.id.clone())
+                            .collect(),
+                        last_safe_resume_point: workflow_stop_reason(outcome.run.state).to_owned(),
+                        recorded_at_ms,
+                    },
+                );
+                let final_content = format_workflow_turn_content(&outcome);
+                session.add_message("assistant", final_content.clone(), Map::new());
+                clear_runtime_markers(session);
+                session.metadata.insert(
+                    RUNTIME_CHECKPOINT_KEY.to_owned(),
+                    json!({
+                        "phase": workflow_stop_reason(outcome.run.state),
+                        "workflow": checkpoint,
+                    }),
+                );
+                session.metadata.insert(
+                    "runtime_diagnostics".to_owned(),
+                    json!({
+                        "refs": [diagnostics_ref],
+                    }),
+                );
+                session.metadata.insert(
+                    "runtime_workflow".to_owned(),
+                    json!({
+                        "workflow_id": outcome.run.workflow_id.clone(),
+                        "harness_plan_digest": outcome.run.harness_plan_digest.clone(),
+                        "state": outcome.run.state,
+                        "events": outcome.events.clone(),
+                        "child_result_count": outcome.child_results.len(),
+                        "budget_usage": {
+                            "child_runs": outcome.child_results.len(),
+                            "verifier_runs": plan.verifier_graph.len(),
+                        },
+                        "verifier_status": format!("{:?}", outcome.verification_gate),
+                    }),
+                );
+                self.sessions.save(session)?;
+                let stop_reason = workflow_stop_reason(outcome.run.state);
+                self.bus.publish_outbound(outbound_for(
+                    message,
+                    session_key,
+                    final_content.clone(),
+                    Vec::new(),
+                    stop_reason,
+                ));
+                Ok(Some(AgentLoopTurnResult {
+                    session_key: session_key.to_owned(),
+                    final_content: Some(final_content),
+                    stop_reason: stop_reason.to_owned(),
+                    tools_used: Vec::new(),
+                    outbound_count: 1,
+                    had_injections: false,
+                    command: None,
+                    ask_user_options: Vec::new(),
+                    message_tool_delivery_configured: self.context_tools.message.is_some(),
+                }))
+            }
+        }
+    }
+
+    fn workflow_subagent_execution_config(
+        &self,
+        plan: &WorkflowHarnessPlan,
+    ) -> SubagentExecutionConfig {
+        let model = plan
+            .model_routing_policy
+            .child_model_hint
+            .clone()
+            .unwrap_or_else(|| self.config.model.clone());
+        let mut config = SubagentExecutionConfig::new(self.config.workspace.clone(), model);
+        config.settings = self.config.settings.clone();
+        config.retry_mode = self.config.retry_mode;
+        config.containment_snapshot = self.config.containment_snapshot.clone();
+        config.permission_mode_snapshot = self.config.permission_mode_snapshot.clone();
+        config.permission_rule_input = self.config.permission_rule_input.clone();
+        config.permission_ceiling_snapshot = self.config.permission_ceiling_snapshot.clone();
+        config.max_iterations = self.config.max_iterations;
+        config.max_tool_result_chars = self.config.max_tool_result_chars;
+        config.fail_on_tool_error = self.config.fail_on_tool_error;
+        config.allow_side_effect_tools = false;
+        config.enable_exec = false;
+        config
     }
 
     fn handle_loop_command(
@@ -1571,6 +1786,7 @@ pub enum AgentLoopError {
     Memory(MemoryConsolidationError),
     GoalMetadata(GoalMetadataError),
     PermissionModeSave(String),
+    Workflow(String),
     DuplicateActiveTurn { session_key: String },
 }
 
@@ -1583,6 +1799,7 @@ impl fmt::Display for AgentLoopError {
             Self::PermissionModeSave(error) => {
                 write!(formatter, "permission mode save failed: {error}")
             }
+            Self::Workflow(error) => write!(formatter, "workflow execution failed: {error}"),
             Self::DuplicateActiveTurn { session_key } => {
                 write!(
                     formatter,
@@ -1733,6 +1950,71 @@ fn append_user_turn(session: &mut Session, message: &InboundMessage) {
         );
     }
     session.add_message("user", message.content.clone(), extra);
+}
+
+fn live_plan_missing_write_isolation(plan: &WorkflowHarnessPlan) -> bool {
+    !matches!(
+        plan.worktree_policy,
+        WorkflowWorktreePolicy::IsolatedWorktreeRequired
+    ) || plan.child_graph.iter().any(|child| {
+        !matches!(
+            child.worktree_policy,
+            WorkflowWorktreePolicy::IsolatedWorktreeRequired
+        )
+    })
+}
+
+fn workflow_request_from_metadata(
+    metadata: &Map<String, Value>,
+) -> Result<Option<(WorkflowAdmissionInput, WorkflowHarnessPlan)>, AgentLoopError> {
+    let Some(admission_value) = metadata
+        .get("workflow_admission")
+        .or_else(|| metadata.get("workflow_admission_input"))
+    else {
+        return Ok(None);
+    };
+    let Some(plan_value) = metadata
+        .get("workflow_plan")
+        .or_else(|| metadata.get("workflow_harness_plan"))
+    else {
+        return Ok(None);
+    };
+    let admission = serde_json::from_value(admission_value.clone()).map_err(|error| {
+        AgentLoopError::Workflow(format!("invalid workflow admission: {error}"))
+    })?;
+    let plan = serde_json::from_value(plan_value.clone())
+        .map_err(|error| AgentLoopError::Workflow(format!("invalid workflow plan: {error}")))?;
+    Ok(Some((admission, plan)))
+}
+
+fn format_workflow_turn_content(outcome: &crate::runtime::RuntimeWorkflowOutcome) -> String {
+    let status = match outcome.run.state {
+        WorkflowRunState::Completed => "completed",
+        WorkflowRunState::Cancelled => "cancelled",
+        WorkflowRunState::Blocked => "blocked",
+        _ => "failed",
+    };
+    let mut lines = vec![format!("Workflow {status}: {}", outcome.run.workflow_id)];
+    lines.push(format!(
+        "Children: {} accepted, {} rejected, {} unresolved.",
+        outcome.synthesis_outcome.accepted_child_ids.len(),
+        outcome.synthesis_outcome.rejected_child_ids.len(),
+        outcome.synthesis_outcome.unresolved_child_ids.len()
+    ));
+    for result in &outcome.child_results {
+        lines.push(format!("- {}: {}", result.child_id, result.summary));
+    }
+    lines.push(format!("Verification: {:?}", outcome.verification_gate));
+    lines.join("\n")
+}
+
+fn workflow_stop_reason(state: WorkflowRunState) -> &'static str {
+    match state {
+        WorkflowRunState::Completed => "workflow_completed",
+        WorkflowRunState::Cancelled => "workflow_cancelled",
+        WorkflowRunState::Blocked => "workflow_blocked",
+        _ => "workflow_failed",
+    }
 }
 
 fn build_live_context_provider_handoff(

@@ -286,6 +286,7 @@ pub struct SubagentExecutionConfig {
     pub exec_path_append: Option<String>,
     pub exec_allowed_env_keys: Vec<String>,
     pub exec_env: BTreeMap<String, String>,
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl SubagentExecutionConfig {
@@ -311,6 +312,7 @@ impl SubagentExecutionConfig {
             exec_path_append: None,
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
+            allowed_tools: None,
         }
     }
 }
@@ -847,6 +849,14 @@ pub fn build_subagent_tool_registry(config: &SubagentExecutionConfig) -> ToolReg
     if config.enable_web {
         registry.register(WebFetchTool::default());
         registry.register(WebSearchTool::default());
+    }
+    if let Some(allowed) = &config.allowed_tools {
+        let allowed_tools = allowed.iter().collect::<BTreeSet<_>>();
+        for tool_name in registry.tool_names() {
+            if !allowed_tools.contains(&tool_name) {
+                registry.unregister(&tool_name);
+            }
+        }
     }
     registry
 }

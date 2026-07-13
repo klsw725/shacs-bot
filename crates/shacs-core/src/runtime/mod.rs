@@ -253,12 +253,13 @@ pub use tool_search::{
     ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
 };
 pub use workflow::{
-    cancel_runtime_workflow, read_only_child_tool_names, run_read_only_runtime_workflow,
-    run_runtime_workflow_admission_branch, runtime_workflow_diagnostics,
-    runtime_workflow_execution_handle, RuntimeWorkflowAdmissionBranchInput,
-    RuntimeWorkflowAdmissionBranchOutcome, RuntimeWorkflowDiagnostics, RuntimeWorkflowEvent,
-    RuntimeWorkflowExecutionHandle, RuntimeWorkflowInput, RuntimeWorkflowInterruptOutcome,
-    RuntimeWorkflowOutcome,
+    cancel_runtime_workflow, read_only_child_tool_names, run_live_runtime_workflow,
+    run_read_only_runtime_workflow, run_runtime_workflow_admission_branch,
+    runtime_workflow_diagnostics, runtime_workflow_execution_handle,
+    RuntimeWorkflowAdmissionBranchInput, RuntimeWorkflowAdmissionBranchOutcome,
+    RuntimeWorkflowDiagnostics, RuntimeWorkflowEvent, RuntimeWorkflowExecutionHandle,
+    RuntimeWorkflowInput, RuntimeWorkflowInterruptOutcome, RuntimeWorkflowLiveError,
+    RuntimeWorkflowLiveInput, RuntimeWorkflowOutcome,
 };
 
 pub use shacs_workflow::{

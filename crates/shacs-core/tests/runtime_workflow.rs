@@ -1,18 +1,26 @@
 use serde_json::{json, Map};
 use shacs_core::runtime::{
     cancel_runtime_workflow, decide_workflow_admission, read_only_child_tool_names,
-    run_read_only_runtime_workflow, run_runtime_workflow_admission_branch,
-    runtime_workflow_diagnostics, runtime_workflow_execution_handle, ChildResultEnvelope,
-    ChildResultStatus, RuntimeWorkflowAdmissionBranchInput, RuntimeWorkflowAdmissionBranchOutcome,
-    RuntimeWorkflowInput, Session, WorkflowAdmissionDecision, WorkflowAdmissionInput,
-    WorkflowBarrierDecision, WorkflowBudgetPolicy, WorkflowBudgetSlice, WorkflowCheckpointPolicy,
-    WorkflowChildSpec, WorkflowContextPolicy, WorkflowHarnessPlan, WorkflowMergePolicy,
-    WorkflowModelRoutingPolicy, WorkflowPattern, WorkflowPermissionPolicy,
+    run_live_runtime_workflow, run_read_only_runtime_workflow,
+    run_runtime_workflow_admission_branch, runtime_workflow_diagnostics,
+    runtime_workflow_execution_handle, AgentLoop, AgentLoopConfig, ChildResultEnvelope,
+    ChildResultStatus, ContextBuilder, InboundMessage, MessageBus,
+    RuntimeWorkflowAdmissionBranchInput, RuntimeWorkflowAdmissionBranchOutcome,
+    RuntimeWorkflowInput, RuntimeWorkflowLiveError, RuntimeWorkflowLiveInput, Session,
+    SessionManager, SubagentExecutionConfig, SubagentRuntime, WorkflowAdmissionDecision,
+    WorkflowAdmissionInput, WorkflowBarrierDecision, WorkflowBudgetPolicy, WorkflowBudgetSlice,
+    WorkflowCheckpointPolicy, WorkflowChildSpec, WorkflowContextPolicy, WorkflowHarnessPlan,
+    WorkflowMergePolicy, WorkflowModelRoutingPolicy, WorkflowPattern, WorkflowPermissionPolicy,
     WorkflowQuarantinePolicy, WorkflowResumePolicy, WorkflowRunState, WorkflowStep,
     WorkflowStopCondition, WorkflowSynthesisOutcome, WorkflowToolScopePolicy,
     WorkflowVerificationGate, WorkflowVerifierSpec, WorkflowVerifierVerdict,
     WorkflowVerifierVerdictKind, WorkflowWorktreePolicy,
 };
+use shacs_core::tools::ToolRegistry;
+use shacs_providers::{LlmResponse, ProviderClient, ProviderError, ProviderRequest};
+use std::collections::VecDeque;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn workflow_symbols_remain_available_through_runtime_reexport() {
@@ -284,6 +292,399 @@ fn workflow_admission_branch_preserves_non_dynamic_decisions(
 }
 
 #[test]
+fn live_runtime_workflow_runs_child_and_verifier_subagents(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(vec![llm_text("claims extracted"), llm_text("pass")]);
+    let runtime = SubagentRuntime::new();
+    let outcome = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan: sample_plan(),
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })?;
+
+    assert_eq!(outcome.run.state, WorkflowRunState::Completed);
+    assert_eq!(outcome.child_results[0].summary, "claims extracted");
+    assert_eq!(outcome.verification_gate, WorkflowVerificationGate::Passed);
+    assert_eq!(provider.request_count()?, 2);
+    assert_eq!(runtime.running_count(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn live_runtime_workflow_fails_closed_on_ambiguous_verifier(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(vec![llm_text("claims extracted"), llm_text("looks good")]);
+    let runtime = SubagentRuntime::new();
+    let outcome = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan: sample_plan(),
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })?;
+
+    assert_eq!(
+        outcome.verification_gate,
+        WorkflowVerificationGate::Failed {
+            failing_child_ids: vec!["child-1".to_owned()]
+        }
+    );
+    assert_eq!(outcome.run.state, WorkflowRunState::Failed);
+    assert_final_success_blocked(&outcome.synthesis_outcome);
+
+    Ok(())
+}
+
+#[test]
+fn live_runtime_workflow_fails_closed_on_negated_approval() -> Result<(), Box<dyn std::error::Error>>
+{
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(vec![llm_text("claims extracted"), llm_text("not approved")]);
+    let runtime = SubagentRuntime::new();
+    let outcome = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan: sample_plan(),
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })?;
+
+    assert_eq!(
+        outcome.verification_gate,
+        WorkflowVerificationGate::Failed {
+            failing_child_ids: vec!["child-1".to_owned()]
+        }
+    );
+    assert_eq!(outcome.run.state, WorkflowRunState::Failed);
+
+    Ok(())
+}
+
+#[test]
+fn live_runtime_workflow_accepts_explicit_pass_with_failure_word(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(vec![
+        llm_text("claims extracted"),
+        llm_text("PASS: no failures found"),
+    ]);
+    let runtime = SubagentRuntime::new();
+    let outcome = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan: sample_plan(),
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })?;
+
+    assert_eq!(outcome.verification_gate, WorkflowVerificationGate::Passed);
+    assert_eq!(outcome.run.state, WorkflowRunState::Completed);
+
+    Ok(())
+}
+
+#[test]
+fn live_runtime_workflow_scopes_child_tools_to_plan_allow_list(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(vec![llm_text("claims extracted"), llm_text("pass")]);
+    let runtime = SubagentRuntime::new();
+    let mut plan = sample_plan();
+    plan.tool_scope_policy.allowed_tools = vec!["grep".to_owned()];
+    let outcome = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan,
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })?;
+    let first_request_tools = provider.request_tool_names(0)?;
+
+    assert_eq!(outcome.run.state, WorkflowRunState::Completed);
+    assert_eq!(first_request_tools, vec!["grep".to_owned()]);
+
+    Ok(())
+}
+
+#[test]
+fn live_runtime_workflow_blocks_denied_allowed_tool_before_spawn(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(Vec::new());
+    let runtime = SubagentRuntime::new();
+    let mut plan = sample_plan();
+    plan.permission_policy.denied_capabilities = vec!["fs_read".to_owned()];
+
+    let error = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan,
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })
+    .expect_err("denied provider-visible workflow tool should block before spawning");
+
+    assert_budget_blocked_reason(error, "fs_read");
+    assert_eq!(provider.request_count()?, 0);
+    assert_eq!(runtime.running_count(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn live_runtime_workflow_blocks_canonical_write_and_exec_capabilities_before_spawn(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (tool_name, denied_capability) in [("write_file", "fs_write"), ("exec", "proc_exec")] {
+        let workspace = tempfile::tempdir()?;
+        let provider = QueueProvider::new(Vec::new());
+        let runtime = SubagentRuntime::new();
+        let mut plan = sample_plan();
+        plan.tool_scope_policy.allowed_tools = vec![tool_name.to_owned()];
+        plan.permission_policy.denied_capabilities = vec![denied_capability.to_owned()];
+
+        let error = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+            plan,
+            subagent_runtime: &runtime,
+            provider_client: &provider,
+            execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+            admitted_at_ms: current_test_ms(),
+        })
+        .expect_err("denied canonical capability should block before spawning");
+
+        assert_budget_blocked_reason(error, denied_capability);
+        assert_eq!(provider.request_count()?, 0);
+        assert_eq!(runtime.running_count(), 0);
+    }
+
+    Ok(())
+}
+
+fn assert_budget_blocked_reason(error: RuntimeWorkflowLiveError, expected: &str) {
+    let RuntimeWorkflowLiveError::BudgetBlocked { reason } = error else {
+        panic!("expected workflow budget block");
+    };
+    assert!(
+        reason.contains(expected),
+        "expected block reason to mention `{expected}`, got `{reason}`"
+    );
+}
+
+#[test]
+fn live_runtime_workflow_enforces_budget_before_spawn() -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(Vec::new());
+    let runtime = SubagentRuntime::new();
+    let mut plan = sample_plan();
+    plan.budget_policy.max_iterations = 0;
+    let error = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan,
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })
+    .expect_err("zero iteration budget should block before spawning");
+
+    assert!(matches!(
+        error,
+        RuntimeWorkflowLiveError::BudgetBlocked { .. }
+    ));
+    assert_eq!(provider.request_count()?, 0);
+    assert_eq!(runtime.running_count(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn live_runtime_workflow_allows_exact_child_iteration_budget(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(vec![llm_text("claims extracted"), llm_text("pass")]);
+    let runtime = SubagentRuntime::new();
+    let mut plan = sample_plan();
+    plan.budget_policy.max_iterations = 1;
+
+    let outcome = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan,
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })?;
+
+    assert_eq!(outcome.run.state, WorkflowRunState::Completed);
+    assert_eq!(provider.request_count()?, 2);
+
+    Ok(())
+}
+
+#[test]
+fn live_runtime_workflow_blocks_non_read_only_plan() -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(Vec::new());
+    let runtime = SubagentRuntime::new();
+    let mut plan = sample_plan();
+    plan.worktree_policy = WorkflowWorktreePolicy::IsolatedWorktreeRequired;
+
+    let error = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan,
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })
+    .expect_err("write-capable workflow plan must not enter live read-only path");
+
+    assert!(matches!(
+        error,
+        RuntimeWorkflowLiveError::BudgetBlocked { .. }
+    ));
+    assert_eq!(provider.request_count()?, 0);
+
+    Ok(())
+}
+
+#[test]
+fn agent_loop_admits_metadata_workflow_into_live_runtime() -> Result<(), Box<dyn std::error::Error>>
+{
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let manager = SessionManager::new(workspace.path())?;
+    let context = ContextBuilder::new(workspace.path());
+    let tools = ToolRegistry::new();
+    let provider = QueueProvider::new(vec![llm_text("claims extracted"), llm_text("pass")]);
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        manager,
+        context,
+        &tools,
+        &provider,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    );
+    let mut message = InboundMessage::new("cli", "user", "direct", "run this as a workflow");
+    message.metadata.insert(
+        "workflow_admission".to_owned(),
+        serde_json::to_value(dynamic_admission())?,
+    );
+    message.metadata.insert(
+        "workflow_plan".to_owned(),
+        serde_json::to_value(sample_plan())?,
+    );
+
+    let result = loop_runtime.process_message(message)?;
+    let session = loop_runtime
+        .session_manager_mut()
+        .get_or_create("cli:direct");
+    let outbound = bus.consume_outbound().ok_or("missing workflow outbound")?;
+
+    assert_eq!(result.stop_reason, "workflow_completed");
+    assert_eq!(provider.request_count()?, 2);
+    assert!(outbound.content.contains("Workflow completed"));
+    assert!(session.metadata.get("runtime_workflow").is_some());
+    assert!(session.metadata.get("runtime_checkpoint").is_some());
+    assert!(session.metadata.get("runtime_diagnostics").is_some());
+    assert!(session.metadata["runtime_diagnostics"]
+        .get("workflow")
+        .is_none());
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.messages[1]["role"], "assistant");
+
+    Ok(())
+}
+
+#[test]
+fn agent_loop_workflow_error_clears_pending_marker_and_replies(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let manager = SessionManager::new(workspace.path())?;
+    let context = ContextBuilder::new(workspace.path());
+    let tools = ToolRegistry::new();
+    let provider = QueueProvider::new(Vec::new());
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        manager,
+        context,
+        &tools,
+        &provider,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    );
+    let mut plan = sample_plan();
+    plan.budget_policy.max_iterations = 0;
+    let mut message = InboundMessage::new("cli", "user", "direct", "run this as a workflow");
+    message.metadata.insert(
+        "workflow_admission".to_owned(),
+        serde_json::to_value(dynamic_admission())?,
+    );
+    message
+        .metadata
+        .insert("workflow_plan".to_owned(), serde_json::to_value(plan)?);
+
+    let result = loop_runtime.process_message(message)?;
+    let session = loop_runtime
+        .session_manager_mut()
+        .get_or_create("cli:direct");
+    let outbound = bus
+        .consume_outbound()
+        .ok_or("missing workflow error outbound")?;
+
+    assert_eq!(result.stop_reason, "workflow_failed");
+    assert_eq!(provider.request_count()?, 0);
+    assert!(outbound.content.contains("Workflow failed"));
+    assert!(session.metadata.get("pending_user_turn").is_none());
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.messages[1]["role"], "assistant");
+
+    Ok(())
+}
+
+#[test]
+fn agent_loop_blocks_write_isolation_admission_with_read_only_plan(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let manager = SessionManager::new(workspace.path())?;
+    let context = ContextBuilder::new(workspace.path());
+    let tools = ToolRegistry::new();
+    let provider = QueueProvider::new(Vec::new());
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        manager,
+        context,
+        &tools,
+        &provider,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    );
+    let mut admission = dynamic_admission();
+    admission.requires_write_isolation = true;
+    let mut message = InboundMessage::new("cli", "user", "direct", "run this as a workflow");
+    message.metadata.insert(
+        "workflow_admission".to_owned(),
+        serde_json::to_value(admission)?,
+    );
+    message.metadata.insert(
+        "workflow_plan".to_owned(),
+        serde_json::to_value(sample_plan())?,
+    );
+
+    let result = loop_runtime.process_message(message)?;
+    let outbound = bus
+        .consume_outbound()
+        .ok_or("missing workflow blocked outbound")?;
+
+    assert_eq!(result.stop_reason, "workflow_blocked");
+    assert_eq!(provider.request_count()?, 0);
+    assert!(outbound.content.contains("Workflow blocked"));
+
+    Ok(())
+}
+
+#[test]
 fn workflow_interrupt_cancels_handle_children_and_terminal_state(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let plan = sample_plan();
@@ -449,6 +850,102 @@ fn verdict(kind: WorkflowVerifierVerdictKind) -> WorkflowVerifierVerdict {
         summary: "verifier summary".to_owned(),
         evidence_refs: Vec::new(),
     }
+}
+
+struct QueueProvider {
+    responses: Mutex<VecDeque<LlmResponse>>,
+    requests: Mutex<usize>,
+    observed_requests: Mutex<Vec<ProviderRequest>>,
+}
+
+impl QueueProvider {
+    fn new(responses: Vec<LlmResponse>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into()),
+            requests: Mutex::new(0),
+            observed_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn request_count(&self) -> Result<usize, ProviderError> {
+        self.requests
+            .lock()
+            .map(|requests| *requests)
+            .map_err(|error| provider_error(error.to_string()))
+    }
+
+    fn request_tool_names(&self, index: usize) -> Result<Vec<String>, ProviderError> {
+        self.observed_requests
+            .lock()
+            .map_err(|error| provider_error(error.to_string()))?
+            .get(index)
+            .map(|request| provider_tool_names(&request.tools))
+            .ok_or_else(|| provider_error(format!("missing observed request {index}")))
+    }
+}
+
+impl ProviderClient for QueueProvider {
+    fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+        *self
+            .requests
+            .lock()
+            .map_err(|error| provider_error(error.to_string()))? += 1;
+        self.observed_requests
+            .lock()
+            .map_err(|error| provider_error(error.to_string()))?
+            .push(request);
+        self.responses
+            .lock()
+            .map_err(|error| provider_error(error.to_string()))?
+            .pop_front()
+            .ok_or_else(|| provider_error("no queued response"))
+    }
+
+    fn chat_stream(
+        &self,
+        request: ProviderRequest,
+        _on_event: &mut dyn FnMut(shacs_providers::ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat(request)
+    }
+}
+
+fn provider_tool_names(tools: &[serde_json::Value]) -> Vec<String> {
+    tools
+        .iter()
+        .filter_map(|tool| {
+            tool.get("function")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|function| function.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| tool.get("name").and_then(serde_json::Value::as_str))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn llm_text(content: impl Into<String>) -> LlmResponse {
+    LlmResponse {
+        content: Some(content.into()),
+        ..LlmResponse::default()
+    }
+}
+
+fn provider_error(message: impl Into<String>) -> ProviderError {
+    ProviderError::Api {
+        status: None,
+        message: message.into(),
+        retryable: false,
+        headers: Default::default(),
+        body: None,
+    }
+}
+
+fn current_test_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn sample_plan() -> WorkflowHarnessPlan {
