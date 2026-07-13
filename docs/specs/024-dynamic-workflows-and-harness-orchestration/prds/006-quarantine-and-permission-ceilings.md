@@ -74,9 +74,9 @@ Untrusted input을 읽은 workflow child와 privileged action 수행자를 분�
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_permission`
+1. `cargo fmt --manifest-path crates/Cargo.toml -p shacs-workflow -- --check`
+2. `cargo clippy --manifest-path crates/Cargo.toml -p shacs-workflow --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/Cargo.toml -p shacs-workflow workflow_permission`
 
 ## 완료 기준
 

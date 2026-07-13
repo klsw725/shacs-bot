@@ -71,9 +71,9 @@ Workflow recipe를 skill-backed reusable harness input으로 저장하고 검사
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_recipe`
+1. `cargo fmt --manifest-path crates/Cargo.toml -p shacs-workflow -- --check`
+2. `cargo clippy --manifest-path crates/Cargo.toml -p shacs-workflow --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/Cargo.toml -p shacs-workflow workflow_recipe`
 
 ## 완료 기준
 

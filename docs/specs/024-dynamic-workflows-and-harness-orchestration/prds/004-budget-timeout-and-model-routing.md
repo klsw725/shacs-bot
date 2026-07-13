@@ -72,9 +72,9 @@ Workflow가 비용과 intelligence routing을 숨기지 않도록 budget/model s
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_budget`
+1. `cargo fmt --manifest-path crates/Cargo.toml -p shacs-workflow -- --check`
+2. `cargo clippy --manifest-path crates/Cargo.toml -p shacs-workflow --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/Cargo.toml -p shacs-workflow workflow_budget`
 
 ## 완료 기준
 

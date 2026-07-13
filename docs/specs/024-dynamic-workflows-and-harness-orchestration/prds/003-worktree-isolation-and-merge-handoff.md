@@ -73,9 +73,9 @@ Write-capable workflow child가 main worktree를 조용히 오염시키지 않�
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-workflow/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-workflow/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_worktree`
+1. `cargo fmt --manifest-path crates/Cargo.toml -p shacs-workflow -- --check`
+2. `cargo clippy --manifest-path crates/Cargo.toml -p shacs-workflow --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/Cargo.toml -p shacs-workflow workflow_worktree`
 
 ## 완료 기준
 
