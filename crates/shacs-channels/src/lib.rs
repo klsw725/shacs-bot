@@ -870,6 +870,48 @@ pub fn websocket_event_from_outbound(message: OutboundMessage) -> WebSocketServe
     }
 }
 
+pub fn workflow_recipe_projection_outbound(
+    channel: impl Into<String>,
+    chat_id: impl Into<String>,
+    projection: &Value,
+) -> OutboundMessage {
+    let recipes = projection
+        .get("data")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    let malformed = projection
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| item.get("readiness").and_then(Value::as_str) == Some("malformed"))
+                .count()
+        })
+        .unwrap_or_default();
+    let mut metadata = Map::new();
+    metadata.insert(
+        "kind".to_owned(),
+        Value::String("workflow_recipes".to_owned()),
+    );
+    metadata.insert(
+        "schema_version".to_owned(),
+        projection
+            .get("schema_version")
+            .cloned()
+            .unwrap_or_else(|| Value::String("024WorkflowRecipeProjection.v1".to_owned())),
+    );
+    metadata.insert("recipe_count".to_owned(), json!(recipes));
+    metadata.insert("malformed_recipe_count".to_owned(), json!(malformed));
+    OutboundMessage::new(
+        channel,
+        chat_id,
+        format!("Workflow recipes: {recipes} discovered, {malformed} malformed"),
+    )
+    .with_metadata(metadata)
+}
+
 fn normalize_websocket_object(
     client_id: &str,
     default_chat_id: &str,
@@ -1611,5 +1653,28 @@ mod tests {
         assert_eq!(inbound.media, vec!["/tmp/photo.jpg"]);
         assert_eq!(inbound.metadata["message_id"], json!("msg-1"));
         Ok(())
+    }
+
+    #[test]
+    fn workflow_recipe_projection_outbound_summarizes_shared_projection() {
+        let projection = json!({
+            "schema_version": "024WorkflowRecipeProjection.v1",
+            "data": [
+                {"recipe_id": "ready", "readiness": "ready"},
+                {"recipe_id": "bad", "readiness": "malformed"}
+            ]
+        });
+
+        let outbound = workflow_recipe_projection_outbound(SLACK_CHANNEL, "C1", &projection);
+        assert_eq!(outbound.channel, SLACK_CHANNEL);
+        assert_eq!(outbound.chat_id, "C1");
+        assert!(outbound.content.contains("2 discovered"));
+        assert!(outbound.content.contains("1 malformed"));
+        assert_eq!(outbound.metadata["kind"], json!("workflow_recipes"));
+        assert_eq!(
+            outbound.metadata["schema_version"],
+            json!("024WorkflowRecipeProjection.v1")
+        );
+        assert_eq!(outbound.metadata["recipe_count"], json!(2));
     }
 }
