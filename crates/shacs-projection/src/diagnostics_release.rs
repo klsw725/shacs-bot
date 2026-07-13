@@ -35,6 +35,21 @@ pub enum ContextReleaseEvidenceBucket {
     Docs,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Spec024ReleaseEvidenceBucket {
+    Prd000StateHarnessPlan,
+    Prd001PatternChildGraph,
+    Prd002VerifierReview,
+    Prd003WorktreeMerge,
+    Prd004BudgetModelRouting,
+    Prd005SkillRecipes,
+    Prd006QuarantinePermissions,
+    Prd007ResumeReplayDiagnostics,
+    Prd008ProjectionReleaseGate,
+    Prd009RuntimeExecution,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSearchReleaseEvidence {
     pub bucket: ToolSearchReleaseEvidenceBucket,
@@ -47,6 +62,15 @@ pub struct ToolSearchReleaseEvidence {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextReleaseEvidence {
     pub bucket: ContextReleaseEvidenceBucket,
+    pub test_names: Vec<String>,
+    pub manual_qa_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Spec024ReleaseEvidence {
+    pub bucket: Spec024ReleaseEvidenceBucket,
     pub test_names: Vec<String>,
     pub manual_qa_refs: Vec<String>,
     #[serde(default)]
@@ -66,6 +90,14 @@ pub struct ContextReleaseEvidenceChecklist {
     pub required_buckets: Vec<ContextReleaseEvidenceBucket>,
     pub covered_buckets: Vec<ContextReleaseEvidenceBucket>,
     pub missing_buckets: Vec<ContextReleaseEvidenceBucket>,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spec024ReleaseEvidenceChecklist {
+    pub required_buckets: Vec<Spec024ReleaseEvidenceBucket>,
+    pub covered_buckets: Vec<Spec024ReleaseEvidenceBucket>,
+    pub missing_buckets: Vec<Spec024ReleaseEvidenceBucket>,
     pub passed: bool,
 }
 
@@ -100,6 +132,23 @@ impl ContextReleaseEvidenceBucket {
             Self::Safety,
             Self::Replay,
             Self::Docs,
+        ]
+    }
+}
+
+impl Spec024ReleaseEvidenceBucket {
+    pub fn required_buckets() -> Vec<Self> {
+        vec![
+            Self::Prd000StateHarnessPlan,
+            Self::Prd001PatternChildGraph,
+            Self::Prd002VerifierReview,
+            Self::Prd003WorktreeMerge,
+            Self::Prd004BudgetModelRouting,
+            Self::Prd005SkillRecipes,
+            Self::Prd006QuarantinePermissions,
+            Self::Prd007ResumeReplayDiagnostics,
+            Self::Prd008ProjectionReleaseGate,
+            Self::Prd009RuntimeExecution,
         ]
     }
 }
@@ -147,6 +196,42 @@ pub fn context_prd005_release_evidence_checklist(
     let passed = missing_buckets.is_empty();
 
     ContextReleaseEvidenceChecklist {
+        required_buckets,
+        covered_buckets,
+        missing_buckets,
+        passed,
+    }
+}
+
+pub fn spec024_release_evidence_checklist(
+    evidence: &[Spec024ReleaseEvidence],
+) -> Spec024ReleaseEvidenceChecklist {
+    let required_buckets = Spec024ReleaseEvidenceBucket::required_buckets();
+    let covered = evidence
+        .iter()
+        .filter(|entry| {
+            (!entry.test_names.is_empty() || !entry.manual_qa_refs.is_empty())
+                && !spec024_release_evidence_is_blocker(entry)
+                && entry
+                    .evidence_refs
+                    .iter()
+                    .any(spec024_evidence_ref_is_valid)
+        })
+        .map(|entry| entry.bucket)
+        .collect::<BTreeSet<_>>();
+    let covered_buckets = required_buckets
+        .iter()
+        .copied()
+        .filter(|bucket| covered.contains(bucket))
+        .collect::<Vec<_>>();
+    let missing_buckets = required_buckets
+        .iter()
+        .copied()
+        .filter(|bucket| !covered.contains(bucket))
+        .collect::<Vec<_>>();
+    let passed = missing_buckets.is_empty();
+
+    Spec024ReleaseEvidenceChecklist {
         required_buckets,
         covered_buckets,
         missing_buckets,
@@ -212,6 +297,23 @@ fn context_release_evidence_is_blocker(entry: &ContextReleaseEvidence) -> bool {
             tool_search_release_label_is_blocker(&evidence_ref.id)
                 || tool_search_release_label_is_blocker(&evidence_ref.summary)
         })
+}
+
+fn spec024_release_evidence_is_blocker(entry: &Spec024ReleaseEvidence) -> bool {
+    entry
+        .test_names
+        .iter()
+        .chain(entry.manual_qa_refs.iter())
+        .any(|label| tool_search_release_label_is_blocker(label))
+        || entry.evidence_refs.iter().any(|evidence_ref| {
+            tool_search_release_label_is_blocker(&evidence_ref.id)
+                || tool_search_release_label_is_blocker(&evidence_ref.summary)
+        })
+}
+
+fn spec024_evidence_ref_is_valid(evidence_ref: &EvidenceRef) -> bool {
+    evidence_ref.owner_spec.as_deref() == Some("024")
+        && spec018_evidence_ref_has_owner_and_redaction(evidence_ref)
 }
 
 fn context_evidence_ref_is_valid(evidence_ref: &EvidenceRef) -> bool {

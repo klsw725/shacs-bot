@@ -18,11 +18,12 @@ use shacs_projection::{
     build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
     build_spec018_projection, context_prd005_release_evidence_checklist,
     evaluate_spec018_release_gate, runtime_spec018_channel_projection,
-    runtime_spec018_local_api_projection, tool_search_prd005_release_evidence_checklist,
-    tool_search_prd006_release_evidence_checklist, ContextReleaseEvidence,
-    ContextReleaseEvidenceBucket, RuntimeSpec018DiagnosticsManifestInput,
+    runtime_spec018_local_api_projection, spec024_release_evidence_checklist,
+    tool_search_prd005_release_evidence_checklist, tool_search_prd006_release_evidence_checklist,
+    ContextReleaseEvidence, ContextReleaseEvidenceBucket, RuntimeSpec018DiagnosticsManifestInput,
     RuntimeSpec018LedgerInspectInput, RuntimeSpec018ProjectionInput,
-    RuntimeSpec018ReleaseGateInput, ToolSearchReleaseEvidence, ToolSearchReleaseEvidenceBucket,
+    RuntimeSpec018ReleaseGateInput, Spec024ReleaseEvidence, Spec024ReleaseEvidenceBucket,
+    ToolSearchReleaseEvidence, ToolSearchReleaseEvidenceBucket,
 };
 use std::error::Error;
 
@@ -65,6 +66,19 @@ fn spec026_evidence_ref(id: &str, redaction_status: RedactionStatus) -> Evidence
         redaction_status,
         owner_spec: Some("026".to_owned()),
         locator: Some(format!("spec026://{id}")),
+        retention_hint: Some("release_evidence".to_owned()),
+    }
+}
+
+fn spec024_evidence_ref(id: &str, redaction_status: RedactionStatus) -> EvidenceRef {
+    EvidenceRef {
+        kind: EvidenceKind::DiagnosticRecord,
+        id: id.to_owned(),
+        digest: format!("digest-{id}"),
+        summary: format!("summary-{id}"),
+        redaction_status,
+        owner_spec: Some("024".to_owned()),
+        locator: Some(format!("spec024://{id}")),
         retention_hint: Some("release_evidence".to_owned()),
     }
 }
@@ -979,6 +993,63 @@ fn context_prd005_release_evidence_checklist_requires_all_buckets_and_valid_refs
     assert!(!redaction_failed
         .covered_buckets
         .contains(&ContextReleaseEvidenceBucket::Docs));
+}
+
+#[test]
+fn spec024_release_evidence_checklist_requires_prd009_runtime_bucket_and_safe_refs() {
+    let evidence = Spec024ReleaseEvidenceBucket::required_buckets()
+        .into_iter()
+        .map(|bucket| Spec024ReleaseEvidence {
+            bucket,
+            test_names: vec![format!("spec024_{bucket:?}_test")],
+            manual_qa_refs: Vec::new(),
+            evidence_refs: vec![spec024_evidence_ref(
+                &format!("spec024-{bucket:?}"),
+                RedactionStatus::Redacted,
+            )],
+        })
+        .collect::<Vec<_>>();
+
+    let passing = spec024_release_evidence_checklist(&evidence);
+    assert!(passing.passed);
+    assert_eq!(passing.required_buckets.len(), 10);
+    assert!(passing
+        .covered_buckets
+        .contains(&Spec024ReleaseEvidenceBucket::Prd009RuntimeExecution));
+
+    let missing_runtime = spec024_release_evidence_checklist(&evidence[..evidence.len() - 1]);
+    assert!(!missing_runtime.passed);
+    assert_eq!(
+        missing_runtime.missing_buckets,
+        vec![Spec024ReleaseEvidenceBucket::Prd009RuntimeExecution]
+    );
+
+    let wrong_owner = spec024_release_evidence_checklist(&[Spec024ReleaseEvidence {
+        bucket: Spec024ReleaseEvidenceBucket::Prd009RuntimeExecution,
+        test_names: vec!["runtime_workflow_diagnostics_are_replay_safe".to_owned()],
+        manual_qa_refs: Vec::new(),
+        evidence_refs: vec![spec018_evidence_ref(
+            EvidenceKind::DiagnosticRecord,
+            "wrong-owner",
+            RedactionStatus::Redacted,
+        )],
+    }]);
+    assert!(!wrong_owner
+        .covered_buckets
+        .contains(&Spec024ReleaseEvidenceBucket::Prd009RuntimeExecution));
+
+    let blocker_label = spec024_release_evidence_checklist(&[Spec024ReleaseEvidence {
+        bucket: Spec024ReleaseEvidenceBucket::Prd009RuntimeExecution,
+        test_names: vec!["blocked-on-runtime-live-subagent".to_owned()],
+        manual_qa_refs: Vec::new(),
+        evidence_refs: vec![spec024_evidence_ref(
+            "runtime-blocker",
+            RedactionStatus::Redacted,
+        )],
+    }]);
+    assert!(!blocker_label
+        .covered_buckets
+        .contains(&Spec024ReleaseEvidenceBucket::Prd009RuntimeExecution));
 }
 
 #[test]
