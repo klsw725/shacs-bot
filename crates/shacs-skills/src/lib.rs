@@ -3,6 +3,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use shacs_workflow::{
+    workflow_recipe_readiness, WorkflowPattern, WorkflowRecipe, WorkflowRecipeReadiness,
+};
+
 pub const BUILTIN_SKILLS_DIR: &str = "builtin_skills";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +106,18 @@ pub struct SkillRegistryEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillRegistry {
     pub entries: Vec<SkillRegistryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillBackedWorkflowRecipe {
+    pub skill_name: String,
+    pub skill_status: SkillRegistryStatus,
+    pub source_kind: SkillSourceKind,
+    pub source_path: Option<PathBuf>,
+    pub body_hash: String,
+    pub recipe: WorkflowRecipe,
+    pub readiness: WorkflowRecipeReadiness,
+    pub diagnostics: Vec<String>,
 }
 
 impl SkillRegistry {
@@ -240,6 +256,257 @@ pub fn discover_skill_registry(options: SkillRegistryOptions) -> io::Result<Skil
     }
 
     Ok(builder.finish())
+}
+
+pub fn discover_workflow_recipes(registry: &SkillRegistry) -> Vec<SkillBackedWorkflowRecipe> {
+    let mut recipes = registry
+        .entries
+        .iter()
+        .filter_map(workflow_recipe_from_entry)
+        .collect::<Vec<_>>();
+    mark_duplicate_recipe_ids(&mut recipes);
+    recipes.sort_by(|left, right| {
+        left.recipe
+            .recipe_id
+            .cmp(&right.recipe.recipe_id)
+            .then_with(|| left.skill_name.cmp(&right.skill_name))
+    });
+    recipes
+}
+
+fn workflow_recipe_from_entry(entry: &SkillRegistryEntry) -> Option<SkillBackedWorkflowRecipe> {
+    let raw = entry.raw.as_deref()?;
+    let frontmatter = parse_skill_frontmatter(raw).ok()?;
+    let mut diagnostics = entry.diagnostics.clone();
+    let recipe = workflow_recipe_from_frontmatter(&frontmatter, entry, &mut diagnostics)?;
+    let readiness = readiness_for_entry(entry, &recipe, &diagnostics);
+    Some(SkillBackedWorkflowRecipe {
+        skill_name: entry.descriptor.name.clone(),
+        skill_status: entry.status,
+        source_kind: entry.descriptor.source_kind,
+        source_path: entry.descriptor.source_path.clone(),
+        body_hash: entry.descriptor.body_hash.clone(),
+        recipe,
+        readiness,
+        diagnostics,
+    })
+}
+
+fn workflow_recipe_from_frontmatter(
+    frontmatter: &BTreeMap<String, String>,
+    entry: &SkillRegistryEntry,
+    diagnostics: &mut Vec<String>,
+) -> Option<WorkflowRecipe> {
+    if let Some(recipe) = workflow_recipe_from_json_metadata(frontmatter, entry, diagnostics) {
+        return Some(recipe);
+    }
+    let id = frontmatter
+        .get("workflow.recipe.id")
+        .or_else(|| frontmatter.get("metadata.shacs.workflow.recipe.id"))?;
+    let pattern = parse_workflow_pattern(
+        frontmatter
+            .get("workflow.recipe.pattern")
+            .or_else(|| frontmatter.get("metadata.shacs.workflow.recipe.pattern"))
+            .map(String::as_str),
+        diagnostics,
+    );
+    Some(WorkflowRecipe {
+        recipe_id: id.trim().to_owned(),
+        source_ref: recipe_source_ref(entry),
+        pattern,
+        prompt_template_ref: frontmatter
+            .get("workflow.recipe.prompt_template_ref")
+            .or_else(|| frontmatter.get("workflow.recipe.prompt_template"))
+            .or_else(|| frontmatter.get("metadata.shacs.workflow.recipe.prompt_template_ref"))
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_default(),
+        rubric_ref: optional_frontmatter(frontmatter, "workflow.recipe.rubric_ref"),
+        output_schema_ref: optional_frontmatter(frontmatter, "workflow.recipe.output_schema_ref"),
+        suggested_budget_tokens: frontmatter
+            .get("workflow.recipe.suggested_budget_tokens")
+            .and_then(|value| parse_u64(value, diagnostics)),
+        suggested_tool_scope_ref: optional_frontmatter(
+            frontmatter,
+            "workflow.recipe.suggested_tool_scope_ref",
+        ),
+        safety_notes: frontmatter
+            .get("workflow.recipe.safety_notes")
+            .map(|value| split_list(value))
+            .unwrap_or_default(),
+    })
+}
+
+fn workflow_recipe_from_json_metadata(
+    frontmatter: &BTreeMap<String, String>,
+    entry: &SkillRegistryEntry,
+    diagnostics: &mut Vec<String>,
+) -> Option<WorkflowRecipe> {
+    let metadata = frontmatter.get("metadata")?;
+    let value = match serde_json::from_str::<serde_json::Value>(metadata) {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    let recipe = value
+        .get("shacs")
+        .and_then(|shacs| shacs.get("workflow_recipe"))
+        .or_else(|| value.get("workflow_recipe"))?;
+    let id = recipe.get("id").and_then(serde_json::Value::as_str)?;
+    let pattern = parse_workflow_pattern(
+        recipe.get("pattern").and_then(serde_json::Value::as_str),
+        diagnostics,
+    );
+    Some(WorkflowRecipe {
+        recipe_id: id.trim().to_owned(),
+        source_ref: recipe_source_ref(entry),
+        pattern,
+        prompt_template_ref: recipe
+            .get("prompt_template_ref")
+            .or_else(|| recipe.get("prompt_template"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+        rubric_ref: json_string(recipe, "rubric_ref"),
+        output_schema_ref: json_string(recipe, "output_schema_ref"),
+        suggested_budget_tokens: recipe
+            .get("suggested_budget_tokens")
+            .and_then(serde_json::Value::as_u64),
+        suggested_tool_scope_ref: json_string(recipe, "suggested_tool_scope_ref"),
+        safety_notes: recipe
+            .get("safety_notes")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn readiness_for_entry(
+    entry: &SkillRegistryEntry,
+    recipe: &WorkflowRecipe,
+    diagnostics: &[String],
+) -> WorkflowRecipeReadiness {
+    let mut reasons = match workflow_recipe_readiness(recipe) {
+        WorkflowRecipeReadiness::Ready => Vec::new(),
+        WorkflowRecipeReadiness::Malformed { reasons } => reasons,
+    };
+    if entry.status != SkillRegistryStatus::Active {
+        reasons.push(format!("source skill is {}", entry.status.label()));
+    }
+    reasons.extend(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.starts_with("workflow recipe "))
+            .cloned(),
+    );
+    if reasons.is_empty() {
+        WorkflowRecipeReadiness::Ready
+    } else {
+        WorkflowRecipeReadiness::Malformed { reasons }
+    }
+}
+
+fn mark_duplicate_recipe_ids(recipes: &mut [SkillBackedWorkflowRecipe]) {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for recipe in recipes.iter() {
+        *counts.entry(recipe.recipe.recipe_id.clone()).or_default() += 1;
+    }
+    for recipe in recipes.iter_mut() {
+        if counts
+            .get(&recipe.recipe.recipe_id)
+            .copied()
+            .unwrap_or_default()
+            <= 1
+        {
+            continue;
+        }
+        let reason = format!("duplicate workflow recipe `{}`", recipe.recipe.recipe_id);
+        recipe.diagnostics.push(reason.clone());
+        let mut reasons = match &recipe.readiness {
+            WorkflowRecipeReadiness::Ready => Vec::new(),
+            WorkflowRecipeReadiness::Malformed { reasons } => reasons.clone(),
+        };
+        reasons.push(reason);
+        recipe.readiness = WorkflowRecipeReadiness::Malformed { reasons };
+    }
+}
+
+fn recipe_source_ref(entry: &SkillRegistryEntry) -> String {
+    format!(
+        "skill://{}/{}#{}",
+        entry.descriptor.source_kind.label(),
+        entry.descriptor.name,
+        entry.descriptor.body_hash
+    )
+}
+
+fn optional_frontmatter(frontmatter: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    frontmatter
+        .get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn parse_u64(value: &str, diagnostics: &mut Vec<String>) -> Option<u64> {
+    match value.trim().parse::<u64>() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            diagnostics.push(format!(
+                "workflow recipe suggested budget is not an integer: {}",
+                value.trim()
+            ));
+            None
+        }
+    }
+}
+
+fn parse_workflow_pattern(value: Option<&str>, diagnostics: &mut Vec<String>) -> WorkflowPattern {
+    match value.unwrap_or_default().trim() {
+        "classify_and_act" => WorkflowPattern::ClassifyAndAct,
+        "fan_out_and_synthesize" => WorkflowPattern::FanOutAndSynthesize,
+        "adversarial_verification" => WorkflowPattern::AdversarialVerification,
+        "generate_and_filter" => WorkflowPattern::GenerateAndFilter,
+        "tournament" => WorkflowPattern::Tournament,
+        "loop_until_done" => WorkflowPattern::LoopUntilDone,
+        "workflow_sequence" => WorkflowPattern::WorkflowSequence,
+        "hybrid" => WorkflowPattern::Hybrid,
+        "" => {
+            diagnostics.push("workflow recipe pattern missing; using hybrid".to_owned());
+            WorkflowPattern::Hybrid
+        }
+        other => {
+            diagnostics.push(format!(
+                "workflow recipe pattern `{other}` is unsupported; using hybrid"
+            ));
+            WorkflowPattern::Hybrid
+        }
+    }
+}
+
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 #[derive(Default)]
@@ -1174,6 +1441,65 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.contains("duplicate skill `dup`"))));
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_recipe_discovery_projects_read_only_skill_metadata(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let skill_dir = workspace.path().join("skills/reviewer");
+        fs::create_dir_all(&skill_dir)?;
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: reviewer\ndescription: Review workflow\nworkflow.recipe.id: review-fanout\nworkflow.recipe.pattern: fan_out_and_synthesize\nworkflow.recipe.prompt_template_ref: prompts/review.md\nworkflow.recipe.suggested_budget_tokens: 12000\nworkflow.recipe.safety_notes: read-only, no permission grants\n---\nUse the recipe as read-only guidance.",
+        )?;
+
+        let registry = discover_skill_registry(SkillRegistryOptions::new(workspace.path()))?;
+        let recipes = discover_workflow_recipes(&registry);
+
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].recipe.recipe_id, "review-fanout");
+        assert_eq!(
+            recipes[0].recipe.pattern,
+            WorkflowPattern::FanOutAndSynthesize
+        );
+        assert_eq!(recipes[0].recipe.prompt_template_ref, "prompts/review.md");
+        assert_eq!(recipes[0].recipe.suggested_budget_tokens, Some(12000));
+        assert_eq!(recipes[0].readiness, WorkflowRecipeReadiness::Ready);
+        assert!(recipes[0]
+            .recipe
+            .source_ref
+            .starts_with("skill://workspace-local/reviewer#"));
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_recipe_discovery_marks_malformed_and_duplicate_recipes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        for name in ["one", "two"] {
+            let skill_dir = workspace.path().join("skills").join(name);
+            fs::create_dir_all(&skill_dir)?;
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                format!(
+                    "---\nname: {name}\nworkflow.recipe.id: duplicate\nworkflow.recipe.pattern: loop_until_done\n---\nbody"
+                ),
+            )?;
+        }
+
+        let registry = discover_skill_registry(SkillRegistryOptions::new(workspace.path()))?;
+        let recipes = discover_workflow_recipes(&registry);
+
+        assert_eq!(recipes.len(), 2);
+        assert!(recipes
+            .iter()
+            .all(|recipe| matches!(recipe.readiness, WorkflowRecipeReadiness::Malformed { .. })));
+        assert!(recipes.iter().all(|recipe| recipe
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("duplicate workflow recipe"))));
         Ok(())
     }
 
