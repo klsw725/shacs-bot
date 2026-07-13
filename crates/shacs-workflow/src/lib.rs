@@ -846,6 +846,41 @@ pub enum WorkflowBudgetDecision {
     Blocked { reason: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowExecutionRole {
+    Classifier,
+    Child,
+    Verifier,
+    Synthesis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRuntimeEnforcementInput {
+    pub role: WorkflowExecutionRole,
+    pub usage: WorkflowBudgetUsage,
+    pub active_child_count: usize,
+    pub elapsed_wall_clock_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_tokens: Option<u64>,
+    pub requests_heavy_command: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "decision")]
+pub enum WorkflowRuntimeEnforcementDecision {
+    Allowed {
+        route: WorkflowModelRouteSnapshot,
+        remaining_tokens: Option<u64>,
+    },
+    Throttled {
+        reason: String,
+    },
+    Blocked {
+        reason: String,
+    },
+}
+
 pub fn workflow_budget_decision(
     policy: &WorkflowBudgetPolicy,
     usage: &WorkflowBudgetUsage,
@@ -858,13 +893,13 @@ pub fn workflow_budget_decision(
             };
         }
     }
-    if usage.child_runs >= policy.max_iterations {
+    if usage.child_runs > policy.max_iterations {
         return WorkflowBudgetDecision::Blocked {
             reason: "workflow iteration budget exhausted".to_owned(),
         };
     }
     if let Some(max_heavy_commands) = policy.max_heavy_commands {
-        if usage.heavy_commands >= max_heavy_commands {
+        if usage.heavy_commands > max_heavy_commands {
             return WorkflowBudgetDecision::Blocked {
                 reason: "workflow heavy command budget exhausted".to_owned(),
             };
@@ -875,6 +910,67 @@ pub fn workflow_budget_decision(
         remaining_tokens: policy
             .max_total_tokens
             .map(|max_total_tokens| max_total_tokens.saturating_sub(used_tokens)),
+    }
+}
+
+pub fn workflow_runtime_enforcement_decision(
+    budget_policy: &WorkflowBudgetPolicy,
+    model_policy: &WorkflowModelRoutingPolicy,
+    input: &WorkflowRuntimeEnforcementInput,
+) -> WorkflowRuntimeEnforcementDecision {
+    if let Some(max_wall_clock_ms) = budget_policy.max_wall_clock_ms {
+        if input.elapsed_wall_clock_ms >= max_wall_clock_ms {
+            return WorkflowRuntimeEnforcementDecision::Blocked {
+                reason: "workflow wall-clock budget exhausted".to_owned(),
+            };
+        }
+    }
+
+    if input.role == WorkflowExecutionRole::Child
+        && input.active_child_count >= budget_policy.max_parallel_children
+    {
+        return WorkflowRuntimeEnforcementDecision::Throttled {
+            reason: "workflow parallel child limit reached".to_owned(),
+        };
+    }
+    if input.role == WorkflowExecutionRole::Child
+        && input.usage.child_runs >= budget_policy.max_iterations
+    {
+        return WorkflowRuntimeEnforcementDecision::Blocked {
+            reason: "workflow iteration budget exhausted".to_owned(),
+        };
+    }
+    if let Some(max_heavy_commands) = budget_policy.max_heavy_commands {
+        if input.requests_heavy_command && input.usage.heavy_commands >= max_heavy_commands {
+            return WorkflowRuntimeEnforcementDecision::Blocked {
+                reason: "workflow heavy command budget exhausted".to_owned(),
+            };
+        }
+    }
+
+    let mut usage = input.usage.clone();
+    if input.requests_heavy_command {
+        usage.heavy_commands = usage.heavy_commands.saturating_add(1);
+    }
+    if let Some(requested_tokens) = input.requested_tokens {
+        if let Some(reason) =
+            per_role_token_block_reason(budget_policy, input.role, requested_tokens)
+        {
+            return WorkflowRuntimeEnforcementDecision::Blocked { reason };
+        }
+        usage.estimated_tokens = usage.estimated_tokens.saturating_add(requested_tokens);
+    }
+
+    match workflow_budget_decision(budget_policy, &usage) {
+        WorkflowBudgetDecision::Allowed { remaining_tokens } => {
+            WorkflowRuntimeEnforcementDecision::Allowed {
+                route: workflow_model_route_snapshot(model_policy, input.role.as_route_role()),
+                remaining_tokens,
+            }
+        }
+        WorkflowBudgetDecision::Blocked { reason } => {
+            WorkflowRuntimeEnforcementDecision::Blocked { reason }
+        }
     }
 }
 
@@ -900,6 +996,37 @@ pub fn workflow_model_route_snapshot(
         role: role.to_owned(),
         selected_model_hint,
         fallback_model_policy: policy.fallback_model_policy.clone(),
+    }
+}
+
+impl WorkflowExecutionRole {
+    fn as_route_role(self) -> &'static str {
+        match self {
+            Self::Classifier => "classifier",
+            Self::Child => "child",
+            Self::Verifier => "verifier",
+            Self::Synthesis => "synthesis",
+        }
+    }
+}
+
+fn per_role_token_block_reason(
+    policy: &WorkflowBudgetPolicy,
+    role: WorkflowExecutionRole,
+    requested_tokens: u64,
+) -> Option<String> {
+    match role {
+        WorkflowExecutionRole::Child => policy.max_child_tokens.and_then(|max_child_tokens| {
+            (requested_tokens > max_child_tokens)
+                .then(|| "workflow child token slice exceeded".to_owned())
+        }),
+        WorkflowExecutionRole::Verifier => {
+            policy.max_verifier_tokens.and_then(|max_verifier_tokens| {
+                (requested_tokens > max_verifier_tokens)
+                    .then(|| "workflow verifier token slice exceeded".to_owned())
+            })
+        }
+        WorkflowExecutionRole::Classifier | WorkflowExecutionRole::Synthesis => None,
     }
 }
 
@@ -1084,6 +1211,8 @@ pub struct WorkflowDiagnosticsManifest {
     pub verifier_graph_digest: String,
     pub merge_decision_ref: Option<String>,
     pub stale_result_refs: Vec<String>,
+    pub runtime_diagnostic_refs: Vec<String>,
+    pub replay_live_actions_allowed: bool,
     pub evidence_refs: Vec<EvidenceRef>,
 }
 
@@ -1099,6 +1228,8 @@ pub fn workflow_diagnostics_manifest(
         verifier_graph_digest: stable_sha256_digest(&serde_json::to_value(&plan.verifier_graph)?)?,
         merge_decision_ref: None,
         stale_result_refs,
+        runtime_diagnostic_refs: Vec::new(),
+        replay_live_actions_allowed: false,
         evidence_refs: evidence_refs
             .into_iter()
             .filter(workflow_evidence_ref_valid)
@@ -1118,6 +1249,7 @@ pub enum WorkflowSpec024ReleaseEvidenceBucket {
     Prd006QuarantinePermissions,
     Prd007ResumeReplayDiagnostics,
     Prd008ProjectionReleaseGate,
+    Prd009RuntimeExecution,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1151,6 +1283,7 @@ impl WorkflowSpec024ReleaseEvidenceBucket {
             Self::Prd006QuarantinePermissions,
             Self::Prd007ResumeReplayDiagnostics,
             Self::Prd008ProjectionReleaseGate,
+            Self::Prd009RuntimeExecution,
         ]
     }
 }

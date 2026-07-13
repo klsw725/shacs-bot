@@ -12,15 +12,16 @@ use shacs_workflow::{
     WorkflowAdmissionInput, WorkflowBarrierDecision, WorkflowBudgetDecision, WorkflowBudgetPolicy,
     WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowCheckpointPolicy,
     WorkflowChildResult, WorkflowChildRunStatus, WorkflowChildSpec, WorkflowContextPolicy,
-    WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy, WorkflowPattern,
-    WorkflowPermissionCeilingDecision, WorkflowPermissionPolicy, WorkflowPrd000ReleaseEvidence,
-    WorkflowPrd000ReleaseEvidenceBucket, WorkflowQuarantineDecision, WorkflowQuarantinePolicy,
-    WorkflowRecipe, WorkflowRecipeReadiness, WorkflowResumeDecision, WorkflowResumePolicy,
-    WorkflowRunState, WorkflowSpec024ReleaseEvidence, WorkflowSpec024ReleaseEvidenceBucket,
-    WorkflowStep, WorkflowStepPrivilege, WorkflowStopCondition, WorkflowToolScopePolicy,
-    WorkflowVerificationGate, WorkflowVerifierSpec, WorkflowVerifierVerdict,
-    WorkflowVerifierVerdictKind, WorkflowWorktreeDecision, WorkflowWorktreePolicy,
-    WorkflowWorktreeRequest,
+    WorkflowExecutionRole, WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy,
+    WorkflowPattern, WorkflowPermissionCeilingDecision, WorkflowPermissionPolicy,
+    WorkflowPrd000ReleaseEvidence, WorkflowPrd000ReleaseEvidenceBucket, WorkflowQuarantineDecision,
+    WorkflowQuarantinePolicy, WorkflowRecipe, WorkflowRecipeReadiness, WorkflowResumeDecision,
+    WorkflowResumePolicy, WorkflowRunState, WorkflowRuntimeEnforcementDecision,
+    WorkflowRuntimeEnforcementInput, WorkflowSpec024ReleaseEvidence,
+    WorkflowSpec024ReleaseEvidenceBucket, WorkflowStep, WorkflowStepPrivilege,
+    WorkflowStopCondition, WorkflowToolScopePolicy, WorkflowVerificationGate, WorkflowVerifierSpec,
+    WorkflowVerifierVerdict, WorkflowVerifierVerdictKind, WorkflowWorktreeDecision,
+    WorkflowWorktreePolicy, WorkflowWorktreeRequest,
 };
 
 fn sample_plan() -> WorkflowHarnessPlan {
@@ -414,10 +415,168 @@ fn workflow_worktree_budget_and_model_routing_contracts_are_explicit() {
         }
     );
 
+    let mut exact_policy = plan.budget_policy.clone();
+    exact_policy.max_iterations = 1;
+    exact_policy.max_heavy_commands = Some(1);
+    assert!(matches!(
+        workflow_budget_decision(
+            &exact_policy,
+            &WorkflowBudgetUsage {
+                known_tokens: 1_000,
+                estimated_tokens: 0,
+                child_runs: 1,
+                verifier_runs: 0,
+                heavy_commands: 1,
+            },
+        ),
+        WorkflowBudgetDecision::Allowed { .. }
+    ));
+
     let route = workflow_model_route_snapshot(&plan.model_routing_policy, "verifier");
     assert_eq!(route.role, "verifier");
     assert_eq!(route.selected_model_hint, Some("strong".to_owned()));
     assert_eq!(route.fallback_model_policy, "use provider default");
+}
+
+#[test]
+fn workflow_runtime_enforcement_applies_budget_timeout_parallelism_and_route() {
+    let mut plan = sample_plan();
+    plan.budget_policy.max_heavy_commands = Some(2);
+    let usage = WorkflowBudgetUsage {
+        known_tokens: 1_000,
+        estimated_tokens: 500,
+        child_runs: 1,
+        verifier_runs: 0,
+        heavy_commands: 0,
+    };
+
+    assert_eq!(
+        shacs_workflow::workflow_runtime_enforcement_decision(
+            &plan.budget_policy,
+            &plan.model_routing_policy,
+            &WorkflowRuntimeEnforcementInput {
+                role: WorkflowExecutionRole::Child,
+                usage: usage.clone(),
+                active_child_count: 1,
+                elapsed_wall_clock_ms: 1_000,
+                requested_tokens: Some(250),
+                requests_heavy_command: false,
+            },
+        ),
+        WorkflowRuntimeEnforcementDecision::Allowed {
+            route: shacs_workflow::workflow_model_route_snapshot(
+                &plan.model_routing_policy,
+                "child"
+            ),
+            remaining_tokens: Some(8_250),
+        }
+    );
+
+    assert_eq!(
+        shacs_workflow::workflow_runtime_enforcement_decision(
+            &plan.budget_policy,
+            &plan.model_routing_policy,
+            &WorkflowRuntimeEnforcementInput {
+                role: WorkflowExecutionRole::Child,
+                usage: usage.clone(),
+                active_child_count: 2,
+                elapsed_wall_clock_ms: 1_000,
+                requested_tokens: Some(250),
+                requests_heavy_command: false,
+            },
+        ),
+        WorkflowRuntimeEnforcementDecision::Throttled {
+            reason: "workflow parallel child limit reached".to_owned(),
+        }
+    );
+
+    assert_eq!(
+        shacs_workflow::workflow_runtime_enforcement_decision(
+            &plan.budget_policy,
+            &plan.model_routing_policy,
+            &WorkflowRuntimeEnforcementInput {
+                role: WorkflowExecutionRole::Verifier,
+                usage: usage.clone(),
+                active_child_count: 0,
+                elapsed_wall_clock_ms: 1_000,
+                requested_tokens: Some(2_001),
+                requests_heavy_command: false,
+            },
+        ),
+        WorkflowRuntimeEnforcementDecision::Blocked {
+            reason: "workflow verifier token slice exceeded".to_owned(),
+        }
+    );
+
+    assert_eq!(
+        shacs_workflow::workflow_runtime_enforcement_decision(
+            &plan.budget_policy,
+            &plan.model_routing_policy,
+            &WorkflowRuntimeEnforcementInput {
+                role: WorkflowExecutionRole::Synthesis,
+                usage,
+                active_child_count: 0,
+                elapsed_wall_clock_ms: 120_000,
+                requested_tokens: None,
+                requests_heavy_command: false,
+            },
+        ),
+        WorkflowRuntimeEnforcementDecision::Blocked {
+            reason: "workflow wall-clock budget exhausted".to_owned(),
+        }
+    );
+
+    let mut exhausted = plan.budget_policy.clone();
+    exhausted.max_iterations = 1;
+    assert_eq!(
+        shacs_workflow::workflow_runtime_enforcement_decision(
+            &exhausted,
+            &plan.model_routing_policy,
+            &WorkflowRuntimeEnforcementInput {
+                role: WorkflowExecutionRole::Child,
+                usage: WorkflowBudgetUsage {
+                    known_tokens: 1_000,
+                    estimated_tokens: 0,
+                    child_runs: 1,
+                    verifier_runs: 0,
+                    heavy_commands: 0,
+                },
+                active_child_count: 0,
+                elapsed_wall_clock_ms: 1_000,
+                requested_tokens: None,
+                requests_heavy_command: false,
+            },
+        ),
+        WorkflowRuntimeEnforcementDecision::Blocked {
+            reason: "workflow iteration budget exhausted".to_owned(),
+        }
+    );
+
+    let mut heavy_exhausted = plan.budget_policy.clone();
+    heavy_exhausted.max_heavy_commands = Some(1);
+    assert_eq!(
+        shacs_workflow::workflow_runtime_enforcement_decision(
+            &heavy_exhausted,
+            &plan.model_routing_policy,
+            &WorkflowRuntimeEnforcementInput {
+                role: WorkflowExecutionRole::Child,
+                usage: WorkflowBudgetUsage {
+                    known_tokens: 1_000,
+                    estimated_tokens: 0,
+                    child_runs: 0,
+                    verifier_runs: 0,
+                    heavy_commands: 1,
+                },
+                active_child_count: 0,
+                elapsed_wall_clock_ms: 1_000,
+                requested_tokens: None,
+                requests_heavy_command: true,
+            },
+        ),
+        WorkflowRuntimeEnforcementDecision::Blocked {
+            reason: "workflow heavy command budget exhausted".to_owned(),
+        }
+    );
 }
 
 #[test]
@@ -541,6 +700,8 @@ fn workflow_projection_diagnostics_and_spec024_release_gate_are_evidence_backed(
     )?;
     assert_eq!(manifest.workflow_id, "workflow-1");
     assert_eq!(manifest.stale_result_refs, vec!["stale-child".to_owned()]);
+    assert!(manifest.runtime_diagnostic_refs.is_empty());
+    assert!(!manifest.replay_live_actions_allowed);
     assert_eq!(manifest.evidence_refs.len(), 1);
 
     let complete = WorkflowSpec024ReleaseEvidenceBucket::required_buckets()
@@ -557,6 +718,9 @@ fn workflow_projection_diagnostics_and_spec024_release_gate_are_evidence_backed(
         })
         .collect::<Vec<_>>();
     assert!(workflow_spec024_release_evidence_checklist(&complete).passed);
+    assert!(complete
+        .iter()
+        .any(|entry| entry.bucket == WorkflowSpec024ReleaseEvidenceBucket::Prd009RuntimeExecution));
 
     let incomplete = [WorkflowSpec024ReleaseEvidence {
         bucket: WorkflowSpec024ReleaseEvidenceBucket::Prd001PatternChildGraph,
