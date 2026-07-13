@@ -6,6 +6,7 @@ rust-version = "1.75"
 
 [dependencies]
 serde_json = "1"
+shacs-workflow = { path = "../shacs-workflow" }
 
 [dev-dependencies]
 tempfile = "3"

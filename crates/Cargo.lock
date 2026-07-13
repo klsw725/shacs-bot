@@ -1638,6 +1638,7 @@ dependencies = [
  "shacs-templates",
  "shacs-utils",
  "shacs-web",
+ "shacs-workflow",
  "tempfile",
  "tokio",
  "tungstenite",
@@ -1782,6 +1783,7 @@ name = "shacs-skills"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "shacs-workflow",
  "tempfile",
 ]
 
@@ -1805,6 +1807,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shacs-redaction",
+ "tempfile",
  "ureq",
  "zip",
 ]
