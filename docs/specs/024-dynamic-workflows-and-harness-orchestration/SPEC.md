@@ -1,6 +1,6 @@
 # dynamic workflows and harness orchestration 아키텍처 명세
 
-Status: Typed workflow foundation and read-only runtime smoke implemented; full dynamic workflow product remains open. Live production agent-loop dynamic workflow, live subagent spawn, git worktree merge, skill recipe discovery, full budget enforcement, and API/TUI/channel projection are not closed yet.
+Status: Typed workflow foundation, durable checkpoint/resume/diagnostics contract, release evidence checklist through PRD009, session diagnostics ref projection, read-only runtime smoke evidence, metadata-gated live AgentLoop subagent/verifier execution, skill-backed recipe discovery, and CLI/local API recipe projection are implemented; full dynamic workflow product remains open. Automatic user-turn planning/admission, write-capable git worktree merge handoff, full workflow progress projection across every UI/channel, and interrupt/resume orchestration remain open.
 
 ## 문서 목적
 
@@ -598,11 +598,11 @@ Diagnostics는 release gate와 replay에서 destructive tool을 재실행하지 
 
 ## 현재 구현 상태
 
-2026-07-06 기준 `shacs-workflow` crate에는 workflow state, harness plan, admission, checkpoint/resume, child graph, barrier, verifier gate, worktree decision, budget/model route snapshot, recipe readiness, quarantine/permission ceiling, diagnostics manifest, projection helper, and Spec 024 release evidence helper가 구현되어 있다. `crates/shacs-core/src/runtime/workflow.rs`는 provider 호출 없이 이 contract helper를 소비하는 read-only runtime workflow smoke path를 제공한다.
+2026-07-13 기준 `shacs-workflow` crate에는 workflow state, harness plan, admission, checkpoint/resume, child graph, barrier, verifier gate, worktree decision, budget/model route snapshot, runtime enforcement helper, recipe readiness, quarantine/permission ceiling, replay-safe diagnostics manifest, projection helper, and Spec 024 release evidence helper가 PRD009 runtime execution bucket까지 구현되어 있다. `crates/shacs-projection`에는 owner `024`와 redaction-valid evidence만 인정하는 projection-side Spec 024 release checklist가 있고, `crates/shacs-session` UX diagnostics는 persisted metadata에서 replay-safe diagnostics refs만 투영한다. `crates/shacs-core/src/runtime/workflow.rs`는 provider 호출 없이 이 contract helper를 소비하는 read-only runtime workflow smoke path와, caller가 typed admission/plan metadata를 제공했을 때 live child/verifier subagent를 실행하는 metadata-gated AgentLoop path를 제공한다.
 
-현재 구현된 runtime smoke는 dynamic admission branch가 read-only workflow path로 들어가는지, monitorable events, verifier fail-closed, child/verifier provenance fail-closed, parent session truth isolation, read-only child registry, cancellation handle, diagnostics/replay summary를 검증한다. 이는 deterministic foundation evidence다.
+현재 구현된 runtime smoke는 dynamic admission branch가 read-only workflow path로 들어가는지, monitorable events, verifier fail-closed, child/verifier provenance fail-closed, parent session truth isolation, read-only child registry, cancellation handle, diagnostics/replay summary를 검증한다. Live metadata-gated AgentLoop smoke는 workflow metadata가 주어진 turn에서 child/verifier subagent execution, runtime budget/timeout/model-route enforcement, session checkpoint metadata, and diagnostics refs가 기록되는지 검증한다. 이는 deterministic foundation plus limited live wiring evidence다.
 
-아직 열린 범위는 live production `AgentLoop`에서 dynamic workflow를 실제 turn execution path로 선택하는 wiring, live subagent spawn execution, write-capable git worktree creation/merge handoff, skill-backed recipe discovery integration, 실제 provider/token budget enforcement, and CLI/TUI/local API/channel projection이다.
+아직 열린 범위는 일반 사용자 turn에서 workflow plan을 자동 생성/선택하는 admission planner, write-capable git worktree creation/merge handoff, verifier의 structured evidence output, full workflow progress projection across TUI/channel surfaces, and interruption/restart resume orchestration이다.
 
 ---
 
