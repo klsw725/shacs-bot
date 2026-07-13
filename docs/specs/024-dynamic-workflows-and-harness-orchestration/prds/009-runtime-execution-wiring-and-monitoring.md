@@ -103,4 +103,5 @@ Dynamic workflow spec closure를 위해 남은 runtime execution wiring gap을 �
 - Admission branch smoke는 `decide_workflow_admission`의 dynamic decision이 read-only runtime workflow path로 들어가고, non-dynamic decision은 regular loop로 남는 것을 검증한다.
 - Interrupt propagation smoke는 workflow execution handle의 cancellation token과 child id set이 cancel event 및 `cancelled` terminal state로 반영되는 것을 검증한다.
 - Diagnostics/replay smoke는 harness/child/verifier graph digest, event phase, terminal state, verifier status를 live 재실행 없이 설명하며 `replay_live_actions_allowed = false`를 검증한다.
+- Spec 024 release evidence checklist는 PRD009 runtime execution bucket을 필수로 요구하며, session UX diagnostics는 persisted metadata에서 diagnostics ref 문자열만 투영해 restart/replay inspection이 raw diagnostic payload 없이 가능하게 한다.
 - 이 메모는 Wave 3 / PRD 009의 deterministic runtime closure evidence다. Provider-backed live subagent execution, write-capable worktree merge, UI projection은 PRD 009 read-only closure 범위가 아니라 후속 wave 또는 다른 PRD가 소유한다.

@@ -205,4 +205,4 @@ Spec 024의 PRD 000-009를 실제 구현 가능한 순서로 묶는다. Dynamic 
 - Child와 verifier는 session truth를 직접 수정하지 않는다.
 - Budget, timeout, permission ceiling, Tool Search child scope가 runtime에서 enforce된다.
 - Diagnostics/replay evidence만으로 workflow 실행 흐름을 설명할 수 있다.
-- 관련 Rust 변경은 workspace 또는 해당 crate 기준 `cargo fmt --manifest-path crates/shacs-core/Cargo.toml -- --check`, `cargo clippy --manifest-path crates/shacs-core/Cargo.toml --all-targets -- -D warnings`, `cargo test --manifest-path crates/shacs-core/Cargo.toml`처럼 범위를 명시해 통과한다.
+- 관련 Rust 변경은 workspace manifest 기준 `cargo fmt --manifest-path crates/Cargo.toml --all -- --check`, `cargo clippy --manifest-path crates/Cargo.toml -p shacs-core --all-targets -- -D warnings`, `cargo test --manifest-path crates/Cargo.toml -p shacs-core`처럼 범위를 명시해 통과한다.

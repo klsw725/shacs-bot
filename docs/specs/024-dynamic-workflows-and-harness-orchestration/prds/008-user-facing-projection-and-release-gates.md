@@ -12,7 +12,7 @@
 - budget usage projection
 - worktree refs, blocked reason, next action, resume availability
 - projection evidence filtering
-- Spec 024 release evidence bucket checklist
+- Spec 024 release evidence bucket checklist including PRD009 runtime execution coverage
 
 ## 비범위
 
@@ -76,10 +76,10 @@
 
 ## Cargo 검증
 
-1. `cargo fmt --manifest-path crates/shacs-cli/Cargo.toml -- --check`
-2. `cargo clippy --manifest-path crates/shacs-cli/Cargo.toml --all-targets -- -D warnings`
-3. `cargo test --manifest-path crates/shacs-cli/Cargo.toml workflow_projection`
-4. workflow projection model을 건드렸다면 `cargo test --manifest-path crates/shacs-workflow/Cargo.toml workflow_projection`
+1. `cargo fmt --manifest-path crates/Cargo.toml -p shacs-cli -- --check`
+2. `cargo clippy --manifest-path crates/Cargo.toml -p shacs-cli --all-targets -- -D warnings`
+3. `cargo test --manifest-path crates/Cargo.toml -p shacs-cli workflow_projection`
+4. workflow projection model을 건드렸다면 `cargo test --manifest-path crates/Cargo.toml -p shacs-workflow workflow_projection`
 
 ## 완료 기준
 
@@ -87,5 +87,5 @@
 - projection은 completed step, active child, pending barrier count를 계산한다.
 - verifier gate는 user-facing status label로 표면화된다.
 - resume point가 있으면 resume available이 true다.
-- release checklist는 PRD 000-008 모든 bucket의 test 또는 manual QA evidence를 요구한다.
+- release checklist는 PRD 000-009 모든 bucket의 test 또는 manual QA evidence를 요구한다.
 - evidence ref는 owner `024`와 redaction-valid 상태를 만족해야 release coverage로 인정된다.
