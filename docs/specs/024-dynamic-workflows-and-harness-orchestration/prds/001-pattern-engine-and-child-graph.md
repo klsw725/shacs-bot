@@ -86,3 +86,8 @@ Spec 024의 workflow pattern과 child graph contract를 runtime이 소비할 수
 - synthesis는 completed/running/failed child를 분리한다.
 - unresolved child가 남아 있으면 final success를 허용하지 않는다.
 - child evidence refs는 owner `024`와 redaction 상태가 유효한 항목만 synthesis evidence로 남는다.
+
+## 구현 메모
+
+- Live runtime은 pattern별 별도 native engine 대신 dependency와 barrier를 표현한 bounded DAG를 공통 scheduler로 실행한다.
+- `tournament`는 pre-expanded bounded static DAG만 허용하며 runtime이 round/bracket을 동적으로 확장하는 native tournament scheduler는 이 PRD의 비범위다.

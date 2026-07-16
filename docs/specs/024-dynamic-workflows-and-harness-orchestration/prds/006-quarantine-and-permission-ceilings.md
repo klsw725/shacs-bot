@@ -85,3 +85,8 @@ Untrusted input을 읽은 workflow child와 privileged action 수행자를 분�
 - denied capability 요청은 approval 여부와 무관하게 blocked다.
 - privileged step approval policy가 true면 approval required decision을 반환한다.
 - quarantine과 permission ceiling은 workflow success보다 우선한다.
+
+## 구현 메모
+
+- Live `PrivilegedActorSeparated` execution은 sanitizer step의 completed output을 deterministic digest evidence로 검증하고, privileged child에는 원래 goal/raw untrusted content 대신 validated sanitized handoff만 전달한다.
+- Worktree root와 child parent의 trusted boundary 아래 symlink component는 git effect 전에 거부한다.
