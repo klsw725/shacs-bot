@@ -219,6 +219,7 @@ pub struct SessionUxDetail {
     pub recovery_markers: Vec<String>,
     pub checkpoint_phase: Option<String>,
     pub diagnostics_refs: Vec<String>,
+    pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,7 +233,36 @@ pub struct SessionUxDiagnostics {
     pub recovery_markers: Vec<String>,
     pub checkpoint_phase: Option<String>,
     pub diagnostics_refs: Vec<String>,
+    pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
     pub legal_start: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRuntimeWorkflowProjection {
+    pub schema_label: Option<String>,
+    pub schema_version: Option<String>,
+    pub workflow_id: Option<String>,
+    pub pattern: Option<String>,
+    pub state: Option<String>,
+    pub progress_count: Option<u64>,
+    pub active_child_count: Option<u64>,
+    pub pending_barrier_count: Option<u64>,
+    pub verifier_status: Option<String>,
+    pub budget_usage: Option<SessionWorkflowBudgetUsage>,
+    pub worktree_ref_count: u64,
+    pub evidence_ref_count: u64,
+    pub blocked_reason: Option<String>,
+    pub next_action: Option<String>,
+    pub resume_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWorkflowBudgetUsage {
+    pub known_tokens: Option<u64>,
+    pub estimated_tokens: Option<u64>,
+    pub child_runs: Option<u64>,
+    pub verifier_runs: Option<u64>,
+    pub heavy_commands: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -498,7 +528,11 @@ impl SessionManager {
             .existing_session_path(key)
             .unwrap_or_else(|| self.session_path(key));
         self.load_existing(key).map(|session| {
-            let history = session.get_history_with_options(options);
+            let history = session
+                .get_history_with_options(options)
+                .into_iter()
+                .filter_map(session_message_to_ux_history)
+                .collect();
             SessionUxHistory {
                 key: session.key,
                 path,
@@ -524,6 +558,7 @@ impl SessionManager {
                 recovery_markers: Vec::new(),
                 checkpoint_phase: None,
                 diagnostics_refs: Vec::new(),
+                runtime_workflow: None,
                 legal_start: 0,
             }
         }
@@ -733,25 +768,24 @@ fn session_payload(session: &Session) -> Value {
 }
 
 fn session_ux_detail_from_session(session: Session, path: PathBuf) -> SessionUxDetail {
-    let (metadata_keys, recovery_markers, checkpoint_phase, diagnostics_refs) =
-        session_ux_metadata(&session.metadata);
+    let metadata = session_ux_metadata(&session.metadata);
     SessionUxDetail {
         key: session.key,
         created_at: Some(session.created_at),
         updated_at: Some(session.updated_at),
         path,
         message_count: session.messages.len(),
-        metadata_keys,
+        metadata_keys: metadata.keys,
         last_consolidated: session.last_consolidated,
-        recovery_markers,
-        checkpoint_phase,
-        diagnostics_refs,
+        recovery_markers: metadata.recovery_markers,
+        checkpoint_phase: metadata.checkpoint_phase,
+        diagnostics_refs: metadata.diagnostics_refs,
+        runtime_workflow: metadata.runtime_workflow,
     }
 }
 
 fn session_ux_diagnostics_from_session(session: Session, path: PathBuf) -> SessionUxDiagnostics {
-    let (metadata_keys, recovery_markers, checkpoint_phase, diagnostics_refs) =
-        session_ux_metadata(&session.metadata);
+    let metadata = session_ux_metadata(&session.metadata);
     let legal_start = find_legal_message_start(&session.messages);
     SessionUxDiagnostics {
         key: session.key,
@@ -759,17 +793,24 @@ fn session_ux_diagnostics_from_session(session: Session, path: PathBuf) -> Sessi
         exists: true,
         message_count: session.messages.len(),
         last_consolidated: session.last_consolidated,
-        metadata_keys,
-        recovery_markers,
-        checkpoint_phase,
-        diagnostics_refs,
+        metadata_keys: metadata.keys,
+        recovery_markers: metadata.recovery_markers,
+        checkpoint_phase: metadata.checkpoint_phase,
+        diagnostics_refs: metadata.diagnostics_refs,
+        runtime_workflow: metadata.runtime_workflow,
         legal_start,
     }
 }
 
-fn session_ux_metadata(
-    metadata: &Map<String, Value>,
-) -> (Vec<String>, Vec<String>, Option<String>, Vec<String>) {
+struct SessionUxMetadata {
+    keys: Vec<String>,
+    recovery_markers: Vec<String>,
+    checkpoint_phase: Option<String>,
+    diagnostics_refs: Vec<String>,
+    runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
+}
+
+fn session_ux_metadata(metadata: &Map<String, Value>) -> SessionUxMetadata {
     let mut metadata_keys = metadata.keys().cloned().collect::<Vec<_>>();
     metadata_keys.sort();
     let mut recovery_markers = Vec::new();
@@ -791,12 +832,77 @@ fn session_ux_metadata(
         .and_then(|checkpoint| checkpoint.get("phase"))
         .and_then(Value::as_str)
         .map(str::to_owned);
-    (
-        metadata_keys,
+    let runtime_workflow = session_runtime_workflow_projection(metadata);
+    SessionUxMetadata {
+        keys: metadata_keys,
         recovery_markers,
         checkpoint_phase,
         diagnostics_refs,
-    )
+        runtime_workflow,
+    }
+}
+
+fn session_runtime_workflow_projection(
+    metadata: &Map<String, Value>,
+) -> Option<SessionRuntimeWorkflowProjection> {
+    let projection = metadata
+        .get("runtime_workflow")?
+        .get("projection")?
+        .as_object()?;
+    Some(SessionRuntimeWorkflowProjection {
+        schema_label: projection_string(projection, "schema_label"),
+        schema_version: projection_string(projection, "schema_version"),
+        workflow_id: projection_string(projection, "workflow_id"),
+        pattern: projection_string(projection, "pattern"),
+        state: projection_string(projection, "state"),
+        progress_count: projection_u64(projection, "progress_count"),
+        active_child_count: projection_u64(projection, "active_child_count"),
+        pending_barrier_count: projection_u64(projection, "pending_barrier_count"),
+        verifier_status: projection_string(projection, "verifier_status"),
+        budget_usage: projection
+            .get("budget_usage")
+            .and_then(Value::as_object)
+            .map(session_workflow_budget_usage),
+        worktree_ref_count: projection_array_len(projection, "worktree_refs"),
+        evidence_ref_count: projection_array_len(projection, "evidence_refs"),
+        blocked_reason: projection_string(projection, "blocked_reason"),
+        next_action: projection_string(projection, "next_action"),
+        resume_available: projection
+            .get("resume_available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn session_workflow_budget_usage(budget: &Map<String, Value>) -> SessionWorkflowBudgetUsage {
+    SessionWorkflowBudgetUsage {
+        known_tokens: projection_u64(budget, "known_tokens"),
+        estimated_tokens: projection_u64(budget, "estimated_tokens"),
+        child_runs: projection_u64(budget, "child_runs"),
+        verifier_runs: projection_u64(budget, "verifier_runs"),
+        heavy_commands: projection_u64(budget, "heavy_commands"),
+    }
+}
+
+fn projection_string(projection: &Map<String, Value>, key: &str) -> Option<String> {
+    projection
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn projection_u64(projection: &Map<String, Value>, key: &str) -> Option<u64> {
+    projection.get(key).and_then(Value::as_u64)
+}
+
+fn projection_array_len(projection: &Map<String, Value>, key: &str) -> u64 {
+    projection
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| items.len() as u64)
+        .unwrap_or_default()
 }
 
 fn session_diagnostics_refs(metadata: &Map<String, Value>) -> Vec<String> {
@@ -908,6 +1014,24 @@ fn session_message_to_history(mut message: Value, include_timestamps: bool) -> O
         }
     }
     Some(Value::Object(out))
+}
+
+fn session_message_to_ux_history(message: Value) -> Option<Value> {
+    let object = message.as_object()?;
+    let role = object.get("role")?.as_str()?;
+    if !matches!(role, "user" | "assistant") {
+        return None;
+    }
+    Some(Value::Object(Map::from_iter([
+        ("role".to_owned(), Value::String(role.to_owned())),
+        (
+            "content".to_owned(),
+            object
+                .get("content")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new())),
+        ),
+    ])))
 }
 
 pub fn find_legal_message_start(messages: &[Value]) -> usize {

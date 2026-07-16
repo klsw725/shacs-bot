@@ -136,6 +136,35 @@ fn session_ux_projection_hides_raw_values_but_preserves_query_semantics(
         "runtime_diagnostics".to_owned(),
         json!({ "refs": ["workflow://diag-safe", "", "workflow://diag-safe"], "raw": "sk-hidden" }),
     );
+    session.metadata.insert(
+        "runtime_workflow".to_owned(),
+        json!({
+            "raw_prompt": "do-not-show",
+            "projection": {
+                "schema_label": "024WorkflowProjection",
+                "schema_version": "024WorkflowProjection.v1",
+                "workflow_id": "wf-1",
+                "objective_summary": "raw objective stays hidden",
+                "pattern": "fan_out_and_synthesize",
+                "state": "Succeeded",
+                "progress_count": 2,
+                "active_child_count": 0,
+                "pending_barrier_count": 1,
+                "verifier_status": "passed",
+                "budget_usage": {
+                    "known_tokens": 10,
+                    "estimated_tokens": 20,
+                    "child_runs": 2,
+                    "verifier_runs": 1,
+                    "heavy_commands": 0
+                },
+                "next_action": "none",
+                "resume_available": true,
+                "worktree_refs": ["diff --raw hidden"],
+                "evidence_refs": [{"id": "hidden-evidence"}]
+            }
+        }),
+    );
     session.add_message("user", "hello secret", Map::new());
     session.add_message("assistant", "world", Map::new());
     manager.save(&session)?;
@@ -158,10 +187,47 @@ fn session_ux_projection_hides_raw_values_but_preserves_query_semantics(
 
     if summaries.len() != 1
         || summaries[0].key != "cli:ux"
-        || detail.metadata_keys != ["api_token", "runtime_checkpoint", "runtime_diagnostics"]
+        || detail.metadata_keys
+            != [
+                "api_token",
+                "runtime_checkpoint",
+                "runtime_diagnostics",
+                "runtime_workflow",
+            ]
         || detail.recovery_markers != ["runtime_checkpoint", "runtime_diagnostics"]
         || detail.checkpoint_phase.as_deref() != Some("awaiting_tools")
         || detail.diagnostics_refs != ["workflow://diag-safe"]
+        || detail
+            .runtime_workflow
+            .as_ref()
+            .and_then(|workflow| workflow.workflow_id.as_deref())
+            != Some("wf-1")
+        || detail
+            .runtime_workflow
+            .as_ref()
+            .and_then(|workflow| workflow.pattern.as_deref())
+            != Some("fan_out_and_synthesize")
+        || detail
+            .runtime_workflow
+            .as_ref()
+            .and_then(|workflow| workflow.budget_usage.as_ref())
+            .and_then(|budget| budget.child_runs)
+            != Some(2)
+        || detail
+            .runtime_workflow
+            .as_ref()
+            .map(|workflow| workflow.worktree_ref_count)
+            != Some(1)
+        || detail
+            .runtime_workflow
+            .as_ref()
+            .map(|workflow| workflow.evidence_ref_count)
+            != Some(1)
+        || diagnostics
+            .runtime_workflow
+            .as_ref()
+            .and_then(|workflow| workflow.verifier_status.as_deref())
+            != Some("passed")
         || detail.message_count != 2
         || detail.last_consolidated != 0
         || diagnostics.legal_start != 0
@@ -179,10 +245,59 @@ fn session_ux_projection_hides_raw_values_but_preserves_query_semantics(
     if detail_json.to_string().contains("secret-value")
         || detail_json.to_string().contains("hidden")
         || detail_json.to_string().contains("sk-hidden")
+        || detail_json.to_string().contains("raw objective")
+        || detail_json.to_string().contains("diff --raw")
+        || detail_json.to_string().contains("do-not-show")
         || detail_json.get("messages").is_some()
     {
         return Err(format!("UX detail exposed raw values: {detail_json}").into());
     }
+    Ok(())
+}
+
+#[test]
+fn session_ux_history_omits_provider_and_tool_internals() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    let mut session = Session::new("cli:history-safe");
+    session.add_message("user", "visible question", Map::new());
+    let mut assistant_extra = Map::new();
+    assistant_extra.insert(
+        "tool_calls".to_owned(),
+        json!([{"id": "call-1", "type": "function", "function": {"name": "secret_tool", "arguments": "{\"secret\":true}"}}]),
+    );
+    assistant_extra.insert("reasoning_content".to_owned(), json!("hidden reasoning"));
+    assistant_extra.insert("thinking_blocks".to_owned(), json!(["hidden thinking"]));
+    session.add_message("assistant", "visible answer", assistant_extra);
+    let mut tool_extra = Map::new();
+    tool_extra.insert("tool_call_id".to_owned(), json!("call-1"));
+    tool_extra.insert("name".to_owned(), json!("secret_tool"));
+    session.add_message("tool", "hidden tool payload", tool_extra);
+    manager.save(&session)?;
+
+    let history = manager
+        .session_ux_history(
+            "cli:history-safe",
+            SessionProjectionOptions {
+                max_messages: 10,
+                include_timestamps: false,
+                ..SessionProjectionOptions::default()
+            },
+        )
+        .ok_or("missing UX history")?;
+
+    assert_eq!(history.history.len(), 2);
+    assert_eq!(history.history[0]["role"], "user");
+    assert_eq!(history.history[0]["content"], "visible question");
+    assert_eq!(history.history[1]["role"], "assistant");
+    assert_eq!(history.history[1]["content"], "visible answer");
+    let history_text = serde_json::to_string(&history)?;
+    assert!(!history_text.contains("tool_calls"));
+    assert!(!history_text.contains("tool_call_id"));
+    assert!(!history_text.contains("secret_tool"));
+    assert!(!history_text.contains("hidden reasoning"));
+    assert!(!history_text.contains("hidden thinking"));
+    assert!(!history_text.contains("hidden tool payload"));
     Ok(())
 }
 
