@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shacs_eval::evaluator::stable_sha256_digest;
 use shacs_eval::evaluator::{EvidenceRef, RedactionStatus};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +41,15 @@ pub enum WorkflowPattern {
     LoopUntilDone,
     WorkflowSequence,
     Hybrid,
+}
+
+impl WorkflowPattern {
+    fn requires_verifier(self) -> bool {
+        matches!(
+            self,
+            Self::AdversarialVerification | Self::GenerateAndFilter | Self::Tournament
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -208,6 +217,36 @@ pub struct WorkflowToolScopePolicy {
     pub quarantine: WorkflowQuarantinePolicy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowToolScopeRole {
+    Sanitizer,
+    Child,
+    Verifier,
+    Synthesis,
+    PrivilegedActor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowSanitizedHandoffContract {
+    pub sanitizer_step_id: String,
+    pub privileged_step_id: String,
+    pub sanitizer_tools: Vec<String>,
+    pub privileged_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum WorkflowSanitizedHandoffStatus {
+    NotRequired,
+    Validated {
+        contract: WorkflowSanitizedHandoffContract,
+    },
+    Blocked {
+        reason: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowPermissionPolicy {
     pub permission_snapshot_ref: String,
@@ -311,6 +350,54 @@ pub struct WorkflowCheckpoint {
     pub evidence_refs: Vec<String>,
     pub last_safe_resume_point: String,
     pub recorded_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowRuntimeCheckpointPayload {
+    pub checkpoint: WorkflowCheckpoint,
+    pub completed_step_id: Option<String>,
+    #[serde(default)]
+    pub completed_child_ids: Vec<String>,
+    pub ready_step_ids: Vec<String>,
+    pub pending_step_ids: Vec<String>,
+    #[serde(default)]
+    pub worktree_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub resume_step_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowPatternContractEvidence {
+    pub pattern: WorkflowPattern,
+    pub bounded: bool,
+    pub static_dag: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum WorkflowPatternContractStatus {
+    Satisfied,
+    Blocked { reasons: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowSanitizedHandoffEvidence {
+    pub sanitizer_step_id: String,
+    pub privileged_step_id: String,
+    pub sanitizer_output_digest: String,
+    pub privileged_input_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_untrusted_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum WorkflowSanitizedHandoffEvidenceStatus {
+    Validated,
+    Blocked { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,6 +551,61 @@ pub fn workflow_resume_decision(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowResumeValidationInput {
+    pub checkpoint: WorkflowCheckpoint,
+    pub resume_policy: WorkflowResumePolicy,
+    pub current_harness_plan_digest: String,
+    #[serde(default)]
+    pub required_completed_steps: Vec<String>,
+    #[serde(default)]
+    pub required_worktree_refs: Vec<String>,
+    #[serde(default)]
+    pub required_evidence_refs: Vec<String>,
+}
+
+pub fn workflow_resume_validation_decision(
+    input: &WorkflowResumeValidationInput,
+) -> WorkflowResumeDecision {
+    match workflow_resume_decision(
+        &input.checkpoint,
+        &input.resume_policy,
+        &input.current_harness_plan_digest,
+    ) {
+        WorkflowResumeDecision::ResumeAllowed { resume_point } => {
+            if let Some(missing_step) = input
+                .required_completed_steps
+                .iter()
+                .find(|step_id| !input.checkpoint.completed_steps.contains(step_id))
+            {
+                return WorkflowResumeDecision::Blocked {
+                    reason: format!("checkpoint missing completed step `{missing_step}`"),
+                };
+            }
+            if let Some(missing_ref) = input
+                .required_worktree_refs
+                .iter()
+                .find(|worktree_ref| !input.checkpoint.worktree_refs.contains(worktree_ref))
+            {
+                return WorkflowResumeDecision::Blocked {
+                    reason: format!("checkpoint missing worktree ref `{missing_ref}`"),
+                };
+            }
+            if let Some(missing_ref) = input
+                .required_evidence_refs
+                .iter()
+                .find(|evidence_ref| !input.checkpoint.evidence_refs.contains(evidence_ref))
+            {
+                return WorkflowResumeDecision::Blocked {
+                    reason: format!("checkpoint missing evidence ref `{missing_ref}`"),
+                };
+            }
+            WorkflowResumeDecision::ResumeAllowed { resume_point }
+        }
+        decision => decision,
+    }
+}
+
 pub fn workflow_prd000_release_evidence_checklist(
     evidence: &[WorkflowPrd000ReleaseEvidence],
 ) -> WorkflowPrd000ReleaseEvidenceChecklist {
@@ -586,6 +728,29 @@ pub enum WorkflowBarrierDecision {
     Blocked { reason: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum WorkflowPlanValidationStatus {
+    Valid,
+    Invalid { reasons: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "decision")]
+pub enum WorkflowReadyScheduleDecision {
+    Ready {
+        ready_step_ids: Vec<String>,
+        ready_child_ids: Vec<String>,
+        deferred_child_ids: Vec<String>,
+    },
+    Waiting {
+        pending_step_ids: Vec<String>,
+    },
+    Blocked {
+        reason: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowSynthesisOutcome {
     pub accepted_child_ids: Vec<String>,
@@ -614,6 +779,22 @@ pub struct WorkflowVerifierVerdict {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowVerifierEvidenceContract {
+    pub verifier_id: String,
+    pub target_child_id: String,
+    pub independent_evidence_required: bool,
+    pub required_owner_spec: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum WorkflowVerifierEvidenceStatus {
+    Satisfied,
+    Missing { verifier_id: String },
+    Invalid { verifier_id: String, reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "decision")]
 pub enum WorkflowVerificationGate {
     Passed,
@@ -637,6 +818,406 @@ pub fn workflow_ready_step_ids(
         })
         .map(|step| step.step_id.clone())
         .collect()
+}
+
+pub fn validate_workflow_plan(plan: &WorkflowHarnessPlan) -> WorkflowPlanValidationStatus {
+    let mut reasons = Vec::new();
+    if plan.workflow_id.trim().is_empty() {
+        reasons.push("workflow id is empty".to_owned());
+    }
+    if plan.objective.trim().is_empty() {
+        reasons.push("workflow objective is empty".to_owned());
+    }
+    if plan
+        .context_policy
+        .root_objective_snapshot
+        .trim()
+        .is_empty()
+    {
+        reasons.push("root objective snapshot is empty".to_owned());
+    }
+    if plan.steps.is_empty() {
+        reasons.push("workflow plan has no steps".to_owned());
+    }
+    if plan.budget_policy.max_parallel_children == 0 {
+        reasons.push("max_parallel_children must be at least 1".to_owned());
+    }
+
+    let step_ids = collect_unique_ids(plan.steps.iter().map(|step| step.step_id.as_str()));
+    if let Some(duplicate) = first_duplicate(plan.steps.iter().map(|step| step.step_id.as_str())) {
+        reasons.push(format!("duplicate workflow step id `{duplicate}`"));
+    }
+    if let Some(duplicate) =
+        first_duplicate(plan.child_graph.iter().map(|child| child.child_id.as_str()))
+    {
+        reasons.push(format!("duplicate workflow child id `{duplicate}`"));
+    }
+    if let Some(duplicate) = first_duplicate(
+        plan.verifier_graph
+            .iter()
+            .map(|verifier| verifier.verifier_id.as_str()),
+    ) {
+        reasons.push(format!("duplicate workflow verifier id `{duplicate}`"));
+    }
+
+    for step in &plan.steps {
+        if step.step_id.trim().is_empty() {
+            reasons.push("workflow step id is empty".to_owned());
+        }
+        for dependency in &step.depends_on {
+            if !step_ids.contains(dependency.as_str()) {
+                reasons.push(format!(
+                    "workflow step `{}` depends on unknown step `{dependency}`",
+                    step.step_id
+                ));
+            }
+        }
+    }
+    if has_step_cycle(plan) {
+        reasons.push("workflow step dependency graph contains a cycle".to_owned());
+    }
+
+    for child in &plan.child_graph {
+        if !step_ids.contains(child.step_id.as_str()) {
+            reasons.push(format!(
+                "workflow child `{}` references unknown step `{}`",
+                child.child_id, child.step_id
+            ));
+        }
+    }
+    for step in plan.steps.iter().filter(|step| step.required) {
+        if !plan
+            .child_graph
+            .iter()
+            .any(|child| child.step_id == step.step_id)
+        {
+            reasons.push(format!(
+                "required workflow step `{}` has no child",
+                step.step_id
+            ));
+        }
+    }
+
+    for verifier in &plan.verifier_graph {
+        if !plan
+            .child_graph
+            .iter()
+            .any(|child| child.child_id == verifier.target_child_id)
+        {
+            reasons.push(format!(
+                "workflow verifier `{}` targets unknown child `{}`",
+                verifier.verifier_id, verifier.target_child_id
+            ));
+        }
+    }
+    if plan.pattern.requires_verifier() && plan.verifier_graph.is_empty() {
+        reasons.push(format!(
+            "workflow pattern {:?} requires verifier graph",
+            plan.pattern
+        ));
+    }
+    if let WorkflowSanitizedHandoffStatus::Blocked { reason } =
+        workflow_sanitized_handoff_status(plan)
+    {
+        reasons.push(reason);
+    }
+    if let WorkflowPatternContractStatus::Blocked {
+        reasons: pattern_reasons,
+    } = workflow_pattern_contract_status(plan)
+    {
+        reasons.extend(pattern_reasons);
+    }
+
+    if reasons.is_empty() {
+        WorkflowPlanValidationStatus::Valid
+    } else {
+        reasons.sort();
+        reasons.dedup();
+        WorkflowPlanValidationStatus::Invalid { reasons }
+    }
+}
+
+pub fn workflow_pattern_contract_status(
+    plan: &WorkflowHarnessPlan,
+) -> WorkflowPatternContractStatus {
+    let mut reasons = Vec::new();
+    let has_static_dag = !plan.steps.is_empty()
+        && plan
+            .child_graph
+            .iter()
+            .all(|child| plan.steps.iter().any(|step| step.step_id == child.step_id));
+    let bounded = plan.budget_policy.max_iterations > 0;
+    match plan.pattern {
+        WorkflowPattern::ClassifyAndAct | WorkflowPattern::FanOutAndSynthesize => {
+            if !has_static_dag {
+                reasons.push("workflow pattern requires a static child DAG".to_owned());
+            }
+        }
+        WorkflowPattern::AdversarialVerification | WorkflowPattern::GenerateAndFilter => {
+            if !has_static_dag {
+                reasons.push("workflow pattern requires a static child DAG".to_owned());
+            }
+            if plan.verifier_graph.is_empty() {
+                reasons.push("workflow pattern requires verifier evidence".to_owned());
+            }
+        }
+        WorkflowPattern::Tournament => {
+            if !has_static_dag {
+                reasons.push("tournament workflow requires a pre-expanded static DAG".to_owned());
+            }
+            if !bounded || plan.stop_condition.no_new_findings_threshold.is_none() {
+                reasons.push(
+                    "tournament workflow requires bounded rounds via stop condition".to_owned(),
+                );
+            }
+            if plan.verifier_graph.is_empty() {
+                reasons.push("tournament workflow requires verifier evidence".to_owned());
+            }
+        }
+        WorkflowPattern::LoopUntilDone => {
+            if !bounded || plan.stop_condition.no_new_findings_threshold.is_none() {
+                reasons.push("loop workflow requires bounded stop condition".to_owned());
+            }
+        }
+        WorkflowPattern::WorkflowSequence => {
+            if plan.steps.iter().any(|step| step.depends_on.len() > 1) {
+                reasons.push("workflow_sequence steps must have at most one dependency".to_owned());
+            }
+        }
+        WorkflowPattern::Hybrid => {
+            if plan
+                .steps
+                .iter()
+                .any(|step| step.pattern == WorkflowPattern::Hybrid)
+            {
+                reasons.push("hybrid workflow must decompose into non-hybrid steps".to_owned());
+            }
+        }
+    }
+    if reasons.is_empty() {
+        WorkflowPatternContractStatus::Satisfied
+    } else {
+        reasons.sort();
+        reasons.dedup();
+        WorkflowPatternContractStatus::Blocked { reasons }
+    }
+}
+
+pub fn workflow_pattern_contract_evidence(
+    plan: &WorkflowHarnessPlan,
+) -> WorkflowPatternContractEvidence {
+    WorkflowPatternContractEvidence {
+        pattern: plan.pattern,
+        bounded: plan.budget_policy.max_iterations > 0
+            && (plan.pattern != WorkflowPattern::LoopUntilDone
+                || plan.stop_condition.no_new_findings_threshold.is_some()),
+        static_dag: !plan.steps.is_empty()
+            && plan
+                .child_graph
+                .iter()
+                .all(|child| plan.steps.iter().any(|step| step.step_id == child.step_id)),
+        evidence_refs: vec![format!(
+            "workflow://{}/pattern/{:?}",
+            plan.workflow_id, plan.pattern
+        )],
+    }
+}
+
+pub fn workflow_ready_schedule_decision(
+    plan: &WorkflowHarnessPlan,
+    completed_step_ids: &[String],
+    completed_child_ids: &[String],
+    active_child_ids: &[String],
+) -> WorkflowReadyScheduleDecision {
+    if let WorkflowPlanValidationStatus::Invalid { reasons } = validate_workflow_plan(plan) {
+        return WorkflowReadyScheduleDecision::Blocked {
+            reason: reasons.join("; "),
+        };
+    }
+    let completed_steps = completed_step_ids.iter().collect::<BTreeSet<_>>();
+    let completed_children = completed_child_ids.iter().collect::<BTreeSet<_>>();
+    let active_children = active_child_ids.iter().collect::<BTreeSet<_>>();
+    if active_children.len() >= plan.budget_policy.max_parallel_children {
+        return WorkflowReadyScheduleDecision::Waiting {
+            pending_step_ids: workflow_ready_step_ids(plan, completed_step_ids),
+        };
+    }
+    let capacity = plan
+        .budget_policy
+        .max_parallel_children
+        .saturating_sub(active_children.len());
+    let mut ready_step_ids = Vec::new();
+    let mut candidate_child_ids = Vec::new();
+    for step in &plan.steps {
+        if completed_steps.contains(&step.step_id) {
+            continue;
+        }
+        if !step
+            .depends_on
+            .iter()
+            .all(|dependency| completed_steps.contains(dependency))
+        {
+            continue;
+        }
+        ready_step_ids.push(step.step_id.clone());
+        for child in plan
+            .child_graph
+            .iter()
+            .filter(|child| child.step_id == step.step_id)
+        {
+            if !completed_children.contains(&child.child_id)
+                && !active_children.contains(&child.child_id)
+            {
+                candidate_child_ids.push(child.child_id.clone());
+            }
+        }
+    }
+    if ready_step_ids.is_empty() {
+        let pending_step_ids = plan
+            .steps
+            .iter()
+            .filter(|step| !completed_steps.contains(&step.step_id))
+            .map(|step| step.step_id.clone())
+            .collect::<Vec<_>>();
+        return WorkflowReadyScheduleDecision::Waiting { pending_step_ids };
+    }
+    let ready_child_ids = candidate_child_ids
+        .iter()
+        .take(capacity)
+        .cloned()
+        .collect::<Vec<_>>();
+    let deferred_child_ids = candidate_child_ids
+        .iter()
+        .skip(capacity)
+        .cloned()
+        .collect::<Vec<_>>();
+    WorkflowReadyScheduleDecision::Ready {
+        ready_step_ids,
+        ready_child_ids,
+        deferred_child_ids,
+    }
+}
+
+pub fn workflow_role_scoped_tool_names(
+    policy: &WorkflowToolScopePolicy,
+    role: WorkflowToolScopeRole,
+    available_tool_names: &[String],
+) -> Vec<String> {
+    policy
+        .allowed_tools
+        .iter()
+        .filter(|tool_name| available_tool_names.contains(tool_name))
+        .filter(|tool_name| role_allows_tool(policy.quarantine, role, tool_name))
+        .cloned()
+        .collect()
+}
+
+pub fn workflow_sanitized_handoff_status(
+    plan: &WorkflowHarnessPlan,
+) -> WorkflowSanitizedHandoffStatus {
+    if plan.tool_scope_policy.quarantine != WorkflowQuarantinePolicy::PrivilegedActorSeparated {
+        return WorkflowSanitizedHandoffStatus::NotRequired;
+    }
+    if plan.context_policy.untrusted_input_labels.is_empty() {
+        return WorkflowSanitizedHandoffStatus::Blocked {
+            reason: "privileged actor separation requires labeled untrusted inputs".to_owned(),
+        };
+    }
+    let Some(privileged_step) = plan
+        .steps
+        .iter()
+        .find(|step| step_has_privileged_child(plan, &step.step_id))
+    else {
+        return WorkflowSanitizedHandoffStatus::Blocked {
+            reason: "privileged actor separation requires an isolated privileged step".to_owned(),
+        };
+    };
+    let Some(sanitizer_step_id) = privileged_step
+        .depends_on
+        .iter()
+        .find(|step_id| !step_has_privileged_child(plan, step_id))
+    else {
+        return WorkflowSanitizedHandoffStatus::Blocked {
+            reason:
+                "privileged actor separation requires a sanitizer dependency before privileged step"
+                    .to_owned(),
+        };
+    };
+    let sanitizer_tools = plan
+        .tool_scope_policy
+        .allowed_tools
+        .iter()
+        .filter(|tool_name| {
+            role_allows_tool(
+                plan.tool_scope_policy.quarantine,
+                WorkflowToolScopeRole::Sanitizer,
+                tool_name,
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let privileged_tools = plan
+        .tool_scope_policy
+        .allowed_tools
+        .iter()
+        .filter(|tool_name| {
+            role_allows_tool(
+                plan.tool_scope_policy.quarantine,
+                WorkflowToolScopeRole::PrivilegedActor,
+                tool_name,
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if sanitizer_tools.is_empty() || privileged_tools.is_empty() {
+        return WorkflowSanitizedHandoffStatus::Blocked {
+            reason: "privileged actor separation requires sanitizer and privileged tool scopes"
+                .to_owned(),
+        };
+    }
+    WorkflowSanitizedHandoffStatus::Validated {
+        contract: WorkflowSanitizedHandoffContract {
+            sanitizer_step_id: sanitizer_step_id.clone(),
+            privileged_step_id: privileged_step.step_id.clone(),
+            sanitizer_tools,
+            privileged_tools,
+        },
+    }
+}
+
+pub fn workflow_sanitized_handoff_evidence_status(
+    contract: &WorkflowSanitizedHandoffContract,
+    evidence: &WorkflowSanitizedHandoffEvidence,
+) -> WorkflowSanitizedHandoffEvidenceStatus {
+    if evidence.sanitizer_step_id != contract.sanitizer_step_id
+        || evidence.privileged_step_id != contract.privileged_step_id
+    {
+        return WorkflowSanitizedHandoffEvidenceStatus::Blocked {
+            reason: "sanitized handoff evidence step mismatch".to_owned(),
+        };
+    }
+    if evidence.sanitizer_output_digest.trim().is_empty()
+        || evidence.privileged_input_digest.trim().is_empty()
+    {
+        return WorkflowSanitizedHandoffEvidenceStatus::Blocked {
+            reason: "sanitized handoff evidence lacks digest".to_owned(),
+        };
+    }
+    if evidence.sanitizer_output_digest != evidence.privileged_input_digest {
+        return WorkflowSanitizedHandoffEvidenceStatus::Blocked {
+            reason: "privileged input must match sanitizer output digest".to_owned(),
+        };
+    }
+    if evidence
+        .raw_untrusted_digest
+        .as_ref()
+        .is_some_and(|raw_digest| raw_digest == &evidence.privileged_input_digest)
+    {
+        return WorkflowSanitizedHandoffEvidenceStatus::Blocked {
+            reason: "privileged input digest must not be raw untrusted input".to_owned(),
+        };
+    }
+    WorkflowSanitizedHandoffEvidenceStatus::Validated
 }
 
 pub fn workflow_barrier_decision(
@@ -711,15 +1292,46 @@ pub fn workflow_verification_gate(
             .collect::<Vec<_>>();
         if matching.is_empty() {
             missing.push(verifier.verifier_id.clone());
-        } else if matching
-            .iter()
-            .any(|verdict| verdict.verdict != WorkflowVerifierVerdictKind::Pass)
-        {
+        } else if matching.iter().any(|verdict| {
+            workflow_verifier_evidence_status(&verifier.evidence_contract(), verdict)
+                != WorkflowVerifierEvidenceStatus::Satisfied
+                || verdict.verdict != WorkflowVerifierVerdictKind::Pass
+        }) {
             failing.push(verifier.target_child_id.clone());
         }
     }
 
+    for child in plan
+        .child_graph
+        .iter()
+        .filter(|child| child.verifier_required)
+    {
+        let verifier_specs = plan
+            .verifier_graph
+            .iter()
+            .filter(|verifier| verifier.target_child_id == child.child_id)
+            .collect::<Vec<_>>();
+        if verifier_specs.is_empty() {
+            missing.push(child.child_id.clone());
+            continue;
+        }
+        if !verifier_specs.iter().any(|verifier| {
+            verdicts.iter().any(|verdict| {
+                verdict.verifier_id == verifier.verifier_id
+                    && verdict.target_child_id == child.child_id
+            })
+        }) && !missing.iter().any(|missing_id| {
+            verifier_specs
+                .iter()
+                .any(|verifier| missing_id == &verifier.verifier_id)
+        }) {
+            missing.push(child.child_id.clone());
+        }
+    }
+
     if !missing.is_empty() {
+        missing.sort();
+        missing.dedup();
         return WorkflowVerificationGate::Blocked {
             missing_verifier_ids: missing,
         };
@@ -734,7 +1346,49 @@ pub fn workflow_verification_gate(
     WorkflowVerificationGate::Passed
 }
 
+pub fn workflow_verifier_evidence_status(
+    contract: &WorkflowVerifierEvidenceContract,
+    verdict: &WorkflowVerifierVerdict,
+) -> WorkflowVerifierEvidenceStatus {
+    if verdict.verifier_id != contract.verifier_id
+        || verdict.target_child_id != contract.target_child_id
+    {
+        return WorkflowVerifierEvidenceStatus::Invalid {
+            verifier_id: contract.verifier_id.clone(),
+            reason: "verifier verdict identity mismatch".to_owned(),
+        };
+    }
+    if !contract.independent_evidence_required {
+        return WorkflowVerifierEvidenceStatus::Satisfied;
+    }
+    if verdict.evidence_refs.is_empty() {
+        return WorkflowVerifierEvidenceStatus::Missing {
+            verifier_id: contract.verifier_id.clone(),
+        };
+    }
+    if verdict.evidence_refs.iter().any(|evidence_ref| {
+        evidence_ref.owner_spec.as_deref() != Some(contract.required_owner_spec.as_str())
+    }) {
+        return WorkflowVerifierEvidenceStatus::Invalid {
+            verifier_id: contract.verifier_id.clone(),
+            reason: "verifier evidence owner mismatch".to_owned(),
+        };
+    }
+    if !verdict
+        .evidence_refs
+        .iter()
+        .all(workflow_evidence_ref_valid)
+    {
+        return WorkflowVerifierEvidenceStatus::Invalid {
+            verifier_id: contract.verifier_id.clone(),
+            reason: "verifier evidence is not redaction-safe".to_owned(),
+        };
+    }
+    WorkflowVerifierEvidenceStatus::Satisfied
+}
+
 pub fn workflow_synthesis_outcome(
+    plan: &WorkflowHarnessPlan,
     results: &[WorkflowChildResult],
     verification_gate: &WorkflowVerificationGate,
     merge_policy: &WorkflowMergePolicy,
@@ -761,7 +1415,8 @@ pub fn workflow_synthesis_outcome(
         .flat_map(|result| result.evidence_refs.iter().cloned())
         .filter(workflow_evidence_ref_valid)
         .collect::<Vec<_>>();
-    let verifier_allows_success = !merge_policy.require_verifier_pass
+    let verifier_required = plan.child_graph.iter().any(|child| child.verifier_required);
+    let verifier_allows_success = !(merge_policy.require_verifier_pass || verifier_required)
         || matches!(verification_gate, WorkflowVerificationGate::Passed);
     let final_success_allowed = verifier_allows_success
         && unresolved_child_ids.is_empty()
@@ -778,6 +1433,8 @@ pub fn workflow_synthesis_outcome(
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowWorktreeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
     pub child_id: String,
     pub requires_write: bool,
     pub policy: WorkflowWorktreePolicy,
@@ -819,7 +1476,7 @@ pub fn workflow_worktree_decision(request: &WorkflowWorktreeRequest) -> Workflow
         WorkflowWorktreePolicy::IsolatedWorktreeRequired => {
             if request.approval_granted {
                 WorkflowWorktreeDecision::CreateIsolated {
-                    branch_name: format!("workflow/{}", request.child_id),
+                    branch_name: workflow_worktree_branch_name(request),
                 }
             } else {
                 WorkflowWorktreeDecision::Blocked {
@@ -830,12 +1487,27 @@ pub fn workflow_worktree_decision(request: &WorkflowWorktreeRequest) -> Workflow
         WorkflowWorktreePolicy::IsolatedWorktreeOptional => {
             if request.approval_granted {
                 WorkflowWorktreeDecision::CreateIsolated {
-                    branch_name: format!("workflow/{}", request.child_id),
+                    branch_name: workflow_worktree_branch_name(request),
                 }
             } else {
                 WorkflowWorktreeDecision::NotRequired
             }
         }
+    }
+}
+
+pub fn workflow_worktree_branch_name(request: &WorkflowWorktreeRequest) -> String {
+    match request
+        .workflow_id
+        .as_deref()
+        .filter(|workflow_id| !workflow_id.trim().is_empty())
+    {
+        Some(workflow_id) => format!(
+            "workflow/{}/{}",
+            sanitize_branch_component(workflow_id),
+            sanitize_branch_component(&request.child_id)
+        ),
+        None => format!("workflow/{}", sanitize_branch_component(&request.child_id)),
     }
 }
 
@@ -1007,6 +1679,35 @@ impl WorkflowExecutionRole {
             Self::Verifier => "verifier",
             Self::Synthesis => "synthesis",
         }
+    }
+}
+
+impl WorkflowVerifierSpec {
+    pub fn evidence_contract(&self) -> WorkflowVerifierEvidenceContract {
+        WorkflowVerifierEvidenceContract {
+            verifier_id: self.verifier_id.clone(),
+            target_child_id: self.target_child_id.clone(),
+            independent_evidence_required: self.independent_evidence_required,
+            required_owner_spec: "024".to_owned(),
+        }
+    }
+}
+
+fn sanitize_branch_component(component: &str) -> String {
+    let sanitized = component
+        .trim()
+        .chars()
+        .map(|character| match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => character,
+            _ => '-',
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if sanitized.is_empty() {
+        "unnamed".to_owned()
+    } else {
+        sanitized
     }
 }
 
@@ -1216,6 +1917,29 @@ pub struct WorkflowDiagnosticsManifest {
     pub evidence_refs: Vec<EvidenceRef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowRuntimeDiagnosticsInput {
+    pub merge_decision_ref: Option<String>,
+    #[serde(default)]
+    pub stale_result_refs: Vec<String>,
+    #[serde(default)]
+    pub recipe_source_refs: Vec<String>,
+    #[serde(default)]
+    pub barrier_refs: Vec<String>,
+    #[serde(default)]
+    pub tool_scope_refs: Vec<String>,
+    #[serde(default)]
+    pub verifier_refs: Vec<String>,
+    #[serde(default)]
+    pub merge_refs: Vec<String>,
+    #[serde(default)]
+    pub synthesis_refs: Vec<String>,
+    #[serde(default)]
+    pub cleanup_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
 pub fn workflow_diagnostics_manifest(
     plan: &WorkflowHarnessPlan,
     stale_result_refs: Vec<String>,
@@ -1235,6 +1959,30 @@ pub fn workflow_diagnostics_manifest(
             .filter(workflow_evidence_ref_valid)
             .collect(),
     })
+}
+
+pub fn workflow_runtime_diagnostics_manifest(
+    plan: &WorkflowHarnessPlan,
+    input: WorkflowRuntimeDiagnosticsInput,
+) -> Result<WorkflowDiagnosticsManifest, serde_json::Error> {
+    let mut runtime_diagnostic_refs = Vec::new();
+    runtime_diagnostic_refs.extend(input.recipe_source_refs);
+    runtime_diagnostic_refs.extend(input.barrier_refs);
+    runtime_diagnostic_refs.extend(input.tool_scope_refs);
+    runtime_diagnostic_refs.extend(input.verifier_refs);
+    runtime_diagnostic_refs.extend(input.merge_refs);
+    runtime_diagnostic_refs.extend(input.synthesis_refs);
+    runtime_diagnostic_refs.extend(input.cleanup_refs);
+    runtime_diagnostic_refs.sort();
+    runtime_diagnostic_refs.dedup();
+
+    let mut manifest =
+        workflow_diagnostics_manifest(plan, input.stale_result_refs, input.evidence_refs)?;
+    manifest.merge_decision_ref = input
+        .merge_decision_ref
+        .filter(|reference| !reference.trim().is_empty());
+    manifest.runtime_diagnostic_refs = runtime_diagnostic_refs;
+    Ok(manifest)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1344,4 +2092,84 @@ fn next_action_for_state(state: WorkflowRunState) -> Option<&'static str> {
         WorkflowRunState::Completed => None,
         _ => Some("continue_workflow"),
     }
+}
+
+fn collect_unique_ids<'a>(ids: impl Iterator<Item = &'a str>) -> BTreeSet<&'a str> {
+    ids.filter(|id| !id.trim().is_empty()).collect()
+}
+
+fn first_duplicate<'a>(ids: impl Iterator<Item = &'a str>) -> Option<String> {
+    let mut seen = BTreeSet::new();
+    for id in ids {
+        if !seen.insert(id) {
+            return Some(id.to_owned());
+        }
+    }
+    None
+}
+
+fn has_step_cycle(plan: &WorkflowHarnessPlan) -> bool {
+    let dependencies = plan
+        .steps
+        .iter()
+        .map(|step| (step.step_id.as_str(), step.depends_on.as_slice()))
+        .collect::<BTreeMap<_, _>>();
+    plan.steps.iter().any(|step| {
+        let mut visiting = BTreeSet::new();
+        step_visits_cycle(step.step_id.as_str(), &dependencies, &mut visiting)
+    })
+}
+
+fn step_visits_cycle<'a>(
+    step_id: &'a str,
+    dependencies: &BTreeMap<&'a str, &'a [String]>,
+    visiting: &mut BTreeSet<&'a str>,
+) -> bool {
+    if !visiting.insert(step_id) {
+        return true;
+    }
+    let has_cycle = dependencies.get(step_id).is_some_and(|step_dependencies| {
+        step_dependencies.iter().any(|dependency| {
+            dependencies.contains_key(dependency.as_str())
+                && step_visits_cycle(dependency.as_str(), dependencies, visiting)
+        })
+    });
+    visiting.remove(step_id);
+    has_cycle
+}
+
+fn step_has_privileged_child(plan: &WorkflowHarnessPlan, step_id: &str) -> bool {
+    plan.child_graph.iter().any(|child| {
+        child.step_id == step_id
+            && matches!(
+                child.worktree_policy,
+                WorkflowWorktreePolicy::IsolatedWorktreeRequired
+                    | WorkflowWorktreePolicy::IsolatedWorktreeOptional
+            )
+    })
+}
+
+fn role_allows_tool(
+    quarantine: WorkflowQuarantinePolicy,
+    role: WorkflowToolScopeRole,
+    tool_name: &str,
+) -> bool {
+    match role {
+        WorkflowToolScopeRole::Sanitizer => !tool_is_privileged(tool_name),
+        WorkflowToolScopeRole::Verifier | WorkflowToolScopeRole::Synthesis => {
+            !tool_is_privileged(tool_name)
+        }
+        WorkflowToolScopeRole::Child => {
+            quarantine != WorkflowQuarantinePolicy::PrivilegedActorSeparated
+                || !tool_is_privileged(tool_name)
+        }
+        WorkflowToolScopeRole::PrivilegedActor => tool_is_privileged(tool_name),
+    }
+}
+
+fn tool_is_privileged(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "write_file" | "edit_file" | "exec" | "notebook_edit" | "message" | "cron" | "spawn"
+    ) || tool_name.starts_with("mcp_")
 }

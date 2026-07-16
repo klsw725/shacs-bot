@@ -2,24 +2,32 @@ use serde_json::json;
 use shacs_eval::evaluator::{EvidenceKind, EvidenceRef, RedactionStatus};
 use shacs_workflow::{
     admit_workflow_plan, build_workflow_checkpoint, decide_workflow_admission,
-    workflow_barrier_decision, workflow_budget_decision, workflow_diagnostics_manifest,
-    workflow_harness_plan_digest, workflow_model_route_snapshot,
+    validate_workflow_plan, workflow_barrier_decision, workflow_budget_decision,
+    workflow_diagnostics_manifest, workflow_harness_plan_digest, workflow_model_route_snapshot,
+    workflow_pattern_contract_evidence, workflow_pattern_contract_status,
     workflow_permission_ceiling_decision, workflow_prd000_release_evidence_checklist,
-    workflow_projection, workflow_quarantine_decision, workflow_ready_step_ids,
-    workflow_recipe_readiness, workflow_resume_decision,
-    workflow_spec024_release_evidence_checklist, workflow_synthesis_outcome,
-    workflow_verification_gate, workflow_worktree_decision, WorkflowAdmissionDecision,
+    workflow_projection, workflow_quarantine_decision, workflow_ready_schedule_decision,
+    workflow_ready_step_ids, workflow_recipe_readiness, workflow_resume_decision,
+    workflow_resume_validation_decision, workflow_role_scoped_tool_names,
+    workflow_runtime_diagnostics_manifest, workflow_sanitized_handoff_evidence_status,
+    workflow_sanitized_handoff_status, workflow_spec024_release_evidence_checklist,
+    workflow_synthesis_outcome, workflow_verification_gate, workflow_verifier_evidence_status,
+    workflow_worktree_branch_name, workflow_worktree_decision, WorkflowAdmissionDecision,
     WorkflowAdmissionInput, WorkflowBarrierDecision, WorkflowBudgetDecision, WorkflowBudgetPolicy,
     WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowCheckpointPolicy,
     WorkflowChildResult, WorkflowChildRunStatus, WorkflowChildSpec, WorkflowContextPolicy,
     WorkflowExecutionRole, WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy,
-    WorkflowPattern, WorkflowPermissionCeilingDecision, WorkflowPermissionPolicy,
-    WorkflowPrd000ReleaseEvidence, WorkflowPrd000ReleaseEvidenceBucket, WorkflowQuarantineDecision,
-    WorkflowQuarantinePolicy, WorkflowRecipe, WorkflowRecipeReadiness, WorkflowResumeDecision,
-    WorkflowResumePolicy, WorkflowRunState, WorkflowRuntimeEnforcementDecision,
-    WorkflowRuntimeEnforcementInput, WorkflowSpec024ReleaseEvidence,
-    WorkflowSpec024ReleaseEvidenceBucket, WorkflowStep, WorkflowStepPrivilege,
-    WorkflowStopCondition, WorkflowToolScopePolicy, WorkflowVerificationGate, WorkflowVerifierSpec,
+    WorkflowPattern, WorkflowPatternContractStatus, WorkflowPermissionCeilingDecision,
+    WorkflowPermissionPolicy, WorkflowPlanValidationStatus, WorkflowPrd000ReleaseEvidence,
+    WorkflowPrd000ReleaseEvidenceBucket, WorkflowQuarantineDecision, WorkflowQuarantinePolicy,
+    WorkflowReadyScheduleDecision, WorkflowRecipe, WorkflowRecipeReadiness, WorkflowResumeDecision,
+    WorkflowResumePolicy, WorkflowResumeValidationInput, WorkflowRunState,
+    WorkflowRuntimeDiagnosticsInput, WorkflowRuntimeEnforcementDecision,
+    WorkflowRuntimeEnforcementInput, WorkflowSanitizedHandoffEvidence,
+    WorkflowSanitizedHandoffEvidenceStatus, WorkflowSanitizedHandoffStatus,
+    WorkflowSpec024ReleaseEvidence, WorkflowSpec024ReleaseEvidenceBucket, WorkflowStep,
+    WorkflowStepPrivilege, WorkflowStopCondition, WorkflowToolScopePolicy, WorkflowToolScopeRole,
+    WorkflowVerificationGate, WorkflowVerifierEvidenceStatus, WorkflowVerifierSpec,
     WorkflowVerifierVerdict, WorkflowVerifierVerdictKind, WorkflowWorktreeDecision,
     WorkflowWorktreePolicy, WorkflowWorktreeRequest,
 };
@@ -220,6 +228,31 @@ fn workflow_checkpoint_resume_requires_matching_plan_digest_and_nonterminal_stat
         WorkflowResumeDecision::Blocked { reason } if reason.contains("digest mismatch")
     ));
 
+    assert_eq!(
+        workflow_resume_validation_decision(&WorkflowResumeValidationInput {
+            checkpoint: checkpoint.clone(),
+            resume_policy: plan.resume_policy.clone(),
+            current_harness_plan_digest: run.harness_plan_digest.clone(),
+            required_completed_steps: vec!["extract-claims".to_owned()],
+            required_worktree_refs: Vec::new(),
+            required_evidence_refs: vec!["evidence-1".to_owned()],
+        }),
+        WorkflowResumeDecision::ResumeAllowed {
+            resume_point: "after-extract-claims".to_owned()
+        }
+    );
+    assert!(matches!(
+        workflow_resume_validation_decision(&WorkflowResumeValidationInput {
+            checkpoint: checkpoint.clone(),
+            resume_policy: plan.resume_policy.clone(),
+            current_harness_plan_digest: run.harness_plan_digest.clone(),
+            required_completed_steps: vec!["missing-step".to_owned()],
+            required_worktree_refs: Vec::new(),
+            required_evidence_refs: Vec::new(),
+        }),
+        WorkflowResumeDecision::Blocked { reason } if reason.contains("missing completed step")
+    ));
+
     let mut terminal = checkpoint;
     terminal.state = WorkflowRunState::Completed;
     assert_eq!(
@@ -324,6 +357,14 @@ fn workflow_barrier_verifier_and_synthesis_fail_closed() {
             if missing_verifier_ids == vec!["verifier-1".to_owned()]
     ));
 
+    let mut missing_verifier_spec = plan.clone();
+    missing_verifier_spec.verifier_graph.clear();
+    assert!(matches!(
+        workflow_verification_gate(&missing_verifier_spec, &[]),
+        WorkflowVerificationGate::Blocked { missing_verifier_ids }
+            if missing_verifier_ids == vec!["child-1".to_owned()]
+    ));
+
     let failed_verdict = WorkflowVerifierVerdict {
         verifier_id: "verifier-1".to_owned(),
         target_child_id: "child-1".to_owned(),
@@ -343,8 +384,42 @@ fn workflow_barrier_verifier_and_synthesis_fail_closed() {
         target_child_id: "child-1".to_owned(),
         verdict: WorkflowVerifierVerdictKind::Pass,
         summary: "looks good".to_owned(),
-        evidence_refs: Vec::new(),
+        evidence_refs: vec![evidence("verifier", Some("024"), RedactionStatus::Redacted)],
     };
+    assert_eq!(
+        workflow_verifier_evidence_status(
+            &plan.verifier_graph[0].evidence_contract(),
+            &pass_verdict
+        ),
+        WorkflowVerifierEvidenceStatus::Satisfied
+    );
+
+    let missing_evidence_verdict = WorkflowVerifierVerdict {
+        evidence_refs: Vec::new(),
+        ..pass_verdict.clone()
+    };
+    assert_eq!(
+        workflow_verification_gate(&plan, std::slice::from_ref(&missing_evidence_verdict)),
+        WorkflowVerificationGate::Failed {
+            failing_child_ids: vec!["child-1".to_owned()]
+        }
+    );
+
+    let wrong_owner_verdict = WorkflowVerifierVerdict {
+        evidence_refs: vec![evidence(
+            "wrong-owner",
+            Some("018"),
+            RedactionStatus::Redacted,
+        )],
+        ..pass_verdict.clone()
+    };
+    assert!(matches!(
+        workflow_verifier_evidence_status(
+            &plan.verifier_graph[0].evidence_contract(),
+            &wrong_owner_verdict
+        ),
+        WorkflowVerifierEvidenceStatus::Invalid { reason, .. } if reason.contains("owner")
+    ));
     assert_eq!(
         workflow_verification_gate(&plan, &[pass_verdict, failed_verdict]),
         WorkflowVerificationGate::Failed {
@@ -353,11 +428,39 @@ fn workflow_barrier_verifier_and_synthesis_fail_closed() {
     );
 
     let passed_gate = WorkflowVerificationGate::Passed;
-    let synthesis = workflow_synthesis_outcome(&[result], &passed_gate, &plan.merge_policy);
+    let synthesis = workflow_synthesis_outcome(
+        &plan,
+        std::slice::from_ref(&result),
+        &passed_gate,
+        &plan.merge_policy,
+    );
     assert_eq!(synthesis.accepted_child_ids, vec!["child-1".to_owned()]);
     assert!(synthesis.rejected_child_ids.is_empty());
     assert!(synthesis.unresolved_child_ids.is_empty());
     assert!(synthesis.final_success_allowed);
+
+    let mut permissive_merge = plan.merge_policy.clone();
+    permissive_merge.require_verifier_pass = false;
+    let blocked_gate = WorkflowVerificationGate::Blocked {
+        missing_verifier_ids: vec!["verifier-1".to_owned()],
+    };
+    let blocked_required_verifier = workflow_synthesis_outcome(
+        &plan,
+        std::slice::from_ref(&result),
+        &blocked_gate,
+        &permissive_merge,
+    );
+    assert!(!blocked_required_verifier.final_success_allowed);
+
+    let mut no_required_verifier = plan.clone();
+    no_required_verifier.child_graph[0].verifier_required = false;
+    let permissive_without_required_verifier = workflow_synthesis_outcome(
+        &no_required_verifier,
+        std::slice::from_ref(&result),
+        &blocked_gate,
+        &permissive_merge,
+    );
+    assert!(permissive_without_required_verifier.final_success_allowed);
 
     let unresolved = WorkflowChildResult {
         child_id: "child-2".to_owned(),
@@ -366,8 +469,213 @@ fn workflow_barrier_verifier_and_synthesis_fail_closed() {
         summary: "still running".to_owned(),
         evidence_refs: Vec::new(),
     };
-    let blocked = workflow_synthesis_outcome(&[unresolved], &passed_gate, &plan.merge_policy);
+    let blocked =
+        workflow_synthesis_outcome(&plan, &[unresolved], &passed_gate, &plan.merge_policy);
     assert!(!blocked.final_success_allowed);
+}
+
+#[test]
+fn workflow_ready_schedule_validates_dag_and_bounds_fan_out() {
+    let mut plan = sample_plan();
+    plan.steps.push(WorkflowStep {
+        step_id: "verify-claims".to_owned(),
+        label: "Verify claims".to_owned(),
+        pattern: WorkflowPattern::AdversarialVerification,
+        depends_on: vec!["extract-claims".to_owned()],
+        required: true,
+        expected_output_schema: None,
+    });
+    plan.child_graph.push(WorkflowChildSpec {
+        child_id: "child-2".to_owned(),
+        step_id: "verify-claims".to_owned(),
+        goal: "verify factual claims".to_owned(),
+        tool_scope_ref: Some("scope-1".to_owned()),
+        worktree_policy: WorkflowWorktreePolicy::ReadOnlySnapshot,
+        budget: WorkflowBudgetSlice {
+            max_tokens: Some(1_000),
+            max_wall_clock_ms: Some(30_000),
+        },
+        verifier_required: false,
+    });
+    plan.budget_policy.max_parallel_children = 1;
+
+    assert_eq!(
+        validate_workflow_plan(&plan),
+        WorkflowPlanValidationStatus::Valid
+    );
+    assert_eq!(
+        workflow_ready_schedule_decision(&plan, &[], &[], &[]),
+        WorkflowReadyScheduleDecision::Ready {
+            ready_step_ids: vec!["extract-claims".to_owned()],
+            ready_child_ids: vec!["child-1".to_owned()],
+            deferred_child_ids: Vec::new(),
+        }
+    );
+    assert_eq!(
+        workflow_ready_schedule_decision(
+            &plan,
+            &["extract-claims".to_owned()],
+            &["child-1".to_owned()],
+            &[],
+        ),
+        WorkflowReadyScheduleDecision::Ready {
+            ready_step_ids: vec!["verify-claims".to_owned()],
+            ready_child_ids: vec!["child-2".to_owned()],
+            deferred_child_ids: Vec::new(),
+        }
+    );
+
+    let mut cyclic = plan;
+    cyclic.steps[0].depends_on = vec!["verify-claims".to_owned()];
+    assert!(matches!(
+        validate_workflow_plan(&cyclic),
+        WorkflowPlanValidationStatus::Invalid { reasons }
+            if reasons.iter().any(|reason| reason.contains("cycle"))
+    ));
+}
+
+#[test]
+fn workflow_pattern_contracts_cover_supported_and_blocked_semantics() {
+    let mut generate_filter = sample_plan();
+    generate_filter.pattern = WorkflowPattern::GenerateAndFilter;
+    assert_eq!(
+        workflow_pattern_contract_status(&generate_filter),
+        WorkflowPatternContractStatus::Satisfied
+    );
+    let evidence = workflow_pattern_contract_evidence(&generate_filter);
+    assert_eq!(evidence.pattern, WorkflowPattern::GenerateAndFilter);
+    assert!(evidence.static_dag);
+
+    let mut tournament = sample_plan();
+    tournament.pattern = WorkflowPattern::Tournament;
+    tournament.stop_condition.no_new_findings_threshold = None;
+    assert!(matches!(
+        workflow_pattern_contract_status(&tournament),
+        WorkflowPatternContractStatus::Blocked { reasons }
+            if reasons.iter().any(|reason| reason.contains("bounded rounds"))
+    ));
+    tournament.stop_condition.no_new_findings_threshold = Some(2);
+    assert_eq!(
+        workflow_pattern_contract_status(&tournament),
+        WorkflowPatternContractStatus::Satisfied
+    );
+
+    let mut loop_plan = sample_plan();
+    loop_plan.pattern = WorkflowPattern::LoopUntilDone;
+    assert!(matches!(
+        workflow_pattern_contract_status(&loop_plan),
+        WorkflowPatternContractStatus::Blocked { reasons }
+            if reasons.iter().any(|reason| reason.contains("bounded stop"))
+    ));
+    loop_plan.stop_condition.no_new_findings_threshold = Some(1);
+    assert_eq!(
+        workflow_pattern_contract_status(&loop_plan),
+        WorkflowPatternContractStatus::Satisfied
+    );
+
+    let mut hybrid = sample_plan();
+    hybrid.pattern = WorkflowPattern::Hybrid;
+    hybrid.steps[0].pattern = WorkflowPattern::Hybrid;
+    assert!(matches!(
+        workflow_pattern_contract_status(&hybrid),
+        WorkflowPatternContractStatus::Blocked { reasons }
+            if reasons.iter().any(|reason| reason.contains("decompose"))
+    ));
+}
+
+#[test]
+fn workflow_privileged_actor_separation_requires_sanitizer_handoff_and_scopes_tools() {
+    let mut plan = sample_plan();
+    plan.tool_scope_policy.quarantine = WorkflowQuarantinePolicy::PrivilegedActorSeparated;
+    plan.tool_scope_policy.allowed_tools = vec![
+        "read_file".to_owned(),
+        "grep".to_owned(),
+        "write_file".to_owned(),
+    ];
+    plan.worktree_policy = WorkflowWorktreePolicy::IsolatedWorktreeRequired;
+    plan.steps.push(WorkflowStep {
+        step_id: "privileged-write".to_owned(),
+        label: "Privileged write".to_owned(),
+        pattern: WorkflowPattern::WorkflowSequence,
+        depends_on: vec!["extract-claims".to_owned()],
+        required: true,
+        expected_output_schema: None,
+    });
+    plan.child_graph.push(WorkflowChildSpec {
+        child_id: "child-2".to_owned(),
+        step_id: "privileged-write".to_owned(),
+        goal: "apply sanitized change".to_owned(),
+        tool_scope_ref: Some("scope-privileged".to_owned()),
+        worktree_policy: WorkflowWorktreePolicy::IsolatedWorktreeRequired,
+        budget: WorkflowBudgetSlice {
+            max_tokens: Some(1_000),
+            max_wall_clock_ms: Some(30_000),
+        },
+        verifier_required: false,
+    });
+
+    let available_tools = vec![
+        "read_file".to_owned(),
+        "grep".to_owned(),
+        "write_file".to_owned(),
+    ];
+    assert_eq!(
+        workflow_role_scoped_tool_names(
+            &plan.tool_scope_policy,
+            WorkflowToolScopeRole::Sanitizer,
+            &available_tools,
+        ),
+        vec!["read_file".to_owned(), "grep".to_owned()]
+    );
+    assert_eq!(
+        workflow_role_scoped_tool_names(
+            &plan.tool_scope_policy,
+            WorkflowToolScopeRole::PrivilegedActor,
+            &available_tools,
+        ),
+        vec!["write_file".to_owned()]
+    );
+    let WorkflowSanitizedHandoffStatus::Validated { contract } =
+        workflow_sanitized_handoff_status(&plan)
+    else {
+        panic!("expected sanitized handoff contract");
+    };
+    assert_eq!(contract.sanitizer_step_id, "extract-claims");
+    assert_eq!(contract.privileged_step_id, "privileged-write");
+    assert_eq!(
+        workflow_sanitized_handoff_evidence_status(
+            &contract,
+            &WorkflowSanitizedHandoffEvidence {
+                sanitizer_step_id: "extract-claims".to_owned(),
+                privileged_step_id: "privileged-write".to_owned(),
+                sanitizer_output_digest: "safe-digest".to_owned(),
+                privileged_input_digest: "safe-digest".to_owned(),
+                raw_untrusted_digest: Some("raw-digest".to_owned()),
+            },
+        ),
+        WorkflowSanitizedHandoffEvidenceStatus::Validated
+    );
+    assert!(matches!(
+        workflow_sanitized_handoff_evidence_status(
+            &contract,
+            &WorkflowSanitizedHandoffEvidence {
+                sanitizer_step_id: "extract-claims".to_owned(),
+                privileged_step_id: "privileged-write".to_owned(),
+                sanitizer_output_digest: "raw-digest".to_owned(),
+                privileged_input_digest: "raw-digest".to_owned(),
+                raw_untrusted_digest: Some("raw-digest".to_owned()),
+            },
+        ),
+        WorkflowSanitizedHandoffEvidenceStatus::Blocked { reason }
+            if reason.contains("raw untrusted")
+    ));
+
+    plan.steps[1].depends_on.clear();
+    assert!(matches!(
+        workflow_sanitized_handoff_status(&plan),
+        WorkflowSanitizedHandoffStatus::Blocked { reason }
+            if reason.contains("sanitizer dependency")
+    ));
 }
 
 #[test]
@@ -376,6 +684,7 @@ fn workflow_worktree_budget_and_model_routing_contracts_are_explicit() {
 
     assert_eq!(
         workflow_worktree_decision(&WorkflowWorktreeRequest {
+            workflow_id: Some("workflow-1".to_owned()),
             child_id: "child-1".to_owned(),
             requires_write: true,
             policy: WorkflowWorktreePolicy::IsolatedWorktreeRequired,
@@ -388,6 +697,7 @@ fn workflow_worktree_budget_and_model_routing_contracts_are_explicit() {
     );
     assert_eq!(
         workflow_worktree_decision(&WorkflowWorktreeRequest {
+            workflow_id: Some("workflow-1".to_owned()),
             child_id: "child-1".to_owned(),
             requires_write: true,
             policy: WorkflowWorktreePolicy::IsolatedWorktreeRequired,
@@ -395,8 +705,19 @@ fn workflow_worktree_budget_and_model_routing_contracts_are_explicit() {
             existing_worktree_ref: None,
         }),
         WorkflowWorktreeDecision::CreateIsolated {
-            branch_name: "workflow/child-1".to_owned()
+            branch_name: "workflow/workflow-1/child-1".to_owned()
         }
+    );
+    assert_eq!(
+        workflow_worktree_branch_name(&WorkflowWorktreeRequest {
+            workflow_id: Some("workflow 1".to_owned()),
+            child_id: "child/one".to_owned(),
+            requires_write: true,
+            policy: WorkflowWorktreePolicy::IsolatedWorktreeRequired,
+            approval_granted: true,
+            existing_worktree_ref: None,
+        }),
+        "workflow/workflow-1/child-one"
     );
 
     assert_eq!(
@@ -703,6 +1024,63 @@ fn workflow_projection_diagnostics_and_spec024_release_gate_are_evidence_backed(
     assert!(manifest.runtime_diagnostic_refs.is_empty());
     assert!(!manifest.replay_live_actions_allowed);
     assert_eq!(manifest.evidence_refs.len(), 1);
+
+    let runtime_manifest = workflow_runtime_diagnostics_manifest(
+        &plan,
+        WorkflowRuntimeDiagnosticsInput {
+            merge_decision_ref: Some("workflow://workflow-1/synthesis/final".to_owned()),
+            stale_result_refs: vec!["stale-child".to_owned()],
+            recipe_source_refs: vec!["workflow://workflow-1/recipe/source".to_owned()],
+            barrier_refs: vec!["workflow://workflow-1/barrier/waiting".to_owned()],
+            tool_scope_refs: vec!["workflow://workflow-1/tool-scope/scope-digest".to_owned()],
+            verifier_refs: vec!["workflow://workflow-1/verifier/verifier-1".to_owned()],
+            merge_refs: vec!["workflow://workflow-1/merge/final".to_owned()],
+            synthesis_refs: vec!["workflow://workflow-1/synthesis/accepted=1".to_owned()],
+            cleanup_refs: vec!["workflow://workflow-1/cleanup/worktree".to_owned()],
+            evidence_refs: vec![evidence(
+                "runtime-diag",
+                Some("024"),
+                RedactionStatus::Redacted,
+            )],
+        },
+    )?;
+    assert_eq!(
+        runtime_manifest.merge_decision_ref.as_deref(),
+        Some("workflow://workflow-1/synthesis/final")
+    );
+    assert_eq!(
+        runtime_manifest.stale_result_refs,
+        vec!["stale-child".to_owned()]
+    );
+    assert!(runtime_manifest
+        .runtime_diagnostic_refs
+        .iter()
+        .any(|reference| reference.contains("/recipe/")));
+    assert!(runtime_manifest
+        .runtime_diagnostic_refs
+        .iter()
+        .any(|reference| reference.contains("/barrier/")));
+    assert!(runtime_manifest
+        .runtime_diagnostic_refs
+        .iter()
+        .any(|reference| reference.contains("/tool-scope/")));
+    assert!(runtime_manifest
+        .runtime_diagnostic_refs
+        .iter()
+        .any(|reference| reference.contains("/verifier/")));
+    assert!(runtime_manifest
+        .runtime_diagnostic_refs
+        .iter()
+        .any(|reference| reference.contains("/merge/")));
+    assert!(runtime_manifest
+        .runtime_diagnostic_refs
+        .iter()
+        .any(|reference| reference.contains("/synthesis/")));
+    assert!(runtime_manifest
+        .runtime_diagnostic_refs
+        .iter()
+        .any(|reference| reference.contains("/cleanup/")));
+    assert_eq!(runtime_manifest.evidence_refs.len(), 1);
 
     let complete = WorkflowSpec024ReleaseEvidenceBucket::required_buckets()
         .into_iter()
