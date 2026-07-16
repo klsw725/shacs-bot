@@ -10,13 +10,14 @@ use shacs_api::{
 };
 use shacs_channels::{
     builtin_channel_default_configs, builtin_live_worker_descriptors, normalize_websocket_frame,
-    normalize_whatsapp_bridge_message, websocket_event_from_outbound, whatsapp_outbound_frames,
-    ChannelAdapter, ChannelCapabilities, ChannelDescriptor, ChannelError, ChannelManager,
-    ChannelRegistry, ChannelRetryPolicy, DiscordInbound, EmailInbound, LiveChannelWorkerDescriptor,
-    LiveChannelWorkerKind, OutboundMessage, RecentMessageIds, SlackInbound, TelegramInbound,
-    WebSocketInboundAction, WebSocketServerEvent, WhatsAppBridgeMessage, WhatsAppChannelConfig,
-    WhatsAppGroupPolicy, WhatsAppOutboundFrame, DISCORD_CHANNEL, EMAIL_CHANNEL, SLACK_CHANNEL,
-    TELEGRAM_CHANNEL, WEBSOCKET_CHANNEL, WHATSAPP_CHANNEL,
+    normalize_whatsapp_bridge_message, runtime_workflow_projection_outbound,
+    websocket_event_from_outbound, whatsapp_outbound_frames, ChannelAdapter, ChannelCapabilities,
+    ChannelDescriptor, ChannelError, ChannelManager, ChannelRegistry, ChannelRetryPolicy,
+    DiscordInbound, EmailInbound, LiveChannelWorkerDescriptor, LiveChannelWorkerKind,
+    OutboundMessage, RecentMessageIds, SlackInbound, TelegramInbound, WebSocketInboundAction,
+    WebSocketServerEvent, WhatsAppBridgeMessage, WhatsAppChannelConfig, WhatsAppGroupPolicy,
+    WhatsAppOutboundFrame, DISCORD_CHANNEL, EMAIL_CHANNEL, SLACK_CHANNEL, TELEGRAM_CHANNEL,
+    WEBSOCKET_CHANNEL, WHATSAPP_CHANNEL,
 };
 use shacs_config::{
     config_context, default_config_path, ensure_runtime_dirs, load_auth_store,
@@ -61,6 +62,7 @@ use shacs_providers::{
     ProviderEvent, ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
 };
 use shacs_redaction::redact_string;
+use shacs_session::SessionRuntimeWorkflowProjection;
 use shacs_skills::{
     discover_skill_registry, discover_workflow_recipes, sync_builtin_skills,
     SkillBackedWorkflowRecipe, SkillRegistryEntry, SkillRegistryOptions, SkillRegistryStatus,
@@ -1339,6 +1341,7 @@ pub struct SessionInspectReport {
     pub last_consolidated: usize,
     pub recovery_markers: Vec<String>,
     pub checkpoint_phase: Option<String>,
+    pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1383,6 +1386,7 @@ pub struct SessionDiagnosticsReport {
     pub metadata_keys: Vec<String>,
     pub recovery_markers: Vec<String>,
     pub checkpoint_phase: Option<String>,
+    pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
     pub legal_start: usize,
 }
 
@@ -1854,6 +1858,27 @@ fn publish_runtime_notification(
     } else {
         bus.publish_outbound(message);
     }
+}
+
+fn runtime_workflow_projection_message_from_session(
+    session: &Session,
+    channel: &str,
+    chat_id: &str,
+    routing_metadata: &Map<String, Value>,
+    reply_to: Option<&str>,
+) -> Option<OutboundMessage> {
+    let projection = session
+        .metadata
+        .get("runtime_workflow")?
+        .get("projection")?;
+    let mut message = runtime_workflow_projection_outbound(channel, chat_id, projection);
+    let mut metadata = routing_metadata.clone();
+    metadata.extend(message.metadata);
+    message.metadata = metadata;
+    if let Some(reply_to) = reply_to {
+        message.reply_to = Some(reply_to.to_owned());
+    }
+    Some(message)
 }
 
 fn skill_usage_notification_message(
@@ -6695,6 +6720,7 @@ pub fn session_inspect(options: SessionInspectOptions) -> Result<SessionInspectR
         last_consolidated: detail.last_consolidated,
         recovery_markers: detail.recovery_markers,
         checkpoint_phase: detail.checkpoint_phase,
+        runtime_workflow: detail.runtime_workflow,
     })
 }
 
@@ -6855,6 +6881,7 @@ pub fn session_diagnostics(
             metadata_keys: Vec::new(),
             recovery_markers: Vec::new(),
             checkpoint_phase: None,
+            runtime_workflow: None,
             legal_start: 0,
         });
     }
@@ -6875,6 +6902,7 @@ pub fn session_diagnostics(
         metadata_keys: diagnostics.metadata_keys,
         recovery_markers: diagnostics.recovery_markers,
         checkpoint_phase: diagnostics.checkpoint_phase,
+        runtime_workflow: diagnostics.runtime_workflow,
         legal_start: diagnostics.legal_start,
     })
 }
@@ -14459,6 +14487,8 @@ impl AgentLoopChatCompletionAdapter {
                 runtime_message_preview(&message),
             );
         }
+        let response_channel = message.channel.clone();
+        let response_chat_id = message.chat_id.clone();
         let sessions = SessionManager::new(&self.workspace).map_err(|error| {
             ApiError::internal(format!("session manager could not be initialized: {error}"))
         })?;
@@ -14595,6 +14625,21 @@ impl AgentLoopChatCompletionAdapter {
             })?;
         let mut outbound = Vec::new();
         while let Some(message) = outbound_bus.consume_outbound() {
+            outbound.push(message);
+        }
+        if let Some(message) = loop_runtime
+            .session_manager_mut()
+            .load_existing(&result.session_key)
+            .and_then(|session| {
+                runtime_workflow_projection_message_from_session(
+                    &session,
+                    &response_channel,
+                    &response_chat_id,
+                    &routing_metadata,
+                    reply_to.as_deref(),
+                )
+            })
+        {
             outbound.push(message);
         }
         Ok((result, outbound))
@@ -16017,7 +16062,7 @@ fn format_session_inspect(report: SessionInspectReport) -> String {
         format!("yes ({})", report.recovery_markers.join(", "))
     };
     let checkpoint = report.checkpoint_phase.unwrap_or_else(|| "none".to_owned());
-    [
+    let mut lines = vec![
         "shacs-bot session inspect".to_owned(),
         format!("Workspace: {}", display_path(&report.workspace)),
         format!("Key: {}", report.key),
@@ -16035,8 +16080,14 @@ fn format_session_inspect(report: SessionInspectReport) -> String {
         format!("Metadata keys: {metadata}"),
         format!("Recovery required: {recovery}"),
         format!("Checkpoint phase: {checkpoint}"),
-    ]
-    .join("\n")
+    ];
+    if let Some(workflow) = report.runtime_workflow.as_ref() {
+        lines.push(format!(
+            "Workflow status: {}",
+            format_runtime_workflow_projection(workflow)
+        ));
+    }
+    lines.join("\n")
 }
 
 fn format_session_create(report: SessionCreateReport) -> String {
@@ -16108,7 +16159,7 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
     } else {
         report.recovery_markers.join(", ")
     };
-    [
+    let mut lines = vec![
         "shacs-bot session diagnostics".to_owned(),
         format!("Workspace: {}", display_path(&report.workspace)),
         format!("Key: {}", report.key),
@@ -16123,8 +16174,53 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
             report.checkpoint_phase.unwrap_or_else(|| "none".to_owned())
         ),
         format!("Legal history start: {}", report.legal_start),
-    ]
-    .join("\n")
+    ];
+    if let Some(workflow) = report.runtime_workflow.as_ref() {
+        lines.push(format!(
+            "Workflow status: {}",
+            format_runtime_workflow_projection(workflow)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_runtime_workflow_projection(workflow: &SessionRuntimeWorkflowProjection) -> String {
+    let workflow_id = workflow.workflow_id.as_deref().unwrap_or("unknown");
+    let schema = workflow.schema_version.as_deref().unwrap_or("unknown");
+    let pattern = workflow.pattern.as_deref().unwrap_or("unknown");
+    let state = workflow.state.as_deref().unwrap_or("unknown");
+    let verifier = workflow.verifier_status.as_deref().unwrap_or("unknown");
+    let progress = workflow.progress_count.unwrap_or_default();
+    let active = workflow.active_child_count.unwrap_or_default();
+    let pending = workflow.pending_barrier_count.unwrap_or_default();
+    let mut parts = vec![format!(
+        "workflow_id={workflow_id}, schema_version={schema}, state={state}, pattern={pattern}, progress={progress}, active_children={active}, pending_barriers={pending}, verifier={verifier}"
+    )];
+    if let Some(budget) = workflow.budget_usage.as_ref() {
+        parts.push(format!(
+            "budget=known_tokens:{} estimated_tokens:{} child_runs:{} verifier_runs:{} heavy_commands:{}",
+            budget.known_tokens.unwrap_or_default(),
+            budget.estimated_tokens.unwrap_or_default(),
+            budget.child_runs.unwrap_or_default(),
+            budget.verifier_runs.unwrap_or_default(),
+            budget.heavy_commands.unwrap_or_default()
+        ));
+    }
+    parts.push(format!(
+        "worktree_ref_count={}, evidence_ref_count={}",
+        workflow.worktree_ref_count, workflow.evidence_ref_count
+    ));
+    if let Some(next_action) = workflow.next_action.as_deref() {
+        parts.push(format!("next_action={next_action}"));
+    }
+    if let Some(blocked_reason) = workflow.blocked_reason.as_deref() {
+        parts.push(format!("blocked_reason={blocked_reason}"));
+    }
+    parts.push(format!(
+        "resume_available={}",
+        yes_no_label(workflow.resume_available)
+    ));
+    parts.join(", ")
 }
 
 fn format_session_compact(report: SessionCompactReport) -> String {
@@ -22817,6 +22913,34 @@ mod tests {
             "agent_configuration".to_owned(),
             json!({"model": "gpt-5.4"}),
         );
+        session.metadata.insert(
+            "runtime_workflow".to_owned(),
+            json!({
+                "raw_prompt": "secret workflow prompt",
+                "projection": {
+                    "schema_label": "024WorkflowProjection",
+                    "schema_version": "024WorkflowProjection.v1",
+                    "workflow_id": "wf-cli",
+                    "objective_summary": "secret objective",
+                    "pattern": "fan_out_and_synthesize",
+                    "state": "Succeeded",
+                    "progress_count": 3,
+                    "active_child_count": 0,
+                    "pending_barrier_count": 0,
+                    "verifier_status": "passed",
+                    "budget_usage": {
+                        "known_tokens": 11,
+                        "estimated_tokens": 22,
+                        "child_runs": 3,
+                        "verifier_runs": 1,
+                        "heavy_commands": 0
+                    },
+                    "resume_available": false,
+                    "worktree_refs": ["diff secret"],
+                    "evidence_refs": [{"id": "secret evidence"}]
+                }
+            }),
+        );
         session.add_message("user", "secret prompt body", Default::default());
         session.add_message("assistant", "secret answer body", Default::default());
         session.last_consolidated = 1;
@@ -22844,13 +22968,94 @@ mod tests {
         assert_eq!(inspect.last_consolidated, 1);
         assert_eq!(
             inspect.metadata_keys,
-            vec!["agent_configuration".to_owned()]
+            vec![
+                "agent_configuration".to_owned(),
+                "runtime_workflow".to_owned()
+            ]
+        );
+        assert_eq!(
+            inspect
+                .runtime_workflow
+                .as_ref()
+                .and_then(|workflow| workflow.workflow_id.as_deref()),
+            Some("wf-cli")
         );
         let inspect_output = format_session_inspect(inspect);
         assert!(inspect_output.contains("Messages: 2"));
-        assert!(inspect_output.contains("Metadata keys: agent_configuration"));
+        assert!(inspect_output.contains("Metadata keys: agent_configuration, runtime_workflow"));
+        assert!(inspect_output.contains("Workflow status: workflow_id=wf-cli"));
+        assert!(inspect_output.contains("schema_version=024WorkflowProjection.v1"));
+        assert!(inspect_output.contains("state=Succeeded"));
+        assert!(inspect_output.contains("pattern=fan_out_and_synthesize"));
+        assert!(inspect_output.contains("verifier=passed"));
+        assert!(inspect_output.contains("budget=known_tokens:11 estimated_tokens:22 child_runs:3 verifier_runs:1 heavy_commands:0"));
+        assert!(inspect_output.contains("worktree_ref_count=1, evidence_ref_count=1"));
         assert!(!inspect_output.contains("gpt-5.4"));
         assert!(!inspect_output.contains("secret answer body"));
+        assert!(!inspect_output.contains("secret workflow prompt"));
+        assert!(!inspect_output.contains("secret objective"));
+        assert!(!inspect_output.contains("diff secret"));
+        assert!(!inspect_output.contains("secret evidence"));
+        Ok(())
+    }
+
+    #[test]
+    fn external_channel_runtime_projection_message_uses_bounded_helper(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut session = Session::new("slack:C1:171.1");
+        session.metadata.insert(
+            "runtime_workflow".to_owned(),
+            json!({
+                "raw_prompt": "do-not-send",
+                "projection": {
+                    "schema_label": "024WorkflowProjection",
+                    "schema_version": "024WorkflowProjection.v1",
+                    "workflow_id": "wf-runtime",
+                    "objective_summary": "raw objective stays local",
+                    "pattern": "fan_out_and_synthesize",
+                    "state": "running",
+                    "progress_count": 2,
+                    "active_child_count": 1,
+                    "pending_barrier_count": 0,
+                    "verifier_status": "pending",
+                    "budget_usage": {
+                        "known_tokens": 12,
+                        "estimated_tokens": 34,
+                        "child_runs": 2,
+                        "verifier_runs": 1,
+                        "heavy_commands": 0
+                    },
+                    "next_action": "wait_for_child",
+                    "resume_available": true,
+                    "worktree_refs": ["secret worktree"],
+                    "evidence_refs": [{"id": "secret evidence"}]
+                }
+            }),
+        );
+        let routing = Map::from_iter([("thread_ts".to_owned(), json!("171.1"))]);
+
+        let outbound = runtime_workflow_projection_message_from_session(
+            &session,
+            SLACK_CHANNEL,
+            "C1",
+            &routing,
+            Some("msg-1"),
+        )
+        .ok_or("missing workflow projection outbound")?;
+
+        assert_eq!(outbound.channel, SLACK_CHANNEL);
+        assert_eq!(outbound.reply_to.as_deref(), Some("msg-1"));
+        assert_eq!(outbound.metadata["kind"], json!("runtime_workflow"));
+        assert_eq!(outbound.metadata["thread_ts"], json!("171.1"));
+        assert_eq!(outbound.metadata["workflow_id"], json!("wf-runtime"));
+        assert_eq!(outbound.metadata["budget_usage"]["child_runs"], json!(2));
+        assert_eq!(outbound.metadata["worktree_ref_count"], json!(1));
+        assert_eq!(outbound.metadata["evidence_ref_count"], json!(1));
+        let serialized = serde_json::to_string(&outbound)?;
+        assert!(!serialized.contains("do-not-send"));
+        assert!(!serialized.contains("raw objective"));
+        assert!(!serialized.contains("secret worktree"));
+        assert!(!serialized.contains("secret evidence"));
         Ok(())
     }
 
@@ -23000,6 +23205,34 @@ mod tests {
             "runtime_checkpoint".to_owned(),
             json!({"phase": "awaiting_tools", "raw_secret": "do-not-print"}),
         );
+        session.metadata.insert(
+            "runtime_workflow".to_owned(),
+            json!({
+                "projection": {
+                    "schema_label": "024WorkflowProjection",
+                    "schema_version": "024WorkflowProjection.v1",
+                    "workflow_id": "wf-managed",
+                    "pattern": "workflow_sequence",
+                    "state": "Running",
+                    "progress_count": 1,
+                    "active_child_count": 2,
+                    "pending_barrier_count": 1,
+                    "verifier_status": "pending",
+                    "budget_usage": {
+                        "known_tokens": 5,
+                        "estimated_tokens": 6,
+                        "child_runs": 1,
+                        "verifier_runs": 0,
+                        "heavy_commands": 0
+                    },
+                    "next_action": "continue",
+                    "resume_available": true,
+                    "worktree_refs": ["worktree://hidden"],
+                    "evidence_refs": [{"id": "hidden"}]
+                },
+                "events": [{"phase": "raw", "prompt": "do-not-print"}]
+            }),
+        );
         session.add_message("user", "alpha", Default::default());
         session.add_message("assistant", "beta", Default::default());
         session.add_message("user", "gamma", Default::default());
@@ -23039,7 +23272,14 @@ mod tests {
             diagnostics_output.contains("Recovery markers: pending_user_turn, runtime_checkpoint")
         );
         assert!(diagnostics_output.contains("Checkpoint phase: awaiting_tools"));
+        assert!(diagnostics_output.contains("Workflow status: workflow_id=wf-managed"));
+        assert!(diagnostics_output.contains("state=Running"));
+        assert!(diagnostics_output.contains("active_children=2"));
+        assert!(diagnostics_output.contains("budget=known_tokens:5 estimated_tokens:6 child_runs:1 verifier_runs:0 heavy_commands:0"));
+        assert!(diagnostics_output.contains("worktree_ref_count=1, evidence_ref_count=1"));
+        assert!(diagnostics_output.contains("next_action=continue"));
         assert!(!diagnostics_output.contains("do-not-print"));
+        assert!(!diagnostics_output.contains("worktree://hidden"));
 
         let export_error = session_export(SessionExportOptions {
             config_path: Some(config_path.clone()),
