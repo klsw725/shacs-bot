@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use shacs_eval::evaluator::{
     spec018_approval_item_channel_visible, spec018_channel_event_kind_for_status,
-    spec018_evidence_refs_are_redacted, Spec018ApprovalProjectionItem,
+    spec018_evidence_refs_are_redacted, EvidenceRef, Spec018ApprovalProjectionItem,
     Spec018AutomationDeliveryStatus, Spec018BlockedProjectionItem, Spec018EvaluatorDecisionSummary,
     Spec018GoalSummary, Spec018Projection, Spec018ReplayRegressionSummary,
     Spec018VerificationProjectionItem, SPEC018_PROJECTION_SCHEMA_LABEL,
@@ -237,10 +238,88 @@ pub fn runtime_spec018_channel_projection(projection: &Spec018Projection) -> Spe
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeSpec024ProjectionInput<'a, T> {
+    pub generated_at_ms: u64,
+    pub session_id: &'a str,
+    pub surface: &'a str,
+    pub projection: &'a T,
+    pub evidence_refs: &'a [EvidenceRef],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeSpec024Projection<T> {
+    pub schema_label: String,
+    pub schema_version: String,
+    pub generated_at_ms: u64,
+    pub session_id: String,
+    pub surface: String,
+    pub projection: T,
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+pub fn build_spec024_projection<T: Clone>(
+    input: RuntimeSpec024ProjectionInput<'_, T>,
+) -> RuntimeSpec024Projection<T> {
+    RuntimeSpec024Projection {
+        schema_label: "024ProjectionWrapper".to_owned(),
+        schema_version: "024ProjectionWrapper.v1".to_owned(),
+        generated_at_ms: input.generated_at_ms,
+        session_id: redact_string(input.session_id),
+        surface: redact_string(input.surface),
+        projection: input.projection.clone(),
+        evidence_refs: sanitize_spec024_refs(input.evidence_refs),
+    }
+}
+
+pub fn runtime_spec024_local_api_projection<T: Clone>(
+    projection: &RuntimeSpec024Projection<T>,
+) -> RuntimeSpec024Projection<T> {
+    sanitize_spec024_projection_wrapper(projection)
+}
+
+pub fn runtime_spec024_channel_projection<T: Clone>(
+    projection: &RuntimeSpec024Projection<T>,
+) -> RuntimeSpec024Projection<T> {
+    sanitize_spec024_projection_wrapper(projection)
+}
+
 fn sanitize_refs(refs: &mut Vec<shacs_eval::evaluator::EvidenceRef>) {
     refs.retain(|evidence_ref| {
         spec018_evidence_refs_are_redacted(std::slice::from_ref(evidence_ref))
     });
+}
+
+fn sanitize_spec024_refs(refs: &[EvidenceRef]) -> Vec<EvidenceRef> {
+    refs.iter()
+        .filter(|evidence_ref| spec024_evidence_ref_is_safe(evidence_ref))
+        .cloned()
+        .collect()
+}
+
+fn sanitize_spec024_projection_wrapper<T: Clone>(
+    projection: &RuntimeSpec024Projection<T>,
+) -> RuntimeSpec024Projection<T> {
+    RuntimeSpec024Projection {
+        schema_label: projection.schema_label.clone(),
+        schema_version: projection.schema_version.clone(),
+        generated_at_ms: projection.generated_at_ms,
+        session_id: redact_string(&projection.session_id),
+        surface: redact_string(&projection.surface),
+        projection: projection.projection.clone(),
+        evidence_refs: sanitize_spec024_refs(&projection.evidence_refs),
+    }
+}
+
+fn spec024_evidence_ref_is_safe(evidence_ref: &EvidenceRef) -> bool {
+    evidence_ref.owner_spec.as_deref() == Some("024")
+        && matches!(
+            evidence_ref.redaction_status,
+            shacs_eval::evaluator::RedactionStatus::AlreadySafe
+                | shacs_eval::evaluator::RedactionStatus::Redacted
+        )
+        && !evidence_ref.id.trim().is_empty()
+        && !evidence_ref.digest.trim().is_empty()
 }
 
 fn sanitize_status(status: &mut shacs_eval::evaluator::Spec018ProjectionStatus) {

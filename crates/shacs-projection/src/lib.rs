@@ -13,6 +13,8 @@ pub use diagnostics_release::{
     ToolSearchReleaseEvidenceChecklist,
 };
 pub use projection::{
-    build_spec018_projection, runtime_spec018_channel_projection,
-    runtime_spec018_local_api_projection, RuntimeSpec018ProjectionInput,
+    build_spec018_projection, build_spec024_projection, runtime_spec018_channel_projection,
+    runtime_spec018_local_api_projection, runtime_spec024_channel_projection,
+    runtime_spec024_local_api_projection, RuntimeSpec018ProjectionInput, RuntimeSpec024Projection,
+    RuntimeSpec024ProjectionInput,
 };

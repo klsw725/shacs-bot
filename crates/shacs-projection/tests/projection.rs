@@ -16,14 +16,16 @@ use shacs_eval::evaluator::{
 };
 use shacs_projection::{
     build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
-    build_spec018_projection, context_prd005_release_evidence_checklist,
+    build_spec018_projection, build_spec024_projection, context_prd005_release_evidence_checklist,
     evaluate_spec018_release_gate, runtime_spec018_channel_projection,
-    runtime_spec018_local_api_projection, spec024_release_evidence_checklist,
+    runtime_spec018_local_api_projection, runtime_spec024_channel_projection,
+    runtime_spec024_local_api_projection, spec024_release_evidence_checklist,
     tool_search_prd005_release_evidence_checklist, tool_search_prd006_release_evidence_checklist,
     ContextReleaseEvidence, ContextReleaseEvidenceBucket, RuntimeSpec018DiagnosticsManifestInput,
     RuntimeSpec018LedgerInspectInput, RuntimeSpec018ProjectionInput,
-    RuntimeSpec018ReleaseGateInput, Spec024ReleaseEvidence, Spec024ReleaseEvidenceBucket,
-    ToolSearchReleaseEvidence, ToolSearchReleaseEvidenceBucket,
+    RuntimeSpec018ReleaseGateInput, RuntimeSpec024Projection, RuntimeSpec024ProjectionInput,
+    Spec024ReleaseEvidence, Spec024ReleaseEvidenceBucket, ToolSearchReleaseEvidence,
+    ToolSearchReleaseEvidenceBucket,
 };
 use std::error::Error;
 
@@ -533,6 +535,51 @@ fn runtime_spec018_local_api_projection_sanitizes_unsanitized_nested_refs(
     );
     assert_eq!(local_projection.evidence_refs, vec![safe_ref]);
     assert!(!serialized.contains("diagnostics-unsafe"));
+
+    Ok(())
+}
+
+#[test]
+fn runtime_spec024_projection_wrappers_keep_only_owner_scoped_safe_evidence(
+) -> Result<(), Box<dyn Error>> {
+    let safe_ref = spec024_evidence_ref("projection-safe", RedactionStatus::Redacted);
+    let failed_ref = spec024_evidence_ref("projection-failed", RedactionStatus::RedactionFailed);
+    let wrong_owner_ref = spec018_evidence_ref(
+        EvidenceKind::DiagnosticRecord,
+        "projection-wrong-owner",
+        RedactionStatus::Redacted,
+    );
+    let projection_payload = serde_json::json!({
+        "workflow_id": "workflow-024",
+        "state": "blocked",
+    });
+
+    let wrapper = build_spec024_projection(RuntimeSpec024ProjectionInput {
+        generated_at_ms: 42,
+        session_id: "session-024",
+        surface: "local_api",
+        projection: &projection_payload,
+        evidence_refs: &[safe_ref.clone(), failed_ref, wrong_owner_ref],
+    });
+
+    assert_eq!(wrapper.schema_label, "024ProjectionWrapper");
+    assert_eq!(wrapper.schema_version, "024ProjectionWrapper.v1");
+    assert_eq!(wrapper.evidence_refs, vec![safe_ref.clone()]);
+
+    let mut unsafe_wrapper: RuntimeSpec024Projection<_> = wrapper.clone();
+    unsafe_wrapper.evidence_refs.push(spec024_evidence_ref(
+        "projection-unsafe-later",
+        RedactionStatus::RedactionFailed,
+    ));
+
+    let local_projection = runtime_spec024_local_api_projection(&unsafe_wrapper);
+    let channel_projection = runtime_spec024_channel_projection(&unsafe_wrapper);
+    let serialized = to_string(&channel_projection)?;
+
+    assert_eq!(local_projection.evidence_refs, vec![safe_ref.clone()]);
+    assert_eq!(channel_projection.evidence_refs, vec![safe_ref]);
+    assert!(!serialized.contains("projection-unsafe-later"));
+    assert!(!serialized.contains("projection-wrong-owner"));
 
     Ok(())
 }
