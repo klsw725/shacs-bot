@@ -18,6 +18,7 @@ members = [
     "shacs-session",
     "shacs-skills",
     "shacs-templates",
+    "shacs-tui",
     "shacs-utils",
     "shacs-web",
     "shacs-workflow",

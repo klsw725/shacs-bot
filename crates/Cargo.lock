@@ -1634,6 +1634,7 @@ dependencies = [
  "shacs-core",
  "shacs-providers",
  "shacs-redaction",
+ "shacs-session",
  "shacs-skills",
  "shacs-templates",
  "shacs-utils",
@@ -1782,6 +1783,7 @@ dependencies = [
 name = "shacs-skills"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "shacs-workflow",
  "tempfile",
@@ -1793,6 +1795,15 @@ version = "0.1.0"
 dependencies = [
  "regex",
  "tempfile",
+]
+
+[[package]]
+name = "shacs-tui"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "shacs-session",
+ "shacs-workflow",
 ]
 
 [[package]]
