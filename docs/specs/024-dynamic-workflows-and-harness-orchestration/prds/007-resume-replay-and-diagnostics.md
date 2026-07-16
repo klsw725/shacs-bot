@@ -85,3 +85,9 @@ Workflow interruption, stale child result, replay/debugging이 destructive re-ex
 - invalid owner 또는 failed redaction evidence는 manifest evidence에서 제외된다.
 - checkpoint resume은 plan digest mismatch와 terminal state를 fail-closed로 처리한다.
 - replay/debugging은 destructive workflow command 없이 manifest를 해석할 수 있다.
+
+## 구현 메모
+
+- Restart recovery는 `workflow_planned`와 evidence-bearing `after-*` checkpoint를 보존하고 plan digest, completed child ids, worktree refs, recipe source refs를 재검증한다.
+- Evidence-valid completed step을 제거할 때 remaining DAG dependency도 함께 정리하며, write-capable/ambiguous checkpoint는 재실행하지 않고 visible blocked state로 닫는다.
+- Runtime diagnostics manifest와 cleanup decision evidence는 session metadata에 내구 저장되며 replay는 live action을 허용하지 않는다.
