@@ -89,3 +89,10 @@
 - resume point가 있으면 resume available이 true다.
 - release checklist는 PRD 000-009 모든 bucket의 test 또는 manual QA evidence를 요구한다.
 - evidence ref는 owner `024`와 redaction-valid 상태를 만족해야 release coverage로 인정된다.
+
+## 구현 메모
+
+- `crates/shacs-workflow` owns the shared `WorkflowProjection` vocabulary and release evidence checklist.
+- `crates/shacs-session` projects persisted `runtime_workflow` metadata without raw workflow prompt or full diagnostic payload.
+- `crates/shacs-cli`, `crates/shacs-api`, and `crates/shacs-channels` consume the same sanitized session/runtime workflow projection for inspect, diagnostics, API response, and bounded channel outbound summaries.
+- `crates/shacs-tui` provides the minimal terminal-facing consumer through `workflow_progress_view(&WorkflowProjection)` and plain-text rendering; visual layout remains a UI-owner concern, not a 024 contract.
