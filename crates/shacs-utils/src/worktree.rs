@@ -66,7 +66,14 @@ pub fn create_git_worktree(
     request: &GitWorktreeCreateRequest,
 ) -> Result<GitWorktreeCreateEvidence, String> {
     validate_branch_name(&request.branch_name)?;
+    let trusted_root = common_path_prefix(&request.repo_path, &request.worktree_root);
+    reject_existing_symlink_components(&trusted_root, &request.worktree_root)?;
+    fs::create_dir_all(&request.worktree_root).map_err(|error| error.to_string())?;
+    reject_existing_symlink_components(&trusted_root, &request.worktree_root)?;
     ensure_child_path(&request.worktree_root, &request.worktree_path)?;
+    if let Some(parent) = request.worktree_path.parent() {
+        reject_existing_symlink_components(&request.worktree_root, parent)?;
+    }
     let repo_root = git_stdout(&request.repo_path, &["rev-parse", "--show-toplevel"])?;
     let repo_root = PathBuf::from(repo_root.trim());
     let base_commit = git_stdout(&repo_root, &["rev-parse", "--verify", &request.base_ref])?
@@ -217,6 +224,44 @@ fn ensure_child_path(root: &Path, child: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn reject_existing_symlink_components(base: &Path, path: &Path) -> Result<(), String> {
+    let relative = path
+        .strip_prefix(base)
+        .map_err(|_| "worktree path escapes trusted root".to_owned())?;
+    let mut current = base.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "worktree path contains symlink component: {}",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "worktree path component is not accessible: {}: {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn common_path_prefix(left: &Path, right: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    for (left, right) in left.components().zip(right.components()) {
+        if left != right {
+            break;
+        }
+        prefix.push(left.as_os_str());
+    }
+    prefix
+}
+
 fn validate_branch_name(branch_name: &str) -> Result<(), String> {
     if branch_name.trim().is_empty()
         || branch_name.starts_with('-')
@@ -359,6 +404,30 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn worktree_symlink_root_is_blocked_before_git_effect() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let symlink_root = root.path().join("workflow-worktrees");
+        symlink(outside.path(), &symlink_root)?;
+        let request = GitWorktreeCreateRequest {
+            repo_path: root.path().to_path_buf(),
+            worktree_root: symlink_root.clone(),
+            worktree_path: symlink_root.join("child"),
+            branch_name: "workflow/child-symlink".to_owned(),
+            base_ref: "HEAD".to_owned(),
+        };
+
+        let error = create_git_worktree(&request).expect_err("symlinked worktree root is rejected");
+        assert!(error.contains("symlink component"));
+        assert!(!outside.path().join("child").exists());
+        Ok(())
+    }
+
     #[test]
     fn worktree_create_diff_handoff_and_cleanup_are_evidence_backed(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -369,7 +438,6 @@ mod tests {
         let repo = root.path().join("repo");
         let worktrees = root.path().join("worktrees");
         fs::create_dir_all(&repo)?;
-        fs::create_dir_all(&worktrees)?;
         git_stdout(&repo, &["init"])?;
         fs::write(repo.join("README.md"), "base\n")?;
         git_stdout(&repo, &["add", "README.md"])?;
@@ -384,6 +452,7 @@ mod tests {
             base_ref: "HEAD".to_owned(),
         })?;
         assert_eq!(create.worktree_ref, "worktree://workflow/child-1");
+        assert!(worktrees.exists());
         fs::write(worktree_path.join("README.md"), "base\nchild\n")?;
 
         let diff = collect_git_worktree_diff_evidence(&worktree_path, "workflow/child-1", "HEAD")?;
