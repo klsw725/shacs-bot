@@ -912,6 +912,101 @@ pub fn workflow_recipe_projection_outbound(
     .with_metadata(metadata)
 }
 
+pub fn runtime_workflow_projection_outbound(
+    channel: impl Into<String>,
+    chat_id: impl Into<String>,
+    projection: &Value,
+) -> OutboundMessage {
+    let state = projection_string(projection, "state").unwrap_or_else(|| "unknown".to_owned());
+    let workflow_id = projection_string(projection, "workflow_id");
+    let pattern = projection_string(projection, "pattern").unwrap_or_else(|| "unknown".to_owned());
+    let progress = projection_u64(projection, "progress_count").unwrap_or_default();
+    let active_children = projection_u64(projection, "active_child_count").unwrap_or_default();
+    let pending_barriers = projection_u64(projection, "pending_barrier_count").unwrap_or_default();
+    let verifier =
+        projection_string(projection, "verifier_status").unwrap_or_else(|| "unknown".to_owned());
+    let worktree_refs = projection_array_len(projection, "worktree_refs");
+    let evidence_refs = projection_array_len(projection, "evidence_refs");
+    let mut metadata = Map::new();
+    metadata.insert(
+        "kind".to_owned(),
+        Value::String("runtime_workflow".to_owned()),
+    );
+    if let Some(schema_label) = projection.get("schema_label").cloned() {
+        metadata.insert("schema_label".to_owned(), schema_label);
+    }
+    if let Some(schema_version) = projection.get("schema_version").cloned() {
+        metadata.insert("schema_version".to_owned(), schema_version);
+    }
+    if let Some(workflow_id) = workflow_id.as_ref() {
+        metadata.insert("workflow_id".to_owned(), Value::String(workflow_id.clone()));
+    }
+    metadata.insert("pattern".to_owned(), Value::String(pattern.clone()));
+    metadata.insert("state".to_owned(), Value::String(state.clone()));
+    metadata.insert("progress_count".to_owned(), json!(progress));
+    metadata.insert("active_child_count".to_owned(), json!(active_children));
+    metadata.insert("pending_barrier_count".to_owned(), json!(pending_barriers));
+    metadata.insert(
+        "verifier_status".to_owned(),
+        Value::String(verifier.clone()),
+    );
+    if let Some(next_action) = projection_string(projection, "next_action") {
+        metadata.insert("next_action".to_owned(), Value::String(next_action));
+    }
+    if let Some(blocked_reason) = projection_string(projection, "blocked_reason") {
+        metadata.insert("blocked_reason".to_owned(), Value::String(blocked_reason));
+    }
+    if let Some(resume_available) = projection.get("resume_available").and_then(Value::as_bool) {
+        metadata.insert("resume_available".to_owned(), json!(resume_available));
+    }
+    if let Some(budget_usage) = bounded_budget_usage(projection) {
+        metadata.insert("budget_usage".to_owned(), budget_usage);
+    }
+    metadata.insert("worktree_ref_count".to_owned(), json!(worktree_refs));
+    metadata.insert("evidence_ref_count".to_owned(), json!(evidence_refs));
+    let workflow_label = workflow_id.as_deref().unwrap_or("unknown");
+    OutboundMessage::new(
+        channel,
+        chat_id,
+        format!(
+            "Workflow {workflow_label}: state {state}; pattern {pattern}; progress {progress}; active children {active_children}; pending barriers {pending_barriers}; verifier {verifier}; worktree refs {worktree_refs}; evidence refs {evidence_refs}"
+        ),
+    )
+    .with_metadata(metadata)
+}
+
+fn bounded_budget_usage(projection: &Value) -> Option<Value> {
+    let budget = projection.get("budget_usage")?.as_object()?;
+    Some(json!({
+        "known_tokens": budget.get("known_tokens").and_then(Value::as_u64).unwrap_or_default(),
+        "estimated_tokens": budget.get("estimated_tokens").and_then(Value::as_u64).unwrap_or_default(),
+        "child_runs": budget.get("child_runs").and_then(Value::as_u64).unwrap_or_default(),
+        "verifier_runs": budget.get("verifier_runs").and_then(Value::as_u64).unwrap_or_default(),
+        "heavy_commands": budget.get("heavy_commands").and_then(Value::as_u64).unwrap_or_default(),
+    }))
+}
+
+fn projection_string(projection: &Value, key: &str) -> Option<String> {
+    projection
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn projection_u64(projection: &Value, key: &str) -> Option<u64> {
+    projection.get(key).and_then(Value::as_u64)
+}
+
+fn projection_array_len(projection: &Value, key: &str) -> usize {
+    projection
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default()
+}
+
 fn normalize_websocket_object(
     client_id: &str,
     default_chat_id: &str,
@@ -1676,5 +1771,58 @@ mod tests {
             json!("024WorkflowRecipeProjection.v1")
         );
         assert_eq!(outbound.metadata["recipe_count"], json!(2));
+    }
+
+    #[test]
+    fn runtime_workflow_projection_outbound_summarizes_bounded_milestones() {
+        let projection = json!({
+            "schema_label": "024WorkflowProjection",
+            "schema_version": "024WorkflowProjection.v1",
+            "workflow_id": "wf-channel",
+            "objective_summary": "secret prompt must not be sent",
+            "pattern": "fan_out_and_synthesize",
+            "state": "Running",
+            "progress_count": 2,
+            "active_child_count": 1,
+            "pending_barrier_count": 0,
+            "verifier_status": "pending",
+            "budget_usage": {
+                "known_tokens": 10,
+                "estimated_tokens": 20,
+                "child_runs": 2,
+                "verifier_runs": 1,
+                "heavy_commands": 0
+            },
+            "next_action": "wait_for_child",
+            "resume_available": true,
+            "worktree_refs": ["diff secret"],
+            "evidence_refs": [{"id": "raw evidence hidden"}]
+        });
+
+        let outbound = runtime_workflow_projection_outbound(WEBSOCKET_CHANNEL, "chat", &projection);
+        assert_eq!(outbound.channel, WEBSOCKET_CHANNEL);
+        assert_eq!(outbound.chat_id, "chat");
+        assert!(outbound.content.contains("Workflow wf-channel"));
+        assert!(outbound.content.contains("state Running"));
+        assert!(outbound.content.contains("progress 2"));
+        assert_eq!(outbound.metadata["kind"], json!("runtime_workflow"));
+        assert_eq!(outbound.metadata["workflow_id"], json!("wf-channel"));
+        assert_eq!(
+            outbound.metadata["pattern"],
+            json!("fan_out_and_synthesize")
+        );
+        assert_eq!(outbound.metadata["progress_count"], json!(2));
+        assert_eq!(outbound.metadata["budget_usage"]["child_runs"], json!(2));
+        assert_eq!(outbound.metadata["worktree_ref_count"], json!(1));
+        assert_eq!(outbound.metadata["evidence_ref_count"], json!(1));
+        assert_eq!(outbound.metadata["next_action"], json!("wait_for_child"));
+        let serialized = serde_json::to_string(&outbound).unwrap_or_default();
+        assert!(!serialized.contains("secret prompt"));
+        assert!(!serialized.contains("diff secret"));
+        assert!(!serialized.contains("raw evidence"));
+
+        let event = websocket_event_from_outbound(outbound);
+        let event_json = serde_json::to_value(event).unwrap_or_default();
+        assert_eq!(event_json["kind"], json!("runtime_workflow"));
     }
 }
