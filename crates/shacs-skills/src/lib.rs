@@ -3,6 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use shacs_workflow::{
     workflow_recipe_readiness, WorkflowPattern, WorkflowRecipe, WorkflowRecipeReadiness,
 };
@@ -31,7 +32,8 @@ pub struct BuiltinSkillsSyncOutcome {
     pub created_dirs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkillSourceKind {
     VirtualBuiltin,
     MaterializedBuiltin,
@@ -65,7 +67,8 @@ impl SkillSourceKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkillRegistryStatus {
     Active,
     Shadowed,
@@ -84,7 +87,7 @@ impl SkillRegistryStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillDescriptor {
     pub name: String,
     pub description: Option<String>,
@@ -95,7 +98,7 @@ pub struct SkillDescriptor {
     pub install_metadata: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillRegistryEntry {
     pub descriptor: SkillDescriptor,
     pub status: SkillRegistryStatus,
@@ -103,12 +106,12 @@ pub struct SkillRegistryEntry {
     pub raw: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillRegistry {
     pub entries: Vec<SkillRegistryEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillBackedWorkflowRecipe {
     pub skill_name: String,
     pub skill_status: SkillRegistryStatus,
