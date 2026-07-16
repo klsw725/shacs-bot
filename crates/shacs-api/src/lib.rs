@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use shacs_channels::WebSocketServerEvent;
 use shacs_providers::{GenerationSettings, LlmResponse, ProviderEvent, ProviderRequest};
-use shacs_session::{SessionManager, SessionProjectionOptions, SessionUxDiagnostics};
+use shacs_session::{
+    SessionManager, SessionProjectionOptions, SessionRuntimeWorkflowProjection,
+    SessionUxDiagnostics,
+};
 use shacs_utils::diagnostics::{
     DiagnosticsKind, DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot,
 };
@@ -803,6 +806,7 @@ fn handle_session_diagnostics_query(
             recovery_markers: Vec::new(),
             checkpoint_phase: None,
             diagnostics_refs: Vec::new(),
+            runtime_workflow: None::<SessionRuntimeWorkflowProjection>,
             legal_start: 0,
         }),
     )
@@ -2557,6 +2561,26 @@ mod tests {
     }
 
     #[test]
+    fn session_query_surface_fails_closed_without_workspace() {
+        let adapter = FakeAdapter::new("gpt-5", text_response("unused"));
+
+        let list = handle_api_request(ApiHttpRequest::get(SESSIONS_PATH), &adapter);
+        assert_eq!(list.status, 404);
+        assert_eq!(list.body["error"]["type"], "not_found");
+        assert!(list.body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("session query surface is not configured"));
+
+        let history = handle_api_request(
+            ApiHttpRequest::get("/v1/sessions/api:work/history"),
+            &adapter,
+        );
+        assert_eq!(history.status, 404);
+        assert_eq!(adapter.call_count(), 0);
+    }
+
+    #[test]
     fn formats_chat_completion_stream_chunks_as_sse_data_frames() {
         let frame = stream_event_frame(
             &ProviderEvent::TextDelta {
@@ -2638,8 +2662,42 @@ mod tests {
             "runtime_checkpoint".to_owned(),
             json!({ "phase": "awaiting_tools", "raw": "hidden" }),
         );
+        session.metadata.insert(
+            "runtime_workflow".to_owned(),
+            json!({
+                "raw_prompt": "hidden workflow prompt",
+                "projection": {
+                    "schema_label": "024WorkflowProjection",
+                    "schema_version": "024WorkflowProjection.v1",
+                    "workflow_id": "wf-api",
+                    "objective_summary": "hidden objective",
+                    "pattern": "fan_out_and_synthesize",
+                    "state": "Succeeded",
+                    "progress_count": 4,
+                    "active_child_count": 0,
+                    "pending_barrier_count": 0,
+                    "verifier_status": "passed",
+                    "budget_usage": {
+                        "known_tokens": 10,
+                        "estimated_tokens": 20,
+                        "child_runs": 4,
+                        "verifier_runs": 1,
+                        "heavy_commands": 0
+                    },
+                    "resume_available": false,
+                    "worktree_refs": ["secret diff"],
+                    "evidence_refs": [{"id": "secret evidence"}]
+                }
+            }),
+        );
         session.add_message("user", "hello", Map::new());
-        session.add_message("assistant", "world", Map::new());
+        let mut assistant_extra = Map::new();
+        assistant_extra.insert(
+            "tool_calls".to_owned(),
+            json!([{"id": "call-1", "type": "function", "function": {"name": "raw_tool", "arguments": "hidden args"}}]),
+        );
+        assistant_extra.insert("reasoning_content".to_owned(), json!("hidden reasoning"));
+        session.add_message("assistant", "world", assistant_extra);
         manager.save(&session)?;
 
         let adapter = Arc::new(
@@ -2674,13 +2732,27 @@ mod tests {
         let detail_body = response_json(detail).await?;
         assert_eq!(
             detail_body["metadata_keys"],
-            json!(["api_token", "runtime_checkpoint"])
+            json!(["api_token", "runtime_checkpoint", "runtime_workflow"])
         );
         assert_eq!(detail_body["checkpoint_phase"], "awaiting_tools");
+        assert_eq!(detail_body["runtime_workflow"]["workflow_id"], "wf-api");
+        assert_eq!(
+            detail_body["runtime_workflow"]["pattern"],
+            "fan_out_and_synthesize"
+        );
+        assert_eq!(detail_body["runtime_workflow"]["progress_count"], 4);
+        assert_eq!(
+            detail_body["runtime_workflow"]["budget_usage"]["child_runs"],
+            4
+        );
+        assert_eq!(detail_body["runtime_workflow"]["worktree_ref_count"], 1);
+        assert_eq!(detail_body["runtime_workflow"]["evidence_ref_count"], 1);
         assert!(detail_body.get("messages").is_none());
         let detail_text = detail_body.to_string();
         assert!(!detail_text.contains("secret-value"));
         assert!(!detail_text.contains("hidden"));
+        assert!(!detail_text.contains("secret diff"));
+        assert!(!detail_text.contains("secret evidence"));
 
         let history = app
             .clone()
@@ -2694,6 +2766,10 @@ mod tests {
         assert_eq!(history.status(), StatusCode::OK);
         let history_body = response_json(history).await?;
         assert_eq!(history_body["history"][0]["content"], "hello");
+        assert_eq!(history_body["history"][1]["content"], "world");
+        assert!(!history_body.to_string().contains("tool_calls"));
+        assert!(!history_body.to_string().contains("raw_tool"));
+        assert!(!history_body.to_string().contains("hidden reasoning"));
 
         let diagnostics = app
             .oneshot(
@@ -2707,8 +2783,13 @@ mod tests {
         let diagnostics_body = response_json(diagnostics).await?;
         assert_eq!(diagnostics_body["exists"], true);
         assert_eq!(diagnostics_body["checkpoint_phase"], "awaiting_tools");
+        assert_eq!(
+            diagnostics_body["runtime_workflow"]["verifier_status"],
+            "passed"
+        );
         assert!(!diagnostics_body.to_string().contains("secret-value"));
         assert!(!diagnostics_body.to_string().contains("hidden"));
+        assert!(!diagnostics_body.to_string().contains("secret diff"));
         assert_eq!(adapter.call_count(), 0);
         Ok(())
     }
@@ -3294,6 +3375,57 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains(r#"{"status":"ok"}"#));
+        let _ = shutdown_tx.send(());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn serve_api_listener_returns_sanitized_session_history_over_tcp(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace = unique_test_dir("api-session-tcp-history")?;
+        let mut manager = SessionManager::new(&workspace)?;
+        let mut session = Session::new("api:tcp");
+        session.add_message("user", "visible question", Map::new());
+        let mut assistant_extra = Map::new();
+        assistant_extra.insert(
+            "tool_calls".to_owned(),
+            json!([{"id": "call-1", "type": "function", "function": {"name": "hidden_tool", "arguments": "hidden args"}}]),
+        );
+        assistant_extra.insert("reasoning_content".to_owned(), json!("hidden reasoning"));
+        session.add_message("assistant", "visible answer", assistant_extra);
+        let mut tool_extra = Map::new();
+        tool_extra.insert("tool_call_id".to_owned(), json!("call-1"));
+        tool_extra.insert("name".to_owned(), json!("hidden_tool"));
+        session.add_message("tool", "hidden tool result", tool_extra);
+        manager.save(&session)?;
+
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("unused")).with_session_workspace(workspace),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_api_listener(listener, adapter, async {
+            let _ = shutdown_rx.await;
+        }));
+
+        let mut stream = TcpStream::connect(addr).await?;
+        stream
+            .write_all(
+                b"GET /v1/sessions/api%3Atcp/history HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await?;
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.contains("visible question"), "{response}");
+        assert!(response.contains("visible answer"), "{response}");
+        assert!(!response.contains("tool_calls"), "{response}");
+        assert!(!response.contains("hidden_tool"), "{response}");
+        assert!(!response.contains("hidden reasoning"), "{response}");
+        assert!(!response.contains("hidden tool result"), "{response}");
         let _ = shutdown_tx.send(());
         server.await??;
         Ok(())
