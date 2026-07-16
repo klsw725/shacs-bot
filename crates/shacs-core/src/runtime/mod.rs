@@ -254,12 +254,14 @@ pub use tool_search::{
 };
 pub use workflow::{
     cancel_runtime_workflow, read_only_child_tool_names, run_live_runtime_workflow,
+    run_live_runtime_workflow_with_checkpoint_callback, run_live_runtime_workflow_with_options,
     run_read_only_runtime_workflow, run_runtime_workflow_admission_branch,
     runtime_workflow_diagnostics, runtime_workflow_execution_handle,
-    RuntimeWorkflowAdmissionBranchInput, RuntimeWorkflowAdmissionBranchOutcome,
-    RuntimeWorkflowDiagnostics, RuntimeWorkflowEvent, RuntimeWorkflowExecutionHandle,
-    RuntimeWorkflowInput, RuntimeWorkflowInterruptOutcome, RuntimeWorkflowLiveError,
-    RuntimeWorkflowLiveInput, RuntimeWorkflowOutcome,
+    runtime_workflow_resume_worktree_decision, RuntimeWorkflowAdmissionBranchInput,
+    RuntimeWorkflowAdmissionBranchOutcome, RuntimeWorkflowDiagnostics, RuntimeWorkflowEvent,
+    RuntimeWorkflowExecutionHandle, RuntimeWorkflowInput, RuntimeWorkflowInterruptOutcome,
+    RuntimeWorkflowLiveError, RuntimeWorkflowLiveInput, RuntimeWorkflowLiveOptions,
+    RuntimeWorkflowLiveWorktreeConfig, RuntimeWorkflowOutcome, RuntimeWorkflowWorktreeEvidence,
 };
 
 pub use shacs_workflow::{

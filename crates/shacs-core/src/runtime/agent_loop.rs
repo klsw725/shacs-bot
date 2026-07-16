@@ -5,8 +5,10 @@ use crate::runtime::{
     resolve_context_reference,
 };
 use crate::runtime::{
-    build_workflow_checkpoint, decide_workflow_admission, run_live_runtime_workflow,
-    runtime_workflow_diagnostics, RuntimeWorkflowLiveInput,
+    build_workflow_checkpoint, decide_workflow_admission,
+    run_live_runtime_workflow_with_checkpoint_callback, runtime_workflow_diagnostics,
+    workflow_projection, RuntimeWorkflowLiveInput, RuntimeWorkflowLiveOptions,
+    RuntimeWorkflowLiveWorktreeConfig,
 };
 use crate::runtime::{
     clear_goal, create_persistent_goal, mark_goal_blocked, mark_goal_done, pause_goal,
@@ -28,8 +30,13 @@ use crate::runtime::{
     RuntimeToolMessage, Session, SessionApprovalCacheEntry, SessionHistoryOptions, SessionManager,
     SessionTurnAcquireError, SessionTurnLock, SubagentExecutionConfig, SubagentRuntime,
     TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext, WorkflowAdmissionDecision,
-    WorkflowAdmissionInput, WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowChildRunStatus,
-    WorkflowHarnessPlan, WorkflowRunState, WorkflowWorktreePolicy, DEFAULT_GOAL_TURN_BUDGET,
+    WorkflowAdmissionInput, WorkflowBudgetPolicy, WorkflowBudgetSlice, WorkflowBudgetUsage,
+    WorkflowCheckpointInput, WorkflowCheckpointPolicy, WorkflowChildRunStatus, WorkflowChildSpec,
+    WorkflowContextPolicy, WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy,
+    WorkflowPattern, WorkflowPermissionPolicy, WorkflowQuarantinePolicy, WorkflowRecipeReadiness,
+    WorkflowResumeDecision, WorkflowResumePolicy, WorkflowRunState, WorkflowStep,
+    WorkflowStopCondition, WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
+    DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, assemble_tool_surface, bridge_tool_names,
@@ -45,6 +52,10 @@ use shacs_command::{
 };
 use shacs_config::AutoApprovalConfig;
 use shacs_providers::{GenerationSettings, ProviderClient, ProviderError, ProviderRetryMode};
+use shacs_skills::{
+    discover_skill_registry, discover_workflow_recipes, SkillBackedWorkflowRecipe,
+    SkillRegistryOptions,
+};
 use shacs_utils::gitstore::{GitCliStore, GitStore};
 use std::error::Error;
 use std::fmt;
@@ -56,6 +67,7 @@ const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 const RUNTIME_CHECKPOINT_KEY: &str = "runtime_checkpoint";
 const PENDING_PERMISSION_APPROVAL_KEY: &str = "pending_permission_approval";
 const PENDING_RECENT_RETRY_APPROVAL_KEY: &str = "pending_recent_retry_approval";
+const PENDING_WORKFLOW_KEY: &str = "pending_workflow";
 const SESSION_PERMISSION_APPROVALS_KEY: &str = "session_permission_approvals";
 const SESSION_PERMISSION_APPROVAL_LIMIT: usize = 32;
 const PENDING_PERMISSION_WIZARD_KEY: &str = "pending_permission_wizard";
@@ -113,6 +125,21 @@ struct PendingRecentRetryApproval {
     requester_digest: String,
     #[serde(default)]
     status: PendingPermissionApprovalStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingWorkflowTurn {
+    session_key: String,
+    admission: WorkflowAdmissionInput,
+    plan: WorkflowHarnessPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recipe_evidence: Option<WorkflowRecipeSelection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkflowRecipeSelection {
+    selected: SkillBackedWorkflowRecipe,
+    ready_candidates: Vec<SkillBackedWorkflowRecipe>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +487,12 @@ impl<'a> AgentLoop<'a> {
 
         if pending_permission_wizard(&session).is_some() {
             return self.handle_pending_permission_wizard(&message, session, &session_key);
+        }
+
+        if let Some(result) =
+            self.try_resume_pending_workflow(&message, &mut session, &session_key)?
+        {
+            return Ok(result);
         }
 
         if self.stopped {
@@ -937,60 +970,246 @@ impl<'a> AgentLoop<'a> {
         session: &mut Session,
         session_key: &str,
     ) -> Result<Option<AgentLoopTurnResult>, AgentLoopError> {
-        let Some((admission, mut plan)) = workflow_request_from_metadata(&message.metadata)? else {
+        let Some((admission, plan, recipe_selection)) = workflow_request_from_message(
+            message,
+            session_key,
+            &self.config.workspace,
+            &self.config.permission_mode_snapshot,
+        )?
+        else {
             return Ok(None);
         };
 
+        self.run_admitted_workflow_turn(
+            message,
+            session,
+            session_key,
+            admission,
+            plan,
+            recipe_selection,
+        )
+        .map(Some)
+    }
+
+    fn try_resume_pending_workflow(
+        &mut self,
+        message: &InboundMessage,
+        session: &mut Session,
+        session_key: &str,
+    ) -> Result<Option<AgentLoopTurnResult>, AgentLoopError> {
+        let Some(mut pending) = pending_workflow(session) else {
+            return Ok(None);
+        };
+        if pending.session_key != session_key {
+            return Ok(None);
+        }
+        if !workflow_plan_is_live_read_only(&pending.plan)
+            || pending.admission.requires_write_isolation
+        {
+            return self.block_pending_workflow_recovery(
+                message,
+                session,
+                session_key,
+                &pending.plan.workflow_id,
+                "ambiguous_write_phase",
+                "Workflow blocked: restart recovery found an ambiguous write-capable workflow phase. Re-run the request after confirming the write scope.",
+            )
+            .map(Some);
+        }
+        if let Some(block_reason) = pending_workflow_resume_block_reason(
+            session,
+            &pending.plan,
+            pending.recipe_evidence.as_ref(),
+            &self.config.workspace,
+        ) {
+            return self
+                .block_pending_workflow_recovery(
+                    message,
+                    session,
+                    session_key,
+                    &pending.plan.workflow_id,
+                    "resume_validation_failed",
+                    &format!("Workflow blocked: restart recovery could not safely resume the saved workflow checkpoint: {block_reason}"),
+                )
+                .map(Some);
+        }
+        pending.plan.origin_session_id = session_key.to_owned();
+        if apply_completed_workflow_checkpoint(&mut pending.plan, session) {
+            let content = format!(
+                "Workflow completed from saved checkpoint: {}",
+                pending.plan.workflow_id
+            );
+            session.add_message("assistant", content.clone(), Map::new());
+            clear_runtime_markers(session);
+            self.sessions.save(session)?;
+            self.bus.publish_outbound(outbound_for(
+                message,
+                session_key,
+                content.clone(),
+                Vec::new(),
+                "workflow_completed",
+            ));
+            return Ok(Some(AgentLoopTurnResult {
+                session_key: session_key.to_owned(),
+                final_content: Some(content),
+                stop_reason: "workflow_completed".to_owned(),
+                tools_used: Vec::new(),
+                outbound_count: 1,
+                had_injections: false,
+                command: None,
+                ask_user_options: Vec::new(),
+                message_tool_delivery_configured: self.context_tools.message.is_some(),
+            }));
+        }
+        self.run_admitted_workflow_turn(
+            message,
+            session,
+            session_key,
+            pending.admission,
+            pending.plan,
+            pending.recipe_evidence,
+        )
+        .map(Some)
+    }
+
+    fn block_pending_workflow_recovery(
+        &mut self,
+        message: &InboundMessage,
+        session: &mut Session,
+        session_key: &str,
+        workflow_id: &str,
+        reason: &str,
+        content: &str,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        session.add_message("assistant", content, Map::new());
+        clear_runtime_markers(session);
+        session.metadata.insert(
+            RUNTIME_CHECKPOINT_KEY.to_owned(),
+            json!({
+                "phase": "workflow_blocked_recovery",
+                "workflow_id": workflow_id,
+                "reason": reason,
+            }),
+        );
+        self.sessions.save(session)?;
+        self.bus.publish_outbound(outbound_for(
+            message,
+            session_key,
+            content.to_owned(),
+            Vec::new(),
+            "workflow_blocked",
+        ));
+        Ok(AgentLoopTurnResult {
+            session_key: session_key.to_owned(),
+            final_content: Some(content.to_owned()),
+            stop_reason: "workflow_blocked".to_owned(),
+            tools_used: Vec::new(),
+            outbound_count: 1,
+            had_injections: false,
+            command: None,
+            ask_user_options: Vec::new(),
+            message_tool_delivery_configured: self.context_tools.message.is_some(),
+        })
+    }
+
+    fn run_admitted_workflow_turn(
+        &mut self,
+        message: &InboundMessage,
+        session: &mut Session,
+        session_key: &str,
+        admission: WorkflowAdmissionInput,
+        mut plan: WorkflowHarnessPlan,
+        recipe_selection: Option<WorkflowRecipeSelection>,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         match decide_workflow_admission(&admission) {
-            WorkflowAdmissionDecision::UseRegularLoop => Ok(None),
-            WorkflowAdmissionDecision::AskUserForScope { question } => {
-                Ok(Some(self.publish_command_response(
+            WorkflowAdmissionDecision::UseRegularLoop => Err(AgentLoopError::Workflow(
+                "workflow metadata admission resolved to regular loop".to_owned(),
+            )),
+            WorkflowAdmissionDecision::AskUserForScope { question } => self
+                .publish_command_response(
                     message,
                     session.clone(),
                     &question,
                     None,
                     "workflow_ask_user",
                     true,
-                )?))
-            }
+                ),
             WorkflowAdmissionDecision::BlockedByPolicy { reasons } => {
                 let content = format!("Workflow blocked: {}", reasons.join("; "));
-                Ok(Some(self.publish_command_response(
+                self.publish_command_response(
                     message,
                     session.clone(),
                     &content,
                     None,
                     "workflow_blocked",
                     true,
-                )?))
+                )
             }
             WorkflowAdmissionDecision::UseQuickWorkflow { .. }
             | WorkflowAdmissionDecision::UseDynamicWorkflow { .. } => {
                 if admission.requires_write_isolation && live_plan_missing_write_isolation(&plan) {
-                    return Ok(Some(self.publish_command_response(
+                    return self.publish_command_response(
                         message,
                         session.clone(),
                         "Workflow blocked: write isolation required but the live plan is read-only",
                         None,
                         "workflow_blocked",
                         true,
-                    )?));
+                    );
                 }
                 plan.origin_session_id = session_key.to_owned();
-                append_user_turn(session, message);
+                if pending_workflow(session).is_none() {
+                    append_user_turn(session, message);
+                }
                 session
                     .metadata
                     .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
+                let recipe_evidence = recipe_selection;
+                store_pending_workflow(
+                    session,
+                    session_key,
+                    &admission,
+                    &plan,
+                    recipe_evidence.clone(),
+                )?;
+                store_planned_workflow_checkpoint(session, &plan, recipe_evidence.as_ref());
                 self.sessions.save(session)?;
 
                 let subagent_runtime = SubagentRuntime::new();
-                let outcome = match run_live_runtime_workflow(RuntimeWorkflowLiveInput {
-                    plan: plan.clone(),
-                    subagent_runtime: &subagent_runtime,
-                    provider_client: self.client,
-                    execution_config: self.workflow_subagent_execution_config(&plan),
-                    admitted_at_ms: now_unix_ms(),
-                }) {
+                let checkpoint_session = Arc::new(Mutex::new(session.clone()));
+                let checkpoint_capture = checkpoint_session.clone();
+                let checkpoint_manager = Arc::new(Mutex::new(self.sessions.clone()));
+                let checkpoint_manager_capture = checkpoint_manager.clone();
+                let recipe_evidence_for_checkpoint = recipe_evidence.clone();
+                let mut checkpoint_callback =
+                    move |payload: &shacs_workflow::WorkflowRuntimeCheckpointPayload| {
+                        let checkpoint = &payload.checkpoint;
+                        let mut session = recover_lock(&checkpoint_capture);
+                        session.metadata.insert(
+                            RUNTIME_CHECKPOINT_KEY.to_owned(),
+                            json!({
+                                "phase": checkpoint.last_safe_resume_point,
+                                "workflow": checkpoint,
+                                "workflow_checkpoint_payload": payload,
+                                "recipe_evidence": recipe_evidence_for_checkpoint.clone(),
+                            }),
+                        );
+                        let _ = recover_lock(&checkpoint_manager_capture).save(&session);
+                    };
+                let outcome = match run_live_runtime_workflow_with_checkpoint_callback(
+                    RuntimeWorkflowLiveOptions {
+                        input: RuntimeWorkflowLiveInput {
+                            plan: plan.clone(),
+                            subagent_runtime: &subagent_runtime,
+                            provider_client: self.client,
+                            execution_config: self.workflow_subagent_execution_config(&plan),
+                            admitted_at_ms: now_unix_ms(),
+                        },
+                        worktree_config: self.workflow_worktree_config(&plan),
+                        cancellation_token: self.task_registry.cancellation_token(session_key),
+                    },
+                    &mut checkpoint_callback,
+                ) {
                     Ok(outcome) => outcome,
                     Err(error) => {
                         let final_content = format!("Workflow failed: {error}");
@@ -1004,7 +1223,7 @@ impl<'a> AgentLoop<'a> {
                             Vec::new(),
                             "workflow_failed",
                         ));
-                        return Ok(Some(AgentLoopTurnResult {
+                        return Ok(AgentLoopTurnResult {
                             session_key: session_key.to_owned(),
                             final_content: Some(final_content),
                             stop_reason: "workflow_failed".to_owned(),
@@ -1014,47 +1233,74 @@ impl<'a> AgentLoop<'a> {
                             command: None,
                             ask_user_options: Vec::new(),
                             message_tool_delivery_configured: self.context_tools.message.is_some(),
-                        }));
+                        });
                     }
                 };
                 let recorded_at_ms = now_unix_ms();
-                let diagnostics = runtime_workflow_diagnostics(&plan, &outcome)
+                let mut diagnostics = runtime_workflow_diagnostics(&plan, &outcome)
                     .map_err(|error| AgentLoopError::Workflow(error.to_string()))?;
+                if let Some(source_ref) = recipe_evidence
+                    .as_ref()
+                    .map(|evidence| evidence.selected.recipe.source_ref.clone())
+                {
+                    diagnostics
+                        .manifest
+                        .runtime_diagnostic_refs
+                        .push(source_ref);
+                    diagnostics.manifest.runtime_diagnostic_refs.sort();
+                    diagnostics.manifest.runtime_diagnostic_refs.dedup();
+                }
                 let diagnostics_ref = format!(
                     "workflow-diagnostics:{}:{}",
                     diagnostics.manifest.workflow_id, diagnostics.manifest.harness_plan_digest
                 );
+                let worktree_refs = outcome
+                    .worktree_evidence
+                    .iter()
+                    .map(|evidence| evidence.create.worktree_ref.clone())
+                    .collect::<Vec<_>>();
+                let mut evidence_refs = outcome
+                    .synthesis_outcome
+                    .evidence_refs
+                    .iter()
+                    .map(|evidence_ref| evidence_ref.id.clone())
+                    .collect::<Vec<_>>();
+                evidence_refs.extend(
+                    outcome
+                        .verifier_verdicts
+                        .iter()
+                        .flat_map(|verdict| verdict.evidence_refs.iter())
+                        .map(|evidence_ref| evidence_ref.id.clone()),
+                );
+                if let Some(source_ref) = recipe_evidence
+                    .as_ref()
+                    .map(|evidence| evidence.selected.recipe.source_ref.clone())
+                {
+                    evidence_refs.push(source_ref);
+                    evidence_refs.sort();
+                    evidence_refs.dedup();
+                }
                 let checkpoint = build_workflow_checkpoint(
                     &plan,
                     &outcome.run,
                     WorkflowCheckpointInput {
                         state: outcome.run.state,
-                        completed_steps: outcome
-                            .child_results
-                            .iter()
-                            .filter(|result| result.status == WorkflowChildRunStatus::Completed)
-                            .map(|result| result.step_id.clone())
-                            .filter(|step_id| !step_id.is_empty())
-                            .collect(),
+                        completed_steps: completed_workflow_step_ids(&plan, &outcome.child_results),
                         active_children: Vec::new(),
                         pending_barriers: Vec::new(),
-                        budget_usage: WorkflowBudgetUsage {
-                            known_tokens: 0,
-                            estimated_tokens: 0,
-                            child_runs: outcome.child_results.len() as u32,
-                            verifier_runs: plan.verifier_graph.len() as u32,
-                            heavy_commands: 0,
-                        },
-                        worktree_refs: Vec::new(),
-                        evidence_refs: outcome
-                            .synthesis_outcome
-                            .evidence_refs
-                            .iter()
-                            .map(|evidence_ref| evidence_ref.id.clone())
-                            .collect(),
+                        budget_usage: outcome.budget_usage.clone(),
+                        worktree_refs,
+                        evidence_refs,
                         last_safe_resume_point: workflow_stop_reason(outcome.run.state).to_owned(),
                         recorded_at_ms,
                     },
+                );
+                let projection = workflow_projection(
+                    &outcome.run,
+                    &plan,
+                    Some(&checkpoint),
+                    &outcome.verification_gate,
+                    &outcome.synthesis_outcome.evidence_refs,
                 );
                 let final_content = format_workflow_turn_content(&outcome);
                 session.add_message("assistant", final_content.clone(), Map::new());
@@ -1064,12 +1310,20 @@ impl<'a> AgentLoop<'a> {
                     json!({
                         "phase": workflow_stop_reason(outcome.run.state),
                         "workflow": checkpoint,
+                        "recipe_evidence": recipe_evidence,
                     }),
                 );
                 session.metadata.insert(
                     "runtime_diagnostics".to_owned(),
                     json!({
                         "refs": [diagnostics_ref],
+                        "workflow_manifest": diagnostics.manifest,
+                        "event_phases": diagnostics.event_phases,
+                        "terminal_state": diagnostics.terminal_state,
+                        "child_result_count": diagnostics.child_result_count,
+                        "verifier_status": diagnostics.verifier_status,
+                        "replay_live_actions_allowed": diagnostics.replay_live_actions_allowed,
+                        "cleanup_evidence": [],
                     }),
                 );
                 session.metadata.insert(
@@ -1078,15 +1332,42 @@ impl<'a> AgentLoop<'a> {
                         "workflow_id": outcome.run.workflow_id.clone(),
                         "harness_plan_digest": outcome.run.harness_plan_digest.clone(),
                         "state": outcome.run.state,
+                        "projection": projection,
                         "events": outcome.events.clone(),
                         "child_result_count": outcome.child_results.len(),
-                        "budget_usage": {
-                            "child_runs": outcome.child_results.len(),
-                            "verifier_runs": plan.verifier_graph.len(),
-                        },
+                        "budget_usage": outcome.budget_usage,
                         "verifier_status": format!("{:?}", outcome.verification_gate),
+                        "recipe_evidence": recipe_evidence,
                     }),
                 );
+                self.sessions.save(session)?;
+                let cleanup_evidence = self
+                    .workflow_worktree_config(&plan)
+                    .map(|config| {
+                        outcome
+                            .worktree_evidence
+                            .iter()
+                            .map(|evidence| {
+                                shacs_utils::worktree::cleanup_git_worktree(
+                                    &config.repo_path,
+                                    &evidence.create.worktree_path,
+                                    true,
+                                )
+                                .map(|cleanup| json!(cleanup))
+                                .unwrap_or_else(|reason| {
+                                    json!({
+                                        "worktree_path": evidence.create.worktree_path,
+                                        "diagnostics_recorded": true,
+                                        "removed": false,
+                                        "message": format!("cleanup failed after diagnostics: {reason}"),
+                                    })
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                session.metadata["runtime_diagnostics"]["cleanup_evidence"] =
+                    json!(cleanup_evidence);
                 self.sessions.save(session)?;
                 let stop_reason = workflow_stop_reason(outcome.run.state);
                 self.bus.publish_outbound(outbound_for(
@@ -1096,7 +1377,7 @@ impl<'a> AgentLoop<'a> {
                     Vec::new(),
                     stop_reason,
                 ));
-                Ok(Some(AgentLoopTurnResult {
+                Ok(AgentLoopTurnResult {
                     session_key: session_key.to_owned(),
                     final_content: Some(final_content),
                     stop_reason: stop_reason.to_owned(),
@@ -1106,7 +1387,7 @@ impl<'a> AgentLoop<'a> {
                     command: None,
                     ask_user_options: Vec::new(),
                     message_tool_delivery_configured: self.context_tools.message.is_some(),
-                }))
+                })
             }
         }
     }
@@ -1133,6 +1414,22 @@ impl<'a> AgentLoop<'a> {
         config.allow_side_effect_tools = false;
         config.enable_exec = false;
         config
+    }
+
+    fn workflow_worktree_config(
+        &self,
+        plan: &WorkflowHarnessPlan,
+    ) -> Option<RuntimeWorkflowLiveWorktreeConfig> {
+        if !workflow_plan_requests_isolated_worktree(plan) {
+            return None;
+        }
+        Some(RuntimeWorkflowLiveWorktreeConfig {
+            enabled: true,
+            approval_granted: workflow_worktree_approval_granted(&self.config, plan),
+            repo_path: self.config.workspace.clone(),
+            worktree_root: self.config.workspace.join(".shacs/workflow-worktrees"),
+            base_ref: "HEAD".to_owned(),
+        })
     }
 
     fn handle_loop_command(
@@ -1964,19 +2261,575 @@ fn live_plan_missing_write_isolation(plan: &WorkflowHarnessPlan) -> bool {
     })
 }
 
+fn workflow_plan_is_live_read_only(plan: &WorkflowHarnessPlan) -> bool {
+    matches!(
+        plan.worktree_policy,
+        WorkflowWorktreePolicy::None | WorkflowWorktreePolicy::ReadOnlySnapshot
+    ) && plan.child_graph.iter().all(|child| {
+        matches!(
+            child.worktree_policy,
+            WorkflowWorktreePolicy::None | WorkflowWorktreePolicy::ReadOnlySnapshot
+        )
+    }) && matches!(
+        plan.tool_scope_policy.quarantine,
+        WorkflowQuarantinePolicy::None | WorkflowQuarantinePolicy::ReadOnlyUntrusted
+    ) && plan
+        .tool_scope_policy
+        .allowed_tools
+        .iter()
+        .all(|tool| !matches!(tool.as_str(), "write_file" | "edit_file" | "exec"))
+}
+
+fn workflow_plan_requests_isolated_worktree(plan: &WorkflowHarnessPlan) -> bool {
+    matches!(
+        plan.worktree_policy,
+        WorkflowWorktreePolicy::IsolatedWorktreeRequired
+            | WorkflowWorktreePolicy::IsolatedWorktreeOptional
+    ) || plan.child_graph.iter().any(|child| {
+        matches!(
+            child.worktree_policy,
+            WorkflowWorktreePolicy::IsolatedWorktreeRequired
+                | WorkflowWorktreePolicy::IsolatedWorktreeOptional
+        )
+    })
+}
+
+fn pending_workflow_resume_block_reason(
+    session: &Session,
+    plan: &WorkflowHarnessPlan,
+    recipe_evidence: Option<&WorkflowRecipeSelection>,
+    workspace: &Path,
+) -> Option<String> {
+    let checkpoint = pending_workflow_checkpoint(session)?;
+    let checkpoint_payload = pending_workflow_checkpoint_payload(session);
+    let digest = match shacs_workflow::workflow_harness_plan_digest(plan) {
+        Ok(digest) => digest,
+        Err(error) => return Some(format!("plan digest failed: {error}")),
+    };
+    let mut completed_steps = checkpoint.completed_steps.clone();
+    if let Some(completed_step_id) = checkpoint_payload
+        .as_ref()
+        .and_then(|payload| payload.completed_step_id.as_ref())
+        .filter(|step_id| !completed_steps.contains(step_id))
+    {
+        completed_steps.push(completed_step_id.clone());
+    }
+    if let Some(missing_step) = completed_steps
+        .iter()
+        .find(|step_id| !plan.steps.iter().any(|step| step.step_id == **step_id))
+    {
+        return Some(format!(
+            "checkpoint completed step `{missing_step}` is not present in the saved plan"
+        ));
+    }
+    if !completed_steps.is_empty() {
+        let Some(payload) = checkpoint_payload.as_ref() else {
+            return Some("completed workflow steps lack checkpoint payload evidence".to_owned());
+        };
+        if let Some(missing_child) = plan
+            .child_graph
+            .iter()
+            .filter(|child| completed_steps.contains(&child.step_id))
+            .find(|child| !payload.completed_child_ids.contains(&child.child_id))
+        {
+            return Some(format!(
+                "completed workflow step `{}` lacks child evidence for `{}`",
+                missing_child.step_id, missing_child.child_id
+            ));
+        }
+    }
+    if let Some(reason) = recipe_evidence_resume_block_reason(recipe_evidence, workspace) {
+        return Some(reason);
+    }
+    match shacs_workflow::workflow_resume_validation_decision(
+        &shacs_workflow::WorkflowResumeValidationInput {
+            checkpoint,
+            resume_policy: plan.resume_policy.clone(),
+            current_harness_plan_digest: digest,
+            required_completed_steps: completed_steps,
+            required_worktree_refs: checkpoint_payload
+                .as_ref()
+                .map(|payload| payload.worktree_refs.clone())
+                .unwrap_or_default(),
+            required_evidence_refs: required_workflow_resume_evidence_refs(
+                recipe_evidence,
+                checkpoint_payload.as_ref(),
+            ),
+        },
+    ) {
+        WorkflowResumeDecision::ResumeAllowed { .. } => None,
+        WorkflowResumeDecision::AlreadyTerminal { state } => Some(format!(
+            "workflow checkpoint is already terminal: {state:?}"
+        )),
+        WorkflowResumeDecision::Blocked { reason } => Some(reason),
+    }
+}
+
+fn pending_workflow_checkpoint(session: &Session) -> Option<shacs_workflow::WorkflowCheckpoint> {
+    session
+        .metadata
+        .get(RUNTIME_CHECKPOINT_KEY)
+        .and_then(|value| value.get("workflow"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn pending_workflow_checkpoint_payload(
+    session: &Session,
+) -> Option<shacs_workflow::WorkflowRuntimeCheckpointPayload> {
+    session
+        .metadata
+        .get(RUNTIME_CHECKPOINT_KEY)
+        .and_then(|value| value.get("workflow_checkpoint_payload"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn required_workflow_resume_evidence_refs(
+    recipe_evidence: Option<&WorkflowRecipeSelection>,
+    checkpoint_payload: Option<&shacs_workflow::WorkflowRuntimeCheckpointPayload>,
+) -> Vec<String> {
+    let mut refs = checkpoint_payload
+        .map(|payload| payload.evidence_refs.clone())
+        .unwrap_or_default();
+    if let Some(source_ref) =
+        recipe_evidence.map(|evidence| evidence.selected.recipe.source_ref.clone())
+    {
+        refs.push(source_ref);
+    }
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn workflow_worktree_approval_granted(
+    config: &AgentLoopConfig,
+    plan: &WorkflowHarnessPlan,
+) -> bool {
+    if !workflow_plan_is_workspace_edit_only(plan) {
+        return false;
+    }
+    match config.permission_mode_snapshot.mode {
+        PermissionMode::AcceptEdits => true,
+        PermissionMode::Auto => {
+            config.permission_auto_approval.enabled
+                && config.permission_auto_approval.allow_workspace_edits
+        }
+        PermissionMode::Plan
+        | PermissionMode::Default
+        | PermissionMode::DontAsk
+        | PermissionMode::BypassPermissions => false,
+    }
+}
+
+fn workflow_plan_is_workspace_edit_only(plan: &WorkflowHarnessPlan) -> bool {
+    plan.tool_scope_policy
+        .allowed_tools
+        .iter()
+        .all(|tool_name| {
+            matches!(
+                tool_name.as_str(),
+                "read_file"
+                    | "list_dir"
+                    | "glob"
+                    | "grep"
+                    | "write_file"
+                    | "edit_file"
+                    | "notebook_read"
+                    | "notebook_edit"
+            )
+        })
+}
+
+fn workflow_request_from_message(
+    message: &InboundMessage,
+    session_key: &str,
+    workspace: &Path,
+    permission_snapshot: &PermissionModeSnapshot,
+) -> Result<
+    Option<(
+        WorkflowAdmissionInput,
+        WorkflowHarnessPlan,
+        Option<WorkflowRecipeSelection>,
+    )>,
+    AgentLoopError,
+> {
+    if let Some(request) = workflow_request_from_metadata(&message.metadata)? {
+        return Ok(Some((request.0, request.1, None)));
+    }
+    let Some((admission, plan, recipe_selection)) = compile_automatic_workflow_request(
+        &message.content,
+        session_key,
+        workspace,
+        message
+            .metadata
+            .get("message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("auto-turn"),
+        permission_snapshot,
+    ) else {
+        return Ok(None);
+    };
+    if matches!(
+        decide_workflow_admission(&admission),
+        WorkflowAdmissionDecision::UseRegularLoop
+    ) {
+        return Ok(None);
+    }
+    Ok(Some((admission, plan, recipe_selection)))
+}
+
+fn compile_automatic_workflow_request(
+    content: &str,
+    session_key: &str,
+    workspace: &Path,
+    turn_id: &str,
+    permission_snapshot: &PermissionModeSnapshot,
+) -> Option<(
+    WorkflowAdmissionInput,
+    WorkflowHarnessPlan,
+    Option<WorkflowRecipeSelection>,
+)> {
+    let profile = automatic_workflow_profile(content)?;
+    let admission = WorkflowAdmissionInput {
+        objective_complexity: profile.objective_complexity,
+        estimated_item_count: profile.estimated_item_count,
+        requires_parallelism: profile.requires_parallelism,
+        requires_independent_verification: true,
+        requires_adversarial_review: false,
+        requires_large_context_partitioning: profile.requires_large_context_partitioning,
+        requires_write_isolation: false,
+        requires_recurring_loop: false,
+        risk_level: profile.risk_level,
+        user_requested_workflow: profile.user_requested_workflow,
+        available_budget_tokens: Some(10_000),
+        blocking_reasons: Vec::new(),
+        missing_scope_questions: Vec::new(),
+    };
+    let mut plan =
+        compile_read_only_workflow_plan(content, session_key, turn_id, permission_snapshot);
+    let recipe_selection = apply_ready_workflow_recipe(content, workspace, &mut plan);
+    Some((admission, plan, recipe_selection))
+}
+
+fn apply_ready_workflow_recipe(
+    content: &str,
+    workspace: &Path,
+    plan: &mut WorkflowHarnessPlan,
+) -> Option<WorkflowRecipeSelection> {
+    let selection = discover_ready_workflow_recipe_selection(content, workspace)?;
+    let selected = &selection.selected;
+    plan.pattern = selected.recipe.pattern;
+    for step in &mut plan.steps {
+        step.pattern = selected.recipe.pattern;
+    }
+    if let Some(max_tokens) = selected.recipe.suggested_budget_tokens {
+        plan.budget_policy.max_total_tokens = Some(max_tokens);
+    }
+    if let Some(scope_ref) = selected.recipe.suggested_tool_scope_ref.as_ref() {
+        plan.tool_scope_policy.scope_digest = format!(
+            "{}:recipe:{}",
+            plan.tool_scope_policy.scope_digest, scope_ref
+        );
+    }
+    if !selected.recipe.safety_notes.is_empty() {
+        plan.constraints.extend(
+            selected
+                .recipe
+                .safety_notes
+                .iter()
+                .map(|note| format!("Recipe safety note: {note}")),
+        );
+    }
+    plan.constraints.push(format!(
+        "Workflow recipe source evidence: {}",
+        selected.recipe.source_ref
+    ));
+    Some(selection)
+}
+
+fn discover_ready_workflow_recipe_selection(
+    content: &str,
+    workspace: &Path,
+) -> Option<WorkflowRecipeSelection> {
+    let mut candidates = discover_workspace_workflow_recipes(workspace)
+        .into_iter()
+        .filter(|recipe| matches!(recipe.readiness, WorkflowRecipeReadiness::Ready))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        recipe_selection_rank(content, left)
+            .cmp(&recipe_selection_rank(content, right))
+            .then_with(|| left.recipe.recipe_id.cmp(&right.recipe.recipe_id))
+            .then_with(|| left.skill_name.cmp(&right.skill_name))
+            .then_with(|| left.recipe.source_ref.cmp(&right.recipe.source_ref))
+    });
+    let selected = candidates.first().cloned()?;
+    Some(WorkflowRecipeSelection {
+        selected,
+        ready_candidates: candidates,
+    })
+}
+
+fn discover_selected_workflow_recipe(
+    workspace: &Path,
+    selected: &SkillBackedWorkflowRecipe,
+) -> Option<shacs_skills::SkillBackedWorkflowRecipe> {
+    discover_workspace_workflow_recipes(workspace)
+        .into_iter()
+        .find(|recipe| {
+            matches!(recipe.readiness, WorkflowRecipeReadiness::Ready)
+                && recipe.recipe.recipe_id == selected.recipe.recipe_id
+                && recipe.skill_name == selected.skill_name
+                && recipe.recipe.source_ref == selected.recipe.source_ref
+                && recipe.body_hash == selected.body_hash
+        })
+}
+
+fn discover_workspace_workflow_recipes(
+    workspace: &Path,
+) -> Vec<shacs_skills::SkillBackedWorkflowRecipe> {
+    discover_skill_registry(SkillRegistryOptions::new(workspace))
+        .map(|registry| discover_workflow_recipes(&registry))
+        .unwrap_or_default()
+}
+
+fn recipe_selection_rank(content: &str, evidence: &SkillBackedWorkflowRecipe) -> u8 {
+    let normalized = content.to_ascii_lowercase();
+    let recipe_id = evidence.recipe.recipe_id.to_ascii_lowercase();
+    let skill_name = evidence.skill_name.to_ascii_lowercase();
+    if normalized.contains(&recipe_id) || normalized.contains(&skill_name) {
+        0
+    } else {
+        1
+    }
+}
+
+fn recipe_evidence_resume_block_reason(
+    evidence: Option<&WorkflowRecipeSelection>,
+    workspace: &Path,
+) -> Option<String> {
+    let evidence = evidence?;
+    let selected = &evidence.selected;
+    if discover_selected_workflow_recipe(workspace, selected).is_some() {
+        None
+    } else {
+        Some(format!(
+            "workflow recipe evidence is no longer valid for `{}` from `{}`",
+            selected.recipe.recipe_id, selected.recipe.source_ref
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AutomaticWorkflowProfile {
+    objective_complexity: u8,
+    estimated_item_count: usize,
+    requires_parallelism: bool,
+    requires_large_context_partitioning: bool,
+    risk_level: u8,
+    user_requested_workflow: bool,
+}
+
+fn automatic_workflow_profile(content: &str) -> Option<AutomaticWorkflowProfile> {
+    let normalized = content.trim();
+    if normalized.is_empty() || normalized.len() < 80 || looks_like_simple_turn(normalized) {
+        return None;
+    }
+    let lower = normalized.to_ascii_lowercase();
+    let user_requested_workflow = ["workflow", "plan", "parallel", "verify", "review", "audit"]
+        .iter()
+        .any(|needle| lower.contains(needle));
+    let estimated_item_count = estimated_workflow_item_count(normalized);
+    let has_clear_complex_action = [
+        "implement",
+        "refactor",
+        "fix",
+        "migrate",
+        "analyze",
+        "audit",
+        "review",
+        "verify",
+        "investigate",
+        "compare",
+        "summarize",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    let requires_parallelism = estimated_item_count >= 4 || lower.contains("parallel");
+    let requires_large_context_partitioning = normalized.len() > 1_200 || estimated_item_count >= 8;
+    let objective_complexity = if requires_large_context_partitioning || estimated_item_count >= 8 {
+        8
+    } else if has_clear_complex_action && estimated_item_count >= 3 {
+        6
+    } else {
+        4
+    };
+    if !(user_requested_workflow || requires_parallelism || objective_complexity >= 5) {
+        return None;
+    }
+    Some(AutomaticWorkflowProfile {
+        objective_complexity,
+        estimated_item_count,
+        requires_parallelism,
+        requires_large_context_partitioning,
+        risk_level: 3,
+        user_requested_workflow,
+    })
+}
+
+fn looks_like_simple_turn(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    content.split_whitespace().count() <= 16
+        && !content.contains('\n')
+        && ["hello", "hi", "thanks", "status", "help"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+}
+
+fn estimated_workflow_item_count(content: &str) -> usize {
+    let listed = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("- ")
+                || trimmed.starts_with("* ")
+                || trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_digit())
+                    && trimmed.contains('.')
+        })
+        .count();
+    listed.max(content.matches(" and ").count().saturating_add(1))
+}
+
+fn compile_read_only_workflow_plan(
+    content: &str,
+    session_key: &str,
+    turn_id: &str,
+    permission_snapshot: &PermissionModeSnapshot,
+) -> WorkflowHarnessPlan {
+    let digest = digest_json(&json!({
+        "session_key": session_key,
+        "turn_id": turn_id,
+        "content": content,
+    }));
+    let short_digest = digest.chars().take(12).collect::<String>();
+    let workflow_id = format!("auto_workflow_{short_digest}");
+    WorkflowHarnessPlan {
+        workflow_id: workflow_id.clone(),
+        origin_session_id: session_key.to_owned(),
+        origin_turn_id: turn_id.to_owned(),
+        objective: content.trim().to_owned(),
+        constraints: vec!["Use read-only tools only; do not modify files or merge changes.".to_owned()],
+        pattern: WorkflowPattern::FanOutAndSynthesize,
+        steps: vec![WorkflowStep {
+            step_id: "read-only-analysis".to_owned(),
+            label: "Read-only analysis".to_owned(),
+            pattern: WorkflowPattern::ClassifyAndAct,
+            depends_on: Vec::new(),
+            required: true,
+            expected_output_schema: None,
+        }],
+        child_graph: vec![WorkflowChildSpec {
+            child_id: "child-1".to_owned(),
+            step_id: "read-only-analysis".to_owned(),
+            goal: content.trim().to_owned(),
+            tool_scope_ref: Some("auto-read-only".to_owned()),
+            worktree_policy: WorkflowWorktreePolicy::ReadOnlySnapshot,
+            budget: WorkflowBudgetSlice {
+                max_tokens: Some(2_000),
+                max_wall_clock_ms: Some(60_000),
+            },
+            verifier_required: true,
+        }],
+        verifier_graph: vec![WorkflowVerifierSpec {
+            verifier_id: "verifier-1".to_owned(),
+            target_child_id: "child-1".to_owned(),
+            rubric: "The result addresses the user request, cites uncertainty, and does not rely on write-side effects.".to_owned(),
+            independent_evidence_required: false,
+        }],
+        context_policy: WorkflowContextPolicy {
+            root_objective_snapshot: content.trim().to_owned(),
+            include_constraints_in_children: true,
+            untrusted_input_labels: vec!["user_turn".to_owned()],
+        },
+        tool_scope_policy: WorkflowToolScopePolicy {
+            scope_digest: format!("auto-read-only:{short_digest}"),
+            allowed_tools: vec!["read_file".to_owned(), "list_dir".to_owned(), "glob".to_owned(), "grep".to_owned()],
+            deferred_tool_search_allowed: true,
+            quarantine: WorkflowQuarantinePolicy::ReadOnlyUntrusted,
+        },
+        permission_policy: WorkflowPermissionPolicy {
+            permission_snapshot_ref: workflow_permission_snapshot_ref(permission_snapshot),
+            denied_capabilities: vec![
+                "fs_write".to_owned(),
+                "proc_exec".to_owned(),
+                "runtime_config_write".to_owned(),
+                "external_delivery".to_owned(),
+            ],
+            approval_required_for_privileged_steps: true,
+        },
+        worktree_policy: WorkflowWorktreePolicy::ReadOnlySnapshot,
+        model_routing_policy: WorkflowModelRoutingPolicy {
+            classifier_model_hint: None,
+            child_model_hint: None,
+            verifier_model_hint: None,
+            synthesis_model_hint: None,
+            fallback_model_policy: "use runtime provider default".to_owned(),
+        },
+        budget_policy: WorkflowBudgetPolicy {
+            max_total_tokens: Some(10_000),
+            max_child_tokens: Some(2_000),
+            max_verifier_tokens: Some(2_000),
+            max_iterations: 4,
+            max_parallel_children: 2,
+            max_wall_clock_ms: Some(120_000),
+            max_heavy_commands: Some(0),
+        },
+        checkpoint_policy: WorkflowCheckpointPolicy {
+            checkpoint_required: true,
+            checkpoint_before_privileged_steps: true,
+        },
+        merge_policy: WorkflowMergePolicy {
+            require_verifier_pass: true,
+            allow_partial_completion: false,
+            surface_disagreements: true,
+        },
+        stop_condition: WorkflowStopCondition {
+            description: "read-only workflow result synthesized".to_owned(),
+            no_new_findings_threshold: None,
+        },
+        resume_policy: WorkflowResumePolicy {
+            require_plan_digest_match: true,
+            allow_completed_resume: false,
+        },
+    }
+}
+
+fn workflow_permission_snapshot_ref(snapshot: &PermissionModeSnapshot) -> String {
+    digest_json(&json!({
+        "mode": snapshot.mode.as_str(),
+        "source": snapshot.source,
+        "scope_ref": snapshot.scope_ref,
+    }))
+}
+
 fn workflow_request_from_metadata(
     metadata: &Map<String, Value>,
 ) -> Result<Option<(WorkflowAdmissionInput, WorkflowHarnessPlan)>, AgentLoopError> {
-    let Some(admission_value) = metadata
+    let admission_value = metadata
         .get("workflow_admission")
-        .or_else(|| metadata.get("workflow_admission_input"))
-    else {
-        return Ok(None);
-    };
-    let Some(plan_value) = metadata
+        .or_else(|| metadata.get("workflow_admission_input"));
+    let plan_value = metadata
         .get("workflow_plan")
-        .or_else(|| metadata.get("workflow_harness_plan"))
-    else {
+        .or_else(|| metadata.get("workflow_harness_plan"));
+    let (Some(admission_value), Some(plan_value)) = (admission_value, plan_value) else {
+        if admission_value.is_some() || plan_value.is_some() {
+            return Err(AgentLoopError::Workflow(
+                "workflow metadata must include both admission and plan".to_owned(),
+            ));
+        }
         return Ok(None);
     };
     let admission = serde_json::from_value(admission_value.clone()).map_err(|error| {
@@ -2159,6 +3012,7 @@ fn clear_runtime_markers(session: &mut Session) {
     session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
     session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
     session.metadata.remove(PENDING_PERMISSION_WIZARD_KEY);
+    session.metadata.remove(PENDING_WORKFLOW_KEY);
 }
 
 fn permission_wizard_choices_text() -> &'static str {
@@ -2329,6 +3183,135 @@ fn pending_recent_retry_approval(session: &Session) -> Option<PendingRecentRetry
         .get(PENDING_RECENT_RETRY_APPROVAL_KEY)
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn store_pending_workflow(
+    session: &mut Session,
+    session_key: &str,
+    admission: &WorkflowAdmissionInput,
+    plan: &WorkflowHarnessPlan,
+    recipe_evidence: Option<WorkflowRecipeSelection>,
+) -> Result<(), AgentLoopError> {
+    let pending = PendingWorkflowTurn {
+        session_key: session_key.to_owned(),
+        admission: admission.clone(),
+        plan: plan.clone(),
+        recipe_evidence,
+    };
+    let value = serde_json::to_value(pending).map_err(|error| {
+        AgentLoopError::Workflow(format!("workflow pending state failed: {error}"))
+    })?;
+    session
+        .metadata
+        .insert(PENDING_WORKFLOW_KEY.to_owned(), value);
+    Ok(())
+}
+
+fn pending_workflow(session: &Session) -> Option<PendingWorkflowTurn> {
+    session
+        .metadata
+        .get(PENDING_WORKFLOW_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn store_planned_workflow_checkpoint(
+    session: &mut Session,
+    plan: &WorkflowHarnessPlan,
+    recipe_evidence: Option<&WorkflowRecipeSelection>,
+) {
+    let recorded_at_ms = now_unix_ms();
+    let evidence_refs = recipe_evidence
+        .map(|evidence| vec![evidence.selected.recipe.source_ref.clone()])
+        .unwrap_or_default();
+    let checkpoint = build_workflow_checkpoint(
+        plan,
+        &shacs_workflow::admit_workflow_plan(plan, recorded_at_ms).unwrap_or_else(|_| {
+            shacs_workflow::WorkflowRunRecord {
+                workflow_id: plan.workflow_id.clone(),
+                origin_session_id: plan.origin_session_id.clone(),
+                origin_turn_id: plan.origin_turn_id.clone(),
+                state: WorkflowRunState::Planned,
+                harness_plan_digest: digest_json(&serde_json::to_value(plan).unwrap_or_default()),
+                admitted_at_ms: recorded_at_ms,
+                updated_at_ms: recorded_at_ms,
+                checkpoint: None,
+            }
+        }),
+        WorkflowCheckpointInput {
+            state: WorkflowRunState::Planned,
+            completed_steps: Vec::new(),
+            active_children: Vec::new(),
+            pending_barriers: plan.steps.iter().map(|step| step.step_id.clone()).collect(),
+            budget_usage: WorkflowBudgetUsage {
+                known_tokens: 0,
+                estimated_tokens: 0,
+                child_runs: 0,
+                verifier_runs: 0,
+                heavy_commands: 0,
+            },
+            worktree_refs: Vec::new(),
+            evidence_refs,
+            last_safe_resume_point: "workflow_planned".to_owned(),
+            recorded_at_ms,
+        },
+    );
+    session.metadata.insert(
+        RUNTIME_CHECKPOINT_KEY.to_owned(),
+        json!({
+            "phase": "workflow_planned",
+            "workflow": checkpoint,
+            "plan": plan,
+            "recipe_evidence": recipe_evidence,
+        }),
+    );
+}
+
+fn apply_completed_workflow_checkpoint(plan: &mut WorkflowHarnessPlan, session: &Session) -> bool {
+    let Some(checkpoint) = pending_workflow_checkpoint(session) else {
+        return false;
+    };
+    if checkpoint.completed_steps.is_empty() {
+        return false;
+    }
+    plan.child_graph
+        .retain(|child| !checkpoint.completed_steps.contains(&child.step_id));
+    plan.steps
+        .retain(|step| !checkpoint.completed_steps.contains(&step.step_id));
+    for step in &mut plan.steps {
+        step.depends_on
+            .retain(|step_id| !checkpoint.completed_steps.contains(step_id));
+    }
+    plan.verifier_graph.retain(|verifier| {
+        plan.child_graph
+            .iter()
+            .any(|child| child.child_id == verifier.target_child_id)
+    });
+    plan.child_graph.is_empty() || plan.steps.is_empty()
+}
+
+fn completed_workflow_step_ids(
+    plan: &WorkflowHarnessPlan,
+    child_results: &[shacs_workflow::WorkflowChildResult],
+) -> Vec<String> {
+    plan.steps
+        .iter()
+        .filter(|step| {
+            let step_children = plan
+                .child_graph
+                .iter()
+                .filter(|child| child.step_id == step.step_id)
+                .collect::<Vec<_>>();
+            !step_children.is_empty()
+                && step_children.iter().all(|child| {
+                    child_results.iter().any(|result| {
+                        result.child_id == child.child_id
+                            && result.status == WorkflowChildRunStatus::Completed
+                    })
+                })
+        })
+        .map(|step| step.step_id.clone())
+        .collect()
 }
 
 fn session_permission_approvals(session: &Session) -> Vec<SessionApprovalCacheEntry> {
@@ -2799,7 +3782,13 @@ fn truncate_history_line(value: &str, max_chars: usize) -> String {
 fn materialize_recovery_markers(session: &mut Session) {
     let had_checkpoint = session.metadata.contains_key(RUNTIME_CHECKPOINT_KEY);
     if let Some(checkpoint) = session.metadata.remove(RUNTIME_CHECKPOINT_KEY) {
-        materialize_checkpoint(session, checkpoint);
+        if workflow_checkpoint_is_resumable(&checkpoint) {
+            session
+                .metadata
+                .insert(RUNTIME_CHECKPOINT_KEY.to_owned(), checkpoint);
+        } else {
+            materialize_checkpoint(session, checkpoint);
+        }
     }
 
     if session
@@ -2819,6 +3808,14 @@ fn materialize_recovery_markers(session: &mut Session) {
             }),
         );
     }
+}
+
+fn workflow_checkpoint_is_resumable(checkpoint: &Value) -> bool {
+    let phase_is_resumable = checkpoint
+        .get("phase")
+        .and_then(Value::as_str)
+        .is_some_and(|phase| phase == "workflow_planned" || phase.starts_with("after-"));
+    phase_is_resumable && checkpoint.get("workflow").is_some()
 }
 
 fn materialize_checkpoint(session: &mut Session, checkpoint: Value) {
@@ -3300,5 +4297,550 @@ mod tests {
         assert!(!session_text.contains("resume-context-body"));
         assert!(!session_text.contains("[Provider Context"));
         Ok(())
+    }
+
+    #[test]
+    fn process_message_auto_admits_clear_complex_turn_without_metadata_or_planning_call(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                LlmResponse {
+                    content: Some("read-only analysis complete".to_owned()),
+                    ..LlmResponse::default()
+                },
+                LlmResponse {
+                    content: Some("pass".to_owned()),
+                    ..LlmResponse::default()
+                },
+            ])),
+            requests: captured_requests.clone(),
+        };
+        let tools = ToolRegistry::new();
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            SessionManager::new(workspace.path())?,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "model"),
+        );
+
+        let outcome = loop_runtime.process_direct(
+            "Please review this migration plan and verify each part:\n- inspect the data flow\n- compare the API assumptions\n- identify risks\n- produce a concise recommendation",
+            Some("direct:auto-workflow"),
+        )?;
+
+        assert_eq!(outcome.stop_reason, "workflow_completed", "{outcome:?}");
+        assert_eq!(captured_requests.lock().expect("requests lock").len(), 2);
+        let session = loop_runtime
+            .session_manager_mut()
+            .get_or_create("direct:auto-workflow");
+        assert!(session.metadata.get("runtime_workflow").is_some());
+        assert!(session.metadata.get("runtime_checkpoint").is_some());
+        assert!(session.metadata.get("pending_workflow").is_none());
+        assert_eq!(session.messages.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn process_message_simple_turn_falls_back_to_regular_loop(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![LlmResponse {
+                content: Some("hello back".to_owned()),
+                ..LlmResponse::default()
+            }])),
+            requests: captured_requests.clone(),
+        };
+        let tools = ToolRegistry::new();
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            SessionManager::new(workspace.path())?,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "model"),
+        );
+
+        let outcome = loop_runtime.process_direct("hello", Some("direct:simple"))?;
+
+        assert_eq!(outcome.final_content.as_deref(), Some("hello back"));
+        assert_eq!(outcome.stop_reason, "completed");
+        assert_eq!(captured_requests.lock().expect("requests lock").len(), 1);
+        let session = loop_runtime
+            .session_manager_mut()
+            .get_or_create("direct:simple");
+        assert!(session.metadata.get("runtime_workflow").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn process_message_persists_selected_skill_recipe_evidence(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        write_workflow_skill(
+            workspace.path(),
+            "reviewer",
+            "review-fanout",
+            "fan_out_and_synthesize",
+        )?;
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                LlmResponse {
+                    content: Some("recipe-backed analysis complete".to_owned()),
+                    ..LlmResponse::default()
+                },
+                LlmResponse {
+                    content: Some("pass".to_owned()),
+                    ..LlmResponse::default()
+                },
+            ])),
+            requests: captured_requests.clone(),
+        };
+        let tools = ToolRegistry::new();
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            SessionManager::new(workspace.path())?,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "model"),
+        );
+
+        let outcome = loop_runtime.process_direct(
+            "Please use the reviewer workflow to review this migration plan and verify each part:\n- inspect the data flow\n- compare the API assumptions\n- identify risks\n- produce a concise recommendation",
+            Some("direct:recipe-workflow"),
+        )?;
+
+        assert_eq!(outcome.stop_reason, "workflow_completed", "{outcome:?}");
+        assert_eq!(captured_requests.lock().expect("requests lock").len(), 2);
+        let session = loop_runtime
+            .session_manager_mut()
+            .get_or_create("direct:recipe-workflow");
+        let selected = &session.metadata["runtime_checkpoint"]["recipe_evidence"]["selected"];
+        assert_eq!(selected["recipe"]["recipe_id"], "review-fanout");
+        assert_eq!(selected["skill_name"], "reviewer");
+        assert!(
+            session.metadata["runtime_checkpoint"]["workflow"]["evidence_refs"]
+                .as_array()
+                .is_some_and(|refs| refs.iter().any(|value| value
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("skill://workspace-local/reviewer#"))))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn process_message_resumes_read_only_pending_workflow_after_restart(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let content = "Please review this complex request in workflow form:\n- map inputs\n- inspect dependencies\n- verify assumptions\n- summarize risks";
+        let (admission, plan, recipe_evidence) = compile_automatic_workflow_request(
+            content,
+            "direct:resume-read-only",
+            workspace.path(),
+            "turn-1",
+            &PermissionModeSnapshot::default(),
+        )
+        .ok_or("missing auto workflow")?;
+        let mut sessions = SessionManager::new(workspace.path())?;
+        let mut session = Session::new("direct:resume-read-only");
+        session.add_message("user", content, Map::new());
+        session
+            .metadata
+            .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
+        store_pending_workflow(
+            &mut session,
+            "direct:resume-read-only",
+            &admission,
+            &plan,
+            recipe_evidence.clone(),
+        )?;
+        store_planned_workflow_checkpoint(&mut session, &plan, recipe_evidence.as_ref());
+        sessions.save(&session)?;
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                LlmResponse {
+                    content: Some("resumed analysis complete".to_owned()),
+                    ..LlmResponse::default()
+                },
+                LlmResponse {
+                    content: Some("pass".to_owned()),
+                    ..LlmResponse::default()
+                },
+            ])),
+            requests: captured_requests.clone(),
+        };
+        let tools = ToolRegistry::new();
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            sessions,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "model"),
+        );
+
+        let outcome = loop_runtime.process_direct("resume", Some("direct:resume-read-only"))?;
+
+        assert_eq!(outcome.stop_reason, "workflow_completed", "{outcome:?}");
+        assert_eq!(captured_requests.lock().expect("requests lock").len(), 2);
+        let session = loop_runtime
+            .session_manager_mut()
+            .get_or_create("direct:resume-read-only");
+        assert!(session.metadata.get("pending_workflow").is_none());
+        assert!(session.metadata.get("runtime_workflow").is_some());
+        assert_eq!(session.messages.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn process_message_blocks_resume_when_recipe_evidence_is_invalid(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let skill_file = write_workflow_skill(
+            workspace.path(),
+            "reviewer",
+            "review-fanout",
+            "fan_out_and_synthesize",
+        )?;
+        let content = "Please use the reviewer workflow to review this complex request:\n- map inputs\n- inspect dependencies\n- verify assumptions\n- summarize risks";
+        let (admission, plan, recipe_evidence) = compile_automatic_workflow_request(
+            content,
+            "direct:resume-recipe-invalid",
+            workspace.path(),
+            "turn-1",
+            &PermissionModeSnapshot::default(),
+        )
+        .ok_or("missing auto workflow")?;
+        let mut sessions = SessionManager::new(workspace.path())?;
+        let mut session = Session::new("direct:resume-recipe-invalid");
+        session.add_message("user", content, Map::new());
+        session
+            .metadata
+            .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
+        store_pending_workflow(
+            &mut session,
+            "direct:resume-recipe-invalid",
+            &admission,
+            &plan,
+            recipe_evidence.clone(),
+        )?;
+        store_planned_workflow_checkpoint(&mut session, &plan, recipe_evidence.as_ref());
+        sessions.save(&session)?;
+        fs::write(skill_file, "---\nname: reviewer\n---\nchanged")?;
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::new()),
+            requests: captured_requests.clone(),
+        };
+        let tools = ToolRegistry::new();
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            sessions,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "model"),
+        );
+
+        let outcome =
+            loop_runtime.process_direct("resume", Some("direct:resume-recipe-invalid"))?;
+
+        assert_eq!(outcome.stop_reason, "workflow_blocked");
+        assert!(outcome
+            .final_content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("recipe evidence is no longer valid"));
+        assert!(captured_requests.lock().expect("requests lock").is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn process_message_completes_from_checkpoint_without_rerunning_completed_step(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let content = "Please review this complex request in workflow form:\n- map inputs\n- inspect dependencies\n- verify assumptions\n- summarize risks";
+        let (admission, plan, recipe_evidence) = compile_automatic_workflow_request(
+            content,
+            "direct:resume-completed-step",
+            workspace.path(),
+            "turn-1",
+            &PermissionModeSnapshot::default(),
+        )
+        .ok_or("missing auto workflow")?;
+        let mut sessions = SessionManager::new(workspace.path())?;
+        let mut session = Session::new("direct:resume-completed-step");
+        session.add_message("user", content, Map::new());
+        session
+            .metadata
+            .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
+        store_pending_workflow(
+            &mut session,
+            "direct:resume-completed-step",
+            &admission,
+            &plan,
+            recipe_evidence.clone(),
+        )?;
+        store_planned_workflow_checkpoint(&mut session, &plan, recipe_evidence.as_ref());
+        session.metadata["runtime_checkpoint"]["workflow"]["completed_steps"] =
+            json!(["read-only-analysis"]);
+        session.metadata["runtime_checkpoint"]["workflow_checkpoint_payload"] = json!({
+            "checkpoint": session.metadata["runtime_checkpoint"]["workflow"].clone(),
+            "completed_step_id": "read-only-analysis",
+            "completed_child_ids": ["child-1"],
+            "ready_step_ids": [],
+            "pending_step_ids": [],
+            "worktree_refs": [],
+            "evidence_refs": [],
+            "resume_step_id": "read-only-analysis"
+        });
+        sessions.save(&session)?;
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::new()),
+            requests: captured_requests.clone(),
+        };
+        let tools = ToolRegistry::new();
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            sessions,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "model"),
+        );
+
+        let outcome =
+            loop_runtime.process_direct("resume", Some("direct:resume-completed-step"))?;
+
+        assert_eq!(outcome.stop_reason, "workflow_completed");
+        assert!(outcome
+            .final_content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved checkpoint"));
+        assert!(captured_requests.lock().expect("requests lock").is_empty());
+        let session = loop_runtime
+            .session_manager_mut()
+            .get_or_create("direct:resume-completed-step");
+        assert!(session.metadata.get("pending_workflow").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn completed_workflow_step_ids_excludes_partially_failed_step() {
+        let mut plan = compile_read_only_workflow_plan(
+            "inspect and verify",
+            "direct:partial-step",
+            "turn-1",
+            &PermissionModeSnapshot::default(),
+        );
+        let mut sibling = plan.child_graph[0].clone();
+        sibling.child_id = "child-2".to_owned();
+        plan.child_graph.push(sibling);
+        let mut results = vec![
+            shacs_workflow::WorkflowChildResult {
+                child_id: "child-1".to_owned(),
+                step_id: "read-only-analysis".to_owned(),
+                status: WorkflowChildRunStatus::Completed,
+                summary: "completed".to_owned(),
+                evidence_refs: Vec::new(),
+            },
+            shacs_workflow::WorkflowChildResult {
+                child_id: "child-2".to_owned(),
+                step_id: "read-only-analysis".to_owned(),
+                status: WorkflowChildRunStatus::Failed,
+                summary: "failed".to_owned(),
+                evidence_refs: Vec::new(),
+            },
+        ];
+
+        assert!(completed_workflow_step_ids(&plan, &results).is_empty());
+        results[1].status = WorkflowChildRunStatus::Completed;
+        assert_eq!(
+            completed_workflow_step_ids(&plan, &results),
+            vec!["read-only-analysis".to_owned()]
+        );
+    }
+
+    #[test]
+    fn workflow_recovery_preserves_live_checkpoint_and_repairs_remaining_dependencies(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut plan = compile_read_only_workflow_plan(
+            "inspect and verify",
+            "direct:resume-dag",
+            "turn-1",
+            &PermissionModeSnapshot::default(),
+        );
+        plan.steps.push(WorkflowStep {
+            step_id: "verify-analysis".to_owned(),
+            label: "Verify analysis".to_owned(),
+            pattern: WorkflowPattern::AdversarialVerification,
+            depends_on: vec!["read-only-analysis".to_owned()],
+            required: true,
+            expected_output_schema: None,
+        });
+        plan.child_graph.push(WorkflowChildSpec {
+            child_id: "child-2".to_owned(),
+            step_id: "verify-analysis".to_owned(),
+            goal: "verify sanitized analysis".to_owned(),
+            tool_scope_ref: Some("auto-read-only".to_owned()),
+            worktree_policy: WorkflowWorktreePolicy::ReadOnlySnapshot,
+            budget: WorkflowBudgetSlice {
+                max_tokens: Some(1_000),
+                max_wall_clock_ms: Some(30_000),
+            },
+            verifier_required: false,
+        });
+        let mut session = Session::new("direct:resume-dag");
+        store_planned_workflow_checkpoint(&mut session, &plan, None);
+        session.metadata["runtime_checkpoint"]["phase"] = json!("after-read-only-analysis");
+        session.metadata["runtime_checkpoint"]["workflow"]["completed_steps"] =
+            json!(["read-only-analysis"]);
+        session.metadata["runtime_checkpoint"]["workflow_checkpoint_payload"] = json!({
+            "checkpoint": session.metadata["runtime_checkpoint"]["workflow"].clone(),
+            "completed_step_id": "read-only-analysis",
+            "completed_child_ids": ["child-1"],
+            "ready_step_ids": ["verify-analysis"],
+            "pending_step_ids": [],
+            "worktree_refs": [],
+            "evidence_refs": [],
+            "resume_step_id": "read-only-analysis"
+        });
+
+        assert!(workflow_checkpoint_is_resumable(
+            &session.metadata["runtime_checkpoint"]
+        ));
+        assert!(!apply_completed_workflow_checkpoint(&mut plan, &session));
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].step_id, "verify-analysis");
+        assert!(plan.steps[0].depends_on.is_empty());
+        assert_eq!(plan.child_graph.len(), 1);
+        assert_eq!(plan.child_graph[0].child_id, "child-2");
+        Ok(())
+    }
+
+    #[test]
+    fn process_message_blocks_write_capable_pending_workflow_after_restart(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let content = "Please implement this workflow with several coordinated file edits and verification steps:\n- update the main module\n- update tests\n- verify behavior\n- summarize the write risks";
+        let (mut admission, mut plan, recipe_evidence) = compile_automatic_workflow_request(
+            content,
+            "direct:resume-write",
+            workspace.path(),
+            "turn-1",
+            &PermissionModeSnapshot::default(),
+        )
+        .ok_or("missing auto workflow")?;
+        admission.requires_write_isolation = true;
+        plan.worktree_policy = WorkflowWorktreePolicy::IsolatedWorktreeRequired;
+        plan.child_graph[0].worktree_policy = WorkflowWorktreePolicy::IsolatedWorktreeRequired;
+        let mut sessions = SessionManager::new(workspace.path())?;
+        let mut session = Session::new("direct:resume-write");
+        session.add_message("user", content, Map::new());
+        session
+            .metadata
+            .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
+        store_pending_workflow(
+            &mut session,
+            "direct:resume-write",
+            &admission,
+            &plan,
+            recipe_evidence.clone(),
+        )?;
+        store_planned_workflow_checkpoint(&mut session, &plan, recipe_evidence.as_ref());
+        sessions.save(&session)?;
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::new()),
+            requests: captured_requests.clone(),
+        };
+        let tools = ToolRegistry::new();
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            sessions,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "model"),
+        );
+
+        let outcome = loop_runtime.process_direct("resume", Some("direct:resume-write"))?;
+
+        assert_eq!(outcome.stop_reason, "workflow_blocked");
+        assert!(outcome
+            .final_content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("ambiguous write-capable workflow phase"));
+        assert!(captured_requests.lock().expect("requests lock").is_empty());
+        let session = loop_runtime
+            .session_manager_mut()
+            .get_or_create("direct:resume-write");
+        assert_eq!(
+            session.metadata["runtime_checkpoint"]["phase"],
+            "workflow_blocked_recovery"
+        );
+        assert!(session.metadata.get("pending_workflow").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_worktree_approval_never_treats_bypass_as_workflow_approval(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let mut plan = compile_read_only_workflow_plan(
+            "Please implement coordinated workspace edits across several files",
+            "direct:permission-map",
+            "turn-1",
+            &PermissionModeSnapshot::default(),
+        );
+        plan.worktree_policy = WorkflowWorktreePolicy::IsolatedWorktreeRequired;
+        plan.child_graph[0].worktree_policy = WorkflowWorktreePolicy::IsolatedWorktreeRequired;
+        plan.tool_scope_policy.allowed_tools =
+            vec!["read_file".to_owned(), "write_file".to_owned()];
+
+        let mut config = AgentLoopConfig::new(workspace.path(), "model");
+        config.permission_mode_snapshot.mode = PermissionMode::BypassPermissions;
+        assert!(!workflow_worktree_approval_granted(&config, &plan));
+
+        config.permission_mode_snapshot.mode = PermissionMode::AcceptEdits;
+        assert!(workflow_worktree_approval_granted(&config, &plan));
+
+        config.permission_mode_snapshot.mode = PermissionMode::Auto;
+        config.permission_auto_approval.enabled = true;
+        config.permission_auto_approval.allow_workspace_edits = true;
+        assert!(workflow_worktree_approval_granted(&config, &plan));
+
+        plan.tool_scope_policy.allowed_tools.push("exec".to_owned());
+        assert!(!workflow_worktree_approval_granted(&config, &plan));
+        Ok(())
+    }
+
+    fn write_workflow_skill(
+        workspace: &Path,
+        name: &str,
+        recipe_id: &str,
+        pattern: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let skill_dir = workspace.join("skills").join(name);
+        fs::create_dir_all(&skill_dir)?;
+        let skill_file = skill_dir.join("SKILL.md");
+        fs::write(
+            &skill_file,
+            format!(
+                "---\nname: {name}\ndescription: Workflow recipe\nworkflow.recipe.id: {recipe_id}\nworkflow.recipe.pattern: {pattern}\nworkflow.recipe.prompt_template_ref: prompts/{recipe_id}.md\nworkflow.recipe.suggested_budget_tokens: 12000\nworkflow.recipe.safety_notes: read-only, no permission grants\n---\nUse this recipe as read-only guidance."
+            ),
+        )?;
+        Ok(skill_file)
     }
 }

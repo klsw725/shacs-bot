@@ -401,6 +401,14 @@ impl SubagentRuntime {
     }
 
     pub fn register_spawn(&self, envelope: SpawnEnvelope) -> Result<SubagentSpawnOutcome, String> {
+        self.register_spawn_with_cancellation(envelope, CancellationToken::new())
+    }
+
+    pub fn register_spawn_with_cancellation(
+        &self,
+        envelope: SpawnEnvelope,
+        cancellation_token: CancellationToken,
+    ) -> Result<SubagentSpawnOutcome, String> {
         let mut state = recover_lock(&self.state);
         let active_count = state
             .session_tasks
@@ -431,7 +439,7 @@ impl SubagentRuntime {
                 envelope: envelope.clone(),
                 status,
                 cancelled: false,
-                cancellation_token: CancellationToken::new(),
+                cancellation_token,
             },
         );
         let user_message = format!(
