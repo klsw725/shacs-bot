@@ -1,5 +1,13 @@
 # runtime services 아키텍처 명세
 
+Status: Complete (Scoped)
+
+Implemented scope: 현재 구현은 process-local `MessageBus`, session turn lock, active task cancellation and status, command router priority, local API and WebSocket surface, channel worker wiring, process-local follow-up queue, and runtime metadata hints를 local runtime services scope로 지원한다.
+
+Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
+
+Not carried forward: distributed task queue, multi-node leader election, organization inbox, operator dashboard, multi-tenant webhook fan-out, public webhook hosting obligation, multi-user task distribution, vendor-specific queue or cron dependency, 현재 지원 목록 밖의 추가 channel은 이 closure에 포함하지 않는다.
+
 ## 문서 목적
 
 이 문서는 `shacs-bot`의 runtime services를 현재 구현과 앞으로 남은 작업으로 나누어 정리한다. Spec 012는 2026-05-17 현재 아키텍처 매핑 기준으로 종료됐다. 현재 코드는 process-local message bus, session turn lock, active task cancellation/status, local runtime channel workers, channel lifecycle/retry/stream dispatch, process-local follow-up queue, runtime metadata JSON hint를 갖고 있지만, durable queue, durable scheduler, formal wake envelope, exactly-once delivery, transactional metadata store가 완성된 상태는 아니다.

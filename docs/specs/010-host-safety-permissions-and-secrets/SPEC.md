@@ -1,5 +1,13 @@
 # host safety, permissions, and secrets 아키텍처 명세
 
+Status: Complete (Baseline)
+
+Implemented scope: 현재 구현은 workspace filesystem guard, shell command guard, network SSRF guard, auth and diagnostics redaction, oversized tool result redaction, MCP default-deny registration, and bounded subagent tool inheritance의 local host safety baseline을 지원한다.
+
+Open work moved to: [030 policy, permission, redaction, and containment model](../030-policy-permission-redaction-and-containment-model/SPEC.md), [035 configuration runtime layout and execution snapshots](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md)
+
+Not carried forward: admin approval chain, central secret vault, organization policy engine or distribution, remote operator console은 self-hosted personal-use 범위 밖에 남긴다.
+
 ## 문서 목적
 
 이 문서는 `shacs-bot`의 host safety, permission, secret handling을 현재 구현과 앞으로 남은 작업으로 나누어 정리한다. Spec 010은 현재 `self-hosted/local baseline` 기준으로 닫힌 상태다. 이것은 formal `SafetySnapshot`, `PermissionMode`, approval engine, 통합 redaction pipeline이 완성되었다는 뜻이 아니라, 개인용 로컬 런타임에서 요구되는 guard-denied execution, default-deny MCP 등록, oversized tool result redaction 기준이 구현과 검증으로 닫혔다는 뜻이다.

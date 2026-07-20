@@ -1,5 +1,13 @@
 # subagent runtime 아키텍처 명세
 
+Status: Complete (Scoped)
+
+Implemented scope: 현재 구현은 `SubagentRuntime`, spawn tool wiring, child lifecycle and correlation, stale discard, synthetic inbound reentry, bounded parallelism, cancellation cleanup, and restricted child tool registry를 current subagent runtime scope로 지원한다.
+
+Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [030 policy, permission, redaction, and containment model](../030-policy-permission-redaction-and-containment-model/SPEC.md), [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
+
+Not carried forward: remote agent fleet management, agent marketplace, agent billing, multi-user shared task board, remote team inbox, agent-to-agent direct negotiation, distributed consensus는 제품 범위에 넣지 않는다.
+
 ## 문서 목적
 
 이 문서는 `shacs-bot`의 subagent runtime을 현재 구현과 앞으로 남은 작업으로 나누어 정리한다. Spec 011은 2026-05-17 현재 아키텍처 매핑 기준으로 종료됐다. 현재 코드는 child identity, lifecycle, spawn, stale discard, synthetic reentry, parallelism, tool registry 제한을 갖고 있지만, formal inherited snapshot, budget, timeout, retry, full merge policy가 완성된 상태는 아니다.
