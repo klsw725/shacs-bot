@@ -1,6 +1,9 @@
 # tool search and provider tool surface 아키텍처 명세
 
-Status: Closed for 020-owned Tool Search scope. Spec 025 owns future plugin manifest/tool implementation; 020 only preserves the Tool Search boundary those plugin tools must consume.
+Status: Complete (Scoped)
+Implemented scope: Provider-visible tool schema progressive disclosure, deferred MCP catalog shape, and bridge tool scope are closed for the 020-owned Tool Search boundary.
+Open work moved to: No open work remains in this owner scope.
+Not carried forward: Plugin manifest implementation, plugin tool execution, memory search, code search, vector search, and marketplace discovery are outside 020.
 
 ## 문서 목적
 

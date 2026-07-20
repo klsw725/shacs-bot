@@ -1,6 +1,9 @@
 # dynamic workflows and harness orchestration 아키텍처 명세
 
-Status: Completed for the Rust self-hosted scope defined by this spec. Typed workflow contracts, deterministic read-only AgentLoop admission/planning, skill recipe selection, a shared bounded live DAG scheduler, child/verifier execution, sanitizer-to-privileged handoff enforcement, isolated git worktrees with parent-review merge handoff, evidence-valid checkpoint resume, cancellation propagation with partial evidence preservation, persisted replay-safe diagnostics/cleanup evidence, and sanitized CLI/local API/channel/TUI/session projections are implemented. `tournament` execution is supported only as a pre-expanded bounded static DAG; a native dynamic bracket scheduler, provider-native orchestration, JavaScript workflow interpreters, SaaS dashboards, and automatic parent checkout merges remain out of scope.
+Status: Complete (Scoped)
+Implemented scope: Typed workflow contracts, deterministic AgentLoop admission, shared bounded DAG scheduling, child and verifier execution, privileged handoff enforcement, isolated worktrees, evidence-valid resume, cancellation evidence, cleanup diagnostics, and user surface projections are closed for the Rust self-hosted scope.
+Open work moved to: No open work remains in this owner scope.
+Not carried forward: Native dynamic tournament brackets, provider-native orchestration, JavaScript workflow interpreters, SaaS dashboards, and automatic parent checkout merges are outside 024.
 
 ## 문서 목적
 
