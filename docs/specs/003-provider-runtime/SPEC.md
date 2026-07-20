@@ -1,5 +1,10 @@
 # provider runtime 아키텍처 명세
 
+Status: Complete (Scoped)
+Implemented scope: 현재 provider 호출은 `ProviderClient`, `ProviderRequest`, `ProviderEvent`, `LlmResponse`, `ToolCallRequest`, `AgentRunner`, `AgentLoop` 경계로 설명되고 세션 반영 권한 분리가 닫혔다.
+Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md)
+Not carried forward: provider vendor별 정책과 모든 provider 기능의 완전한 parity를 003 또는 028의 완료 조건으로 삼지 않는다.
+
 ## 문서 목적
 
 이 문서는 현재 코드베이스의 provider runtime 구조를 기준으로, 모델 호출 경계와 세션 상태 확정 경계를 정리한다. Spec 001은 세션 커널을, Spec 002는 Command, Event, Effect 용어를 아키텍처 권한 경계로 정리했다. 이 문서도 같은 기준을 따른다.

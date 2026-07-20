@@ -1,5 +1,10 @@
 # 002. Command, Event, Effect 현재 아키텍처 명세
 
+Status: Complete (Scoped)
+Implemented scope: slash command, channel inbound, message bus, `AgentLoop` 권한 경계, provider/tool/subagent 결과 흐름을 current architecture의 Command, Event, Effect 개념어로 정리했다.
+Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md)
+Not carried forward: 전체 런타임을 하나의 거대한 공용 enum으로 재작성하거나 scheduler와 mailbox 구현 세부를 002가 직접 소유하는 방향은 후속 범위로 가져가지 않는다.
+
 ## 목적
 
 이 문서는 현재 `shacs-bot` 런타임에서 `Command`, `Event`, `Effect`라는 말을 어떤 의미로 쓰는지 정리한다.
