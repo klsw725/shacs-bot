@@ -457,6 +457,23 @@ bundled < user-global < workspace-local < app-provided
 18. `docs/specs/018-evaluation-automation-and-self-improvement/SPEC.md`
 19. `docs/specs/019-image-generation-and-generated-media/SPEC.md`
 20. `docs/specs/020-tool-search-and-provider-tool-surface/SPEC.md`
+21. `docs/specs/021-app-maker-and-app-authoring/SPEC.md`
+22. `docs/specs/022-auto-approval-permissions/SPEC.md`
+23. `docs/specs/023-zero-setup-sandbox-execution/SPEC.md`
+24. `docs/specs/024-dynamic-workflows-and-harness-orchestration/SPEC.md`
+25. `docs/specs/025-user-extensible-hooks-and-plugins/SPEC.md`
+26. `docs/specs/026-context-files-and-inline-references/SPEC.md`
+27. `docs/specs/027-channel-attachment-intake-and-file-context/SPEC.md`
+28. `docs/specs/028-formal-execution-reentry-and-outcome-contracts/SPEC.md`
+29. `docs/specs/029-durable-runtime-recovery-and-data-migration/SPEC.md`
+30. `docs/specs/030-policy-permission-redaction-and-containment-model/SPEC.md`
+31. `docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md`
+32. `docs/specs/032-app-maker-runtime-and-extension-lifecycle/SPEC.md`
+33. `docs/specs/033-evaluation-automation-live-integration/SPEC.md`
+34. `docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md`
+35. `docs/specs/035-configuration-runtime-layout-and-execution-snapshots/SPEC.md`
+
+`001`부터 `027`은 2026-07-20 기준 실제 구현 범위로 완료 처리되었다. 각 문서에서 분리된 accepted open work는 `028`부터 `035`가 소유하며, 명시적 비목표와 미결정 아이디어는 자동으로 backlog에 포함하지 않는다.
 
 `docs/product/cli-experience.md` 같은 제품 문서는 인터페이스 메모와 사용성 설명에 중요하지만, 위 architecture spec 세트를 대체하지 않는다.
 
