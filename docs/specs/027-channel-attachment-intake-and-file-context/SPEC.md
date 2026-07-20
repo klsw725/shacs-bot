@@ -1,6 +1,9 @@
 # channel attachment intake and file context 아키텍처 명세
 
-Status: Implemented for v1 storage, routing, and analyzer handoff. Video-specific local API/inspect/channel status projection remains limited/open. 이 문서는 채널로 들어온 사용자 첨부 파일을 안전하게 받아 저장하고, provider 입력에 파일 문맥으로 넘기는 owner boundary를 고정한다.
+Status: Complete (Scoped)
+Implemented scope: Channel-neutral v1 attachment storage, safe routing, and analyzer handoff into provider file context are closed in this owner scope.
+Open work moved to: [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [034 generated media and rich file context expansion](../034-generated-media-and-rich-file-context-expansion/SPEC.md).
+Not carried forward: Generated media asset management, durable channel delivery guarantees, and full video processing guarantees are outside 027.
 
 ## 문서 목적
 

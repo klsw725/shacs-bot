@@ -1,6 +1,9 @@
 # image generation and generated media 아키텍처 명세
 
-Status: PRD 000 and PRD 001 implemented, PRD 002 partially implemented for OpenRouter provider expansion. Codex Responses image generation, image edit, streaming partial images, and remote URL provider output remain open.
+Status: Complete (Scoped)
+Implemented scope: OpenAI image generation baseline, `image_generate` local media artifact storage, and the implemented OpenRouter provider slice are closed in this owner scope.
+Open work moved to: [034 generated media and rich file context expansion](../034-generated-media-and-rich-file-context-expansion/SPEC.md).
+Not carried forward: Generic media asset management, audio generation, video generation, and music generation are non-goals for 019.
 
 ## 문서 목적
 
