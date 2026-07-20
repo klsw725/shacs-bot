@@ -1,5 +1,10 @@
 # context assembly and compaction input 아키텍처 명세
 
+Status: Complete (Scoped)
+Implemented scope: `ContextBuilder`, memory, recent history, skill and media message injection, compaction, auto compact, runner message governance, provider shaping의 current context assembly 경계를 닫았다.
+Open work moved to: [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md), [035 configuration runtime layout and execution snapshots](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md)
+Not carried forward: advanced semantic retrieval, multi-session ranking, UI reasoning display, multi-user context policy를 후속 owner 범위로 가져가지 않는다.
+
 ## 문서 목적
 
 이 문서는 `docs/SYSTEM-FOUNDATION.md`, `docs/specs/001-session-kernel/SPEC.md`, `docs/specs/003-provider-runtime/SPEC.md`, `docs/specs/004-tool-runtime/SPEC.md`, `docs/specs/005-skill-system/SPEC.md`, `docs/specs/006-session-store/SPEC.md`, `docs/specs/007-main-orchestrator-policy/SPEC.md`, `docs/specs/008-configuration-profiles-and-runtime-layout/SPEC.md`를 바탕으로 `shacs-bot`의 문맥 조립과 compaction 입력 경계를 정리한다.

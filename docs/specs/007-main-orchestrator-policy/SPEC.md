@@ -1,5 +1,10 @@
 # main orchestrator policy 아키텍처 명세
 
+Status: Complete (Scoped)
+Implemented scope: `AgentLoop`, `SessionTurnLock`, recovery marker cleanup, `AgentRunner` retry/abort, subagent stale discard, provider selection snapshot, context and spawn snapshot의 current policy boundary를 닫았다.
+Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [030 policy, permission, redaction, and containment model](../030-policy-permission-redaction-and-containment-model/SPEC.md)
+Not carried forward: 멀티유저 역할 정책, 원격 운영자 console, 외부 policy server, 조직 승인 체계, 통계 기반 자동 최적화를 후속 owner 범위로 가져가지 않는다.
+
 ## 문서 목적
 
 이 문서는 `shacs-bot`의 현재 main orchestrator policy 경계를 코드 구조에 맞춰 정리한다. 이전 초안은 formal `PolicyDecisionEngine`이 이미 완료돼야 하는 구현 계약처럼 읽혔다. 이 문서는 그 관점을 고친다.

@@ -1,5 +1,10 @@
 # configuration profiles and runtime layout 아키텍처 명세
 
+Status: Complete (Scoped)
+Implemented scope: `.shacs-bot/config.json`, `.shacs-bot/auth.json`, JSON config loader, env placeholder resolution, auth store, path helper, current runtime dirs, skill discovery 연결을 current configuration/runtime layout으로 닫았다.
+Open work moved to: [035 configuration runtime layout and execution snapshots](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md)
+Not carried forward: GUI config editor, remote config sync, cloud secret manager, multi-user RBAC, cluster runtime layout, marketplace profile distribution을 후속 owner 범위로 가져가지 않는다.
+
 ## 문서 목적
 
 이 문서는 `shacs-bot`의 현재 설정, 인증 저장, runtime 디렉터리, skill discovery 경계를 코드 구조에 맞춰 정리한다. 이전 초안은 `.shacs/config.toml`, `.shacs/secrets.toml`, formal profile 타입, formal runtime layout이 이미 구현 계약인 것처럼 읽혔다. 이 문서는 그 관점을 고친다.
