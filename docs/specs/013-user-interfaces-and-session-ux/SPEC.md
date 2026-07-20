@@ -1,5 +1,13 @@
 # user interfaces and session UX 아키텍처 명세
 
+Status: Complete (Scoped)
+
+Implemented scope: 현재 구현은 CLI session commands, `shacs-session` UX projection and query model, local API session query, WebSocket chat and streaming surface, command router, runtime loop command handling, and static web helper를 current interface scope로 지원한다.
+
+Open work moved to: [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
+
+Not carried forward: 특정 TUI widget library, HTTP framework or WebSocket frame 선택, branding or theme design, remote multi-client editing UX, mobile app, browser SaaS console, external channel adapter internals는 이 closure에 포함하지 않는다.
+
 ## 문서 목적
 
 이 문서는 `docs/SYSTEM-FOUNDATION.md`, `docs/specs/001-session-kernel/SPEC.md`, `docs/specs/006-session-store/SPEC.md`, `docs/specs/007-main-orchestrator-policy/SPEC.md`, `docs/specs/010-host-safety-permissions-and-secrets/SPEC.md`, `docs/specs/011-subagent-runtime/SPEC.md`, `docs/specs/012-runtime-services/SPEC.md`를 바탕으로 `shacs-bot`의 사용자 인터페이스 경계와 session UX를 구현 가능한 수준으로 고정한다.

@@ -1,5 +1,13 @@
 # observability, diagnostics, and inspection 아키텍처 명세
 
+Status: Complete (Baseline)
+
+Implemented scope: 현재 구현은 local status, runtime inspect, runtime diagnostics bundle, session diagnostics projection, runtime marker projection, shared redaction, and progress evidence helper를 self-hosted local diagnostics baseline으로 지원한다.
+
+Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
+
+Not carried forward: remote observability SaaS, organization or admin dashboard, time-series metrics platform, SOC or audit portal, multi-tenant APM, distributed trace aggregation, long-term performance analytics product strategy는 self-hosted local baseline 밖에 둔다.
+
 ## 문서 목적
 
 이 문서는 `docs/SYSTEM-FOUNDATION.md`, `docs/specs/001-session-kernel/SPEC.md`, `docs/specs/006-session-store/SPEC.md`, `docs/specs/007-main-orchestrator-policy/SPEC.md`, `docs/specs/010-host-safety-permissions-and-secrets/SPEC.md`, `docs/specs/012-runtime-services/SPEC.md`, `docs/specs/013-user-interfaces-and-session-ux/SPEC.md`를 바탕으로 `shacs-bot`의 관측 가능성, 진단, inspection surface를 구현 가능한 수준으로 고정한다.
