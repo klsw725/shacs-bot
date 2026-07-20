@@ -1,5 +1,10 @@
 # tool runtime 아키텍처 명세
 
+Status: Complete (Scoped)
+Implemented scope: `AgentRunner`, `RuntimeToolExecutor`, `ToolRegistry`, `RuntimeToolCall`, `ToolResult`, `RuntimeToolMessage`, `RuntimeToolExecutionReport`, `ToolEvent`, checkpoint callback의 current tool runtime 경계를 닫았다.
+Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [030 policy, permission, redaction, and containment model](../030-policy-permission-redaction-and-containment-model/SPEC.md), [034 generated media and rich file context expansion](../034-generated-media-and-rich-file-context-expansion/SPEC.md)
+Not carried forward: 개별 tool 내부 알고리즘, 원격 plugin marketplace, 모든 tool에 대한 완전한 host sandbox 보장을 004의 후속 owner 범위로 가져가지 않는다.
+
 ## 문서 목적
 
 이 문서는 `docs/SYSTEM-FOUNDATION.md`, `docs/specs/001-session-kernel/SPEC.md`, `docs/specs/002-command-event-effect/SPEC.md`, `docs/specs/003-provider-runtime/SPEC.md`를 바탕으로 `shacs-bot`의 tool runtime 경계를 현재 구현 기준으로 고정한다.

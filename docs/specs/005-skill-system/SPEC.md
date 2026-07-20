@@ -1,5 +1,10 @@
 # skill system 아키텍처 명세
 
+Status: Complete (Scoped)
+Implemented scope: Markdown skill discovery, source kind, registry status, descriptor, body hash, read-only context injection, CLI `skills list`/`skills show` inspect 표면을 current skill system으로 닫았다.
+Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md)
+Not carried forward: remote marketplace, signed distribution, executable plugin code sandbox, 고급 추천 ranking, skill 편집 UI는 후속 owner 범위로 가져가지 않는다.
+
 ## 문서 목적
 
 이 문서는 `docs/SYSTEM-FOUNDATION.md`의 스킬 시스템 방향을 현재 Rust 구현 기준으로 구체화한 하위 아키텍처 명세다.
@@ -37,7 +42,7 @@
 ### 후속 비목표 / 별도 owner로 넘길 것
 
 - formal per-turn registry snapshot과 replay/effect provenance snapshot은 현재 완료 조건이 아니다.
-- app bundle 설치, 제거, 업데이트 lifecycle ownership은 Spec 005가 아니라 `017-app-operating-environment/`와 `015-packaging-process-lifecycle-and-upgrades/`가 소유한다.
+- app bundle registry/lifecycle baseline은 `017-app-operating-environment/`와 `015-packaging-process-lifecycle-and-upgrades/`가 보존하고, 실제 app/extension lifecycle의 open owner는 `032-app-maker-runtime-and-extension-lifecycle/`이다.
 - 원격 marketplace, 서명된 배포 채널, 실행 가능한 plugin code는 이 문서의 현재 구현 범위가 아니다.
 
 ---
@@ -554,12 +559,12 @@ description: 릴리스 전 체크리스트
 - 스킬 추천 UX 세부 화면
 - 스킬 설치용 네트워크 프로토콜
 - 서명 검증, trust policy, 원격 배포 메타데이터
-- app 시스템 전체 수명주기와 바이너리 로딩 계약, 이 계약은 `017-app-operating-environment/`와 `015-packaging-process-lifecycle-and-upgrades/`가 소유한다.
+- app 시스템 전체 수명주기와 바이너리 로딩 계약. 기존 baseline은 `017-app-operating-environment/`와 `015-packaging-process-lifecycle-and-upgrades/`에 남고, accepted open lifecycle은 `032-app-maker-runtime-and-extension-lifecycle/`이 소유한다.
 - 다중 파일 스킬 팩 포맷
 
 이 항목들은 필요가 생기면 별도 문서에서 다룬다. 단, 어떤 확장도 "스킬은 read-only Markdown 지식 팩이며 최종 권한은 오케스트레이터에 남는다"는 원칙을 뒤집어서는 안 된다.
 
-> 참고 메모: 현재 스킬 탐색 규약은 `plugin_roots`를 `PluginProvided` source로 받을 수 있지만, app bundle 자체의 설치/업데이트/제거 lifecycle은 `017-app-operating-environment/`와 `015-packaging-process-lifecycle-and-upgrades/`가 소유한다.
+> 참고 메모: 현재 스킬 탐색 규약은 `plugin_roots`를 `PluginProvided` source로 받을 수 있다. App bundle 설치/업데이트/제거 baseline은 017/015에 남고, accepted open lifecycle은 032가 소유한다.
 > 따라서 이 문서는 skill discovery와 injection 경계만 다루고, app ownership 계약이나 실행 가능한 plugin code 계약은 정의하지 않는다.
 
 ---

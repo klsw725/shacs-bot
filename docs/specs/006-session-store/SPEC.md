@@ -1,5 +1,10 @@
 # session store 아키텍처 명세
 
+Status: Complete (Scoped)
+Implemented scope: 세션별 JSONL `SessionManager`, metadata header, message records, `last_consolidated`, `save_with_fsync`, recovery marker materialization, CLI session inspect 표면을 current session store로 닫았다.
+Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md)
+Not carried forward: 외부 DB, 분산 저장, 멀티유저 동시성 제어를 006 또는 029의 기본 완료 조건으로 가져가지 않는다.
+
 ## 문서 목적
 
 이 문서는 현재 코드베이스의 session store 구조를 기준으로, 로컬 세션 파일 저장과 crash 이후 재진입 경계를 정리한다. Spec 001은 세션 커널을, Spec 002는 Command, Event, Effect 용어를 아키텍처 권한 경계로 정리했다. 이 문서도 같은 기준을 따른다.
