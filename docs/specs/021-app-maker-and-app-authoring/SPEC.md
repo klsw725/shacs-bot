@@ -1,6 +1,9 @@
 # App Maker와 app authoring 아키텍처 명세
 
-Status: Draft. PRD 000의 안전한 `apps init` authoring draft baseline은 구현됐다. 이 문서는 App Maker 전체의 app 작성, 검토, 제안, 설치 인계 owner contract를 계속 열린 상태로 고정한다.
+Status: Complete (Baseline)
+Implemented scope: The safe `apps init` authoring draft baseline from PRD 000 is closed in this owner scope.
+Open work moved to: [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md).
+Not carried forward: Remote marketplace, organization-admin authoring approval, fleet rollout, visual widget design, and secret vault backend are outside this follow-up scope.
 
 ## 문서 목적
 이 문서는 `docs/SYSTEM-FOUNDATION.md`와 numbered spec set 전체를 바탕으로 `shacs-bot`의 App Maker 경계를 정의한다.
@@ -53,7 +56,7 @@ App Maker는 app을 실행하는 곳이 아니라, app 변경을 설명 가능�
 | 013 user interfaces and session UX | CLI, future TUI, local API projection과 approval surface 의미 | authoring projection과 review loop의 제품 의미. transport 세부 구현은 소유하지 않음 |
 | 014 observability, diagnostics, and inspection | observability, diagnostics, trace, redaction evidence surface | authoring receipt의 의미와 app authoring evidence 구성. diagnostics, trace, redaction 표면은 014를 소비 |
 | 016 verification matrix and release gates | 정적, 단위, 통합, UX, 안전성, release gate 관점 | App Maker 전용 검증 관점과 완료 기준 |
-| 017 app operating environment | `.shacsapp` bundle, manifest, registry, install/list/inspect/show/enable/disable/uninstall 의미 | 설치 전 authoring과 install handoff. app runtime은 소유하지 않음 |
+| 017 app operating environment | `.shacsapp` bundle, manifest, registry, install/list/inspect/show/enable/disable/uninstall baseline 의미 | 설치 전 authoring baseline을 소비하며 실제 app runtime과 install handoff의 open owner는 032 |
 | 018 evaluation, automation, and self-improvement | improvement proposal, approval, checkpoint, apply, verify, rollback 순서 | authoring proposal 생성과 evidence 구성. approval/checkpoint/apply는 소유하지 않음 |
 | 020 tool search and provider tool surface | provider-visible tool surface와 tool schema 노출 경계 | tool declaration candidate 작성 의미. generated tool을 provider-visible surface에 노출하지 않음 |
 이 문서는 017을 약화하지 않는다. App Maker가 만든 결과도 017의 app manifest, bundle, install semantics를 통과해야 한다.
@@ -74,11 +77,11 @@ App Maker는 app을 실행하는 곳이 아니라, app 변경을 설명 가능�
 8. future local API와 TUI projection 의미.
 9. 상태 모델, 불변식, 금지 패턴, Rust checkpoint, 검증 관점.
 이 문서는 다음을 정의하지 않는다.
-1. app process 실행 모델. 이는 017이 소유한다.
-2. app registry install/list/inspect/show/enable/disable/uninstall semantics. 이는 017이 소유한다.
-3. permission approval engine과 secret vault backend. 이는 010이 소유한다.
+1. app process 실행 모델. 017은 baseline을 보존하고 open lifecycle은 032가 소유한다.
+2. app registry install/list/inspect/show/enable/disable/uninstall baseline은 017에 남고, authoring 이후 apply/install lifecycle은 032가 소유한다.
+3. permission/secret baseline은 010/022를 소비하고, formal open model은 030과 035가 소유한다.
 4. skill discovery, precedence, active injection 전체. 이는 005가 소유한다.
-5. MCP server 내부 구현이나 process supervisor. 이는 004, 012, 017의 경계를 따른다.
+5. MCP server 내부 구현이나 process supervisor. Baseline은 004/012/017을 소비하고 app supervisor open scope는 032가 소유한다.
 6. TUI widget 설계, HTTP framework, visual design. 이는 013의 projection 경계를 소비한다.
 7. 조직 app catalog, 관리자 승인, fleet rollout, remote marketplace 운영.
 8. PRD 구현 계획. 이 문서는 owner spec이고 PRD를 만들지 않는다.
@@ -188,7 +191,7 @@ dry-run은 process spawn, MCP server start, network probe, package install, secr
 
 ### 5. explicit install handoff
 proposal이 승인되고 checkpoint/apply/verify 흐름을 통과하면 App Maker는 install handoff를 표시한다. handoff 출력은 bundle path, manifest digest, app id, name, version, declared skills, declared devices/tools/services, requested secret key names, requested permissions, validation summary, 다음 명시 action을 포함해야 한다.
-handoff 이후 실제 install은 017의 app operating environment가 소유한다. App Maker는 install 결과를 자기 상태처럼 확정하지 않는다.
+017은 registry/install baseline을 보존하고, authoring handoff 이후 apply/install과 app process lifecycle의 open 계약은 032가 소유한다. App Maker는 install 결과를 자기 상태처럼 확정하지 않는다.
 
 ### 6. future local API와 TUI projection
 local API와 TUI는 013의 projection 원칙을 따른다.
@@ -341,7 +344,7 @@ user intent
 -> verify
 -> authoring receipt recorded
 -> explicit install handoff
--> 017 install flow begins only after user action
+-> 032 apply/install flow begins only after user action
 ```
 기존 app 수정:
 ```text
@@ -352,7 +355,7 @@ installed app selected for edit
 -> validation report created
 -> authoring proposal targets app_manifest_ref
 -> 018 approval/checkpoint/apply/verify
--> install or update handoff through 017 owner boundary
+-> install or update handoff through 032 owner boundary
 ```
 거절 또는 검증 실패 흐름은 registry, skill, tool, service, secret, process mutation 없이 `rejected` 또는 `failed`로 기록되어야 한다. 사용자는 draft를 다시 편집하거나 archive할 수 있어야 한다.
 
@@ -431,7 +434,7 @@ App Maker full implementation은 아래 조건을 충족해야 한다.
 2. AI assisted authoring이 manifest candidate, skill draft, device/tool/service declaration candidate를 만들 수 있다.
 3. validation/dry-run은 정적 검사만 수행하고 process, MCP, package, network, secret access를 실행하지 않는다.
 4. authoring proposal은 018의 approval/checkpoint/apply/verify 순서를 소비한다.
-5. install handoff는 승인되고 검증된 output만 017 install 흐름으로 넘긴다.
+5. install handoff는 승인되고 검증된 output만 032 apply/install 흐름으로 넘긴다.
 6. secret value, grant, active skill, running process, service registration, tool exposure가 authoring만으로 생기지 않는다.
 7. CLI, future TUI, local API projection이 같은 authoring 상태를 표시할 수 있다.
 8. 016 관점의 정적, 단위, 통합, 안전성, UX, 복구 테스트가 App Maker 범위를 검증한다.

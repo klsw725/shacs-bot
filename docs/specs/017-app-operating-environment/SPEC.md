@@ -1,5 +1,13 @@
 # AI app operating environment 아키텍처 명세
 
+Status: Complete (Baseline)
+
+Implemented scope: 현재 구현은 local `.shacsapp` manifest validation, app registry, app install/list/inspect/show/enable/disable/uninstall CLI surface, lifecycle state, process snapshot projection, and redacted task ledger receipt baseline을 지원한다.
+
+Open work moved to: [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md)
+
+Not carried forward: remote marketplace, Rust dynamic plugin ABI, arbitrary in-process third-party code loading, SaaS/admin/fleet workflow, OS-specific visual UI design은 이 app environment baseline에 포함하지 않는다.
+
 ## 문서 목적
 
 이 문서는 `docs/SYSTEM-FOUNDATION.md`와 numbered spec set 전체를 바탕으로 `shacs-bot`의 장기 제품 도착점을 **개인용 AI Operating System**으로 고정한다.
@@ -267,7 +275,7 @@ Intent routing:
 
 ```text
 Task: 어제 회의 Notion 정리
-Status: waiting for approval
+Task status: waiting for approval
 Apps: Notion, Memory
 Secrets: NOTION_TOKEN_KEY 사용
 Tools: notion_search, notion_create_page
@@ -306,7 +314,9 @@ enable은 실행이 아니다. enabled app은 아직 process를 갖지 않을 �
 
 ### open / start
 
-open 또는 start는 app process를 만든다.
+이 절은 017이 보존하는 historical/full target이다. 실제 app process lifecycle의 open owner는 032다.
+
+open 또는 start는 032 계약이 닫힌 뒤 app process를 만든다.
 
 start 단계에서는 해당 process에 필요한 scope를 계산하고, approval policy를 평가하고, device/MCP process를 준비한다.
 
@@ -368,7 +378,7 @@ duration: this-task
 - process card, approval center, app list, settings projection은 `013-user-interfaces-and-session-ux/`가 소유한다.
 - install/update/recover/restart의 host process lifecycle은 `015-packaging-process-lifecycle-and-upgrades/`가 소유한다.
 - diagnostics, receipts, task ledger projection은 `014-observability-diagnostics-and-inspection/`와 연결된다.
-- App Maker, app authoring, draft/proposal/install handoff는 `021-app-maker-and-app-authoring/`가 소유하고, 이 문서는 설치된 bundle의 install, registry, enable/start runtime 의미론을 계속 소유한다.
+- App Maker draft baseline과 설치된 bundle의 registry/lifecycle baseline은 021과 017이 각각 보존한다. Draft 이후 proposal/apply/install handoff와 enable/start process runtime의 accepted open 계약은 `032-app-maker-runtime-and-extension-lifecycle/`이 소유한다.
 
 이 문서가 소유하는 것은 위 요소를 **설치 가능한 AI app operating environment**로 묶는 상위 개념과 lifecycle 계약이다.
 
