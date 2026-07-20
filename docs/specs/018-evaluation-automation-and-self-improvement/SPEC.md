@@ -1,6 +1,12 @@
 # evaluation, automation, and self-improvement 아키텍처 명세
 
-Status: Closed for Rust contract/runtime-helper and release-gate helper scope. This status does not claim full live end-to-end product integration, nor does it rely on repository-stored QA/security/docs re-review artifacts.
+Status: Complete (Scoped)
+
+Implemented scope: 현재 구현은 PRD 000-014의 Rust contract, runtime helper, projection helper, and release-gate helper scope를 `crates/shacs-eval`, `crates/shacs-core`, `crates/shacs-projection`의 typed model, helper, adapter, and tests로 지원한다.
+
+Open work moved to: [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
+
+Not carried forward: 개별 provider adapter protocol, tool or MCP server internals, full skill file format, session store physical format, TUI widget design, cron parser choice, checkpoint backend detail, public training data obligation, organization approval workflow는 018 closure에 포함하지 않는다.
 
 ## 문서 목적
 

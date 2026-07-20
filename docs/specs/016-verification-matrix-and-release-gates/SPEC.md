@@ -1,5 +1,13 @@
 # verification matrix and release gates 아키텍처 명세
 
+Status: Complete (Baseline)
+
+Implemented scope: 현재 구현은 Cargo workspace verification commands, verification family language, spec coverage matrix, release gate and blocker vocabulary, waiver rules, and demo versus full implementation distinction을 release baseline으로 고정한다.
+
+Open work moved to: [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
+
+Not carried forward: 특정 CI service, branch strategy, human organization approval line, marketing release plan, external vendor certification은 release gate 계약에 넣지 않는다.
+
 ## 문서 목적
 
 이 문서는 `docs/SYSTEM-FOUNDATION.md`와 numbered spec set 전체를 바탕으로 `shacs-bot`의 검증 전략, 테스트 매트릭스, release gate, 완료 기준을 구현 가능한 수준으로 고정한다.
