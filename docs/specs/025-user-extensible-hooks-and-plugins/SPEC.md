@@ -1,6 +1,9 @@
 # user-extensible hooks and plugins 아키텍처 명세
 
-Status: Closed for the self-hosted/local manifest scope with explicit supported boundaries. Hermes의 hooks/plugins 제품 의미론을 `shacs-bot`의 Rust self-hosted runtime에 맞게 재해석해 owner boundary를 고정했고, 현재 구현은 `plugin.json`/`plugin.toml` manifest discovery, descriptor projection, safety diagnostics, management CLI, bounded enabled-plugin hook dispatch, `tool:before` block-only 적용, command-backed plugin tool registration/execution, production-only plugin MCP startup, plugin-provided read-only skill roots, standalone plugin command router/dispatcher execution, replay live-dispatch rejection까지 닫았다.
+Status: Complete (Scoped)
+Implemented scope: The self-hosted local-manifest plugin scope is closed for manifest discovery, descriptor projection, safety diagnostics, management CLI, bounded hook dispatch, command-backed plugin tools, production MCP startup projection, read-only skill roots, plugin command routing, and replay rejection.
+Open work moved to: [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md).
+Not carried forward: Python in-process loading, pip or Nix distribution, hosted plugin marketplaces, organization governance, and unlimited provider-family expansion are outside 025.
 
 ## 문서 목적
 

@@ -1,6 +1,9 @@
 # context files and inline references 아키텍처 명세
 
-Status: Implemented for CLI/core diagnostics and live provider handoff; TUI/local API projection remains future unless a later owner closes it. Hermes의 context files와 inline `@` reference 제품 의미론을 `shacs-bot`의 Rust self-hosted runtime에 맞게 재해석해, context assembly 이후 단계의 user-controlled context injection owner boundary를 고정한다.
+Status: Complete (Scoped)
+Implemented scope: CLI/core context diagnostics, workspace and current-directory context file discovery, inline reference resolution, and live provider handoff are closed in this owner scope.
+Open work moved to: [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [035 configuration runtime layout and execution snapshots](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md).
+Not carried forward: Hosted workspace policy, team context rollout, remote reference marketplaces, and provider-specific prompt features are outside 026.
 
 ## 문서 목적
 
