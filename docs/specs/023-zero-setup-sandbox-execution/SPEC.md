@@ -1,6 +1,9 @@
 # zero-setup sandbox execution 아키텍처 명세
 
-Status: Closed. 현재 closure scope는 공식 Docker/Compose containment evidence, native unknown fallback, exec workspace narrowing/fail-closed, MCP/subagent snapshot inheritance, release evidence lane까지다. 이 closure는 kernel-level isolation, full MCP child execution smoke, child-side containment evidence, active app process inheritance, completed auto approval을 주장하지 않는다.
+Status: Complete (Scoped)
+Implemented scope: The official Docker/Compose containment evidence lane, native unknown fallback, exec workspace narrowing and fail-closed behavior, MCP/subagent snapshot inheritance, and release evidence lane are closed.
+Open work moved to: [030 policy, permission, redaction, and containment model](../030-policy-permission-redaction-and-containment-model/SPEC.md), [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md).
+Not carried forward: A complete kernel-level isolation guarantee, mandatory user-installed host sandbox runtime, privileged Docker-in-Docker default, and organization policy or fleet administration are outside the follow-up scope.
 
 ## 문서 목적
 

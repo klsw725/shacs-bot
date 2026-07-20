@@ -1,6 +1,9 @@
 # auto approval permissions 아키텍처 명세
 
-Status: Implemented and closed for PRDs 000-006, with guarded direct classifier-backed auto mode landed. PRD 007 recent denial visibility, process-local exact one-shot retry, and deferred bridge classifier routing are implemented. 이 문서는 `shacs-bot`의 permission mode와 auto approval 계약을 고정하며, 현재 구현에서 typed helper, runtime policy gate, audit, diagnostics, replay evidence까지 구현 증거가 연결됐다. 현재 `/permission auto` runtime 실행 경로는 local static auto-approval fast path를 먼저 쓰고, direct tool action 및 resolved deferred bridge `tool_call` 중 current user message와 classifier capability ceiling으로 평가 가능한 action에는 provider-backed classifier fallback을 적용한다. 별도 classifier model 설정은 아직 구현 완료 범위가 아니다.
+Status: Complete (Scoped)
+Implemented scope: Permission modes, capability taxonomy, runtime policy gate, approval correlation, audit diagnostics, replay evidence, recent denial visibility, exact one-shot retry, and guarded classifier-backed auto mode are closed.
+Open work moved to: [030 policy, permission, redaction, and containment model](../030-policy-permission-redaction-and-containment-model/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md).
+Not carried forward: Organization approval consoles, remote operator workflows, multi-user permission administration, hidden allow rules, and persistent permission widening are outside the follow-up scope.
 
 ## 문서 목적
 
