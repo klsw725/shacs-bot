@@ -1573,6 +1573,7 @@ fn workflow_child_spawn_envelope(
     });
     spawn.timeout_ms = plan.budget_policy.max_wall_clock_ms;
     spawn.parallelism_group = plan.workflow_id.clone();
+    spawn.refresh_execution_fields();
     spawn
 }
 

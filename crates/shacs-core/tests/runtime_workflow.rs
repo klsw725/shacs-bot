@@ -1384,6 +1384,13 @@ fn agent_loop_admits_metadata_workflow_into_live_runtime() -> Result<(), Box<dyn
             .and_then(|workflow| workflow.workflow_id.as_deref()),
         Some("workflow-1")
     );
+    assert_eq!(
+        detail
+            .runtime_execution
+            .as_ref()
+            .map(|execution| execution.outcomes_by_domain.subagent),
+        Some(1)
+    );
     assert!(session.metadata.get("runtime_diagnostics").is_some());
     assert!(session.metadata["runtime_diagnostics"]
         .get("workflow")
@@ -1651,6 +1658,9 @@ fn child_result(status: ChildResultStatus) -> ChildResultEnvelope {
         parent_turn_id: "turn-1".to_owned(),
         child_task_id: "child-1".to_owned(),
         spawn_effect_id: "spawn:child-1".to_owned(),
+        correlation_id: Some("subagent:cli:direct:turn-1:child-1:spawn:child-1".to_owned()),
+        attempt_id: Some("attempt:1".to_owned()),
+        idempotency_key: Some("subagent-result:cli:direct:turn-1:child-1:spawn:child-1".to_owned()),
         subagent_kind: "default".to_owned(),
         status,
         started_at_ms: 10,
