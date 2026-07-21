@@ -18,19 +18,20 @@ use shacs_core::runtime::{
     BridgeUnderlyingMappingEvidence, CancellationToken, ChildResultEnvelope, ChildResultStatus,
     ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBuilder,
     DockerContainmentSnapshot, DreamLifecycle, EvaluatorConfidence, EvaluatorDecisionInput,
-    EvaluatorScopeMatch, GoalCompletionVerdict, InboundMessage, LedgerConsumptionStatus,
-    LoopTaskRegisterResult, McpLifecycle, MergeDecision, MessageBus, PermissionMode,
-    PermissionModeSnapshot, PermissionPolicyReason, PermissionRuleInput, PermissionedActionOrigin,
-    PersistentGoal, PersistentGoalStatus, ProcExecSummary, ProviderHotSwapResult,
-    ProviderSelectionSnapshot, RecentAutoModeDenial, RecentAutoModeDenialStore,
-    RecentAutoModeRetryToken, RecentAutoModeRetryTokenStore, RuntimeCapabilityStatus,
-    RuntimeContextTools, RuntimeDecisionKind, RuntimeInterrupt, RuntimeMemoryEvidenceRequestInput,
-    RuntimePolicyGateResults, RuntimeReplayInput, RuntimeSelectedAction,
-    RuntimeSpec018ProjectionInput, RuntimeToolCall, RuntimeToolExecutor, Session, SessionManager,
-    SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector, SubagentExecutionConfig,
-    SubagentMergeState, SubagentProgressUpdate, SubagentRuntime, SubagentRuntimeConfig, ToolEvent,
-    ToolExecutionContext, ToolSearchConfig, ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
-    PERSISTENT_GOAL_METADATA_KEY, RECENT_AUTO_MODE_DENIAL_LIMIT,
+    EvaluatorScopeMatch, ExecutionOutcome, GoalCompletionVerdict, InboundMessage,
+    LateResultDecision, LedgerConsumptionStatus, LoopTaskRegisterResult, McpLifecycle,
+    MergeDecision, MessageBus, PermissionMode, PermissionModeSnapshot, PermissionPolicyReason,
+    PermissionRuleInput, PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus,
+    ProcExecSummary, ProviderHotSwapResult, ProviderSelectionSnapshot, RecentAutoModeDenial,
+    RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenStore,
+    RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind, RuntimeInterrupt,
+    RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults, RuntimeReplayInput,
+    RuntimeSelectedAction, RuntimeSpec018ProjectionInput, RuntimeToolCall, RuntimeToolExecutor,
+    Session, SessionManager, SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector,
+    SubagentExecutionConfig, SubagentMergeState, SubagentOutcomeKind, SubagentProgressUpdate,
+    SubagentRuntime, SubagentRuntimeConfig, ToolEvent, ToolExecutionContext, ToolSearchConfig,
+    ToolSearchMode, ToolSearchRuntimeInput, ToolStatus, PERSISTENT_GOAL_METADATA_KEY,
+    RECENT_AUTO_MODE_DENIAL_LIMIT,
 };
 use shacs_core::tools::{
     assemble_tool_surface, ActivationState, AskUserTool, JsonMap, MessageTool, SchemaFragment,
@@ -67,6 +68,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct ProcExecCountingTool {
+    calls: Arc<AtomicUsize>,
+}
+
+struct ProcExecLargeOutputTool;
+
+struct ProcExecMcpFailureTool {
     calls: Arc<AtomicUsize>,
 }
 
@@ -135,6 +142,49 @@ impl Tool for ProcExecCountingTool {
     fn execute(&self, _params: JsonMap) -> ToolResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
         "exec-output".into()
+    }
+}
+
+impl Tool for ProcExecLargeOutputTool {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn description(&self) -> &str {
+        "Return a large proc exec result."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("command", shacs_core::tools::StringSchema::new("Command"))
+            .required(["command"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        "sensitive-output".repeat(128).into()
+    }
+}
+
+impl Tool for ProcExecMcpFailureTool {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn description(&self) -> &str {
+        "Return an MCP-style failure from a permission-gated exec."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("command", shacs_core::tools::StringSchema::new("Command"))
+            .required(["command"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "(MCP tool call failed: TimeoutError)".into()
     }
 }
 
@@ -1227,6 +1277,15 @@ fn loop_process_direct_saves_turn_and_publishes_outbound() -> Result<(), Box<dyn
         || raw["messages"][1]["content"] != "hello back"
     {
         return Err(format!("session messages drifted: {raw:?}").into());
+    }
+    let runtime_execution = &raw["metadata"]["runtime_execution"];
+    if runtime_execution["pending"].as_array().map(Vec::len) != Some(0)
+        || runtime_execution["outcomes"].as_array().map(Vec::len) != Some(1)
+        || runtime_execution["outcomes"][0]["fact"]["outcome"]["domain"] != "provider"
+        || runtime_execution["outcomes"][0]["fact"]["outcome"]["outcome"] != "completed"
+        || runtime_execution["outcomes"][0]["decision"]["kind"] != "accepted"
+    {
+        return Err(format!("runtime execution ledger did not persist: {raw:?}").into());
     }
     Ok(())
 }
@@ -2330,8 +2389,34 @@ fn subagent_spawn_inherits_snapshot_contract() -> Result<(), Box<dyn Error>> {
         || outcome.envelope.inherited_policy_snapshot["capability_ceiling"] != "parent"
         || outcome.envelope.parent_turn_id != "turn:session-1"
         || outcome.envelope.parallelism_group != "session-1"
+        || outcome.envelope.correlation_id.is_none()
+        || outcome.envelope.attempt_id.as_deref() != Some("attempt:1")
+        || outcome.envelope.idempotency_key.is_none()
     {
         return Err(format!("subagent spawn snapshots drifted: {outcome:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_registration_begins_pending_execution_fact() -> Result<(), Box<dyn Error>> {
+    let runtime = SubagentRuntime::new();
+    let outcome = runtime.spawn_from_request(SpawnRequest {
+        task: "Inspect docs".to_owned(),
+        label: None,
+        origin_channel: "cli".to_owned(),
+        origin_chat_id: "direct".to_owned(),
+        session_key: "cli:direct".to_owned(),
+    })?;
+    let ledger = runtime.execution_ledger_snapshot();
+
+    if ledger.pending.len() != 1
+        || ledger.pending[0].domain != shacs_core::runtime::ExecutionDomain::Subagent
+        || ledger.pending[0].identity.scope.session_id != "cli:direct"
+        || ledger.pending[0].identity.scope.turn_id != "turn:cli:direct"
+        || ledger.pending[0].identity.effect_id != outcome.envelope.spawn_effect_id
+    {
+        return Err(format!("subagent pending execution drifted: {ledger:?}").into());
     }
     Ok(())
 }
@@ -2435,6 +2520,15 @@ fn subagent_finish_publishes_synthetic_inbound_and_closes_active_task() -> Resul
     if decision != MergeDecision::AcceptSummaryOnly || runtime.running_count() != 0 {
         return Err(format!("subagent finish drifted: {decision:?}").into());
     }
+    let ledger = runtime.execution_ledger_snapshot();
+    if !ledger.pending.is_empty()
+        || ledger.outcomes.len() != 1
+        || ledger.outcomes[0].decision != LateResultDecision::Accepted
+        || ledger.outcomes[0].fact.outcome
+            != ExecutionOutcome::Subagent(SubagentOutcomeKind::Completed)
+    {
+        return Err(format!("completed subagent ledger drifted: {ledger:?}").into());
+    }
     let inbound = bus
         .consume_inbound()
         .ok_or("missing synthetic subagent inbound")?;
@@ -2443,6 +2537,11 @@ fn subagent_finish_publishes_synthetic_inbound_and_closes_active_task() -> Resul
         || inbound.session_key_override.as_deref() != Some("session-1")
         || inbound.metadata["injected_event"] != "subagent_result"
         || inbound.metadata["subagent_task_id"] != outcome.envelope.child_task_id
+        || inbound.metadata["subagent_outcome"]["outcome"] != "completed"
+        || inbound.metadata["late_result_decision"]["kind"] != "accepted"
+        || inbound.metadata["execution_fact"]["outcome"]["domain"] != "subagent"
+        || inbound.metadata["execution_fact"]["outcome"]["outcome"] != "completed"
+        || inbound.metadata.get("structured_result").is_some()
         || !inbound
             .content
             .contains("[Subagent 'Summarize runtime' completed successfully]")
@@ -2451,6 +2550,114 @@ fn subagent_finish_publishes_synthetic_inbound_and_closes_active_task() -> Resul
         || inbound.content.contains("Merge decision")
     {
         return Err(format!("synthetic subagent inbound drifted: {inbound:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_reentry_persists_outcome_in_session_diagnostics() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let runtime = SubagentRuntime::with_bus(bus.clone());
+    let outcome = runtime.spawn_from_request(SpawnRequest {
+        task: "Summarize runtime".to_owned(),
+        label: None,
+        origin_channel: "cli".to_owned(),
+        origin_chat_id: "direct".to_owned(),
+        session_key: "session-1".to_owned(),
+    })?;
+    runtime.publish_child_result(ChildResultEnvelope::from_spawn(
+        &outcome.envelope,
+        ChildResultStatus::Completed,
+        "Child summary",
+    ));
+
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("Parent incorporated child summary".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    );
+    loop_runtime
+        .process_next_inbound()?
+        .ok_or("missing subagent reentry turn")?;
+
+    let diagnostics = loop_runtime
+        .session_manager()
+        .session_ux_diagnostics("session-1");
+    let execution = diagnostics
+        .runtime_execution
+        .ok_or("missing runtime execution projection")?;
+    if execution.outcomes_by_domain.subagent != 1
+        || execution.outcomes_by_domain.provider != 1
+        || execution.decisions.accepted != 2
+    {
+        return Err(format!("subagent session projection drifted: {execution:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_failed_timedout_and_cancelled_finishes_record_formal_outcomes(
+) -> Result<(), Box<dyn Error>> {
+    let cases = [
+        (
+            ChildResultStatus::Failed,
+            MergeDecision::AcceptFailureFact,
+            SubagentOutcomeKind::Failed,
+            "subagent_failed",
+        ),
+        (
+            ChildResultStatus::TimedOut,
+            MergeDecision::RetryChild,
+            SubagentOutcomeKind::TimedOut,
+            "subagent_timed_out",
+        ),
+        (
+            ChildResultStatus::Cancelled,
+            MergeDecision::AcceptCancellationFact,
+            SubagentOutcomeKind::Cancelled,
+            "subagent_cancelled",
+        ),
+    ];
+
+    for (status, expected_decision, expected_outcome, expected_command) in cases {
+        let bus = MessageBus::new();
+        let runtime = SubagentRuntime::with_bus(bus.clone());
+        let outcome = runtime.spawn_from_request(SpawnRequest {
+            task: format!("case {status:?}"),
+            label: None,
+            origin_channel: "cli".to_owned(),
+            origin_chat_id: "direct".to_owned(),
+            session_key: format!("session-{status:?}"),
+        })?;
+        let result = ChildResultEnvelope::from_spawn(&outcome.envelope, status, "case result");
+
+        let decision = runtime.publish_child_result(result);
+        let inbound = bus.consume_inbound().ok_or("missing typed reentry")?;
+        let ledger = runtime.execution_ledger_snapshot();
+
+        if decision != expected_decision
+            || runtime.running_count() != 0
+            || ledger.outcomes.last().map(|record| &record.decision)
+                != Some(&LateResultDecision::Accepted)
+            || ledger.outcomes.last().map(|record| &record.fact.outcome)
+                != Some(&ExecutionOutcome::Subagent(expected_outcome))
+            || inbound.metadata["subagent_command"] != expected_command
+            || inbound.metadata["late_result_decision"]["kind"] != "accepted"
+        {
+            return Err(format!(
+                "subagent terminal outcome drifted: decision={decision:?} inbound={inbound:?} ledger={ledger:?}"
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -2549,6 +2756,12 @@ fn subagent_cancel_before_run_cleans_without_announcement() -> Result<(), Box<dy
         || bus.try_consume_inbound().is_some()
     {
         return Err(format!("cancelled subagent cleanup drifted: {result:?}").into());
+    }
+    let ledger = runtime.execution_ledger_snapshot();
+    if ledger.outcomes.last().map(|record| &record.fact.outcome)
+        != Some(&ExecutionOutcome::Subagent(SubagentOutcomeKind::Cancelled))
+    {
+        return Err(format!("cancelled subagent ledger drifted: {ledger:?}").into());
     }
     Ok(())
 }
@@ -3257,6 +3470,82 @@ fn loop_permission_recent_retry_approval_executes_once_through_existing_permissi
     {
         return Err(format!(
             "recent retry approval did not execute once: {approved:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_recent_retry_stops_after_fatal_tool_outcome() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecMcpFailureTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-recent-retry-fatal",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ))?,
+        classifier_verdict_response("deny_candidate", "high", "requested"),
+        LlmResponse {
+            content: Some("classifier denied loop exec".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("provider must not resume".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = recent_retry_config(workspace.path(), true);
+    config.fail_on_tool_error = true;
+    let events = Arc::new(Mutex::new(Vec::<ToolEvent>::new()));
+    let event_capture = events.clone();
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    )
+    .with_tool_event_callback(Arc::new(move |event| {
+        if let Ok(mut events) = event_capture.lock() {
+            events.push(event.clone());
+        }
+    }));
+    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-fatal"))?;
+    let denial_id = recent_denial_id_from_output(
+        &loop_runtime
+            .process_direct("/permission recent", Some("cli:recent-retry-fatal"))?
+            .final_content
+            .unwrap_or_default(),
+    )?;
+    loop_runtime.process_direct(
+        format!("/permission recent retry {denial_id}"),
+        Some("cli:recent-retry-fatal"),
+    )?;
+
+    let approved = loop_runtime.process_direct("approve", Some("cli:recent-retry-fatal"))?;
+    let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    let events = events.lock().map_err(|error| error.to_string())?;
+    if approved.stop_reason != "tool_error"
+        || approved
+            .final_content
+            .as_deref()
+            .is_none_or(|content| !content.contains("MCP tool call failed"))
+        || calls.load(Ordering::SeqCst) != 1
+        || requests.len() != 3
+        || !events
+            .iter()
+            .any(|event| event.name == "exec" && event.status == ToolStatus::Error)
+    {
+        return Err(format!(
+            "recent retry fatal tool resumed provider: approved={approved:?} requests={requests:?} calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());
@@ -4973,6 +5262,134 @@ fn subagent_stale_result_does_not_publish_or_close_active_child() -> Result<(), 
     if active.state != shacs_core::runtime::SubagentState::Spawned {
         return Err(format!("stale result should not mutate active state: {active:?}").into());
     }
+    let ledger = runtime.execution_ledger_snapshot();
+    if ledger.outcomes.len() != 1
+        || !matches!(
+            ledger.outcomes[0].decision,
+            LateResultDecision::DiscardedStale { .. }
+        )
+        || ledger.outcomes[0].fact.outcome != ExecutionOutcome::Subagent(SubagentOutcomeKind::Stale)
+    {
+        return Err(format!("stale subagent ledger drifted: {ledger:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_optional_ids_do_not_override_authoritative_four_field_correlation(
+) -> Result<(), Box<dyn Error>> {
+    let bus = MessageBus::new();
+    let runtime = SubagentRuntime::with_bus(bus.clone());
+    let outcome = runtime.spawn_from_request(SpawnRequest {
+        task: "Inspect authoritative fields".to_owned(),
+        label: None,
+        origin_channel: "cli".to_owned(),
+        origin_chat_id: "direct".to_owned(),
+        session_key: "session-1".to_owned(),
+    })?;
+    let mut stale = ChildResultEnvelope::from_spawn(
+        &outcome.envelope,
+        ChildResultStatus::Completed,
+        "Wrong session summary",
+    );
+    stale.session_id = "session-2".to_owned();
+    stale.correlation_id = outcome.envelope.correlation_id.clone();
+    stale.idempotency_key = outcome.envelope.idempotency_key.clone();
+
+    let decision = runtime.publish_child_result(stale);
+
+    if !matches!(&decision, MergeDecision::DiscardAsStale { reason } if reason.contains("parent session mismatch"))
+        || runtime.running_count() != 1
+        || bus.try_consume_inbound().is_some()
+    {
+        return Err(
+            format!("four-field correlation should remain authoritative: {decision:?}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_second_delivery_is_classified_as_duplicate_without_republishing(
+) -> Result<(), Box<dyn Error>> {
+    let bus = MessageBus::new();
+    let runtime = SubagentRuntime::with_bus(bus.clone());
+    let outcome = runtime.spawn_from_request(SpawnRequest {
+        task: "Summarize once".to_owned(),
+        label: None,
+        origin_channel: "cli".to_owned(),
+        origin_chat_id: "direct".to_owned(),
+        session_key: "session-1".to_owned(),
+    })?;
+    let result = ChildResultEnvelope::from_spawn(
+        &outcome.envelope,
+        ChildResultStatus::Completed,
+        "First summary",
+    );
+    let first = runtime.publish_child_result(result.clone());
+    let _ = bus.consume_inbound().ok_or("missing first reentry")?;
+
+    let second = runtime.publish_child_result(result);
+    let ledger = runtime.execution_ledger_snapshot();
+
+    if first != MergeDecision::AcceptSummaryOnly
+        || !matches!(second, MergeDecision::DiscardAsDuplicate { .. })
+        || bus.try_consume_inbound().is_some()
+        || ledger.outcomes.len() != 2
+        || !matches!(
+            ledger.outcomes[1].decision,
+            LateResultDecision::DuplicateIgnored { .. }
+        )
+    {
+        return Err(format!(
+            "duplicate subagent delivery drifted: second={second:?} ledger={ledger:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_later_attempt_after_timeout_is_classified_as_late_without_republishing(
+) -> Result<(), Box<dyn Error>> {
+    let bus = MessageBus::new();
+    let runtime = SubagentRuntime::with_bus(bus.clone());
+    let outcome = runtime.spawn_from_request(SpawnRequest {
+        task: "Timeout once".to_owned(),
+        label: None,
+        origin_channel: "cli".to_owned(),
+        origin_chat_id: "direct".to_owned(),
+        session_key: "session-1".to_owned(),
+    })?;
+    let timed_out = ChildResultEnvelope::from_spawn(
+        &outcome.envelope,
+        ChildResultStatus::TimedOut,
+        "Timed out",
+    );
+    let first = runtime.publish_child_result(timed_out);
+    let _ = bus.consume_inbound().ok_or("missing timeout reentry")?;
+    let mut completed_late = ChildResultEnvelope::from_spawn(
+        &outcome.envelope,
+        ChildResultStatus::Completed,
+        "Late summary",
+    );
+    completed_late.attempt_id = Some("attempt:2".to_owned());
+
+    let second = runtime.publish_child_result(completed_late);
+    let ledger = runtime.execution_ledger_snapshot();
+
+    if first != MergeDecision::RetryChild
+        || !matches!(second, MergeDecision::DiscardAsLate { .. })
+        || bus.try_consume_inbound().is_some()
+        || !matches!(
+            ledger.outcomes.last().map(|record| &record.decision),
+            Some(LateResultDecision::DiscardedLate { .. })
+        )
+    {
+        return Err(
+            format!("late subagent delivery drifted: second={second:?} ledger={ledger:?}").into(),
+        );
+    }
     Ok(())
 }
 
@@ -5296,6 +5713,167 @@ fn loop_permission_approval_executes_pending_tool_and_resumes() -> Result<(), Bo
         })
     {
         return Err(format!("approved exec result was not persisted: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_normalizes_artifact_and_records_tool_outcome(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecLargeOutputTool);
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-large-approved",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("resumed after large exec".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.max_tool_result_chars = 10;
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("cli:approved-artifact"))?;
+    if first.stop_reason != "ask_user" {
+        return Err(format!("large exec should pause for approval: {first:?}").into());
+    }
+    let second = loop_runtime.process_direct("approve", Some("cli:approved-artifact"))?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:approved-artifact")
+        .ok_or("missing approved artifact session")?;
+    let tool_message = raw["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|message| message["tool_call_id"] == "exec-large-approved")
+        .ok_or("missing approved tool message")?;
+    let tool_content = tool_message["content"].as_str().unwrap_or_default();
+    let outcomes = raw["metadata"]["runtime_execution"]["outcomes"]
+        .as_array()
+        .ok_or("missing runtime execution outcomes")?;
+    if second.final_content.as_deref() != Some("resumed after large exec")
+        || tool_content.len() >= "sensitive-output".len() * 128
+        || !tool_content.contains(".nanobot/tool-results/")
+        || !outcomes.iter().any(|record| {
+            record["fact"]["outcome"]["domain"] == "tool"
+                && record["fact"]["outcome"]["outcome"]["kind"] == "completed"
+                && record["fact"]["artifact_ref"]["locator"]
+                    .as_str()
+                    .is_some_and(|locator| locator.starts_with(".nanobot/tool-results/"))
+                && record["decision"]["kind"] == "accepted"
+        })
+    {
+        return Err(format!(
+            "approved tool result bypassed normalization or ledger recording: second={second:?} raw={raw:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_stops_after_fatal_tool_outcome() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecMcpFailureTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-fatal-approved",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("provider must not resume".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.fail_on_tool_error = true;
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let events = Arc::new(Mutex::new(Vec::<ToolEvent>::new()));
+    let event_capture = events.clone();
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    )
+    .with_tool_event_callback(Arc::new(move |event| {
+        if let Ok(mut events) = event_capture.lock() {
+            events.push(event.clone());
+        }
+    }));
+
+    let first = loop_runtime.process_direct("start", Some("cli:approved-fatal"))?;
+    let second = loop_runtime.process_direct("approve", Some("cli:approved-fatal"))?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:approved-fatal")
+        .ok_or("missing approved fatal session")?;
+    let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    let events = events.lock().map_err(|error| error.to_string())?;
+    if first.stop_reason != "ask_user"
+        || second.stop_reason != "tool_error"
+        || second
+            .final_content
+            .as_deref()
+            .is_none_or(|content| !content.contains("MCP tool call failed"))
+        || calls.load(Ordering::SeqCst) != 1
+        || requests.len() != 1
+        || !events
+            .iter()
+            .any(|event| event.name == "exec" && event.status == ToolStatus::Error)
+        || !raw["metadata"]["runtime_execution"]["outcomes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|record| {
+                record["fact"]["outcome"]["domain"] == "tool"
+                    && record["fact"]["outcome"]["outcome"]["kind"] == "failed"
+                    && record["fact"]["outcome"]["outcome"]["class"] == "fatal"
+            })
+    {
+        return Err(format!(
+            "approved fatal tool resumed provider or lost outcome: first={first:?} second={second:?} raw={raw:?} requests={requests:?}"
+        )
+        .into());
     }
     Ok(())
 }

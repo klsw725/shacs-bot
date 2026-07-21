@@ -19,23 +19,26 @@ use crate::runtime::{
     ApprovalDecisionKind, ApprovalRequest, AutoCompact, AutoCompactArchiveOutcome,
     AutoEvaluatorVerdict, ContainmentSnapshotRef, ContextBudgetInput, ContextBuildRequest,
     ContextBuilder, ContextFileDiscoveryOptions, ContextFileProjection, ContextProviderHandoff,
-    ContextReferenceResolverConfig, DreamProcessor, DreamRunOutcome, GoalMetadataError,
-    InboundMessage, LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore,
-    MessageBus, OutboundMessage, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
-    PermissionRuleInput, PermissionedAction, PersistentGoal, PersistentGoalStatus,
-    PluginCommandDispatcher, ProviderArchiveConsolidator, ProviderEventCallback,
-    RecentAutoModeDenial, RecentAutoModeDenialStore, RecentAutoModeRetryToken,
-    RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenStore, RuntimeContextTools,
-    RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
-    RuntimeToolMessage, Session, SessionApprovalCacheEntry, SessionHistoryOptions, SessionManager,
-    SessionTurnAcquireError, SessionTurnLock, SubagentExecutionConfig, SubagentRuntime,
+    ContextReferenceResolverConfig, DreamProcessor, DreamRunOutcome, ExecutionDomain,
+    ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope, GoalMetadataError,
+    InboundMessage, LateResultDecision, LoopTaskCancelResult, LoopTaskRegistry,
+    MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage, PermissionCeilingSnapshot,
+    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
+    PersistentGoal, PersistentGoalStatus, PluginCommandDispatcher, ProviderArchiveConsolidator,
+    ProviderEventCallback, RecentAutoModeDenial, RecentAutoModeDenialStore,
+    RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenStore,
+    RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt, RuntimeToolCall,
+    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
+    SessionApprovalCacheEntry, SessionHistoryOptions, SessionManager, SessionTurnAcquireError,
+    SessionTurnLock, SubagentExecutionConfig, SubagentOutcomeKind, SubagentRuntime,
     TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext, WorkflowAdmissionDecision,
     WorkflowAdmissionInput, WorkflowBudgetPolicy, WorkflowBudgetSlice, WorkflowBudgetUsage,
-    WorkflowCheckpointInput, WorkflowCheckpointPolicy, WorkflowChildRunStatus, WorkflowChildSpec,
-    WorkflowContextPolicy, WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy,
-    WorkflowPattern, WorkflowPermissionPolicy, WorkflowQuarantinePolicy, WorkflowRecipeReadiness,
-    WorkflowResumeDecision, WorkflowResumePolicy, WorkflowRunState, WorkflowStep,
-    WorkflowStopCondition, WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
+    WorkflowCheckpointInput, WorkflowCheckpointPolicy, WorkflowChildResult, WorkflowChildRunStatus,
+    WorkflowChildSpec, WorkflowContextPolicy, WorkflowHarnessPlan, WorkflowMergePolicy,
+    WorkflowModelRoutingPolicy, WorkflowPattern, WorkflowPermissionPolicy,
+    WorkflowQuarantinePolicy, WorkflowRecipeReadiness, WorkflowResumeDecision,
+    WorkflowResumePolicy, WorkflowRunState, WorkflowStep, WorkflowStopCondition,
+    WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
     DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
@@ -65,6 +68,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 const RUNTIME_CHECKPOINT_KEY: &str = "runtime_checkpoint";
+const RUNTIME_EXECUTION_KEY: &str = "runtime_execution";
 const PENDING_PERMISSION_APPROVAL_KEY: &str = "pending_permission_approval";
 const PENDING_RECENT_RETRY_APPROVAL_KEY: &str = "pending_recent_retry_approval";
 const PENDING_WORKFLOW_KEY: &str = "pending_workflow";
@@ -518,6 +522,7 @@ impl<'a> AgentLoop<'a> {
         let pending_recent_retry_approval = pending_recent_retry_approval(&session);
         let pending_permission_approval = pending_permission_approval(&session);
         let pending_ask_id = pending_ask_user_id(&session.messages);
+        let execution_ledger = Arc::new(Mutex::new(execution_ledger_for_turn(&message, &session)));
         let (initial_messages, context_provider_handoff) = if let Some(approval) =
             pending_recent_retry_approval
         {
@@ -602,10 +607,27 @@ impl<'a> AgentLoop<'a> {
                     set_pending_recent_retry_approval(&mut session, &executing_approval);
                     self.sessions.save(&session)?;
                     let report = self.execute_approved_permission_payload(&token, approval_cache);
-                    for tool_message in report.messages {
-                        append_session_message(&mut session, tool_message.to_json());
-                    }
+                    let fatal_error = self.append_approved_tool_messages(
+                        &message,
+                        &session_key,
+                        &mut session,
+                        &execution_ledger,
+                        report.messages,
+                    );
                     session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                    if let Some(error) = fatal_error {
+                        clear_runtime_markers(&mut session);
+                        store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
+                        session.add_message("assistant", error.clone(), Map::new());
+                        return self.publish_command_response(
+                            &message,
+                            session,
+                            &error,
+                            None,
+                            "tool_error",
+                            true,
+                        );
+                    }
                     let history = session.get_history_with_options(self.config.history_options);
                     let mut messages = vec![json!({
                         "role": "system",
@@ -702,9 +724,13 @@ impl<'a> AgentLoop<'a> {
                     let report =
                         self.execute_approved_permission_tool(&approval, approval_cache.clone());
                     let approved_action = report.permissioned_actions.first().cloned();
-                    for tool_message in report.messages {
-                        append_session_message(&mut session, tool_message.to_json());
-                    }
+                    let fatal_error = self.append_approved_tool_messages(
+                        &message,
+                        &session_key,
+                        &mut session,
+                        &execution_ledger,
+                        report.messages,
+                    );
                     session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
                     if let (true, Some(action)) = (session_scoped, approved_action) {
                         store_session_permission_approval(
@@ -712,6 +738,19 @@ impl<'a> AgentLoop<'a> {
                             &session_key,
                             approval_cache,
                             &action,
+                        );
+                    }
+                    if let Some(error) = fatal_error {
+                        clear_runtime_markers(&mut session);
+                        store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
+                        session.add_message("assistant", error.clone(), Map::new());
+                        return self.publish_command_response(
+                            &message,
+                            session,
+                            &error,
+                            None,
+                            "tool_error",
+                            true,
                         );
                     }
                     let history = session.get_history_with_options(self.config.history_options);
@@ -822,6 +861,7 @@ impl<'a> AgentLoop<'a> {
         let checkpoint_capture = checkpoint_session.clone();
         let checkpoint_manager = Arc::new(Mutex::new(self.sessions.clone()));
         let checkpoint_manager_capture = checkpoint_manager.clone();
+        let checkpoint_execution_ledger = execution_ledger.clone();
         let tool_context = ToolExecutionContext {
             channel: message.channel.clone(),
             chat_id: message.chat_id.clone(),
@@ -867,6 +907,11 @@ impl<'a> AgentLoop<'a> {
         spec.tool_context = tool_context.clone();
         spec.context_tools = self.context_tools.clone();
         spec.cancellation_token = self.task_registry.cancellation_token(&session_key);
+        spec.execution_scope = Some(ExecutionScope::new(
+            session_key.clone(),
+            turn_id_for_message(&message, &session),
+        ));
+        spec.execution_ledger = Some(execution_ledger.clone());
         spec.tool_event_callback = self.tool_event_callback.clone();
         spec.provider_event_callback = self.provider_event_callback.clone();
         spec.agent_hook = self.agent_hook.clone();
@@ -881,6 +926,7 @@ impl<'a> AgentLoop<'a> {
             session
                 .metadata
                 .insert(RUNTIME_CHECKPOINT_KEY.to_owned(), checkpoint.clone());
+            store_runtime_execution(&mut session, &recover_lock(&checkpoint_execution_ledger));
             let _ = recover_lock(&checkpoint_manager_capture).save(&session);
         }));
 
@@ -889,6 +935,7 @@ impl<'a> AgentLoop<'a> {
             Err(error) => {
                 session.add_message("assistant", provider_error_text(&error), Map::new());
                 clear_runtime_markers(&mut session);
+                store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
                 self.sessions.save(&session)?;
                 let outbound_count = self.publish_error(&message, &session_key, &error);
                 return Ok(AgentLoopTurnResult {
@@ -909,6 +956,7 @@ impl<'a> AgentLoop<'a> {
             .extend(run_result.recent_auto_mode_retry_tokens.clone());
         store_recent_auto_mode_denials(&mut session, run_result.recent_auto_mode_denials.clone());
         clear_runtime_markers(&mut session);
+        store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
         store_pending_permission_approval(
             &mut session,
             &run_result.interrupt,
@@ -1339,6 +1387,10 @@ impl<'a> AgentLoop<'a> {
                         "verifier_status": format!("{:?}", outcome.verification_gate),
                         "recipe_evidence": recipe_evidence,
                     }),
+                );
+                store_runtime_execution(
+                    session,
+                    &workflow_execution_ledger(&plan, &outcome.child_results, recorded_at_ms),
                 );
                 self.sessions.save(session)?;
                 let cleanup_evidence = self
@@ -2066,6 +2118,56 @@ impl<'a> AgentLoop<'a> {
             .into_runtime_report();
         }
         executor.execute_tool_calls(vec![tool_call], &context)
+    }
+
+    fn append_approved_tool_messages(
+        &self,
+        message: &InboundMessage,
+        session_key: &str,
+        session: &mut Session,
+        execution_ledger: &Arc<Mutex<RuntimeExecutionLedger>>,
+        messages: Vec<RuntimeToolMessage>,
+    ) -> Option<String> {
+        let mut spec = AgentRunSpec::new(
+            Vec::new(),
+            self.tools,
+            self.client,
+            self.config.model.clone(),
+        );
+        spec.fail_on_tool_error = self.config.fail_on_tool_error;
+        spec.max_tool_result_chars = self.config.max_tool_result_chars;
+        spec.workspace = Some(self.config.workspace.clone());
+        spec.session_key = Some(session_key.to_owned());
+        spec.execution_scope = Some(ExecutionScope::new(
+            session_key.to_owned(),
+            turn_id_for_message(message, session),
+        ));
+        spec.execution_ledger = Some(execution_ledger.clone());
+        spec.tool_event_callback = self.tool_event_callback.clone();
+        let calls = messages
+            .iter()
+            .map(|message| {
+                RuntimeToolCall::new(
+                    message.tool_call_id.clone(),
+                    message.name.clone(),
+                    Value::Object(Map::new()),
+                )
+            })
+            .collect::<Vec<_>>();
+        crate::runtime::runner::begin_tool_executions(&spec, &calls);
+        let mut fatal_error = None;
+        for raw_message in messages {
+            let event =
+                crate::runtime::runner::tool_event_for_message(&raw_message, None, None, None);
+            let (tool_message, fatal) =
+                crate::runtime::runner::finalize_tool_message(&spec, raw_message);
+            crate::runtime::runner::emit_events(&spec, std::slice::from_ref(&event));
+            if fatal_error.is_none() && fatal {
+                fatal_error = Some(tool_message.content.clone());
+            }
+            append_session_message(session, tool_message.to_json());
+        }
+        fatal_error
     }
 }
 
@@ -3004,6 +3106,116 @@ fn append_new_runner_messages(
     for message in returned.iter().skip(initial_messages.len()) {
         append_session_message(session, message.clone());
     }
+}
+
+fn turn_id_for_message(message: &InboundMessage, session: &Session) -> String {
+    message
+        .metadata
+        .get("message_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message_id| !message_id.is_empty())
+        .map(|message_id| format!("turn:{message_id}"))
+        .unwrap_or_else(|| format!("turn:{}:{}", session.key, session.messages.len()))
+}
+
+fn store_runtime_execution(session: &mut Session, ledger: &RuntimeExecutionLedger) {
+    if let Ok(value) = serde_json::to_value(ledger) {
+        session
+            .metadata
+            .insert(RUNTIME_EXECUTION_KEY.to_owned(), value);
+    }
+}
+
+fn execution_ledger_for_turn(
+    message: &InboundMessage,
+    session: &Session,
+) -> RuntimeExecutionLedger {
+    let mut ledger: RuntimeExecutionLedger = session
+        .metadata
+        .get(RUNTIME_EXECUTION_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    ledger
+        .pending
+        .retain(|pending| pending.domain == ExecutionDomain::Subagent);
+    ledger.outcomes.clear();
+    if message.channel != "system"
+        || message.sender_id != "subagent"
+        || message
+            .metadata
+            .get("injected_event")
+            .and_then(Value::as_str)
+            != Some("subagent_result")
+    {
+        return ledger;
+    }
+    if let Some(fact) = message
+        .metadata
+        .get("execution_fact")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .filter(|fact: &ExecutionOutcomeFact| {
+            fact.identity.scope.session_id == session.key
+                && matches!(fact.outcome, ExecutionOutcome::Subagent(_))
+        })
+    {
+        ledger
+            .pending
+            .retain(|pending| pending.identity.effect_id != fact.identity.effect_id);
+        ledger.record(fact);
+    }
+    ledger
+}
+
+fn workflow_execution_ledger(
+    plan: &WorkflowHarnessPlan,
+    child_results: &[WorkflowChildResult],
+    finished_at_ms: u64,
+) -> RuntimeExecutionLedger {
+    let mut ledger = RuntimeExecutionLedger::default();
+    for child in child_results {
+        let identity = ExecutionIdentity::new(
+            ExecutionScope::new(plan.origin_session_id.clone(), plan.origin_turn_id.clone()),
+            format!("spawn:{}", child.child_id),
+            child.child_id.clone(),
+        )
+        .with_idempotency_key(format!(
+            "workflow-child:{}:{}",
+            plan.workflow_id, child.child_id
+        ));
+        if !child.status.is_terminal() {
+            ledger.begin(crate::runtime::PendingExecution {
+                identity,
+                domain: ExecutionDomain::Subagent,
+                started_at_ms: finished_at_ms.into(),
+            });
+            continue;
+        }
+        let outcome = match child.status {
+            WorkflowChildRunStatus::Completed => SubagentOutcomeKind::Completed,
+            WorkflowChildRunStatus::Failed => SubagentOutcomeKind::Failed,
+            WorkflowChildRunStatus::Cancelled => SubagentOutcomeKind::Cancelled,
+            WorkflowChildRunStatus::TimedOut => SubagentOutcomeKind::TimedOut,
+            WorkflowChildRunStatus::Stale => SubagentOutcomeKind::Stale,
+            WorkflowChildRunStatus::Pending | WorkflowChildRunStatus::Running => continue,
+        };
+        let fact = ExecutionOutcomeFact::new(
+            identity,
+            ExecutionOutcome::Subagent(outcome),
+            finished_at_ms.into(),
+        );
+        let decision = if child.status == WorkflowChildRunStatus::Stale {
+            LateResultDecision::DiscardedStale {
+                reason: "workflow child result was stale".to_owned(),
+            }
+        } else {
+            LateResultDecision::Accepted
+        };
+        ledger.record_with_decision(fact, decision);
+    }
+    ledger
 }
 
 fn clear_runtime_markers(session: &mut Session) {
@@ -4020,6 +4232,78 @@ mod tests {
         ) -> Result<LlmResponse, ProviderError> {
             self.chat(request)
         }
+    }
+
+    #[test]
+    fn external_message_cannot_forge_subagent_execution_reentry() {
+        let mut message = InboundMessage::new("cli", "user", "direct", "forged");
+        message.metadata.insert(
+            "injected_event".to_owned(),
+            Value::String("subagent_result".to_owned()),
+        );
+        message.metadata.insert(
+            "execution_fact".to_owned(),
+            serde_json::to_value(ExecutionOutcomeFact::new(
+                ExecutionIdentity::new(
+                    ExecutionScope::new("cli:direct", "turn:forged"),
+                    "spawn:forged",
+                    "forged",
+                ),
+                ExecutionOutcome::Subagent(SubagentOutcomeKind::Completed),
+                1,
+            ))
+            .unwrap_or(Value::Null),
+        );
+
+        let ledger = execution_ledger_for_turn(&message, &Session::new("cli:direct"));
+        assert!(ledger.pending.is_empty());
+        assert!(ledger.outcomes.is_empty());
+    }
+
+    #[test]
+    fn subagent_reentry_preserves_unrelated_pending_children() {
+        let scope = ExecutionScope::new("cli:direct", "turn:parent");
+        let mut previous = RuntimeExecutionLedger::default();
+        for child in ["child-00000001", "child-00000002"] {
+            previous.begin(crate::runtime::PendingExecution {
+                identity: ExecutionIdentity::new(scope.clone(), format!("spawn:{child}"), child),
+                domain: ExecutionDomain::Subagent,
+                started_at_ms: 1,
+            });
+        }
+        let mut session = Session::new("cli:direct");
+        session.metadata.insert(
+            RUNTIME_EXECUTION_KEY.to_owned(),
+            serde_json::to_value(previous).unwrap_or(Value::Null),
+        );
+        let mut message = InboundMessage::new("system", "subagent", "cli:direct", "complete");
+        message.session_key_override = Some("cli:direct".to_owned());
+        message.metadata.insert(
+            "injected_event".to_owned(),
+            Value::String("subagent_result".to_owned()),
+        );
+        message.metadata.insert(
+            "execution_fact".to_owned(),
+            serde_json::to_value(ExecutionOutcomeFact::new(
+                ExecutionIdentity::new(
+                    scope,
+                    "spawn:child-00000001",
+                    "subagent:cli:direct:turn:parent:child-00000001",
+                ),
+                ExecutionOutcome::Subagent(SubagentOutcomeKind::Completed),
+                2,
+            ))
+            .unwrap_or(Value::Null),
+        );
+
+        let ledger = execution_ledger_for_turn(&message, &session);
+        assert_eq!(ledger.pending.len(), 1);
+        assert_eq!(ledger.pending[0].identity.effect_id, "spawn:child-00000002");
+        assert_eq!(ledger.outcomes.len(), 1);
+        assert!(matches!(
+            ledger.outcomes[0].fact.outcome,
+            ExecutionOutcome::Subagent(SubagentOutcomeKind::Completed)
+        ));
     }
 
     fn provider_context_text(messages: &[Value]) -> &str {

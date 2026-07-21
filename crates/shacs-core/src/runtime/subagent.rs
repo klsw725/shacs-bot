@@ -1,8 +1,10 @@
 use crate::runtime::{
     AgentRunResult, AgentRunSpec, AgentRunner, CancellationToken, ContainmentSnapshotRef,
-    ContextBuilder, InboundMessage, MessageBus, PermissionCeilingSnapshot, PermissionModeSnapshot,
-    PermissionRuleInput, RuntimeCapabilityReport, RuntimeCapabilityStatus, ToolEvent,
-    ToolExecutionContext, ToolStatus,
+    ContextBuilder, ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact,
+    ExecutionScope, InboundMessage, LateResultDecision, MessageBus, PendingExecution,
+    PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionRuleInput,
+    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeExecutionLedger, SubagentOutcomeKind,
+    ToolEvent, ToolExecutionContext, ToolStatus,
 };
 use crate::tools::{
     EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool, PathContext,
@@ -52,6 +54,12 @@ pub struct SpawnEnvelope {
     pub parent_turn_id: String,
     pub child_task_id: String,
     pub spawn_effect_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     pub subagent_kind: String,
     pub task_goal: String,
     pub task_scope: String,
@@ -77,9 +85,24 @@ impl SpawnEnvelope {
         let session_id = parent_session_key.into();
         let child_task_id = child_id.into();
         let task_goal = task.into();
+        let parent_turn_id = "turn:unknown".to_owned();
+        let spawn_effect_id = format!("spawn:{child_task_id}");
         Self {
-            parent_turn_id: "turn:unknown".to_owned(),
-            spawn_effect_id: format!("spawn:{child_task_id}"),
+            correlation_id: Some(spawn_correlation_id(
+                &session_id,
+                &parent_turn_id,
+                &child_task_id,
+                &spawn_effect_id,
+            )),
+            attempt_id: Some("attempt:1".to_owned()),
+            idempotency_key: Some(spawn_idempotency_key(
+                &session_id,
+                &parent_turn_id,
+                &child_task_id,
+                &spawn_effect_id,
+            )),
+            parent_turn_id,
+            spawn_effect_id,
             subagent_kind: "default".to_owned(),
             task_scope: task_goal.clone(),
             inherited_context_snapshot: Value::Null,
@@ -105,9 +128,24 @@ impl SpawnEnvelope {
             .clone()
             .unwrap_or_else(|| default_label(&request.task));
         let session_id = request.session_key;
+        let parent_turn_id = format!("turn:{session_id}");
+        let spawn_effect_id = format!("spawn:{child_task_id}");
         Self {
-            parent_turn_id: format!("turn:{session_id}"),
-            spawn_effect_id: format!("spawn:{child_task_id}"),
+            correlation_id: Some(spawn_correlation_id(
+                &session_id,
+                &parent_turn_id,
+                &child_task_id,
+                &spawn_effect_id,
+            )),
+            attempt_id: Some("attempt:1".to_owned()),
+            idempotency_key: Some(spawn_idempotency_key(
+                &session_id,
+                &parent_turn_id,
+                &child_task_id,
+                &spawn_effect_id,
+            )),
+            parent_turn_id,
+            spawn_effect_id,
             subagent_kind: "default".to_owned(),
             task_scope: request.task.clone(),
             inherited_context_snapshot: json!({
@@ -129,6 +167,26 @@ impl SpawnEnvelope {
             task_goal: request.task,
         }
     }
+
+    pub fn refresh_execution_fields(&mut self) {
+        self.correlation_id = Some(spawn_correlation_id(
+            &self.session_id,
+            &self.parent_turn_id,
+            &self.child_task_id,
+            &self.spawn_effect_id,
+        ));
+        self.attempt_id = Some(
+            self.attempt_id
+                .clone()
+                .unwrap_or_else(|| "attempt:1".to_owned()),
+        );
+        self.idempotency_key = Some(spawn_idempotency_key(
+            &self.session_id,
+            &self.parent_turn_id,
+            &self.child_task_id,
+            &self.spawn_effect_id,
+        ));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,6 +195,12 @@ pub struct ChildResultEnvelope {
     pub parent_turn_id: String,
     pub child_task_id: String,
     pub spawn_effect_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     pub subagent_kind: String,
     pub status: ChildResultStatus,
     pub started_at_ms: u128,
@@ -159,9 +223,24 @@ impl ChildResultEnvelope {
         let child_task_id = child_id.into();
         let summary = content.into();
         let finished_at_ms = now_millis();
+        let parent_turn_id = "turn:unknown".to_owned();
+        let spawn_effect_id = format!("spawn:{child_task_id}");
         Self {
-            parent_turn_id: "turn:unknown".to_owned(),
-            spawn_effect_id: format!("spawn:{child_task_id}"),
+            correlation_id: Some(spawn_correlation_id(
+                &session_id,
+                &parent_turn_id,
+                &child_task_id,
+                &spawn_effect_id,
+            )),
+            attempt_id: Some("attempt:1".to_owned()),
+            idempotency_key: Some(spawn_idempotency_key(
+                &session_id,
+                &parent_turn_id,
+                &child_task_id,
+                &spawn_effect_id,
+            )),
+            parent_turn_id,
+            spawn_effect_id,
             subagent_kind: "default".to_owned(),
             status: ChildResultStatus::Completed,
             started_at_ms: finished_at_ms,
@@ -188,6 +267,22 @@ impl ChildResultEnvelope {
             parent_turn_id: spawn.parent_turn_id.clone(),
             child_task_id: spawn.child_task_id.clone(),
             spawn_effect_id: spawn.spawn_effect_id.clone(),
+            correlation_id: Some(spawn_correlation_id(
+                &spawn.session_id,
+                &spawn.parent_turn_id,
+                &spawn.child_task_id,
+                &spawn.spawn_effect_id,
+            )),
+            attempt_id: spawn
+                .attempt_id
+                .clone()
+                .or_else(|| Some("attempt:1".to_owned())),
+            idempotency_key: Some(spawn_idempotency_key(
+                &spawn.session_id,
+                &spawn.parent_turn_id,
+                &spawn.child_task_id,
+                &spawn.spawn_effect_id,
+            )),
             subagent_kind: spawn.subagent_kind.clone(),
             status,
             started_at_ms: spawn.issued_at_ms,
@@ -208,7 +303,10 @@ pub enum MergeDecision {
     AcceptFull,
     AcceptSummaryOnly,
     AcceptFailureFact,
+    AcceptCancellationFact,
     RetryChild,
+    DiscardAsDuplicate { reason: String },
+    DiscardAsLate { reason: String },
     DiscardAsStale { reason: String },
     AbortParentTurn,
 }
@@ -351,6 +449,7 @@ struct SubagentRuntimeState {
 #[derive(Clone)]
 pub struct SubagentRuntime {
     state: Arc<Mutex<SubagentRuntimeState>>,
+    execution_ledger: Arc<Mutex<RuntimeExecutionLedger>>,
     bus: Option<MessageBus>,
     config: SubagentRuntimeConfig,
 }
@@ -373,6 +472,7 @@ impl SubagentRuntime {
     pub fn with_config(config: SubagentRuntimeConfig) -> Self {
         Self {
             state: Arc::new(Mutex::new(SubagentRuntimeState::default())),
+            execution_ledger: Arc::new(Mutex::new(RuntimeExecutionLedger::default())),
             bus: None,
             config,
         }
@@ -406,9 +506,10 @@ impl SubagentRuntime {
 
     pub fn register_spawn_with_cancellation(
         &self,
-        envelope: SpawnEnvelope,
+        mut envelope: SpawnEnvelope,
         cancellation_token: CancellationToken,
     ) -> Result<SubagentSpawnOutcome, String> {
+        envelope.refresh_execution_fields();
         let mut state = recover_lock(&self.state);
         let active_count = state
             .session_tasks
@@ -442,6 +543,7 @@ impl SubagentRuntime {
                 cancellation_token,
             },
         );
+        self.begin_subagent_execution(&envelope);
         let user_message = format!(
             "Subagent [{}] started (id: {}). I'll notify you when it completes.",
             envelope.label, envelope.child_task_id
@@ -496,6 +598,10 @@ impl SubagentRuntime {
             .map(|record| record.status.clone())
     }
 
+    pub fn execution_ledger_snapshot(&self) -> RuntimeExecutionLedger {
+        recover_lock(&self.execution_ledger).clone()
+    }
+
     pub fn update_progress(
         &self,
         child_task_id: &str,
@@ -522,9 +628,10 @@ impl SubagentRuntime {
     pub fn classify_active_result(&self, result: &ChildResultEnvelope) -> MergeDecision {
         let state = recover_lock(&self.state);
         let Some(record) = state.tasks.get(&result.child_task_id) else {
-            return MergeDecision::DiscardAsStale {
-                reason: format!("child task is not active: {}", result.child_task_id),
-            };
+            return inactive_result_decision(&self.execution_ledger_snapshot(), result)
+                .unwrap_or_else(|| MergeDecision::DiscardAsStale {
+                    reason: format!("child task is not active: {}", result.child_task_id),
+                });
         };
         if let Some(decision) = correlation_decision(&record.envelope, result) {
             return decision;
@@ -569,7 +676,8 @@ impl SubagentRuntime {
         let cancellation_token = self
             .cancellation_token(&envelope.child_task_id)
             .unwrap_or_default();
-        let result = if cancellation_token.is_cancelled() {
+        let cancelled_before_start = cancellation_token.is_cancelled();
+        let result = if cancelled_before_start {
             ChildResultEnvelope::from_spawn(
                 &envelope,
                 ChildResultStatus::Cancelled,
@@ -578,7 +686,11 @@ impl SubagentRuntime {
         } else {
             self.execute_spawn(&envelope, client, &config, cancellation_token)
         };
-        self.publish_child_result(result.clone());
+        if cancelled_before_start {
+            self.finish_child(result.clone());
+        } else {
+            self.publish_child_result(result.clone());
+        }
         result
     }
 
@@ -643,6 +755,8 @@ impl SubagentRuntime {
             Some("Task completed but no final response was generated.".to_owned());
         spec.fail_on_tool_error = config.fail_on_tool_error;
         spec.cancellation_token = Some(cancellation_token.clone());
+        spec.execution_scope = Some(execution_scope_from_spawn(envelope));
+        spec.execution_ledger = Some(self.execution_ledger.clone());
         let progress_runtime = self.clone();
         let progress_child = envelope.child_task_id.clone();
         spec.tool_event_callback = Some(Arc::new(move |event| {
@@ -752,6 +866,29 @@ impl SubagentRuntime {
             "subagent_command".to_owned(),
             serde_json::to_value(command).unwrap_or(Value::String("subagent_failed".to_owned())),
         );
+        message.metadata.insert(
+            "subagent_outcome".to_owned(),
+            serde_json::to_value(subagent_execution_outcome(result, decision))
+                .unwrap_or(Value::String("subagent_failed".to_owned())),
+        );
+        message.metadata.insert(
+            "merge_decision".to_owned(),
+            serde_json::to_value(decision).unwrap_or(Value::String("unknown".to_owned())),
+        );
+        message.metadata.insert(
+            "late_result_decision".to_owned(),
+            serde_json::to_value(late_result_decision_for_merge(decision))
+                .unwrap_or(Value::String("accepted".to_owned())),
+        );
+        let expected = recover_lock(&self.state)
+            .tasks
+            .get(&result.child_task_id)
+            .map(|record| record.envelope.clone());
+        let execution_fact = subagent_execution_fact(result, expected.as_ref(), decision);
+        message.metadata.insert(
+            "execution_fact".to_owned(),
+            serde_json::to_value(execution_fact).unwrap_or(Value::Null),
+        );
         message
     }
 
@@ -778,11 +915,14 @@ impl SubagentRuntime {
     fn apply_finish(&self, result: &ChildResultEnvelope, decision: &MergeDecision) {
         let mut state = recover_lock(&self.state);
         let Some(record) = state.tasks.get(&result.child_task_id) else {
+            self.record_subagent_result(result, None, decision);
             return;
         };
         if correlation_decision(&record.envelope, result).is_some() {
+            self.record_subagent_result(result, Some(&record.envelope), decision);
             return;
         };
+        self.record_subagent_result(result, Some(&record.envelope), decision);
         let Some(mut record) = state.tasks.remove(&result.child_task_id) else {
             return;
         };
@@ -794,9 +934,13 @@ impl SubagentRuntime {
         }
         record.status.state = match decision {
             MergeDecision::DiscardAsStale { .. } => SubagentState::Stale,
+            MergeDecision::DiscardAsDuplicate { .. } | MergeDecision::DiscardAsLate { .. } => {
+                record.status.state.clone()
+            }
             MergeDecision::AcceptFailureFact | MergeDecision::AbortParentTurn => {
                 SubagentState::Failed
             }
+            MergeDecision::AcceptCancellationFact => SubagentState::Cancelled,
             MergeDecision::RetryChild => SubagentState::TimedOut,
             MergeDecision::AcceptFull | MergeDecision::AcceptSummaryOnly => {
                 SubagentState::Completed
@@ -812,6 +956,26 @@ impl SubagentRuntime {
                 .adopted_scope
                 .insert(scope_key(&record.envelope), result.child_task_id.clone());
         }
+    }
+
+    fn begin_subagent_execution(&self, envelope: &SpawnEnvelope) {
+        let mut ledger = recover_lock(&self.execution_ledger);
+        ledger.begin(PendingExecution {
+            identity: execution_identity_from_spawn(envelope),
+            domain: ExecutionDomain::Subagent,
+            started_at_ms: envelope.issued_at_ms,
+        });
+    }
+
+    fn record_subagent_result(
+        &self,
+        result: &ChildResultEnvelope,
+        expected: Option<&SpawnEnvelope>,
+        decision: &MergeDecision,
+    ) -> LateResultDecision {
+        let fact = subagent_execution_fact(result, expected, decision)
+            .with_detail(format!("subagent merge decision: {decision:?}"));
+        recover_lock(&self.execution_ledger).record(fact)
     }
 }
 
@@ -919,7 +1083,12 @@ fn synthetic_command_for(
     result: &ChildResultEnvelope,
     decision: &MergeDecision,
 ) -> SyntheticSubagentCommand {
-    if matches!(decision, MergeDecision::DiscardAsStale { .. }) {
+    if matches!(
+        decision,
+        MergeDecision::DiscardAsStale { .. }
+            | MergeDecision::DiscardAsDuplicate { .. }
+            | MergeDecision::DiscardAsLate { .. }
+    ) {
         return SyntheticSubagentCommand::SubagentProgressObserved;
     }
     match result.status {
@@ -931,18 +1100,155 @@ fn synthetic_command_for(
 }
 
 fn should_publish_decision(decision: &MergeDecision) -> bool {
-    !matches!(decision, MergeDecision::DiscardAsStale { .. })
+    !matches!(
+        decision,
+        MergeDecision::DiscardAsStale { .. }
+            | MergeDecision::DiscardAsDuplicate { .. }
+            | MergeDecision::DiscardAsLate { .. }
+    )
 }
 
 fn merge_decision_for_status(result: &ChildResultEnvelope) -> MergeDecision {
     match result.status {
         ChildResultStatus::Completed => MergeDecision::AcceptSummaryOnly,
         ChildResultStatus::Failed => MergeDecision::AcceptFailureFact,
-        ChildResultStatus::Cancelled => MergeDecision::DiscardAsStale {
-            reason: "cancelled child result is observational only".to_owned(),
-        },
+        ChildResultStatus::Cancelled => MergeDecision::AcceptCancellationFact,
         ChildResultStatus::TimedOut => MergeDecision::RetryChild,
     }
+}
+
+fn inactive_result_decision(
+    ledger: &RuntimeExecutionLedger,
+    result: &ChildResultEnvelope,
+) -> Option<MergeDecision> {
+    let identity = execution_identity_from_result(result, None);
+    let recorded = ledger.outcomes.iter().rev().find(|recorded| {
+        recorded.fact.identity.idempotency_key == identity.idempotency_key
+            && matches!(recorded.decision, LateResultDecision::Accepted)
+    })?;
+    if recorded.fact.identity.attempt_id == identity.attempt_id {
+        return Some(MergeDecision::DiscardAsDuplicate {
+            reason: "subagent outcome attempt was already accepted".to_owned(),
+        });
+    }
+    Some(MergeDecision::DiscardAsLate {
+        reason: "a terminal subagent outcome was already accepted for this effect".to_owned(),
+    })
+}
+
+fn subagent_execution_outcome(
+    result: &ChildResultEnvelope,
+    decision: &MergeDecision,
+) -> ExecutionOutcome {
+    let outcome = match decision {
+        MergeDecision::DiscardAsStale { .. } => SubagentOutcomeKind::Stale,
+        MergeDecision::DiscardAsDuplicate { .. } => SubagentOutcomeKind::MergeRejected,
+        MergeDecision::DiscardAsLate { .. } => SubagentOutcomeKind::Stale,
+        MergeDecision::RetryChild => SubagentOutcomeKind::TimedOut,
+        MergeDecision::AcceptCancellationFact => SubagentOutcomeKind::Cancelled,
+        MergeDecision::AcceptFailureFact | MergeDecision::AbortParentTurn => {
+            SubagentOutcomeKind::Failed
+        }
+        MergeDecision::AcceptFull | MergeDecision::AcceptSummaryOnly => match result.status {
+            ChildResultStatus::Completed => SubagentOutcomeKind::Completed,
+            ChildResultStatus::Failed => SubagentOutcomeKind::Failed,
+            ChildResultStatus::TimedOut => SubagentOutcomeKind::TimedOut,
+            ChildResultStatus::Cancelled => SubagentOutcomeKind::Cancelled,
+        },
+    };
+    ExecutionOutcome::Subagent(outcome)
+}
+
+fn subagent_execution_fact(
+    result: &ChildResultEnvelope,
+    expected: Option<&SpawnEnvelope>,
+    decision: &MergeDecision,
+) -> ExecutionOutcomeFact {
+    ExecutionOutcomeFact::new(
+        execution_identity_from_result(result, expected),
+        subagent_execution_outcome(result, decision),
+        result.finished_at_ms,
+    )
+}
+
+fn late_result_decision_for_merge(decision: &MergeDecision) -> LateResultDecision {
+    match decision {
+        MergeDecision::DiscardAsDuplicate { reason } => LateResultDecision::DuplicateIgnored {
+            reason: reason.clone(),
+        },
+        MergeDecision::DiscardAsLate { reason } => LateResultDecision::DiscardedLate {
+            reason: reason.clone(),
+        },
+        MergeDecision::DiscardAsStale { reason } => LateResultDecision::DiscardedStale {
+            reason: reason.clone(),
+        },
+        MergeDecision::AcceptFull
+        | MergeDecision::AcceptSummaryOnly
+        | MergeDecision::AcceptFailureFact
+        | MergeDecision::AcceptCancellationFact
+        | MergeDecision::RetryChild
+        | MergeDecision::AbortParentTurn => LateResultDecision::Accepted,
+    }
+}
+
+fn execution_scope_from_spawn(spawn: &SpawnEnvelope) -> ExecutionScope {
+    ExecutionScope::new(spawn.session_id.clone(), spawn.parent_turn_id.clone())
+}
+
+fn execution_identity_from_spawn(spawn: &SpawnEnvelope) -> ExecutionIdentity {
+    ExecutionIdentity::new(
+        execution_scope_from_spawn(spawn),
+        spawn.spawn_effect_id.clone(),
+        spawn_correlation_id(
+            &spawn.session_id,
+            &spawn.parent_turn_id,
+            &spawn.child_task_id,
+            &spawn.spawn_effect_id,
+        ),
+    )
+    .with_attempt(
+        spawn
+            .attempt_id
+            .clone()
+            .unwrap_or_else(|| "attempt:1".to_owned()),
+    )
+    .with_idempotency_key(spawn_idempotency_key(
+        &spawn.session_id,
+        &spawn.parent_turn_id,
+        &spawn.child_task_id,
+        &spawn.spawn_effect_id,
+    ))
+}
+
+fn execution_identity_from_result(
+    result: &ChildResultEnvelope,
+    expected: Option<&SpawnEnvelope>,
+) -> ExecutionIdentity {
+    let effect_id = expected
+        .map(|spawn| spawn.spawn_effect_id.clone())
+        .unwrap_or_else(|| result.spawn_effect_id.clone());
+    ExecutionIdentity::new(
+        ExecutionScope::new(result.session_id.clone(), result.parent_turn_id.clone()),
+        effect_id,
+        spawn_correlation_id(
+            &result.session_id,
+            &result.parent_turn_id,
+            &result.child_task_id,
+            &result.spawn_effect_id,
+        ),
+    )
+    .with_attempt(
+        result
+            .attempt_id
+            .clone()
+            .unwrap_or_else(|| "attempt:1".to_owned()),
+    )
+    .with_idempotency_key(spawn_idempotency_key(
+        &result.session_id,
+        &result.parent_turn_id,
+        &result.child_task_id,
+        &result.spawn_effect_id,
+    ))
 }
 
 pub fn format_partial_progress(result: &AgentRunResult) -> String {
@@ -1062,6 +1368,24 @@ fn scope_key(envelope: &SpawnEnvelope) -> (String, String, String) {
         envelope.parent_turn_id.clone(),
         envelope.task_scope.clone(),
     )
+}
+
+fn spawn_correlation_id(
+    session_id: &str,
+    parent_turn_id: &str,
+    child_task_id: &str,
+    spawn_effect_id: &str,
+) -> String {
+    format!("subagent:{session_id}:{parent_turn_id}:{child_task_id}:{spawn_effect_id}")
+}
+
+fn spawn_idempotency_key(
+    session_id: &str,
+    parent_turn_id: &str,
+    child_task_id: &str,
+    spawn_effect_id: &str,
+) -> String {
+    format!("subagent-result:{session_id}:{parent_turn_id}:{child_task_id}:{spawn_effect_id}")
 }
 
 fn default_label(task: &str) -> String {
