@@ -1,10 +1,12 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::text::{safe_filename, stringify_text_blocks, truncate_text};
+use crate::text::{stringify_text_blocks, truncate_text};
 use shacs_redaction::{redact_string, redact_value};
 
 pub const TOOL_RESULTS_DIR: &str = ".nanobot/tool-results";
@@ -12,19 +14,52 @@ pub const TOOL_RESULT_PREVIEW_CHARS: usize = 1_200;
 pub const TOOL_RESULT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const TOOL_RESULT_MAX_BUCKETS: usize = 32;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultPersistenceDisposition {
+    Inline,
+    Persisted,
+    TruncatedFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultArtifactContentKind {
+    Text,
+    JsonTextBlocks,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultArtifactRef {
+    pub locator: String,
+    pub digest: String,
+    pub content_kind: ToolResultArtifactContentKind,
+    pub original_size: usize,
+    pub preview_truncated: bool,
+    pub redacted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultPersistenceOutcome {
+    pub content: Value,
+    pub disposition: ToolResultPersistenceDisposition,
+    pub artifact: Option<ToolResultArtifactRef>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedToolResult {
     pub path: PathBuf,
     pub original_size: usize,
     pub preview: String,
     pub truncated_preview: bool,
+    pub artifact: ToolResultArtifactRef,
 }
 
 impl PersistedToolResult {
     pub fn reference_text(&self) -> String {
         let mut text = format!(
             "[tool output persisted]\nFull output saved to: {}\nOriginal size: {} chars\nPreview:\n{}",
-            self.path.display(),
+            self.artifact.locator,
             self.original_size,
             self.preview
         );
@@ -42,14 +77,31 @@ pub fn maybe_persist_text_tool_result(
     content: &str,
     max_chars: usize,
 ) -> Option<String> {
-    maybe_persist_tool_result(
+    maybe_persist_tool_result_with_artifact(
         workspace,
         session_key,
         tool_call_id,
         &Value::String(content.to_owned()),
         max_chars,
     )
+    .map(|outcome| outcome.content)
     .and_then(|value| value.as_str().map(str::to_owned))
+}
+
+pub fn maybe_persist_text_tool_result_with_artifact(
+    workspace: Option<&Path>,
+    session_key: Option<&str>,
+    tool_call_id: &str,
+    content: &str,
+    max_chars: usize,
+) -> Option<ToolResultPersistenceOutcome> {
+    maybe_persist_tool_result_with_artifact(
+        workspace,
+        session_key,
+        tool_call_id,
+        &Value::String(content.to_owned()),
+        max_chars,
+    )
 }
 
 pub fn maybe_persist_tool_result(
@@ -59,28 +111,63 @@ pub fn maybe_persist_tool_result(
     content: &Value,
     max_chars: usize,
 ) -> Option<Value> {
+    maybe_persist_tool_result_with_artifact(
+        workspace,
+        session_key,
+        tool_call_id,
+        content,
+        max_chars,
+    )
+    .map(|outcome| outcome.content)
+}
+
+pub fn maybe_persist_tool_result_with_artifact(
+    workspace: Option<&Path>,
+    session_key: Option<&str>,
+    tool_call_id: &str,
+    content: &Value,
+    max_chars: usize,
+) -> Option<ToolResultPersistenceOutcome> {
     if max_chars == 0 {
-        return Some(content.clone());
+        return Some(ToolResultPersistenceOutcome {
+            content: content.clone(),
+            disposition: ToolResultPersistenceDisposition::Inline,
+            artifact: None,
+        });
     }
     let payload = content_text_payload(content)?;
     if payload.text.chars().count() <= max_chars {
-        return Some(content.clone());
+        return Some(ToolResultPersistenceOutcome {
+            content: content.clone(),
+            disposition: ToolResultPersistenceDisposition::Inline,
+            artifact: None,
+        });
     }
     let original_size = payload.text.chars().count();
     let Some(workspace) = workspace else {
-        return Some(Value::String(payload.fallback_text(max_chars)));
+        return Some(ToolResultPersistenceOutcome {
+            content: Value::String(payload.fallback_text(max_chars)),
+            disposition: ToolResultPersistenceDisposition::TruncatedFallback,
+            artifact: None,
+        });
     };
     match persist_tool_result(
         workspace,
         session_key.unwrap_or("default"),
         tool_call_id,
-        &payload.redacted_file,
-        &payload.redacted_preview,
-        payload.suffix,
+        &payload,
         original_size,
     ) {
-        Ok(persisted) => Some(Value::String(persisted.reference_text())),
-        Err(_) => Some(Value::String(payload.fallback_text(max_chars))),
+        Ok(persisted) => Some(ToolResultPersistenceOutcome {
+            content: Value::String(persisted.reference_text()),
+            disposition: ToolResultPersistenceDisposition::Persisted,
+            artifact: Some(persisted.artifact),
+        }),
+        Err(_) => Some(ToolResultPersistenceOutcome {
+            content: Value::String(payload.fallback_text(max_chars)),
+            disposition: ToolResultPersistenceDisposition::TruncatedFallback,
+            artifact: None,
+        }),
     }
 }
 
@@ -89,6 +176,8 @@ struct ToolResultPayload {
     redacted_file: String,
     redacted_preview: String,
     suffix: &'static str,
+    content_kind: ToolResultArtifactContentKind,
+    redacted: bool,
 }
 
 impl ToolResultPayload {
@@ -99,12 +188,17 @@ impl ToolResultPayload {
 
 fn content_text_payload(content: &Value) -> Option<ToolResultPayload> {
     match content {
-        Value::String(text) => Some(ToolResultPayload {
-            text: text.clone(),
-            redacted_file: redact_string(text),
-            redacted_preview: redact_string(text),
-            suffix: "txt",
-        }),
+        Value::String(text) => {
+            let redacted = redact_string(text);
+            Some(ToolResultPayload {
+                text: text.clone(),
+                redacted_file: redacted.clone(),
+                redacted_preview: redacted.clone(),
+                suffix: "txt",
+                content_kind: ToolResultArtifactContentKind::Text,
+                redacted: redacted != *text,
+            })
+        }
         Value::Array(blocks) => stringify_text_blocks(blocks).map(|text| {
             let redacted = redact_value(content);
             let redacted_file =
@@ -120,6 +214,8 @@ fn content_text_payload(content: &Value) -> Option<ToolResultPayload> {
                 redacted_file,
                 redacted_preview,
                 suffix: "json",
+                content_kind: ToolResultArtifactContentKind::JsonTextBlocks,
+                redacted: redacted != *content,
             }
         }),
         _ => None,
@@ -130,34 +226,89 @@ fn persist_tool_result(
     workspace: &Path,
     session_key: &str,
     tool_call_id: &str,
-    file_payload: &str,
-    preview_payload: &str,
-    suffix: &str,
+    payload: &ToolResultPayload,
     original_size: usize,
 ) -> std::io::Result<PersistedToolResult> {
     let root = workspace.join(TOOL_RESULTS_DIR);
-    let bucket = root.join(non_empty_safe_filename(session_key));
+    let relative_path = tool_result_relative_path(session_key, tool_call_id, payload);
+    let path = workspace.join(&relative_path);
+    let bucket = path
+        .parent()
+        .ok_or_else(|| permission_denied("tool result path has no parent"))?
+        .to_path_buf();
     reject_existing_tool_result_symlinks(workspace, &bucket)?;
     fs::create_dir_all(&bucket)?;
     reject_tool_result_symlinks(workspace, &bucket)?;
     cleanup_tool_result_buckets(&root, &bucket).ok();
 
-    let path = bucket.join(format!(
-        "{}.{}",
-        non_empty_safe_filename(tool_call_id),
-        suffix
-    ));
     reject_tool_result_leaf_symlink(&path)?;
     if !path.exists() {
-        write_text_atomic(&path, file_payload)?;
+        write_text_atomic(&path, &payload.redacted_file)?;
     }
-    let preview = truncate_text(preview_payload, TOOL_RESULT_PREVIEW_CHARS);
+    let persisted_bytes = fs::read(&path)?;
+    if persisted_bytes != payload.redacted_file.as_bytes() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "tool result artifact collision",
+        ));
+    }
+    let preview = truncate_text(&payload.redacted_preview, TOOL_RESULT_PREVIEW_CHARS);
+    let locator = workspace_relative_locator(workspace, &path)?;
+    let truncated_preview = original_size > TOOL_RESULT_PREVIEW_CHARS;
     Ok(PersistedToolResult {
         path,
         original_size,
-        truncated_preview: original_size > TOOL_RESULT_PREVIEW_CHARS,
+        truncated_preview,
         preview,
+        artifact: ToolResultArtifactRef {
+            locator,
+            digest: sha256_hex(&persisted_bytes),
+            content_kind: payload.content_kind.clone(),
+            original_size,
+            preview_truncated: truncated_preview,
+            redacted: payload.redacted,
+        },
     })
+}
+
+fn workspace_relative_locator(workspace: &Path, path: &Path) -> std::io::Result<String> {
+    let relative = path
+        .strip_prefix(workspace)
+        .map_err(|_| permission_denied("tool result path escapes workspace"))?;
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(permission_denied("tool result path escapes workspace"));
+    }
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{digest:x}")
+}
+
+fn opaque_name(prefix: &str, value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    format!("{prefix}-{digest:x}")
+}
+
+fn tool_result_relative_path(
+    session_key: &str,
+    tool_call_id: &str,
+    payload: &ToolResultPayload,
+) -> PathBuf {
+    let payload_digest = sha256_hex(payload.redacted_file.as_bytes());
+    Path::new(TOOL_RESULTS_DIR)
+        .join(opaque_name("session", session_key))
+        .join(format!(
+            "{}-{}.{}",
+            opaque_name("call", tool_call_id),
+            payload_digest.trim_start_matches("sha256:"),
+            payload.suffix
+        ))
 }
 
 fn cleanup_tool_result_buckets(root: &Path, current_bucket: &Path) -> std::io::Result<()> {
@@ -277,17 +428,214 @@ fn permission_denied(message: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::PermissionDenied, message)
 }
 
-fn non_empty_safe_filename(value: &str) -> String {
-    match safe_filename(value).as_str() {
-        "" | "." | ".." => "tool-result".to_owned(),
-        safe => safe.to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn temp_root(label: &str) -> Result<PathBuf, String> {
+        let root = std::env::temp_dir().join(format!(
+            "shacs-utils-tool-results-{label}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        Ok(root)
+    }
+
+    fn expected_artifact_path(
+        root: &Path,
+        session_key: &str,
+        tool_call_id: &str,
+        content: &Value,
+    ) -> Result<PathBuf, String> {
+        let payload = content_text_payload(content).ok_or_else(|| "missing payload".to_owned())?;
+        Ok(root.join(tool_result_relative_path(
+            session_key,
+            tool_call_id,
+            &payload,
+        )))
+    }
+
+    #[test]
+    fn returns_inline_outcome_for_small_text_tool_result() -> Result<(), String> {
+        let outcome = maybe_persist_text_tool_result_with_artifact(
+            Some(&temp_root("inline")?),
+            None,
+            "call",
+            "short",
+            64,
+        )
+        .ok_or_else(|| "missing inline outcome".to_owned())?;
+        assert_eq!(outcome.content, Value::String("short".to_owned()));
+        assert_eq!(
+            outcome.disposition,
+            ToolResultPersistenceDisposition::Inline
+        );
+        assert_eq!(outcome.artifact, None);
+        Ok(())
+    }
+
+    #[test]
+    fn persists_oversized_text_with_safe_relative_artifact_ref() -> Result<(), String> {
+        let root = temp_root("structured-text")?;
+        let outcome = maybe_persist_text_tool_result_with_artifact(
+            Some(&root),
+            Some("session/one"),
+            "call:1",
+            "abcdef",
+            3,
+        )
+        .ok_or_else(|| "missing persisted outcome".to_owned())?;
+        let artifact = outcome
+            .artifact
+            .ok_or_else(|| "missing artifact ref".to_owned())?;
+        assert_eq!(
+            outcome.disposition,
+            ToolResultPersistenceDisposition::Persisted
+        );
+        let expected_path = expected_artifact_path(
+            &root,
+            "session/one",
+            "call:1",
+            &Value::String("abcdef".to_owned()),
+        )?;
+        assert_eq!(root.join(&artifact.locator), expected_path);
+        assert!(Path::new(&artifact.locator).is_relative());
+        assert!(!artifact
+            .locator
+            .contains(&root.to_string_lossy().to_string()));
+        assert_eq!(artifact.content_kind, ToolResultArtifactContentKind::Text);
+        assert_eq!(artifact.original_size, 6);
+        assert!(!artifact.preview_truncated);
+        assert!(!artifact.redacted);
+        let stored =
+            fs::read_to_string(root.join(&artifact.locator)).map_err(|error| error.to_string())?;
+        assert_eq!(stored, "abcdef");
+        assert_eq!(artifact.digest, sha256_hex(stored.as_bytes()));
+        Ok(())
+    }
+
+    #[test]
+    fn persists_oversized_json_with_artifact_ref() -> Result<(), String> {
+        let root = temp_root("structured-json")?;
+        let content = json!([
+            {"type": "text", "text": "hello"},
+            {"type": "text", "text": "world"}
+        ]);
+        let outcome =
+            maybe_persist_tool_result_with_artifact(Some(&root), None, "call", &content, 3)
+                .ok_or_else(|| "missing persisted json outcome".to_owned())?;
+        let artifact = outcome
+            .artifact
+            .ok_or_else(|| "missing artifact ref".to_owned())?;
+        assert_eq!(
+            outcome.disposition,
+            ToolResultPersistenceDisposition::Persisted
+        );
+        let expected_path = expected_artifact_path(&root, "default", "call", &content)?;
+        assert_eq!(root.join(&artifact.locator), expected_path);
+        assert_eq!(
+            artifact.content_kind,
+            ToolResultArtifactContentKind::JsonTextBlocks
+        );
+        assert_eq!(artifact.original_size, "hello\nworld".chars().count());
+        assert!(!artifact.redacted);
+        let stored =
+            fs::read_to_string(root.join(&artifact.locator)).map_err(|error| error.to_string())?;
+        assert_eq!(artifact.digest, sha256_hex(stored.as_bytes()));
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored).map_err(|error| error.to_string())?,
+            content
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_call_id_uses_payload_specific_artifact() -> Result<(), String> {
+        let root = temp_root("repeated-call-id")?;
+        let first = maybe_persist_text_tool_result_with_artifact(
+            Some(&root),
+            Some("session"),
+            "call",
+            "first oversized result",
+            3,
+        )
+        .and_then(|outcome| outcome.artifact)
+        .ok_or_else(|| "missing first artifact".to_owned())?;
+        let second = maybe_persist_text_tool_result_with_artifact(
+            Some(&root),
+            Some("session"),
+            "call",
+            "second oversized result",
+            3,
+        )
+        .and_then(|outcome| outcome.artifact)
+        .ok_or_else(|| "missing second artifact".to_owned())?;
+
+        assert_ne!(first.locator, second.locator);
+        assert_ne!(first.digest, second.digest);
+        assert_eq!(
+            fs::read_to_string(root.join(first.locator)).map_err(|error| error.to_string())?,
+            "first oversized result"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(second.locator)).map_err(|error| error.to_string())?,
+            "second oversized result"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn marks_structured_artifact_redacted_and_digests_redacted_payload() -> Result<(), String> {
+        let root = temp_root("structured-redacted")?;
+        let secret = "OPENAI_API_KEY=sk-secret-token visible text";
+        let outcome =
+            maybe_persist_text_tool_result_with_artifact(Some(&root), None, "call", secret, 3)
+                .ok_or_else(|| "missing redacted outcome".to_owned())?;
+        let artifact = outcome
+            .artifact
+            .ok_or_else(|| "missing artifact ref".to_owned())?;
+        let stored =
+            fs::read_to_string(root.join(&artifact.locator)).map_err(|error| error.to_string())?;
+        let rendered = outcome
+            .content
+            .as_str()
+            .ok_or_else(|| "content was not string".to_owned())?;
+        assert!(artifact.redacted);
+        assert_eq!(artifact.digest, sha256_hex(stored.as_bytes()));
+        assert!(stored.contains(shacs_redaction::REDACTED));
+        assert!(rendered.contains(shacs_redaction::REDACTED));
+        assert!(!stored.contains("sk-secret-token"));
+        assert!(!rendered.contains("sk-secret-token"));
+        Ok(())
+    }
+
+    #[test]
+    fn returns_truncated_fallback_outcome_without_workspace() -> Result<(), String> {
+        let outcome = maybe_persist_text_tool_result_with_artifact(
+            None,
+            None,
+            "call",
+            r#"before {"api_key":"plain-secret"} after with enough extra output to persist"#,
+            64,
+        )
+        .ok_or_else(|| "missing fallback outcome".to_owned())?;
+        let fallback = outcome
+            .content
+            .as_str()
+            .ok_or_else(|| "fallback was not string".to_owned())?;
+        assert_eq!(
+            outcome.disposition,
+            ToolResultPersistenceDisposition::TruncatedFallback
+        );
+        assert_eq!(outcome.artifact, None);
+        assert!(fallback.contains(shacs_redaction::REDACTED));
+        assert!(!fallback.contains("plain-secret"));
+        Ok(())
+    }
 
     #[test]
     fn persists_oversized_string_tool_result() -> Result<(), String> {
@@ -304,11 +652,13 @@ mod tests {
                 .ok_or_else(|| "missing reference".to_owned())?;
         assert!(reference.contains("[tool output persisted]"));
         assert!(reference.contains("Original size: 6 chars"));
-        assert!(root
-            .join(TOOL_RESULTS_DIR)
-            .join("session_one")
-            .join("call_1.txt")
-            .is_file());
+        assert!(expected_artifact_path(
+            &root,
+            "session/one",
+            "call:1",
+            &Value::String("abcdef".to_owned()),
+        )?
+        .is_file());
         Ok(())
     }
 
@@ -325,9 +675,13 @@ mod tests {
         let secret = "OPENAI_API_KEY=sk-secret-token visible text";
         let reference = maybe_persist_text_tool_result(Some(&root), None, "call", secret, 3)
             .ok_or_else(|| "missing reference".to_owned())?;
-        let stored =
-            fs::read_to_string(root.join(TOOL_RESULTS_DIR).join("default").join("call.txt"))
-                .map_err(|error| error.to_string())?;
+        let stored = fs::read_to_string(expected_artifact_path(
+            &root,
+            "default",
+            "call",
+            &Value::String(secret.to_owned()),
+        )?)
+        .map_err(|error| error.to_string())?;
         assert!(stored.contains(shacs_redaction::REDACTED));
         assert!(reference.contains(shacs_redaction::REDACTED));
         assert!(!stored.contains("sk-secret-token"));
@@ -349,9 +703,13 @@ mod tests {
         let secret = r#"before {"api_key":"plain-secret"} after with enough output to persist"#;
         let reference = maybe_persist_text_tool_result(Some(&root), None, "call", secret, 24)
             .ok_or_else(|| "missing reference".to_owned())?;
-        let stored =
-            fs::read_to_string(root.join(TOOL_RESULTS_DIR).join("default").join("call.txt"))
-                .map_err(|error| error.to_string())?;
+        let stored = fs::read_to_string(expected_artifact_path(
+            &root,
+            "default",
+            "call",
+            &Value::String(secret.to_owned()),
+        )?)
+        .map_err(|error| error.to_string())?;
         assert!(stored.contains("before"));
         assert!(stored.contains(shacs_redaction::REDACTED));
         assert!(reference.contains(shacs_redaction::REDACTED));
@@ -380,17 +738,9 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("hello\nworld"));
-        assert!(root
-            .join(TOOL_RESULTS_DIR)
-            .join("default")
-            .join("call.json")
-            .is_file());
-        let stored = fs::read_to_string(
-            root.join(TOOL_RESULTS_DIR)
-                .join("default")
-                .join("call.json"),
-        )
-        .map_err(|error| error.to_string())?;
+        let path = expected_artifact_path(&root, "default", "call", &content)?;
+        assert!(path.is_file());
+        let stored = fs::read_to_string(path).map_err(|error| error.to_string())?;
         assert_eq!(
             serde_json::from_str::<Value>(&stored).map_err(|error| error.to_string())?,
             content
@@ -418,12 +768,9 @@ mod tests {
         let reference = reference
             .as_str()
             .ok_or_else(|| "reference was not string".to_owned())?;
-        let stored = fs::read_to_string(
-            root.join(TOOL_RESULTS_DIR)
-                .join("default")
-                .join("call.json"),
-        )
-        .map_err(|error| error.to_string())?;
+        let stored =
+            fs::read_to_string(expected_artifact_path(&root, "default", "call", &content)?)
+                .map_err(|error| error.to_string())?;
         assert!(stored.contains(shacs_redaction::REDACTED));
         assert!(reference.contains(shacs_redaction::REDACTED));
         assert!(!stored.contains("ghp_secret_token"));
@@ -450,12 +797,9 @@ mod tests {
         let reference = reference
             .as_str()
             .ok_or_else(|| "reference was not string".to_owned())?;
-        let stored = fs::read_to_string(
-            root.join(TOOL_RESULTS_DIR)
-                .join("default")
-                .join("call.json"),
-        )
-        .map_err(|error| error.to_string())?;
+        let stored =
+            fs::read_to_string(expected_artifact_path(&root, "default", "call", &content)?)
+                .map_err(|error| error.to_string())?;
         assert!(stored.contains("safe output"));
         assert!(stored.contains(shacs_redaction::REDACTED));
         assert!(reference.contains(shacs_redaction::REDACTED));
@@ -490,16 +834,20 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .as_nanos()
         ));
-        let bucket = root.join(TOOL_RESULTS_DIR).join("default");
-        fs::create_dir_all(&bucket).map_err(|error| error.to_string())?;
-        let outside = root.join("outside.json");
-        fs::write(&outside, "outside").map_err(|error| error.to_string())?;
-        symlink(&outside, bucket.join("call.json")).map_err(|error| error.to_string())?;
-
         let content = json!([
             {"type": "text", "text": "safe output"},
             {"type": "text", "text": "client_secret: \"plain-secret\" after with enough output"}
         ]);
+        let artifact_path = expected_artifact_path(&root, "default", "call", &content)?;
+        fs::create_dir_all(
+            artifact_path
+                .parent()
+                .ok_or_else(|| "missing artifact parent".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let outside = root.join("outside.json");
+        fs::write(&outside, "outside").map_err(|error| error.to_string())?;
+        symlink(&outside, artifact_path).map_err(|error| error.to_string())?;
         let result = maybe_persist_tool_result(Some(&root), None, "call", &content, 64)
             .ok_or_else(|| "missing fail-closed fallback".to_owned())?;
         let result = result
@@ -527,20 +875,21 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .as_nanos()
         ));
-        let bucket = root.join(TOOL_RESULTS_DIR).join("default");
-        fs::create_dir_all(&bucket).map_err(|error| error.to_string())?;
+        let content = "before Authorization: Bearer ghp_secret_token after with enough extra output to persist";
+        let artifact_path =
+            expected_artifact_path(&root, "default", "call", &Value::String(content.to_owned()))?;
+        fs::create_dir_all(
+            artifact_path
+                .parent()
+                .ok_or_else(|| "missing artifact parent".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
         let outside = root.join("outside.txt");
         fs::write(&outside, "outside").map_err(|error| error.to_string())?;
-        symlink(&outside, bucket.join("call.txt")).map_err(|error| error.to_string())?;
+        symlink(&outside, artifact_path).map_err(|error| error.to_string())?;
 
-        let result = maybe_persist_text_tool_result(
-            Some(&root),
-            None,
-            "call",
-            "before Authorization: Bearer ghp_secret_token after with enough extra output to persist",
-            64,
-        )
-        .ok_or_else(|| "missing fail-closed fallback".to_owned())?;
+        let result = maybe_persist_text_tool_result(Some(&root), None, "call", content, 64)
+            .ok_or_else(|| "missing fail-closed fallback".to_owned())?;
         assert!(result.contains("before Authorization: Bearer"));
         assert!(result.contains(shacs_redaction::REDACTED));
         assert!(result.contains("after"));
@@ -564,11 +913,21 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .as_nanos()
         ));
-        let bucket = root.join(TOOL_RESULTS_DIR).join("default");
-        fs::create_dir_all(&bucket).map_err(|error| error.to_string())?;
+        let artifact_path = expected_artifact_path(
+            &root,
+            "default",
+            "call",
+            &Value::String("abcdef".to_owned()),
+        )?;
+        fs::create_dir_all(
+            artifact_path
+                .parent()
+                .ok_or_else(|| "missing artifact parent".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
         let outside = root.join("outside.txt");
         fs::write(&outside, "outside").map_err(|error| error.to_string())?;
-        symlink(&outside, bucket.join("call.txt")).map_err(|error| error.to_string())?;
+        symlink(&outside, artifact_path).map_err(|error| error.to_string())?;
         let result = maybe_persist_text_tool_result(Some(&root), None, "call", "abcdef", 3)
             .ok_or_else(|| "missing fail-closed fallback".to_owned())?;
         assert_eq!(result, "abc\n... (truncated)");
