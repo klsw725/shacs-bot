@@ -302,6 +302,176 @@ fn session_ux_history_omits_provider_and_tool_internals() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn session_ux_projects_runtime_execution_without_raw_ledger_values() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    let mut session = Session::new("cli:runtime-execution");
+    let outcomes = (0..22)
+        .map(|index| {
+            let (domain, outcome, decision, locator) = match index {
+                0 => (
+                    "provider",
+                    json!("completed"),
+                    json!({"kind": "accepted"}),
+                    json!({"locator": "/tmp/secret-output.txt", "digest": "hidden"}),
+                ),
+                1 => (
+                    "tool",
+                    json!({"kind": "failed", "class": "fatal"}),
+                    json!({"kind": "duplicate_ignored", "reason": "same secret correlation"}),
+                    json!({"locator": "../secret-output.txt", "digest": "hidden"}),
+                ),
+                2 => (
+                    "subagent",
+                    json!("timed_out"),
+                    json!({"kind": "discarded_late", "reason": "late secret"}),
+                    json!({"locator": ".nanobot/tool-results/default/call.json", "digest": "safe"}),
+                ),
+                3 => (
+                    "provider",
+                    json!("stale"),
+                    json!({"kind": "discarded_stale", "reason": "stale secret"}),
+                    Value::Null,
+                ),
+                _ => (
+                    "tool",
+                    json!("completed"),
+                    json!({"kind": "accepted"}),
+                    Value::Null,
+                ),
+            };
+            json!({
+                "fact": {
+                    "identity": {
+                        "scope": {"session_id": "cli:runtime-execution", "turn_id": "turn-secret"},
+                        "effect_id": if index == 2 {
+                            "Authorization: Bearer ghp_effect_secret".to_owned()
+                        } else {
+                            format!("effect-{index:02}")
+                        },
+                        "correlation_id": format!("corr-secret-{index}"),
+                        "attempt_id": "attempt-secret",
+                        "idempotency_key": "idempotency-secret"
+                    },
+                    "outcome": {"domain": domain, "outcome": outcome},
+                    "finished_at_ms": index,
+                    "detail": "raw secret detail",
+                    "artifact_ref": locator
+                },
+                "decision": decision
+            })
+        })
+        .collect::<Vec<_>>();
+    session.metadata.insert(
+        "runtime_execution".to_owned(),
+        json!({
+            "pending": [
+                {"domain": "provider", "identity": {"effect_id": "pending-provider", "correlation_id": "hidden"}},
+                {"domain": "tool", "identity": {"effect_id": "pending-tool", "correlation_id": "hidden"}},
+                {"domain": "subagent", "identity": {"effect_id": "pending-subagent", "correlation_id": "hidden"}},
+                {"domain": "other", "identity": {"effect_id": "pending-other", "correlation_id": "hidden"}}
+            ],
+            "outcomes": outcomes,
+            "raw_payload": "sk-hidden-runtime-payload"
+        }),
+    );
+    manager.save(&session)?;
+
+    let detail = manager
+        .session_ux_detail("cli:runtime-execution")
+        .ok_or("missing UX detail")?;
+    let diagnostics = manager.session_ux_diagnostics("cli:runtime-execution");
+    let execution = detail
+        .runtime_execution
+        .as_ref()
+        .ok_or("missing runtime execution projection")?;
+
+    assert_eq!(execution.pending_count, 4);
+    assert_eq!(execution.outcome_count, 22);
+    assert_eq!(execution.pending_by_domain.provider, 1);
+    assert_eq!(execution.pending_by_domain.tool, 1);
+    assert_eq!(execution.pending_by_domain.subagent, 1);
+    assert_eq!(execution.pending_by_domain.unknown, 1);
+    assert_eq!(execution.outcomes_by_domain.provider, 2);
+    assert_eq!(execution.outcomes_by_domain.tool, 19);
+    assert_eq!(execution.outcomes_by_domain.subagent, 1);
+    assert_eq!(execution.decisions.accepted, 19);
+    assert_eq!(execution.decisions.duplicate, 1);
+    assert_eq!(execution.decisions.late, 1);
+    assert_eq!(execution.decisions.stale, 1);
+    assert_eq!(execution.artifact_ref_count, 3);
+    assert_eq!(execution.safe_artifact_ref_count, 1);
+    assert_eq!(execution.recent_outcomes.len(), 20);
+    assert!(execution.recent_outcomes[0]
+        .effect_ref
+        .starts_with("subagent:sha256:"));
+    assert_eq!(execution.recent_outcomes[0].domain, "subagent");
+    assert_eq!(execution.recent_outcomes[0].outcome, "timed_out");
+    assert_eq!(execution.recent_outcomes[0].decision, "late");
+    assert_eq!(
+        execution.recent_outcomes[0].artifact_locator.as_deref(),
+        Some(".nanobot/tool-results/default/call.json")
+    );
+    assert_eq!(
+        diagnostics
+            .runtime_execution
+            .as_ref()
+            .map(|execution| execution.outcome_count),
+        Some(22)
+    );
+
+    let detail_text = serde_json::to_string(&detail)?;
+    for forbidden in [
+        "sk-hidden-runtime-payload",
+        "raw secret detail",
+        "corr-secret",
+        "attempt-secret",
+        "idempotency-secret",
+        "turn-secret",
+        "/tmp/secret-output.txt",
+        "../secret-output.txt",
+        "same secret correlation",
+        "late secret",
+        "stale secret",
+        "ghp_effect_secret",
+    ] {
+        assert!(
+            !detail_text.contains(forbidden),
+            "runtime execution projection leaked {forbidden}: {detail_text}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn session_ux_ignores_absent_and_malformed_runtime_execution() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    let mut absent = Session::new("cli:runtime-execution-absent");
+    absent.add_message("user", "hello", Map::new());
+    manager.save(&absent)?;
+
+    let mut malformed = Session::new("cli:runtime-execution-malformed");
+    malformed.metadata.insert(
+        "runtime_execution".to_owned(),
+        json!({"pending": "old", "outcomes": 7}),
+    );
+    manager.save(&malformed)?;
+
+    assert!(manager
+        .session_ux_detail("cli:runtime-execution-absent")
+        .ok_or("missing absent detail")?
+        .runtime_execution
+        .is_none());
+    assert!(manager
+        .session_ux_detail("cli:runtime-execution-malformed")
+        .ok_or("missing malformed detail")?
+        .runtime_execution
+        .is_none());
+    Ok(())
+}
+
+#[test]
 fn session_manager_repairs_orphan_tool_boundaries_and_file_cap() -> Result<(), Box<dyn Error>> {
     let mut session = Session::new("cli:tools");
     session.add_message("user", "start", Map::new());

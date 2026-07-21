@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const FILE_MAX_MESSAGES: usize = 2000;
@@ -220,6 +220,7 @@ pub struct SessionUxDetail {
     pub checkpoint_phase: Option<String>,
     pub diagnostics_refs: Vec<String>,
     pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
+    pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,7 +235,46 @@ pub struct SessionUxDiagnostics {
     pub checkpoint_phase: Option<String>,
     pub diagnostics_refs: Vec<String>,
     pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
+    pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
     pub legal_start: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRuntimeExecutionProjection {
+    pub pending_count: u64,
+    pub outcome_count: u64,
+    pub pending_by_domain: SessionRuntimeExecutionDomainCounts,
+    pub outcomes_by_domain: SessionRuntimeExecutionDomainCounts,
+    pub decisions: SessionRuntimeExecutionDecisionCounts,
+    pub artifact_ref_count: u64,
+    pub safe_artifact_ref_count: u64,
+    pub recent_outcomes: Vec<SessionRuntimeExecutionOutcomeRow>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRuntimeExecutionDomainCounts {
+    pub provider: u64,
+    pub tool: u64,
+    pub subagent: u64,
+    pub unknown: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRuntimeExecutionDecisionCounts {
+    pub accepted: u64,
+    pub duplicate: u64,
+    pub late: u64,
+    pub stale: u64,
+    pub unknown: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRuntimeExecutionOutcomeRow {
+    pub effect_ref: String,
+    pub domain: String,
+    pub outcome: String,
+    pub decision: String,
+    pub artifact_locator: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -559,6 +599,7 @@ impl SessionManager {
                 checkpoint_phase: None,
                 diagnostics_refs: Vec::new(),
                 runtime_workflow: None,
+                runtime_execution: None,
                 legal_start: 0,
             }
         }
@@ -781,6 +822,7 @@ fn session_ux_detail_from_session(session: Session, path: PathBuf) -> SessionUxD
         checkpoint_phase: metadata.checkpoint_phase,
         diagnostics_refs: metadata.diagnostics_refs,
         runtime_workflow: metadata.runtime_workflow,
+        runtime_execution: metadata.runtime_execution,
     }
 }
 
@@ -798,6 +840,7 @@ fn session_ux_diagnostics_from_session(session: Session, path: PathBuf) -> Sessi
         checkpoint_phase: metadata.checkpoint_phase,
         diagnostics_refs: metadata.diagnostics_refs,
         runtime_workflow: metadata.runtime_workflow,
+        runtime_execution: metadata.runtime_execution,
         legal_start,
     }
 }
@@ -808,6 +851,7 @@ struct SessionUxMetadata {
     checkpoint_phase: Option<String>,
     diagnostics_refs: Vec<String>,
     runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
+    runtime_execution: Option<SessionRuntimeExecutionProjection>,
 }
 
 fn session_ux_metadata(metadata: &Map<String, Value>) -> SessionUxMetadata {
@@ -833,13 +877,187 @@ fn session_ux_metadata(metadata: &Map<String, Value>) -> SessionUxMetadata {
         .and_then(Value::as_str)
         .map(str::to_owned);
     let runtime_workflow = session_runtime_workflow_projection(metadata);
+    let runtime_execution = session_runtime_execution_projection(metadata);
     SessionUxMetadata {
         keys: metadata_keys,
         recovery_markers,
         checkpoint_phase,
         diagnostics_refs,
         runtime_workflow,
+        runtime_execution,
     }
+}
+
+fn session_runtime_execution_projection(
+    metadata: &Map<String, Value>,
+) -> Option<SessionRuntimeExecutionProjection> {
+    let ledger = metadata.get("runtime_execution")?.as_object()?;
+    let pending = ledger.get("pending").and_then(Value::as_array);
+    let outcomes = ledger.get("outcomes").and_then(Value::as_array);
+    if pending.is_none() && outcomes.is_none() {
+        return None;
+    }
+
+    let mut pending_by_domain = SessionRuntimeExecutionDomainCounts::default();
+    let mut outcomes_by_domain = SessionRuntimeExecutionDomainCounts::default();
+    let mut decisions = SessionRuntimeExecutionDecisionCounts::default();
+    let mut artifact_ref_count = 0;
+    let mut safe_artifact_ref_count = 0;
+
+    if let Some(pending) = pending {
+        for item in pending {
+            increment_domain(
+                &mut pending_by_domain,
+                value_string(item.get("domain")).as_deref(),
+            );
+        }
+    }
+
+    let mut rows = Vec::new();
+    if let Some(outcomes) = outcomes {
+        for item in outcomes {
+            let fact = item.get("fact").and_then(Value::as_object);
+            let outcome_value = fact.and_then(|fact| fact.get("outcome"));
+            let domain = outcome_value
+                .and_then(|outcome| value_string(outcome.get("domain")))
+                .unwrap_or_else(|| "unknown".to_owned());
+            increment_domain(&mut outcomes_by_domain, Some(&domain));
+
+            let decision = decision_summary(item.get("decision"));
+            increment_decision(&mut decisions, &decision);
+
+            let artifact_locator = fact
+                .and_then(|fact| fact.get("artifact_ref"))
+                .filter(|artifact_ref| artifact_ref.as_object().is_some())
+                .and_then(|artifact_ref| {
+                    artifact_ref_count += 1;
+                    safe_artifact_locator(artifact_ref)
+                });
+            if artifact_locator.is_some() {
+                safe_artifact_ref_count += 1;
+            }
+
+            if let Some(row) =
+                fact.and_then(|fact| outcome_row(fact, &domain, &decision, artifact_locator))
+            {
+                rows.push(row);
+            }
+        }
+    }
+    if rows.len() > 20 {
+        rows = rows.split_off(rows.len() - 20);
+    }
+
+    Some(SessionRuntimeExecutionProjection {
+        pending_count: pending.map(|items| items.len() as u64).unwrap_or_default(),
+        outcome_count: outcomes.map(|items| items.len() as u64).unwrap_or_default(),
+        pending_by_domain,
+        outcomes_by_domain,
+        decisions,
+        artifact_ref_count,
+        safe_artifact_ref_count,
+        recent_outcomes: rows,
+    })
+}
+
+fn outcome_row(
+    fact: &Map<String, Value>,
+    domain: &str,
+    decision: &str,
+    artifact_locator: Option<String>,
+) -> Option<SessionRuntimeExecutionOutcomeRow> {
+    let effect_id = fact
+        .get("identity")
+        .and_then(|identity| value_string(identity.get("effect_id")))?;
+    Some(SessionRuntimeExecutionOutcomeRow {
+        effect_ref: opaque_execution_ref(domain, &effect_id),
+        domain: domain.to_owned(),
+        outcome: fact
+            .get("outcome")
+            .and_then(outcome_summary)
+            .unwrap_or_else(|| "unknown".to_owned()),
+        decision: decision.to_owned(),
+        artifact_locator,
+    })
+}
+
+fn opaque_execution_ref(domain: &str, effect_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(effect_id.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{domain}:sha256:{}", &digest[..16])
+}
+
+fn outcome_summary(value: &Value) -> Option<String> {
+    let outcome = value.get("outcome")?;
+    if let Some(text) = outcome.as_str() {
+        return non_empty_string(text);
+    }
+    outcome
+        .get("kind")
+        .and_then(Value::as_str)
+        .and_then(non_empty_string)
+}
+
+fn decision_summary(value: Option<&Value>) -> String {
+    value
+        .and_then(|decision| value_string(decision.get("kind")))
+        .map(|kind| match kind.as_str() {
+            "accepted" => "accepted".to_owned(),
+            "duplicate_ignored" => "duplicate".to_owned(),
+            "discarded_late" => "late".to_owned(),
+            "discarded_stale" => "stale".to_owned(),
+            _ => "unknown".to_owned(),
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn value_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).and_then(non_empty_string)
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn increment_domain(counts: &mut SessionRuntimeExecutionDomainCounts, domain: Option<&str>) {
+    match domain {
+        Some("provider") => counts.provider += 1,
+        Some("tool") => counts.tool += 1,
+        Some("subagent") => counts.subagent += 1,
+        _ => counts.unknown += 1,
+    }
+}
+
+fn increment_decision(counts: &mut SessionRuntimeExecutionDecisionCounts, decision: &str) {
+    match decision {
+        "accepted" => counts.accepted += 1,
+        "duplicate" => counts.duplicate += 1,
+        "late" => counts.late += 1,
+        "stale" => counts.stale += 1,
+        _ => counts.unknown += 1,
+    }
+}
+
+fn safe_artifact_locator(artifact_ref: &Value) -> Option<String> {
+    let locator = artifact_ref.get("locator").and_then(Value::as_str)?.trim();
+    if locator.is_empty() {
+        return None;
+    }
+    let path = Path::new(locator);
+    if !path.is_relative() || !path.starts_with(Path::new(".nanobot/tool-results")) {
+        return None;
+    }
+    let mut has_normal = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_normal = true,
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    has_normal.then(|| locator.to_owned())
 }
 
 fn session_runtime_workflow_projection(
