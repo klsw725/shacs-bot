@@ -1,19 +1,21 @@
 use serde_json::{json, Map, Value};
 use shacs_core::runtime::{
     pick_consolidation_boundary, AgentHook, AgentHookContext, AgentRunSpec, AgentRunner,
-    AudioContextAnalysis, AudioContextAnalyzer, AudioContextRequest, CompositeHook,
-    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBuildRequest,
-    ContextBuilder, DockerContainmentSnapshot, Dream, DreamProcessor, InboundMessage,
+    AudioContextAnalysis, AudioContextAnalyzer, AudioContextRequest, CancellationToken,
+    CompositeHook, ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef,
+    ContextBuildRequest, ContextBuilder, DockerContainmentSnapshot, Dream, DreamProcessor,
+    ExecutionDomain, ExecutionOutcome, ExecutionScope, InboundMessage, LateResultDecision,
     MemoryGitBoundary, MemoryLineAge, MemoryStore, MessageBus, MessageBusError, OutboundMessage,
     PermissionMode, PermissionModeSnapshot, PermissionRuleInput, ProcExecSummary,
-    ProviderArchiveConsolidator, ProviderMemoryConsolidator, Session, SessionHistoryOptions,
-    SessionManager, SkillsLoader, StreamDeltaCoalescer, SubagentManager, TokenConsolidationConfig,
-    ToolExecutionContext, ToolSearchConfig, ToolSearchMode, VideoContextAnalysis,
-    VideoContextAnalyzer, VideoContextRequest, VideoMetadata,
+    ProviderArchiveConsolidator, ProviderMemoryConsolidator, ProviderOutcomeKind,
+    RuntimeExecutionLedger, Session, SessionHistoryOptions, SessionManager, SkillsLoader,
+    StreamDeltaCoalescer, SubagentManager, TokenConsolidationConfig, ToolExecutionContext,
+    ToolFailureClass, ToolOutcomeKind, ToolSearchConfig, ToolSearchMode, ToolStatus,
+    VideoContextAnalysis, VideoContextAnalyzer, VideoContextRequest, VideoMetadata,
 };
 use shacs_core::tools::{
-    AskUserTool, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters, ToolRegistry,
-    ToolResult,
+    AskUserTool, JsonMap, SchemaFragment, SpawnRequest, SpawnTool, StringSchema, Tool,
+    ToolParameters, ToolRegistry, ToolResult,
 };
 use shacs_providers::{
     LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest, ToolCallRequest,
@@ -2006,6 +2008,180 @@ fn runtime_runner_direct_visible_tool_still_executes_with_tool_search_active(
 }
 
 #[test]
+fn runtime_runner_records_later_mixed_segments_as_skipped_after_interrupt(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(PermissionExecTool {
+        calls: calls.clone(),
+    });
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![LlmResponse {
+        tool_calls: vec![
+            ToolCallRequest::new(
+                "exec-interrupt",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            ),
+            ToolCallRequest::new(
+                "bridge-after-interrupt",
+                "tool_search",
+                Map::from_iter([("query".to_owned(), json!("echo"))]),
+            ),
+        ],
+        finish_reason: "tool_calls".to_owned(),
+        ..LlmResponse::default()
+    }]);
+    let ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let mut context = safe_mcp_tool_context();
+    context.permission_mode_snapshot.mode = PermissionMode::Auto;
+    context.permission_interactive = true;
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+    spec.tool_context = context;
+    spec.execution_scope = Some(ExecutionScope::new("cli:mixed", "turn:mixed"));
+    spec.execution_ledger = Some(ledger.clone());
+
+    let result = AgentRunner::new().run(spec)?;
+    let ledger = ledger.lock().map_err(|error| error.to_string())?;
+    if calls.load(Ordering::SeqCst) != 0
+        || !matches!(
+            result.interrupt,
+            Some(shacs_core::runtime::RuntimeInterrupt::PermissionApproval { .. })
+        )
+        || !ledger.pending.is_empty()
+        || !ledger.outcomes.iter().any(|record| {
+            record.fact.identity.correlation_id == "bridge-after-interrupt"
+                && matches!(
+                    record.fact.outcome,
+                    ExecutionOutcome::Tool(ToolOutcomeKind::Skipped { .. })
+                )
+        })
+    {
+        return Err(format!(
+            "mixed dispatch left an unclosed tool effect: result={result:?} ledger={ledger:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_fail_on_tool_error_skips_later_bridge_segment() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(ErrorTool);
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![LlmResponse {
+        tool_calls: vec![
+            ToolCallRequest::new("fatal-direct", "mcp_error_tool", Map::new()),
+            ToolCallRequest::new(
+                "bridge-after-fatal",
+                "tool_call",
+                Map::from_iter([
+                    ("name".to_owned(), json!("mcp_echo_lookup")),
+                    ("arguments".to_owned(), json!({"query": "must-not-run"})),
+                ]),
+            ),
+        ],
+        finish_reason: "tool_calls".to_owned(),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+    spec.fail_on_tool_error = true;
+    spec.tool_context = safe_mcp_tool_context();
+
+    let result = AgentRunner::new().run(spec)?;
+    let skipped = result
+        .messages
+        .iter()
+        .find(|message| message["tool_call_id"] == "bridge-after-fatal")
+        .ok_or("missing skipped bridge result")?;
+    if result.stop_reason != "tool_error"
+        || skipped["content"]
+            .as_str()
+            .is_none_or(|content| !content.contains("fatal tool error stopped"))
+        || skipped["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("mcp:must-not-run"))
+    {
+        return Err(
+            format!("fatal direct result did not skip later bridge segment: {result:?}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_fail_on_tool_error_stops_within_bridge_segment() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(McpFailedTimeoutNameTool);
+    registry.register(McpEchoTool);
+    let client = MockProvider::new(vec![LlmResponse {
+        tool_calls: vec![
+            ToolCallRequest::new(
+                "bridge-fatal",
+                "tool_call",
+                Map::from_iter([
+                    ("name".to_owned(), json!("mcp_error_tool")),
+                    ("arguments".to_owned(), json!({})),
+                ]),
+            ),
+            ToolCallRequest::new(
+                "bridge-after-bridge-fatal",
+                "tool_call",
+                Map::from_iter([
+                    ("name".to_owned(), json!("mcp_echo_lookup")),
+                    ("arguments".to_owned(), json!({"query": "must-not-run"})),
+                ]),
+            ),
+        ],
+        finish_reason: "tool_calls".to_owned(),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.tool_search = activated_tool_search_config();
+    spec.fail_on_tool_error = true;
+    spec.tool_context = safe_mcp_tool_context();
+
+    let result = AgentRunner::new().run(spec)?;
+    let skipped = result
+        .messages
+        .iter()
+        .find(|message| message["tool_call_id"] == "bridge-after-bridge-fatal")
+        .ok_or("missing skipped bridge result")?;
+    if result.stop_reason != "tool_error"
+        || skipped["content"]
+            .as_str()
+            .is_none_or(|content| !content.contains("fatal tool error stopped"))
+        || skipped["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("mcp:must-not-run"))
+    {
+        return Err(
+            format!("fatal bridge result did not stop later bridge call: {result:?}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn runtime_runner_rebuilds_catalog_and_rejects_stale_bridge_call() -> Result<(), Box<dyn Error>> {
     let fresh_name = Arc::new(AtomicBool::new(false));
     let tool_calls = Arc::new(AtomicUsize::new(0));
@@ -2351,6 +2527,170 @@ fn runtime_runner_streams_provider_events_when_callback_is_configured() -> Resul
 }
 
 #[test]
+fn runtime_runner_records_provider_final_and_stream_outcomes() -> Result<(), Box<dyn Error>> {
+    let registry = ToolRegistry::new();
+    let ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let final_client = MockProvider::new(vec![LlmResponse {
+        content: Some("final".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let mut final_spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &final_client,
+        "test-model",
+    );
+    final_spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:final"));
+    final_spec.execution_ledger = Some(ledger.clone());
+    AgentRunner::new().run(final_spec)?;
+
+    let stream_client = StreamMockProvider::new(
+        vec![LlmResponse {
+            content: Some("stream".to_owned()),
+            ..LlmResponse::default()
+        }],
+        vec![
+            ProviderEvent::TextDelta {
+                text: "st".to_owned(),
+            },
+            ProviderEvent::ReasoningDelta {
+                text: "why".to_owned(),
+            },
+            ProviderEvent::Finish {
+                usage: json!({"completion_tokens": 1}),
+                reason: "stop".to_owned(),
+            },
+        ],
+    );
+    let mut stream_spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &stream_client,
+        "test-model",
+    );
+    stream_spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:stream"));
+    stream_spec.execution_ledger = Some(ledger.clone());
+    stream_spec.provider_event_callback = Some(Arc::new(|_| {}));
+    AgentRunner::new().run(stream_spec)?;
+
+    let ledger = ledger.lock().map_err(|error| error.to_string())?;
+    let provider_outcomes = ledger
+        .outcomes
+        .iter()
+        .filter(|record| matches!(record.fact.outcome, ExecutionOutcome::Provider(_)))
+        .collect::<Vec<_>>();
+    if provider_outcomes.len() != 2
+        || !provider_outcomes.iter().all(|record| {
+            matches!(
+                record.fact.outcome,
+                ExecutionOutcome::Provider(ProviderOutcomeKind::Completed)
+            ) && record.decision == LateResultDecision::Accepted
+        })
+        || provider_outcomes[0].fact.detail.is_some()
+        || !provider_outcomes[1]
+            .fact
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("\"total\":3")
+    {
+        return Err(format!("provider ledger facts drifted: {provider_outcomes:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_records_provider_error_and_timeout_outcomes() -> Result<(), Box<dyn Error>> {
+    let registry = ToolRegistry::new();
+    let timeout_ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let timeout_client = ErroringProvider::new(ProviderError::Api {
+        status: Some(504),
+        message: "gateway timeout".to_owned(),
+        retryable: false,
+        headers: BTreeMap::new(),
+        body: None,
+    });
+    let mut timeout_spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &timeout_client,
+        "test-model",
+    );
+    timeout_spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:timeout"));
+    timeout_spec.execution_ledger = Some(timeout_ledger.clone());
+    if AgentRunner::new().run(timeout_spec).is_ok() {
+        return Err("timeout provider should return Err".into());
+    }
+
+    let failed_ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let failed_client = ErroringProvider::new(ProviderError::Api {
+        status: Some(500),
+        message: "upstream exploded".to_owned(),
+        retryable: false,
+        headers: BTreeMap::new(),
+        body: None,
+    });
+    let mut failed_spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &failed_client,
+        "test-model",
+    );
+    failed_spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:failed"));
+    failed_spec.execution_ledger = Some(failed_ledger.clone());
+    if AgentRunner::new().run(failed_spec).is_ok() {
+        return Err("failed provider should return Err".into());
+    }
+
+    let cancelled_ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let cancelled_client = ErroringProvider::new(ProviderError::Api {
+        status: None,
+        message: "request cancelled by caller".to_owned(),
+        retryable: false,
+        headers: BTreeMap::new(),
+        body: None,
+    });
+    let mut cancelled_spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &cancelled_client,
+        "test-model",
+    );
+    cancelled_spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:cancelled"));
+    cancelled_spec.execution_ledger = Some(cancelled_ledger.clone());
+    if AgentRunner::new().run(cancelled_spec).is_ok() {
+        return Err("cancelled provider should return Err".into());
+    }
+
+    let timeout = timeout_ledger.lock().map_err(|error| error.to_string())?;
+    let failed = failed_ledger.lock().map_err(|error| error.to_string())?;
+    let cancelled = cancelled_ledger.lock().map_err(|error| error.to_string())?;
+    if !timeout.outcomes.iter().any(|record| {
+        matches!(
+            record.fact.outcome,
+            ExecutionOutcome::Provider(ProviderOutcomeKind::TimedOut)
+        )
+    }) || !failed.outcomes.iter().any(|record| {
+        matches!(
+            record.fact.outcome,
+            ExecutionOutcome::Provider(ProviderOutcomeKind::Failed)
+        )
+    }) || !cancelled.outcomes.iter().any(|record| {
+        matches!(
+            record.fact.outcome,
+            ExecutionOutcome::Provider(ProviderOutcomeKind::Cancelled)
+        )
+    }) {
+        return Err(format!(
+            "provider error classification drifted: timeout={:?} failed={:?} cancelled={:?}",
+            timeout.outcomes, failed.outcomes, cancelled.outcomes
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn runtime_runner_agent_hook_stream_lifecycle_finalize_and_composite_order(
 ) -> Result<(), Box<dyn Error>> {
     let mut registry = ToolRegistry::new();
@@ -2659,6 +2999,500 @@ fn runtime_runner_prioritizes_fatal_tool_error_before_ask_user() -> Result<(), B
 }
 
 #[test]
+fn runtime_runner_records_tool_outcomes_interrupts_skips_and_artifacts(
+) -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(RepeatTool);
+    registry.register(ErrorTool);
+    registry.register(AskUserTool::new());
+    registry.register(LargeTool);
+
+    let recoverable_ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let recoverable_client = MockProvider::new(vec![
+        LlmResponse {
+            tool_calls: vec![
+                ToolCallRequest::new(
+                    "repeat-ok",
+                    "repeat",
+                    Map::from_iter([("text".to_owned(), json!("ha"))]),
+                ),
+                ToolCallRequest::new("error-recoverable", "mcp_error_tool", Map::new()),
+            ],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("done".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut recoverable_spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &recoverable_client,
+        "test-model",
+    );
+    recoverable_spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:tools-a"));
+    recoverable_spec.execution_ledger = Some(recoverable_ledger.clone());
+    recoverable_spec.max_iterations = 3;
+    recoverable_spec.tool_context = safe_mcp_tool_context();
+    let recoverable_result = AgentRunner::new().run(recoverable_spec)?;
+
+    let interrupt_ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let interrupt_client = MockProvider::new(vec![LlmResponse {
+        tool_calls: vec![ToolCallRequest::new(
+            "ask-interrupt",
+            "ask_user",
+            Map::from_iter([("question".to_owned(), json!("Continue?"))]),
+        )],
+        finish_reason: "tool_calls".to_owned(),
+        ..LlmResponse::default()
+    }]);
+    let mut interrupt_spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &interrupt_client,
+        "test-model",
+    );
+    interrupt_spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:tools-b"));
+    interrupt_spec.execution_ledger = Some(interrupt_ledger.clone());
+    AgentRunner::new().run(interrupt_spec)?;
+
+    let artifact_ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let workspace = tempfile::tempdir()?;
+    let artifact_client = MockProvider::new(vec![LlmResponse {
+        tool_calls: vec![
+            ToolCallRequest::new("large-artifact", "mcp_large_tool", Map::new()),
+            ToolCallRequest::new("error-fatal", "mcp_error_tool", Map::new()),
+            ToolCallRequest::new(
+                "ask-skipped",
+                "ask_user",
+                Map::from_iter([("question".to_owned(), json!("Continue?"))]),
+            ),
+        ],
+        finish_reason: "tool_calls".to_owned(),
+        ..LlmResponse::default()
+    }]);
+    let mut artifact_spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &artifact_client,
+        "test-model",
+    );
+    artifact_spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:tools-c"));
+    artifact_spec.execution_ledger = Some(artifact_ledger.clone());
+    artifact_spec.fail_on_tool_error = true;
+    artifact_spec.workspace = Some(workspace.path().to_path_buf());
+    artifact_spec.session_key = Some("cli:tool-ledger".to_owned());
+    artifact_spec.max_tool_result_chars = 10;
+    artifact_spec.tool_context = safe_mcp_tool_context();
+    AgentRunner::new().run(artifact_spec)?;
+
+    let recoverable = recoverable_ledger
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let interrupt = interrupt_ledger.lock().map_err(|error| error.to_string())?;
+    let artifact = artifact_ledger.lock().map_err(|error| error.to_string())?;
+    let recoverable_outcomes = recoverable
+        .outcomes
+        .iter()
+        .map(|record| &record.fact.outcome)
+        .collect::<Vec<_>>();
+    let interrupt_outcomes = interrupt
+        .outcomes
+        .iter()
+        .map(|record| &record.fact.outcome)
+        .collect::<Vec<_>>();
+    let artifact_records = artifact
+        .outcomes
+        .iter()
+        .filter(|record| matches!(record.fact.outcome, ExecutionOutcome::Tool(_)))
+        .collect::<Vec<_>>();
+
+    if !recoverable_outcomes
+        .iter()
+        .any(|outcome| matches!(outcome, ExecutionOutcome::Tool(ToolOutcomeKind::Completed)))
+        || !recoverable_outcomes.iter().any(|outcome| {
+            matches!(
+                outcome,
+                ExecutionOutcome::Tool(ToolOutcomeKind::Failed {
+                    class: ToolFailureClass::Recoverable
+                })
+            )
+        })
+        || !interrupt_outcomes.iter().any(|outcome| {
+            matches!(
+                outcome,
+                ExecutionOutcome::Tool(ToolOutcomeKind::Interrupted { .. })
+            )
+        })
+        || !artifact_records.iter().any(|record| {
+            matches!(
+                record.fact.outcome,
+                ExecutionOutcome::Tool(ToolOutcomeKind::Failed {
+                    class: ToolFailureClass::Fatal
+                })
+            )
+        })
+        || !artifact_records.iter().any(|record| {
+            matches!(
+                record.fact.outcome,
+                ExecutionOutcome::Tool(ToolOutcomeKind::Skipped { .. })
+            )
+        })
+        || !artifact_records.iter().any(|record| {
+            record
+                .fact
+                .artifact_ref
+                .as_ref()
+                .is_some_and(|artifact_ref| {
+                    artifact_ref
+                        .locator
+                        .starts_with(".nanobot/tool-results/session-")
+                        && artifact_ref.locator.ends_with(".txt")
+                        && !artifact_ref.locator.contains("cli_tool-ledger")
+                        && !artifact_ref.locator.contains("large-artifact")
+                        && artifact_ref.content_kind
+                            == shacs_utils::tool_results::ToolResultArtifactContentKind::Text
+                })
+        })
+        || !artifact_records.iter().any(|record| {
+            matches!(
+                record.fact.outcome,
+                ExecutionOutcome::Tool(ToolOutcomeKind::Failed {
+                    class: ToolFailureClass::Fatal
+                })
+            ) && record.fact.artifact_ref.is_some()
+        })
+        || !recoverable.pending.is_empty()
+        || !interrupt.pending.is_empty()
+        || !artifact.pending.is_empty()
+        || !artifact_records
+            .iter()
+            .all(|record| record.decision == LateResultDecision::Accepted)
+    {
+        return Err(format!(
+            "tool ledger facts drifted: recoverable={:?} events={:?} interrupt={:?} artifact={:?}",
+            recoverable.outcomes,
+            recoverable_result.tool_events,
+            interrupt.outcomes,
+            artifact.outcomes
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_records_tool_cancellation_before_dispatch() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(RepeatTool);
+    let client = MockProvider::new(vec![LlmResponse {
+        tool_calls: vec![ToolCallRequest::new(
+            "cancelled-tool",
+            "repeat",
+            Map::from_iter([("text".to_owned(), json!("unused"))]),
+        )],
+        finish_reason: "tool_calls".to_owned(),
+        ..LlmResponse::default()
+    }]);
+    let ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let cancellation_token = CancellationToken::new();
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:tool-cancel"));
+    spec.execution_ledger = Some(ledger.clone());
+    spec.cancellation_token = Some(cancellation_token.clone());
+    spec.agent_hook = Some(Arc::new(CancelBeforeToolsHook { cancellation_token }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let ledger = ledger.lock().map_err(|error| error.to_string())?;
+    if result.stop_reason != "cancelled"
+        || !ledger.pending.is_empty()
+        || !ledger.outcomes.iter().any(|record| {
+            matches!(
+                record.fact.outcome,
+                ExecutionOutcome::Tool(ToolOutcomeKind::Cancelled)
+            )
+        })
+    {
+        return Err(format!(
+            "tool cancellation outcome drifted: result={result:?} ledger={ledger:?}"
+        )
+        .into());
+    }
+    let cancelled_message = result.messages.iter().find(|message| {
+        message.get("tool_call_id").and_then(Value::as_str) == Some("cancelled-tool")
+    });
+    if cancelled_message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        != Some("[Tool call skipped because the turn was cancelled]")
+    {
+        return Err(format!("cancelled tool message drifted: {cancelled_message:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_records_spawned_subagent_as_pending() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(SpawnTool::new(Arc::new(|_request: SpawnRequest| {
+        Ok(
+            "Subagent [Inspect] started (id: child-00000042). I'll notify you when it completes."
+                .to_owned(),
+        )
+    })));
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            tool_calls: vec![ToolCallRequest::new(
+                "spawn-call",
+                "spawn",
+                Map::from_iter([("task".to_owned(), json!("Inspect workspace"))]),
+            )],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("delegated".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "delegate"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:spawn"));
+    spec.execution_ledger = Some(ledger.clone());
+    spec.tool_context = safe_mcp_tool_context();
+
+    AgentRunner::new().run(spec)?;
+    let ledger = ledger.lock().map_err(|error| error.to_string())?;
+    if !ledger.pending.iter().any(|pending| {
+        pending.domain == ExecutionDomain::Subagent
+            && pending.identity.effect_id == "spawn:child-00000042"
+    }) {
+        return Err(format!("spawned subagent pending fact missing: {ledger:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_records_mcp_timeout_as_timed_out() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(McpTimeoutTool);
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            tool_calls: vec![ToolCallRequest::new(
+                "mcp-timeout",
+                "mcp_error_tool",
+                Map::new(),
+            )],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("done".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "call mcp"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:mcp-timeout"));
+    spec.execution_ledger = Some(ledger.clone());
+    spec.tool_context = safe_mcp_tool_context();
+
+    let result = AgentRunner::new().run(spec)?;
+    let ledger = ledger.lock().map_err(|error| error.to_string())?;
+    if !ledger.outcomes.iter().any(|record| {
+        matches!(
+            record.fact.outcome,
+            ExecutionOutcome::Tool(ToolOutcomeKind::TimedOut)
+        )
+    }) || !result
+        .tool_events
+        .iter()
+        .any(|event| event.name == "mcp_error_tool" && event.status == ToolStatus::Error)
+    {
+        return Err(format!("MCP timeout outcome drifted: {ledger:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_treats_mcp_failed_timeout_name_as_fatal_error() -> Result<(), Box<dyn Error>> {
+    let mut registry = ToolRegistry::new();
+    registry.register(McpFailedTimeoutNameTool);
+    let client = MockProvider::new(vec![LlmResponse {
+        tool_calls: vec![ToolCallRequest::new(
+            "mcp-failed-timeout-name",
+            "mcp_error_tool",
+            Map::new(),
+        )],
+        finish_reason: "tool_calls".to_owned(),
+        ..LlmResponse::default()
+    }]);
+    let ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "call mcp"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.execution_scope = Some(ExecutionScope::new("cli:ledger", "turn:mcp-failed"));
+    spec.execution_ledger = Some(ledger.clone());
+    spec.fail_on_tool_error = true;
+    spec.tool_context = safe_mcp_tool_context();
+
+    let result = AgentRunner::new().run(spec)?;
+    let ledger = ledger.lock().map_err(|error| error.to_string())?;
+    if result.stop_reason != "tool_error"
+        || !result
+            .tool_events
+            .iter()
+            .any(|event| event.name == "mcp_error_tool" && event.status == ToolStatus::Error)
+        || !ledger.outcomes.iter().any(|record| {
+            matches!(
+                record.fact.outcome,
+                ExecutionOutcome::Tool(ToolOutcomeKind::Failed {
+                    class: ToolFailureClass::Fatal
+                })
+            )
+        })
+    {
+        return Err(format!(
+            "MCP failed wrapper did not remain fatal and observable: result={result:?} ledger={ledger:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_fail_on_tool_error_does_not_execute_later_direct_call(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(Mutex::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ErrorTool);
+    registry.register(CountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![LlmResponse {
+        tool_calls: vec![
+            ToolCallRequest::new("fatal-first", "mcp_error_tool", Map::new()),
+            ToolCallRequest::new("count-after-fatal", "count", Map::new()),
+        ],
+        finish_reason: "tool_calls".to_owned(),
+        ..LlmResponse::default()
+    }]);
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.fail_on_tool_error = true;
+    spec.tool_context = safe_mcp_tool_context();
+
+    let result = AgentRunner::new().run(spec)?;
+    if result.stop_reason != "tool_error"
+        || *calls.lock().map_err(|error| error.to_string())? != 0
+        || !result.messages.iter().any(|message| {
+            message["tool_call_id"] == "count-after-fatal"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("fatal tool error stopped"))
+        })
+    {
+        return Err(format!(
+            "fatal tool result did not stop later direct call: result={result:?} calls={calls:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_runner_classifier_interrupt_closes_later_same_segment_call() -> Result<(), Box<dyn Error>>
+{
+    let calls = Arc::new(Mutex::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(PermissionExecTool {
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    registry.register(CountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            tool_calls: vec![
+                ToolCallRequest::new(
+                    "exec-classifier-interrupt",
+                    "exec",
+                    Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                ),
+                ToolCallRequest::new("count-after-interrupt", "count", Map::new()),
+            ],
+            finish_reason: "tool_calls".to_owned(),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("not a classifier verdict".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let ledger = Arc::new(Mutex::new(RuntimeExecutionLedger::default()));
+    let mut context = safe_mcp_tool_context();
+    context.permission_mode_snapshot.mode = PermissionMode::Auto;
+    context.permission_interactive = true;
+    context.permission_auto_approval.enabled = true;
+    let mut spec = AgentRunSpec::new(
+        vec![json!({"role": "user", "content": "go"})],
+        &registry,
+        &client,
+        "test-model",
+    );
+    spec.permission_classifier_client = Some(&client);
+    spec.tool_context = context;
+    spec.execution_scope = Some(ExecutionScope::new("cli:classifier", "turn:classifier"));
+    spec.execution_ledger = Some(ledger.clone());
+
+    let result = AgentRunner::new().run(spec)?;
+    let ledger = ledger.lock().map_err(|error| error.to_string())?;
+    if !matches!(
+        result.interrupt,
+        Some(shacs_core::runtime::RuntimeInterrupt::PermissionApproval { .. })
+    ) || *calls.lock().map_err(|error| error.to_string())? != 0
+        || !ledger.pending.is_empty()
+        || !ledger.outcomes.iter().any(|record| {
+            record.fact.identity.correlation_id == "count-after-interrupt"
+                && matches!(
+                    record.fact.outcome,
+                    ExecutionOutcome::Tool(ToolOutcomeKind::Skipped { .. })
+                )
+        })
+    {
+        return Err(format!(
+            "classifier interrupt left later same-segment call open: result={result:?} ledger={ledger:?} calls={calls:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn runtime_runner_includes_throttled_tool_results_in_checkpoint_and_fatal(
 ) -> Result<(), Box<dyn Error>> {
     let mut registry = ToolRegistry::new();
@@ -2796,7 +3630,10 @@ fn runtime_runner_handles_error_empty_length_and_tool_result_governance(
         .filter_map(Result::ok)
         .flat_map(|entry| std::fs::read_dir(entry.path()).into_iter().flatten())
         .filter_map(Result::ok)
-        .any(|entry| entry.file_name().to_string_lossy() == "large.txt");
+        .any(|entry| {
+            entry.path().extension().and_then(|value| value.to_str()) == Some("txt")
+                && !entry.file_name().to_string_lossy().contains("large")
+        });
     if !large_result.messages[2]["content"]
         .as_str()
         .unwrap_or_default()
@@ -3090,7 +3927,15 @@ struct CountingTool {
     calls: Arc<Mutex<usize>>,
 }
 
+struct PermissionExecTool {
+    calls: Arc<AtomicUsize>,
+}
+
 struct ErrorTool;
+
+struct McpTimeoutTool;
+
+struct McpFailedTimeoutNameTool;
 
 impl Tool for ErrorTool {
     fn name(&self) -> &str {
@@ -3107,6 +3952,42 @@ impl Tool for ErrorTool {
 
     fn execute(&self, _params: JsonMap) -> ToolResult {
         ToolResult::Text("Error: simulated failure".to_owned())
+    }
+}
+
+impl Tool for McpTimeoutTool {
+    fn name(&self) -> &str {
+        "mcp_error_tool"
+    }
+
+    fn description(&self) -> &str {
+        "Return an MCP timeout outcome."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new().to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        ToolResult::Text("(MCP tool call timed out after 30s)".to_owned())
+    }
+}
+
+impl Tool for McpFailedTimeoutNameTool {
+    fn name(&self) -> &str {
+        "mcp_error_tool"
+    }
+
+    fn description(&self) -> &str {
+        "Return an MCP failure whose type name contains timeout."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new().to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        ToolResult::Text("(MCP tool call failed: TimeoutError)".to_owned())
     }
 }
 
@@ -3245,6 +4126,20 @@ struct RecordingHook {
     events: Arc<Mutex<Vec<String>>>,
     wants_streaming: bool,
     suffix: &'static str,
+}
+
+struct CancelBeforeToolsHook {
+    cancellation_token: CancellationToken,
+}
+
+impl AgentHook for CancelBeforeToolsHook {
+    fn before_execute_tools(
+        &self,
+        _context: &AgentHookContext,
+        _calls: &[shacs_core::runtime::RuntimeToolCall],
+    ) {
+        self.cancellation_token.cancel();
+    }
 }
 
 impl RecordingHook {
@@ -3394,6 +4289,28 @@ impl Tool for CountingTool {
     }
 }
 
+impl Tool for PermissionExecTool {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn description(&self) -> &str {
+        "Count permission-gated exec attempts."
+    }
+
+    fn parameters(&self) -> Value {
+        ToolParameters::new()
+            .property("command", StringSchema::new("Command"))
+            .required(["command"])
+            .to_json_schema()
+    }
+
+    fn execute(&self, _params: JsonMap) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ToolResult::Text("executed".to_owned())
+    }
+}
+
 fn activated_tool_search_config() -> ToolSearchConfig {
     ToolSearchConfig {
         enabled: ToolSearchMode::On,
@@ -3503,6 +4420,11 @@ struct StreamMockProvider {
     events: Vec<ProviderEvent>,
 }
 
+struct ErroringProvider {
+    error: ProviderError,
+    requests: Mutex<Vec<ProviderRequest>>,
+}
+
 struct MutatingProvider {
     responses: Mutex<VecDeque<LlmResponse>>,
     requests: Mutex<Vec<ProviderRequest>>,
@@ -3514,6 +4436,15 @@ impl StreamMockProvider {
         Self {
             inner: MockProvider::new(responses),
             events,
+        }
+    }
+}
+
+impl ErroringProvider {
+    fn new(error: ProviderError) -> Self {
+        Self {
+            error,
+            requests: Mutex::new(Vec::new()),
         }
     }
 }
@@ -3542,6 +4473,24 @@ impl ProviderClient for StreamMockProvider {
             on_event(event.clone());
         }
         self.inner.chat(request)
+    }
+}
+
+impl ProviderClient for ErroringProvider {
+    fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+        self.requests
+            .lock()
+            .map_err(|error| provider_error(error.to_string()))?
+            .push(request);
+        Err(self.error.clone())
+    }
+
+    fn chat_stream(
+        &self,
+        request: ProviderRequest,
+        _on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat(request)
     }
 }
 

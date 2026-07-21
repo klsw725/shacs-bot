@@ -4,19 +4,21 @@ use crate::runtime::tool_execution::{
     permissioned_action_input_from_context,
 };
 use crate::runtime::tool_search::{
-    BridgeUnderlyingMappingEvidence, ToolDescribeEvidence, ToolSearchActivationReason,
-    ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
+    BridgeToolExecutionReport, BridgeUnderlyingMappingEvidence, ToolDescribeEvidence,
+    ToolSearchActivationReason, ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
 };
 use crate::runtime::ContextProviderHandoff;
 use crate::runtime::{
     dispatch_bridge_tool_calls_with_context_resolver,
     recent_auto_mode_denial_from_classifier_decision, AutoEvaluatorVerdict,
     AutoEvaluatorVerdictKind, CancellationToken, EvaluatorConfidence, EvaluatorScopeMatch,
-    PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyReason,
-    PermissionedAction, PromptInjectionSignal, RecentAutoModeDenial, RecentAutoModeRetryToken,
-    ResolvedDeferredToolCall, RuntimeAssistantToolCallMessage, RuntimeContextTools,
-    RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
-    RuntimeToolMessage, SafetyCapability, ToolExecutionContext,
+    ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope,
+    PendingExecution, PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind,
+    PermissionPolicyReason, PermissionedAction, PromptInjectionSignal, ProviderOutcomeKind,
+    RecentAutoModeDenial, RecentAutoModeRetryToken, ResolvedDeferredToolCall,
+    RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
+    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage,
+    SafetyCapability, ToolExecutionContext, ToolFailureClass, ToolInterruptKind, ToolOutcomeKind,
 };
 use crate::tools::{
     assemble_tool_surface, bridge_tool_names, DeferredToolCatalog, ToolRegistry,
@@ -30,11 +32,13 @@ use shacs_providers::{
     ProviderRetryWaiter, ThreadRetryWaiter,
 };
 use shacs_redaction::{redact_string, redact_value};
-use shacs_utils::tool_results::maybe_persist_text_tool_result;
+use shacs_utils::tool_results::{
+    maybe_persist_text_tool_result_with_artifact, ToolResultArtifactRef,
+};
 use std::collections::{BTreeMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_ERROR_MESSAGE: &str = "Sorry, I encountered an error calling the AI model.";
@@ -54,6 +58,7 @@ const MAX_TOOL_SEARCH_EVIDENCE_MATCHES: usize = 5;
 const MAX_TOOL_SEARCH_QUERY_CHARS: usize = 120;
 const BACKFILL_CONTENT: &str = "[Tool result unavailable — call was interrupted or lost]";
 const FATAL_SKIP_CONTENT: &str = "[Tool call skipped because a fatal tool error stopped the turn]";
+const CANCELLED_SKIP_CONTENT: &str = "[Tool call skipped because the turn was cancelled]";
 const COMPACTABLE_TOOLS: [&str; 7] = [
     "read_file",
     "exec",
@@ -218,6 +223,8 @@ pub struct AgentRunSpec<'a> {
     pub agent_hook: Option<Arc<dyn AgentHook>>,
     pub context_tools: RuntimeContextTools,
     pub cancellation_token: Option<CancellationToken>,
+    pub execution_scope: Option<ExecutionScope>,
+    pub execution_ledger: Option<Arc<Mutex<RuntimeExecutionLedger>>>,
 }
 
 impl<'a> AgentRunSpec<'a> {
@@ -256,6 +263,8 @@ impl<'a> AgentRunSpec<'a> {
             agent_hook: None,
             context_tools: RuntimeContextTools::new(),
             cancellation_token: None,
+            execution_scope: None,
+            execution_ledger: None,
         }
     }
 
@@ -440,6 +449,7 @@ impl AgentRunner {
                 {
                     runtime_calls.truncate(ask_index + 1);
                 }
+                begin_tool_executions(&spec, &runtime_calls);
                 messages.push(
                     RuntimeAssistantToolCallMessage::new(
                         Some(response.content.clone().unwrap_or_default()),
@@ -465,10 +475,18 @@ impl AgentRunner {
                 let mut completed_tool_messages = Vec::new();
                 let mut completed_tool_results = Vec::new();
                 for message in throttled_messages {
-                    let message = normalize_tool_message(&spec, message);
-                    completed_tool_results.push(message.to_json());
-                    completed_tool_messages.push(message.clone());
-                    messages.push(message.to_json());
+                    let normalized = normalize_tool_message(&spec, message);
+                    record_tool_message_outcome(
+                        &spec,
+                        &normalized.message,
+                        ToolOutcomeKind::Skipped {
+                            reason: "repeated external lookup blocked".to_owned(),
+                        },
+                        normalized.artifact_ref.clone(),
+                    );
+                    completed_tool_results.push(normalized.message.to_json());
+                    completed_tool_messages.push(normalized.message.clone());
+                    messages.push(normalized.message.to_json());
                 }
 
                 let executable_calls_for_checkpoint = executable_calls.clone();
@@ -478,10 +496,12 @@ impl AgentRunner {
                     .collect::<BTreeMap<_, _>>();
                 if cancellation_requested(&spec) {
                     append_skipped_tool_results(
+                        &spec,
                         &executable_calls_for_checkpoint,
                         &mut completed_tool_messages,
                         &mut completed_tool_results,
                         &mut messages,
+                        ToolOutcomeKind::Cancelled,
                     );
                     append_iteration_tool_uses(&mut tools_used, iteration_tool_uses);
                     emit_checkpoint(
@@ -511,13 +531,48 @@ impl AgentRunner {
                     .map(|message| message.tool_call_id.clone())
                     .collect::<HashSet<_>>();
                 for blocked_message in blocked_tool_messages {
-                    let message = normalize_tool_message(&spec, blocked_message);
-                    completed_tool_results.push(message.to_json());
-                    completed_tool_messages.push(message.clone());
-                    messages.push(message.to_json());
+                    let normalized = normalize_tool_message(&spec, blocked_message);
+                    record_tool_message_outcome(
+                        &spec,
+                        &normalized.message,
+                        ToolOutcomeKind::Skipped {
+                            reason: "blocked by agent hook".to_owned(),
+                        },
+                        normalized.artifact_ref.clone(),
+                    );
+                    completed_tool_results.push(normalized.message.to_json());
+                    completed_tool_messages.push(normalized.message.clone());
+                    messages.push(normalized.message.to_json());
                 }
                 if !blocked_tool_call_ids.is_empty() {
                     executable_calls.retain(|call| !blocked_tool_call_ids.contains(&call.id));
+                }
+                if cancellation_requested(&spec) {
+                    append_skipped_tool_results(
+                        &spec,
+                        &executable_calls_for_checkpoint,
+                        &mut completed_tool_messages,
+                        &mut completed_tool_results,
+                        &mut messages,
+                        ToolOutcomeKind::Cancelled,
+                    );
+                    append_iteration_tool_uses(&mut tools_used, iteration_tool_uses);
+                    emit_checkpoint(
+                        &spec,
+                        "tools_completed",
+                        latest_assistant_tool_message(&messages),
+                        completed_tool_results,
+                        Vec::new(),
+                    );
+                    return Ok(cancelled_run_result(
+                        messages,
+                        tools_used,
+                        usage,
+                        tool_events,
+                        had_injections,
+                        recent_auto_mode_denials,
+                        recent_auto_mode_retry_tokens,
+                    ));
                 }
                 let report = execute_tool_dispatch(
                     executable_calls,
@@ -537,6 +592,7 @@ impl AgentRunner {
                     .iter()
                     .map(|resolved_call| (resolved_call.original_call_id.clone(), resolved_call))
                     .collect::<BTreeMap<_, _>>();
+                let mut fatal_outcome_content = None;
                 for raw_message in &report.messages {
                     let event = tool_event_for_message(
                         raw_message,
@@ -546,19 +602,39 @@ impl AgentRunner {
                             .get(&raw_message.tool_call_id)
                             .copied(),
                     );
-                    let message = normalize_tool_message(&spec, raw_message.clone());
+                    let (normalized, fatal) = finalize_tool_message(&spec, raw_message.clone());
+                    if fatal {
+                        fatal_outcome_content = Some(normalized.content.clone());
+                    }
                     emit_events(&spec, std::slice::from_ref(&event));
                     tool_events.push(event);
-                    completed_tool_results.push(message.to_json());
-                    completed_tool_messages.push(message.clone());
-                    messages.push(message.to_json());
+                    completed_tool_results.push(normalized.to_json());
+                    completed_tool_messages.push(normalized.clone());
+                    messages.push(normalized.to_json());
                 }
-                if let Some(error) = fatal_tool_error(&spec, &completed_tool_messages) {
+                for skipped_call in &report.skipped_tool_calls {
+                    record_tool_call_outcome(
+                        &spec,
+                        skipped_call,
+                        ToolOutcomeKind::Skipped {
+                            reason: "tool dispatch skipped after interrupt".to_owned(),
+                        },
+                        None,
+                        None,
+                    );
+                }
+                if let Some(error) = fatal_outcome_content
+                    .or_else(|| fatal_tool_error(&spec, &completed_tool_messages))
+                {
                     append_skipped_tool_results(
+                        &spec,
                         &executable_calls_for_checkpoint,
                         &mut completed_tool_messages,
                         &mut completed_tool_results,
                         &mut messages,
+                        ToolOutcomeKind::Skipped {
+                            reason: "fatal tool error stopped the turn".to_owned(),
+                        },
                     );
                     emit_checkpoint(
                         &spec,
@@ -585,6 +661,7 @@ impl AgentRunner {
                     });
                 }
                 if let Some(interrupt) = report.interrupt {
+                    record_tool_interrupt_outcome(&spec, &interrupt);
                     emit_checkpoint(
                         &spec,
                         "awaiting_tools",
@@ -873,6 +950,76 @@ fn cancellation_requested(spec: &AgentRunSpec<'_>) -> bool {
         .is_some_and(CancellationToken::is_cancelled)
 }
 
+fn execution_scope(spec: &AgentRunSpec<'_>) -> Option<ExecutionScope> {
+    spec.execution_scope.clone()
+}
+
+fn with_execution_ledger<T>(
+    spec: &AgentRunSpec<'_>,
+    operation: impl FnOnce(&mut RuntimeExecutionLedger) -> T,
+) -> Option<T> {
+    let ledger = spec.execution_ledger.as_ref()?;
+    let mut ledger = ledger
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Some(operation(&mut ledger))
+}
+
+fn begin_execution(spec: &AgentRunSpec<'_>, identity: ExecutionIdentity, domain: ExecutionDomain) {
+    let _ = with_execution_ledger(spec, |ledger| {
+        ledger.begin(PendingExecution {
+            identity,
+            domain,
+            started_at_ms: now_unix_ms().into(),
+        });
+    });
+}
+
+fn record_execution_fact(
+    spec: &AgentRunSpec<'_>,
+    identity: ExecutionIdentity,
+    outcome: ExecutionOutcome,
+    detail: Option<String>,
+    artifact_ref: Option<ToolResultArtifactRef>,
+) {
+    let mut fact = ExecutionOutcomeFact::new(identity, outcome, now_unix_ms().into());
+    if let Some(detail) = detail {
+        fact = fact.with_detail(detail);
+    }
+    if let Some(artifact_ref) = artifact_ref {
+        fact = fact.with_artifact_ref(artifact_ref);
+    }
+    let _ = with_execution_ledger(spec, |ledger| ledger.record(fact));
+}
+
+fn provider_execution_identity(
+    spec: &AgentRunSpec<'_>,
+    iteration: usize,
+    request: &ProviderRequest,
+) -> Option<ExecutionIdentity> {
+    let scope = execution_scope(spec)?;
+    let sequence =
+        with_execution_ledger(spec, |ledger| ledger.outcomes.len() + ledger.pending.len())
+            .unwrap_or_default();
+    let effect_id = format!("provider:{}:{iteration}:{sequence}", scope.turn_id);
+    let correlation_id = format!(
+        "provider:{}:{iteration}:messages:{}:tools:{}",
+        scope.turn_id,
+        request.messages.len(),
+        request.tools.len()
+    );
+    Some(ExecutionIdentity::new(scope, effect_id, correlation_id))
+}
+
+fn tool_execution_identity(spec: &AgentRunSpec<'_>, call_id: &str) -> Option<ExecutionIdentity> {
+    let scope = execution_scope(spec)?;
+    let effect_id = format!("tool:{}:{call_id}", scope.turn_id);
+    Some(
+        ExecutionIdentity::new(scope.clone(), effect_id, call_id.to_owned())
+            .with_causation_id(format!("provider:{}", scope.turn_id)),
+    )
+}
+
 fn cancelled_run_result(
     mut messages: Vec<Value>,
     tools_used: Vec<String>,
@@ -905,12 +1052,65 @@ struct ModelResponse {
     hook_streamed: bool,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct ProviderStreamCounts {
+    text_delta: usize,
+    reasoning_delta: usize,
+    tool_call_start: usize,
+    tool_call_delta: usize,
+    tool_call_ready: usize,
+    finish: usize,
+}
+
+impl ProviderStreamCounts {
+    fn observe(&mut self, event: &ProviderEvent) {
+        match event {
+            ProviderEvent::TextDelta { .. } => self.text_delta += 1,
+            ProviderEvent::ReasoningDelta { .. } => self.reasoning_delta += 1,
+            ProviderEvent::ToolCallStart { .. } => self.tool_call_start += 1,
+            ProviderEvent::ToolCallDelta { .. } => self.tool_call_delta += 1,
+            ProviderEvent::ToolCallReady { .. } => self.tool_call_ready += 1,
+            ProviderEvent::Finish { .. } => self.finish += 1,
+        }
+    }
+
+    fn total(self) -> usize {
+        self.text_delta
+            + self.reasoning_delta
+            + self.tool_call_start
+            + self.tool_call_delta
+            + self.tool_call_ready
+            + self.finish
+    }
+
+    fn detail(self) -> String {
+        json!({
+            "stream_events": {
+                "total": self.total(),
+                "text_delta": self.text_delta,
+                "reasoning_delta": self.reasoning_delta,
+                "tool_call_start": self.tool_call_start,
+                "tool_call_delta": self.tool_call_delta,
+                "tool_call_ready": self.tool_call_ready,
+                "finish": self.finish,
+            }
+        })
+        .to_string()
+    }
+}
+
 struct ToolDispatchReport {
     messages: Vec<RuntimeToolMessage>,
     interrupt: Option<RuntimeInterrupt>,
+    skipped_tool_calls: Vec<RuntimeToolCall>,
     resolved_bridge_calls: Vec<ResolvedDeferredToolCall>,
     recent_auto_mode_denials: Vec<RecentAutoModeDenial>,
     recent_auto_mode_retry_tokens: Vec<RecentAutoModeRetryToken>,
+}
+
+struct NormalizedToolMessage {
+    message: RuntimeToolMessage,
+    artifact_ref: Option<ToolResultArtifactRef>,
 }
 
 struct IterationToolUse {
@@ -933,6 +1133,7 @@ fn execute_tool_dispatch(
 
     let mut messages = Vec::new();
     let mut resolved_bridge_calls = Vec::new();
+    let mut skipped_tool_calls = Vec::new();
     let mut recent_auto_mode_denials = Vec::new();
     let mut recent_auto_mode_retry_tokens = Vec::new();
     let mut index = 0;
@@ -944,32 +1145,34 @@ fn execute_tool_dispatch(
         }
         let segment = calls[segment_start..index].to_vec();
         if bridge_segment {
-            let bridge_context_resolver =
-                |resolved_call: &ResolvedDeferredToolCall, context: &ToolExecutionContext| {
-                    tool_context_with_resolved_bridge_classifier_verdict(
-                        resolved_call,
-                        context,
-                        spec,
-                        executor,
-                    )
-                };
-            let report = dispatch_bridge_tool_calls_with_context_resolver(
-                segment,
-                Some(catalog),
-                spec.tools,
-                executor,
-                &spec.tool_context,
-                spec.concurrent_tools,
-                Some(&bridge_context_resolver),
-            );
+            let report = dispatch_bridge_segment(segment, catalog, spec, executor);
+            let fatal = report
+                .results
+                .iter()
+                .any(|result| fatal_tool_message(spec, &result.message));
             resolved_bridge_calls.extend(report.resolved_calls);
             recent_auto_mode_denials.extend(report.recent_auto_mode_denials);
             recent_auto_mode_retry_tokens.extend(report.recent_auto_mode_retry_tokens);
             messages.extend(report.results.into_iter().map(|result| result.message));
             if let Some(interrupt) = report.interrupt {
+                skipped_tool_calls.extend(report.skipped_tool_calls);
+                skipped_tool_calls.extend_from_slice(&calls[index..]);
                 return ToolDispatchReport {
                     messages,
                     interrupt: Some(interrupt),
+                    skipped_tool_calls,
+                    resolved_bridge_calls,
+                    recent_auto_mode_denials,
+                    recent_auto_mode_retry_tokens,
+                };
+            }
+            skipped_tool_calls.extend(report.skipped_tool_calls);
+            if fatal {
+                skipped_tool_calls.extend_from_slice(&calls[index..]);
+                return ToolDispatchReport {
+                    messages,
+                    interrupt: None,
+                    skipped_tool_calls,
                     resolved_bridge_calls,
                     recent_auto_mode_denials,
                     recent_auto_mode_retry_tokens,
@@ -977,13 +1180,32 @@ fn execute_tool_dispatch(
             }
         } else {
             let report = direct_runtime_report(segment, spec, executor);
+            let fatal = report
+                .messages
+                .iter()
+                .any(|message| fatal_tool_message(spec, message));
             messages.extend(report.messages);
             recent_auto_mode_denials.extend(report.recent_auto_mode_denials);
             recent_auto_mode_retry_tokens.extend(report.recent_auto_mode_retry_tokens);
             if let Some(interrupt) = report.interrupt {
+                skipped_tool_calls.extend(report.skipped_tool_calls);
+                skipped_tool_calls.extend_from_slice(&calls[index..]);
                 return ToolDispatchReport {
                     messages,
                     interrupt: Some(interrupt),
+                    skipped_tool_calls,
+                    resolved_bridge_calls,
+                    recent_auto_mode_denials,
+                    recent_auto_mode_retry_tokens,
+                };
+            }
+            skipped_tool_calls.extend(report.skipped_tool_calls);
+            if fatal {
+                skipped_tool_calls.extend_from_slice(&calls[index..]);
+                return ToolDispatchReport {
+                    messages,
+                    interrupt: None,
+                    skipped_tool_calls,
                     resolved_bridge_calls,
                     recent_auto_mode_denials,
                     recent_auto_mode_retry_tokens,
@@ -995,10 +1217,89 @@ fn execute_tool_dispatch(
     ToolDispatchReport {
         messages,
         interrupt: None,
+        skipped_tool_calls,
         resolved_bridge_calls,
         recent_auto_mode_denials,
         recent_auto_mode_retry_tokens,
     }
+}
+
+fn dispatch_bridge_segment(
+    calls: Vec<RuntimeToolCall>,
+    catalog: &DeferredToolCatalog,
+    spec: &AgentRunSpec<'_>,
+    executor: &RuntimeToolExecutor<'_>,
+) -> BridgeToolExecutionReport {
+    let bridge_context_resolver =
+        |resolved_call: &ResolvedDeferredToolCall, context: &ToolExecutionContext| {
+            tool_context_with_resolved_bridge_classifier_verdict(
+                resolved_call,
+                context,
+                spec,
+                executor,
+            )
+        };
+    if !spec.fail_on_tool_error {
+        return dispatch_bridge_tool_calls_with_context_resolver(
+            calls,
+            Some(catalog),
+            spec.tools,
+            executor,
+            &spec.tool_context,
+            spec.concurrent_tools,
+            Some(&bridge_context_resolver),
+        );
+    }
+
+    let mut combined = BridgeToolExecutionReport {
+        results: Vec::new(),
+        interrupt: None,
+        skipped_tool_calls: Vec::new(),
+        resolved_calls: Vec::new(),
+        permissioned_actions: Vec::new(),
+        recent_auto_mode_denials: Vec::new(),
+        recent_auto_mode_retry_tokens: Vec::new(),
+    };
+    for (index, call) in calls.iter().cloned().enumerate() {
+        let mut report = dispatch_bridge_tool_calls_with_context_resolver(
+            vec![call],
+            Some(catalog),
+            spec.tools,
+            executor,
+            &spec.tool_context,
+            false,
+            Some(&bridge_context_resolver),
+        );
+        let fatal = report
+            .results
+            .iter()
+            .any(|result| fatal_tool_message(spec, &result.message));
+        combined.results.append(&mut report.results);
+        combined
+            .skipped_tool_calls
+            .append(&mut report.skipped_tool_calls);
+        combined.resolved_calls.append(&mut report.resolved_calls);
+        combined
+            .permissioned_actions
+            .append(&mut report.permissioned_actions);
+        combined
+            .recent_auto_mode_denials
+            .append(&mut report.recent_auto_mode_denials);
+        combined
+            .recent_auto_mode_retry_tokens
+            .append(&mut report.recent_auto_mode_retry_tokens);
+        if let Some(interrupt) = report.interrupt {
+            combined.interrupt = Some(interrupt);
+            combined
+                .skipped_tool_calls
+                .extend_from_slice(&calls[index + 1..]);
+            break;
+        }
+        if fatal {
+            break;
+        }
+    }
+    combined
 }
 
 fn direct_tool_dispatch(
@@ -1010,6 +1311,7 @@ fn direct_tool_dispatch(
     ToolDispatchReport {
         messages: report.messages,
         interrupt: report.interrupt,
+        skipped_tool_calls: report.skipped_tool_calls,
         resolved_bridge_calls: Vec::new(),
         recent_auto_mode_denials: report.recent_auto_mode_denials,
         recent_auto_mode_retry_tokens: report.recent_auto_mode_retry_tokens,
@@ -1027,11 +1329,53 @@ fn direct_runtime_report(
     {
         return direct_runtime_report_with_classifier(calls, spec, executor);
     }
+    if spec.fail_on_tool_error {
+        return direct_runtime_report_fail_fast(calls, spec, executor);
+    }
     if spec.concurrent_tools {
         executor.execute_tool_calls_concurrent(calls, &spec.tool_context)
     } else {
         executor.execute_tool_calls(calls, &spec.tool_context)
     }
+}
+
+fn direct_runtime_report_fail_fast(
+    calls: Vec<RuntimeToolCall>,
+    spec: &AgentRunSpec<'_>,
+    executor: &RuntimeToolExecutor<'_>,
+) -> RuntimeToolExecutionReport {
+    let mut combined = RuntimeToolExecutionReport::completed(Vec::new());
+    for (index, call) in calls.iter().cloned().enumerate() {
+        let mut report = executor.execute_tool_calls(vec![call], &spec.tool_context);
+        let fatal = report
+            .messages
+            .iter()
+            .any(|message| fatal_tool_message(spec, message));
+        combined.messages.append(&mut report.messages);
+        combined
+            .skipped_tool_calls
+            .append(&mut report.skipped_tool_calls);
+        combined
+            .permissioned_actions
+            .append(&mut report.permissioned_actions);
+        combined
+            .recent_auto_mode_denials
+            .append(&mut report.recent_auto_mode_denials);
+        combined
+            .recent_auto_mode_retry_tokens
+            .append(&mut report.recent_auto_mode_retry_tokens);
+        if let Some(interrupt) = report.interrupt {
+            combined.interrupt = Some(interrupt);
+            combined
+                .skipped_tool_calls
+                .extend_from_slice(&calls[index + 1..]);
+            break;
+        }
+        if fatal {
+            break;
+        }
+    }
+    combined
 }
 
 fn direct_runtime_report_with_classifier(
@@ -1045,7 +1389,7 @@ fn direct_runtime_report_with_classifier(
     let mut recent_auto_mode_denials = Vec::new();
     let mut recent_auto_mode_retry_tokens = Vec::new();
 
-    for call in calls {
+    for (index, call) in calls.iter().cloned().enumerate() {
         let context = tool_context_with_classifier_verdict(&call, spec, executor);
         let action = normalize_runtime_tool_call(
             executor.registry(),
@@ -1093,6 +1437,7 @@ fn direct_runtime_report_with_classifier(
         recent_auto_mode_denials.append(&mut report.recent_auto_mode_denials);
         recent_auto_mode_retry_tokens.append(&mut report.recent_auto_mode_retry_tokens);
         if let Some(interrupt) = report.interrupt {
+            skipped_tool_calls.extend_from_slice(&calls[index + 1..]);
             return RuntimeToolExecutionReport {
                 messages,
                 interrupt: Some(interrupt),
@@ -1101,6 +1446,13 @@ fn direct_runtime_report_with_classifier(
                 recent_auto_mode_denials,
                 recent_auto_mode_retry_tokens,
             };
+        }
+        if spec.fail_on_tool_error
+            && messages
+                .last()
+                .is_some_and(|message| fatal_tool_message(spec, message))
+        {
+            break;
         }
     }
 
@@ -1589,6 +1941,10 @@ fn request_model(
     request: ProviderRequest,
     context: AgentHookContext,
 ) -> Result<ModelResponse, ProviderError> {
+    let identity = provider_execution_identity(spec, context.iteration, &request);
+    if let Some(identity) = identity.clone() {
+        begin_execution(spec, identity, ExecutionDomain::Provider);
+    }
     let hook_wants_streaming = spec
         .agent_hook
         .as_ref()
@@ -1597,7 +1953,12 @@ fn request_model(
     if spec.provider_event_callback.is_some() || hook_wants_streaming {
         let callback = spec.provider_event_callback.clone();
         let hook = spec.agent_hook.clone();
+        let stream_counts = Arc::new(Mutex::new(ProviderStreamCounts::default()));
+        let stream_counts_capture = stream_counts.clone();
         let mut on_event = move |event: ProviderEvent| {
+            if let Ok(mut counts) = stream_counts_capture.lock() {
+                counts.observe(&event);
+            }
             if let Some(callback) = &callback {
                 let observable_event = observable_provider_event(&event);
                 invoke_provider_event_callback(callback, &observable_event);
@@ -1625,11 +1986,40 @@ fn request_model(
                 &mut on_event,
                 waiter,
             ),
-        }?;
-        Ok(ModelResponse {
-            response,
-            hook_streamed: hook_wants_streaming,
-        })
+        };
+        match response {
+            Ok(response) => {
+                if let Some(identity) = identity {
+                    let counts = stream_counts
+                        .lock()
+                        .map(|counts| *counts)
+                        .unwrap_or_default();
+                    record_execution_fact(
+                        spec,
+                        identity,
+                        ExecutionOutcome::Provider(provider_outcome_for_response(&response)),
+                        Some(counts.detail()),
+                        None,
+                    );
+                }
+                Ok(ModelResponse {
+                    response,
+                    hook_streamed: hook_wants_streaming,
+                })
+            }
+            Err(error) => {
+                if let Some(identity) = identity {
+                    record_execution_fact(
+                        spec,
+                        identity,
+                        ExecutionOutcome::Provider(provider_outcome_for_error(&error)),
+                        Some(provider_error_detail(&error)),
+                        None,
+                    );
+                }
+                Err(error)
+            }
+        }
     } else {
         let response = match &mut waiter {
             RetryWaiter::Thread(waiter) => {
@@ -1638,11 +2028,96 @@ fn request_model(
             RetryWaiter::Callback(waiter) => {
                 chat_with_retry_using_waiter(spec.client, request, spec.retry_mode, waiter)
             }
-        }?;
-        Ok(ModelResponse {
-            response,
-            hook_streamed: false,
+        };
+        match response {
+            Ok(response) => {
+                if let Some(identity) = identity {
+                    record_execution_fact(
+                        spec,
+                        identity,
+                        ExecutionOutcome::Provider(provider_outcome_for_response(&response)),
+                        None,
+                        None,
+                    );
+                }
+                Ok(ModelResponse {
+                    response,
+                    hook_streamed: false,
+                })
+            }
+            Err(error) => {
+                if let Some(identity) = identity {
+                    record_execution_fact(
+                        spec,
+                        identity,
+                        ExecutionOutcome::Provider(provider_outcome_for_error(&error)),
+                        Some(provider_error_detail(&error)),
+                        None,
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+fn provider_outcome_for_response(response: &LlmResponse) -> ProviderOutcomeKind {
+    if response.should_execute_tools() {
+        ProviderOutcomeKind::ToolRequested
+    } else if response.finish_reason == "error" {
+        ProviderOutcomeKind::Failed
+    } else {
+        ProviderOutcomeKind::Completed
+    }
+}
+
+fn provider_outcome_for_error(error: &ProviderError) -> ProviderOutcomeKind {
+    let detail = provider_error_detail(error).to_ascii_lowercase();
+    if detail.contains("cancelled") || detail.contains("canceled") {
+        ProviderOutcomeKind::Cancelled
+    } else if provider_error_status(error).is_some_and(|status| matches!(status, 408 | 504))
+        || detail.contains("timeout")
+        || detail.contains("timed out")
+    {
+        ProviderOutcomeKind::TimedOut
+    } else {
+        ProviderOutcomeKind::Failed
+    }
+}
+
+fn provider_error_status(error: &ProviderError) -> Option<u16> {
+    match error {
+        ProviderError::Api { status, .. } => *status,
+        _ => None,
+    }
+}
+
+fn provider_error_detail(error: &ProviderError) -> String {
+    match error {
+        ProviderError::ProviderNotFound { provider_id, .. } => {
+            format!("provider not found: {provider_id}")
+        }
+        ProviderError::ModelNotFound {
+            provider_id,
+            model_id,
+            ..
+        } => format!("model not found: {provider_id}/{model_id}"),
+        ProviderError::AuthRequired { provider_id } => format!("auth required: {provider_id}"),
+        ProviderError::UnsupportedCapability {
+            provider_id,
+            capability,
+        } => format!("unsupported capability: {provider_id}/{capability}"),
+        ProviderError::Api {
+            status,
+            message,
+            retryable,
+            ..
+        } => json!({
+            "status": status,
+            "message": redact_string(message),
+            "retryable": retryable,
         })
+        .to_string(),
     }
 }
 
@@ -1982,11 +2457,143 @@ fn pending_interrupt_tool_call(
         .collect()
 }
 
+pub(super) fn begin_tool_executions(spec: &AgentRunSpec<'_>, calls: &[RuntimeToolCall]) {
+    for call in calls {
+        if let Some(identity) = tool_execution_identity(spec, &call.id) {
+            begin_execution(spec, identity, ExecutionDomain::Tool);
+        }
+    }
+}
+
+fn begin_spawned_subagent_execution(spec: &AgentRunSpec<'_>, message: &RuntimeToolMessage) {
+    if message.name != "spawn" {
+        return;
+    }
+    let Some(child_task_id) = spawn_receipt_child_id(&message.content) else {
+        return;
+    };
+    let Some(scope) = execution_scope(spec) else {
+        return;
+    };
+    let identity = ExecutionIdentity::new(
+        scope.clone(),
+        format!("spawn:{child_task_id}"),
+        child_task_id.clone(),
+    )
+    .with_causation_id(format!("tool:{}:{}", scope.turn_id, message.tool_call_id));
+    begin_execution(spec, identity, ExecutionDomain::Subagent);
+}
+
+fn spawn_receipt_child_id(content: &str) -> Option<String> {
+    let (_, suffix) = content.split_once("] started (id: ")?;
+    let (child_task_id, _) = suffix.split_once(')')?;
+    let sequence = child_task_id.strip_prefix("child-")?;
+    if sequence.len() != 8 || !sequence.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    Some(child_task_id.to_owned())
+}
+
+fn record_tool_message_outcome(
+    spec: &AgentRunSpec<'_>,
+    message: &RuntimeToolMessage,
+    outcome: ToolOutcomeKind,
+    artifact_ref: Option<ToolResultArtifactRef>,
+) {
+    record_tool_call_outcome(spec, &message_to_call(message), outcome, None, artifact_ref);
+}
+
+fn record_tool_call_outcome(
+    spec: &AgentRunSpec<'_>,
+    call: &RuntimeToolCall,
+    outcome: ToolOutcomeKind,
+    detail: Option<String>,
+    artifact_ref: Option<ToolResultArtifactRef>,
+) {
+    if let Some(identity) = tool_execution_identity(spec, &call.id) {
+        record_execution_fact(
+            spec,
+            identity,
+            ExecutionOutcome::Tool(outcome),
+            detail,
+            artifact_ref,
+        );
+    }
+}
+
+fn message_to_call(message: &RuntimeToolMessage) -> RuntimeToolCall {
+    RuntimeToolCall::new(
+        message.tool_call_id.clone(),
+        message.name.clone(),
+        Value::Object(Map::new()),
+    )
+}
+
+fn tool_outcome_for_message(
+    spec: &AgentRunSpec<'_>,
+    message: &RuntimeToolMessage,
+) -> ToolOutcomeKind {
+    if is_tool_cancelled_message(message) {
+        ToolOutcomeKind::Cancelled
+    } else if is_tool_timeout_message(message) {
+        ToolOutcomeKind::TimedOut
+    } else if is_tool_error_message(message) {
+        ToolOutcomeKind::Failed {
+            class: if fatal_tool_message(spec, message) {
+                ToolFailureClass::Fatal
+            } else {
+                ToolFailureClass::Recoverable
+            },
+        }
+    } else {
+        ToolOutcomeKind::Completed
+    }
+}
+
+fn is_tool_timeout_message(message: &RuntimeToolMessage) -> bool {
+    let content = message.content.to_ascii_lowercase();
+    mcp_outcome_starts_with(&content, "timed out")
+        || (!mcp_outcome_starts_with(&content, "failed")
+            && is_tool_error_message(message)
+            && (content.contains("timed out") || content.contains("timeout")))
+}
+
+fn is_tool_cancelled_message(message: &RuntimeToolMessage) -> bool {
+    mcp_outcome_starts_with(&message.content.to_ascii_lowercase(), "was cancelled")
+}
+
+fn record_tool_interrupt_outcome(spec: &AgentRunSpec<'_>, interrupt: &RuntimeInterrupt) {
+    let (call, kind) = match interrupt {
+        RuntimeInterrupt::AskUser {
+            tool_call_id, name, ..
+        } => (
+            RuntimeToolCall::new(
+                tool_call_id.clone(),
+                name.clone(),
+                Value::Object(Map::new()),
+            ),
+            ToolInterruptKind::AskUser,
+        ),
+        RuntimeInterrupt::PermissionApproval { tool_call, .. } => {
+            (tool_call.clone(), ToolInterruptKind::PermissionApproval)
+        }
+    };
+    record_tool_call_outcome(
+        spec,
+        &call,
+        ToolOutcomeKind::Interrupted { interrupt: kind },
+        interrupt_text(interrupt),
+        None,
+    );
+}
+
 fn append_skipped_tool_results(
+    spec: &AgentRunSpec<'_>,
     calls: &[RuntimeToolCall],
     completed_messages: &mut Vec<RuntimeToolMessage>,
     completed_results: &mut Vec<Value>,
     messages: &mut Vec<Value>,
+    outcome: ToolOutcomeKind,
 ) {
     let completed_ids = completed_messages
         .iter()
@@ -1996,12 +2603,18 @@ fn append_skipped_tool_results(
         if completed_ids.contains(&call.id) {
             continue;
         }
+        let content = if matches!(outcome, ToolOutcomeKind::Cancelled) {
+            CANCELLED_SKIP_CONTENT
+        } else {
+            FATAL_SKIP_CONTENT
+        };
         let skipped = RuntimeToolMessage {
             tool_call_id: call.id.clone(),
             name: call.name.clone(),
-            content: FATAL_SKIP_CONTENT.to_owned(),
+            content: content.to_owned(),
         };
         let skipped_json = skipped.to_json();
+        record_tool_message_outcome(spec, &skipped, outcome.clone(), None);
         completed_messages.push(skipped);
         completed_results.push(skipped_json.clone());
         messages.push(skipped_json);
@@ -2311,19 +2924,48 @@ fn external_lookup_signature(call: &RuntimeToolCall) -> Option<String> {
 fn normalize_tool_message(
     spec: &AgentRunSpec<'_>,
     mut message: RuntimeToolMessage,
-) -> RuntimeToolMessage {
+) -> NormalizedToolMessage {
     if message.content.trim().is_empty() {
         message.content = format!("({} completed with no output)", message.name);
     }
-    message.content = maybe_persist_text_tool_result(
+    let artifact_outcome = maybe_persist_text_tool_result_with_artifact(
         spec.workspace.as_deref(),
         spec.session_key.as_deref(),
         &message.tool_call_id,
         &message.content,
         spec.max_tool_result_chars,
-    )
-    .unwrap_or_else(|| truncate_text(&message.content, spec.max_tool_result_chars));
-    message
+    );
+    let artifact_ref = artifact_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.artifact.clone());
+    message.content = artifact_outcome
+        .map(|outcome| outcome.content)
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| truncate_text(&message.content, spec.max_tool_result_chars));
+    NormalizedToolMessage {
+        message,
+        artifact_ref,
+    }
+}
+
+pub(super) fn finalize_tool_message(
+    spec: &AgentRunSpec<'_>,
+    raw_message: RuntimeToolMessage,
+) -> (RuntimeToolMessage, bool) {
+    let fatal = fatal_tool_message(spec, &raw_message);
+    let outcome = tool_outcome_for_message(spec, &raw_message);
+    let spawn_completed = matches!(outcome, ToolOutcomeKind::Completed);
+    let normalized = normalize_tool_message(spec, raw_message.clone());
+    record_tool_message_outcome(
+        spec,
+        &normalized.message,
+        outcome.clone(),
+        normalized.artifact_ref,
+    );
+    if spawn_completed {
+        begin_spawned_subagent_execution(spec, &raw_message);
+    }
+    (normalized.message, fatal)
 }
 
 fn truncate_text(content: &str, max_chars: usize) -> String {
@@ -2364,7 +3006,7 @@ fn tool_search_activation_reason_label(reason: &ToolSearchActivationReason) -> &
     }
 }
 
-fn tool_event_for_message(
+pub(super) fn tool_event_for_message(
     message: &RuntimeToolMessage,
     call: Option<&RuntimeToolCall>,
     catalog: Option<&DeferredToolCatalog>,
@@ -2375,7 +3017,7 @@ fn tool_event_for_message(
         return event;
     }
 
-    let is_error = message.content.starts_with("Error") || is_workspace_violation(&message.content);
+    let is_error = is_tool_unsuccessful_message(message);
     ToolEvent {
         name: message.name.clone(),
         status: if is_error {
@@ -2397,8 +3039,7 @@ fn bridge_tool_event_for_message(
     resolved_bridge_call: Option<&ResolvedDeferredToolCall>,
 ) -> Option<ToolEvent> {
     let scope_digest = catalog.map(|catalog| catalog.scope_digest.clone())?;
-    let status = if message.content.starts_with("Error") || is_workspace_violation(&message.content)
-    {
+    let status = if is_tool_unsuccessful_message(message) {
         ToolStatus::Error
     } else {
         ToolStatus::Ok
@@ -2575,7 +3216,7 @@ fn event_detail(content: &str) -> String {
     detail
 }
 
-fn emit_events(spec: &AgentRunSpec<'_>, events: &[ToolEvent]) {
+pub(super) fn emit_events(spec: &AgentRunSpec<'_>, events: &[ToolEvent]) {
     if let Some(callback) = &spec.tool_event_callback {
         for event in events {
             invoke_tool_event_callback(callback, event);
@@ -2585,14 +3226,36 @@ fn emit_events(spec: &AgentRunSpec<'_>, events: &[ToolEvent]) {
 
 fn fatal_tool_error(spec: &AgentRunSpec<'_>, messages: &[RuntimeToolMessage]) -> Option<String> {
     messages.iter().find_map(|message| {
-        if is_workspace_violation(&message.content)
-            || (spec.fail_on_tool_error && message.content.starts_with("Error"))
-        {
+        if fatal_tool_message(spec, message) {
             Some(message.content.clone())
         } else {
             None
         }
     })
+}
+
+fn fatal_tool_message(spec: &AgentRunSpec<'_>, message: &RuntimeToolMessage) -> bool {
+    is_workspace_violation(&message.content)
+        || (spec.fail_on_tool_error && is_tool_unsuccessful_message(message))
+}
+
+fn is_tool_unsuccessful_message(message: &RuntimeToolMessage) -> bool {
+    is_tool_cancelled_message(message)
+        || is_tool_timeout_message(message)
+        || is_tool_error_message(message)
+}
+
+fn is_tool_error_message(message: &RuntimeToolMessage) -> bool {
+    let content = message.content.to_ascii_lowercase();
+    message.content.starts_with("Error")
+        || mcp_outcome_starts_with(&content, "failed")
+        || is_workspace_violation(&message.content)
+}
+
+fn mcp_outcome_starts_with(content: &str, outcome: &str) -> bool {
+    ["tool call", "resource read", "prompt call"]
+        .iter()
+        .any(|operation| content.starts_with(&format!("(mcp {operation} {outcome}")))
 }
 
 fn is_workspace_violation(text: &str) -> bool {
@@ -2662,6 +3325,84 @@ fn interrupt_name(interrupt: &RuntimeInterrupt) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_timeout_message_is_distinct_from_generic_failure() {
+        let message = RuntimeToolMessage {
+            tool_call_id: "call-timeout".to_owned(),
+            name: "exec".to_owned(),
+            content: "Error: command timed out after 60 seconds".to_owned(),
+        };
+
+        assert!(is_tool_timeout_message(&message));
+        assert!(is_tool_error_message(&message));
+
+        let successful = RuntimeToolMessage {
+            tool_call_id: "call-config".to_owned(),
+            name: "exec".to_owned(),
+            content: "Timeout configured successfully".to_owned(),
+        };
+        assert!(!is_tool_timeout_message(&successful));
+
+        let mcp_timeout = RuntimeToolMessage {
+            tool_call_id: "mcp-timeout".to_owned(),
+            name: "mcp_server_tool".to_owned(),
+            content: "(MCP tool call timed out after 30s)".to_owned(),
+        };
+        let mcp_cancelled = RuntimeToolMessage {
+            tool_call_id: "mcp-cancelled".to_owned(),
+            name: "mcp_server_tool".to_owned(),
+            content: "(MCP tool call was cancelled)".to_owned(),
+        };
+        let mcp_failed = RuntimeToolMessage {
+            tool_call_id: "mcp-failed".to_owned(),
+            name: "mcp_server_tool".to_owned(),
+            content: "(MCP tool call failed after retry: transport)".to_owned(),
+        };
+        let mcp_failed_with_timeout_name = RuntimeToolMessage {
+            tool_call_id: "mcp-failed-timeout-name".to_owned(),
+            name: "mcp_server_tool".to_owned(),
+            content: "(MCP tool call failed: TimeoutError)".to_owned(),
+        };
+        let resource_cancelled = RuntimeToolMessage {
+            tool_call_id: "resource-cancelled".to_owned(),
+            name: "mcp_server_resource".to_owned(),
+            content: "(MCP resource read was cancelled)".to_owned(),
+        };
+        let prompt_failed = RuntimeToolMessage {
+            tool_call_id: "prompt-failed".to_owned(),
+            name: "mcp_server_prompt".to_owned(),
+            content: "(MCP prompt call failed: protocol)".to_owned(),
+        };
+        let prompt_timeout = RuntimeToolMessage {
+            tool_call_id: "prompt-timeout".to_owned(),
+            name: "mcp_server_prompt".to_owned(),
+            content: "(MCP prompt call timed out after 30s)".to_owned(),
+        };
+        assert!(is_tool_timeout_message(&mcp_timeout));
+        assert!(is_tool_cancelled_message(&mcp_cancelled));
+        assert!(is_tool_error_message(&mcp_failed));
+        assert!(!is_tool_timeout_message(&mcp_failed_with_timeout_name));
+        assert!(is_tool_error_message(&mcp_failed_with_timeout_name));
+        assert!(is_tool_cancelled_message(&resource_cancelled));
+        assert!(is_tool_error_message(&prompt_failed));
+        assert!(is_tool_timeout_message(&prompt_timeout));
+    }
+
+    #[test]
+    fn spawn_receipt_accepts_only_runtime_child_identifier() {
+        assert_eq!(
+            spawn_receipt_child_id(
+                "Subagent [Inspect] started (id: child-00000042). I'll notify you when it completes."
+            )
+            .as_deref(),
+            Some("child-00000042")
+        );
+        assert_eq!(
+            spawn_receipt_child_id("Subagent [Inspect] started (id: secret-token)."),
+            None
+        );
+    }
     use crate::runtime::ProviderContextBlock;
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
