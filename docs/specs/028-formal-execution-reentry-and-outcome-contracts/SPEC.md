@@ -1,6 +1,9 @@
 # 028. formal execution reentry and outcome contracts 아키텍처 명세
 
-Status: Open
+Status: Complete (Scoped)
+Implemented scope: 현재 synchronous `AgentRunner`/`RuntimeToolExecutor`와 `SubagentRuntime` 경계에서 shared execution identity, provider/tool/subagent outcome, pending/terminal reconciliation, typed subagent reentry, safe artifact reference, session inspect/diagnostics projection을 닫았다.
+Open work moved to: durable outcome replay와 restart recovery는 [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md)이 소유한다.
+Not carried forward: 실행 중인 blocking provider/tool trait를 강제 중단하는 새 async executor 설계와 모든 tool에 공통 wall-clock deadline을 주입하는 trait 재작성은 028 closure에 포함하지 않는다. 현재 경계가 관찰한 provider/tool timeout과 cancellation은 별도 terminal outcome으로 남는다.
 
 Origin specs: 002, 003, 004, 006, 007, 011
 
@@ -8,7 +11,7 @@ Origin specs: 002, 003, 004, 006, 007, 011
 
 이 문서는 기존 002, 003, 004, 006, 007, 011에서 current architecture closure 밖으로 남긴 실행 재진입과 outcome 계약을 새 owner 범위로 모은다.
 
-목표는 provider, tool, subagent 같은 외부 실행 경계가 결과를 어떻게 식별하고, 어떤 outcome으로 정규화하며, 어떤 command 또는 runtime entrypoint로 다시 돌아오는지 설명 가능한 계약으로 고정하는 것이다. 이 문서는 현재 구현 완료를 주장하지 않는다. 기존 런타임을 하나의 거대한 `Command`/`Event`/`Effect` enum으로 다시 쓰라는 요구도 아니다.
+목표는 provider, tool, subagent 같은 외부 실행 경계가 결과를 어떻게 식별하고, 어떤 outcome으로 정규화하며, 어떤 command 또는 runtime entrypoint로 다시 돌아오는지 설명 가능한 계약으로 고정하는 것이다. 기존 런타임을 하나의 거대한 `Command`/`Event`/`Effect` enum으로 다시 쓰라는 요구는 아니다.
 
 028은 필요한 곳에만 shared optional identifier와 envelope를 추가하는 점진적 계약이다. 현재 `AgentLoop`, `AgentRunner`, `RuntimeToolExecutor`, `SubagentRuntime`, `SessionManager` 경계를 존중하면서, 비동기 실행, 취소, timeout, late result, idempotency, artifact outcome을 같은 언어로 설명할 수 있게 한다.
 
@@ -23,7 +26,15 @@ Origin specs: 002, 003, 004, 006, 007, 011
 5. 007은 retry, abort, stale discard가 현재 runtime 여러 경계에 흩어져 있음을 인정한다. formal `LateResultDecision`, timeout table, policy-owned retry decision은 없다.
 6. 011은 subagent의 `SpawnEnvelope`, `ChildResultEnvelope`, correlation stale discard, synthetic inbound reentry를 current mapping으로 인정한다. typed inherited snapshot, wall clock timeout, full merge policy, durable child recovery는 없다.
 
-이 baseline은 새 작업의 출발점이다. 028 closure 전까지 위 gap을 구현된 것으로 말하면 안 된다.
+이 baseline은 구현 전 출발점이었다. 아래 implementation evidence가 028에서 새로 닫은 범위이며, source spec의 기존 closure 의미를 소급 변경하지 않는다.
+
+## implemented contract
+
+1. `shacs-core::runtime::execution_contract`가 `ExecutionScope`, `ExecutionIdentity`, domain별 outcome, `LateResultDecision`, bounded `RuntimeExecutionLedger`를 소유한다. 같은 logical effect의 duplicate attempt, terminal outcome 뒤 late result, pending correlation mismatch를 각각 별도 decision으로 남긴다.
+2. `AgentRunner`는 provider request와 tool call마다 pending effect를 만들고 final response, tool request, provider error/timeout/cancel, tool complete/recoverable/fatal/timeout/cancel/interrupted/skipped를 terminal fact로 기록한다. Streaming delta count는 diagnostics detail이며 final provider outcome과 분리된다.
+3. `SubagentRuntime`은 기존 `session_id`, `parent_turn_id`, `child_task_id`, `spawn_effect_id` 검증을 authoritative invariant로 유지한다. Optional correlation/attempt/idempotency field를 추가하고 accepted result만 typed synthetic inbound로 `AgentLoop`에 reentry한다. Cancellation은 stale이 아닌 cancellation fact이며 mismatch, duplicate, late result는 session truth를 변경하지 않는다.
+4. `shacs-utils::tool_results`는 inline, persisted, truncated fallback disposition과 redacted payload digest, runtime-root-relative locator를 가진 `ToolResultArtifactRef`를 반환한다. 기존 provider handoff text API는 호환 wrapper로 유지된다.
+5. `AgentLoop`만 bounded ledger를 `session.metadata.runtime_execution`에 저장한다. Executor는 `SessionManager`를 호출하지 않는다. `shacs-session`과 CLI/local API diagnostics는 raw detail, correlation, payload를 제외하고 pending/outcome/domain/decision count와 안전한 `.nanobot/tool-results` locator만 projection한다.
 
 ## owned open scope
 
@@ -119,3 +130,12 @@ Closure를 주장하려면 최소한 아래 증거가 있어야 한다.
 8. Inspect 또는 diagnostics output에서 pending effect, terminal outcome, stale discard, artifact reference를 확인한 CLI 또는 local API evidence.
 9. Migration note. 기존 current architecture 문서가 완료로 말한 범위를 바꾸지 않고, 028의 새 구현 범위만 추가했음을 설명해야 한다.
 10. `cargo fmt --manifest-path crates/Cargo.toml --all -- --check`, `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings`, `cargo test --manifest-path crates/Cargo.toml --workspace` 통과 기록.
+
+## closure evidence
+
+- Shared contract: `crates/shacs-core/src/runtime/execution_contract.rs`의 duplicate, late-after-timeout, stale correlation, recoverable retry tests.
+- Provider/tool boundary: `crates/shacs-core/tests/runtime_agent.rs`의 `runtime_runner_records_provider_final_and_stream_outcomes`, `runtime_runner_records_provider_error_and_timeout_outcomes`, `runtime_runner_records_tool_outcomes_interrupts_skips_and_artifacts`, `runtime_runner_records_tool_cancellation_before_dispatch`, `runtime_runner_records_mcp_timeout_as_timed_out`, `runtime_runner_records_spawned_subagent_as_pending`와 runner unit timeout classification test.
+- Subagent/reentry: `crates/shacs-core/tests/runtime_loop.rs`의 completed/failed/timed out/cancelled/stale/duplicate/late tests, four-field correlation regression, synthetic inbound metadata assertions.
+- Session truth/inspection: `loop_process_direct_saves_turn_and_publishes_outbound`, `session_ux_projects_runtime_execution_without_raw_ledger_values`, CLI session inspect/diagnostics formatting 및 local API diagnostics serialization tests.
+- Artifact safety: `crates/shacs-utils/src/tool_results.rs`의 inline/persisted/truncated fallback, redacted payload digest, relative locator, text/JSON artifact tests.
+- Migration note: 002, 003, 004, 006, 007, 011의 기존 current mapping은 유지한다. 028은 공용 mega enum이나 replay log를 추가하지 않고 runner/subagent/session 경계에 optional identity와 outcome fact만 추가했다.

@@ -12,10 +12,10 @@
 
 ## 상태 체계와 2026-07-20 migration
 
-- `001`부터 `027`은 실제 Rust 구현과 테스트가 존재하는 현재 범위로 완료 처리했다.
+- `001`부터 `028`은 실제 Rust 구현과 테스트가 존재하는 현재 범위로 완료 처리했다.
 - `Complete (Scoped)`는 해당 owner가 정의한 현재 구현 범위가 닫혔음을 뜻한다.
 - `Complete (Baseline)`은 self-hosted/local 최소 기준이 닫혔음을 뜻한다.
-- 기존 문서의 미구현 accepted work는 `028`부터 `035`의 새 `Status: Open` owner spec으로 이관했다.
+- 기존 문서의 미구현 accepted work는 `029`부터 `035`의 남은 `Status: Open` owner spec으로 이관했다. `028`은 scoped implementation을 완료했다.
 - 기존 문서 본문의 future 문구는 역사와 설계 근거로 보존하지만, 구현 owner는 각 문서 상단의 `Open work moved to:` ledger와 새 spec을 따른다.
 - SaaS/admin/fleet, 멀티유저 조직 운영, remote marketplace, complete kernel isolation 같은 명시적 비목표는 신규 backlog로 승격하지 않았다.
 
@@ -23,7 +23,6 @@
 
 | Spec | Owner scope | Origin specs |
 |---|---|---|
-| `028-formal-execution-reentry-and-outcome-contracts` | provider/tool/subagent outcome, reentry, timeout/cancel/late result, artifact outcome | 002, 003, 004, 006, 007, 011 |
 | `029-durable-runtime-recovery-and-data-migration` | event/checkpoint replay, durable queue, restart recovery, migration, supervisor | 001, 002, 005, 006, 011, 012, 014, 015 |
 | `030-policy-permission-redaction-and-containment-model` | formal policy/safety snapshot, capability, approval, redaction, containment | 004, 007, 010, 011, 022, 023 |
 | `031-ui-projection-diagnostics-and-release-evidence-parity` | shared projection, TUI/REPL/wizard, diagnostics parity, release runner | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |

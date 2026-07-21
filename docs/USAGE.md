@@ -154,7 +154,7 @@ shacs-bot session inspect --session cli:direct
 shacs-bot session inspect --session cli:direct --workspace /tmp/ws
 ```
 
-`session list`는 key, timestamp, file path를 보여줍니다. `session inspect`는 key, path, timestamp, message count, `last_consolidated`, metadata key 이름, `pending_user_turn` 또는 `runtime_checkpoint` 같은 recovery marker 이름만 보여줍니다. 저장된 prompt/assistant content나 raw metadata value는 출력하지 않습니다.
+`session list`는 key, timestamp, file path를 보여줍니다. `session inspect`는 key, path, timestamp, message count, `last_consolidated`, metadata key 이름, `pending_user_turn` 또는 `runtime_checkpoint` 같은 recovery marker 이름을 보여줍니다. Runtime execution metadata가 있으면 provider/tool/subagent별 pending·terminal outcome 수, duplicate/late/stale decision 수, 안전한 artifact reference 수도 함께 표시합니다. 저장된 prompt/assistant content, raw outcome detail, correlation ID, raw metadata value는 출력하지 않습니다.
 
 빈 session 파일을 만들거나, 필터링된 conversation history를 출력하거나, 로컬 diagnostics를 확인합니다:
 
@@ -166,6 +166,8 @@ shacs-bot session diagnostics --session cli:work
 ```
 
 `session history`는 runtime과 같은 filtered replay view를 사용합니다. Consolidated message는 건너뛰고, orphan tool result는 복구하며, 기본 text 출력에서는 긴 user/assistant message를 잘라 보여줍니다. Raw session 파일이 아니라 필터링된 구조화 history가 필요할 때 `--json`을 사용하세요.
+
+`session diagnostics`도 같은 redacted runtime execution projection을 사용하며 diagnostics reference를 보존합니다. Human-readable CLI는 artifact 개수만 요약하고, 구조화 session/local API projection의 artifact locator는 workspace 상대 `.nanobot/tool-results/...` 경로만 포함하며 absolute path나 parent traversal 경로는 제외합니다.
 
 Raw 로컬 session content는 명시적으로 필요할 때만 export하세요:
 
