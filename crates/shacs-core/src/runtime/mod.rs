@@ -8,6 +8,7 @@ mod context_handoff;
 mod context_refs;
 mod context_resolvers;
 mod context_safety;
+mod execution_contract;
 mod file_context;
 mod goal;
 mod lifecycle;
@@ -75,6 +76,12 @@ pub use context_safety::{
     apply_context_safety_gate, context_trust_label_name, protected_context_path_reason,
     replay_context_artifact_from_evidence, trust_label_for_kind, ContextPermissionDecision,
     ContextReplayEvidence, ContextSafetyDiagnostic, ContextSafetyReport, ContextTrustLabel,
+};
+pub use execution_contract::{
+    ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope,
+    LateResultDecision, PendingExecution, ProviderOutcomeKind, RecordedExecutionOutcome,
+    RuntimeExecutionLedger, SubagentOutcomeKind, ToolFailureClass, ToolInterruptKind,
+    ToolOutcomeKind,
 };
 pub use file_context::{
     AudioAnalysisPolicy, AudioContextAnalysis, AudioContextAnalyzer, AudioContextError,
