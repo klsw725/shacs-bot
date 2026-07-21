@@ -2,6 +2,7 @@ use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials as SmtpCredentials;
 use lettre::{Message as EmailMessage, SmtpTransport, Transport};
 use mailparse::MailHeaderMap;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use shacs_api::{
@@ -62,7 +63,7 @@ use shacs_providers::{
     ProviderEvent, ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
 };
 use shacs_redaction::redact_string;
-use shacs_session::SessionRuntimeWorkflowProjection;
+use shacs_session::{SessionRuntimeExecutionProjection, SessionRuntimeWorkflowProjection};
 use shacs_skills::{
     discover_skill_registry, discover_workflow_recipes, sync_builtin_skills,
     SkillBackedWorkflowRecipe, SkillRegistryEntry, SkillRegistryOptions, SkillRegistryStatus,
@@ -1341,7 +1342,9 @@ pub struct SessionInspectReport {
     pub last_consolidated: usize,
     pub recovery_markers: Vec<String>,
     pub checkpoint_phase: Option<String>,
+    pub diagnostics_refs: Vec<String>,
     pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
+    pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1375,7 +1378,7 @@ pub struct SessionClearReport {
     pub message_count_before: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionDiagnosticsReport {
     pub workspace: PathBuf,
     pub key: String,
@@ -1386,7 +1389,9 @@ pub struct SessionDiagnosticsReport {
     pub metadata_keys: Vec<String>,
     pub recovery_markers: Vec<String>,
     pub checkpoint_phase: Option<String>,
+    pub diagnostics_refs: Vec<String>,
     pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
+    pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
     pub legal_start: usize,
 }
 
@@ -6720,7 +6725,9 @@ pub fn session_inspect(options: SessionInspectOptions) -> Result<SessionInspectR
         last_consolidated: detail.last_consolidated,
         recovery_markers: detail.recovery_markers,
         checkpoint_phase: detail.checkpoint_phase,
+        diagnostics_refs: detail.diagnostics_refs,
         runtime_workflow: detail.runtime_workflow,
+        runtime_execution: detail.runtime_execution,
     })
 }
 
@@ -6881,7 +6888,9 @@ pub fn session_diagnostics(
             metadata_keys: Vec::new(),
             recovery_markers: Vec::new(),
             checkpoint_phase: None,
+            diagnostics_refs: Vec::new(),
             runtime_workflow: None,
+            runtime_execution: None,
             legal_start: 0,
         });
     }
@@ -6902,7 +6911,9 @@ pub fn session_diagnostics(
         metadata_keys: diagnostics.metadata_keys,
         recovery_markers: diagnostics.recovery_markers,
         checkpoint_phase: diagnostics.checkpoint_phase,
+        diagnostics_refs: diagnostics.diagnostics_refs,
         runtime_workflow: diagnostics.runtime_workflow,
+        runtime_execution: diagnostics.runtime_execution,
         legal_start: diagnostics.legal_start,
     })
 }
@@ -16087,6 +16098,12 @@ fn format_session_inspect(report: SessionInspectReport) -> String {
             format_runtime_workflow_projection(workflow)
         ));
     }
+    if let Some(execution) = report.runtime_execution.as_ref() {
+        lines.push(format!(
+            "Runtime execution: {}",
+            format_runtime_execution_projection(execution)
+        ));
+    }
     lines.join("\n")
 }
 
@@ -16159,6 +16176,11 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
     } else {
         report.recovery_markers.join(", ")
     };
+    let diagnostics_refs = if report.diagnostics_refs.is_empty() {
+        "none".to_owned()
+    } else {
+        report.diagnostics_refs.join(", ")
+    };
     let mut lines = vec![
         "shacs-bot session diagnostics".to_owned(),
         format!("Workspace: {}", display_path(&report.workspace)),
@@ -16169,6 +16191,7 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
         format!("Last consolidated: {}", report.last_consolidated),
         format!("Metadata keys: {metadata}"),
         format!("Recovery markers: {recovery}"),
+        format!("Diagnostics refs: {diagnostics_refs}"),
         format!(
             "Checkpoint phase: {}",
             report.checkpoint_phase.unwrap_or_else(|| "none".to_owned())
@@ -16181,7 +16204,37 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
             format_runtime_workflow_projection(workflow)
         ));
     }
+    if let Some(execution) = report.runtime_execution.as_ref() {
+        lines.push(format!(
+            "Runtime execution: {}",
+            format_runtime_execution_projection(execution)
+        ));
+    }
     lines.join("\n")
+}
+
+fn format_runtime_execution_projection(execution: &SessionRuntimeExecutionProjection) -> String {
+    format!(
+        "pending={} outcomes={} pending_by_domain=provider:{} tool:{} subagent:{} unknown:{} outcomes_by_domain=provider:{} tool:{} subagent:{} unknown:{} decisions=accepted:{} duplicate:{} late:{} stale:{} unknown:{} artifacts={}/{} recent_outcomes={}",
+        execution.pending_count,
+        execution.outcome_count,
+        execution.pending_by_domain.provider,
+        execution.pending_by_domain.tool,
+        execution.pending_by_domain.subagent,
+        execution.pending_by_domain.unknown,
+        execution.outcomes_by_domain.provider,
+        execution.outcomes_by_domain.tool,
+        execution.outcomes_by_domain.subagent,
+        execution.outcomes_by_domain.unknown,
+        execution.decisions.accepted,
+        execution.decisions.duplicate,
+        execution.decisions.late,
+        execution.decisions.stale,
+        execution.decisions.unknown,
+        execution.safe_artifact_ref_count,
+        execution.artifact_ref_count,
+        execution.recent_outcomes.len()
+    )
 }
 
 fn format_runtime_workflow_projection(workflow: &SessionRuntimeWorkflowProjection) -> String {
@@ -22941,6 +22994,27 @@ mod tests {
                 }
             }),
         );
+        session.metadata.insert(
+            "runtime_execution".to_owned(),
+            json!({
+                "pending": [{"domain": "tool", "identity": {"effect_id": "pending-tool", "correlation_id": "secret-corr"}}],
+                "outcomes": [{
+                    "fact": {
+                        "identity": {
+                            "scope": {"session_id": "cli:direct", "turn_id": "turn-secret"},
+                            "effect_id": "effect-cli",
+                            "correlation_id": "secret-corr",
+                            "attempt_id": "secret-attempt",
+                            "idempotency_key": "secret-idempotency"
+                        },
+                        "outcome": {"domain": "provider", "outcome": "completed"},
+                        "detail": "secret runtime detail",
+                        "artifact_ref": {"locator": ".nanobot/tool-results/default/call.json", "digest": "hidden"}
+                    },
+                    "decision": {"kind": "accepted"}
+                }]
+            }),
+        );
         session.add_message("user", "secret prompt body", Default::default());
         session.add_message("assistant", "secret answer body", Default::default());
         session.last_consolidated = 1;
@@ -22970,6 +23044,7 @@ mod tests {
             inspect.metadata_keys,
             vec![
                 "agent_configuration".to_owned(),
+                "runtime_execution".to_owned(),
                 "runtime_workflow".to_owned()
             ]
         );
@@ -22980,10 +23055,23 @@ mod tests {
                 .and_then(|workflow| workflow.workflow_id.as_deref()),
             Some("wf-cli")
         );
+        assert_eq!(
+            inspect
+                .runtime_execution
+                .as_ref()
+                .map(|execution| execution.pending_count),
+            Some(1)
+        );
         let inspect_output = format_session_inspect(inspect);
         assert!(inspect_output.contains("Messages: 2"));
-        assert!(inspect_output.contains("Metadata keys: agent_configuration, runtime_workflow"));
+        assert!(inspect_output
+            .contains("Metadata keys: agent_configuration, runtime_execution, runtime_workflow"));
         assert!(inspect_output.contains("Workflow status: workflow_id=wf-cli"));
+        assert!(inspect_output.contains("Runtime execution: pending=1 outcomes=1"));
+        assert!(
+            inspect_output.contains("decisions=accepted:1 duplicate:0 late:0 stale:0 unknown:0")
+        );
+        assert!(inspect_output.contains("artifacts=1/1"));
         assert!(inspect_output.contains("schema_version=024WorkflowProjection.v1"));
         assert!(inspect_output.contains("state=Succeeded"));
         assert!(inspect_output.contains("pattern=fan_out_and_synthesize"));
@@ -22994,6 +23082,9 @@ mod tests {
         assert!(!inspect_output.contains("secret answer body"));
         assert!(!inspect_output.contains("secret workflow prompt"));
         assert!(!inspect_output.contains("secret objective"));
+        assert!(!inspect_output.contains("secret-corr"));
+        assert!(!inspect_output.contains("secret runtime detail"));
+        assert!(!inspect_output.contains("secret-attempt"));
         assert!(!inspect_output.contains("diff secret"));
         assert!(!inspect_output.contains("secret evidence"));
         Ok(())
@@ -23206,6 +23297,10 @@ mod tests {
             json!({"phase": "awaiting_tools", "raw_secret": "do-not-print"}),
         );
         session.metadata.insert(
+            "diagnostics_refs".to_owned(),
+            json!(["workflow://diag-managed", "workflow://diag-managed"]),
+        );
+        session.metadata.insert(
             "runtime_workflow".to_owned(),
             json!({
                 "projection": {
@@ -23231,6 +23326,48 @@ mod tests {
                     "evidence_refs": [{"id": "hidden"}]
                 },
                 "events": [{"phase": "raw", "prompt": "do-not-print"}]
+            }),
+        );
+        session.metadata.insert(
+            "runtime_execution".to_owned(),
+            json!({
+                "pending": [
+                    {"domain": "tool", "identity": {"effect_id": "pending-tool", "correlation_id": "secret-corr"}},
+                    {"domain": "subagent", "identity": {"effect_id": "pending-subagent", "correlation_id": "secret-corr"}}
+                ],
+                "outcomes": [
+                    {
+                        "fact": {
+                            "identity": {
+                                "scope": {"session_id": "cli:managed", "turn_id": "turn-secret"},
+                                "effect_id": "effect-provider",
+                                "correlation_id": "secret-corr",
+                                "attempt_id": "secret-attempt",
+                                "idempotency_key": "secret-idempotency"
+                            },
+                            "outcome": {"domain": "provider", "outcome": "completed"},
+                            "detail": "secret runtime detail",
+                            "artifact_ref": {"locator": ".nanobot/tool-results/default/call.json", "digest": "hidden"}
+                        },
+                        "decision": {"kind": "accepted"}
+                    },
+                    {
+                        "fact": {
+                            "identity": {"effect_id": "effect-tool", "correlation_id": "secret-corr"},
+                            "outcome": {"domain": "tool", "outcome": {"kind": "failed", "class": "fatal"}},
+                            "artifact_ref": {"locator": "/tmp/secret-output.txt", "digest": "hidden"}
+                        },
+                        "decision": {"kind": "duplicate_ignored", "reason": "secret duplicate"}
+                    },
+                    {
+                        "fact": {
+                            "identity": {"effect_id": "effect-subagent", "correlation_id": "secret-corr"},
+                            "outcome": {"domain": "subagent", "outcome": "stale"}
+                        },
+                        "decision": {"kind": "discarded_stale", "reason": "secret stale"}
+                    }
+                ],
+                "raw_payload": "secret raw payload"
             }),
         );
         session.add_message("user", "alpha", Default::default());
@@ -23267,12 +23404,42 @@ mod tests {
             workspace_override: None,
             session: "cli:managed".to_owned(),
         })?;
-        let diagnostics_output = format_session_diagnostics(diagnostics);
-        assert!(
-            diagnostics_output.contains("Recovery markers: pending_user_turn, runtime_checkpoint")
+        assert_eq!(
+            diagnostics.diagnostics_refs,
+            vec!["workflow://diag-managed"]
         );
+        assert_eq!(
+            diagnostics
+                .runtime_execution
+                .as_ref()
+                .map(|execution| execution.outcome_count),
+            Some(3)
+        );
+        let diagnostics_json = serde_json::to_value(&diagnostics)?;
+        assert_eq!(
+            diagnostics_json["diagnostics_refs"],
+            json!(["workflow://diag-managed"])
+        );
+        assert_eq!(
+            diagnostics_json["runtime_execution"]["pending_count"],
+            json!(2)
+        );
+        let diagnostics_output = format_session_diagnostics(diagnostics);
+        assert!(diagnostics_output.contains(
+            "Recovery markers: pending_user_turn, runtime_checkpoint, runtime_diagnostics"
+        ));
+        assert!(diagnostics_output.contains("Diagnostics refs: workflow://diag-managed"));
         assert!(diagnostics_output.contains("Checkpoint phase: awaiting_tools"));
         assert!(diagnostics_output.contains("Workflow status: workflow_id=wf-managed"));
+        assert!(diagnostics_output.contains("Runtime execution: pending=2 outcomes=3"));
+        assert!(
+            diagnostics_output.contains("pending_by_domain=provider:0 tool:1 subagent:1 unknown:0")
+        );
+        assert!(diagnostics_output
+            .contains("outcomes_by_domain=provider:1 tool:1 subagent:1 unknown:0"));
+        assert!(diagnostics_output
+            .contains("decisions=accepted:1 duplicate:1 late:0 stale:1 unknown:0"));
+        assert!(diagnostics_output.contains("artifacts=1/2"));
         assert!(diagnostics_output.contains("state=Running"));
         assert!(diagnostics_output.contains("active_children=2"));
         assert!(diagnostics_output.contains("budget=known_tokens:5 estimated_tokens:6 child_runs:1 verifier_runs:0 heavy_commands:0"));
@@ -23280,6 +23447,10 @@ mod tests {
         assert!(diagnostics_output.contains("next_action=continue"));
         assert!(!diagnostics_output.contains("do-not-print"));
         assert!(!diagnostics_output.contains("worktree://hidden"));
+        assert!(!diagnostics_output.contains("secret-corr"));
+        assert!(!diagnostics_output.contains("secret runtime detail"));
+        assert!(!diagnostics_output.contains("secret raw payload"));
+        assert!(!diagnostics_output.contains("/tmp/secret-output.txt"));
 
         let export_error = session_export(SessionExportOptions {
             config_path: Some(config_path.clone()),

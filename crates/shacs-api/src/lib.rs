@@ -11,8 +11,8 @@ use serde_json::{json, Map, Value};
 use shacs_channels::WebSocketServerEvent;
 use shacs_providers::{GenerationSettings, LlmResponse, ProviderEvent, ProviderRequest};
 use shacs_session::{
-    SessionManager, SessionProjectionOptions, SessionRuntimeWorkflowProjection,
-    SessionUxDiagnostics,
+    SessionManager, SessionProjectionOptions, SessionRuntimeExecutionProjection,
+    SessionRuntimeWorkflowProjection, SessionUxDiagnostics,
 };
 use shacs_utils::diagnostics::{
     DiagnosticsKind, DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot,
@@ -807,6 +807,7 @@ fn handle_session_diagnostics_query(
             checkpoint_phase: None,
             diagnostics_refs: Vec::new(),
             runtime_workflow: None::<SessionRuntimeWorkflowProjection>,
+            runtime_execution: None::<SessionRuntimeExecutionProjection>,
             legal_start: 0,
         }),
     )

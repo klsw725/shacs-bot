@@ -1625,6 +1625,7 @@ dependencies = [
  "libc",
  "mailparse",
  "native-tls",
+ "serde",
  "serde_json",
  "sha2",
  "shacs-api",
