@@ -454,7 +454,7 @@ Background runtime에도 같은 원칙을 적용한다.
 
 ## Approval cache와 사용자 decision
 
-사용자가 한 번 승인한 decision은 action digest와 scope에 묶인다.
+사용자가 한 번 승인한 decision 자체는 action digest와 scope에 묶인다. `approved_for_session`으로 만든 후속 재사용 grant는 같은 session, permission context, requested scope 안에서 별도의 typed reuse match를 적용한다. 기본 match는 exact action digest이고, 단순 `exec` shell 명령은 OpenCode식 arity prefix pattern을 사용할 수 있다. 기존 metadata에 reuse match가 없으면 exact action으로 해석한다.
 
 Approval request 필수 필드:
 

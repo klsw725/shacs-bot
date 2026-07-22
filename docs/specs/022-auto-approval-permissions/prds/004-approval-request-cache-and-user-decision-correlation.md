@@ -70,7 +70,7 @@ Status: Implemented.
 2. `ApprovalDecision`: request id, decision, approved scope, actor, decided at.
 3. `ApprovalDecisionKind`: approved, approved for session, denied, inspect only.
 4. `ApprovalCacheEntry`: request ref, approved scope, expiration, consumed state.
-5. `SessionApprovalCacheEntry`: session key, session-stable approval context digest, approval cache entry. Runtime session metadata에만 저장되며 config/global grant store가 아니다.
+5. `SessionApprovalCacheEntry`: session key, session-stable approval context digest, typed reuse match, approval cache entry. Runtime session metadata에만 저장되며 config/global grant store가 아니다. Reuse match가 없는 기존 entry는 exact action으로 읽는다.
 6. `UserFacingPermissionStatus`: allowed automatically, waiting for approval, denied by policy, denied by scope, denied by protected target, evaluator unavailable, containment unknown.
 7. `ApprovalCorrelationError`: request mismatch, action mismatch, snapshot mismatch, expired, consumed, inspect only.
 
@@ -80,14 +80,14 @@ Status: Implemented.
 2. Approval request를 만들고 risk summary를 사용자에게 보여 준다.
 3. 사용자가 approved 또는 approved for session을 선택한다.
 4. Runtime이 request id, action digest, snapshot digest, expiration을 검증한다.
-5. 검증이 통과하면 해당 action 또는 approved scope 안에서 decision을 소비한다. Approved for session은 같은 session key, action digest, session-stable approval context digest, requested scope가 모두 일치하는 후속 action에만 재사용된다.
+5. 검증이 통과하면 해당 action 또는 approved scope 안에서 decision을 소비한다. Approved for session은 같은 session key, session-stable approval context digest, requested scope가 모두 일치하고 typed reuse match를 만족하는 후속 action에만 재사용된다. 기본 reuse match는 action digest exact이고, 단순 `exec` shell 명령은 승인 질문에 표시된 OpenCode식 arity prefix pattern을 사용한다.
 6. Tool runtime handoff는 새 final allow decision을 통해서만 일어난다.
 
 ## 실패 시퀀스
 
 1. 사용자가 승인한 뒤 action arguments가 바뀐다.
-2. Action digest mismatch가 발생한다.
-3. Runtime은 approval을 소비하지 않고 deny 또는 새 ask로 접는다.
+2. Exact reuse entry는 action digest mismatch로 재사용하지 않는다. Exec command pattern entry는 같은 prefix이면 재사용하고, 다른 prefix 또는 pattern을 만들 수 없는 복합 shell 명령이면 재사용하지 않는다.
+3. Reuse match가 없으면 runtime은 approval을 소비하지 않고 deny 또는 새 ask로 접는다.
 4. Approval이 만료된 뒤 도착한다.
 5. Runtime은 expired rejection을 기록한다.
 6. 사용자가 inspect evidence만 선택한다.
@@ -102,7 +102,7 @@ Status: Implemented.
 5. Message acknowledgement가 approval로 해석되지 않는지 확인한다.
 6. `ask_user` resume만으로 formal approval이 되지 않는지 확인한다.
 7. Approval prompt가 필수 summary와 expiration을 포함하는지 확인한다.
-8. Approved for session cache가 다른 session key, 다른 action digest, 다른 approval context digest, 다른 requested scope, `/new` 이후 session에 재사용되지 않는지 확인한다.
+8. Approved for session cache가 다른 session key, 다른 typed reuse match, 다른 approval context digest, 다른 requested scope, `/new` 이후 session에 재사용되지 않는지 확인한다.
 
 ## 완료 기준
 
