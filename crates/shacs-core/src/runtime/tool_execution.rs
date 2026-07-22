@@ -1,3 +1,6 @@
+use crate::runtime::permission_pattern::{
+    session_approval_reuse_matches, session_approval_reuse_pattern,
+};
 use crate::runtime::{
     correlate_approval, decide_permission, evaluate_static_rules, normalize_runtime_tool_call,
     ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError, ApprovalDecisionKind,
@@ -654,16 +657,19 @@ pub(crate) fn permission_approval_interrupt(
     };
     let arguments = action.redacted_arguments.to_string();
     let target_summary = approval_target_summary(action);
+    let session_reuse_summary =
+        session_approval_reuse_pattern(action).unwrap_or_else(|| "exact action only".to_owned());
     RuntimeInterrupt::PermissionApproval {
         approval_request_id: approval_request_id.clone(),
         approval_request: Box::new(approval_request),
         tool_call: call,
         question: format!(
-            "Permission approval required before running tool `{}`.\n\nRisk: {}\nTarget: {}\nScope: {}\nExpires at (unix ms): {}\nArguments: `{}`\n\nReply with `1` or `approve` to run it once, `3` or `approve_session` to approve matching actions in this session, or `2` or `deny` to cancel.\n\nApproval id: `{}`",
+            "Permission approval required before running tool `{}`.\n\nRisk: {}\nTarget: {}\nScope: {}\nSession reuse: {}\nExpires at (unix ms): {}\nArguments: `{}`\n\nReply with `1` or `approve` to run it once, `3` or `approve_session` to approve matching actions in this session, or `2` or `deny` to cancel.\n\nApproval id: `{}`",
             action.tool_name,
             risk_summary,
             target_summary,
             action.session_id,
+            session_reuse_summary,
             expires_at_unix_ms,
             arguments,
             approval_request_id
@@ -718,7 +724,8 @@ fn session_approval_cache_correlation(
     action: &PermissionedAction,
 ) -> Option<ApprovalCorrelation> {
     let approval = &entry.approval;
-    if approval.request.action_digest != action.action_digest {
+    if !session_approval_reuse_matches(&entry.reuse_match, &approval.request.action_digest, action)
+    {
         return None;
     }
     if approval.request.requested_scope != action.session_id {

@@ -48,7 +48,19 @@ pub struct ApprovalCacheEntry {
 pub struct SessionApprovalCacheEntry {
     pub session_key: String,
     pub approval_context_digest: String,
+    #[serde(default)]
+    pub reuse_match: SessionApprovalReuseMatch,
     pub approval: ApprovalCacheEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SessionApprovalReuseMatch {
+    #[default]
+    ExactAction,
+    ExecCommandPattern {
+        pattern: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,3 +1,6 @@
+use crate::runtime::permission_pattern::{
+    same_session_approval_grant, session_approval_reuse_match,
+};
 use crate::runtime::tool_execution::session_approval_context_digest;
 use crate::runtime::{
     apply_context_safety_gate, build_context_provider_handoff, correlate_approval,
@@ -3543,12 +3546,18 @@ fn store_session_permission_approval(
 ) {
     let now = now_unix_ms();
     let approval_context_digest = session_approval_context_digest(action);
+    let reuse_match = session_approval_reuse_match(action);
     let mut approvals = session_permission_approvals(session)
         .into_iter()
         .filter(|entry| entry.approval.request.expires_at_unix_ms >= now)
         .filter(|entry| {
             !(entry.session_key == session_key
-                && entry.approval.request.action_digest == action.action_digest
+                && same_session_approval_grant(
+                    &entry.reuse_match,
+                    &entry.approval.request.action_digest,
+                    &reuse_match,
+                    &action.action_digest,
+                )
                 && entry.approval.request.requested_scope == action.session_id
                 && entry.approval_context_digest == approval_context_digest)
         })
@@ -3556,6 +3565,7 @@ fn store_session_permission_approval(
     approvals.push(SessionApprovalCacheEntry {
         session_key: session_key.to_owned(),
         approval_context_digest,
+        reuse_match,
         approval,
     });
     if approvals.len() > SESSION_PERMISSION_APPROVAL_LIMIT {

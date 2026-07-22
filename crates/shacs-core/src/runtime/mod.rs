@@ -19,6 +19,7 @@ mod permission_action;
 mod permission_approval;
 mod permission_audit;
 mod permission_ceiling;
+mod permission_pattern;
 mod permission_policy;
 mod permission_recent_denials;
 mod permission_replay;
@@ -138,7 +139,7 @@ pub use permission_action::{
 pub use permission_approval::{
     correlate_approval, ApprovalActor, ApprovalCacheEntry, ApprovalCorrelation,
     ApprovalCorrelationError, ApprovalDecision, ApprovalDecisionKind, ApprovalRequest,
-    SessionApprovalCacheEntry,
+    SessionApprovalCacheEntry, SessionApprovalReuseMatch,
 };
 pub use permission_audit::{
     build_permission_audit_record, build_permission_diagnostics_summary,

@@ -5907,7 +5907,7 @@ fn loop_permission_approval_session_option_reuses_same_session_match() -> Result
             tool_calls: vec![ToolCallRequest::new(
                 "exec-2",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo test --workspace"))]),
             )],
             ..LlmResponse::default()
         },
@@ -5979,6 +5979,10 @@ fn loop_permission_approval_session_option_reuses_same_session_match() -> Result
             != "discord:approval-session"
         || !raw["metadata"]["session_permission_approvals"][0]["approval_context_digest"]
             .is_string()
+        || raw["metadata"]["session_permission_approvals"][0]["reuse_match"]["kind"]
+            != "exec_command_pattern"
+        || raw["metadata"]["session_permission_approvals"][0]["reuse_match"]["pattern"]
+            != "cargo test *"
         || raw["metadata"]["session_permission_approvals"][0]["approval"]["decision"]["decision"]
             != "approved_for_session"
     {
