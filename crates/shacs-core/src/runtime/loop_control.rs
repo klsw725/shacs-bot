@@ -5,7 +5,22 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Default, Clone)]
 pub struct SessionTurnLock {
-    active_sessions: Arc<Mutex<BTreeSet<String>>>,
+    state: Arc<Mutex<SessionTurnState>>,
+}
+
+#[derive(Debug, Default)]
+struct SessionTurnState {
+    active_sessions: BTreeMap<String, CancellationToken>,
+    pending_cancellations: BTreeSet<String>,
+    reserved_sessions: BTreeMap<String, ReservedSessionTurn>,
+    next_reservation_id: u64,
+}
+
+#[derive(Debug)]
+struct ReservedSessionTurn {
+    id: u64,
+    owner: Option<std::thread::ThreadId>,
+    cancelled: bool,
 }
 
 impl SessionTurnLock {
@@ -17,27 +32,146 @@ impl SessionTurnLock {
         &self,
         session_key: impl Into<String>,
     ) -> Result<SessionTurnGuard, SessionTurnAcquireError> {
-        let session_key = session_key.into();
-        let mut active_sessions = recover_lock(&self.active_sessions);
-        if active_sessions.contains(&session_key) {
+        self.acquire_with_pending_cancellation(session_key.into(), true)
+    }
+
+    pub fn acquire_priority(
+        &self,
+        session_key: impl Into<String>,
+    ) -> Result<SessionTurnGuard, SessionTurnAcquireError> {
+        self.acquire_with_pending_cancellation(session_key.into(), false)
+    }
+
+    fn acquire_with_pending_cancellation(
+        &self,
+        session_key: String,
+        consume_pending_cancellation: bool,
+    ) -> Result<SessionTurnGuard, SessionTurnAcquireError> {
+        let mut state = recover_lock(&self.state);
+        let pending_cancellation = if consume_pending_cancellation {
+            match state.reserved_sessions.get(&session_key) {
+                Some(reservation) if reservation.owner == Some(std::thread::current().id()) => {
+                    let cancelled = reservation.cancelled;
+                    state.reserved_sessions.remove(&session_key);
+                    cancelled
+                }
+                Some(_) => {
+                    return Err(SessionTurnAcquireError::AlreadyActive { session_key });
+                }
+                None => state.pending_cancellations.remove(&session_key),
+            }
+        } else {
+            false
+        };
+        if state.active_sessions.contains_key(&session_key) {
             return Err(SessionTurnAcquireError::AlreadyActive { session_key });
         }
-        active_sessions.insert(session_key.clone());
+        let cancellation = CancellationToken::new();
+        if pending_cancellation {
+            cancellation.cancel();
+        }
+        state
+            .active_sessions
+            .insert(session_key.clone(), cancellation);
         Ok(SessionTurnGuard {
-            active_sessions: self.active_sessions.clone(),
+            state: self.state.clone(),
             session_key,
         })
     }
 
     pub fn active_session_keys(&self) -> Vec<String> {
-        recover_lock(&self.active_sessions)
-            .iter()
+        recover_lock(&self.state)
+            .active_sessions
+            .keys()
             .cloned()
             .collect()
     }
 
     pub fn is_active(&self, session_key: &str) -> bool {
-        recover_lock(&self.active_sessions).contains(session_key)
+        recover_lock(&self.state)
+            .active_sessions
+            .contains_key(session_key)
+    }
+
+    pub fn reserve(&self, session_key: impl Into<String>) -> SessionTurnReservation {
+        let session_key = session_key.into();
+        let mut state = recover_lock(&self.state);
+        state.next_reservation_id = state.next_reservation_id.wrapping_add(1);
+        let id = state.next_reservation_id;
+        state.reserved_sessions.insert(
+            session_key.clone(),
+            ReservedSessionTurn {
+                id,
+                owner: None,
+                cancelled: false,
+            },
+        );
+        SessionTurnReservation {
+            state: self.state.clone(),
+            session_key,
+            id,
+        }
+    }
+
+    pub fn cancellation_token(&self, session_key: &str) -> Option<CancellationToken> {
+        recover_lock(&self.state)
+            .active_sessions
+            .get(session_key)
+            .cloned()
+    }
+
+    pub fn cancel(&self, session_key: &str) -> bool {
+        let mut state = recover_lock(&self.state);
+        if let Some(token) = state.active_sessions.get(session_key) {
+            token.cancel();
+            true
+        } else {
+            state.pending_cancellations.insert(session_key.to_owned())
+        }
+    }
+
+    pub fn cancel_active_or_reserved(&self, session_key: &str) -> bool {
+        let mut state = recover_lock(&self.state);
+        if let Some(token) = state.active_sessions.get(session_key) {
+            token.cancel();
+            true
+        } else if let Some(reservation) = state.reserved_sessions.get_mut(session_key) {
+            reservation.cancelled = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SessionTurnReservation {
+    state: Arc<Mutex<SessionTurnState>>,
+    session_key: String,
+    id: u64,
+}
+
+impl SessionTurnReservation {
+    pub fn bind_to_current_thread(&self) {
+        let mut state = recover_lock(&self.state);
+        if let Some(reservation) = state.reserved_sessions.get_mut(&self.session_key) {
+            if reservation.id == self.id {
+                reservation.owner = Some(std::thread::current().id());
+            }
+        }
+    }
+}
+
+impl Drop for SessionTurnReservation {
+    fn drop(&mut self) {
+        let mut state = recover_lock(&self.state);
+        if state
+            .reserved_sessions
+            .get(&self.session_key)
+            .is_some_and(|reservation| reservation.id == self.id)
+        {
+            state.reserved_sessions.remove(&self.session_key);
+        }
     }
 }
 
@@ -48,7 +182,7 @@ pub enum SessionTurnAcquireError {
 
 #[derive(Debug)]
 pub struct SessionTurnGuard {
-    active_sessions: Arc<Mutex<BTreeSet<String>>>,
+    state: Arc<Mutex<SessionTurnState>>,
     session_key: String,
 }
 
@@ -60,7 +194,9 @@ impl SessionTurnGuard {
 
 impl Drop for SessionTurnGuard {
     fn drop(&mut self) {
-        recover_lock(&self.active_sessions).remove(&self.session_key);
+        recover_lock(&self.state)
+            .active_sessions
+            .remove(&self.session_key);
     }
 }
 

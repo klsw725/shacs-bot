@@ -1,4 +1,5 @@
 use serde_json::{json, Map, Value};
+use sha2::Digest;
 use shacs_config::AutoApprovalConfig;
 use shacs_core::runtime::{
     app_provided_skill_reference_evidence, authored_skill_ready_for_active_registry,
@@ -56,6 +57,9 @@ use shacs_eval::evaluator::{
 use shacs_providers::{
     GenerationSettings, LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest,
     ToolCallRequest,
+};
+use shacs_session::durable_event::{
+    DurableEventStore, SESSION_TURN_ACCEPTED, SESSION_TURN_COMPLETED,
 };
 use shacs_skills::{
     SkillDescriptor, SkillRegistry, SkillRegistryEntry, SkillRegistryStatus, SkillSourceKind,
@@ -1246,13 +1250,30 @@ fn loop_process_direct_saves_turn_and_publishes_outbound() -> Result<(), Box<dyn
         content: Some("hello back".to_owned()),
         ..LlmResponse::default()
     }]);
+    let durable_event_root = workspace.path().join("runtime").join("durable-events");
+    let plugin_skill_root = workspace.path().join("plugin-skills");
+    std::fs::create_dir_all(plugin_skill_root.join("plugin-skill"))?;
+    std::fs::create_dir_all(plugin_skill_root.join("disabled-skill"))?;
+    std::fs::write(
+        plugin_skill_root.join("plugin-skill").join("SKILL.md"),
+        "---\ndescription: Plugin skill\n---\nPlugin body",
+    )?;
+    std::fs::write(
+        plugin_skill_root.join("disabled-skill").join("SKILL.md"),
+        "---\ndescription: Disabled skill\n---\nDisabled body",
+    )?;
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.durable_event_root = Some(durable_event_root.clone());
+    let context_builder = ContextBuilder::new(workspace.path())
+        .with_skill_roots([plugin_skill_root])
+        .with_disabled_skills(["disabled-skill".to_owned()]);
     let mut loop_runtime = AgentLoop::new(
         bus.clone(),
         SessionManager::new(workspace.path())?,
-        ContextBuilder::new(workspace.path()),
+        context_builder,
         &registry,
         &client,
-        AgentLoopConfig::new(workspace.path(), "test-model"),
+        config,
     );
 
     let result = loop_runtime.process_direct("hello", Some("cli:thread-1"))?;
@@ -1286,6 +1307,80 @@ fn loop_process_direct_saves_turn_and_publishes_outbound() -> Result<(), Box<dyn
         || runtime_execution["outcomes"][0]["decision"]["kind"] != "accepted"
     {
         return Err(format!("runtime execution ledger did not persist: {raw:?}").into());
+    }
+    let events = DurableEventStore::open(durable_event_root)?
+        .scan(10)?
+        .records;
+    if events.len() != 2
+        || events[0].kind != SESSION_TURN_ACCEPTED
+        || events[1].kind != SESSION_TURN_COMPLETED
+        || events[0].session_id != "cli:thread-1"
+        || events[0]
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.skill_registry_hash.as_ref())
+            .is_none()
+        || !events[0].provenance.as_ref().is_some_and(|provenance| {
+            provenance.skill_body_hashes.contains_key("plugin-skill")
+                && !provenance.skill_body_hashes.contains_key("disabled-skill")
+        })
+        || events[0].payload
+            != shacs_session::durable_event::DurableEventPayload::inline(
+                "orchestrator_fact",
+                json!({
+                    "channel": "direct",
+                    "content_hash": format!("sha256:{:x}", sha2::Sha256::digest(b"hello")),
+                    "media_count": 0,
+                }),
+            )
+        || events[1]
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.execution_identity.as_ref())
+            .is_none()
+    {
+        return Err(format!("durable accepted facts drifted: {events:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_command_response_records_a_durable_accepted_fact() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let durable_event_root = workspace.path().join("runtime").join("durable-events");
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.durable_event_root = Some(durable_event_root.clone());
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let result = loop_runtime.process_direct("/status", Some("cli:command-event"))?;
+    assert_eq!(result.command, Some(AgentLoopCommandResult::Status));
+    assert!(client
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?
+        .is_empty());
+    let events = DurableEventStore::open(durable_event_root)?
+        .scan(10)?
+        .records;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, SESSION_TURN_COMPLETED);
+    assert_eq!(events[0].session_id, "cli:command-event");
+    match &events[0].payload {
+        shacs_session::durable_event::DurableEventPayload::Inline { data, .. } => {
+            assert_eq!(data["command"], "status");
+            assert_eq!(data["stop_reason"], "status");
+        }
+        payload => return Err(format!("unexpected command event payload: {payload:?}").into()),
     }
     Ok(())
 }
@@ -7228,6 +7323,80 @@ fn loop_priority_status_bypasses_active_session_lock() -> Result<(), Box<dyn Err
         .ok_or("missing active session")?;
     assert_eq!(raw["metadata"]["pending_user_turn"], true);
     assert_eq!(raw["messages"].as_array().map(Vec::len), Some(0));
+    Ok(())
+}
+
+#[test]
+fn loop_priority_stop_cancels_active_session_turn() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let turn_lock = SessionTurnLock::new();
+    let _guard = turn_lock
+        .acquire("telegram:chat-1")
+        .map_err(|error| format!("test lock acquire failed: {error:?}"))?;
+    let cancellation = turn_lock
+        .cancellation_token("telegram:chat-1")
+        .ok_or("missing active turn cancellation token")?;
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_session_turn_lock(turn_lock);
+
+    let result = loop_runtime
+        .process_message(InboundMessage::new("telegram", "user-1", "chat-1", "/stop"))?;
+    assert_eq!(result.command, Some(AgentLoopCommandResult::StopRequested));
+    assert!(cancellation.is_cancelled());
+    Ok(())
+}
+
+#[test]
+fn session_turn_lock_applies_cancellation_requested_before_acquire() -> Result<(), Box<dyn Error>> {
+    let turn_lock = SessionTurnLock::new();
+    assert!(turn_lock.cancel("telegram:chat-1"));
+    let _guard = turn_lock
+        .acquire("telegram:chat-1")
+        .map_err(|error| format!("test lock acquire failed: {error:?}"))?;
+    let cancellation = turn_lock
+        .cancellation_token("telegram:chat-1")
+        .ok_or("missing pending cancellation token")?;
+    assert!(cancellation.is_cancelled());
+    Ok(())
+}
+
+#[test]
+fn priority_stop_does_not_consume_pending_cancellation_for_original_turn(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let turn_lock = SessionTurnLock::new();
+    assert!(turn_lock.cancel("telegram:chat-1"));
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_session_turn_lock(turn_lock.clone());
+
+    let stop = loop_runtime
+        .process_message(InboundMessage::new("telegram", "user-1", "chat-1", "/stop"))?;
+    assert_eq!(stop.command, Some(AgentLoopCommandResult::StopRequested));
+    let _guard = turn_lock
+        .acquire("telegram:chat-1")
+        .map_err(|error| format!("original turn lock acquire failed: {error:?}"))?;
+    assert!(turn_lock
+        .cancellation_token("telegram:chat-1")
+        .is_some_and(|token| token.is_cancelled()));
     Ok(())
 }
 

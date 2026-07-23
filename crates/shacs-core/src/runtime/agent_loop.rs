@@ -58,6 +58,12 @@ use shacs_command::{
 };
 use shacs_config::AutoApprovalConfig;
 use shacs_providers::{GenerationSettings, ProviderClient, ProviderError, ProviderRetryMode};
+use shacs_session::durable_child::DurableChildRecorder;
+use shacs_session::durable_event::{
+    DurableEventError, DurableEventInput, DurableEventPayload, DurableEventProvenance,
+    DurableEventStore, DurableExecutionIdentityRef, SESSION_TURN_ACCEPTED, SESSION_TURN_COMPLETED,
+    SESSION_TURN_FAILED, WORKFLOW_COMPLETED, WORKFLOW_FAILED, WORKFLOW_PLANNED,
+};
 use shacs_skills::{
     discover_skill_registry, discover_workflow_recipes, SkillBackedWorkflowRecipe,
     SkillRegistryOptions,
@@ -70,6 +76,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowDurableFactState {
+    Absent,
+    Planned,
+    Terminal,
+}
 const RUNTIME_CHECKPOINT_KEY: &str = "runtime_checkpoint";
 const RUNTIME_EXECUTION_KEY: &str = "runtime_execution";
 const PENDING_PERMISSION_APPROVAL_KEY: &str = "pending_permission_approval";
@@ -191,6 +204,7 @@ pub struct AgentLoopConfig {
     pub permission_evaluator: Option<AutoEvaluatorVerdict>,
     pub permission_interactive: bool,
     pub permission_mode_setter: Option<PermissionModeSetter>,
+    pub durable_event_root: Option<PathBuf>,
 }
 
 impl AgentLoopConfig {
@@ -220,6 +234,7 @@ impl AgentLoopConfig {
             permission_evaluator: None,
             permission_interactive: false,
             permission_mode_setter: None,
+            durable_event_root: None,
         }
     }
 }
@@ -274,6 +289,7 @@ pub struct AgentLoop<'a> {
     agent_hook: Option<Arc<dyn AgentHook>>,
     plugin_command_dispatcher: Option<PluginCommandDispatcher>,
     recent_retry_tokens: RecentAutoModeRetryTokenStore,
+    durable_events: Option<DurableEventStore>,
     stopped: bool,
 }
 
@@ -304,6 +320,7 @@ impl<'a> AgentLoop<'a> {
             agent_hook: None,
             plugin_command_dispatcher: None,
             recent_retry_tokens: RecentAutoModeRetryTokenStore::default(),
+            durable_events: None,
             stopped: false,
         }
     }
@@ -346,6 +363,104 @@ impl<'a> AgentLoop<'a> {
     pub fn with_auto_compact(mut self, auto_compact: AutoCompact) -> Self {
         self.auto_compact = Some(auto_compact);
         self
+    }
+
+    fn append_durable_fact(
+        &mut self,
+        session_id: &str,
+        turn_id: Option<String>,
+        kind: &str,
+        payload: Value,
+        provenance: Option<DurableEventProvenance>,
+    ) -> Result<(), AgentLoopError> {
+        let Some(root) = self.config.durable_event_root.clone() else {
+            return Ok(());
+        };
+        if self.durable_events.is_none() {
+            self.durable_events = Some(DurableEventStore::open(root)?);
+        }
+        let mut input = DurableEventInput::new(
+            session_id,
+            kind,
+            DurableEventPayload::inline("orchestrator_fact", payload),
+        );
+        input.turn_id = turn_id;
+        input.correlation_id = provenance
+            .as_ref()
+            .and_then(|value| value.execution_identity.as_ref())
+            .map(|identity| identity.correlation_id.clone());
+        input.causation_id = provenance
+            .as_ref()
+            .and_then(|value| value.execution_identity.as_ref())
+            .map(|identity| identity.effect_id.clone());
+        input.provenance = provenance;
+        if let Some(store) = self.durable_events.as_mut() {
+            store.append(input)?;
+        }
+        Ok(())
+    }
+
+    fn durable_workflow_fact_state(
+        &mut self,
+        workflow_id: &str,
+    ) -> Result<WorkflowDurableFactState, AgentLoopError> {
+        let Some(root) = self.config.durable_event_root.clone() else {
+            return Ok(WorkflowDurableFactState::Absent);
+        };
+        if self.durable_events.is_none() {
+            self.durable_events = Some(DurableEventStore::open(root)?);
+        }
+        let Some(store) = self.durable_events.as_ref() else {
+            return Ok(WorkflowDurableFactState::Absent);
+        };
+        let scan = store.scan(usize::MAX)?;
+        let mut state = WorkflowDurableFactState::Absent;
+        for event in scan.records {
+            if !matches!(
+                event.kind.as_str(),
+                WORKFLOW_PLANNED | WORKFLOW_COMPLETED | WORKFLOW_FAILED
+            ) {
+                continue;
+            }
+            let DurableEventPayload::Inline { data, .. } = event.payload else {
+                continue;
+            };
+            if data.get("workflow_id").and_then(Value::as_str) != Some(workflow_id) {
+                continue;
+            }
+            state = if event.kind == WORKFLOW_PLANNED {
+                WorkflowDurableFactState::Planned
+            } else {
+                WorkflowDurableFactState::Terminal
+            };
+        }
+        Ok(state)
+    }
+
+    fn ensure_durable_workflow_planned(
+        &mut self,
+        session_id: &str,
+        turn_id: String,
+        plan: &WorkflowHarnessPlan,
+        provenance: DurableEventProvenance,
+    ) -> Result<WorkflowDurableFactState, AgentLoopError> {
+        let state = self.durable_workflow_fact_state(&plan.workflow_id)?;
+        if state != WorkflowDurableFactState::Absent {
+            return Ok(state);
+        }
+        let harness_plan_digest = shacs_workflow::workflow_harness_plan_digest(plan)
+            .map_err(|error| AgentLoopError::Workflow(error.to_string()))?;
+        self.append_durable_fact(
+            session_id,
+            Some(turn_id),
+            WORKFLOW_PLANNED,
+            json!({
+                "workflow_id": plan.workflow_id.clone(),
+                "harness_plan_digest": harness_plan_digest,
+            }),
+            Some(provenance),
+        )?;
+        Ok(WorkflowDurableFactState::Planned)
     }
 
     pub fn with_message_tool_delivery(mut self, message_tool: MessageTool) -> Self {
@@ -471,13 +586,16 @@ impl<'a> AgentLoop<'a> {
             .as_ref()
             .filter(|route| route.parsed.kind == CommandKind::Priority)
         {
-            return match self.turn_lock.acquire(session_key.clone()) {
+            return match self.turn_lock.acquire_priority(session_key.clone()) {
                 Ok(_turn_guard) => {
                     let mut session = self.sessions.get_or_create(&session_key);
                     materialize_recovery_markers(&mut session);
                     self.handle_loop_command(route.command.clone(), &message, session, true)
                 }
                 Err(SessionTurnAcquireError::AlreadyActive { .. }) => {
+                    if matches!(&route.command, LoopCommand::Stop) {
+                        self.turn_lock.cancel_active_or_reserved(&session_key);
+                    }
                     let session = self.sessions.get_or_create(&session_key);
                     self.handle_loop_command(route.command.clone(), &message, session, false)
                 }
@@ -526,6 +644,8 @@ impl<'a> AgentLoop<'a> {
         let pending_permission_approval = pending_permission_approval(&session);
         let pending_ask_id = pending_ask_user_id(&session.messages);
         let execution_ledger = Arc::new(Mutex::new(execution_ledger_for_turn(&message, &session)));
+        let turn_provenance =
+            durable_event_provenance(&self.context_builder, &recover_lock(&execution_ledger));
         let (initial_messages, context_provider_handoff) = if let Some(approval) =
             pending_recent_retry_approval
         {
@@ -846,11 +966,24 @@ impl<'a> AgentLoop<'a> {
                 live_context_budget_bytes(self.config.context_block_limit),
             );
             append_user_turn(&mut session, &message);
+            let accepted_turn_id = turn_id_for_message(&message, &session);
+            self.append_durable_fact(
+                &session_key,
+                Some(accepted_turn_id),
+                SESSION_TURN_ACCEPTED,
+                json!({
+                    "channel": message.channel.clone(),
+                    "content_hash": format!("sha256:{:x}", Sha256::digest(message.content.as_bytes())),
+                    "media_count": message.media.len(),
+                }),
+                Some(turn_provenance.clone()),
+            )?;
             session
                 .metadata
                 .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
             (initial_messages, Some(context_provider_handoff))
         };
+        let turn_id = turn_id_for_message(&message, &session);
         self.sessions.save(&session)?;
 
         let _delivery_target_guard = self.message_delivery_target.as_ref().map(|target| {
@@ -909,11 +1042,11 @@ impl<'a> AgentLoop<'a> {
         spec.fail_on_tool_error = self.config.fail_on_tool_error;
         spec.tool_context = tool_context.clone();
         spec.context_tools = self.context_tools.clone();
-        spec.cancellation_token = self.task_registry.cancellation_token(&session_key);
-        spec.execution_scope = Some(ExecutionScope::new(
-            session_key.clone(),
-            turn_id_for_message(&message, &session),
-        ));
+        spec.cancellation_token = self
+            .task_registry
+            .cancellation_token(&session_key)
+            .or_else(|| self.turn_lock.cancellation_token(&session_key));
+        spec.execution_scope = Some(ExecutionScope::new(session_key.clone(), turn_id.clone()));
         spec.execution_ledger = Some(execution_ledger.clone());
         spec.tool_event_callback = self.tool_event_callback.clone();
         spec.provider_event_callback = self.provider_event_callback.clone();
@@ -938,7 +1071,18 @@ impl<'a> AgentLoop<'a> {
             Err(error) => {
                 session.add_message("assistant", provider_error_text(&error), Map::new());
                 clear_runtime_markers(&mut session);
-                store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
+                let execution_ledger = recover_lock(&execution_ledger);
+                store_runtime_execution(&mut session, &execution_ledger);
+                let provenance =
+                    durable_event_provenance_from_snapshot(&turn_provenance, &execution_ledger);
+                drop(execution_ledger);
+                self.append_durable_fact(
+                    &session_key,
+                    Some(turn_id),
+                    SESSION_TURN_FAILED,
+                    json!({"stop_reason": "provider_error"}),
+                    Some(provenance),
+                )?;
                 self.sessions.save(&session)?;
                 let outbound_count = self.publish_error(&message, &session_key, &error);
                 return Ok(AgentLoopTurnResult {
@@ -967,6 +1111,24 @@ impl<'a> AgentLoop<'a> {
             &message,
             &session_key,
         );
+        let execution_ledger = recover_lock(&execution_ledger);
+        let provenance =
+            durable_event_provenance_from_snapshot(&turn_provenance, &execution_ledger);
+        let outcome_count = execution_ledger.outcomes.len();
+        let pending_effect_count = execution_ledger.pending.len();
+        drop(execution_ledger);
+        self.append_durable_fact(
+            &session_key,
+            Some(turn_id),
+            SESSION_TURN_COMPLETED,
+            json!({
+                "stop_reason": run_result.stop_reason.clone(),
+                "tool_count": run_result.tools_used.len(),
+                "outcome_count": outcome_count,
+                "pending_effect_count": pending_effect_count,
+            }),
+            Some(provenance),
+        )?;
         self.sessions.save(&session)?;
 
         let (outbound_count, ask_user_options) =
@@ -1061,7 +1223,7 @@ impl<'a> AgentLoop<'a> {
                 message,
                 session,
                 session_key,
-                &pending.plan.workflow_id,
+                &pending.plan,
                 "ambiguous_write_phase",
                 "Workflow blocked: restart recovery found an ambiguous write-capable workflow phase. Re-run the request after confirming the write scope.",
             )
@@ -1078,7 +1240,7 @@ impl<'a> AgentLoop<'a> {
                     message,
                     session,
                     session_key,
-                    &pending.plan.workflow_id,
+                    &pending.plan,
                     "resume_validation_failed",
                     &format!("Workflow blocked: restart recovery could not safely resume the saved workflow checkpoint: {block_reason}"),
                 )
@@ -1086,6 +1248,28 @@ impl<'a> AgentLoop<'a> {
         }
         pending.plan.origin_session_id = session_key.to_owned();
         if apply_completed_workflow_checkpoint(&mut pending.plan, session) {
+            let workflow_turn_id = turn_id_for_message(message, session);
+            let workflow_provenance =
+                durable_event_provenance(&self.context_builder, &RuntimeExecutionLedger::default());
+            let durable_state = self.ensure_durable_workflow_planned(
+                session_key,
+                workflow_turn_id.clone(),
+                &pending.plan,
+                workflow_provenance.clone(),
+            )?;
+            if durable_state != WorkflowDurableFactState::Terminal {
+                self.append_durable_fact(
+                    session_key,
+                    Some(workflow_turn_id),
+                    WORKFLOW_COMPLETED,
+                    json!({
+                        "workflow_id": pending.plan.workflow_id.clone(),
+                        "state": "completed_from_checkpoint",
+                        "child_result_count": 0,
+                    }),
+                    Some(workflow_provenance),
+                )?;
+            }
             let content = format!(
                 "Workflow completed from saved checkpoint: {}",
                 pending.plan.workflow_id
@@ -1128,7 +1312,7 @@ impl<'a> AgentLoop<'a> {
         message: &InboundMessage,
         session: &mut Session,
         session_key: &str,
-        workflow_id: &str,
+        plan: &WorkflowHarnessPlan,
         reason: &str,
         content: &str,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
@@ -1138,10 +1322,32 @@ impl<'a> AgentLoop<'a> {
             RUNTIME_CHECKPOINT_KEY.to_owned(),
             json!({
                 "phase": "workflow_blocked_recovery",
-                "workflow_id": workflow_id,
+                "workflow_id": plan.workflow_id,
                 "reason": reason,
             }),
         );
+        let workflow_turn_id = turn_id_for_message(message, session);
+        let workflow_provenance =
+            durable_event_provenance(&self.context_builder, &RuntimeExecutionLedger::default());
+        let durable_state = self.ensure_durable_workflow_planned(
+            session_key,
+            workflow_turn_id.clone(),
+            plan,
+            workflow_provenance.clone(),
+        )?;
+        if durable_state != WorkflowDurableFactState::Terminal {
+            self.append_durable_fact(
+                session_key,
+                Some(workflow_turn_id),
+                WORKFLOW_FAILED,
+                json!({
+                    "workflow_id": plan.workflow_id.clone(),
+                    "state": "blocked_recovery",
+                    "reason": reason,
+                }),
+                Some(workflow_provenance),
+            )?;
+        }
         self.sessions.save(session)?;
         self.bus.publish_outbound(outbound_for(
             message,
@@ -1224,9 +1430,31 @@ impl<'a> AgentLoop<'a> {
                     recipe_evidence.clone(),
                 )?;
                 store_planned_workflow_checkpoint(session, &plan, recipe_evidence.as_ref());
+                let workflow_turn_id = turn_id_for_message(message, session);
+                let workflow_provenance = durable_event_provenance(
+                    &self.context_builder,
+                    &RuntimeExecutionLedger::default(),
+                );
+                let durable_workflow_state = self.ensure_durable_workflow_planned(
+                    session_key,
+                    workflow_turn_id.clone(),
+                    &plan,
+                    workflow_provenance.clone(),
+                )?;
+                if durable_workflow_state == WorkflowDurableFactState::Terminal {
+                    return Err(AgentLoopError::Workflow(format!(
+                        "workflow {} is already terminal",
+                        plan.workflow_id
+                    )));
+                }
                 self.sessions.save(session)?;
 
-                let subagent_runtime = SubagentRuntime::new();
+                let mut subagent_runtime = SubagentRuntime::new();
+                if let Some(root) = self.config.durable_event_root.as_deref() {
+                    subagent_runtime = subagent_runtime
+                        .attach_durable_recorder(DurableChildRecorder::open(root)?)
+                        .map_err(AgentLoopError::Workflow)?;
+                }
                 let checkpoint_session = Arc::new(Mutex::new(session.clone()));
                 let checkpoint_capture = checkpoint_session.clone();
                 let checkpoint_manager = Arc::new(Mutex::new(self.sessions.clone()));
@@ -1257,7 +1485,10 @@ impl<'a> AgentLoop<'a> {
                             admitted_at_ms: now_unix_ms(),
                         },
                         worktree_config: self.workflow_worktree_config(&plan),
-                        cancellation_token: self.task_registry.cancellation_token(session_key),
+                        cancellation_token: self
+                            .task_registry
+                            .cancellation_token(session_key)
+                            .or_else(|| self.turn_lock.cancellation_token(session_key)),
                     },
                     &mut checkpoint_callback,
                 ) {
@@ -1266,6 +1497,16 @@ impl<'a> AgentLoop<'a> {
                         let final_content = format!("Workflow failed: {error}");
                         session.add_message("assistant", final_content.clone(), Map::new());
                         clear_runtime_markers(session);
+                        self.append_durable_fact(
+                            session_key,
+                            Some(workflow_turn_id),
+                            WORKFLOW_FAILED,
+                            json!({
+                                "workflow_id": plan.workflow_id.clone(),
+                                "stop_reason": "workflow_error",
+                            }),
+                            Some(workflow_provenance),
+                        )?;
                         self.sessions.save(session)?;
                         self.bus.publish_outbound(outbound_for(
                             message,
@@ -1391,10 +1632,23 @@ impl<'a> AgentLoop<'a> {
                         "recipe_evidence": recipe_evidence,
                     }),
                 );
-                store_runtime_execution(
-                    session,
-                    &workflow_execution_ledger(&plan, &outcome.child_results, recorded_at_ms),
-                );
+                let workflow_ledger =
+                    workflow_execution_ledger(&plan, &outcome.child_results, recorded_at_ms);
+                store_runtime_execution(session, &workflow_ledger);
+                self.append_durable_fact(
+                    session_key,
+                    Some(workflow_turn_id),
+                    WORKFLOW_COMPLETED,
+                    json!({
+                        "workflow_id": outcome.run.workflow_id.clone(),
+                        "state": outcome.run.state,
+                        "child_result_count": outcome.child_results.len(),
+                    }),
+                    Some(durable_event_provenance_from_snapshot(
+                        &workflow_provenance,
+                        &workflow_ledger,
+                    )),
+                )?;
                 self.sessions.save(session)?;
                 let cleanup_evidence = self
                     .workflow_worktree_config(&plan)
@@ -1543,10 +1797,19 @@ impl<'a> AgentLoop<'a> {
                 )
             }
             LoopCommand::Stop => {
+                let synchronous_turn_cancelled = self
+                    .turn_lock
+                    .cancellation_token(&session.key)
+                    .is_some_and(|token| token.is_cancelled());
                 let content = match self.task_registry.cancel(&session.key) {
                     LoopTaskCancelResult::NoAsyncTask => {
-                        "Stop requested. No async task is running in this synchronous loop."
-                            .to_owned()
+                        if synchronous_turn_cancelled {
+                            "Stop requested. Cancellation requested for the active session turn. Provider/tool execution will stop only if it observes the cancellation token."
+                                .to_owned()
+                        } else {
+                            "Stop requested. No async task is running in this synchronous loop."
+                                .to_owned()
+                        }
                     }
                     LoopTaskCancelResult::CancellationRequested(snapshot) => format!(
                         "Stop requested. Cancellation requested for async task {}. Provider/tool execution will stop only if the task observes the cancellation token.",
@@ -1964,6 +2227,20 @@ impl<'a> AgentLoop<'a> {
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         let session_key = session.key.clone();
         if save_session {
+            self.append_durable_fact(
+                &session_key,
+                Some(turn_id_for_message(message, &session)),
+                SESSION_TURN_COMPLETED,
+                json!({
+                    "command": command.clone(),
+                    "response_hash": format!("sha256:{:x}", Sha256::digest(content.as_bytes())),
+                    "stop_reason": stop_reason,
+                }),
+                Some(durable_event_provenance(
+                    &self.context_builder,
+                    &RuntimeExecutionLedger::default(),
+                )),
+            )?;
             self.sessions.save(&session)?;
         }
         self.bus.publish_outbound(outbound_for(
@@ -2185,6 +2462,7 @@ pub struct AgentLoopRunSummary {
 #[derive(Debug)]
 pub enum AgentLoopError {
     Session(std::io::Error),
+    DurableEvent(DurableEventError),
     Memory(MemoryConsolidationError),
     GoalMetadata(GoalMetadataError),
     PermissionModeSave(String),
@@ -2196,6 +2474,7 @@ impl fmt::Display for AgentLoopError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Session(error) => write!(formatter, "session persistence failed: {error}"),
+            Self::DurableEvent(error) => write!(formatter, "durable event append failed: {error}"),
             Self::Memory(error) => write!(formatter, "memory consolidation failed: {error}"),
             Self::GoalMetadata(error) => write!(formatter, "goal metadata failed: {error}"),
             Self::PermissionModeSave(error) => {
@@ -2217,6 +2496,12 @@ impl Error for AgentLoopError {}
 impl From<std::io::Error> for AgentLoopError {
     fn from(error: std::io::Error) -> Self {
         Self::Session(error)
+    }
+}
+
+impl From<DurableEventError> for AgentLoopError {
+    fn from(error: DurableEventError) -> Self {
+        Self::DurableEvent(error)
     }
 }
 
@@ -3120,6 +3405,47 @@ fn turn_id_for_message(message: &InboundMessage, session: &Session) -> String {
         .filter(|message_id| !message_id.is_empty())
         .map(|message_id| format!("turn:{message_id}"))
         .unwrap_or_else(|| format!("turn:{}:{}", session.key, session.messages.len()))
+}
+
+fn durable_event_provenance(
+    context_builder: &ContextBuilder,
+    ledger: &RuntimeExecutionLedger,
+) -> DurableEventProvenance {
+    let skill_body_hashes = context_builder.skill_body_hashes_for_context();
+    let skill_registry_hash = serde_json::to_vec(&skill_body_hashes)
+        .ok()
+        .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)));
+    DurableEventProvenance {
+        skill_registry_hash,
+        skill_body_hashes,
+        execution_identity: durable_execution_identity(ledger),
+    }
+}
+
+fn durable_event_provenance_from_snapshot(
+    snapshot: &DurableEventProvenance,
+    ledger: &RuntimeExecutionLedger,
+) -> DurableEventProvenance {
+    let mut provenance = snapshot.clone();
+    provenance.execution_identity = durable_execution_identity(ledger);
+    provenance
+}
+
+fn durable_execution_identity(
+    ledger: &RuntimeExecutionLedger,
+) -> Option<DurableExecutionIdentityRef> {
+    ledger
+        .outcomes
+        .iter()
+        .rev()
+        .find(|outcome| matches!(outcome.decision, LateResultDecision::Accepted))
+        .map(|outcome| DurableExecutionIdentityRef {
+            session_id: outcome.fact.identity.scope.session_id.clone(),
+            turn_id: outcome.fact.identity.scope.turn_id.clone(),
+            effect_id: outcome.fact.identity.effect_id.clone(),
+            attempt_id: outcome.fact.identity.attempt_id.clone(),
+            correlation_id: outcome.fact.identity.correlation_id.clone(),
+        })
 }
 
 fn store_runtime_execution(session: &mut Session, ledger: &RuntimeExecutionLedger) {
@@ -4213,10 +4539,23 @@ mod tests {
     use shacs_providers::{LlmResponse, ProviderEvent, ProviderRequest};
     use std::collections::{BTreeMap, VecDeque};
     use std::fs;
+    use std::path::Path;
 
     struct CapturingProviderClient {
         responses: Mutex<VecDeque<LlmResponse>>,
         requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    }
+
+    fn durable_event_kind_count(
+        root: &Path,
+        kind: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(DurableEventStore::open(root)?
+            .scan(usize::MAX)?
+            .records
+            .into_iter()
+            .filter(|event| event.kind == kind)
+            .count())
     }
 
     impl ProviderClient for CapturingProviderClient {
@@ -4733,6 +5072,7 @@ mod tests {
     fn process_message_resumes_read_only_pending_workflow_after_restart(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let workspace = tempfile::tempdir()?;
+        let durable_events = tempfile::tempdir()?;
         let content = "Please review this complex request in workflow form:\n- map inputs\n- inspect dependencies\n- verify assumptions\n- summarize risks";
         let (admission, plan, recipe_evidence) = compile_automatic_workflow_request(
             content,
@@ -4772,13 +5112,15 @@ mod tests {
             requests: captured_requests.clone(),
         };
         let tools = ToolRegistry::new();
+        let mut config = AgentLoopConfig::new(workspace.path(), "model");
+        config.durable_event_root = Some(durable_events.path().to_path_buf());
         let mut loop_runtime = AgentLoop::new(
             MessageBus::new(),
             sessions,
             ContextBuilder::new(workspace.path()),
             &tools,
             &client,
-            AgentLoopConfig::new(workspace.path(), "model"),
+            config,
         );
 
         let outcome = loop_runtime.process_direct("resume", Some("direct:resume-read-only"))?;
@@ -4791,6 +5133,14 @@ mod tests {
         assert!(session.metadata.get("pending_workflow").is_none());
         assert!(session.metadata.get("runtime_workflow").is_some());
         assert_eq!(session.messages.len(), 2);
+        assert_eq!(
+            durable_event_kind_count(durable_events.path(), WORKFLOW_PLANNED)?,
+            1
+        );
+        assert_eq!(
+            durable_event_kind_count(durable_events.path(), WORKFLOW_COMPLETED)?,
+            1
+        );
         Ok(())
     }
 
@@ -4798,6 +5148,7 @@ mod tests {
     fn process_message_blocks_resume_when_recipe_evidence_is_invalid(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let workspace = tempfile::tempdir()?;
+        let durable_events = tempfile::tempdir()?;
         let skill_file = write_workflow_skill(
             workspace.path(),
             "reviewer",
@@ -4835,13 +5186,15 @@ mod tests {
             requests: captured_requests.clone(),
         };
         let tools = ToolRegistry::new();
+        let mut config = AgentLoopConfig::new(workspace.path(), "model");
+        config.durable_event_root = Some(durable_events.path().to_path_buf());
         let mut loop_runtime = AgentLoop::new(
             MessageBus::new(),
             sessions,
             ContextBuilder::new(workspace.path()),
             &tools,
             &client,
-            AgentLoopConfig::new(workspace.path(), "model"),
+            config,
         );
 
         let outcome =
@@ -4854,6 +5207,14 @@ mod tests {
             .unwrap_or_default()
             .contains("recipe evidence is no longer valid"));
         assert!(captured_requests.lock().expect("requests lock").is_empty());
+        assert_eq!(
+            durable_event_kind_count(durable_events.path(), WORKFLOW_PLANNED)?,
+            1
+        );
+        assert_eq!(
+            durable_event_kind_count(durable_events.path(), WORKFLOW_FAILED)?,
+            1
+        );
         Ok(())
     }
 
@@ -4861,6 +5222,7 @@ mod tests {
     fn process_message_completes_from_checkpoint_without_rerunning_completed_step(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let workspace = tempfile::tempdir()?;
+        let durable_events = tempfile::tempdir()?;
         let content = "Please review this complex request in workflow form:\n- map inputs\n- inspect dependencies\n- verify assumptions\n- summarize risks";
         let (admission, plan, recipe_evidence) = compile_automatic_workflow_request(
             content,
@@ -4903,13 +5265,15 @@ mod tests {
             requests: captured_requests.clone(),
         };
         let tools = ToolRegistry::new();
+        let mut config = AgentLoopConfig::new(workspace.path(), "model");
+        config.durable_event_root = Some(durable_events.path().to_path_buf());
         let mut loop_runtime = AgentLoop::new(
             MessageBus::new(),
             sessions,
             ContextBuilder::new(workspace.path()),
             &tools,
             &client,
-            AgentLoopConfig::new(workspace.path(), "model"),
+            config,
         );
 
         let outcome =
@@ -4926,6 +5290,14 @@ mod tests {
             .session_manager_mut()
             .get_or_create("direct:resume-completed-step");
         assert!(session.metadata.get("pending_workflow").is_none());
+        assert_eq!(
+            durable_event_kind_count(durable_events.path(), WORKFLOW_PLANNED)?,
+            1
+        );
+        assert_eq!(
+            durable_event_kind_count(durable_events.path(), WORKFLOW_COMPLETED)?,
+            1
+        );
         Ok(())
     }
 
