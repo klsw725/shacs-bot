@@ -1,35 +1,53 @@
 # 029. durable runtime recovery and data migration 아키텍처 명세
 
-Status: Open
+Status: Complete (Scoped)
 
 Origin specs: 001, 002, 005, 006, 011, 012, 014, 015
+
+Implementation PRDs, in required order:
+
+1. [`PRD 000: durable event store and schema registry`](prds/000-durable-event-store-and-schema-registry.md)
+2. [`PRD 001: checkpoint tail replay and corruption admission`](prds/001-checkpoint-tail-replay-and-corruption-admission.md)
+3. [`PRD 002: durable work queue scheduler retry and cancellation`](prds/002-durable-work-queue-scheduler-retry-and-cancellation.md)
+4. [`PRD 003: channel restart state and conservative delivery`](prds/003-channel-restart-state-and-conservative-delivery.md)
+5. [`PRD 004: durable child task recovery`](prds/004-durable-child-task-recovery.md)
+6. [`PRD 005: durable trace log and diagnostics correlation`](prds/005-durable-trace-log-and-diagnostics-correlation.md)
+7. [`PRD 006: stored-data migration runner`](prds/006-stored-data-migration-runner.md)
+8. [`PRD 007: runtime owner lease gateway supervision and closure`](prds/007-runtime-owner-lease-gateway-supervision-and-closure.md)
+9. [`PRD 008: sequential implementation plan`](prds/008-sequential-implementation-plan.md)
+
+Cross-owner boundaries:
+
+1. 029 owns durable runtime event/checkpoint/work/channel/child/diagnostics schema migration orchestration and writable-start admission. [035](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md) owns future config/profile schema transforms, formal runtime directory layout, and physical marker locations. 029 closes against the current config compatibility and runtime path-helper boundary; 035 can later extend that boundary without reopening 029.
+2. 029 requires redaction before durable persistence and export, but [030](../030-policy-permission-redaction-and-containment-model/SPEC.md) owns the unified redaction taxonomy and typed secret reference model. 029 consumes the current shared redaction boundary and later 030 model rather than creating a competing classifier.
+3. 029 owns owner lease/heartbeat/supervision state transitions. 035 owns where owner markers live and which runtime directories each process may mutate.
 
 ## 목적
 
 이 문서는 기존 001, 002, 005, 006, 011, 012, 014, 015에서 current architecture closure 밖으로 남긴 durable runtime, recovery, stored-data migration 계약을 새 owner 범위로 모은다.
 
-목표는 self-hosted, personal-use 런타임이 process restart, crash, interrupted upgrade, channel reconnect, child task interruption, partial migration 뒤에도 사용자가 inspect하고 복구할 수 있는 durable 기준을 세우는 것이다. 이 문서는 현재 구현 완료를 주장하지 않는다.
+목표는 self-hosted, personal-use 런타임이 process restart, crash, interrupted upgrade, channel reconnect, child task interruption, partial migration 뒤에도 사용자가 inspect하고 복구할 수 있는 durable 기준을 세우는 것이다. Wave 1-8 baseline은 current Rust implementation 범위에서 닫혔다.
 
-029는 local single-user runtime을 위한 durability 계약이다. 분산 큐, multi-user concurrency, fleet 운영, SaaS control plane은 범위가 아니다. Exactly-once delivery도 증명 없이 주장하지 않는다.
+029는 local single-user runtime을 위한 durability 계약이다. 분산 큐, multi-user concurrency, fleet 운영, SaaS control plane은 범위가 아니다. Exactly-once delivery, 자동 reexec/process-manager, runtime worker restart/backoff 보장은 주장하지 않는다.
 
 ## 현재 구현 baseline
 
 현재 구현은 다음 범위까지 인정한다.
 
 1. 001은 `AgentLoop`, `AgentRunner`, `SessionManager`, `SessionTurnLock`, `runtime_checkpoint`, `pending_user_turn` marker를 current session kernel mapping으로 인정한다. 별도 durable `TurnState`와 formal phase enum은 없다.
-2. 002는 command, event, effect를 개념어로 정리했다. Formal append-only event record는 없다.
+2. 002의 command, event, effect 경계 위에 formal append-only event record와 schema registry를 구현했다. Event record는 replay나 exactly-once delivery를 의미하지 않는다.
 3. 005는 skill registry discovery, descriptor, body hash, context injection을 current mapping으로 인정한다. Per-turn registry snapshot과 replay provenance snapshot은 없다.
-4. 006은 session별 JSONL file, metadata header, message records, `last_consolidated`, `save_with_fsync`, recovery marker materialization을 current persistence로 인정한다. Append-only event log, checkpoint plus tail replay, corruption fallback은 없다.
-5. 011은 subagent identity, lifecycle, stale discard, synthetic inbound, bounded parallelism, cancellation cleanup을 current mapping으로 인정한다. Durable child recovery는 없다.
-6. 012는 process-local bus, session lock, active task registry, channel workers, process-local follow-up queue, runtime metadata JSON hint를 current services로 인정한다. Durable queue, scheduler, restart replay, owner lease, safe shutdown supervisor는 없다.
-7. 014는 local diagnostics, redaction, diagnostics bundle, trace/log evidence model을 baseline으로 인정한다. Durable trace/log store와 event replay 기반 inspection은 없다.
-8. 015는 runtime ownership marker, heartbeat, lifecycle commands, update marker, no-op schema compatibility gate를 current lifecycle baseline으로 인정한다. Stored-data transform migration framework는 없다.
+4. 006의 session별 JSONL persistence와 별도로 append-only event log, checkpoint plus deterministic tail replay, corruption fallback과 writable-start admission을 구현했다. Checkpoint는 event truth를 대체하지 않는다.
+5. 011의 subagent identity, lifecycle, stale discard, bounded parallelism, cancellation cleanup 위에 durable child lifecycle과 artifact-backed run/result ref, child-run work, spawned/running restart distinction, accepted parent reentry repair를 구현했다. Stale/late/duplicate result는 parent session truth를 바꾸지 않는다.
+6. 012의 process-local bus와 session lock 앞에 external inbound용 durable work queue, scheduler wake/retry/cancellation record, restart replay와 dispatcher adapter를 구현했다. Process-local follow-up queue와 channel runtime metadata hint는 durable work/session/delivery truth가 아니다. Wave 8 기준 owner lease와 bounded safe shutdown supervision evidence가 추가됐지만 runtime worker restart/backoff 보장은 아니다.
+7. 014는 local diagnostics, redaction, diagnostics bundle, trace/log evidence model을 baseline으로 인정한다. Wave 6 기준 formal durable diagnostics evidence store는 event sequence에 correlation되지만 replay truth나 writable admission을 대체하지 않는다. Wave 8 기준 runtime inspect/recover, channels status, session diagnostics, local API diagnostics가 같은 redacted supervision projection을 소비한다. Redaction taxonomy의 장기 owner는 030이다.
+8. 015는 runtime ownership marker, heartbeat, lifecycle commands, update marker, no-op schema compatibility gate를 current lifecycle baseline으로 인정한다. Wave 7 기준 stored-data transform migration framework는 명시적 `runtime migrate` surface와 partial/admission gate까지 구현됐다. Wave 8 기준 strict v1 local owner lease, owner generation, process evidence, acquired/renewed/expires time, lifecycle, stale/live-expired admission, generation-linked stop/restart request, owner-loss fence, v1 supervision-state가 구현됐다. Physical marker path/layout ownership은 035가 유지한다.
 
-이 baseline은 새 작업의 출발점이다. 029 closure 전까지 durable queue, durable replay, stored-data migration, exactly-once delivery를 구현됐다고 말하면 안 된다.
+이 baseline은 Wave 1-8까지의 현재 구현이다. Durable event/replay/work/channel/child/diagnostics/migration/owner supervision은 위에 명시한 scoped boundary에서만 닫혔다. Exactly-once delivery, 자동 reexec/process-manager, fleet/admin 운영, runtime worker restart/backoff는 구현 범위로 광고하면 안 된다.
 
-## owned open scope
+## owned scoped closure
 
-029가 소유하는 열린 범위는 다음이다.
+029가 scoped closure로 닫은 범위는 다음이다.
 
 1. Append-only event record. 최소 필드는 `event_id`, `sequence`, `session_id`, optional `turn_id`, optional `causation_id`, optional `correlation_id`, `kind`, `payload`, `recorded_at`, schema version이다.
 2. Checkpoint plus tail replay. Checkpoint는 포함 sequence를 명시하고, 이후 event tail을 replay해 stable state를 복원할 수 있어야 한다.
@@ -38,9 +56,9 @@ Origin specs: 001, 002, 005, 006, 011, 012, 014, 015
 5. Channel restart semantics. Telegram, Discord, Slack, Email, WhatsApp, WebSocket의 cursor, delivery hint, pending outbound, inbound dedupe hint를 restart 뒤 어떻게 해석할지 정한다.
 6. Child recovery. Active child task, finished child result, stale child result, cancelled child task가 restart 뒤 어떻게 inspect되고 정리되는지 정한다.
 7. Trace durability. Event, log, trace, diagnostics가 같은 correlation chain을 유지하되 trace가 session truth를 대체하지 않게 한다.
-8. Stored-data migration. Config, session metadata, event log, checkpoint, queue, scheduler, trace, diagnostics artifact schema를 버전별로 migration한다.
-9. Owner lease, heartbeat, safe shutdown, gateway supervision. Long-lived runtime owner가 누구인지, stale owner를 어떻게 판단하는지, shutdown과 restart가 durable state를 어떻게 남기는지 정한다.
-10. Local gateway supervision. CLI, local API, channel runtime, WebSocket gateway가 같은 runtime root를 어떻게 공유하고, 하나의 owner 또는 supervised child로 어떻게 동작하는지 정한다.
+8. Stored-data migration. Session metadata, event log, checkpoint, queue, scheduler, channel, child, trace, diagnostics artifact 같은 durable runtime family를 버전별로 migration한다. Config/profile은 current compatibility 결과만 admission에서 소비하며 실제 transform은 035가 소유한다. 이 closure에는 tenth migration family가 없다.
+9. Owner lease, heartbeat, safe shutdown, gateway supervision. Long-lived runtime owner가 누구인지, stale owner를 어떻게 판단하는지, shutdown과 restart가 durable state를 어떻게 남기는지 정한다. Stale owner는 evidence-first `runtime recover`로 정리하고, live-expired suspect owner는 먼저 process stop/kill evidence가 필요하다.
+10. Local gateway supervision. CLI, local API, channel runtime, WebSocket gateway가 같은 runtime root를 어떻게 공유하고, 하나의 owner 또는 supervised child로 어떻게 동작하는지 정한다. Restart는 safe-stop intent이며 자동 reexec가 아니다.
 
 ## invariants
 
@@ -87,20 +105,20 @@ Origin specs: 001, 002, 005, 006, 011, 012, 014, 015
 
 ## acceptance criteria
 
-029는 아래 조건을 모두 만족할 때 닫을 수 있다.
+029 scoped closure는 아래 조건을 current implementation evidence로 만족한다.
 
-1. Append-only event store가 Rust 타입과 저장 format으로 구현되어 있고 sequence invariant 테스트가 있다.
-2. Checkpoint plus tail replay가 정상 case, checkpoint 손상, tail 손상, incomplete record, sequence gap을 테스트한다.
-3. Recovery command 또는 runtime start admission이 corruption, partial migration, stale owner, pending cancellation을 구분한다.
-4. Durable queue와 scheduler가 restart 뒤 pending work, retry wake, cancellation request를 복원한다.
-5. Channel runtime이 restart 뒤 cursor와 pending outbound/inbound state를 보수적으로 다루고, duplicate hint를 session truth로 과장하지 않는다.
-6. Subagent active child와 finished child result가 restart 뒤 inspect 가능하며, stale 또는 mismatch result가 session content로 persist되지 않는다.
-7. Trace/log/diagnostics durable record가 event sequence와 correlation id를 연결하고, redaction rule을 통과한다.
-8. Stored-data migration runner가 dry plan, start, partial, complete, inspect-only blocked path를 검증한다.
-9. Owner lease와 heartbeat가 active owner conflict, stale owner recovery, safe shutdown, stop request, restart request를 구분한다.
-10. Local API, WebSocket, channel gateway가 runtime owner 또는 supervisor lifecycle 아래에서 start, stop, restart, diagnostics에 반영된다.
-11. Documentation과 CLI inspect output이 current baseline과 029 구현 범위를 분리한다.
-12. Exactly-once wording이 없거나, 제한된 invariant마다 근거 테스트와 failure model을 함께 둔다.
+1. Append-only event store와 sequence: `crates/shacs-session/src/durable_event.rs`, `DurableEventStore`, `DurableEventRecord`, `crates/shacs-session/tests/durable_event_store.rs`.
+2. Checkpoint, tail replay, corruption: `crates/shacs-session/src/durable_replay.rs`, `DurableCheckpointStore`, `evaluate_runtime_durable_recovery`, `crates/shacs-session/tests/durable_replay.rs`.
+3. Recovery admission: `runtime_recover`, `guard_runtime_non_update_admission`, `guard_runtime_migration_admission`, `guard_runtime_ownership_acquire_admission` in `crates/shacs-cli/src/lib.rs`.
+4. Durable queue/scheduler/cancellation: `crates/shacs-core/src/runtime/durable_dispatch.rs`, `DurableWorkDispatcher`, `evaluate_runtime_durable_work`, `crates/shacs-core/tests/durable_dispatch.rs`.
+5. Channel restart semantics: `inspect_channel_restart_states`, `channel_restart_state_from_metadata`, `format_channel_restart_state_line`, channel worker metadata restart envelope tests in `crates/shacs-cli/src/lib.rs` and channel tests.
+6. Child task recovery: `crates/shacs-core/src/runtime/subagent.rs`, `crates/shacs-core/tests/durable_child.rs`, including `child_run_work_is_leased_before_running_and_terminal_after_result`.
+7. Durable trace/log/diagnostics: `crates/shacs-session/src/durable_trace.rs`, durable diagnostics inspection and redacted bundle projection in `crates/shacs-cli/src/lib.rs`.
+8. Stored-data migration: `crates/shacs-session/src/durable_migration.rs`, `runtime_migrate`, `format_runtime_migrate`, `guard_runtime_migration_admission`.
+9. Owner lease/heartbeat/shutdown: `RuntimeOwnershipMarker`, `RuntimeOwnerProcessEvidence`, `RuntimeOwnershipLease`, `RuntimeOwnerFence`, `RuntimeShutdownReport`, `RuntimeStopRequestMarker` in `crates/shacs-cli/src/lib.rs`. Focused PRD007 tests include `prd007_runtime_owner_marker_is_strict_v1_lease`, `prd007_stale_start_blocks_and_retains_marker`, `prd007_recover_records_owner_evidence_before_delete_and_blocks_live_expired`, `runtime_stop_and_restart_write_request_for_active_owner`, `prd007_owner_lost_shutdown_skips_checkpoint_and_keeps_marker`, `prd007_owner_lost_mismatched_generation_does_not_overwrite_supervision`, `prd007_owner_lost_processor_does_not_requeue_or_terminal_work`, `prd007_runtime_wait_observes_owner_fence_loss`, `prd007_runtime_wait_reports_processor_unexpected_exit`, `prd007_shutdown_timeout_report_is_bounded_and_unknown`, `runtime_stale_ownership_cleanup_rechecks_active_marker_before_removing`, `runtime_ownership_preserve_keeps_marker_for_failed_shutdown_recovery`, `runtime_recover_clears_stale_ownership_marker`, `prd007_runtime_final_shutdown_state_retains_owner_after_marker_cleanup`, `runtime_stop_reports_no_active_or_stale_owner`.
+10. Gateway supervision and shared projections: `RuntimeSupervisionState`, `RuntimeSupervisionOwner`, `RuntimeSupervisionComponent`, `runtime_supervision_from_owner`, `runtime_components_for_mode`, `runtime_supervisor_projection`, `format_runtime_inspect`, `format_runtime_recover`, `session_diagnostics`, local API diagnostics projection in `crates/shacs-cli/src/lib.rs`. Focused tests include `prd007_supervision_records_api_only_and_channel_components`, `prd007_component_report_uses_names_without_raw_secret`, `prd007_recover_and_session_diagnostics_project_redacted_supervision`.
+11. Documentation and CLI inspect separation: `README.md`, `docs/USAGE.md`, this SPEC, PRD007, PRD008 now separate scoped implementation evidence from final full gate/manual review evidence.
+12. Exactly-once wording audit: docs and projections keep durable queue/channel metadata as hints, not delivery/session truth. 029 does not claim exactly-once delivery, auto reexec/process-manager, fleet/admin operation, or runtime worker restart/backoff.
 
 ## handoff table back to source specs
 
@@ -117,7 +135,7 @@ Origin specs: 001, 002, 005, 006, 011, 012, 014, 015
 
 ## implementation evidence required for closure
 
-Closure를 주장하려면 최소한 아래 증거가 있어야 한다.
+Scoped closure evidence는 아래 파일과 symbols에 연결한다.
 
 1. Event store schema와 writer, reader, sequence validation code 위치.
 2. Checkpoint schema, included sequence, replay implementation, replay diagnostics code 위치.
@@ -127,7 +145,7 @@ Closure를 주장하려면 최소한 아래 증거가 있어야 한다.
 6. Child recovery 테스트. Active child, completed child, failed child, cancelled child, stale result, duplicate result를 restart 뒤 검증해야 한다.
 7. Trace durability와 redaction 테스트. Correlation id chain이 유지되고 secret 원문이 남지 않아야 한다.
 8. Stored-data migration 테스트. Plan, no-op, real transform, partial interruption, resume or blocked recovery, inspect-only path가 포함되어야 한다.
-9. Owner lease와 heartbeat 테스트. Active owner conflict, stale owner recovery, safe shutdown, stop request, restart request, gateway supervised child 상태를 검증해야 한다.
-10. CLI 또는 local API manual evidence. `runtime inspect`, `runtime recover`, channel status, session diagnostics가 durable recovery state를 보여야 한다.
-11. Documentation evidence. Old specs의 closure 범위와 029 closure 범위를 구분하는 handoff 또는 release note가 있어야 한다.
-12. `cargo fmt --manifest-path crates/Cargo.toml --all -- --check`, `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings`, `cargo test --manifest-path crates/Cargo.toml --workspace` 통과 기록.
+9. Owner lease와 heartbeat 테스트: `crates/shacs-cli/src/lib.rs`의 PRD007 focused tests가 strict v1 lease, active/stale start block, evidence-first recover, live-expired suspect block, durable event와 결합된 generation-linked stop/restart request, crash-safe mutation lock, bounded nofollow marker read, owner-loss fence, failed/timeout shutdown outcomes, turn panic recovery, supervision projection을 검증한다. 최종 focused PRD007 test set은 22개가 통과했다.
+10. CLI 또는 local API projection evidence: `format_runtime_inspect`, `format_runtime_recover`, `format_channels_status`, `format_session_diagnostics`, local API `/v1/diagnostics` projection이 durable recovery state와 redacted supervision을 공유한다.
+11. Documentation evidence: `README.md`, `docs/USAGE.md`, `docs/specs/029-durable-runtime-recovery-and-data-migration/SPEC.md`, PRD007, PRD008이 old baseline, Wave 1-8 closure, 030 redaction ownership, 035 physical path/layout ownership을 분리한다.
+12. Full gate evidence: 최종 `cargo fmt --manifest-path crates/Cargo.toml --all -- --check`, `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings`, `cargo test --manifest-path crates/Cargo.toml --workspace`, `cargo build --manifest-path crates/Cargo.toml -p shacs-cli`가 통과했다. 격리된 임시 config/workspace의 실제 CLI QA에서 active/idle owner, second start block, stop/restart safe shutdown, no auto-reexec, startup failure, stale recover, named component projection과 redaction을 확인했다.
