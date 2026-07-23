@@ -24,6 +24,7 @@ use shacs_eval::evaluator::{EvidenceKind, EvidenceRef, RedactionStatus};
 use shacs_providers::{
     LlmResponse, ProviderClient, ProviderError, ProviderRequest, ToolCallRequest,
 };
+use shacs_session::durable_replay::{evaluate_durable_recovery, DurableRecoveryStatus};
 use shacs_utils::worktree::GitWorktreeMergeHandoffState;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -1468,13 +1469,17 @@ fn agent_loop_blocks_write_isolation_admission_with_read_only_plan(
     let context = ContextBuilder::new(workspace.path());
     let tools = ToolRegistry::new();
     let provider = QueueProvider::new(Vec::new());
+    let durable_event_root = workspace.path().join("runtime").join("durable-events");
+    let durable_checkpoint_root = workspace.path().join("runtime").join("durable-checkpoints");
+    let mut loop_config = AgentLoopConfig::new(workspace.path(), "test-model");
+    loop_config.durable_event_root = Some(durable_event_root.clone());
     let mut loop_runtime = AgentLoop::new(
         bus.clone(),
         manager,
         context,
         &tools,
         &provider,
-        AgentLoopConfig::new(workspace.path(), "test-model"),
+        loop_config,
     );
     let mut admission = dynamic_admission();
     admission.requires_write_isolation = true;
@@ -1496,6 +1501,9 @@ fn agent_loop_blocks_write_isolation_admission_with_read_only_plan(
     assert_eq!(result.stop_reason, "workflow_blocked");
     assert_eq!(provider.request_count()?, 0);
     assert!(outbound.content.contains("Workflow blocked"));
+    let replay = evaluate_durable_recovery(durable_event_root, durable_checkpoint_root);
+    assert_eq!(replay.status, DurableRecoveryStatus::Healthy);
+    assert!(replay.writable);
 
     Ok(())
 }

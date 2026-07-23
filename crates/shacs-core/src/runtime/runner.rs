@@ -2488,7 +2488,21 @@ fn spawn_receipt_child_id(content: &str) -> Option<String> {
     let (_, suffix) = content.split_once("] started (id: ")?;
     let (child_task_id, _) = suffix.split_once(')')?;
     let sequence = child_task_id.strip_prefix("child-")?;
-    if sequence.len() != 8 || !sequence.chars().all(|character| character.is_ascii_digit()) {
+    let legacy =
+        sequence.len() == 8 && sequence.chars().all(|character| character.is_ascii_digit());
+    let namespaced = sequence
+        .split_once('-')
+        .is_some_and(|(namespace, counter)| {
+            namespace.len() == 32
+                && namespace
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+                && counter.len() == 8
+                && counter
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+        });
+    if !legacy && !namespaced {
         return None;
     }
     Some(child_task_id.to_owned())
@@ -3397,6 +3411,13 @@ mod tests {
             )
             .as_deref(),
             Some("child-00000042")
+        );
+        assert_eq!(
+            spawn_receipt_child_id(
+                "Subagent [Inspect] started (id: child-0123456789abcdef0123456789abcdef-0000002a). I'll notify you when it completes."
+            )
+            .as_deref(),
+            Some("child-0123456789abcdef0123456789abcdef-0000002a")
         );
         assert_eq!(
             spawn_receipt_child_id("Subagent [Inspect] started (id: secret-token)."),

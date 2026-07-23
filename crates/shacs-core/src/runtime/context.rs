@@ -4,6 +4,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::{Datelike, Local, Offset, Utc};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use shacs_skills::{builtin_skills, is_deferred_builtin_skill, BUILTIN_SKILLS_DIR};
 use shacs_templates::{render_agent_template, template_variables, AgentTemplate};
 use std::collections::{BTreeMap, BTreeSet};
@@ -342,6 +343,18 @@ impl ContextBuilder {
             .into_iter()
             .filter(|skill| skill.always && skill.available)
             .map(|skill| skill.name)
+            .collect()
+    }
+
+    pub fn skill_body_hashes_for_context(&self) -> BTreeMap<String, String> {
+        self.load_skill_documents()
+            .into_iter()
+            .map(|skill| {
+                (
+                    skill.name,
+                    format!("sha256:{:x}", Sha256::digest(skill.raw.as_bytes())),
+                )
+            })
             .collect()
     }
 

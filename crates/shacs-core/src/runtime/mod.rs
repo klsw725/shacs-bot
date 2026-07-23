@@ -8,6 +8,7 @@ mod context_handoff;
 mod context_refs;
 mod context_resolvers;
 mod context_safety;
+mod durable_dispatch;
 mod execution_contract;
 mod file_context;
 mod goal;
@@ -77,6 +78,10 @@ pub use context_safety::{
     apply_context_safety_gate, context_trust_label_name, protected_context_path_reason,
     replay_context_artifact_from_evidence, trust_label_for_kind, ContextPermissionDecision,
     ContextReplayEvidence, ContextSafetyDiagnostic, ContextSafetyReport, ContextTrustLabel,
+};
+pub use durable_dispatch::{
+    inline_control_payload, runtime_control_payload, DurableDispatchError, DurableDispatchSummary,
+    DurableStaleRecoverySummary, DurableWorkDispatcher, DurableWorkEnqueueInput,
 };
 pub use execution_contract::{
     ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope,
