@@ -81,7 +81,7 @@ impl MessageBus {
     }
 
     pub fn publish_outbound(&self, message: OutboundMessage) {
-        self.outbound.push(message);
+        self.outbound.push_lossy(message);
     }
 
     pub fn try_publish_outbound(&self, message: OutboundMessage) -> Result<(), MessageBusError> {
@@ -120,8 +120,17 @@ impl<T> QueueState<T> {
 
     fn push(&self, message: T) {
         let mut queue = self.lock_queue();
+        while self
+            .capacity
+            .is_some_and(|capacity| queue.len() >= capacity)
+        {
+            queue = self
+                .available
+                .wait(queue)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
         queue.push_back(message);
-        self.available.notify_one();
+        self.available.notify_all();
     }
 
     fn try_push(&self, message: T) -> Result<(), MessageBusError> {
@@ -136,8 +145,24 @@ impl<T> QueueState<T> {
         Ok(())
     }
 
+    fn push_lossy(&self, message: T) {
+        let mut queue = self.lock_queue();
+        if self
+            .capacity
+            .is_some_and(|capacity| queue.len() >= capacity)
+        {
+            queue.pop_front();
+        }
+        queue.push_back(message);
+        self.available.notify_all();
+    }
+
     fn try_pop(&self) -> Option<T> {
-        self.lock_queue().pop_front()
+        let item = self.lock_queue().pop_front();
+        if item.is_some() {
+            self.available.notify_all();
+        }
+        item
     }
 
     fn pop_blocking(&self) -> T {
@@ -171,6 +196,9 @@ impl<T> QueueState<T> {
             }
         }
         *queue = retained;
+        if !drained.is_empty() {
+            self.available.notify_all();
+        }
         drained
     }
 
@@ -235,6 +263,48 @@ mod tests {
         assert_eq!(
             bus.try_publish_outbound(OutboundMessage::new("a", "c", "2")),
             Err(MessageBusError::QueueFull { capacity: 1 })
+        );
+    }
+
+    #[test]
+    fn bounded_bus_blocking_publish_waits_for_capacity() {
+        let bus = MessageBus::bounded(1);
+        bus.publish_inbound(InboundMessage::new("a", "b", "c", "first"));
+        let producer = bus.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            started_tx.send(()).expect("publish start signal");
+            producer.publish_inbound(InboundMessage::new("a", "b", "c", "second"));
+            done_tx.send(()).expect("publish completion signal");
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bounded publisher should start");
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        assert_eq!(
+            bus.consume_inbound().map(|message| message.content),
+            Some("first".to_owned())
+        );
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bounded publisher should wake after consume");
+        assert_eq!(
+            bus.consume_inbound().map(|message| message.content),
+            Some("second".to_owned())
+        );
+        handle.join().expect("publisher join");
+    }
+
+    #[test]
+    fn bounded_bus_outbound_publish_keeps_newest_message_without_blocking() {
+        let bus = MessageBus::bounded(1);
+        bus.publish_outbound(OutboundMessage::new("a", "c", "progress"));
+        bus.publish_outbound(OutboundMessage::new("a", "c", "final"));
+        assert_eq!(
+            bus.consume_outbound().map(|message| message.content),
+            Some("final".to_owned())
         );
     }
 
