@@ -6,7 +6,7 @@ Origin specs: 008, 009, 010, 015, 026
 
 ## 문서 목적
 
-이 문서는 008, 009, 010, 015, 026이 구현 완료 범위를 닫은 뒤에도 남아 있는 configuration, runtime layout, execution snapshot 작업의 새 owner boundary를 고정한다. 008은 현재 `.shacs-bot/config.json`, `.shacs-bot/auth.json`, JSON config loader, env placeholder, legacy migration, path helper, current runtime dirs를 닫았다. 009는 현재 context assembly와 compaction input mapping을 닫았고, formal snapshot과 tokenizer-aware budget은 남겼다. 010은 local safety baseline을 닫았고, secret reference와 unified redaction model은 남겼다. 015는 local process lifecycle baseline을 닫았고, 실제 stored-data transform migration과 더 엄격한 runtime ownership은 남겼다. 026은 context files와 inline references의 CLI/core handoff를 닫았고, explicit config-provided extra context file live wiring은 닫지 않았다.
+이 문서는 008, 009, 010, 015, 026이 구현 완료 범위를 닫은 뒤에도 남아 있는 configuration, runtime layout, execution snapshot 작업의 새 owner boundary를 고정한다. 008은 현재 `.shacs-bot/config.json`, `.shacs-bot/auth.json`, JSON config loader, env placeholder, legacy migration, path helper, current runtime dirs를 닫았다. 009는 현재 context assembly와 compaction input mapping을 닫았고, formal snapshot과 tokenizer-aware budget은 남겼다. 010은 local safety baseline을 닫았고, secret reference와 unified redaction model은 남겼다. 015는 local process lifecycle baseline을 닫았고, config/profile stored-data transform migration과 더 엄격한 runtime directory ownership은 남겼다. Durable runtime event/checkpoint/work/channel/child/diagnostics family의 migration과 writable-start admission은 029가 소유한다. 029는 current config compatibility와 runtime path-helper boundary로 먼저 닫히며, 035는 그 boundary를 확장하되 029를 다시 열지 않는다. 026은 context files와 inline references의 CLI/core handoff를 닫았고, explicit config-provided extra context file live wiring은 닫지 않았다.
 
 035의 목적은 이 잔여 작업을 하나의 실행 계약으로 묶는 것이다. 핵심은 schema-versioned config migration, profiles and secret refs, formal runtime directory ownership, config/policy/context/provider execution snapshots and provenance, strict snapshot immutability, tokenizer-aware budget, explicit extra context config live wiring이다.
 
@@ -133,8 +133,8 @@ Origin specs: 008, 009, 010, 015, 026
     <tr>
       <td>015 packaging process lifecycle and upgrades</td>
       <td>Local lifecycle baseline, ownership marker, update marker, recover baseline</td>
-      <td>Stored-data transform migration, schema marker, formal runtime directory ownership</td>
-      <td>Migration과 runtime admission을 같은 evidence chain으로 설명한다.</td>
+      <td>Config/profile transform migration과 schema marker, formal runtime directory ownership</td>
+      <td>Config/profile migration과 layout admission을 같은 evidence chain으로 설명하고, durable runtime family migration과 writable-start admission은 이미 닫힌 029 boundary를 소비한다. 035는 029 closure의 선행 조건이 아니다.</td>
     </tr>
     <tr>
       <td>026 context files and inline references</td>
