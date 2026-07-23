@@ -1,3 +1,4 @@
+use fs2::FileExt;
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials as SmtpCredentials;
 use lettre::{Message as EmailMessage, SmtpTransport, Transport};
@@ -20,6 +21,7 @@ use shacs_channels::{
     WhatsAppOutboundFrame, DISCORD_CHANNEL, EMAIL_CHANNEL, SLACK_CHANNEL, TELEGRAM_CHANNEL,
     WEBSOCKET_CHANNEL, WHATSAPP_CHANNEL,
 };
+use shacs_command::{parse_loop_command, LoopCommand};
 use shacs_config::{
     config_context, default_config_path, ensure_runtime_dirs, load_auth_store,
     load_config_with_env, resolve_config_env_refs, save_auth_store_to_path, save_config_to_path,
@@ -34,21 +36,21 @@ use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
     build_plugin_runtime_snapshot, build_plugin_surface_projection, discover_context_files,
     discover_plugins, parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
-    resolve_context_reference, AgentHook, AgentHookContext, AgentLoop, AgentLoopConfig,
-    AgentLoopTurnResult, CompositeHook, ContainerNetworkMode, ContainerRuntimeKind,
-    ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput,
-    ContextDiagnosticsSummary, ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions,
-    ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig, DiscoveredPlugin,
-    DockerContainmentSnapshot, DreamLifecycle, HeartbeatError, HeartbeatNotifier,
-    HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker,
-    InboundMessage, McpLifecycle, MessageBus, PermissionMode, PermissionModeSnapshot,
-    PluginCommandDispatcher, PluginDiscoveryError, PluginHookCatalog, PluginHookDescriptor,
-    PluginHookDispatchSink, PluginHookDispatchSummary, PluginRuntimeHookAgentHook,
-    PluginRuntimeSnapshot, PluginState, PluginSurfaceProjection, ProviderNotificationEvaluator,
-    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, Session,
-    SessionHistoryOptions, SessionManager, SessionTurnLock, StreamDeltaCoalescer,
-    SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig, ToolSearchMode,
-    ToolStatus, HEARTBEAT_FILE_NAME,
+    resolve_context_reference, runtime_control_payload, AgentHook, AgentHookContext, AgentLoop,
+    AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
+    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput,
+    ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
+    ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
+    ContextReferenceResolverConfig, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
+    DurableWorkDispatcher, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
+    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle,
+    MessageBus, PermissionMode, PermissionModeSnapshot, PluginCommandDispatcher,
+    PluginDiscoveryError, PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink,
+    PluginHookDispatchSummary, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
+    PluginSurfaceProjection, ProviderNotificationEvaluator, RuntimeCapabilityReport,
+    RuntimeCapabilityStatus, RuntimeToolCall, Session, SessionHistoryOptions, SessionManager,
+    SessionTurnLock, StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent,
+    ToolSearchConfig, ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -63,6 +65,32 @@ use shacs_providers::{
     ProviderEvent, ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
 };
 use shacs_redaction::redact_string;
+use shacs_session::durable_child::{
+    ChildCancelRequested, ChildResultDecisionKind, ChildResultRecorded, DurableChildRecorder,
+    DurableChildReplayState, ReplayChildTaskState,
+};
+use shacs_session::durable_event::{
+    DurableEventInput, DurableEventPayload, DurableEventRecord, DurableEventStore,
+    RUNTIME_OWNER_LIFECYCLE, RUNTIME_RESTART_REQUESTED, RUNTIME_STOP_REQUESTED,
+    RUNTIME_SUPERVISION_RECORDED,
+};
+use shacs_session::durable_migration::{
+    durable_migration_blocks_writable_runtime_for_roots, plan_durable_migration_for_roots,
+    read_durable_migration_ledger, run_durable_migration_for_roots, DurableConfigCompatibility,
+    DurableMigrationAction, DurableMigrationPlan, DurableMigrationReport,
+    DurableMigrationResultStatus, DurableMigrationRunMode,
+};
+use shacs_session::durable_replay::{
+    evaluate_durable_recovery, DurableCheckpointStore, DurableRecoveryHint, DurableRecoveryIssue,
+    DurableRecoveryStatus, DurableReplayAdmission,
+};
+use shacs_session::durable_trace::{
+    DurableTraceStore, CURRENT_DURABLE_TRACE_SCHEMA_VERSION, DURABLE_TRACE_SCHEMA_FAMILY,
+};
+use shacs_session::durable_work::{
+    evaluate_durable_work_recovery, evaluate_durable_work_recovery_for_owner, DurableWorkAdmission,
+    DurableWorkRecoveryStatus, ReplayWorkState, WorkTerminalKind, MAX_DURABLE_WORK_ATTEMPTS,
+};
 use shacs_session::{SessionRuntimeExecutionProjection, SessionRuntimeWorkflowProjection};
 use shacs_skills::{
     discover_skill_registry, discover_workflow_recipes, sync_builtin_skills,
@@ -88,14 +116,17 @@ use shacs_utils::progress_events::{
 use shacs_workflow::{WorkflowPattern, WorkflowRecipeReadiness};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::stream::MaybeTlsStream;
@@ -123,6 +154,17 @@ const WEBSOCKET_STREAM_FLUSH_CHARS: usize = 32;
 const EXTERNAL_SESSION_PENDING_LIMIT: usize = 20;
 const EXTERNAL_TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(7);
 const EXTERNAL_TYPING_INDICATOR_KEY: &str = "_typing_indicator";
+const DURABLE_WORK_ID_METADATA: &str = "durable_work_id";
+const DURABLE_SESSION_REF_METADATA: &str = "durable_session_ref";
+const MAX_CHANNEL_METADATA_BYTES: u64 = 1024 * 1024;
+static CHANNEL_METADATA_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static DURABLE_INBOUND_ENQUEUE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static PROCESS_INSTANCE_REF: OnceLock<String> = OnceLock::new();
+const DURABLE_WORK_LEASE_DURATION_MS: u64 = 30_000;
+const DURABLE_WORK_BUSY_RETRY_MS: u64 = 250;
+const DURABLE_WORK_MAX_OPEN_ITEMS: usize = 1024;
+const EXTERNAL_RUNTIME_BUS_CAPACITY: usize = 256;
+const EXTERNAL_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 type ApiProviderEventCallback = Arc<dyn Fn(&shacs_providers::ProviderEvent) + Send + Sync>;
 type ExternalTransportRunner = Arc<
     dyn Fn(
@@ -144,6 +186,7 @@ pub enum CliCommand {
     RuntimeInspect(RuntimeInspectOptions),
     RuntimeDiagnostics(RuntimeDiagnosticsOptions),
     RuntimeUpdate(RuntimeUpdateOptions),
+    RuntimeMigrate(RuntimeMigrateOptions),
     RuntimeRecover(RuntimeRecoverOptions),
     RuntimeStart(RuntimeStartOptions),
     RuntimeStop(RuntimeStopOptions),
@@ -194,6 +237,21 @@ pub struct RuntimeUpdateOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
     pub target_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeMigrateOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub mode: RuntimeMigrateMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeMigrateMode {
+    #[default]
+    DryRun,
+    Apply,
+    Resume,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -890,8 +948,41 @@ pub struct RuntimeInspectReport {
     pub capabilities: Vec<RuntimeCapabilityReport>,
     pub sessions: RuntimeSessionInspect,
     pub lifecycle: RuntimeLifecycleInspect,
+    pub supervision: RuntimeSupervisionState,
+    pub channel_restart: Vec<ChannelRestartStateInspect>,
     pub containment: RuntimeContainmentInspect,
     pub workflow_recipes: Vec<SkillBackedWorkflowRecipe>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelRestartStateInspect {
+    pub channel: String,
+    pub connection_ref: String,
+    pub metadata_ref: String,
+    pub schema_version: u32,
+    pub cursor_kind: Option<String>,
+    pub cursor_ref: Option<String>,
+    pub pending_inbound_refs: Vec<String>,
+    pub pending_outbound_refs: Vec<String>,
+    pub delivery_statuses: Vec<ChannelDeliveryStatusInspect>,
+    pub dedupe_candidate_refs: Vec<String>,
+    pub last_transition_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelDeliveryStatusInspect {
+    pub delivery_ref: String,
+    pub status: ChannelDeliveryProjectionStatus,
+    pub updated_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ChannelDeliveryProjectionStatus {
+    Pending,
+    SentHint,
+    FailedHint,
+    Unknown,
+    DedupeCandidate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -983,6 +1074,49 @@ pub struct RuntimeLifecycleInspect {
     pub ownership: RuntimeOwnershipStatus,
     pub stop_request: Option<RuntimeStopRequestMarker>,
     pub update_marker: Option<RuntimeUpdateMarker>,
+    pub migration_plan: DurableMigrationPlan,
+    pub migration_ledger: DurableMigrationLedgerInspect,
+    pub durable_recovery: DurableReplayAdmission,
+    pub durable_work: DurableWorkAdmission,
+    pub durable_children: DurableChildInspect,
+    pub durable_diagnostics: DurableDiagnosticsInspect,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DurableMigrationLedgerInspect {
+    pub present: bool,
+    pub phase: Option<String>,
+    pub result_count: usize,
+    pub manual_recovery_required: bool,
+    pub issue_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DurableDiagnosticsInspect {
+    pub schema_family: String,
+    pub schema_version: u32,
+    pub missing: bool,
+    pub corrupt_tail: bool,
+    pub evidence_count: usize,
+    pub active_recovery_count: usize,
+    pub terminal_count: usize,
+    pub latest_event_sequence: Option<u64>,
+    pub issue: Option<String>,
+    pub recent_trace_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DurableChildInspect {
+    pub spawned_count: usize,
+    pub recovery_needed_count: usize,
+    pub cancellation_requested_count: usize,
+    pub terminal_count: usize,
+    pub stale_decision_count: usize,
+    pub duplicate_decision_count: usize,
+    pub late_decision_count: usize,
+    pub terminal_evicted_count: u64,
+    pub decision_evicted_count: u64,
+    pub active_child_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1030,21 +1164,220 @@ pub struct RuntimeOwnershipStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeOwnershipMarker {
+    pub schema_version: u32,
+    pub owner_id: String,
     pub pid: u32,
     pub started_at_ms: u64,
     pub updated_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub lifecycle: String,
     pub binary_version: String,
     pub data_schema_version: u32,
     pub mode: String,
     pub config_path: String,
     pub workspace: String,
+    pub process_evidence: RuntimeOwnerProcessEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeOwnerProcessEvidence {
+    pub pid: u32,
+    pub pid_alive: bool,
+    pub process_started_after_marker: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStopRequestMarker {
+    pub schema_version: u32,
     pub request: String,
+    pub request_id: String,
     pub requested_at_ms: u64,
     pub owner_pid: Option<u32>,
+    pub target_owner_id: Option<String>,
+    pub event_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeOwnerFence {
+    lost: Arc<AtomicBool>,
+}
+
+impl RuntimeOwnerFence {
+    fn new() -> Self {
+        Self {
+            lost: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn mark_lost(&self) {
+        self.lost.store(true, Ordering::SeqCst);
+    }
+
+    fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeShutdownReason {
+    None,
+    Stop,
+    Restart,
+    CtrlC,
+    OwnerLost,
+    StartupFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeShutdownPhase {
+    Idle,
+    Draining,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeShutdownStatus {
+    Ok,
+    Failed,
+    Skipped,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeShutdownStepReport {
+    pub name: String,
+    pub status: String,
+    pub count: u64,
+}
+
+impl RuntimeShutdownStepReport {
+    fn new(status: impl Into<String>, count: u64) -> Self {
+        Self {
+            name: "summary".to_owned(),
+            status: status.into(),
+            count,
+        }
+    }
+
+    fn named(name: impl Into<String>, status: impl Into<String>, count: u64) -> Self {
+        Self {
+            name: name.into(),
+            status: status.into(),
+            count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSupervisionShutdown {
+    pub reason: RuntimeShutdownReason,
+    pub phase: RuntimeShutdownPhase,
+    pub queue: RuntimeShutdownStepReport,
+    pub work: RuntimeShutdownStepReport,
+    pub child: RuntimeShutdownStepReport,
+    pub event: RuntimeShutdownStepReport,
+    pub checkpoint: RuntimeShutdownStepReport,
+    pub component_results: Vec<RuntimeShutdownStepReport>,
+}
+
+impl Default for RuntimeSupervisionShutdown {
+    fn default() -> Self {
+        Self {
+            reason: RuntimeShutdownReason::None,
+            phase: RuntimeShutdownPhase::Idle,
+            queue: RuntimeShutdownStepReport::new("unknown", 0),
+            work: RuntimeShutdownStepReport::new("unknown", 0),
+            child: RuntimeShutdownStepReport::new("unknown", 0),
+            event: RuntimeShutdownStepReport::new("unknown", 0),
+            checkpoint: RuntimeShutdownStepReport::new("unknown", 0),
+            component_results: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeShutdownReport {
+    pub reason: RuntimeShutdownReason,
+    pub phase: RuntimeShutdownPhase,
+    pub queue: RuntimeShutdownStepReport,
+    pub work: RuntimeShutdownStepReport,
+    pub child: RuntimeShutdownStepReport,
+    pub event: RuntimeShutdownStepReport,
+    pub checkpoint: RuntimeShutdownStepReport,
+    pub component_results: Vec<RuntimeShutdownStepReport>,
+}
+
+impl RuntimeShutdownReport {
+    fn draining(reason: RuntimeShutdownReason) -> Self {
+        Self {
+            reason,
+            phase: RuntimeShutdownPhase::Draining,
+            queue: RuntimeShutdownStepReport::new("pending", 0),
+            work: RuntimeShutdownStepReport::new("pending", 0),
+            child: RuntimeShutdownStepReport::new("pending", 0),
+            event: RuntimeShutdownStepReport::new("pending", 0),
+            checkpoint: RuntimeShutdownStepReport::new("pending", 0),
+            component_results: Vec::new(),
+        }
+    }
+
+    fn completed(reason: RuntimeShutdownReason) -> Self {
+        Self {
+            phase: RuntimeShutdownPhase::Completed,
+            ..Self::draining(reason)
+        }
+    }
+
+    fn failed(reason: RuntimeShutdownReason) -> Self {
+        Self {
+            phase: RuntimeShutdownPhase::Failed,
+            ..Self::draining(reason)
+        }
+    }
+
+    fn supervision_shutdown(&self) -> RuntimeSupervisionShutdown {
+        RuntimeSupervisionShutdown {
+            reason: self.reason,
+            phase: self.phase,
+            queue: self.queue.clone(),
+            work: self.work.clone(),
+            child: self.child.clone(),
+            event: self.event.clone(),
+            checkpoint: self.checkpoint.clone(),
+            component_results: self.component_results.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSupervisionState {
+    pub schema_version: u32,
+    pub owner: Option<RuntimeSupervisionOwner>,
+    pub components: Vec<RuntimeSupervisionComponent>,
+    pub shutdown: RuntimeSupervisionShutdown,
+    pub last_event_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSupervisionOwner {
+    pub owner_id: String,
+    pub mode: String,
+    pub acquired_at_ms: u64,
+    pub renewed_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub state: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSupervisionComponent {
+    pub name: String,
+    pub state: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1076,6 +1409,11 @@ pub struct RuntimeRecoverOutcome {
     pub marker_path: PathBuf,
     pub recovered: bool,
     pub detail: String,
+    pub durable_recovery: DurableReplayAdmission,
+    pub durable_work: DurableWorkAdmission,
+    pub durable_children: DurableChildInspect,
+    pub durable_diagnostics: DurableDiagnosticsInspect,
+    pub supervision: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1140,11 +1478,14 @@ pub struct SkillsRecipesReport {
 pub struct ChannelsReport {
     pub config_path: PathBuf,
     pub workspace: PathBuf,
+    pub data_dir: PathBuf,
     pub channels: Vec<ChannelReportItem>,
     pub unknown_plugins: Vec<String>,
     pub worker_count: usize,
     pub send_memory_hints: bool,
     pub send_max_retries: u32,
+    pub channel_restart: Vec<ChannelRestartStateInspect>,
+    pub supervision: RuntimeSupervisionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1345,6 +1686,17 @@ pub struct SessionInspectReport {
     pub diagnostics_refs: Vec<String>,
     pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
     pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
+    pub durable_children: DurableChildSessionInspect,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableChildSessionInspect {
+    pub active_count: usize,
+    pub terminal_count: usize,
+    pub stale_decision_count: usize,
+    pub duplicate_decision_count: usize,
+    pub late_decision_count: usize,
+    pub child_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1392,6 +1744,8 @@ pub struct SessionDiagnosticsReport {
     pub diagnostics_refs: Vec<String>,
     pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
     pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
+    pub durable_children: DurableChildSessionInspect,
+    pub supervision: Value,
     pub legal_start: usize,
 }
 
@@ -2215,6 +2569,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
             runtime_diagnostics(options).map(format_runtime_diagnostics)
         }
         CliCommand::RuntimeUpdate(options) => runtime_update(options).map(format_runtime_update),
+        CliCommand::RuntimeMigrate(options) => runtime_migrate(options).map(format_runtime_migrate),
         CliCommand::RuntimeRecover(options) => runtime_recover(options).map(format_runtime_recover),
         CliCommand::RuntimeStart(options) => runtime_start(options),
         CliCommand::RuntimeStop(options) => runtime_stop(options).map(format_runtime_stop),
@@ -2305,7 +2660,7 @@ fn parse_runtime(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "runtime requires `start`, `stop`, `restart`, `inspect`, `diagnostics`, `update`, or `recover`".to_owned(),
+            "runtime requires `start`, `stop`, `restart`, `inspect`, `diagnostics`, `update`, `migrate`, or `recover`".to_owned(),
         ));
     };
     match action.as_str() {
@@ -2315,6 +2670,7 @@ fn parse_runtime(
         "inspect" => parse_runtime_inspect(parser, global_config),
         "diagnostics" | "diagnose" => parse_runtime_diagnostics(parser, global_config),
         "update" => parse_runtime_update(parser, global_config),
+        "migrate" => parse_runtime_migrate(parser, global_config),
         "recover" => parse_runtime_recover(parser, global_config),
         "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(CliError::InvalidArguments(format!(
@@ -2343,7 +2699,6 @@ pub fn load_runtime_config_with_env(
         },
         env,
     )?;
-    guard_runtime_marker_for_mutation(&bundle.context.data_dir)?;
     if !bundle.migrations.is_empty() {
         save_config_to_path(&bundle.config, &bundle.context.config_path)?;
     }
@@ -2357,6 +2712,7 @@ pub fn load_runtime_config_with_env(
         Some(bundle.context.config_path.clone()),
         Some(bundle.config.workspace_path()),
     );
+    guard_runtime_admission_for_roots(&bundle.context.data_dir, &bundle.context.workspace)?;
     apply_codex_auth_overlay(&mut bundle)?;
     apply_copilot_auth_overlay(&mut bundle)?;
     apply_api_key_auth_overlay(&mut bundle)?;
@@ -2690,6 +3046,23 @@ fn runtime_inspect_inner(
         &bundle.context.data_dir,
     ))?;
     let compatibility = evaluate_runtime_compatibility(RUNTIME_DATA_SCHEMA_VERSION);
+    let migration_plan = plan_durable_migration_for_roots(
+        &bundle.context.data_dir,
+        &bundle.context.workspace,
+        DurableConfigCompatibility::Readable,
+    )
+    .map_err(|error| CliError::InvalidArguments(redact_string(&error.to_string())))?;
+    let migration_ledger = inspect_durable_migration_ledger(&bundle.context.data_dir);
+    let durable_recovery = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
+    let durable_work = evaluate_runtime_durable_work(&bundle.context.data_dir, &durable_recovery);
+    let durable_children =
+        durable_child_inspect(durable_recovery.state.as_ref().map(|state| &state.children));
+    let durable_diagnostics = inspect_durable_diagnostics(&bundle.context.data_dir);
+    let supervision = read_runtime_supervision_state(&bundle.context.data_dir)?;
+    let channel_restart = inspect_channel_restart_states(
+        &bundle.context.data_dir,
+        durable_recovery.state.as_ref().map(|state| &state.work),
+    );
     let containment = runtime_containment_inspect(&bundle);
     let workflow_recipes = workflow_recipes_for_bundle(&bundle)?;
 
@@ -2713,10 +3086,209 @@ fn runtime_inspect_inner(
             ownership,
             stop_request,
             update_marker,
+            migration_plan,
+            migration_ledger,
+            durable_recovery,
+            durable_work,
+            durable_children,
+            durable_diagnostics,
         },
+        supervision,
+        channel_restart,
         containment,
         workflow_recipes,
     })
+}
+
+fn inspect_durable_diagnostics(data_dir: &Path) -> DurableDiagnosticsInspect {
+    let root = runtime_durable_trace_root(data_dir);
+    let mut inspect = DurableDiagnosticsInspect {
+        schema_family: DURABLE_TRACE_SCHEMA_FAMILY.to_owned(),
+        schema_version: CURRENT_DURABLE_TRACE_SCHEMA_VERSION,
+        missing: !root.join("diagnostics.log").exists(),
+        ..DurableDiagnosticsInspect::default()
+    };
+    if inspect.missing {
+        return inspect;
+    }
+    let scan = match DurableTraceStore::scan_existing(&root, usize::MAX) {
+        Ok(scan) => scan,
+        Err(error) => {
+            inspect.corrupt_tail = true;
+            inspect.issue = Some(redact_string(&error.to_string()));
+            return inspect;
+        }
+    };
+    inspect.corrupt_tail = scan.corrupt_tail;
+    inspect.issue = scan.issue.map(|issue| redact_string(&issue));
+    inspect.evidence_count = scan.records.len();
+    inspect.active_recovery_count = scan
+        .records
+        .iter()
+        .filter(|record| record.active_recovery)
+        .count();
+    inspect.terminal_count = inspect
+        .evidence_count
+        .saturating_sub(inspect.active_recovery_count);
+    inspect.latest_event_sequence = scan
+        .records
+        .iter()
+        .filter_map(|record| record.event_sequence)
+        .max();
+    inspect.recent_trace_refs = scan
+        .records
+        .iter()
+        .rev()
+        .take(20)
+        .map(|record| opaque_ref("trace", &record.trace_id))
+        .collect::<Vec<_>>();
+    inspect.recent_trace_refs.reverse();
+    inspect
+}
+
+fn inspect_durable_migration_ledger(data_dir: &Path) -> DurableMigrationLedgerInspect {
+    match read_durable_migration_ledger(data_dir) {
+        Ok(Some(ledger)) => DurableMigrationLedgerInspect {
+            present: true,
+            phase: Some(ledger.phase.clone()),
+            result_count: ledger.results.len(),
+            manual_recovery_required: ledger.results.iter().any(|result| {
+                matches!(
+                    result.status,
+                    DurableMigrationResultStatus::Failed | DurableMigrationResultStatus::Blocked
+                )
+            }),
+            issue_ref: None,
+        },
+        Ok(None) => DurableMigrationLedgerInspect::default(),
+        Err(error) => DurableMigrationLedgerInspect {
+            present: true,
+            phase: Some("unreadable".to_owned()),
+            result_count: 0,
+            manual_recovery_required: true,
+            issue_ref: Some(opaque_ref("migration-ledger-issue", &error.to_string())),
+        },
+    }
+}
+
+fn durable_migration_projection(
+    plan: &DurableMigrationPlan,
+    ledger: &DurableMigrationLedgerInspect,
+) -> Value {
+    json!({
+        "blocked": plan.blocked,
+        "transform_count": plan.entries.iter().filter(|entry| entry.action == DurableMigrationAction::Transform).count(),
+        "family_count": plan.entries.len(),
+        "ledger": {
+            "present": ledger.present,
+            "phase": ledger.phase,
+            "result_count": ledger.result_count,
+            "manual_recovery_required": ledger.manual_recovery_required,
+            "issue_ref": ledger.issue_ref,
+        },
+    })
+}
+
+fn durable_diagnostics_projection(inspect: &DurableDiagnosticsInspect) -> Value {
+    json!({
+        "truth_role": "diagnostics_evidence_not_replay_truth",
+        "schema_family": inspect.schema_family,
+        "schema_version": inspect.schema_version,
+        "missing": inspect.missing,
+        "corrupt_tail": inspect.corrupt_tail,
+        "evidence_count": inspect.evidence_count,
+        "active_recovery_count": inspect.active_recovery_count,
+        "terminal_count": inspect.terminal_count,
+        "latest_event_sequence": inspect.latest_event_sequence,
+        "issue": inspect.issue,
+        "recent_trace_refs": inspect.recent_trace_refs,
+    })
+}
+
+fn runtime_supervisor_projection(state: &RuntimeSupervisionState) -> Value {
+    json!({
+        "schema_version": state.schema_version,
+        "owner_present": state.owner.is_some(),
+        "owner_ref": state.owner.as_ref().map(|owner| opaque_ref("owner", &owner.owner_id)),
+        "shutdown_reason": format!("{:?}", state.shutdown.reason),
+        "shutdown_phase": format!("{:?}", state.shutdown.phase),
+        "component_count": state.components.len(),
+        "components": state.components.iter().map(|component| json!({
+            "name": component.name,
+            "state": component.state,
+            "detail_ref": opaque_ref("supervision-detail", &component.detail),
+        })).collect::<Vec<_>>(),
+        "last_event_sequence": state.last_event_sequence,
+    })
+}
+
+fn format_runtime_supervisor_projection(value: &Value) -> String {
+    let reason = value
+        .get("shutdown_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let phase = value
+        .get("shutdown_phase")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let component_count = value
+        .get("component_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let owner = value
+        .get("owner_ref")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    format!("reason={reason} phase={phase} components={component_count} owner={owner}")
+}
+
+fn durable_recovery_issue_projection(issue: &DurableRecoveryIssue) -> Value {
+    json!({
+        "kind": issue.kind.as_str(),
+        "detail_ref": opaque_ref("recovery-detail", &issue.detail),
+    })
+}
+
+fn durable_child_inspect(state: Option<&DurableChildReplayState>) -> DurableChildInspect {
+    let Some(state) = state else {
+        return DurableChildInspect::default();
+    };
+    let mut inspect = DurableChildInspect {
+        terminal_evicted_count: state.terminal_evicted_count,
+        decision_evicted_count: state.decision_evicted_count,
+        ..DurableChildInspect::default()
+    };
+    for item in state.items.values() {
+        match item.state {
+            ReplayChildTaskState::Spawned => inspect.spawned_count += 1,
+            ReplayChildTaskState::Running => inspect.recovery_needed_count += 1,
+            _ => inspect.terminal_count += 1,
+        }
+        if item.cancellation_requested_sequence.is_some() && !item.state.is_terminal() {
+            inspect.cancellation_requested_count += 1;
+        }
+        if !item.state.is_terminal() {
+            inspect
+                .active_child_refs
+                .push(opaque_ref("child", &item.child_task_id));
+        }
+    }
+    for decision in &state.decisions {
+        match decision.decision {
+            shacs_session::durable_child::ChildResultDecisionKind::Stale => {
+                inspect.stale_decision_count += 1
+            }
+            shacs_session::durable_child::ChildResultDecisionKind::Duplicate => {
+                inspect.duplicate_decision_count += 1
+            }
+            shacs_session::durable_child::ChildResultDecisionKind::Late => {
+                inspect.late_decision_count += 1
+            }
+            shacs_session::durable_child::ChildResultDecisionKind::Accepted => {}
+        }
+    }
+    inspect.active_child_refs.sort();
+    inspect
 }
 
 fn runtime_containment_inspect(bundle: &ConfigBundle) -> RuntimeContainmentInspect {
@@ -3264,7 +3836,7 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
             timestamp_ms: shacs_utils::diagnostics::current_time_ms(),
             summary: "config file is missing during diagnostics inspection".to_owned(),
             correlation: Default::default(),
-            fields: json!({ "path": report.config_path }),
+            fields: json!({ "path_ref": diagnostics_path_ref(&report.config_path) }),
         });
     }
     if !report.workspace_exists {
@@ -3272,7 +3844,7 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
             timestamp_ms: shacs_utils::diagnostics::current_time_ms(),
             summary: "workspace directory is missing during diagnostics inspection".to_owned(),
             correlation: Default::default(),
-            fields: json!({ "path": report.workspace }),
+            fields: json!({ "path_ref": diagnostics_path_ref(&report.workspace) }),
         });
     }
     let recovery_evidence = report
@@ -3346,22 +3918,22 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
             "binary_version": marker.binary_version,
             "data_schema_version": marker.data_schema_version,
             "mode": marker.mode,
-            "config_path": marker.config_path,
-            "workspace": marker.workspace,
+            "config_path_ref": diagnostics_path_ref(Path::new(&marker.config_path)),
+            "workspace_ref": diagnostics_path_ref(Path::new(&marker.workspace)),
         })).unwrap_or(Value::Null),
     });
     DiagnosticsSnapshot {
         generated_at_ms: shacs_utils::diagnostics::current_time_ms(),
         runtime: json!({
             "config": {
-                "path": report.config_path,
+                "path_ref": diagnostics_path_ref(&report.config_path),
                 "exists": report.config_exists,
             },
             "workspace": {
-                "path": report.workspace,
+                "path_ref": diagnostics_path_ref(&report.workspace),
                 "exists": report.workspace_exists,
             },
-            "data_dir": report.data_dir,
+            "data_dir_ref": diagnostics_path_ref(&report.data_dir),
             "defaults": {
                 "provider": report.provider,
                 "model": report.model,
@@ -3385,6 +3957,68 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
                 "data_schema_version": report.lifecycle.data_schema_version,
                 "data_schema_min_version": report.lifecycle.data_schema_min_version,
                 "compatibility": report.lifecycle.compatibility.as_str(),
+                "durable_recovery": {
+                    "status": report.lifecycle.durable_recovery.status.as_str(),
+                    "writable": report.lifecycle.durable_recovery.writable,
+                    "checkpoint_used": report.lifecycle.durable_recovery.checkpoint_used,
+                    "replayed_event_count": report.lifecycle.durable_recovery.replayed_event_count,
+                    "issues": report.lifecycle.durable_recovery.issues.iter().map(durable_recovery_issue_projection).collect::<Vec<_>>(),
+                    "recovery_hints": report.lifecycle.durable_recovery.recovery_hints,
+                },
+                "stored_data_migration": durable_migration_projection(
+                    &report.lifecycle.migration_plan,
+                    &report.lifecycle.migration_ledger,
+                ),
+                "durable_work": {
+                    "status": report.lifecycle.durable_work.status.as_str(),
+                    "writable": report.lifecycle.durable_work.writable,
+                    "pending_count": report.lifecycle.durable_work.pending_count,
+                    "leased_count": report.lifecycle.durable_work.leased_count,
+                    "waiting_retry_count": report.lifecycle.durable_work.waiting_retry_count,
+                    "cancellation_requested_count": report.lifecycle.durable_work.cancellation_requested_count,
+                    "terminal_count": report.lifecycle.durable_work.terminal_count,
+                    "terminal_evicted_count": report.lifecycle.durable_work.terminal_evicted_count,
+                    "next_wake_at_ms": report.lifecycle.durable_work.next_wake_at_ms,
+                    "stale_lease_work_refs": report.lifecycle.durable_work.stale_lease_work_ids.iter().map(|work_id| opaque_ref("work", work_id)).collect::<Vec<_>>(),
+                    "issues": report.lifecycle.durable_work.issues.iter().map(|issue| json!({
+                        "kind": issue.kind.as_str(),
+                        "work_ref": opaque_ref("work", &issue.work_id),
+                        "detail": redact_string(&issue.detail),
+                    })).collect::<Vec<_>>(),
+                },
+                "durable_children": {
+                    "spawned_count": report.lifecycle.durable_children.spawned_count,
+                    "recovery_needed_count": report.lifecycle.durable_children.recovery_needed_count,
+                    "cancellation_requested_count": report.lifecycle.durable_children.cancellation_requested_count,
+                    "terminal_count": report.lifecycle.durable_children.terminal_count,
+                    "stale_decision_count": report.lifecycle.durable_children.stale_decision_count,
+                    "duplicate_decision_count": report.lifecycle.durable_children.duplicate_decision_count,
+                    "late_decision_count": report.lifecycle.durable_children.late_decision_count,
+                    "terminal_evicted_count": report.lifecycle.durable_children.terminal_evicted_count,
+                    "decision_evicted_count": report.lifecycle.durable_children.decision_evicted_count,
+                    "active_child_refs": report.lifecycle.durable_children.active_child_refs,
+                },
+                "durable_diagnostics_evidence": durable_diagnostics_projection(&report.lifecycle.durable_diagnostics),
+                "supervision": runtime_supervisor_projection(&report.supervision),
+                "channel_restart": report.channel_restart.iter().map(|state| json!({
+                    "channel": state.channel,
+                    "connection_ref": state.connection_ref,
+                    "metadata_ref": state.metadata_ref,
+                    "schema_version": state.schema_version,
+                    "cursor_kind": state.cursor_kind,
+                    "cursor_ref": state.cursor_ref,
+                    "pending_inbound_count": state.pending_inbound_refs.len(),
+                    "pending_outbound_count": state.pending_outbound_refs.len(),
+                    "dedupe_candidate_count": state.dedupe_candidate_refs.len(),
+                    "delivery_statuses": channel_delivery_status_counts(&state.delivery_statuses)
+                        .into_iter()
+                        .map(|(status, count)| json!({
+                            "status": channel_delivery_status_label(status),
+                            "count": count,
+                        }))
+                        .collect::<Vec<_>>(),
+                    "last_transition_ms": state.last_transition_ms,
+                })).collect::<Vec<_>>(),
                 "ownership": ownership,
                 "update_marker": update_marker.clone(),
             },
@@ -3415,6 +4049,10 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
     }
 }
 
+fn diagnostics_path_ref(path: &Path) -> String {
+    opaque_ref("path", &display_path(path))
+}
+
 pub fn runtime_update(options: RuntimeUpdateOptions) -> Result<RuntimeUpdateOutcome, CliError> {
     let target_version = validate_runtime_target_version(&options.target_version)?;
     if target_version != VERSION {
@@ -3442,7 +4080,7 @@ pub fn runtime_update(options: RuntimeUpdateOptions) -> Result<RuntimeUpdateOutc
             )));
         }
     }
-    guard_runtime_non_update_admission(&bundle.context.data_dir)?;
+    guard_runtime_non_update_admission(&bundle.context.data_dir, &bundle.context.workspace)?;
 
     let started = runtime_update_marker_value(&target_version, "in_progress", None);
     write_runtime_marker_atomically(&marker_path, &started)?;
@@ -3461,6 +4099,44 @@ pub fn runtime_update(options: RuntimeUpdateOptions) -> Result<RuntimeUpdateOutc
         phase: "completed_cleanup".to_owned(),
         migration_required: false,
     })
+}
+
+pub fn runtime_migrate(options: RuntimeMigrateOptions) -> Result<DurableMigrationReport, CliError> {
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    let bundle = load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path),
+            workspace_override: options.workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )?;
+    let mut ownership_lock = None;
+    if options.mode != RuntimeMigrateMode::DryRun {
+        let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
+        let ownership_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        ownership_lock = Some(RuntimeOwnershipMutationLock::acquire(&ownership_path)?);
+        let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
+        if ownership.state == RuntimeOwnershipState::Active {
+            return Err(active_runtime_ownership_error(&ownership));
+        }
+    }
+    let mode = match options.mode {
+        RuntimeMigrateMode::DryRun => DurableMigrationRunMode::DryRun,
+        RuntimeMigrateMode::Apply => DurableMigrationRunMode::Apply,
+        RuntimeMigrateMode::Resume => DurableMigrationRunMode::Resume,
+    };
+    let report = run_durable_migration_for_roots(
+        &bundle.context.data_dir,
+        &bundle.context.workspace,
+        mode,
+        DurableConfigCompatibility::Readable,
+        Default::default(),
+    )
+    .map_err(|error| CliError::InvalidArguments(redact_string(&error.to_string())))?;
+    drop(ownership_lock);
+    Ok(report)
 }
 
 pub fn runtime_start(options: RuntimeStartOptions) -> Result<String, CliError> {
@@ -3497,19 +4173,49 @@ fn runtime_stop_or_restart(
         &ProcessEnv,
     )?;
     let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
+    let ownership_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+    let _mutation_lock = RuntimeOwnershipMutationLock::acquire(&ownership_path)?;
     let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
     let request_path = runtime_stop_request_marker_path(&bundle.context.data_dir);
     let (status, detail) = match ownership.state {
         RuntimeOwnershipState::Active => {
-            let owner_pid = ownership.marker.as_ref().map(|marker| marker.pid);
+            let owner = ownership.marker.as_ref().ok_or_else(|| {
+                CliError::InvalidArguments("active runtime ownership marker disappeared".to_owned())
+            })?;
+            let request_id = runtime_request_id(request, &owner.owner_id);
+            let requested_at_ms = now_millis();
+            let event_sequence = append_runtime_control_request(
+                &bundle.context.data_dir,
+                request,
+                requested_at_ms,
+                &request_id,
+                &owner.owner_id,
+            )
+            .map(|record| record.sequence)?;
+            let current = read_runtime_ownership_marker(&ownership_path)?;
+            if current.as_ref().map(|marker| marker.owner_id.as_str())
+                != Some(owner.owner_id.as_str())
+            {
+                return Err(CliError::InvalidArguments(
+                    "runtime control request blocked by owner generation change".to_owned(),
+                ));
+            }
             write_runtime_marker_atomically(
                 &request_path,
-                &runtime_stop_request_marker_value(request, owner_pid),
+                &runtime_stop_request_marker_value(
+                    request,
+                    &request_id,
+                    Some(owner.pid),
+                    Some(&owner.owner_id),
+                    event_sequence,
+                    requested_at_ms,
+                ),
             )?;
-            (
-                RuntimeStopOutcomeStatus::RequestWritten,
-                format!("wrote {request} request for active runtime"),
-            )
+            let detail = format!(
+                "wrote {request} request for active runtime owner {}",
+                owner.owner_id
+            );
+            (RuntimeStopOutcomeStatus::RequestWritten, detail)
         }
         RuntimeOwnershipState::Stale => (
             RuntimeStopOutcomeStatus::StaleOwnerOnly,
@@ -3542,10 +4248,25 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
         &ProcessEnv,
     )?;
     let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
+    guard_runtime_migration_admission(&bundle.context.data_dir, &bundle.context.workspace)?;
+    let ownership_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+    let _mutation_lock = RuntimeOwnershipMutationLock::acquire(&ownership_path)?;
     let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
     let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
     if ownership.state == RuntimeOwnershipState::Active {
         return Err(active_runtime_owner_recover_error());
+    }
+    if ownership.state == RuntimeOwnershipState::Stale {
+        if let Some(marker) = ownership.marker.as_ref() {
+            if marker.process_evidence.pid_alive
+                && !marker.process_evidence.process_started_after_marker
+                && ownership.reason == "ownership heartbeat is stale"
+            {
+                return Err(CliError::InvalidArguments(
+                    "runtime recover blocked: owner is live but lease-expired; request stop or inspect before takeover".to_owned(),
+                ));
+            }
+        }
     }
     let update_marker = read_runtime_update_marker(&marker_path)?;
     if let Some(marker) = update_marker.as_ref() {
@@ -3557,6 +4278,296 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
         }
     }
     let mut details = Vec::new();
+    let mut durable_recovery = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
+    match durable_recovery.status {
+        DurableRecoveryStatus::Healthy => {}
+        DurableRecoveryStatus::Recoverable
+            if durable_recovery
+                .recovery_hints
+                .contains(&DurableRecoveryHint::RewriteCheckpoint) =>
+        {
+            let state = durable_recovery.state.clone().ok_or_else(|| {
+                CliError::InvalidArguments(
+                    "runtime recover could not rebuild a durable checkpoint state".to_owned(),
+                )
+            })?;
+            let checkpoint_store = DurableCheckpointStore::open(runtime_durable_checkpoint_root(
+                &bundle.context.data_dir,
+            ))
+            .map_err(|error| {
+                CliError::InvalidArguments(format!(
+                    "runtime recover could not open durable checkpoints: {}",
+                    redact_string(&error.to_string())
+                ))
+            })?;
+            let event_store =
+                DurableEventStore::open(runtime_durable_event_root(&bundle.context.data_dir))
+                    .map_err(|error| {
+                        CliError::InvalidArguments(format!(
+                            "runtime recover could not open durable events: {}",
+                            redact_string(&error.to_string())
+                        ))
+                    })?;
+            let quarantined = checkpoint_store
+                .quarantine_unusable_candidates(&event_store, state.applied_through.unwrap_or(0))
+                .map_err(|error| {
+                    CliError::InvalidArguments(format!(
+                        "runtime recover could not quarantine unusable checkpoints: {}",
+                        redact_string(&error.to_string())
+                    ))
+                })?;
+            if quarantined > 0 {
+                details.push(format!(
+                    "quarantined {quarantined} unusable checkpoint{}",
+                    if quarantined == 1 { "" } else { "s" }
+                ));
+            }
+            let checkpoint = checkpoint_store.write(&state).map_err(|error| {
+                CliError::InvalidArguments(format!(
+                    "runtime recover could not rewrite durable checkpoint: {}",
+                    redact_string(&error.to_string())
+                ))
+            })?;
+            details.push(format!(
+                "rewrote durable checkpoint through sequence {}",
+                checkpoint.included_sequence
+            ));
+            durable_recovery = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
+            if durable_recovery.status != DurableRecoveryStatus::Healthy {
+                return Err(durable_recovery_admission_error(&durable_recovery));
+            }
+        }
+        _ => return Err(durable_recovery_admission_error(&durable_recovery)),
+    }
+    let child_recorder = DurableChildRecorder::open_with_payload_root(
+        runtime_durable_event_root(&bundle.context.data_dir),
+        runtime_durable_work_payload_root(&bundle.context.data_dir),
+    )
+    .map_err(|error| {
+        CliError::InvalidArguments(format!(
+            "durable child recovery failed: {}",
+            redact_string(&error.to_string())
+        ))
+    })?;
+    let repaired_lifecycle = child_recorder
+        .repair_incomplete_lifecycle(now_millis())
+        .map_err(|error| CliError::InvalidArguments(redact_string(&error)))?;
+    if repaired_lifecycle.terminal_work_repaired > 0 {
+        details.push(format!(
+            "repaired {} terminal durable child work item{}",
+            repaired_lifecycle.terminal_work_repaired,
+            if repaired_lifecycle.terminal_work_repaired == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    if repaired_lifecycle.cancellations_completed > 0 {
+        details.push(format!(
+            "completed {} requested durable child cancellation{}",
+            repaired_lifecycle.cancellations_completed,
+            if repaired_lifecycle.cancellations_completed == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    let repaired_child_runs = child_recorder
+        .enqueue_missing_child_runs()
+        .map_err(|error| CliError::InvalidArguments(redact_string(&error)))?;
+    let repaired_reentries = child_recorder
+        .enqueue_missing_accepted_reentries()
+        .map_err(|error| CliError::InvalidArguments(redact_string(&error)))?;
+    if repaired_child_runs > 0 {
+        details.push(format!(
+            "restored {repaired_child_runs} pending durable child run{}",
+            if repaired_child_runs == 1 { "" } else { "s" }
+        ));
+    }
+    if repaired_reentries > 0 {
+        details.push(format!(
+            "restored {repaired_reentries} durable child parent reentr{}",
+            if repaired_reentries == 1 { "y" } else { "ies" }
+        ));
+    }
+    if repaired_lifecycle.terminal_work_repaired > 0
+        || repaired_lifecycle.cancellations_completed > 0
+        || repaired_child_runs > 0
+        || repaired_reentries > 0
+    {
+        durable_recovery = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
+    }
+    let mut durable_work =
+        evaluate_runtime_durable_work(&bundle.context.data_dir, &durable_recovery);
+    match durable_work.status {
+        DurableWorkRecoveryStatus::Healthy => {}
+        DurableWorkRecoveryStatus::Recoverable => {
+            let state = durable_recovery.state.as_ref().ok_or_else(|| {
+                CliError::InvalidArguments(
+                    "runtime recover could not rebuild durable work state".to_owned(),
+                )
+            })?;
+            let mut dispatcher = DurableWorkDispatcher::open(
+                runtime_durable_event_root(&bundle.context.data_dir),
+                runtime_durable_work_payload_root(&bundle.context.data_dir),
+                MessageBus::new(),
+                "runtime-recover",
+                30_000,
+            )
+            .map_err(|error| {
+                CliError::InvalidArguments(format!(
+                    "runtime recover could not open durable work dispatcher: {}",
+                    redact_string(&error.to_string())
+                ))
+            })?;
+            let recovered = dispatcher
+                .requeue_stale(&state.work, &durable_work)
+                .map_err(|error| {
+                    CliError::InvalidArguments(format!(
+                        "runtime recover could not requeue stale work: {}",
+                        redact_string(&error.to_string())
+                    ))
+                })?;
+            if !recovered.requeued_work_ids.is_empty() {
+                details.push(format!(
+                    "requeued {} stale durable work lease{}",
+                    recovered.requeued_work_ids.len(),
+                    if recovered.requeued_work_ids.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            }
+            if !recovered.cancelled_work_ids.is_empty() {
+                details.push(format!(
+                    "cancelled {} stale durable work lease{} with prior cancellation request",
+                    recovered.cancelled_work_ids.len(),
+                    if recovered.cancelled_work_ids.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            }
+            durable_recovery = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
+            durable_work =
+                evaluate_runtime_durable_work(&bundle.context.data_dir, &durable_recovery);
+            if durable_work.status != DurableWorkRecoveryStatus::Healthy {
+                return Err(durable_work_admission_error(&durable_work));
+            }
+        }
+        DurableWorkRecoveryStatus::Blocked => {
+            return Err(durable_work_admission_error(&durable_work))
+        }
+    }
+    let active_children = durable_recovery
+        .state
+        .as_ref()
+        .map(|state| {
+            state
+                .children
+                .items
+                .values()
+                .filter(|item| item.state == ReplayChildTaskState::Running)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !active_children.is_empty() {
+        let recorder = DurableChildRecorder::open_with_payload_root(
+            runtime_durable_event_root(&bundle.context.data_dir),
+            runtime_durable_work_payload_root(&bundle.context.data_dir),
+        )
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "durable child recovery failed: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+        for child in &active_children {
+            if child.cancellation_requested_sequence.is_none() {
+                recorder
+                    .record_cancel_requested(
+                        &child.session_id,
+                        &child.parent_turn_id,
+                        &child.spawn_effect_id,
+                        &child.correlation_id,
+                        &ChildCancelRequested {
+                            child_task_id: child.child_task_id.clone(),
+                            requested_at_ms: now_millis(),
+                        },
+                    )
+                    .map_err(|error| {
+                        CliError::InvalidArguments(format!(
+                            "durable child cancellation request failed: {}",
+                            redact_string(&error.to_string())
+                        ))
+                    })?;
+            }
+            let result_ref = recorder
+                .write_result_artifact(&json!({
+                    "payload_type": shacs_session::durable_child::CHILD_RESULT_REENTRY_PAYLOAD_TYPE,
+                    "result": {
+                        "child_task_id": child.child_task_id,
+                        "session_id": child.session_id,
+                        "parent_turn_id": child.parent_turn_id,
+                        "spawn_effect_id": child.spawn_effect_id,
+                        "status": "cancelled",
+                        "summary": "Runtime recovery cancelled an interrupted child task.",
+                    },
+                    "decision": "runtime_recovery_cancelled",
+                    "reentry_message": null,
+                }))
+                .map_err(|error| {
+                    CliError::InvalidArguments(format!(
+                        "durable child cancellation artifact failed: {}",
+                        redact_string(&error)
+                    ))
+                })?;
+            recorder
+                .record_result(
+                    &child.session_id,
+                    &ChildResultRecorded {
+                        child_task_id: child.child_task_id.clone(),
+                        parent_turn_id: child.parent_turn_id.clone(),
+                        spawn_effect_id: child.spawn_effect_id.clone(),
+                        correlation_id: child.correlation_id.clone(),
+                        idempotency_key: child.idempotency_key.clone(),
+                        decision: ChildResultDecisionKind::Accepted,
+                        terminal_state: Some(ReplayChildTaskState::Cancelled),
+                        result_ref,
+                        finished_at_ms: now_millis(),
+                    },
+                )
+                .map_err(|error| {
+                    CliError::InvalidArguments(format!(
+                        "durable child cancellation outcome failed: {}",
+                        redact_string(&error.to_string())
+                    ))
+                })?;
+            recorder
+                .cancel_child_run_work(&child.child_task_id, "runtime_recovery_cancelled")
+                .map_err(|error| {
+                    CliError::InvalidArguments(format!(
+                        "durable child run cancellation failed: {}",
+                        redact_string(&error)
+                    ))
+                })?;
+        }
+        details.push(format!(
+            "cancelled {} recovered durable child task{}",
+            active_children.len(),
+            if active_children.len() == 1 { "" } else { "s" }
+        ));
+        durable_recovery = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
+        if !durable_recovery.writable {
+            return Err(durable_recovery_admission_error(&durable_recovery));
+        }
+        durable_work = evaluate_runtime_durable_work(&bundle.context.data_dir, &durable_recovery);
+    }
     if let Some(marker) = update_marker {
         fs::remove_file(&marker_path)?;
         sync_parent_dir(&marker_path)?;
@@ -3565,11 +4576,23 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
             marker.phase, marker.target_version
         ));
     }
-    if ownership.state == RuntimeOwnershipState::Stale
-        && remove_stale_runtime_ownership_marker(&bundle.context.data_dir, now_millis())?
-    {
-        details.push("cleared stale runtime ownership marker".to_owned());
+    if ownership.state == RuntimeOwnershipState::Stale {
+        append_runtime_owner_lifecycle(
+            &bundle.context.data_dir,
+            "recover_observed_stale_owner",
+            &ownership,
+        )?;
+        if remove_stale_runtime_ownership_marker_locked(
+            &bundle.context.data_dir,
+            &ownership_path,
+            now_millis(),
+        )? {
+            details.push("cleared stale runtime ownership marker".to_owned());
+        }
     }
+    let durable_diagnostics = inspect_durable_diagnostics(&bundle.context.data_dir);
+    let supervision =
+        runtime_supervisor_projection(&read_runtime_supervision_state(&bundle.context.data_dir)?);
     if details.is_empty() {
         return Ok(RuntimeRecoverOutcome {
             config_path,
@@ -3578,6 +4601,13 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
             marker_path,
             recovered: false,
             detail: "no runtime update or stale ownership marker found".to_owned(),
+            durable_children: durable_child_inspect(
+                durable_recovery.state.as_ref().map(|state| &state.children),
+            ),
+            durable_recovery,
+            durable_work,
+            durable_diagnostics,
+            supervision,
         });
     }
     Ok(RuntimeRecoverOutcome {
@@ -3587,28 +4617,422 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
         marker_path,
         recovered: true,
         detail: details.join("; "),
+        durable_children: durable_child_inspect(
+            durable_recovery.state.as_ref().map(|state| &state.children),
+        ),
+        durable_recovery,
+        durable_work,
+        durable_diagnostics,
+        supervision,
     })
+}
+
+fn append_runtime_owner_lifecycle(
+    data_dir: &Path,
+    lifecycle: &str,
+    ownership: &RuntimeOwnershipStatus,
+) -> Result<DurableEventRecord, CliError> {
+    let mut events =
+        DurableEventStore::open(runtime_durable_event_root(data_dir)).map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime owner lifecycle could not open durable events: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    let payload = json!({
+        "lifecycle": lifecycle,
+        "state": ownership.state.as_str(),
+        "reason": ownership.reason,
+        "owner": ownership.marker.as_ref().map(|marker| json!({
+            "owner_id": marker.owner_id,
+            "pid": marker.pid,
+            "acquired_at_ms": marker.started_at_ms,
+            "renewed_at_ms": marker.updated_at_ms,
+            "expires_at_ms": marker.expires_at_ms,
+            "mode": marker.mode,
+            "process_evidence": marker.process_evidence,
+        })).unwrap_or(Value::Null),
+    });
+    events
+        .append(DurableEventInput::new(
+            "runtime",
+            RUNTIME_OWNER_LIFECYCLE,
+            DurableEventPayload::inline("runtime_owner_lifecycle", payload),
+        ))
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime owner lifecycle could not append: {}",
+                redact_string(&error.to_string())
+            ))
+        })
 }
 
 fn runtime_update_marker_path(data_dir: &Path) -> PathBuf {
     data_dir.join("runtime").join("update-marker.json")
 }
 
-fn guard_runtime_marker_for_mutation(data_dir: &Path) -> Result<(), CliError> {
-    guard_runtime_admission(data_dir)?;
+fn runtime_durable_event_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("durable-events")
+}
+
+fn runtime_durable_checkpoint_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("durable-checkpoints")
+}
+
+fn runtime_durable_work_payload_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("work-payloads")
+}
+
+fn runtime_durable_trace_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("durable-diagnostics")
+}
+
+fn runtime_supervision_state_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("supervision-state.json")
+}
+
+fn read_runtime_supervision_state(data_dir: &Path) -> Result<RuntimeSupervisionState, CliError> {
+    let path = runtime_supervision_state_path(data_dir);
+    let Some(value) = read_runtime_marker_json(&path, "runtime supervision state")? else {
+        return Ok(RuntimeSupervisionState {
+            schema_version: 1,
+            ..RuntimeSupervisionState::default()
+        });
+    };
+    let schema_version = required_marker_u64(&value, "schema_version")?;
+    if schema_version != 1 {
+        return Err(CliError::InvalidArguments(format!(
+            "runtime supervision state has unsupported schema_version {schema_version}"
+        )));
+    }
+    validate_runtime_supervision_value_bounds(&value)?;
+    let state: RuntimeSupervisionState = serde_json::from_value(value).map_err(|error| {
+        CliError::InvalidArguments(format!("invalid runtime supervision state: {error}"))
+    })?;
+    validate_runtime_supervision_state_bounds(&state)?;
+    Ok(state)
+}
+
+fn validate_runtime_supervision_value_bounds(value: &Value) -> Result<(), CliError> {
+    let components = value
+        .get("components")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CliError::InvalidArguments("runtime supervision state missing `components`".to_owned())
+        })?;
+    if components.len() > 128 {
+        return Err(CliError::InvalidArguments(
+            "runtime supervision state has too many components".to_owned(),
+        ));
+    }
     Ok(())
 }
 
-fn guard_runtime_admission(data_dir: &Path) -> Result<(), CliError> {
-    guard_runtime_update_marker_for_admission(data_dir)?;
-    guard_runtime_non_update_admission(data_dir)
+fn validate_runtime_supervision_state_bounds(
+    state: &RuntimeSupervisionState,
+) -> Result<(), CliError> {
+    fn bounded(label: &str, value: &str, max: usize) -> Result<(), CliError> {
+        if value.len() > max {
+            return Err(CliError::InvalidArguments(format!(
+                "runtime supervision state `{label}` exceeds {max} byte limit"
+            )));
+        }
+        Ok(())
+    }
+    if let Some(owner) = &state.owner {
+        bounded("owner.owner_id", &owner.owner_id, 256)?;
+        bounded("owner.mode", &owner.mode, 64)?;
+        bounded("owner.state", &owner.state, 64)?;
+        bounded("owner.reason", &owner.reason, 1024)?;
+    }
+    for component in &state.components {
+        bounded("component.name", &component.name, 128)?;
+        bounded("component.state", &component.state, 256)?;
+        bounded("component.detail", &component.detail, 1024)?;
+    }
+    Ok(())
 }
 
-fn guard_runtime_ownership_acquire_admission(data_dir: &Path) -> Result<(), CliError> {
+fn write_runtime_supervision_state(
+    data_dir: &Path,
+    mut state: RuntimeSupervisionState,
+) -> Result<(), CliError> {
+    state.schema_version = 1;
+    let path = runtime_supervision_state_path(data_dir);
+    let record = append_runtime_supervision_event(data_dir, &state)?;
+    state.last_event_sequence = Some(record.sequence);
+    state.shutdown.event = RuntimeShutdownStepReport::new("appended", record.sequence);
+    write_runtime_marker_atomically(
+        &path,
+        &serde_json::to_value(&state).map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime supervision state could not serialize: {error}"
+            ))
+        })?,
+    )?;
+    Ok(())
+}
+
+fn append_runtime_supervision_event(
+    data_dir: &Path,
+    state: &RuntimeSupervisionState,
+) -> Result<DurableEventRecord, CliError> {
+    let mut events =
+        DurableEventStore::open(runtime_durable_event_root(data_dir)).map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime supervision event could not open durable events: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    let payload = serde_json::to_value(state).map_err(|error| {
+        CliError::InvalidArguments(format!(
+            "runtime supervision event could not serialize: {error}"
+        ))
+    })?;
+    events
+        .append(DurableEventInput::new(
+            "runtime",
+            RUNTIME_SUPERVISION_RECORDED,
+            DurableEventPayload::inline("runtime_supervision", payload),
+        ))
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime supervision event could not append: {}",
+                redact_string(&error.to_string())
+            ))
+        })
+}
+
+fn runtime_supervision_from_owner(
+    ownership: &RuntimeOwnershipStatus,
+    components: Vec<RuntimeSupervisionComponent>,
+    shutdown: RuntimeSupervisionShutdown,
+) -> RuntimeSupervisionState {
+    RuntimeSupervisionState {
+        schema_version: 1,
+        owner: ownership
+            .marker
+            .as_ref()
+            .map(|marker| RuntimeSupervisionOwner {
+                owner_id: marker.owner_id.clone(),
+                mode: marker.mode.clone(),
+                acquired_at_ms: marker.started_at_ms,
+                renewed_at_ms: marker.updated_at_ms,
+                expires_at_ms: marker.expires_at_ms,
+                state: ownership.state.as_str().to_owned(),
+                reason: ownership.reason.clone(),
+            }),
+        components,
+        shutdown,
+        last_event_sequence: None,
+    }
+}
+
+fn runtime_component(
+    name: &str,
+    state: &str,
+    detail: impl Into<String>,
+) -> RuntimeSupervisionComponent {
+    RuntimeSupervisionComponent {
+        name: name.to_owned(),
+        state: state.to_owned(),
+        detail: detail.into(),
+    }
+}
+
+fn append_runtime_control_request(
+    data_dir: &Path,
+    request: &str,
+    requested_at_ms: u64,
+    request_id: &str,
+    target_owner_id: &str,
+) -> Result<DurableEventRecord, CliError> {
+    let kind = match request {
+        "stop" => RUNTIME_STOP_REQUESTED,
+        "restart" => RUNTIME_RESTART_REQUESTED,
+        other => {
+            return Err(CliError::InvalidArguments(format!(
+                "unsupported runtime control request {other}"
+            )))
+        }
+    };
+    let mut events =
+        DurableEventStore::open(runtime_durable_event_root(data_dir)).map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime control request could not open durable events: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    let mut payload =
+        serde_json::to_value(runtime_control_payload(requested_at_ms)).map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime control request could not serialize durable evidence: {error}"
+            ))
+        })?;
+    payload["request_id"] = json!(request_id);
+    payload["target_owner_id"] = json!(target_owner_id);
+    events
+        .append(DurableEventInput::new(
+            "runtime",
+            kind,
+            DurableEventPayload::inline("durable_work", payload),
+        ))
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime control request could not append durable evidence: {}",
+                redact_string(&error.to_string())
+            ))
+        })
+}
+
+fn runtime_request_id(request: &str, owner_id: &str) -> String {
+    format!("{request}-{owner_id}-{}", now_millis())
+}
+
+fn evaluate_runtime_durable_recovery(data_dir: &Path) -> DurableReplayAdmission {
+    evaluate_durable_recovery(
+        runtime_durable_event_root(data_dir),
+        runtime_durable_checkpoint_root(data_dir),
+    )
+}
+
+fn evaluate_runtime_durable_work(
+    data_dir: &Path,
+    replay: &DurableReplayAdmission,
+) -> DurableWorkAdmission {
+    let Some(state) = replay.state.as_ref() else {
+        return DurableWorkAdmission::blocked_by_replay(
+            "durable event replay is unavailable for work recovery",
+        );
+    };
+    evaluate_durable_work_recovery(
+        &state.work,
+        runtime_durable_work_payload_root(data_dir),
+        now_millis(),
+    )
+}
+
+fn guard_runtime_durable_recovery_admission(data_dir: &Path) -> Result<(), CliError> {
+    let admission = evaluate_runtime_durable_recovery(data_dir);
+    if !admission.writable {
+        return Err(durable_recovery_admission_error(&admission));
+    }
+    let work = evaluate_runtime_durable_work(data_dir, &admission);
+    if !work.writable {
+        return Err(durable_work_admission_error(&work));
+    }
+    let active_children = admission
+        .state
+        .as_ref()
+        .map(|state| {
+            state
+                .children
+                .items
+                .values()
+                .filter(|item| item.state == ReplayChildTaskState::Running)
+                .count()
+        })
+        .unwrap_or(0);
+    if active_children > 0 {
+        return Err(CliError::InvalidArguments(format!(
+            "durable child recovery blocks writable runtime admission: {active_children} active child task{} require runtime recover",
+            if active_children == 1 { "" } else { "s" }
+        )));
+    }
+    let child_recorder = DurableChildRecorder::open_with_payload_root(
+        runtime_durable_event_root(data_dir),
+        runtime_durable_work_payload_root(data_dir),
+    )
+    .map_err(|error| {
+        CliError::InvalidArguments(format!(
+            "durable child recovery admission failed: {}",
+            redact_string(&error.to_string())
+        ))
+    })?;
+    let (missing_child_runs, missing_parent_reentries) = child_recorder
+        .recovery_work_gap_counts()
+        .map_err(|error| CliError::InvalidArguments(redact_string(&error)))?;
+    if missing_child_runs > 0 || missing_parent_reentries > 0 {
+        return Err(CliError::InvalidArguments(format!(
+            "durable child recovery requires runtime recover: missing_child_runs={missing_child_runs} missing_parent_reentries={missing_parent_reentries}"
+        )));
+    }
+    Ok(())
+}
+
+fn record_runtime_shutdown_checkpoint(
+    data_dir: &Path,
+    report: &mut RuntimeShutdownReport,
+) -> Result<(), CliError> {
+    let replay = evaluate_runtime_durable_recovery(data_dir);
+    let Some(state) = replay.state.as_ref() else {
+        report.checkpoint = RuntimeShutdownStepReport::new("skipped_no_replay", 0);
+        return Ok(());
+    };
+    let checkpoint = DurableCheckpointStore::open(runtime_durable_checkpoint_root(data_dir))
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime shutdown could not open durable checkpoints: {}",
+                redact_string(&error.to_string())
+            ))
+        })?
+        .write(state)
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime shutdown could not write durable checkpoint: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    report.checkpoint = RuntimeShutdownStepReport::new("written", checkpoint.included_sequence);
+    Ok(())
+}
+
+fn durable_work_admission_error(admission: &DurableWorkAdmission) -> CliError {
+    let detail = admission
+        .issues
+        .first()
+        .map(|issue| redact_string(&issue.detail))
+        .unwrap_or_else(|| "durable work requires recovery".to_owned());
+    CliError::InvalidArguments(format!(
+        "durable work status {} blocks writable runtime admission: {}",
+        admission.status.as_str(),
+        detail
+    ))
+}
+
+fn durable_recovery_admission_error(admission: &DurableReplayAdmission) -> CliError {
+    let detail = admission
+        .issues
+        .first()
+        .map(|issue| redact_string(&issue.detail))
+        .unwrap_or_else(|| "durable replay state requires recovery".to_owned());
+    let hints = admission
+        .recovery_hints
+        .iter()
+        .map(|hint| hint.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    CliError::InvalidArguments(format!(
+        "durable recovery status {} blocks writable runtime admission: {}; safe_actions={}",
+        admission.status.as_str(),
+        detail,
+        if hints.is_empty() { "none" } else { &hints }
+    ))
+}
+
+fn guard_runtime_admission_for_roots(data_dir: &Path, workspace: &Path) -> Result<(), CliError> {
+    guard_runtime_update_marker_for_admission(data_dir)?;
+    guard_runtime_non_update_admission(data_dir, workspace)
+}
+
+fn guard_runtime_ownership_acquire_admission(bundle: &ConfigBundle) -> Result<(), CliError> {
+    let data_dir = &bundle.context.data_dir;
     guard_runtime_update_marker_for_admission(data_dir)?;
     guard_runtime_compatibility_for_admission(evaluate_runtime_compatibility(
         RUNTIME_DATA_SCHEMA_VERSION,
-    ))
+    ))?;
+    guard_runtime_migration_admission(data_dir, &bundle.context.workspace)?;
+    guard_runtime_durable_recovery_admission(data_dir)
 }
 
 fn guard_runtime_update_marker_for_admission(data_dir: &Path) -> Result<(), CliError> {
@@ -3624,13 +5048,30 @@ fn guard_runtime_update_marker_for_admission(data_dir: &Path) -> Result<(), CliE
     Ok(())
 }
 
-fn guard_runtime_non_update_admission(data_dir: &Path) -> Result<(), CliError> {
+fn guard_runtime_non_update_admission(data_dir: &Path, workspace: &Path) -> Result<(), CliError> {
     guard_runtime_compatibility_for_admission(evaluate_runtime_compatibility(
         RUNTIME_DATA_SCHEMA_VERSION,
     ))?;
+    guard_runtime_migration_admission(data_dir, workspace)?;
+    guard_runtime_durable_recovery_admission(data_dir)?;
     let ownership = inspect_runtime_ownership(data_dir, now_millis())?;
-    if ownership.state == RuntimeOwnershipState::Active {
+    if ownership.state != RuntimeOwnershipState::None {
         return Err(active_runtime_ownership_error(&ownership));
+    }
+    Ok(())
+}
+
+fn guard_runtime_migration_admission(data_dir: &Path, workspace: &Path) -> Result<(), CliError> {
+    if let Some(reason) = durable_migration_blocks_writable_runtime_for_roots(
+        data_dir,
+        workspace,
+        DurableConfigCompatibility::Readable,
+    )
+    .map_err(|error| CliError::InvalidArguments(redact_string(&error.to_string())))?
+    {
+        return Err(CliError::InvalidArguments(format!(
+            "runtime mutation blocked by stored-data migration state: {reason}"
+        )));
     }
     Ok(())
 }
@@ -3683,8 +5124,57 @@ fn runtime_ownership_mutation_lock_path(marker_path: &Path) -> PathBuf {
     marker_path.with_extension("json.lock")
 }
 
+const RUNTIME_MARKER_MAX_BYTES: u64 = 1024 * 1024;
+
+fn open_runtime_marker_file_nofollow(path: &Path) -> Result<Option<File>, CliError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    match options.open(path) {
+        Ok(file) => {
+            let metadata = file.metadata()?;
+            if !metadata.file_type().is_file() {
+                return Err(CliError::InvalidArguments(format!(
+                    "runtime marker is not a regular file: {}",
+                    display_path(path)
+                )));
+            }
+            if metadata.len() > RUNTIME_MARKER_MAX_BYTES {
+                return Err(CliError::InvalidArguments(format!(
+                    "runtime marker exceeds {} byte limit: {}",
+                    RUNTIME_MARKER_MAX_BYTES,
+                    display_path(path)
+                )));
+            }
+            Ok(Some(file))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CliError::Io(error)),
+    }
+}
+
+fn read_runtime_marker_json(path: &Path, label: &str) -> Result<Option<Value>, CliError> {
+    let Some(file) = open_runtime_marker_file_nofollow(path)? else {
+        return Ok(None);
+    };
+    let mut reader = file.take(RUNTIME_MARKER_MAX_BYTES + 1);
+    let mut raw = String::new();
+    reader.read_to_string(&mut raw)?;
+    if raw.len() as u64 > RUNTIME_MARKER_MAX_BYTES {
+        return Err(CliError::InvalidArguments(format!(
+            "runtime marker exceeds {} byte limit: {}",
+            RUNTIME_MARKER_MAX_BYTES,
+            display_path(path)
+        )));
+    }
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|error| CliError::InvalidArguments(format!("invalid {label}: {error}")))
+}
+
 struct RuntimeOwnershipMutationLock {
-    path: PathBuf,
+    _file: File,
 }
 
 impl RuntimeOwnershipMutationLock {
@@ -3696,24 +5186,28 @@ impl RuntimeOwnershipMutationLock {
             )
         })?;
         fs::create_dir_all(parent)?;
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
         {
-            Ok(_file) => Ok(Self { path }),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(
-                CliError::InvalidArguments(RUNTIME_OWNERSHIP_MUTATION_LOCK_ERROR.to_owned()),
-            ),
-            Err(error) => Err(CliError::Io(error)),
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-    }
-}
-
-impl Drop for RuntimeOwnershipMutationLock {
-    fn drop(&mut self) {
-        let _remove_result = fs::remove_file(&self.path);
-        let _sync_result = sync_parent_dir(&self.path);
+        let file = options.open(&path)?;
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() {
+            return Err(CliError::InvalidArguments(format!(
+                "runtime ownership mutation lock is not a regular file: {}",
+                display_path(&path)
+            )));
+        }
+        file.try_lock_exclusive().map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                CliError::InvalidArguments(RUNTIME_OWNERSHIP_MUTATION_LOCK_ERROR.to_owned())
+            } else {
+                CliError::Io(error)
+            }
+        })?;
+        Ok(Self { _file: file })
     }
 }
 
@@ -3729,25 +5223,43 @@ fn runtime_ownership_marker_value(
     config_path: &Path,
     workspace: &Path,
 ) -> Value {
+    let owner_id = runtime_owner_id(pid, started_at_ms);
     json!({
+        "schema_version": 1,
+        "owner_id": owner_id,
         "pid": pid,
-        "startedAtMs": started_at_ms,
-        "updatedAtMs": updated_at_ms,
-        "binaryVersion": VERSION,
-        "dataSchemaVersion": RUNTIME_DATA_SCHEMA_VERSION,
+        "acquired_at_ms": started_at_ms,
+        "renewed_at_ms": updated_at_ms,
+        "expires_at_ms": updated_at_ms.saturating_add(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS),
+        "lifecycle": "active",
+        "binary_version": VERSION,
+        "data_schema_version": RUNTIME_DATA_SCHEMA_VERSION,
         "mode": mode,
-        "configPath": config_path.to_string_lossy(),
+        "config_path": config_path.to_string_lossy(),
         "workspace": workspace.to_string_lossy(),
+        "process_evidence": {
+            "pid": pid,
+            "pid_alive": pid_is_alive(pid),
+            "process_started_after_marker": false,
+        },
     })
 }
 
+fn runtime_owner_id(pid: u32, acquired_at_ms: u64) -> String {
+    format!("owner-{pid}-{acquired_at_ms}")
+}
+
 fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipMarker>, CliError> {
-    if !path.exists() {
+    let Some(value) = read_runtime_marker_json(path, "runtime ownership marker")? else {
         return Ok(None);
+    };
+    let schema_version = required_marker_u64(&value, "schema_version")? as u32;
+    if schema_version != 1 {
+        return Err(CliError::InvalidArguments(format!(
+            "runtime ownership marker has unsupported schema_version {schema_version}"
+        )));
     }
-    let value: Value = serde_json::from_str(&fs::read_to_string(path)?).map_err(|error| {
-        CliError::InvalidArguments(format!("invalid runtime ownership marker: {error}"))
-    })?;
+    let owner_id = required_marker_string(&value, "owner_id")?;
     let pid = value
         .get("pid")
         .and_then(Value::as_u64)
@@ -3755,20 +5267,95 @@ fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipM
         .ok_or_else(|| {
             CliError::InvalidArguments("runtime ownership marker missing `pid`".to_owned())
         })? as u32;
-    let started_at_ms = required_marker_u64(&value, "startedAtMs")?;
-    let updated_at_ms = required_marker_u64(&value, "updatedAtMs")?;
+    let started_at_ms = required_marker_u64(&value, "acquired_at_ms")?;
+    let updated_at_ms = required_marker_u64(&value, "renewed_at_ms")?;
+    let expires_at_ms = required_marker_u64(&value, "expires_at_ms")?;
+    let lifecycle = required_marker_string(&value, "lifecycle")?;
+    let process_evidence = value
+        .get("process_evidence")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            CliError::InvalidArguments(
+                "runtime ownership marker missing `process_evidence`".to_owned(),
+            )
+        })?;
+    let process_evidence_pid = process_evidence
+        .get("pid")
+        .and_then(Value::as_u64)
+        .filter(|pid| *pid <= u32::MAX as u64)
+        .ok_or_else(|| {
+            CliError::InvalidArguments(
+                "runtime ownership marker missing `process_evidence.pid`".to_owned(),
+            )
+        })? as u32;
+    let process_evidence_pid_alive = process_evidence
+        .get("pid_alive")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            CliError::InvalidArguments(
+                "runtime ownership marker missing `process_evidence.pid_alive`".to_owned(),
+            )
+        })?;
+    let process_evidence_started_after_marker = process_evidence
+        .get("process_started_after_marker")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            CliError::InvalidArguments(
+                "runtime ownership marker missing `process_evidence.process_started_after_marker`"
+                    .to_owned(),
+            )
+        })?;
+    if expires_at_ms <= updated_at_ms || owner_id != runtime_owner_id(pid, started_at_ms) {
+        return Err(CliError::InvalidArguments(
+            "runtime ownership marker has invalid owner lease identity".to_owned(),
+        ));
+    }
+    if process_evidence_pid != pid {
+        return Err(CliError::InvalidArguments(
+            "runtime ownership marker has mismatched process evidence".to_owned(),
+        ));
+    }
+    let process_started_after_marker = owner_process_started_after_marker(
+        &RuntimeOwnershipMarker {
+            schema_version,
+            owner_id: owner_id.clone(),
+            pid,
+            started_at_ms,
+            updated_at_ms,
+            expires_at_ms,
+            lifecycle: lifecycle.clone(),
+            binary_version: marker_string(&value, "binary_version").unwrap_or_default(),
+            data_schema_version: required_marker_u64(&value, "data_schema_version")? as u32,
+            mode: marker_string(&value, "mode").unwrap_or_default(),
+            config_path: marker_string(&value, "config_path").unwrap_or_default(),
+            workspace: marker_string(&value, "workspace").unwrap_or_default(),
+            process_evidence: RuntimeOwnerProcessEvidence {
+                pid,
+                pid_alive: process_evidence_pid_alive,
+                process_started_after_marker: process_evidence_started_after_marker,
+            },
+        },
+        Path::new("/proc"),
+    );
+    let pid_alive = pid_is_alive(pid);
     Ok(Some(RuntimeOwnershipMarker {
+        schema_version,
+        owner_id,
         pid,
         started_at_ms,
         updated_at_ms,
-        binary_version: required_marker_string(&value, "binaryVersion")?,
-        data_schema_version: value
-            .get("dataSchemaVersion")
-            .and_then(Value::as_u64)
-            .unwrap_or_default() as u32,
+        expires_at_ms,
+        lifecycle,
+        binary_version: required_marker_string(&value, "binary_version")?,
+        data_schema_version: required_marker_u64(&value, "data_schema_version")? as u32,
         mode: required_marker_string(&value, "mode")?,
-        config_path: required_marker_string(&value, "configPath")?,
+        config_path: required_marker_string(&value, "config_path")?,
         workspace: required_marker_string(&value, "workspace")?,
+        process_evidence: RuntimeOwnerProcessEvidence {
+            pid,
+            pid_alive,
+            process_started_after_marker,
+        },
     }))
 }
 
@@ -3791,21 +5378,21 @@ fn classify_runtime_ownership_marker(
     marker: RuntimeOwnershipMarker,
     now_ms: u64,
 ) -> RuntimeOwnershipStatus {
-    if !pid_is_alive(marker.pid) {
+    if !marker.process_evidence.pid_alive {
         return RuntimeOwnershipStatus {
             state: RuntimeOwnershipState::Stale,
             marker: Some(marker),
             reason: "owner pid is not alive".to_owned(),
         };
     }
-    if owner_process_started_after_marker(&marker, Path::new("/proc")) {
+    if marker.process_evidence.process_started_after_marker {
         return RuntimeOwnershipStatus {
             state: RuntimeOwnershipState::Stale,
             marker: Some(marker),
             reason: "owner pid was reused after marker creation".to_owned(),
         };
     }
-    if now_ms.saturating_sub(marker.updated_at_ms) > RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS {
+    if now_ms > marker.expires_at_ms {
         return RuntimeOwnershipStatus {
             state: RuntimeOwnershipState::Stale,
             marker: Some(marker),
@@ -3824,17 +5411,20 @@ fn runtime_ownership_marker_matches(
     pid: u32,
     started_at_ms: u64,
 ) -> bool {
-    marker.pid == pid && marker.started_at_ms == started_at_ms
+    marker.pid == pid
+        && marker.started_at_ms == started_at_ms
+        && marker.owner_id == runtime_owner_id(pid, started_at_ms)
 }
 
 fn active_runtime_ownership_error(ownership: &RuntimeOwnershipStatus) -> CliError {
-    let pid = ownership
+    let owner = ownership
         .marker
         .as_ref()
-        .map(|marker| marker.pid.to_string())
+        .map(|marker| format!("{} pid={}", marker.owner_id, marker.pid))
         .unwrap_or_else(|| "unknown".to_owned());
+    let state = ownership.state.as_str();
     CliError::InvalidArguments(format!(
-        "runtime mutation blocked by active runtime ownership pid={pid}; request stop or inspect first"
+        "runtime mutation blocked by {state} runtime ownership {owner}; request stop or inspect first"
     ))
 }
 
@@ -3872,20 +5462,19 @@ fn acquire_runtime_ownership_marker(
     data_dir: &Path,
     path: &Path,
     marker: &Value,
+    request_path: &Path,
 ) -> Result<(), CliError> {
     let _mutation_lock = RuntimeOwnershipMutationLock::acquire(path)?;
     let ownership = inspect_runtime_ownership(data_dir, now_millis())?;
     match ownership.state {
         RuntimeOwnershipState::None => {
-            write_runtime_marker_if_absent_or_concurrent(path, marker)?;
-        }
-        RuntimeOwnershipState::Stale => {
-            if path.exists() {
-                fs::remove_file(path)?;
-                sync_parent_dir(path)?;
+            if request_path.exists() {
+                fs::remove_file(request_path)?;
+                sync_parent_dir(request_path)?;
             }
             write_runtime_marker_if_absent_or_concurrent(path, marker)?;
         }
+        RuntimeOwnershipState::Stale => return Err(active_runtime_ownership_error(&ownership)),
         RuntimeOwnershipState::Active => return Err(active_runtime_ownership_error(&ownership)),
     }
     Ok(())
@@ -3925,17 +5514,26 @@ fn remove_runtime_ownership_marker_if_current(
     Ok(true)
 }
 
+#[cfg(test)]
 fn remove_stale_runtime_ownership_marker(data_dir: &Path, now_ms: u64) -> Result<bool, CliError> {
     let path = runtime_ownership_marker_path(data_dir);
     let _mutation_lock = RuntimeOwnershipMutationLock::acquire(&path)?;
+    remove_stale_runtime_ownership_marker_locked(data_dir, &path, now_ms)
+}
+
+fn remove_stale_runtime_ownership_marker_locked(
+    data_dir: &Path,
+    path: &Path,
+    now_ms: u64,
+) -> Result<bool, CliError> {
     let ownership = inspect_runtime_ownership(data_dir, now_ms)?;
     match ownership.state {
         RuntimeOwnershipState::None => Ok(false),
         RuntimeOwnershipState::Active => Err(active_runtime_owner_recover_error()),
         RuntimeOwnershipState::Stale => {
             if path.exists() {
-                fs::remove_file(&path)?;
-                sync_parent_dir(&path)?;
+                fs::remove_file(path)?;
+                sync_parent_dir(path)?;
                 Ok(true)
             } else {
                 Ok(false)
@@ -4026,19 +5624,25 @@ fn procfs_boot_time_seconds(proc_root: &Path) -> Option<u64> {
 
 struct RuntimeOwnershipLease {
     path: PathBuf,
+    data_dir: PathBuf,
     stop: Arc<AtomicBool>,
+    fence: RuntimeOwnerFence,
     handle: Option<thread::JoinHandle<()>>,
     pid: u32,
     started_at_ms: u64,
+    owner_id: String,
+    remove_on_drop: bool,
+    finalized: bool,
 }
 
 impl RuntimeOwnershipLease {
     fn acquire(bundle: &ConfigBundle, mode: &str) -> Result<Self, CliError> {
-        guard_runtime_ownership_acquire_admission(&bundle.context.data_dir)?;
+        guard_runtime_ownership_acquire_admission(bundle)?;
         let path = runtime_ownership_marker_path(&bundle.context.data_dir);
         let request_path = runtime_stop_request_marker_path(&bundle.context.data_dir);
         let pid = std::process::id();
         let started_at_ms = now_millis();
+        let owner_id = runtime_owner_id(pid, started_at_ms);
         let marker = runtime_ownership_marker_value(
             pid,
             started_at_ms,
@@ -4047,20 +5651,58 @@ impl RuntimeOwnershipLease {
             &bundle.context.config_path,
             &bundle.context.workspace,
         );
-        acquire_runtime_ownership_marker(&bundle.context.data_dir, &path, &marker)?;
+        acquire_runtime_ownership_marker(&bundle.context.data_dir, &path, &marker, &request_path)?;
         let stop = Arc::new(AtomicBool::new(false));
+        let fence = RuntimeOwnerFence::new();
         let mut lease = Self {
             path,
+            data_dir: bundle.context.data_dir.clone(),
             stop,
+            fence,
             handle: None,
             pid,
             started_at_ms,
+            owner_id,
+            remove_on_drop: true,
+            finalized: false,
         };
-        if request_path.exists() {
-            fs::remove_file(&request_path)?;
-            sync_parent_dir(&request_path)?;
+        let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
+        let components = runtime_components_for_mode(mode, &bundle.config.channels.plugins);
+        if let Err(error) = write_runtime_supervision_state(
+            &bundle.context.data_dir,
+            runtime_supervision_from_owner(
+                &ownership,
+                components.clone(),
+                RuntimeSupervisionShutdown::default(),
+            ),
+        ) {
+            let mut failed_report =
+                RuntimeShutdownReport::failed(RuntimeShutdownReason::StartupFailed);
+            failed_report.component_results = components
+                .iter()
+                .map(|component| {
+                    RuntimeShutdownStepReport::named(&component.name, "startup_failed", 1)
+                })
+                .collect();
+            let _failed_evidence = write_runtime_supervision_state(
+                &bundle.context.data_dir,
+                runtime_supervision_from_owner(
+                    &ownership,
+                    components,
+                    failed_report.supervision_shutdown(),
+                ),
+            );
+            let _removed = remove_runtime_ownership_marker_if_current(
+                &lease.path,
+                lease.pid,
+                lease.started_at_ms,
+            );
+            lease.remove_on_drop = false;
+            lease.finalized = true;
+            return Err(error);
         }
         let thread_stop = lease.stop.clone();
+        let thread_fence = lease.fence.clone();
         let thread_path = lease.path.clone();
         let config_path = bundle.context.config_path.clone();
         let workspace = bundle.context.workspace.clone();
@@ -4086,9 +5728,15 @@ impl RuntimeOwnershipLease {
                     &marker,
                 ) {
                     Ok(true) => {}
-                    Ok(false) => break,
+                    Ok(false) => {
+                        thread_fence.mark_lost();
+                        break;
+                    }
                     Err(error) if is_runtime_ownership_mutation_lock_error(&error) => continue,
-                    Err(_error) => break,
+                    Err(_error) => {
+                        thread_fence.mark_lost();
+                        break;
+                    }
                 }
             }
         });
@@ -4096,59 +5744,369 @@ impl RuntimeOwnershipLease {
         Ok(lease)
     }
 
-    fn cleanup(mut self) -> Result<(), CliError> {
+    fn complete_shutdown(
+        mut self,
+        mut report: RuntimeShutdownReport,
+        components: Vec<RuntimeSupervisionComponent>,
+    ) -> Result<(), CliError> {
+        report.phase = RuntimeShutdownPhase::Completed;
+        self.record_shutdown(report, components, true)
+    }
+
+    fn fail_shutdown(
+        mut self,
+        mut report: RuntimeShutdownReport,
+        components: Vec<RuntimeSupervisionComponent>,
+    ) -> Result<(), CliError> {
+        report.phase = RuntimeShutdownPhase::Failed;
+        self.remove_on_drop = false;
+        if report.reason == RuntimeShutdownReason::OwnerLost || self.fence.is_lost() {
+            return self.record_owner_lost_shutdown(report, components);
+        }
+        self.record_shutdown(report, components, false)
+    }
+
+    #[cfg(test)]
+    fn cleanup(self) -> Result<(), CliError> {
+        let components = read_runtime_supervision_state(&self.data_dir)?.components;
+        self.complete_shutdown(
+            RuntimeShutdownReport::completed(RuntimeShutdownReason::Stop),
+            components,
+        )
+    }
+
+    #[cfg(test)]
+    fn preserve_for_recovery(mut self) -> Result<(), CliError> {
+        self.remove_on_drop = false;
         self.cleanup_inner()
     }
 
-    fn cleanup_inner(&mut self) -> Result<(), CliError> {
+    fn fence(&self) -> RuntimeOwnerFence {
+        self.fence.clone()
+    }
+
+    fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    fn record_shutdown(
+        &mut self,
+        mut report: RuntimeShutdownReport,
+        components: Vec<RuntimeSupervisionComponent>,
+        remove_marker: bool,
+    ) -> Result<(), CliError> {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             handle
                 .join()
                 .map_err(|_| CliError::Api(ApiError::internal("runtime heartbeat panicked")))?;
         }
-        remove_runtime_ownership_marker_if_current(&self.path, self.pid, self.started_at_ms)?;
+        record_runtime_shutdown_checkpoint(&self.data_dir, &mut report)?;
+        let ownership = inspect_runtime_ownership(&self.data_dir, now_millis())?;
+        write_runtime_supervision_state(
+            &self.data_dir,
+            runtime_supervision_from_owner(&ownership, components, report.supervision_shutdown()),
+        )?;
+        if remove_marker {
+            remove_runtime_ownership_marker_if_current(&self.path, self.pid, self.started_at_ms)?;
+        }
+        self.remove_on_drop = false;
+        self.finalized = true;
+        Ok(())
+    }
+
+    fn record_owner_lost_shutdown(
+        &mut self,
+        mut report: RuntimeShutdownReport,
+        components: Vec<RuntimeSupervisionComponent>,
+    ) -> Result<(), CliError> {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .map_err(|_| CliError::Api(ApiError::internal("runtime heartbeat panicked")))?;
+        }
+        report.phase = RuntimeShutdownPhase::Failed;
+        report.checkpoint = RuntimeShutdownStepReport::named("checkpoint", "skipped_owner_lost", 0);
+        let _mutation_lock = RuntimeOwnershipMutationLock::acquire(&self.path)?;
+        let Some(marker) = read_runtime_ownership_marker(&self.path)? else {
+            self.remove_on_drop = false;
+            self.finalized = true;
+            return Ok(());
+        };
+        if !runtime_ownership_marker_matches(&marker, self.pid, self.started_at_ms) {
+            self.remove_on_drop = false;
+            self.finalized = true;
+            return Ok(());
+        }
+        let ownership = classify_runtime_ownership_marker(marker, now_millis());
+        write_runtime_supervision_state(
+            &self.data_dir,
+            runtime_supervision_from_owner(&ownership, components, report.supervision_shutdown()),
+        )?;
+        self.remove_on_drop = false;
+        self.finalized = true;
+        Ok(())
+    }
+
+    fn cleanup_inner(&mut self) -> Result<(), CliError> {
+        if self.finalized {
+            return Ok(());
+        }
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .map_err(|_| CliError::Api(ApiError::internal("runtime heartbeat panicked")))?;
+        }
+        self.remove_on_drop = false;
+        let report = if self.fence.is_lost() {
+            RuntimeShutdownReport::failed(RuntimeShutdownReason::OwnerLost)
+        } else {
+            RuntimeShutdownReport::failed(RuntimeShutdownReason::StartupFailed)
+        };
+        let ownership = inspect_runtime_ownership(&self.data_dir, now_millis()).ok();
+        if let Some(ownership) = ownership {
+            let components = read_runtime_supervision_state(&self.data_dir)
+                .map(|state| state.components)
+                .unwrap_or_default();
+            let _write = write_runtime_supervision_state(
+                &self.data_dir,
+                runtime_supervision_from_owner(
+                    &ownership,
+                    components,
+                    report.supervision_shutdown(),
+                ),
+            );
+        }
+        self.finalized = true;
         Ok(())
     }
 }
 
+fn runtime_components_for_mode(
+    mode: &str,
+    plugins: &BTreeMap<String, Value>,
+) -> Vec<RuntimeSupervisionComponent> {
+    let mut components = vec![runtime_component(
+        "api",
+        if mode == "serve" {
+            "running"
+        } else {
+            "api_only_owner_absent"
+        },
+        mode,
+    )];
+    if mode != "serve" {
+        let websocket_enabled = channel_enabled_from_plugins(plugins, WEBSOCKET_CHANNEL, true);
+        components.push(runtime_component(
+            "websocket",
+            if websocket_enabled {
+                "configured"
+            } else {
+                "disabled"
+            },
+            "runtime start/run owns websocket when enabled",
+        ));
+        for channel in [
+            TELEGRAM_CHANNEL,
+            DISCORD_CHANNEL,
+            SLACK_CHANNEL,
+            EMAIL_CHANNEL,
+            WHATSAPP_CHANNEL,
+        ] {
+            components.push(runtime_component(
+                format!("external:{channel}").as_str(),
+                if channel_enabled_from_plugins(plugins, channel, false) {
+                    "configured"
+                } else {
+                    "disabled"
+                },
+                "external processor component projection",
+            ));
+        }
+    }
+    components
+}
+
+fn runtime_components_from_shutdown_report(
+    report: &RuntimeShutdownReport,
+    mut fallback: Vec<RuntimeSupervisionComponent>,
+) -> Vec<RuntimeSupervisionComponent> {
+    if report.component_results.is_empty() {
+        return fallback;
+    }
+    for result in &report.component_results {
+        if result.name == "summary" {
+            for component in &mut fallback {
+                if matches!(
+                    component.state.as_str(),
+                    "configured" | "running" | "starting"
+                ) {
+                    component.state.clone_from(&result.status);
+                    component.detail = "supervised shutdown".to_owned();
+                }
+            }
+            continue;
+        }
+        let external_name = format!("external:{}", result.name);
+        if let Some(component) = fallback
+            .iter_mut()
+            .find(|component| component.name == result.name || component.name == external_name)
+        {
+            component.state.clone_from(&result.status);
+            component.detail = "supervised shutdown".to_owned();
+        } else {
+            fallback.push(runtime_component(
+                &result.name,
+                &result.status,
+                "supervised shutdown",
+            ));
+        }
+    }
+    fallback
+}
+
 impl Drop for RuntimeOwnershipLease {
     fn drop(&mut self) {
-        let _cleanup_result = self.cleanup_inner();
+        if !self.finalized {
+            let _cleanup_result = self.cleanup_inner();
+        }
     }
 }
 
-fn runtime_stop_request_marker_value(request: &str, owner_pid: Option<u32>) -> Value {
+fn runtime_stop_request_marker_value(
+    request: &str,
+    request_id: &str,
+    owner_pid: Option<u32>,
+    target_owner_id: Option<&str>,
+    event_sequence: u64,
+    requested_at_ms: u64,
+) -> Value {
     json!({
+        "schema_version": 1,
         "request": request,
-        "requestedAtMs": now_millis(),
-        "ownerPid": owner_pid,
+        "request_id": request_id,
+        "requested_at_ms": requested_at_ms,
+        "owner_pid": owner_pid,
+        "target_owner_id": target_owner_id,
+        "event_sequence": event_sequence,
     })
 }
 
 fn read_runtime_stop_request_marker(
     path: &Path,
 ) -> Result<Option<RuntimeStopRequestMarker>, CliError> {
-    if !path.exists() {
+    let Some(value) = read_runtime_marker_json(path, "runtime stop request marker")? else {
         return Ok(None);
+    };
+    let schema_version = required_marker_u64(&value, "schema_version")? as u32;
+    if schema_version != 1 {
+        return Err(CliError::InvalidArguments(format!(
+            "runtime stop request marker has unsupported schema_version {schema_version}"
+        )));
     }
-    let value: Value = serde_json::from_str(&fs::read_to_string(path)?).map_err(|error| {
-        CliError::InvalidArguments(format!("invalid runtime stop request marker: {error}"))
-    })?;
     Ok(Some(RuntimeStopRequestMarker {
+        schema_version,
         request: required_marker_string(&value, "request")?,
-        requested_at_ms: required_marker_u64(&value, "requestedAtMs")?,
+        request_id: required_marker_string(&value, "request_id")?,
+        requested_at_ms: required_marker_u64(&value, "requested_at_ms")?,
         owner_pid: value
-            .get("ownerPid")
+            .get("owner_pid")
             .and_then(Value::as_u64)
             .filter(|pid| *pid <= u32::MAX as u64)
             .map(|pid| pid as u32),
+        target_owner_id: marker_string(&value, "target_owner_id"),
+        event_sequence: Some(required_marker_u64(&value, "event_sequence")?),
     }))
 }
 
+#[cfg(test)]
 fn runtime_stop_request_observed(data_dir: &Path) -> Result<Option<String>, CliError> {
     let marker_path = runtime_stop_request_marker_path(data_dir);
     Ok(read_runtime_stop_request_marker(&marker_path)?.map(|marker| marker.request))
+}
+
+fn runtime_stop_request_reason_for_owner(
+    data_dir: &Path,
+    owner_id: &str,
+) -> Result<Option<RuntimeShutdownReason>, CliError> {
+    let marker_path = runtime_stop_request_marker_path(data_dir);
+    let Some(marker) = read_runtime_stop_request_marker(&marker_path)? else {
+        return Ok(None);
+    };
+    if marker.target_owner_id.as_deref() != Some(owner_id) {
+        return Ok(None);
+    }
+    validate_runtime_stop_request_event(data_dir, &marker, owner_id)?;
+    match marker.request.as_str() {
+        "stop" => Ok(Some(RuntimeShutdownReason::Stop)),
+        "restart" => Ok(Some(RuntimeShutdownReason::Restart)),
+        other => Err(CliError::InvalidArguments(format!(
+            "runtime stop request marker has unsupported request `{other}`"
+        ))),
+    }
+}
+
+fn validate_runtime_stop_request_event(
+    data_dir: &Path,
+    marker: &RuntimeStopRequestMarker,
+    owner_id: &str,
+) -> Result<(), CliError> {
+    let expected_kind = match marker.request.as_str() {
+        "stop" => RUNTIME_STOP_REQUESTED,
+        "restart" => RUNTIME_RESTART_REQUESTED,
+        other => {
+            return Err(CliError::InvalidArguments(format!(
+                "runtime stop request marker has unsupported request `{other}`"
+            )))
+        }
+    };
+    let sequence = marker.event_sequence.ok_or_else(|| {
+        CliError::InvalidArguments("runtime stop request marker missing event_sequence".to_owned())
+    })?;
+    let store = DurableEventStore::open(runtime_durable_event_root(data_dir)).map_err(|error| {
+        CliError::InvalidArguments(format!(
+            "runtime stop request event validation could not open durable events: {}",
+            redact_string(&error.to_string())
+        ))
+    })?;
+    let mut matching: Option<DurableEventRecord> = None;
+    store
+        .visit_from_sequence(sequence.saturating_sub(1), |record| {
+            if record.sequence == sequence {
+                matching = Some(record.clone());
+            }
+        })
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "runtime stop request event validation failed: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    let Some(record) = matching else {
+        return Err(CliError::InvalidArguments(
+            "runtime stop request marker references missing durable event".to_owned(),
+        ));
+    };
+    if record.kind != expected_kind {
+        return Err(CliError::InvalidArguments(
+            "runtime stop request marker references mismatched durable event kind".to_owned(),
+        ));
+    }
+    let DurableEventPayload::Inline { data, .. } = record.payload else {
+        return Err(CliError::InvalidArguments(
+            "runtime stop request marker references non-inline durable event".to_owned(),
+        ));
+    };
+    let request_id = data.get("request_id").and_then(Value::as_str);
+    let target_owner_id = data.get("target_owner_id").and_then(Value::as_str);
+    if request_id != Some(marker.request_id.as_str()) || target_owner_id != Some(owner_id) {
+        return Err(CliError::InvalidArguments(
+            "runtime stop request marker does not match durable event payload".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn required_marker_u64(value: &Value, key: &str) -> Result<u64, CliError> {
@@ -4200,12 +6158,9 @@ fn runtime_update_marker_value(
 }
 
 fn read_runtime_update_marker(path: &Path) -> Result<Option<RuntimeUpdateMarker>, CliError> {
-    if !path.exists() {
+    let Some(value) = read_runtime_marker_json(path, "runtime update marker")? else {
         return Ok(None);
-    }
-    let value: Value = serde_json::from_str(&fs::read_to_string(path)?).map_err(|error| {
-        CliError::InvalidArguments(format!("invalid runtime update marker: {error}"))
-    })?;
+    };
     let phase = required_marker_string(&value, "phase")?;
     validate_runtime_marker_phase(&phase)?;
     let from_version = marker_string(&value, "fromVersion").unwrap_or_else(|| "unknown".to_owned());
@@ -4235,7 +6190,7 @@ fn validate_runtime_marker_phase(phase: &str) -> Result<(), CliError> {
 
 fn required_marker_string(value: &Value, key: &str) -> Result<String, CliError> {
     marker_string(value, key)
-        .ok_or_else(|| CliError::InvalidArguments(format!("runtime update marker missing `{key}`")))
+        .ok_or_else(|| CliError::InvalidArguments(format!("runtime marker missing `{key}`")))
 }
 
 fn marker_string(value: &Value, key: &str) -> Option<String> {
@@ -5206,14 +7161,23 @@ fn load_channels_report(
         .cloned()
         .collect::<Vec<_>>();
     unknown_plugins.sort();
+    let durable_recovery = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
+    let supervision = read_runtime_supervision_state(&bundle.context.data_dir)?;
+    let channel_restart = inspect_channel_restart_states(
+        &bundle.context.data_dir,
+        durable_recovery.state.as_ref().map(|state| &state.work),
+    );
     Ok(ChannelsReport {
         config_path,
         workspace: bundle.context.workspace,
+        data_dir: bundle.context.data_dir,
         channels,
         unknown_plugins,
         worker_count: workers.len(),
         send_memory_hints: bundle.config.channels.send_memory_hints,
         send_max_retries: bundle.config.channels.send_max_retries,
+        channel_restart,
+        supervision,
     })
 }
 
@@ -6509,6 +8473,16 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
         format!("Worker boundaries: {}", report.worker_count),
         format!("Send memory hints: {}", report.send_memory_hints),
         format!("Send max retries: {}", report.send_max_retries),
+        format!(
+            "Channel restart states: {} (hint projection; not session truth)",
+            report.channel_restart.len()
+        ),
+        format!(
+            "Supervision: reason={:?} phase={:?} components={} (persisted owner lifecycle; restart metadata remains hint-only)",
+            report.supervision.shutdown.reason,
+            report.supervision.shutdown.phase,
+            report.supervision.components.len()
+        ),
         "Live workers: websocket runnable; external channels start only when transport adapters and credentials are available".to_owned(),
     ];
     for item in report.channels {
@@ -6524,6 +8498,17 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
         lines.push(format!(
             "- {}: enabled={} configured={} runtime={} workers={}",
             item.descriptor.name, item.enabled, item.configured, item.runtime_status, worker_labels
+        ));
+    }
+    for state in report.channel_restart {
+        lines.push(format_channel_restart_state_line(&state));
+    }
+    for component in report.supervision.components {
+        lines.push(format!(
+            "Supervised component {}: {} ({})",
+            component.name,
+            component.state,
+            opaque_ref("supervision-detail", &component.detail)
         ));
     }
     if !report.unknown_plugins.is_empty() {
@@ -6702,7 +8687,8 @@ pub fn session_inspect(options: SessionInspectOptions) -> Result<SessionInspectR
         ));
     }
 
-    let workspace = load_session_workspace(options.config_path, options.workspace_override)?;
+    let (workspace, data_dir) =
+        load_session_context(options.config_path, options.workspace_override)?;
     if !workspace.join("sessions").exists() {
         return Err(CliError::InvalidArguments(format!(
             "session `{}` was not found",
@@ -6728,6 +8714,7 @@ pub fn session_inspect(options: SessionInspectOptions) -> Result<SessionInspectR
         diagnostics_refs: detail.diagnostics_refs,
         runtime_workflow: detail.runtime_workflow,
         runtime_execution: detail.runtime_execution,
+        durable_children: inspect_session_durable_children(&data_dir, &options.session),
     })
 }
 
@@ -6875,7 +8862,10 @@ pub fn session_diagnostics(
             "session diagnostics requires --session <key>".to_owned(),
         ));
     }
-    let workspace = load_session_workspace(options.config_path, options.workspace_override)?;
+    let (workspace, data_dir) =
+        load_session_context(options.config_path, options.workspace_override)?;
+    let durable_children = inspect_session_durable_children(&data_dir, &options.session);
+    let supervision = runtime_supervisor_projection(&read_runtime_supervision_state(&data_dir)?);
     let fallback_path = session_path_without_creating_dir(&workspace, &options.session);
     if !workspace.join("sessions").exists() {
         return Ok(SessionDiagnosticsReport {
@@ -6891,6 +8881,8 @@ pub fn session_diagnostics(
             diagnostics_refs: Vec::new(),
             runtime_workflow: None,
             runtime_execution: None,
+            durable_children,
+            supervision,
             legal_start: 0,
         });
     }
@@ -6914,6 +8906,8 @@ pub fn session_diagnostics(
         diagnostics_refs: diagnostics.diagnostics_refs,
         runtime_workflow: diagnostics.runtime_workflow,
         runtime_execution: diagnostics.runtime_execution,
+        durable_children,
+        supervision,
         legal_start: diagnostics.legal_start,
     })
 }
@@ -7040,6 +9034,13 @@ fn load_session_workspace(
     config_path: Option<PathBuf>,
     workspace_override: Option<PathBuf>,
 ) -> Result<PathBuf, CliError> {
+    load_session_context(config_path, workspace_override).map(|(workspace, _)| workspace)
+}
+
+fn load_session_context(
+    config_path: Option<PathBuf>,
+    workspace_override: Option<PathBuf>,
+) -> Result<(PathBuf, PathBuf), CliError> {
     let config_path = config_path.unwrap_or_else(default_config_path);
     let bundle = load_config_with_env(
         LoadOptions {
@@ -7050,7 +9051,48 @@ fn load_session_workspace(
         },
         &ProcessEnv,
     )?;
-    Ok(bundle.context.workspace)
+    Ok((bundle.context.workspace, bundle.context.data_dir))
+}
+
+fn inspect_session_durable_children(
+    data_dir: &Path,
+    session_id: &str,
+) -> DurableChildSessionInspect {
+    let recovery = evaluate_runtime_durable_recovery(data_dir);
+    let Some(state) = recovery.state else {
+        return DurableChildSessionInspect::default();
+    };
+    let mut inspect = DurableChildSessionInspect::default();
+    for item in state
+        .children
+        .items
+        .values()
+        .filter(|item| item.session_id == session_id)
+    {
+        if item.state.is_terminal() {
+            inspect.terminal_count += 1;
+        } else {
+            inspect.active_count += 1;
+        }
+        inspect
+            .child_refs
+            .push(opaque_ref("child", &item.child_task_id));
+    }
+    for decision in state
+        .children
+        .decisions
+        .iter()
+        .filter(|decision| decision.session_id == session_id)
+    {
+        match decision.decision {
+            ChildResultDecisionKind::Stale => inspect.stale_decision_count += 1,
+            ChildResultDecisionKind::Duplicate => inspect.duplicate_decision_count += 1,
+            ChildResultDecisionKind::Late => inspect.late_decision_count += 1,
+            ChildResultDecisionKind::Accepted => {}
+        }
+    }
+    inspect.child_refs.sort();
+    inspect
 }
 
 fn run_provider_command(command: ProviderCommand) -> Result<String, CliError> {
@@ -7900,6 +9942,7 @@ pub fn ask(options: AskOptions) -> Result<String, CliError> {
         workspace_override: options.workspace_override.clone(),
         resolve_env: true,
     })?;
+    guard_runtime_durable_recovery_admission(&bundle.context.data_dir)?;
     let adapter = AgentLoopChatCompletionAdapter::from_bundle(bundle, options.allow_side_effects)?;
     complete_direct_message(&adapter, &options)
 }
@@ -8002,7 +10045,11 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         .unwrap_or(bundle.config.api.timeout)
         .max(0.001);
     let ownership = RuntimeOwnershipLease::acquire(&bundle, "serve")?;
+    let owner_fence = ownership.fence();
+    let owner_id = ownership.owner_id().to_owned();
     let data_dir = bundle.context.data_dir.clone();
+    let shutdown_reason = Arc::new(Mutex::new(RuntimeShutdownReason::CtrlC));
+    let shutdown_reason_writer = shutdown_reason.clone();
     let adapter = Arc::new(AgentLoopChatCompletionAdapter::from_bundle(
         bundle,
         options.allow_api_side_effects,
@@ -8019,11 +10066,55 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         addr,
         adapter,
         Duration::from_secs_f64(timeout_seconds),
-        async {
-            wait_for_ctrl_c_or_runtime_request(data_dir).await;
+        async move {
+            let reason =
+                wait_for_ctrl_c_or_runtime_request(data_dir, owner_fence, owner_id, None).await;
+            if let Ok(mut stored_reason) = shutdown_reason_writer.lock() {
+                *stored_reason = reason;
+            }
         },
     ));
-    ownership.cleanup()?;
+    let mut reason = shutdown_reason
+        .lock()
+        .map(|reason| *reason)
+        .unwrap_or(RuntimeShutdownReason::StartupFailed);
+    reason = finalized_runtime_shutdown_reason(reason, serve_result.is_err());
+    let mut shutdown_report = if reason == RuntimeShutdownReason::OwnerLost || serve_result.is_err()
+    {
+        RuntimeShutdownReport::failed(reason)
+    } else {
+        RuntimeShutdownReport::completed(reason)
+    };
+    shutdown_report
+        .component_results
+        .push(RuntimeShutdownStepReport::new(
+            if serve_result.is_ok() {
+                "stopped"
+            } else {
+                "failed"
+            },
+            1,
+        ));
+    let components = vec![runtime_component(
+        "api",
+        if serve_result.is_ok() {
+            "stopped"
+        } else {
+            "failed"
+        },
+        "api component shutdown",
+    )];
+    if reason == RuntimeShutdownReason::OwnerLost || ownership.fence.is_lost() {
+        ownership.fail_shutdown(shutdown_report, components)?;
+        return Err(CliError::InvalidArguments(
+            "runtime owner fence lost during API shutdown".to_owned(),
+        ));
+    }
+    if serve_result.is_ok() {
+        ownership.complete_shutdown(shutdown_report, components)?;
+    } else {
+        ownership.fail_shutdown(shutdown_report, components)?;
+    }
     serve_result?;
     Ok(format!("API server stopped: http://{addr}"))
 }
@@ -8049,7 +10140,8 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
     let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
     let worker_metadata_dir = bundle
         .context
-        .runtime_subdir("channels")
+        .runtime_subdir("runtime")
+        .join("channels")
         .join("worker-metadata");
     let external_context = ExternalTransportRuntimeContext::new(
         worker_metadata_dir,
@@ -8061,22 +10153,42 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
         return Ok(plan);
     }
     let ownership = RuntimeOwnershipLease::acquire(&bundle, mode)?;
+    let owner_fence = ownership.fence();
+    let owner_id = ownership.owner_id().to_owned();
     let data_dir = bundle.context.data_dir.clone();
     let adapter = Arc::new(
         AgentLoopChatCompletionAdapter::from_bundle(bundle.clone(), options.allow_side_effects)?
             .with_runtime_verbose(options.verbose),
     );
     let heartbeat_worker = start_heartbeat_runtime(adapter.clone(), &bundle)?;
-    let supervisor = ExternalChannelSupervisor::start(
+    let supervisor = match ExternalChannelSupervisor::start(
         adapter.clone(),
         specs,
         send_max_retries,
         external_context,
-    );
+        bundle.context.data_dir.clone(),
+    ) {
+        Ok(supervisor) => supervisor,
+        Err(error) => {
+            let mut report = RuntimeShutdownReport::failed(RuntimeShutdownReason::StartupFailed);
+            report
+                .component_results
+                .push(RuntimeShutdownStepReport::named(
+                    "external_processor",
+                    "startup_failed",
+                    1,
+                ));
+            ownership.fail_shutdown(report, runtime_components_for_mode(mode, &plugins))?;
+            return Err(error);
+        }
+    };
+    let supervisor_health = supervisor.health_signal();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     eprintln!("{plan}");
+    let shutdown_reason_store = Arc::new(Mutex::new(RuntimeShutdownReason::CtrlC));
+    let shutdown_reason_writer = shutdown_reason_store.clone();
     let serve_result = if report.websocket.enabled {
         let request_data_dir = data_dir.clone();
         runtime.block_on(shacs_api::serve_websocket_with_timeout_and_path(
@@ -8085,22 +10197,93 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
             Duration::from_secs_f64(timeout_seconds),
             &report.websocket.path,
             async move {
-                wait_for_ctrl_c_or_runtime_request(request_data_dir).await;
+                let reason = wait_for_ctrl_c_or_runtime_request(
+                    request_data_dir,
+                    owner_fence,
+                    owner_id,
+                    Some(supervisor_health.clone()),
+                )
+                .await;
+                if let Ok(mut stored_reason) = shutdown_reason_writer.lock() {
+                    *stored_reason = reason;
+                }
             },
         ))
     } else {
-        runtime.block_on(async {
-            wait_for_ctrl_c_or_runtime_request(data_dir).await;
+        let reason = runtime.block_on(async {
+            wait_for_ctrl_c_or_runtime_request(
+                data_dir,
+                owner_fence,
+                owner_id,
+                Some(supervisor_health),
+            )
+            .await
         });
+        if let Ok(mut stored_reason) = shutdown_reason_store.lock() {
+            *stored_reason = reason;
+        }
         Ok(())
     };
-    supervisor.stop();
+    let mut shutdown_reason = shutdown_reason_store
+        .lock()
+        .map(|reason| *reason)
+        .unwrap_or(RuntimeShutdownReason::StartupFailed);
+    shutdown_reason = finalized_runtime_shutdown_reason(shutdown_reason, serve_result.is_err());
+    let supervisor_report = match supervisor.stop(shutdown_reason) {
+        Ok(report) => report,
+        Err(error) => {
+            if let Some(worker) = heartbeat_worker {
+                worker
+                    .join()
+                    .map_err(|_| CliError::Api(ApiError::internal("heartbeat worker panicked")))?;
+            }
+            ownership.fail_shutdown(
+                RuntimeShutdownReport::failed(shutdown_reason),
+                runtime_components_for_mode(mode, &plugins),
+            )?;
+            return Err(error);
+        }
+    };
     if let Some(worker) = heartbeat_worker {
         worker
             .join()
             .map_err(|_| CliError::Api(ApiError::internal("heartbeat worker panicked")))?;
     }
-    ownership.cleanup()?;
+    if shutdown_reason == RuntimeShutdownReason::OwnerLost || ownership.fence.is_lost() {
+        let report = supervisor_report.report;
+        let components = runtime_components_from_shutdown_report(
+            &report,
+            runtime_components_for_mode(mode, &plugins),
+        );
+        ownership.fail_shutdown(report, components)?;
+        return Err(CliError::InvalidArguments(
+            "runtime owner fence lost; owner_lost shutdown recorded".to_owned(),
+        ));
+    }
+    if supervisor_report.report.phase == RuntimeShutdownPhase::Failed {
+        let report = supervisor_report.report;
+        let components = runtime_components_from_shutdown_report(
+            &report,
+            runtime_components_for_mode(mode, &plugins),
+        );
+        ownership.fail_shutdown(report, components)?;
+        return Err(CliError::InvalidArguments(
+            "runtime shutdown failed; ownership marker retained for recovery".to_owned(),
+        ));
+    }
+    if serve_result.is_ok() {
+        let report = supervisor_report.report;
+        let components = runtime_components_from_shutdown_report(
+            &report,
+            runtime_components_for_mode(mode, &plugins),
+        );
+        ownership.complete_shutdown(report, components)?;
+    } else {
+        ownership.fail_shutdown(
+            RuntimeShutdownReport::failed(shutdown_reason),
+            runtime_components_for_mode(mode, &plugins),
+        )?;
+    }
     serve_result?;
     Ok(format!(
         "Channel runtime stopped: websocket_enabled={} ws://{}:{}{}",
@@ -8111,22 +10294,62 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
     ))
 }
 
-async fn wait_for_ctrl_c_or_runtime_request(data_dir: PathBuf) {
+async fn wait_for_ctrl_c_or_runtime_request(
+    data_dir: PathBuf,
+    owner_fence: RuntimeOwnerFence,
+    owner_id: String,
+    processor_exited: Option<Arc<AtomicBool>>,
+) -> RuntimeShutdownReason {
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::signal::ctrl_c() => return RuntimeShutdownReason::CtrlC,
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
-                if runtime_stop_request_observed(&data_dir).ok().flatten().is_some() {
-                    break;
+                if let Ok(Some(reason)) = runtime_stop_request_reason_for_owner(&data_dir, &owner_id) {
+                    return reason;
+                }
+                if owner_fence.is_lost() {
+                    return RuntimeShutdownReason::OwnerLost;
+                }
+                if processor_exited
+                    .as_ref()
+                    .is_some_and(|exited| exited.load(Ordering::SeqCst))
+                {
+                    return RuntimeShutdownReason::StartupFailed;
                 }
             }
         }
     }
 }
 
+fn finalized_runtime_shutdown_reason(
+    observed: RuntimeShutdownReason,
+    listener_failed: bool,
+) -> RuntimeShutdownReason {
+    if listener_failed && observed == RuntimeShutdownReason::CtrlC {
+        RuntimeShutdownReason::StartupFailed
+    } else {
+        observed
+    }
+}
+
 struct ExternalChannelSupervisor {
     stop: Arc<AtomicBool>,
-    handles: Vec<thread::JoinHandle<()>>,
+    shutdown_reason: Arc<Mutex<RuntimeShutdownReason>>,
+    exited: Arc<AtomicBool>,
+    handles: Vec<thread::JoinHandle<Result<ExternalSupervisorShutdownReport, CliError>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalSupervisorShutdownReport {
+    report: RuntimeShutdownReport,
+}
+
+#[derive(Clone)]
+struct ExternalProcessorShutdownControl {
+    stop: Arc<AtomicBool>,
+    reason: Arc<Mutex<RuntimeShutdownReason>>,
+    exited: Arc<AtomicBool>,
+    startup_tx: Option<mpsc::Sender<Result<Vec<RuntimeShutdownStepReport>, String>>>,
 }
 
 #[derive(Debug, Default)]
@@ -8141,6 +10364,11 @@ struct ExternalAgentTurnResult {
     error: Option<String>,
     retry_message: Option<InboundMessage>,
     subagent_runtime: Option<SubagentRuntime>,
+    durable_work_id: Option<String>,
+    turn_failed: bool,
+    cancel_session_work: bool,
+    priority_command: bool,
+    turn_cancelled: bool,
 }
 
 #[derive(Clone)]
@@ -8224,10 +10452,34 @@ impl ExternalSessionTurnCoordinator {
     }
 }
 
+fn external_active_sessions(
+    turn_lock: &SessionTurnLock,
+    coordinator: &ExternalSessionTurnCoordinator,
+) -> Vec<String> {
+    let mut sessions = turn_lock
+        .active_session_keys()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    sessions.extend(coordinator.active_sessions.iter().cloned());
+    sessions.into_iter().collect()
+}
+
+fn cancel_external_active_session(turn_lock: &SessionTurnLock, session_key: &str) -> bool {
+    turn_lock.cancel_active_or_reserved(session_key)
+}
+
 #[derive(Debug, Clone)]
 struct ExternalTransportRuntimeContext {
     metadata_dir: PathBuf,
     send_attempts: usize,
+    durable_data_dir: Option<PathBuf>,
+    lease_owner_ref: Option<String>,
+    unified_session_key: Option<String>,
+}
+
+struct ExternalDurableWorkRuntime {
+    data_dir: PathBuf,
+    dispatcher: DurableWorkDispatcher,
 }
 
 impl ExternalTransportRuntimeContext {
@@ -8235,11 +10487,97 @@ impl ExternalTransportRuntimeContext {
         Self {
             metadata_dir,
             send_attempts: send_attempts.clamp(1, 10),
+            durable_data_dir: None,
+            lease_owner_ref: None,
+            unified_session_key: None,
         }
     }
 
     fn metadata_path(&self, name: &str) -> PathBuf {
         self.metadata_dir.join(format!("{name}.json"))
+    }
+
+    fn configure_durable_inbound(
+        &mut self,
+        data_dir: PathBuf,
+        lease_owner_ref: String,
+        unified_session_key: Option<String>,
+    ) {
+        self.durable_data_dir = Some(data_dir);
+        self.lease_owner_ref = Some(lease_owner_ref);
+        self.unified_session_key = unified_session_key;
+    }
+
+    fn enqueue_inbound(
+        &self,
+        runtime_bus: &MessageBus,
+        message: &InboundMessage,
+    ) -> Result<(), String> {
+        let data_dir = self
+            .durable_data_dir
+            .as_deref()
+            .ok_or_else(|| "durable inbound data directory is unavailable".to_owned())?;
+        let lease_owner_ref = self
+            .lease_owner_ref
+            .as_deref()
+            .ok_or_else(|| "durable inbound lease owner is unavailable".to_owned())?;
+        let _enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut durable_message = message.clone();
+        if durable_message.session_key_override.is_none() {
+            durable_message.session_key_override = self.unified_session_key.clone();
+        }
+        let (state, admission) = durable_work_state_for_owner(data_dir, lease_owner_ref)
+            .map_err(|error| error.to_string())?;
+        if !admission.writable {
+            return Err(durable_work_admission_error(&admission).to_string());
+        }
+        if state
+            .work
+            .items
+            .values()
+            .filter(|item| !item.state.is_terminal())
+            .count()
+            >= DURABLE_WORK_MAX_OPEN_ITEMS
+        {
+            return Err(format!(
+                "open durable work limit {DURABLE_WORK_MAX_OPEN_ITEMS} reached"
+            ));
+        }
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            runtime_bus.clone(),
+            lease_owner_ref,
+            DURABLE_WORK_LEASE_DURATION_MS,
+        )
+        .map_err(|error| error.to_string())?;
+        let (work_id, dedupe_hint) = durable_inbound_identity(&durable_message);
+        dispatcher
+            .enqueue_inbound(work_id.clone(), &durable_message, Some(dedupe_hint), None)
+            .map_err(|error| error.to_string())?;
+        clear_pending_inbound_hint(data_dir, message);
+        if is_external_stop_command(message) {
+            let (state, admission) = durable_work_state_for_owner(data_dir, lease_owner_ref)
+                .map_err(|error| error.to_string())?;
+            if !admission.writable {
+                return Err(durable_work_admission_error(&admission).to_string());
+            }
+            let item = state
+                .work
+                .items
+                .get(&work_id)
+                .ok_or_else(|| format!("durable priority work {work_id} is missing"))?;
+            if item.state.is_terminal() {
+                return Ok(());
+            }
+            dispatcher
+                .dispatch_priority(item, now_millis())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -8248,35 +10586,120 @@ impl ExternalChannelSupervisor {
         adapter: Arc<AgentLoopChatCompletionAdapter>,
         specs: Vec<ExternalTransportSpec>,
         send_max_retries: u32,
-        transport_context: ExternalTransportRuntimeContext,
-    ) -> Self {
+        mut transport_context: ExternalTransportRuntimeContext,
+        data_dir: PathBuf,
+    ) -> Result<Self, CliError> {
         let stop = Arc::new(AtomicBool::new(false));
+        let shutdown_reason = Arc::new(Mutex::new(RuntimeShutdownReason::Stop));
+        let exited = Arc::new(AtomicBool::new(false));
         if specs.is_empty() {
-            return Self {
+            return Ok(Self {
                 stop,
+                shutdown_reason,
+                exited,
                 handles: Vec::new(),
-            };
+            });
         }
-        let runtime_bus = MessageBus::new();
-        let processor_stop = stop.clone();
+        let runtime_bus = MessageBus::bounded(EXTERNAL_RUNTIME_BUS_CAPACITY);
+        let lease_owner_ref = format!("runtime-{}-{}", std::process::id(), now_millis());
+        transport_context.configure_durable_inbound(
+            data_dir.clone(),
+            lease_owner_ref.clone(),
+            adapter
+                .defaults
+                .unified_session
+                .then(|| "api:default".to_owned()),
+        );
+        let mut durable_dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(&data_dir),
+            runtime_durable_work_payload_root(&data_dir),
+            runtime_bus.clone(),
+            lease_owner_ref,
+            DURABLE_WORK_LEASE_DURATION_MS,
+        )
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "external durable work dispatcher could not start: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+        dispatch_due_external_work(&mut durable_dispatcher, &data_dir)?;
+        let durable_work = ExternalDurableWorkRuntime {
+            data_dir,
+            dispatcher: durable_dispatcher,
+        };
+        let (startup_tx, startup_rx) = mpsc::channel();
+        let processor_shutdown = ExternalProcessorShutdownControl {
+            stop: stop.clone(),
+            reason: shutdown_reason.clone(),
+            exited: exited.clone(),
+            startup_tx: Some(startup_tx),
+        };
         let handles = vec![thread::spawn(move || {
             run_external_agent_processor(
                 adapter,
                 runtime_bus,
                 specs,
                 send_max_retries,
-                processor_stop,
+                processor_shutdown,
                 transport_context,
-            );
+                durable_work,
+            )
         })];
-        Self { stop, handles }
+        match startup_rx.recv().map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "external channel startup handshake failed: {}",
+                redact_string(&error.to_string())
+            ))
+        })? {
+            Ok(_components) => {}
+            Err(error) => {
+                stop.store(true, Ordering::SeqCst);
+                for handle in handles {
+                    handle.join().map_err(|_| {
+                        CliError::Api(ApiError::internal("external runtime panicked"))
+                    })??;
+                }
+                return Err(CliError::InvalidArguments(format!(
+                    "external channel startup failed: {}",
+                    redact_string(&error)
+                )));
+            }
+        }
+        Ok(Self {
+            stop,
+            shutdown_reason,
+            exited,
+            handles,
+        })
     }
 
-    fn stop(self) {
-        self.stop.store(true, Ordering::SeqCst);
-        for handle in self.handles {
-            let _ = handle.join();
+    fn health_signal(&self) -> Arc<AtomicBool> {
+        self.exited.clone()
+    }
+
+    fn stop(
+        self,
+        reason: RuntimeShutdownReason,
+    ) -> Result<ExternalSupervisorShutdownReport, CliError> {
+        if let Ok(mut stored_reason) = self.shutdown_reason.lock() {
+            *stored_reason = reason;
         }
+        self.stop.store(true, Ordering::SeqCst);
+        let mut report = RuntimeShutdownReport::completed(reason);
+        let component_count = self.handles.len() as u64;
+        for handle in self.handles {
+            let worker_report = handle
+                .join()
+                .map_err(|_| CliError::Api(ApiError::internal("external runtime panicked")))??;
+            report = worker_report.report;
+        }
+        if report.component_results.is_empty() {
+            report
+                .component_results
+                .push(RuntimeShutdownStepReport::new("stopped", component_count));
+        }
+        Ok(ExternalSupervisorShutdownReport { report })
     }
 }
 
@@ -8301,42 +10724,62 @@ fn run_external_agent_processor(
     runtime_bus: MessageBus,
     specs: Vec<ExternalTransportSpec>,
     send_max_retries: u32,
-    stop: Arc<AtomicBool>,
+    mut shutdown: ExternalProcessorShutdownControl,
     transport_context: ExternalTransportRuntimeContext,
-) {
+    mut durable_work: ExternalDurableWorkRuntime,
+) -> Result<ExternalSupervisorShutdownReport, CliError> {
     let mut channels = external_transport_channel_manager(
         specs,
         runtime_bus.clone(),
         send_max_retries,
         transport_context,
     );
-    if let Err(error) = channels.start_all() {
-        eprintln!("external channel start failed: {error}");
+    let startup_result = channels
+        .start_all()
+        .map(|()| channel_component_reports(&channels, "started"))
+        .map_err(|error| error.to_string());
+    if let Some(startup_tx) = shutdown.startup_tx.take() {
+        let _send_result = startup_tx.send(startup_result.clone());
+    }
+    if let Err(error) = startup_result {
+        shutdown.exited.store(true, Ordering::SeqCst);
+        return Ok(ExternalSupervisorShutdownReport {
+            report: RuntimeShutdownReport {
+                phase: RuntimeShutdownPhase::Failed,
+                component_results: vec![RuntimeShutdownStepReport::named(
+                    "external_processor",
+                    format!("startup_failed:{}", opaque_ref("detail", &error)),
+                    1,
+                )],
+                ..RuntimeShutdownReport::failed(RuntimeShutdownReason::StartupFailed)
+            },
+        });
     }
     let (turn_tx, turn_rx) = mpsc::channel::<ExternalAgentTurnResult>();
     let mut turn_coordinator = ExternalSessionTurnCoordinator::default();
     let mut turn_handles = Vec::new();
     let mut typing_indicators = Vec::new();
-    while !stop.load(Ordering::SeqCst) {
+    while !shutdown.stop.load(Ordering::SeqCst) {
         join_finished_turns(&mut turn_handles);
         let mut progressed = false;
         while let Ok(result) = turn_rx.try_recv() {
             progressed = true;
-            finish_external_typing_indicator(
+            let next = match handle_external_agent_turn_result(
+                result,
+                &runtime_bus,
+                &mut durable_work,
+                &mut turn_coordinator,
                 &mut typing_indicators,
-                &result.session_key,
-                result.subagent_runtime.as_ref(),
-            );
-            if let Some(error) = result.error {
-                eprintln!("external channel turn failed: {error}");
-            }
-            for message in result.outbound {
-                runtime_bus.publish_outbound(message);
-            }
-            if let Some(message) = result.retry_message {
-                turn_coordinator.defer_turn(result.session_key, message);
-                continue;
-            } else if let Some(next) = turn_coordinator.finish_turn(&result.session_key) {
+                true,
+            ) {
+                Ok(next) => next,
+                Err(error) => {
+                    eprintln!("external durable work transition failed: {error}");
+                    shutdown.stop.store(true, Ordering::SeqCst);
+                    break;
+                }
+            };
+            if let Some(next) = next {
                 let session_key = adapter.external_effective_session_key(&next);
                 start_external_typing_indicator(
                     &adapter,
@@ -8356,8 +10799,125 @@ fn run_external_agent_processor(
         }
         while let Some(message) = runtime_bus.try_consume_inbound() {
             progressed = true;
+            if message
+                .metadata
+                .get(DURABLE_WORK_ID_METADATA)
+                .and_then(Value::as_str)
+                .is_none()
+            {
+                let session_key = adapter.external_effective_session_key(&message);
+                let priority_stop = is_external_stop_command(&message);
+                let (work_id, dedupe_hint) = durable_inbound_identity(&message);
+                let enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
+                    .get_or_init(|| Mutex::new(()))
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let open_work_count = match durable_work_state_for_owner(
+                    &durable_work.data_dir,
+                    durable_work.dispatcher.lease_owner_ref(),
+                ) {
+                    Ok((state, admission)) if admission.writable => state
+                        .work
+                        .items
+                        .values()
+                        .filter(|item| !item.state.is_terminal())
+                        .count(),
+                    Ok((_, admission)) => {
+                        eprintln!(
+                            "external durable work admission failed: {}",
+                            durable_work_admission_error(&admission)
+                        );
+                        shutdown.stop.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Err(error) => {
+                        eprintln!("external durable work admission failed: {error}");
+                        shutdown.stop.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                };
+                if open_work_count >= DURABLE_WORK_MAX_OPEN_ITEMS {
+                    eprintln!(
+                        "external durable work enqueue rejected: open work limit {DURABLE_WORK_MAX_OPEN_ITEMS} reached"
+                    );
+                    continue;
+                }
+                if let Err(error) = durable_work.dispatcher.enqueue_inbound(
+                    work_id.clone(),
+                    &message,
+                    Some(dedupe_hint),
+                    None,
+                ) {
+                    eprintln!("external durable work enqueue failed: {error}");
+                    continue;
+                }
+                clear_pending_inbound_hint(&durable_work.data_dir, &message);
+                drop(enqueue_guard);
+                if priority_stop {
+                    cancel_external_active_session(&adapter.session_turn_lock, &session_key);
+                    if let Err(error) = request_external_session_cancellation(
+                        &mut durable_work.dispatcher,
+                        &durable_work.data_dir,
+                        &session_key,
+                        Some(&work_id),
+                    ) {
+                        eprintln!("external durable work cancellation failed: {error}");
+                        shutdown.stop.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    let priority_dispatch = (|| -> Result<(), CliError> {
+                        let (state, admission) = durable_work_state_for_owner(
+                            &durable_work.data_dir,
+                            durable_work.dispatcher.lease_owner_ref(),
+                        )?;
+                        if !admission.writable {
+                            return Err(durable_work_admission_error(&admission));
+                        }
+                        let item = state.work.items.get(&work_id).ok_or_else(|| {
+                            CliError::InvalidArguments(format!(
+                                "durable priority work {work_id} is missing"
+                            ))
+                        })?;
+                        if item.state.is_terminal() {
+                            return Ok(());
+                        }
+                        durable_work
+                            .dispatcher
+                            .dispatch_priority(item, now_millis())
+                            .map_err(|error| {
+                                CliError::InvalidArguments(format!(
+                                    "external durable priority dispatch failed: {}",
+                                    redact_string(&error.to_string())
+                                ))
+                            })?;
+                        Ok(())
+                    })();
+                    if let Err(error) = priority_dispatch {
+                        eprintln!("external durable priority dispatch failed: {error}");
+                        shutdown.stop.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    continue;
+                }
+                if let Err(error) =
+                    dispatch_due_external_work(&mut durable_work.dispatcher, &durable_work.data_dir)
+                {
+                    eprintln!("external durable work dispatch failed: {error}");
+                    shutdown.stop.store(true, Ordering::SeqCst);
+                    break;
+                }
+                continue;
+            }
             let session_key = adapter.external_effective_session_key(&message);
-            if adapter.external_session_is_active(&session_key) {
+            if is_external_stop_command(&message) {
+                turn_handles.push(spawn_external_agent_turn(
+                    adapter.clone(),
+                    session_key,
+                    message,
+                    runtime_bus.clone(),
+                    turn_tx.clone(),
+                ));
+            } else if adapter.external_session_is_active(&session_key) {
                 turn_coordinator.enqueue(session_key, message);
             } else if let Some(next) =
                 turn_coordinator.start_or_enqueue(session_key.clone(), message)
@@ -8399,25 +10959,571 @@ fn run_external_agent_processor(
         }
         progressed |= publish_due_external_typing_indicators(&mut typing_indicators, &runtime_bus);
         progressed |= drain_runtime_outbound(&runtime_bus, &mut channels);
+        if let Err(error) =
+            dispatch_due_external_work(&mut durable_work.dispatcher, &durable_work.data_dir)
+        {
+            eprintln!("external durable work wake failed: {error}");
+            shutdown.stop.store(true, Ordering::SeqCst);
+        }
         if !progressed {
-            sleep_with_stop(&stop, Duration::from_millis(50));
+            sleep_with_stop(&shutdown.stop, Duration::from_millis(50));
         }
     }
-    for handle in turn_handles {
-        let _ = handle.join();
+    let reason = shutdown
+        .reason
+        .lock()
+        .map(|reason| *reason)
+        .unwrap_or(RuntimeShutdownReason::StartupFailed);
+    let mut shutdown_report = RuntimeShutdownReport::completed(reason);
+    if reason == RuntimeShutdownReason::OwnerLost {
+        let active_count = turn_handles.len() as u64;
+        channels.stop_all().map_err(|error| {
+            CliError::InvalidArguments(format!("external channel stop failed: {error}"))
+        })?;
+        drop(turn_rx);
+        drop(turn_tx);
+        drop(turn_handles);
+        shutdown_report.phase = RuntimeShutdownPhase::Failed;
+        shutdown_report.queue = RuntimeShutdownStepReport::named(
+            "inbound_queue",
+            "unknown_after_owner_loss",
+            runtime_bus.inbound_size() as u64,
+        );
+        shutdown_report.work = RuntimeShutdownStepReport::named(
+            "owned_work",
+            "unknown_after_owner_loss",
+            active_count,
+        );
+        shutdown_report.child = RuntimeShutdownStepReport::named(
+            "child_tasks",
+            "unknown_after_owner_loss",
+            active_count,
+        );
+        shutdown_report
+            .component_results
+            .extend(channel_component_reports(&channels, "stopped"));
+        shutdown.exited.store(true, Ordering::SeqCst);
+        return Ok(ExternalSupervisorShutdownReport {
+            report: shutdown_report,
+        });
+    }
+    enqueue_remaining_external_inbound(&runtime_bus, &mut durable_work)?;
+    shutdown_report.queue =
+        RuntimeShutdownStepReport::new("drained", runtime_bus.inbound_size() as u64);
+    let active_sessions = external_active_sessions(&adapter.session_turn_lock, &turn_coordinator);
+    for session_key in &active_sessions {
+        adapter
+            .session_turn_lock
+            .cancel_active_or_reserved(session_key);
+    }
+    request_active_external_work_cancellation(&mut durable_work, &active_sessions)?;
+    let shutdown_deadline = Instant::now() + EXTERNAL_SHUTDOWN_DRAIN_TIMEOUT;
+    while !turn_handles.is_empty() && Instant::now() < shutdown_deadline {
+        enqueue_remaining_external_inbound(&runtime_bus, &mut durable_work)?;
+        drain_runtime_outbound(&runtime_bus, &mut channels);
+        join_finished_turns(&mut turn_handles);
+        while let Ok(result) = turn_rx.try_recv() {
+            handle_external_agent_turn_result(
+                result,
+                &runtime_bus,
+                &mut durable_work,
+                &mut turn_coordinator,
+                &mut typing_indicators,
+                false,
+            )?;
+        }
+        if !turn_handles.is_empty() {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    if !turn_handles.is_empty() {
+        let active_count = turn_handles.len() as u64;
+        channels.stop_all().map_err(|error| {
+            CliError::InvalidArguments(format!("external channel stop failed: {error}"))
+        })?;
+        enqueue_remaining_external_inbound(&runtime_bus, &mut durable_work)?;
+        drop(turn_handles);
+        shutdown_report.phase = RuntimeShutdownPhase::Failed;
+        shutdown_report.work =
+            RuntimeShutdownStepReport::named("owned_work", "unknown_after_timeout", active_count);
+        shutdown_report.child =
+            RuntimeShutdownStepReport::named("child_tasks", "unknown_after_timeout", active_count);
+        shutdown_report
+            .component_results
+            .extend(channel_component_reports(&channels, "stopped"));
+        shutdown.exited.store(true, Ordering::SeqCst);
+        return Ok(ExternalSupervisorShutdownReport {
+            report: shutdown_report,
+        });
     }
     while let Ok(result) = turn_rx.try_recv() {
-        if let Some(error) = result.error {
-            eprintln!("external channel turn failed: {error}");
-        }
-        for message in result.outbound {
-            runtime_bus.publish_outbound(message);
-        }
+        handle_external_agent_turn_result(
+            result,
+            &runtime_bus,
+            &mut durable_work,
+            &mut turn_coordinator,
+            &mut typing_indicators,
+            false,
+        )?;
     }
     drain_runtime_outbound(&runtime_bus, &mut channels);
-    if let Err(error) = channels.stop_all() {
-        eprintln!("external channel stop failed: {error}");
+    channels.stop_all().map_err(|error| {
+        CliError::InvalidArguments(format!("external channel stop failed: {error}"))
+    })?;
+    enqueue_remaining_external_inbound(&runtime_bus, &mut durable_work)?;
+    if let Err(error) = requeue_owned_external_work(&mut durable_work) {
+        eprintln!("external durable work shutdown requeue failed: {error}");
+        shutdown_report.work = RuntimeShutdownStepReport::new("requeue_failed", 0);
+    } else {
+        shutdown_report.work = RuntimeShutdownStepReport::new("drained", 0);
     }
+    shutdown_report
+        .component_results
+        .extend(channel_component_reports(&channels, "stopped"));
+    shutdown.exited.store(true, Ordering::SeqCst);
+    Ok(ExternalSupervisorShutdownReport {
+        report: shutdown_report,
+    })
+}
+
+fn channel_component_reports(
+    channels: &ChannelManager,
+    fallback_status: &str,
+) -> Vec<RuntimeShutdownStepReport> {
+    let mut reports = channels
+        .status_report()
+        .into_iter()
+        .map(|(name, status)| {
+            let state = if let Some(error) = status.last_error.as_deref() {
+                format!("failed:{}", opaque_ref("detail", error))
+            } else if status.running {
+                "running".to_owned()
+            } else if status.enabled {
+                fallback_status.to_owned()
+            } else {
+                "disabled".to_owned()
+            };
+            RuntimeShutdownStepReport::named(format!("channel:{name}"), state, 1)
+        })
+        .collect::<Vec<_>>();
+    reports.push(RuntimeShutdownStepReport::named(
+        "external_processor",
+        fallback_status,
+        1,
+    ));
+    reports
+}
+
+fn durable_inbound_identity(message: &InboundMessage) -> (String, String) {
+    let mut value = serde_json::to_value(message).unwrap_or_default();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("timestamp");
+    }
+    let bytes = serde_json::to_vec(&value).unwrap_or_default();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    (
+        format!("work-{digest}-{nonce:039}"),
+        format!("inbound-{digest}"),
+    )
+}
+
+fn is_external_stop_command(message: &InboundMessage) -> bool {
+    matches!(
+        parse_loop_command(&message.content),
+        Some(LoopCommand::Stop)
+    )
+}
+
+fn handle_external_agent_turn_result(
+    result: ExternalAgentTurnResult,
+    runtime_bus: &MessageBus,
+    durable_work: &mut ExternalDurableWorkRuntime,
+    turn_coordinator: &mut ExternalSessionTurnCoordinator,
+    typing_indicators: &mut Vec<ExternalTypingIndicator>,
+    continue_session: bool,
+) -> Result<Option<InboundMessage>, CliError> {
+    let ExternalAgentTurnResult {
+        session_key,
+        outbound,
+        error,
+        mut retry_message,
+        subagent_runtime,
+        durable_work_id,
+        turn_failed,
+        cancel_session_work,
+        priority_command,
+        turn_cancelled,
+    } = result;
+    let had_error = turn_failed || error.is_some();
+    finish_external_typing_indicator(typing_indicators, &session_key, subagent_runtime.as_ref());
+    if let Some(error) = error {
+        eprintln!("external channel turn failed: {error}");
+    }
+    for mut message in outbound {
+        message.metadata.insert(
+            DURABLE_SESSION_REF_METADATA.to_owned(),
+            Value::String(opaque_ref("session", &session_key)),
+        );
+        if let Some(work_id) = durable_work_id.as_deref() {
+            message.metadata.insert(
+                DURABLE_WORK_ID_METADATA.to_owned(),
+                Value::String(opaque_ref("work", work_id)),
+            );
+        }
+        runtime_bus.publish_outbound(message);
+    }
+    if cancel_session_work {
+        request_external_session_cancellation(
+            &mut durable_work.dispatcher,
+            &durable_work.data_dir,
+            &session_key,
+            durable_work_id.as_deref(),
+        )?;
+    }
+    if let Some(work_id) = durable_work_id.as_deref() {
+        if retry_message.is_some() {
+            let scheduled = schedule_external_work_retry(
+                &mut durable_work.dispatcher,
+                &durable_work.data_dir,
+                work_id,
+                now_millis().saturating_add(DURABLE_WORK_BUSY_RETRY_MS),
+            )?;
+            if !scheduled {
+                retry_message = None;
+            }
+        } else if turn_cancelled {
+            record_external_work_cancelled(
+                &mut durable_work.dispatcher,
+                &durable_work.data_dir,
+                work_id,
+            )?;
+        } else {
+            record_external_work_terminal(
+                &mut durable_work.dispatcher,
+                &durable_work.data_dir,
+                work_id,
+                if had_error {
+                    WorkTerminalKind::Failed
+                } else {
+                    WorkTerminalKind::Succeeded
+                },
+            )?;
+        }
+    }
+    if !continue_session || priority_command {
+        return Ok(None);
+    }
+    let next = if let Some(message) = retry_message {
+        if durable_work_id.is_some() {
+            turn_coordinator.finish_turn(&session_key)
+        } else {
+            turn_coordinator.defer_turn(session_key, message);
+            None
+        }
+    } else {
+        turn_coordinator.finish_turn(&session_key)
+    };
+    Ok(next)
+}
+
+fn durable_work_state_for_owner(
+    data_dir: &Path,
+    active_lease_owner_ref: &str,
+) -> Result<
+    (
+        shacs_session::durable_replay::DurableReplayState,
+        DurableWorkAdmission,
+    ),
+    CliError,
+> {
+    let replay = evaluate_runtime_durable_recovery(data_dir);
+    if !replay.writable {
+        return Err(durable_recovery_admission_error(&replay));
+    }
+    let state = replay.state.ok_or_else(|| {
+        CliError::InvalidArguments("durable work replay state is unavailable".to_owned())
+    })?;
+    let work = evaluate_durable_work_recovery_for_owner(
+        &state.work,
+        runtime_durable_work_payload_root(data_dir),
+        now_millis(),
+        Some(active_lease_owner_ref),
+    );
+    Ok((state, work))
+}
+
+fn dispatch_due_external_work(
+    dispatcher: &mut DurableWorkDispatcher,
+    data_dir: &Path,
+) -> Result<(), CliError> {
+    let (state, admission) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+    if !admission.writable {
+        return Err(durable_work_admission_error(&admission));
+    }
+    dispatcher
+        .dispatch_due(&state.work, &admission, now_millis())
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "external durable work dispatch failed: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    Ok(())
+}
+
+fn schedule_external_work_retry(
+    dispatcher: &mut DurableWorkDispatcher,
+    data_dir: &Path,
+    work_id: &str,
+    next_wake_at_ms: u64,
+) -> Result<bool, CliError> {
+    let (state, _) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+    let item =
+        state.work.items.get(work_id).ok_or_else(|| {
+            CliError::InvalidArguments(format!("durable work {work_id} is missing"))
+        })?;
+    if item.cancellation_requested_sequence.is_some() {
+        dispatcher
+            .record_cancelled(item, "cancellation_observed_before_retry")
+            .map_err(|error| {
+                CliError::InvalidArguments(format!(
+                    "external durable work cancellation recording failed: {}",
+                    redact_string(&error.to_string())
+                ))
+            })?;
+        return Ok(false);
+    }
+    if item.attempt >= MAX_DURABLE_WORK_ATTEMPTS {
+        dispatcher
+            .record_terminal(item, WorkTerminalKind::Exhausted, "attempt_limit")
+            .map_err(|error| {
+                CliError::InvalidArguments(format!(
+                    "external durable work exhaustion recording failed: {}",
+                    redact_string(&error.to_string())
+                ))
+            })?;
+        return Ok(false);
+    }
+    dispatcher
+        .schedule_retry(
+            item,
+            next_wake_at_ms,
+            DURABLE_WORK_BUSY_RETRY_MS,
+            "session_busy",
+        )
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "external durable work retry scheduling failed: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    Ok(true)
+}
+
+fn record_external_work_terminal(
+    dispatcher: &mut DurableWorkDispatcher,
+    data_dir: &Path,
+    work_id: &str,
+    terminal_kind: shacs_session::durable_work::WorkTerminalKind,
+) -> Result<(), CliError> {
+    let (state, _) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+    let item =
+        state.work.items.get(work_id).ok_or_else(|| {
+            CliError::InvalidArguments(format!("durable work {work_id} is missing"))
+        })?;
+    let outcome_ref = match terminal_kind {
+        shacs_session::durable_work::WorkTerminalKind::Succeeded => "external_turn_completed",
+        _ => "external_turn_failed",
+    };
+    dispatcher
+        .record_terminal(item, terminal_kind, outcome_ref)
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "external durable work terminal recording failed: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    Ok(())
+}
+
+fn record_external_work_cancelled(
+    dispatcher: &mut DurableWorkDispatcher,
+    data_dir: &Path,
+    work_id: &str,
+) -> Result<(), CliError> {
+    let (state, _) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+    let item =
+        state.work.items.get(work_id).ok_or_else(|| {
+            CliError::InvalidArguments(format!("durable work {work_id} is missing"))
+        })?;
+    dispatcher
+        .record_cancelled(item, "cancellation_observed")
+        .map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "external durable work cancellation recording failed: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    Ok(())
+}
+
+fn request_external_session_cancellation(
+    dispatcher: &mut DurableWorkDispatcher,
+    data_dir: &Path,
+    session_key: &str,
+    command_work_id: Option<&str>,
+) -> Result<(), CliError> {
+    let (state, _) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+    let targets = state
+        .work
+        .items
+        .values()
+        .filter(|item| item.session_key == session_key)
+        .filter(|item| Some(item.work_id.as_str()) != command_work_id)
+        .filter(|item| !item.state.is_terminal() && item.cancellation_requested_sequence.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    for item in targets {
+        dispatcher
+            .request_cancellation(&item, "session_stop_command")
+            .map_err(|error| {
+                CliError::InvalidArguments(format!(
+                    "external durable work cancellation request failed: {}",
+                    redact_string(&error.to_string())
+                ))
+            })?;
+        if item.state != ReplayWorkState::Leased {
+            dispatcher
+                .record_cancelled(&item, "not_running_when_stop_observed")
+                .map_err(|error| {
+                    CliError::InvalidArguments(format!(
+                        "external durable work cancellation recording failed: {}",
+                        redact_string(&error.to_string())
+                    ))
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn enqueue_remaining_external_inbound(
+    runtime_bus: &MessageBus,
+    durable_work: &mut ExternalDurableWorkRuntime,
+) -> Result<(), CliError> {
+    while let Some(message) = runtime_bus.try_consume_inbound() {
+        if message
+            .metadata
+            .get(DURABLE_WORK_ID_METADATA)
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            continue;
+        }
+        let _enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (state, admission) = durable_work_state_for_owner(
+            &durable_work.data_dir,
+            durable_work.dispatcher.lease_owner_ref(),
+        )?;
+        if !admission.writable {
+            return Err(durable_work_admission_error(&admission));
+        }
+        let open_work_count = state
+            .work
+            .items
+            .values()
+            .filter(|item| !item.state.is_terminal())
+            .count();
+        if open_work_count >= DURABLE_WORK_MAX_OPEN_ITEMS {
+            eprintln!(
+                "external durable work shutdown enqueue rejected: open work limit {DURABLE_WORK_MAX_OPEN_ITEMS} reached"
+            );
+            continue;
+        }
+        let (work_id, dedupe_hint) = durable_inbound_identity(&message);
+        if let Err(error) =
+            durable_work
+                .dispatcher
+                .enqueue_inbound(work_id, &message, Some(dedupe_hint), None)
+        {
+            eprintln!("external durable work shutdown enqueue failed: {error}");
+        } else {
+            clear_pending_inbound_hint(&durable_work.data_dir, &message);
+        }
+    }
+    Ok(())
+}
+
+fn request_active_external_work_cancellation(
+    durable_work: &mut ExternalDurableWorkRuntime,
+    active_sessions: &[String],
+) -> Result<(), CliError> {
+    let (state, _) = durable_work_state_for_owner(
+        &durable_work.data_dir,
+        durable_work.dispatcher.lease_owner_ref(),
+    )?;
+    let targets = state
+        .work
+        .items
+        .values()
+        .filter(|item| item.state == ReplayWorkState::Leased)
+        .filter(|item| active_sessions.contains(&item.session_key))
+        .filter(|item| item.cancellation_requested_sequence.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    for item in targets {
+        durable_work
+            .dispatcher
+            .request_cancellation(&item, "runtime_shutdown")
+            .map_err(|error| {
+                CliError::InvalidArguments(format!(
+                    "external durable work shutdown cancellation failed: {}",
+                    redact_string(&error.to_string())
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+fn requeue_owned_external_work(
+    durable_work: &mut ExternalDurableWorkRuntime,
+) -> Result<(), CliError> {
+    let owner_ref = durable_work.dispatcher.lease_owner_ref().to_owned();
+    let (state, _) = durable_work_state_for_owner(&durable_work.data_dir, &owner_ref)?;
+    let leased = state
+        .work
+        .items
+        .values()
+        .filter(|item| {
+            item.state == ReplayWorkState::Leased
+                && item.lease_owner_ref.as_deref() == Some(owner_ref.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for item in leased {
+        let transition = if item.cancellation_requested_sequence.is_some() {
+            durable_work
+                .dispatcher
+                .record_cancelled(&item, "controlled_shutdown_after_cancellation")
+        } else {
+            durable_work
+                .dispatcher
+                .requeue(&item, "controlled_shutdown")
+        };
+        transition.map_err(|error| {
+            CliError::InvalidArguments(format!(
+                "external durable work shutdown transition failed: {}",
+                redact_string(&error.to_string())
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn start_external_typing_indicator(
@@ -8519,31 +11625,74 @@ fn spawn_external_agent_turn(
     runtime_bus: MessageBus,
     result_tx: mpsc::Sender<ExternalAgentTurnResult>,
 ) -> thread::JoinHandle<()> {
+    let priority_command = matches!(
+        parse_loop_command(&message.content),
+        Some(LoopCommand::Stop)
+    );
+    let reservation =
+        (!priority_command).then(|| adapter.session_turn_lock.reserve(session_key.clone()));
     thread::spawn(move || {
+        let _reservation = reservation;
+        if let Some(reservation) = _reservation.as_ref() {
+            reservation.bind_to_current_thread();
+        }
+        let durable_work_id = message
+            .metadata
+            .get(DURABLE_WORK_ID_METADATA)
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let retry_message = message.clone();
-        let result = match adapter.process_external_inbound_with_streaming(
-            message,
-            adapter.loop_config(),
-            &runtime_bus,
-        ) {
-            Ok((_, outbound, subagent_runtime)) => ExternalAgentTurnResult {
+        let result = match catch_unwind(AssertUnwindSafe(|| {
+            adapter.process_external_inbound_with_streaming(
+                message,
+                adapter.loop_config(),
+                &runtime_bus,
+            )
+        })) {
+            Ok(Ok((turn, outbound, subagent_runtime))) => ExternalAgentTurnResult {
                 session_key,
                 outbound,
                 error: None,
                 retry_message: None,
                 subagent_runtime: Some(subagent_runtime),
+                durable_work_id: durable_work_id.clone(),
+                turn_failed: turn.stop_reason == "error",
+                cancel_session_work: turn.command == Some(AgentLoopCommandResult::StopRequested),
+                priority_command,
+                turn_cancelled: external_turn_was_cancelled(&turn.stop_reason),
             },
-            Err(error) => ExternalAgentTurnResult {
+            Ok(Err(error)) => ExternalAgentTurnResult {
                 session_key,
                 outbound: Vec::new(),
                 retry_message: (error.status == 409 && error.error_type == "session_busy")
                     .then_some(retry_message),
                 error: Some(error.to_string()),
                 subagent_runtime: None,
+                durable_work_id,
+                turn_failed: true,
+                cancel_session_work: false,
+                priority_command,
+                turn_cancelled: false,
+            },
+            Err(_panic) => ExternalAgentTurnResult {
+                session_key,
+                outbound: Vec::new(),
+                retry_message: None,
+                error: Some("external turn panicked".to_owned()),
+                subagent_runtime: None,
+                durable_work_id,
+                turn_failed: true,
+                cancel_session_work: false,
+                priority_command,
+                turn_cancelled: false,
             },
         };
         let _ = result_tx.send(result);
     })
+}
+
+fn external_turn_was_cancelled(stop_reason: &str) -> bool {
+    matches!(stop_reason, "cancelled" | "workflow_cancelled")
 }
 
 fn join_finished_turns(handles: &mut Vec<thread::JoinHandle<()>>) {
@@ -8956,6 +12105,7 @@ struct DiscordGatewaySessionContext<'a> {
     send_attempts: usize,
     metadata_path: &'a Path,
     resume_state: &'a mut DiscordGatewayResumeState,
+    runtime_context: &'a ExternalTransportRuntimeContext,
 }
 
 const DISCORD_EXTERNAL_MESSAGE_LIMIT: usize = 2000;
@@ -9041,19 +12191,450 @@ fn outbound_route_key(message: &OutboundMessage) -> String {
 }
 
 fn load_metadata_json(path: &Path) -> Value {
-    fs::read_to_string(path)
+    let _guard = CHANNEL_METADATA_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    load_metadata_json_unlocked(path)
+}
+
+fn load_metadata_json_unlocked(path: &Path) -> Value {
+    let Some(metadata) = fs::symlink_metadata(path).ok() else {
+        return json!({});
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_CHANNEL_METADATA_BYTES {
+        return json!({});
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| {
+            file.take(MAX_CHANNEL_METADATA_BYTES + 1)
+                .read_to_end(&mut bytes)
+        })
         .ok()
-        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        .filter(|size| *size as u64 <= MAX_CHANNEL_METADATA_BYTES)
+        .and_then(|_| serde_json::from_slice::<Value>(&bytes).ok())
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}))
 }
 
-fn save_metadata_json(path: &Path, value: &Value) -> Result<(), String> {
+fn inspect_channel_restart_states(
+    data_dir: &Path,
+    work: Option<&shacs_session::durable_work::DurableWorkReplayState>,
+) -> Vec<ChannelRestartStateInspect> {
+    let metadata_dir = data_dir
+        .join("runtime")
+        .join("channels")
+        .join("worker-metadata");
+    let mut states = BTreeMap::<String, ChannelRestartStateInspect>::new();
+    if let Ok(entries) = fs::read_dir(metadata_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let value = load_metadata_json(&path);
+            if !value.is_object() {
+                continue;
+            }
+            let channel = channel_name_from_metadata_path(&path, &value);
+            let state = channel_restart_state_from_metadata(&channel, &path, &value);
+            states.insert(path.display().to_string(), state);
+        }
+    }
+    if let Some(work) = work {
+        link_channel_restart_work_refs(&mut states, work);
+    }
+    for channel in [
+        TELEGRAM_CHANNEL,
+        DISCORD_CHANNEL,
+        SLACK_CHANNEL,
+        EMAIL_CHANNEL,
+        WHATSAPP_CHANNEL,
+        WEBSOCKET_CHANNEL,
+    ] {
+        if !states.values().any(|state| state.channel == channel) {
+            states.insert(
+                format!("default:{channel}"),
+                empty_channel_restart_state(channel),
+            );
+        }
+    }
+    states.into_values().collect()
+}
+
+fn channel_name_from_metadata_path(path: &Path, value: &Value) -> String {
+    value
+        .get("restart_state")
+        .and_then(|state| state.get("channel"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("channel").and_then(Value::as_str))
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("unknown");
+            match stem {
+                "discord-rest" | "discord-gateway" => DISCORD_CHANNEL.to_owned(),
+                "email-imap" => EMAIL_CHANNEL.to_owned(),
+                name => name.to_owned(),
+            }
+        })
+}
+
+fn channel_restart_state_from_metadata(
+    channel: &str,
+    path: &Path,
+    value: &Value,
+) -> ChannelRestartStateInspect {
+    let (cursor_kind, cursor_ref) = channel_cursor_projection(channel, value);
+    let mut delivery_by_ref = BTreeMap::new();
+    for status in value
+        .get("deliveries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(channel_delivery_status_from_value)
+    {
+        delivery_by_ref.insert(status.delivery_ref.clone(), status);
+    }
+    let mut delivery_statuses = delivery_by_ref.into_values().collect::<Vec<_>>();
+    delivery_statuses.sort_by(|left, right| {
+        left.updated_at_ms
+            .cmp(&right.updated_at_ms)
+            .then_with(|| left.delivery_ref.cmp(&right.delivery_ref))
+    });
+    let keep_from = delivery_statuses.len().saturating_sub(32);
+    if keep_from > 0 {
+        delivery_statuses.drain(0..keep_from);
+    }
+    let last_transition_ms = value
+        .get("restart_state")
+        .and_then(|state| state.get("last_transition_ms"))
+        .and_then(Value::as_u64)
+        .or_else(|| value.get("updated_at").and_then(Value::as_u64))
+        .or_else(|| {
+            delivery_statuses
+                .iter()
+                .filter_map(|item| item.updated_at_ms)
+                .max()
+        });
+    let mut pending_inbound_refs = value
+        .get("pending_inbound")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("inbound_ref").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    pending_inbound_refs.extend(
+        value
+            .get("restart_state")
+            .and_then(|state| state.get("pending_inbound_refs"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned),
+    );
+    pending_inbound_refs.sort();
+    pending_inbound_refs.dedup();
+    let mut pending_outbound_refs = delivery_statuses
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.status,
+                ChannelDeliveryProjectionStatus::Pending | ChannelDeliveryProjectionStatus::Unknown
+            )
+        })
+        .map(|item| item.delivery_ref.clone())
+        .collect::<Vec<_>>();
+    pending_outbound_refs.extend(
+        value
+            .get("restart_state")
+            .and_then(|state| state.get("pending_outbound_refs"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned),
+    );
+    pending_outbound_refs.sort();
+    pending_outbound_refs.dedup();
+    ChannelRestartStateInspect {
+        channel: channel.to_owned(),
+        connection_ref: value
+            .get("restart_state")
+            .and_then(|state| state.get("connection_ref"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| connection_ref_from_metadata_path(path)),
+        metadata_ref: safe_path_ref(path),
+        schema_version: value
+            .get("restart_state")
+            .and_then(|state| state.get("schema_version"))
+            .and_then(Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok())
+            .unwrap_or(1),
+        cursor_kind,
+        cursor_ref,
+        pending_inbound_refs,
+        pending_outbound_refs,
+        delivery_statuses,
+        dedupe_candidate_refs: Vec::new(),
+        last_transition_ms,
+    }
+}
+
+fn channel_cursor_projection(channel: &str, value: &Value) -> (Option<String>, Option<String>) {
+    if let Some(cursor) = value
+        .get("restart_state")
+        .and_then(|state| state.get("cursor"))
+    {
+        let kind = cursor
+            .get("kind")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let cursor_ref = cursor
+            .get("value_ref")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if kind.is_some() || cursor_ref.is_some() {
+            return (kind, cursor_ref);
+        }
+    }
+    match channel {
+        TELEGRAM_CHANNEL => value
+            .get("offset")
+            .and_then(Value::as_i64)
+            .map(|offset| {
+                (
+                    Some("telegram_offset".to_owned()),
+                    Some(opaque_ref("cursor", &offset.to_string())),
+                )
+            })
+            .unwrap_or((None, None)),
+        DISCORD_CHANNEL => {
+            if value.get("session_id").is_some() || value.get("sequence").is_some() {
+                return (
+                    Some("discord_gateway_resume".to_owned()),
+                    Some(opaque_ref(
+                        "cursor",
+                        &canonical_json_ref_value(
+                            value,
+                            &["session_id", "sequence", "resume_gateway_url"],
+                        ),
+                    )),
+                );
+            }
+            value
+                .get("last_ids")
+                .and_then(Value::as_object)
+                .filter(|object| !object.is_empty())
+                .map(|object| {
+                    (
+                        Some("discord_rest_last_message_id".to_owned()),
+                        Some(opaque_ref(
+                            "cursor",
+                            &Value::Object(object.clone()).to_string(),
+                        )),
+                    )
+                })
+                .unwrap_or((None, None))
+        }
+        EMAIL_CHANNEL => value
+            .get("mailboxes")
+            .or_else(|| value.get("seen"))
+            .map(|seen| {
+                (
+                    Some("email_uidvalidity_seen_uid".to_owned()),
+                    Some(opaque_ref("cursor", &seen.to_string())),
+                )
+            })
+            .unwrap_or((None, None)),
+        SLACK_CHANNEL => (Some("slack_socket_envelope_thread_hint".to_owned()), None),
+        WHATSAPP_CHANNEL => (Some("whatsapp_bridge_connection_hint".to_owned()), None),
+        WEBSOCKET_CHANNEL => (Some("websocket_connection_hint".to_owned()), None),
+        _ => (None, None),
+    }
+}
+
+fn canonical_json_ref_value(value: &Value, keys: &[&str]) -> String {
+    let mut object = Map::new();
+    for key in keys {
+        if let Some(item) = value.get(*key) {
+            object.insert((*key).to_owned(), item.clone());
+        }
+    }
+    Value::Object(object).to_string()
+}
+
+fn channel_delivery_status_from_value(value: &Value) -> Option<ChannelDeliveryStatusInspect> {
+    let id = value.get("id").and_then(Value::as_str)?;
+    let mut status = channel_delivery_projection_status(
+        value
+            .get("delivery_projection_status")
+            .or_else(|| value.get("status"))
+            .and_then(Value::as_str),
+    );
+    if status == ChannelDeliveryProjectionStatus::Pending
+        && value.get("writer_instance_ref").and_then(Value::as_str) != Some(process_instance_ref())
+    {
+        status = ChannelDeliveryProjectionStatus::Unknown;
+    }
+    Some(ChannelDeliveryStatusInspect {
+        delivery_ref: opaque_ref("delivery", id),
+        status,
+        updated_at_ms: value.get("updated_at").and_then(Value::as_u64),
+    })
+}
+
+fn channel_delivery_projection_status(status: Option<&str>) -> ChannelDeliveryProjectionStatus {
+    match status {
+        Some("pending") => ChannelDeliveryProjectionStatus::Pending,
+        Some("sent_hint") | Some("sent") | Some("processed") => {
+            ChannelDeliveryProjectionStatus::SentHint
+        }
+        Some("failed_hint") | Some("failed") => ChannelDeliveryProjectionStatus::FailedHint,
+        Some("dedupe_candidate") => ChannelDeliveryProjectionStatus::DedupeCandidate,
+        _ => ChannelDeliveryProjectionStatus::Unknown,
+    }
+}
+
+fn link_channel_restart_work_refs(
+    states: &mut BTreeMap<String, ChannelRestartStateInspect>,
+    work: &shacs_session::durable_work::DurableWorkReplayState,
+) {
+    for item in work.items.values().filter(|item| !item.state.is_terminal()) {
+        let Some(channel) = durable_work_channel(item) else {
+            continue;
+        };
+        let existing_key = states
+            .iter()
+            .find_map(|(key, state)| (state.channel == channel).then(|| key.clone()));
+        let state = if let Some(key) = existing_key {
+            states.get_mut(&key)
+        } else {
+            states.insert(channel.clone(), empty_channel_restart_state(&channel));
+            states.get_mut(&channel)
+        };
+        let Some(state) = state else {
+            continue;
+        };
+        let work_ref = opaque_ref("work", &item.work_id);
+        if item.work_kind == "agent.inbound_turn" {
+            push_unique(&mut state.pending_inbound_refs, work_ref.clone());
+            if item.dedupe_hint.is_some() {
+                push_unique(&mut state.dedupe_candidate_refs, work_ref.clone());
+                state.delivery_statuses.push(ChannelDeliveryStatusInspect {
+                    delivery_ref: work_ref,
+                    status: ChannelDeliveryProjectionStatus::DedupeCandidate,
+                    updated_at_ms: None,
+                });
+            }
+        } else {
+            push_unique(&mut state.pending_outbound_refs, work_ref);
+        }
+    }
+}
+
+fn empty_channel_restart_state(channel: &str) -> ChannelRestartStateInspect {
+    ChannelRestartStateInspect {
+        channel: channel.to_owned(),
+        connection_ref: opaque_ref("connection", channel),
+        metadata_ref: "metadata:none".to_owned(),
+        schema_version: 1,
+        cursor_kind: match channel {
+            TELEGRAM_CHANNEL => Some("telegram_offset".to_owned()),
+            DISCORD_CHANNEL => Some("discord_gateway_resume".to_owned()),
+            SLACK_CHANNEL => Some("slack_socket_envelope_thread_hint".to_owned()),
+            EMAIL_CHANNEL => Some("email_uidvalidity_seen_uid".to_owned()),
+            WHATSAPP_CHANNEL => Some("whatsapp_bridge_connection_hint".to_owned()),
+            WEBSOCKET_CHANNEL => Some("websocket_connection_hint".to_owned()),
+            _ => None,
+        },
+        cursor_ref: None,
+        pending_inbound_refs: Vec::new(),
+        pending_outbound_refs: Vec::new(),
+        delivery_statuses: Vec::new(),
+        dedupe_candidate_refs: Vec::new(),
+        last_transition_ms: None,
+    }
+}
+
+fn durable_work_channel(item: &shacs_session::durable_work::ReplayWorkItem) -> Option<String> {
+    match &item.payload_ref {
+        shacs_session::durable_work::WorkPayloadRef::Inline { data, .. } => data
+            .get("channel")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        shacs_session::durable_work::WorkPayloadRef::Artifact { .. } => item
+            .session_key
+            .split_once(':')
+            .map(|(channel, _)| channel.to_owned()),
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn safe_path_ref(path: &Path) -> String {
+    opaque_ref("metadata", &path.display().to_string())
+}
+
+fn connection_ref_from_metadata_path(path: &Path) -> String {
+    opaque_ref(
+        "connection",
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown"),
+    )
+}
+
+fn opaque_ref(prefix: &str, value: &str) -> String {
+    let digest = sha256_hex(value);
+    let visible_len = digest.len().min(16);
+    format!("{prefix}:{}", &digest[..visible_len])
+}
+
+fn process_instance_ref() -> &'static str {
+    PROCESS_INSTANCE_REF
+        .get_or_init(|| {
+            opaque_ref(
+                "process",
+                &format!("{}:{}", std::process::id(), now_millis()),
+            )
+        })
+        .as_str()
+}
+
+fn save_metadata_json_unlocked(path: &Path, value: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let temp = path.with_extension(format!("json.tmp-{}", now_millis()));
-    let payload = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    let mut value = value.clone();
+    sync_restart_pending_refs(&mut value);
+    if let Some(restart_state) = value
+        .get_mut("restart_state")
+        .and_then(Value::as_object_mut)
+    {
+        restart_state.insert(
+            "connection_ref".to_owned(),
+            Value::String(connection_ref_from_metadata_path(path)),
+        );
+    }
+    let payload = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
+    if payload.len() as u64 > MAX_CHANNEL_METADATA_BYTES {
+        return Err("channel metadata exceeds size limit".to_owned());
+    }
     {
         let mut file = fs::File::create(&temp).map_err(|error| error.to_string())?;
         file.write_all(&payload)
@@ -9062,7 +12643,165 @@ fn save_metadata_json(path: &Path, value: &Value) -> Result<(), String> {
         file.sync_all().map_err(|error| error.to_string())?;
     }
     fs::rename(&temp, path).map_err(|error| error.to_string())?;
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
+}
+
+fn sync_restart_pending_refs(root: &mut Value) {
+    let pending_inbound_refs = root
+        .get("pending_inbound")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("inbound_ref").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut latest_deliveries = BTreeMap::new();
+    for delivery in root
+        .get("deliveries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(id) = delivery.get("id").and_then(Value::as_str) {
+            latest_deliveries.insert(id.to_owned(), delivery.clone());
+        }
+    }
+    let pending_outbound_refs = latest_deliveries
+        .into_iter()
+        .filter_map(|(id, delivery)| {
+            (delivery.get("status").and_then(Value::as_str) == Some("pending"))
+                .then(|| opaque_ref("delivery", &id))
+        })
+        .collect::<Vec<_>>();
+    if let Some(restart_state) = root.get_mut("restart_state").and_then(Value::as_object_mut) {
+        restart_state.insert(
+            "pending_inbound_refs".to_owned(),
+            json!(pending_inbound_refs),
+        );
+        restart_state.insert(
+            "pending_outbound_refs".to_owned(),
+            json!(pending_outbound_refs),
+        );
+    }
+}
+
+fn set_restart_state_envelope(
+    root: &mut Value,
+    channel: &str,
+    cursor_kind: Option<&str>,
+    cursor_value: Option<Value>,
+) {
+    let cursor = cursor_kind.map(|kind| {
+        let value_ref = cursor_value
+            .as_ref()
+            .map(Value::to_string)
+            .map(|value| opaque_ref("cursor", &value));
+        json!({
+            "kind": kind,
+            "value_ref": value_ref,
+        })
+    });
+    root["restart_state"] = json!({
+        "schema_version": 1,
+        "channel": channel,
+        "connection_ref": opaque_ref("connection", channel),
+        "cursor": cursor,
+        "pending_inbound_refs": [],
+        "pending_outbound_refs": [],
+        "last_transition_ms": now_millis(),
+        "semantics": "cursor_and_delivery_hint_only",
+    });
+}
+
+fn pending_inbound_ref(message: &InboundMessage) -> Result<String, String> {
+    let bytes = serde_json::to_vec(message).map_err(|error| error.to_string())?;
+    Ok(opaque_ref("inbound", &hex_lower(&Sha256::digest(bytes))))
+}
+
+fn record_pending_inbound_hint(path: &Path, message: &InboundMessage) -> Result<(), String> {
+    let _guard = CHANNEL_METADATA_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut root = load_metadata_json_unlocked(path);
+    if root.get("restart_state").is_none() {
+        set_restart_state_envelope(&mut root, &message.channel, None, None);
+    }
+    if !root.get("pending_inbound").is_some_and(Value::is_array) {
+        root["pending_inbound"] = json!([]);
+    }
+    let inbound_ref = pending_inbound_ref(message)?;
+    if let Some(pending) = root["pending_inbound"].as_array_mut() {
+        if !pending.iter().any(|item| {
+            item.get("inbound_ref").and_then(Value::as_str) == Some(inbound_ref.as_str())
+        }) {
+            pending.push(json!({
+                "inbound_ref": inbound_ref.clone(),
+                "session_ref": opaque_ref("session", &message.session_key()),
+                "dedupe_ref": opaque_ref("dedupe", &inbound_ref),
+                "recorded_at_ms": now_millis(),
+            }));
+        }
+        let keep_from = pending.len().saturating_sub(128);
+        if keep_from > 0 {
+            pending.drain(0..keep_from);
+        }
+    }
+    save_metadata_json_unlocked(path, &root)
+}
+
+fn clear_pending_inbound_hint(data_dir: &Path, message: &InboundMessage) {
+    let Ok(inbound_ref) = pending_inbound_ref(message) else {
+        return;
+    };
+    let metadata_dir = data_dir
+        .join("runtime")
+        .join("channels")
+        .join("worker-metadata");
+    let Ok(entries) = fs::read_dir(metadata_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let _guard = CHANNEL_METADATA_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut root = load_metadata_json_unlocked(&path);
+        let Some(pending) = root
+            .get_mut("pending_inbound")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        let before = pending.len();
+        pending.retain(|item| {
+            item.get("inbound_ref").and_then(Value::as_str) != Some(inbound_ref.as_str())
+        });
+        if pending.len() != before {
+            if let Err(error) = save_metadata_json_unlocked(&path, &root) {
+                eprintln!("channel pending inbound metadata clear failed: {error}");
+            }
+        }
+    }
+}
+
+fn delivery_projection_status_label(status: &str) -> &'static str {
+    match channel_delivery_projection_status(Some(status)) {
+        ChannelDeliveryProjectionStatus::Pending => "pending",
+        ChannelDeliveryProjectionStatus::SentHint => "sent_hint",
+        ChannelDeliveryProjectionStatus::FailedHint => "failed_hint",
+        ChannelDeliveryProjectionStatus::Unknown => "unknown",
+        ChannelDeliveryProjectionStatus::DedupeCandidate => "dedupe_candidate",
+    }
 }
 
 fn delivery_record_id(message: &OutboundMessage) -> String {
@@ -9085,7 +12824,11 @@ fn record_delivery_state(
     status: &str,
     last_error: Option<&str>,
 ) {
-    let mut root = load_metadata_json(path);
+    let _guard = CHANNEL_METADATA_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut root = load_metadata_json_unlocked(path);
     if !root.get("deliveries").is_some_and(Value::is_array) {
         root["deliveries"] = json!([]);
     }
@@ -9096,6 +12839,11 @@ fn record_delivery_state(
         "reply_to": message.reply_to,
         "content_sha256": sha256_hex(&message.content),
         "status": status,
+        "delivery_projection_status": delivery_projection_status_label(status),
+        "writer_pid": std::process::id(),
+        "writer_instance_ref": process_instance_ref(),
+        "work_ref": message.metadata.get(DURABLE_WORK_ID_METADATA),
+        "session_ref": message.metadata.get(DURABLE_SESSION_REF_METADATA),
         "updated_at": now_millis(),
         "last_error": last_error,
     });
@@ -9106,7 +12854,19 @@ fn record_delivery_state(
             deliveries.drain(0..keep_from);
         }
     }
-    if let Err(error) = save_metadata_json(path, &root) {
+    if root.get("restart_state").is_none() {
+        let cursor_kind = match message.channel.as_str() {
+            SLACK_CHANNEL => Some("slack_socket_envelope_thread_hint"),
+            WHATSAPP_CHANNEL => Some("whatsapp_bridge_connection_hint"),
+            WEBSOCKET_CHANNEL => Some("websocket_connection_hint"),
+            TELEGRAM_CHANNEL => Some("telegram_offset"),
+            DISCORD_CHANNEL => Some("discord_gateway_resume"),
+            EMAIL_CHANNEL => Some("email_uidvalidity_seen_uid"),
+            _ => None,
+        };
+        set_restart_state_envelope(&mut root, &message.channel, cursor_kind, None);
+    }
+    if let Err(error) = save_metadata_json_unlocked(path, &root) {
         eprintln!("delivery metadata save failed: {error}");
     }
 }
@@ -9135,9 +12895,19 @@ fn load_telegram_offset(path: &Path) -> i64 {
 }
 
 fn save_telegram_offset(path: &Path, offset: i64) {
-    let mut root = load_metadata_json(path);
+    let _guard = CHANNEL_METADATA_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut root = load_metadata_json_unlocked(path);
     root["offset"] = json!(offset);
-    if let Err(error) = save_metadata_json(path, &root) {
+    set_restart_state_envelope(
+        &mut root,
+        TELEGRAM_CHANNEL,
+        Some("telegram_offset"),
+        Some(json!(offset)),
+    );
+    if let Err(error) = save_metadata_json_unlocked(path, &root) {
         eprintln!("telegram metadata save failed: {error}");
     }
 }
@@ -9157,9 +12927,19 @@ fn load_discord_last_ids(path: &Path) -> BTreeMap<String, String> {
 }
 
 fn save_discord_last_ids(path: &Path, last_ids: &BTreeMap<String, String>) {
-    let mut root = load_metadata_json(path);
+    let _guard = CHANNEL_METADATA_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut root = load_metadata_json_unlocked(path);
     root["last_ids"] = json!(last_ids);
-    if let Err(error) = save_metadata_json(path, &root) {
+    set_restart_state_envelope(
+        &mut root,
+        DISCORD_CHANNEL,
+        Some("discord_rest_last_message_id"),
+        Some(json!(last_ids)),
+    );
+    if let Err(error) = save_metadata_json_unlocked(path, &root) {
         eprintln!("discord metadata save failed: {error}");
     }
 }
@@ -9212,7 +12992,11 @@ fn load_email_seen_uid_state(path: &Path, key: &str) -> EmailSeenUidState {
 }
 
 fn save_email_seen_uid_state(path: &Path, key: &str, state: &EmailSeenUidState) {
-    let mut root = load_metadata_json(path);
+    let _guard = CHANNEL_METADATA_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut root = load_metadata_json_unlocked(path);
     if !root.get("mailboxes").is_some_and(Value::is_object) {
         root["mailboxes"] = json!({});
     }
@@ -9225,7 +13009,14 @@ fn save_email_seen_uid_state(path: &Path, key: &str, state: &EmailSeenUidState) 
             .map(Value::String)
             .collect::<Vec<_>>()
     });
-    if let Err(error) = save_metadata_json(path, &root) {
+    let cursor_value = root.get("mailboxes").cloned();
+    set_restart_state_envelope(
+        &mut root,
+        EMAIL_CHANNEL,
+        Some("email_uidvalidity_seen_uid"),
+        cursor_value,
+    );
+    if let Err(error) = save_metadata_json_unlocked(path, &root) {
         eprintln!("email metadata save failed: {error}");
     }
 }
@@ -9278,7 +13069,11 @@ fn load_discord_gateway_resume_state(path: &Path, token: &str) -> DiscordGateway
 }
 
 fn save_discord_gateway_resume_state(path: &Path, state: &DiscordGatewayResumeState, token: &str) {
-    let mut root = load_metadata_json(path);
+    let _guard = CHANNEL_METADATA_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut root = load_metadata_json_unlocked(path);
     root["session_id"] = json!(state.session_id);
     root["sequence"] = json!(state.sequence);
     root["resume_gateway_url"] = json!(state.resume_gateway_url);
@@ -9288,13 +13083,39 @@ fn save_discord_gateway_resume_state(path: &Path, state: &DiscordGatewayResumeSt
         .clone()
         .unwrap_or_else(|| sha256_hex(token)));
     root["updated_at"] = json!(now_millis());
-    if let Err(error) = save_metadata_json(path, &root) {
+    let cursor_value = canonical_discord_gateway_resume_value(&root);
+    set_restart_state_envelope(
+        &mut root,
+        DISCORD_CHANNEL,
+        Some("discord_gateway_resume"),
+        Some(cursor_value),
+    );
+    if let Err(error) = save_metadata_json_unlocked(path, &root) {
         eprintln!("discord gateway metadata save failed: {error}");
     }
 }
 
+fn canonical_discord_gateway_resume_value(root: &Value) -> Value {
+    let mut value = Map::new();
+    for key in [
+        "session_id",
+        "sequence",
+        "resume_gateway_url",
+        "bot_user_id",
+    ] {
+        if let Some(item) = root.get(key) {
+            value.insert(key.to_owned(), item.clone());
+        }
+    }
+    Value::Object(value)
+}
+
 fn clear_discord_gateway_resume_state(path: &Path) {
-    let mut root = load_metadata_json(path);
+    let _guard = CHANNEL_METADATA_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut root = load_metadata_json_unlocked(path);
     if let Some(object) = root.as_object_mut() {
         for key in [
             "session_id",
@@ -9307,7 +13128,13 @@ fn clear_discord_gateway_resume_state(path: &Path) {
             object.remove(key);
         }
     }
-    if let Err(error) = save_metadata_json(path, &root) {
+    set_restart_state_envelope(
+        &mut root,
+        DISCORD_CHANNEL,
+        Some("discord_gateway_resync_required"),
+        None,
+    );
+    if let Err(error) = save_metadata_json_unlocked(path, &root) {
         eprintln!("discord gateway metadata clear failed: {error}");
     }
 }
@@ -9368,6 +13195,38 @@ fn run_external_transport_worker(
     }
 }
 
+fn publish_external_inbound_with_hint(
+    bus: &MessageBus,
+    message: InboundMessage,
+    metadata_path: &Path,
+    runtime_context: &ExternalTransportRuntimeContext,
+) -> bool {
+    if let Err(error) = record_pending_inbound_hint(metadata_path, &message) {
+        eprintln!("channel pending inbound metadata save failed: {error}");
+        return false;
+    }
+    if let Err(error) = runtime_context.enqueue_inbound(bus, &message) {
+        eprintln!("external durable inbound enqueue failed: {error}");
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+fn publish_external_inbound(
+    inbound_bus: &MessageBus,
+    inbound: InboundMessage,
+    stop: &AtomicBool,
+) -> bool {
+    loop {
+        match inbound_bus.try_publish_inbound(inbound.clone()) {
+            Ok(()) => return true,
+            Err(_) if stop.load(Ordering::SeqCst) => return false,
+            Err(_) => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
 fn run_telegram_transport(
     config: TelegramRuntimeConfig,
     inbound_bus: MessageBus,
@@ -9407,7 +13266,14 @@ fn run_telegram_transport(
                         if let Some(inbound) =
                             telegram_update_to_inbound_with_download(&agent, &config.token, update)
                         {
-                            inbound_bus.publish_inbound(inbound);
+                            if !publish_external_inbound_with_hint(
+                                &inbound_bus,
+                                inbound,
+                                &metadata_path,
+                                &transport_context,
+                            ) {
+                                return;
+                            }
                         }
                     }
                     save_telegram_offset(&metadata_path, offset);
@@ -9725,12 +13591,19 @@ fn run_discord_rest_polling_transport(
         for channel_id in channel_ids {
             match poll_discord_channel(&agent, &config, channel_id, last_ids.get(channel_id)) {
                 Ok((messages, newest)) => {
+                    for inbound in messages {
+                        if !publish_external_inbound_with_hint(
+                            &inbound_bus,
+                            inbound,
+                            &metadata_path,
+                            &transport_context,
+                        ) {
+                            return;
+                        }
+                    }
                     if let Some(newest) = newest {
                         last_ids.insert(channel_id.clone(), newest);
                         save_discord_last_ids(&metadata_path, &last_ids);
-                    }
-                    for inbound in messages {
-                        inbound_bus.publish_inbound(inbound);
                     }
                 }
                 Err(error) => eprintln!("discord polling failed for {channel_id}: {error}"),
@@ -9765,6 +13638,7 @@ fn run_discord_gateway_transport(
                 send_attempts: transport_context.send_attempts,
                 metadata_path: &metadata_path,
                 resume_state: &mut resume_state,
+                runtime_context: &transport_context,
             },
         ) {
             Ok(()) => backoff = Duration::from_secs(1),
@@ -9790,6 +13664,7 @@ fn run_discord_gateway_session(
     let send_attempts = gateway_context.send_attempts;
     let metadata_path = gateway_context.metadata_path;
     let resume_state = gateway_context.resume_state;
+    let runtime_context = gateway_context.runtime_context;
     let gateway_url = resume_state
         .resume_gateway_url
         .as_deref()
@@ -9827,9 +13702,9 @@ fn run_discord_gateway_session(
                 };
                 let value =
                     serde_json::from_str::<Value>(&text).map_err(|error| error.to_string())?;
-                if let Some(seq) = value.get("s").and_then(Value::as_i64) {
-                    last_seq = Some(seq);
-                    resume_state.sequence = Some(seq);
+                let event_sequence = value.get("s").and_then(Value::as_i64);
+                if event_sequence.is_some() {
+                    last_seq = event_sequence;
                 }
                 match value.get("op").and_then(Value::as_i64) {
                     Some(10) => {
@@ -9861,18 +13736,28 @@ fn run_discord_gateway_session(
                         clear_discord_gateway_resume_state(metadata_path);
                         return Err("gateway invalid session".to_owned());
                     }
-                    Some(0) => handle_discord_gateway_dispatch(
-                        DiscordGatewayDispatchContext {
-                            config,
-                            agent,
-                            inbound_bus,
-                            recent_ids: &mut recent_ids,
-                            bot_user_id: &mut bot_user_id,
-                            resume_state,
+                    Some(0) => {
+                        let dispatch_result = handle_discord_gateway_dispatch(
+                            DiscordGatewayDispatchContext {
+                                config,
+                                agent,
+                                inbound_bus,
+                                recent_ids: &mut recent_ids,
+                                bot_user_id: &mut bot_user_id,
+                                resume_state: &mut *resume_state,
+                                metadata_path,
+                                runtime_context,
+                            },
+                            &value,
+                        );
+                        commit_discord_gateway_dispatch_sequence(
+                            dispatch_result,
+                            event_sequence,
                             metadata_path,
-                        },
-                        &value,
-                    ),
+                            resume_state,
+                            &config.token,
+                        )?;
+                    }
                     _ => {}
                 }
             }
@@ -9888,6 +13773,21 @@ fn run_discord_gateway_session(
         }
     }
     let _ = socket.close(None);
+    Ok(())
+}
+
+fn commit_discord_gateway_dispatch_sequence(
+    dispatch_result: Result<(), String>,
+    event_sequence: Option<i64>,
+    metadata_path: &Path,
+    resume_state: &mut DiscordGatewayResumeState,
+    token: &str,
+) -> Result<(), String> {
+    dispatch_result?;
+    if let Some(sequence) = event_sequence {
+        resume_state.sequence = Some(sequence);
+    }
+    save_discord_gateway_resume_state(metadata_path, resume_state, token);
     Ok(())
 }
 
@@ -9938,9 +13838,13 @@ struct DiscordGatewayDispatchContext<'a> {
     bot_user_id: &'a mut Option<String>,
     resume_state: &'a mut DiscordGatewayResumeState,
     metadata_path: &'a Path,
+    runtime_context: &'a ExternalTransportRuntimeContext,
 }
 
-fn handle_discord_gateway_dispatch(context: DiscordGatewayDispatchContext<'_>, value: &Value) {
+fn handle_discord_gateway_dispatch(
+    context: DiscordGatewayDispatchContext<'_>,
+    value: &Value,
+) -> Result<(), String> {
     match value.get("t").and_then(Value::as_str) {
         Some("READY") => {
             let data = value.get("d");
@@ -9958,15 +13862,10 @@ fn handle_discord_gateway_dispatch(context: DiscordGatewayDispatchContext<'_>, v
                 .and_then(|data| data.get("resume_gateway_url"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            save_discord_gateway_resume_state(
-                context.metadata_path,
-                context.resume_state,
-                &context.config.token,
-            );
         }
         Some("MESSAGE_CREATE") => {
             let Some(data) = value.get("d") else {
-                return;
+                return Ok(());
             };
             if let Some(inbound) = discord_gateway_message_to_inbound_with_download(
                 context.config,
@@ -9975,16 +13874,19 @@ fn handle_discord_gateway_dispatch(context: DiscordGatewayDispatchContext<'_>, v
                 context.recent_ids,
                 data,
             ) {
-                context.inbound_bus.publish_inbound(inbound);
+                if !publish_external_inbound_with_hint(
+                    context.inbound_bus,
+                    inbound,
+                    context.metadata_path,
+                    context.runtime_context,
+                ) {
+                    return Err("discord gateway inbound durable enqueue failed".to_owned());
+                }
             }
-            save_discord_gateway_resume_state(
-                context.metadata_path,
-                context.resume_state,
-                &context.config.token,
-            );
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn discord_gateway_message_to_inbound(
@@ -10271,7 +14173,6 @@ fn run_slack_transport(
 ) {
     let agent = runtime_http_agent(Duration::from_secs(30));
     let mut backoff = Duration::from_secs(1);
-    let metadata_path = transport_context.metadata_path("slack");
     while !stop.load(Ordering::SeqCst) {
         match run_slack_socket_mode_session(
             &config,
@@ -10279,8 +14180,7 @@ fn run_slack_transport(
             &inbound_bus,
             &outbound_rx,
             &stop,
-            transport_context.send_attempts,
-            &metadata_path,
+            &transport_context,
         ) {
             Ok(()) => backoff = Duration::from_secs(1),
             Err(error) => {
@@ -10300,9 +14200,10 @@ fn run_slack_socket_mode_session(
     inbound_bus: &MessageBus,
     outbound_rx: &mpsc::Receiver<OutboundMessage>,
     stop: &Arc<AtomicBool>,
-    send_attempts: usize,
-    metadata_path: &Path,
+    runtime_context: &ExternalTransportRuntimeContext,
 ) -> Result<(), String> {
+    let send_attempts = runtime_context.send_attempts;
+    let metadata_path = runtime_context.metadata_path("slack");
     let url = open_slack_socket_mode_url(agent, &config.app_token)?;
     let (mut socket, _) = websocket_connect(url.as_str()).map_err(|error| error.to_string())?;
     set_websocket_timeouts(&mut socket, Duration::from_millis(500));
@@ -10311,7 +14212,7 @@ fn run_slack_socket_mode_session(
             outbound_rx,
             send_attempts,
             stop,
-            Some(metadata_path),
+            Some(&metadata_path),
             |message| send_slack_message(agent, config, message),
         );
         match socket.read() {
@@ -10321,13 +14222,14 @@ fn run_slack_socket_mode_session(
                 };
                 let envelope =
                     serde_json::from_str::<Value>(&text).map_err(|error| error.to_string())?;
+                let inbound =
+                    slack_socket_envelope_to_inbound_with_download(config, agent, &envelope);
+                if let Some(inbound) = inbound.as_ref() {
+                    record_pending_inbound_hint(&metadata_path, inbound)?;
+                    runtime_context.enqueue_inbound(inbound_bus, inbound)?;
+                }
                 if let Some(ack) = slack_socket_ack_frame(&envelope) {
                     send_websocket_json(&mut socket, ack)?;
-                }
-                if let Some(inbound) =
-                    slack_socket_envelope_to_inbound_with_download(config, agent, &envelope)
-                {
-                    inbound_bus.publish_inbound(inbound);
                 }
             }
             Err(tungstenite::Error::Io(error))
@@ -10745,11 +14647,11 @@ fn run_email_transport(
         }
         if let Some(imap) = config.imap.as_ref() {
             if last_poll.elapsed() >= Duration::from_secs(imap.poll_interval_seconds) {
-                match poll_email_inbox(&config, imap, &mut seen_state) {
-                    Ok(messages) => {
-                        for inbound in messages {
-                            inbound_bus.publish_inbound(inbound);
-                        }
+                match poll_email_inbox(&config, imap, &mut seen_state, |inbound| {
+                    record_pending_inbound_hint(&metadata_path, inbound)?;
+                    transport_context.enqueue_inbound(&inbound_bus, inbound)
+                }) {
+                    Ok(_) => {
                         save_email_seen_uid_state(
                             &metadata_path,
                             &email_metadata_key(imap),
@@ -10853,7 +14755,8 @@ fn poll_email_inbox(
     runtime: &EmailRuntimeConfig,
     config: &EmailImapRuntimeConfig,
     seen_state: &mut EmailSeenUidState,
-) -> Result<Vec<InboundMessage>, String> {
+    mut accept: impl FnMut(&InboundMessage) -> Result<(), String>,
+) -> Result<usize, String> {
     if !matches!(config.security, EmailSecurity::Tls) {
         return Err("only TLS IMAP polling is supported in this runtime".to_owned());
     }
@@ -10868,7 +14771,7 @@ fn poll_email_inbox(
     let uids = session
         .uid_search("UNSEEN")
         .map_err(|error| error.to_string())?;
-    let mut messages = Vec::new();
+    let mut accepted = 0_usize;
     for uid in uids.iter().take(10) {
         let uid = uid.to_string();
         if seen_state.seen_uids.contains(&uid) {
@@ -10899,19 +14802,21 @@ fn poll_email_inbox(
                 continue;
             }
             parsed.inbound.attachments = email_attachment_data_urls_from_body(body)?;
+            let message = parsed.inbound.into_message();
+            accept(&message)?;
             remember_seen_email_uid(
                 &mut seen_state.seen_uids,
                 &mut seen_state.seen_uid_order,
                 uid.clone(),
             );
-            messages.push(parsed.inbound.into_message());
+            accepted = accepted.saturating_add(1);
         }
         if config.mark_seen {
             let _ = session.uid_store(uid, "+FLAGS (\\Seen)");
         }
     }
     let _ = session.logout();
-    Ok(messages)
+    Ok(accepted)
 }
 
 fn connect_imap_tls(
@@ -11149,6 +15054,7 @@ fn run_whatsapp_transport(
             &stop,
             transport_context.send_attempts,
             &metadata_path,
+            &transport_context,
         ) {
             Ok(()) => backoff = Duration::from_secs(1),
             Err(error) => {
@@ -11169,6 +15075,7 @@ fn run_whatsapp_bridge_session(
     stop: &Arc<AtomicBool>,
     send_attempts: usize,
     metadata_path: &Path,
+    runtime_context: &ExternalTransportRuntimeContext,
 ) -> Result<(), String> {
     let (mut socket, _) =
         websocket_connect(config.bridge_url.as_str()).map_err(|error| error.to_string())?;
@@ -11200,7 +15107,16 @@ fn run_whatsapp_bridge_session(
                     serde_json::from_str::<Value>(&text).map_err(|error| error.to_string())?;
                 for item in whatsapp_message_items(&value) {
                     match normalize_whatsapp_bridge_value(item, &channel_config, &mut recent) {
-                        Ok(Some(inbound)) => inbound_bus.publish_inbound(inbound),
+                        Ok(Some(inbound)) => {
+                            if !publish_external_inbound_with_hint(
+                                inbound_bus,
+                                inbound,
+                                metadata_path,
+                                runtime_context,
+                            ) {
+                                return Ok(());
+                            }
+                        }
                         Ok(None) => {}
                         Err(error) => eprintln!("whatsapp bridge message failed: {error}"),
                     }
@@ -11283,7 +15199,8 @@ fn drain_outbound(
 ) {
     while let Ok(message) = outbound_rx.try_recv() {
         let typing_indicator = message_is_typing_indicator(&message);
-        let transport_marker_only = message_is_stream_end(&message);
+        let transport_marker_only =
+            message_is_stream_delta(&message) || message_is_stream_end(&message);
         if let Some(path) =
             delivery_metadata_path.filter(|_| !transport_marker_only && !typing_indicator)
         {
@@ -11291,17 +15208,16 @@ fn drain_outbound(
         }
         match send_with_transport_retries(message.clone(), attempts, stop, &mut send) {
             Ok(()) => {
-                if let Some(path) = delivery_metadata_path.filter(|_| !typing_indicator) {
-                    let status = if transport_marker_only {
-                        "processed"
-                    } else {
-                        "sent"
-                    };
-                    record_delivery_state(path, &message, status, None);
+                if let Some(path) =
+                    delivery_metadata_path.filter(|_| !transport_marker_only && !typing_indicator)
+                {
+                    record_delivery_state(path, &message, "sent", None);
                 }
             }
             Err(error) => {
-                if let Some(path) = delivery_metadata_path.filter(|_| !typing_indicator) {
+                if let Some(path) =
+                    delivery_metadata_path.filter(|_| !transport_marker_only && !typing_indicator)
+                {
                     record_delivery_state(path, &message, "failed", Some(&error));
                 }
                 eprintln!("external channel outbound failed: {error}");
@@ -11925,6 +15841,47 @@ fn parse_runtime_update(
     }
     validate_runtime_target_version(&options.target_version)?;
     Ok(CliCommand::RuntimeUpdate(options))
+}
+
+fn parse_runtime_migrate(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = RuntimeMigrateOptions {
+        config_path: global_config,
+        workspace_override: None,
+        mode: RuntimeMigrateMode::DryRun,
+    };
+    let mut mode_selected = false;
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--dry-run" | "--apply" | "--resume" => {
+                if mode_selected {
+                    return Err(CliError::InvalidArguments(
+                        "runtime migrate accepts only one of --dry-run, --apply, or --resume"
+                            .to_owned(),
+                    ));
+                }
+                mode_selected = true;
+                options.mode = match arg.as_str() {
+                    "--apply" => RuntimeMigrateMode::Apply,
+                    "--resume" => RuntimeMigrateMode::Resume,
+                    _ => RuntimeMigrateMode::DryRun,
+                };
+            }
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown runtime migrate argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(CliCommand::RuntimeMigrate(options))
 }
 
 fn parse_runtime_recover(
@@ -13828,6 +17785,10 @@ impl AgentLoopChatCompletionAdapter {
         if let Some(media_root) = self.media_dir.parent() {
             config.media_roots.push(media_root.to_path_buf());
         }
+        config.durable_event_root = self
+            .config_path
+            .parent()
+            .map(|data_dir| data_dir.join("runtime").join("durable-events"));
         config.settings = shacs_providers::GenerationSettings {
             temperature: self.defaults.temperature,
             max_tokens: self.defaults.max_tokens,
@@ -14048,12 +18009,30 @@ impl AgentLoopChatCompletionAdapter {
                 )?;
                 inbound.media = media_paths;
                 inbound.session_key_override = Some(session_key);
+                let data_dir = self
+                    .media_dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or_else(|| ApiError::internal("media directory has no data root"))?;
+                let metadata_path = data_dir
+                    .join("runtime")
+                    .join("channels")
+                    .join("worker-metadata")
+                    .join("websocket.json");
+                record_pending_inbound_hint(&metadata_path, &inbound).map_err(|_| {
+                    ApiError::internal("websocket restart metadata could not be persisted")
+                })?;
+                let pending_inbound = inbound.clone();
                 let stream_id = format!("{chat_id}:{}", now_millis());
                 let mut config = self.loop_config();
                 config.permission_interactive = true;
-                let (_, outbound) = self.process_websocket_inbound_with_streaming(
+                let result = self.process_websocket_inbound_with_streaming(
                     inbound, config, &chat_id, &stream_id, emit,
-                )?;
+                );
+                if result.is_ok() {
+                    clear_pending_inbound_hint(data_dir, &pending_inbound);
+                }
+                let (_, outbound) = result?;
                 let sink = WebSocketEventSink::default();
                 let mut manager =
                     websocket_event_channel_manager(self.send_max_retries, sink.clone());
@@ -14190,7 +18169,15 @@ impl AgentLoopChatCompletionAdapter {
         let session_key = self.external_effective_session_key(&inbound);
         let routing_metadata = stream_routing_metadata_from_inbound(&inbound);
         let reply_to = inbound_reply_to(&inbound);
-        let subagent_runtime = SubagentRuntime::with_bus(runtime_bus.clone());
+        let mut subagent_runtime = SubagentRuntime::with_bus(runtime_bus.clone());
+        if let Some(root) = config.durable_event_root.as_deref() {
+            subagent_runtime = subagent_runtime
+                .attach_durable_recorder(
+                    DurableChildRecorder::open(root)
+                        .map_err(|_| ApiError::internal("durable child recorder is unavailable"))?,
+                )
+                .map_err(|_| ApiError::internal("durable child replay is unavailable"))?;
+        }
         let live_runtime_bus = runtime_bus.clone();
         let live_sink: RuntimeNotificationSink = Arc::new(move |message| {
             live_runtime_bus.publish_outbound(message);
@@ -14518,8 +18505,20 @@ impl AgentLoopChatCompletionAdapter {
             routing_metadata.clone(),
             reply_to.clone(),
         );
-        let subagent_runtime =
-            subagent_runtime.unwrap_or_else(|| SubagentRuntime::with_bus(bus.clone()));
+        let subagent_runtime = match subagent_runtime {
+            Some(runtime) => runtime,
+            None => {
+                let mut runtime = SubagentRuntime::with_bus(bus.clone());
+                if let Some(root) = config.durable_event_root.as_deref() {
+                    runtime = runtime
+                        .attach_durable_recorder(DurableChildRecorder::open(root).map_err(
+                            |_| ApiError::internal("durable child recorder is unavailable"),
+                        )?)
+                        .map_err(|_| ApiError::internal("durable child replay is unavailable"))?;
+                }
+                runtime
+            }
+        };
         let spawn_config = self.subagent_execution_config(&config);
         let subagent_client = self.client.clone();
         let spawner_runtime = subagent_runtime.clone();
@@ -14960,11 +18959,46 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
     }
 
     fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
+        let durable_diagnostics = self
+            .config_path
+            .parent()
+            .map(inspect_durable_diagnostics)
+            .unwrap_or_else(|| DurableDiagnosticsInspect {
+                schema_family: DURABLE_TRACE_SCHEMA_FAMILY.to_owned(),
+                schema_version: CURRENT_DURABLE_TRACE_SCHEMA_VERSION,
+                missing: true,
+                ..DurableDiagnosticsInspect::default()
+            });
+        let stored_data_migration = self
+            .config_path
+            .parent()
+            .and_then(|data_dir| {
+                plan_durable_migration_for_roots(
+                    data_dir,
+                    &self.workspace,
+                    DurableConfigCompatibility::Readable,
+                )
+                .ok()
+                .map(|plan| {
+                    durable_migration_projection(&plan, &inspect_durable_migration_ledger(data_dir))
+                })
+            })
+            .unwrap_or_else(|| {
+                json!({
+                    "blocked": true,
+                    "issue_ref": "migration-inspect:unavailable",
+                })
+            });
+        let supervision = self
+            .config_path
+            .parent()
+            .and_then(|data_dir| read_runtime_supervision_state(data_dir).ok())
+            .unwrap_or_default();
         DiagnosticsSnapshot {
             generated_at_ms: shacs_utils::diagnostics::current_time_ms(),
             runtime: json!({
-                "workspace": { "path": self.workspace, "exists": self.workspace.exists() },
-                "media_dir": { "path": self.media_dir, "exists": self.media_dir.exists() },
+                "workspace": { "path_ref": diagnostics_path_ref(&self.workspace), "exists": self.workspace.exists() },
+                "media_dir": { "path_ref": diagnostics_path_ref(&self.media_dir), "exists": self.media_dir.exists() },
                 "defaults": {
                     "provider": self.provider_id,
                     "model": self.configured_model,
@@ -14979,7 +19013,10 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
                     "exec_sandbox": self.exec_sandbox,
                     "exec_allowed_env_keys": self.exec_allowed_env_keys,
                     "exec_env_keys": self.exec_env.keys().collect::<Vec<_>>(),
-                }
+                },
+                "durable_diagnostics_evidence": durable_diagnostics_projection(&durable_diagnostics),
+                "supervision": runtime_supervisor_projection(&supervision),
+                "stored_data_migration": stored_data_migration,
             }),
             operational_logs: vec![OperationalLogRecord::new(
                 DiagnosticsSeverity::Info,
@@ -15873,6 +19910,72 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
         ),
         format!("Compatibility: {}", report.lifecycle.compatibility.as_str()),
         format!(
+            "Stored-data migration: blocked={} transforms={} families={} ledger_phase={} manual_recovery={}",
+            report.lifecycle.migration_plan.blocked,
+            report
+                .lifecycle
+                .migration_plan
+                .entries
+                .iter()
+                .filter(|entry| entry.action == DurableMigrationAction::Transform)
+                .count(),
+            report.lifecycle.migration_plan.entries.len(),
+            report
+                .lifecycle
+                .migration_ledger
+                .phase
+                .as_deref()
+                .unwrap_or("none"),
+            report.lifecycle.migration_ledger.manual_recovery_required,
+        ),
+        format!(
+            "Durable recovery: {} (writable={}, checkpoint={}, replayed_events={})",
+            report.lifecycle.durable_recovery.status.as_str(),
+            report.lifecycle.durable_recovery.writable,
+            report
+                .lifecycle
+                .durable_recovery
+                .checkpoint_used
+                .as_deref()
+                .unwrap_or("none"),
+            report.lifecycle.durable_recovery.replayed_event_count
+        ),
+        format!(
+            "Durable work: {} (writable={}, pending={}, leased={}, retry_waiting={}, cancel_requested={}, terminal={}, evicted={})",
+            report.lifecycle.durable_work.status.as_str(),
+            report.lifecycle.durable_work.writable,
+            report.lifecycle.durable_work.pending_count,
+            report.lifecycle.durable_work.leased_count,
+            report.lifecycle.durable_work.waiting_retry_count,
+            report.lifecycle.durable_work.cancellation_requested_count,
+            report.lifecycle.durable_work.terminal_count,
+            report.lifecycle.durable_work.terminal_evicted_count,
+        ),
+        format!(
+            "Durable children: spawned={} recovery_needed={} cancel_requested={} terminal={} stale={} duplicate={} late={} evicted={}/{}",
+            report.lifecycle.durable_children.spawned_count,
+            report.lifecycle.durable_children.recovery_needed_count,
+            report.lifecycle.durable_children.cancellation_requested_count,
+            report.lifecycle.durable_children.terminal_count,
+            report.lifecycle.durable_children.stale_decision_count,
+            report.lifecycle.durable_children.duplicate_decision_count,
+            report.lifecycle.durable_children.late_decision_count,
+            report.lifecycle.durable_children.terminal_evicted_count,
+            report.lifecycle.durable_children.decision_evicted_count,
+        ),
+        format!(
+            "Durable diagnostics evidence: schema={}.v{} missing={} corrupt_tail={} evidence={} active_recovery={} terminal={} latest_event_sequence={} refs={}",
+            report.lifecycle.durable_diagnostics.schema_family,
+            report.lifecycle.durable_diagnostics.schema_version,
+            report.lifecycle.durable_diagnostics.missing,
+            report.lifecycle.durable_diagnostics.corrupt_tail,
+            report.lifecycle.durable_diagnostics.evidence_count,
+            report.lifecycle.durable_diagnostics.active_recovery_count,
+            report.lifecycle.durable_diagnostics.terminal_count,
+            report.lifecycle.durable_diagnostics.latest_event_sequence.map(|value| value.to_string()).unwrap_or_else(|| "none".to_owned()),
+            report.lifecycle.durable_diagnostics.recent_trace_refs.len(),
+        ),
+        format!(
             "Ownership: {} ({})",
             report.lifecycle.ownership.state.as_str(),
             report.lifecycle.ownership.reason
@@ -15882,18 +19985,52 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
     ];
     if let Some(marker) = &report.lifecycle.ownership.marker {
         lines.push(format!(
-            "Owner: pid={} mode={} updated_at_ms={}",
-            marker.pid, marker.mode, marker.updated_at_ms
+            "Owner: ref={} mode={} renewed_at_ms={} expires_at_ms={}",
+            opaque_ref("owner", &marker.owner_id),
+            marker.mode,
+            marker.updated_at_ms,
+            marker.expires_at_ms
+        ));
+    }
+    lines.push(format!(
+        "Supervision: schema=v{} owner={} components={} shutdown=reason={:?} phase={:?}",
+        report.supervision.schema_version,
+        report
+            .supervision
+            .owner
+            .as_ref()
+            .map(|owner| opaque_ref("owner", &owner.owner_id))
+            .unwrap_or_else(|| "none".to_owned()),
+        report.supervision.components.len(),
+        report.supervision.shutdown.reason,
+        report.supervision.shutdown.phase
+    ));
+    for component in &report.supervision.components {
+        lines.push(format!(
+            "Supervision component {}: {} ({})",
+            component.name,
+            component.state,
+            opaque_ref("supervision-detail", &component.detail)
         ));
     }
     if let Some(request) = &report.lifecycle.stop_request {
         lines.push(format!(
-            "Stop request: {} requested_at_ms={} owner_pid={}",
+            "Stop request: {} request_id={} requested_at_ms={} owner_ref={} target_owner_ref={} event_sequence={}",
             request.request,
+            request.request_id,
             request.requested_at_ms,
             request
                 .owner_pid
-                .map(|pid| pid.to_string())
+                .map(|pid| opaque_ref("pid", &pid.to_string()))
+                .unwrap_or_else(|| "unknown".to_owned()),
+            request
+                .target_owner_id
+                .as_deref()
+                .map(|owner| opaque_ref("owner", owner))
+                .unwrap_or_else(|| "unknown".to_owned()),
+            request
+                .event_sequence
+                .map(|sequence| sequence.to_string())
                 .unwrap_or_else(|| "unknown".to_owned())
         ));
     } else {
@@ -15905,6 +20042,39 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
             marker.phase, marker.from_version, marker.target_version, marker.migration_required
         )),
         None => lines.push("Update marker: none".to_owned()),
+    }
+    for entry in &report.lifecycle.migration_plan.entries {
+        if entry.action != DurableMigrationAction::NoOp {
+            lines.push(format!(
+                "Stored-data migration plan {}: {:?} {} -> {} detail_ref={}",
+                entry.family,
+                entry.action,
+                entry.source_version,
+                entry.target_version,
+                entry.detail_ref
+            ));
+        }
+    }
+    for issue in &report.lifecycle.durable_recovery.issues {
+        lines.push(format!(
+            "Durable recovery issue: {} detail_ref={}",
+            issue.kind.as_str(),
+            opaque_ref("recovery-detail", &issue.detail)
+        ));
+    }
+    for hint in &report.lifecycle.durable_recovery.recovery_hints {
+        lines.push(format!("Durable recovery hint: {}", hint.as_str()));
+    }
+    for issue in &report.lifecycle.durable_work.issues {
+        lines.push(format!(
+            "Durable work issue: {} work_ref={} detail={}",
+            issue.kind.as_str(),
+            opaque_ref("work", &issue.work_id),
+            redact_string(&issue.detail)
+        ));
+    }
+    for child_ref in &report.lifecycle.durable_children.active_child_refs {
+        lines.push(format!("Durable child active: {child_ref}"));
     }
     if let Some(latest_key) = report.sessions.latest_key {
         let updated = report
@@ -15928,6 +20098,13 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
             "  - {}: {} {} bytes redacted={}",
             artifact.artifact_id, artifact.mime_type, artifact.byte_len, artifact.redacted
         ));
+    }
+    lines.push(format!(
+        "Channel restart states: {} (hint projection; not session truth)",
+        report.channel_restart.len()
+    ));
+    for state in &report.channel_restart {
+        lines.push(format_channel_restart_state_line(state));
     }
     if report.providers.is_empty() {
         lines.push("Configured providers: none".to_owned());
@@ -15966,14 +20143,11 @@ fn format_runtime_diagnostics(report: RuntimeDiagnosticsReport) -> String {
             Some(error) => {
                 output.push_str(&format!(
                     "\nBundle: failed at {} ({error})",
-                    redact_string(&display_path(&path)),
+                    diagnostics_path_ref(&path),
                     error = redact_string(&error)
                 ));
             }
-            None => output.push_str(&format!(
-                "\nBundle: {}",
-                redact_string(&display_path(&path))
-            )),
+            None => output.push_str(&format!("\nBundle: {}", diagnostics_path_ref(&path))),
         }
     }
     output
@@ -15984,6 +20158,50 @@ fn optional_bool_label(value: Option<bool>) -> &'static str {
         Some(true) => "true",
         Some(false) => "false",
         None => "unknown",
+    }
+}
+
+fn format_channel_restart_state_line(state: &ChannelRestartStateInspect) -> String {
+    let delivery_counts = channel_delivery_status_counts(&state.delivery_statuses)
+        .into_iter()
+        .map(|(status, count)| format!("{}={count}", channel_delivery_status_label(status)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "Channel restart {}: connection_ref={} cursor={} cursor_ref={} pending_inbound={} pending_outbound={} dedupe_candidates={} deliveries=[{}] metadata_ref={} last_transition_ms={}",
+        state.channel,
+        state.connection_ref,
+        state.cursor_kind.as_deref().unwrap_or("none"),
+        state.cursor_ref.as_deref().unwrap_or("none"),
+        state.pending_inbound_refs.len(),
+        state.pending_outbound_refs.len(),
+        state.dedupe_candidate_refs.len(),
+        if delivery_counts.is_empty() { "none" } else { delivery_counts.as_str() },
+        state.metadata_ref,
+        state
+            .last_transition_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_owned())
+    )
+}
+
+fn channel_delivery_status_counts(
+    statuses: &[ChannelDeliveryStatusInspect],
+) -> BTreeMap<ChannelDeliveryProjectionStatus, usize> {
+    let mut counts = BTreeMap::new();
+    for status in statuses {
+        *counts.entry(status.status).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn channel_delivery_status_label(status: ChannelDeliveryProjectionStatus) -> &'static str {
+    match status {
+        ChannelDeliveryProjectionStatus::Pending => "pending",
+        ChannelDeliveryProjectionStatus::SentHint => "sent_hint",
+        ChannelDeliveryProjectionStatus::FailedHint => "failed_hint",
+        ChannelDeliveryProjectionStatus::Unknown => "unknown",
+        ChannelDeliveryProjectionStatus::DedupeCandidate => "dedupe_candidate",
     }
 }
 
@@ -16003,7 +20221,53 @@ fn format_runtime_update(outcome: RuntimeUpdateOutcome) -> String {
     .join("\n")
 }
 
+fn format_runtime_migrate(report: DurableMigrationReport) -> String {
+    let mut lines = vec![
+        "shacs-bot runtime migrate".to_owned(),
+        format!("Data dir: {}", display_path(&report.data_dir)),
+        format!("Ledger: {}", display_path(&report.ledger_path)),
+        format!("Dry run: {}", report.dry_run),
+        format!("Blocked: {}", report.plan.blocked),
+        format!(
+            "Config compatibility: {:?}",
+            report.plan.config_compatibility
+        ),
+    ];
+    if let Some(ledger) = &report.ledger {
+        lines.push(format!("Phase: {}", ledger.phase));
+        lines.push(format!(
+            "Run ref: {}",
+            opaque_ref("migration", &ledger.run_id)
+        ));
+        lines.push(format!("Results: {}", ledger.results.len()));
+        for result in &ledger.results {
+            lines.push(format!(
+                "Migration result {}: {:?} {} -> {} detail_ref={}",
+                result.family,
+                result.status,
+                result.source_version,
+                result.target_version,
+                result.detail_ref
+            ));
+        }
+    }
+    for entry in &report.plan.entries {
+        lines.push(format!(
+            "Plan {:02} {}: {:?} {} -> {} rollback={} precondition_ref={}",
+            entry.order,
+            entry.family,
+            entry.action,
+            entry.source_version,
+            entry.target_version,
+            entry.rollback_capability,
+            opaque_ref("migration-precondition", &entry.precondition_digest)
+        ));
+    }
+    lines.join("\n")
+}
+
 fn format_runtime_recover(outcome: RuntimeRecoverOutcome) -> String {
+    let supervision = format_runtime_supervisor_projection(&outcome.supervision);
     [
         "shacs-bot runtime recover".to_owned(),
         format!("Config: {}", display_path(&outcome.config_path)),
@@ -16011,6 +20275,42 @@ fn format_runtime_recover(outcome: RuntimeRecoverOutcome) -> String {
         format!("Data dir: {}", display_path(&outcome.data_dir)),
         format!("Marker: {}", display_path(&outcome.marker_path)),
         format!("Recovered: {}", outcome.recovered),
+        format!(
+            "Durable recovery: {} (writable={})",
+            outcome.durable_recovery.status.as_str(),
+            outcome.durable_recovery.writable
+        ),
+        format!(
+            "Durable work: {} (writable={}, pending={}, retry_waiting={}, cancel_requested={})",
+            outcome.durable_work.status.as_str(),
+            outcome.durable_work.writable,
+            outcome.durable_work.pending_count,
+            outcome.durable_work.waiting_retry_count,
+            outcome.durable_work.cancellation_requested_count
+        ),
+        format!(
+            "Durable children: spawned={} recovery_needed={} cancel_requested={} terminal={} stale={} duplicate={} late={}",
+            outcome.durable_children.spawned_count,
+            outcome.durable_children.recovery_needed_count,
+            outcome.durable_children.cancellation_requested_count,
+            outcome.durable_children.terminal_count,
+            outcome.durable_children.stale_decision_count,
+            outcome.durable_children.duplicate_decision_count,
+            outcome.durable_children.late_decision_count,
+        ),
+        format!(
+            "Durable diagnostics evidence: missing={} corrupt_tail={} evidence={} active_recovery={} latest_event_sequence={}",
+            outcome.durable_diagnostics.missing,
+            outcome.durable_diagnostics.corrupt_tail,
+            outcome.durable_diagnostics.evidence_count,
+            outcome.durable_diagnostics.active_recovery_count,
+            outcome
+                .durable_diagnostics
+                .latest_event_sequence
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_owned()),
+        ),
+        format!("Supervision: {supervision}"),
         format!("Detail: {}", outcome.detail),
     ]
     .join("\n")
@@ -16104,6 +20404,7 @@ fn format_session_inspect(report: SessionInspectReport) -> String {
             format_runtime_execution_projection(execution)
         ));
     }
+    lines.push(format_session_durable_children(&report.durable_children));
     lines.join("\n")
 }
 
@@ -16197,6 +20498,10 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
             report.checkpoint_phase.unwrap_or_else(|| "none".to_owned())
         ),
         format!("Legal history start: {}", report.legal_start),
+        format!(
+            "Supervision: {}",
+            format_runtime_supervisor_projection(&report.supervision)
+        ),
     ];
     if let Some(workflow) = report.runtime_workflow.as_ref() {
         lines.push(format!(
@@ -16210,7 +20515,24 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
             format_runtime_execution_projection(execution)
         ));
     }
+    lines.push(format_session_durable_children(&report.durable_children));
     lines.join("\n")
+}
+
+fn format_session_durable_children(children: &DurableChildSessionInspect) -> String {
+    format!(
+        "Durable children: active={} terminal={} stale={} duplicate={} late={} refs={}",
+        children.active_count,
+        children.terminal_count,
+        children.stale_decision_count,
+        children.duplicate_decision_count,
+        children.late_decision_count,
+        if children.child_refs.is_empty() {
+            "none".to_owned()
+        } else {
+            children.child_refs.join(",")
+        }
+    )
 }
 
 fn format_runtime_execution_projection(execution: &SessionRuntimeExecutionProjection) -> String {
@@ -17073,7 +21395,6 @@ mod tests {
         let mut config = Config::default();
         config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
         save_config_to_path(&config, &config_path)?;
-
         let report = apps_init(AppsInitOptions {
             config_path: Some(config_path.clone()),
             workspace_override: None,
@@ -17676,7 +21997,7 @@ mod tests {
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
-        assert!(error.contains("runtime requires `start`, `stop`, `restart`, `inspect`, `diagnostics`, `update`, or `recover`"));
+        assert!(error.contains("runtime requires `start`, `stop`, `restart`, `inspect`, `diagnostics`, `update`, `migrate`, or `recover`"));
 
         let error = parse_cli_args(["runtime", "update"])
             .err()
@@ -17689,6 +22010,214 @@ mod tests {
             .map(|error| error.to_string())
             .unwrap_or_default();
         assert!(error.contains("must contain only ASCII"));
+
+        let parsed = parse_cli_args(["runtime", "migrate", "--apply", "-w", "/tmp/runtime"])?;
+        let CliCommand::RuntimeMigrate(options) = parsed else {
+            return Err("expected runtime migrate command".into());
+        };
+        assert_eq!(options.mode, RuntimeMigrateMode::Apply);
+        assert_eq!(
+            options.workspace_override,
+            Some(PathBuf::from("/tmp/runtime"))
+        );
+
+        let error = parse_cli_args(["runtime", "migrate", "--bad"])
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(error.contains("unknown runtime migrate argument"));
+        let error = parse_cli_args(["runtime", "migrate", "--apply", "--resume"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("accepts only one"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_migrate_surface_dry_run_apply_and_projection_are_redacted(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let data_dir = root.path();
+        let trace_fixture = data_dir
+            .join("runtime")
+            .join("migration-fixtures")
+            .join("v0")
+            .join("trace.json");
+        fs::create_dir_all(trace_fixture.parent().ok_or("missing fixture parent")?)?;
+        fs::write(
+            &trace_fixture,
+            serde_json::to_vec(&json!({
+                "schema_version": 0,
+                "family": "trace",
+                "detail": {"token": "sk-cli-secret", "summary": "safe"}
+            }))?,
+        )?;
+        let session_fixture = data_dir
+            .join("runtime")
+            .join("migration-fixtures")
+            .join("v0")
+            .join("session_metadata.json");
+        fs::write(
+            &session_fixture,
+            serde_json::to_vec(&json!({
+                "schema_version": 0,
+                "family": "session_metadata",
+                "key": "cli:test"
+            }))?,
+        )?;
+        let before = fs::read(&trace_fixture)?;
+        let dry = runtime_migrate(RuntimeMigrateOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(root.path().to_path_buf()),
+            mode: RuntimeMigrateMode::DryRun,
+        })?;
+        assert!(dry.dry_run);
+        assert_eq!(fs::read(&trace_fixture)?, before);
+        assert!(!dry.ledger_path.exists());
+        assert!(load_runtime_config(RuntimeConfigOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(root.path().to_path_buf()),
+            resolve_env: false,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("stored-data migration requires explicit"));
+
+        let applied = runtime_migrate(RuntimeMigrateOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(root.path().to_path_buf()),
+            mode: RuntimeMigrateMode::Apply,
+        })?;
+        let output = format_runtime_migrate(applied);
+        assert!(output.contains("Phase: complete"));
+        assert!(!output.contains("sk-cli-secret"));
+        assert!(SessionManager::new(root.path())?
+            .session_path("cli:test")
+            .exists());
+        assert!(!root.path().join("runtime").join("sessions").exists());
+        load_runtime_config(RuntimeConfigOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(root.path().to_path_buf()),
+            resolve_env: false,
+        })?;
+        let inspect = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path),
+            workspace_override: Some(root.path().to_path_buf()),
+        })?;
+        let inspect_output = format_runtime_inspect(inspect);
+        assert!(inspect_output.contains("Stored-data migration: blocked=false transforms=0"));
+        assert!(inspect_output.contains("ledger_phase=complete manual_recovery=false"));
+        assert!(!inspect_output.contains("sk-cli-secret"));
+        assert!(!inspect_output.contains("migration-fixtures"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_start_and_recover_do_not_bypass_migration_admission() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = root.path().to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let fixture = root
+            .path()
+            .join("runtime")
+            .join("migration-fixtures")
+            .join("v0")
+            .join("trace.json");
+        fs::create_dir_all(fixture.parent().ok_or("missing fixture parent")?)?;
+        fs::write(
+            &fixture,
+            serde_json::to_vec(&json!({
+                "schema_version": 0,
+                "family": "trace",
+                "detail": {"summary": "pending"}
+            }))?,
+        )?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(root.path().to_path_buf()),
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &ProcessEnv,
+        )?;
+        let start_error = match RuntimeOwnershipLease::acquire(&bundle, "run") {
+            Ok(lease) => {
+                drop(lease);
+                return Err("runtime ownership unexpectedly bypassed migration".into());
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(start_error.contains("stored-data migration"));
+        let recover_error = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path),
+            workspace_override: Some(root.path().to_path_buf()),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(recover_error.contains("stored-data migration"));
+        assert!(!root
+            .path()
+            .join("runtime")
+            .join("migration-ledger.json")
+            .exists());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_migrate_apply_holds_ownership_mutation_lock_before_writes(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = root.path().to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let fixture = root
+            .path()
+            .join("runtime")
+            .join("migration-fixtures")
+            .join("v0")
+            .join("trace.json");
+        fs::create_dir_all(fixture.parent().ok_or("missing fixture parent")?)?;
+        fs::write(
+            &fixture,
+            serde_json::to_vec(&json!({
+                "schema_version": 0,
+                "family": "trace",
+                "detail": {"summary": "pending"}
+            }))?,
+        )?;
+        let marker_path = runtime_ownership_marker_path(root.path());
+        fs::create_dir_all(marker_path.parent().ok_or("missing marker parent")?)?;
+        let lock = RuntimeOwnershipMutationLock::acquire(&marker_path)?;
+        let error = runtime_migrate(RuntimeMigrateOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(root.path().to_path_buf()),
+            mode: RuntimeMigrateMode::Apply,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(RUNTIME_OWNERSHIP_MUTATION_LOCK_ERROR));
+        assert!(!root
+            .path()
+            .join("runtime")
+            .join("migration-ledger.json")
+            .exists());
+        drop(lock);
+        let report = runtime_migrate(RuntimeMigrateOptions {
+            config_path: Some(config_path),
+            workspace_override: Some(root.path().to_path_buf()),
+            mode: RuntimeMigrateMode::Apply,
+        })?;
+        assert!(report.ledger_path.exists());
         Ok(())
     }
 
@@ -19196,10 +23725,456 @@ mod tests {
 
         let metadata = load_metadata_json(&path);
         assert_eq!(metadata["offset"], json!(42));
+        assert_eq!(
+            metadata["restart_state"]["channel"],
+            json!(TELEGRAM_CHANNEL)
+        );
+        assert_eq!(
+            metadata["restart_state"]["cursor"]["kind"],
+            json!("telegram_offset")
+        );
         assert!(metadata
             .get("deliveries")
             .and_then(Value::as_array)
             .is_some_and(|deliveries| !deliveries.is_empty()));
+        assert_eq!(
+            metadata["deliveries"][0]["delivery_projection_status"],
+            json!("pending")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn channel_restart_projection_reads_legacy_metadata_and_safe_work_refs(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let metadata_dir = data_dir
+            .join("runtime")
+            .join("channels")
+            .join("worker-metadata");
+        fs::create_dir_all(&metadata_dir)?;
+        fs::write(
+            metadata_dir.join("telegram.json"),
+            serde_json::to_vec_pretty(&json!({
+                "offset": 42,
+                "deliveries": [
+                    {"id": "pending-delivery", "status": "pending", "writer_pid": std::process::id(), "writer_instance_ref": process_instance_ref(), "updated_at": 10},
+                    {"id": "sent-delivery", "status": "sent", "updated_at": 11},
+                    {"id": "failed-delivery", "status": "failed", "updated_at": 12},
+                    {"id": "mystery-delivery", "status": "mystery", "updated_at": 13}
+                ]
+            }))?,
+        )?;
+        fs::write(
+            metadata_dir.join("discord-rest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "last_ids": {"channel-1": "message-1"}
+            }))?,
+        )?;
+        fs::write(
+            metadata_dir.join("discord-gateway.json"),
+            serde_json::to_vec_pretty(&json!({
+                "session_id": "gateway-session",
+                "sequence": 7,
+                "resume_gateway_url": "wss://gateway.example"
+            }))?,
+        )?;
+        fs::write(
+            metadata_dir.join("slack.json"),
+            serde_json::to_vec_pretty(&json!({
+                "restart_state": {
+                    "schema_version": 1,
+                    "channel": SLACK_CHANNEL,
+                    "cursor": {"kind": "slack_socket_envelope_thread_hint", "value_ref": null},
+                    "last_transition_ms": 20
+                }
+            }))?,
+        )?;
+        fs::write(
+            metadata_dir.join("email-imap.json"),
+            serde_json::to_vec_pretty(&json!({
+                "mailboxes": {"imap.example:993:user:INBOX": {"uid_validity": 99, "seen": ["11"]}}
+            }))?,
+        )?;
+        fs::write(
+            metadata_dir.join("whatsapp.json"),
+            serde_json::to_vec_pretty(&json!({
+                "restart_state": {
+                    "schema_version": 1,
+                    "channel": WHATSAPP_CHANNEL,
+                    "cursor": {"kind": "whatsapp_bridge_connection_hint", "value_ref": null},
+                    "last_transition_ms": 30
+                }
+            }))?,
+        )?;
+        fs::write(
+            metadata_dir.join("websocket.json"),
+            serde_json::to_vec_pretty(&json!({
+                "restart_state": {
+                    "schema_version": 1,
+                    "channel": WEBSOCKET_CHANNEL,
+                    "cursor": {"kind": "websocket_connection_hint", "value_ref": null},
+                    "last_transition_ms": 40
+                }
+            }))?,
+        )?;
+        let mut work = shacs_session::durable_work::DurableWorkReplayState::default();
+        work.items.insert(
+            "work-telegram-1".to_owned(),
+            shacs_session::durable_work::ReplayWorkItem {
+                work_id: "work-telegram-1".to_owned(),
+                work_kind: "agent.inbound_turn".to_owned(),
+                session_key: "telegram:chat".to_owned(),
+                turn_id: None,
+                effect_id: None,
+                payload_ref: shacs_session::durable_work::WorkPayloadRef::Artifact {
+                    payload_type: "external_inbound".to_owned(),
+                    artifact_ref: "payload.json".to_owned(),
+                    sha256: "a".repeat(64),
+                    byte_len: 1,
+                },
+                dedupe_hint: Some("inbound-digest".to_owned()),
+                state: shacs_session::durable_work::ReplayWorkState::Pending,
+                attempt: 0,
+                next_wake_at_ms: None,
+                lease_id: None,
+                lease_owner_ref: None,
+                lease_expires_at_ms: None,
+                cancellation_requested_sequence: None,
+                terminal_kind: None,
+                enqueued_sequence: 1,
+                updated_sequence: 1,
+                enqueued_at: "2026-07-22T00:00:00Z".to_owned(),
+                updated_at: "2026-07-22T00:00:00Z".to_owned(),
+                terminal_sequence: None,
+                terminal_at: None,
+            },
+        );
+
+        let states = inspect_channel_restart_states(data_dir, Some(&work));
+        for channel in [
+            TELEGRAM_CHANNEL,
+            DISCORD_CHANNEL,
+            SLACK_CHANNEL,
+            EMAIL_CHANNEL,
+            WHATSAPP_CHANNEL,
+            WEBSOCKET_CHANNEL,
+        ] {
+            assert!(
+                states.iter().any(|state| state.channel == channel),
+                "missing restart fixture projection for {channel}"
+            );
+        }
+        assert_eq!(
+            states
+                .iter()
+                .filter(|state| state.channel == DISCORD_CHANNEL)
+                .count(),
+            2
+        );
+        let telegram = states
+            .iter()
+            .find(|state| state.channel == TELEGRAM_CHANNEL)
+            .ok_or("telegram restart state missing")?;
+
+        assert_eq!(telegram.cursor_kind.as_deref(), Some("telegram_offset"));
+        assert!(telegram.connection_ref.starts_with("connection:"));
+        assert!(telegram
+            .cursor_ref
+            .as_deref()
+            .is_some_and(|value| value.starts_with("cursor:")));
+        assert_eq!(telegram.pending_inbound_refs.len(), 1);
+        assert_eq!(telegram.dedupe_candidate_refs.len(), 1);
+        assert!(telegram
+            .delivery_statuses
+            .iter()
+            .any(|status| status.status == ChannelDeliveryProjectionStatus::Pending));
+        assert!(telegram
+            .delivery_statuses
+            .iter()
+            .any(|status| status.status == ChannelDeliveryProjectionStatus::SentHint));
+        assert!(telegram
+            .delivery_statuses
+            .iter()
+            .any(|status| status.status == ChannelDeliveryProjectionStatus::FailedHint));
+        assert!(telegram
+            .delivery_statuses
+            .iter()
+            .any(|status| status.status == ChannelDeliveryProjectionStatus::Unknown));
+        assert!(telegram
+            .delivery_statuses
+            .iter()
+            .any(|status| status.status == ChannelDeliveryProjectionStatus::DedupeCandidate));
+        let formatted = format_channel_restart_state_line(telegram);
+        assert!(formatted.contains("sent_hint=1"));
+        assert!(!formatted.contains("redacted before projection"));
+        assert!(!formatted.contains("chat"));
+        Ok(())
+    }
+
+    #[test]
+    fn channel_delivery_pending_from_prior_process_is_unknown_until_committed(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("telegram.json");
+        let message = OutboundMessage::new(TELEGRAM_CHANNEL, "chat", "secret body");
+        record_delivery_state(&path, &message, "pending", None);
+        let mut metadata = load_metadata_json(&path);
+        metadata["deliveries"][0]["writer_instance_ref"] = json!("process:prior");
+        save_metadata_json_unlocked(&path, &metadata).map_err(io::Error::other)?;
+
+        let state = channel_restart_state_from_metadata(
+            TELEGRAM_CHANNEL,
+            &path,
+            &load_metadata_json(&path),
+        );
+        assert_eq!(state.pending_outbound_refs.len(), 1);
+        assert_eq!(
+            state.delivery_statuses[0].status,
+            ChannelDeliveryProjectionStatus::Unknown
+        );
+
+        record_delivery_state(&path, &message, "sent", None);
+        let state = channel_restart_state_from_metadata(
+            TELEGRAM_CHANNEL,
+            &path,
+            &load_metadata_json(&path),
+        );
+        assert!(state.pending_outbound_refs.is_empty());
+        assert_eq!(state.delivery_statuses.len(), 1);
+        assert_eq!(
+            state.delivery_statuses[0].status,
+            ChannelDeliveryProjectionStatus::SentHint
+        );
+        assert!(!format!("{state:?}").contains("secret body"));
+        Ok(())
+    }
+
+    #[test]
+    fn channel_pending_inbound_hint_survives_until_durable_enqueue() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let metadata_dir = root
+            .path()
+            .join("runtime")
+            .join("channels")
+            .join("worker-metadata");
+        fs::create_dir_all(&metadata_dir)?;
+        let path = metadata_dir.join("telegram.json");
+        let message = InboundMessage::new(TELEGRAM_CHANNEL, "user", "chat", "secret inbound");
+        record_pending_inbound_hint(&path, &message).map_err(io::Error::other)?;
+        let state = channel_restart_state_from_metadata(
+            TELEGRAM_CHANNEL,
+            &path,
+            &load_metadata_json(&path),
+        );
+        assert_eq!(state.pending_inbound_refs.len(), 1);
+        assert!(!format!("{state:?}").contains("secret inbound"));
+
+        clear_pending_inbound_hint(root.path(), &message);
+        let state = channel_restart_state_from_metadata(
+            TELEGRAM_CHANNEL,
+            &path,
+            &load_metadata_json(&path),
+        );
+        assert!(state.pending_inbound_refs.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn external_inbound_is_durable_before_transport_ack() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let metadata_dir = root
+            .path()
+            .join("runtime")
+            .join("channels")
+            .join("worker-metadata");
+        fs::create_dir_all(&metadata_dir)?;
+        let path = metadata_dir.join("telegram.json");
+        let owner = "runtime-test-owner";
+        let mut context = ExternalTransportRuntimeContext::new(metadata_dir, 1);
+        context.configure_durable_inbound(
+            root.path().to_path_buf(),
+            owner.to_owned(),
+            Some("unified:test".to_owned()),
+        );
+        let bus = MessageBus::bounded(4);
+        let message = InboundMessage::new(TELEGRAM_CHANNEL, "user", "chat", "secret inbound");
+
+        assert!(publish_external_inbound_with_hint(
+            &bus,
+            message.clone(),
+            &path,
+            &context,
+        ));
+        assert!(bus.try_consume_inbound().is_none());
+        let restart = channel_restart_state_from_metadata(
+            TELEGRAM_CHANNEL,
+            &path,
+            &load_metadata_json(&path),
+        );
+        assert!(restart.pending_inbound_refs.is_empty());
+        let (state, admission) = durable_work_state_for_owner(root.path(), owner)?;
+        assert!(admission.writable);
+        assert_eq!(state.work.items.len(), 1);
+        assert!(state
+            .work
+            .items
+            .values()
+            .all(|item| item.session_key == "unified:test"));
+        assert!(state
+            .work
+            .items
+            .values()
+            .all(|item| !item.state.is_terminal()));
+
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(root.path()),
+            runtime_durable_work_payload_root(root.path()),
+            bus.clone(),
+            owner,
+            DURABLE_WORK_LEASE_DURATION_MS,
+        )?;
+        dispatcher.dispatch_due(&state.work, &admission, now_millis())?;
+        let dispatched = bus
+            .try_consume_inbound()
+            .ok_or_else(|| io::Error::other("durable inbound was not dispatched"))?;
+        assert!(dispatched
+            .metadata
+            .get(DURABLE_WORK_ID_METADATA)
+            .and_then(Value::as_str)
+            .is_some());
+        assert_eq!(dispatched.session_key(), "unified:test");
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_priority_stop_does_not_lease_superseded_work() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let metadata_dir = root
+            .path()
+            .join("runtime")
+            .join("channels")
+            .join("worker-metadata");
+        fs::create_dir_all(&metadata_dir)?;
+        let mut context = ExternalTransportRuntimeContext::new(metadata_dir.clone(), 1);
+        let owner = "runtime-stop-owner";
+        context.configure_durable_inbound(root.path().to_path_buf(), owner.to_owned(), None);
+        let bus = MessageBus::bounded(4);
+        let first = InboundMessage::new(TELEGRAM_CHANNEL, "user", "chat", "/stop");
+        let mut duplicate = first.clone();
+        duplicate.timestamp = "2099-01-01T00:00:00Z".to_owned();
+
+        context
+            .enqueue_inbound(&bus, &first)
+            .map_err(io::Error::other)?;
+        context
+            .enqueue_inbound(&bus, &duplicate)
+            .map_err(io::Error::other)?;
+
+        assert!(bus.try_consume_inbound().is_some());
+        assert!(bus.try_consume_inbound().is_none());
+        let (state, admission) = durable_work_state_for_owner(root.path(), owner)?;
+        assert!(admission.writable);
+        assert_eq!(state.work.items.len(), 2);
+        assert_eq!(
+            state
+                .work
+                .items
+                .values()
+                .filter(|item| item.state.is_terminal())
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_inbound_dedupe_ignores_local_receive_timestamp() {
+        let first = InboundMessage::new(TELEGRAM_CHANNEL, "user", "chat", "same remote body")
+            .with_metadata(Map::from_iter([("message_id".to_owned(), json!("42"))]));
+        let mut redelivered = first.clone();
+        redelivered.timestamp = "2099-01-01T00:00:00Z".to_owned();
+
+        assert_eq!(
+            durable_inbound_identity(&first).1,
+            durable_inbound_identity(&redelivered).1
+        );
+    }
+
+    #[test]
+    fn discord_invalid_resume_projects_resync_instead_of_stale_cursor() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("discord-gateway.json");
+        let state = DiscordGatewayResumeState {
+            session_id: Some("session".to_owned()),
+            sequence: Some(7),
+            resume_gateway_url: Some("wss://gateway.example".to_owned()),
+            bot_user_id: Some("bot".to_owned()),
+            token_hash: None,
+        };
+        save_discord_gateway_resume_state(&path, &state, "token");
+        clear_discord_gateway_resume_state(&path);
+        let projected =
+            channel_restart_state_from_metadata(DISCORD_CHANNEL, &path, &load_metadata_json(&path));
+        assert_eq!(
+            projected.cursor_kind.as_deref(),
+            Some("discord_gateway_resync_required")
+        );
+        assert!(projected.cursor_ref.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn discord_gateway_enqueue_failure_does_not_advance_resume_sequence(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("discord-gateway.json");
+        let mut state = DiscordGatewayResumeState {
+            session_id: Some("session".to_owned()),
+            sequence: Some(7),
+            resume_gateway_url: Some("wss://gateway.example".to_owned()),
+            bot_user_id: Some("bot".to_owned()),
+            token_hash: None,
+        };
+        save_discord_gateway_resume_state(&path, &state, "token");
+
+        assert!(commit_discord_gateway_dispatch_sequence(
+            Err("durable enqueue failed".to_owned()),
+            Some(8),
+            &path,
+            &mut state,
+            "token",
+        )
+        .is_err());
+        assert_eq!(state.sequence, Some(7));
+        assert_eq!(
+            load_discord_gateway_resume_state(&path, "token").sequence,
+            Some(7)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn channel_metadata_reader_rejects_oversized_and_symlink_files() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let oversized = root.path().join("oversized.json");
+        fs::write(
+            &oversized,
+            vec![b'x'; (MAX_CHANNEL_METADATA_BYTES + 1) as usize],
+        )?;
+        assert_eq!(load_metadata_json(&oversized), json!({}));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target = root.path().join("target.json");
+            let link = root.path().join("link.json");
+            fs::write(&target, br#"{"offset":42}"#)?;
+            symlink(&target, &link)?;
+            assert_eq!(load_metadata_json(&link), json!({}));
+        }
         Ok(())
     }
 
@@ -19722,6 +24697,37 @@ mod tests {
         assert!(deliveries
             .iter()
             .all(|delivery| delivery.get("content").is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn drain_outbound_does_not_record_unsent_stream_markers() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let metadata_path = root.path().join("telegram.json");
+        let (tx, rx) = mpsc::channel();
+        tx.send(stream_outbound_message(
+            TELEGRAM_CHANNEL,
+            "chat",
+            "stream",
+            "delta".to_owned(),
+            false,
+        ))?;
+        tx.send(stream_outbound_message(
+            TELEGRAM_CHANNEL,
+            "chat",
+            "stream",
+            String::new(),
+            true,
+        ))?;
+        drop(tx);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        drain_outbound(&rx, 1, &stop, Some(&metadata_path), |_message| Ok(()));
+
+        assert!(load_metadata_json(&metadata_path)
+            .get("deliveries")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty));
         Ok(())
     }
 
@@ -21913,6 +26919,16 @@ mod tests {
             RUNTIME_DATA_SCHEMA_VERSION
         );
         assert!(report.lifecycle.update_marker.is_none());
+        assert_eq!(
+            report.lifecycle.durable_recovery.status,
+            DurableRecoveryStatus::Healthy
+        );
+        assert!(report.lifecycle.durable_recovery.writable);
+        assert_eq!(
+            report.lifecycle.durable_work.status,
+            DurableWorkRecoveryStatus::Healthy
+        );
+        assert!(report.lifecycle.durable_work.writable);
         assert!(report
             .capabilities
             .iter()
@@ -21925,11 +26941,1048 @@ mod tests {
         assert!(output.contains("shacs-bot runtime inspect"));
         assert!(output.contains("Binary version:"));
         assert!(output.contains("Update marker: none"));
+        assert!(output.contains("Durable recovery: healthy (writable=true"));
+        assert!(output.contains("Durable work: healthy (writable=true"));
         assert!(output.contains("Sessions: 1"));
         assert!(output.contains("Runtime containment: contained="));
         assert!(output.contains("snapshot_digest="));
         assert!(output.contains("Generated image artifacts: 0"));
         assert!(!output.contains("hello"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_inspect_and_recover_project_active_child_without_raw_identity(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let mut sessions = SessionManager::new(&workspace)?;
+        sessions.save_with_fsync(&Session::new("session-secret-id"))?;
+        let recorder = DurableChildRecorder::open(runtime_durable_event_root(root.path()))?;
+        let spawned = shacs_session::durable_child::ChildSpawned {
+            child_task_id: "child-secret-id".to_owned(),
+            parent_turn_id: "turn-secret-id".to_owned(),
+            spawn_effect_id: "spawn-secret-id".to_owned(),
+            correlation_id: "correlation-secret-id".to_owned(),
+            idempotency_key: "idempotency-secret-id".to_owned(),
+            run_ref: None,
+            attempt: 1,
+            spawned_at_ms: 10,
+        };
+        recorder.record_spawned("session-secret-id", &spawned)?;
+        recorder.record_running(
+            "session-secret-id",
+            &spawned.parent_turn_id,
+            &spawned.spawn_effect_id,
+            &spawned.correlation_id,
+            &shacs_session::durable_child::ChildRunning {
+                child_task_id: spawned.child_task_id.clone(),
+                started_at_ms: 20,
+            },
+        )?;
+        let pending_run = json!({
+            "child_task_id": "child-pending-id",
+            "session_id": "session-pending-id",
+            "parent_turn_id": "turn-pending-id",
+            "spawn_effect_id": "spawn-pending-id",
+        });
+        let pending_run_ref = recorder.write_child_run_artifact(&pending_run)?;
+        let pending_payload_ref = recorder.child_run_payload_ref(&pending_run)?;
+        recorder.record_spawned(
+            "session-pending-id",
+            &shacs_session::durable_child::ChildSpawned {
+                child_task_id: "child-pending-id".to_owned(),
+                parent_turn_id: "turn-pending-id".to_owned(),
+                spawn_effect_id: "spawn-pending-id".to_owned(),
+                correlation_id: "correlation-pending-id".to_owned(),
+                idempotency_key: "idempotency-pending-id".to_owned(),
+                run_ref: Some(pending_run_ref),
+                attempt: 1,
+                spawned_at_ms: 10,
+            },
+        )?;
+        recorder.ensure_child_run_work(
+            "session-pending-id",
+            "turn-pending-id",
+            "child-pending-id",
+            "spawn-pending-id",
+            pending_payload_ref,
+        )?;
+
+        let inspected = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert_eq!(
+            inspected.lifecycle.durable_children.recovery_needed_count,
+            1
+        );
+        assert_eq!(inspected.lifecycle.durable_children.spawned_count, 1);
+        assert_eq!(
+            inspected.lifecycle.durable_children.active_child_refs.len(),
+            2
+        );
+        let output = format_runtime_inspect(inspected);
+        assert!(output.contains("Durable children: spawned=1 recovery_needed=1"));
+        assert!(!output.contains("child-secret-id"));
+        assert!(!output.contains("correlation-secret-id"));
+        assert!(guard_runtime_durable_recovery_admission(root.path()).is_err());
+        let session_inspected = session_inspect(SessionInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            session: "session-secret-id".to_owned(),
+        })?;
+        assert_eq!(session_inspected.durable_children.active_count, 1);
+        assert!(!format_session_inspect(session_inspected).contains("child-secret-id"));
+
+        let ownership_path = runtime_ownership_marker_path(root.path());
+        let held_lock = RuntimeOwnershipMutationLock::acquire(&ownership_path)?;
+        let concurrent = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })
+        .expect_err("concurrent recovery must not mutate durable child state");
+        assert!(is_runtime_ownership_mutation_lock_error(&concurrent));
+        drop(held_lock);
+
+        let recovered = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+        assert!(recovered.recovered);
+        assert_eq!(recovered.durable_children.recovery_needed_count, 0);
+        assert_eq!(recovered.durable_children.spawned_count, 1);
+        assert_eq!(recovered.durable_children.terminal_count, 1);
+        assert!(recovered
+            .detail
+            .contains("cancelled 1 recovered durable child task"));
+        assert!(!format_runtime_recover(recovered).contains("child-secret-id"));
+        let replayed = evaluate_runtime_durable_recovery(root.path());
+        let child = replayed
+            .state
+            .as_ref()
+            .and_then(|state| state.children.items.get("child-secret-id"))
+            .ok_or("recovered child missing")?;
+        assert_eq!(child.state, ReplayChildTaskState::Cancelled);
+        assert!(child.cancellation_requested_sequence < child.terminal_sequence);
+        assert_eq!(
+            replayed
+                .state
+                .as_ref()
+                .and_then(|state| state.children.items.get("child-pending-id"))
+                .map(|child| child.state),
+            Some(ReplayChildTaskState::Spawned)
+        );
+        guard_runtime_durable_recovery_admission(root.path())?;
+        let session_diagnostics = session_diagnostics(SessionDiagnosticsOptions {
+            config_path: Some(root.path().join("config.json")),
+            workspace_override: None,
+            session: "session-secret-id".to_owned(),
+        })?;
+        assert_eq!(session_diagnostics.durable_children.active_count, 0);
+        assert_eq!(session_diagnostics.durable_children.terminal_count, 1);
+        assert!(!format_session_diagnostics(session_diagnostics).contains("child-secret-id"));
+        let second_recovery = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(root.path().join("config.json")),
+            workspace_override: None,
+        })?;
+        assert!(!second_recovery.recovered);
+        assert_eq!(second_recovery.durable_children.terminal_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_start_admission_blocks_corrupt_durable_events() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let report = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        let event_root = runtime_durable_event_root(&report.data_dir);
+        let mut events = shacs_session::durable_event::DurableEventStore::open(&event_root)?;
+        let mut input = shacs_session::durable_event::DurableEventInput::new(
+            "session-1",
+            shacs_session::durable_event::SESSION_TURN_ACCEPTED,
+            shacs_session::durable_event::DurableEventPayload::inline(
+                "orchestrator_fact",
+                json!({"content_hash": "sha256:one", "media_count": 0}),
+            ),
+        );
+        input.turn_id = Some("turn-1".to_owned());
+        events.append(input)?;
+        let event_path = event_root.join("events.log");
+        let mut file = fs::OpenOptions::new().append(true).open(event_path)?;
+        writeln!(file, "{{malformed}}")?;
+
+        let inspected = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert_eq!(
+            inspected.lifecycle.durable_recovery.status,
+            DurableRecoveryStatus::Blocked
+        );
+        let error = load_runtime_config(RuntimeConfigOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            resolve_env: false,
+        })
+        .expect_err("corrupt durable event store must block runtime start admission");
+        assert!(error
+            .to_string()
+            .contains("durable recovery status blocked"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_recover_rewrites_corrupt_checkpoint_from_event_truth() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let report = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        let event_root = runtime_durable_event_root(&report.data_dir);
+        let checkpoint_root = runtime_durable_checkpoint_root(&report.data_dir);
+        let mut events = shacs_session::durable_event::DurableEventStore::open(&event_root)?;
+        let mut input = shacs_session::durable_event::DurableEventInput::new(
+            "session-1",
+            shacs_session::durable_event::SESSION_TURN_ACCEPTED,
+            shacs_session::durable_event::DurableEventPayload::inline(
+                "orchestrator_fact",
+                json!({"content_hash": "sha256:one", "media_count": 0}),
+            ),
+        );
+        input.turn_id = Some("turn-1".to_owned());
+        events.append(input)?;
+        let state = evaluate_durable_recovery(&event_root, &checkpoint_root)
+            .state
+            .ok_or("missing replay state")?;
+        let checkpoints = DurableCheckpointStore::open(&checkpoint_root)?;
+        checkpoints.write(&state)?;
+        let latest = checkpoints
+            .candidate_paths()?
+            .into_iter()
+            .next()
+            .ok_or("missing checkpoint")?;
+        fs::write(latest, b"{}")?;
+
+        let before = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert_eq!(
+            before.lifecycle.durable_recovery.status,
+            DurableRecoveryStatus::Recoverable
+        );
+        let before_output = format_runtime_inspect(before);
+        assert!(before_output.contains("Durable recovery hint: rewrite_checkpoint"));
+        let outcome = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+        assert!(outcome.recovered);
+        assert!(outcome.detail.contains("rewrote durable checkpoint"));
+        assert_eq!(
+            outcome.durable_recovery.status,
+            DurableRecoveryStatus::Healthy
+        );
+        assert!(outcome.durable_recovery.writable);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_inspect_shows_incomplete_tail_recovery_hint() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let report = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        let event_root = runtime_durable_event_root(&report.data_dir);
+        let mut events = shacs_session::durable_event::DurableEventStore::open(&event_root)?;
+        let mut input = shacs_session::durable_event::DurableEventInput::new(
+            "session-1",
+            shacs_session::durable_event::SESSION_TURN_ACCEPTED,
+            shacs_session::durable_event::DurableEventPayload::inline(
+                "orchestrator_fact",
+                json!({"content_hash": "sha256:one", "media_count": 0}),
+            ),
+        );
+        input.turn_id = Some("turn-1".to_owned());
+        events.append(input)?;
+        let mut bytes = fs::read(events.path())?;
+        bytes.truncate(bytes.len().saturating_sub(8));
+        fs::write(events.path(), bytes)?;
+
+        let inspected = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+        assert_eq!(
+            inspected.lifecycle.durable_recovery.status,
+            DurableRecoveryStatus::Recoverable
+        );
+        let output = format_runtime_inspect(inspected);
+        assert!(output.contains("Durable recovery hint: discard_incomplete_tail"));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_recover_quarantines_checkpoint_ahead_of_event_truth() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let report = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        let event_root = runtime_durable_event_root(&report.data_dir);
+        let checkpoint_root = runtime_durable_checkpoint_root(&report.data_dir);
+        let mut events = shacs_session::durable_event::DurableEventStore::open(&event_root)?;
+        let mut input = shacs_session::durable_event::DurableEventInput::new(
+            "session-1",
+            shacs_session::durable_event::SESSION_TURN_ACCEPTED,
+            shacs_session::durable_event::DurableEventPayload::inline(
+                "orchestrator_fact",
+                json!({"content_hash": "sha256:one", "media_count": 0}),
+            ),
+        );
+        input.turn_id = Some("turn-1".to_owned());
+        events.append(input)?;
+        let mut ahead = shacs_session::durable_replay::DurableReplayState::event_zero();
+        ahead.applied_through = Some(10);
+        DurableCheckpointStore::open(&checkpoint_root)?.write(&ahead)?;
+
+        let outcome = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+        assert!(outcome.recovered);
+        assert!(outcome.detail.contains("quarantined 1 unusable checkpoint"));
+        assert_eq!(
+            outcome.durable_recovery.status,
+            DurableRecoveryStatus::Healthy
+        );
+        assert!(outcome.durable_recovery.writable);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_recover_requeues_stale_durable_work_lease() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let report = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        let bus = MessageBus::new();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(&report.data_dir),
+            runtime_durable_work_payload_root(&report.data_dir),
+            bus,
+            "test-owner",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "child-run-child-secret-id",
+            &InboundMessage::new("cli", "user", "direct", "hello"),
+            None,
+            None,
+        )?;
+        let lease_at = now_millis().saturating_sub(200);
+        let replay = evaluate_runtime_durable_recovery(&report.data_dir);
+        let work = evaluate_runtime_durable_work(&report.data_dir, &replay);
+        let state = replay.state.ok_or("missing work replay state")?;
+        dispatcher.dispatch_due(&state.work, &work, lease_at)?;
+
+        let before = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert_eq!(
+            before.lifecycle.durable_work.status,
+            DurableWorkRecoveryStatus::Recoverable
+        );
+        assert_eq!(
+            before.lifecycle.durable_work.stale_lease_work_ids,
+            vec!["child-run-child-secret-id"]
+        );
+        let before_output = format_runtime_inspect(before.clone());
+        assert!(before_output.contains("work_ref=work:"));
+        assert!(!before_output.contains("child-secret-id"));
+        let error = load_runtime_config(RuntimeConfigOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            resolve_env: false,
+        })
+        .expect_err("stale durable work lease must block writable start");
+        assert!(error
+            .to_string()
+            .contains("durable work status recoverable"));
+
+        let recovered = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+        assert!(recovered.recovered);
+        assert!(recovered
+            .detail
+            .contains("requeued 1 stale durable work lease"));
+        assert_eq!(
+            recovered.durable_work.status,
+            DurableWorkRecoveryStatus::Healthy
+        );
+        assert_eq!(recovered.durable_work.pending_count, 1);
+        assert!(format_runtime_recover(recovered).contains("Durable diagnostics evidence:"));
+        Ok(())
+    }
+
+    #[test]
+    fn durable_external_retry_limit_records_exhausted_terminal() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let bus = MessageBus::new();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            bus.clone(),
+            "owner-1",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "work-retry",
+            &InboundMessage::new("cli", "user", "direct", "hello"),
+            None,
+            None,
+        )?;
+        for attempt in 1..=MAX_DURABLE_WORK_ATTEMPTS {
+            let (state, admission) =
+                durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+            dispatcher.dispatch_due(&state.work, &admission, u64::from(attempt))?;
+            let _ = bus.consume_inbound();
+            if attempt < MAX_DURABLE_WORK_ATTEMPTS {
+                let (state, _) =
+                    durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+                dispatcher.requeue(&state.work.items["work-retry"], "test_retry")?;
+            }
+        }
+
+        assert!(!schedule_external_work_retry(
+            &mut dispatcher,
+            data_dir,
+            "work-retry",
+            1_000,
+        )?);
+        let replay = evaluate_runtime_durable_recovery(data_dir);
+        let state = replay.state.ok_or("missing exhausted replay state")?;
+        assert_eq!(
+            state.work.items["work-retry"].terminal_kind,
+            Some(WorkTerminalKind::Exhausted)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_external_cancelled_lease_does_not_enter_retry_waiting() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let bus = MessageBus::new();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            bus.clone(),
+            "owner-1",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "work-cancelled-retry",
+            &InboundMessage::new("cli", "user", "direct", "hello"),
+            None,
+            None,
+        )?;
+        let (state, admission) =
+            durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.dispatch_due(&state.work, &admission, 1)?;
+        let _ = bus.consume_inbound();
+        let (state, _) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.request_cancellation(&state.work.items["work-cancelled-retry"], "test_stop")?;
+
+        assert!(!schedule_external_work_retry(
+            &mut dispatcher,
+            data_dir,
+            "work-cancelled-retry",
+            1_000,
+        )?);
+        let replay = evaluate_runtime_durable_recovery(data_dir);
+        let state = replay.state.ok_or("missing cancelled replay state")?;
+        assert_eq!(
+            state.work.items["work-cancelled-retry"].state,
+            ReplayWorkState::Cancelled
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_external_stop_command_cancels_waiting_session_work() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            MessageBus::new(),
+            "owner-1",
+            100,
+        )?;
+        for work_id in ["command-work", "waiting-work"] {
+            dispatcher.enqueue_inbound(
+                work_id,
+                &InboundMessage::new("cli", "user", "direct", work_id)
+                    .with_session_key_override("cli:session"),
+                None,
+                None,
+            )?;
+        }
+
+        request_external_session_cancellation(
+            &mut dispatcher,
+            data_dir,
+            "cli:session",
+            Some("command-work"),
+        )?;
+        let replay = evaluate_runtime_durable_recovery(data_dir);
+        let state = replay.state.ok_or("missing cancellation replay state")?;
+        assert_eq!(
+            state.work.items["waiting-work"].state,
+            ReplayWorkState::Cancelled
+        );
+        assert!(state.work.items["waiting-work"]
+            .cancellation_requested_sequence
+            .is_some());
+        assert_eq!(
+            state.work.items["command-work"].state,
+            ReplayWorkState::Pending
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_external_shutdown_result_records_failed_terminal() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let bus = MessageBus::new();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            bus.clone(),
+            "owner-1",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "work-failed",
+            &InboundMessage::new("cli", "user", "direct", "hello"),
+            None,
+            None,
+        )?;
+        let (state, admission) =
+            durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.dispatch_due(&state.work, &admission, 1)?;
+        let _ = bus.consume_inbound();
+        let mut durable_work = ExternalDurableWorkRuntime {
+            data_dir: data_dir.to_path_buf(),
+            dispatcher,
+        };
+        handle_external_agent_turn_result(
+            ExternalAgentTurnResult {
+                session_key: "cli:direct".to_owned(),
+                outbound: Vec::new(),
+                error: None,
+                retry_message: None,
+                subagent_runtime: None,
+                durable_work_id: Some("work-failed".to_owned()),
+                turn_failed: true,
+                cancel_session_work: false,
+                priority_command: false,
+                turn_cancelled: false,
+            },
+            &bus,
+            &mut durable_work,
+            &mut ExternalSessionTurnCoordinator::default(),
+            &mut Vec::new(),
+            false,
+        )?;
+        let replay = evaluate_runtime_durable_recovery(data_dir);
+        let state = replay.state.ok_or("missing failed replay state")?;
+        assert_eq!(
+            state.work.items["work-failed"].terminal_kind,
+            Some(WorkTerminalKind::Failed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_external_turn_panic_records_failed_terminal_and_releases_session(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let bus = MessageBus::new();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            bus.clone(),
+            "owner-1",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "work-panic",
+            &InboundMessage::new("cli", "user", "direct", "hello"),
+            None,
+            None,
+        )?;
+        let (state, admission) =
+            durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.dispatch_due(&state.work, &admission, 1)?;
+        let message = bus
+            .consume_inbound()
+            .ok_or("missing dispatched panic work")?;
+        let mut adapter = external_media_test_adapter(
+            root.path(),
+            Arc::new(Mutex::new(Vec::<ProviderRequest>::new())),
+        )?;
+        adapter.client = Arc::new(PanicProviderClient);
+        let adapter = Arc::new(adapter);
+        let (result_tx, result_rx) = mpsc::channel();
+        let session_key = adapter.external_effective_session_key(&message);
+        let handle = spawn_external_agent_turn(
+            adapter.clone(),
+            session_key.clone(),
+            message,
+            bus.clone(),
+            result_tx,
+        );
+        handle
+            .join()
+            .map_err(|_| "panic should be converted to a failed turn result")?;
+        let result = result_rx.recv()?;
+        let mut durable_work = ExternalDurableWorkRuntime {
+            data_dir: data_dir.to_path_buf(),
+            dispatcher,
+        };
+        handle_external_agent_turn_result(
+            result,
+            &bus,
+            &mut durable_work,
+            &mut ExternalSessionTurnCoordinator::default(),
+            &mut Vec::new(),
+            false,
+        )?;
+
+        assert!(!adapter.external_session_is_active(&session_key));
+        let replay = evaluate_runtime_durable_recovery(data_dir);
+        let state = replay.state.ok_or("missing panic replay state")?;
+        assert_eq!(
+            state.work.items["work-panic"].terminal_kind,
+            Some(WorkTerminalKind::Failed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_external_cancelled_turn_records_cancelled_outcome() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let bus = MessageBus::new();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            bus.clone(),
+            "owner-1",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "work-cancelled",
+            &InboundMessage::new("cli", "user", "direct", "hello"),
+            None,
+            None,
+        )?;
+        let (state, admission) =
+            durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.dispatch_due(&state.work, &admission, 1)?;
+        let _ = bus.consume_inbound();
+        let (state, _) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.request_cancellation(&state.work.items["work-cancelled"], "user_stop")?;
+        let mut durable_work = ExternalDurableWorkRuntime {
+            data_dir: data_dir.to_path_buf(),
+            dispatcher,
+        };
+        handle_external_agent_turn_result(
+            ExternalAgentTurnResult {
+                session_key: "cli:direct".to_owned(),
+                outbound: Vec::new(),
+                error: None,
+                retry_message: None,
+                subagent_runtime: None,
+                durable_work_id: Some("work-cancelled".to_owned()),
+                turn_failed: false,
+                cancel_session_work: false,
+                priority_command: false,
+                turn_cancelled: true,
+            },
+            &bus,
+            &mut durable_work,
+            &mut ExternalSessionTurnCoordinator::default(),
+            &mut Vec::new(),
+            false,
+        )?;
+        let replay = evaluate_runtime_durable_recovery(data_dir);
+        let state = replay.state.ok_or("missing cancelled replay state")?;
+        assert_eq!(
+            state.work.items["work-cancelled"].state,
+            ReplayWorkState::Cancelled
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_external_workflow_cancelled_reason_is_a_cancellation() {
+        assert!(external_turn_was_cancelled("cancelled"));
+        assert!(external_turn_was_cancelled("workflow_cancelled"));
+        assert!(!external_turn_was_cancelled("completed"));
+    }
+
+    #[test]
+    fn durable_external_controlled_shutdown_cancels_requested_lease() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let bus = MessageBus::new();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            bus.clone(),
+            "owner-1",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "work-cancelled",
+            &InboundMessage::new("cli", "user", "direct", "hello"),
+            None,
+            None,
+        )?;
+        let (state, admission) =
+            durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.dispatch_due(&state.work, &admission, 1)?;
+        let _ = bus.consume_inbound();
+        let (state, _) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.request_cancellation(&state.work.items["work-cancelled"], "runtime_shutdown")?;
+        let mut durable_work = ExternalDurableWorkRuntime {
+            data_dir: data_dir.to_path_buf(),
+            dispatcher,
+        };
+
+        requeue_owned_external_work(&mut durable_work)?;
+        let replay = evaluate_runtime_durable_recovery(data_dir);
+        let state = replay.state.ok_or("missing controlled shutdown state")?;
+        assert_eq!(
+            state.work.items["work-cancelled"].state,
+            ReplayWorkState::Cancelled
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn external_shutdown_includes_coordinator_session_before_turn_lock_acquire(
+    ) -> Result<(), Box<dyn Error>> {
+        let turn_lock = SessionTurnLock::new();
+        let mut coordinator = ExternalSessionTurnCoordinator::default();
+        let started = coordinator.start_or_enqueue(
+            "telegram:coordinator".to_owned(),
+            InboundMessage::new("telegram", "user", "chat", "hello"),
+        );
+        assert!(started.is_some());
+        let _guard = turn_lock
+            .acquire("telegram:locked")
+            .map_err(|error| format!("test lock acquire failed: {error:?}"))?;
+
+        assert_eq!(
+            external_active_sessions(&turn_lock, &coordinator),
+            vec![
+                "telegram:coordinator".to_owned(),
+                "telegram:locked".to_owned()
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn external_idle_stop_does_not_cancel_the_next_session_turn() -> Result<(), Box<dyn Error>> {
+        let turn_lock = SessionTurnLock::new();
+        assert!(!cancel_external_active_session(&turn_lock, "telegram:idle"));
+        let _guard = turn_lock
+            .acquire("telegram:idle")
+            .map_err(|error| format!("next turn lock acquire failed: {error:?}"))?;
+        assert!(turn_lock
+            .cancellation_token("telegram:idle")
+            .is_some_and(|token| !token.is_cancelled()));
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_external_reservation_clears_its_pending_cancellation() -> Result<(), Box<dyn Error>>
+    {
+        let turn_lock = SessionTurnLock::new();
+        let reservation = turn_lock.reserve("telegram:media-error");
+        assert!(cancel_external_active_session(
+            &turn_lock,
+            "telegram:media-error",
+        ));
+        drop(reservation);
+        assert!(!cancel_external_active_session(
+            &turn_lock,
+            "telegram:media-error",
+        ));
+        let _guard = turn_lock
+            .acquire("telegram:media-error")
+            .map_err(|error| format!("next turn lock acquire failed: {error:?}"))?;
+        assert!(turn_lock
+            .cancellation_token("telegram:media-error")
+            .is_some_and(|token| !token.is_cancelled()));
+        Ok(())
+    }
+
+    #[test]
+    fn external_coordinator_active_stop_cancels_before_turn_lock_acquire(
+    ) -> Result<(), Box<dyn Error>> {
+        let turn_lock = SessionTurnLock::new();
+        let mut coordinator = ExternalSessionTurnCoordinator::default();
+        assert!(coordinator
+            .start_or_enqueue(
+                "telegram:active".to_owned(),
+                InboundMessage::new("telegram", "user", "chat", "hello"),
+            )
+            .is_some());
+        let _reservation = turn_lock.reserve("telegram:active");
+        _reservation.bind_to_current_thread();
+        assert!(cancel_external_active_session(
+            &turn_lock,
+            "telegram:active"
+        ));
+        let _guard = turn_lock
+            .acquire("telegram:active")
+            .map_err(|error| format!("active turn lock acquire failed: {error:?}"))?;
+        assert!(turn_lock
+            .cancellation_token("telegram:active")
+            .is_some_and(|token| token.is_cancelled()));
+        Ok(())
+    }
+
+    #[test]
+    fn external_stop_after_turn_lock_release_does_not_cancel_the_next_turn(
+    ) -> Result<(), Box<dyn Error>> {
+        let turn_lock = SessionTurnLock::new();
+        let mut coordinator = ExternalSessionTurnCoordinator::default();
+        assert!(coordinator
+            .start_or_enqueue(
+                "telegram:released".to_owned(),
+                InboundMessage::new("telegram", "user", "chat", "hello"),
+            )
+            .is_some());
+        let _reservation = turn_lock.reserve("telegram:released");
+        _reservation.bind_to_current_thread();
+        drop(
+            turn_lock
+                .acquire("telegram:released")
+                .map_err(|error| format!("first turn lock acquire failed: {error:?}"))?,
+        );
+        assert!(coordinator.active_sessions.contains("telegram:released"));
+        assert!(!cancel_external_active_session(
+            &turn_lock,
+            "telegram:released",
+        ));
+        let _guard = turn_lock
+            .acquire("telegram:released")
+            .map_err(|error| format!("next turn lock acquire failed: {error:?}"))?;
+        assert!(turn_lock
+            .cancellation_token("telegram:released")
+            .is_some_and(|token| !token.is_cancelled()));
+        Ok(())
+    }
+
+    #[test]
+    fn external_busy_turn_does_not_leave_a_stale_reservation() -> Result<(), Box<dyn Error>> {
+        let turn_lock = SessionTurnLock::new();
+        let priority_guard = turn_lock
+            .acquire_priority("telegram:busy")
+            .map_err(|error| format!("priority turn lock acquire failed: {error:?}"))?;
+        let _reservation = turn_lock.reserve("telegram:busy");
+        _reservation.bind_to_current_thread();
+        assert!(cancel_external_active_session(&turn_lock, "telegram:busy",));
+        assert!(turn_lock.acquire("telegram:busy").is_err());
+        drop(priority_guard);
+        assert!(!cancel_external_active_session(&turn_lock, "telegram:busy",));
+        let _guard = turn_lock
+            .acquire("telegram:busy")
+            .map_err(|error| format!("next turn lock acquire failed: {error:?}"))?;
+        assert!(turn_lock
+            .cancellation_token("telegram:busy")
+            .is_some_and(|token| !token.is_cancelled()));
+        Ok(())
+    }
+
+    #[test]
+    fn external_reservation_is_consumed_only_by_its_bound_worker() -> Result<(), Box<dyn Error>> {
+        let turn_lock = SessionTurnLock::new();
+        let reservation = turn_lock.reserve("telegram:reserved");
+        assert!(turn_lock.acquire("telegram:reserved").is_err());
+        assert!(cancel_external_active_session(
+            &turn_lock,
+            "telegram:reserved",
+        ));
+        reservation.bind_to_current_thread();
+        let _guard = turn_lock
+            .acquire("telegram:reserved")
+            .map_err(|error| format!("reserved worker lock acquire failed: {error:?}"))?;
+        assert!(turn_lock
+            .cancellation_token("telegram:reserved")
+            .is_some_and(|token| token.is_cancelled()));
+        Ok(())
+    }
+
+    #[test]
+    fn external_inbound_publish_stops_when_bounded_bus_is_full() {
+        let bus = MessageBus::bounded(1);
+        bus.publish_inbound(InboundMessage::new("cli", "user", "first", "first"));
+        let stop = AtomicBool::new(true);
+        assert!(!publish_external_inbound(
+            &bus,
+            InboundMessage::new("cli", "user", "second", "second"),
+            &stop,
+        ));
+        assert_eq!(bus.inbound_size(), 1);
+    }
+
+    #[test]
+    fn durable_external_shutdown_enqueues_remaining_raw_inbound() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let bus = MessageBus::new();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            bus.clone(),
+            "owner-1",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "already-durable",
+            &InboundMessage::new("cli", "user", "durable", "first"),
+            None,
+            None,
+        )?;
+        let (state, admission) =
+            durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.dispatch_due(&state.work, &admission, 1)?;
+        bus.publish_inbound(InboundMessage::new("cli", "user", "raw", "second"));
+        let mut durable_work = ExternalDurableWorkRuntime {
+            data_dir: data_dir.to_path_buf(),
+            dispatcher,
+        };
+
+        enqueue_remaining_external_inbound(&bus, &mut durable_work)?;
+        let replay = evaluate_runtime_durable_recovery(data_dir);
+        let state = replay.state.ok_or("missing shutdown replay state")?;
+        assert_eq!(state.work.items.len(), 2);
+        assert_eq!(
+            state
+                .work
+                .items
+                .values()
+                .filter(|item| item.state == ReplayWorkState::Pending)
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_start_admission_blocks_missing_durable_work_payload() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let report = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        let payload_root = runtime_durable_work_payload_root(&report.data_dir);
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(&report.data_dir),
+            &payload_root,
+            MessageBus::new(),
+            "test-owner",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "work-missing",
+            &InboundMessage::new("cli", "user", "direct", "hello"),
+            None,
+            None,
+        )?;
+        let replay = evaluate_runtime_durable_recovery(&report.data_dir);
+        let state = replay.state.ok_or("missing work replay state")?;
+        let artifact_ref = match &state.work.items["work-missing"].payload_ref {
+            shacs_session::durable_work::WorkPayloadRef::Artifact { artifact_ref, .. } => {
+                artifact_ref
+            }
+            _ => return Err("missing artifact payload ref".into()),
+        };
+        fs::remove_file(payload_root.join(artifact_ref))?;
+
+        let inspected = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert_eq!(
+            inspected.lifecycle.durable_work.status,
+            DurableWorkRecoveryStatus::Blocked
+        );
+        let output = format_runtime_inspect(inspected);
+        assert!(output.contains("Durable work issue: missing_payload"));
+        let error = load_runtime_config(RuntimeConfigOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            resolve_env: false,
+        })
+        .expect_err("missing durable work payload must block writable start");
+        assert!(error.to_string().contains("durable work status blocked"));
         Ok(())
     }
 
@@ -22275,6 +28328,152 @@ mod tests {
     }
 
     #[test]
+    fn runtime_diagnostics_projects_durable_evidence_without_raw_secret(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        config.agents.defaults.provider = "openai".to_owned();
+        config.agents.defaults.model = "openai/gpt-5".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                api_key: Some("sk-adapter-secret".to_owned()),
+                api_base: None,
+                extra_headers: None,
+                extra_body: None,
+            },
+        );
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let store = DurableTraceStore::open(runtime_durable_trace_root(&bundle.context.data_dir))?;
+        let mut input = shacs_session::durable_trace::DurableTraceInput::new(
+            "runtime.recovery",
+            shacs_session::durable_trace::DurableTraceSeverity::Warning,
+            json!({ "token": "sk-runtime-secret", "summary": "recovery evidence" }),
+        );
+        input.event_sequence = Some(3);
+        input.active_recovery = true;
+        store.append(input)?;
+        let ownership_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        fs::create_dir_all(ownership_path.parent().ok_or("missing runtime directory")?)?;
+        fs::write(
+            &ownership_path,
+            serde_json::to_vec(&runtime_ownership_marker_value(
+                std::process::id(),
+                now_millis(),
+                now_millis(),
+                "serve",
+                &config_path,
+                &workspace,
+            ))?,
+        )?;
+        let raw_supervision_owner = "owner-raw-supervision-secret";
+        let raw_supervision_detail = "/Users/alice/ClientA/sk-supervision-secret";
+        write_runtime_supervision_state(
+            &bundle.context.data_dir,
+            RuntimeSupervisionState {
+                schema_version: 1,
+                owner: Some(RuntimeSupervisionOwner {
+                    owner_id: raw_supervision_owner.to_owned(),
+                    mode: "serve".to_owned(),
+                    acquired_at_ms: 1,
+                    renewed_at_ms: 2,
+                    expires_at_ms: 3,
+                    state: "active".to_owned(),
+                    reason: raw_supervision_detail.to_owned(),
+                }),
+                components: vec![RuntimeSupervisionComponent {
+                    name: "api".to_owned(),
+                    state: "running".to_owned(),
+                    detail: raw_supervision_detail.to_owned(),
+                }],
+                shutdown: RuntimeShutdownReport::completed(RuntimeShutdownReason::Stop)
+                    .supervision_shutdown(),
+                last_event_sequence: None,
+            },
+        )?;
+
+        let inspect = runtime_inspect(RuntimeInspectOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert_eq!(inspect.lifecycle.durable_diagnostics.evidence_count, 1);
+        assert_eq!(
+            inspect.lifecycle.durable_diagnostics.active_recovery_count,
+            1
+        );
+        let output = format_runtime_inspect(inspect);
+        assert!(output.contains("Durable diagnostics evidence"));
+        assert!(output.contains("owner:"));
+        assert!(output.contains("supervision-detail:"));
+        assert!(!output.contains(raw_supervision_owner));
+        assert!(!output.contains(raw_supervision_detail));
+
+        let diagnostics = runtime_diagnostics(RuntimeDiagnosticsOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+            bundle_path: None,
+        })?;
+        let rendered = format_runtime_diagnostics(diagnostics);
+        assert!(rendered.contains("diagnostics_evidence_not_replay_truth"));
+        assert!(!rendered.contains("sk-runtime-secret"));
+        assert!(!rendered.contains("sk-adapter-secret"));
+        assert!(!rendered.contains(raw_supervision_owner));
+        assert!(!rendered.contains(raw_supervision_detail));
+        assert!(!rendered.contains(&root.path().to_string_lossy().to_string()));
+        assert!(rendered.contains("config_path_ref"));
+        assert!(rendered.contains("workspace_ref"));
+
+        let adapter_bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: true,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let adapter = AgentLoopChatCompletionAdapter::from_bundle(adapter_bundle, false)?;
+        let api_snapshot = adapter.diagnostics_snapshot().redacted_value();
+        assert_eq!(
+            api_snapshot["runtime"]["durable_diagnostics_evidence"]["evidence_count"],
+            json!(1)
+        );
+        assert_eq!(
+            api_snapshot["runtime"]["durable_diagnostics_evidence"]["truth_role"],
+            json!("diagnostics_evidence_not_replay_truth")
+        );
+        assert_eq!(
+            api_snapshot["runtime"]["supervision"]["component_count"],
+            json!(1)
+        );
+        let api_snapshot_text = api_snapshot.to_string();
+        assert!(api_snapshot_text.contains("supervision-detail:"));
+        assert!(!api_snapshot_text.contains(raw_supervision_owner));
+        assert!(!api_snapshot_text.contains(raw_supervision_detail));
+        let recovery_issue = DurableRecoveryIssue {
+            kind: shacs_session::durable_replay::DurableRecoveryIssueKind::EventCorrupt,
+            detail: "/Users/alice/ClientA/runtime/durable-events/events.log is a symlink"
+                .to_owned(),
+        };
+        let issue_projection = durable_recovery_issue_projection(&recovery_issue).to_string();
+        assert!(issue_projection.contains("recovery-detail:"));
+        assert!(!issue_projection.contains("/Users/alice/ClientA"));
+        Ok(())
+    }
+
+    #[test]
     fn runtime_update_records_marker_and_recover_clears_it() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
@@ -22440,45 +28639,54 @@ mod tests {
     #[test]
     fn runtime_ownership_classifies_active_and_stale_markers() -> Result<(), Box<dyn Error>> {
         let now = now_millis();
-        let active = RuntimeOwnershipMarker {
-            pid: std::process::id(),
-            started_at_ms: now,
-            updated_at_ms: now,
-            binary_version: VERSION.to_owned(),
-            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
-            mode: "run".to_owned(),
-            config_path: "/tmp/config.json".to_owned(),
-            workspace: "/tmp/workspace".to_owned(),
-        };
+        let active = runtime_marker_for_test(std::process::id(), now, now, "run", true, false);
         let status = classify_runtime_ownership_marker(active, now);
         assert_eq!(status.state, RuntimeOwnershipState::Active);
 
-        let stale_pid = RuntimeOwnershipMarker {
-            pid: 999_999,
-            started_at_ms: now,
-            updated_at_ms: now,
-            binary_version: VERSION.to_owned(),
-            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
-            mode: "run".to_owned(),
-            config_path: "/tmp/config.json".to_owned(),
-            workspace: "/tmp/workspace".to_owned(),
-        };
+        let stale_pid = runtime_marker_for_test(999_999, now, now, "run", false, false);
         let status = classify_runtime_ownership_marker(stale_pid, now);
         assert_eq!(status.state, RuntimeOwnershipState::Stale);
 
-        let stale_heartbeat = RuntimeOwnershipMarker {
-            pid: std::process::id(),
-            started_at_ms: now,
-            updated_at_ms: now.saturating_sub(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS + 1),
-            binary_version: VERSION.to_owned(),
-            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
-            mode: "serve".to_owned(),
-            config_path: "/tmp/config.json".to_owned(),
-            workspace: "/tmp/workspace".to_owned(),
-        };
+        let stale_heartbeat = runtime_marker_for_test(
+            std::process::id(),
+            now,
+            now.saturating_sub(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS + 1),
+            "serve",
+            true,
+            false,
+        );
         let status = classify_runtime_ownership_marker(stale_heartbeat, now);
         assert_eq!(status.state, RuntimeOwnershipState::Stale);
         Ok(())
+    }
+
+    fn runtime_marker_for_test(
+        pid: u32,
+        started_at_ms: u64,
+        updated_at_ms: u64,
+        mode: &str,
+        pid_alive: bool,
+        process_started_after_marker: bool,
+    ) -> RuntimeOwnershipMarker {
+        RuntimeOwnershipMarker {
+            schema_version: 1,
+            owner_id: runtime_owner_id(pid, started_at_ms),
+            pid,
+            started_at_ms,
+            updated_at_ms,
+            expires_at_ms: updated_at_ms.saturating_add(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS),
+            lifecycle: "active".to_owned(),
+            binary_version: VERSION.to_owned(),
+            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
+            mode: mode.to_owned(),
+            config_path: "/tmp/config.json".to_owned(),
+            workspace: "/tmp/workspace".to_owned(),
+            process_evidence: RuntimeOwnerProcessEvidence {
+                pid,
+                pid_alive,
+                process_started_after_marker,
+            },
+        }
     }
 
     #[test]
@@ -22509,16 +28717,7 @@ mod tests {
             pid_root.join("stat"),
             format!("42 (shacs-bot) {}", proc_stat_fields.join(" ")),
         )?;
-        let marker = RuntimeOwnershipMarker {
-            pid,
-            started_at_ms: 1_004_000,
-            updated_at_ms: 1_004_000,
-            binary_version: VERSION.to_owned(),
-            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
-            mode: "run".to_owned(),
-            config_path: "/tmp/config.json".to_owned(),
-            workspace: "/tmp/workspace".to_owned(),
-        };
+        let marker = runtime_marker_for_test(pid, 1_004_000, 1_004_000, "run", true, false);
 
         assert_eq!(
             procfs_process_started_at_ms(pid, &proc_root, 100),
@@ -22655,6 +28854,772 @@ mod tests {
     }
 
     #[test]
+    fn prd007_runtime_wait_observes_owner_fence_loss() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let fence = RuntimeOwnerFence::new();
+        fence.mark_lost();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        runtime.block_on(wait_for_ctrl_c_or_runtime_request(
+            root.path().to_path_buf(),
+            fence,
+            "owner-test".to_owned(),
+            None,
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_runtime_wait_ignores_request_for_previous_owner_generation(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        write_runtime_marker_atomically(
+            &runtime_stop_request_marker_path(root.path()),
+            &runtime_stop_request_marker_value(
+                "stop",
+                "stop-owner-old-1",
+                Some(std::process::id()),
+                Some("owner-old"),
+                1,
+                now_millis(),
+            ),
+        )?;
+        let fence = RuntimeOwnerFence::new();
+        let delayed_fence = fence.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            delayed_fence.mark_lost();
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        let reason = runtime.block_on(wait_for_ctrl_c_or_runtime_request(
+            root.path().to_path_buf(),
+            fence,
+            "owner-current".to_owned(),
+            None,
+        ));
+
+        assert_eq!(reason, RuntimeShutdownReason::OwnerLost);
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_runtime_stop_request_requires_matching_durable_event() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let data_dir = root.path();
+        let owner_id = "owner-current";
+        write_runtime_marker_atomically(
+            &runtime_stop_request_marker_path(data_dir),
+            &runtime_stop_request_marker_value(
+                "stop",
+                "stop-forged",
+                Some(std::process::id()),
+                Some(owner_id),
+                999,
+                now_millis(),
+            ),
+        )?;
+        assert!(runtime_stop_request_reason_for_owner(data_dir, owner_id).is_err());
+
+        let record =
+            append_runtime_control_request(data_dir, "stop", now_millis(), "stop-valid", owner_id)?;
+        write_runtime_marker_atomically(
+            &runtime_stop_request_marker_path(data_dir),
+            &runtime_stop_request_marker_value(
+                "stop",
+                "stop-valid",
+                Some(std::process::id()),
+                Some(owner_id),
+                record.sequence,
+                now_millis(),
+            ),
+        )?;
+        assert_eq!(
+            runtime_stop_request_reason_for_owner(data_dir, owner_id)?,
+            Some(RuntimeShutdownReason::Stop)
+        );
+
+        write_runtime_marker_atomically(
+            &runtime_stop_request_marker_path(data_dir),
+            &runtime_stop_request_marker_value(
+                "stop",
+                "stop-mismatch",
+                Some(std::process::id()),
+                Some(owner_id),
+                record.sequence,
+                now_millis(),
+            ),
+        )?;
+        assert!(runtime_stop_request_reason_for_owner(data_dir, owner_id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_runtime_wait_reports_processor_unexpected_exit() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let exited = Arc::new(AtomicBool::new(true));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        let reason = runtime.block_on(wait_for_ctrl_c_or_runtime_request(
+            root.path().to_path_buf(),
+            RuntimeOwnerFence::new(),
+            "owner-current".to_owned(),
+            Some(exited),
+        ));
+
+        assert_eq!(reason, RuntimeShutdownReason::StartupFailed);
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_owner_lost_processor_does_not_requeue_or_terminal_work() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        config.agents.defaults.provider = "openai".to_owned();
+        config.agents.defaults.model = "openai/gpt-5".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                api_key: Some("sk-test".to_owned()),
+                api_base: None,
+                extra_headers: None,
+                extra_body: None,
+            },
+        );
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let bus = MessageBus::new();
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(&bundle.context.data_dir),
+            runtime_durable_work_payload_root(&bundle.context.data_dir),
+            bus.clone(),
+            "owner-lost-worker",
+            100,
+        )?;
+        dispatcher.enqueue_inbound(
+            "owner-lost-work",
+            &InboundMessage::new("cli", "user", "direct", "hello"),
+            None,
+            None,
+        )?;
+        let (state, admission) =
+            durable_work_state_for_owner(&bundle.context.data_dir, dispatcher.lease_owner_ref())?;
+        dispatcher.dispatch_due(&state.work, &admission, 1)?;
+        let _ = bus.consume_inbound();
+        let stop = Arc::new(AtomicBool::new(true));
+        let reason = Arc::new(Mutex::new(RuntimeShutdownReason::OwnerLost));
+        let report = run_external_agent_processor(
+            Arc::new(AgentLoopChatCompletionAdapter::from_bundle(
+                bundle.clone(),
+                false,
+            )?),
+            bus,
+            Vec::new(),
+            1,
+            ExternalProcessorShutdownControl {
+                stop,
+                reason,
+                exited: Arc::new(AtomicBool::new(false)),
+                startup_tx: None,
+            },
+            ExternalTransportRuntimeContext::new(bundle.context.data_dir.join("metadata"), 1),
+            ExternalDurableWorkRuntime {
+                data_dir: bundle.context.data_dir.clone(),
+                dispatcher,
+            },
+        )?;
+
+        assert_eq!(report.report.reason, RuntimeShutdownReason::OwnerLost);
+        assert_eq!(report.report.phase, RuntimeShutdownPhase::Failed);
+        assert_eq!(report.report.work.status, "unknown_after_owner_loss");
+        assert_eq!(report.report.child.status, "unknown_after_owner_loss");
+        let replay = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
+        let state = replay.state.ok_or("missing owner lost replay state")?;
+        let item = state
+            .work
+            .items
+            .get("owner-lost-work")
+            .ok_or("missing owner lost work")?;
+        assert_eq!(item.state, ReplayWorkState::Leased);
+        assert_eq!(item.terminal_kind, None);
+        assert!(item.cancellation_requested_sequence.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_shutdown_timeout_report_is_bounded_and_unknown() {
+        let mut report = RuntimeShutdownReport::failed(RuntimeShutdownReason::Stop);
+        report.work = RuntimeShutdownStepReport::named("owned_work", "unknown_after_timeout", 2);
+        report.child = RuntimeShutdownStepReport::named("child_tasks", "unknown_after_timeout", 2);
+
+        assert_eq!(report.phase, RuntimeShutdownPhase::Failed);
+        assert_eq!(report.work.status, "unknown_after_timeout");
+        assert_eq!(report.work.count, 2);
+        assert_eq!(report.child.status, "unknown_after_timeout");
+    }
+
+    #[test]
+    fn prd007_listener_start_failure_is_not_reported_as_ctrl_c() {
+        assert_eq!(
+            finalized_runtime_shutdown_reason(RuntimeShutdownReason::CtrlC, true),
+            RuntimeShutdownReason::StartupFailed
+        );
+        assert_eq!(
+            finalized_runtime_shutdown_reason(RuntimeShutdownReason::Restart, true),
+            RuntimeShutdownReason::Restart
+        );
+    }
+
+    #[test]
+    fn prd007_component_report_uses_names_without_raw_secret() -> Result<(), Box<dyn Error>> {
+        let mut manager = ChannelManager::new();
+        manager.register_adapter(
+            Box::new(WebSocketEventChannelAdapter::new(
+                WebSocketEventSink::default(),
+            )),
+            true,
+        )?;
+
+        let reports = channel_component_reports(&manager, "stopped");
+
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "channel:websocket"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "external_processor"));
+        assert!(!format!("{reports:?}").contains("token"));
+
+        let mut shutdown = RuntimeShutdownReport::completed(RuntimeShutdownReason::Restart);
+        shutdown
+            .component_results
+            .push(RuntimeShutdownStepReport::new("stopped", 1));
+        let components = runtime_components_from_shutdown_report(
+            &shutdown,
+            vec![
+                runtime_component("websocket", "configured", "listener"),
+                runtime_component("external:telegram", "disabled", "config"),
+            ],
+        );
+        assert!(components
+            .iter()
+            .any(|component| component.name == "websocket" && component.state == "stopped"));
+        assert!(components.iter().any(|component| {
+            component.name == "external:telegram" && component.state == "disabled"
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_runtime_acquire_cleans_old_request_inside_mutation_lock() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let marker_path = runtime_ownership_marker_path(root.path());
+        let request_path = runtime_stop_request_marker_path(root.path());
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        write_runtime_marker_atomically(
+            &request_path,
+            &runtime_stop_request_marker_value(
+                "restart",
+                "restart-owner-old-1",
+                Some(std::process::id()),
+                Some("owner-old"),
+                1,
+                now_millis(),
+            ),
+        )?;
+        let now = now_millis();
+        let marker = runtime_ownership_marker_value(
+            std::process::id(),
+            now,
+            now,
+            "run",
+            &config_path,
+            &workspace,
+        );
+
+        acquire_runtime_ownership_marker(root.path(), &marker_path, &marker, &request_path)?;
+
+        assert!(marker_path.exists());
+        assert!(!request_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_runtime_ownership_lock_survives_stale_file_and_releases_on_drop(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let marker_path = runtime_ownership_marker_path(root.path());
+        let lock_path = runtime_ownership_mutation_lock_path(&marker_path);
+        fs::create_dir_all(lock_path.parent().ok_or("missing lock parent")?)?;
+        fs::write(&lock_path, "stale")?;
+
+        let lock = RuntimeOwnershipMutationLock::acquire(&marker_path)?;
+        assert!(lock_path.exists());
+        let blocked = RuntimeOwnershipMutationLock::acquire(&marker_path)
+            .err()
+            .ok_or("expected held lock conflict")?
+            .to_string();
+        assert!(blocked.contains(RUNTIME_OWNERSHIP_MUTATION_LOCK_ERROR));
+        drop(lock);
+
+        let reacquired = RuntimeOwnershipMutationLock::acquire(&marker_path)?;
+        assert!(lock_path.exists());
+        drop(reacquired);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prd007_runtime_ownership_lock_rejects_symlink() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let marker_path = runtime_ownership_marker_path(root.path());
+        let lock_path = runtime_ownership_mutation_lock_path(&marker_path);
+        fs::create_dir_all(lock_path.parent().ok_or("missing lock parent")?)?;
+        let target = root.path().join("target-lock");
+        fs::write(&target, "target")?;
+        std::os::unix::fs::symlink(&target, &lock_path)?;
+
+        assert!(RuntimeOwnershipMutationLock::acquire(&marker_path).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prd007_runtime_marker_reads_reject_symlink_fifo_oversize_and_schema(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let marker_path = runtime_ownership_marker_path(root.path());
+        fs::create_dir_all(marker_path.parent().ok_or("missing marker parent")?)?;
+        let target = root.path().join("target-marker.json");
+        fs::write(&target, "{}")?;
+        std::os::unix::fs::symlink(&target, &marker_path)?;
+        assert!(read_runtime_ownership_marker(&marker_path).is_err());
+
+        fs::remove_file(&marker_path)?;
+        let fifo_result = Command::new("mkfifo").arg(&marker_path).status();
+        if fifo_result.is_ok_and(|status| status.success()) {
+            assert!(read_runtime_ownership_marker(&marker_path).is_err());
+            fs::remove_file(&marker_path)?;
+        }
+
+        fs::write(
+            &marker_path,
+            vec![b' '; (RUNTIME_MARKER_MAX_BYTES as usize) + 1],
+        )?;
+        assert!(read_runtime_ownership_marker(&marker_path).is_err());
+        fs::remove_file(&marker_path)?;
+
+        let supervision_path = runtime_supervision_state_path(root.path());
+        write_runtime_marker_atomically(&supervision_path, &json!({"schema_version": 2}))?;
+        assert!(read_runtime_supervision_state(root.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_runtime_acquire_initialization_failure_removes_current_marker(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let supervision_path = runtime_supervision_state_path(&bundle.context.data_dir);
+        fs::create_dir_all(
+            supervision_path
+                .parent()
+                .ok_or("missing supervision parent")?,
+        )?;
+        fs::create_dir(&supervision_path)?;
+
+        let error = RuntimeOwnershipLease::acquire(&bundle, "run")
+            .err()
+            .ok_or("expected supervision write failure")?
+            .to_string();
+
+        assert!(error.contains("directory") || error.contains("Is a directory"));
+        assert!(!runtime_ownership_marker_path(&bundle.context.data_dir).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_runtime_final_shutdown_state_retains_owner_after_marker_cleanup(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let lease = RuntimeOwnershipLease::acquire(&bundle, "run")?;
+        let owner_id = lease.owner_id().to_owned();
+
+        lease.complete_shutdown(
+            RuntimeShutdownReport::completed(RuntimeShutdownReason::Stop),
+            runtime_components_for_mode("run", &bundle.config.channels.plugins),
+        )?;
+
+        assert!(!marker_path.exists());
+        let supervision = read_runtime_supervision_state(&bundle.context.data_dir)?;
+        assert_eq!(
+            supervision
+                .owner
+                .as_ref()
+                .map(|owner| owner.owner_id.as_str()),
+            Some(owner_id.as_str())
+        );
+        assert_eq!(supervision.shutdown.phase, RuntimeShutdownPhase::Completed);
+        assert!(supervision.last_event_sequence.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_unfinalized_lease_drop_preserves_startup_failure() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+
+        drop(RuntimeOwnershipLease::acquire(&bundle, "runtime-start")?);
+
+        assert!(marker_path.exists());
+        let supervision = read_runtime_supervision_state(&bundle.context.data_dir)?;
+        assert_eq!(
+            supervision.shutdown.reason,
+            RuntimeShutdownReason::StartupFailed
+        );
+        assert_eq!(supervision.shutdown.phase, RuntimeShutdownPhase::Failed);
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_owner_lost_shutdown_skips_checkpoint_and_keeps_marker() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let lease = RuntimeOwnershipLease::acquire(&bundle, "run")?;
+        let owner_id = lease.owner_id().to_owned();
+
+        lease.fail_shutdown(
+            RuntimeShutdownReport::failed(RuntimeShutdownReason::OwnerLost),
+            runtime_components_for_mode("run", &bundle.config.channels.plugins),
+        )?;
+
+        assert!(marker_path.exists());
+        let supervision = read_runtime_supervision_state(&bundle.context.data_dir)?;
+        assert_eq!(
+            supervision.shutdown.reason,
+            RuntimeShutdownReason::OwnerLost
+        );
+        assert_eq!(supervision.shutdown.checkpoint.status, "skipped_owner_lost");
+        assert_eq!(
+            supervision
+                .owner
+                .as_ref()
+                .map(|owner| owner.owner_id.as_str()),
+            Some(owner_id.as_str())
+        );
+        let checkpoint_root = runtime_durable_checkpoint_root(&bundle.context.data_dir);
+        assert!(!checkpoint_root.exists() || fs::read_dir(checkpoint_root)?.next().is_none());
+        fs::remove_file(marker_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_owner_lost_mismatched_generation_does_not_overwrite_supervision(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let lease = RuntimeOwnershipLease::acquire(&bundle, "run")?;
+        write_runtime_supervision_state(
+            &bundle.context.data_dir,
+            RuntimeSupervisionState {
+                schema_version: 1,
+                components: vec![RuntimeSupervisionComponent {
+                    name: "api".to_owned(),
+                    state: "running".to_owned(),
+                    detail: "previous generation".to_owned(),
+                }],
+                shutdown: RuntimeShutdownReport::completed(RuntimeShutdownReason::Stop)
+                    .supervision_shutdown(),
+                ..RuntimeSupervisionState::default()
+            },
+        )?;
+        let supervision_path = runtime_supervision_state_path(&bundle.context.data_dir);
+        let before = fs::read_to_string(&supervision_path)?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let now = now_millis();
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(999_999, now, now, "run", &config_path, &workspace),
+        )?;
+
+        lease.fail_shutdown(
+            RuntimeShutdownReport::failed(RuntimeShutdownReason::OwnerLost),
+            runtime_components_for_mode("run", &bundle.config.channels.plugins),
+        )?;
+
+        assert_eq!(fs::read_to_string(&supervision_path)?, before);
+        fs::remove_file(marker_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_runtime_owner_marker_is_strict_v1_lease() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let marker_path = runtime_ownership_marker_path(root.path());
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let now = now_millis();
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(
+                std::process::id(),
+                now,
+                now,
+                "serve",
+                &config_path,
+                &workspace,
+            ),
+        )?;
+
+        let marker = read_runtime_ownership_marker(&marker_path)?.ok_or("missing marker")?;
+        assert_eq!(marker.schema_version, 1);
+        assert_eq!(
+            marker.owner_id,
+            runtime_owner_id(marker.pid, marker.started_at_ms)
+        );
+        assert!(marker.expires_at_ms > marker.updated_at_ms);
+        assert_eq!(marker.lifecycle, "active");
+        assert_eq!(marker.process_evidence.pid, marker.pid);
+        let raw_marker: Value = serde_json::from_str(&fs::read_to_string(&marker_path)?)?;
+        assert!(raw_marker.get("schema_version").is_some());
+        assert!(raw_marker.get("owner_id").is_some());
+        assert!(raw_marker.get("acquired_at_ms").is_some());
+        assert!(raw_marker.get("renewed_at_ms").is_some());
+        assert!(raw_marker.get("expires_at_ms").is_some());
+        assert!(raw_marker.get("lifecycle").is_some());
+        assert!(raw_marker.get("process_evidence").is_some());
+        assert!(raw_marker.get("schemaVersion").is_none());
+        assert!(raw_marker.get("ownerId").is_none());
+
+        let legacy_path = root.path().join("runtime").join("legacy-owner.json");
+        write_runtime_marker_atomically(&legacy_path, &json!({"pid": std::process::id()}))?;
+        let error = read_runtime_ownership_marker(&legacy_path)
+            .err()
+            .ok_or("expected strict v1 marker failure")?
+            .to_string();
+        assert!(error.contains("schema_version"));
+        let malformed_current = root.path().join("runtime").join("malformed-owner.json");
+        write_runtime_marker_atomically(
+            &malformed_current,
+            &json!({
+                "schema_version": 1,
+                "owner_id": "owner-1-2",
+                "pid": 1,
+                "acquired_at_ms": 2,
+                "renewed_at_ms": 2,
+                "expires_at_ms": 3,
+                "lifecycle": "active",
+                "binary_version": VERSION,
+                "data_schema_version": RUNTIME_DATA_SCHEMA_VERSION,
+                "mode": "run",
+                "config_path": "/tmp/config.json",
+                "workspace": "/tmp/workspace",
+            }),
+        )?;
+        let current_error = read_runtime_ownership_marker(&malformed_current)
+            .err()
+            .ok_or("expected malformed current marker failure")?
+            .to_string();
+        assert!(current_error.contains("process_evidence"));
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_stale_start_blocks_and_retains_marker() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        config.channels.plugins.insert(
+            WEBSOCKET_CHANNEL.to_owned(),
+            json!({"enabled": true, "host": "127.0.0.1", "port": 0}),
+        );
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let now = now_millis();
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(999_999, now, now, "run", &config_path, &workspace),
+        )?;
+        let before = fs::read_to_string(&marker_path)?;
+
+        let error = run_runtime(RunOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            ..RunOptions::default()
+        })
+        .err()
+        .ok_or("expected stale ownership start block")?
+        .to_string();
+
+        assert!(error.contains("stale runtime ownership"));
+        assert_eq!(fs::read_to_string(&marker_path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_recover_records_owner_evidence_before_delete_and_blocks_live_expired(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let now = now_millis();
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(999_999, now, now, "run", &config_path, &workspace),
+        )?;
+
+        let recovered = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        assert!(recovered.recovered);
+        assert!(!marker_path.exists());
+        let events = DurableEventStore::open(runtime_durable_event_root(&bundle.context.data_dir))?
+            .scan(10)?;
+        assert!(events
+            .records
+            .iter()
+            .any(|record| record.kind == RUNTIME_OWNER_LIFECYCLE));
+
+        let stale_renewed = now.saturating_sub(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS + 100);
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(
+                std::process::id(),
+                now,
+                stale_renewed,
+                "run",
+                &config_path,
+                &workspace,
+            ),
+        )?;
+        let error = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })
+        .err()
+        .ok_or("expected live expired owner recovery block")?
+        .to_string();
+        assert!(error.contains("live but lease-expired"));
+        assert!(marker_path.exists());
+        Ok(())
+    }
+
+    #[test]
     fn runtime_stale_ownership_cleanup_rechecks_active_marker_before_removing(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -22730,6 +29695,31 @@ mod tests {
         assert!(error.to_string().contains("CLI I/O failed"));
         assert!(!ownership_path.exists());
         assert!(request_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_ownership_preserve_keeps_marker_for_failed_shutdown_recovery(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        RuntimeOwnershipLease::acquire(&bundle, "run")?.preserve_for_recovery()?;
+        assert!(marker_path.exists());
+        fs::remove_file(marker_path)?;
         Ok(())
     }
 
@@ -22843,6 +29833,167 @@ mod tests {
             runtime_stop_request_observed(&bundle.context.data_dir)?.as_deref(),
             Some("restart")
         );
+        let request_marker = read_runtime_stop_request_marker(&runtime_stop_request_marker_path(
+            &bundle.context.data_dir,
+        ))?
+        .ok_or("missing stop request marker")?;
+        assert_eq!(request_marker.schema_version, 1);
+        assert!(request_marker.request_id.starts_with("restart-owner-"));
+        assert!(request_marker.target_owner_id.is_some());
+        assert!(request_marker.event_sequence.is_some());
+        let raw_request: Value = serde_json::from_str(&fs::read_to_string(
+            runtime_stop_request_marker_path(&bundle.context.data_dir),
+        )?)?;
+        assert!(raw_request.get("schema_version").is_some());
+        assert!(raw_request.get("request_id").is_some());
+        assert!(raw_request.get("target_owner_id").is_some());
+        assert!(raw_request.get("event_sequence").is_some());
+        assert!(raw_request.get("schemaVersion").is_none());
+        assert!(raw_request.get("targetOwnerId").is_none());
+        let replay = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
+        let state = replay.state.ok_or("missing runtime control replay state")?;
+        assert_eq!(state.work.runtime_requests.len(), 2);
+        assert_eq!(
+            state.work.runtime_requests[0].kind,
+            shacs_session::durable_work::RuntimeControlRequestKind::Stop
+        );
+        assert_eq!(
+            state.work.runtime_requests[1].kind,
+            shacs_session::durable_work::RuntimeControlRequestKind::Restart
+        );
+        assert_eq!(
+            state.work.runtime_requests[1].target_owner_id,
+            request_marker.target_owner_id
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_supervision_records_api_only_and_channel_components() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        config.channels.plugins.insert(
+            TELEGRAM_CHANNEL.to_owned(),
+            json!({"enabled": true, "botToken": "secret-token"}),
+        );
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+
+        let api_lease = RuntimeOwnershipLease::acquire(&bundle, "serve")?;
+        let active_api_state = read_runtime_supervision_state(&bundle.context.data_dir)?;
+        assert_eq!(
+            active_api_state.shutdown.reason,
+            RuntimeShutdownReason::None
+        );
+        assert_eq!(active_api_state.shutdown.phase, RuntimeShutdownPhase::Idle);
+        api_lease.cleanup()?;
+        let api_state = read_runtime_supervision_state(&bundle.context.data_dir)?;
+        assert!(api_state
+            .components
+            .iter()
+            .any(|component| component.name == "api" && component.state == "running"));
+        assert!(!api_state
+            .components
+            .iter()
+            .any(|component| component.name == "websocket"));
+
+        RuntimeOwnershipLease::acquire(&bundle, "runtime-start")?.cleanup()?;
+        let channel_state = read_runtime_supervision_state(&bundle.context.data_dir)?;
+        assert!(channel_state
+            .components
+            .iter()
+            .any(|component| component.name == "websocket"));
+        assert!(channel_state
+            .components
+            .iter()
+            .any(|component| component.name == "external:telegram"
+                && component.state == "configured"));
+        Ok(())
+    }
+
+    #[test]
+    fn prd007_recover_and_session_diagnostics_project_redacted_supervision(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let raw_owner = "owner-raw-recover-secret";
+        let raw_detail = "/Users/alice/ClientA/sk-supervision-secret";
+        write_runtime_supervision_state(
+            &bundle.context.data_dir,
+            RuntimeSupervisionState {
+                schema_version: 1,
+                owner: Some(RuntimeSupervisionOwner {
+                    owner_id: raw_owner.to_owned(),
+                    mode: "run".to_owned(),
+                    acquired_at_ms: 1,
+                    renewed_at_ms: 2,
+                    expires_at_ms: 3,
+                    state: "active".to_owned(),
+                    reason: raw_detail.to_owned(),
+                }),
+                components: vec![RuntimeSupervisionComponent {
+                    name: "external_processor".to_owned(),
+                    state: "failed".to_owned(),
+                    detail: raw_detail.to_owned(),
+                }],
+                shutdown: RuntimeShutdownReport::failed(RuntimeShutdownReason::StartupFailed)
+                    .supervision_shutdown(),
+                last_event_sequence: None,
+            },
+        )?;
+
+        let recover = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: None,
+        })?;
+        let recover_output = format_runtime_recover(recover.clone());
+        assert_eq!(
+            recover.supervision["shutdown_reason"],
+            json!("StartupFailed")
+        );
+        assert_eq!(recover.supervision["component_count"], json!(1));
+        assert!(recover_output.contains("Supervision: reason=StartupFailed"));
+        assert!(!recover_output.contains(raw_owner));
+        assert!(!recover_output.contains(raw_detail));
+
+        let session = session_diagnostics(SessionDiagnosticsOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+            session: "cli:missing".to_owned(),
+        })?;
+        let session_output = format_session_diagnostics(session.clone());
+        let session_json = serde_json::to_string(&session)?;
+        assert_eq!(session.supervision["shutdown_phase"], json!("Failed"));
+        assert!(session_output.contains("Supervision: reason=StartupFailed"));
+        assert!(!session_output.contains(raw_owner));
+        assert!(!session_output.contains(raw_detail));
+        assert!(!session_json.contains(raw_owner));
+        assert!(!session_json.contains(raw_detail));
+        assert!(session_json.contains("supervision-detail:"));
         Ok(())
     }
 
@@ -24144,6 +31295,24 @@ mod tests {
             .is_some_and(|name| name.ends_with("-a.txt")));
         assert_eq!(fs::read_to_string(stored_files[0].path())?, "hi");
         assert!(fs::read_dir(&media_dir).is_err());
+        let websocket_metadata = root
+            .path()
+            .join("data")
+            .join("runtime")
+            .join("channels")
+            .join("worker-metadata")
+            .join("websocket.json");
+        assert!(websocket_metadata.is_file());
+        let restart_state = channel_restart_state_from_metadata(
+            WEBSOCKET_CHANNEL,
+            &websocket_metadata,
+            &load_metadata_json(&websocket_metadata),
+        );
+        assert_eq!(
+            restart_state.cursor_kind.as_deref(),
+            Some("websocket_connection_hint")
+        );
+        assert!(restart_state.pending_inbound_refs.is_empty());
         let session = SessionManager::new(&workspace)?
             .load_existing("websocket:chat-b")
             .ok_or("websocket session missing")?;
@@ -26533,6 +33702,8 @@ mod tests {
         response: LlmResponse,
     }
 
+    struct PanicProviderClient;
+
     struct StreamingProviderClient {
         captured: std::sync::Arc<Mutex<Vec<ProviderRequest>>>,
         response: LlmResponse,
@@ -26709,6 +33880,20 @@ mod tests {
                 })?
                 .push(request);
             Ok(self.response.clone())
+        }
+
+        fn chat_stream(
+            &self,
+            request: ProviderRequest,
+            _on_event: &mut dyn FnMut(ProviderEvent),
+        ) -> Result<LlmResponse, ProviderError> {
+            self.chat(request)
+        }
+    }
+
+    impl ProviderClient for PanicProviderClient {
+        fn chat(&self, _request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+            panic!("provider panic for test")
         }
 
         fn chat_stream(

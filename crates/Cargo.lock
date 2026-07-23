@@ -535,6 +535,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1620,6 +1640,7 @@ dependencies = [
 name = "shacs-cli"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "imap",
  "lettre",
  "libc",
@@ -1774,9 +1795,12 @@ name = "shacs-session"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs4",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
+ "shacs-redaction",
  "tempfile",
 ]
 
@@ -2317,6 +2341,28 @@ checksum = "bf85cb06032201fa7c6f829d7db5a7e5aa45bcc0655327713065f6f0576731bf"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows-core"
