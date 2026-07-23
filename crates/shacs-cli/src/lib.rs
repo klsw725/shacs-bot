@@ -5253,6 +5253,39 @@ fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipM
     let Some(value) = read_runtime_marker_json(path, "runtime ownership marker")? else {
         return Ok(None);
     };
+    if value.get("schema_version").is_none() && value.get("startedAtMs").is_some() {
+        let pid = value
+            .get("pid")
+            .and_then(Value::as_u64)
+            .filter(|pid| *pid <= u32::MAX as u64)
+            .ok_or_else(|| {
+                CliError::InvalidArguments("runtime ownership marker missing `pid`".to_owned())
+            })? as u32;
+        let started_at_ms = required_marker_u64(&value, "startedAtMs")?;
+        let updated_at_ms = required_marker_u64(&value, "updatedAtMs")?;
+        let mut marker = RuntimeOwnershipMarker {
+            schema_version: 0,
+            owner_id: runtime_owner_id(pid, started_at_ms),
+            pid,
+            started_at_ms,
+            updated_at_ms,
+            expires_at_ms: updated_at_ms.saturating_add(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS),
+            lifecycle: "legacy".to_owned(),
+            binary_version: required_marker_string(&value, "binaryVersion")?,
+            data_schema_version: required_marker_u64(&value, "dataSchemaVersion")? as u32,
+            mode: required_marker_string(&value, "mode")?,
+            config_path: required_marker_string(&value, "configPath")?,
+            workspace: required_marker_string(&value, "workspace")?,
+            process_evidence: RuntimeOwnerProcessEvidence {
+                pid,
+                pid_alive: pid_is_alive(pid),
+                process_started_after_marker: false,
+            },
+        };
+        marker.process_evidence.process_started_after_marker =
+            owner_process_started_after_marker(&marker, Path::new("/proc"));
+        return Ok(Some(marker));
+    }
     let schema_version = required_marker_u64(&value, "schema_version")? as u32;
     if schema_version != 1 {
         return Err(CliError::InvalidArguments(format!(
@@ -10300,9 +10333,31 @@ async fn wait_for_ctrl_c_or_runtime_request(
     owner_id: String,
     processor_exited: Option<Arc<AtomicBool>>,
 ) -> RuntimeShutdownReason {
+    wait_for_ctrl_c_or_runtime_request_with_termination_signal(
+        data_dir,
+        owner_fence,
+        owner_id,
+        processor_exited,
+        wait_for_termination_signal(),
+    )
+    .await
+}
+
+async fn wait_for_ctrl_c_or_runtime_request_with_termination_signal<F>(
+    data_dir: PathBuf,
+    owner_fence: RuntimeOwnerFence,
+    owner_id: String,
+    processor_exited: Option<Arc<AtomicBool>>,
+    termination_signal: F,
+) -> RuntimeShutdownReason
+where
+    F: std::future::Future<Output = RuntimeShutdownReason>,
+{
+    tokio::pin!(termination_signal);
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return RuntimeShutdownReason::CtrlC,
+            reason = &mut termination_signal => return reason,
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 if let Ok(Some(reason)) = runtime_stop_request_reason_for_owner(&data_dir, &owner_id) {
                     return reason;
@@ -10319,6 +10374,23 @@ async fn wait_for_ctrl_c_or_runtime_request(
             }
         }
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_termination_signal() -> RuntimeShutdownReason {
+    let Ok(mut signal) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    else {
+        return std::future::pending::<RuntimeShutdownReason>().await;
+    };
+    match signal.recv().await {
+        Some(()) => RuntimeShutdownReason::Stop,
+        None => std::future::pending::<RuntimeShutdownReason>().await,
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_termination_signal() -> RuntimeShutdownReason {
+    std::future::pending::<RuntimeShutdownReason>().await
 }
 
 fn finalized_runtime_shutdown_reason(
@@ -28872,6 +28944,25 @@ mod tests {
     }
 
     #[test]
+    fn runtime_wait_maps_termination_signal_to_stop() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        let reason = runtime.block_on(wait_for_ctrl_c_or_runtime_request_with_termination_signal(
+            root.path().to_path_buf(),
+            RuntimeOwnerFence::new(),
+            "owner-current".to_owned(),
+            None,
+            std::future::ready(RuntimeShutdownReason::Stop),
+        ));
+
+        assert_eq!(reason, RuntimeShutdownReason::Stop);
+        Ok(())
+    }
+
+    #[test]
     fn prd007_runtime_wait_ignores_request_for_previous_owner_generation(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -29616,6 +29707,39 @@ mod tests {
         .to_string();
         assert!(error.contains("live but lease-expired"));
         assert!(marker_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_recover_clears_stale_legacy_ownership_marker() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let marker_path = runtime_ownership_marker_path(root.path());
+        write_runtime_marker_atomically(
+            &marker_path,
+            &json!({
+                "pid": 999_999,
+                "startedAtMs": 1,
+                "updatedAtMs": 1,
+                "binaryVersion": "0.1.0",
+                "dataSchemaVersion": RUNTIME_DATA_SCHEMA_VERSION,
+                "mode": "run",
+                "configPath": config_path,
+                "workspace": workspace,
+            }),
+        )?;
+
+        let recovered = runtime_recover(RuntimeRecoverOptions {
+            config_path: Some(config_path),
+            workspace_override: None,
+        })?;
+
+        assert!(recovered.recovered);
+        assert!(!marker_path.exists());
         Ok(())
     }
 
