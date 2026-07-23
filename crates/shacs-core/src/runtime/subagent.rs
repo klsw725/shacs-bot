@@ -13,17 +13,24 @@ use crate::tools::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use shacs_config::AutoApprovalConfig;
 use shacs_providers::{GenerationSettings, ProviderClient, ProviderRetryMode};
+use shacs_session::durable_child::{
+    ChildCancelRequested, ChildResultDecisionKind, ChildResultRecorded, ChildRunning, ChildSpawned,
+    DurableChildRecorder, DurableChildReplayState, ReplayChildTaskState,
+};
+use shacs_session::durable_work::WorkTerminalKind;
 use shacs_templates::{render_agent_template, template_variables, AgentTemplate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT_CHILD_ID: AtomicU64 = AtomicU64::new(1);
+static CHILD_ID_NAMESPACE: OnceLock<u128> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -452,6 +459,9 @@ pub struct SubagentRuntime {
     execution_ledger: Arc<Mutex<RuntimeExecutionLedger>>,
     bus: Option<MessageBus>,
     config: SubagentRuntimeConfig,
+    durable_recorder: Option<DurableChildRecorder>,
+    durable_snapshot: Option<Arc<DurableChildReplayState>>,
+    transition_lock: Arc<Mutex<()>>,
 }
 
 impl Default for SubagentRuntime {
@@ -475,12 +485,27 @@ impl SubagentRuntime {
             execution_ledger: Arc::new(Mutex::new(RuntimeExecutionLedger::default())),
             bus: None,
             config,
+            durable_recorder: None,
+            durable_snapshot: None,
+            transition_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub fn attach_bus(mut self, bus: MessageBus) -> Self {
         self.bus = Some(bus);
         self
+    }
+
+    pub fn attach_durable_recorder(
+        mut self,
+        recorder: DurableChildRecorder,
+    ) -> Result<Self, String> {
+        recorder.repair_incomplete_lifecycle(durable_timestamp(now_millis()))?;
+        recorder.enqueue_missing_child_runs()?;
+        recorder.enqueue_missing_accepted_reentries()?;
+        self.durable_snapshot = Some(Arc::new(recorder.replay_state()?));
+        self.durable_recorder = Some(recorder);
+        Ok(self)
     }
 
     pub fn status(&self) -> RuntimeCapabilityReport {
@@ -510,6 +535,32 @@ impl SubagentRuntime {
         cancellation_token: CancellationToken,
     ) -> Result<SubagentSpawnOutcome, String> {
         envelope.refresh_execution_fields();
+        let durable_spawn_exists = match self
+            .durable_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.items.get(&envelope.child_task_id))
+        {
+            Some(item)
+                if item.session_id == envelope.session_id
+                    && item.parent_turn_id == envelope.parent_turn_id
+                    && item.spawn_effect_id == envelope.spawn_effect_id
+                    && item.correlation_id
+                        == durable_correlation_id(envelope.correlation_id.as_deref())
+                    && item.idempotency_key
+                        == durable_idempotency_key(envelope.idempotency_key.as_deref())
+                    && item.attempt == durable_attempt(envelope.attempt_id.as_deref())
+                    && item.state == ReplayChildTaskState::Spawned =>
+            {
+                true
+            }
+            Some(item) => {
+                return Err(format!(
+                    "durable child task cannot be re-registered from state {:?}: {}",
+                    item.state, envelope.child_task_id
+                ));
+            }
+            None => false,
+        };
         let mut state = recover_lock(&self.state);
         let active_count = state
             .session_tasks
@@ -527,6 +578,9 @@ impl SubagentRuntime {
                 "subagent task already exists: {}",
                 envelope.child_task_id
             ));
+        }
+        if !durable_spawn_exists {
+            self.record_durable_spawn(&envelope)?;
         }
         let status = SubagentStatus::from_spawn(&envelope);
         state
@@ -555,28 +609,35 @@ impl SubagentRuntime {
     }
 
     pub fn mark_running(&self, child_task_id: &str) -> Option<SubagentStatus> {
+        let _transition = recover_lock(&self.transition_lock);
+        let envelope = recover_lock(&self.state)
+            .tasks
+            .get(child_task_id)
+            .map(|record| record.envelope.clone())?;
+        if let Some(recorder) = &self.durable_recorder {
+            recorder
+                .lease_child_run_work(
+                    &envelope.child_task_id,
+                    "subagent-runtime",
+                    durable_timestamp(now_millis()),
+                    envelope.timeout_ms.unwrap_or(300_000).max(1),
+                )
+                .ok()?;
+        }
+        self.record_durable_running(&envelope).ok()?;
         self.update_state(child_task_id, SubagentState::Running)
     }
 
     pub fn cancel_by_session(&self, session_id: &str) -> usize {
-        let mut state = recover_lock(&self.state);
-        let task_ids = state
+        let task_ids = recover_lock(&self.state)
             .session_tasks
             .get(session_id)
             .cloned()
             .unwrap_or_default();
-        let mut cancelled = 0;
-        for task_id in task_ids {
-            if let Some(record) = state.tasks.get_mut(&task_id) {
-                if !record.cancelled {
-                    record.cancelled = true;
-                    record.cancellation_token.cancel();
-                    record.status.state = SubagentState::Cancelled;
-                    cancelled += 1;
-                }
-            }
-        }
-        cancelled
+        task_ids
+            .into_iter()
+            .filter(|task_id| self.request_child_cancellation(task_id))
+            .count()
     }
 
     pub fn running_count(&self) -> usize {
@@ -628,11 +689,26 @@ impl SubagentRuntime {
     pub fn classify_active_result(&self, result: &ChildResultEnvelope) -> MergeDecision {
         let state = recover_lock(&self.state);
         let Some(record) = state.tasks.get(&result.child_task_id) else {
-            return inactive_result_decision(&self.execution_ledger_snapshot(), result)
-                .unwrap_or_else(|| MergeDecision::DiscardAsStale {
-                    reason: format!("child task is not active: {}", result.child_task_id),
-                });
+            if let Some(decision) =
+                inactive_result_decision(&self.execution_ledger_snapshot(), result)
+            {
+                return decision;
+            }
+            if let Some(decision) = self.classify_replayed_result(result) {
+                return decision;
+            }
+            return MergeDecision::DiscardAsStale {
+                reason: format!("child task is not active: {}", result.child_task_id),
+            };
         };
+        if record.cancelled && result.status != ChildResultStatus::Cancelled {
+            return MergeDecision::DiscardAsLate {
+                reason: format!(
+                    "child result arrived after cancellation request: {}",
+                    result.child_task_id
+                ),
+            };
+        }
         if let Some(decision) = correlation_decision(&record.envelope, result) {
             return decision;
         }
@@ -647,21 +723,81 @@ impl SubagentRuntime {
         merge_decision_for_status(result)
     }
 
+    fn classify_replayed_result(&self, result: &ChildResultEnvelope) -> Option<MergeDecision> {
+        let item = self
+            .durable_snapshot
+            .as_ref()?
+            .items
+            .get(&result.child_task_id)?;
+        if item.session_id != result.session_id
+            || item.parent_turn_id != result.parent_turn_id
+            || item.spawn_effect_id != result.spawn_effect_id
+            || item.correlation_id != durable_correlation_id(result.correlation_id.as_deref())
+            || item.idempotency_key != durable_idempotency_key(result.idempotency_key.as_deref())
+            || item.attempt != durable_attempt(result.attempt_id.as_deref())
+        {
+            return Some(MergeDecision::DiscardAsStale {
+                reason: format!(
+                    "replayed child correlation mismatch: {}",
+                    result.child_task_id
+                ),
+            });
+        }
+        if item.state.is_terminal() {
+            return Some(if item.state == ReplayChildTaskState::Cancelled {
+                MergeDecision::DiscardAsLate {
+                    reason: format!("child was already cancelled: {}", result.child_task_id),
+                }
+            } else {
+                MergeDecision::DiscardAsDuplicate {
+                    reason: format!(
+                        "child result was already terminal: {}",
+                        result.child_task_id
+                    ),
+                }
+            });
+        }
+        Some(MergeDecision::DiscardAsStale {
+            reason: format!(
+                "replayed active child requires parent revalidation: {}",
+                result.child_task_id
+            ),
+        })
+    }
+
     pub fn finish_child(
         &self,
         result: ChildResultEnvelope,
     ) -> (MergeDecision, Option<InboundMessage>) {
+        let _transition = recover_lock(&self.transition_lock);
         let decision = self.classify_active_result(&result);
+        let expected = recover_lock(&self.state)
+            .tasks
+            .get(&result.child_task_id)
+            .map(|record| record.envelope.clone());
         let message = should_publish_decision(&decision)
             .then(|| self.synthetic_inbound_for_result(&result, &decision));
+        if self
+            .record_durable_result(&result, expected.as_ref(), &decision, message.as_ref())
+            .is_err()
+        {
+            return (
+                MergeDecision::DiscardAsStale {
+                    reason: "durable child result recording failed".to_owned(),
+                },
+                None,
+            );
+        }
         self.apply_finish(&result, &decision);
         (decision, message)
     }
 
     pub fn publish_child_result(&self, result: ChildResultEnvelope) -> MergeDecision {
         let (decision, message) = self.finish_child(result);
-        if let (Some(bus), Some(message)) = (&self.bus, message) {
-            bus.publish_inbound(message);
+        if self.durable_recorder.is_none() {
+            if let (Some(bus), Some(message)) = (&self.bus, message) {
+                bus.publish_inbound(message);
+            }
         }
         decision
     }
@@ -672,12 +808,19 @@ impl SubagentRuntime {
         client: &dyn ProviderClient,
         config: SubagentExecutionConfig,
     ) -> ChildResultEnvelope {
-        self.mark_running(&envelope.child_task_id);
         let cancellation_token = self
             .cancellation_token(&envelope.child_task_id)
             .unwrap_or_default();
         let cancelled_before_start = cancellation_token.is_cancelled();
+        if !cancelled_before_start && self.mark_running(&envelope.child_task_id).is_none() {
+            return ChildResultEnvelope::from_spawn(
+                &envelope,
+                ChildResultStatus::Failed,
+                "Subagent could not enter running state.",
+            );
+        }
         let result = if cancelled_before_start {
+            self.request_child_cancellation(&envelope.child_task_id);
             ChildResultEnvelope::from_spawn(
                 &envelope,
                 ChildResultStatus::Cancelled,
@@ -686,6 +829,9 @@ impl SubagentRuntime {
         } else {
             self.execute_spawn(&envelope, client, &config, cancellation_token)
         };
+        if result.status == ChildResultStatus::Cancelled {
+            self.request_child_cancellation(&envelope.child_task_id);
+        }
         if cancelled_before_start {
             self.finish_child(result.clone());
         } else {
@@ -923,6 +1069,9 @@ impl SubagentRuntime {
             return;
         };
         self.record_subagent_result(result, Some(&record.envelope), decision);
+        if !should_publish_decision(decision) {
+            return;
+        }
         let Some(mut record) = state.tasks.remove(&result.child_task_id) else {
             return;
         };
@@ -977,6 +1126,240 @@ impl SubagentRuntime {
             .with_detail(format!("subagent merge decision: {decision:?}"));
         recover_lock(&self.execution_ledger).record(fact)
     }
+
+    fn record_durable_spawn(&self, envelope: &SpawnEnvelope) -> Result<(), String> {
+        let Some(recorder) = &self.durable_recorder else {
+            return Ok(());
+        };
+        let spawn_value = serde_json::to_value(envelope).map_err(|error| error.to_string())?;
+        let run_ref = recorder.write_child_run_artifact(&spawn_value)?;
+        let payload_ref = recorder.child_run_payload_ref(&spawn_value)?;
+        recorder
+            .record_spawned(
+                &envelope.session_id,
+                &ChildSpawned {
+                    child_task_id: envelope.child_task_id.clone(),
+                    parent_turn_id: envelope.parent_turn_id.clone(),
+                    spawn_effect_id: envelope.spawn_effect_id.clone(),
+                    correlation_id: durable_correlation_id(envelope.correlation_id.as_deref()),
+                    idempotency_key: durable_idempotency_key(envelope.idempotency_key.as_deref()),
+                    run_ref: Some(run_ref),
+                    attempt: durable_attempt(envelope.attempt_id.as_deref()),
+                    spawned_at_ms: durable_timestamp(envelope.issued_at_ms),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        recorder.ensure_child_run_work(
+            &envelope.session_id,
+            &envelope.parent_turn_id,
+            &envelope.child_task_id,
+            &envelope.spawn_effect_id,
+            payload_ref,
+        )
+    }
+
+    fn record_durable_running(&self, envelope: &SpawnEnvelope) -> Result<(), String> {
+        let Some(recorder) = &self.durable_recorder else {
+            return Ok(());
+        };
+        recorder
+            .record_running(
+                &envelope.session_id,
+                &envelope.parent_turn_id,
+                &envelope.spawn_effect_id,
+                &durable_correlation_id(envelope.correlation_id.as_deref()),
+                &ChildRunning {
+                    child_task_id: envelope.child_task_id.clone(),
+                    started_at_ms: durable_timestamp(now_millis()),
+                },
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn record_durable_cancel_requested(&self, envelope: &SpawnEnvelope) -> Result<(), String> {
+        let Some(recorder) = &self.durable_recorder else {
+            return Ok(());
+        };
+        recorder
+            .record_cancel_requested(
+                &envelope.session_id,
+                &envelope.parent_turn_id,
+                &envelope.spawn_effect_id,
+                &durable_correlation_id(envelope.correlation_id.as_deref()),
+                &ChildCancelRequested {
+                    child_task_id: envelope.child_task_id.clone(),
+                    requested_at_ms: durable_timestamp(now_millis()),
+                },
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn record_durable_result(
+        &self,
+        result: &ChildResultEnvelope,
+        expected: Option<&SpawnEnvelope>,
+        decision: &MergeDecision,
+        reentry_message: Option<&InboundMessage>,
+    ) -> Result<(), String> {
+        let Some(recorder) = &self.durable_recorder else {
+            return Ok(());
+        };
+        let decision_kind = durable_result_decision(decision);
+        let terminal_state = (decision_kind == ChildResultDecisionKind::Accepted)
+            .then(|| durable_terminal_state(&result.status));
+        let accepted_identity = (decision_kind == ChildResultDecisionKind::Accepted)
+            .then_some(expected)
+            .flatten();
+        let result_ref = if decision_kind == ChildResultDecisionKind::Accepted {
+            recorder.write_result_artifact(&json!({
+                "payload_type": shacs_session::durable_child::CHILD_RESULT_REENTRY_PAYLOAD_TYPE,
+                "result": result,
+                "decision": decision,
+                "reentry_message": reentry_message,
+            }))?
+        } else {
+            durable_child_decision_ref(result, decision)?
+        };
+        recorder
+            .record_result(
+                &result.session_id,
+                &ChildResultRecorded {
+                    child_task_id: result.child_task_id.clone(),
+                    parent_turn_id: result.parent_turn_id.clone(),
+                    spawn_effect_id: result.spawn_effect_id.clone(),
+                    correlation_id: durable_correlation_id(
+                        accepted_identity
+                            .and_then(|spawn| spawn.correlation_id.as_deref())
+                            .or(result.correlation_id.as_deref()),
+                    ),
+                    idempotency_key: durable_idempotency_key(
+                        accepted_identity
+                            .and_then(|spawn| spawn.idempotency_key.as_deref())
+                            .or(result.idempotency_key.as_deref()),
+                    ),
+                    decision: decision_kind,
+                    terminal_state,
+                    result_ref: result_ref.clone(),
+                    finished_at_ms: durable_timestamp(result.finished_at_ms),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        if decision_kind == ChildResultDecisionKind::Accepted {
+            if result.status == ChildResultStatus::Cancelled {
+                recorder.cancel_child_run_work(&result.child_task_id, "child_cancelled")?;
+            } else {
+                recorder.finish_child_run_work(
+                    &result.child_task_id,
+                    match result.status {
+                        ChildResultStatus::Completed => WorkTerminalKind::Succeeded,
+                        ChildResultStatus::Failed | ChildResultStatus::TimedOut => {
+                            WorkTerminalKind::Failed
+                        }
+                        ChildResultStatus::Cancelled => WorkTerminalKind::Failed,
+                    },
+                    &result_ref,
+                )?;
+            }
+        }
+        if decision_kind == ChildResultDecisionKind::Accepted {
+            if let Some(message) = reentry_message {
+                recorder.ensure_parent_reentry_work(
+                    &result.session_id,
+                    &result.parent_turn_id,
+                    &result.child_task_id,
+                    &result.spawn_effect_id,
+                    &serde_json::to_value(message).map_err(|error| error.to_string())?,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn request_child_cancellation(&self, child_task_id: &str) -> bool {
+        let _transition = recover_lock(&self.transition_lock);
+        let mut state = recover_lock(&self.state);
+        let Some(record) = state.tasks.get_mut(child_task_id) else {
+            return false;
+        };
+        if record.cancelled {
+            return false;
+        }
+        if self
+            .record_durable_cancel_requested(&record.envelope)
+            .is_err()
+        {
+            return false;
+        }
+        record.cancelled = true;
+        record.cancellation_token.cancel();
+        record.status.state = SubagentState::Cancelled;
+        match self.durable_recorder.as_ref() {
+            Some(recorder) => recorder
+                .cancel_child_run_work(child_task_id, "child_cancellation_requested")
+                .is_ok(),
+            None => true,
+        }
+    }
+}
+
+fn durable_correlation_id(value: Option<&str>) -> String {
+    value.unwrap_or("correlation:missing").to_owned()
+}
+
+fn durable_idempotency_key(value: Option<&str>) -> String {
+    value.unwrap_or("idempotency:missing").to_owned()
+}
+
+fn durable_attempt(value: Option<&str>) -> u32 {
+    value
+        .and_then(|value| value.rsplit(':').next())
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1)
+}
+
+fn durable_timestamp(value: u128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn durable_result_decision(decision: &MergeDecision) -> ChildResultDecisionKind {
+    match decision {
+        MergeDecision::DiscardAsDuplicate { .. } => ChildResultDecisionKind::Duplicate,
+        MergeDecision::DiscardAsLate { .. } => ChildResultDecisionKind::Late,
+        MergeDecision::DiscardAsStale { .. } => ChildResultDecisionKind::Stale,
+        _ => ChildResultDecisionKind::Accepted,
+    }
+}
+
+fn durable_terminal_state(status: &ChildResultStatus) -> ReplayChildTaskState {
+    match status {
+        ChildResultStatus::Completed => ReplayChildTaskState::Completed,
+        ChildResultStatus::Failed => ReplayChildTaskState::Failed,
+        ChildResultStatus::Cancelled => ReplayChildTaskState::Cancelled,
+        ChildResultStatus::TimedOut => ReplayChildTaskState::TimedOut,
+    }
+}
+
+fn durable_child_decision_ref(
+    result: &ChildResultEnvelope,
+    decision: &MergeDecision,
+) -> Result<String, String> {
+    let metadata = json!({
+        "child_task_id": result.child_task_id,
+        "session_id": result.session_id,
+        "parent_turn_id": result.parent_turn_id,
+        "spawn_effect_id": result.spawn_effect_id,
+        "correlation_id": result.correlation_id,
+        "idempotency_key": result.idempotency_key,
+        "attempt_id": result.attempt_id,
+        "status": result.status,
+        "started_at_ms": result.started_at_ms,
+        "finished_at_ms": result.finished_at_ms,
+        "decision": decision,
+    });
+    let bytes = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+    Ok(format!("child-result:{:x}", Sha256::digest(bytes)))
 }
 
 pub fn build_subagent_tool_registry(config: &SubagentExecutionConfig) -> ToolRegistry {
@@ -1074,6 +1457,21 @@ fn correlation_decision(
                 "spawn effect mismatch: expected {}, got {}",
                 expected.spawn_effect_id, result.spawn_effect_id
             ),
+        });
+    }
+    if expected.correlation_id != result.correlation_id {
+        return Some(MergeDecision::DiscardAsStale {
+            reason: "child correlation id mismatch".to_owned(),
+        });
+    }
+    if expected.idempotency_key != result.idempotency_key {
+        return Some(MergeDecision::DiscardAsStale {
+            reason: "child idempotency key mismatch".to_owned(),
+        });
+    }
+    if expected.attempt_id != result.attempt_id {
+        return Some(MergeDecision::DiscardAsStale {
+            reason: "child attempt id mismatch".to_owned(),
         });
     }
     None
@@ -1398,7 +1796,13 @@ fn default_label(task: &str) -> String {
 
 fn next_child_id() -> String {
     let id = NEXT_CHILD_ID.fetch_add(1, Ordering::SeqCst);
-    format!("child-{id:08}")
+    let namespace = CHILD_ID_NAMESPACE.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    });
+    format!("child-{namespace:032x}-{id:08x}")
 }
 
 fn now_millis() -> u128 {
