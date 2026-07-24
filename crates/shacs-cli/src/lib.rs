@@ -10529,7 +10529,7 @@ fn external_active_sessions(
     coordinator: &ExternalSessionTurnCoordinator,
 ) -> Vec<String> {
     let mut sessions = turn_lock
-        .active_session_keys()
+        .busy_session_keys()
         .into_iter()
         .collect::<BTreeSet<_>>();
     sessions.extend(coordinator.active_sessions.iter().cloned());
@@ -10695,7 +10695,7 @@ impl ExternalChannelSupervisor {
                 redact_string(&error.to_string())
             ))
         })?;
-        dispatch_due_external_work(&mut durable_dispatcher, &data_dir)?;
+        dispatch_due_external_work(&mut durable_dispatcher, &data_dir, &BTreeSet::new())?;
         let durable_work = ExternalDurableWorkRuntime {
             data_dir,
             dispatcher: durable_dispatcher,
@@ -10971,9 +10971,15 @@ fn run_external_agent_processor(
                     }
                     continue;
                 }
-                if let Err(error) =
-                    dispatch_due_external_work(&mut durable_work.dispatcher, &durable_work.data_dir)
-                {
+                let unavailable_sessions =
+                    external_active_sessions(&adapter.session_turn_lock, &turn_coordinator)
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                if let Err(error) = dispatch_due_external_work(
+                    &mut durable_work.dispatcher,
+                    &durable_work.data_dir,
+                    &unavailable_sessions,
+                ) {
                     eprintln!("external durable work dispatch failed: {error}");
                     shutdown.stop.store(true, Ordering::SeqCst);
                     break;
@@ -10989,7 +10995,7 @@ fn run_external_agent_processor(
                     runtime_bus.clone(),
                     turn_tx.clone(),
                 ));
-            } else if adapter.external_session_is_active(&session_key) {
+            } else if adapter.external_session_is_busy(&session_key) {
                 turn_coordinator.enqueue(session_key, message);
             } else if let Some(next) =
                 turn_coordinator.start_or_enqueue(session_key.clone(), message)
@@ -11011,7 +11017,7 @@ fn run_external_agent_processor(
             }
         }
         while let Some((session_key, message)) = turn_coordinator
-            .start_next_ready(|session_key| adapter.external_session_is_active(session_key))
+            .start_next_ready(|session_key| adapter.external_session_is_busy(session_key))
         {
             progressed = true;
             start_external_typing_indicator(
@@ -11031,9 +11037,15 @@ fn run_external_agent_processor(
         }
         progressed |= publish_due_external_typing_indicators(&mut typing_indicators, &runtime_bus);
         progressed |= drain_runtime_outbound(&runtime_bus, &mut channels);
-        if let Err(error) =
-            dispatch_due_external_work(&mut durable_work.dispatcher, &durable_work.data_dir)
-        {
+        let unavailable_sessions =
+            external_active_sessions(&adapter.session_turn_lock, &turn_coordinator)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+        if let Err(error) = dispatch_due_external_work(
+            &mut durable_work.dispatcher,
+            &durable_work.data_dir,
+            &unavailable_sessions,
+        ) {
             eprintln!("external durable work wake failed: {error}");
             shutdown.stop.store(true, Ordering::SeqCst);
         }
@@ -11331,13 +11343,19 @@ fn durable_work_state_for_owner(
 fn dispatch_due_external_work(
     dispatcher: &mut DurableWorkDispatcher,
     data_dir: &Path,
+    unavailable_sessions: &BTreeSet<String>,
 ) -> Result<(), CliError> {
     let (state, admission) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
     if !admission.writable {
         return Err(durable_work_admission_error(&admission));
     }
     dispatcher
-        .dispatch_due(&state.work, &admission, now_millis())
+        .dispatch_due_excluding_sessions(
+            &state.work,
+            &admission,
+            now_millis(),
+            unavailable_sessions,
+        )
         .map_err(|error| {
             CliError::InvalidArguments(format!(
                 "external durable work dispatch failed: {}",
@@ -11701,13 +11719,7 @@ fn spawn_external_agent_turn(
         parse_loop_command(&message.content),
         Some(LoopCommand::Stop)
     );
-    let reservation =
-        (!priority_command).then(|| adapter.session_turn_lock.reserve(session_key.clone()));
     thread::spawn(move || {
-        let _reservation = reservation;
-        if let Some(reservation) = _reservation.as_ref() {
-            reservation.bind_to_current_thread();
-        }
         let durable_work_id = message
             .metadata
             .get(DURABLE_WORK_ID_METADATA)
@@ -11733,19 +11745,22 @@ fn spawn_external_agent_turn(
                 priority_command,
                 turn_cancelled: external_turn_was_cancelled(&turn.stop_reason),
             },
-            Ok(Err(error)) => ExternalAgentTurnResult {
-                session_key,
-                outbound: Vec::new(),
-                retry_message: (error.status == 409 && error.error_type == "session_busy")
-                    .then_some(retry_message),
-                error: Some(error.to_string()),
-                subagent_runtime: None,
-                durable_work_id,
-                turn_failed: true,
-                cancel_session_work: false,
-                priority_command,
-                turn_cancelled: false,
-            },
+            Ok(Err(error)) => {
+                let retryable_session_busy =
+                    error.status == 409 && error.error_type == "session_busy";
+                ExternalAgentTurnResult {
+                    session_key,
+                    outbound: Vec::new(),
+                    retry_message: retryable_session_busy.then_some(retry_message),
+                    error: (!retryable_session_busy).then(|| error.to_string()),
+                    subagent_runtime: None,
+                    durable_work_id,
+                    turn_failed: true,
+                    cancel_session_work: false,
+                    priority_command,
+                    turn_cancelled: false,
+                }
+            }
             Err(_panic) => ExternalAgentTurnResult {
                 session_key,
                 outbound: Vec::new(),
@@ -17942,8 +17957,8 @@ impl AgentLoopChatCompletionAdapter {
         effective_external_session_key(&self.loop_config(), message)
     }
 
-    fn external_session_is_active(&self, session_key: &str) -> bool {
-        self.session_turn_lock.is_active(session_key)
+    fn external_session_is_busy(&self, session_key: &str) -> bool {
+        self.session_turn_lock.is_busy(session_key)
     }
 
     fn run_agent_loop(
@@ -18239,6 +18254,7 @@ impl AgentLoopChatCompletionAdapter {
         let channel = inbound.channel.clone();
         let chat_id = inbound.chat_id.clone();
         let session_key = self.external_effective_session_key(&inbound);
+        let priority_command = is_external_stop_command(&inbound);
         let routing_metadata = stream_routing_metadata_from_inbound(&inbound);
         let reply_to = inbound_reply_to(&inbound);
         let mut subagent_runtime = SubagentRuntime::with_bus(runtime_bus.clone());
@@ -18255,6 +18271,11 @@ impl AgentLoopChatCompletionAdapter {
             live_runtime_bus.publish_outbound(message);
         });
         if !self.send_progress || !provider_streaming_channel(&channel) {
+            let reservation =
+                (!priority_command).then(|| self.session_turn_lock.reserve(session_key.clone()));
+            if let Some(reservation) = reservation.as_ref() {
+                reservation.bind_to_current_thread();
+            }
             let result = self.process_inbound_with_outbound_inner(
                 inbound,
                 config,
@@ -18273,7 +18294,14 @@ impl AgentLoopChatCompletionAdapter {
         });
         thread::scope(|scope| {
             let child_runtime = subagent_runtime.clone();
+            let turn_lock = self.session_turn_lock.clone();
+            let reserved_session_key = session_key.clone();
             let handle = scope.spawn(move || {
+                let reservation =
+                    (!priority_command).then(|| turn_lock.reserve(reserved_session_key));
+                if let Some(reservation) = reservation.as_ref() {
+                    reservation.bind_to_current_thread();
+                }
                 self.process_inbound_with_outbound_inner(
                     inbound,
                     config,
@@ -23527,6 +23555,71 @@ mod tests {
     }
 
     #[test]
+    fn discord_session_busy_retry_is_not_reported_as_turn_failure() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let adapter = external_media_test_adapter(
+            root.path(),
+            Arc::new(Mutex::new(Vec::<ProviderRequest>::new())),
+        )?;
+        let session_key = "discord:channel-1";
+        let busy_guard = adapter
+            .session_turn_lock
+            .acquire_priority(session_key)
+            .map_err(|error| format!("busy turn lock acquire failed: {error:?}"))?;
+        let message = InboundMessage::new(DISCORD_CHANNEL, "user-1", "channel-1", "hello");
+        let adapter = Arc::new(adapter);
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let handle = spawn_external_agent_turn(
+            adapter,
+            session_key.to_owned(),
+            message,
+            MessageBus::new(),
+            result_tx,
+        );
+        handle
+            .join()
+            .map_err(|_| "busy turn worker should return a retry result")?;
+        let result = result_rx.recv()?;
+
+        assert!(result.retry_message.is_some());
+        assert!(result.error.is_none());
+        drop(busy_guard);
+        Ok(())
+    }
+
+    #[test]
+    fn discord_streaming_worker_consumes_its_own_session_reservation() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let mut adapter = external_media_test_adapter(
+            root.path(),
+            Arc::new(Mutex::new(Vec::<ProviderRequest>::new())),
+        )?;
+        adapter.send_progress = true;
+        let adapter = Arc::new(adapter);
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let handle = spawn_external_agent_turn(
+            adapter,
+            "discord:channel-1".to_owned(),
+            InboundMessage::new(DISCORD_CHANNEL, "user-1", "channel-1", "hello"),
+            MessageBus::new(),
+            result_tx,
+        );
+        handle
+            .join()
+            .map_err(|_| "Discord streaming worker should complete")?;
+        let result = result_rx.recv()?;
+
+        assert!(result.error.is_none());
+        assert!(result.retry_message.is_none());
+        assert_eq!(result.outbound.len(), 1);
+        assert_eq!(result.outbound[0].content, "ok");
+        Ok(())
+    }
+
+    #[test]
     fn external_inline_data_url_is_stored_under_channel_attachments() -> Result<(), Box<dyn Error>>
     {
         let root = tempfile::tempdir()?;
@@ -27675,7 +27768,7 @@ mod tests {
             false,
         )?;
 
-        assert!(!adapter.external_session_is_active(&session_key));
+        assert!(!adapter.external_session_is_busy(&session_key));
         let replay = evaluate_runtime_durable_recovery(data_dir);
         let state = replay.state.ok_or("missing panic replay state")?;
         assert_eq!(
@@ -27801,12 +27894,14 @@ mod tests {
         let _guard = turn_lock
             .acquire("telegram:locked")
             .map_err(|error| format!("test lock acquire failed: {error:?}"))?;
+        let _reservation = turn_lock.reserve("telegram:reserved");
 
         assert_eq!(
             external_active_sessions(&turn_lock, &coordinator),
             vec![
                 "telegram:coordinator".to_owned(),
-                "telegram:locked".to_owned()
+                "telegram:locked".to_owned(),
+                "telegram:reserved".to_owned()
             ]
         );
         Ok(())
