@@ -9987,6 +9987,7 @@ fn complete_direct_message(
     let mut invocation = direct_message_invocation(adapter.configured_model(), options)?;
     invocation.session_key = cli_session_key(options.session.as_deref());
     let mut config = adapter.loop_config();
+    config.permission_interactive = true;
     config.settings.temperature = invocation
         .temperature
         .unwrap_or(config.settings.temperature);
@@ -32052,6 +32053,110 @@ mod tests {
         let requests = captured.lock().map_err(|_| "captured lock poisoned")?;
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].model, "gpt-5");
+        Ok(())
+    }
+
+    #[test]
+    fn direct_message_asks_before_auto_mode_protected_target_action() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        let config_path = root.path().join("config.json");
+        fs::create_dir_all(&workspace)?;
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&json!({
+                "permissions": {
+                    "mode": "auto",
+                    "autoApproval": {
+                        "enabled": true,
+                        "allowWorkspaceEdits": true,
+                        "protectedTargets": ["protected.txt"]
+                    }
+                }
+            }))?,
+        )?;
+        let path_context = PathContext {
+            workspace: Some(workspace.clone()),
+            allowed_dir: Some(workspace.clone()),
+            media_dir: Some(media_dir.clone()),
+            extra_allowed_dirs: Vec::new(),
+        };
+        let mut tools = ToolRegistry::new();
+        tools.register(WriteFileTool::new(path_context));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut arguments = Map::new();
+        arguments.insert("path".to_owned(), json!("protected.txt"));
+        arguments.insert("content".to_owned(), json!("approved"));
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 2,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
+            client: Arc::new(SequentialProviderClient {
+                captured: captured.clone(),
+                responses: Mutex::new(VecDeque::from([LlmResponse {
+                    tool_calls: vec![ToolCallRequest::new(
+                        "call-protected-write",
+                        "write_file",
+                        arguments,
+                    )],
+                    finish_reason: "tool_calls".to_owned(),
+                    ..LlmResponse::default()
+                }])),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace: workspace.clone(),
+            config_path,
+            media_dir,
+            tools,
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: true,
+            send_progress: true,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            runtime_verbose: false,
+            tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: PermissionMode::Auto,
+                source: Some("test".to_owned()),
+                scope_ref: None,
+            },
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
+        };
+
+        let output = complete_direct_message(
+            &adapter,
+            &AskOptions {
+                message: "write protected.txt".to_owned(),
+                session: Some("protected".to_owned()),
+                allow_side_effects: true,
+                ..AskOptions::default()
+            },
+        )?;
+
+        assert!(output.contains("Permission approval required"), "{output}");
+        assert!(!workspace.join("protected.txt").exists());
+        assert_eq!(
+            captured.lock().map_err(|_| "captured lock poisoned")?.len(),
+            1
+        );
         Ok(())
     }
 
