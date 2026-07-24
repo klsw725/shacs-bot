@@ -114,7 +114,7 @@ fn policy_input(
 }
 
 #[test]
-fn protected_targets_fail_closed_before_policy_allow() -> Result<(), Box<dyn Error>> {
+fn auto_mode_asks_before_protected_target_action() -> Result<(), Box<dyn Error>> {
     let action = action(
         PermissionMode::Auto,
         "write_file",
@@ -142,11 +142,114 @@ fn protected_targets_fail_closed_before_policy_allow() -> Result<(), Box<dyn Err
             .diagnostics
             .protected_targets
             .contains(&ProtectedTargetClass::GitState)
-        || decision.kind != PermissionPolicyDecisionKind::Deny
+        || decision.kind != PermissionPolicyDecisionKind::Ask
         || decision.reason != PermissionPolicyReason::ProtectedTarget
         || decision.can_handoff_to_tool_runtime
     {
-        return Err(format!("protected target was not fail-closed: {rules:?} {decision:?}").into());
+        return Err(
+            format!("protected target did not ask the user: {rules:?} {decision:?}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn auto_mode_user_approval_allows_protected_target_action() -> Result<(), Box<dyn Error>> {
+    let protected = action(
+        PermissionMode::Auto,
+        "write_file",
+        vec![SafetyCapability::FsWrite],
+        vec![target(json!(".git/config"))],
+    );
+    let rules = evaluate_static_rules(&protected, &PermissionRuleInput::default());
+    let mut input = policy_input(protected, rules.clone());
+    input.approval = Some(ApprovalCorrelation::approved("approval-1".to_owned()));
+
+    let decision = decide_permission(input);
+
+    if rules.kind != StaticRuleDecisionKind::Deny
+        || decision.kind != PermissionPolicyDecisionKind::Allow
+        || decision.reason != PermissionPolicyReason::ApprovalAccepted
+        || decision.approval_ref.as_deref() != Some("approval-1")
+        || !decision.can_handoff_to_tool_runtime
+    {
+        return Err(format!(
+            "approved protected target action was not allowed: {rules:?} {decision:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn auto_mode_asks_for_every_ready_static_deny() -> Result<(), Box<dyn Error>> {
+    let cases = [
+        (
+            action(
+                PermissionMode::Auto,
+                "read_secret",
+                vec![SafetyCapability::SecretRead],
+                Vec::new(),
+            ),
+            PermissionRuleInput::default(),
+            StaticRuleReason::SecretRead,
+        ),
+        (
+            action(
+                PermissionMode::Auto,
+                "read_file",
+                vec![SafetyCapability::FsRead],
+                vec![target(json!(".shacs-bot/auth.json"))],
+            ),
+            PermissionRuleInput::default(),
+            StaticRuleReason::RawAuthExport,
+        ),
+        (
+            action(
+                PermissionMode::Auto,
+                "write_file",
+                vec![SafetyCapability::FsWrite],
+                vec![target(json!({ "opaque": true }))],
+            ),
+            PermissionRuleInput::default(),
+            StaticRuleReason::UnknownTargetClassification,
+        ),
+        (
+            action(
+                PermissionMode::Auto,
+                "exec",
+                vec![SafetyCapability::ProcExec],
+                vec![target(json!("rm -rf /workspace"))],
+            ),
+            PermissionRuleInput {
+                containment: safe_containment(),
+                protected_targets: Vec::new(),
+                proc_exec_summary: Some(ProcExecSummary {
+                    command_family: "rm".to_owned(),
+                    target_refs: vec!["workspace".to_owned()],
+                    destructive: true,
+                    network: false,
+                    secret_exposure: false,
+                    summary_available: true,
+                }),
+            },
+            StaticRuleReason::DangerousProcExec,
+        ),
+    ];
+
+    for (candidate, rule_input, expected_reason) in cases {
+        let rules = evaluate_static_rules(&candidate, &rule_input);
+        let decision = decide_permission(policy_input(candidate, rules.clone()));
+        if rules.kind != StaticRuleDecisionKind::Deny
+            || rules.reason != expected_reason
+            || decision.kind != PermissionPolicyDecisionKind::Ask
+            || decision.can_handoff_to_tool_runtime
+        {
+            return Err(format!(
+                "auto static deny did not ask: expected={expected_reason:?} rules={rules:?} decision={decision:?}"
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -246,10 +349,10 @@ fn custom_protected_targets_match_lexical_path_variants() -> Result<(), Box<dyn 
                 .diagnostics
                 .protected_targets
                 .contains(&ProtectedTargetClass::CustomProtectedTarget)
-            || decision.kind != PermissionPolicyDecisionKind::Deny
+            || decision.kind != PermissionPolicyDecisionKind::Ask
         {
             return Err(format!(
-                "custom protected target variant was not denied: target={value:?} rules={rules:?} decision={decision:?}"
+                "custom protected target variant did not ask: target={value:?} rules={rules:?} decision={decision:?}"
             )
             .into());
         }
@@ -600,7 +703,8 @@ fn evaluator_cannot_allow_unsummarized_proc_exec() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn evaluator_uncertainty_and_prompt_injection_never_allow() -> Result<(), Box<dyn Error>> {
+fn evaluator_uncertainty_and_prompt_injection_ask_in_interactive_auto_mode(
+) -> Result<(), Box<dyn Error>> {
     let exec = action(
         PermissionMode::Auto,
         "exec",
@@ -618,6 +722,10 @@ fn evaluator_uncertainty_and_prompt_injection_never_allow() -> Result<(), Box<dy
 
     for verdict in [
         evaluator(
+            AutoEvaluatorVerdictKind::DenyCandidate,
+            EvaluatorConfidence::High,
+        ),
+        evaluator(
             AutoEvaluatorVerdictKind::Timeout,
             EvaluatorConfidence::Unknown,
         ),
@@ -633,7 +741,7 @@ fn evaluator_uncertainty_and_prompt_injection_never_allow() -> Result<(), Box<dy
         let mut input = policy_input(exec.clone(), rules.clone());
         input.evaluator = Some(verdict);
         let decision = decide_permission(input);
-        if decision.kind == PermissionPolicyDecisionKind::Allow
+        if decision.kind != PermissionPolicyDecisionKind::Ask
             || decision.can_handoff_to_tool_runtime
         {
             return Err(format!("uncertain evaluator allowed execution: {decision:?}").into());
@@ -654,7 +762,7 @@ fn evaluator_uncertainty_and_prompt_injection_never_allow() -> Result<(), Box<dy
     let mut input = policy_input(exec, rules);
     input.evaluator = Some(injected);
     let decision = decide_permission(input);
-    if decision.kind == PermissionPolicyDecisionKind::Allow
+    if decision.kind != PermissionPolicyDecisionKind::Ask
         || decision.reason != PermissionPolicyReason::PromptInjectionSignal
     {
         return Err(format!("prompt injection signal did not block allow: {decision:?}").into());
@@ -867,26 +975,29 @@ fn permission_audit_diagnostics_count_decisions_and_failure_reasons() -> Result<
         },
     );
 
-    let deny_action = action(
+    let protected_action = action(
         PermissionMode::Auto,
         "write_file",
         vec![SafetyCapability::FsWrite],
         vec![target(json!(".git/config"))],
     );
-    let deny_rules = evaluate_static_rules(&deny_action, &PermissionRuleInput::default());
-    let deny_decision = decide_permission(policy_input(deny_action.clone(), deny_rules.clone()));
+    let protected_rules = evaluate_static_rules(&protected_action, &PermissionRuleInput::default());
+    let protected_decision = decide_permission(policy_input(
+        protected_action.clone(),
+        protected_rules.clone(),
+    ));
 
     let records = vec![
         build_permission_audit_record(&allow_action, &allow_decision, 1),
         build_permission_audit_record(&ask_action, &ask_decision, 2),
-        build_permission_audit_record(&deny_action, &deny_decision, 3),
+        build_permission_audit_record(&protected_action, &protected_decision, 3),
     ];
-    let diagnostics = vec![containment_rules.diagnostics, deny_rules.diagnostics];
+    let diagnostics = vec![containment_rules.diagnostics, protected_rules.diagnostics];
     let summary = build_permission_diagnostics_summary(&records, &diagnostics);
 
     if summary.allow_count != 1
-        || summary.ask_count != 1
-        || summary.deny_count != 1
+        || summary.ask_count != 2
+        || summary.deny_count != 0
         || summary.evaluator_failure_count != 1
         || !summary
             .evaluator_failure_reasons

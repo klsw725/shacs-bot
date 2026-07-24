@@ -588,7 +588,7 @@ fn runtime_auto_approval_does_not_widen_disallowed_workspace_edits() -> Result<(
 }
 
 #[test]
-fn runtime_auto_approval_respects_configured_protected_targets() -> Result<(), Box<dyn Error>> {
+fn runtime_auto_mode_asks_for_configured_protected_targets() -> Result<(), Box<dyn Error>> {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register(WriteFileCountingTool {
@@ -621,14 +621,87 @@ fn runtime_auto_approval_respects_configured_protected_targets() -> Result<(), B
     );
 
     if calls.load(Ordering::SeqCst) != 0
+        || !matches!(
+            report.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+    {
+        return Err(format!(
+            "protected target should ask before execution: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_auto_mode_executes_protected_target_after_user_approval() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(WriteFileCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_auto_approval: AutoApprovalConfig {
+            enabled: true,
+            allow_workspace_edits: true,
+            protected_targets: vec!["src".to_owned()],
+            ..AutoApprovalConfig::default()
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+    let call = RuntimeToolCall::new(
+        "write-call",
+        "write_file",
+        json!({ "path": "src/lib.rs", "content": "ok" }),
+    );
+    let approval_report = executor.execute_tool_calls(vec![call.clone()], &context);
+    let approval_request = match approval_report.interrupt {
+        Some(RuntimeInterrupt::PermissionApproval {
+            approval_request, ..
+        }) => approval_request,
+        other => {
+            return Err(format!("missing protected target approval request: {other:?}").into())
+        }
+    };
+    let approved_at = approval_request.expires_at_unix_ms.saturating_sub(1);
+    let decision = ApprovalDecision {
+        approval_request_id: approval_request.approval_request_id.clone(),
+        action_digest: approval_request.action_digest.clone(),
+        snapshot_digest: approval_request.snapshot_digest.clone(),
+        decision: ApprovalDecisionKind::Approved,
+        approved_scope: approval_request.requested_scope.clone(),
+        actor: ApprovalActor::LocalUser,
+        decided_at_unix_ms: approved_at,
+        consumed: false,
+    };
+    let approved_context = ToolExecutionContext {
+        permission_approval_cache: Some(ApprovalCacheEntry {
+            request: *approval_request,
+            decision,
+        }),
+        ..context
+    };
+
+    let report = executor.execute_tool_calls(vec![call], &approved_context);
+
+    if calls.load(Ordering::SeqCst) != 1
         || report.interrupt.is_some()
         || !report
             .messages
             .first()
-            .is_some_and(|message| message.content.contains("Permission denied"))
+            .is_some_and(|message| message.content == "written")
     {
         return Err(format!(
-            "protected target should be denied before auto approval: report={report:?} calls={}",
+            "approved protected target did not execute: report={report:?} calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());
@@ -776,8 +849,7 @@ fn runtime_executes_proc_exec_after_permission_approval() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn runtime_rejects_permission_approval_cache_with_mismatched_decision() -> Result<(), Box<dyn Error>>
-{
+fn runtime_asks_again_for_mismatched_permission_approval_cache() -> Result<(), Box<dyn Error>> {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register(ProcExecCountingTool {
@@ -837,10 +909,11 @@ fn runtime_rejects_permission_approval_cache_with_mismatched_decision() -> Resul
         &approved_context,
     );
 
-    let message = report.messages.first().ok_or("missing denial result")?;
     if calls.load(Ordering::SeqCst) != 0
-        || report.interrupt.is_some()
-        || !message.content.contains("Permission denied")
+        || !matches!(
+            report.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
         || !report
             .permissioned_actions
             .first()
@@ -864,7 +937,7 @@ fn runtime_rejects_permission_approval_cache_with_mismatched_decision() -> Resul
         )
     {
         return Err(format!(
-            "mismatched cached approval should not execute: report={report:?} calls={}",
+            "mismatched cached approval should ask again without executing: report={report:?} calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());

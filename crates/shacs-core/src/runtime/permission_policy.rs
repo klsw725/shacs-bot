@@ -125,17 +125,16 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
         }
     }
 
-    match input.static_rule_decision.kind {
-        StaticRuleDecisionKind::Deny => {
-            return decision(
-                PermissionPolicyDecisionKind::Deny,
-                static_deny_reason(&input.static_rule_decision),
-                None,
-                None,
-                None,
-            );
-        }
-        StaticRuleDecisionKind::AskRequired | StaticRuleDecisionKind::AllowCandidate => {}
+    if input.static_rule_decision.kind == StaticRuleDecisionKind::Deny
+        && input.static_rule_decision.reason == StaticRuleReason::NormalizationError
+    {
+        return decision(
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::StaticDeny,
+            None,
+            None,
+            None,
+        );
     }
 
     if input.action.tool_name == "ask_user" && input.action.capabilities.is_empty() {
@@ -158,7 +157,10 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
     }
 
     if let Some(approval) = input.approval {
-        if approval.is_approved() {
+        if approval.is_approved()
+            && (input.static_rule_decision.kind != StaticRuleDecisionKind::Deny
+                || input.action.permission_mode_snapshot.mode == PermissionMode::Auto)
+        {
             return decision(
                 PermissionPolicyDecisionKind::Allow,
                 PermissionPolicyReason::ApprovalAccepted,
@@ -167,13 +169,30 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
                 None,
             );
         }
-        return decision(
-            PermissionPolicyDecisionKind::Deny,
-            PermissionPolicyReason::ApprovalRejected,
-            None,
-            None,
-            approval.error,
-        );
+        if !approval.is_approved() {
+            let kind = if input.action.permission_mode_snapshot.mode == PermissionMode::Auto
+                && input.interactive
+            {
+                PermissionPolicyDecisionKind::Ask
+            } else {
+                PermissionPolicyDecisionKind::Deny
+            };
+            return decision(
+                kind,
+                PermissionPolicyReason::ApprovalRejected,
+                None,
+                None,
+                approval.error,
+            );
+        }
+    }
+
+    if input.static_rule_decision.kind == StaticRuleDecisionKind::Deny {
+        let reason = static_deny_reason(&input.static_rule_decision);
+        if input.action.permission_mode_snapshot.mode == PermissionMode::Auto {
+            return ask_or_deny(input.interactive, reason);
+        }
+        return decision(PermissionPolicyDecisionKind::Deny, reason, None, None, None);
     }
 
     if input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired
@@ -307,12 +326,10 @@ fn decide_auto(
         );
     }
     if evaluator.verdict == AutoEvaluatorVerdictKind::DenyCandidate {
-        return decision(
-            PermissionPolicyDecisionKind::Deny,
+        return ask_or_deny_with_evaluator(
+            interactive,
             PermissionPolicyReason::EvaluatorUncertain,
             evaluator_ref,
-            None,
-            None,
         );
     }
     ask_or_deny_with_evaluator(
