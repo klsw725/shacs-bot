@@ -251,7 +251,10 @@ pub fn recent_auto_mode_denial_from_classifier_decision(
     created_at_unix_ms: u64,
 ) -> Option<RecentAutoModeDenial> {
     if action.permission_mode_snapshot.mode != PermissionMode::Auto
-        || decision.kind != PermissionPolicyDecisionKind::Deny
+        || !matches!(
+            decision.kind,
+            PermissionPolicyDecisionKind::Ask | PermissionPolicyDecisionKind::Deny
+        )
         || decision.reason != PermissionPolicyReason::EvaluatorUncertain
         || evaluator.verdict != AutoEvaluatorVerdictKind::DenyCandidate
         || evaluator.evaluator_ref.as_deref() != Some("auto-mode-classifier")

@@ -3371,8 +3371,8 @@ fn agent_runner_bridge_classifier_denial_records_recent_visibility() -> Result<(
 }
 
 #[test]
-fn agent_runner_cancelled_after_classifier_denial_preserves_recent_denials(
-) -> Result<(), Box<dyn Error>> {
+fn agent_runner_classifier_denial_asks_and_preserves_recent_denials() -> Result<(), Box<dyn Error>>
+{
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register(ProcExecCountingTool {
@@ -3406,15 +3406,33 @@ fn agent_runner_cancelled_after_classifier_denial_preserves_recent_denials(
     }));
 
     let result = AgentRunner::new().run(spec)?;
-    if result.stop_reason != "cancelled"
+    if result.stop_reason != "ask_user"
         || calls.load(Ordering::SeqCst) != 0
         || result.recent_auto_mode_denials.len() != 1
     {
         return Err(format!(
-            "cancelled run should preserve accumulated recent denials without executing: result={result:?} calls={}",
+            "classifier denial should ask and preserve recent visibility without executing: result={result:?} calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());
+    }
+    Ok(())
+}
+
+fn decline_initial_auto_permission(
+    loop_runtime: &mut AgentLoop<'_>,
+    session_key: &str,
+) -> Result<(), Box<dyn Error>> {
+    let pending = loop_runtime.process_direct("run the tests", Some(session_key))?;
+    if pending.stop_reason != "ask_user" {
+        return Err(format!("classifier denial did not ask the user: {pending:?}").into());
+    }
+
+    let denied = loop_runtime.process_direct("deny", Some(session_key))?;
+    if denied.stop_reason != "permission_denied_by_user" {
+        return Err(
+            format!("permission denial did not close the pending action: {denied:?}").into(),
+        );
     }
     Ok(())
 }
@@ -3468,12 +3486,10 @@ fn loop_permission_recent_shows_sanitized_classifier_denials() -> Result<(), Box
         config,
     );
 
-    let first = loop_runtime.process_direct("run the tests", Some("cli:recent-denials"))?;
-    if calls.load(Ordering::SeqCst) != 0
-        || first.final_content.as_deref() != Some("classifier denied loop exec")
-    {
+    decline_initial_auto_permission(&mut loop_runtime, "cli:recent-denials")?;
+    if calls.load(Ordering::SeqCst) != 0 {
         return Err(format!(
-            "classifier denial turn should not execute and should resume: {first:?} calls={}",
+            "declined classifier action should not execute: calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());
@@ -3498,7 +3514,7 @@ fn loop_permission_recent_shows_sanitized_classifier_denials() -> Result<(), Box
 fn loop_permission_recent_shows_token_availability_not_blanket_retryable(
 ) -> Result<(), Box<dyn Error>> {
     let (mut loop_runtime, calls, _workspace) = recent_retry_loop(true)?;
-    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-state"))?;
+    decline_initial_auto_permission(&mut loop_runtime, "cli:recent-retry-state")?;
 
     let recent =
         loop_runtime.process_direct("/permission recent", Some("cli:recent-retry-state"))?;
@@ -3516,7 +3532,7 @@ fn loop_permission_recent_shows_token_availability_not_blanket_retryable(
 fn loop_permission_recent_retry_creates_formal_approval_without_raw_payload_metadata(
 ) -> Result<(), Box<dyn Error>> {
     let (mut loop_runtime, _calls, workspace) = recent_retry_loop(true)?;
-    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-meta"))?;
+    decline_initial_auto_permission(&mut loop_runtime, "cli:recent-retry-meta")?;
     let denial_id = recent_denial_id_from_output(
         &loop_runtime
             .process_direct("/permission recent", Some("cli:recent-retry-meta"))?
@@ -3548,7 +3564,7 @@ fn loop_permission_recent_retry_creates_formal_approval_without_raw_payload_meta
 fn loop_permission_recent_retry_approval_executes_once_through_existing_permission_path(
 ) -> Result<(), Box<dyn Error>> {
     let (mut loop_runtime, calls, _workspace) = recent_retry_loop(true)?;
-    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-approve"))?;
+    decline_initial_auto_permission(&mut loop_runtime, "cli:recent-retry-approve")?;
     let denial_id = recent_denial_id_from_output(
         &loop_runtime
             .process_direct("/permission recent", Some("cli:recent-retry-approve"))?
@@ -3588,10 +3604,6 @@ fn loop_permission_recent_retry_stops_after_fatal_tool_outcome() -> Result<(), B
         ))?,
         classifier_verdict_response("deny_candidate", "high", "requested"),
         LlmResponse {
-            content: Some("classifier denied loop exec".to_owned()),
-            ..LlmResponse::default()
-        },
-        LlmResponse {
             content: Some("provider must not resume".to_owned()),
             ..LlmResponse::default()
         },
@@ -3613,7 +3625,7 @@ fn loop_permission_recent_retry_stops_after_fatal_tool_outcome() -> Result<(), B
             events.push(event.clone());
         }
     }));
-    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-fatal"))?;
+    decline_initial_auto_permission(&mut loop_runtime, "cli:recent-retry-fatal")?;
     let denial_id = recent_denial_id_from_output(
         &loop_runtime
             .process_direct("/permission recent", Some("cli:recent-retry-fatal"))?
@@ -3634,7 +3646,7 @@ fn loop_permission_recent_retry_stops_after_fatal_tool_outcome() -> Result<(), B
             .as_deref()
             .is_none_or(|content| !content.contains("MCP tool call failed"))
         || calls.load(Ordering::SeqCst) != 1
-        || requests.len() != 3
+        || requests.len() != 2
         || !events
             .iter()
             .any(|event| event.name == "exec" && event.status == ToolStatus::Error)
@@ -3652,7 +3664,7 @@ fn loop_permission_recent_retry_stops_after_fatal_tool_outcome() -> Result<(), B
 fn loop_permission_recent_retry_rejects_approve_session_without_execution(
 ) -> Result<(), Box<dyn Error>> {
     let (mut loop_runtime, calls, _workspace) = recent_retry_loop(true)?;
-    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-session"))?;
+    decline_initial_auto_permission(&mut loop_runtime, "cli:recent-retry-session")?;
     let denial_id = recent_denial_id_from_output(
         &loop_runtime
             .process_direct("/permission recent", Some("cli:recent-retry-session"))?
@@ -3674,7 +3686,7 @@ fn loop_permission_recent_retry_rejects_approve_session_without_execution(
 #[test]
 fn loop_permission_recent_retry_missing_token_fails_closed() -> Result<(), Box<dyn Error>> {
     let (mut loop_runtime, calls, workspace) = recent_retry_loop(true)?;
-    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-missing"))?;
+    decline_initial_auto_permission(&mut loop_runtime, "cli:recent-retry-missing")?;
     let denial_id = recent_denial_id_from_output(
         &loop_runtime
             .process_direct("/permission recent", Some("cli:recent-retry-missing"))?
@@ -3711,7 +3723,7 @@ fn loop_permission_recent_retry_missing_token_fails_closed() -> Result<(), Box<d
 fn loop_permission_recent_retry_non_interactive_fails_closed_without_pending_approval(
 ) -> Result<(), Box<dyn Error>> {
     let (mut loop_runtime, calls, workspace) = recent_retry_loop(true)?;
-    loop_runtime.process_direct("run the tests", Some("cli:recent-retry-noninteractive"))?;
+    decline_initial_auto_permission(&mut loop_runtime, "cli:recent-retry-noninteractive")?;
     let denial_id = recent_denial_id_from_output(
         &loop_runtime
             .process_direct(
@@ -3771,10 +3783,6 @@ fn loop_permission_recent_retry_does_not_overwrite_pending_permission_approval(
             json!({ "command": "cargo test" }),
         ))?,
         classifier_verdict_response("deny_candidate", "high", "requested"),
-        LlmResponse {
-            content: Some("classifier denied retry overwrite fixture".to_owned()),
-            ..LlmResponse::default()
-        },
         response_with_runtime_tool_call(RuntimeToolCall::new(
             "exec-existing-approval",
             "exec",
@@ -3795,7 +3803,7 @@ fn loop_permission_recent_retry_does_not_overwrite_pending_permission_approval(
         recent_retry_config(workspace.path(), true),
     );
 
-    loop_runtime.process_direct("run the tests", Some("cli:retry-overwrite-permission"))?;
+    decline_initial_auto_permission(&mut loop_runtime, "cli:retry-overwrite-permission")?;
     let denial_id = recent_denial_id_from_output(
         &loop_runtime
             .process_direct("/permission recent", Some("cli:retry-overwrite-permission"))?
@@ -3846,7 +3854,7 @@ fn loop_permission_recent_retry_does_not_overwrite_pending_permission_approval(
 fn loop_permission_recent_retry_does_not_overwrite_pending_recent_retry_approval(
 ) -> Result<(), Box<dyn Error>> {
     let (mut loop_runtime, calls, _workspace) = recent_retry_loop(true)?;
-    loop_runtime.process_direct("run the tests", Some("cli:retry-overwrite-recent"))?;
+    decline_initial_auto_permission(&mut loop_runtime, "cli:retry-overwrite-recent")?;
     let denial_id = recent_denial_id_from_output(
         &loop_runtime
             .process_direct("/permission recent", Some("cli:retry-overwrite-recent"))?
@@ -4130,10 +4138,6 @@ fn recent_retry_loop(
             json!({ "command": "cargo test" }),
         ))?,
         classifier_verdict_response("deny_candidate", "high", "requested"),
-        LlmResponse {
-            content: Some("classifier denied loop exec".to_owned()),
-            ..LlmResponse::default()
-        },
         LlmResponse {
             content: Some("recent retry completed".to_owned()),
             ..LlmResponse::default()
@@ -5086,7 +5090,7 @@ fn agent_runner_auto_classifier_prompt_injection_signal_interrupts_without_execu
 }
 
 #[test]
-fn agent_runner_auto_classifier_static_deny_protected_target_skips_classifier_and_execution(
+fn agent_runner_auto_static_protected_target_asks_without_classifier_or_execution(
 ) -> Result<(), Box<dyn Error>> {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
@@ -5120,16 +5124,14 @@ fn agent_runner_auto_classifier_static_deny_protected_target_skips_classifier_an
         .map_err(|error| error.to_string())?;
     if calls.load(Ordering::SeqCst) != 0
         || !classifier_requests.is_empty()
-        || !result.messages.iter().any(|message| {
-            message["role"] == "tool"
-                && message["tool_call_id"] == "write-protected-target"
-                && message["content"]
-                    .as_str()
-                    .is_some_and(|content| content.contains("Permission denied"))
-        })
+        || !matches!(
+            result.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+        || result.stop_reason != "ask_user"
     {
         return Err(format!(
-            "protected static deny should not call classifier or execute: result={result:?} calls={} classifier_requests={classifier_requests:?}",
+            "protected static rule should ask without classifier or execution: result={result:?} calls={} classifier_requests={classifier_requests:?}",
             calls.load(Ordering::SeqCst)
         )
         .into());

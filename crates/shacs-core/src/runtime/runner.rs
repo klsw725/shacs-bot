@@ -676,7 +676,7 @@ impl AgentRunner {
                     let event = ToolEvent {
                         name: interrupt_name(&interrupt),
                         status: ToolStatus::Waiting,
-                        detail: interrupt_text(&interrupt).unwrap_or_default(),
+                        detail: interrupt_observable_text(&interrupt).unwrap_or_default(),
                         call_id: pending_call.as_ref().map(|call| call.id.clone()),
                         arguments: pending_call
                             .as_ref()
@@ -2596,7 +2596,7 @@ fn record_tool_interrupt_outcome(spec: &AgentRunSpec<'_>, interrupt: &RuntimeInt
         spec,
         &call,
         ToolOutcomeKind::Interrupted { interrupt: kind },
-        interrupt_text(interrupt),
+        interrupt_observable_text(interrupt),
         None,
     );
 }
@@ -3326,6 +3326,15 @@ fn interrupt_text(interrupt: &RuntimeInterrupt) -> Option<String> {
     match interrupt {
         RuntimeInterrupt::AskUser { question, .. } => Some(question.clone()),
         RuntimeInterrupt::PermissionApproval { question, .. } => Some(question.clone()),
+    }
+}
+
+fn interrupt_observable_text(interrupt: &RuntimeInterrupt) -> Option<String> {
+    match interrupt {
+        RuntimeInterrupt::AskUser { question, .. } => Some(question.clone()),
+        RuntimeInterrupt::PermissionApproval { .. } => {
+            Some("Permission approval required.".to_owned())
+        }
     }
 }
 
