@@ -42,6 +42,7 @@ Origin specs: 008, 009, 010, 015, 026
 8. Tokenizer-aware budget과 truncation plan.
 9. Explicit extra context file config의 live agent loop wiring.
 10. Snapshot diagnostics, replay, release evidence.
+11. 032가 소유하는 skill trust record의 schema-versioned persistence, migration, mutation admission과 execution snapshot reference.
 
 ## 구현 불변식
 
@@ -55,6 +56,7 @@ Origin specs: 008, 009, 010, 015, 026
 8. Context budget은 active user message와 required instructions를 밀어내면 안 된다.
 9. Token budget은 provider/model tokenizer 차이를 설명할 수 있어야 하며, 추정 실패는 evidence와 fallback policy를 남겨야 한다.
 10. Explicit extra context config는 default context discovery보다 낮거나 명시된 priority를 가져야 하며, permission, redaction, budget gate를 우회하면 안 된다.
+11. Skill trust persistence는 discovery registry나 session approval cache와 분리되고, skill identity, source identity, content digest, dependency manifest digest, capability scope, lifecycle status를 보존해야 한다.
 
 ## Must Have
 
@@ -70,6 +72,7 @@ Origin specs: 008, 009, 010, 015, 026
 10. Truncation plan은 어떤 context block이 included, truncated, skipped 되었는지 evidence를 남겨야 한다.
 11. Explicit extra context files config는 live agent loop에서 context builder handoff까지 연결되어야 한다.
 12. Diagnostics와 replay는 raw secret 없이 snapshot id, digest, source summary, migration state를 보여야 한다.
+13. Skill-derived dependency install 또는 entrypoint execution snapshot은 active trust record ref와 현재 skill/dependency digest를 포함해야 하며, stale/revoked/mismatched record를 allow provenance로 저장하면 안 된다.
 
 ## Must Not Have
 
@@ -83,6 +86,7 @@ Origin specs: 008, 009, 010, 015, 026
 8. Provider adapter가 snapshot 생성 뒤 config, policy, context source를 다시 읽으면 안 된다.
 9. Budget overflow를 silent drop으로 처리하면 안 된다.
 10. Explicit extra context files가 protected path, symlink escape, redaction, token budget을 우회하면 안 된다.
+11. Skill trust record의 구체적인 storage path나 dependency 설치 directory를 035 closure 조건으로 고정하지 않는다. 035는 schema, ownership, mutation admission, snapshot provenance만 소유한다.
 
 ## Acceptance Criteria
 
@@ -99,6 +103,16 @@ Origin specs: 008, 009, 010, 015, 026
 11. Extra context config live wiring test가 config-provided context files를 live provider handoff에 포함하고, default discovery와 중복을 피한다.
 12. Diagnostics/replay test가 snapshot을 live source 재조회 없이 해석한다.
 13. 사용자 문서가 JSON compatibility, migration 필요 여부, profile/secret ref 사용법, 비범위를 정확히 말한다.
+14. Skill trust persistence test가 active/stale/revoked/removed state, digest mismatch, migration, inspect/revoke mutation을 검증하고 execution snapshot이 정확한 trust ref만 소비함을 보인다.
+
+## 032 skill lifecycle handoff
+
+1. 032는 skill install proposal, dependency manifest 의미, trust lifecycle 상태 전이, inspect/revoke domain contract를 소유한다.
+2. 030은 trust provenance가 dependency install과 entrypoint action의 permission 근거로 사용될 수 있는 조건을 소유한다.
+3. 035는 trust record의 schema version, persistence, migration, owner-safe mutation, execution snapshot reference를 소유한다.
+4. Trust record persistence에는 skill/source identity, content digest, dependency manifest digest, capability scope, approval actor/time, active/stale/revoked/removed status와 reason이 포함돼야 한다.
+5. Raw secret, package repository credential, full environment, executable retry payload는 trust record에 저장하지 않는다.
+6. 구체적인 trust storage path와 dependency 설치 위치는 이 handoff에서 정의하지 않는다.
 
 ## Source Handoff Table
 
@@ -160,5 +174,6 @@ Origin specs: 008, 009, 010, 015, 026
 9. Diagnostics와 replay가 live source 재조회와 raw secret 노출 없이 snapshot evidence를 해석하는 테스트.
 10. README, usage, specs index 중 사용자에게 노출되는 문서가 migration, JSON compatibility, profiles, secret refs, 비범위를 정확히 반영한다.
 11. 닫는 문서에는 구현 파일, 테스트 이름, migration compatibility 판단, snapshot immutability evidence, TOML 결정 여부가 함께 기록되어야 한다.
+12. Skill trust schema, migration, mutation admission, inspect/revoke, snapshot provenance를 검증하는 evidence가 032 lifecycle 및 030 policy evidence와 연결돼야 한다.
 
 현재 이 문서는 Open 상태다. 위 evidence가 없으면 035의 범위를 구현 완료로 닫을 수 없다.

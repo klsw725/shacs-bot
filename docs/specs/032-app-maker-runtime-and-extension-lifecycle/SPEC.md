@@ -8,7 +8,7 @@ Origin specs: 005, 017, 021, 025
 
 이 문서는 기존 specs 005, 017, 021, 025가 implemented scope로 닫힌 뒤 남는 app product work의 owner boundary를 연다.
 
-핵심 목적은 App Maker가 만든 제안과 설치 가능한 `.shacsapp` bundle이 실제 app process, AppSupervisor, permission과 secret binding, extension lifecycle provenance로 이어지는 끝단을 한 곳에 고정하는 것이다.
+핵심 목적은 App Maker가 만든 제안과 설치 가능한 `.shacsapp` bundle이 실제 app process, AppSupervisor, permission과 secret binding, extension lifecycle provenance로 이어지는 끝단을 한 곳에 고정하는 것이다. 설치 가능한 skill extension에 대해서는 설치 시 검증·승인된 dependency와 capability를 이후 사용에서 반복 질문 없이 소비하되, content 또는 manifest 변경 시 승인을 무효화하는 lifecycle도 이 문서가 소유한다.
 
 이 문서는 기존 spec의 완료 선언을 되돌리지 않는다. 005는 read-only skill registry와 context injection, 017은 app manifest와 registry baseline, 021은 안전한 authoring draft baseline, 025는 self-hosted local plugin manifest와 제한된 executable surface를 닫은 것으로 본다. 032는 그 다음에 남은 실제 제품 흐름을 소유한다.
 
@@ -41,6 +41,7 @@ Origin specs: 005, 017, 021, 025
 6. App lifecycle 안에서 발생하는 extension, skill, plugin, hook, command, MCP provenance의 소유 위치.
 7. App install, enable, start, stop, disable, uninstall, recover의 domain state vocabulary와 projection input contract. Shared surface adapter와 parity smoke는 031이 소유한다.
 8. App process와 extension action이 task ledger, diagnostics, replay evidence에 redacted receipt로 남는 규칙.
+9. Skill install proposal, 별도 skill trust registry의 domain model, dependency 준비·검증, trust invalidation, inspect/revoke lifecycle.
 
 032가 다른 spec에서 소비하는 것과 다시 소유하지 않는 것은 명확히 분리한다. 004/005/010/012/013/014/016/017/021/022/025는 구현 baseline을 제공한다. Open formal policy·permission·redaction은 030, config와 secret-ref consumption은 035, shared UI adapter와 parity smoke는 031이 소유한다. 032는 app lifecycle state와 receipt를 생산한다.
 
@@ -57,6 +58,11 @@ Origin specs: 005, 017, 021, 025
 9. Existing app edit은 installed bundle을 직접 덮어쓰지 않는다. Snapshot, draft, diff, proposal, checkpoint, apply, verify를 거쳐야 한다.
 10. Uninstall과 recover는 historical ledger와 session reference를 조용히 파괴하지 않는다.
 11. Replay는 destructive app process나 plugin command를 live-dispatch하지 않는다. Recorded evidence만 해석한다.
+12. Skill 설치 승인은 skill 이름이 아니라 source identity, content digest, dependency manifest digest, capability scope에 묶인다.
+13. 승인된 Python/Node package가 누락된 경우에만 pinned manifest 범위에서 자동 준비하고 검증한 뒤 skill entrypoint를 실행할 수 있다.
+14. Skill content, dependency manifest, resolved version, source identity, capability scope가 바뀌면 기존 trust record는 stale이 되고 다시 검증·승인받아야 한다.
+15. Python/Node package 누락과 Python/Node runtime 자체 누락은 다른 상태다. Runtime 자체 누락은 managed runtime 또는 prerequisite로 처리하며 package trust로 임의 system installer를 허용하지 않는다.
+16. Skill trust registry는 discovery registry 및 session approval cache와 분리된 inspectable·revocable lifecycle state다.
 
 ## Must Have
 
@@ -70,6 +76,11 @@ Origin specs: 005, 017, 021, 025
 8. Extension lifecycle provenance는 app이 제공한 skill, plugin, hook, command, MCP declaration의 source app id, manifest digest, enabled state, activation decision, blocked reason을 inspect와 receipt에 남겨야 한다.
 9. 032는 app registry state, process state, missing secret, permission blocker, extension blocker, last receipt의 domain vocabulary와 evidence를 생산해야 하며, 031의 shared adapter가 CLI, local API, future TUI에서 같은 의미로 투영할 수 있어야 한다.
 10. Release tests는 normal path, blocked path, denied permission, missing secret, failed start, failed stop, recover after interruption, replay-safe diagnostics를 포함해야 한다.
+11. Skill install proposal은 source identity, content digest, dependency manifest digest, pinned dependency resolution, required runtime, requested capability, lifecycle/native build 요구사항, redacted risk summary를 구조화해야 한다.
+12. Active skill trust record는 승인 actor인 local user, 승인 시각, 승인된 digest/scope, active/stale/revoked/removed 상태와 사유를 가져야 한다.
+13. Skill 사용 전에는 현재 digest와 trust record를 대조하고, 승인된 Python/Node package가 없으면 manifest 범위에서 준비한 뒤 expected package/version을 검증해야 한다.
+14. 사용자는 승인된 skill 목록, scope, digest 일치 여부, stale/revoked reason을 inspect하고 개별 trust record를 revoke할 수 있어야 한다.
+15. Skill-derived install과 entrypoint action은 030 permission pipeline이 소비할 trust provenance를 만들고, 035 execution snapshot과 lifecycle state persistence에 연결해야 한다.
 
 ## Must Not Have
 
@@ -83,6 +94,25 @@ Origin specs: 005, 017, 021, 025
 8. Generated skill, tool, hook, MCP declaration을 승인 없이 live runtime에 노출하지 않는다.
 9. Disable이나 uninstall을 historical evidence 삭제로 해석하지 않는다.
 10. AppSupervisor가 session truth, permission truth, approval truth를 직접 확정하게 하지 않는다.
+11. Markdown 본문의 자연어 `pip install`, `npm install`, shell snippet을 구조화된 dependency manifest 또는 사용자 승인으로 해석하지 않는다.
+12. Skill 이름이 승인 목록에 있다는 이유로 변경된 script, 미선언 package, global install, lifecycle script, native build를 자동 실행하지 않는다.
+13. Python/Node runtime 자체가 없을 때 임의의 `apt`, `brew`, global installer를 package trust에서 파생해 실행하지 않는다.
+14. Dependency의 구체적인 설치 위치나 directory layout을 이 spec의 closure 조건으로 고정하지 않는다.
+
+## skill trust와 dependency lifecycle
+
+Skill install과 사용은 다음 단계로 분리한다.
+
+1. Install proposal은 skill source와 실행에 포함되는 content를 정규화하고 content digest를 만든다.
+2. 구조화된 dependency manifest는 ecosystem, package name, pinned version 또는 immutable resolution, required runtime, lifecycle/native build 요구사항, capability를 선언한다.
+3. 사용자가 proposal을 승인하면 discovery registry나 session cache와 별개인 trust record가 생성된다.
+4. Dependency 준비 action은 030 policy gate를 통과하고, trust record와 현재 source/content/dependency/capability가 정확히 일치할 때만 자동 진행할 수 있다.
+5. 설치 시 dependency를 준비할 수 있고, 이후 사용 시 승인된 package가 사라졌다면 같은 pinned manifest 범위에서 자동 복구할 수 있다.
+6. Dependency 준비가 끝나면 expected package/version을 검증하고, 검증 성공 뒤에만 digest 범위에 포함된 skill entrypoint를 실행한다.
+7. Manifest에 없던 network source, lifecycle script, native build, global mutation이 필요해지면 자동 준비를 중단하고 새 proposal과 승인을 요구한다.
+8. Content나 manifest가 바뀌면 active trust는 stale이 되며, session approval로 stale 상태를 덮어쓸 수 없다.
+9. Skill 제거는 trust를 active로 남기지 않으며, historical receipt를 보존하는 removed 상태 또는 안전한 삭제로 처리한다.
+10. 구체적인 dependency 설치 위치와 filesystem layout은 이 lifecycle 계약의 범위가 아니다.
 
 ## acceptance criteria
 
@@ -96,12 +126,16 @@ Origin specs: 005, 017, 021, 025
 8. Plugin-provided skill, command-backed tool, hook, MCP declaration은 app lifecycle provenance와 연결되지만 기존 owner runtime gate를 우회하지 않는다.
 9. Replay runner와 diagnostics reader는 app process와 extension action을 live 재실행하지 않고 recorded evidence만 해석한다.
 10. 016 기준 정적, 단위, 통합, 안전성, UX, 복구, replay release evidence가 032 coverage entry로 남는다.
+11. Skill trust 목록이 discovery/session approval과 분리되고 install, inspect, revoke, stale, removed lifecycle을 재현할 수 있다.
+12. 승인된 pinned Python/Node package 누락은 준비·검증 후 실행되며, manifest 밖 install은 ask/deny로 멈춘다.
+13. 같은 skill 이름이어도 content/dependency digest 또는 capability scope가 바뀌면 기존 trust가 재사용되지 않는다.
+14. Python/Node runtime 자체 누락은 package 누락과 구분되어 prerequisite 또는 별도 managed runtime 상태로 표시된다.
 
 ## source handoff table
 
 | origin spec | 닫힌 implemented scope | 032로 넘어오는 open work |
 |---|---|---|
-| 005 skill system | Skill registry, discovery, status, descriptor, read-only context injection, CLI inspect baseline | App bundle과 extension이 제공한 skill의 lifecycle provenance, app enable/start 시점의 activation snapshot, receipt linkage |
+| 005 skill system | Skill registry, discovery, status, descriptor, body hash, requirements/install metadata, read-only context injection, CLI inspect baseline | App bundle과 extension이 제공한 skill의 install proposal, digest-bound trust registry, dependency lifecycle, activation snapshot, receipt linkage |
 | 017 app operating environment | Local app manifest, registry, lifecycle state, process projection, task ledger receipt baseline | Actual app process start/stop/recover, AppSupervisor, process receipt, permission/secret handoff, extension activation lifecycle |
 | 021 app maker and app authoring | `apps init` draft baseline, scaffold and manifest candidate, installed registry non-mutation | AI-assisted proposal, validation, receipt, approval/checkpoint/apply/verify integration, install handoff, existing-app edit flow |
 | 025 user-extensible hooks and plugins | Local plugin manifest, activation gate, hook/tool/skill/MCP/command slice, replay live-dispatch rejection | App-owned extension provenance, app lifecycle tied enable/disable/start/recover evidence, extension blocker projection |
@@ -116,5 +150,6 @@ Origin specs: 005, 017, 021, 025
 4. Diagnostics 증거: redacted app process receipt, extension activation receipt, failed start/stop/recover diagnostics, no raw secret regression.
 5. Release 증거: 032를 이름으로 가리키고 reproducible command 또는 artifact를 연결하는 016 coverage entry.
 6. Documentation 증거: marketplace, dynamic ABI, SaaS/admin, fleet behavior를 구현 완료처럼 주장하지 않고 app start, stop, recover, edit, install handoff를 설명하는 user-facing docs.
+7. Skill lifecycle 증거: trust install/inspect/revoke/stale/removed, approved dependency 준비, manifest 밖 install 차단, runtime prerequisite 구분을 검증하는 코드·테스트·redacted receipt.
 
 현재 closure evidence는 없다. 기존 specs 005, 017, 021, 025의 implemented evidence는 032의 baseline일 뿐이며, 032 completion evidence가 아니다.

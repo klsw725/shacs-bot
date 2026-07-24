@@ -2,7 +2,7 @@
 
 Status: Open
 
-Origin specs: 004, 007, 010, 011, 022, 023
+Origin specs: 004, 005, 007, 010, 011, 022, 023
 
 ## 문서 목적
 
@@ -32,6 +32,7 @@ Origin specs: 004, 007, 010, 011, 022, 023
 4. 011은 subagent tool registry restriction, execution config inheritance, parent boundary보다 넓어지지 않는 child runtime 의미를 닫았다.
 5. 022는 permission mode, capability taxonomy, permissioned action normalization, static rule, runtime policy gate, approval correlation, inherited ceiling, audit diagnostics, replay matrix, guarded classifier fallback의 구현 범위를 닫았다.
 6. 023은 Docker/Compose containment evidence, native unknown fallback, exec workspace narrowing, MCP/subagent snapshot inheritance, release evidence lane을 닫았다.
+7. 005는 read-only skill discovery, descriptor, body hash, requirements/install metadata inspect, context injection 경계를 닫았으며 skill content 자체는 permission grant source가 아니다.
 
 이 기준선은 이 문서의 open scope가 이미 구현됐다는 뜻이 아니다. 030은 흩어진 기준선을 하나의 formal model로 묶고, 현재 닫힌 spec들이 주장하지 않은 typed secret ref, unified redaction, classifier model routing/accounting, structured process envelope, containment inheritance evidence를 완성 조건으로 받는다.
 
@@ -48,6 +49,7 @@ Origin specs: 004, 007, 010, 011, 022, 023
 7. Process start, exec, MCP stdio, plugin command, app process를 설명하는 structured process envelope.
 8. Classifier model routing, classifier capability ceiling, classifier latency/cost/accounting, denial fallback counter.
 9. Containment inheritance와 fail-closed evidence가 action denial, degraded health, release evidence에 남는 방식.
+10. 032가 생산하고 035가 영속하는 skill trust record를 dependency install과 검증된 skill entrypoint action의 permission 근거로 소비하는 규칙.
 
 ## Invariants
 
@@ -61,6 +63,7 @@ Origin specs: 004, 007, 010, 011, 022, 023
 8. Secret 값은 config, diagnostics, replay, classifier prompt, process envelope에 raw로 들어가면 안 된다.
 9. Classifier는 policy owner가 아니다. Classifier verdict는 bounded input과 accounting evidence를 가진 evaluator 신호다.
 10. Containment evidence가 unknown이면 sandboxed 또는 safe로 표시하지 않는다.
+11. Skill trust는 사용자가 설치 시 승인한 source identity, skill content digest, dependency manifest digest, capability scope가 모두 일치할 때만 유효하다. Skill 이름이나 Markdown 지시는 permission grant source가 아니다.
 
 ## Must Have
 
@@ -73,6 +76,8 @@ Origin specs: 004, 007, 010, 011, 022, 023
 7. Structured process envelope은 command identity, args digest, cwd policy, env secret refs, timeout, exit status, containment snapshot, permission decision ref를 담아야 한다.
 8. Classifier model routing은 main model과 분리 가능한 설정, capability ceiling, budget/accounting, failure reason을 가져야 한다.
 9. Fail-closed decision은 사용자가 이해할 수 있는 redacted reason과 release evidence locator를 남겨야 한다.
+10. Skill-derived action의 policy input은 032의 active trust record ref, current skill/content digest, dependency manifest digest, requested capability scope를 포함해야 한다.
+11. 승인된 manifest에 고정된 Python/Node package 준비와 검증된 entrypoint 실행만 trust match를 auto allow 근거로 사용할 수 있다. Protected target, secret, containment static deny는 classifier allow보다 우선하되, interactive auto mode에서는 사용자에게 redacted approval을 요청하고 일치하는 명시 승인 뒤에만 실행할 수 있다.
 
 ## Must Not Have
 
@@ -80,11 +85,13 @@ Origin specs: 004, 007, 010, 011, 022, 023
 2. 중앙 secret vault를 필수 dependency로 삼지 않는다.
 3. Docker 또는 process envelope을 kernel isolation 보증으로 광고하지 않는다.
 4. Tool 내부 코드, plugin hook, subagent prompt가 permission mode나 ceiling을 높이게 하지 않는다.
-5. Classifier allow만으로 protected target, missing containment, secret exposure deny를 우회하지 않는다.
+5. Classifier allow만으로 protected target, missing containment, secret exposure approval gate를 우회하지 않는다. Interactive auto mode의 일치하는 명시 사용자 승인만 해당 action의 실행을 허용할 수 있다.
 6. Redaction을 diagnostics 화면별 ad hoc string replace로 끝내지 않는다.
 7. Secret ref metadata를 secret value 저장소로 쓰지 않는다.
 8. Approval retry를 raw executable payload의 durable replay로 만들지 않는다.
 9. Native unknown containment를 warning-only로 낮추고 side-effect 실행을 계속하지 않는다.
+10. 설치된 skill 이름만 보고 package install, shell command, entrypoint 실행을 자동 승인하지 않는다.
+11. Manifest에 없는 package, global install, 미선언 lifecycle script/native build, Python/Node runtime 자체 설치를 skill trust에서 파생해 허용하지 않는다.
 
 ## Acceptance Criteria
 
@@ -97,12 +104,14 @@ Origin specs: 004, 007, 010, 011, 022, 023
 7. Structured process envelope이 exec, MCP stdio, plugin command, app process start에 공통으로 기록된다.
 8. Classifier model routing은 별도 model 선택, unsupported capability fallback, latency/cost accounting, deny candidate visibility를 증명한다.
 9. Containment inheritance가 unknown 또는 unsafe이면 fail closed 하거나 명시적으로 좁아진 scope로 내려가며, release evidence가 그 결정을 확인한다.
+10. Skill trust match, stale/revoked/mismatched trust, manifest 밖 install, runtime 자체 누락이 각각 allow, ask/deny, prerequisite 상태로 구분되고 policy/audit test로 검증된다.
 
 ## Source Handoff Table
 
 | Origin spec | 닫힌 범위 | 030으로 넘어온 open 계약 |
 |---|---|---|
 | 004 tool runtime | Tool execution, result, interrupt, skipped event | Tool 실행 전후에 붙는 policy snapshot, process envelope, capability evidence |
+| 005 skill system | Read-only skill discovery, descriptor, body hash, requirements/install metadata inspect, context injection | Skill content를 grant로 승격하지 않으면서 032 lifecycle trust provenance를 action policy에 소비하는 규칙 |
 | 007 main orchestrator policy | Orchestrator authority, turn ownership | Orchestrator가 소비하는 formal policy and safety snapshot schema |
 | 010 host safety, permissions, and secrets | Current local safety guard, secret boundary, redaction principle | Unified redaction, typed secret refs, fail-closed safety snapshot evidence |
 | 011 subagent runtime | Child tool restriction, execution config inheritance | Inherited permission and containment ceilings across child execution |
@@ -121,3 +130,4 @@ Origin specs: 004, 007, 010, 011, 022, 023
 6. Classifier evidence: classifier route, model id, capability ceiling, fallback reason, latency/cost counter가 raw prompt secret 없이 남는다.
 7. Containment evidence: official container, native unknown, unsafe privileged, child inheritance case가 release smoke 또는 regression test로 증명된다.
 8. Documentation evidence: old specs가 030을 open owner로 링크해도 기존 closed scope와 새 open scope가 충돌하지 않는다.
+9. Skill trust evidence: exact digest/scope match만 선언된 dependency 준비를 허용하고 stale, revoked, manifest 밖 install, runtime 자체 설치는 fail closed 하는 테스트가 있다.
