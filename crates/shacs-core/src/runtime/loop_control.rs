@@ -87,10 +87,27 @@ impl SessionTurnLock {
             .collect()
     }
 
+    pub fn busy_session_keys(&self) -> Vec<String> {
+        let state = recover_lock(&self.state);
+        let mut keys = state
+            .active_sessions
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        keys.extend(state.reserved_sessions.keys().cloned());
+        keys.into_iter().collect()
+    }
+
     pub fn is_active(&self, session_key: &str) -> bool {
         recover_lock(&self.state)
             .active_sessions
             .contains_key(session_key)
+    }
+
+    pub fn is_busy(&self, session_key: &str) -> bool {
+        let state = recover_lock(&self.state);
+        state.active_sessions.contains_key(session_key)
+            || state.reserved_sessions.contains_key(session_key)
     }
 
     pub fn reserve(&self, session_key: impl Into<String>) -> SessionTurnReservation {

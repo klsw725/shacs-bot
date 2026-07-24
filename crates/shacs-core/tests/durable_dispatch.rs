@@ -7,6 +7,7 @@ use shacs_session::durable_work::{
     evaluate_durable_work_recovery, DurableWorkPayloadStore, DurableWorkRecoveryStatus,
     ReplayWorkState, WorkTerminalKind,
 };
+use std::collections::BTreeSet;
 use std::error::Error;
 
 #[test]
@@ -179,6 +180,50 @@ fn durable_dispatch_rejects_retry_after_cancellation_request() -> Result<(), Box
     assert!(error
         .to_string()
         .contains("cannot retry after cancellation was requested"));
+    Ok(())
+}
+
+#[test]
+fn durable_dispatch_does_not_spend_retry_attempt_while_session_is_busy(
+) -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let checkpoint_root = root.path().join("checkpoints");
+    let payload_root = root.path().join("payloads");
+    let bus = MessageBus::new();
+    let mut dispatcher =
+        DurableWorkDispatcher::open(&event_root, &payload_root, bus.clone(), "owner-1", 100)?;
+    dispatcher.enqueue_inbound(
+        "work-1",
+        &InboundMessage::new("discord", "user", "channel-1", "hello"),
+        None,
+        None,
+    )?;
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let pending = replay.state.ok_or("missing pending state")?;
+    let due = evaluate_durable_work_recovery(&pending.work, &payload_root, 100);
+    dispatcher.dispatch_due(&pending.work, &due, 100)?;
+    let _ = bus.consume_inbound().ok_or("missing first attempt")?;
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let leased = replay.state.ok_or("missing leased state")?;
+    dispatcher.schedule_retry(&leased.work.items["work-1"], 200, 100, "session_busy")?;
+
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let waiting = replay.state.ok_or("missing waiting retry state")?;
+    let due = evaluate_durable_work_recovery(&waiting.work, &payload_root, 200);
+    let busy_sessions = BTreeSet::from(["discord:channel-1".to_owned()]);
+    let summary =
+        dispatcher.dispatch_due_excluding_sessions(&waiting.work, &due, 200, &busy_sessions)?;
+
+    assert!(summary.leased_work_ids.is_empty());
+    assert!(bus.consume_inbound().is_none());
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let still_waiting = replay.state.ok_or("missing gated retry state")?;
+    assert_eq!(
+        still_waiting.work.items["work-1"].state,
+        ReplayWorkState::WaitingRetry
+    );
+    assert_eq!(still_waiting.work.items["work-1"].attempt, 1);
     Ok(())
 }
 

@@ -209,15 +209,27 @@ impl DurableWorkDispatcher {
         admission: &DurableWorkAdmission,
         now_ms: u64,
     ) -> Result<DurableDispatchSummary, DurableDispatchError> {
+        self.dispatch_due_excluding_sessions(state, admission, now_ms, &BTreeSet::new())
+    }
+
+    pub fn dispatch_due_excluding_sessions(
+        &mut self,
+        state: &DurableWorkReplayState,
+        admission: &DurableWorkAdmission,
+        now_ms: u64,
+        excluded_sessions: &BTreeSet<String>,
+    ) -> Result<DurableDispatchSummary, DurableDispatchError> {
         let mut leased_work_ids = Vec::new();
         let mut retry_scheduled_work_ids = Vec::new();
         let mut exhausted_work_ids = Vec::new();
-        let mut unavailable_sessions = state
-            .items
-            .values()
-            .filter(|item| item.state == ReplayWorkState::Leased)
-            .map(|item| item.session_key.clone())
-            .collect::<BTreeSet<_>>();
+        let mut unavailable_sessions = excluded_sessions.clone();
+        unavailable_sessions.extend(
+            state
+                .items
+                .values()
+                .filter(|item| item.state == ReplayWorkState::Leased)
+                .map(|item| item.session_key.clone()),
+        );
         for work_id in &admission.due_work_ids {
             let item = state
                 .items
