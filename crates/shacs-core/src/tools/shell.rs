@@ -1,7 +1,15 @@
+use crate::runtime::{
+    ProcessExecutionReceipt, ProcessGate, ProcessRedactedSpawnSummary, ProcessRedactedStatus,
+    ProcessRedactedStreamKind, ProcessRedactedStreamSummary, ProcessSpawnAuthorization,
+    ProcessSpawnReport, ProcessTerminalOutcome,
+};
 use crate::tools::filesystem::{raw_candidate_path, PathContext};
 use crate::tools::sandbox::wrap_command;
 use crate::tools::SchemaFragment;
-use crate::tools::{IntegerSchema, JsonMap, StringSchema, Tool, ToolParameters, ToolResult};
+use crate::tools::{
+    IntegerSchema, JsonMap, StringSchema, Tool, ToolCallExecutionContext, ToolParameters,
+    ToolResult,
+};
 use regex::Regex;
 use serde_json::Value;
 use shacs_security::NetworkGuard;
@@ -46,6 +54,12 @@ impl ExecConfig {
             network_guard: NetworkGuard::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecToolProcessResult {
+    pub output: String,
+    pub receipt: ProcessExecutionReceipt,
 }
 
 #[derive(Clone)]
@@ -94,6 +108,14 @@ impl Tool for ExecTool {
     }
 
     fn execute(&self, params: JsonMap) -> ToolResult {
+        self.execute_with_context(params, &ToolCallExecutionContext::default())
+    }
+
+    fn execute_with_context(
+        &self,
+        params: JsonMap,
+        context: &ToolCallExecutionContext,
+    ) -> ToolResult {
         let command = params
             .get("command")
             .and_then(Value::as_str)
@@ -108,7 +130,7 @@ impl Tool for ExecTool {
             .unwrap_or(self.config.timeout_seconds)
             .min(MAX_TIMEOUT_SECONDS);
 
-        match self.execute_command(command, working_dir, timeout) {
+        match self.execute_command(command, working_dir, timeout, context) {
             Ok(output) => output.into(),
             Err(error) => format!("Error executing command: {error}").into(),
         }
@@ -121,10 +143,44 @@ impl ExecTool {
         command: &str,
         working_dir: Option<&str>,
         timeout_seconds: u64,
+        context: &ToolCallExecutionContext,
     ) -> Result<String, String> {
+        self.execute_command_with_receipt(command, working_dir, timeout_seconds, context)
+            .map(|result| result.output)
+    }
+
+    pub fn execute_with_receipt(
+        &self,
+        params: JsonMap,
+        context: &ToolCallExecutionContext,
+    ) -> Result<ExecToolProcessResult, String> {
+        let command = params
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if command.trim().is_empty() {
+            return Err("Unknown command".to_owned());
+        }
+        let working_dir = params.get("working_dir").and_then(Value::as_str);
+        let timeout = params
+            .get("timeout")
+            .and_then(Value::as_u64)
+            .unwrap_or(self.config.timeout_seconds)
+            .min(MAX_TIMEOUT_SECONDS);
+
+        self.execute_command_with_receipt(command, working_dir, timeout, context)
+    }
+
+    fn execute_command_with_receipt(
+        &self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_seconds: u64,
+        context: &ToolCallExecutionContext,
+    ) -> Result<ExecToolProcessResult, String> {
         let mut cwd = self.resolve_working_dir(working_dir)?;
         if let Some(error) = self.guard_command(command, &cwd) {
-            return Ok(error);
+            return Err(error);
         }
 
         let mut command_text = command.to_owned();
@@ -159,12 +215,51 @@ impl ExecTool {
             );
         }
 
-        run_shell(
-            &command_text,
-            &cwd,
-            &env,
-            Duration::from_secs(timeout_seconds),
-        )
+        let gate_input = context
+            .process_gate_input
+            .clone()
+            .ok_or_else(|| "missing runtime process context".to_owned())?;
+        let mut user_output = None;
+        let receipt = ProcessGate::new()
+            .evaluate_and_maybe_spawn(gate_input, |authorization| {
+                let result = run_shell(
+                    authorization,
+                    &command_text,
+                    &cwd,
+                    &env,
+                    Duration::from_secs(timeout_seconds),
+                );
+                match result {
+                    Ok(shell_result) => {
+                        let terminal_outcome = shell_result.terminal_outcome;
+                        user_output = Some(shell_result.output);
+                        ProcessSpawnReport {
+                            terminal_outcome,
+                            redacted_summary: shell_result.redacted_summary,
+                        }
+                    }
+                    Err(error) => {
+                        user_output = Some(format!("Error executing command: {error}"));
+                        ProcessSpawnReport {
+                            terminal_outcome: ProcessTerminalOutcome::Failed,
+                            redacted_summary: process_status_summary(
+                                "spawn_failed",
+                                "shell process failed before terminal output",
+                            ),
+                        }
+                    }
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        let output = if receipt.dispatch_count == 0 {
+            format!(
+                "Error: Process launch blocked by permission gate ({:?})",
+                receipt.terminal_outcome
+            )
+        } else {
+            user_output.ok_or_else(|| "process gate did not return command output".to_owned())?
+        };
+        Ok(ExecToolProcessResult { output, receipt })
     }
 
     fn resolve_working_dir(&self, working_dir: Option<&str>) -> Result<PathBuf, String> {
@@ -284,11 +379,12 @@ impl ExecTool {
 }
 
 fn run_shell(
+    _authorization: ProcessSpawnAuthorization,
     command: &str,
     cwd: &Path,
     env: &HashMap<String, String>,
     timeout: Duration,
-) -> Result<String, String> {
+) -> Result<ShellRunResult, String> {
     let mut child = if cfg!(windows) {
         Command::new("cmd.exe")
             .arg("/c")
@@ -323,17 +419,94 @@ fn run_shell(
             let output = child
                 .wait_with_output()
                 .map_err(|error| error.to_string())?;
-            return Ok(format_output(output));
+            let terminal_outcome = if output.status.success() {
+                ProcessTerminalOutcome::Succeeded
+            } else {
+                ProcessTerminalOutcome::Failed
+            };
+            let stdout_len = output.stdout.len();
+            let stderr_len = output.stderr.len();
+            return Ok(ShellRunResult {
+                output: format_output(output),
+                terminal_outcome,
+                redacted_summary: shell_output_summary(terminal_outcome, stdout_len, stderr_len),
+            });
         }
         if start.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(format!(
-                "Error: Command timed out after {} seconds",
-                timeout.as_secs()
-            ));
+            return Ok(ShellRunResult {
+                output: format!(
+                    "Error: Command timed out after {} seconds",
+                    timeout.as_secs()
+                ),
+                terminal_outcome: ProcessTerminalOutcome::TimedOut,
+                redacted_summary: process_status_summary(
+                    "timed_out",
+                    "shell process timed out before completion",
+                ),
+            });
         }
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+struct ShellRunResult {
+    output: String,
+    terminal_outcome: ProcessTerminalOutcome,
+    redacted_summary: ProcessRedactedSpawnSummary,
+}
+
+fn shell_output_summary(
+    terminal_outcome: ProcessTerminalOutcome,
+    stdout_len: usize,
+    stderr_len: usize,
+) -> ProcessRedactedSpawnSummary {
+    let (code, summary) = match terminal_outcome {
+        ProcessTerminalOutcome::Succeeded => ("completed_success", "shell process completed"),
+        ProcessTerminalOutcome::Failed => {
+            ("completed_failed", "shell process exited unsuccessfully")
+        }
+        ProcessTerminalOutcome::Denied => ("denied", "shell process was denied"),
+        ProcessTerminalOutcome::ReplaySkipped => ("replay_skipped", "shell process replay skipped"),
+        ProcessTerminalOutcome::TimedOut => ("timed_out", "shell process timed out"),
+        ProcessTerminalOutcome::Cancelled => ("cancelled", "shell process was cancelled"),
+        ProcessTerminalOutcome::Interrupted => ("interrupted", "shell process was interrupted"),
+    };
+    ProcessRedactedSpawnSummary {
+        status: Some(ProcessRedactedStatus {
+            code: code.to_owned(),
+            summary: summary.to_owned(),
+        }),
+        stdout: stream_count(ProcessRedactedStreamKind::Stdout, stdout_len),
+        stderr: stream_count(ProcessRedactedStreamKind::Stderr, stderr_len),
+    }
+}
+
+fn process_status_summary(code: &str, summary: &str) -> ProcessRedactedSpawnSummary {
+    ProcessRedactedSpawnSummary {
+        status: Some(ProcessRedactedStatus {
+            code: code.to_owned(),
+            summary: summary.to_owned(),
+        }),
+        stdout: ProcessRedactedStreamSummary::empty(ProcessRedactedStreamKind::Stdout),
+        stderr: ProcessRedactedStreamSummary::empty(ProcessRedactedStreamKind::Stderr),
+    }
+}
+
+fn stream_count(
+    stream: ProcessRedactedStreamKind,
+    byte_count: usize,
+) -> ProcessRedactedStreamSummary {
+    ProcessRedactedStreamSummary {
+        stream,
+        byte_count,
+        redacted_preview: None,
+        evidence_refs: if byte_count == 0 {
+            Vec::new()
+        } else {
+            vec!["exec_process_redacted_stream_count.v1".to_owned()]
+        },
     }
 }
 
