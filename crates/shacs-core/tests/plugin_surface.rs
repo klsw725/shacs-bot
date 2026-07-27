@@ -4,9 +4,10 @@ use shacs_core::runtime::{
     plugin_spec025_evidence_ref, plugin_spec025_release_evidence_checklist,
     plugin_surface_diagnostic, reject_plugin_replay_live_dispatch,
     required_spec025_release_evidence_buckets, BoundaryPermissionViolation, DiscoveredPlugin,
-    PermissionMode, PluginBlockReason, PluginManifest, PluginManifestSource,
-    PluginPermissionCeilingRequest, PluginSecretRefKind, PluginSpec025ReleaseEvidence,
-    PluginSpec025ReleaseEvidenceBucket, PluginState, SafetyCapability,
+    PermissionMode, PermissionSecretRefStatus, PluginBlockReason, PluginManifest,
+    PluginManifestSource, PluginPermissionCeilingRequest, PluginSecretRefKind,
+    PluginSpec025ReleaseEvidence, PluginSpec025ReleaseEvidenceBucket, PluginState,
+    SafetyCapability,
 };
 use std::path::PathBuf;
 
@@ -170,6 +171,58 @@ fn spec025_secret_refs_expose_names_and_presence_without_raw_values() {
     }));
     assert!(!json.contains("sk-secret-token"));
     assert!(!json.contains("raw-bot-token"));
+    assert!(!json.contains("spec030-inline-token"));
+}
+
+#[test]
+fn spec030_baseline_plugin_projection_serializes_secret_names_and_presence_only() {
+    let mut plugin = enabled_plugin("spec030-secrets", json!({"skills": ["audit"]}), json!({}));
+    if let Some(manifest) = plugin.manifest.as_mut() {
+        manifest.requires_env = vec!["SPEC030_API_TOKEN".to_owned()];
+        manifest.requires_config = vec!["providers.openrouter.apiKey".to_owned()];
+    }
+    plugin.missing_config = vec!["providers.openrouter.apiKey".to_owned()];
+
+    let projection = build_plugin_surface_projection(&[plugin]);
+    let serialized = serde_json::to_string(&projection).unwrap_or_else(|error| error.to_string());
+
+    assert!(serialized.contains("SPEC030_API_TOKEN"));
+    assert!(serialized.contains("providers.openrouter.apiKey"));
+    assert!(projection.plugins[0].secret_refs.iter().any(|secret| {
+        secret.kind == PluginSecretRefKind::Env
+            && secret.name == "SPEC030_API_TOKEN"
+            && secret.present
+    }));
+    assert!(projection.plugins[0].secret_refs.iter().any(|secret| {
+        secret.kind == PluginSecretRefKind::Config
+            && secret.name == "providers.openrouter.apiKey"
+            && !secret.present
+    }));
+    assert!(!serialized.contains("spec030-raw-token"));
+    assert!(!serialized.contains("spec030-inline-token"));
+}
+
+#[test]
+fn spec030_plugin_secret_disclosure_includes_redaction_evidence_without_raw_values() {
+    let mut plugin = enabled_plugin(
+        "spec030-typed-secrets",
+        json!({"skills": ["audit"]}),
+        json!({}),
+    );
+    if let Some(manifest) = plugin.manifest.as_mut() {
+        manifest.requires_env = vec!["SPEC030_API_TOKEN".to_owned()];
+    }
+
+    let projection = build_plugin_surface_projection(&[plugin]);
+    let secret = &projection.plugins[0].secret_refs[0];
+    let serialized = serde_json::to_string(&projection).unwrap_or_else(|error| error.to_string());
+
+    assert_eq!(secret.kind, PluginSecretRefKind::Env);
+    assert_eq!(secret.status, PermissionSecretRefStatus::Resolved);
+    assert_eq!(secret.safe_summary.label, "env:SPEC030_API_TOKEN");
+    assert!(secret.redaction_evidence.is_some());
+    assert!(serialized.contains("redaction_evidence"));
+    assert!(!serialized.contains("sk-spec030-raw-token"));
 }
 
 #[test]

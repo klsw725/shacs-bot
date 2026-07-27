@@ -1,13 +1,15 @@
 use crate::runtime::{
     evaluate_inherited_ceiling, BoundaryPermissionViolation, DiscoveredPlugin,
-    InheritedPermissionContext, PermissionCeilingSnapshot, PermissionMode, PluginState,
-    RuntimeBoundaryOrigin, SafetyCapability,
+    InheritedPermissionContext, PermissionCeilingSnapshot, PermissionMode,
+    PermissionSecretRefStatus, PluginState, RuntimeBoundaryOrigin, SafetyCapability,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use shacs_eval::evaluator::{EvidenceKind, EvidenceRef, RedactionStatus};
-use shacs_redaction::redact_string;
+use shacs_redaction::{
+    redact_string, RedactionEvidence, RedactionEvidenceRef, SafeSecretSummary, SecretRefId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginSurfaceProjection {
@@ -83,6 +85,12 @@ pub struct PluginSecretRef {
     pub kind: PluginSecretRefKind,
     pub name: String,
     pub present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_id: Option<String>,
+    pub safe_summary: SafeSecretSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction_evidence: Option<RedactionEvidence>,
+    pub status: PermissionSecretRefStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,18 +393,64 @@ fn command_conflict_diagnostics(
 fn plugin_secret_refs(plugin: &DiscoveredPlugin) -> Vec<PluginSecretRef> {
     let mut refs = Vec::new();
     if let Some(manifest) = &plugin.manifest {
-        refs.extend(manifest.requires_env.iter().map(|name| PluginSecretRef {
-            kind: PluginSecretRefKind::Env,
-            name: name.clone(),
-            present: !plugin.missing_env.contains(name),
+        refs.extend(manifest.requires_env.iter().map(|name| {
+            plugin_secret_ref(
+                &plugin.id,
+                PluginSecretRefKind::Env,
+                name,
+                !plugin.missing_env.contains(name),
+            )
         }));
-        refs.extend(manifest.requires_config.iter().map(|name| PluginSecretRef {
-            kind: PluginSecretRefKind::Config,
-            name: name.clone(),
-            present: !plugin.missing_config.contains(name),
+        refs.extend(manifest.requires_config.iter().map(|name| {
+            plugin_secret_ref(
+                &plugin.id,
+                PluginSecretRefKind::Config,
+                name,
+                !plugin.missing_config.contains(name),
+            )
         }));
     }
     refs
+}
+
+fn plugin_secret_ref(
+    plugin_id: &str,
+    kind: PluginSecretRefKind,
+    name: &str,
+    present: bool,
+) -> PluginSecretRef {
+    let label = match kind {
+        PluginSecretRefKind::Env => format!("env:{name}"),
+        PluginSecretRefKind::Config => format!("config:{name}"),
+    };
+    let safe_summary = SafeSecretSummary {
+        label: label.clone(),
+        required: true,
+    };
+    let label_digest = sha256_hex(label.as_bytes());
+    let ref_id = format!(
+        "sec_plugin_{}_{}",
+        plugin_id,
+        label_digest.chars().take(12).collect::<String>()
+    );
+    PluginSecretRef {
+        kind,
+        name: name.to_owned(),
+        present,
+        ref_id: Some(ref_id.clone()),
+        safe_summary,
+        redaction_evidence: Some(RedactionEvidence::for_secret_ref(
+            RedactionEvidenceRef::new(format!("red_{ref_id}")),
+            SecretRefId::new(ref_id),
+            "plugin_surface",
+            format!("sha256:{label_digest}"),
+        )),
+        status: if present {
+            PermissionSecretRefStatus::Resolved
+        } else {
+            PermissionSecretRefStatus::Missing
+        },
+    }
 }
 
 fn names_from_surface(surfaces: &Value, key: &str) -> Vec<String> {
