@@ -41,6 +41,7 @@ fn codex_builder_converts_responses_body_headers_and_cache_key() -> Result<(), B
     };
     let config = ProviderConfig {
         api_key: Some("codex-token".to_owned()),
+        api_key_ref: None,
         extra_headers: Some(BTreeMap::from([(
             "chatgpt-account-id".to_owned(),
             "acct_123".to_owned(),
@@ -79,6 +80,7 @@ fn codex_builder_converts_responses_body_headers_and_cache_key() -> Result<(), B
 fn codex_headers_allow_user_overrides() -> Result<(), Box<dyn Error>> {
     let headers = build_codex_headers(&ProviderConfig {
         api_key: Some("token".to_owned()),
+        api_key_ref: None,
         extra_headers: Some(BTreeMap::from([
             ("originator".to_owned(), "custom".to_owned()),
             ("Authorization".to_owned(), "Bearer override".to_owned()),

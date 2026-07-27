@@ -119,6 +119,7 @@ fn anthropic_builder_preserves_large_max_tokens_when_thinking_is_enabled(
 fn anthropic_headers_include_version_key_and_allow_overrides() -> Result<(), Box<dyn Error>> {
     let headers = build_anthropic_headers(&ProviderConfig {
         api_key: Some("sk-ant".to_owned()),
+        api_key_ref: None,
         extra_headers: Some(BTreeMap::from([(
             "anthropic-version".to_owned(),
             "override".to_owned(),

@@ -40,6 +40,7 @@ fn chat_completions_builder_keeps_body_and_headers_separate() -> Result<(), Box<
     };
     let config = ProviderConfig {
         api_key: Some("sk-test".to_owned()),
+        api_key_ref: None,
         extra_headers: Some(BTreeMap::from([("X-Test".to_owned(), "yes".to_owned())])),
         ..ProviderConfig::default()
     };
@@ -308,6 +309,7 @@ fn merge_json_objects_recursively_preserves_unmentioned_nested_keys() -> Result<
 fn build_headers_user_headers_override_authorization() -> Result<(), Box<dyn Error>> {
     let config = ProviderConfig {
         api_key: Some("from-api-key".to_owned()),
+        api_key_ref: None,
         extra_headers: Some(BTreeMap::from([(
             "Authorization".to_owned(),
             "Bearer override".to_owned(),
@@ -603,6 +605,7 @@ fn openai_client_posts_built_request_and_parses_success_response() -> Result<(),
     let client = OpenAiCompatibleClient::new(
         ProviderConfig {
             api_key: Some("sk-test".to_owned()),
+            api_key_ref: None,
             extra_headers: Some(BTreeMap::from([("X-Test".to_owned(), "yes".to_owned())])),
             ..ProviderConfig::default()
         },
@@ -1013,6 +1016,7 @@ fn provider_spec_applies_model_overrides_thinking_and_openrouter_headers(
     let openrouter_client = OpenAiCompatibleClient::with_provider_spec(
         ProviderConfig {
             api_key: Some("sk-or-test".to_owned()),
+            api_key_ref: None,
             extra_headers: Some(BTreeMap::from([(
                 "X-OpenRouter-Title".to_owned(),
                 "override".to_owned(),
