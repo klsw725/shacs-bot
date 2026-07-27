@@ -1,7 +1,24 @@
+#[path = "permission_audit_policy_safety.rs"]
+mod permission_audit_policy_safety;
+#[path = "permission_audit_release.rs"]
+mod permission_audit_release;
+
+pub use permission_audit_policy_safety::{
+    PermissionPolicySafetySnapshotAuditStatus, PermissionPolicySafetySnapshotAuditSummary,
+    PermissionPolicySafetySnapshotDiagnosticsSummary,
+};
+pub use permission_audit_release::{
+    permission_prd005_006_contract_cases, permission_release_evidence_complete,
+    required_permission_release_evidence_buckets, PermissionContractCase,
+    PermissionReleaseEvidence, PermissionReleaseEvidenceBucket,
+};
+
 use crate::runtime::{
     PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyReason,
-    PermissionedAction, ProtectedTargetClass, RuleDiagnostics, SafetyCapability,
+    PermissionSecretRefStatus, PermissionedAction, PolicySafetySnapshotRef, ProtectedTargetClass,
+    RuleDiagnostics, SafetyCapability,
 };
+use permission_audit_policy_safety::policy_safety_snapshot_audit_summary;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,7 +41,21 @@ pub struct PermissionAuditRecord {
     pub remembered_rule_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub containment_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_ref_summary: Vec<PermissionSecretRefAuditSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_safety_snapshot_ref: Option<PolicySafetySnapshotRef>,
     pub created_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSecretRefAuditSummary {
+    pub ref_id: String,
+    pub source_kind: String,
+    pub safe_summary: String,
+    pub redaction_evidence_ref: String,
+    pub status: PermissionSecretRefStatus,
+    pub requested_consumer: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,28 +72,19 @@ pub struct PermissionDiagnosticsSummary {
     pub containment_warnings: Vec<String>,
     pub protected_target_count: u64,
     pub protected_target_reasons: Vec<ProtectedTargetClass>,
+    pub secret_refs: PermissionSecretRefDiagnosticsSummary,
+    pub policy_safety_refs: PermissionPolicySafetySnapshotDiagnosticsSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionContractCase {
-    pub id: String,
-    pub required_bucket: PermissionReleaseEvidenceBucket,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionReleaseEvidenceBucket {
-    InheritedBoundaryCases,
-    PermissionAuditDiagnostics,
-    PermissionReplayInvariants,
-    ContractMatrix,
-    ReleaseEvidence,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionReleaseEvidence {
-    pub buckets: Vec<PermissionReleaseEvidenceBucket>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PermissionSecretRefDiagnosticsSummary {
+    pub resolved_count: u64,
+    pub unresolved_count: u64,
+    pub missing_count: u64,
+    pub stale_count: u64,
+    pub unsupported_count: u64,
+    pub malformed_count: u64,
+    pub items: Vec<PermissionSecretRefAuditSummary>,
 }
 
 pub fn build_permission_audit_record(
@@ -92,6 +114,27 @@ pub fn build_permission_audit_record(
             .containment_snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.summary.clone()),
+        secret_ref_summary: action
+            .secret_ref_evidence
+            .iter()
+            .map(|evidence| PermissionSecretRefAuditSummary {
+                ref_id: evidence.secret_ref.ref_id.as_str().to_owned(),
+                source_kind: serde_json::to_value(evidence.secret_ref.source_kind)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                safe_summary: evidence.secret_ref.safe_summary.label.clone(),
+                redaction_evidence_ref: serde_json::to_value(
+                    &evidence.redaction_evidence.evidence_id,
+                )
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+                status: evidence.status,
+                requested_consumer: evidence.requested_consumer.clone(),
+            })
+            .collect(),
+        policy_safety_snapshot_ref: action.policy_safety_snapshot_ref.clone(),
         created_at_unix_ms,
     }
 }
@@ -113,6 +156,8 @@ pub fn build_permission_diagnostics_summary(
         containment_warnings: Vec::new(),
         protected_target_count: 0,
         protected_target_reasons: Vec::new(),
+        secret_refs: PermissionSecretRefDiagnosticsSummary::default(),
+        policy_safety_refs: PermissionPolicySafetySnapshotDiagnosticsSummary::default(),
     };
 
     for record in records {
@@ -138,6 +183,38 @@ pub fn build_permission_diagnostics_summary(
                 .evaluator_failure_reasons
                 .push(record.decision_reason.clone());
         }
+        for secret_ref in &record.secret_ref_summary {
+            match secret_ref.status {
+                PermissionSecretRefStatus::Resolved => summary.secret_refs.resolved_count += 1,
+                PermissionSecretRefStatus::Unresolved => summary.secret_refs.unresolved_count += 1,
+                PermissionSecretRefStatus::Missing => summary.secret_refs.missing_count += 1,
+                PermissionSecretRefStatus::Stale => summary.secret_refs.stale_count += 1,
+                PermissionSecretRefStatus::Unsupported => {
+                    summary.secret_refs.unsupported_count += 1
+                }
+                PermissionSecretRefStatus::Malformed => summary.secret_refs.malformed_count += 1,
+            }
+            summary.secret_refs.items.push(secret_ref.clone());
+        }
+        let policy_safety_ref = policy_safety_snapshot_audit_summary(
+            record.policy_safety_snapshot_ref.as_ref(),
+            record.created_at_unix_ms,
+        );
+        match policy_safety_ref.status {
+            PermissionPolicySafetySnapshotAuditStatus::Present => {
+                summary.policy_safety_refs.present_count += 1
+            }
+            PermissionPolicySafetySnapshotAuditStatus::Missing => {
+                summary.policy_safety_refs.missing_count += 1
+            }
+            PermissionPolicySafetySnapshotAuditStatus::Stale => {
+                summary.policy_safety_refs.stale_count += 1
+            }
+            PermissionPolicySafetySnapshotAuditStatus::Malformed => {
+                summary.policy_safety_refs.malformed_count += 1
+            }
+        }
+        summary.policy_safety_refs.items.push(policy_safety_ref);
     }
 
     for diagnostics in rule_diagnostics {
@@ -154,49 +231,6 @@ pub fn build_permission_diagnostics_summary(
     }
 
     summary
-}
-
-pub fn permission_prd005_006_contract_cases() -> Vec<PermissionContractCase> {
-    vec![
-        PermissionContractCase {
-            id: "prd005-inherited-boundary".to_owned(),
-            required_bucket: PermissionReleaseEvidenceBucket::InheritedBoundaryCases,
-            summary: "inherited permission boundaries cannot widen by declaration or deferred gate"
-                .to_owned(),
-        },
-        PermissionContractCase {
-            id: "prd005-audit-diagnostics".to_owned(),
-            required_bucket: PermissionReleaseEvidenceBucket::PermissionAuditDiagnostics,
-            summary: "permission audit diagnostics include decision and failure reason counts"
-                .to_owned(),
-        },
-        PermissionContractCase {
-            id: "prd006-replay-invariants".to_owned(),
-            required_bucket: PermissionReleaseEvidenceBucket::PermissionReplayInvariants,
-            summary: "permission replay preserves same-context decisions and fail-closed denies"
-                .to_owned(),
-        },
-        PermissionContractCase {
-            id: "prd006-contract-matrix".to_owned(),
-            required_bucket: PermissionReleaseEvidenceBucket::ContractMatrix,
-            summary: "permission policy contract matrix records release closure cases".to_owned(),
-        },
-    ]
-}
-
-pub fn required_permission_release_evidence_buckets() -> Vec<PermissionReleaseEvidenceBucket> {
-    let mut buckets = permission_prd005_006_contract_cases()
-        .into_iter()
-        .map(|case| case.required_bucket)
-        .collect::<Vec<_>>();
-    buckets.push(PermissionReleaseEvidenceBucket::ReleaseEvidence);
-    buckets
-}
-
-pub fn permission_release_evidence_complete(evidence: &PermissionReleaseEvidence) -> bool {
-    required_permission_release_evidence_buckets()
-        .into_iter()
-        .all(|bucket| evidence.buckets.contains(&bucket))
 }
 
 fn is_evaluator_failure_reason(reason: &PermissionPolicyReason) -> bool {

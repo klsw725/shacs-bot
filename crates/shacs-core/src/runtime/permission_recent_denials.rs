@@ -1,7 +1,8 @@
 use crate::runtime::{
     AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, EvaluatorConfidence, EvaluatorScopeMatch,
     PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyReason,
-    PermissionedAction, RuntimeToolCall, SafetyCapability, ToolExecutionContext,
+    PermissionSecretRefEvidence, PermissionedAction, PolicySafetySnapshotRef, RuntimeToolCall,
+    SafetyCapability, ToolExecutionContext,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,6 +24,10 @@ pub struct RecentAutoModeDenial {
     pub action_digest: String,
     pub argument_digest: String,
     pub snapshot_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_safety_snapshot_ref: Option<PolicySafetySnapshotRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_ref_evidence: Vec<PermissionSecretRefEvidence>,
     pub decision_reason: PermissionPolicyReason,
     pub classifier_verdict: AutoEvaluatorVerdictKind,
     pub classifier_confidence: EvaluatorConfidence,
@@ -41,9 +46,32 @@ pub struct RecentAutoModeRetryToken {
     action_digest: String,
     argument_digest: String,
     snapshot_digest: String,
+    policy_safety_snapshot_ref: Option<PolicySafetySnapshotRef>,
+    secret_ref_evidence: Vec<PermissionSecretRefEvidence>,
     tool_call: RuntimeToolCall,
     tool_context: ToolExecutionContext,
     expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RecentAutoModeRetryTokenMatch<'a> {
+    pub action_digest: &'a str,
+    pub argument_digest: &'a str,
+    pub snapshot_digest: &'a str,
+    pub policy_safety_snapshot_ref: Option<&'a PolicySafetySnapshotRef>,
+    pub secret_ref_evidence: &'a [PermissionSecretRefEvidence],
+}
+
+impl<'a> RecentAutoModeRetryTokenMatch<'a> {
+    pub fn from_denial(denial: &'a RecentAutoModeDenial) -> Self {
+        Self {
+            action_digest: &denial.action_digest,
+            argument_digest: &denial.argument_digest,
+            snapshot_digest: &denial.snapshot_digest,
+            policy_safety_snapshot_ref: denial.policy_safety_snapshot_ref.as_ref(),
+            secret_ref_evidence: &denial.secret_ref_evidence,
+        }
+    }
 }
 
 impl RecentAutoModeRetryToken {
@@ -58,6 +86,8 @@ impl RecentAutoModeRetryToken {
             action_digest: denial.action_digest.clone(),
             argument_digest: denial.argument_digest.clone(),
             snapshot_digest: denial.snapshot_digest.clone(),
+            policy_safety_snapshot_ref: denial.policy_safety_snapshot_ref.clone(),
+            secret_ref_evidence: denial.secret_ref_evidence.clone(),
             tool_call,
             tool_context,
             expires_at_unix_ms,
@@ -78,6 +108,14 @@ impl RecentAutoModeRetryToken {
 
     pub fn snapshot_digest(&self) -> &str {
         &self.snapshot_digest
+    }
+
+    pub fn policy_safety_snapshot_ref(&self) -> Option<&PolicySafetySnapshotRef> {
+        self.policy_safety_snapshot_ref.as_ref()
+    }
+
+    pub fn secret_ref_evidence(&self) -> &[PermissionSecretRefEvidence] {
+        &self.secret_ref_evidence
     }
 
     pub fn tool_call(&self) -> &RuntimeToolCall {
@@ -101,6 +139,11 @@ impl fmt::Debug for RecentAutoModeRetryToken {
             .field("action_digest", &self.action_digest)
             .field("argument_digest", &self.argument_digest)
             .field("snapshot_digest", &self.snapshot_digest)
+            .field(
+                "policy_safety_snapshot_ref",
+                &self.policy_safety_snapshot_ref,
+            )
+            .field("secret_ref_count", &self.secret_ref_evidence.len())
             .field("tool_name", &self.tool_call.name)
             .field("tool_call", &"<redacted>")
             .field("tool_context", &"<redacted>")
@@ -174,9 +217,7 @@ impl RecentAutoModeRetryTokenStore {
     pub fn consume(
         &mut self,
         denial_id: &str,
-        action_digest: &str,
-        argument_digest: &str,
-        snapshot_digest: &str,
+        expected: RecentAutoModeRetryTokenMatch<'_>,
         now_unix_ms: u64,
     ) -> Result<RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError> {
         let Some(entry) = self.tokens.get_mut(denial_id) else {
@@ -189,9 +230,12 @@ impl RecentAutoModeRetryTokenStore {
             entry.consumed = true;
             return Err(RecentAutoModeRetryTokenConsumeError::Expired);
         }
-        if entry.token.action_digest != action_digest
-            || entry.token.argument_digest != argument_digest
-            || entry.token.snapshot_digest != snapshot_digest
+        if entry.token.action_digest != expected.action_digest
+            || entry.token.argument_digest != expected.argument_digest
+            || entry.token.snapshot_digest != expected.snapshot_digest
+            || entry.token.policy_safety_snapshot_ref.as_ref()
+                != expected.policy_safety_snapshot_ref
+            || entry.token.secret_ref_evidence.as_slice() != expected.secret_ref_evidence
         {
             entry.consumed = true;
             return Err(RecentAutoModeRetryTokenConsumeError::Mismatched);
@@ -276,6 +320,8 @@ pub fn recent_auto_mode_denial_from_classifier_decision(
         action_digest: action.action_digest.clone(),
         argument_digest: action.argument_digest.clone(),
         snapshot_digest: action.snapshot_digest.clone(),
+        policy_safety_snapshot_ref: action.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: action.secret_ref_evidence.clone(),
         decision_reason: decision.reason.clone(),
         classifier_verdict: evaluator.verdict,
         classifier_confidence: evaluator.confidence,
@@ -300,6 +346,7 @@ fn denial_id(action: &PermissionedAction) -> String {
         "action_digest": &action.action_digest,
         "argument_digest": &action.argument_digest,
         "snapshot_digest": &action.snapshot_digest,
+        "policy_safety_snapshot_ref": &action.policy_safety_snapshot_ref,
     }));
     format!(
         "auto_denial_{}",
