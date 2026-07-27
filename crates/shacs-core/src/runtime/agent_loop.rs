@@ -28,9 +28,10 @@ use crate::runtime::{
     MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage, PermissionCeilingSnapshot,
     PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
     PermissionedActionInput, PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus,
-    PluginCommandDispatcher, ProviderArchiveConsolidator, ProviderEventCallback,
-    RecentAutoModeDenial, RecentAutoModeDenialStore, RecentAutoModeRetryToken,
-    RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenStore, RuntimeContextTools,
+    PluginCommandDispatcher, PolicySafetySnapshotRef, ProviderArchiveConsolidator,
+    ProviderEventCallback, RecentAutoModeDenial, RecentAutoModeDenialStore,
+    RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError,
+    RecentAutoModeRetryTokenMatch, RecentAutoModeRetryTokenStore, RuntimeContextTools,
     RuntimeExecutionLedger, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport,
     RuntimeToolExecutor, RuntimeToolMessage, Session, SessionApprovalCacheEntry,
     SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
@@ -153,6 +154,10 @@ struct PendingRecentRetryApproval {
     action_digest: String,
     argument_digest: String,
     snapshot_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_safety_snapshot_ref: Option<PolicySafetySnapshotRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    secret_ref_evidence: Vec<crate::runtime::PermissionSecretRefEvidence>,
     tool_name: String,
     expires_at_unix_ms: u64,
     requester_digest: String,
@@ -701,9 +706,15 @@ impl<'a> AgentLoop<'a> {
                 PermissionApprovalReply::Approve => {
                     let token_result = self.recent_retry_tokens.consume(
                         &approval.denial_id,
-                        &approval.action_digest,
-                        &approval.argument_digest,
-                        &approval.snapshot_digest,
+                        RecentAutoModeRetryTokenMatch {
+                            action_digest: &approval.action_digest,
+                            argument_digest: &approval.argument_digest,
+                            snapshot_digest: &approval.snapshot_digest,
+                            policy_safety_snapshot_ref: approval
+                                .policy_safety_snapshot_ref
+                                .as_ref(),
+                            secret_ref_evidence: &approval.secret_ref_evidence,
+                        },
                         now_unix_ms(),
                     );
                     let token = match token_result {
@@ -2395,6 +2406,8 @@ impl<'a> AgentLoop<'a> {
         if token.action_digest() != denial.action_digest
             || token.argument_digest() != denial.argument_digest
             || token.snapshot_digest() != denial.snapshot_digest
+            || token.policy_safety_snapshot_ref() != denial.policy_safety_snapshot_ref.as_ref()
+            || token.secret_ref_evidence() != denial.secret_ref_evidence.as_slice()
         {
             self.recent_retry_tokens.invalidate(denial_id);
             return self.publish_command_response(
@@ -2413,6 +2426,8 @@ impl<'a> AgentLoop<'a> {
             action_digest: denial.action_digest.clone(),
             argument_digest: denial.argument_digest.clone(),
             snapshot_digest: denial.snapshot_digest.clone(),
+            policy_safety_snapshot_ref: denial.policy_safety_snapshot_ref.clone(),
+            secret_ref_evidence: denial.secret_ref_evidence.clone(),
             tool_name: denial.tool_name.clone(),
             expires_at_unix_ms: token.expires_at_unix_ms(),
             requester_digest: recent_retry_requester_digest(message, &session.key),
@@ -4432,6 +4447,8 @@ fn approval_decision(
         actor: ApprovalActor::LocalUser,
         decided_at_unix_ms: now_unix_ms(),
         consumed: false,
+        policy_safety_snapshot_ref: approval.approval_request.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: approval.approval_request.secret_ref_evidence.clone(),
     }
 }
 
@@ -4448,6 +4465,8 @@ fn recent_retry_approval_decision(
         actor: ApprovalActor::LocalUser,
         decided_at_unix_ms: now_unix_ms(),
         consumed: false,
+        policy_safety_snapshot_ref: approval_request.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: approval_request.secret_ref_evidence.clone(),
     }
 }
 
@@ -4467,6 +4486,8 @@ fn recent_retry_approval_request_from_pending(
         risk_summary: format!("Run exact recent denied tool `{}` once", approval.tool_name),
         allowed_decisions: vec![ApprovalDecisionKind::Approved, ApprovalDecisionKind::Denied],
         expires_at_unix_ms: approval.expires_at_unix_ms,
+        policy_safety_snapshot_ref: approval.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: approval.secret_ref_evidence.clone(),
     }
 }
 
@@ -5212,6 +5233,8 @@ mod tests {
             action_digest: format!("action-{label}"),
             argument_digest: format!("argument-{label}"),
             snapshot_digest: format!("snapshot-{label}"),
+            policy_safety_snapshot_ref: None,
+            secret_ref_evidence: Vec::new(),
             decision_reason: PermissionPolicyReason::EvaluatorUncertain,
             classifier_verdict: AutoEvaluatorVerdictKind::DenyCandidate,
             classifier_confidence: EvaluatorConfidence::High,

@@ -3,18 +3,25 @@ use crate::runtime::permission_pattern::{
 };
 use crate::runtime::permission_remembered::remembered_permission_matcher_matches;
 use crate::runtime::{
-    approval_decision_options, correlate_approval, decide_permission, evaluate_static_rules,
+    approval_decision_options,
+    containment_permission_proof_for_process_gate, correlate_approval,
+    correlate_policy_safety_snapshot_ref, decide_permission, evaluate_static_rules,
     normalize_runtime_tool_call, ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError,
     ApprovalDecisionKind, ApprovalRequest, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind,
     ContainmentSnapshotRef, EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
     PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionPolicyDecision,
     PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionPolicyReason,
     PermissionRuleInput, PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
-    ProcExecSummary, ProjectPermissionStoreConfig, RecentAutoModeDenial, RecentAutoModeRetryToken,
+    ProcExecSummary, ProcessAdapterKind,
+    ProcessContainmentProofCandidate, ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput,
+    ProcessGateInput, ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
+    ProjectPermissionStoreConfig, RecentAutoModeDenial, RecentAutoModeRetryToken,
     SafetyCapability, SessionApprovalCacheEntry, SessionRememberedPermissionRule,
     StaticRuleDecision, StaticRuleDecisionKind,
 };
-use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
+use crate::tools::{
+    CronTool, MessageTool, SpawnTool, ToolCallExecutionContext, ToolRegistry, ToolResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -325,7 +332,8 @@ impl<'a> RuntimeToolExecutor<'a> {
                 &call,
                 permissioned_action_input_from_context(context),
             );
-            let decision = permission_decision_for_action(&action, context);
+            let evaluation = permission_evaluation_for_action(&action, context);
+            let decision = evaluation.decision.clone();
             permissioned_actions.push(action.clone());
             if !decision.can_handoff_to_tool_runtime {
                 if let Some(report) = flush_allowed_batch(
@@ -357,6 +365,7 @@ impl<'a> RuntimeToolExecutor<'a> {
             let entry = IndexedToolCall {
                 original_index,
                 call,
+                context: tool_call_execution_context(self.registry, &action, evaluation),
             };
             if concurrent_tools && can_batch_concurrently(self.registry, &entry.call) {
                 pending_batch.push(entry);
@@ -461,6 +470,23 @@ pub(crate) fn permission_decision_for_action(
     action: &PermissionedAction,
     context: &ToolExecutionContext,
 ) -> PermissionPolicyDecision {
+    permission_evaluation_for_action(action, context).decision
+}
+
+#[derive(Debug, Clone)]
+struct PermissionEvaluation {
+    rule_input: PermissionRuleInput,
+    evaluator: Option<AutoEvaluatorVerdict>,
+    approval: Option<ApprovalCorrelation>,
+    inherited_context: Option<InheritedPermissionContext>,
+    interactive: bool,
+    decision: PermissionPolicyDecision,
+}
+
+fn permission_evaluation_for_action(
+    action: &PermissionedAction,
+    context: &ToolExecutionContext,
+) -> PermissionEvaluation {
     let rule_input = effective_permission_rule_input(action, context);
     let static_rule_decision = evaluate_static_rules(action, &rule_input);
     let evaluator = context.permission_evaluator.clone().or_else(|| {
@@ -469,16 +495,26 @@ pub(crate) fn permission_decision_for_action(
     let project_state = project_remembered_policy_matches(action, context);
     let mut remembered_rules = session_remembered_policy_matches(action, context);
     remembered_rules.extend(project_state.matches);
-    decide_permission(PermissionPolicyInput {
+    let approval = permission_approval_for_action(action, context);
+    let inherited_context = inherited_context_for_action(action, context);
+    let decision = decide_permission(PermissionPolicyInput {
         action: action.clone(),
         static_rule_decision,
-        evaluator,
-        approval: permission_approval_for_action(action, context),
-        inherited_context: inherited_context_for_action(action, context),
+        evaluator: evaluator.clone(),
+        approval: approval.clone(),
+        inherited_context: inherited_context.clone(),
         remembered_rules,
         remembered_store_unavailable: project_state.store_unavailable,
         interactive: context.permission_interactive,
-    })
+    });
+    PermissionEvaluation {
+        rule_input,
+        evaluator,
+        approval,
+        inherited_context,
+        interactive: context.permission_interactive,
+        decision,
+    }
 }
 
 struct ProjectRememberedPolicyState {
@@ -768,14 +804,14 @@ fn auto_approval_allows_capabilities(
 }
 
 pub fn session_approval_context_digest(action: &PermissionedAction) -> String {
-    session_approval_context_digest_for_input(&PermissionedActionInput {
-        session_id: action.session_id.clone(),
-        turn_id: action.turn_id.clone(),
-        origin: action.origin.clone(),
-        permission_mode_snapshot: action.permission_mode_snapshot.clone(),
-        containment_snapshot: action.containment_snapshot.clone(),
-        intent_snapshot: action.intent_snapshot.clone(),
-    })
+    digest_json(&json!({
+        "permission_mode_snapshot": &action.permission_mode_snapshot,
+        "containment_snapshot": &action.containment_snapshot,
+        "intent_snapshot": &action.intent_snapshot,
+        "policy_safety_snapshot_ref": &action.policy_safety_snapshot_ref,
+        "session_id": &action.session_id,
+        "origin": stable_session_approval_origin(&action.origin),
+    }))
 }
 
 pub fn session_approval_context_digest_for_input(input: &PermissionedActionInput) -> String {
@@ -844,6 +880,8 @@ pub(crate) fn permission_approval_interrupt(
         risk_summary: risk_summary.clone(),
         allowed_decisions,
         expires_at_unix_ms,
+        policy_safety_snapshot_ref: action.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: action.secret_ref_evidence.clone(),
     };
     let arguments = action.redacted_arguments.to_string();
     let target_summary = approval_target_summary(action);
@@ -923,6 +961,24 @@ fn session_approval_cache_correlation(
     if entry.approval_context_digest != session_approval_context_digest(action) {
         return None;
     }
+    if correlate_policy_safety_snapshot_ref(
+        approval.request.policy_safety_snapshot_ref.as_ref(),
+        approval.decision.policy_safety_snapshot_ref.as_ref(),
+        now_unix_ms(),
+    )
+    .is_err()
+    {
+        return None;
+    }
+    if correlate_policy_safety_snapshot_ref(
+        approval.request.policy_safety_snapshot_ref.as_ref(),
+        action.policy_safety_snapshot_ref.as_ref(),
+        now_unix_ms(),
+    )
+    .is_err()
+    {
+        return None;
+    }
     if approval.request.approval_request_id != approval.decision.approval_request_id
         || approval.request.action_digest != approval.decision.action_digest
         || approval.request.snapshot_digest != approval.decision.snapshot_digest
@@ -956,6 +1012,13 @@ fn approval_cache_correlation(
     }
     if entry.request.snapshot_digest != action.snapshot_digest {
         return ApprovalCorrelation::rejected(ApprovalCorrelationError::SnapshotMismatch);
+    }
+    if let Err(error) = correlate_policy_safety_snapshot_ref(
+        entry.request.policy_safety_snapshot_ref.as_ref(),
+        action.policy_safety_snapshot_ref.as_ref(),
+        now_unix_ms(),
+    ) {
+        return ApprovalCorrelation::rejected(error);
     }
     if entry.request.requested_scope != action.session_id {
         return ApprovalCorrelation::rejected(ApprovalCorrelationError::ScopeMismatch);
@@ -1024,6 +1087,7 @@ fn non_empty_or(value: &str, fallback: &str) -> String {
 struct IndexedToolCall {
     original_index: usize,
     call: RuntimeToolCall,
+    context: ToolCallExecutionContext,
 }
 
 struct ToolCallOutcome {
@@ -1093,7 +1157,7 @@ fn execute_sequential_batch(
 ) -> Vec<ToolCallOutcome> {
     let mut outcomes = Vec::new();
     for entry in batch {
-        let outcome = execute_one_tool(registry, &entry.call);
+        let outcome = execute_one_tool(registry, &entry.call, &entry.context);
         let is_interrupt = matches!(outcome, ToolResult::AskUserInterrupt { .. });
         outcomes.push(ToolCallOutcome {
             original_index: entry.original_index,
@@ -1117,10 +1181,13 @@ fn execute_concurrent_batch(
             let original_index = entry.original_index;
             let fallback_call = entry.call.clone();
             let call = entry.call.clone();
+            let context = entry.context.clone();
             let prepared = registry.prepare_call(&call.name, call.arguments.clone());
             let handle = thread::spawn(move || {
                 let outcome = match prepared {
-                    Ok(prepared) => prepared.tool.execute(prepared.params),
+                    Ok(prepared) => prepared
+                        .tool
+                        .execute_with_context(prepared.params, &context),
                     Err(error) => ToolResult::Text(format!("{error}{ERROR_HINT}")),
                 };
                 ToolCallOutcome {
@@ -1148,11 +1215,98 @@ fn execute_concurrent_batch(
         .collect()
 }
 
-fn execute_one_tool(registry: &ToolRegistry, call: &RuntimeToolCall) -> ToolResult {
+fn execute_one_tool(
+    registry: &ToolRegistry,
+    call: &RuntimeToolCall,
+    context: &ToolCallExecutionContext,
+) -> ToolResult {
     match registry.prepare_call(&call.name, call.arguments.clone()) {
-        Ok(prepared) => prepared.tool.execute(prepared.params),
+        Ok(prepared) => prepared.tool.execute_with_context(prepared.params, context),
         Err(error) => ToolResult::Text(format!("{error}{ERROR_HINT}")),
     }
+}
+
+fn tool_call_execution_context(
+    registry: &ToolRegistry,
+    action: &PermissionedAction,
+    evaluation: PermissionEvaluation,
+) -> ToolCallExecutionContext {
+    if !action.capabilities.contains(&SafetyCapability::ProcExec) {
+        return ToolCallExecutionContext::default();
+    }
+    ToolCallExecutionContext::new(process_gate_input_for_action(registry, action, evaluation).ok())
+}
+
+fn process_gate_input_for_action(
+    registry: &ToolRegistry,
+    action: &PermissionedAction,
+    evaluation: PermissionEvaluation,
+) -> Result<ProcessGateInput, String> {
+    let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
+        identity: ProcessIdentity::new(
+            format!("tool:{}", action.action_id),
+            action.session_id.clone(),
+            action.turn_id.clone(),
+        ),
+        adapter: process_adapter_for_tool(registry, &action.tool_name)?,
+        action: action.clone(),
+        required_secret_ref_count: 0,
+        redacted_command: ProcessRedactedCommand {
+            command_family: process_command_family(&evaluation.rule_input),
+            redacted_summary: format!("{} process execution", action.tool_name),
+            redacted_targets: action
+                .target_refs
+                .iter()
+                .map(|target| target.redacted_value.to_string())
+                .collect(),
+        },
+    })
+    .map_err(|error| error.to_string())?;
+    let now_unix_ms = now_unix_ms();
+    let containment_proof = containment_permission_proof_for_process_gate(
+        &envelope,
+        &evaluation.rule_input,
+        evaluation.inherited_context.as_ref(),
+        now_unix_ms,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(ProcessGateInput {
+        envelope,
+        permission_rules: evaluation.rule_input,
+        inherited_context: evaluation.inherited_context,
+        evaluator: evaluation.evaluator,
+        approval: evaluation.approval,
+        containment_proof: ProcessContainmentProofCandidate::Proof(Box::new(containment_proof)),
+        interactive: evaluation.interactive,
+        terminal_precondition: ProcessGateTerminalPrecondition::Ready,
+        now_unix_ms,
+    })
+}
+
+fn process_adapter_for_tool(
+    registry: &ToolRegistry,
+    tool_name: &str,
+) -> Result<ProcessAdapterKind, String> {
+    if let Some(adapter) = registry
+        .get(tool_name)
+        .and_then(|tool| tool.process_adapter_kind())
+    {
+        return Ok(adapter);
+    }
+    match tool_name {
+        "exec" => Ok(ProcessAdapterKind::ExecTool),
+        other => Err(format!(
+            "process gate adapter unavailable for tool `{other}`"
+        )),
+    }
+}
+
+fn process_command_family(rule_input: &PermissionRuleInput) -> String {
+    rule_input
+        .proc_exec_summary
+        .as_ref()
+        .map(|summary| summary.command_family.clone())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn append_error_hint(content: String) -> String {
