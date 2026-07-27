@@ -1,0 +1,5 @@
+{
+  "fixture": "spec030-prd004-classifier-accounting-v1",
+  "route_id": "permission_classifier.primary",
+  "model_id": "spec030-classifier-fixture-model"
+}

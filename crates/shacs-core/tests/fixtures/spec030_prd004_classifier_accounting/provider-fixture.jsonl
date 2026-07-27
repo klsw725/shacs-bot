@@ -1,0 +1,8 @@
+{"case":"normal","verdict":"allow_candidate","confidence":"high","scope_match":"requested","prompt_tokens":17,"completion_tokens":3}
+{"case":"missing_accounting","verdict":"allow_candidate","confidence":"high","scope_match":"requested"}
+{"case":"provider_error","error":"provider unavailable"}
+{"case":"malformed_verdict","content":"not json"}
+{"case":"static_deny_precedence","verdict":"allow_candidate","confidence":"high","scope_match":"requested","static":"deny"}
+{"case":"diagnostics_bundle","verdict":"allow_candidate","confidence":"high","scope_match":"requested","prompt_tokens":17,"completion_tokens":3}
+{"case":"provider_timeout","error":"provider timeout"}
+{"case":"config_unavailable","error":"missing classifier config"}
