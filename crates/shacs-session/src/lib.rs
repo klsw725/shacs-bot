@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod diagnostics;
 pub mod durable_child;
 pub mod durable_event;
 pub mod durable_migration;
@@ -16,6 +17,11 @@ pub mod durable_trace;
 pub mod durable_work;
 
 pub const FILE_MAX_MESSAGES: usize = 2000;
+
+pub use diagnostics::{
+    build_session_diagnostics_aggregate, SessionDiagnosticsAggregate, SessionDiagnosticsError,
+    SessionRuntimeExecutionDiagnostics,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
