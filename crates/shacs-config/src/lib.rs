@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod permissions;
 mod remembered_permissions;
+mod secret_ref;
 
 pub use permissions::{
     AutoApprovalConfig, PermissionActivationContext, PermissionConfigDiagnostics,
@@ -24,6 +25,7 @@ pub use remembered_permissions::{
     RememberedPermissionRuleId, RememberedPermissionStore, RememberedPermissionStoreError,
     RememberedPermissionStoreErrorKind, WorkspacePathScope, WorkspacePermissionId,
 };
+pub use secret_ref::{provider_secret_refs, ConfigSecretRef};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -160,6 +162,12 @@ impl Default for DreamConfig {
 pub struct ProviderConfig {
     #[serde(default, alias = "api_key", skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(
+        default,
+        alias = "api_key_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub api_key_ref: Option<ConfigSecretRef>,
     #[serde(default, alias = "api_base", skip_serializing_if = "Option::is_none")]
     pub api_base: Option<String>,
     #[serde(
@@ -2024,6 +2032,89 @@ mod tests {
         assert!(!saved.contains("temporary-workspace"));
         assert!(saved.contains("idleCompactAfterMinutes"));
         assert!(!saved.contains("sessionTtlMinutes"));
+        Ok(())
+    }
+
+    #[test]
+    fn spec030_baseline_env_refs_resolve_but_writeback_preserves_placeholders(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let raw = json!({
+            "providers": {
+                "openrouter": {
+                    "apiKey": "${SPEC030_OPENROUTER_TOKEN}",
+                    "extraHeaders": {"Authorization": "Bearer ${SPEC030_BEARER_TOKEN}"}
+                }
+            },
+            "env": {"RUNTIME_TOKEN": "${SPEC030_RUNTIME_TOKEN}"},
+            "tools": {"exec": {"env": {"TOOL_TOKEN": "${SPEC030_TOOL_TOKEN}"}}}
+        });
+        fs::write(&config_path, serde_json::to_string_pretty(&raw)?)?;
+        let env = BTreeMap::from([
+            (
+                "SPEC030_OPENROUTER_TOKEN".to_owned(),
+                "spec030-provider-secret".to_owned(),
+            ),
+            (
+                "SPEC030_BEARER_TOKEN".to_owned(),
+                "spec030-header-secret".to_owned(),
+            ),
+            (
+                "SPEC030_RUNTIME_TOKEN".to_owned(),
+                "spec030-runtime-secret".to_owned(),
+            ),
+            (
+                "SPEC030_TOOL_TOKEN".to_owned(),
+                "spec030-tool-secret".to_owned(),
+            ),
+        ]);
+
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: true,
+                write_back_migrations: true,
+            },
+            &env,
+        )?;
+        let saved = fs::read_to_string(config_path)?;
+
+        assert_eq!(
+            bundle.config.providers["openrouter"].api_key.as_deref(),
+            Some("spec030-provider-secret")
+        );
+        assert_eq!(
+            bundle.config.providers["openrouter"]
+                .extra_headers
+                .as_ref()
+                .and_then(|headers| headers.get("Authorization"))
+                .map(String::as_str),
+            Some("Bearer spec030-header-secret")
+        );
+        assert_eq!(
+            bundle.config.env.get("RUNTIME_TOKEN").map(String::as_str),
+            Some("spec030-runtime-secret")
+        );
+        assert_eq!(
+            bundle
+                .config
+                .tools
+                .exec
+                .env
+                .get("TOOL_TOKEN")
+                .map(String::as_str),
+            Some("spec030-tool-secret")
+        );
+        assert!(saved.contains("${SPEC030_OPENROUTER_TOKEN}"));
+        assert!(saved.contains("${SPEC030_BEARER_TOKEN}"));
+        assert!(saved.contains("${SPEC030_RUNTIME_TOKEN}"));
+        assert!(saved.contains("${SPEC030_TOOL_TOKEN}"));
+        assert!(!saved.contains("spec030-provider-secret"));
+        assert!(!saved.contains("spec030-header-secret"));
+        assert!(!saved.contains("spec030-runtime-secret"));
+        assert!(!saved.contains("spec030-tool-secret"));
         Ok(())
     }
 }
