@@ -1,6 +1,8 @@
 mod agent_loop;
 mod autocompact;
 mod automation;
+mod classifier_evidence;
+mod containment_permission;
 mod context;
 mod context_diagnostics;
 mod context_files;
@@ -8,6 +10,7 @@ mod context_handoff;
 mod context_refs;
 mod context_resolvers;
 mod context_safety;
+mod diagnostics;
 mod durable_dispatch;
 mod execution_contract;
 mod file_context;
@@ -30,9 +33,13 @@ mod plugin_discovery;
 mod plugin_hooks;
 mod plugin_runtime;
 mod plugin_surface;
+mod policy_safety_snapshot;
+mod process_envelope;
+mod process_gate;
 mod replay;
 mod runner;
 mod self_improvement;
+mod skill_trust_permission;
 mod subagent;
 mod tool_execution;
 mod tool_search;
@@ -47,6 +54,26 @@ pub use automation::{
     coordinate_automation_run, AutomationCoordinationOutcome, AutomationPrd008LinkageMetadata,
     AutomationSourceEvent, AutomationSourceEventKind, AutomationTaskOutcomeEligibility,
     SubagentMergeState,
+};
+pub use classifier_evidence::{
+    classifier_decision_evidence, skipped_classifier_evidence, AccountingState,
+    AccountingUnavailableReason, AccountingValue, ClassifierActionCorrelation,
+    ClassifierAttemptStatus, ClassifierCostAccounting, ClassifierDecisionEvidence,
+    ClassifierDisposition, ClassifierEvidenceId, ClassifierEvidenceInput,
+    ClassifierEvidenceSchemaId, ClassifierFallbackCause, ClassifierFallbackEvidence,
+    ClassifierLatencyAccounting, ClassifierModelEvidence, ClassifierRequestCorrelation,
+    ClassifierRouteEvidence, ClassifierRouteKind, ClassifierTokenAccounting,
+    ClassifierVerdictEvidence, RedactedDiagnosticRef, StaticPolicyPrecedence,
+    CLASSIFIER_EVIDENCE_SCHEMA_V1,
+};
+pub use containment_permission::{
+    containment_permission_proof_for_process_gate, evaluate_containment_permission,
+    BlockedExternalSurface, BlockedExternalSurfaceReason, ContainmentBoundaryRef,
+    ContainmentComparisonOutcome, ContainmentEvidenceState, ContainmentPermissionError,
+    ContainmentPermissionInput, ContainmentPermissionProof,
+    ContainmentPermissionProofProjectionInput, ContainmentProofViolation,
+    PermissionCeilingComparisonOutcome, PermissionCeilingProofInput, ProcessEnvelopeAdmission,
+    RuntimeBoundaryKind, WorkspaceComparisonOutcome, WorkspaceScopeProof,
 };
 pub use context::{add_assistant_message, add_tool_result, ContextBuildRequest, ContextBuilder};
 pub use context_diagnostics::{
@@ -79,6 +106,13 @@ pub use context_safety::{
     apply_context_safety_gate, context_trust_label_name, protected_context_path_reason,
     replay_context_artifact_from_evidence, trust_label_for_kind, ContextPermissionDecision,
     ContextReplayEvidence, ContextSafetyDiagnostic, ContextSafetyReport, ContextTrustLabel,
+};
+pub use diagnostics::{
+    build_core_diagnostics_aggregate, ClassifierDiagnosticsDto, ClassifierEvidenceDiagnostic,
+    ContainmentDiagnosticsDto, ContainmentProofDiagnostic, CoreDiagnosticsAggregate,
+    CoreDiagnosticsAggregateInput, CoreDiagnosticsError, PolicySafetyDiagnosticsDto,
+    PolicySafetyRefDiagnostic, ProcessDiagnosticsDto, ProcessReceiptDiagnostic,
+    SecretDiagnosticsDto, SecretRefDiagnostic, TrustDecisionDiagnostic, TrustDiagnosticsDto,
 };
 pub use durable_dispatch::{
     inline_control_payload, runtime_control_payload, DurableDispatchError, DurableDispatchSummary,
@@ -139,21 +173,26 @@ pub use memory_skill_curator::{
 pub use permission_action::{
     normalize_resolved_deferred_tool_call, normalize_runtime_tool_call, ActionNormalizationError,
     ActionNormalizationState, ContainmentSnapshotRef, IntentSnapshotRef, PermissionDecisionInput,
-    PermissionMode, PermissionModeSnapshot, PermissionedAction, PermissionedActionInput,
-    PermissionedActionOrigin, SafetyCapability, TargetRef,
+    PermissionMode, PermissionModeSnapshot, PermissionSecretRefEvidence, PermissionSecretRefStatus,
+    PermissionedAction, PermissionedActionInput, PermissionedActionOrigin, SafetyCapability,
+    TargetRef,
 };
 pub use permission_approval::{
-    approval_decision_options, correlate_approval, ApprovalActor, ApprovalCacheEntry,
-    ApprovalCorrelation, ApprovalCorrelationError, ApprovalDecision, ApprovalDecisionEffect,
-    ApprovalDecisionKind, ApprovalDecisionOption, ApprovalDecisionScope, ApprovalRequest,
-    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionRememberedPermissionDiagnostic,
-    SessionRememberedPermissionRule, SessionRememberedPermissionRules,
+    approval_decision_options, correlate_approval, correlate_policy_safety_snapshot_ref,
+    ApprovalActor, ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError,
+    ApprovalDecision, ApprovalDecisionEffect, ApprovalDecisionKind, ApprovalDecisionOption,
+    ApprovalDecisionScope, ApprovalRequest, SessionApprovalCacheEntry, SessionApprovalReuseMatch,
+    SessionRememberedPermissionDiagnostic, SessionRememberedPermissionRule,
+    SessionRememberedPermissionRules,
 };
 pub use permission_audit::{
     build_permission_audit_record, build_permission_diagnostics_summary,
     permission_prd005_006_contract_cases, permission_release_evidence_complete,
     required_permission_release_evidence_buckets, PermissionAuditRecord, PermissionContractCase,
-    PermissionDiagnosticsSummary, PermissionReleaseEvidence, PermissionReleaseEvidenceBucket,
+    PermissionDiagnosticsSummary, PermissionPolicySafetySnapshotAuditStatus,
+    PermissionPolicySafetySnapshotAuditSummary, PermissionPolicySafetySnapshotDiagnosticsSummary,
+    PermissionReleaseEvidence, PermissionReleaseEvidenceBucket, PermissionSecretRefAuditSummary,
+    PermissionSecretRefDiagnosticsSummary,
 };
 pub use permission_ceiling::{
     app_declaration_grants_permission, boundary_origin_from_action, ceiling_for_origin,
@@ -171,15 +210,16 @@ pub use permission_policy::{
 pub use permission_recent_denials::{
     recent_auto_mode_denial_from_classifier_decision, RecentAutoModeDenial,
     RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError,
-    RecentAutoModeRetryTokenStore, RECENT_AUTO_MODE_DENIAL_LIMIT,
+    RecentAutoModeRetryTokenMatch, RecentAutoModeRetryTokenStore, RECENT_AUTO_MODE_DENIAL_LIMIT,
 };
 pub use permission_remembered::{
     remembered_permission_matcher_matches, safe_remembered_permission_matcher,
     RememberedPermissionMatcherError, SafeRememberedPermissionMatcher,
 };
 pub use permission_replay::{
-    evaluate_permission_replay, PermissionReplayInput, PermissionReplayInvariant,
-    PermissionReplayOutcome, PermissionReplayViolation,
+    evaluate_permission_replay, evaluate_permission_replay_value, PermissionReplayInput,
+    PermissionReplayInvariant, PermissionReplayOutcome, PermissionReplayPolicySafetySnapshotStatus,
+    PermissionReplayViolation,
 };
 pub use permission_rules::{
     classify_permission_action, evaluate_static_rules, CapabilityClassification,
@@ -205,9 +245,10 @@ pub use plugin_runtime::{
     register_plugin_runtime_tools, PluginCommandDispatchError, PluginCommandDispatcher,
     PluginCommandExecution, PluginCommandInvocation, PluginCommandToolInvocation,
     PluginExecutableCommand, PluginHookCommandExecutor, PluginHookCommandInvocation,
-    PluginHookDispatchMode, PluginHookDispatchSink, PluginRuntimeCommand, PluginRuntimeDiagnostic,
-    PluginRuntimeHook, PluginRuntimeHookAgentHook, PluginRuntimePlugin, PluginRuntimeSnapshot,
-    PluginRuntimeTool, ProcessPluginHookCommandExecutor,
+    PluginHookDispatchMode, PluginHookDispatchSink, PluginProcessPermissionContext,
+    PluginRuntimeCommand, PluginRuntimeDiagnostic, PluginRuntimeHook, PluginRuntimeHookAgentHook,
+    PluginRuntimePlugin, PluginRuntimeSnapshot, PluginRuntimeTool,
+    ProcessPluginHookCommandExecutor,
 };
 pub use plugin_surface::{
     build_plugin_surface_projection, evaluate_plugin_permission_ceiling,
@@ -219,6 +260,23 @@ pub use plugin_surface::{
     PluginSkillDescriptor, PluginSpec025ReleaseEvidence, PluginSpec025ReleaseEvidenceBucket,
     PluginSpec025ReleaseEvidenceChecklist, PluginSurfaceDiagnostic, PluginSurfaceProjection,
     PluginToolDescriptor,
+};
+pub use policy_safety_snapshot::{
+    CapabilityCeilingRef, PolicySafetyDigest, PolicySafetyProvenanceKind,
+    PolicySafetyProvenanceRef, PolicySafetySnapshot, PolicySafetySnapshotCreationReason,
+    PolicySafetySnapshotError, PolicySafetySnapshotId, PolicySafetySnapshotInput,
+    PolicySafetySnapshotRef, PolicySafetySnapshotSchemaId, PolicySafetySourceKind,
+    PolicySafetySourceRef, RedactedPolicySafetySummary, POLICY_SAFETY_SNAPSHOT_SCHEMA_V1,
+};
+pub use process_envelope::{
+    ProcessAdapterKind, ProcessEnvelopeError, ProcessExecutionEnvelope,
+    ProcessExecutionEnvelopeInput, ProcessIdentity, ProcessRedactedCommand,
+};
+pub use process_gate::{
+    ProcessContainmentProofCandidate, ProcessExecutionReceipt, ProcessGate, ProcessGateError,
+    ProcessGateInput, ProcessGateTerminalPrecondition, ProcessRedactedSpawnSummary,
+    ProcessRedactedStatus, ProcessRedactedStreamKind, ProcessRedactedStreamSummary,
+    ProcessSpawnAuthorization, ProcessSpawnReport, ProcessTerminalOutcome,
 };
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub use runner::{
@@ -254,6 +312,12 @@ pub use shacs_providers::{GenerationSettings, ProviderClient, ProviderRetryMode}
 pub use shacs_session::{
     find_legal_message_start, Session, SessionHistoryOptions, SessionManager, SessionSummary,
     FILE_MAX_MESSAGES,
+};
+pub use skill_trust_permission::{
+    blocked_skill_trust_external_surface, validate_skill_trust_permission, SkillTrustActionKind,
+    SkillTrustDigestPair, SkillTrustGuardInput, SkillTrustPermissionDecision,
+    SkillTrustPermissionDecisionKind, SkillTrustPermissionInput, SkillTrustPermissionSchemaId,
+    SkillTrustRejectionReason, TrustLifecycleStatus,
 };
 pub use subagent::{
     build_subagent_tool_registry, format_partial_progress,

@@ -7,6 +7,7 @@ rust-version = "1.75"
 [dependencies]
 glob = "0.3"
 libc = "0.2"
+nix = { version = "0.30", features = ["process", "signal"] }
 regex = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -14,6 +15,7 @@ chrono-tz = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tempfile = "3"
 toml = "0.8"
 shacs-app = { path = "../shacs-app" }
 shacs-cron = { path = "../shacs-cron" }
@@ -35,4 +37,3 @@ ureq = { version = ">=3.2.1, <3.3.0", features = ["charset"] }
 
 [dev-dependencies]
 filetime = "0.2"
-tempfile = "3"
