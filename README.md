@@ -71,6 +71,16 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime recover --wo
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- ask "hello" --workspace /tmp/shacs-ws
 ```
 
+Permission approval prompt는 한 번 승인/거절, session remembered 승인/거절, project remembered 승인/거절의 여섯 가지 선택을 지원합니다. Project remembered rule은 config data directory의 `permissions.json`에 현재 canonical workspace bucket별로 저장되며, `exec` arity prefix, workspace path exact/subtree, `web_fetch` origin, MCP tool name, exact action matcher 중 구현된 요약만 재사용합니다. 현재 rule은 CLI에서 read/revoke할 수 있고, slash/API/TUI projection도 같은 redacted rule summary를 소비합니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- permissions list --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- permissions inspect <rule-id-prefix> --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- permissions revoke <rule-id-prefix> --workspace /tmp/shacs-ws
+```
+
+Malformed `permissions.json`은 raw content를 출력하지 않고 fail closed됩니다. Remembered allow는 protected target, static deny, permission ceiling, containment precondition을 우회하지 않으며, 이 기능은 완전한 sandboxing/redaction이나 prompt/tool/repo content 기반 permission grant를 보장하지 않습니다.
+
 선택된 channel runtime worker를 시작합니다. 새 lifecycle workflow에서는 `runtime start`를 우선 사용하고, `run`은 같은 foreground channel runtime의 기존 호환 진입점입니다:
 
 ```sh
