@@ -426,8 +426,10 @@ fn runtime_denies_direct_proc_exec_without_executing_tool() -> Result<(), Box<dy
         || report.interrupt.is_some()
         || message.tool_call_id != "exec-call"
         || message.name != "exec"
-        || !(message.content.contains("Permission denied")
-            || message.content.contains("Permission approval required"))
+        || report
+            .permissioned_actions
+            .first()
+            .is_none_or(|action| action.tool_name != "exec" || action.action_digest.is_empty())
     {
         return Err(format!(
             "direct proc_exec should be blocked before execution: report={report:?} calls={}",
@@ -453,6 +455,10 @@ fn runtime_asks_before_interactive_proc_exec_without_executing_tool() -> Result<
             source: Some("test".to_owned()),
             scope_ref: None,
         },
+        permission_auto_approval: AutoApprovalConfig {
+            enabled: true,
+            ..AutoApprovalConfig::default()
+        },
         permission_interactive: true,
         ..ToolExecutionContext::default()
     };
@@ -471,20 +477,34 @@ fn runtime_asks_before_interactive_proc_exec_without_executing_tool() -> Result<
             approval_request_id,
             approval_request,
             tool_call,
-            question,
             options,
+            ..
         }) if calls.load(Ordering::SeqCst) == 0
             && approval_request_id.starts_with("approval_")
             && approval_request.approval_request_id.as_str() == approval_request_id.as_str()
+            && approval_request.requested_scope == "cli:direct"
+            && !approval_request.action_digest.is_empty()
+            && !approval_request.snapshot_digest.is_empty()
+            && approval_request.allowed_decisions.as_slice()
+                == [
+                    ApprovalDecisionKind::Approved,
+                    ApprovalDecisionKind::Denied,
+                    ApprovalDecisionKind::ApprovedForSession,
+                    ApprovalDecisionKind::ApprovedForProject,
+                    ApprovalDecisionKind::DeniedForSession,
+                    ApprovalDecisionKind::DeniedForProject,
+                ]
             && tool_call.id == "exec-call"
             && tool_call.name == "exec"
-            && question.contains("Permission approval required")
-            && question.contains("Risk: Run tool `exec`")
-            && question.contains("Target: command=\"cargo test\"")
-            && question.contains("Scope: cli:direct")
-            && question.contains("Expires at (unix ms):")
-            && question.contains("Arguments: `{")
-            && options.as_slice() == ["approve", "deny", "approve_session"] => Ok(()),
+            && options.as_slice()
+                == [
+                    "approve",
+                    "deny",
+                    "approve_session",
+                    "approve_project",
+                    "deny_session",
+                    "deny_project",
+                ] => Ok(()),
         other => Err(format!(
             "interactive proc_exec should ask before execution: interrupt={other:?} report={report:?} calls={}",
             calls.load(Ordering::SeqCst)
@@ -536,6 +556,141 @@ fn runtime_auto_approval_executes_safe_workspace_edit_without_evaluator(
             calls.load(Ordering::SeqCst)
         )
         .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_auto_approval_executes_guarded_web_tools_without_evaluator() -> Result<(), Box<dyn Error>>
+{
+    for name in ["web_search", "web_fetch"] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(NamedCountingTool {
+            name,
+            calls: calls.clone(),
+        });
+        let executor = RuntimeToolExecutor::new(&registry);
+        let context = ToolExecutionContext {
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: PermissionMode::Auto,
+                source: Some("test".to_owned()),
+                scope_ref: None,
+            },
+            permission_auto_approval: AutoApprovalConfig {
+                enabled: true,
+                ..AutoApprovalConfig::default()
+            },
+            permission_interactive: true,
+            ..ToolExecutionContext::default()
+        };
+
+        let report = executor.execute_tool_calls(
+            vec![RuntimeToolCall::new(
+                format!("{name}-call"),
+                name,
+                json!({}),
+            )],
+            &context,
+        );
+
+        if calls.load(Ordering::SeqCst) != 1 || report.interrupt.is_some() {
+            return Err(format!(
+                "guarded web tool was not auto-approved: name={name} report={report:?} calls={}",
+                calls.load(Ordering::SeqCst)
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_auto_approval_keeps_image_generation_approval_gated() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(NamedCountingTool {
+        name: "image_generate",
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_auto_approval: AutoApprovalConfig {
+            enabled: true,
+            ..AutoApprovalConfig::default()
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "image-call",
+            "image_generate",
+            json!({}),
+        )],
+        &context,
+    );
+
+    if calls.load(Ordering::SeqCst) != 0
+        || !matches!(
+            report.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+    {
+        return Err(format!(
+            "image generation should remain approval-gated: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_auto_approval_executes_native_safe_verification() -> Result<(), Box<dyn Error>> {
+    for command in ["pwd", "cargo fmt --check"] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(ProcExecCountingTool {
+            calls: calls.clone(),
+        });
+        let executor = RuntimeToolExecutor::new(&registry);
+        let context = ToolExecutionContext {
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: PermissionMode::Auto,
+                source: Some("test".to_owned()),
+                scope_ref: None,
+            },
+            permission_auto_approval: AutoApprovalConfig {
+                enabled: true,
+                ..AutoApprovalConfig::default()
+            },
+            permission_interactive: true,
+            ..ToolExecutionContext::default()
+        };
+
+        let report = executor.execute_tool_calls(
+            vec![RuntimeToolCall::new(
+                "exec-call",
+                "exec",
+                json!({ "command": command }),
+            )],
+            &context,
+        );
+
+        if calls.load(Ordering::SeqCst) != 1 || report.interrupt.is_some() {
+            return Err(format!(
+                "native-safe verification was not auto-approved: command={command} report={report:?} calls={}",
+                calls.load(Ordering::SeqCst)
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -636,7 +791,8 @@ fn runtime_auto_mode_asks_for_configured_protected_targets() -> Result<(), Box<d
 }
 
 #[test]
-fn runtime_auto_mode_executes_protected_target_after_user_approval() -> Result<(), Box<dyn Error>> {
+fn runtime_auto_mode_does_not_execute_protected_target_after_user_approval(
+) -> Result<(), Box<dyn Error>> {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register(WriteFileCountingTool {
@@ -693,15 +849,17 @@ fn runtime_auto_mode_executes_protected_target_after_user_approval() -> Result<(
 
     let report = executor.execute_tool_calls(vec![call], &approved_context);
 
-    if calls.load(Ordering::SeqCst) != 1
+    if calls.load(Ordering::SeqCst) != 0
         || report.interrupt.is_some()
-        || !report
-            .messages
-            .first()
-            .is_some_and(|message| message.content == "written")
+        || !report.messages.first().is_some_and(|message| {
+            message.tool_call_id == "write-call"
+                && message.name == "write_file"
+                && message.content.contains("Permission denied")
+                && message.content.contains("ProtectedTarget")
+        })
     {
         return Err(format!(
-            "approved protected target did not execute: report={report:?} calls={}",
+            "approved protected target was not denied cleanly: report={report:?} calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());
@@ -750,19 +908,35 @@ fn bridge_permission_ask_interrupts_before_exec_without_executing() -> Result<()
             approval_request_id,
             approval_request,
             tool_call,
-            question,
+            options,
             ..
         }) if calls.load(Ordering::SeqCst) == 0
             && report.messages().is_empty()
             && approval_request_id.starts_with("approval_")
             && approval_request.approval_request_id.as_str() == approval_request_id.as_str()
+            && approval_request.requested_scope == "cli:direct"
+            && !approval_request.action_digest.is_empty()
+            && !approval_request.snapshot_digest.is_empty()
+            && approval_request.allowed_decisions.as_slice()
+                == [
+                    ApprovalDecisionKind::Approved,
+                    ApprovalDecisionKind::Denied,
+                    ApprovalDecisionKind::ApprovedForSession,
+                    ApprovalDecisionKind::ApprovedForProject,
+                    ApprovalDecisionKind::DeniedForSession,
+                    ApprovalDecisionKind::DeniedForProject,
+                ]
             && tool_call.id == "exec-bridge"
             && tool_call.name == "tool_call"
-            && question.contains("Permission approval required")
-            && question.contains("Risk: Run tool `exec`")
-            && question.contains("Target: command=\"cargo test\"")
-            && question.contains("Scope: cli:direct")
-            && question.contains("Expires at (unix ms):") => Ok(()),
+            && options.as_slice()
+                == [
+                    "approve",
+                    "deny",
+                    "approve_session",
+                    "approve_project",
+                    "deny_session",
+                    "deny_project",
+                ] => Ok(()),
         other => Err(format!(
             "bridge exec should ask before execution: interrupt={other:?} report={report:?} calls={}",
             calls.load(Ordering::SeqCst)
@@ -784,6 +958,11 @@ fn runtime_executes_proc_exec_after_permission_approval() -> Result<(), Box<dyn 
             mode: PermissionMode::Auto,
             source: Some("test".to_owned()),
             scope_ref: None,
+        },
+        permission_rule_input: PermissionRuleInput {
+            containment: confirmed_containment(),
+            protected_targets: Vec::new(),
+            proc_exec_summary: None,
         },
         permission_interactive: true,
         ..ToolExecutionContext::default()
@@ -861,6 +1040,11 @@ fn runtime_asks_again_for_mismatched_permission_approval_cache() -> Result<(), B
             mode: PermissionMode::Auto,
             source: Some("test".to_owned()),
             scope_ref: None,
+        },
+        permission_rule_input: PermissionRuleInput {
+            containment: confirmed_containment(),
+            protected_targets: Vec::new(),
+            proc_exec_summary: None,
         },
         permission_interactive: true,
         ..ToolExecutionContext::default()
@@ -1033,8 +1217,6 @@ fn bridge_denies_deferred_proc_exec_without_executing_underlying_tool() -> Resul
         || report.interrupt.is_some()
         || message.tool_call_id != "bridge-exec"
         || message.name != "tool_call"
-        || !(message.content.contains("Permission denied")
-            || message.content.contains("Permission approval required"))
         || report
             .permissioned_actions
             .first()
@@ -2186,6 +2368,9 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         permission_interactive: false,
         permission_approval_cache: None,
         permission_session_approval_cache: Vec::new(),
+        permission_session_remembered_rules: Vec::new(),
+        project_permission_store: None,
+        active_workspace: None,
         in_cron_context: false,
         record_channel_delivery: true,
     };
