@@ -1,5 +1,6 @@
 mod diagnostics_release;
 mod projection;
+mod remembered_permissions;
 
 pub use diagnostics_release::{
     build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
@@ -17,4 +18,12 @@ pub use projection::{
     runtime_spec018_local_api_projection, runtime_spec024_channel_projection,
     runtime_spec024_local_api_projection, RuntimeSpec018ProjectionInput, RuntimeSpec024Projection,
     RuntimeSpec024ProjectionInput,
+};
+pub use remembered_permissions::{
+    build_remembered_permission_projection, format_remembered_permission_projection,
+    format_remembered_permission_rule, normalize_remembered_permission_rule_prefix,
+    project_remembered_permission_rule, project_remembered_permission_rule_by_prefix,
+    project_removed_remembered_permission_rule, RememberedPermissionProjection,
+    RememberedPermissionProjectionInput, RememberedPermissionRulePrefixError,
+    RememberedPermissionRuleProjection, RememberedPermissionStoreHealthInput,
 };
