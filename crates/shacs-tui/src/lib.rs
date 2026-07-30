@@ -1,3 +1,7 @@
+mod remembered_permissions;
+
+pub use remembered_permissions::{remembered_permissions_view, RememberedPermissionsView};
+
 use shacs_session::SessionRuntimeWorkflowProjection;
 use shacs_workflow::{WorkflowPattern, WorkflowProjection, WorkflowRunState};
 
