@@ -1599,6 +1599,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shacs-channels",
+ "shacs-projection",
  "shacs-providers",
  "shacs-session",
  "shacs-utils",
@@ -1654,6 +1655,7 @@ dependencies = [
  "shacs-command",
  "shacs-config",
  "shacs-core",
+ "shacs-projection",
  "shacs-providers",
  "shacs-redaction",
  "shacs-session",
@@ -1679,8 +1681,11 @@ dependencies = [
 name = "shacs-config"
 version = "0.1.0"
 dependencies = [
+ "fs2",
+ "libc",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -1758,6 +1763,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "shacs-config",
  "shacs-eval",
  "shacs-redaction",
 ]
@@ -1827,6 +1833,8 @@ name = "shacs-tui"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "shacs-config",
+ "shacs-projection",
  "shacs-session",
  "shacs-workflow",
 ]

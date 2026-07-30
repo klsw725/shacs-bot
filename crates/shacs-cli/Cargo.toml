@@ -10,6 +10,7 @@ shacs-channels = { path = "../shacs-channels" }
 shacs-command = { path = "../shacs-command" }
 shacs-config = { path = "../shacs-config" }
 shacs-core = { path = "../shacs-core" }
+shacs-projection = { path = "../shacs-projection" }
 shacs-providers = { path = "../shacs-providers" }
 shacs-redaction = { path = "../shacs-redaction" }
 shacs-session = { path = "../shacs-session" }

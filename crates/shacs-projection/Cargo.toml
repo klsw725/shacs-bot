@@ -6,6 +6,7 @@ rust-version = "1.75"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+shacs-config = { path = "../shacs-config" }
 shacs-eval = { path = "../shacs-eval" }
 shacs-redaction = { path = "../shacs-redaction" }
 

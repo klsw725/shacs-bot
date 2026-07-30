@@ -6,6 +6,8 @@ rust-version = "1.75"
 
 [dependencies]
 serde_json = "1"
+shacs-config = { path = "../shacs-config" }
+shacs-projection = { path = "../shacs-projection" }
 shacs-session = { path = "../shacs-session" }
 shacs-workflow = { path = "../shacs-workflow" }
 

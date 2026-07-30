@@ -10,6 +10,7 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 shacs-channels = { path = "../shacs-channels" }
+shacs-projection = { path = "../shacs-projection" }
 shacs-providers = { path = "../shacs-providers" }
 shacs-session = { path = "../shacs-session" }
 shacs-utils = { path = "../shacs-utils" }
