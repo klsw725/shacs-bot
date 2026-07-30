@@ -23,7 +23,7 @@
 
 | Spec | Owner scope | Origin specs |
 |---|---|---|
-| `030-policy-permission-redaction-and-containment-model` | formal policy/safety snapshot, capability, approval, redaction, containment | 004, 007, 010, 011, 022, 023 |
+| `030-policy-permission-redaction-and-containment-model` | current distributed permission, approval, redaction, containment, diagnostics, read-only skill baseline, explicit non-guarantees | 004, 005, 007, 010, 011, 022, 023 |
 | `031-ui-projection-diagnostics-and-release-evidence-parity` | shared projection, TUI/REPL/wizard, diagnostics parity, release runner | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
 | `032-app-maker-runtime-and-extension-lifecycle` | app supervisor, process lifecycle, App Maker apply/install, extension provenance | 005, 017, 021, 025 |
 | `033-evaluation-automation-live-integration` | evaluator, automation, self-improvement, replay의 live product integration | 009, 012, 013, 014, 016, 018, 022 |
