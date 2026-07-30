@@ -328,6 +328,9 @@ pub enum PermissionCommandArgs {
     ModeWizard,
     Recent,
     RecentRetry(String),
+    Rules,
+    Inspect(String),
+    Revoke(String),
     Invalid,
 }
 
@@ -429,21 +432,49 @@ fn parse_permission_args(args: &str) -> PermissionCommandArgs {
         return PermissionCommandArgs::ModeWizard;
     }
     if rest.eq_ignore_ascii_case("recent") {
-        PermissionCommandArgs::Recent
-    } else if let Some((first, after_first)) = split_first_token(rest) {
-        if !first.eq_ignore_ascii_case("recent") {
-            return PermissionCommandArgs::Invalid;
+        return PermissionCommandArgs::Recent;
+    }
+    let Some((first, after_first)) = split_first_token(rest) else {
+        return PermissionCommandArgs::Invalid;
+    };
+    match first.to_ascii_lowercase().as_str() {
+        "recent" => parse_permission_recent_args(after_first),
+        "rules" => {
+            if after_first.trim().is_empty() {
+                PermissionCommandArgs::Rules
+            } else {
+                PermissionCommandArgs::Invalid
+            }
         }
-        let Some((second, denial_id)) = split_first_token(after_first) else {
-            return PermissionCommandArgs::Invalid;
-        };
-        if second.eq_ignore_ascii_case("retry") && denial_id.split_whitespace().count() == 1 {
-            PermissionCommandArgs::RecentRetry(denial_id.to_owned())
-        } else {
-            PermissionCommandArgs::Invalid
-        }
+        "inspect" => parse_permission_rule_id_arg(after_first).map_or(
+            PermissionCommandArgs::Invalid,
+            PermissionCommandArgs::Inspect,
+        ),
+        "revoke" => parse_permission_rule_id_arg(after_first).map_or(
+            PermissionCommandArgs::Invalid,
+            PermissionCommandArgs::Revoke,
+        ),
+        _ => PermissionCommandArgs::Invalid,
+    }
+}
+
+fn parse_permission_recent_args(args: &str) -> PermissionCommandArgs {
+    let Some((second, denial_id)) = split_first_token(args) else {
+        return PermissionCommandArgs::Invalid;
+    };
+    if second.eq_ignore_ascii_case("retry") && denial_id.split_whitespace().count() == 1 {
+        PermissionCommandArgs::RecentRetry(denial_id.to_owned())
     } else {
         PermissionCommandArgs::Invalid
+    }
+}
+
+fn parse_permission_rule_id_arg(args: &str) -> Option<String> {
+    let trimmed = args.trim();
+    if trimmed.split_whitespace().count() == 1 {
+        Some(trimmed.to_owned())
+    } else {
+        None
     }
 }
 
@@ -496,6 +527,9 @@ pub fn build_help_text() -> String {
         "/permission — Change permissions.mode for subsequent turns",
         "/permission recent — Show recent auto-mode classifier denials",
         "/permission recent retry <denial_id> — Request one-shot approval for a recent denial while the process-local retry token is available",
+        "/permission rules — Show remembered permission rules for this workspace",
+        "/permission inspect <id-or-prefix> — Show one remembered permission rule",
+        "/permission revoke <id-or-prefix> — Revoke one remembered permission rule",
         "/goal [status|pause|resume|clear|done|blocked <reason>|<text>] — Manage the persistent goal",
         "/history [n] — Show the last N conversation messages (default 10)",
         "/dream — Manually trigger Dream consolidation",
