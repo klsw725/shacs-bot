@@ -1,6 +1,7 @@
+use crate::runtime::permission_pattern::session_approval_reuse_pattern;
 use crate::runtime::tool_execution::permissioned_action_input_from_context;
 use crate::runtime::tool_execution::{
-    session_approval_context_digest, session_approval_context_digest_for_input,
+    session_remembered_context_digest, session_remembered_context_digest_for_input,
 };
 use crate::runtime::{
     apply_context_safety_gate, build_context_provider_handoff, correlate_approval,
@@ -30,11 +31,10 @@ use crate::runtime::{
     PermissionedActionInput, PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus,
     PluginCommandDispatcher, PolicySafetySnapshotRef, ProviderArchiveConsolidator,
     ProviderEventCallback, RecentAutoModeDenial, RecentAutoModeDenialStore,
-    RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError,
-    RecentAutoModeRetryTokenMatch, RecentAutoModeRetryTokenStore, RuntimeContextTools,
-    RuntimeExecutionLedger, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport,
-    RuntimeToolExecutor, RuntimeToolMessage, Session, SessionApprovalCacheEntry,
-    SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
+    RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenMatch,
+    RecentAutoModeRetryTokenStore, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
+    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
+    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
     SessionRememberedPermissionDiagnostic, SessionRememberedPermissionRule,
     SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnLock,
     SubagentExecutionConfig, SubagentOutcomeKind, SubagentRuntime, TokenConsolidationConfig,
@@ -939,6 +939,12 @@ impl<'a> AgentLoop<'a> {
                     if let (true, true, Some(action)) =
                         (session_scoped, approval_is_valid, executed_action)
                     {
+                        store_session_approval_cache_entry(
+                            &mut session,
+                            &session_key,
+                            approval_cache,
+                            &action,
+                        );
                         store_session_remembered_permission_rule(
                             &mut session,
                             &session_key,
@@ -1148,7 +1154,7 @@ impl<'a> AgentLoop<'a> {
         };
         let turn_id = turn_id_for_message(&message, &session);
         let session_context_digest =
-            session_approval_context_digest_for_input(&PermissionedActionInput {
+            session_remembered_context_digest_for_input(&PermissionedActionInput {
                 session_id: session_key.clone(),
                 turn_id: turn_id.clone(),
                 origin: PermissionedActionOrigin::ChannelInbound {
@@ -1195,7 +1201,7 @@ impl<'a> AgentLoop<'a> {
             permission_evaluator: self.config.permission_evaluator.clone(),
             permission_interactive: self.config.permission_interactive,
             permission_approval_cache: None,
-            permission_session_approval_cache: Vec::new(),
+            permission_session_approval_cache: session_approval_cache_entries(&session),
             permission_session_remembered_rules: session_remembered_permission_rules(
                 &mut session,
                 &session_key,
@@ -4366,7 +4372,7 @@ fn store_session_remembered_permission_rule(
         rules: session_remembered_permission_rules(
             session,
             session_key,
-            Some(&session_approval_context_digest(action)),
+            Some(&session_remembered_context_digest(action)),
             now_unix_ms(),
         ),
         diagnostics: Vec::new(),
@@ -4375,7 +4381,7 @@ fn store_session_remembered_permission_rule(
         &mut envelope.rules,
         SessionRememberedPermissionRule {
             session_key: session_key.to_owned(),
-            approval_context_digest: session_approval_context_digest(action),
+            approval_context_digest: session_remembered_context_digest(action),
             effect,
             matcher: matcher.matcher,
             created_unix_ms: now_unix_ms(),
@@ -4383,6 +4389,56 @@ fn store_session_remembered_permission_rule(
         },
     );
     store_session_remembered_permission_envelope(session, &envelope);
+}
+
+fn session_approval_cache_entries(session: &Session) -> Vec<SessionApprovalCacheEntry> {
+    session
+        .metadata
+        .get(SESSION_PERMISSION_APPROVALS_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .map(|entries: Vec<SessionApprovalCacheEntry>| {
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.approval.request.policy_safety_snapshot_ref.is_some()
+                        && entry.approval.decision.policy_safety_snapshot_ref.is_some()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn store_session_approval_cache_entry(
+    session: &mut Session,
+    session_key: &str,
+    approval: ApprovalCacheEntry,
+    action: &PermissionedAction,
+) {
+    let reuse_match = session_approval_reuse_pattern(action)
+        .map(|pattern| SessionApprovalReuseMatch::ExecCommandPattern { pattern })
+        .unwrap_or(SessionApprovalReuseMatch::ExactAction);
+    let entry = SessionApprovalCacheEntry {
+        session_key: session_key.to_owned(),
+        approval_context_digest: session_remembered_context_digest(action),
+        reuse_match,
+        approval,
+    };
+    let mut entries = session_approval_cache_entries(session);
+    entries.retain(|existing| {
+        !(existing.session_key == entry.session_key
+            && existing.approval_context_digest == entry.approval_context_digest
+            && existing.reuse_match == entry.reuse_match)
+    });
+    entries.push(entry);
+    if entries.len() > SESSION_PERMISSION_APPROVAL_LIMIT {
+        entries.drain(0..entries.len() - SESSION_PERMISSION_APPROVAL_LIMIT);
+    }
+    if let Ok(value) = serde_json::to_value(entries) {
+        session
+            .metadata
+            .insert(SESSION_PERMISSION_APPROVALS_KEY.to_owned(), value);
+    }
 }
 
 fn upsert_session_remembered_permission_rule(

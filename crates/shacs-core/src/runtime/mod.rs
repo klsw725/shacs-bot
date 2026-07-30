@@ -327,9 +327,10 @@ pub use subagent::{
     SyntheticSubagentCommand,
 };
 pub use tool_execution::{
-    session_approval_context_digest, RuntimeAssistantToolCallMessage, RuntimeContextTools,
-    RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
-    RuntimeToolMessage, ToolExecutionContext,
+    session_approval_context_digest, session_approval_context_digest_for_input,
+    session_remembered_context_digest, session_remembered_context_digest_for_input,
+    RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
+    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext,
 };
 pub(crate) use tool_search::dispatch_bridge_tool_calls_with_context_resolver;
 pub use tool_search::{

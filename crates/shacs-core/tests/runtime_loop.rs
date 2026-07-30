@@ -6654,9 +6654,12 @@ fn loop_permission_approval_session_option_reuses_same_session_match() -> Result
     let _approved_outbound = bus.consume_outbound().ok_or("missing approved outbound")?;
 
     let reused = loop_runtime.process_direct("again", Some("discord:approval-session"))?;
-    if calls.load(Ordering::SeqCst) != 1 || reused.stop_reason != "ask_user" {
+    if calls.load(Ordering::SeqCst) != 2
+        || reused.final_content.as_deref() != Some("reused session approval")
+        || reused.stop_reason == "ask_user"
+    {
         return Err(format!(
-            "changed current policy safety ref should block session approval reuse: {reused:?} calls={}",
+            "session remembered approval did not reuse matching action: {reused:?} calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());

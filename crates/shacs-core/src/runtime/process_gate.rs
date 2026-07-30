@@ -190,6 +190,8 @@ impl ProcessGate {
             evaluator: input.evaluator.clone(),
             approval: input.approval.clone(),
             inherited_context: input.inherited_context.clone(),
+            remembered_rules: Vec::new(),
+            remembered_store_unavailable: false,
             interactive: input.interactive,
         });
         if input.terminal_precondition != ProcessGateTerminalPrecondition::Ready

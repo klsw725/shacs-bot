@@ -3,8 +3,7 @@ use crate::runtime::permission_pattern::{
 };
 use crate::runtime::permission_remembered::remembered_permission_matcher_matches;
 use crate::runtime::{
-    approval_decision_options,
-    containment_permission_proof_for_process_gate, correlate_approval,
+    approval_decision_options, containment_permission_proof_for_process_gate, correlate_approval,
     correlate_policy_safety_snapshot_ref, decide_permission, evaluate_static_rules,
     normalize_runtime_tool_call, ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError,
     ApprovalDecisionKind, ApprovalRequest, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind,
@@ -12,12 +11,12 @@ use crate::runtime::{
     PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionPolicyDecision,
     PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionPolicyReason,
     PermissionRuleInput, PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
-    ProcExecSummary, ProcessAdapterKind,
-    ProcessContainmentProofCandidate, ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput,
-    ProcessGateInput, ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
-    ProjectPermissionStoreConfig, RecentAutoModeDenial, RecentAutoModeRetryToken,
-    SafetyCapability, SessionApprovalCacheEntry, SessionRememberedPermissionRule,
-    StaticRuleDecision, StaticRuleDecisionKind,
+    ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
+    ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
+    ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
+    ProjectPermissionStoreConfig, RecentAutoModeDenial, RecentAutoModeRetryToken, SafetyCapability,
+    SessionApprovalCacheEntry, SessionRememberedPermissionRule, StaticRuleDecision,
+    StaticRuleDecisionKind,
 };
 use crate::tools::{
     CronTool, MessageTool, SpawnTool, ToolCallExecutionContext, ToolRegistry, ToolResult,
@@ -620,7 +619,7 @@ fn session_remembered_policy_matches(
     let Some(session_key) = context.session_key.as_deref() else {
         return Vec::new();
     };
-    let approval_context_digest = session_approval_context_digest(action);
+    let approval_context_digest = session_remembered_context_digest(action);
     context
         .permission_session_remembered_rules
         .iter()
@@ -815,6 +814,20 @@ pub fn session_approval_context_digest(action: &PermissionedAction) -> String {
 }
 
 pub fn session_approval_context_digest_for_input(input: &PermissionedActionInput) -> String {
+    session_remembered_context_digest_for_input(input)
+}
+
+pub fn session_remembered_context_digest(action: &PermissionedAction) -> String {
+    digest_json(&json!({
+        "permission_mode_snapshot": &action.permission_mode_snapshot,
+        "containment_snapshot": &action.containment_snapshot,
+        "intent_snapshot": &action.intent_snapshot,
+        "session_id": &action.session_id,
+        "origin": stable_session_approval_origin(&action.origin),
+    }))
+}
+
+pub fn session_remembered_context_digest_for_input(input: &PermissionedActionInput) -> String {
     digest_json(&json!({
         "permission_mode_snapshot": &input.permission_mode_snapshot,
         "containment_snapshot": &input.containment_snapshot,
@@ -958,26 +971,22 @@ fn session_approval_cache_correlation(
     if approval.request.requested_scope != action.session_id {
         return None;
     }
-    if entry.approval_context_digest != session_approval_context_digest(action) {
+    if entry.approval_context_digest != session_remembered_context_digest(action) {
         return None;
     }
-    if correlate_policy_safety_snapshot_ref(
+    if let Err(error) = correlate_policy_safety_snapshot_ref(
         approval.request.policy_safety_snapshot_ref.as_ref(),
         approval.decision.policy_safety_snapshot_ref.as_ref(),
         now_unix_ms(),
-    )
-    .is_err()
-    {
-        return None;
+    ) {
+        return Some(ApprovalCorrelation::rejected(error));
     }
-    if correlate_policy_safety_snapshot_ref(
+    if let Err(error) = correlate_policy_safety_snapshot_ref(
         approval.request.policy_safety_snapshot_ref.as_ref(),
         action.policy_safety_snapshot_ref.as_ref(),
         now_unix_ms(),
-    )
-    .is_err()
-    {
-        return None;
+    ) {
+        return Some(ApprovalCorrelation::rejected(error));
     }
     if approval.request.approval_request_id != approval.decision.approval_request_id
         || approval.request.action_digest != approval.decision.action_digest

@@ -39,6 +39,7 @@ pub fn write_config(root: &Path, workspace: &Path) -> Result<PathBuf, Box<dyn st
         "custom".to_owned(),
         ProviderConfig {
             api_key: Some("sk-fake-provider".to_owned()),
+            api_key_ref: None,
             api_base: Some("http://127.0.0.1:1/v1".to_owned()),
             extra_headers: None,
             extra_body: None,

@@ -1,9 +1,9 @@
 use serde_json::{json, Map, Value};
 use shacs_core::runtime::{
-    session_approval_context_digest, AgentLoop, AgentLoopConfig, ApprovalActor, ApprovalCacheEntry,
-    ApprovalDecision, ApprovalDecisionKind, ApprovalRequest, ContextBuilder, MessageBus,
-    PermissionMode, PermissionModeSnapshot, PermissionedActionInput, PermissionedActionOrigin,
-    RuntimeToolCall, SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionManager,
+    session_remembered_context_digest_for_input, AgentLoop, AgentLoopConfig, ApprovalActor,
+    ApprovalCacheEntry, ApprovalDecision, ApprovalDecisionKind, ApprovalRequest, ContextBuilder,
+    MessageBus, PermissionMode, PermissionModeSnapshot, PermissionedActionInput,
+    PermissionedActionOrigin, SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionManager,
 };
 use shacs_core::tools::{JsonMap, SchemaFragment, Tool, ToolParameters, ToolRegistry, ToolResult};
 use shacs_providers::{
@@ -209,6 +209,8 @@ fn legacy_entry(
         risk_summary: "Run tool `exec`".to_owned(),
         allowed_decisions: vec![ApprovalDecisionKind::ApprovedForSession],
         expires_at_unix_ms,
+        policy_safety_snapshot_ref: None,
+        secret_ref_evidence: Vec::new(),
     };
     SessionApprovalCacheEntry {
         session_key: session_key.to_owned(),
@@ -226,6 +228,8 @@ fn legacy_entry(
                 actor: ApprovalActor::LocalUser,
                 decided_at_unix_ms: 1,
                 consumed,
+                policy_safety_snapshot_ref: None,
+                secret_ref_evidence: Vec::new(),
             },
             request,
         },
@@ -233,24 +237,19 @@ fn legacy_entry(
 }
 
 fn legacy_context_digest(session_key: &str) -> String {
-    let action = shacs_core::runtime::normalize_runtime_tool_call(
-        &registry(Arc::new(AtomicUsize::new(0))),
-        &RuntimeToolCall::new("legacy", "exec", json!({ "command": "cargo fmt --check" })),
-        PermissionedActionInput {
-            session_id: session_key.to_owned(),
-            turn_id: format!("turn:{session_key}"),
-            origin: PermissionedActionOrigin::ChannelInbound {
-                channel: "direct".to_owned(),
-                message_id: None,
-            },
-            permission_mode_snapshot: PermissionModeSnapshot {
-                mode: PermissionMode::Auto,
-                source: Some("test".to_owned()),
-                scope_ref: None,
-            },
-            containment_snapshot: None,
-            intent_snapshot: None,
+    session_remembered_context_digest_for_input(&PermissionedActionInput {
+        session_id: session_key.to_owned(),
+        turn_id: format!("turn:{session_key}:1"),
+        origin: PermissionedActionOrigin::ChannelInbound {
+            channel: "direct".to_owned(),
+            message_id: None,
         },
-    );
-    session_approval_context_digest(&action)
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        containment_snapshot: None,
+        intent_snapshot: None,
+    })
 }

@@ -118,6 +118,7 @@ fn process_receipt_with_policy_ref(
             evaluator_ref: None,
             approval_ref: None,
             approval_error: None,
+            remembered_rule_ref: None,
             can_handoff_to_tool_runtime: true,
         },
         terminal_outcome: ProcessTerminalOutcome::Succeeded,
@@ -601,6 +602,11 @@ fn remembered_permission_precedence_audit_and_replay_preserve_remembered_reason(
         recorded_decision: PermissionPolicyDecisionKind::Deny,
         replay_decision: PermissionPolicyDecisionKind::Allow,
         replay_reason: PermissionPolicyReason::RememberedAllow,
+        recorded_policy_safety_snapshot_ref: Some(policy_safety_ref("replay")),
+        replay_policy_safety_snapshot_ref: Some(policy_safety_ref("replay")),
+        process_receipt_policy_safety_snapshot_ref: Some(policy_safety_ref("replay")),
+        replay_dispatch_count: 0,
+        now_unix_ms: 500,
     });
     if looser.violation != Some(PermissionReplayViolation::LooserReplayAllowedRecordedDeny)
         || looser.accepted

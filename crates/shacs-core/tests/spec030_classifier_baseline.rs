@@ -61,6 +61,8 @@ fn policy_input(action: PermissionedAction, rules: StaticRuleDecision) -> Permis
         evaluator: None,
         approval: None,
         inherited_context: None,
+        remembered_rules: Vec::new(),
+        remembered_store_unavailable: false,
         interactive: true,
     }
 }

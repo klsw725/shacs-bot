@@ -113,6 +113,9 @@ fn precedence_for_decision(decision: &PermissionPolicyDecision) -> StaticPolicyP
         | PermissionPolicyReason::ModeBaselineDeny
         | PermissionPolicyReason::EvaluatorAllow
         | PermissionPolicyReason::ApprovalAccepted
+        | PermissionPolicyReason::RememberedAllow
+        | PermissionPolicyReason::RememberedDeny
+        | PermissionPolicyReason::RememberedStoreUnavailable
         | PermissionPolicyReason::LocalUserInteraction => {
             StaticPolicyPrecedence::ClassifierReviewable
         }
@@ -153,6 +156,9 @@ fn success_disposition(decision: &PermissionPolicyDecision) -> ClassifierDisposi
         | PermissionPolicyReason::ModeBaselineDeny
         | PermissionPolicyReason::ApprovalAccepted
         | PermissionPolicyReason::ApprovalRejected
+        | PermissionPolicyReason::RememberedAllow
+        | PermissionPolicyReason::RememberedDeny
+        | PermissionPolicyReason::RememberedStoreUnavailable
         | PermissionPolicyReason::LocalUserInteraction => ClassifierDisposition::AskUser,
     }
 }

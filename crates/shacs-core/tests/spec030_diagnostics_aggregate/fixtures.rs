@@ -71,6 +71,7 @@ pub fn process_receipt(
             evaluator_ref: Some("classifier:evidence".to_owned()),
             approval_ref: None,
             approval_error: None,
+            remembered_rule_ref: None,
             can_handoff_to_tool_runtime: true,
         },
         terminal_outcome: ProcessTerminalOutcome::Succeeded,
