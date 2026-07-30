@@ -21,6 +21,8 @@ pub struct PermissionAuditRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remembered_rule_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub containment_summary: Option<String>,
     pub created_at_unix_ms: u64,
 }
@@ -85,6 +87,7 @@ pub fn build_permission_audit_record(
         decision_reason: decision.reason.clone(),
         evaluator_ref: decision.evaluator_ref.clone(),
         approval_ref: decision.approval_ref.clone(),
+        remembered_rule_ref: decision.remembered_rule_ref.clone(),
         containment_summary: action
             .containment_snapshot
             .as_ref()

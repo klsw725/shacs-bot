@@ -6,6 +6,7 @@ use crate::runtime::{
     PermissionedAction, SafetyCapability,
 };
 use serde::{Deserialize, Serialize};
+use shacs_config::{RememberedPermissionEffect, RememberedPermissionMatcher, WorkspacePathScope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +31,9 @@ pub enum PermissionPolicyReason {
     PromptInjectionSignal,
     ApprovalAccepted,
     ApprovalRejected,
+    RememberedAllow,
+    RememberedDeny,
+    RememberedStoreUnavailable,
     CeilingViolation,
     LocalUserInteraction,
 }
@@ -44,7 +48,18 @@ pub struct PermissionPolicyDecision {
     pub approval_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_error: Option<ApprovalCorrelationError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remembered_rule_ref: Option<String>,
     pub can_handoff_to_tool_runtime: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RememberedPermissionPolicyMatch {
+    pub effect: RememberedPermissionEffect,
+    pub rule_ref: String,
+    pub matcher: RememberedPermissionMatcher,
+    #[serde(default)]
+    pub session_scoped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +72,10 @@ pub struct PermissionPolicyInput {
     pub approval: Option<ApprovalCorrelation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_context: Option<InheritedPermissionContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remembered_rules: Vec<RememberedPermissionPolicyMatch>,
+    #[serde(default)]
+    pub remembered_store_unavailable: bool,
     pub interactive: bool,
 }
 
@@ -118,175 +137,210 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
             return decision(
                 PermissionPolicyDecisionKind::Deny,
                 PermissionPolicyReason::CeilingViolation,
-                None,
-                None,
-                None,
+                DecisionRefs::default(),
             );
         }
     }
 
-    if input.static_rule_decision.kind == StaticRuleDecisionKind::Deny
-        && input.static_rule_decision.reason == StaticRuleReason::NormalizationError
-    {
-        return decision(
-            PermissionPolicyDecisionKind::Deny,
-            PermissionPolicyReason::StaticDeny,
-            None,
-            None,
-            None,
-        );
+    if input.static_rule_decision.kind == StaticRuleDecisionKind::Deny {
+        return static_deny_decision(&input);
     }
 
     if input.action.tool_name == "ask_user" && input.action.capabilities.is_empty() {
         return decision(
             PermissionPolicyDecisionKind::Allow,
             PermissionPolicyReason::LocalUserInteraction,
-            None,
-            None,
-            None,
+            DecisionRefs::default(),
         );
     }
     if input.action.capabilities.is_empty() {
         return decision(
             PermissionPolicyDecisionKind::Deny,
             PermissionPolicyReason::ModeBaselineDeny,
-            None,
-            None,
-            None,
+            DecisionRefs::default(),
         );
     }
 
-    if let Some(approval) = input.approval {
-        if approval.is_approved()
-            && (input.static_rule_decision.kind != StaticRuleDecisionKind::Deny
-                || input.action.permission_mode_snapshot.mode == PermissionMode::Auto)
-        {
+    match input.action.permission_mode_snapshot.mode {
+        PermissionMode::Plan => return decide_plan(&input),
+        PermissionMode::BypassPermissions if input.remembered_store_unavailable => {
+            return ask_or_deny(
+                input.interactive,
+                PermissionPolicyReason::RememberedStoreUnavailable,
+            );
+        }
+        PermissionMode::BypassPermissions => {
             return decision(
                 PermissionPolicyDecisionKind::Allow,
-                PermissionPolicyReason::ApprovalAccepted,
-                None,
-                approval.approval_ref,
-                None,
+                PermissionPolicyReason::ModeBaselineAllow,
+                DecisionRefs::default(),
             );
         }
-        if !approval.is_approved() {
-            let kind = if input.action.permission_mode_snapshot.mode == PermissionMode::Auto
-                && input.interactive
-            {
-                PermissionPolicyDecisionKind::Ask
-            } else {
-                PermissionPolicyDecisionKind::Deny
-            };
-            return decision(
-                kind,
-                PermissionPolicyReason::ApprovalRejected,
-                None,
-                None,
-                approval.error,
-            );
-        }
+        PermissionMode::Default
+        | PermissionMode::AcceptEdits
+        | PermissionMode::Auto
+        | PermissionMode::DontAsk => {}
     }
 
-    if input.static_rule_decision.kind == StaticRuleDecisionKind::Deny {
-        let reason = static_deny_reason(&input.static_rule_decision);
-        if input.action.permission_mode_snapshot.mode == PermissionMode::Auto {
-            return ask_or_deny(input.interactive, reason);
-        }
-        return decision(PermissionPolicyDecisionKind::Deny, reason, None, None, None);
-    }
-
-    if input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired
-        && (input.action.permission_mode_snapshot.mode != PermissionMode::Auto
-            || input.evaluator.is_none()
-            || matches!(
-                input.static_rule_decision.reason,
-                StaticRuleReason::ContainmentUnknown | StaticRuleReason::ProcExecSummaryUnavailable
-            ))
+    if let Some(rule) =
+        strongest_remembered_match(&input.remembered_rules, RememberedPermissionEffect::Deny)
     {
+        return remembered_decision(
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::RememberedDeny,
+            rule,
+        );
+    }
+
+    if input.remembered_store_unavailable {
+        return ask_or_deny(
+            input.interactive,
+            PermissionPolicyReason::RememberedStoreUnavailable,
+        );
+    }
+
+    if static_ask_blocks_approval(&input) {
         return ask_or_deny(input.interactive, PermissionPolicyReason::StaticAskRequired);
     }
 
+    if let Some(approval) = &input.approval {
+        if approval.is_approved() {
+            return decision(
+                PermissionPolicyDecisionKind::Allow,
+                PermissionPolicyReason::ApprovalAccepted,
+                DecisionRefs {
+                    approval_ref: approval.approval_ref.clone(),
+                    ..DecisionRefs::default()
+                },
+            );
+        }
+        if !approval.is_approved() {
+            return decision(
+                if input.interactive {
+                    PermissionPolicyDecisionKind::Ask
+                } else {
+                    PermissionPolicyDecisionKind::Deny
+                },
+                PermissionPolicyReason::ApprovalRejected,
+                DecisionRefs {
+                    approval_error: approval.error,
+                    ..DecisionRefs::default()
+                },
+            );
+        }
+    }
+
+    if input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired {
+        return ask_or_deny(input.interactive, PermissionPolicyReason::StaticAskRequired);
+    }
+
+    if let Some(rule) =
+        strongest_remembered_match(&input.remembered_rules, RememberedPermissionEffect::Allow)
+    {
+        return remembered_decision(
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::RememberedAllow,
+            rule,
+        );
+    }
+
     match input.action.permission_mode_snapshot.mode {
-        PermissionMode::Plan => {
-            if !input.action.capabilities.is_empty()
-                && input
-                    .action
-                    .capabilities
-                    .iter()
-                    .all(|capability| *capability == SafetyCapability::FsRead)
-            {
-                decision(
-                    PermissionPolicyDecisionKind::Allow,
-                    PermissionPolicyReason::ModeBaselineAllow,
-                    None,
-                    None,
-                    None,
-                )
-            } else {
-                decision(
-                    PermissionPolicyDecisionKind::Deny,
-                    PermissionPolicyReason::ModeBaselineDeny,
-                    None,
-                    None,
-                    None,
-                )
-            }
-        }
-        PermissionMode::Default => {
-            if !input.action.capabilities.is_empty()
-                && input
-                    .action
-                    .capabilities
-                    .iter()
-                    .all(|capability| *capability == SafetyCapability::FsRead)
-            {
-                decision(
-                    PermissionPolicyDecisionKind::Allow,
-                    PermissionPolicyReason::ModeBaselineAllow,
-                    None,
-                    None,
-                    None,
-                )
-            } else {
-                ask_or_deny(input.interactive, PermissionPolicyReason::ModeBaselineAsk)
-            }
-        }
-        PermissionMode::AcceptEdits => {
-            if !input.action.capabilities.is_empty()
-                && input.action.capabilities.iter().all(|capability| {
-                    matches!(
-                        capability,
-                        SafetyCapability::FsRead | SafetyCapability::FsWrite
-                    )
-                })
-            {
-                decision(
-                    PermissionPolicyDecisionKind::Allow,
-                    PermissionPolicyReason::ModeBaselineAllow,
-                    None,
-                    None,
-                    None,
-                )
-            } else {
-                ask_or_deny(input.interactive, PermissionPolicyReason::ModeBaselineAsk)
-            }
-        }
+        PermissionMode::Plan => decide_plan(&input),
+        PermissionMode::Default => decide_default(&input),
+        PermissionMode::AcceptEdits => decide_accept_edits(&input),
         PermissionMode::Auto => decide_auto(input.evaluator, input.interactive),
         PermissionMode::DontAsk => decision(
             PermissionPolicyDecisionKind::Deny,
             PermissionPolicyReason::ModeBaselineDeny,
-            None,
-            None,
-            None,
+            DecisionRefs::default(),
         ),
         PermissionMode::BypassPermissions => decision(
             PermissionPolicyDecisionKind::Allow,
             PermissionPolicyReason::ModeBaselineAllow,
-            None,
-            None,
-            None,
+            DecisionRefs::default(),
         ),
     }
+}
+
+fn static_ask_blocks_approval(input: &PermissionPolicyInput) -> bool {
+    !input.interactive
+        && input.static_rule_decision.kind == StaticRuleDecisionKind::AskRequired
+        && matches!(
+            input.static_rule_decision.reason,
+            StaticRuleReason::ProcExecSummaryUnavailable | StaticRuleReason::ContainmentUnknown
+        )
+}
+
+fn decide_plan(input: &PermissionPolicyInput) -> PermissionPolicyDecision {
+    if all_capabilities(input, &[SafetyCapability::FsRead]) {
+        decision(
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::ModeBaselineAllow,
+            DecisionRefs::default(),
+        )
+    } else {
+        decision(
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::ModeBaselineDeny,
+            DecisionRefs::default(),
+        )
+    }
+}
+
+fn decide_default(input: &PermissionPolicyInput) -> PermissionPolicyDecision {
+    if all_capabilities(input, &[SafetyCapability::FsRead]) {
+        decision(
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::ModeBaselineAllow,
+            DecisionRefs::default(),
+        )
+    } else {
+        ask_or_deny(input.interactive, PermissionPolicyReason::ModeBaselineAsk)
+    }
+}
+
+fn decide_accept_edits(input: &PermissionPolicyInput) -> PermissionPolicyDecision {
+    if all_capabilities(
+        input,
+        &[SafetyCapability::FsRead, SafetyCapability::FsWrite],
+    ) {
+        decision(
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::ModeBaselineAllow,
+            DecisionRefs::default(),
+        )
+    } else {
+        ask_or_deny(input.interactive, PermissionPolicyReason::ModeBaselineAsk)
+    }
+}
+
+fn all_capabilities(input: &PermissionPolicyInput, allowed: &[SafetyCapability]) -> bool {
+    !input.action.capabilities.is_empty()
+        && input
+            .action
+            .capabilities
+            .iter()
+            .all(|capability| allowed.contains(capability))
+}
+
+fn static_deny_decision(input: &PermissionPolicyInput) -> PermissionPolicyDecision {
+    let reason = static_deny_reason(&input.static_rule_decision);
+    if input.action.permission_mode_snapshot.mode == PermissionMode::Auto
+        && input.interactive
+        && input.approval.is_none()
+        && input.static_rule_decision.reason == StaticRuleReason::ProtectedTarget
+    {
+        return decision(
+            PermissionPolicyDecisionKind::Ask,
+            reason,
+            DecisionRefs::default(),
+        );
+    }
+    decision(
+        PermissionPolicyDecisionKind::Deny,
+        reason,
+        DecisionRefs::default(),
+    )
 }
 
 fn static_deny_reason(decision: &StaticRuleDecision) -> PermissionPolicyReason {
@@ -294,7 +348,14 @@ fn static_deny_reason(decision: &StaticRuleDecision) -> PermissionPolicyReason {
         StaticRuleReason::ProtectedTarget | StaticRuleReason::RawAuthExport => {
             PermissionPolicyReason::ProtectedTarget
         }
-        _ => PermissionPolicyReason::StaticDeny,
+        StaticRuleReason::NormalizationError
+        | StaticRuleReason::UnknownTargetClassification
+        | StaticRuleReason::SecretRead
+        | StaticRuleReason::ProcExecSummaryUnavailable
+        | StaticRuleReason::DangerousProcExec
+        | StaticRuleReason::ContainmentUnknown
+        | StaticRuleReason::BypassContainmentNotConfirmed
+        | StaticRuleReason::NoStaticMatch => PermissionPolicyReason::StaticDeny,
     }
 }
 
@@ -320,9 +381,10 @@ fn decide_auto(
         return decision(
             PermissionPolicyDecisionKind::Allow,
             PermissionPolicyReason::EvaluatorAllow,
-            evaluator_ref,
-            None,
-            None,
+            DecisionRefs {
+                evaluator_ref,
+                ..DecisionRefs::default()
+            },
         );
     }
     if evaluator.verdict == AutoEvaluatorVerdictKind::DenyCandidate {
@@ -341,9 +403,17 @@ fn decide_auto(
 
 fn ask_or_deny(interactive: bool, reason: PermissionPolicyReason) -> PermissionPolicyDecision {
     if interactive {
-        decision(PermissionPolicyDecisionKind::Ask, reason, None, None, None)
+        decision(
+            PermissionPolicyDecisionKind::Ask,
+            reason,
+            DecisionRefs::default(),
+        )
     } else {
-        decision(PermissionPolicyDecisionKind::Deny, reason, None, None, None)
+        decision(
+            PermissionPolicyDecisionKind::Deny,
+            reason,
+            DecisionRefs::default(),
+        )
     }
 }
 
@@ -356,34 +426,83 @@ fn ask_or_deny_with_evaluator(
         decision(
             PermissionPolicyDecisionKind::Ask,
             reason,
-            evaluator_ref,
-            None,
-            None,
+            DecisionRefs {
+                evaluator_ref,
+                ..DecisionRefs::default()
+            },
         )
     } else {
         decision(
             PermissionPolicyDecisionKind::Deny,
             reason,
-            evaluator_ref,
-            None,
-            None,
+            DecisionRefs {
+                evaluator_ref,
+                ..DecisionRefs::default()
+            },
         )
     }
+}
+
+fn strongest_remembered_match(
+    rules: &[RememberedPermissionPolicyMatch],
+    effect: RememberedPermissionEffect,
+) -> Option<&RememberedPermissionPolicyMatch> {
+    rules
+        .iter()
+        .filter(|rule| rule.effect == effect)
+        .max_by_key(|rule| matcher_specificity(&rule.matcher))
+}
+
+fn matcher_specificity(matcher: &RememberedPermissionMatcher) -> u8 {
+    match matcher {
+        RememberedPermissionMatcher::ExactAction { .. } => 50,
+        RememberedPermissionMatcher::WorkspacePath { scope, .. } => match scope {
+            WorkspacePathScope::Exact => 40,
+            WorkspacePathScope::Subtree => 30,
+        },
+        RememberedPermissionMatcher::WebOrigin { .. }
+        | RememberedPermissionMatcher::McpTool { .. } => 20,
+        RememberedPermissionMatcher::ExecPrefix { tokens } => {
+            10_u8.saturating_add(tokens.len().try_into().unwrap_or(u8::MAX))
+        }
+    }
+}
+
+fn remembered_decision(
+    kind: PermissionPolicyDecisionKind,
+    reason: PermissionPolicyReason,
+    rule: &RememberedPermissionPolicyMatch,
+) -> PermissionPolicyDecision {
+    decision(
+        kind,
+        reason,
+        DecisionRefs {
+            remembered_rule_ref: Some(rule.rule_ref.clone()),
+            ..DecisionRefs::default()
+        },
+    )
+}
+
+#[derive(Default)]
+struct DecisionRefs {
+    evaluator_ref: Option<String>,
+    approval_ref: Option<String>,
+    approval_error: Option<ApprovalCorrelationError>,
+    remembered_rule_ref: Option<String>,
 }
 
 fn decision(
     kind: PermissionPolicyDecisionKind,
     reason: PermissionPolicyReason,
-    evaluator_ref: Option<String>,
-    approval_ref: Option<String>,
-    approval_error: Option<ApprovalCorrelationError>,
+    refs: DecisionRefs,
 ) -> PermissionPolicyDecision {
     PermissionPolicyDecision {
         kind,
         reason,
-        evaluator_ref,
-        approval_ref,
-        approval_error,
+        evaluator_ref: refs.evaluator_ref,
+        approval_ref: refs.approval_ref,
+        approval_error: refs.approval_error,
+        remembered_rule_ref: refs.remembered_rule_ref,
         can_handoff_to_tool_runtime: kind == PermissionPolicyDecisionKind::Allow,
     }
 }

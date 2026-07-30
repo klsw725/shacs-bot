@@ -97,6 +97,12 @@ pub struct ProcExecSummary {
     pub summary_available: bool,
 }
 
+impl ProcExecSummary {
+    pub fn requires_containment(&self) -> bool {
+        !matches!(self.command_family.as_str(), "pwd" | "cargo fmt")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtectedTargetClass {
@@ -314,7 +320,7 @@ pub fn evaluate_static_rules(
                 diagnostics,
             );
         }
-        if !input.containment.confirmed_non_privileged() {
+        if summary.requires_containment() && !input.containment.confirmed_non_privileged() {
             diagnostics
                 .matched_rules
                 .push("containment_unknown".to_owned());
@@ -405,17 +411,19 @@ fn classify_target_value(
     if normalized == "/" || normalized == "/home" || normalized == "/workspace" {
         return Some(ProtectedTargetClass::HostMountRoot);
     }
-    if configured_targets
-        .iter()
-        .any(|configured| target_matches(&normalized, configured))
-    {
-        return Some(ProtectedTargetClass::CustomProtectedTarget);
+    for configured in configured_targets {
+        let configured = normalize_target_path(configured);
+        if target_matches_normalized(&normalized, &configured) {
+            if configured.ends_with("permissions.json") {
+                return Some(ProtectedTargetClass::AuthStore);
+            }
+            return Some(ProtectedTargetClass::CustomProtectedTarget);
+        }
     }
     None
 }
 
-fn target_matches(normalized: &str, configured: &str) -> bool {
-    let configured = normalize_target_path(configured);
+fn target_matches_normalized(normalized: &str, configured: &str) -> bool {
     if configured.is_empty() {
         return false;
     }

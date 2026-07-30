@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use shacs_config::{RememberedPermissionEffect, RememberedPermissionMatcher};
 use shacs_core::runtime::{
     app_declaration_grants_permission, build_permission_audit_record,
     build_permission_diagnostics_summary, correlate_approval, decide_permission,
@@ -109,8 +110,434 @@ fn policy_input(
         evaluator: None,
         approval: None,
         inherited_context: None,
+        remembered_rules: Vec::new(),
+        remembered_store_unavailable: false,
         interactive: true,
     }
+}
+
+fn remembered_match(
+    effect: RememberedPermissionEffect,
+    rule_ref: &str,
+    matcher: RememberedPermissionMatcher,
+) -> shacs_core::runtime::RememberedPermissionPolicyMatch {
+    shacs_core::runtime::RememberedPermissionPolicyMatch {
+        effect,
+        rule_ref: rule_ref.to_owned(),
+        matcher,
+        session_scoped: false,
+    }
+}
+
+fn exact_matcher(digest: &str) -> RememberedPermissionMatcher {
+    RememberedPermissionMatcher::ExactAction {
+        action_digest: digest.to_owned(),
+    }
+}
+
+fn exec_prefix_matcher(tokens: &[&str]) -> RememberedPermissionMatcher {
+    RememberedPermissionMatcher::ExecPrefix {
+        tokens: tokens.iter().map(|token| (*token).to_owned()).collect(),
+    }
+}
+
+fn assert_remembered_decision(
+    input: PermissionPolicyInput,
+    expected_kind: PermissionPolicyDecisionKind,
+    expected_reason: PermissionPolicyReason,
+    expected_rule_ref: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let decision = decide_permission(input);
+    if decision.kind != expected_kind
+        || decision.reason != expected_reason
+        || decision.remembered_rule_ref.as_deref() != expected_rule_ref
+        || decision.can_handoff_to_tool_runtime
+            != (expected_kind == PermissionPolicyDecisionKind::Allow)
+    {
+        return Err(format!(
+            "remembered precedence drifted: expected={expected_kind:?}/{expected_reason:?}/{expected_rule_ref:?} decision={decision:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn remembered_permission_precedence_static_safety_dominates_rules() -> Result<(), Box<dyn Error>> {
+    let cases = [
+        (
+            action(
+                PermissionMode::Default,
+                "write_file",
+                vec![SafetyCapability::FsWrite],
+                vec![target(json!(".git/config"))],
+            ),
+            PermissionRuleInput::default(),
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::ProtectedTarget,
+        ),
+        (
+            action(
+                PermissionMode::Default,
+                "read_secret",
+                vec![SafetyCapability::SecretRead],
+                Vec::new(),
+            ),
+            PermissionRuleInput::default(),
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::StaticDeny,
+        ),
+        (
+            action(
+                PermissionMode::Auto,
+                "exec",
+                vec![SafetyCapability::ProcExec],
+                vec![target(json!("python3 - <<'PY'"))],
+            ),
+            PermissionRuleInput {
+                containment: safe_containment(),
+                protected_targets: Vec::new(),
+                proc_exec_summary: None,
+            },
+            PermissionPolicyDecisionKind::Ask,
+            PermissionPolicyReason::StaticAskRequired,
+        ),
+        (
+            action(
+                PermissionMode::Auto,
+                "exec",
+                vec![SafetyCapability::ProcExec],
+                vec![target(json!("cargo test"))],
+            ),
+            PermissionRuleInput {
+                containment: DockerContainmentSnapshot::unknown(),
+                protected_targets: Vec::new(),
+                proc_exec_summary: Some(proc_summary()),
+            },
+            PermissionPolicyDecisionKind::Ask,
+            PermissionPolicyReason::StaticAskRequired,
+        ),
+        (
+            action(
+                PermissionMode::Auto,
+                "exec",
+                vec![SafetyCapability::ProcExec],
+                vec![target(json!("rm -rf /workspace"))],
+            ),
+            PermissionRuleInput {
+                containment: safe_containment(),
+                protected_targets: Vec::new(),
+                proc_exec_summary: Some(ProcExecSummary {
+                    command_family: "rm".to_owned(),
+                    target_refs: vec!["workspace".to_owned()],
+                    destructive: true,
+                    network: false,
+                    secret_exposure: false,
+                    summary_available: true,
+                }),
+            },
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::StaticDeny,
+        ),
+    ];
+
+    for (candidate, rule_input, expected_kind, expected_reason) in cases {
+        let rules = evaluate_static_rules(&candidate, &rule_input);
+        let mut input = policy_input(candidate, rules);
+        input.remembered_rules = vec![remembered_match(
+            RememberedPermissionEffect::Allow,
+            "allow-rule",
+            exact_matcher("action-digest"),
+        )];
+        input.evaluator = Some(evaluator(
+            AutoEvaluatorVerdictKind::AllowCandidate,
+            EvaluatorConfidence::High,
+        ));
+
+        assert_remembered_decision(input, expected_kind, expected_reason, None)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn remembered_permission_precedence_inherited_ceiling_dominates_allow() -> Result<(), Box<dyn Error>>
+{
+    let candidate = action(
+        PermissionMode::Auto,
+        "write_file",
+        vec![SafetyCapability::FsWrite],
+        vec![target(json!("src/lib.rs"))],
+    );
+    let rules = evaluate_static_rules(&candidate, &PermissionRuleInput::default());
+    let mut input = policy_input(candidate, rules);
+    input.inherited_context = Some(InheritedPermissionContext {
+        ceiling: PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::Default,
+            capability_ceiling: vec![SafetyCapability::FsRead],
+            approved_scope_refs: Vec::new(),
+            origin: RuntimeBoundaryOrigin::Subagent {
+                subagent_id: Some("child-1".to_owned()),
+            },
+        },
+        requested_mode: PermissionMode::Auto,
+        requested_capabilities: vec![SafetyCapability::FsWrite],
+        per_action_evaluation_required: true,
+    });
+    input.remembered_rules = vec![remembered_match(
+        RememberedPermissionEffect::Allow,
+        "allow-rule",
+        exact_matcher("action-digest"),
+    )];
+
+    assert_remembered_decision(
+        input,
+        PermissionPolicyDecisionKind::Deny,
+        PermissionPolicyReason::CeilingViolation,
+        None,
+    )
+}
+
+#[test]
+fn remembered_permission_precedence_project_allow_runs_before_auto_without_evaluator(
+) -> Result<(), Box<dyn Error>> {
+    let candidate = action(
+        PermissionMode::Auto,
+        "write_file",
+        vec![SafetyCapability::FsWrite],
+        vec![target(json!("src/lib.rs"))],
+    );
+    let rules = evaluate_static_rules(&candidate, &PermissionRuleInput::default());
+    let mut input = policy_input(candidate, rules);
+    input.evaluator = None;
+    input.remembered_rules = vec![remembered_match(
+        RememberedPermissionEffect::Allow,
+        "project-allow-rule",
+        exact_matcher("action-digest"),
+    )];
+
+    assert_remembered_decision(
+        input,
+        PermissionPolicyDecisionKind::Allow,
+        PermissionPolicyReason::RememberedAllow,
+        Some("project-allow-rule"),
+    )
+}
+
+#[test]
+fn remembered_permission_precedence_deny_wins_before_once_approval_allow_and_auto(
+) -> Result<(), Box<dyn Error>> {
+    let candidate = action(
+        PermissionMode::Auto,
+        "write_file",
+        vec![SafetyCapability::FsWrite],
+        vec![target(json!("src/lib.rs"))],
+    );
+    let rules = evaluate_static_rules(&candidate, &PermissionRuleInput::default());
+    let mut input = policy_input(candidate, rules);
+    input.approval = Some(ApprovalCorrelation::approved("approval-1".to_owned()));
+    input.evaluator = Some(evaluator(
+        AutoEvaluatorVerdictKind::AllowCandidate,
+        EvaluatorConfidence::High,
+    ));
+    input.remembered_rules = vec![
+        remembered_match(
+            RememberedPermissionEffect::Allow,
+            "allow-specific",
+            exact_matcher("action-digest"),
+        ),
+        remembered_match(
+            RememberedPermissionEffect::Deny,
+            "deny-broader",
+            exec_prefix_matcher(&["cargo"]),
+        ),
+    ];
+
+    assert_remembered_decision(
+        input,
+        PermissionPolicyDecisionKind::Deny,
+        PermissionPolicyReason::RememberedDeny,
+        Some("deny-broader"),
+    )
+}
+
+#[test]
+fn remembered_permission_precedence_allow_runs_before_auto_and_dontask_baseline(
+) -> Result<(), Box<dyn Error>> {
+    for mode in [PermissionMode::Auto, PermissionMode::DontAsk] {
+        let candidate = action(
+            mode,
+            "write_file",
+            vec![SafetyCapability::FsWrite],
+            vec![target(json!("src/lib.rs"))],
+        );
+        let rules = evaluate_static_rules(&candidate, &PermissionRuleInput::default());
+        let mut input = policy_input(candidate, rules);
+        input.evaluator = Some(evaluator(
+            AutoEvaluatorVerdictKind::DenyCandidate,
+            EvaluatorConfidence::High,
+        ));
+        input.remembered_rules = vec![remembered_match(
+            RememberedPermissionEffect::Allow,
+            "allow-rule",
+            exact_matcher("action-digest"),
+        )];
+
+        assert_remembered_decision(
+            input,
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::RememberedAllow,
+            Some("allow-rule"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn remembered_permission_precedence_store_unavailable_fails_closed_before_baseline(
+) -> Result<(), Box<dyn Error>> {
+    for (interactive, expected_kind) in [
+        (true, PermissionPolicyDecisionKind::Ask),
+        (false, PermissionPolicyDecisionKind::Deny),
+    ] {
+        let candidate = action(
+            PermissionMode::BypassPermissions,
+            "write_file",
+            vec![SafetyCapability::FsWrite],
+            vec![target(json!("src/lib.rs"))],
+        );
+        let rules = evaluate_static_rules(
+            &candidate,
+            &PermissionRuleInput {
+                containment: safe_containment(),
+                protected_targets: Vec::new(),
+                proc_exec_summary: None,
+            },
+        );
+        let mut input = policy_input(candidate, rules);
+        input.interactive = interactive;
+        input.remembered_store_unavailable = true;
+
+        assert_remembered_decision(
+            input,
+            expected_kind,
+            PermissionPolicyReason::RememberedStoreUnavailable,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn remembered_permission_precedence_audit_and_replay_preserve_remembered_reason(
+) -> Result<(), Box<dyn Error>> {
+    let candidate = action(
+        PermissionMode::Auto,
+        "write_file",
+        vec![SafetyCapability::FsWrite],
+        vec![target(json!("src/lib.rs"))],
+    );
+    let rules = evaluate_static_rules(&candidate, &PermissionRuleInput::default());
+    let mut input = policy_input(candidate.clone(), rules);
+    input.remembered_rules = vec![remembered_match(
+        RememberedPermissionEffect::Deny,
+        "deny-rule",
+        exact_matcher("action-digest"),
+    )];
+    let decision = decide_permission(input);
+    let audit = build_permission_audit_record(&candidate, &decision, 123);
+
+    if audit.decision_reason != PermissionPolicyReason::RememberedDeny
+        || audit.remembered_rule_ref.as_deref() != Some("deny-rule")
+    {
+        return Err(format!("remembered audit evidence drifted: {audit:?}").into());
+    }
+
+    let looser = evaluate_permission_replay(&PermissionReplayInput {
+        recorded_snapshot_digest: "snapshot-old".to_owned(),
+        replay_snapshot_digest: "snapshot-new".to_owned(),
+        recorded_rule_version: "remembered-rules-old".to_owned(),
+        replay_rule_version: "remembered-rules-new".to_owned(),
+        recorded_decision: PermissionPolicyDecisionKind::Deny,
+        replay_decision: PermissionPolicyDecisionKind::Allow,
+        replay_reason: PermissionPolicyReason::RememberedAllow,
+    });
+    if looser.violation != Some(PermissionReplayViolation::LooserReplayAllowedRecordedDeny)
+        || looser.accepted
+    {
+        return Err(format!("remembered replay allowed stale deny loosening: {looser:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn remembered_permission_precedence_plan_and_bypass_explicit_baselines_remain_hard(
+) -> Result<(), Box<dyn Error>> {
+    let plan = action(
+        PermissionMode::Plan,
+        "write_file",
+        vec![SafetyCapability::FsWrite],
+        vec![target(json!("src/lib.rs"))],
+    );
+    let plan_rules = evaluate_static_rules(&plan, &PermissionRuleInput::default());
+    let mut plan_input = policy_input(plan, plan_rules);
+    plan_input.remembered_rules = vec![remembered_match(
+        RememberedPermissionEffect::Allow,
+        "allow-rule",
+        exact_matcher("action-digest"),
+    )];
+    assert_remembered_decision(
+        plan_input,
+        PermissionPolicyDecisionKind::Deny,
+        PermissionPolicyReason::ModeBaselineDeny,
+        None,
+    )?;
+
+    let plan_read = action(
+        PermissionMode::Plan,
+        "read_file",
+        vec![SafetyCapability::FsRead],
+        vec![target(json!("src/lib.rs"))],
+    );
+    let plan_read_rules = evaluate_static_rules(&plan_read, &PermissionRuleInput::default());
+    let mut plan_read_input = policy_input(plan_read, plan_read_rules);
+    plan_read_input.remembered_rules = vec![remembered_match(
+        RememberedPermissionEffect::Deny,
+        "deny-rule",
+        exact_matcher("action-digest"),
+    )];
+    assert_remembered_decision(
+        plan_read_input,
+        PermissionPolicyDecisionKind::Allow,
+        PermissionPolicyReason::ModeBaselineAllow,
+        None,
+    )?;
+
+    let bypass = action(
+        PermissionMode::BypassPermissions,
+        "write_file",
+        vec![SafetyCapability::FsWrite],
+        vec![target(json!("src/lib.rs"))],
+    );
+    let bypass_rules = evaluate_static_rules(
+        &bypass,
+        &PermissionRuleInput {
+            containment: safe_containment(),
+            protected_targets: Vec::new(),
+            proc_exec_summary: None,
+        },
+    );
+    let mut bypass_input = policy_input(bypass, bypass_rules);
+    bypass_input.remembered_rules = vec![remembered_match(
+        RememberedPermissionEffect::Deny,
+        "deny-rule",
+        exact_matcher("action-digest"),
+    )];
+    assert_remembered_decision(
+        bypass_input,
+        PermissionPolicyDecisionKind::Allow,
+        PermissionPolicyReason::ModeBaselineAllow,
+        None,
+    )
 }
 
 #[test]
@@ -146,15 +573,16 @@ fn auto_mode_asks_before_protected_target_action() -> Result<(), Box<dyn Error>>
         || decision.reason != PermissionPolicyReason::ProtectedTarget
         || decision.can_handoff_to_tool_runtime
     {
-        return Err(
-            format!("protected target did not ask the user: {rules:?} {decision:?}").into(),
-        );
+        return Err(format!(
+            "protected target did not ask before auto policy: {rules:?} {decision:?}"
+        )
+        .into());
     }
     Ok(())
 }
 
 #[test]
-fn auto_mode_user_approval_allows_protected_target_action() -> Result<(), Box<dyn Error>> {
+fn auto_mode_user_approval_cannot_allow_protected_target_action() -> Result<(), Box<dyn Error>> {
     let protected = action(
         PermissionMode::Auto,
         "write_file",
@@ -168,15 +596,12 @@ fn auto_mode_user_approval_allows_protected_target_action() -> Result<(), Box<dy
     let decision = decide_permission(input);
 
     if rules.kind != StaticRuleDecisionKind::Deny
-        || decision.kind != PermissionPolicyDecisionKind::Allow
-        || decision.reason != PermissionPolicyReason::ApprovalAccepted
-        || decision.approval_ref.as_deref() != Some("approval-1")
-        || !decision.can_handoff_to_tool_runtime
+        || rules.reason != StaticRuleReason::ProtectedTarget
+        || decision.kind != PermissionPolicyDecisionKind::Deny
+        || decision.reason != PermissionPolicyReason::ProtectedTarget
+        || decision.can_handoff_to_tool_runtime
     {
-        return Err(format!(
-            "approved protected target action was not allowed: {rules:?} {decision:?}"
-        )
-        .into());
+        return Err(format!("approval bypassed protected target: {rules:?} {decision:?}").into());
     }
     Ok(())
 }
@@ -242,11 +667,11 @@ fn auto_mode_asks_for_every_ready_static_deny() -> Result<(), Box<dyn Error>> {
         let decision = decide_permission(policy_input(candidate, rules.clone()));
         if rules.kind != StaticRuleDecisionKind::Deny
             || rules.reason != expected_reason
-            || decision.kind != PermissionPolicyDecisionKind::Ask
+            || decision.kind != PermissionPolicyDecisionKind::Deny
             || decision.can_handoff_to_tool_runtime
         {
             return Err(format!(
-                "auto static deny did not ask: expected={expected_reason:?} rules={rules:?} decision={decision:?}"
+                "auto static deny did not fail closed: expected={expected_reason:?} rules={rules:?} decision={decision:?}"
             )
             .into());
         }
@@ -630,36 +1055,51 @@ fn approval_correlation_rejects_mismatched_expired_inspect_only_and_consumed(
 }
 
 #[test]
-fn approved_correlation_allows_static_ask_required_proc_exec() -> Result<(), Box<dyn Error>> {
-    let exec = action(
-        PermissionMode::Auto,
-        "exec",
-        vec![SafetyCapability::ProcExec],
-        vec![target(json!("cargo test"))],
-    );
-    let rules = evaluate_static_rules(
-        &exec,
-        &PermissionRuleInput {
-            containment: safe_containment(),
-            protected_targets: Vec::new(),
-            proc_exec_summary: None,
-        },
-    );
-    let mut input = policy_input(exec, rules.clone());
-    input.interactive = false;
-    input.approval = Some(ApprovalCorrelation::approved("approval-1".to_owned()));
-    let decision = decide_permission(input);
+fn approved_correlation_cannot_allow_static_ask_required_proc_exec() -> Result<(), Box<dyn Error>> {
+    let cases = [
+        (
+            PermissionRuleInput {
+                containment: safe_containment(),
+                protected_targets: Vec::new(),
+                proc_exec_summary: None,
+            },
+            StaticRuleReason::ProcExecSummaryUnavailable,
+        ),
+        (
+            PermissionRuleInput {
+                containment: DockerContainmentSnapshot::unknown(),
+                protected_targets: Vec::new(),
+                proc_exec_summary: Some(proc_summary()),
+            },
+            StaticRuleReason::ContainmentUnknown,
+        ),
+    ];
 
-    if rules.kind != StaticRuleDecisionKind::AskRequired
-        || decision.kind != PermissionPolicyDecisionKind::Allow
-        || decision.reason != PermissionPolicyReason::ApprovalAccepted
-        || decision.approval_ref.as_deref() != Some("approval-1")
-        || !decision.can_handoff_to_tool_runtime
-    {
-        return Err(format!(
-            "approved ask-required proc_exec was not allowed: {rules:?} {decision:?}"
-        )
-        .into());
+    for (rule_input, expected_reason) in cases {
+        let exec = action(
+            PermissionMode::Auto,
+            "exec",
+            vec![SafetyCapability::ProcExec],
+            vec![target(json!("cargo test"))],
+        );
+        let rules = evaluate_static_rules(&exec, &rule_input);
+        let mut input = policy_input(exec, rules.clone());
+        input.interactive = false;
+        input.approval = Some(ApprovalCorrelation::approved("approval-1".to_owned()));
+        let decision = decide_permission(input);
+
+        if rules.kind != StaticRuleDecisionKind::AskRequired
+            || rules.reason != expected_reason
+            || decision.kind != PermissionPolicyDecisionKind::Deny
+            || decision.reason != PermissionPolicyReason::StaticAskRequired
+            || decision.approval_ref.is_some()
+            || decision.can_handoff_to_tool_runtime
+        {
+            return Err(format!(
+                "approval bypassed ask-required proc_exec: expected={expected_reason:?} rules={rules:?} decision={decision:?}"
+            )
+            .into());
+        }
     }
     Ok(())
 }
