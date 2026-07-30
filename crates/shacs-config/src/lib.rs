@@ -11,11 +11,18 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod permissions;
+mod remembered_permissions;
 
 pub use permissions::{
     AutoApprovalConfig, PermissionActivationContext, PermissionConfigDiagnostics,
     PermissionConfigSnapshot, PermissionMode, PermissionModeSource, PermissionsConfig,
     SafetyCapability,
+};
+pub use remembered_permissions::{
+    RememberedPermissionEffect, RememberedPermissionFileStore, RememberedPermissionMatcher,
+    RememberedPermissionRemoveByPrefixOutcome, RememberedPermissionRule,
+    RememberedPermissionRuleId, RememberedPermissionStore, RememberedPermissionStoreError,
+    RememberedPermissionStoreErrorKind, WorkspacePathScope, WorkspacePermissionId,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -663,6 +670,17 @@ pub struct ConfigContext {
 impl ConfigContext {
     pub fn auth_path(&self) -> PathBuf {
         self.data_dir.join("auth.json")
+    }
+
+    pub fn remembered_permissions_path(&self) -> PathBuf {
+        self.data_dir.join("permissions.json")
+    }
+
+    pub fn workspace_permission_id(&self) -> std::io::Result<WorkspacePermissionId> {
+        let canonical_workspace = self.workspace.canonicalize()?;
+        Ok(WorkspacePermissionId::from_canonical_workspace_path(
+            canonical_workspace.to_string_lossy().as_ref(),
+        ))
     }
 
     pub fn runtime_subdir(&self, name: &str) -> PathBuf {
