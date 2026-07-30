@@ -9,6 +9,7 @@ use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use shacs_channels::WebSocketServerEvent;
+use shacs_projection::RememberedPermissionProjection;
 use shacs_providers::{GenerationSettings, LlmResponse, ProviderEvent, ProviderRequest};
 use shacs_session::{
     SessionManager, SessionProjectionOptions, SessionRuntimeExecutionProjection,
@@ -38,6 +39,7 @@ pub const MODELS_PATH: &str = "/v1/models";
 pub const SESSIONS_PATH: &str = "/v1/sessions";
 pub const DIAGNOSTICS_PATH: &str = "/v1/diagnostics";
 pub const WORKFLOW_RECIPES_PATH: &str = "/v1/workflows/recipes";
+pub const PERMISSIONS_PATH: &str = "/v1/permissions";
 pub const HEALTH_PATH: &str = "/health";
 pub const WEBSOCKET_PATH: &str = "/ws";
 pub const JSON_CONTENT_TYPE: &str = "application/json";
@@ -281,6 +283,10 @@ pub trait ChatCompletionAdapter {
         None
     }
 
+    fn remembered_permissions_projection(&self) -> Option<RememberedPermissionProjection> {
+        None
+    }
+
     fn process_websocket_frame(
         &self,
         _frame: Value,
@@ -363,6 +369,7 @@ pub fn api_router_with_timeout_and_websocket_path(
         .route(MODELS_PATH, any(axum_dispatch))
         .route(DIAGNOSTICS_PATH, any(axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(axum_dispatch))
+        .route(PERMISSIONS_PATH, any(axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(axum_dispatch))
         .route(websocket_path, any(websocket_upgrade_axum))
         .fallback(axum_dispatch)
@@ -401,6 +408,7 @@ pub fn web_ui_router_with_timeout_and_websocket_path(
         .route(MODELS_PATH, any(webui_axum_dispatch))
         .route(DIAGNOSTICS_PATH, any(webui_axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(webui_axum_dispatch))
+        .route(PERMISSIONS_PATH, any(webui_axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(webui_axum_dispatch))
         .route(websocket_path, any(webui_websocket_upgrade_axum))
         .fallback(webui_static_or_api_fallback)
@@ -693,6 +701,12 @@ pub fn handle_api_request(
                 "workflow recipe projection is not configured",
             )),
         },
+        (ApiMethod::Get, PERMISSIONS_PATH) => match adapter.remembered_permissions_projection() {
+            Some(projection) => json_response(200, json!(projection)),
+            None => error_response(ApiError::not_found(
+                "remembered permission projection is not configured",
+            )),
+        },
         (ApiMethod::Get, path) if path == SESSIONS_PATH || path.starts_with("/v1/sessions/") => {
             handle_session_query_request(path, adapter)
         }
@@ -703,6 +717,7 @@ pub fn handle_api_request(
         | (_, MODELS_PATH)
         | (_, DIAGNOSTICS_PATH)
         | (_, WORKFLOW_RECIPES_PATH)
+        | (_, PERMISSIONS_PATH)
         | (_, CHAT_COMPLETIONS_PATH)
         | (_, SESSIONS_PATH) => error_response(ApiError::method_not_allowed(
             "method is not supported for this endpoint",
@@ -1974,6 +1989,7 @@ mod tests {
     use axum::body::Body;
     use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
+    use shacs_projection::RememberedPermissionProjection;
     use shacs_providers::types::{text_response, usage};
     use shacs_session::{Session, SessionManager};
     use std::error::Error;
@@ -1997,6 +2013,7 @@ mod tests {
         websocket_frames: Mutex<Vec<Value>>,
         session_workspace: Option<PathBuf>,
         workflow_recipes_projection: Option<Value>,
+        remembered_permissions_projection: Option<RememberedPermissionProjection>,
     }
 
     struct SlowAdapter {
@@ -2044,6 +2061,7 @@ mod tests {
                 websocket_frames: Mutex::new(Vec::new()),
                 session_workspace: None,
                 workflow_recipes_projection: None,
+                remembered_permissions_projection: None,
             }
         }
 
@@ -2059,6 +2077,14 @@ mod tests {
 
         fn with_workflow_recipes_projection(mut self, projection: Value) -> Self {
             self.workflow_recipes_projection = Some(projection);
+            self
+        }
+
+        fn with_remembered_permissions_projection(
+            mut self,
+            projection: RememberedPermissionProjection,
+        ) -> Self {
+            self.remembered_permissions_projection = Some(projection);
             self
         }
 
@@ -2155,6 +2181,10 @@ mod tests {
 
         fn workflow_recipes_projection(&self) -> Option<Value> {
             self.workflow_recipes_projection.clone()
+        }
+
+        fn remembered_permissions_projection(&self) -> Option<RememberedPermissionProjection> {
+            self.remembered_permissions_projection.clone()
         }
 
         fn process_websocket_frame(
@@ -2380,6 +2410,56 @@ mod tests {
         assert_eq!(response.body["data"][0]["recipe_id"], "review-loop");
         assert_eq!(adapter.call_count(), 0);
         assert_eq!(adapter.websocket_frame_count(), 0);
+    }
+
+    #[test]
+    fn remembered_permissions_route_uses_adapter_projection_and_fails_closed() {
+        let projection = RememberedPermissionProjection {
+            schema_version: 1,
+            status: "available".to_owned(),
+            workspace_digest_prefix: "abcdef123456".to_owned(),
+            store_health_reason: None,
+            rules: Vec::new(),
+        };
+        let adapter = FakeAdapter::new("gpt-5", text_response("unused"))
+            .with_remembered_permissions_projection(projection.clone());
+
+        let response = handle_api_request(ApiHttpRequest::get("/v1/permissions"), &adapter);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, json!(projection));
+        assert_eq!(adapter.call_count(), 0);
+        assert_eq!(adapter.websocket_frame_count(), 0);
+
+        let unconfigured = FakeAdapter::new("gpt-5", text_response("unused"));
+        let missing = handle_api_request(ApiHttpRequest::get("/v1/permissions"), &unconfigured);
+        assert_eq!(missing.status, 404);
+        assert_eq!(missing.body["error"]["type"], "not_found");
+        assert!(missing.body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("permission projection is not configured"));
+    }
+
+    #[test]
+    fn remembered_permissions_route_rejects_mutation_methods() {
+        let adapter = FakeAdapter::new("gpt-5", text_response("unused"));
+
+        for method in [ApiMethod::Post, ApiMethod::Other] {
+            let response = handle_api_request(
+                ApiHttpRequest {
+                    method,
+                    path: "/v1/permissions".to_owned(),
+                    headers: BTreeMap::new(),
+                    body: None,
+                },
+                &adapter,
+            );
+
+            assert_eq!(response.status, 405);
+            assert_eq!(response.body["error"]["type"], "method_not_allowed");
+            assert_eq!(adapter.call_count(), 0);
+        }
     }
 
     #[test]
