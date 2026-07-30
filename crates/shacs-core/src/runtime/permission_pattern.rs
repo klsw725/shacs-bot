@@ -1,14 +1,6 @@
 use crate::runtime::{PermissionedAction, SessionApprovalReuseMatch};
 use serde_json::Value;
 
-pub(crate) fn session_approval_reuse_match(
-    action: &PermissionedAction,
-) -> SessionApprovalReuseMatch {
-    exec_command_pattern(action)
-        .map(|pattern| SessionApprovalReuseMatch::ExecCommandPattern { pattern })
-        .unwrap_or_default()
-}
-
 pub(crate) fn session_approval_reuse_matches(
     reuse_match: &SessionApprovalReuseMatch,
     approved_action_digest: &str,
@@ -26,40 +18,14 @@ pub(crate) fn session_approval_reuse_pattern(action: &PermissionedAction) -> Opt
     exec_command_pattern(action)
 }
 
-pub(crate) fn same_session_approval_grant(
-    existing_match: &SessionApprovalReuseMatch,
-    existing_action_digest: &str,
-    new_match: &SessionApprovalReuseMatch,
-    new_action_digest: &str,
-) -> bool {
-    match (existing_match, new_match) {
-        (SessionApprovalReuseMatch::ExactAction, SessionApprovalReuseMatch::ExactAction) => {
-            existing_action_digest == new_action_digest
-        }
-        (
-            SessionApprovalReuseMatch::ExecCommandPattern { pattern: existing },
-            SessionApprovalReuseMatch::ExecCommandPattern { pattern: new },
-        ) => existing == new,
-        (
-            SessionApprovalReuseMatch::ExactAction,
-            SessionApprovalReuseMatch::ExecCommandPattern { .. },
-        )
-        | (
-            SessionApprovalReuseMatch::ExecCommandPattern { .. },
-            SessionApprovalReuseMatch::ExactAction,
-        ) => false,
-    }
-}
-
 fn exec_command_pattern(action: &PermissionedAction) -> Option<String> {
     let command = exec_command(action)?;
     command_pattern(command)
 }
 
 fn command_pattern(command: &str) -> Option<String> {
-    let tokens = reusable_command_tokens(command)?;
-    let prefix_len = command_prefix_len(&tokens).min(tokens.len());
-    Some(format!("{} *", tokens[..prefix_len].join(" ")))
+    let tokens = reusable_command_prefix_tokens(command)?;
+    Some(format!("{} *", tokens.join(" ")))
 }
 
 fn exec_command(action: &PermissionedAction) -> Option<&str> {
@@ -69,7 +35,13 @@ fn exec_command(action: &PermissionedAction) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-fn reusable_command_tokens(command: &str) -> Option<Vec<&str>> {
+pub(crate) fn reusable_command_prefix_tokens(command: &str) -> Option<Vec<&str>> {
+    let tokens = reusable_command_tokens(command)?;
+    let prefix_len = command_prefix_len(&tokens).min(tokens.len());
+    Some(tokens[..prefix_len].to_vec())
+}
+
+pub(crate) fn reusable_command_tokens(command: &str) -> Option<Vec<&str>> {
     if command.trim().is_empty()
         || command.chars().any(|character| {
             matches!(
@@ -190,7 +162,7 @@ fn command_prefix_len(tokens: &[&str]) -> usize {
     1
 }
 
-fn command_matches_pattern(command: &str, pattern: &str) -> bool {
+pub(crate) fn command_matches_pattern(command: &str, pattern: &str) -> bool {
     let Some(prefix) = pattern.strip_suffix(" *") else {
         return false;
     };
@@ -210,8 +182,7 @@ fn command_matches_pattern(command: &str, pattern: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_matches_pattern, command_pattern, same_session_approval_grant};
-    use crate::runtime::SessionApprovalReuseMatch;
+    use super::{command_matches_pattern, command_pattern};
 
     #[test]
     fn command_pattern_uses_open_code_arity_prefix() {
@@ -248,22 +219,6 @@ mod tests {
         assert!(!command_matches_pattern(
             "cargo test && rm -rf .",
             "cargo test *"
-        ));
-    }
-
-    #[test]
-    fn exact_session_approval_grants_are_distinguished_by_action_digest() {
-        assert!(same_session_approval_grant(
-            &SessionApprovalReuseMatch::ExactAction,
-            "digest-a",
-            &SessionApprovalReuseMatch::ExactAction,
-            "digest-a"
-        ));
-        assert!(!same_session_approval_grant(
-            &SessionApprovalReuseMatch::ExactAction,
-            "digest-a",
-            &SessionApprovalReuseMatch::ExactAction,
-            "digest-b"
         ));
     }
 }

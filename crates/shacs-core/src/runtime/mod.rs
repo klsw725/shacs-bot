@@ -23,6 +23,7 @@ mod permission_ceiling;
 mod permission_pattern;
 mod permission_policy;
 mod permission_recent_denials;
+mod permission_remembered;
 mod permission_replay;
 mod permission_rules;
 mod plugin_discovery;
@@ -39,7 +40,7 @@ mod workflow;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
-    AgentLoopRunSummary, AgentLoopTurnResult, PermissionModeSetter,
+    AgentLoopRunSummary, AgentLoopTurnResult, PermissionModeSetter, ProjectPermissionStoreConfig,
 };
 pub use autocompact::{AutoCompact, AutoCompactArchiveOutcome, RECENT_SUFFIX_MESSAGES};
 pub use automation::{
@@ -142,9 +143,11 @@ pub use permission_action::{
     PermissionedActionOrigin, SafetyCapability, TargetRef,
 };
 pub use permission_approval::{
-    correlate_approval, ApprovalActor, ApprovalCacheEntry, ApprovalCorrelation,
-    ApprovalCorrelationError, ApprovalDecision, ApprovalDecisionKind, ApprovalRequest,
-    SessionApprovalCacheEntry, SessionApprovalReuseMatch,
+    approval_decision_options, correlate_approval, ApprovalActor, ApprovalCacheEntry,
+    ApprovalCorrelation, ApprovalCorrelationError, ApprovalDecision, ApprovalDecisionEffect,
+    ApprovalDecisionKind, ApprovalDecisionOption, ApprovalDecisionScope, ApprovalRequest,
+    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionRememberedPermissionDiagnostic,
+    SessionRememberedPermissionRule, SessionRememberedPermissionRules,
 };
 pub use permission_audit::{
     build_permission_audit_record, build_permission_diagnostics_summary,
@@ -163,11 +166,16 @@ pub use permission_policy::{
     decide_permission, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, EvaluatorConfidence,
     EvaluatorScopeMatch, PermissionPolicyDecision, PermissionPolicyDecisionKind,
     PermissionPolicyInput, PermissionPolicyReason, PromptInjectionSignal,
+    RememberedPermissionPolicyMatch,
 };
 pub use permission_recent_denials::{
     recent_auto_mode_denial_from_classifier_decision, RecentAutoModeDenial,
     RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError,
     RecentAutoModeRetryTokenStore, RECENT_AUTO_MODE_DENIAL_LIMIT,
+};
+pub use permission_remembered::{
+    remembered_permission_matcher_matches, safe_remembered_permission_matcher,
+    RememberedPermissionMatcherError, SafeRememberedPermissionMatcher,
 };
 pub use permission_replay::{
     evaluate_permission_replay, PermissionReplayInput, PermissionReplayInvariant,
@@ -255,8 +263,9 @@ pub use subagent::{
     SyntheticSubagentCommand,
 };
 pub use tool_execution::{
-    RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
-    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext,
+    session_approval_context_digest, RuntimeAssistantToolCallMessage, RuntimeContextTools,
+    RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
+    RuntimeToolMessage, ToolExecutionContext,
 };
 pub(crate) use tool_search::dispatch_bridge_tool_calls_with_context_resolver;
 pub use tool_search::{
