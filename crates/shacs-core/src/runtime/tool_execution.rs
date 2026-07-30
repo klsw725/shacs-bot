@@ -1,22 +1,25 @@
 use crate::runtime::permission_pattern::{
     session_approval_reuse_matches, session_approval_reuse_pattern,
 };
+use crate::runtime::permission_remembered::remembered_permission_matcher_matches;
 use crate::runtime::{
-    correlate_approval, decide_permission, evaluate_static_rules, normalize_runtime_tool_call,
-    ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError, ApprovalDecisionKind,
-    ApprovalRequest, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, ContainmentSnapshotRef,
-    EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
+    approval_decision_options, correlate_approval, decide_permission, evaluate_static_rules,
+    normalize_runtime_tool_call, ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError,
+    ApprovalDecisionKind, ApprovalRequest, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind,
+    ContainmentSnapshotRef, EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
     PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionPolicyDecision,
-    PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionRuleInput, PermissionedAction,
-    PermissionedActionInput, PermissionedActionOrigin, ProcExecSummary, RecentAutoModeDenial,
-    RecentAutoModeRetryToken, SafetyCapability, SessionApprovalCacheEntry, StaticRuleDecision,
-    StaticRuleDecisionKind,
+    PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionPolicyReason,
+    PermissionRuleInput, PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
+    ProcExecSummary, ProjectPermissionStoreConfig, RecentAutoModeDenial, RecentAutoModeRetryToken,
+    SafetyCapability, SessionApprovalCacheEntry, SessionRememberedPermissionRule,
+    StaticRuleDecision, StaticRuleDecisionKind,
 };
 use crate::tools::{CronTool, MessageTool, SpawnTool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use shacs_config::AutoApprovalConfig;
+use shacs_config::{AutoApprovalConfig, RememberedPermissionEffect, RememberedPermissionFileStore};
+use std::path::PathBuf;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -197,6 +200,12 @@ pub struct ToolExecutionContext {
     pub permission_approval_cache: Option<ApprovalCacheEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_session_approval_cache: Vec<SessionApprovalCacheEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_session_remembered_rules: Vec<SessionRememberedPermissionRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_permission_store: Option<ProjectPermissionStoreConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workspace: Option<PathBuf>,
     pub in_cron_context: bool,
     pub record_channel_delivery: bool,
 }
@@ -218,6 +227,9 @@ impl Default for ToolExecutionContext {
             permission_interactive: false,
             permission_approval_cache: None,
             permission_session_approval_cache: Vec::new(),
+            permission_session_remembered_rules: Vec::new(),
+            project_permission_store: None,
+            active_workspace: None,
             in_cron_context: false,
             record_channel_delivery: false,
         }
@@ -337,8 +349,10 @@ impl<'a> RuntimeToolExecutor<'a> {
                     };
                 }
                 messages.push(permission_block_message(&call.id, &call.name, &decision));
+                update_project_remembered_rule_metadata(context, &decision);
                 continue;
             }
+            update_project_remembered_rule_metadata(context, &decision);
 
             let entry = IndexedToolCall {
                 original_index,
@@ -452,14 +466,161 @@ pub(crate) fn permission_decision_for_action(
     let evaluator = context.permission_evaluator.clone().or_else(|| {
         auto_approval_evaluator_for_action(action, &static_rule_decision, &rule_input, context)
     });
+    let project_state = project_remembered_policy_matches(action, context);
+    let mut remembered_rules = session_remembered_policy_matches(action, context);
+    remembered_rules.extend(project_state.matches);
     decide_permission(PermissionPolicyInput {
         action: action.clone(),
         static_rule_decision,
         evaluator,
         approval: permission_approval_for_action(action, context),
         inherited_context: inherited_context_for_action(action, context),
+        remembered_rules,
+        remembered_store_unavailable: project_state.store_unavailable,
         interactive: context.permission_interactive,
     })
+}
+
+struct ProjectRememberedPolicyState {
+    matches: Vec<crate::runtime::RememberedPermissionPolicyMatch>,
+    store_unavailable: bool,
+}
+
+fn project_remembered_policy_matches(
+    action: &PermissionedAction,
+    context: &ToolExecutionContext,
+) -> ProjectRememberedPolicyState {
+    let Some(config) = &context.project_permission_store else {
+        return ProjectRememberedPolicyState {
+            matches: Vec::new(),
+            store_unavailable: false,
+        };
+    };
+    let Some(workspace) = context.active_workspace.as_deref() else {
+        return ProjectRememberedPolicyState {
+            matches: Vec::new(),
+            store_unavailable: true,
+        };
+    };
+    let store = RememberedPermissionFileStore::from_path(config.store_path.clone());
+    let permissions = match store.load() {
+        Ok(permissions) => permissions,
+        Err(error) => {
+            eprintln!(
+                "remembered permission store unavailable: {:?}",
+                error.kind()
+            );
+            return ProjectRememberedPolicyState {
+                matches: Vec::new(),
+                store_unavailable: true,
+            };
+        }
+    };
+    let matches = permissions
+        .project(&config.workspace_id)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|rule| {
+            remembered_permission_matcher_matches(rule.matcher(), action, workspace)
+                .ok()
+                .filter(|matches| *matches)
+                .map(|_| crate::runtime::RememberedPermissionPolicyMatch {
+                    effect: rule.effect(),
+                    rule_ref: project_remembered_rule_ref(rule),
+                    matcher: rule.matcher().clone(),
+                    session_scoped: false,
+                })
+        })
+        .collect();
+    ProjectRememberedPolicyState {
+        matches,
+        store_unavailable: false,
+    }
+}
+
+fn project_remembered_rule_ref(rule: &shacs_config::RememberedPermissionRule) -> String {
+    format!("project:{}", rule.id().as_str())
+}
+
+fn update_project_remembered_rule_metadata(
+    context: &ToolExecutionContext,
+    decision: &PermissionPolicyDecision,
+) {
+    if !matches!(
+        decision.reason,
+        PermissionPolicyReason::RememberedAllow | PermissionPolicyReason::RememberedDeny
+    ) {
+        return;
+    }
+    let Some(rule_id) = decision
+        .remembered_rule_ref
+        .as_deref()
+        .and_then(|value| value.strip_prefix("project:"))
+    else {
+        return;
+    };
+    let Some(config) = &context.project_permission_store else {
+        return;
+    };
+    let store = RememberedPermissionFileStore::from_path(config.store_path.clone());
+    if let Err(error) = store.mutate(|permissions| {
+        permissions.mark_rule_used(&config.workspace_id, rule_id, now_unix_ms());
+        Ok(())
+    }) {
+        eprintln!(
+            "remembered permission metadata update failed: {:?}",
+            error.kind()
+        );
+    }
+}
+
+fn session_remembered_policy_matches(
+    action: &PermissionedAction,
+    context: &ToolExecutionContext,
+) -> Vec<crate::runtime::RememberedPermissionPolicyMatch> {
+    let Some(workspace) = context.active_workspace.as_deref() else {
+        return Vec::new();
+    };
+    let Some(session_key) = context.session_key.as_deref() else {
+        return Vec::new();
+    };
+    let approval_context_digest = session_approval_context_digest(action);
+    context
+        .permission_session_remembered_rules
+        .iter()
+        .filter(|rule| {
+            rule.session_key == session_key
+                && rule.approval_context_digest == approval_context_digest
+        })
+        .filter_map(|rule| {
+            let matches =
+                remembered_permission_matcher_matches(&rule.matcher, action, workspace).ok()?;
+            matches.then(|| crate::runtime::RememberedPermissionPolicyMatch {
+                effect: rule.effect,
+                rule_ref: session_remembered_rule_ref(rule),
+                matcher: rule.matcher.clone(),
+                session_scoped: true,
+            })
+        })
+        .collect()
+}
+
+fn session_remembered_rule_ref(rule: &SessionRememberedPermissionRule) -> String {
+    let effect = match rule.effect {
+        RememberedPermissionEffect::Allow => "allow",
+        RememberedPermissionEffect::Deny => "deny",
+    };
+    format!(
+        "session:{effect}:{}",
+        digest_json(&json!({
+            "session_key": rule.session_key,
+            "approval_context_digest": rule.approval_context_digest,
+            "matcher": rule.matcher,
+        }))
+        .chars()
+        .take(16)
+        .collect::<String>()
+    )
 }
 
 pub(crate) fn effective_permission_rule_input(
@@ -470,6 +631,12 @@ pub(crate) fn effective_permission_rule_input(
     for protected_target in &context.permission_auto_approval.protected_targets {
         if !input.protected_targets.contains(protected_target) {
             input.protected_targets.push(protected_target.clone());
+        }
+    }
+    if let Some(config) = &context.project_permission_store {
+        let store_path = config.store_path.to_string_lossy().to_string();
+        if !input.protected_targets.contains(&store_path) {
+            input.protected_targets.push(store_path);
         }
     }
     if input.proc_exec_summary.is_none()
@@ -542,9 +709,13 @@ fn auto_approval_evaluator_for_action(
     context: &ToolExecutionContext,
 ) -> Option<AutoEvaluatorVerdict> {
     let config = &context.permission_auto_approval;
+    let decision_can_use_auto_approval = matches!(
+        static_rule_decision.kind,
+        StaticRuleDecisionKind::AllowCandidate | StaticRuleDecisionKind::AskRequired
+    );
     if !config.enabled
         || action.permission_mode_snapshot.mode != PermissionMode::Auto
-        || static_rule_decision.kind != StaticRuleDecisionKind::AllowCandidate
+        || !decision_can_use_auto_approval
         || !auto_approval_allows_capabilities(action, config, rule_input)
     {
         return None;
@@ -575,12 +746,19 @@ fn auto_approval_allows_capabilities(
                 SafetyCapability::FsRead => true,
                 SafetyCapability::FsWrite => config.allow_workspace_edits,
                 SafetyCapability::ProcExec => {
-                    config.allow_proc_exec_verification
-                        && (!config.require_docker_containment_for_exec
-                            || rule_input.containment.confirmed_non_privileged())
+                    let requires_containment = rule_input
+                        .proc_exec_summary
+                        .as_ref()
+                        .is_some_and(ProcExecSummary::requires_containment);
+                    !requires_containment
+                        || (config.allow_proc_exec_verification
+                            && (!config.require_docker_containment_for_exec
+                                || rule_input.containment.confirmed_non_privileged()))
                 }
-                SafetyCapability::NetOutbound
-                | SafetyCapability::SecretRead
+                SafetyCapability::NetOutbound => {
+                    matches!(action.tool_name.as_str(), "web_fetch" | "web_search")
+                }
+                SafetyCapability::SecretRead
                 | SafetyCapability::ExternalDelivery
                 | SafetyCapability::AutomationSchedule
                 | SafetyCapability::AppInstall
@@ -589,13 +767,24 @@ fn auto_approval_allows_capabilities(
             })
 }
 
-pub(crate) fn session_approval_context_digest(action: &PermissionedAction) -> String {
+pub fn session_approval_context_digest(action: &PermissionedAction) -> String {
+    session_approval_context_digest_for_input(&PermissionedActionInput {
+        session_id: action.session_id.clone(),
+        turn_id: action.turn_id.clone(),
+        origin: action.origin.clone(),
+        permission_mode_snapshot: action.permission_mode_snapshot.clone(),
+        containment_snapshot: action.containment_snapshot.clone(),
+        intent_snapshot: action.intent_snapshot.clone(),
+    })
+}
+
+pub fn session_approval_context_digest_for_input(input: &PermissionedActionInput) -> String {
     digest_json(&json!({
-        "permission_mode_snapshot": &action.permission_mode_snapshot,
-        "containment_snapshot": &action.containment_snapshot,
-        "intent_snapshot": &action.intent_snapshot,
-        "session_id": &action.session_id,
-        "origin": stable_session_approval_origin(&action.origin),
+        "permission_mode_snapshot": &input.permission_mode_snapshot,
+        "containment_snapshot": &input.containment_snapshot,
+        "intent_snapshot": &input.intent_snapshot,
+        "session_id": &input.session_id,
+        "origin": stable_session_approval_origin(&input.origin),
     }))
 }
 
@@ -642,17 +831,18 @@ pub(crate) fn permission_approval_interrupt(
     );
     let expires_at_unix_ms = now.saturating_add(PERMISSION_APPROVAL_TTL_MS);
     let risk_summary = format!("Run tool `{}`", action.tool_name);
+    let options = approval_decision_options();
+    let allowed_decisions = options
+        .iter()
+        .map(|option| option.decision)
+        .collect::<Vec<_>>();
     let approval_request = ApprovalRequest {
         approval_request_id: approval_request_id.clone(),
         action_digest: action.action_digest.clone(),
         snapshot_digest: action.snapshot_digest.clone(),
         requested_scope: action.session_id.clone(),
         risk_summary: risk_summary.clone(),
-        allowed_decisions: vec![
-            ApprovalDecisionKind::Approved,
-            ApprovalDecisionKind::ApprovedForSession,
-            ApprovalDecisionKind::Denied,
-        ],
+        allowed_decisions,
         expires_at_unix_ms,
     };
     let arguments = action.redacted_arguments.to_string();
@@ -664,7 +854,7 @@ pub(crate) fn permission_approval_interrupt(
         approval_request: Box::new(approval_request),
         tool_call: call,
         question: format!(
-            "Permission approval required before running tool `{}`.\n\nRisk: {}\nTarget: {}\nScope: {}\nSession reuse: {}\nExpires at (unix ms): {}\nArguments: `{}`\n\nReply with `1` or `approve` to run it once, `3` or `approve_session` to approve matching actions in this session, or `2` or `deny` to cancel.\n\nApproval id: `{}`",
+            "Permission approval required before running tool `{}`.\n\nRisk: {}\nTarget: {}\nScope: {}\nReusable pattern: {}\nExpires at (unix ms): {}\nArguments: `{}`\n\nReply with `1` or `approve` to run it once, `2` or `deny` to cancel once, `3` or `approve_session` to approve matching actions in this session, `4` or `approve_project` to approve matching actions in this project, `5` or `deny_session` to deny matching actions in this session, or `6` or `deny_project` to deny matching actions in this project.\n\nApproval id: `{}`",
             action.tool_name,
             risk_summary,
             target_summary,
@@ -674,11 +864,10 @@ pub(crate) fn permission_approval_interrupt(
             arguments,
             approval_request_id
         ),
-        options: vec![
-            "approve".to_owned(),
-            "deny".to_owned(),
-            "approve_session".to_owned(),
-        ],
+        options: options
+            .into_iter()
+            .map(|option| option.value.to_owned())
+            .collect(),
     }
 }
 

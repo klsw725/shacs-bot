@@ -3,8 +3,9 @@ use crate::runtime::{
     ContextBuilder, ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact,
     ExecutionScope, InboundMessage, LateResultDecision, MessageBus, PendingExecution,
     PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionRuleInput,
-    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeExecutionLedger, SubagentOutcomeKind,
-    ToolEvent, ToolExecutionContext, ToolStatus,
+    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeExecutionLedger,
+    SessionRememberedPermissionRule, SubagentOutcomeKind, ToolEvent, ToolExecutionContext,
+    ToolStatus,
 };
 use crate::tools::{
     EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool, PathContext,
@@ -392,6 +393,8 @@ pub struct SubagentExecutionConfig {
     pub exec_allowed_env_keys: Vec<String>,
     pub exec_env: BTreeMap<String, String>,
     pub allowed_tools: Option<Vec<String>>,
+    pub permission_session_remembered_rules: Vec<SessionRememberedPermissionRule>,
+    pub project_permission_store: Option<crate::runtime::ProjectPermissionStoreConfig>,
 }
 
 impl SubagentExecutionConfig {
@@ -418,6 +421,8 @@ impl SubagentExecutionConfig {
             exec_allowed_env_keys: Vec::new(),
             exec_env: BTreeMap::new(),
             allowed_tools: None,
+            permission_session_remembered_rules: Vec::new(),
+            project_permission_store: None,
         }
     }
 }
@@ -894,6 +899,9 @@ impl SubagentRuntime {
             permission_interactive: false,
             permission_approval_cache: None,
             permission_session_approval_cache: Vec::new(),
+            permission_session_remembered_rules: config.permission_session_remembered_rules.clone(),
+            project_permission_store: config.project_permission_store.clone(),
+            active_workspace: Some(config.workspace.clone()),
             in_cron_context: false,
             record_channel_delivery: false,
         };

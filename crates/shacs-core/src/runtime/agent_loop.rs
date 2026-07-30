@@ -1,7 +1,7 @@
-use crate::runtime::permission_pattern::{
-    same_session_approval_grant, session_approval_reuse_match,
+use crate::runtime::tool_execution::permissioned_action_input_from_context;
+use crate::runtime::tool_execution::{
+    session_approval_context_digest, session_approval_context_digest_for_input,
 };
-use crate::runtime::tool_execution::session_approval_context_digest;
 use crate::runtime::{
     apply_context_safety_gate, build_context_provider_handoff, correlate_approval,
     discover_context_files, dispatch_bridge_tool_calls, parse_context_references,
@@ -27,21 +27,23 @@ use crate::runtime::{
     InboundMessage, LateResultDecision, LoopTaskCancelResult, LoopTaskRegistry,
     MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage, PermissionCeilingSnapshot,
     PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
-    PersistentGoal, PersistentGoalStatus, PluginCommandDispatcher, ProviderArchiveConsolidator,
-    ProviderEventCallback, RecentAutoModeDenial, RecentAutoModeDenialStore,
-    RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenStore,
-    RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt, RuntimeToolCall,
-    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
-    SessionApprovalCacheEntry, SessionHistoryOptions, SessionManager, SessionTurnAcquireError,
-    SessionTurnLock, SubagentExecutionConfig, SubagentOutcomeKind, SubagentRuntime,
-    TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext, WorkflowAdmissionDecision,
-    WorkflowAdmissionInput, WorkflowBudgetPolicy, WorkflowBudgetSlice, WorkflowBudgetUsage,
-    WorkflowCheckpointInput, WorkflowCheckpointPolicy, WorkflowChildResult, WorkflowChildRunStatus,
-    WorkflowChildSpec, WorkflowContextPolicy, WorkflowHarnessPlan, WorkflowMergePolicy,
-    WorkflowModelRoutingPolicy, WorkflowPattern, WorkflowPermissionPolicy,
-    WorkflowQuarantinePolicy, WorkflowRecipeReadiness, WorkflowResumeDecision,
-    WorkflowResumePolicy, WorkflowRunState, WorkflowStep, WorkflowStopCondition,
-    WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
+    PermissionedActionInput, PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus,
+    PluginCommandDispatcher, ProviderArchiveConsolidator, ProviderEventCallback,
+    RecentAutoModeDenial, RecentAutoModeDenialStore, RecentAutoModeRetryToken,
+    RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenStore, RuntimeContextTools,
+    RuntimeExecutionLedger, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport,
+    RuntimeToolExecutor, RuntimeToolMessage, Session, SessionApprovalCacheEntry,
+    SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
+    SessionRememberedPermissionDiagnostic, SessionRememberedPermissionRule,
+    SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnLock,
+    SubagentExecutionConfig, SubagentOutcomeKind, SubagentRuntime, TokenConsolidationConfig,
+    ToolEventCallback, ToolExecutionContext, WorkflowAdmissionDecision, WorkflowAdmissionInput,
+    WorkflowBudgetPolicy, WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpointInput,
+    WorkflowCheckpointPolicy, WorkflowChildResult, WorkflowChildRunStatus, WorkflowChildSpec,
+    WorkflowContextPolicy, WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy,
+    WorkflowPattern, WorkflowPermissionPolicy, WorkflowQuarantinePolicy, WorkflowRecipeReadiness,
+    WorkflowResumeDecision, WorkflowResumePolicy, WorkflowRunState, WorkflowStep,
+    WorkflowStopCondition, WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
     DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
@@ -56,7 +58,16 @@ use shacs_command::{
     build_help_text, is_builtin_command, parse_loop_command_route, CommandKind, GoalCommandArgs,
     HistoryCommandArgs, LoopCommand, PermissionCommandArgs,
 };
-use shacs_config::AutoApprovalConfig;
+use shacs_config::{
+    AutoApprovalConfig, RememberedPermissionEffect, RememberedPermissionFileStore,
+    RememberedPermissionMatcher, RememberedPermissionRule, WorkspacePermissionId,
+};
+use shacs_projection::{
+    build_remembered_permission_projection, format_remembered_permission_projection,
+    format_remembered_permission_rule, normalize_remembered_permission_rule_prefix,
+    project_remembered_permission_rule_by_prefix, project_removed_remembered_permission_rule,
+    RememberedPermissionProjectionInput, RememberedPermissionStoreHealthInput,
+};
 use shacs_providers::{GenerationSettings, ProviderClient, ProviderError, ProviderRetryMode};
 use shacs_session::durable_child::DurableChildRecorder;
 use shacs_session::durable_event::{
@@ -89,6 +100,8 @@ const PENDING_PERMISSION_APPROVAL_KEY: &str = "pending_permission_approval";
 const PENDING_RECENT_RETRY_APPROVAL_KEY: &str = "pending_recent_retry_approval";
 const PENDING_WORKFLOW_KEY: &str = "pending_workflow";
 const SESSION_PERMISSION_APPROVALS_KEY: &str = "session_permission_approvals";
+const SESSION_REMEMBERED_PERMISSIONS_KEY: &str = "session_remembered_permissions_v1";
+const SESSION_REMEMBERED_PERMISSION_SCHEMA_VERSION: u32 = 1;
 const SESSION_PERMISSION_APPROVAL_LIMIT: usize = 32;
 const PENDING_PERMISSION_WIZARD_KEY: &str = "pending_permission_wizard";
 const RECENT_AUTO_MODE_DENIALS_KEY: &str = "recent_auto_mode_denials";
@@ -174,7 +187,10 @@ enum PendingPermissionApprovalStatus {
 enum PermissionApprovalReply {
     Approve,
     ApproveSession,
+    ApproveProject,
     Deny,
+    DenySession,
+    DenyProject,
     Unknown,
 }
 
@@ -203,8 +219,15 @@ pub struct AgentLoopConfig {
     pub permission_ceiling_snapshot: Option<PermissionCeilingSnapshot>,
     pub permission_evaluator: Option<AutoEvaluatorVerdict>,
     pub permission_interactive: bool,
+    pub project_permission_store: Option<ProjectPermissionStoreConfig>,
     pub permission_mode_setter: Option<PermissionModeSetter>,
     pub durable_event_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectPermissionStoreConfig {
+    pub store_path: PathBuf,
+    pub workspace_id: WorkspacePermissionId,
 }
 
 impl AgentLoopConfig {
@@ -233,6 +256,7 @@ impl AgentLoopConfig {
             permission_ceiling_snapshot: None,
             permission_evaluator: None,
             permission_interactive: false,
+            project_permission_store: None,
             permission_mode_setter: None,
             durable_event_root: None,
         }
@@ -487,6 +511,10 @@ impl<'a> AgentLoop<'a> {
 
     pub fn session_manager_mut(&mut self) -> &mut SessionManager {
         &mut self.sessions
+    }
+
+    pub fn config_mut(&mut self) -> &mut AgentLoopConfig {
+        &mut self.config
     }
 
     pub fn active_session_keys(&self) -> Vec<String> {
@@ -766,13 +794,16 @@ impl<'a> AgentLoop<'a> {
                     );
                     (messages, Some(context_provider_handoff))
                 }
-                PermissionApprovalReply::ApproveSession => {
+                PermissionApprovalReply::ApproveSession
+                | PermissionApprovalReply::ApproveProject
+                | PermissionApprovalReply::DenySession
+                | PermissionApprovalReply::DenyProject => {
                     self.recent_retry_tokens.invalidate(&approval.denial_id);
                     session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
                     return self.publish_command_response(
                         &message,
                         session,
-                        "Recent retry supports only one-shot `approve`; `approve_session` is rejected and the action was not run.",
+                        "Recent retry supports only one-shot `approve` or `deny`; scoped approval replies are rejected and the action was not run.",
                         None,
                         "permission_recent_retry_rejected",
                         true,
@@ -823,17 +854,25 @@ impl<'a> AgentLoop<'a> {
                 );
             }
             match parse_permission_approval_reply(&message.content) {
-                PermissionApprovalReply::Approve | PermissionApprovalReply::ApproveSession => {
-                    let session_scoped = matches!(
-                        parse_permission_approval_reply(&message.content),
-                        PermissionApprovalReply::ApproveSession
-                    );
+                PermissionApprovalReply::Approve
+                | PermissionApprovalReply::ApproveSession
+                | PermissionApprovalReply::ApproveProject => {
+                    let reply = parse_permission_approval_reply(&message.content);
+                    let session_scoped = matches!(reply, PermissionApprovalReply::ApproveSession);
                     let decision = approval_decision(
                         &approval,
-                        if session_scoped {
-                            ApprovalDecisionKind::ApprovedForSession
-                        } else {
-                            ApprovalDecisionKind::Approved
+                        match reply {
+                            PermissionApprovalReply::Approve => ApprovalDecisionKind::Approved,
+                            PermissionApprovalReply::ApproveSession => {
+                                ApprovalDecisionKind::ApprovedForSession
+                            }
+                            PermissionApprovalReply::ApproveProject => {
+                                ApprovalDecisionKind::ApprovedForProject
+                            }
+                            PermissionApprovalReply::Deny
+                            | PermissionApprovalReply::DenySession
+                            | PermissionApprovalReply::DenyProject
+                            | PermissionApprovalReply::Unknown => ApprovalDecisionKind::InspectOnly,
                         },
                     );
                     let approval_cache = ApprovalCacheEntry {
@@ -844,9 +883,40 @@ impl<'a> AgentLoop<'a> {
                     executing_approval.status = PendingPermissionApprovalStatus::Executing;
                     set_pending_permission_approval(&mut session, &executing_approval);
                     self.sessions.save(&session)?;
+                    let approval_is_valid = correlate_approval(
+                        &approval_cache.request,
+                        &approval_cache.decision,
+                        now_unix_ms(),
+                    )
+                    .is_approved();
+                    let approved_action = crate::runtime::normalize_runtime_tool_call(
+                        self.tools,
+                        &approval.tool_call,
+                        permissioned_action_input_from_context(&approval.tool_context),
+                    );
+                    let project_persist_failed =
+                        matches!(reply, PermissionApprovalReply::ApproveProject)
+                            && approval_is_valid
+                            && self
+                                .store_project_remembered_permission_rule(
+                                    RememberedPermissionEffect::Allow,
+                                    &approved_action,
+                                )
+                                .is_err();
+                    if project_persist_failed {
+                        session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+                        return self.publish_command_response(
+                            &message,
+                            session,
+                            "Project permission could not be saved; the action was not run.",
+                            None,
+                            "permission_project_store_unavailable",
+                            true,
+                        );
+                    }
                     let report =
                         self.execute_approved_permission_tool(&approval, approval_cache.clone());
-                    let approved_action = report.permissioned_actions.first().cloned();
+                    let executed_action = report.permissioned_actions.first().cloned();
                     let fatal_error = self.append_approved_tool_messages(
                         &message,
                         &session_key,
@@ -855,12 +925,15 @@ impl<'a> AgentLoop<'a> {
                         report.messages,
                     );
                     session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
-                    if let (true, Some(action)) = (session_scoped, approved_action) {
-                        store_session_permission_approval(
+                    if let (true, true, Some(action)) =
+                        (session_scoped, approval_is_valid, executed_action)
+                    {
+                        store_session_remembered_permission_rule(
                             &mut session,
                             &session_key,
-                            approval_cache,
+                            RememberedPermissionEffect::Allow,
                             &action,
+                            &self.config.workspace,
                         );
                     }
                     if let Some(error) = fatal_error {
@@ -891,7 +964,86 @@ impl<'a> AgentLoop<'a> {
                     );
                     (messages, Some(context_provider_handoff))
                 }
-                PermissionApprovalReply::Deny => {
+                PermissionApprovalReply::Deny
+                | PermissionApprovalReply::DenySession
+                | PermissionApprovalReply::DenyProject => {
+                    let reply = parse_permission_approval_reply(&message.content);
+                    if matches!(
+                        reply,
+                        PermissionApprovalReply::DenySession | PermissionApprovalReply::DenyProject
+                    ) {
+                        let decision = approval_decision(
+                            &approval,
+                            match reply {
+                                PermissionApprovalReply::DenySession => {
+                                    ApprovalDecisionKind::DeniedForSession
+                                }
+                                PermissionApprovalReply::DenyProject => {
+                                    ApprovalDecisionKind::DeniedForProject
+                                }
+                                PermissionApprovalReply::Approve
+                                | PermissionApprovalReply::ApproveSession
+                                | PermissionApprovalReply::ApproveProject
+                                | PermissionApprovalReply::Deny
+                                | PermissionApprovalReply::Unknown => {
+                                    ApprovalDecisionKind::InspectOnly
+                                }
+                            },
+                        );
+                        let approval_cache = ApprovalCacheEntry {
+                            request: approval.approval_request.clone(),
+                            decision,
+                        };
+                        if correlate_approval(
+                            &approval_cache.request,
+                            &approval_cache.decision,
+                            now_unix_ms(),
+                        )
+                        .error
+                            == Some(crate::runtime::ApprovalCorrelationError::Denied)
+                        {
+                            let action = crate::runtime::normalize_runtime_tool_call(
+                                self.tools,
+                                &approval.tool_call,
+                                permissioned_action_input_from_context(&approval.tool_context),
+                            );
+                            match reply {
+                                PermissionApprovalReply::DenySession => {
+                                    store_session_remembered_permission_rule(
+                                        &mut session,
+                                        &session_key,
+                                        RememberedPermissionEffect::Deny,
+                                        &action,
+                                        &self.config.workspace,
+                                    );
+                                }
+                                PermissionApprovalReply::DenyProject => {
+                                    if self
+                                        .store_project_remembered_permission_rule(
+                                            RememberedPermissionEffect::Deny,
+                                            &action,
+                                        )
+                                        .is_err()
+                                    {
+                                        session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+                                        return self.publish_command_response(
+                                            &message,
+                                            session,
+                                            "Project permission denial could not be saved; the action was not run.",
+                                            None,
+                                            "permission_project_store_unavailable",
+                                            true,
+                                        );
+                                    }
+                                }
+                                PermissionApprovalReply::Approve
+                                | PermissionApprovalReply::ApproveSession
+                                | PermissionApprovalReply::ApproveProject
+                                | PermissionApprovalReply::Deny
+                                | PermissionApprovalReply::Unknown => {}
+                            }
+                        }
+                    }
                     append_session_message(
                         &mut session,
                         RuntimeToolMessage {
@@ -984,6 +1136,22 @@ impl<'a> AgentLoop<'a> {
             (initial_messages, Some(context_provider_handoff))
         };
         let turn_id = turn_id_for_message(&message, &session);
+        let session_context_digest =
+            session_approval_context_digest_for_input(&PermissionedActionInput {
+                session_id: session_key.clone(),
+                turn_id: turn_id.clone(),
+                origin: PermissionedActionOrigin::ChannelInbound {
+                    channel: message.channel.clone(),
+                    message_id: message
+                        .metadata
+                        .get("message_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                },
+                permission_mode_snapshot: self.config.permission_mode_snapshot.clone(),
+                containment_snapshot: self.config.containment_snapshot.clone(),
+                intent_snapshot: None,
+            });
         self.sessions.save(&session)?;
 
         let _delivery_target_guard = self.message_delivery_target.as_ref().map(|target| {
@@ -1016,7 +1184,15 @@ impl<'a> AgentLoop<'a> {
             permission_evaluator: self.config.permission_evaluator.clone(),
             permission_interactive: self.config.permission_interactive,
             permission_approval_cache: None,
-            permission_session_approval_cache: session_permission_approvals(&session),
+            permission_session_approval_cache: Vec::new(),
+            permission_session_remembered_rules: session_remembered_permission_rules(
+                &mut session,
+                &session_key,
+                Some(&session_context_digest),
+                now_unix_ms(),
+            ),
+            project_permission_store: self.config.project_permission_store.clone(),
+            active_workspace: Some(self.config.workspace.clone()),
             in_cron_context: false,
             record_channel_delivery: self.config.record_channel_delivery,
         };
@@ -1475,13 +1651,15 @@ impl<'a> AgentLoop<'a> {
                         );
                         let _ = recover_lock(&checkpoint_manager_capture).save(&session);
                     };
+                let execution_config =
+                    self.workflow_subagent_execution_config(&plan, session, session_key);
                 let outcome = match run_live_runtime_workflow_with_checkpoint_callback(
                     RuntimeWorkflowLiveOptions {
                         input: RuntimeWorkflowLiveInput {
                             plan: plan.clone(),
                             subagent_runtime: &subagent_runtime,
                             provider_client: self.client,
-                            execution_config: self.workflow_subagent_execution_config(&plan),
+                            execution_config,
                             admitted_at_ms: now_unix_ms(),
                         },
                         worktree_config: self.workflow_worktree_config(&plan),
@@ -1704,6 +1882,8 @@ impl<'a> AgentLoop<'a> {
     fn workflow_subagent_execution_config(
         &self,
         plan: &WorkflowHarnessPlan,
+        session: &mut Session,
+        session_key: &str,
     ) -> SubagentExecutionConfig {
         let model = plan
             .model_routing_policy
@@ -1717,6 +1897,9 @@ impl<'a> AgentLoop<'a> {
         config.permission_mode_snapshot = self.config.permission_mode_snapshot.clone();
         config.permission_rule_input = self.config.permission_rule_input.clone();
         config.permission_ceiling_snapshot = self.config.permission_ceiling_snapshot.clone();
+        config.permission_session_remembered_rules =
+            session_remembered_permission_rules(session, session_key, None, now_unix_ms());
+        config.project_permission_store = self.config.project_permission_store.clone();
         config.max_iterations = self.config.max_iterations;
         config.max_tool_result_chars = self.config.max_tool_result_chars;
         config.fail_on_tool_error = self.config.fail_on_tool_error;
@@ -1775,6 +1958,7 @@ impl<'a> AgentLoop<'a> {
                 session.clear();
                 clear_runtime_markers(&mut session);
                 session.metadata.remove(SESSION_PERMISSION_APPROVALS_KEY);
+                session.metadata.remove(SESSION_REMEMBERED_PERMISSIONS_KEY);
                 remove_persistent_goal(&mut session);
                 self.publish_command_response(
                     message,
@@ -1929,11 +2113,44 @@ impl<'a> AgentLoop<'a> {
             }
             LoopCommand::Permission(PermissionCommandArgs::RecentRetry(denial_id)) => self
                 .handle_permission_recent_retry_command(message, session, &denial_id, save_session),
+            LoopCommand::Permission(PermissionCommandArgs::Rules) => {
+                let content = self.format_project_permission_rules();
+                self.publish_command_response(
+                    message,
+                    session,
+                    &content,
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission_rules",
+                    save_session,
+                )
+            }
+            LoopCommand::Permission(PermissionCommandArgs::Inspect(rule_id_prefix)) => {
+                let content = self.format_project_permission_rule_inspect(&rule_id_prefix);
+                self.publish_command_response(
+                    message,
+                    session,
+                    &content,
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission_inspect",
+                    save_session,
+                )
+            }
+            LoopCommand::Permission(PermissionCommandArgs::Revoke(rule_id_prefix)) => {
+                let content = self.format_project_permission_rule_revoke(&rule_id_prefix);
+                self.publish_command_response(
+                    message,
+                    session,
+                    &content,
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission_revoke",
+                    save_session,
+                )
+            }
             LoopCommand::Permission(PermissionCommandArgs::Invalid) => self
                 .publish_command_response(
                 message,
                 session,
-                "Usage: /permission, /permission recent, or /permission recent retry <denial_id>.",
+                "Usage: /permission, /permission recent, /permission recent retry <denial_id>, /permission rules, /permission inspect <id-or-prefix>, or /permission revoke <id-or-prefix>.",
                 Some(AgentLoopCommandResult::Permission),
                 "permission_usage",
                 save_session,
@@ -2379,6 +2596,7 @@ impl<'a> AgentLoop<'a> {
         let mut context = tool_context;
         context.permission_approval_cache = Some(approval_cache);
         context.permission_session_approval_cache = Vec::new();
+        context.permission_session_remembered_rules = Vec::new();
         if bridge_tool_names().contains(&tool_call.name.as_str()) {
             let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
                 definitions: self.tools.definitions(),
@@ -2398,6 +2616,120 @@ impl<'a> AgentLoop<'a> {
             .into_runtime_report();
         }
         executor.execute_tool_calls(vec![tool_call], &context)
+    }
+
+    fn store_project_remembered_permission_rule(
+        &self,
+        effect: RememberedPermissionEffect,
+        action: &PermissionedAction,
+    ) -> Result<(), String> {
+        let config = self
+            .config
+            .project_permission_store
+            .as_ref()
+            .ok_or_else(|| "project permission store is not configured".to_owned())?;
+        let matcher =
+            crate::runtime::safe_remembered_permission_matcher(action, &self.config.workspace)
+                .map_err(|error| error.to_string())?;
+        let rule = RememberedPermissionRule::new(effect, matcher.matcher, now_unix_ms());
+        let store = RememberedPermissionFileStore::from_path(config.store_path.clone());
+        store
+            .mutate(|permissions| {
+                permissions.upsert_rule(config.workspace_id.clone(), rule);
+                Ok(())
+            })
+            .map_err(|error| format!("{:?}", error.kind()))
+    }
+
+    fn format_project_permission_rules(&self) -> String {
+        let Some((store, workspace_id)) = self.project_permission_store() else {
+            return "Remembered permissions are not configured for this runtime.".to_owned();
+        };
+        let loaded = match store.load() {
+            Ok(permissions) => Some(permissions),
+            Err(error) => {
+                let projection =
+                    build_remembered_permission_projection(RememberedPermissionProjectionInput {
+                        store: None,
+                        workspace_id,
+                        health: RememberedPermissionStoreHealthInput::unavailable(&format!(
+                            "{:?}",
+                            error.kind()
+                        )),
+                    });
+                return format_remembered_permission_projection(&projection);
+            }
+        };
+        let projection =
+            build_remembered_permission_projection(RememberedPermissionProjectionInput {
+                store: loaded.as_ref(),
+                workspace_id,
+                health: RememberedPermissionStoreHealthInput::available(),
+            });
+        format_remembered_permission_projection(&projection)
+    }
+
+    fn format_project_permission_rule_inspect(&self, rule_id_prefix: &str) -> String {
+        let Some((store, workspace_id)) = self.project_permission_store() else {
+            return "Remembered permissions are not configured for this runtime.".to_owned();
+        };
+        let prefix = match normalize_remembered_permission_rule_prefix(rule_id_prefix) {
+            Ok(prefix) => prefix,
+            Err(error) => return error.runtime_message().to_owned(),
+        };
+        let permissions = match store.load() {
+            Ok(permissions) => permissions,
+            Err(error) => {
+                return format!(
+                    "Remembered permission store is unavailable: {:?}.",
+                    error.kind()
+                );
+            }
+        };
+        let projection = match project_remembered_permission_rule_by_prefix(
+            &permissions,
+            workspace_id,
+            prefix,
+        ) {
+            Ok(projection) => projection,
+            Err(error) => return error.runtime_message().to_owned(),
+        };
+        format_remembered_permission_rule("Remembered permission", &projection)
+    }
+
+    fn format_project_permission_rule_revoke(&self, rule_id_prefix: &str) -> String {
+        let Some((store, workspace_id)) = self.project_permission_store() else {
+            return "Remembered permissions are not configured for this runtime.".to_owned();
+        };
+        let prefix = match normalize_remembered_permission_rule_prefix(rule_id_prefix) {
+            Ok(prefix) => prefix,
+            Err(error) => return error.runtime_message().to_owned(),
+        };
+        let outcome = match store.remove_rule_by_prefix(workspace_id, prefix) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return format!(
+                    "Remembered permission store is unavailable: {:?}.",
+                    error.kind()
+                );
+            }
+        };
+        match project_removed_remembered_permission_rule(outcome) {
+            Ok(projection) => {
+                format_remembered_permission_rule("Revoked remembered permission", &projection)
+            }
+            Err(error) => error.runtime_message().to_owned(),
+        }
+    }
+
+    fn project_permission_store(
+        &self,
+    ) -> Option<(RememberedPermissionFileStore, &WorkspacePermissionId)> {
+        let config = self.config.project_permission_store.as_ref()?;
+        Some((
+            RememberedPermissionFileStore::from_path(config.store_path.clone()),
+            &config.workspace_id,
+        ))
     }
 
     fn append_approved_tool_messages(
@@ -3855,52 +4187,216 @@ fn completed_workflow_step_ids(
         .collect()
 }
 
-fn session_permission_approvals(session: &Session) -> Vec<SessionApprovalCacheEntry> {
-    session
-        .metadata
-        .get(SESSION_PERMISSION_APPROVALS_KEY)
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
-}
-
-fn store_session_permission_approval(
+fn session_remembered_permission_rules(
     session: &mut Session,
     session_key: &str,
-    approval: ApprovalCacheEntry,
-    action: &PermissionedAction,
-) {
-    let now = now_unix_ms();
-    let approval_context_digest = session_approval_context_digest(action);
-    let reuse_match = session_approval_reuse_match(action);
-    let mut approvals = session_permission_approvals(session)
-        .into_iter()
-        .filter(|entry| entry.approval.request.expires_at_unix_ms >= now)
-        .filter(|entry| {
-            !(entry.session_key == session_key
-                && same_session_approval_grant(
-                    &entry.reuse_match,
-                    &entry.approval.request.action_digest,
-                    &reuse_match,
-                    &action.action_digest,
-                )
-                && entry.approval.request.requested_scope == action.session_id
-                && entry.approval_context_digest == approval_context_digest)
-        })
-        .collect::<Vec<_>>();
-    approvals.push(SessionApprovalCacheEntry {
-        session_key: session_key.to_owned(),
-        approval_context_digest,
-        reuse_match,
-        approval,
-    });
-    if approvals.len() > SESSION_PERMISSION_APPROVAL_LIMIT {
-        approvals.drain(0..approvals.len() - SESSION_PERMISSION_APPROVAL_LIMIT);
+    expected_context_digest: Option<&str>,
+    now: u64,
+) -> Vec<SessionRememberedPermissionRule> {
+    let mut envelope = session
+        .metadata
+        .get(SESSION_REMEMBERED_PERMISSIONS_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value::<SessionRememberedPermissionRules>(value).ok())
+        .filter(|rules| rules.schema_version == SESSION_REMEMBERED_PERMISSION_SCHEMA_VERSION)
+        .unwrap_or_else(|| SessionRememberedPermissionRules {
+            schema_version: SESSION_REMEMBERED_PERMISSION_SCHEMA_VERSION,
+            rules: Vec::new(),
+            diagnostics: session
+                .metadata
+                .contains_key(SESSION_REMEMBERED_PERMISSIONS_KEY)
+                .then(|| SessionRememberedPermissionDiagnostic {
+                    code: "malformed_session_remembered_permissions".to_owned(),
+                })
+                .into_iter()
+                .collect(),
+        });
+    let before_import = envelope.rules.len();
+    let legacy_import = legacy_session_remembered_permission_rules(
+        session,
+        session_key,
+        expected_context_digest,
+        now,
+    );
+    envelope.diagnostics.extend(legacy_import.diagnostics);
+    for rule in legacy_import.rules {
+        upsert_session_remembered_permission_rule(&mut envelope.rules, rule);
     }
-    if let Ok(value) = serde_json::to_value(approvals) {
+    let before_prune = envelope.rules.len();
+    prune_session_remembered_permission_rules(&mut envelope.rules);
+    if envelope.rules.len() != before_import
+        || envelope.rules.len() != before_prune
+        || session
+            .metadata
+            .get(SESSION_REMEMBERED_PERMISSIONS_KEY)
+            .and_then(|value| {
+                serde_json::from_value::<SessionRememberedPermissionRules>(value.clone()).ok()
+            })
+            .is_none()
+    {
+        store_session_remembered_permission_envelope(session, &envelope);
+    }
+    envelope.rules
+}
+
+struct LegacySessionRememberedPermissionImport {
+    rules: Vec<SessionRememberedPermissionRule>,
+    diagnostics: Vec<SessionRememberedPermissionDiagnostic>,
+}
+
+fn legacy_session_remembered_permission_rules(
+    session: &Session,
+    session_key: &str,
+    expected_context_digest: Option<&str>,
+    now: u64,
+) -> LegacySessionRememberedPermissionImport {
+    let Some(value) = session.metadata.get(SESSION_PERMISSION_APPROVALS_KEY) else {
+        return LegacySessionRememberedPermissionImport {
+            rules: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+    };
+    let Ok(approvals) = serde_json::from_value::<Vec<SessionApprovalCacheEntry>>(value.clone())
+    else {
+        return LegacySessionRememberedPermissionImport {
+            rules: Vec::new(),
+            diagnostics: vec![SessionRememberedPermissionDiagnostic {
+                code: "malformed_legacy_session_permission_approvals".to_owned(),
+            }],
+        };
+    };
+    LegacySessionRememberedPermissionImport {
+        rules: approvals
+            .into_iter()
+            .filter(|entry| {
+                valid_legacy_session_allow(entry, session_key, expected_context_digest, now)
+            })
+            .map(|entry| SessionRememberedPermissionRule {
+                session_key: entry.session_key,
+                approval_context_digest: entry.approval_context_digest,
+                effect: RememberedPermissionEffect::Allow,
+                matcher: legacy_session_matcher(
+                    entry.reuse_match,
+                    &entry.approval.request.action_digest,
+                ),
+                created_unix_ms: entry.approval.decision.decided_at_unix_ms,
+                legacy_imported: true,
+            })
+            .collect(),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn valid_legacy_session_allow(
+    entry: &SessionApprovalCacheEntry,
+    session_key: &str,
+    expected_context_digest: Option<&str>,
+    now: u64,
+) -> bool {
+    entry.session_key == session_key
+        && expected_context_digest == Some(entry.approval_context_digest.as_str())
+        && entry.approval.request.expires_at_unix_ms >= now
+        && entry.approval.request.requested_scope == session_key
+        && entry.approval.decision.approved_scope == session_key
+        && !entry.approval.decision.consumed
+        && entry.approval.decision.decision == ApprovalDecisionKind::ApprovedForSession
+        && entry
+            .approval
+            .request
+            .allowed_decisions
+            .contains(&ApprovalDecisionKind::ApprovedForSession)
+        && entry.approval.request.approval_request_id == entry.approval.decision.approval_request_id
+        && entry.approval.request.action_digest == entry.approval.decision.action_digest
+        && entry.approval.request.snapshot_digest == entry.approval.decision.snapshot_digest
+        && entry.approval.decision.decided_at_unix_ms <= entry.approval.request.expires_at_unix_ms
+}
+
+fn legacy_session_matcher(
+    reuse_match: SessionApprovalReuseMatch,
+    action_digest: &str,
+) -> RememberedPermissionMatcher {
+    match reuse_match {
+        SessionApprovalReuseMatch::ExactAction => RememberedPermissionMatcher::ExactAction {
+            action_digest: action_digest.to_owned(),
+        },
+        SessionApprovalReuseMatch::ExecCommandPattern { pattern } => {
+            let tokens = pattern
+                .trim_end_matches(" *")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if tokens.is_empty() {
+                RememberedPermissionMatcher::ExactAction {
+                    action_digest: action_digest.to_owned(),
+                }
+            } else {
+                RememberedPermissionMatcher::ExecPrefix { tokens }
+            }
+        }
+    }
+}
+
+fn store_session_remembered_permission_rule(
+    session: &mut Session,
+    session_key: &str,
+    effect: RememberedPermissionEffect,
+    action: &PermissionedAction,
+    workspace: &Path,
+) {
+    let Ok(matcher) = crate::runtime::safe_remembered_permission_matcher(action, workspace) else {
+        return;
+    };
+    let mut envelope = SessionRememberedPermissionRules {
+        schema_version: SESSION_REMEMBERED_PERMISSION_SCHEMA_VERSION,
+        rules: session_remembered_permission_rules(
+            session,
+            session_key,
+            Some(&session_approval_context_digest(action)),
+            now_unix_ms(),
+        ),
+        diagnostics: Vec::new(),
+    };
+    upsert_session_remembered_permission_rule(
+        &mut envelope.rules,
+        SessionRememberedPermissionRule {
+            session_key: session_key.to_owned(),
+            approval_context_digest: session_approval_context_digest(action),
+            effect,
+            matcher: matcher.matcher,
+            created_unix_ms: now_unix_ms(),
+            legacy_imported: false,
+        },
+    );
+    store_session_remembered_permission_envelope(session, &envelope);
+}
+
+fn upsert_session_remembered_permission_rule(
+    rules: &mut Vec<SessionRememberedPermissionRule>,
+    rule: SessionRememberedPermissionRule,
+) {
+    rules.retain(|existing| {
+        !(existing.session_key == rule.session_key
+            && existing.approval_context_digest == rule.approval_context_digest
+            && existing.matcher == rule.matcher)
+    });
+    rules.push(rule);
+    prune_session_remembered_permission_rules(rules);
+}
+
+fn prune_session_remembered_permission_rules(rules: &mut Vec<SessionRememberedPermissionRule>) {
+    if rules.len() > SESSION_PERMISSION_APPROVAL_LIMIT {
+        rules.drain(0..rules.len() - SESSION_PERMISSION_APPROVAL_LIMIT);
+    }
+}
+
+fn store_session_remembered_permission_envelope(
+    session: &mut Session,
+    envelope: &SessionRememberedPermissionRules,
+) {
+    if let Ok(value) = serde_json::to_value(envelope) {
         session
             .metadata
-            .insert(SESSION_PERMISSION_APPROVALS_KEY.to_owned(), value);
+            .insert(SESSION_REMEMBERED_PERMISSIONS_KEY.to_owned(), value);
     }
 }
 
@@ -4016,9 +4512,12 @@ fn parse_permission_approval_reply(content: &str) -> PermissionApprovalReply {
         "1" | "y" | "yes" | "approve" | "approved" | "allow" | "run" | "go" | "진행"
         | "진행해줘" | "승인" | "허용" => PermissionApprovalReply::Approve,
         "3" | "approve_session" | "approve-session" => PermissionApprovalReply::ApproveSession,
+        "4" | "approve_project" | "approve-project" => PermissionApprovalReply::ApproveProject,
         "2" | "n" | "no" | "deny" | "denied" | "cancel" | "stop" | "취소" | "거절" => {
             PermissionApprovalReply::Deny
         }
+        "5" | "deny_session" | "deny-session" => PermissionApprovalReply::DenySession,
+        "6" | "deny_project" | "deny-project" => PermissionApprovalReply::DenyProject,
         _ => PermissionApprovalReply::Unknown,
     }
 }
@@ -4556,6 +5055,42 @@ mod tests {
             .into_iter()
             .filter(|event| event.kind == kind)
             .count())
+    }
+
+    #[test]
+    fn permission_approval_scope_legacy_numeric_replies_keep_current_semantics() {
+        let fixtures = [
+            ("1", PermissionApprovalReply::Approve),
+            ("2", PermissionApprovalReply::Deny),
+            ("3", PermissionApprovalReply::ApproveSession),
+            ("approve", PermissionApprovalReply::Approve),
+            ("deny", PermissionApprovalReply::Deny),
+            ("approve_session", PermissionApprovalReply::ApproveSession),
+        ];
+
+        for (reply, expected) in fixtures {
+            assert_eq!(parse_permission_approval_reply(reply), expected);
+        }
+    }
+
+    #[test]
+    fn permission_approval_scope_project_and_deny_session_replies_parse_by_machine_value() {
+        let fixtures = [
+            ("4", PermissionApprovalReply::ApproveProject),
+            ("5", PermissionApprovalReply::DenySession),
+            ("6", PermissionApprovalReply::DenyProject),
+            ("approve_project", PermissionApprovalReply::ApproveProject),
+            ("deny_session", PermissionApprovalReply::DenySession),
+            ("deny_project", PermissionApprovalReply::DenyProject),
+            ("approve-project", PermissionApprovalReply::ApproveProject),
+            ("deny-session", PermissionApprovalReply::DenySession),
+            ("deny-project", PermissionApprovalReply::DenyProject),
+            ("unknown", PermissionApprovalReply::Unknown),
+        ];
+
+        for (reply, expected) in fixtures {
+            assert_eq!(parse_permission_approval_reply(reply), expected);
+        }
     }
 
     impl ProviderClient for CapturingProviderClient {

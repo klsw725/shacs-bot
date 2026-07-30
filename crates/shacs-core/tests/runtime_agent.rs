@@ -3458,6 +3458,9 @@ fn runtime_runner_classifier_interrupt_closes_later_same_segment_call() -> Resul
     context.permission_mode_snapshot.mode = PermissionMode::Auto;
     context.permission_interactive = true;
     context.permission_auto_approval.enabled = true;
+    context
+        .permission_auto_approval
+        .allow_proc_exec_verification = false;
     let mut spec = AgentRunSpec::new(
         vec![json!({"role": "user", "content": "go"})],
         &registry,

@@ -1483,7 +1483,8 @@ fn tool_context_with_classifier_verdict(
         call,
         permissioned_action_input_from_context(&context),
     );
-    let decision = permission_decision_for_action(&action, &context);
+    let review_context = context_for_classifier_review(&action, &context);
+    let decision = permission_decision_for_action(&action, &review_context);
     if !classifier_reviewable_policy_decision(&decision, &action) {
         emit_auto_permission_diagnostic(
             spec,
@@ -1566,7 +1567,8 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
         resolved_call,
         permissioned_action_input_from_context(&context),
     );
-    let decision = permission_decision_for_action(&action, &context);
+    let review_context = context_for_classifier_review(&action, &context);
+    let decision = permission_decision_for_action(&action, &review_context);
     if !classifier_reviewable_policy_decision(&decision, &action) {
         emit_auto_permission_diagnostic(
             spec,
@@ -1628,6 +1630,18 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
     );
     context.permission_evaluator = Some(verdict);
     context
+}
+
+fn context_for_classifier_review(
+    action: &PermissionedAction,
+    context: &ToolExecutionContext,
+) -> ToolExecutionContext {
+    if !action.capabilities.contains(&SafetyCapability::ProcExec) {
+        return context.clone();
+    }
+    let mut review_context = context.clone();
+    review_context.permission_auto_approval.enabled = false;
+    review_context
 }
 
 struct AutoPermissionDiagnosticInput<'a> {

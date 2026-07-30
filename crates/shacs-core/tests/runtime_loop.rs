@@ -2562,6 +2562,9 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         permission_interactive: false,
         permission_approval_cache: None,
         permission_session_approval_cache: Vec::new(),
+        permission_session_remembered_rules: Vec::new(),
+        project_permission_store: None,
+        active_workspace: None,
         in_cron_context: false,
         record_channel_delivery: false,
     };
@@ -4907,6 +4910,7 @@ fn agent_runner_auto_classifier_provider_error_interrupts_without_executing_in_i
     let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
     spec.tool_context = interactive_auto_context(AutoApprovalConfig {
         enabled: true,
+        allow_proc_exec_verification: false,
         ..AutoApprovalConfig::default()
     });
 
@@ -4955,6 +4959,7 @@ fn agent_runner_auto_classifier_uncertain_verdict_interrupts_without_executing_i
     let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
     spec.tool_context = interactive_auto_context(AutoApprovalConfig {
         enabled: true,
+        allow_proc_exec_verification: false,
         ..AutoApprovalConfig::default()
     });
 
@@ -5002,6 +5007,7 @@ fn agent_runner_auto_classifier_malformed_verdict_interrupts_without_executing_i
     let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
     spec.tool_context = interactive_auto_context(AutoApprovalConfig {
         enabled: true,
+        allow_proc_exec_verification: false,
         ..AutoApprovalConfig::default()
     });
 
@@ -5064,6 +5070,7 @@ fn agent_runner_auto_classifier_prompt_injection_signal_interrupts_without_execu
     let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
     spec.tool_context = interactive_auto_context(AutoApprovalConfig {
         enabled: true,
+        allow_proc_exec_verification: false,
         ..AutoApprovalConfig::default()
     });
 
@@ -5736,7 +5743,7 @@ fn loop_permission_approval_executes_pending_tool_and_resumes() -> Result<(), Bo
             tool_calls: vec![ToolCallRequest::new(
                 "exec-1",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
             )],
             ..LlmResponse::default()
         },
@@ -5769,15 +5776,33 @@ fn loop_permission_approval_executes_pending_tool_and_resumes() -> Result<(), Bo
         )
         .into());
     }
-    let approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
-    if !approval_outbound
-        .content
-        .contains("Permission approval required")
-        || !approval_outbound.content.contains("1. approve")
-        || !approval_outbound.content.contains("3. approve_session")
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+    let pending_raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:approval")
+        .ok_or("missing pending approval session")?;
+    if first.ask_user_options.as_slice()
+        != [
+            "approve",
+            "deny",
+            "approve_session",
+            "approve_project",
+            "deny_session",
+            "deny_project",
+        ]
+        || pending_raw["metadata"]["pending_permission_approval"]["approval_request"]
+            ["allowed_decisions"]
+            != json!([
+                "approved",
+                "denied",
+                "approved_for_session",
+                "approved_for_project",
+                "denied_for_session",
+                "denied_for_project"
+            ])
     {
         return Err(format!(
-            "approval outbound was not rendered for chat approval: {approval_outbound:?}"
+            "approval interrupt did not expose structured approval options: first={first:?} raw={pending_raw:?}"
         )
         .into());
     }
@@ -5826,7 +5851,7 @@ fn loop_permission_approval_normalizes_artifact_and_records_tool_outcome(
             tool_calls: vec![ToolCallRequest::new(
                 "exec-large-approved",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
             )],
             ..LlmResponse::default()
         },
@@ -5905,7 +5930,7 @@ fn loop_permission_approval_stops_after_fatal_tool_outcome() -> Result<(), Box<d
             tool_calls: vec![ToolCallRequest::new(
                 "exec-fatal-approved",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
             )],
             ..LlmResponse::default()
         },
@@ -5991,7 +6016,7 @@ fn loop_permission_approval_session_option_reuses_same_session_match() -> Result
             tool_calls: vec![ToolCallRequest::new(
                 "exec-1",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
             )],
             ..LlmResponse::default()
         },
@@ -6004,7 +6029,7 @@ fn loop_permission_approval_session_option_reuses_same_session_match() -> Result
             tool_calls: vec![ToolCallRequest::new(
                 "exec-2",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test --workspace"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
             )],
             ..LlmResponse::default()
         },
@@ -6068,20 +6093,20 @@ fn loop_permission_approval_session_option_reuses_same_session_match() -> Result
         .session_manager()
         .read_session_file("discord:approval-session")
         .ok_or("missing session approval session")?;
-    if raw["metadata"]["session_permission_approvals"]
+    if raw["metadata"]["session_remembered_permissions_v1"]["rules"]
         .as_array()
         .map(Vec::len)
         != Some(1)
-        || raw["metadata"]["session_permission_approvals"][0]["session_key"]
+        || raw["metadata"]["session_remembered_permissions_v1"]["rules"][0]["session_key"]
             != "discord:approval-session"
-        || !raw["metadata"]["session_permission_approvals"][0]["approval_context_digest"]
+        || !raw["metadata"]["session_remembered_permissions_v1"]["rules"][0]
+            ["approval_context_digest"]
             .is_string()
-        || raw["metadata"]["session_permission_approvals"][0]["reuse_match"]["kind"]
-            != "exec_command_pattern"
-        || raw["metadata"]["session_permission_approvals"][0]["reuse_match"]["pattern"]
-            != "cargo test *"
-        || raw["metadata"]["session_permission_approvals"][0]["approval"]["decision"]["decision"]
-            != "approved_for_session"
+        || raw["metadata"]["session_remembered_permissions_v1"]["rules"][0]["matcher"]["kind"]
+            != "exec_prefix"
+        || raw["metadata"]["session_remembered_permissions_v1"]["rules"][0]["matcher"]["tokens"]
+            != json!(["cargo", "fmt"])
+        || raw["metadata"]["session_remembered_permissions_v1"]["rules"][0]["effect"] != "allow"
     {
         return Err(format!("session approval metadata drifted: {raw:?}").into());
     }
@@ -6115,7 +6140,7 @@ fn loop_permission_approval_session_option_reuses_channel_message_id_change(
             tool_calls: vec![ToolCallRequest::new(
                 "exec-channel-1",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
             )],
             ..LlmResponse::default()
         },
@@ -6128,7 +6153,7 @@ fn loop_permission_approval_session_option_reuses_channel_message_id_change(
             tool_calls: vec![ToolCallRequest::new(
                 "exec-channel-2",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
             )],
             ..LlmResponse::default()
         },
@@ -6212,7 +6237,7 @@ fn loop_permission_approval_session_option_does_not_cross_sessions() -> Result<(
             tool_calls: vec![ToolCallRequest::new(
                 "exec-a",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
             )],
             ..LlmResponse::default()
         },
@@ -6225,7 +6250,7 @@ fn loop_permission_approval_session_option_does_not_cross_sessions() -> Result<(
             tool_calls: vec![ToolCallRequest::new(
                 "exec-b",
                 "exec",
-                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
             )],
             ..LlmResponse::default()
         },
@@ -6267,11 +6292,20 @@ fn loop_permission_approval_session_option_does_not_cross_sessions() -> Result<(
         )
         .into());
     }
-    let outbound = bus
+    let _outbound = bus
         .consume_outbound()
         .ok_or("missing second session approval outbound")?;
-    if !outbound.content.contains("Permission approval required") {
-        return Err(format!("second session did not ask for approval: {outbound:?}").into());
+    if second_session.ask_user_options.as_slice()
+        != [
+            "approve",
+            "deny",
+            "approve_session",
+            "approve_project",
+            "deny_session",
+            "deny_project",
+        ]
+    {
+        return Err(format!("second session did not ask for approval: {second_session:?}").into());
     }
     Ok(())
 }
@@ -6359,8 +6393,206 @@ fn loop_permission_approval_session_option_clears_on_new_session() -> Result<(),
     if raw["metadata"]
         .get("session_permission_approvals")
         .is_some()
+        || raw["metadata"]
+            .get("session_remembered_permissions_v1")
+            .and_then(|value| value.get("rules"))
+            .and_then(Value::as_array)
+            .is_some_and(|rules| !rules.is_empty())
     {
-        return Err(format!("/new left session approvals in metadata: {raw:?}").into());
+        return Err(format!("/new left session permission rules in metadata: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn remembered_session_permission_allow_survives_legacy_request_expiry() -> Result<(), Box<dyn Error>>
+{
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-remember-allow-1",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("approved remembered session".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-remember-allow-2",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo fmt --check"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("reused remembered session".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:remembered-allow"))?;
+    if first.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!("remembered allow fixture did not pause: {first:?}").into());
+    }
+    let _approval_outbound = bus.consume_outbound().ok_or("missing approval outbound")?;
+    let approved =
+        loop_runtime.process_direct("approve_session", Some("discord:remembered-allow"))?;
+    if calls.load(Ordering::SeqCst) != 1
+        || approved.final_content.as_deref() != Some("approved remembered session")
+    {
+        return Err(format!("remembered allow approval failed: {approved:?}").into());
+    }
+    let _approved_outbound = bus.consume_outbound().ok_or("missing approved outbound")?;
+
+    let mut session = loop_runtime
+        .session_manager()
+        .load_existing("discord:remembered-allow")
+        .ok_or("missing remembered allow session")?;
+    if let Some(entry) = session
+        .metadata
+        .get_mut("session_permission_approvals")
+        .and_then(Value::as_array_mut)
+        .and_then(|entries| entries.first_mut())
+    {
+        entry["approval"]["request"]["expires_at_unix_ms"] = json!(0);
+    }
+    loop_runtime.session_manager_mut().save(&session)?;
+
+    let reused = loop_runtime.process_direct("again", Some("discord:remembered-allow"))?;
+    if reused.stop_reason == "ask_user"
+        || calls.load(Ordering::SeqCst) != 2
+        || reused.final_content.as_deref() != Some("reused remembered session")
+    {
+        return Err(format!(
+            "remembered session allow did not outlive legacy expiry: {reused:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:remembered-allow")
+        .ok_or("missing remembered allow raw session")?;
+    if raw["metadata"]["session_remembered_permissions_v1"]["rules"]
+        .as_array()
+        .map(Vec::len)
+        != Some(1)
+    {
+        return Err(format!("remembered allow rule was not persisted: {raw:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn remembered_session_permission_deny_cancels_matching_action_without_prompt(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-remember-deny-1",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-remember-deny-2",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test --workspace"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("denied by remembered session".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:remembered-deny"))?;
+    if first.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!("remembered deny fixture did not pause: {first:?}").into());
+    }
+    let _approval_outbound = bus
+        .consume_outbound()
+        .ok_or("missing deny approval outbound")?;
+    let denied = loop_runtime.process_direct("deny_session", Some("discord:remembered-deny"))?;
+    if denied.final_content.as_deref() != Some("Tool execution cancelled.")
+        || calls.load(Ordering::SeqCst) != 0
+    {
+        return Err(format!("remembered deny reply executed tool: {denied:?}").into());
+    }
+    let _denied_outbound = bus.consume_outbound().ok_or("missing denied outbound")?;
+
+    let reused = loop_runtime.process_direct("again", Some("discord:remembered-deny"))?;
+    if reused.stop_reason == "ask_user"
+        || calls.load(Ordering::SeqCst) != 0
+        || reused.final_content.as_deref() != Some("denied by remembered session")
+    {
+        return Err(format!(
+            "remembered session deny did not cancel without prompting: {reused:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:remembered-deny")
+        .ok_or("missing remembered deny raw session")?;
+    if raw["metadata"]["session_remembered_permissions_v1"]["rules"][0]["effect"] != "deny" {
+        return Err(format!("remembered deny rule was not persisted: {raw:?}").into());
     }
     Ok(())
 }
