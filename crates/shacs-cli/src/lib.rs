@@ -27,6 +27,7 @@ use shacs_config::{
     load_config_with_env, resolve_config_env_refs, save_auth_store_to_path, save_config_to_path,
     ApiConfig, ConfigBundle, ConfigError, EnvSource, LoadOptions, PermissionActivationContext,
     PermissionConfigSnapshot, PermissionModeSource, ProcessEnv, ProviderAuth, ProviderConfig,
+    RememberedPermissionFileStore, WorkspacePermissionId,
 };
 use shacs_core::app::{AppError, AppId, AppLifecycleState, AppRegistryEntry, AppRegistryStore};
 use shacs_core::app_authoring::{
@@ -47,10 +48,11 @@ use shacs_core::runtime::{
     MessageBus, PermissionMode, PermissionModeSnapshot, PluginCommandDispatcher,
     PluginDiscoveryError, PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink,
     PluginHookDispatchSummary, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
-    PluginSurfaceProjection, ProviderNotificationEvaluator, RuntimeCapabilityReport,
-    RuntimeCapabilityStatus, RuntimeToolCall, Session, SessionHistoryOptions, SessionManager,
-    SessionTurnLock, StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime, ToolEvent,
-    ToolSearchConfig, ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
+    PluginSurfaceProjection, ProjectPermissionStoreConfig, ProviderNotificationEvaluator,
+    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, Session,
+    SessionHistoryOptions, SessionManager, SessionTurnLock, StreamDeltaCoalescer,
+    SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig, ToolSearchMode,
+    ToolStatus, HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -58,6 +60,14 @@ use shacs_core::tools::{
     McpServerSpec, MessageTool, NetworkGuard, PathContext, ReadFileTool, SelfRuntimeState,
     SelfTool, SpawnTool, StdioMcpConnector, ToolRegistry, WebFetchConfig, WebFetchTool,
     WebSearchConfig, WebSearchTool, WriteFileTool,
+};
+use shacs_projection::{
+    build_remembered_permission_projection, format_remembered_permission_projection,
+    format_remembered_permission_rule, normalize_remembered_permission_rule_prefix,
+    project_remembered_permission_rule_by_prefix, project_removed_remembered_permission_rule,
+    RememberedPermissionProjection, RememberedPermissionProjectionInput,
+    RememberedPermissionRulePrefixError, RememberedPermissionRuleProjection,
+    RememberedPermissionStoreHealthInput,
 };
 use shacs_providers::{
     chat_with_retry, prepare_provider_request, resolve_image_generation_client,
@@ -117,7 +127,7 @@ use shacs_workflow::{WorkflowPattern, WorkflowRecipeReadiness};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -198,6 +208,7 @@ pub enum CliCommand {
     Hooks(HooksCommand),
     Channels(ChannelsCommand),
     Context(ContextCommand),
+    Permissions(PermissionsCommand),
     Ask(AskOptions),
     Run(RunOptions),
     Serve(ServeOptions),
@@ -331,6 +342,13 @@ pub enum ContextCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionsCommand {
+    List(PermissionsListOptions),
+    Inspect(PermissionsIdOptions),
+    Revoke(PermissionsIdOptions),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextFilesCommand {
     List(ContextFilesOptions),
     Inspect(ContextFilesOptions),
@@ -371,6 +389,19 @@ pub struct ContextRefsResolveOptions {
     pub workspace_override: Option<PathBuf>,
     pub message: String,
     pub network_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PermissionsListOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PermissionsIdOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub rule_id_prefix: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -2581,6 +2612,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Hooks(command) => run_hooks_command(command),
         CliCommand::Channels(command) => run_channels_command(command),
         CliCommand::Context(command) => run_context_command(command),
+        CliCommand::Permissions(command) => run_permissions_command(command),
         CliCommand::Ask(options) => ask(options),
         CliCommand::Run(options) => run_runtime(options),
         CliCommand::Serve(options) => serve(options),
@@ -2622,6 +2654,7 @@ where
         "hooks" | "hook" => parse_hooks(parser, global_config),
         "channels" | "channel" => parse_channels(parser, global_config),
         "context" => parse_context(parser, global_config),
+        "permissions" | "permission" => parse_permissions(parser, global_config),
         "ask" => parse_ask(parser, global_config, false),
         "agent" => parse_ask(parser, global_config, true),
         "run" => parse_run(parser, global_config),
@@ -6427,6 +6460,118 @@ fn run_context_command(command: ContextCommand) -> Result<String, CliError> {
             context_refs_resolve(options).map(format_context_refs_resolve_report)
         }
     }
+}
+
+fn run_permissions_command(command: PermissionsCommand) -> Result<String, CliError> {
+    match command {
+        PermissionsCommand::List(options) => permissions_list(options).map(format_permissions_list),
+        PermissionsCommand::Inspect(options) => {
+            permissions_inspect(options).map(format_permissions_inspect)
+        }
+        PermissionsCommand::Revoke(options) => {
+            permissions_revoke(options).map(format_permissions_revoke)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionsListReport {
+    pub projection: RememberedPermissionProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionsRuleReport {
+    pub rule: RememberedPermissionRuleProjection,
+}
+
+pub fn permissions_list(
+    options: PermissionsListOptions,
+) -> Result<PermissionsListReport, CliError> {
+    let (store, workspace_id) =
+        permissions_store_for_options(options.config_path, options.workspace_override)?;
+    let store_value = if store.path().exists() {
+        Some(store.load().map_err(permissions_store_error)?)
+    } else {
+        None
+    };
+    let projection = build_remembered_permission_projection(RememberedPermissionProjectionInput {
+        store: store_value.as_ref(),
+        workspace_id: &workspace_id,
+        health: RememberedPermissionStoreHealthInput::available(),
+    });
+    Ok(PermissionsListReport { projection })
+}
+
+pub fn permissions_inspect(
+    options: PermissionsIdOptions,
+) -> Result<PermissionsRuleReport, CliError> {
+    let (store, workspace_id) =
+        permissions_store_for_options(options.config_path, options.workspace_override)?;
+    let store_value = store.load().map_err(permissions_store_error)?;
+    let rule = project_remembered_permission_rule_by_prefix(
+        &store_value,
+        &workspace_id,
+        &options.rule_id_prefix,
+    )
+    .map_err(permission_prefix_error)?;
+    Ok(PermissionsRuleReport { rule })
+}
+
+pub fn permissions_revoke(
+    options: PermissionsIdOptions,
+) -> Result<PermissionsRuleReport, CliError> {
+    let (store, workspace_id) =
+        permissions_store_for_options(options.config_path, options.workspace_override)?;
+    let prefix = normalize_remembered_permission_rule_prefix(&options.rule_id_prefix)
+        .map_err(permission_prefix_error)?;
+    let outcome = store
+        .remove_rule_by_prefix(&workspace_id, prefix)
+        .map_err(permissions_store_error)?;
+    let projected_rule =
+        project_removed_remembered_permission_rule(outcome).map_err(permission_prefix_error)?;
+    Ok(PermissionsRuleReport {
+        rule: projected_rule,
+    })
+}
+
+fn permissions_store_for_options(
+    config_path: Option<PathBuf>,
+    workspace_override: Option<PathBuf>,
+) -> Result<(RememberedPermissionFileStore, WorkspacePermissionId), CliError> {
+    let bundle = load_config_with_env(
+        LoadOptions {
+            config_path,
+            workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )?;
+    let workspace_id = bundle.context.workspace_permission_id()?;
+    Ok((
+        RememberedPermissionFileStore::for_context(&bundle.context),
+        workspace_id,
+    ))
+}
+
+fn permission_prefix_error(error: RememberedPermissionRulePrefixError) -> CliError {
+    CliError::InvalidArguments(error.cli_message().to_owned())
+}
+
+fn permissions_store_error(error: shacs_config::RememberedPermissionStoreError) -> CliError {
+    CliError::InvalidArguments(redact_string(&error.to_string()))
+}
+
+pub fn format_permissions_list(report: PermissionsListReport) -> String {
+    format_remembered_permission_projection(&report.projection)
+}
+
+pub fn format_permissions_inspect(report: PermissionsRuleReport) -> String {
+    format_remembered_permission_rule("Remembered permission", &report.rule)
+}
+
+pub fn format_permissions_revoke(report: PermissionsRuleReport) -> String {
+    format_remembered_permission_rule("Revoked remembered permission", &report.rule)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15680,6 +15825,7 @@ pub fn help_text() -> String {
         "  apps      Init authoring drafts; install, list, inspect, enable, disable, or uninstall local app bundles",
         "  plugins   List, inspect, doctor, enable, or disable plugin state and surfaces",
         "  hooks     List and inspect plugin hook metadata",
+        "  permissions List, inspect, or revoke remembered permission rules",
         "  channels  List channel registry/config status",
         "  context   Inspect context files and dry-run inline @ references",
         "  ask       Send one message through the local AgentLoop",
@@ -16363,6 +16509,106 @@ fn parse_plugins(
             "unknown plugins subcommand `{other}`"
         ))),
     }
+}
+
+fn parse_permissions(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "permissions requires `list`, `inspect`, or `revoke`".to_owned(),
+        ));
+    };
+    match action.as_str() {
+        "list" | "ls" => Ok(CliCommand::Permissions(PermissionsCommand::List(
+            parse_permissions_list_options(parser, global_config, "list")?,
+        ))),
+        "inspect" | "show" => Ok(CliCommand::Permissions(PermissionsCommand::Inspect(
+            parse_permissions_id_options(parser, global_config, "inspect")?,
+        ))),
+        "revoke" => Ok(CliCommand::Permissions(PermissionsCommand::Revoke(
+            parse_permissions_id_options(parser, global_config, "revoke")?,
+        ))),
+        "--help" | "-h" => Ok(CliCommand::Help),
+        other => Err(CliError::InvalidArguments(format!(
+            "unknown permissions subcommand `{other}`"
+        ))),
+    }
+}
+
+fn parse_permissions_list_options(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    action: &str,
+) -> Result<PermissionsListOptions, CliError> {
+    let mut options = PermissionsListOptions {
+        config_path: global_config,
+        workspace_override: None,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => {
+                return Err(CliError::InvalidArguments(
+                    "help requested after action".to_owned(),
+                ))
+            }
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown permissions {action} argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn parse_permissions_id_options(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    action: &str,
+) -> Result<PermissionsIdOptions, CliError> {
+    let mut options = PermissionsIdOptions {
+        config_path: global_config,
+        workspace_override: None,
+        rule_id_prefix: String::new(),
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--help" | "-h" => {
+                return Err(CliError::InvalidArguments(
+                    "help requested after action".to_owned(),
+                ))
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown permissions {action} argument `{other}`"
+                )))
+            }
+            other => {
+                if !options.rule_id_prefix.is_empty() {
+                    return Err(CliError::InvalidArguments(format!(
+                        "permissions {action} accepts exactly one rule id prefix"
+                    )));
+                }
+                options.rule_id_prefix = other.to_owned();
+            }
+        }
+    }
+    if options.rule_id_prefix.trim().is_empty() {
+        return Err(CliError::InvalidArguments(format!(
+            "permissions {action} requires a rule id prefix"
+        )));
+    }
+    Ok(options)
 }
 
 fn parse_plugins_list_options(
@@ -17828,7 +18074,8 @@ impl AgentLoopChatCompletionAdapter {
                 provider_model_supports_native_image_input(spec.backend, &resolved.model)
             });
         let resolved_model = resolved.model.clone();
-        let client: Arc<dyn ProviderClient> = Arc::from(resolved.client);
+        let client: Arc<dyn ProviderClient> =
+            debug_fake_provider_client().unwrap_or_else(|| Arc::from(resolved.client));
         Ok(Self {
             configured_model: defaults.model.clone(),
             provider_id,
@@ -17913,6 +18160,28 @@ impl AgentLoopChatCompletionAdapter {
             runtime_permission_rule_containment_from_snapshot(self.containment_snapshot.as_ref());
         config.permission_rule_input.protected_targets =
             config.permission_auto_approval.protected_targets.clone();
+        let config_context = shacs_config::config_context(
+            Some(self.config_path.clone()),
+            Some(self.workspace.clone()),
+        );
+        let permissions_path = config_context.remembered_permissions_path();
+        let permissions_target = permissions_path.to_string_lossy().to_string();
+        if !config
+            .permission_rule_input
+            .protected_targets
+            .contains(&permissions_target)
+        {
+            config
+                .permission_rule_input
+                .protected_targets
+                .push(permissions_target);
+        }
+        if let Ok(workspace_id) = config_context.workspace_permission_id() {
+            config.project_permission_store = Some(ProjectPermissionStoreConfig {
+                store_path: permissions_path,
+                workspace_id,
+            });
+        }
         let config_path = self.config_path.clone();
         let containment_precondition_met =
             permission_containment_precondition_met(&self.containment_snapshot);
@@ -18765,6 +19034,7 @@ impl AgentLoopChatCompletionAdapter {
         subagent.permission_mode_snapshot = config.permission_mode_snapshot.clone();
         subagent.permission_rule_input = config.permission_rule_input.clone();
         subagent.permission_ceiling_snapshot = config.permission_ceiling_snapshot.clone();
+        subagent.project_permission_store = config.project_permission_store.clone();
         subagent.max_iterations = config.max_iterations;
         subagent.max_tool_result_chars = config.max_tool_result_chars;
         subagent.fail_on_tool_error = true;
@@ -18837,6 +19107,85 @@ impl AgentLoopChatCompletionAdapter {
             }
         }
         Ok(paths)
+    }
+}
+
+#[cfg(debug_assertions)]
+struct DebugFileProviderClient {
+    responses_path: PathBuf,
+}
+
+#[cfg(debug_assertions)]
+impl ProviderClient for DebugFileProviderClient {
+    fn chat(
+        &self,
+        _request: shacs_providers::ProviderRequest,
+    ) -> Result<LlmResponse, ProviderError> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.responses_path)
+            .map_err(debug_fake_provider_error)?;
+        file.lock_exclusive().map_err(debug_fake_provider_error)?;
+        let mut responses: Vec<LlmResponse> = serde_json::from_reader(&file).map_err(|error| {
+            debug_fake_provider_error(io::Error::new(io::ErrorKind::InvalidData, error))
+        })?;
+        if responses.is_empty() {
+            let _ = FileExt::unlock(&file);
+            return Err(ProviderError::Api {
+                status: None,
+                message: "debug fake provider response queue is empty".to_owned(),
+                retryable: false,
+                headers: BTreeMap::new(),
+                body: None,
+            });
+        }
+        let response = responses.remove(0);
+        file.set_len(0).map_err(debug_fake_provider_error)?;
+        file.rewind().map_err(debug_fake_provider_error)?;
+        file.write_all(
+            serde_json::to_string(&responses)
+                .map_err(|error| {
+                    debug_fake_provider_error(io::Error::new(io::ErrorKind::InvalidData, error))
+                })?
+                .as_bytes(),
+        )
+        .map_err(debug_fake_provider_error)?;
+        FileExt::unlock(&file).map_err(debug_fake_provider_error)?;
+        Ok(response)
+    }
+
+    fn chat_stream(
+        &self,
+        request: shacs_providers::ProviderRequest,
+        _on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat(request)
+    }
+}
+
+#[cfg(debug_assertions)]
+fn debug_fake_provider_client() -> Option<Arc<dyn ProviderClient>> {
+    std::env::var_os("SHACS_DEBUG_FAKE_PROVIDER_RESPONSES").map(|path| {
+        Arc::new(DebugFileProviderClient {
+            responses_path: PathBuf::from(path),
+        }) as Arc<dyn ProviderClient>
+    })
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_fake_provider_client() -> Option<Arc<dyn ProviderClient>> {
+    None
+}
+
+#[cfg(debug_assertions)]
+fn debug_fake_provider_error(error: io::Error) -> ProviderError {
+    ProviderError::Api {
+        status: None,
+        message: format!("debug fake provider error: {error}"),
+        retryable: false,
+        headers: BTreeMap::new(),
+        body: None,
     }
 }
 
@@ -19185,6 +19534,37 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         discover_skill_registry(options).ok().map(|registry| {
             workflow_recipes_projection_value(&discover_workflow_recipes(&registry))
         })
+    }
+
+    fn remembered_permissions_projection(&self) -> Option<RememberedPermissionProjection> {
+        let context = config_context(Some(self.config_path.clone()), Some(self.workspace.clone()));
+        let workspace_id = context.workspace_permission_id().ok()?;
+        let store = RememberedPermissionFileStore::for_context(&context);
+        let store_value = if store.path().exists() {
+            match store.load() {
+                Ok(store_value) => Some(store_value),
+                Err(error) => {
+                    return Some(build_remembered_permission_projection(
+                        RememberedPermissionProjectionInput {
+                            store: None,
+                            workspace_id: &workspace_id,
+                            health: RememberedPermissionStoreHealthInput::unavailable(
+                                &error.to_string(),
+                            ),
+                        },
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+        Some(build_remembered_permission_projection(
+            RememberedPermissionProjectionInput {
+                store: store_value.as_ref(),
+                workspace_id: &workspace_id,
+                health: RememberedPermissionStoreHealthInput::available(),
+            },
+        ))
     }
 
     fn persist_uploaded_file(
@@ -21279,6 +21659,7 @@ mod tests {
         let help = help_text();
         assert!(help.contains("plugins   List, inspect, doctor, enable, or disable"));
         assert!(help.contains("hooks     List and inspect plugin hook metadata"));
+        assert!(help.contains("permissions List, inspect, or revoke remembered permission rules"));
         assert!(!help.contains("Reserved for a later plugin slice"));
     }
 
@@ -26440,7 +26821,7 @@ mod tests {
                 response: LlmResponse::default(),
             }),
             retry_mode: ProviderRetryMode::Standard,
-            workspace,
+            workspace: workspace.clone(),
             config_path: config_path.clone(),
             media_dir: root.path().join("data").join("media").join("api"),
             tools: ToolRegistry::new(),
@@ -26480,9 +26861,14 @@ mod tests {
             PermissionMode::Default
         );
         assert!(!initial_config.permission_auto_approval.enabled);
+        let expected_permissions_target =
+            shacs_config::config_context(Some(config_path.clone()), Some(workspace.clone()))
+                .remembered_permissions_path()
+                .to_string_lossy()
+                .to_string();
         assert_eq!(
             initial_config.permission_rule_input.protected_targets,
-            vec!["secrets".to_owned()]
+            vec!["secrets".to_owned(), expected_permissions_target]
         );
         let setter = initial_config
             .permission_mode_setter
