@@ -52,7 +52,7 @@ Origin specs: 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027
 6. 029/033이 생산하는 reconnect, backpressure, bounded queue, dropped event, channel delivery 상태의 projection과 accounting vocabulary.
 7. Release runner, coverage matrix, lifecycle smoke evidence, projection parity smoke, local install/start/diagnose/recover evidence.
 
-Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime state를, 032는 app state와 receipt를, 033은 evaluation/automation state와 coverage entry/review artifact를, 034는 media/analyzer state와 evidence를 생산한다. 031은 그 상태를 CLI/TUI/API/channel에 투영하는 shared adapter, parity smoke, release runner shell만 소유하며 domain state transition이나 evidence 생성 규칙을 다시 소유하지 않는다.
+Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime state를, 030은 approval/policy/redaction/containment evidence를, 032는 app state와 receipt를, 033은 evaluation/automation state와 coverage entry/review artifact를, 034는 media/analyzer state와 evidence를, 035는 config/profile/secret-ref consumption과 execution snapshot을 생산한다. 031은 그 상태를 CLI/TUI/API/channel에 투영하는 shared adapter, parity smoke, release runner shell만 소유하며 domain state transition, config/persistence contract, evidence 생성 규칙을 다시 소유하지 않는다.
 
 ## Invariants
 
@@ -119,6 +119,29 @@ Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime 
 | 025 hooks and plugins | Plugin/hook inspect and local manifest scope | Plugin readiness, hook diagnostics, extension projection parity |
 | 026 context files and inline references | Context discovery and live provider handoff | Context reference projection parity across CLI/TUI/API/channel |
 | 027 channel attachment intake | Stored attachment and file context routing | 034가 생산하는 media/analyzer state의 shared adapter와 channel parity |
+
+## Implementation PRDs
+
+Spec 031은 아래 PRD를 순서대로 구현하고 검증한다. PRD 007은 새 domain contract를 정의하지 않는 유일한 sequential integration and closure gate다.
+
+| PRD | Sole owner scope | Depends on |
+|---|---|---|
+| [PRD 000](prds/000-shared-projection-model-and-vocabulary.md) | Shared typed projection model, bounded vocabulary, versioning, redaction boundary | Existing owner records |
+| [PRD 001](prds/001-surface-adapter-parity-cli-api-channel.md) | CLI, local API, WebSocket, external channel adapter parity | PRD 000 |
+| [PRD 002](prds/002-approval-progress-and-recovery-parity.md) | Approval lineage, progress/final distinction, recovery projection parity | PRDs 000-001, Specs 029-030 owner facts |
+| [PRD 003](prds/003-readiness-degraded-health-and-diagnostics.md) | Component readiness, degraded health aggregation, diagnostics parity | PRDs 000-001, component owner observations |
+| [PRD 004](prds/004-context-extension-app-and-media-projection.md) | Context, plugin/hook, app, attachment/media projection and reason parity | PRDs 000-001, 003, Specs 032 and 034 evidence |
+| [PRD 005](prds/005-interactive-tui-repl-and-onboard-flows.md) | Interactive TUI, REPL command parity, onboard secret-ref/readiness flows | PRDs 000-004, Specs 030 and 035 owner facts |
+| [PRD 006](prds/006-reconnect-backpressure-and-drop-accounting.md) | Reconnect, backpressure, coalescing, drop, final-delivery accounting | PRDs 000-002, Specs 029 and 033 evidence |
+| [PRD 007](prds/007-release-runner-and-spec031-closure.md) | Release runner, coverage/lifecycle/parity smoke, failure triage, final closure | PRDs 000-006 and all required external evidence |
+
+Dependency rules:
+
+1. PRD 000의 canonical vocabulary가 닫히기 전에 surface adapter가 private status contract를 추가하면 안 된다.
+2. PRD 001은 interactive flow를 소유하지 않고, PRD 005는 adapter/domain contract를 재정의하지 않는다.
+3. PRD 002의 terminal outcome 의미와 PRD 006의 delivery accounting은 분리한다. Progress drop과 final delivery는 동시에 참일 수 있다.
+4. Spec 030/032/033/034/035가 생산해야 하는 evidence가 없으면 해당 adapter는 blocked 또는 unavailable 상태와 safe reason을 기록할 수 있지만 Spec 031 final closure는 통과할 수 없다.
+5. PRD 007의 dependency DAG, requirement mapping, real-surface QA, artifact-backed audit가 모두 통과하기 전에는 이 문서의 status를 변경하지 않는다.
 
 ## Closure Evidence
 
