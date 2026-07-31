@@ -1,7 +1,16 @@
 use serde_json::{json, Value};
 use shacs_core::runtime::{
-    dispatch_bridge_tool_call, ContainmentSnapshotRef, RuntimeToolCall, RuntimeToolExecutor,
-    ToolExecutionContext, ToolSearchActivationReason, ToolSearchConfig,
+    containment_permission_proof_for_process_gate, dispatch_bridge_tool_call,
+    ActionNormalizationState, CapabilityCeilingRef, ContainerNetworkMode, ContainerRuntimeKind,
+    ContainmentSnapshotRef, DockerContainmentSnapshot, InheritedPermissionContext,
+    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
+    PermissionedAction, PermissionedActionOrigin, PolicySafetySnapshot,
+    PolicySafetySnapshotCreationReason, PolicySafetySnapshotInput, PolicySafetySnapshotRef,
+    PolicySafetySourceKind, PolicySafetySourceRef, ProcExecSummary, ProcessAdapterKind,
+    ProcessContainmentProofCandidate, ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput,
+    ProcessGateInput, ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
+    ProcessTerminalOutcome, RuntimeBoundaryOrigin, RuntimeToolCall, RuntimeToolExecutor,
+    SafetyCapability, ToolExecutionContext, ToolSearchActivationReason, ToolSearchConfig,
     ToolSearchDiagnosticsSummary, ToolSearchMode, ToolSearchRuntimeInput,
 };
 use shacs_core::tools::{
@@ -13,12 +22,12 @@ use shacs_core::tools::{
     normalize_schema_for_openai, register_mcp_capabilities, sanitize_mcp_name, tool_parameters,
     tool_parameters_schema, wrap_command, ActivationState, EditFileTool, ExecConfig, ExecTool,
     FileState, JsonMap, McpCallOutcome, McpCapability, McpCapabilityKind, McpClient, McpConnector,
-    McpErrorKind, McpOperation, McpPromptArgument, McpRuntime, McpServerSpec, McpTransportKind,
-    NotebookEditTool, ObjectSchema, OutboundMessage, PathContext, ReadFileTool, Schema,
-    SearchHttpClient, SearchHttpResponse, SelfRuntimeState, SelfTool, SpawnRequest, StringSchema,
-    Tool, ToolParameters, ToolRegistry, ToolResult, ToolSurfaceAssemblyInput, UreqWebSearchClient,
-    WebClient, WebFetchConfig, WebFetchTool, WebSearchClient, WebSearchConfig, WebSearchResult,
-    WebSearchTool, WriteFileTool,
+    McpErrorKind, McpOperation, McpPromptArgument, McpRuntime, McpServerSpec, McpStartupGate,
+    McpTransportKind, NotebookEditTool, ObjectSchema, OutboundMessage, PathContext, ReadFileTool,
+    Schema, SearchHttpClient, SearchHttpResponse, SelfRuntimeState, SelfTool, SpawnRequest,
+    StdioMcpConnector, StringSchema, Tool, ToolCallExecutionContext, ToolParameters, ToolRegistry,
+    ToolResult, ToolSurfaceAssemblyInput, UreqWebSearchClient, WebClient, WebFetchConfig,
+    WebFetchTool, WebSearchClient, WebSearchConfig, WebSearchResult, WebSearchTool, WriteFileTool,
 };
 use shacs_cron::{
     system_job, CronJobState, CronRunStatus, CronSchedule, CronService, InMemoryCronService,
@@ -1661,14 +1670,39 @@ fn exec_tool_runs_command_and_reports_exit_code() -> Result<(), Box<dyn Error>> 
     let tool = ExecTool::with_workspace(temp.path());
 
     let result = tool
-        .execute(json_map(json!({
-            "command": "printf hello",
-            "timeout": 5
-        }))?)
+        .execute_with_context(
+            json_map(json!({
+                "command": "printf hello",
+                "timeout": 5
+            }))?,
+            &exec_tool_call_context(
+                PermissionMode::BypassPermissions,
+                ProcessGateTerminalPrecondition::Ready,
+                false,
+            )?,
+        )
         .into_text();
     if !result.contains("hello") || !result.contains("Exit code: 0") {
         return Err(format!("exec did not return expected output: {result}").into());
     }
+    Ok(())
+}
+
+#[test]
+fn oracle_exec_tool_direct_no_context_rejects_without_spawn() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("direct-marker");
+    let tool = ExecTool::with_workspace(temp.path());
+
+    let result = tool
+        .execute(json_map(json!({
+            "command": "touch direct-marker",
+            "timeout": 5
+        }))?)
+        .into_text();
+
+    assert!(result.contains("process context"));
+    assert!(!marker.exists());
     Ok(())
 }
 
@@ -1684,10 +1718,17 @@ fn exec_tool_injects_configured_env_after_allowed_process_env() -> Result<(), Bo
     let tool = ExecTool::new(config);
 
     let result = tool
-        .execute(json_map(json!({
-            "command": "printf '%s|%s' \"$SHACS_CONFIG_ONLY\" \"$HOME\"",
-            "timeout": 5
-        }))?)
+        .execute_with_context(
+            json_map(json!({
+                "command": "printf '%s|%s' \"$SHACS_CONFIG_ONLY\" \"$HOME\"",
+                "timeout": 5
+            }))?,
+            &exec_tool_call_context(
+                PermissionMode::BypassPermissions,
+                ProcessGateTerminalPrecondition::Ready,
+                false,
+            )?,
+        )
         .into_text();
     if !result.contains("configured|/configured-home") || !result.contains("Exit code: 0") {
         return Err(
@@ -1857,10 +1898,17 @@ exit 1
     let tool = ExecTool::new(config);
 
     let result = tool
-        .execute(json_map(json!({
-            "command": "touch should-not-run",
-            "timeout": 5
-        }))?)
+        .execute_with_context(
+            json_map(json!({
+                "command": "touch should-not-run",
+                "timeout": 5
+            }))?,
+            &exec_tool_call_context(
+                PermissionMode::BypassPermissions,
+                ProcessGateTerminalPrecondition::Ready,
+                false,
+            )?,
+        )
         .into_text();
     if !result.contains("Exit code: 1") {
         return Err(format!(
@@ -1903,10 +1951,17 @@ fn exec_tool_truncates_multibyte_output_without_panicking() -> Result<(), Box<dy
     let temp = tempfile::tempdir()?;
     let tool = ExecTool::with_workspace(temp.path());
     let result = tool
-        .execute(json_map(json!({
-            "command": "printf '한%.0s' {1..12000}",
-            "timeout": 5
-        }))?)
+        .execute_with_context(
+            json_map(json!({
+                "command": "printf '한%.0s' {1..12000}",
+                "timeout": 5
+            }))?,
+            &exec_tool_call_context(
+                PermissionMode::BypassPermissions,
+                ProcessGateTerminalPrecondition::Ready,
+                false,
+            )?,
+        )
         .into_text();
     if !result.contains("chars truncated") || !result.contains("Exit code: 0") {
         return Err(format!("multibyte output was not truncated safely: {result}").into());
@@ -1920,12 +1975,264 @@ fn exec_tool_times_out_long_running_command() -> Result<(), Box<dyn Error>> {
     let tool = ExecTool::with_workspace(temp.path());
 
     let result = tool
-        .execute(json_map(json!({ "command": "sleep 2", "timeout": 1 }))?)
+        .execute_with_context(
+            json_map(json!({ "command": "sleep 2", "timeout": 1 }))?,
+            &exec_tool_call_context(
+                PermissionMode::BypassPermissions,
+                ProcessGateTerminalPrecondition::Ready,
+                false,
+            )?,
+        )
         .into_text();
     if !result.contains("Command timed out after 1 seconds") {
         return Err(format!("timeout did not fire: {result}").into());
     }
     Ok(())
+}
+
+#[test]
+fn exec_tool_allowed_pwd_returns_output_and_separate_redacted_receipt() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let tool = ExecTool::with_workspace(temp.path());
+
+    let result = tool.execute_with_receipt(
+        json_map(json!({
+            "command": "pwd",
+            "timeout": 5
+        }))?,
+        &exec_tool_call_context(
+            PermissionMode::BypassPermissions,
+            ProcessGateTerminalPrecondition::Ready,
+            false,
+        )?,
+    )?;
+    let receipt = serde_json::to_string(&result.receipt)?;
+
+    assert!(result
+        .output
+        .contains(&temp.path().to_string_lossy().to_string()));
+    assert!(result.output.contains("Exit code: 0"));
+    assert_eq!(result.receipt.dispatch_count, 1);
+    assert_eq!(
+        result.receipt.terminal_outcome,
+        ProcessTerminalOutcome::Succeeded
+    );
+    assert_eq!(result.receipt.adapter, ProcessAdapterKind::ExecTool);
+    assert!(!receipt.contains(&temp.path().to_string_lossy().to_string()));
+    assert!(!receipt.contains("pwd"));
+    Ok(())
+}
+
+#[test]
+fn exec_tool_denied_and_replay_gate_spawn_zero_processes() -> Result<(), Box<dyn Error>> {
+    for (precondition, marker_name) in [
+        (ProcessGateTerminalPrecondition::Ready, "denied-marker"),
+        (ProcessGateTerminalPrecondition::Replay, "replay-marker"),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let marker = temp.path().join(marker_name);
+        let tool = ExecTool::with_workspace(temp.path());
+
+        let result = tool.execute_with_receipt(
+            json_map(json!({
+                "command": format!("touch {marker_name}"),
+                "timeout": 5
+            }))?,
+            &exec_tool_call_context(PermissionMode::DontAsk, precondition, true)?,
+        )?;
+
+        assert_eq!(result.receipt.dispatch_count, 0);
+        assert!(!marker.exists());
+        assert!(result.output.contains("Process launch blocked"));
+    }
+    Ok(())
+}
+
+#[test]
+fn exec_tool_timeout_and_cancel_receipts_are_deterministic() -> Result<(), Box<dyn Error>> {
+    let timeout_temp = tempfile::tempdir()?;
+    let timeout_tool = ExecTool::with_workspace(timeout_temp.path());
+
+    let timeout_result = timeout_tool.execute_with_receipt(
+        json_map(json!({
+            "command": "sleep 2",
+            "timeout": 1
+        }))?,
+        &exec_tool_call_context(
+            PermissionMode::BypassPermissions,
+            ProcessGateTerminalPrecondition::Ready,
+            false,
+        )?,
+    )?;
+
+    assert!(timeout_result
+        .output
+        .contains("Command timed out after 1 seconds"));
+    assert_eq!(timeout_result.receipt.dispatch_count, 1);
+    assert_eq!(
+        timeout_result.receipt.terminal_outcome,
+        ProcessTerminalOutcome::TimedOut
+    );
+
+    let cancel_temp = tempfile::tempdir()?;
+    let marker = cancel_temp.path().join("cancel-marker");
+    let cancel_tool = ExecTool::with_workspace(cancel_temp.path());
+
+    let cancel_result = cancel_tool.execute_with_receipt(
+        json_map(json!({
+            "command": "touch cancel-marker",
+            "timeout": 5
+        }))?,
+        &exec_tool_call_context(
+            PermissionMode::BypassPermissions,
+            ProcessGateTerminalPrecondition::Cancelled,
+            false,
+        )?,
+    )?;
+
+    assert_eq!(cancel_result.receipt.dispatch_count, 0);
+    assert_eq!(
+        cancel_result.receipt.terminal_outcome,
+        ProcessTerminalOutcome::Cancelled
+    );
+    assert!(!marker.exists());
+    Ok(())
+}
+
+fn exec_process_gate_input(
+    mode: PermissionMode,
+    precondition: ProcessGateTerminalPrecondition,
+    destructive: bool,
+) -> Result<ProcessGateInput, Box<dyn Error>> {
+    let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
+        identity: ProcessIdentity::new("proc-task10", "session-task10", "turn-task10"),
+        adapter: ProcessAdapterKind::ExecTool,
+        action: exec_permissioned_action(mode),
+        required_secret_ref_count: 0,
+        redacted_command: ProcessRedactedCommand {
+            command_family: "sh".to_owned(),
+            redacted_summary: "exec shell command".to_owned(),
+            redacted_targets: Vec::new(),
+        },
+    })?;
+    let permission_rules = PermissionRuleInput {
+        containment: DockerContainmentSnapshot {
+            contained: Some(true),
+            runtime: ContainerRuntimeKind::Docker,
+            root_user: Some(false),
+            privileged: Some(false),
+            host_mounts_summary: vec!["workspace".to_owned()],
+            network_mode: ContainerNetworkMode::Bridge,
+            digest: Some("container-digest".to_owned()),
+            summary: Some("docker non-root".to_owned()),
+        },
+        proc_exec_summary: Some(ProcExecSummary {
+            command_family: "sh".to_owned(),
+            target_refs: Vec::new(),
+            destructive,
+            network: false,
+            secret_exposure: false,
+            summary_available: true,
+        }),
+        protected_targets: Vec::new(),
+    };
+    let inherited_context = process_inherited_context(mode);
+    let containment_proof = containment_permission_proof_for_process_gate(
+        &envelope,
+        &permission_rules,
+        Some(&inherited_context),
+        200,
+    )?;
+    Ok(ProcessGateInput {
+        envelope,
+        permission_rules,
+        inherited_context: Some(inherited_context),
+        evaluator: None,
+        approval: None,
+        containment_proof: ProcessContainmentProofCandidate::Proof(Box::new(containment_proof)),
+        interactive: false,
+        terminal_precondition: precondition,
+        now_unix_ms: 200,
+    })
+}
+
+fn process_inherited_context(mode: PermissionMode) -> InheritedPermissionContext {
+    InheritedPermissionContext {
+        ceiling: PermissionCeilingSnapshot {
+            parent_mode: mode,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec!["workspace".to_owned()],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        },
+        requested_mode: mode,
+        requested_capabilities: vec![SafetyCapability::ProcExec],
+        per_action_evaluation_required: true,
+    }
+}
+
+fn exec_tool_call_context(
+    mode: PermissionMode,
+    precondition: ProcessGateTerminalPrecondition,
+    destructive: bool,
+) -> Result<ToolCallExecutionContext, Box<dyn Error>> {
+    Ok(ToolCallExecutionContext::new(Some(
+        exec_process_gate_input(mode, precondition, destructive)?,
+    )))
+}
+
+fn exec_permissioned_action(mode: PermissionMode) -> PermissionedAction {
+    PermissionedAction {
+        action_id: "action-task10".to_owned(),
+        provider_tool_call_id: Some("call-task10".to_owned()),
+        session_id: "session-task10".to_owned(),
+        turn_id: "turn-task10".to_owned(),
+        tool_name: "exec".to_owned(),
+        capabilities: vec![SafetyCapability::ProcExec],
+        target_refs: Vec::new(),
+        action_digest: "task10-action-digest".to_owned(),
+        argument_digest: "task10-argument-digest".to_owned(),
+        snapshot_digest: "task10-snapshot-digest".to_owned(),
+        policy_safety_snapshot_ref: Some(exec_policy_ref(mode)),
+        origin: PermissionedActionOrigin::UserTurn,
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode,
+            source: Some("task10-test".to_owned()),
+            scope_ref: Some("workspace".to_owned()),
+        },
+        containment_snapshot: None,
+        intent_snapshot: None,
+        redacted_arguments: json!({"cmd":"[REDACTED]"}),
+        secret_ref_evidence: Vec::new(),
+        normalization_state: ActionNormalizationState::Ready,
+        normalization_errors: Vec::new(),
+    }
+}
+
+fn exec_policy_ref(mode: PermissionMode) -> PolicySafetySnapshotRef {
+    PolicySafetySnapshot::create(PolicySafetySnapshotInput {
+        snapshot_id: "snapshot-task10".to_owned(),
+        created_at_unix_ms: 100,
+        expires_at_unix_ms: None,
+        permission_mode: PermissionModeSnapshot {
+            mode,
+            source: Some("task10-test".to_owned()),
+            scope_ref: Some("workspace".to_owned()),
+        },
+        capability_ceiling: CapabilityCeilingRef {
+            capabilities: vec![SafetyCapability::ProcExec],
+        },
+        containment: None,
+        source_refs: vec![PolicySafetySourceRef {
+            kind: PolicySafetySourceKind::RuntimePolicy,
+            ref_id: "task10-exec-process-gate".to_owned(),
+            digest: Some("task10-action-digest".to_owned()),
+        }],
+        provenance_refs: Vec::new(),
+        creation_reason: PolicySafetySnapshotCreationReason::DownstreamConsumer,
+    })
+    .expect("exec policy fixture should build canonical snapshot")
+    .reference()
 }
 
 #[test]
@@ -3169,6 +3476,7 @@ fn mcp_server_spec_detects_transport_and_normalizes_stdio_command() -> Result<()
         timeout_seconds: 30,
         enabled_tools: vec!["*".to_owned()],
         parent_containment_snapshot: None,
+        startup_gate: None,
     };
     if stdio.transport_kind() != Some(McpTransportKind::Stdio)
         || stdio.normalized_stdio_command()
@@ -3189,6 +3497,7 @@ fn mcp_server_spec_detects_transport_and_normalizes_stdio_command() -> Result<()
         timeout_seconds: 30,
         enabled_tools: Vec::new(),
         parent_containment_snapshot: None,
+        startup_gate: None,
     };
     let http = McpServerSpec {
         url: Some("https://example.test/mcp".to_owned()),
@@ -3212,6 +3521,7 @@ fn mcp_server_spec_detects_transport_and_normalizes_stdio_command() -> Result<()
         timeout_seconds: 30,
         enabled_tools: Vec::new(),
         parent_containment_snapshot: None,
+        startup_gate: None,
     };
     let normalized = npx
         .normalized_stdio_command()
@@ -3292,6 +3602,7 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
             timeout_seconds: 11,
             enabled_tools: vec!["*".to_owned()],
             parent_containment_snapshot: Some(parent_containment_snapshot.clone()),
+            startup_gate: None,
         },
         McpServerSpec {
             name: "deny".to_owned(),
@@ -3305,6 +3616,7 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
             timeout_seconds: 11,
             enabled_tools: Vec::new(),
             parent_containment_snapshot: Some(parent_containment_snapshot.clone()),
+            startup_gate: None,
         },
         McpServerSpec {
             name: "fail".to_owned(),
@@ -3318,6 +3630,7 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
             timeout_seconds: 11,
             enabled_tools: vec!["*".to_owned()],
             parent_containment_snapshot: Some(parent_containment_snapshot.clone()),
+            startup_gate: None,
         },
     ];
 
@@ -3330,7 +3643,7 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
     {
         return Err(format!("MCP runtime did not register capabilities: {reports:?}").into());
     }
-    if !reports[1].connected
+    if reports[1].connected
         || reports[1].registered_count != 0
         || reports[1].error.is_some()
         || !reports[1].unmatched_enabled_tools.is_empty()
@@ -3352,11 +3665,397 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
     }
     runtime.close();
     runtime.close();
-    let expected_closed = vec!["srv".to_owned(), "deny".to_owned()];
+    let expected_closed = vec!["srv".to_owned()];
     if *closed.lock().map_err(|error| error.to_string())? != expected_closed {
         return Err(format!("MCP runtime close was not idempotent: {closed:?}").into());
     }
     Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn stdio_mcp_connector_spawns_deterministic_child_and_closes_it() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let server_path = temp.path().join("spec030-mcp-server");
+    let marker_path = temp.path().join("child-started");
+    std::fs::write(
+        &server_path,
+        format!(
+            "#!/bin/sh\n\
+printf started > {}\n\
+frame() {{ body=$1; printf 'Content-Length: %s\r\n\r\n%s' \"${{#body}}\" \"$body\"; }}\n\
+frame '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"spec030\",\"version\":\"1\"}}}}}}'\n\
+frame '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":[{{\"name\":\"ping\",\"description\":\"Ping\",\"inputSchema\":{{\"type\":\"object\"}}}}]}}}}'\n\
+frame '{{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{\"resources\":[]}}}}'\n\
+frame '{{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{{\"prompts\":[]}}}}'\n\
+frame '{{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"pong\"}}]}}}}'\n\
+while read line; do :; done\n",
+            shell_quote(marker_path.to_string_lossy().as_ref())
+        ),
+    )?;
+    std::fs::set_permissions(&server_path, std::fs::Permissions::from_mode(0o755))?;
+    let spec = McpServerSpec {
+        name: "spec030".to_owned(),
+        r#type: Some("stdio".to_owned()),
+        command: Some(server_path.to_string_lossy().into_owned()),
+        args: Vec::new(),
+        env: Vec::new(),
+        clear_env: true,
+        url: None,
+        headers: Vec::new(),
+        timeout_seconds: 5,
+        enabled_tools: vec!["*".to_owned()],
+        parent_containment_snapshot: None,
+        startup_gate: Some(mcp_startup_gate("spec030", "spec030-mcp-server")),
+    };
+    let connector = StdioMcpConnector::new();
+
+    let (client, capabilities) = connector.connect(&spec)?;
+    let outcome = client.call_tool("ping", serde_json::Map::new(), 5);
+    let receipt = connector
+        .startup_receipt("spec030")
+        .ok_or("missing MCP startup receipt")?;
+    connector.close("spec030");
+
+    if capabilities.len() != 1
+        || capabilities[0].kind != McpCapabilityKind::Tool
+        || capabilities[0].name != "ping"
+        || outcome != McpCallOutcome::Success(vec!["pong".to_owned()])
+        || receipt.adapter != shacs_core::runtime::ProcessAdapterKind::McpStdio
+        || receipt.dispatch_count != 1
+        || receipt.terminal_outcome != shacs_core::runtime::ProcessTerminalOutcome::Succeeded
+        || !marker_path.exists()
+    {
+        return Err(format!(
+            "stdio MCP child baseline drifted: capabilities={capabilities:?} outcome={outcome:?} marker={}",
+            marker_path.exists()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn stdio_mcp_connector_deny_replay_and_malformed_command_do_not_spawn() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let server_path = temp.path().join("spec030-mcp-denied-server");
+    let marker_path = temp.path().join("child-started");
+    std::fs::write(
+        &server_path,
+        format!(
+            "#!/bin/sh\nprintf started > {}\nwhile read line; do :; done\n",
+            shell_quote(marker_path.to_string_lossy().as_ref())
+        ),
+    )?;
+    std::fs::set_permissions(&server_path, std::fs::Permissions::from_mode(0o755))?;
+    let connector = StdioMcpConnector::new();
+
+    let mut denied = mcp_startup_gate("denied", "spec030-mcp-denied-server");
+    denied.input.envelope.action.permission_mode_snapshot.mode = PermissionMode::DontAsk;
+    let denied_spec = stdio_test_spec(
+        "denied",
+        server_path.to_string_lossy().as_ref(),
+        Some(denied),
+        1,
+    );
+    let denied_result = connector.connect(&denied_spec);
+    let denied_receipt = connector
+        .startup_receipt("denied")
+        .ok_or("missing denied startup receipt")?;
+
+    let mut replay = mcp_startup_gate("replay", "spec030-mcp-denied-server");
+    replay.input.terminal_precondition = ProcessGateTerminalPrecondition::Replay;
+    let replay_spec = stdio_test_spec(
+        "replay",
+        server_path.to_string_lossy().as_ref(),
+        Some(replay),
+        1,
+    );
+    let replay_result = connector.connect(&replay_spec);
+    let replay_receipt = connector
+        .startup_receipt("replay")
+        .ok_or("missing replay startup receipt")?;
+
+    let malformed_spec = stdio_test_spec("malformed", "", None, 1);
+    let malformed_result = connector.connect(&malformed_spec);
+
+    if denied_result.is_ok()
+        || denied_receipt.dispatch_count != 0
+        || denied_receipt.terminal_outcome != ProcessTerminalOutcome::Denied
+        || replay_result.is_ok()
+        || replay_receipt.dispatch_count != 0
+        || replay_receipt.terminal_outcome != ProcessTerminalOutcome::ReplaySkipped
+        || malformed_result.is_ok()
+        || marker_path.exists()
+    {
+        return Err(format!(
+            "MCP gated zero-spawn drifted: denied={denied_receipt:?} replay={replay_receipt:?} marker={}",
+            marker_path.exists()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn stdio_mcp_connector_timeout_records_receipt_and_cleans_child_once() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let server_path = temp.path().join("spec030-mcp-timeout-server");
+    std::fs::write(
+        &server_path,
+        "#!/bin/sh\nframe() { body=$1; printf 'Content-Length: %s\r\n\r\n%s' \"${#body}\" \"$body\"; }\nframe '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"timeout\",\"version\":\"1\"}}}'\nwhile read line; do :; done\n",
+    )?;
+    std::fs::set_permissions(&server_path, std::fs::Permissions::from_mode(0o755))?;
+    let spec = stdio_test_spec(
+        "timeout",
+        server_path.to_string_lossy().as_ref(),
+        Some(mcp_startup_gate("timeout", "spec030-mcp-timeout-server")),
+        1,
+    );
+
+    let (child_id_tx, child_id_rx) = std::sync::mpsc::channel();
+    let connector = Arc::new(StdioMcpConnector::with_child_observer(Arc::new(
+        move |child_id| {
+            let _ = child_id_tx.send(child_id);
+        },
+    )));
+    let connector_for_thread = connector.clone();
+    let connect_thread = std::thread::spawn(move || -> Result<_, String> {
+        let result = connector_for_thread.connect(&spec);
+        let receipt = connector_for_thread
+            .startup_receipt("timeout")
+            .ok_or_else(|| "missing timeout startup receipt".to_owned())?;
+        Ok((result.is_ok(), receipt))
+    });
+    let child_id = child_id_rx.recv_timeout(Duration::from_secs(2))?;
+    let (result_ok, receipt) = connect_thread
+        .join()
+        .map_err(|_| std::io::Error::other("timeout connector thread panicked"))?
+        .map_err(std::io::Error::other)?;
+
+    if result_ok
+        || receipt.dispatch_count != 1
+        || receipt.terminal_outcome != ProcessTerminalOutcome::TimedOut
+        || process_exists(child_id)
+    {
+        return Err(
+            format!("MCP timeout cleanup drifted: receipt={receipt:?} pid={child_id}").into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn stdio_mcp_startup_receipt_redacts_raw_path_env_and_payload() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let server_path = temp.path().join("spec030-secret-server");
+    let raw_env_value = "sk-task12-env-secret";
+    let raw_payload_value = "task12 raw payload secret";
+    std::fs::write(
+        &server_path,
+        format!(
+            "#!/bin/sh\nif [ \"$TASK12_SECRET_ENV\" = {} ]; then :; fi\nframe() {{ body=$1; printf 'Content-Length: %s\r\n\r\n%s' \"${{#body}}\" \"$body\"; }}\nframe '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"redaction\",\"version\":\"1\"}}}}}}'\nframe '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":[]}}}}'\nframe '{{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{\"resources\":[]}}}}'\nframe '{{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{{\"prompts\":[]}}}}'\nwhile read line; do :; done\n",
+            shell_quote(raw_env_value)
+        ),
+    )?;
+    std::fs::set_permissions(&server_path, std::fs::Permissions::from_mode(0o755))?;
+    let mut startup_gate = mcp_startup_gate("redaction", "spec030-secret-server");
+    startup_gate.input.envelope.action.redacted_arguments = json!({
+        "command": "[REDACTED]",
+        "payload": "[REDACTED]"
+    });
+    let spec = McpServerSpec {
+        name: "redaction".to_owned(),
+        r#type: Some("stdio".to_owned()),
+        command: Some(server_path.to_string_lossy().into_owned()),
+        args: vec![raw_payload_value.to_owned()],
+        env: vec![("TASK12_SECRET_ENV".to_owned(), raw_env_value.to_owned())],
+        clear_env: true,
+        url: None,
+        headers: Vec::new(),
+        timeout_seconds: 5,
+        enabled_tools: vec!["*".to_owned()],
+        parent_containment_snapshot: None,
+        startup_gate: Some(startup_gate),
+    };
+    let connector = StdioMcpConnector::new();
+
+    let (_client, capabilities) = connector.connect(&spec)?;
+    let receipt = connector
+        .startup_receipt("redaction")
+        .ok_or("missing redaction startup receipt")?;
+    connector.close("redaction");
+    let serialized = serde_json::to_string(&receipt)?;
+
+    assert!(capabilities.is_empty());
+    assert_eq!(receipt.dispatch_count, 1);
+    assert_eq!(receipt.terminal_outcome, ProcessTerminalOutcome::Succeeded);
+    assert!(!serialized.contains(&server_path.to_string_lossy().to_string()));
+    assert!(!serialized.contains(&temp.path().to_string_lossy().to_string()));
+    assert!(!serialized.contains(raw_env_value));
+    assert!(!serialized.contains(raw_payload_value));
+    assert!(!serialized.contains("TASK12_SECRET_ENV"));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stdio_test_spec(
+    name: &str,
+    command: &str,
+    startup_gate: Option<McpStartupGate>,
+    timeout_seconds: u64,
+) -> McpServerSpec {
+    McpServerSpec {
+        name: name.to_owned(),
+        r#type: Some("stdio".to_owned()),
+        command: Some(command.to_owned()),
+        args: Vec::new(),
+        env: Vec::new(),
+        clear_env: true,
+        url: None,
+        headers: Vec::new(),
+        timeout_seconds,
+        enabled_tools: vec!["*".to_owned()],
+        parent_containment_snapshot: None,
+        startup_gate,
+    }
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: kill(pid, 0) probes process existence without sending a signal.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(unix)]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn mcp_startup_gate(server_name: &str, command_family: &str) -> McpStartupGate {
+    use shacs_core::runtime::{
+        ActionNormalizationState, ContainerNetworkMode, ContainerRuntimeKind,
+        DockerContainmentSnapshot, InheritedPermissionContext, PermissionCeilingSnapshot,
+        PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
+        PermissionedActionOrigin, PolicySafetyDigest, PolicySafetySnapshotId,
+        PolicySafetySnapshotRef, PolicySafetySnapshotSchemaId, ProcExecSummary, ProcessAdapterKind,
+        ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
+        ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
+        RedactedPolicySafetySummary, RuntimeBoundaryOrigin, SafetyCapability,
+    };
+
+    let action = PermissionedAction {
+        action_id: format!("mcp-startup-{server_name}"),
+        provider_tool_call_id: Some(format!("mcp-startup-{server_name}")),
+        session_id: "session-mcp".to_owned(),
+        turn_id: "turn-mcp".to_owned(),
+        tool_name: format!("mcp_{server_name}_startup"),
+        capabilities: vec![SafetyCapability::ProcExec],
+        target_refs: Vec::new(),
+        action_digest: format!("mcp-startup-digest-{server_name}"),
+        argument_digest: "argument-digest".to_owned(),
+        snapshot_digest: "snapshot-digest".to_owned(),
+        policy_safety_snapshot_ref: Some(PolicySafetySnapshotRef {
+            schema_id: PolicySafetySnapshotSchemaId::V1,
+            snapshot_id: PolicySafetySnapshotId("snapshot-mcp".to_owned()),
+            policy_safety_digest: PolicySafetyDigest(
+                "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            ),
+            created_at_unix_ms: 100,
+            expires_at_unix_ms: None,
+            redacted_summary: RedactedPolicySafetySummary {
+                permission_mode: "bypass_permissions".to_owned(),
+                capability_count: 1,
+                containment_digest: None,
+                source_ref_count: 1,
+                provenance_ref_count: 1,
+            },
+        }),
+        origin: PermissionedActionOrigin::UserTurn,
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("test".to_owned()),
+            scope_ref: Some("workspace".to_owned()),
+        },
+        containment_snapshot: None,
+        intent_snapshot: None,
+        redacted_arguments: json!({"command_family": command_family}),
+        secret_ref_evidence: Vec::new(),
+        normalization_state: ActionNormalizationState::Ready,
+        normalization_errors: Vec::new(),
+    };
+    let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
+        identity: ProcessIdentity::new(format!("mcp:{server_name}"), "session-mcp", "turn-mcp"),
+        adapter: ProcessAdapterKind::McpStdio,
+        action,
+        required_secret_ref_count: 0,
+        redacted_command: ProcessRedactedCommand {
+            command_family: command_family.to_owned(),
+            redacted_summary: format!("mcp stdio server {server_name}"),
+            redacted_targets: Vec::new(),
+        },
+    })
+    .expect("MCP startup envelope fixture should be valid");
+    let permission_rules = PermissionRuleInput {
+        containment: DockerContainmentSnapshot {
+            contained: Some(true),
+            runtime: ContainerRuntimeKind::Docker,
+            root_user: Some(false),
+            privileged: Some(false),
+            host_mounts_summary: vec!["workspace".to_owned()],
+            network_mode: ContainerNetworkMode::Bridge,
+            digest: Some("container-digest".to_owned()),
+            summary: Some("docker non-root".to_owned()),
+        },
+        protected_targets: Vec::new(),
+        proc_exec_summary: Some(ProcExecSummary {
+            command_family: command_family.to_owned(),
+            target_refs: Vec::new(),
+            destructive: false,
+            network: false,
+            secret_exposure: false,
+            summary_available: true,
+        }),
+    };
+    let inherited_context = InheritedPermissionContext {
+        ceiling: PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::BypassPermissions,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec!["workspace".to_owned()],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        },
+        requested_mode: PermissionMode::BypassPermissions,
+        requested_capabilities: vec![SafetyCapability::ProcExec],
+        per_action_evaluation_required: true,
+    };
+    let containment_proof = containment_permission_proof_for_process_gate(
+        &envelope,
+        &permission_rules,
+        Some(&inherited_context),
+        200,
+    )
+    .expect("MCP startup containment proof fixture should be valid");
+    McpStartupGate {
+        input: ProcessGateInput {
+            envelope,
+            permission_rules,
+            inherited_context: Some(inherited_context),
+            evaluator: None,
+            approval: None,
+            containment_proof: ProcessContainmentProofCandidate::Proof(Box::new(containment_proof)),
+            interactive: false,
+            terminal_precondition: ProcessGateTerminalPrecondition::Ready,
+            now_unix_ms: 200,
+        },
+    }
 }
 
 #[test]

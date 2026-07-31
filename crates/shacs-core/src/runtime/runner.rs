@@ -9,9 +9,10 @@ use crate::runtime::tool_search::{
 };
 use crate::runtime::ContextProviderHandoff;
 use crate::runtime::{
-    dispatch_bridge_tool_calls_with_context_resolver,
-    recent_auto_mode_denial_from_classifier_decision, AutoEvaluatorVerdict,
-    AutoEvaluatorVerdictKind, CancellationToken, EvaluatorConfidence, EvaluatorScopeMatch,
+    classifier_decision_evidence, dispatch_bridge_tool_calls_with_context_resolver,
+    recent_auto_mode_denial_from_classifier_decision, skipped_classifier_evidence,
+    AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, CancellationToken, ClassifierAttemptStatus,
+    ClassifierEvidenceInput, ClassifierFallbackCause, EvaluatorConfidence, EvaluatorScopeMatch,
     ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope,
     PendingExecution, PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind,
     PermissionPolicyReason, PermissionedAction, PromptInjectionSignal, ProviderOutcomeKind,
@@ -218,6 +219,7 @@ pub struct AgentRunSpec<'a> {
     pub tool_event_callback: Option<ToolEventCallback>,
     pub provider_event_callback: Option<ProviderEventCallback>,
     pub retry_wait_callback: Option<RetryWaitCallback>,
+    pub classifier_time_source: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
     pub checkpoint_callback: Option<CheckpointCallback>,
     pub mid_turn_injection_callback: Option<MidTurnInjectionCallback>,
     pub agent_hook: Option<Arc<dyn AgentHook>>,
@@ -258,6 +260,7 @@ impl<'a> AgentRunSpec<'a> {
             tool_event_callback: None,
             provider_event_callback: None,
             retry_wait_callback: None,
+            classifier_time_source: None,
             checkpoint_callback: None,
             mid_turn_injection_callback: None,
             agent_hook: None,
@@ -1417,7 +1420,7 @@ fn direct_runtime_report_with_classifier(
                 &action,
                 &decision,
                 evaluator,
-                now_unix_ms(),
+                classifier_now_unix_ms(spec),
             ) {
                 if denial.retryable {
                     recent_auto_mode_retry_tokens.push(RecentAutoModeRetryToken::new(
@@ -1486,6 +1489,16 @@ fn tool_context_with_classifier_verdict(
     let review_context = context_for_classifier_review(&action, &context);
     let decision = permission_decision_for_action(&action, &review_context);
     if !classifier_reviewable_policy_decision(&decision, &action) {
+        set_classifier_evidence(
+            &mut context,
+            skipped_classifier_evidence(
+                classifier_now_unix_ms(spec),
+                &spec.model,
+                &action,
+                &decision,
+                ClassifierFallbackCause::StaticPolicyNotReviewable,
+            ),
+        );
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
@@ -1501,6 +1514,16 @@ fn tool_context_with_classifier_verdict(
         return context;
     }
     let Some(user_request_summary) = latest_user_request_summary(&spec.initial_messages) else {
+        set_classifier_evidence(
+            &mut context,
+            skipped_classifier_evidence(
+                classifier_now_unix_ms(spec),
+                &spec.model,
+                &action,
+                &decision,
+                ClassifierFallbackCause::MissingUserRequest,
+            ),
+        );
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
@@ -1516,6 +1539,16 @@ fn tool_context_with_classifier_verdict(
         return context;
     };
     if !classifier_eligible_action(&action, &context) {
+        set_classifier_evidence(
+            &mut context,
+            skipped_classifier_evidence(
+                classifier_now_unix_ms(spec),
+                &spec.model,
+                &action,
+                &decision,
+                ClassifierFallbackCause::IneligibleCapability,
+            ),
+        );
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
@@ -1531,8 +1564,29 @@ fn tool_context_with_classifier_verdict(
         return context;
     }
 
-    let verdict =
-        classify_auto_permission_action(classifier, &spec.model, &action, &user_request_summary);
+    let attempt = classify_auto_permission_action(
+        classifier,
+        &spec.model,
+        &action,
+        &user_request_summary,
+        classifier_time_source(spec),
+    );
+    let mut evaluated_context = context.clone();
+    evaluated_context.permission_evaluator = Some(attempt.verdict.clone());
+    let final_decision = permission_decision_for_action(&action, &evaluated_context);
+    let evidence = classifier_decision_evidence(ClassifierEvidenceInput {
+        created_at_unix_ms: attempt.started_at_unix_ms,
+        completed_at_unix_ms: Some(attempt.completed_at_unix_ms),
+        model_id: &spec.model,
+        action: &action,
+        initial_decision: &decision,
+        final_decision: &final_decision,
+        request_payload: &attempt.request_payload,
+        verdict: &attempt.verdict,
+        usage: attempt.usage.as_ref(),
+        attempt_status: attempt.status,
+    });
+    set_classifier_evidence(&mut context, evidence);
     emit_auto_permission_diagnostic(
         spec,
         AutoPermissionDiagnosticInput {
@@ -1540,12 +1594,12 @@ fn tool_context_with_classifier_verdict(
             gate_reason: Some("classifier_invoked"),
             action: &action,
             decision: Some(&decision),
-            evaluator: Some(&verdict),
+            evaluator: Some(&attempt.verdict),
             evaluator_source: Some("permission_classifier"),
             context: &context,
         },
     );
-    context.permission_evaluator = Some(verdict);
+    context.permission_evaluator = Some(attempt.verdict);
     context
 }
 
@@ -1570,6 +1624,16 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
     let review_context = context_for_classifier_review(&action, &context);
     let decision = permission_decision_for_action(&action, &review_context);
     if !classifier_reviewable_policy_decision(&decision, &action) {
+        set_classifier_evidence(
+            &mut context,
+            skipped_classifier_evidence(
+                classifier_now_unix_ms(spec),
+                &spec.model,
+                &action,
+                &decision,
+                ClassifierFallbackCause::StaticPolicyNotReviewable,
+            ),
+        );
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
@@ -1585,6 +1649,16 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
         return context;
     }
     let Some(user_request_summary) = latest_user_request_summary(&spec.initial_messages) else {
+        set_classifier_evidence(
+            &mut context,
+            skipped_classifier_evidence(
+                classifier_now_unix_ms(spec),
+                &spec.model,
+                &action,
+                &decision,
+                ClassifierFallbackCause::MissingUserRequest,
+            ),
+        );
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
@@ -1600,6 +1674,16 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
         return context;
     };
     if !classifier_eligible_action(&action, &context) {
+        set_classifier_evidence(
+            &mut context,
+            skipped_classifier_evidence(
+                classifier_now_unix_ms(spec),
+                &spec.model,
+                &action,
+                &decision,
+                ClassifierFallbackCause::IneligibleCapability,
+            ),
+        );
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
@@ -1614,8 +1698,29 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
         );
         return context;
     }
-    let verdict =
-        classify_auto_permission_action(classifier, &spec.model, &action, &user_request_summary);
+    let attempt = classify_auto_permission_action(
+        classifier,
+        &spec.model,
+        &action,
+        &user_request_summary,
+        classifier_time_source(spec),
+    );
+    let mut evaluated_context = context.clone();
+    evaluated_context.permission_evaluator = Some(attempt.verdict.clone());
+    let final_decision = permission_decision_for_action(&action, &evaluated_context);
+    let evidence = classifier_decision_evidence(ClassifierEvidenceInput {
+        created_at_unix_ms: attempt.started_at_unix_ms,
+        completed_at_unix_ms: Some(attempt.completed_at_unix_ms),
+        model_id: &spec.model,
+        action: &action,
+        initial_decision: &decision,
+        final_decision: &final_decision,
+        request_payload: &attempt.request_payload,
+        verdict: &attempt.verdict,
+        usage: attempt.usage.as_ref(),
+        attempt_status: attempt.status,
+    });
+    set_classifier_evidence(&mut context, evidence);
     emit_auto_permission_diagnostic(
         spec,
         AutoPermissionDiagnosticInput {
@@ -1623,12 +1728,12 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
             gate_reason: Some("classifier_invoked"),
             action: &action,
             decision: Some(&decision),
-            evaluator: Some(&verdict),
+            evaluator: Some(&attempt.verdict),
             evaluator_source: Some("permission_classifier"),
             context: &context,
         },
     );
-    context.permission_evaluator = Some(verdict);
+    context.permission_evaluator = Some(attempt.verdict);
     context
 }
 
@@ -1675,6 +1780,8 @@ fn emit_auto_permission_diagnostic(
         "evaluator_confidence": input.evaluator.map(|verdict| verdict.confidence),
         "evaluator_scope_match": input.evaluator.map(|verdict| verdict.scope_match),
         "prompt_injection_signal_count": input.evaluator.map(|verdict| verdict.prompt_injection_signals.len()).unwrap_or(0),
+        "classifier_evidence_id": classifier_evidence_value(input.context).and_then(|evidence| evidence.get("evidence_id")),
+        "classifier_evidence": classifier_evidence_value(input.context),
         "auto_approval_enabled": input.context.permission_auto_approval.enabled,
         "allow_workspace_edits": input.context.permission_auto_approval.allow_workspace_edits,
         "allow_proc_exec_verification": input.context.permission_auto_approval.allow_proc_exec_verification,
@@ -1697,6 +1804,21 @@ fn emit_auto_permission_diagnostic(
         result: None,
     };
     emit_events(spec, std::slice::from_ref(&event));
+}
+
+fn set_classifier_evidence(
+    context: &mut ToolExecutionContext,
+    evidence: crate::runtime::ClassifierDecisionEvidence,
+) {
+    if let Ok(value) = serde_json::to_value(evidence) {
+        if let Value::Object(metadata) = &mut context.metadata {
+            metadata.insert("classifier_evidence".to_owned(), value);
+        }
+    }
+}
+
+fn classifier_evidence_value(context: &ToolExecutionContext) -> Option<&Value> {
+    context.metadata.get("classifier_evidence")
 }
 
 fn latest_user_request_summary(messages: &[Value]) -> Option<String> {
@@ -1778,12 +1900,23 @@ fn classifier_reviewable_policy_decision(
         )
 }
 
+struct ClassifierAttempt {
+    verdict: AutoEvaluatorVerdict,
+    request_payload: Value,
+    usage: Option<BTreeMap<String, u64>>,
+    status: ClassifierAttemptStatus,
+    started_at_unix_ms: u64,
+    completed_at_unix_ms: u64,
+}
+
 fn classify_auto_permission_action(
     classifier: &dyn ProviderClient,
     model: &str,
     action: &PermissionedAction,
     user_request_summary: &str,
-) -> AutoEvaluatorVerdict {
+    time_source: &dyn Fn() -> u64,
+) -> ClassifierAttempt {
+    let started_at_unix_ms = time_source();
     let action_payload = json!({
         "user_request_summary": user_request_summary,
         "tool_name": &action.tool_name,
@@ -1818,8 +1951,58 @@ fn classify_auto_permission_action(
         tool_choice: None,
     };
     match classifier.chat(request) {
-        Ok(response) => parse_classifier_verdict(response.content.as_deref()),
-        Err(error) => classifier_failure_verdict(format!("classifier unavailable: {error}")),
+        Ok(response) => {
+            let (verdict, status) = parse_classifier_verdict(response.content.as_deref());
+            let usage = if response.usage.is_empty() {
+                None
+            } else {
+                Some(response.usage)
+            };
+            ClassifierAttempt {
+                verdict,
+                request_payload: action_payload,
+                usage,
+                status,
+                started_at_unix_ms,
+                completed_at_unix_ms: time_source(),
+            }
+        }
+        Err(error) => ClassifierAttempt {
+            verdict: classifier_failure_verdict(format!("classifier unavailable: {error}")),
+            request_payload: action_payload,
+            usage: None,
+            status: classifier_attempt_status_for_error(&error),
+            started_at_unix_ms,
+            completed_at_unix_ms: time_source(),
+        },
+    }
+}
+
+fn classifier_time_source<'a>(spec: &'a AgentRunSpec<'_>) -> &'a (dyn Fn() -> u64 + Send + Sync) {
+    spec.classifier_time_source
+        .as_deref()
+        .unwrap_or(&now_unix_ms)
+}
+
+fn classifier_now_unix_ms(spec: &AgentRunSpec<'_>) -> u64 {
+    classifier_time_source(spec)()
+}
+
+fn classifier_attempt_status_for_error(error: &ProviderError) -> ClassifierAttemptStatus {
+    if provider_error_is_timeout(error) {
+        ClassifierAttemptStatus::ProviderTimeout
+    } else {
+        ClassifierAttemptStatus::ProviderError
+    }
+}
+
+fn provider_error_is_timeout(error: &ProviderError) -> bool {
+    match error {
+        ProviderError::Api { message, .. } => message.to_ascii_lowercase().contains("timeout"),
+        ProviderError::ProviderNotFound { .. }
+        | ProviderError::ModelNotFound { .. }
+        | ProviderError::AuthRequired { .. }
+        | ProviderError::UnsupportedCapability { .. } => false,
     }
 }
 
@@ -1836,24 +2019,35 @@ struct ClassifierVerdictPayload {
     prompt_injection_signals: Vec<PromptInjectionSignal>,
 }
 
-fn parse_classifier_verdict(content: Option<&str>) -> AutoEvaluatorVerdict {
+fn parse_classifier_verdict(
+    content: Option<&str>,
+) -> (AutoEvaluatorVerdict, ClassifierAttemptStatus) {
     let Some(content) = content else {
-        return classifier_failure_verdict("classifier returned no content");
+        return (
+            classifier_failure_verdict("classifier returned no content"),
+            ClassifierAttemptStatus::ParseFailure,
+        );
     };
     match parse_classifier_verdict_payload(content) {
-        Ok(payload) => AutoEvaluatorVerdict {
-            verdict: payload.verdict,
-            confidence: payload.confidence,
-            scope_match: payload.scope_match,
-            risk_summary: payload
-                .risk_summary
-                .unwrap_or_else(|| "classified by auto mode evaluator".to_owned()),
-            evidence_refs: payload.evidence_refs,
-            expires_at_unix_ms: now_unix_ms().saturating_add(5 * 60 * 1000),
-            evaluator_ref: Some("auto-mode-classifier".to_owned()),
-            prompt_injection_signals: payload.prompt_injection_signals,
-        },
-        Err(error) => classifier_failure_verdict(format!("classifier parse failure: {error}")),
+        Ok(payload) => (
+            AutoEvaluatorVerdict {
+                verdict: payload.verdict,
+                confidence: payload.confidence,
+                scope_match: payload.scope_match,
+                risk_summary: payload
+                    .risk_summary
+                    .unwrap_or_else(|| "classified by auto mode evaluator".to_owned()),
+                evidence_refs: payload.evidence_refs,
+                expires_at_unix_ms: now_unix_ms().saturating_add(5 * 60 * 1000),
+                evaluator_ref: Some("auto-mode-classifier".to_owned()),
+                prompt_injection_signals: payload.prompt_injection_signals,
+            },
+            ClassifierAttemptStatus::Success,
+        ),
+        Err(error) => (
+            classifier_failure_verdict(format!("classifier parse failure: {error}")),
+            ClassifierAttemptStatus::ParseFailure,
+        ),
     }
 }
 

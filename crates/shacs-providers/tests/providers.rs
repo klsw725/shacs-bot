@@ -39,6 +39,7 @@ fn provider_registry_matches_explicit_prefix_and_local_fallback() -> Result<(), 
         "openrouter".to_owned(),
         ProviderConfig {
             api_key: Some("or-key".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     );
@@ -158,6 +159,7 @@ fn provider_client_factory_builds_openai_compatible_client() -> Result<(), Box<d
     let client = provider_client_from_config(
         ProviderConfig {
             api_key: Some("openai-key".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
         spec,
@@ -188,6 +190,7 @@ fn provider_client_factory_builds_github_copilot_client() -> Result<(), Box<dyn 
     let client = provider_client_from_config(
         ProviderConfig {
             api_key: Some("copilot-token".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
         spec,
@@ -201,6 +204,7 @@ fn provider_client_factory_builds_azure_openai_client() -> Result<(), Box<dyn Er
     let spec = find_by_name("azure_openai").ok_or("azure_openai spec missing")?;
     let config = ProviderConfig {
         api_key: Some("azure-key".to_owned()),
+        api_key_ref: None,
         api_base: Some("https://resource.openai.azure.com".to_owned()),
         ..ProviderConfig::default()
     };
@@ -339,6 +343,7 @@ fn provider_client_resolver_selects_provider_and_normalizes_model() -> Result<()
         "aihubmix".to_owned(),
         ProviderConfig {
             api_key: Some("aihubmix-key".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     )]);
@@ -393,6 +398,7 @@ fn provider_client_resolver_propagates_azure_openai_config_errors() -> Result<()
         "azure_openai".to_owned(),
         ProviderConfig {
             api_key: Some("azure-key".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     )]);
@@ -416,6 +422,7 @@ fn provider_client_resolver_builds_azure_openai_client() -> Result<(), Box<dyn E
         "azure_openai".to_owned(),
         ProviderConfig {
             api_key: Some("azure-key".to_owned()),
+            api_key_ref: None,
             api_base: Some("https://resource.openai.azure.com".to_owned()),
             ..ProviderConfig::default()
         },
@@ -440,6 +447,7 @@ fn provider_request_preparation_uses_resolved_model_and_agent_defaults(
         "aihubmix".to_owned(),
         ProviderConfig {
             api_key: Some("aihubmix-key".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     )]);
@@ -483,6 +491,7 @@ fn provider_request_preparation_prefers_explicit_generation_settings() -> Result
         "openai".to_owned(),
         ProviderConfig {
             api_key: Some("openai-key".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     )]);

@@ -1,5 +1,12 @@
 use serde_json::{Map, Value};
 
+mod secret_ref;
+
+pub use secret_ref::{
+    RedactionEvidence, RedactionEvidenceRef, RedactionProfile, SafeSecretSummary, SecretLocator,
+    SecretRef, SecretRefError, SecretRefId, SecretRefKind, SecretSourceKind,
+};
+
 pub const REDACTED: &str = "[REDACTED]";
 
 const SECRET_KEY_FRAGMENTS: &[&str] = &[
@@ -385,6 +392,31 @@ mod tests {
             redacted["nested"]["message"],
             format!("provider failed with {REDACTED} in body")
         );
+    }
+
+    #[test]
+    fn spec030_baseline_recursively_redacts_secret_shaped_fixture_markers() {
+        let redacted = redact_value(&json!({
+            "apiKey": "spec030-raw-token",
+            "env": {
+                "TOKEN": "spec030-inline-token",
+                "TRACE": "safe-trace"
+            },
+            "nested": [
+                {"privateKey": "-----BEGIN PRIVATE KEY-----\nspec030-private\n-----END PRIVATE KEY-----"},
+                "AUTH_TOKEN=spec030-inline-token visible",
+                {"notes": ["Authorization: Bearer spec030-raw-token"]}
+            ]
+        }));
+        let serialized = serde_json::to_string(&redacted).unwrap_or_default();
+
+        assert_eq!(redacted["apiKey"], REDACTED);
+        assert_eq!(redacted["env"]["TOKEN"], REDACTED);
+        assert_eq!(redacted["nested"][0]["privateKey"], REDACTED);
+        assert!(!serialized.contains("spec030-raw-token"));
+        assert!(!serialized.contains("spec030-inline-token"));
+        assert!(!serialized.contains("spec030-private"));
+        assert!(serialized.contains("safe-trace"));
     }
 
     #[test]

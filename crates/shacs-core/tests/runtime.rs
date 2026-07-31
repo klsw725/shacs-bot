@@ -10,9 +10,9 @@ use shacs_core::runtime::{
     RuntimeToolExecutor, SafetyCapability, ToolExecutionContext,
 };
 use shacs_core::tools::{
-    AskUserTool, CronTool, DeferredToolCatalog, DeferredToolCatalogEntry, JsonMap, MessageTool,
-    OutboundMessage, SchemaFragment, SpawnRequest, SpawnTool, StringSchema, Tool, ToolParameters,
-    ToolRegistry, ToolResult,
+    AskUserTool, CronTool, DeferredToolCatalog, DeferredToolCatalogEntry, ExecTool, JsonMap,
+    MessageTool, OutboundMessage, SchemaFragment, SpawnRequest, SpawnTool, StringSchema, Tool,
+    ToolParameters, ToolRegistry, ToolResult,
 };
 use shacs_cron::InMemoryCronService;
 use std::error::Error;
@@ -453,12 +453,18 @@ fn runtime_asks_before_interactive_proc_exec_without_executing_tool() -> Result<
         permission_mode_snapshot: PermissionModeSnapshot {
             mode: PermissionMode::Auto,
             source: Some("test".to_owned()),
-            scope_ref: None,
+            scope_ref: Some("workspace".to_owned()),
         },
         permission_auto_approval: AutoApprovalConfig {
             enabled: true,
             ..AutoApprovalConfig::default()
         },
+        permission_ceiling_snapshot: Some(PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::Auto,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec!["workspace".to_owned(), "".to_owned()],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        }),
         permission_interactive: true,
         ..ToolExecutionContext::default()
     };
@@ -829,6 +835,7 @@ fn runtime_auto_mode_does_not_execute_protected_target_after_user_approval(
         }
     };
     let approved_at = approval_request.expires_at_unix_ms.saturating_sub(1);
+    let policy_safety_snapshot_ref = approval_request.policy_safety_snapshot_ref.clone();
     let decision = ApprovalDecision {
         approval_request_id: approval_request.approval_request_id.clone(),
         action_digest: approval_request.action_digest.clone(),
@@ -838,6 +845,8 @@ fn runtime_auto_mode_does_not_execute_protected_target_after_user_approval(
         actor: ApprovalActor::LocalUser,
         decided_at_unix_ms: approved_at,
         consumed: false,
+        policy_safety_snapshot_ref,
+        secret_ref_evidence: approval_request.secret_ref_evidence.clone(),
     };
     let approved_context = ToolExecutionContext {
         permission_approval_cache: Some(ApprovalCacheEntry {
@@ -957,13 +966,19 @@ fn runtime_executes_proc_exec_after_permission_approval() -> Result<(), Box<dyn 
         permission_mode_snapshot: PermissionModeSnapshot {
             mode: PermissionMode::Auto,
             source: Some("test".to_owned()),
-            scope_ref: None,
+            scope_ref: Some("workspace".to_owned()),
         },
         permission_rule_input: PermissionRuleInput {
             containment: confirmed_containment(),
             protected_targets: Vec::new(),
             proc_exec_summary: None,
         },
+        permission_ceiling_snapshot: Some(PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::Auto,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec!["workspace".to_owned()],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        }),
         permission_interactive: true,
         ..ToolExecutionContext::default()
     };
@@ -993,6 +1008,8 @@ fn runtime_executes_proc_exec_after_permission_approval() -> Result<(), Box<dyn 
         actor: ApprovalActor::LocalUser,
         decided_at_unix_ms: approved_at,
         consumed: false,
+        policy_safety_snapshot_ref: approval_request.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: approval_request.secret_ref_evidence.clone(),
     };
     let approved_context = ToolExecutionContext {
         permission_approval_cache: Some(ApprovalCacheEntry {
@@ -1023,6 +1040,83 @@ fn runtime_executes_proc_exec_after_permission_approval() -> Result<(), Box<dyn 
             calls.load(Ordering::SeqCst)
         )
         .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn oracle_runtime_approved_exec_uses_actual_process_context() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let mut registry = ToolRegistry::new();
+    registry.register(ExecTool::with_workspace(temp.path()));
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: Some("workspace".to_owned()),
+        },
+        permission_ceiling_snapshot: Some(PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::Auto,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec!["workspace".to_owned()],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        }),
+        permission_interactive: true,
+        permission_rule_input: PermissionRuleInput {
+            containment: confirmed_containment(),
+            protected_targets: Vec::new(),
+            proc_exec_summary: Some(ProcExecSummary {
+                command_family: "pwd".to_owned(),
+                target_refs: Vec::new(),
+                destructive: false,
+                network: false,
+                secret_exposure: false,
+                summary_available: true,
+            }),
+        },
+        ..ToolExecutionContext::default()
+    };
+    let call = RuntimeToolCall::new("exec-call", "exec", json!({ "command": "pwd" }));
+    let approval_report = executor.execute_tool_calls(vec![call.clone()], &context);
+    let approval_request = match approval_report.interrupt {
+        Some(RuntimeInterrupt::PermissionApproval {
+            approval_request, ..
+        }) => approval_request,
+        other => return Err(format!("missing approval request before exec: {other:?}").into()),
+    };
+    let approved_at = approval_request.expires_at_unix_ms.saturating_sub(1);
+    let approved_context = ToolExecutionContext {
+        permission_approval_cache: Some(ApprovalCacheEntry {
+            request: (*approval_request).clone(),
+            decision: ApprovalDecision {
+                approval_request_id: approval_request.approval_request_id.clone(),
+                action_digest: approval_request.action_digest.clone(),
+                snapshot_digest: approval_request.snapshot_digest.clone(),
+                decision: ApprovalDecisionKind::Approved,
+                approved_scope: approval_request.requested_scope.clone(),
+                actor: ApprovalActor::LocalUser,
+                decided_at_unix_ms: approved_at,
+                consumed: false,
+                policy_safety_snapshot_ref: approval_request.policy_safety_snapshot_ref.clone(),
+                secret_ref_evidence: approval_request.secret_ref_evidence.clone(),
+            },
+        }),
+        ..context
+    };
+
+    let report = executor.execute_tool_calls(vec![call], &approved_context);
+
+    let message = report.messages.first().ok_or("missing exec output")?;
+    if report.interrupt.is_some()
+        || !message
+            .content
+            .contains(&temp.path().to_string_lossy().to_string())
+        || !message.content.contains("Exit code: 0")
+    {
+        return Err(
+            format!("approved runtime exec did not use process context: {report:?}").into(),
+        );
     }
     Ok(())
 }
@@ -1075,6 +1169,8 @@ fn runtime_asks_again_for_mismatched_permission_approval_cache() -> Result<(), B
         actor: ApprovalActor::LocalUser,
         decided_at_unix_ms: approved_at,
         consumed: false,
+        policy_safety_snapshot_ref: approval_request.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: approval_request.secret_ref_evidence.clone(),
     };
     let approved_context = ToolExecutionContext {
         permission_approval_cache: Some(ApprovalCacheEntry {
@@ -1122,6 +1218,91 @@ fn runtime_asks_again_for_mismatched_permission_approval_cache() -> Result<(), B
     {
         return Err(format!(
             "mismatched cached approval should ask again without executing: report={report:?} calls={}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_asks_again_for_changed_policy_safety_snapshot_ref_cache() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let executor = RuntimeToolExecutor::new(&registry);
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: None,
+        },
+        permission_interactive: true,
+        ..ToolExecutionContext::default()
+    };
+    let approval_report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-call",
+            "exec",
+            json!({ "command": "cargo test" }),
+        )],
+        &context,
+    );
+    let approval_request = match approval_report.interrupt {
+        Some(RuntimeInterrupt::PermissionApproval {
+            approval_request, ..
+        }) => approval_request,
+        other => {
+            return Err(format!("missing approval request before execution: {other:?}").into())
+        }
+    };
+    let approved_at = approval_request.expires_at_unix_ms.saturating_sub(1);
+    let mut stale_request = (*approval_request).clone();
+    let mut stale_ref = stale_request
+        .policy_safety_snapshot_ref
+        .clone()
+        .ok_or("approval request must carry policy safety snapshot ref")?;
+    stale_ref.created_at_unix_ms = stale_ref.created_at_unix_ms.saturating_add(1);
+    stale_request.policy_safety_snapshot_ref = Some(stale_ref);
+    let approval_decision = ApprovalDecision {
+        approval_request_id: stale_request.approval_request_id.clone(),
+        action_digest: stale_request.action_digest.clone(),
+        snapshot_digest: stale_request.snapshot_digest.clone(),
+        decision: ApprovalDecisionKind::Approved,
+        approved_scope: stale_request.requested_scope.clone(),
+        actor: ApprovalActor::LocalUser,
+        decided_at_unix_ms: approved_at,
+        consumed: false,
+        policy_safety_snapshot_ref: stale_request.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: stale_request.secret_ref_evidence.clone(),
+    };
+    let approved_context = ToolExecutionContext {
+        permission_approval_cache: Some(ApprovalCacheEntry {
+            request: stale_request,
+            decision: approval_decision,
+        }),
+        ..context
+    };
+
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "exec-call",
+            "exec",
+            json!({ "command": "cargo test" }),
+        )],
+        &approved_context,
+    );
+
+    if calls.load(Ordering::SeqCst) != 0
+        || !matches!(
+            report.interrupt,
+            Some(RuntimeInterrupt::PermissionApproval { .. })
+        )
+    {
+        return Err(format!(
+            "changed policy safety snapshot ref should ask again without executing: report={report:?} calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());

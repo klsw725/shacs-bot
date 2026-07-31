@@ -12,8 +12,8 @@ use shacs_channels::WebSocketServerEvent;
 use shacs_projection::RememberedPermissionProjection;
 use shacs_providers::{GenerationSettings, LlmResponse, ProviderEvent, ProviderRequest};
 use shacs_session::{
-    SessionManager, SessionProjectionOptions, SessionRuntimeExecutionProjection,
-    SessionRuntimeWorkflowProjection, SessionUxDiagnostics,
+    build_session_diagnostics_aggregate, SessionManager, SessionProjectionOptions,
+    SessionRuntimeExecutionProjection, SessionRuntimeWorkflowProjection, SessionUxDiagnostics,
 };
 use shacs_utils::diagnostics::{
     DiagnosticsKind, DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot,
@@ -277,6 +277,10 @@ pub trait ChatCompletionAdapter {
             "diagnostics request was read-only",
         ));
         snapshot
+    }
+
+    fn diagnostics_projection(&self) -> Value {
+        self.diagnostics_snapshot().redacted_value()
     }
 
     fn workflow_recipes_projection(&self) -> Option<Value> {
@@ -692,9 +696,7 @@ pub fn handle_api_request(
         (ApiMethod::Get, MODELS_PATH) => {
             json_response(200, models_response_with_owned_by(&adapter.models()))
         }
-        (ApiMethod::Get, DIAGNOSTICS_PATH) => {
-            json_response(200, adapter.diagnostics_snapshot().redacted_value())
-        }
+        (ApiMethod::Get, DIAGNOSTICS_PATH) => json_response(200, adapter.diagnostics_projection()),
         (ApiMethod::Get, WORKFLOW_RECIPES_PATH) => match adapter.workflow_recipes_projection() {
             Some(projection) => json_response(200, projection),
             None => error_response(ApiError::not_found(
@@ -805,27 +807,40 @@ fn handle_session_diagnostics_query(
     key: &str,
 ) -> ApiHttpResponse {
     if let Some(manager) = manager {
-        return json_response(200, json!(manager.session_ux_diagnostics(key)));
+        return session_diagnostics_response(&manager.session_ux_diagnostics(key));
     }
-    json_response(
-        200,
-        json!(SessionUxDiagnostics {
-            key: key.to_owned(),
-            path: workspace
-                .join("sessions")
-                .join(format!("{}.jsonl", SessionManager::safe_key(key))),
-            exists: false,
-            message_count: 0,
-            last_consolidated: 0,
-            metadata_keys: Vec::new(),
-            recovery_markers: Vec::new(),
-            checkpoint_phase: None,
-            diagnostics_refs: Vec::new(),
-            runtime_workflow: None::<SessionRuntimeWorkflowProjection>,
-            runtime_execution: None::<SessionRuntimeExecutionProjection>,
-            legal_start: 0,
-        }),
-    )
+    session_diagnostics_response(&SessionUxDiagnostics {
+        key: key.to_owned(),
+        path: workspace
+            .join("sessions")
+            .join(format!("{}.jsonl", SessionManager::safe_key(key))),
+        exists: false,
+        message_count: 0,
+        last_consolidated: 0,
+        metadata_keys: Vec::new(),
+        recovery_markers: Vec::new(),
+        checkpoint_phase: None,
+        diagnostics_refs: Vec::new(),
+        runtime_workflow: None::<SessionRuntimeWorkflowProjection>,
+        runtime_execution: None::<SessionRuntimeExecutionProjection>,
+        legal_start: 0,
+    })
+}
+
+fn session_diagnostics_response(diagnostics: &SessionUxDiagnostics) -> ApiHttpResponse {
+    let mut safe_diagnostics = diagnostics.clone();
+    safe_diagnostics.metadata_keys = (0..diagnostics.metadata_keys.len())
+        .map(|index| format!("metadata-key-{index}"))
+        .collect();
+    safe_diagnostics.diagnostics_refs = (0..diagnostics.diagnostics_refs.len())
+        .map(|index| format!("diagnostics-source-{index}"))
+        .collect();
+    match build_session_diagnostics_aggregate(&safe_diagnostics) {
+        Ok(aggregate) => json_response(200, json!(aggregate)),
+        Err(error) => error_response(ApiError::internal(format!(
+            "session diagnostics could not be projected safely: {error}"
+        ))),
+    }
 }
 
 enum SessionQueryRoute {
@@ -2862,15 +2877,20 @@ mod tests {
             .await?;
         assert_eq!(diagnostics.status(), StatusCode::OK);
         let diagnostics_body = response_json(diagnostics).await?;
-        assert_eq!(diagnostics_body["exists"], true);
-        assert_eq!(diagnostics_body["checkpoint_phase"], "awaiting_tools");
         assert_eq!(
-            diagnostics_body["runtime_workflow"]["verifier_status"],
-            "passed"
+            diagnostics_body["schema_id"],
+            "spec030_session_diagnostics.v1"
         );
+        assert_eq!(diagnostics_body["exists"], true);
+        assert!(diagnostics_body["session_ref"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("session:sha256:")));
+        assert_eq!(diagnostics_body["checkpoint_phase"], "awaiting_tools");
+        assert_eq!(diagnostics_body["workflow_state"], "Succeeded");
         assert!(!diagnostics_body.to_string().contains("secret-value"));
         assert!(!diagnostics_body.to_string().contains("hidden"));
         assert!(!diagnostics_body.to_string().contains("secret diff"));
+        assert!(!diagnostics_body.to_string().contains("api:work"));
         assert_eq!(adapter.call_count(), 0);
         Ok(())
     }
@@ -2900,6 +2920,10 @@ mod tests {
         );
         assert_eq!(missing_diagnostics.status, 200);
         assert_eq!(missing_diagnostics.body["exists"], false);
+        assert_eq!(
+            missing_diagnostics.body["schema_id"],
+            "spec030_session_diagnostics.v1"
+        );
 
         let invalid_percent = handle_api_request(ApiHttpRequest::get("/v1/sessions/%zz"), &adapter);
         assert_eq!(invalid_percent.status, 404);

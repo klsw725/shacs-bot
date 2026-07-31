@@ -35,31 +35,39 @@ use shacs_core::app_authoring::{
 };
 use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
-    build_plugin_runtime_snapshot, build_plugin_surface_projection, discover_context_files,
-    discover_plugins, parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
-    resolve_context_reference, runtime_control_payload, AgentHook, AgentHookContext, AgentLoop,
-    AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
-    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput,
-    ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
+    build_core_diagnostics_aggregate, build_permission_diagnostics_summary,
+    build_plugin_runtime_snapshot, build_plugin_surface_projection, ceiling_for_origin,
+    containment_permission_proof_for_process_gate, discover_context_files, discover_plugins,
+    parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
+    resolve_context_reference, runtime_control_payload, ActionNormalizationState, AgentHook,
+    AgentHookContext, AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult,
+    CompositeHook, ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef,
+    ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
     ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
-    ContextReferenceResolverConfig, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
-    DurableWorkDispatcher, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
-    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage, McpLifecycle,
-    MessageBus, PermissionMode, PermissionModeSnapshot, PluginCommandDispatcher,
-    PluginDiscoveryError, PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink,
-    PluginHookDispatchSummary, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
-    PluginSurfaceProjection, ProjectPermissionStoreConfig, ProviderNotificationEvaluator,
-    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, Session,
-    SessionHistoryOptions, SessionManager, SessionTurnLock, StreamDeltaCoalescer,
+    ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput, DiscoveredPlugin,
+    DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, HeartbeatError,
+    HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor,
+    HeartbeatWorker, InboundMessage, InheritedPermissionContext, McpLifecycle, MessageBus,
+    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
+    PermissionedAction, PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError,
+    PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
+    PluginProcessPermissionContext, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
+    PluginSurfaceProjection, ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
+    ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
+    ProcessGateTerminalPrecondition, ProcessIdentity, ProcessPluginHookCommandExecutor,
+    ProcessRedactedCommand, ProjectPermissionStoreConfig, ProviderNotificationEvaluator,
+    RuntimeBoundaryOrigin, RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall,
+    SafetyCapability, Session, SessionHistoryOptions, SessionManager, SessionTurnLock,
+    SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
     SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig, ToolSearchMode,
     ToolStatus, HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
     ImageGenerateTool, ImageGenerateToolConfig, ListDirTool, McpRuntime, McpServerConnectionReport,
-    McpServerSpec, MessageTool, NetworkGuard, PathContext, ReadFileTool, SelfRuntimeState,
-    SelfTool, SpawnTool, StdioMcpConnector, ToolRegistry, WebFetchConfig, WebFetchTool,
-    WebSearchConfig, WebSearchTool, WriteFileTool,
+    McpServerSpec, McpStartupGate, MessageTool, NetworkGuard, PathContext, ReadFileTool,
+    SelfRuntimeState, SelfTool, SpawnTool, StdioMcpConnector, ToolRegistry, WebFetchConfig,
+    WebFetchTool, WebSearchConfig, WebSearchTool, WriteFileTool,
 };
 use shacs_projection::{
     build_remembered_permission_projection, format_remembered_permission_projection,
@@ -101,7 +109,10 @@ use shacs_session::durable_work::{
     evaluate_durable_work_recovery, evaluate_durable_work_recovery_for_owner, DurableWorkAdmission,
     DurableWorkRecoveryStatus, ReplayWorkState, WorkTerminalKind, MAX_DURABLE_WORK_ATTEMPTS,
 };
-use shacs_session::{SessionRuntimeExecutionProjection, SessionRuntimeWorkflowProjection};
+use shacs_session::{
+    build_session_diagnostics_aggregate, SessionDiagnosticsAggregate,
+    SessionRuntimeExecutionProjection, SessionRuntimeWorkflowProjection, SessionUxDiagnostics,
+};
 use shacs_skills::{
     discover_skill_registry, discover_workflow_recipes, sync_builtin_skills,
     SkillBackedWorkflowRecipe, SkillRegistryEntry, SkillRegistryOptions, SkillRegistryStatus,
@@ -113,7 +124,7 @@ use shacs_utils::attachments::{
     DEFAULT_MAX_ATTACHMENTS_PER_MESSAGE, DEFAULT_MAX_BYTES_PER_TURN,
 };
 use shacs_utils::diagnostics::{
-    write_diagnostics_bundle, CrashEvidence, DiagnosticsBundleManifest, DiagnosticsKind,
+    write_redacted_diagnostics_bundle, CrashEvidence, DiagnosticsBundleManifest, DiagnosticsKind,
     DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot, OperationalLogRecord,
     RecoveryEvidence, TraceRecord, TraceStatus,
 };
@@ -1041,6 +1052,7 @@ pub struct GeneratedMediaArtifactInspect {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeDiagnosticsReport {
     pub snapshot: DiagnosticsSnapshot,
+    pub redacted_projection: Value,
     pub bundle: Option<DiagnosticsBundleManifest>,
     pub bundle_path: Option<PathBuf>,
     pub bundle_error: Option<String>,
@@ -1761,23 +1773,11 @@ pub struct SessionClearReport {
     pub message_count_before: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionDiagnosticsReport {
-    pub workspace: PathBuf,
-    pub key: String,
-    pub path: PathBuf,
-    pub exists: bool,
-    pub message_count: usize,
-    pub last_consolidated: usize,
-    pub metadata_keys: Vec<String>,
-    pub recovery_markers: Vec<String>,
-    pub checkpoint_phase: Option<String>,
-    pub diagnostics_refs: Vec<String>,
-    pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
-    pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
+    pub aggregate: SessionDiagnosticsAggregate,
     pub durable_children: DurableChildSessionInspect,
     pub supervision: Value,
-    pub legal_start: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2482,13 +2482,15 @@ fn observability_tool_callback(
                 let result = event
                     .result
                     .clone()
+                    .map(observability_tool_result_value)
                     .unwrap_or_else(|| Value::String(event.detail.clone()));
+                let ok = !tool_event_detail_is_error(event) && !tool_result_is_error(&result);
                 Some(build_tool_progress_finish_payload(
                     call_id,
                     event.name.clone(),
                     arguments,
                     result,
-                    event.status == ToolStatus::Ok,
+                    ok,
                     event.detail.clone(),
                 ))
             }
@@ -2502,6 +2504,39 @@ fn observability_tool_callback(
             },
         );
     }))
+}
+
+fn observability_tool_result_value(result: Value) -> Value {
+    if let Some(parsed) = result
+        .as_str()
+        .and_then(|content| serde_json::from_str(content).ok())
+    {
+        return parsed;
+    }
+    result
+        .get("result_json")
+        .cloned()
+        .or_else(|| {
+            result
+                .get("content")
+                .and_then(Value::as_str)
+                .and_then(|content| serde_json::from_str(content).ok())
+        })
+        .unwrap_or(result)
+}
+
+fn tool_event_detail_is_error(event: &ToolEvent) -> bool {
+    event.detail.trim_start().starts_with("Error")
+}
+
+fn tool_result_is_error(result: &Value) -> bool {
+    result
+        .as_str()
+        .is_some_and(|text| text.trim_start().starts_with("Error"))
+        || result
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.trim_start().starts_with("Error"))
 }
 
 fn runtime_verbose_tool_event_callback() -> RuntimeToolEventCallback {
@@ -3625,6 +3660,88 @@ fn runtime_permission_mode_snapshot(snapshot: &PermissionConfigSnapshot) -> Perm
     }
 }
 
+fn runtime_permission_mode_snapshot_for_workspace(
+    snapshot: &PermissionConfigSnapshot,
+    workspace: &Path,
+) -> PermissionModeSnapshot {
+    PermissionModeSnapshot {
+        scope_ref: Some(opaque_workspace_scope_ref(workspace)),
+        ..runtime_permission_mode_snapshot(snapshot)
+    }
+}
+
+fn opaque_workspace_scope_ref(workspace: &Path) -> String {
+    let canonical = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    format!("workspace:{digest:x}")
+}
+
+fn runtime_capability_ceiling_from_registry(registry: &ToolRegistry) -> Vec<SafetyCapability> {
+    let mut capabilities = Vec::new();
+    for tool_name in registry.tool_names() {
+        match tool_name.as_str() {
+            "read_file" | "list_dir" | "glob" | "grep" | "notebook_read" => {
+                capabilities.push(SafetyCapability::FsRead)
+            }
+            "write_file" | "edit_file" | "notebook_edit" => {
+                capabilities.push(SafetyCapability::FsWrite)
+            }
+            "exec" | "spawn" => capabilities.push(SafetyCapability::ProcExec),
+            "web_fetch" | "web_search" | "image_generate" => {
+                capabilities.push(SafetyCapability::NetOutbound)
+            }
+            "message" => capabilities.push(SafetyCapability::ExternalDelivery),
+            "cron" => capabilities.push(SafetyCapability::AutomationSchedule),
+            "my" | "self" => capabilities.push(SafetyCapability::RuntimeConfigWrite),
+            name if name.starts_with("mcp_") => capabilities.push(SafetyCapability::ProcExec),
+            _ => {
+                if let Some(tool) = registry.get(&tool_name) {
+                    if tool.process_adapter_kind().is_some() {
+                        capabilities.push(SafetyCapability::ProcExec);
+                    } else if tool.read_only() {
+                        capabilities.push(SafetyCapability::FsRead);
+                    }
+                }
+            }
+        }
+    }
+    capabilities.sort_by_key(|capability| safety_capability_label(*capability));
+    capabilities.dedup();
+    capabilities
+}
+
+fn safety_capability_label(capability: SafetyCapability) -> &'static str {
+    match capability {
+        SafetyCapability::FsRead => "fs_read",
+        SafetyCapability::FsWrite => "fs_write",
+        SafetyCapability::ProcExec => "proc_exec",
+        SafetyCapability::NetOutbound => "net_outbound",
+        SafetyCapability::SecretRead => "secret_read",
+        SafetyCapability::ExternalDelivery => "external_delivery",
+        SafetyCapability::AutomationSchedule => "automation_schedule",
+        SafetyCapability::AppInstall => "app_install",
+        SafetyCapability::RuntimeConfigWrite => "runtime_config_write",
+        SafetyCapability::SelfModification => "self_modification",
+    }
+}
+
+fn plugin_process_permission_context_from_loop_config(
+    config: &AgentLoopConfig,
+) -> PluginProcessPermissionContext {
+    PluginProcessPermissionContext {
+        permission_mode: config.permission_mode_snapshot.mode,
+        permission_rules: config.permission_rule_input.clone(),
+        inherited_context: config.permission_ceiling_snapshot.clone().map(|ceiling| {
+            InheritedPermissionContext {
+                ceiling,
+                requested_mode: config.permission_mode_snapshot.mode,
+                requested_capabilities: vec![SafetyCapability::ProcExec],
+                per_action_evaluation_required: true,
+            }
+        }),
+    }
+}
+
 fn reload_failure_permission_config_snapshot(
     _previous: &PermissionModeSnapshot,
 ) -> PermissionConfigSnapshot {
@@ -3768,8 +3885,9 @@ pub fn runtime_diagnostics(
         false,
     )?;
     let mut snapshot = diagnostics_snapshot_from_runtime_inspect(&inspect);
+    let mut redacted_projection = diagnostics_projection_from_snapshot(&snapshot)?;
     let (bundle, bundle_path, bundle_error) = match options.bundle_path {
-        Some(path) => match write_diagnostics_bundle(&path, &snapshot) {
+        Some(path) => match write_redacted_diagnostics_bundle(&path, &redacted_projection) {
             Ok(outcome) => (Some(outcome.manifest), Some(outcome.path), None),
             Err(error) => {
                 let message = format!("diagnostics bundle could not be written: {error}");
@@ -3783,6 +3901,7 @@ pub fn runtime_diagnostics(
                     "error": redact_string(&message),
                 });
                 snapshot.diagnostics.push(record);
+                redacted_projection = diagnostics_projection_from_snapshot(&snapshot)?;
                 (None, Some(path), Some(message))
             }
         },
@@ -3790,9 +3909,46 @@ pub fn runtime_diagnostics(
     };
     Ok(RuntimeDiagnosticsReport {
         snapshot,
+        redacted_projection,
         bundle,
         bundle_path,
         bundle_error,
+    })
+}
+
+fn diagnostics_projection_from_snapshot(snapshot: &DiagnosticsSnapshot) -> Result<Value, CliError> {
+    let mut projection = snapshot.redacted_value();
+    if let Value::Object(runtime) = &mut projection["runtime"] {
+        runtime.insert(
+            "spec030_core".to_owned(),
+            spec030_core_diagnostics_projection()?,
+        );
+    }
+    Ok(projection)
+}
+
+fn spec030_core_diagnostics_projection() -> Result<Value, CliError> {
+    let permission = build_permission_diagnostics_summary(&[], &[]);
+    let trust_decisions = vec![
+        shacs_core::runtime::blocked_skill_trust_external_surface(
+            SkillTrustActionKind::DependencyPreparation,
+        ),
+        shacs_core::runtime::blocked_skill_trust_external_surface(
+            SkillTrustActionKind::VerifiedEntrypoint,
+        ),
+    ];
+    let aggregate = build_core_diagnostics_aggregate(CoreDiagnosticsAggregateInput {
+        permission: &permission,
+        process_receipts: &[],
+        containment_proofs: &[],
+        classifier_evidence: &[],
+        trust_decisions: &trust_decisions,
+    })
+    .map_err(|error| {
+        CliError::InvalidArguments(format!("core diagnostics projection failed: {error}"))
+    })?;
+    serde_json::to_value(aggregate).map_err(|error| {
+        CliError::InvalidArguments(format!("core diagnostics serialization failed: {error}"))
     })
 }
 
@@ -7238,6 +7394,13 @@ pub fn skills_recipes(options: SkillsRecipesOptions) -> Result<SkillsRecipesRepo
     })
 }
 
+pub fn skill_trust_permission_from_read_only_descriptor(
+    _entry: &SkillRegistryEntry,
+    action_kind: SkillTrustActionKind,
+) -> SkillTrustPermissionDecision {
+    shacs_core::runtime::blocked_skill_trust_external_surface(action_kind)
+}
+
 fn load_skill_registry(
     config_path: Option<PathBuf>,
     workspace_override: Option<PathBuf>,
@@ -9046,8 +9209,7 @@ pub fn session_diagnostics(
     let supervision = runtime_supervisor_projection(&read_runtime_supervision_state(&data_dir)?);
     let fallback_path = session_path_without_creating_dir(&workspace, &options.session);
     if !workspace.join("sessions").exists() {
-        return Ok(SessionDiagnosticsReport {
-            workspace,
+        let diagnostics = SessionUxDiagnostics {
             key: options.session,
             path: fallback_path,
             exists: false,
@@ -9059,34 +9221,35 @@ pub fn session_diagnostics(
             diagnostics_refs: Vec::new(),
             runtime_workflow: None,
             runtime_execution: None,
+            legal_start: 0,
+        };
+        return Ok(SessionDiagnosticsReport {
+            aggregate: session_diagnostics_aggregate_for_surface(&diagnostics)?,
             durable_children,
             supervision,
-            legal_start: 0,
         });
     }
     let manager = SessionManager::new(&workspace)?;
     let diagnostics = manager.session_ux_diagnostics(&options.session);
-    let path = if diagnostics.exists {
-        diagnostics.path
-    } else {
-        fallback_path
-    };
     Ok(SessionDiagnosticsReport {
-        workspace,
-        key: diagnostics.key,
-        path,
-        exists: diagnostics.exists,
-        message_count: diagnostics.message_count,
-        last_consolidated: diagnostics.last_consolidated,
-        metadata_keys: diagnostics.metadata_keys,
-        recovery_markers: diagnostics.recovery_markers,
-        checkpoint_phase: diagnostics.checkpoint_phase,
-        diagnostics_refs: diagnostics.diagnostics_refs,
-        runtime_workflow: diagnostics.runtime_workflow,
-        runtime_execution: diagnostics.runtime_execution,
+        aggregate: session_diagnostics_aggregate_for_surface(&diagnostics)?,
         durable_children,
         supervision,
-        legal_start: diagnostics.legal_start,
+    })
+}
+
+fn session_diagnostics_aggregate_for_surface(
+    diagnostics: &SessionUxDiagnostics,
+) -> Result<SessionDiagnosticsAggregate, CliError> {
+    let mut safe_diagnostics = diagnostics.clone();
+    safe_diagnostics.metadata_keys = (0..diagnostics.metadata_keys.len())
+        .map(|index| format!("metadata-key-{index}"))
+        .collect();
+    safe_diagnostics.diagnostics_refs = (0..diagnostics.diagnostics_refs.len())
+        .map(|index| format!("diagnostics-source-{index}"))
+        .collect();
+    build_session_diagnostics_aggregate(&safe_diagnostics).map_err(|error| {
+        CliError::InvalidArguments(format!("session diagnostics projection failed: {error}"))
     })
 }
 
@@ -9432,6 +9595,7 @@ fn codex_headless_login_with_polling(
 fn codex_provider_config() -> ProviderConfig {
     ProviderConfig {
         api_key: None,
+        api_key_ref: None,
         api_base: Some("https://chatgpt.com/backend-api".to_owned()),
         extra_headers: None,
         extra_body: None,
@@ -9441,6 +9605,7 @@ fn codex_provider_config() -> ProviderConfig {
 fn copilot_provider_config() -> ProviderConfig {
     ProviderConfig {
         api_key: None,
+        api_key_ref: None,
         api_base: Some("https://api.githubcopilot.com".to_owned()),
         extra_headers: None,
         extra_body: None,
@@ -18058,12 +18223,14 @@ impl AgentLoopChatCompletionAdapter {
             .then(|| bundle.config.tools.exec.sandbox.clone());
         let exec_path_append = non_empty(Some(bundle.config.tools.exec.path_append.as_str()))
             .then(|| bundle.config.tools.exec.path_append.clone());
+        let workspace = fs::canonicalize(&bundle.context.workspace)
+            .unwrap_or_else(|_| bundle.context.workspace.clone());
         let containment = runtime_containment_inspect(&bundle);
         let permission_config_snapshot =
             agent_loop_permission_config_snapshot(&bundle, &containment);
         let containment_snapshot = Some(runtime_containment_snapshot_ref(&containment));
         let permission_mode_snapshot =
-            runtime_permission_mode_snapshot(&permission_config_snapshot);
+            runtime_permission_mode_snapshot_for_workspace(&permission_config_snapshot, &workspace);
         let plugin_discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
         let plugin_runtime_snapshot = build_plugin_runtime_snapshot(&plugin_discovery.plugins);
         let plugin_skill_roots = enabled_plugin_skill_roots(&plugin_discovery.plugins);
@@ -18084,7 +18251,7 @@ impl AgentLoopChatCompletionAdapter {
             native_image_input_supported,
             client,
             retry_mode,
-            workspace: bundle.context.workspace.clone(),
+            workspace,
             config_path: bundle.context.config_path.clone(),
             media_dir,
             tools: tooling.registry,
@@ -18153,9 +18320,22 @@ impl AgentLoopChatCompletionAdapter {
         config.concurrent_tools = true;
         config.containment_snapshot = self.containment_snapshot.clone();
         let permission_config_snapshot = self.current_permission_config_snapshot();
-        config.permission_mode_snapshot =
-            runtime_permission_mode_snapshot(&permission_config_snapshot);
+        config.permission_mode_snapshot = runtime_permission_mode_snapshot_for_workspace(
+            &permission_config_snapshot,
+            &self.workspace,
+        );
         config.permission_auto_approval = permission_config_snapshot.auto_approval;
+        let workspace_scope_ref = config
+            .permission_mode_snapshot
+            .scope_ref
+            .clone()
+            .unwrap_or_else(|| opaque_workspace_scope_ref(&self.workspace));
+        config.permission_ceiling_snapshot = Some(ceiling_for_origin(
+            config.permission_mode_snapshot.mode,
+            runtime_capability_ceiling_from_registry(&self.tools),
+            vec![workspace_scope_ref],
+            RuntimeBoundaryOrigin::UserTurn,
+        ));
         config.permission_rule_input.containment =
             runtime_permission_rule_containment_from_snapshot(self.containment_snapshot.as_ref());
         config.permission_rule_input.protected_targets =
@@ -18841,7 +19021,7 @@ impl AgentLoopChatCompletionAdapter {
     fn process_inbound_with_outbound_inner(
         &self,
         message: InboundMessage,
-        config: AgentLoopConfig,
+        mut config: AgentLoopConfig,
         on_event: Option<ApiProviderEventCallback>,
         observability_hooks: &[ShacsBotObservabilityHook],
         live_notification_sink: Option<RuntimeNotificationSink>,
@@ -18876,7 +19056,7 @@ impl AgentLoopChatCompletionAdapter {
             reply_to.clone(),
         );
         let subagent_runtime = match subagent_runtime {
-            Some(runtime) => runtime,
+            Some(runtime) => runtime.attach_bus(bus.clone()),
             None => {
                 let mut runtime = SubagentRuntime::with_bus(bus.clone());
                 if let Some(root) = config.durable_event_root.as_deref() {
@@ -18890,6 +19070,17 @@ impl AgentLoopChatCompletionAdapter {
             }
         };
         let spawn_config = self.subagent_execution_config(&config);
+        if let Some(ceiling) = config.permission_ceiling_snapshot.as_mut() {
+            if !ceiling
+                .capability_ceiling
+                .contains(&SafetyCapability::ProcExec)
+            {
+                ceiling.capability_ceiling.push(SafetyCapability::ProcExec);
+                ceiling
+                    .capability_ceiling
+                    .sort_by_key(|capability| safety_capability_label(*capability));
+            }
+        }
         let subagent_client = self.client.clone();
         let spawner_runtime = subagent_runtime.clone();
         let notification_bus = bus.clone();
@@ -18927,6 +19118,8 @@ impl AgentLoopChatCompletionAdapter {
         }));
         let mut tools = self.tools.clone();
         tools.register(spawn_tool.clone());
+        let plugin_process_permission_context =
+            plugin_process_permission_context_from_loop_config(&config);
         let mut loop_runtime = AgentLoop::new(
             bus,
             sessions,
@@ -18939,7 +19132,10 @@ impl AgentLoopChatCompletionAdapter {
         .with_session_turn_lock(self.session_turn_lock.clone());
         if !self.plugin_runtime_snapshot.commands.is_empty() {
             loop_runtime = loop_runtime.with_plugin_command_dispatcher(
-                PluginCommandDispatcher::new(self.plugin_runtime_snapshot.commands.clone()),
+                PluginCommandDispatcher::with_permission_context(
+                    self.plugin_runtime_snapshot.commands.clone(),
+                    plugin_process_permission_context.clone(),
+                ),
             );
         }
         if let Some(message_tool) = &self.message_tool {
@@ -18977,8 +19173,14 @@ impl AgentLoopChatCompletionAdapter {
             .any(|plugin| !plugin.hooks.is_empty())
         {
             let plugin_hook: Arc<dyn AgentHook> = Arc::new(
-                PluginRuntimeHookAgentHook::new(self.plugin_runtime_snapshot.clone())
-                    .with_sink(plugin_notification_sink),
+                PluginRuntimeHookAgentHook::with_executor(
+                    self.plugin_runtime_snapshot.clone(),
+                    shacs_core::runtime::PluginHookDispatchMode::LiveDiagnostics,
+                    Arc::new(ProcessPluginHookCommandExecutor::with_permission_context(
+                        plugin_process_permission_context,
+                    )),
+                )
+                .with_sink(plugin_notification_sink),
             );
             agent_hook = Some(match agent_hook {
                 Some(existing) => Arc::new(CompositeHook::new(vec![existing, plugin_hook])),
@@ -19487,6 +19689,11 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         }
     }
 
+    fn diagnostics_projection(&self) -> Value {
+        diagnostics_projection_from_snapshot(&self.diagnostics_snapshot())
+            .unwrap_or_else(|_| self.diagnostics_snapshot().redacted_value())
+    }
+
     fn stream_chat(
         &self,
         invocation: ChatCompletionInvocation,
@@ -19980,26 +20187,32 @@ fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
         .tools
         .mcp_servers
         .iter()
-        .map(|(name, config)| McpServerSpec {
-            name: name.clone(),
-            r#type: config.r#type.clone(),
-            command: non_empty(Some(config.command.as_str())).then(|| config.command.clone()),
-            args: config.args.clone(),
-            env: config
-                .env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-            clear_env: false,
-            url: non_empty(Some(config.url.as_str())).then(|| config.url.clone()),
-            headers: config
-                .headers
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-            timeout_seconds: u64::from(config.tool_timeout),
-            enabled_tools: config.enabled_tools.clone(),
-            parent_containment_snapshot: parent_containment_snapshot.clone(),
+        .map(|(name, config)| {
+            let command = non_empty(Some(config.command.as_str())).then(|| config.command.clone());
+            McpServerSpec {
+                name: name.clone(),
+                r#type: config.r#type.clone(),
+                command: command.clone(),
+                args: config.args.clone(),
+                env: config
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                clear_env: false,
+                url: non_empty(Some(config.url.as_str())).then(|| config.url.clone()),
+                headers: config
+                    .headers
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                timeout_seconds: u64::from(config.tool_timeout),
+                enabled_tools: config.enabled_tools.clone(),
+                parent_containment_snapshot: parent_containment_snapshot.clone(),
+                startup_gate: command.as_deref().map(|command| {
+                    mcp_startup_gate(bundle, name, command, parent_containment_snapshot.clone())
+                }),
+            }
         })
         .collect()
 }
@@ -20011,6 +20224,157 @@ fn production_mcp_server_specs(
     let mut specs = mcp_server_specs(bundle);
     specs.extend(plugin_mcp_server_specs(bundle, plugins));
     specs
+}
+
+fn mcp_startup_gate(
+    bundle: &ConfigBundle,
+    server_name: &str,
+    command: &str,
+    parent_containment_snapshot: Option<ContainmentSnapshotRef>,
+) -> McpStartupGate {
+    let containment =
+        runtime_permission_rule_containment_from_snapshot(parent_containment_snapshot.as_ref());
+    let permission_config =
+        agent_loop_permission_config_snapshot(bundle, &runtime_containment_inspect(bundle));
+    let permission_mode_snapshot = runtime_permission_mode_snapshot(&permission_config);
+    let approved_scope_ref = permission_mode_snapshot
+        .scope_ref
+        .clone()
+        .unwrap_or_else(|| "workspace".to_owned());
+    let inherited_context = InheritedPermissionContext {
+        ceiling: PermissionCeilingSnapshot {
+            parent_mode: permission_mode_snapshot.mode,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec![approved_scope_ref],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        },
+        requested_mode: permission_mode_snapshot.mode,
+        requested_capabilities: vec![SafetyCapability::ProcExec],
+        per_action_evaluation_required: true,
+    };
+    let command_family = mcp_command_family(command);
+    let action_digest = mcp_startup_digest(server_name, &command_family);
+    let policy_safety_snapshot_ref = mcp_policy_safety_ref(
+        server_name,
+        &action_digest,
+        &permission_mode_snapshot,
+        parent_containment_snapshot.clone(),
+    );
+    let action = PermissionedAction {
+        action_id: format!("mcp-startup-{server_name}"),
+        provider_tool_call_id: Some(format!("mcp-startup-{server_name}")),
+        session_id: "mcp-startup".to_owned(),
+        turn_id: "mcp-startup".to_owned(),
+        tool_name: format!("mcp_{server_name}_startup"),
+        capabilities: vec![SafetyCapability::ProcExec],
+        target_refs: Vec::new(),
+        action_digest: action_digest.clone(),
+        argument_digest: action_digest.clone(),
+        snapshot_digest: action_digest,
+        policy_safety_snapshot_ref: Some(policy_safety_snapshot_ref),
+        origin: PermissionedActionOrigin::UserTurn,
+        permission_mode_snapshot,
+        containment_snapshot: parent_containment_snapshot,
+        intent_snapshot: None,
+        redacted_arguments: json!({"command_family": command_family}),
+        secret_ref_evidence: Vec::new(),
+        normalization_state: ActionNormalizationState::Ready,
+        normalization_errors: Vec::new(),
+    };
+    let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
+        identity: ProcessIdentity::new(format!("mcp:{server_name}"), "mcp-startup", "mcp-startup"),
+        adapter: ProcessAdapterKind::McpStdio,
+        action,
+        required_secret_ref_count: 0,
+        redacted_command: ProcessRedactedCommand {
+            command_family: command_family.clone(),
+            redacted_summary: format!("mcp stdio server {server_name}"),
+            redacted_targets: Vec::new(),
+        },
+    })
+    .unwrap_or_else(|error| panic!("MCP startup envelope construction failed: {error}"));
+    let permission_rules = PermissionRuleInput {
+        containment,
+        protected_targets: Vec::new(),
+        proc_exec_summary: Some(ProcExecSummary {
+            command_family,
+            target_refs: Vec::new(),
+            destructive: false,
+            network: false,
+            secret_exposure: false,
+            summary_available: true,
+        }),
+    };
+    let containment_proof = containment_permission_proof_for_process_gate(
+        &envelope,
+        &permission_rules,
+        Some(&inherited_context),
+        0,
+    )
+    .unwrap_or_else(|error| panic!("MCP startup containment proof construction failed: {error}"));
+    McpStartupGate {
+        input: ProcessGateInput {
+            envelope,
+            permission_rules,
+            inherited_context: Some(inherited_context),
+            evaluator: None,
+            approval: None,
+            containment_proof: ProcessContainmentProofCandidate::Proof(Box::new(containment_proof)),
+            interactive: false,
+            terminal_precondition: ProcessGateTerminalPrecondition::Ready,
+            now_unix_ms: 0,
+        },
+    }
+}
+
+fn mcp_command_family(command: &str) -> String {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(redact_string)
+        .unwrap_or_else(|| "mcp-stdio".to_owned())
+}
+
+fn mcp_startup_digest(server_name: &str, command_family: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(server_name.as_bytes());
+    hasher.update([0]);
+    hasher.update(command_family.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn mcp_policy_safety_ref(
+    server_name: &str,
+    digest: &str,
+    permission_mode: &PermissionModeSnapshot,
+    containment: Option<ContainmentSnapshotRef>,
+) -> shacs_core::runtime::PolicySafetySnapshotRef {
+    shacs_core::runtime::PolicySafetySnapshot::create(
+        shacs_core::runtime::PolicySafetySnapshotInput {
+            snapshot_id: format!("mcp_stdio_startup_{server_name}"),
+            created_at_unix_ms: 0,
+            expires_at_unix_ms: None,
+            permission_mode: permission_mode.clone(),
+            capability_ceiling: shacs_core::runtime::CapabilityCeilingRef {
+                capabilities: vec![SafetyCapability::ProcExec],
+            },
+            containment,
+            source_refs: vec![shacs_core::runtime::PolicySafetySourceRef {
+                kind: shacs_core::runtime::PolicySafetySourceKind::RuntimePolicy,
+                ref_id: "mcp_stdio_startup".to_owned(),
+                digest: Some(digest.to_owned()),
+            }],
+            provenance_refs: vec![shacs_core::runtime::PolicySafetyProvenanceRef {
+                kind: shacs_core::runtime::PolicySafetyProvenanceKind::RuntimeEventRef,
+                ref_id: format!("mcp:{server_name}"),
+                digest: Some(digest.to_owned()),
+            }],
+            creation_reason:
+                shacs_core::runtime::PolicySafetySnapshotCreationReason::PermissionedAction,
+        },
+    )
+    .map(|snapshot| snapshot.reference())
+    .unwrap_or_else(|error| panic!("MCP policy snapshot construction failed: {error}"))
 }
 
 fn plugin_mcp_server_specs(
@@ -20039,6 +20403,10 @@ fn plugin_mcp_server_specs(
             let Some(entrypoint) = entrypoints.get(&name).and_then(Value::as_object) else {
                 continue;
             };
+            let command = entrypoint
+                .get("command")
+                .and_then(Value::as_str)
+                .and_then(|command| plugin_relative_command(&plugin.root, command));
             specs.push(McpServerSpec {
                 name: format!(
                     "plugin_{}_{}",
@@ -20050,10 +20418,7 @@ fn plugin_mcp_server_specs(
                     .or_else(|| entrypoint.get("transport"))
                     .and_then(Value::as_str)
                     .map(str::to_owned),
-                command: entrypoint
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .and_then(|command| plugin_relative_command(&plugin.root, command)),
+                command: command.clone(),
                 args: string_array_field(entrypoint, "args"),
                 env: string_map_field(entrypoint, "env"),
                 clear_env: true,
@@ -20071,6 +20436,9 @@ fn plugin_mcp_server_specs(
                     .unwrap_or(30),
                 enabled_tools: string_array_field(entrypoint, "enabledTools"),
                 parent_containment_snapshot: parent_containment_snapshot.clone(),
+                startup_gate: command.as_deref().map(|command| {
+                    mcp_startup_gate(bundle, &name, command, parent_containment_snapshot.clone())
+                }),
             });
         }
     }
@@ -20613,7 +20981,7 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
 }
 
 fn format_runtime_diagnostics(report: RuntimeDiagnosticsReport) -> String {
-    let mut output = match serde_json::to_string_pretty(&report.snapshot.redacted_value()) {
+    let mut output = match serde_json::to_string_pretty(&report.redacted_projection) {
         Ok(value) => value,
         Err(error) => format!(
             "{{\n  \"error\": \"diagnostics snapshot could not be formatted safely: {error}\"\n}}"
@@ -20948,52 +21316,60 @@ fn format_session_clear(report: SessionClearReport) -> String {
 }
 
 fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
-    let metadata = if report.metadata_keys.is_empty() {
+    let recovery = if report.aggregate.recovery_markers.is_empty() {
         "none".to_owned()
     } else {
-        report.metadata_keys.join(", ")
+        report.aggregate.recovery_markers.join(", ")
     };
-    let recovery = if report.recovery_markers.is_empty() {
+    let diagnostics_refs = if report.aggregate.diagnostics_refs.is_empty() {
         "none".to_owned()
     } else {
-        report.recovery_markers.join(", ")
-    };
-    let diagnostics_refs = if report.diagnostics_refs.is_empty() {
-        "none".to_owned()
-    } else {
-        report.diagnostics_refs.join(", ")
+        report.aggregate.diagnostics_refs.join(", ")
     };
     let mut lines = vec![
         "shacs-bot session diagnostics".to_owned(),
-        format!("Workspace: {}", display_path(&report.workspace)),
-        format!("Key: {}", report.key),
-        format!("Path: {}", display_path(&report.path)),
-        format!("Exists: {}", yes_no_label(report.exists)),
-        format!("Messages: {}", report.message_count),
-        format!("Last consolidated: {}", report.last_consolidated),
-        format!("Metadata keys: {metadata}"),
+        format!("Schema: {}", report.aggregate.schema_id),
+        format!("Session ref: {}", report.aggregate.session_ref),
+        format!("Exists: {}", yes_no_label(report.aggregate.exists)),
+        format!("Messages: {}", report.aggregate.message_count),
+        format!("Last consolidated: {}", report.aggregate.last_consolidated),
+        format!(
+            "Metadata key count: {}",
+            report.aggregate.metadata_key_count
+        ),
         format!("Recovery markers: {recovery}"),
         format!("Diagnostics refs: {diagnostics_refs}"),
         format!(
             "Checkpoint phase: {}",
-            report.checkpoint_phase.unwrap_or_else(|| "none".to_owned())
+            report
+                .aggregate
+                .checkpoint_phase
+                .unwrap_or_else(|| "none".to_owned())
         ),
-        format!("Legal history start: {}", report.legal_start),
+        format!(
+            "Diagnostics ref count: {}",
+            report.aggregate.diagnostics_ref_count
+        ),
+        format!("Legal history start: {}", report.aggregate.legal_start),
         format!(
             "Supervision: {}",
             format_runtime_supervisor_projection(&report.supervision)
         ),
     ];
-    if let Some(workflow) = report.runtime_workflow.as_ref() {
-        lines.push(format!(
-            "Workflow status: {}",
-            format_runtime_workflow_projection(workflow)
-        ));
+    if let Some(state) = report.aggregate.workflow_state.as_ref() {
+        lines.push(format!("Workflow state: {state}"));
     }
-    if let Some(execution) = report.runtime_execution.as_ref() {
+    if let Some(reason) = report.aggregate.workflow_blocked_reason.as_ref() {
+        lines.push(format!("Workflow blocked reason: {reason}"));
+    }
+    if let Some(execution) = report.aggregate.runtime_execution.as_ref() {
         lines.push(format!(
-            "Runtime execution: {}",
-            format_runtime_execution_projection(execution)
+            "Runtime execution: pending={} outcomes={} accepted={} stale={} safe_artifacts={}",
+            execution.pending_count,
+            execution.outcome_count,
+            execution.accepted_count,
+            execution.stale_count,
+            execution.safe_artifact_ref_count
         ));
     }
     lines.push(format_session_durable_children(&report.durable_children));
@@ -21286,7 +21662,7 @@ mod tests {
         PluginHookEvent, PluginManifestSource, PluginRuntimeHook, PluginRuntimePlugin,
         ProcExecSummary, RuntimeBoundaryOrigin, SafetyCapability, Session,
     };
-    use shacs_core::tools::{JsonMap, Tool, ToolResult};
+    use shacs_core::tools::{JsonMap, Tool, ToolCallExecutionContext, ToolResult};
     use shacs_providers::{
         GenerationSettings, ProviderClient, ProviderEvent, ProviderRequest, ToolCallRequest,
     };
@@ -25953,6 +26329,8 @@ mod tests {
             vec![("MCP_TOKEN".to_owned(), "secret".to_owned())]
         );
         assert_eq!(specs[0].timeout_seconds, 12);
+        assert_eq!(specs[0].enabled_tools, vec!["*".to_owned()]);
+        assert!(specs[0].startup_gate.is_some());
         assert_eq!(
             runtime_capabilities(&bundle)[0].status,
             RuntimeCapabilityStatus::Available
@@ -26023,6 +26401,7 @@ mod tests {
         assert!(specs[0].clear_env);
         assert_eq!(specs[0].timeout_seconds, 9);
         assert_eq!(specs[0].enabled_tools, vec!["search_docs".to_owned()]);
+        assert!(specs[0].startup_gate.is_some());
         Ok(())
     }
 
@@ -26229,6 +26608,36 @@ mod tests {
     }
 
     #[test]
+    fn read_only_skill_descriptor_maps_to_blocked_skill_trust_surface() {
+        let entry = SkillRegistryEntry {
+            descriptor: shacs_skills::SkillDescriptor {
+                name: "spec030-weather".to_owned(),
+                description: Some("read-only descriptor".to_owned()),
+                source_kind: shacs_skills::SkillSourceKind::WorkspaceLocal,
+                source_path: None,
+                body_hash: "sha256:body".to_owned(),
+                requirements: vec!["pip: requests".to_owned()],
+                install_metadata: Some("pip install requests".to_owned()),
+            },
+            status: SkillRegistryStatus::Active,
+            diagnostics: Vec::new(),
+            raw: Some("Install this package now".to_owned()),
+        };
+
+        let decision = skill_trust_permission_from_read_only_descriptor(
+            &entry,
+            SkillTrustActionKind::DependencyPreparation,
+        );
+
+        assert_eq!(
+            decision.kind,
+            shacs_core::runtime::SkillTrustPermissionDecisionKind::BlockedExternalSurface
+        );
+        assert_eq!(decision.dispatch_count, 0);
+        assert!(decision.blocked_external_surface.is_some());
+    }
+
+    #[test]
     fn production_tool_registry_wires_exec_env() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
@@ -26255,20 +26664,447 @@ mod tests {
         };
 
         let tooling = production_tool_registry(&bundle, true)?;
-        let result = tooling
+        let call = tooling
             .registry
-            .execute(
+            .prepare_call(
                 "exec",
                 json!({
                     "command": "printf '%s|%s' \"$SHACS_CLI_EXEC_CONFIG_ONLY\" \"$SHACS_CLI_EXEC_OVERRIDE\"",
                     "timeout": 5
                 }),
+            )?;
+        let result = call
+            .tool
+            .execute_with_context(
+                call.params,
+                &production_exec_test_context(&bundle.context.workspace)?,
             )
             .into_text();
         if !result.contains("configured|exec") || !result.contains("Exit code: 0") {
             return Err(format!("production registry exec env was not wired: {result}").into());
         }
         Ok(())
+    }
+
+    #[test]
+    fn public_adapter_loop_config_carries_canonical_scope_and_exec_ceiling(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let bundle = public_adapter_test_bundle(root.path(), true)?;
+        let adapter = AgentLoopChatCompletionAdapter::from_bundle(bundle, true)?;
+
+        let loop_config = adapter.loop_config();
+        let scope_ref = loop_config
+            .permission_mode_snapshot
+            .scope_ref
+            .as_deref()
+            .ok_or("missing permission mode scope ref")?;
+        assert!(scope_ref.starts_with("workspace:"), "{scope_ref}");
+        assert!(!scope_ref.starts_with('/'), "{scope_ref}");
+        assert!(!scope_ref.contains(&root.path().to_string_lossy().to_string()));
+        assert_ne!(
+            loop_config.permission_mode_snapshot.mode,
+            PermissionMode::BypassPermissions
+        );
+
+        let ceiling = loop_config
+            .permission_ceiling_snapshot
+            .as_ref()
+            .ok_or("missing permission ceiling snapshot")?;
+        assert_eq!(
+            ceiling.parent_mode,
+            loop_config.permission_mode_snapshot.mode
+        );
+        assert_eq!(ceiling.origin, RuntimeBoundaryOrigin::UserTurn);
+        assert_eq!(ceiling.approved_scope_refs, vec![scope_ref.to_owned()]);
+        assert!(ceiling
+            .capability_ceiling
+            .contains(&SafetyCapability::ProcExec));
+        Ok(())
+    }
+
+    #[test]
+    fn public_adapter_exec_ceiling_tracks_registered_exec_tool() -> Result<(), Box<dyn Error>> {
+        let side_effect_root = tempfile::tempdir()?;
+        let side_effect_bundle = public_adapter_test_bundle(side_effect_root.path(), true)?;
+        let side_effect_disabled =
+            AgentLoopChatCompletionAdapter::from_bundle(side_effect_bundle, false)?;
+        let side_effect_ceiling = side_effect_disabled
+            .loop_config()
+            .permission_ceiling_snapshot
+            .ok_or("missing side-effect-disabled ceiling")?;
+        assert!(!side_effect_ceiling
+            .capability_ceiling
+            .contains(&SafetyCapability::ProcExec));
+
+        let exec_root = tempfile::tempdir()?;
+        let exec_disabled_bundle = public_adapter_test_bundle(exec_root.path(), false)?;
+        let exec_disabled =
+            AgentLoopChatCompletionAdapter::from_bundle(exec_disabled_bundle, true)?;
+        let exec_ceiling = exec_disabled
+            .loop_config()
+            .permission_ceiling_snapshot
+            .ok_or("missing exec-disabled ceiling")?;
+        assert!(!exec_ceiling
+            .capability_ceiling
+            .contains(&SafetyCapability::ProcExec));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_adapter_approval_reuses_stored_scope_and_ceiling_for_real_exec(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let mut bundle = public_adapter_test_bundle(root.path(), true)?;
+        let workspace = bundle.context.workspace.clone();
+        let scope_ref = opaque_workspace_scope_ref_for_test(&workspace)?;
+        bundle.config.permissions.mode = PermissionMode::Default;
+        let path_context = PathContext {
+            workspace: Some(workspace.clone()),
+            allowed_dir: Some(workspace.clone()),
+            media_dir: Some(bundle.context.media_dir(Some("api"))),
+            extra_allowed_dirs: Vec::new(),
+        };
+        let mut exec_config = ExecConfig::new(path_context);
+        exec_config.restrict_to_workspace = true;
+        let mut tools = ToolRegistry::new();
+        tools.register(ExecTool::new(exec_config));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openrouter/openai/gpt-4o-mini".to_owned(),
+            provider_id: "openrouter".to_owned(),
+            defaults: AgentDefaults {
+                model: "openrouter/openai/gpt-4o-mini".to_owned(),
+                provider: "openrouter".to_owned(),
+                max_tool_iterations: 2,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "openai/gpt-4o-mini".to_owned(),
+            native_image_input_supported: true,
+            client: Arc::new(SequentialProviderClient {
+                captured: captured.clone(),
+                responses: Mutex::new(VecDeque::from([
+                    LlmResponse {
+                        tool_calls: vec![ToolCallRequest::new(
+                            "call-pwd",
+                            "exec",
+                            json!({"command": "pwd", "timeout": 5})
+                                .as_object()
+                                .cloned()
+                                .ok_or("exec arguments must be object")?,
+                        )],
+                        finish_reason: "tool_calls".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                    LlmResponse {
+                        content: Some("approved exec complete".to_owned()),
+                        finish_reason: "stop".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                    LlmResponse {
+                        content: Some("approved exec complete".to_owned()),
+                        finish_reason: "stop".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                ])),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace: workspace.clone(),
+            config_path: bundle.context.config_path.clone(),
+            media_dir: bundle.context.media_dir(Some("api")),
+            tools,
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: true,
+            send_progress: false,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            tool_search: ToolSearchConfig::default(),
+            containment_snapshot: Some(ContainmentSnapshotRef {
+                contained: Some(true),
+                backend: Some("official-container+test".to_owned()),
+                digest: Some("test-containment".to_owned()),
+                summary: Some("test non-privileged containment".to_owned()),
+            }),
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: PermissionMode::Default,
+                source: Some("test".to_owned()),
+                scope_ref: Some(scope_ref.clone()),
+            },
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
+        };
+
+        let mut first_config = adapter.loop_config();
+        first_config.permission_interactive = true;
+        first_config.permission_rule_input.containment = DockerContainmentSnapshot {
+            contained: Some(true),
+            runtime: ContainerRuntimeKind::Docker,
+            root_user: Some(false),
+            privileged: Some(false),
+            host_mounts_summary: Vec::new(),
+            network_mode: ContainerNetworkMode::Bridge,
+            digest: Some("test-containment".to_owned()),
+            summary: Some("test non-privileged containment".to_owned()),
+        };
+        let first = InboundMessage::new("cli", "user", "direct", "run pwd")
+            .with_session_key_override("cli:exec-approval");
+        let (first_turn, first_outbound) =
+            adapter.process_inbound_with_outbound(first, first_config, None, &[])?;
+        let first_output = render_direct_turn_content(
+            first_turn.final_content.unwrap_or_default(),
+            first_outbound,
+        );
+        assert!(
+            first_output.contains("Permission approval required"),
+            "{first_output}"
+        );
+
+        let session = SessionManager::new(&workspace)?
+            .load_existing("cli:exec-approval")
+            .ok_or("missing exec approval session")?;
+        let pending = session
+            .metadata
+            .get("pending_permission_approval")
+            .ok_or("missing pending permission approval metadata")?;
+        assert_eq!(
+            pending["tool_context"]["permission_mode_snapshot"]["scope_ref"],
+            json!(scope_ref)
+        );
+        assert_eq!(
+            pending["tool_context"]["permission_ceiling_snapshot"]["approved_scope_refs"],
+            json!([scope_ref])
+        );
+        assert_eq!(
+            pending["tool_context"]["permission_ceiling_snapshot"]["capability_ceiling"],
+            json!(["proc_exec"])
+        );
+        assert!(pending["approval_request"]["policy_safety_snapshot_ref"].is_object());
+
+        let mut approval_config = adapter.loop_config();
+        approval_config.permission_interactive = true;
+        approval_config.permission_rule_input.containment = DockerContainmentSnapshot {
+            contained: Some(true),
+            runtime: ContainerRuntimeKind::Docker,
+            root_user: Some(false),
+            privileged: Some(false),
+            host_mounts_summary: Vec::new(),
+            network_mode: ContainerNetworkMode::Bridge,
+            digest: Some("test-containment".to_owned()),
+            summary: Some("test non-privileged containment".to_owned()),
+        };
+        let approval = InboundMessage::new("cli", "user", "direct", "approve")
+            .with_session_key_override("cli:exec-approval");
+        let (approval_turn, approval_outbound) =
+            adapter.process_inbound_with_outbound(approval, approval_config, None, &[])?;
+        let approval_output = render_direct_turn_content(
+            approval_turn.final_content.unwrap_or_default(),
+            approval_outbound,
+        );
+        assert!(
+            approval_output.contains("approved exec complete"),
+            "{approval_output}"
+        );
+        let approved_session = SessionManager::new(&workspace)?
+            .load_existing("cli:exec-approval")
+            .ok_or("missing approved exec session")?;
+        let tool_transcript = approved_session
+            .messages
+            .iter()
+            .map(session_message_content_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            tool_transcript.contains(&workspace.to_string_lossy().to_string()),
+            "{tool_transcript}"
+        );
+        assert!(
+            tool_transcript.contains("Exit code: 0"),
+            "{tool_transcript}"
+        );
+        Ok(())
+    }
+
+    fn public_adapter_test_bundle(
+        root: &Path,
+        exec_enabled: bool,
+    ) -> Result<ConfigBundle, Box<dyn Error>> {
+        let workspace = root.join("workspace");
+        let data_dir = root.join("data");
+        let config_path = root.join("config.json");
+        fs::create_dir_all(&workspace)?;
+        fs::create_dir_all(&data_dir)?;
+        let mut config = Config::default();
+        config.agents.defaults.provider = "openrouter".to_owned();
+        config.agents.defaults.model = "openrouter/openai/gpt-4o-mini".to_owned();
+        config.permissions.mode = PermissionMode::Auto;
+        config.tools.exec.enable = exec_enabled;
+        config.providers.insert(
+            "openrouter".to_owned(),
+            ProviderConfig {
+                api_key: Some("sk-test".to_owned()),
+                api_base: Some("https://openrouter.ai/api/v1".to_owned()),
+                ..ProviderConfig::default()
+            },
+        );
+        save_config_to_path(&config, &config_path)?;
+        Ok(ConfigBundle {
+            config,
+            context: shacs_config::ConfigContext {
+                config_path,
+                data_dir,
+                workspace,
+            },
+            migrations: Vec::new(),
+        })
+    }
+
+    fn opaque_workspace_scope_ref_for_test(workspace: &Path) -> Result<String, Box<dyn Error>> {
+        let canonical = fs::canonicalize(workspace)?;
+        let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+        Ok(format!("workspace:{digest:x}"))
+    }
+
+    fn production_exec_test_context(
+        workspace: &Path,
+    ) -> Result<ToolCallExecutionContext, Box<dyn Error>> {
+        let identity = ProcessIdentity::new("exec-tool-test", "exec-tool-test", "exec-tool-test");
+        let permission_mode = PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("test".to_owned()),
+            scope_ref: Some("workspace".to_owned()),
+        };
+        let containment = DockerContainmentSnapshot {
+            contained: Some(true),
+            runtime: ContainerRuntimeKind::Docker,
+            root_user: Some(false),
+            privileged: Some(false),
+            host_mounts_summary: vec!["workspace".to_owned()],
+            network_mode: ContainerNetworkMode::Bridge,
+            digest: Some("exec-test-containment".to_owned()),
+            summary: Some("exec test containment".to_owned()),
+        };
+        let policy_ref = shacs_core::runtime::PolicySafetySnapshot::create(
+            shacs_core::runtime::PolicySafetySnapshotInput {
+                snapshot_id: "exec_tool_test".to_owned(),
+                created_at_unix_ms: 0,
+                expires_at_unix_ms: None,
+                permission_mode: permission_mode.clone(),
+                capability_ceiling: shacs_core::runtime::CapabilityCeilingRef {
+                    capabilities: vec![SafetyCapability::ProcExec],
+                },
+                containment: Some(ContainmentSnapshotRef {
+                    contained: Some(true),
+                    backend: Some("docker".to_owned()),
+                    digest: Some("exec-test-containment".to_owned()),
+                    summary: Some("exec test containment".to_owned()),
+                }),
+                source_refs: vec![shacs_core::runtime::PolicySafetySourceRef {
+                    kind: shacs_core::runtime::PolicySafetySourceKind::RuntimePolicy,
+                    ref_id: "exec_tool_test".to_owned(),
+                    digest: Some("exec-tool-test".to_owned()),
+                }],
+                provenance_refs: vec![shacs_core::runtime::PolicySafetyProvenanceRef {
+                    kind: shacs_core::runtime::PolicySafetyProvenanceKind::RuntimeEventRef,
+                    ref_id: "exec-tool-test".to_owned(),
+                    digest: Some("exec-tool-test".to_owned()),
+                }],
+                creation_reason:
+                    shacs_core::runtime::PolicySafetySnapshotCreationReason::PermissionedAction,
+            },
+        )?
+        .reference();
+        let action = PermissionedAction {
+            action_id: "exec-tool-test".to_owned(),
+            provider_tool_call_id: Some("exec-tool-test".to_owned()),
+            session_id: identity.session_id.clone(),
+            turn_id: identity.turn_id.clone(),
+            tool_name: "exec".to_owned(),
+            capabilities: vec![SafetyCapability::ProcExec],
+            target_refs: Vec::new(),
+            action_digest: "exec-tool-test-action".to_owned(),
+            argument_digest: "exec-tool-test-arguments".to_owned(),
+            snapshot_digest: "exec-tool-test-snapshot".to_owned(),
+            policy_safety_snapshot_ref: Some(policy_ref),
+            origin: PermissionedActionOrigin::UserTurn,
+            permission_mode_snapshot: permission_mode,
+            containment_snapshot: Some(ContainmentSnapshotRef {
+                contained: Some(true),
+                backend: Some("docker".to_owned()),
+                digest: Some("exec-test-containment".to_owned()),
+                summary: Some("exec test containment".to_owned()),
+            }),
+            intent_snapshot: None,
+            redacted_arguments: json!({"workspace": workspace.display().to_string()}),
+            secret_ref_evidence: Vec::new(),
+            normalization_state: ActionNormalizationState::Ready,
+            normalization_errors: Vec::new(),
+        };
+        let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
+            identity,
+            adapter: ProcessAdapterKind::ExecTool,
+            action,
+            required_secret_ref_count: 0,
+            redacted_command: ProcessRedactedCommand {
+                command_family: "sh".to_owned(),
+                redacted_summary: "exec test command".to_owned(),
+                redacted_targets: Vec::new(),
+            },
+        })?;
+        let permission_rules = PermissionRuleInput {
+            containment,
+            protected_targets: Vec::new(),
+            proc_exec_summary: Some(ProcExecSummary {
+                command_family: "sh".to_owned(),
+                target_refs: Vec::new(),
+                destructive: false,
+                network: false,
+                secret_exposure: false,
+                summary_available: true,
+            }),
+        };
+        let inherited_context = InheritedPermissionContext {
+            ceiling: PermissionCeilingSnapshot {
+                parent_mode: envelope.action.permission_mode_snapshot.mode,
+                capability_ceiling: vec![SafetyCapability::ProcExec],
+                approved_scope_refs: vec![envelope
+                    .action
+                    .permission_mode_snapshot
+                    .scope_ref
+                    .clone()
+                    .unwrap_or_else(|| "workspace".to_owned())],
+                origin: RuntimeBoundaryOrigin::UserTurn,
+            },
+            requested_mode: envelope.action.permission_mode_snapshot.mode,
+            requested_capabilities: vec![SafetyCapability::ProcExec],
+            per_action_evaluation_required: true,
+        };
+        let containment_proof = containment_permission_proof_for_process_gate(
+            &envelope,
+            &permission_rules,
+            Some(&inherited_context),
+            0,
+        )?;
+        Ok(ToolCallExecutionContext::new(Some(ProcessGateInput {
+            envelope,
+            permission_rules,
+            inherited_context: Some(inherited_context),
+            evaluator: None,
+            approval: None,
+            containment_proof: ProcessContainmentProofCandidate::Proof(Box::new(containment_proof)),
+            interactive: false,
+            terminal_precondition: ProcessGateTerminalPrecondition::Ready,
+            now_unix_ms: 0,
+        })))
     }
 
     #[cfg(unix)]
@@ -26364,6 +27200,7 @@ mod tests {
             "openai".to_owned(),
             ProviderConfig {
                 api_key: Some("sk-test".to_owned()),
+                api_key_ref: None,
                 ..ProviderConfig::default()
             },
         );
@@ -26996,6 +27833,7 @@ mod tests {
             "openrouter".to_owned(),
             shacs_config::ProviderConfig {
                 api_key: Some("${OPENROUTER_API_KEY}".to_owned()),
+                api_key_ref: None,
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
@@ -27203,6 +28041,7 @@ mod tests {
             "openrouter".to_owned(),
             shacs_config::ProviderConfig {
                 api_key: Some("sk-test".to_owned()),
+                api_key_ref: None,
                 api_base: Some("https://example.invalid/v1".to_owned()),
                 extra_headers: None,
                 extra_body: None,
@@ -27267,6 +28106,7 @@ mod tests {
             "openrouter".to_owned(),
             ProviderConfig {
                 api_key: Some("sk-config".to_owned()),
+                api_key_ref: None,
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
@@ -28555,6 +29395,7 @@ mod tests {
             "openai_codex".to_owned(),
             ProviderConfig {
                 api_key: Some("sk-raw-secret".to_owned()),
+                api_key_ref: None,
                 api_base: Some("https://chatgpt.com/backend-api".to_owned()),
                 extra_headers: None,
                 extra_body: None,
@@ -28605,11 +29446,21 @@ mod tests {
         assert!(!output.contains("not real png"));
         assert!(output.contains("runtime diagnostics provider snapshot"));
         assert!(output.contains("runtime capability snapshot"));
+        assert!(output.contains("runtime diagnostics inspected local files only"));
+        assert!(output.contains("spec030_core"));
+        assert!(output.contains("spec030_core_diagnostics.v1"));
+        assert!(output.contains("BLOCKED_EXTERNAL_SURFACE"));
+        assert!(output.contains("blocked_external_count"));
+        assert!(output.contains("workspace directory is missing"));
         assert!(output.contains("containment"));
         assert!(output.contains("summary"));
         assert!(output.contains("[REDACTED]") || !output.contains("api_key"));
         assert!(!output.contains("sk-raw-secret"));
         assert!(!output.contains("raw-token"));
+        let bundle_bytes = fs::read(&bundle_path)?;
+        let bundle_text = String::from_utf8_lossy(&bundle_bytes);
+        assert!(!bundle_text.contains("sk-raw-secret"));
+        assert!(!bundle_text.contains("not real png"));
         Ok(())
     }
 
@@ -28861,6 +29712,7 @@ mod tests {
             "openai".to_owned(),
             ProviderConfig {
                 api_key: Some("sk-bundle-secret".to_owned()),
+                api_key_ref: None,
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
@@ -28895,6 +29747,7 @@ mod tests {
             "openai".to_owned(),
             ProviderConfig {
                 api_key: Some("sk-adapter-secret".to_owned()),
+                api_key_ref: None,
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
@@ -29564,6 +30417,7 @@ mod tests {
             "openai".to_owned(),
             ProviderConfig {
                 api_key: Some("sk-test".to_owned()),
+                api_key_ref: None,
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
@@ -31161,12 +32015,10 @@ mod tests {
             workspace_override: None,
             session: "cli:managed".to_owned(),
         })?;
-        assert_eq!(
-            diagnostics.diagnostics_refs,
-            vec!["workflow://diag-managed"]
-        );
+        assert_eq!(diagnostics.aggregate.diagnostics_ref_count, 1);
         assert_eq!(
             diagnostics
+                .aggregate
                 .runtime_execution
                 .as_ref()
                 .map(|execution| execution.outcome_count),
@@ -31174,34 +32026,37 @@ mod tests {
         );
         let diagnostics_json = serde_json::to_value(&diagnostics)?;
         assert_eq!(
-            diagnostics_json["diagnostics_refs"],
+            diagnostics_json["aggregate"]["schema_id"],
+            json!("spec030_session_diagnostics.v1")
+        );
+        assert!(diagnostics_json["aggregate"]["session_ref"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("session:sha256:")));
+        assert!(diagnostics_json["aggregate"]["diagnostics_refs"][0]
+            .as_str()
+            .is_some_and(|value| value.starts_with("diagnostics:sha256:")));
+        assert_ne!(
+            diagnostics_json["aggregate"]["diagnostics_refs"],
             json!(["workflow://diag-managed"])
         );
         assert_eq!(
-            diagnostics_json["runtime_execution"]["pending_count"],
+            diagnostics_json["aggregate"]["runtime_execution"]["pending_count"],
             json!(2)
         );
         let diagnostics_output = format_session_diagnostics(diagnostics);
         assert!(diagnostics_output.contains(
             "Recovery markers: pending_user_turn, runtime_checkpoint, runtime_diagnostics"
         ));
-        assert!(diagnostics_output.contains("Diagnostics refs: workflow://diag-managed"));
+        assert!(diagnostics_output.contains("Schema: spec030_session_diagnostics.v1"));
+        assert!(diagnostics_output.contains("Session ref: session:sha256:"));
+        assert!(diagnostics_output.contains("Diagnostics refs: diagnostics:sha256:"));
         assert!(diagnostics_output.contains("Checkpoint phase: awaiting_tools"));
-        assert!(diagnostics_output.contains("Workflow status: workflow_id=wf-managed"));
-        assert!(diagnostics_output.contains("Runtime execution: pending=2 outcomes=3"));
-        assert!(
-            diagnostics_output.contains("pending_by_domain=provider:0 tool:1 subagent:1 unknown:0")
-        );
-        assert!(diagnostics_output
-            .contains("outcomes_by_domain=provider:1 tool:1 subagent:1 unknown:0"));
-        assert!(diagnostics_output
-            .contains("decisions=accepted:1 duplicate:1 late:0 stale:1 unknown:0"));
-        assert!(diagnostics_output.contains("artifacts=1/2"));
-        assert!(diagnostics_output.contains("state=Running"));
-        assert!(diagnostics_output.contains("active_children=2"));
-        assert!(diagnostics_output.contains("budget=known_tokens:5 estimated_tokens:6 child_runs:1 verifier_runs:0 heavy_commands:0"));
-        assert!(diagnostics_output.contains("worktree_ref_count=1, evidence_ref_count=1"));
-        assert!(diagnostics_output.contains("next_action=continue"));
+        assert!(diagnostics_output.contains("Workflow state: Running"));
+        assert!(diagnostics_output.contains(
+            "Runtime execution: pending=2 outcomes=3 accepted=1 stale=1 safe_artifacts=1"
+        ));
+        assert!(!diagnostics_output.contains("cli:managed"));
+        assert!(!diagnostics_output.contains("workflow://diag-managed"));
         assert!(!diagnostics_output.contains("do-not-print"));
         assert!(!diagnostics_output.contains("worktree://hidden"));
         assert!(!diagnostics_output.contains("secret-corr"));
@@ -32636,8 +33491,34 @@ mod tests {
 
         let inbound = InboundMessage::new("cli", "user", "direct", "hello")
             .with_session_key_override("plugin-hook");
+        let mut loop_config = adapter.loop_config();
+        loop_config.permission_mode_snapshot = PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("test".to_owned()),
+            scope_ref: Some("plugin-hook".to_owned()),
+        };
+        loop_config.permission_rule_input = PermissionRuleInput {
+            containment: DockerContainmentSnapshot {
+                contained: Some(true),
+                runtime: ContainerRuntimeKind::Docker,
+                root_user: Some(false),
+                privileged: Some(false),
+                host_mounts_summary: Vec::new(),
+                network_mode: ContainerNetworkMode::Bridge,
+                digest: Some("plugin-hook-test".to_owned()),
+                summary: Some("test supplied non-privileged containment".to_owned()),
+            },
+            protected_targets: Vec::new(),
+            proc_exec_summary: None,
+        };
+        loop_config.permission_ceiling_snapshot = Some(PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::BypassPermissions,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec!["plugin-process".to_owned()],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        });
         let (turn, outbound) =
-            adapter.process_inbound_with_outbound(inbound, adapter.loop_config(), None, &[])?;
+            adapter.process_inbound_with_outbound(inbound, loop_config, None, &[])?;
         let output =
             render_direct_turn_content(turn.final_content.unwrap_or_default(), outbound.clone());
 

@@ -1,5 +1,6 @@
 pub mod attachments;
 pub mod diagnostics;
+mod diagnostics_sanitizer;
 pub mod document;
 pub mod gitstore;
 pub mod media_decode;

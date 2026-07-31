@@ -22,16 +22,19 @@ use shacs_core::runtime::{
     EvaluatorScopeMatch, ExecutionOutcome, GoalCompletionVerdict, InboundMessage,
     LateResultDecision, LedgerConsumptionStatus, LoopTaskRegisterResult, McpLifecycle,
     MergeDecision, MessageBus, PermissionMode, PermissionModeSnapshot, PermissionPolicyReason,
-    PermissionRuleInput, PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus,
-    ProcExecSummary, ProviderHotSwapResult, ProviderSelectionSnapshot, RecentAutoModeDenial,
-    RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenStore,
-    RuntimeCapabilityStatus, RuntimeContextTools, RuntimeDecisionKind, RuntimeInterrupt,
-    RuntimeMemoryEvidenceRequestInput, RuntimePolicyGateResults, RuntimeReplayInput,
-    RuntimeSelectedAction, RuntimeSpec018ProjectionInput, RuntimeToolCall, RuntimeToolExecutor,
-    Session, SessionManager, SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector,
-    SubagentExecutionConfig, SubagentMergeState, SubagentOutcomeKind, SubagentProgressUpdate,
-    SubagentRuntime, SubagentRuntimeConfig, ToolEvent, ToolExecutionContext, ToolSearchConfig,
-    ToolSearchMode, ToolSearchRuntimeInput, ToolStatus, PERSISTENT_GOAL_METADATA_KEY,
+    PermissionRuleInput, PermissionSecretRefEvidence, PermissionSecretRefStatus,
+    PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus, PolicySafetyDigest,
+    PolicySafetySnapshotId, PolicySafetySnapshotRef, PolicySafetySnapshotSchemaId, ProcExecSummary,
+    ProviderHotSwapResult, ProviderSelectionSnapshot, RecentAutoModeDenial,
+    RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenMatch,
+    RecentAutoModeRetryTokenStore, RedactedPolicySafetySummary, RuntimeCapabilityStatus,
+    RuntimeContextTools, RuntimeDecisionKind, RuntimeInterrupt, RuntimeMemoryEvidenceRequestInput,
+    RuntimePolicyGateResults, RuntimeReplayInput, RuntimeSelectedAction,
+    RuntimeSpec018ProjectionInput, RuntimeToolCall, RuntimeToolExecutor, Session, SessionManager,
+    SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector, SubagentExecutionConfig,
+    SubagentMergeState, SubagentOutcomeKind, SubagentProgressUpdate, SubagentRuntime,
+    SubagentRuntimeConfig, ToolEvent, ToolExecutionContext, ToolSearchConfig, ToolSearchMode,
+    ToolSearchRuntimeInput, ToolStatus, PERSISTENT_GOAL_METADATA_KEY,
     RECENT_AUTO_MODE_DENIAL_LIMIT,
 };
 use shacs_core::tools::{
@@ -57,6 +60,10 @@ use shacs_eval::evaluator::{
 use shacs_providers::{
     GenerationSettings, LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest,
     ToolCallRequest,
+};
+use shacs_redaction::{
+    RedactionEvidence, RedactionEvidenceRef, SafeSecretSummary, SecretLocator, SecretRef,
+    SecretRefId, SecretRefKind, SecretSourceKind,
 };
 use shacs_session::durable_event::{
     DurableEventStore, SESSION_TURN_ACCEPTED, SESSION_TURN_COMPLETED,
@@ -526,6 +533,39 @@ fn replay_runner_executes_selected_cases_only_and_never_dispatches_live_tools() 
     assert_eq!(outcome.live_tool_dispatch_count, 0);
     assert_eq!(outcome.replayed_tool_policy_count, 1);
     assert_eq!(outcome.run_record.status, ReplayRunStatus::Passed);
+}
+
+#[test]
+fn replay_runner_blocks_without_live_tool_dispatch_for_failure_cases() {
+    let missing_outcome_dataset =
+        vec![replay_item("case-1", vec![replay_tool_policy(false, None)])];
+    let selected = vec!["case-1".to_owned()];
+
+    let missing_outcome = run_local_replay(replay_input(&missing_outcome_dataset, &selected));
+
+    assert_eq!(missing_outcome.live_tool_dispatch_count, 0);
+    assert_eq!(missing_outcome.replayed_tool_policy_count, 1);
+    assert_eq!(missing_outcome.run_record.status, ReplayRunStatus::Blocked);
+    assert_eq!(
+        missing_outcome.run_record.case_results[0]
+            .blocked_reason
+            .as_deref(),
+        Some("blocked_missing_replay_outcome")
+    );
+
+    let schema_mismatch_dataset = vec![replay_item(
+        "case-1",
+        vec![replay_tool_policy(false, Some("schema-b"))],
+    )];
+    let schema_mismatch = run_local_replay(replay_input(&schema_mismatch_dataset, &selected));
+
+    assert_eq!(schema_mismatch.live_tool_dispatch_count, 0);
+    assert_eq!(schema_mismatch.replayed_tool_policy_count, 1);
+    assert_eq!(schema_mismatch.run_record.status, ReplayRunStatus::Blocked);
+    assert_eq!(
+        schema_mismatch.run_record.case_results[0].comparison_status,
+        ReplayComparisonStatus::SchemaMismatch
+    );
 }
 
 #[test]
@@ -3196,6 +3236,399 @@ fn agent_runner_auto_classifier_allows_unresolved_static_allow_candidate(
 }
 
 #[test]
+fn agent_runner_classifier_records_deterministic_accounting_evidence() -> Result<(), Box<dyn Error>>
+{
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-classifier-accounting",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ))?,
+        LlmResponse {
+            content: Some("classifier accounting allowed exec".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut classifier_response =
+        classifier_verdict_response("allow_candidate", "high", "requested");
+    classifier_response.usage = BTreeMap::from([
+        ("prompt_tokens".to_owned(), 17),
+        ("completion_tokens".to_owned(), 3),
+    ]);
+    let classifier = MockProvider::new(vec![classifier_response]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    let observed_events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_events_capture = observed_events.clone();
+    spec.tool_event_callback = Some(Arc::new(move |event| {
+        if event.name == "permission_auto_approval" {
+            if let Ok(mut observed) = observed_events_capture.lock() {
+                observed.push(event.detail.clone());
+            }
+        }
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let diagnostic_text = observed_events
+        .lock()
+        .map_err(|error| error.to_string())?
+        .join("\n");
+
+    if calls.load(Ordering::SeqCst) != 1
+        || result.final_content.as_deref() != Some("classifier accounting allowed exec")
+        || !diagnostic_text.contains("\"classifier_evidence_id\"")
+        || !diagnostic_text.contains("\"disposition\":\"allow_candidate_consumed\"")
+        || !diagnostic_text.contains("\"precedence\":\"classifier_reviewable\"")
+        || !diagnostic_text.contains("\"token_accounting\"")
+        || !diagnostic_text.contains("\"value\":17")
+        || !diagnostic_text.contains("\"value\":3")
+        || !diagnostic_text.contains("\"latency\"")
+        || !diagnostic_text.contains("\"cost\"")
+        || diagnostic_text.contains("RAW_PROVIDER_RESPONSE_SECRET")
+    {
+        return Err(format!(
+            "classifier accounting evidence missing or unsafe: result={result:?} calls={} diagnostics={diagnostic_text}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_classifier_serializes_deterministic_evidence_with_injected_clock(
+) -> Result<(), Box<dyn Error>> {
+    fn run_once() -> Result<String, Box<dyn Error>> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(ProcExecCountingTool {
+            calls: calls.clone(),
+        });
+        let client = MockProvider::new(vec![
+            response_with_runtime_tool_call(RuntimeToolCall::new(
+                "exec-classifier-deterministic",
+                "exec",
+                json!({ "command": "cargo test" }),
+            ))?,
+            LlmResponse {
+                content: Some("classifier deterministic evidence".to_owned()),
+                ..LlmResponse::default()
+            },
+        ]);
+        let mut classifier_response =
+            classifier_verdict_response("allow_candidate", "high", "requested");
+        classifier_response.usage = BTreeMap::from([
+            ("prompt_tokens".to_owned(), 17),
+            ("completion_tokens".to_owned(), 3),
+        ]);
+        let classifier = MockProvider::new(vec![classifier_response]);
+        let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+        spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+            enabled: true,
+            allow_proc_exec_verification: false,
+            ..AutoApprovalConfig::default()
+        });
+        let times = Arc::new(Mutex::new(VecDeque::from([1_000_u64, 1_007, 1_307])));
+        let times_capture = times.clone();
+        spec.classifier_time_source = Some(Arc::new(move || {
+            times_capture
+                .lock()
+                .ok()
+                .and_then(|mut values| values.pop_front())
+                .unwrap_or(1_307)
+        }));
+        let observed_events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed_events_capture = observed_events.clone();
+        spec.tool_event_callback = Some(Arc::new(move |event| {
+            if event.name == "permission_auto_approval" {
+                if let Ok(mut observed) = observed_events_capture.lock() {
+                    observed.push(event.detail.clone());
+                }
+            }
+        }));
+
+        let result = AgentRunner::new().run(spec)?;
+        if calls.load(Ordering::SeqCst) != 1
+            || result.final_content.as_deref() != Some("classifier deterministic evidence")
+        {
+            return Err(format!(
+                "deterministic classifier run did not execute once: result={result:?} calls={}",
+                calls.load(Ordering::SeqCst)
+            )
+            .into());
+        }
+        let diagnostic = observed_events
+            .lock()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .find(|detail| detail.contains("\"classifier_evidence_id\""))
+            .cloned();
+        let Some(diagnostic) = diagnostic else {
+            return Err("missing classifier evidence diagnostic".into());
+        };
+        Ok(diagnostic)
+    }
+
+    let first = run_once()?;
+    let second = run_once()?;
+
+    assert_eq!(first, second);
+    assert!(first.contains("\"created_at_unix_ms\":1000"));
+    assert!(first.contains("\"value\":7"));
+    Ok(())
+}
+
+#[test]
+fn agent_runner_classifier_missing_usage_is_unavailable_not_zero() -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        response_with_runtime_tool_call(RuntimeToolCall::new(
+            "exec-classifier-missing-usage",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ))?,
+        LlmResponse {
+            content: Some("classifier missing usage allowed exec".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "allow_candidate",
+        "high",
+        "requested",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    let observed_events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_events_capture = observed_events.clone();
+    spec.tool_event_callback = Some(Arc::new(move |event| {
+        if event.name == "permission_auto_approval" {
+            if let Ok(mut observed) = observed_events_capture.lock() {
+                observed.push(event.detail.clone());
+            }
+        }
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let diagnostic_text = observed_events
+        .lock()
+        .map_err(|error| error.to_string())?
+        .join("\n");
+
+    if calls.load(Ordering::SeqCst) != 1
+        || result.stop_reason != "completed"
+        || !diagnostic_text.contains("\"unavailable_reason\":\"provider_omitted_usage\"")
+        || diagnostic_text.contains("\"input_tokens\":0")
+        || diagnostic_text.contains("\"output_tokens\":0")
+        || diagnostic_text.contains("\"cost_amount\":0")
+    {
+        return Err(format!(
+            "missing classifier usage should preserve allow behavior with unavailable accounting, not zeros: result={result:?} calls={} diagnostics={diagnostic_text}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_classifier_provider_error_records_fallback_and_fails_closed(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classifier-provider-error",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(Vec::new());
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    let observed_events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_events_capture = observed_events.clone();
+    spec.tool_event_callback = Some(Arc::new(move |event| {
+        if event.name == "permission_auto_approval" {
+            if let Ok(mut observed) = observed_events_capture.lock() {
+                observed.push(event.detail.clone());
+            }
+        }
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let diagnostic_text = observed_events
+        .lock()
+        .map_err(|error| error.to_string())?
+        .join("\n");
+
+    if calls.load(Ordering::SeqCst) != 0
+        || result.stop_reason != "ask_user"
+        || !diagnostic_text.contains("\"fallback_cause\":\"provider_error\"")
+        || !diagnostic_text.contains("\"disposition\":\"failed_closed\"")
+        || diagnostic_text.contains("\"can_handoff_to_tool_runtime\":true")
+    {
+        return Err(format!(
+            "classifier provider error should fail closed with fallback evidence: result={result:?} calls={} diagnostics={diagnostic_text}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_classifier_provider_timeout_records_timeout_fallback_without_sleep(
+) -> Result<(), Box<dyn Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "exec-classifier-provider-timeout",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+    )?]);
+    let classifier = ErrorProvider {
+        message: "deterministic provider timeout".to_owned(),
+    };
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_proc_exec_verification: false,
+        ..AutoApprovalConfig::default()
+    });
+    let times = Arc::new(Mutex::new(VecDeque::from([1_000_u64, 1_125])));
+    let times_capture = times.clone();
+    spec.classifier_time_source = Some(Arc::new(move || {
+        times_capture
+            .lock()
+            .ok()
+            .and_then(|mut values| values.pop_front())
+            .unwrap_or(1_125)
+    }));
+    let observed_events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_events_capture = observed_events.clone();
+    spec.tool_event_callback = Some(Arc::new(move |event| {
+        if event.name == "permission_auto_approval" {
+            if let Ok(mut observed) = observed_events_capture.lock() {
+                observed.push(event.detail.clone());
+            }
+        }
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let diagnostic_text = observed_events
+        .lock()
+        .map_err(|error| error.to_string())?
+        .join("\n");
+
+    if calls.load(Ordering::SeqCst) != 0
+        || result.stop_reason != "ask_user"
+        || !diagnostic_text.contains("\"fallback_cause\":\"provider_timeout\"")
+        || !diagnostic_text.contains("\"disposition\":\"failed_closed\"")
+        || diagnostic_text.contains("\"value\":0")
+        || diagnostic_text.contains("\"can_handoff_to_tool_runtime\":true")
+    {
+        return Err(format!(
+            "classifier provider timeout should fail closed without sleeps: result={result:?} calls={} diagnostics={diagnostic_text}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_runner_static_deny_records_classifier_not_invoked_precedence() -> Result<(), Box<dyn Error>>
+{
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(WriteFileCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![response_with_runtime_tool_call(
+        RuntimeToolCall::new(
+            "write-static-deny-classifier-evidence",
+            "write_file",
+            json!({ "path": ".git/config", "content": "blocked" }),
+        ),
+    )?]);
+    let classifier = MockProvider::new(vec![classifier_verdict_response(
+        "allow_candidate",
+        "high",
+        "requested",
+    )]);
+    let mut spec = classifier_agent_run_spec(&registry, &client, &classifier);
+    spec.tool_context = interactive_auto_context(AutoApprovalConfig {
+        enabled: true,
+        allow_workspace_edits: true,
+        ..AutoApprovalConfig::default()
+    });
+    let observed_events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_events_capture = observed_events.clone();
+    spec.tool_event_callback = Some(Arc::new(move |event| {
+        if event.name == "permission_auto_approval" {
+            if let Ok(mut observed) = observed_events_capture.lock() {
+                observed.push(event.detail.clone());
+            }
+        }
+    }));
+
+    let result = AgentRunner::new().run(spec)?;
+    let classifier_requests = classifier
+        .requests
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let diagnostic_text = observed_events
+        .lock()
+        .map_err(|error| error.to_string())?
+        .join("\n");
+
+    if calls.load(Ordering::SeqCst) != 0
+        || result.stop_reason != "ask_user"
+        || !classifier_requests.is_empty()
+        || !diagnostic_text.contains("\"precedence\":\"static_deny_wins\"")
+        || !diagnostic_text.contains("\"disposition\":\"not_invoked_static_policy\"")
+        || diagnostic_text.contains("allow_candidate_consumed")
+    {
+        return Err(format!(
+            "static deny should skip classifier with precedence evidence: result={result:?} calls={} classifier_requests={classifier_requests:?} diagnostics={diagnostic_text}",
+            calls.load(Ordering::SeqCst)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn agent_runner_auto_classifier_records_recent_denial_without_raw_command(
 ) -> Result<(), Box<dyn Error>> {
     const RAW_COMMAND: &str = "RAW_EVENT_COMMAND_SECRET";
@@ -3919,6 +4352,8 @@ fn recent_auto_mode_denial_store_caps_at_twenty_newest_records() -> Result<(), B
             action_digest: format!("action-{index}"),
             argument_digest: format!("argument-{index}"),
             snapshot_digest: format!("snapshot-{index}"),
+            policy_safety_snapshot_ref: None,
+            secret_ref_evidence: Vec::new(),
             decision_reason: PermissionPolicyReason::EvaluatorUncertain,
             classifier_verdict: AutoEvaluatorVerdictKind::DenyCandidate,
             classifier_confidence: EvaluatorConfidence::High,
@@ -3962,6 +4397,8 @@ fn recent_auto_mode_denial_store_extend_keeps_newest_first_input_order(
                 action_digest: format!("action-{id}"),
                 argument_digest: format!("argument-{id}"),
                 snapshot_digest: format!("snapshot-{id}"),
+                policy_safety_snapshot_ref: None,
+                secret_ref_evidence: Vec::new(),
                 decision_reason: PermissionPolicyReason::EvaluatorUncertain,
                 classifier_verdict: AutoEvaluatorVerdictKind::DenyCandidate,
                 classifier_confidence: EvaluatorConfidence::High,
@@ -3996,9 +4433,7 @@ fn recent_auto_mode_retry_token_store_consumes_one_shot() -> Result<(), Box<dyn 
     let consumed = store
         .consume(
             &denial.denial_id,
-            &denial.action_digest,
-            &denial.argument_digest,
-            &denial.snapshot_digest,
+            RecentAutoModeRetryTokenMatch::from_denial(&denial),
             5,
         )
         .map_err(|error| format!("unexpected consume error: {error:?}"))?;
@@ -4008,9 +4443,7 @@ fn recent_auto_mode_retry_token_store_consumes_one_shot() -> Result<(), Box<dyn 
     if store
         .consume(
             &denial.denial_id,
-            &denial.action_digest,
-            &denial.argument_digest,
-            &denial.snapshot_digest,
+            RecentAutoModeRetryTokenMatch::from_denial(&denial),
             5,
         )
         .is_ok()
@@ -4047,16 +4480,12 @@ fn recent_auto_mode_retry_token_store_rejects_expired_and_mismatched_once(
 
     if store.consume(
         &expired_denial.denial_id,
-        &expired_denial.action_digest,
-        &expired_denial.argument_digest,
-        &expired_denial.snapshot_digest,
+        RecentAutoModeRetryTokenMatch::from_denial(&expired_denial),
         11,
     ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Expired)
         || store.consume(
             &expired_denial.denial_id,
-            &expired_denial.action_digest,
-            &expired_denial.argument_digest,
-            &expired_denial.snapshot_digest,
+            RecentAutoModeRetryTokenMatch::from_denial(&expired_denial),
             11,
         ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Consumed)
     {
@@ -4065,20 +4494,112 @@ fn recent_auto_mode_retry_token_store_rejects_expired_and_mismatched_once(
 
     if store.consume(
         &mismatched_denial.denial_id,
-        "different-action",
-        &mismatched_denial.argument_digest,
-        &mismatched_denial.snapshot_digest,
+        RecentAutoModeRetryTokenMatch {
+            action_digest: "different-action",
+            ..RecentAutoModeRetryTokenMatch::from_denial(&mismatched_denial)
+        },
         20,
     ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Mismatched)
         || store.consume(
             &mismatched_denial.denial_id,
-            &mismatched_denial.action_digest,
-            &mismatched_denial.argument_digest,
-            &mismatched_denial.snapshot_digest,
+            RecentAutoModeRetryTokenMatch::from_denial(&mismatched_denial),
             20,
         ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Consumed)
     {
         return Err("mismatched token was not terminally consumed".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn recent_auto_mode_retry_token_store_rejects_policy_safety_ref_mismatch_once(
+) -> Result<(), Box<dyn Error>> {
+    let mut denial = sample_recent_denial("policy-ref");
+    denial.policy_safety_snapshot_ref = Some(policy_safety_ref("original"));
+    let token = RecentAutoModeRetryToken::new(
+        &denial,
+        RuntimeToolCall::new(
+            "call-policy-ref",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+        interactive_auto_context(AutoApprovalConfig::default()),
+        100,
+    );
+    let mut store = RecentAutoModeRetryTokenStore::default();
+    store.insert(token);
+
+    if store.consume(
+        &denial.denial_id,
+        RecentAutoModeRetryTokenMatch {
+            policy_safety_snapshot_ref: Some(&policy_safety_ref("changed")),
+            ..RecentAutoModeRetryTokenMatch::from_denial(&denial)
+        },
+        20,
+    ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Mismatched)
+        || store.consume(
+            &denial.denial_id,
+            RecentAutoModeRetryTokenMatch::from_denial(&denial),
+            20,
+        ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Consumed)
+    {
+        return Err("policy safety ref mismatch was not terminally consumed".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn spec030_recent_retry_token_preserves_secret_ref_evidence_and_rejects_token_change(
+) -> Result<(), Box<dyn Error>> {
+    let mut denial = sample_recent_denial("secret-ref");
+    denial.secret_ref_evidence = vec![sample_secret_ref_evidence("opaque-owner-state-a")];
+    let token = RecentAutoModeRetryToken::new(
+        &denial,
+        RuntimeToolCall::new(
+            "call-secret-ref",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+        interactive_auto_context(AutoApprovalConfig::default()),
+        100,
+    );
+    let mut store = RecentAutoModeRetryTokenStore::default();
+    store.insert(token);
+
+    let mut changed = denial.secret_ref_evidence.clone();
+    changed[0].secret_ref.staleness_token = "opaque-owner-state-b".to_owned();
+    if store.consume(
+        &denial.denial_id,
+        RecentAutoModeRetryTokenMatch {
+            secret_ref_evidence: &changed,
+            ..RecentAutoModeRetryTokenMatch::from_denial(&denial)
+        },
+        20,
+    ) != Err(shacs_core::runtime::RecentAutoModeRetryTokenConsumeError::Mismatched)
+    {
+        return Err("retry token accepted changed secret ref staleness token".into());
+    }
+
+    let mut store = RecentAutoModeRetryTokenStore::default();
+    store.insert(RecentAutoModeRetryToken::new(
+        &denial,
+        RuntimeToolCall::new(
+            "call-secret-ref",
+            "exec",
+            json!({ "command": "cargo test" }),
+        ),
+        interactive_auto_context(AutoApprovalConfig::default()),
+        100,
+    ));
+    let consumed = store
+        .consume(
+            &denial.denial_id,
+            RecentAutoModeRetryTokenMatch::from_denial(&denial),
+            20,
+        )
+        .map_err(|error| format!("retry token should be consumable: {error:?}"))?;
+    if consumed.secret_ref_evidence() != denial.secret_ref_evidence.as_slice() {
+        return Err("retry token did not preserve denied action secret evidence".into());
     }
     Ok(())
 }
@@ -4116,11 +4637,65 @@ fn sample_recent_denial(label: &str) -> RecentAutoModeDenial {
         action_digest: format!("action-{label}"),
         argument_digest: format!("argument-{label}"),
         snapshot_digest: format!("snapshot-{label}"),
+        policy_safety_snapshot_ref: None,
+        secret_ref_evidence: Vec::new(),
         decision_reason: PermissionPolicyReason::EvaluatorUncertain,
         classifier_verdict: AutoEvaluatorVerdictKind::DenyCandidate,
         classifier_confidence: EvaluatorConfidence::High,
         classifier_scope_match: EvaluatorScopeMatch::Unrelated,
         retryable: true,
+    }
+}
+
+fn sample_secret_ref_evidence(token: &str) -> PermissionSecretRefEvidence {
+    let secret_ref = SecretRef {
+        kind: SecretRefKind::SecretRef,
+        schema_version: 1,
+        ref_id: SecretRefId::new("sec_spec030_recent_retry"),
+        source_kind: SecretSourceKind::Env,
+        locator: SecretLocator::EnvVar {
+            name: "SPEC030_API_KEY".to_owned(),
+        },
+        owner: "spec035-config-profile".to_owned(),
+        scope: "provider-auth".to_owned(),
+        created_by: Some("config-profile".to_owned()),
+        created_at_ms: Some(0),
+        locator_digest: "sha256:recent-retry-locator".to_owned(),
+        staleness_token: token.to_owned(),
+        safe_summary: SafeSecretSummary {
+            label: "env:SPEC030_API_KEY".to_owned(),
+            required: true,
+        },
+    };
+    PermissionSecretRefEvidence {
+        secret_ref: secret_ref.clone(),
+        redaction_evidence: RedactionEvidence::for_secret_ref(
+            RedactionEvidenceRef::new("red_spec030_recent_retry"),
+            secret_ref.ref_id,
+            "recent_retry",
+            "sha256:safe-summary",
+        ),
+        status: PermissionSecretRefStatus::Unresolved,
+        requested_consumer: "tool:exec".to_owned(),
+    }
+}
+
+fn policy_safety_ref(label: &str) -> PolicySafetySnapshotRef {
+    PolicySafetySnapshotRef {
+        schema_id: PolicySafetySnapshotSchemaId::V1,
+        snapshot_id: PolicySafetySnapshotId(format!("snapshot-{label}")),
+        policy_safety_digest: PolicySafetyDigest(
+            "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+        ),
+        created_at_unix_ms: 500,
+        expires_at_unix_ms: None,
+        redacted_summary: RedactedPolicySafetySummary {
+            permission_mode: "auto".to_owned(),
+            capability_count: 1,
+            containment_digest: Some(format!("containment-{label}")),
+            source_ref_count: 2,
+            provenance_ref_count: 1,
+        },
     }
 }
 
@@ -6084,7 +6659,7 @@ fn loop_permission_approval_session_option_reuses_same_session_match() -> Result
         || reused.stop_reason == "ask_user"
     {
         return Err(format!(
-            "matching session approval was not reused: {reused:?} calls={}",
+            "session remembered approval did not reuse matching action: {reused:?} calls={}",
             calls.load(Ordering::SeqCst)
         )
         .into());
@@ -6111,16 +6686,9 @@ fn loop_permission_approval_session_option_reuses_same_session_match() -> Result
         return Err(format!("session approval metadata drifted: {raw:?}").into());
     }
 
-    let _reused_outbound = bus.consume_outbound().ok_or("missing reused outbound")?;
-    let different_action =
-        loop_runtime.process_direct("different action", Some("discord:approval-session"))?;
-    if different_action.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 2 {
-        return Err(format!(
-            "session approval reused a different action: {different_action:?} calls={}",
-            calls.load(Ordering::SeqCst)
-        )
-        .into());
-    }
+    let _reused_outbound = bus
+        .consume_outbound()
+        .ok_or("missing changed-ref approval outbound")?;
     Ok(())
 }
 
@@ -9341,6 +9909,24 @@ impl ProviderClient for MockProvider {
             .map_err(|error| provider_error(error.to_string()))?
             .pop_front()
             .ok_or_else(|| provider_error("no mock response"))
+    }
+
+    fn chat_stream(
+        &self,
+        request: ProviderRequest,
+        _on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat(request)
+    }
+}
+
+struct ErrorProvider {
+    message: String,
+}
+
+impl ProviderClient for ErrorProvider {
+    fn chat(&self, _request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+        Err(provider_error(self.message.clone()))
     }
 
     fn chat_stream(

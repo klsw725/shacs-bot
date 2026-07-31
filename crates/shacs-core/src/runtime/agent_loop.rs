@@ -1,6 +1,7 @@
+use crate::runtime::permission_pattern::session_approval_reuse_pattern;
 use crate::runtime::tool_execution::permissioned_action_input_from_context;
 use crate::runtime::tool_execution::{
-    session_approval_context_digest, session_approval_context_digest_for_input,
+    session_remembered_context_digest, session_remembered_context_digest_for_input,
 };
 use crate::runtime::{
     apply_context_safety_gate, build_context_provider_handoff, correlate_approval,
@@ -28,12 +29,12 @@ use crate::runtime::{
     MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage, PermissionCeilingSnapshot,
     PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
     PermissionedActionInput, PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus,
-    PluginCommandDispatcher, ProviderArchiveConsolidator, ProviderEventCallback,
-    RecentAutoModeDenial, RecentAutoModeDenialStore, RecentAutoModeRetryToken,
-    RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenStore, RuntimeContextTools,
-    RuntimeExecutionLedger, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport,
-    RuntimeToolExecutor, RuntimeToolMessage, Session, SessionApprovalCacheEntry,
-    SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
+    PluginCommandDispatcher, PolicySafetySnapshotRef, ProviderArchiveConsolidator,
+    ProviderEventCallback, RecentAutoModeDenial, RecentAutoModeDenialStore,
+    RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenMatch,
+    RecentAutoModeRetryTokenStore, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
+    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
+    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
     SessionRememberedPermissionDiagnostic, SessionRememberedPermissionRule,
     SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnLock,
     SubagentExecutionConfig, SubagentOutcomeKind, SubagentRuntime, TokenConsolidationConfig,
@@ -153,6 +154,10 @@ struct PendingRecentRetryApproval {
     action_digest: String,
     argument_digest: String,
     snapshot_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_safety_snapshot_ref: Option<PolicySafetySnapshotRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    secret_ref_evidence: Vec<crate::runtime::PermissionSecretRefEvidence>,
     tool_name: String,
     expires_at_unix_ms: u64,
     requester_digest: String,
@@ -701,9 +706,15 @@ impl<'a> AgentLoop<'a> {
                 PermissionApprovalReply::Approve => {
                     let token_result = self.recent_retry_tokens.consume(
                         &approval.denial_id,
-                        &approval.action_digest,
-                        &approval.argument_digest,
-                        &approval.snapshot_digest,
+                        RecentAutoModeRetryTokenMatch {
+                            action_digest: &approval.action_digest,
+                            argument_digest: &approval.argument_digest,
+                            snapshot_digest: &approval.snapshot_digest,
+                            policy_safety_snapshot_ref: approval
+                                .policy_safety_snapshot_ref
+                                .as_ref(),
+                            secret_ref_evidence: &approval.secret_ref_evidence,
+                        },
                         now_unix_ms(),
                     );
                     let token = match token_result {
@@ -928,6 +939,12 @@ impl<'a> AgentLoop<'a> {
                     if let (true, true, Some(action)) =
                         (session_scoped, approval_is_valid, executed_action)
                     {
+                        store_session_approval_cache_entry(
+                            &mut session,
+                            &session_key,
+                            approval_cache,
+                            &action,
+                        );
                         store_session_remembered_permission_rule(
                             &mut session,
                             &session_key,
@@ -1137,7 +1154,7 @@ impl<'a> AgentLoop<'a> {
         };
         let turn_id = turn_id_for_message(&message, &session);
         let session_context_digest =
-            session_approval_context_digest_for_input(&PermissionedActionInput {
+            session_remembered_context_digest_for_input(&PermissionedActionInput {
                 session_id: session_key.clone(),
                 turn_id: turn_id.clone(),
                 origin: PermissionedActionOrigin::ChannelInbound {
@@ -1184,7 +1201,7 @@ impl<'a> AgentLoop<'a> {
             permission_evaluator: self.config.permission_evaluator.clone(),
             permission_interactive: self.config.permission_interactive,
             permission_approval_cache: None,
-            permission_session_approval_cache: Vec::new(),
+            permission_session_approval_cache: session_approval_cache_entries(&session),
             permission_session_remembered_rules: session_remembered_permission_rules(
                 &mut session,
                 &session_key,
@@ -2395,6 +2412,8 @@ impl<'a> AgentLoop<'a> {
         if token.action_digest() != denial.action_digest
             || token.argument_digest() != denial.argument_digest
             || token.snapshot_digest() != denial.snapshot_digest
+            || token.policy_safety_snapshot_ref() != denial.policy_safety_snapshot_ref.as_ref()
+            || token.secret_ref_evidence() != denial.secret_ref_evidence.as_slice()
         {
             self.recent_retry_tokens.invalidate(denial_id);
             return self.publish_command_response(
@@ -2413,6 +2432,8 @@ impl<'a> AgentLoop<'a> {
             action_digest: denial.action_digest.clone(),
             argument_digest: denial.argument_digest.clone(),
             snapshot_digest: denial.snapshot_digest.clone(),
+            policy_safety_snapshot_ref: denial.policy_safety_snapshot_ref.clone(),
+            secret_ref_evidence: denial.secret_ref_evidence.clone(),
             tool_name: denial.tool_name.clone(),
             expires_at_unix_ms: token.expires_at_unix_ms(),
             requester_digest: recent_retry_requester_digest(message, &session.key),
@@ -4351,7 +4372,7 @@ fn store_session_remembered_permission_rule(
         rules: session_remembered_permission_rules(
             session,
             session_key,
-            Some(&session_approval_context_digest(action)),
+            Some(&session_remembered_context_digest(action)),
             now_unix_ms(),
         ),
         diagnostics: Vec::new(),
@@ -4360,7 +4381,7 @@ fn store_session_remembered_permission_rule(
         &mut envelope.rules,
         SessionRememberedPermissionRule {
             session_key: session_key.to_owned(),
-            approval_context_digest: session_approval_context_digest(action),
+            approval_context_digest: session_remembered_context_digest(action),
             effect,
             matcher: matcher.matcher,
             created_unix_ms: now_unix_ms(),
@@ -4368,6 +4389,56 @@ fn store_session_remembered_permission_rule(
         },
     );
     store_session_remembered_permission_envelope(session, &envelope);
+}
+
+fn session_approval_cache_entries(session: &Session) -> Vec<SessionApprovalCacheEntry> {
+    session
+        .metadata
+        .get(SESSION_PERMISSION_APPROVALS_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .map(|entries: Vec<SessionApprovalCacheEntry>| {
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.approval.request.policy_safety_snapshot_ref.is_some()
+                        && entry.approval.decision.policy_safety_snapshot_ref.is_some()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn store_session_approval_cache_entry(
+    session: &mut Session,
+    session_key: &str,
+    approval: ApprovalCacheEntry,
+    action: &PermissionedAction,
+) {
+    let reuse_match = session_approval_reuse_pattern(action)
+        .map(|pattern| SessionApprovalReuseMatch::ExecCommandPattern { pattern })
+        .unwrap_or(SessionApprovalReuseMatch::ExactAction);
+    let entry = SessionApprovalCacheEntry {
+        session_key: session_key.to_owned(),
+        approval_context_digest: session_remembered_context_digest(action),
+        reuse_match,
+        approval,
+    };
+    let mut entries = session_approval_cache_entries(session);
+    entries.retain(|existing| {
+        !(existing.session_key == entry.session_key
+            && existing.approval_context_digest == entry.approval_context_digest
+            && existing.reuse_match == entry.reuse_match)
+    });
+    entries.push(entry);
+    if entries.len() > SESSION_PERMISSION_APPROVAL_LIMIT {
+        entries.drain(0..entries.len() - SESSION_PERMISSION_APPROVAL_LIMIT);
+    }
+    if let Ok(value) = serde_json::to_value(entries) {
+        session
+            .metadata
+            .insert(SESSION_PERMISSION_APPROVALS_KEY.to_owned(), value);
+    }
 }
 
 fn upsert_session_remembered_permission_rule(
@@ -4432,6 +4503,8 @@ fn approval_decision(
         actor: ApprovalActor::LocalUser,
         decided_at_unix_ms: now_unix_ms(),
         consumed: false,
+        policy_safety_snapshot_ref: approval.approval_request.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: approval.approval_request.secret_ref_evidence.clone(),
     }
 }
 
@@ -4448,6 +4521,8 @@ fn recent_retry_approval_decision(
         actor: ApprovalActor::LocalUser,
         decided_at_unix_ms: now_unix_ms(),
         consumed: false,
+        policy_safety_snapshot_ref: approval_request.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: approval_request.secret_ref_evidence.clone(),
     }
 }
 
@@ -4467,6 +4542,8 @@ fn recent_retry_approval_request_from_pending(
         risk_summary: format!("Run exact recent denied tool `{}` once", approval.tool_name),
         allowed_decisions: vec![ApprovalDecisionKind::Approved, ApprovalDecisionKind::Denied],
         expires_at_unix_ms: approval.expires_at_unix_ms,
+        policy_safety_snapshot_ref: approval.policy_safety_snapshot_ref.clone(),
+        secret_ref_evidence: approval.secret_ref_evidence.clone(),
     }
 }
 
@@ -5212,6 +5289,8 @@ mod tests {
             action_digest: format!("action-{label}"),
             argument_digest: format!("argument-{label}"),
             snapshot_digest: format!("snapshot-{label}"),
+            policy_safety_snapshot_ref: None,
+            secret_ref_evidence: Vec::new(),
             decision_reason: PermissionPolicyReason::EvaluatorUncertain,
             classifier_verdict: AutoEvaluatorVerdictKind::DenyCandidate,
             classifier_confidence: EvaluatorConfidence::High,

@@ -1,14 +1,23 @@
 use serde_json::{json, Map};
 use shacs_core::runtime::{
-    build_plugin_runtime_snapshot, build_plugin_surface_projection, plugin_runtime_commands,
+    build_plugin_runtime_snapshot, build_plugin_surface_projection,
+    containment_permission_proof_for_process_gate, plugin_runtime_commands,
     register_plugin_runtime_tools, AgentHook, AgentHookContext, AgentLoop, AgentLoopCommandResult,
-    AgentLoopConfig, ContextBuilder, DiscoveredPlugin, MessageBus, PermissionMode,
-    PermissionModeSnapshot, PluginBlockReason, PluginCommandDispatcher, PluginExecutableCommand,
+    AgentLoopConfig, ContainerNetworkMode, ContainerRuntimeKind, ContextBuilder, DiscoveredPlugin,
+    DockerContainmentSnapshot, InheritedPermissionContext, MessageBus, PermissionCeilingSnapshot,
+    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
+    PermissionedActionOrigin, PluginBlockReason, PluginCommandDispatcher, PluginExecutableCommand,
     PluginHookCallbackResult, PluginHookCommandExecutor, PluginHookCommandInvocation,
     PluginHookDispatchMode, PluginHookDispatchStatus, PluginHookEvent, PluginManifest,
-    PluginManifestSource, PluginRuntimeHook, PluginRuntimeHookAgentHook, PluginRuntimePlugin,
-    PluginRuntimeSnapshot, PluginState, ProcessPluginHookCommandExecutor, RuntimeToolCall,
-    SessionManager,
+    PluginManifestSource, PluginProcessPermissionContext, PluginRuntimeHook,
+    PluginRuntimeHookAgentHook, PluginRuntimePlugin, PluginRuntimeSnapshot, PluginState,
+    PolicySafetyDigest, PolicySafetySnapshotId, PolicySafetySnapshotRef,
+    PolicySafetySnapshotSchemaId, ProcExecSummary, ProcessAdapterKind,
+    ProcessContainmentProofCandidate, ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput,
+    ProcessGateInput, ProcessGateTerminalPrecondition, ProcessIdentity,
+    ProcessPluginHookCommandExecutor, ProcessRedactedCommand, RedactedPolicySafetySummary,
+    RuntimeBoundaryOrigin, RuntimeToolCall, RuntimeToolExecutor, SafetyCapability, SessionManager,
+    ToolExecutionContext,
 };
 use shacs_core::tools::{
     AskUserTool, JsonMap, SchemaFragment, Tool, ToolParameters, ToolRegistry, ToolResult,
@@ -20,7 +29,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 
 static PROCESS_EXECUTOR_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -333,7 +342,7 @@ fn spec025_s3_process_executor_runs_argv_without_shell_and_parses_json_stdout() 
                 event: PluginHookEvent::LlmAfter,
                 event_name: "llm:after".to_owned(),
                 command: PluginExecutableCommand {
-                    command_path: hook_path,
+                    command_path: hook_path.clone(),
                     args: Vec::new(),
                     timeout_ms: 1_000,
                 },
@@ -345,7 +354,18 @@ fn spec025_s3_process_executor_runs_argv_without_shell_and_parses_json_stdout() 
     let hook = PluginRuntimeHookAgentHook::with_executor(
         snapshot,
         PluginHookDispatchMode::LiveDiagnostics,
-        Arc::new(ProcessPluginHookCommandExecutor),
+        Arc::new(ProcessPluginHookCommandExecutor::with_process_gate_input(
+            plugin_process_gate_input(
+                ProcessAdapterKind::PluginHook,
+                "process",
+                "llm:after",
+                &PluginExecutableCommand {
+                    command_path: hook_path,
+                    args: Vec::new(),
+                    timeout_ms: 1_000,
+                },
+            ),
+        )),
     );
     let context = AgentHookContext {
         iteration: 0,
@@ -379,11 +399,27 @@ fn spec025_s3_process_executor_clears_parent_environment() {
     )
     .unwrap_or_else(|error| panic!("failed to write hook script: {error}"));
     make_executable(&hook_path);
-    let snapshot = process_snapshot("env", tempdir.path().to_path_buf(), hook_path, 1_000);
+    let snapshot = process_snapshot(
+        "env",
+        tempdir.path().to_path_buf(),
+        hook_path.clone(),
+        1_000,
+    );
     let hook = PluginRuntimeHookAgentHook::with_executor(
         snapshot,
         PluginHookDispatchMode::LiveDiagnostics,
-        Arc::new(ProcessPluginHookCommandExecutor),
+        Arc::new(ProcessPluginHookCommandExecutor::with_process_gate_input(
+            plugin_process_gate_input(
+                ProcessAdapterKind::PluginHook,
+                "env",
+                "llm:after",
+                &PluginExecutableCommand {
+                    command_path: hook_path,
+                    args: Vec::new(),
+                    timeout_ms: 1_000,
+                },
+            ),
+        )),
     );
     let context = AgentHookContext {
         iteration: 0,
@@ -423,11 +459,27 @@ fn spec025_s3_process_executor_kills_process_group_on_timeout() {
     )
     .unwrap_or_else(|error| panic!("failed to write hook script: {error}"));
     make_executable(&hook_path);
-    let snapshot = process_snapshot("timeout", tempdir.path().to_path_buf(), hook_path, 50);
+    let snapshot = process_snapshot(
+        "timeout",
+        tempdir.path().to_path_buf(),
+        hook_path.clone(),
+        50,
+    );
     let hook = PluginRuntimeHookAgentHook::with_executor(
         snapshot,
         PluginHookDispatchMode::LiveDiagnostics,
-        Arc::new(ProcessPluginHookCommandExecutor),
+        Arc::new(ProcessPluginHookCommandExecutor::with_process_gate_input(
+            plugin_process_gate_input(
+                ProcessAdapterKind::PluginHook,
+                "timeout",
+                "llm:after",
+                &PluginExecutableCommand {
+                    command_path: hook_path,
+                    args: Vec::new(),
+                    timeout_ms: 50,
+                },
+            ),
+        )),
     );
     let context = AgentHookContext {
         iteration: 0,
@@ -466,13 +518,24 @@ fn spec025_s3_process_executor_success_cleans_background_child_without_hanging()
     let snapshot = process_snapshot(
         "background-child",
         tempdir.path().to_path_buf(),
-        hook_path,
+        hook_path.clone(),
         1_000,
     );
     let hook = PluginRuntimeHookAgentHook::with_executor(
         snapshot,
         PluginHookDispatchMode::LiveDiagnostics,
-        Arc::new(ProcessPluginHookCommandExecutor),
+        Arc::new(ProcessPluginHookCommandExecutor::with_process_gate_input(
+            plugin_process_gate_input(
+                ProcessAdapterKind::PluginHook,
+                "background-child",
+                "llm:after",
+                &PluginExecutableCommand {
+                    command_path: hook_path,
+                    args: Vec::new(),
+                    timeout_ms: 1_000,
+                },
+            ),
+        )),
     );
     let context = AgentHookContext {
         iteration: 0,
@@ -512,7 +575,7 @@ fn spec025_s3_process_executor_timeout_is_not_blocked_by_noisy_stdout() {
         event: PluginHookEvent::LlmAfter,
         event_name: "llm:after".to_owned(),
         command: PluginExecutableCommand {
-            command_path: hook_path,
+            command_path: hook_path.clone(),
             args: Vec::new(),
             timeout_ms: 50,
         },
@@ -521,7 +584,18 @@ fn spec025_s3_process_executor_timeout_is_not_blocked_by_noisy_stdout() {
     };
 
     let started = std::time::Instant::now();
-    let result = ProcessPluginHookCommandExecutor.execute(&invocation);
+    let result =
+        ProcessPluginHookCommandExecutor::with_process_gate_input(plugin_process_gate_input(
+            ProcessAdapterKind::PluginHook,
+            "noisy-stdout",
+            "llm:after",
+            &PluginExecutableCommand {
+                command_path: hook_path,
+                args: Vec::new(),
+                timeout_ms: 50,
+            },
+        ))
+        .execute(&invocation);
 
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
     assert!(matches!(result, PluginHookCallbackResult::Timeout(_)));
@@ -544,7 +618,7 @@ fn spec025_s3_process_executor_timeout_is_not_blocked_by_large_stdin() {
         event: PluginHookEvent::LlmAfter,
         event_name: "llm:after".to_owned(),
         command: PluginExecutableCommand {
-            command_path: hook_path,
+            command_path: hook_path.clone(),
             args: Vec::new(),
             timeout_ms: 50,
         },
@@ -553,7 +627,18 @@ fn spec025_s3_process_executor_timeout_is_not_blocked_by_large_stdin() {
     };
 
     let started = std::time::Instant::now();
-    let result = ProcessPluginHookCommandExecutor.execute(&invocation);
+    let result =
+        ProcessPluginHookCommandExecutor::with_process_gate_input(plugin_process_gate_input(
+            ProcessAdapterKind::PluginHook,
+            "large-stdin",
+            "llm:after",
+            &PluginExecutableCommand {
+                command_path: hook_path,
+                args: Vec::new(),
+                timeout_ms: 50,
+            },
+        ))
+        .execute(&invocation);
 
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
     assert!(matches!(result, PluginHookCallbackResult::Timeout(_)));
@@ -717,9 +802,16 @@ fn spec025_command_backed_plugin_tool_registers_and_executes_without_shell_env()
     let mut registry = ToolRegistry::new();
 
     let diagnostics = register_plugin_runtime_tools(&mut registry, &[plugin]);
-    let output = registry
-        .execute("plugin_tool_probe", json!({"input": "hello"}))
-        .into_text();
+    let executor = RuntimeToolExecutor::new(&registry);
+    let report = executor.execute_tool_calls(
+        vec![RuntimeToolCall::new(
+            "plugin-tool-call",
+            "plugin_tool_probe",
+            json!({"input": "hello"}),
+        )],
+        &plugin_tool_context(),
+    );
+    let output = report.messages[0].content.clone();
     let definitions = registry.definitions();
 
     assert!(diagnostics.is_empty());
@@ -813,7 +905,19 @@ fn spec025_plugin_command_dispatcher_routes_and_executes_without_shell_env() {
     let mut diagnostics = Vec::new();
 
     let commands = plugin_runtime_commands(&[enabled, disabled], &mut diagnostics);
-    let dispatcher = PluginCommandDispatcher::new(commands);
+    let dispatcher = PluginCommandDispatcher::with_process_gate_input(
+        commands,
+        plugin_process_gate_input(
+            ProcessAdapterKind::PluginCommand,
+            "command-plugin",
+            "review",
+            &PluginExecutableCommand {
+                command_path: command_path.clone(),
+                args: Vec::new(),
+                timeout_ms: 1_000,
+            },
+        ),
+    );
     let execution = dispatcher
         .dispatch_text("/review today")
         .unwrap_or_else(|error| panic!("plugin command dispatch failed: {error:?}"));
@@ -822,13 +926,221 @@ fn spec025_plugin_command_dispatcher_routes_and_executes_without_shell_env() {
     assert_eq!(dispatcher.commands().len(), 1);
     assert_eq!(execution.plugin_id, "command-plugin");
     assert_eq!(execution.command_name, "review");
-    assert!(output.contains("plugin command ran"));
+    assert!(output.contains("plugin command ran"), "{output}");
     assert!(dispatcher.dispatch_text("/status").is_err());
     assert!(dispatcher.dispatch_text("/disabled-command").is_err());
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "builtin_command_conflict"
             && diagnostic.event.as_deref() == Some("status")
     }));
+}
+
+#[cfg(unix)]
+#[test]
+fn plugin_command_dispatcher_fails_closed_without_process_gate_context() {
+    let _guard = process_executor_test_guard();
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+    let bin_dir = tempdir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+    let marker_path = tempdir.path().join("plugin-command-ran");
+    let command_path = bin_dir.join("review");
+    fs::write(
+        &command_path,
+        format!(
+            "#!/bin/sh\nprintf ran > {}\nprintf '{{\"ok\":true,\"message\":\"plugin command ran\"}}'\n",
+            shell_quote(marker_path.to_string_lossy().as_ref())
+        ),
+    )
+    .unwrap_or_else(|error| panic!("failed to write command script: {error}"));
+    make_executable(&command_path);
+    let plugin = plugin_with_root(
+        "command-plugin",
+        tempdir.path().to_path_buf(),
+        json!({"commands": ["review"]}),
+        json!({"commands": {
+            "review": {"command": "bin/review", "description": "Run review", "timeoutMs": 5000}
+        }}),
+    );
+    let mut diagnostics = Vec::new();
+    let dispatcher =
+        PluginCommandDispatcher::new(plugin_runtime_commands(&[plugin], &mut diagnostics));
+
+    let execution = dispatcher
+        .dispatch_text("/review today")
+        .unwrap_or_else(|error| panic!("plugin command dispatch failed: {error:?}"));
+    let output = execution.output.into_text();
+
+    assert!(diagnostics.is_empty());
+    assert!(output.contains("process gate rejected before spawn"));
+    assert!(output.contains("Denied"));
+    assert!(!marker_path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn plugin_command_dispatcher_uses_live_permission_context() {
+    let _guard = process_executor_test_guard();
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+    let bin_dir = tempdir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+    let command_path = bin_dir.join("review");
+    fs::write(
+        &command_path,
+        "#!/bin/sh\nprintf '{\"ok\":true,\"message\":\"plugin command ran\"}'\n",
+    )
+    .unwrap_or_else(|error| panic!("failed to write command script: {error}"));
+    make_executable(&command_path);
+    let plugin = plugin_with_root(
+        "command-plugin",
+        tempdir.path().to_path_buf(),
+        json!({"commands": ["review"]}),
+        json!({"commands": {
+            "review": {"command": "bin/review", "description": "Run review"}
+        }}),
+    );
+    let mut diagnostics = Vec::new();
+    let dispatcher = PluginCommandDispatcher::with_permission_context(
+        plugin_runtime_commands(&[plugin], &mut diagnostics),
+        PluginProcessPermissionContext {
+            permission_mode: PermissionMode::BypassPermissions,
+            permission_rules: confirmed_permission_rules("review"),
+            inherited_context: Some(InheritedPermissionContext {
+                ceiling: PermissionCeilingSnapshot {
+                    parent_mode: PermissionMode::BypassPermissions,
+                    capability_ceiling: vec![SafetyCapability::ProcExec],
+                    approved_scope_refs: vec!["plugin-process".to_owned()],
+                    origin: RuntimeBoundaryOrigin::UserTurn,
+                },
+                requested_mode: PermissionMode::BypassPermissions,
+                requested_capabilities: vec![SafetyCapability::ProcExec],
+                per_action_evaluation_required: true,
+            }),
+        },
+    );
+
+    let execution = dispatcher
+        .dispatch_text("/review today")
+        .unwrap_or_else(|error| panic!("plugin command dispatch failed: {error:?}"));
+    let output = execution.output.into_text();
+
+    assert!(diagnostics.is_empty());
+    assert!(output.contains("plugin command ran"), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plugin_command_process_closes_stdin_after_payload_write() {
+    let _guard = process_executor_test_guard();
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+    let bin_dir = tempdir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+    let command_path = bin_dir.join("review");
+    fs::write(
+        &command_path,
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"ok\":true,\"message\":\"stdin-closed\"}'\n",
+    )
+    .unwrap_or_else(|error| panic!("failed to write command script: {error}"));
+    make_executable(&command_path);
+    let plugin = plugin_with_root(
+        "command-plugin",
+        tempdir.path().to_path_buf(),
+        json!({"commands": ["review"]}),
+        json!({"commands": {
+            "review": {"command": "bin/review", "description": "Run review", "timeoutMs": 1000}
+        }}),
+    );
+    let mut diagnostics = Vec::new();
+    let dispatcher = PluginCommandDispatcher::with_process_gate_input(
+        plugin_runtime_commands(&[plugin], &mut diagnostics),
+        plugin_process_gate_input(
+            ProcessAdapterKind::PluginCommand,
+            "command-plugin",
+            "review",
+            &PluginExecutableCommand {
+                command_path: command_path.clone(),
+                args: Vec::new(),
+                timeout_ms: 1_000,
+            },
+        ),
+    );
+
+    let execution = dispatcher
+        .dispatch_text("/review today")
+        .unwrap_or_else(|error| panic!("plugin command dispatch failed: {error:?}"));
+    let output = execution.output.into_text();
+
+    assert!(diagnostics.is_empty());
+    assert!(output.contains("stdin-closed"));
+    assert!(!output.contains("timed out"));
+}
+
+#[cfg(unix)]
+#[test]
+fn plugin_hook_process_concurrent_stdin_consumers_complete_without_timeouts() {
+    let _guard = process_executor_test_guard();
+    let workers = 2;
+    let stdin_payload = format!(
+        "{}stdin-eof-sentinel",
+        "x".repeat(70 * 1024 - "stdin-eof-sentinel".len())
+    );
+    let barrier = Arc::new(Barrier::new(workers));
+    let mut handles = Vec::with_capacity(workers);
+
+    for index in 0..workers {
+        let barrier = barrier.clone();
+        let stdin_payload = stdin_payload.clone();
+        handles.push(std::thread::spawn(move || {
+            let tempdir = tempfile::tempdir()
+                .unwrap_or_else(|error| panic!("failed to create temporary plugin root: {error}"));
+            let bin_dir = tempdir.path().join("bin");
+            fs::create_dir(&bin_dir)
+                .unwrap_or_else(|error| panic!("failed to create bin dir: {error}"));
+            let hook_path = bin_dir.join("hook");
+            fs::write(
+                &hook_path,
+                "#!/bin/sh\nIFS= read -r input || true\ncase \"$input\" in\n  *stdin-eof-sentinel*) printf '{\"diagnostic\":{\"message\":\"stdin-closed\"}}' ;;\n  *) printf 'missing stdin-eof-sentinel\\n' >&2; exit 7 ;;\nesac\n",
+            )
+            .unwrap_or_else(|error| panic!("failed to write hook script: {error}"));
+            make_executable(&hook_path);
+            let command = PluginExecutableCommand {
+                command_path: hook_path.clone(),
+                args: Vec::new(),
+                timeout_ms: 1_000,
+            };
+            let invocation = PluginHookCommandInvocation {
+                plugin_id: format!("stdin-consumer-{index}"),
+                event: PluginHookEvent::LlmAfter,
+                event_name: "llm:after".to_owned(),
+                command: command.clone(),
+                working_dir: bin_dir,
+                stdin_payload: json!({"payload": stdin_payload}),
+            };
+            barrier.wait();
+
+            ProcessPluginHookCommandExecutor::with_process_gate_input(plugin_process_gate_input(
+                ProcessAdapterKind::PluginHook,
+                &format!("stdin-consumer-{index}"),
+                "llm:after",
+                &command,
+            ))
+            .execute(&invocation)
+        }));
+    }
+
+    for handle in handles {
+        let result = handle
+            .join()
+            .unwrap_or_else(|error| panic!("worker thread panicked: {error:?}"));
+        assert_eq!(
+            result,
+            PluginHookCallbackResult::Output(json!({
+                "diagnostic": {"message": "stdin-closed"}
+            }))
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -870,7 +1182,19 @@ fn spec025_agent_loop_executes_enabled_plugin_commands_without_provider_call() {
         &client,
         AgentLoopConfig::new(&workspace, "test-model"),
     )
-    .with_plugin_command_dispatcher(PluginCommandDispatcher::new(snapshot.commands));
+    .with_plugin_command_dispatcher(PluginCommandDispatcher::with_process_gate_input(
+        snapshot.commands,
+        plugin_process_gate_input(
+            ProcessAdapterKind::PluginCommand,
+            "agent-command-plugin",
+            "review",
+            &PluginExecutableCommand {
+                command_path: command_path.clone(),
+                args: Vec::new(),
+                timeout_ms: 1_000,
+            },
+        ),
+    ));
 
     let result = loop_runtime
         .process_direct("/review today", Some("plugin-command"))
@@ -1250,6 +1574,160 @@ fn process_snapshot(
         }],
         commands: Vec::new(),
         diagnostics: Vec::new(),
+    }
+}
+
+fn plugin_tool_context() -> ToolExecutionContext {
+    ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("plugin-runtime-test".to_owned()),
+            scope_ref: Some("plugin-process".to_owned()),
+        },
+        permission_rule_input: confirmed_permission_rules("plugin-tool"),
+        permission_ceiling_snapshot: Some(PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::BypassPermissions,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec!["plugin-process".to_owned()],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        }),
+        ..ToolExecutionContext::default()
+    }
+}
+
+fn plugin_process_gate_input(
+    adapter: ProcessAdapterKind,
+    plugin_id: &str,
+    process_name: &str,
+    command: &PluginExecutableCommand,
+) -> ProcessGateInput {
+    let action = PermissionedAction {
+        action_id: format!("test-plugin-process:{plugin_id}:{process_name}"),
+        provider_tool_call_id: None,
+        session_id: "test-plugin-session".to_owned(),
+        turn_id: "test-plugin-turn".to_owned(),
+        tool_name: format!("plugin:{plugin_id}:{process_name}"),
+        capabilities: vec![SafetyCapability::ProcExec],
+        target_refs: Vec::new(),
+        action_digest: format!("test-action:{plugin_id}:{process_name}"),
+        argument_digest: format!("test-arguments:{plugin_id}:{process_name}"),
+        snapshot_digest: format!("test-snapshot:{plugin_id}:{process_name}"),
+        policy_safety_snapshot_ref: Some(test_policy_ref()),
+        origin: PermissionedActionOrigin::UserTurn,
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::BypassPermissions,
+            source: Some("plugin-runtime-test".to_owned()),
+            scope_ref: Some("plugin-process".to_owned()),
+        },
+        containment_snapshot: None,
+        intent_snapshot: None,
+        redacted_arguments: json!({
+            "plugin_id": plugin_id,
+            "process": process_name,
+        }),
+        secret_ref_evidence: Vec::new(),
+        normalization_state: shacs_core::runtime::ActionNormalizationState::Ready,
+        normalization_errors: Vec::new(),
+    };
+    let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
+        identity: ProcessIdentity::new(
+            format!("plugin:{plugin_id}:{process_name}"),
+            "test-plugin-session",
+            "test-plugin-turn",
+        ),
+        adapter,
+        action,
+        required_secret_ref_count: 0,
+        redacted_command: ProcessRedactedCommand {
+            command_family: command
+                .command_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("plugin-process")
+                .to_owned(),
+            redacted_summary: format!("plugin process {plugin_id}:{process_name}"),
+            redacted_targets: Vec::new(),
+        },
+    })
+    .unwrap_or_else(|error| panic!("failed to build plugin process envelope: {error}"));
+    let permission_rules = confirmed_permission_rules(
+        command
+            .command_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("plugin-process"),
+    );
+    let inherited_context = Some(InheritedPermissionContext {
+        ceiling: PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::BypassPermissions,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec!["plugin-process".to_owned()],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        },
+        requested_mode: PermissionMode::BypassPermissions,
+        requested_capabilities: vec![SafetyCapability::ProcExec],
+        per_action_evaluation_required: true,
+    });
+    let containment_proof = containment_permission_proof_for_process_gate(
+        &envelope,
+        &permission_rules,
+        inherited_context.as_ref(),
+        1,
+    )
+    .expect("plugin process containment proof fixture should be valid");
+    ProcessGateInput {
+        envelope,
+        permission_rules,
+        inherited_context,
+        evaluator: None,
+        approval: None,
+        containment_proof: ProcessContainmentProofCandidate::Proof(Box::new(containment_proof)),
+        interactive: false,
+        terminal_precondition: ProcessGateTerminalPrecondition::Ready,
+        now_unix_ms: 1,
+    }
+}
+
+fn confirmed_permission_rules(command_family: &str) -> PermissionRuleInput {
+    PermissionRuleInput {
+        containment: DockerContainmentSnapshot {
+            contained: Some(true),
+            runtime: ContainerRuntimeKind::Docker,
+            root_user: Some(false),
+            privileged: Some(false),
+            host_mounts_summary: vec!["plugin-runtime-test".to_owned()],
+            network_mode: ContainerNetworkMode::Bridge,
+            digest: Some("plugin-runtime-test".to_owned()),
+            summary: Some("test supplied non-privileged containment".to_owned()),
+        },
+        protected_targets: Vec::new(),
+        proc_exec_summary: Some(ProcExecSummary {
+            command_family: command_family.to_owned(),
+            target_refs: Vec::new(),
+            destructive: false,
+            network: false,
+            secret_exposure: false,
+            summary_available: true,
+        }),
+    }
+}
+
+fn test_policy_ref() -> PolicySafetySnapshotRef {
+    PolicySafetySnapshotRef {
+        schema_id: PolicySafetySnapshotSchemaId::V1,
+        snapshot_id: PolicySafetySnapshotId("plugin-runtime-test".to_owned()),
+        policy_safety_digest: PolicySafetyDigest(
+            "3333333333333333333333333333333333333333333333333333333333333333".to_owned(),
+        ),
+        created_at_unix_ms: 0,
+        expires_at_unix_ms: None,
+        redacted_summary: RedactedPolicySafetySummary {
+            permission_mode: "bypass_permissions".to_owned(),
+            capability_count: 1,
+            containment_digest: Some("plugin-runtime-test".to_owned()),
+            source_ref_count: 1,
+            provenance_ref_count: 1,
+        },
     }
 }
 

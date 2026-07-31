@@ -57,6 +57,7 @@ fn azure_openai_builder_uses_responses_api_headers_and_body() -> Result<(), Box<
     };
     let config = ProviderConfig {
         api_key: Some("azure-key".to_owned()),
+        api_key_ref: None,
         extra_headers: Some(BTreeMap::from([("X-Test".to_owned(), "yes".to_owned())])),
         ..ProviderConfig::default()
     };
@@ -103,6 +104,7 @@ fn azure_openai_client_posts_responses_request_and_parses_success() -> Result<()
     let client = AzureOpenAiClient::with_session_affinity(
         ProviderConfig {
             api_key: Some("azure-key".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
         move |request: OpenAiCompatibleRequestParts| {

@@ -1,10 +1,17 @@
-use crate::runtime::{ResolvedDeferredToolCall, RuntimeToolCall};
+use crate::runtime::{
+    CapabilityCeilingRef, PolicySafetyProvenanceKind, PolicySafetyProvenanceRef,
+    PolicySafetySnapshot, PolicySafetySnapshotCreationReason, PolicySafetySnapshotError,
+    PolicySafetySnapshotInput, PolicySafetySnapshotRef, PolicySafetySourceKind,
+    PolicySafetySourceRef, ResolvedDeferredToolCall, RuntimeToolCall,
+};
 use crate::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 pub use shacs_config::{PermissionMode, SafetyCapability};
-use shacs_redaction::{redact_string, redact_value, REDACTED};
+use shacs_redaction::{
+    redact_string, redact_value, RedactionEvidence, RedactionEvidenceRef, SecretRef, REDACTED,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionModeSnapshot {
@@ -96,6 +103,9 @@ pub enum ActionNormalizationError {
     InvalidArguments { tool_name: String, detail: String },
     UnsafeRawSecret { field: String },
     RedactionFailed { field: String },
+    PolicySafetySnapshotInvalid { detail: String },
+    SecretRefMalformed { detail: String },
+    SecretRefStale { ref_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +141,8 @@ pub struct PermissionedAction {
     pub action_digest: String,
     pub argument_digest: String,
     pub snapshot_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_safety_snapshot_ref: Option<PolicySafetySnapshotRef>,
     pub origin: PermissionedActionOrigin,
     pub permission_mode_snapshot: PermissionModeSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,8 +150,29 @@ pub struct PermissionedAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_snapshot: Option<IntentSnapshotRef>,
     pub redacted_arguments: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_ref_evidence: Vec<PermissionSecretRefEvidence>,
     pub normalization_state: ActionNormalizationState,
     pub normalization_errors: Vec<ActionNormalizationError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionSecretRefStatus {
+    Resolved,
+    Unresolved,
+    Missing,
+    Stale,
+    Unsupported,
+    Malformed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSecretRefEvidence {
+    pub secret_ref: SecretRef,
+    pub redaction_evidence: RedactionEvidence,
+    pub status: PermissionSecretRefStatus,
+    pub requested_consumer: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,8 +223,10 @@ fn normalize_tool_candidate(
     let input = sanitize_input(input);
     let mut normalization_errors = Vec::new();
     let redacted_arguments = checked_redacted_arguments(arguments, &mut normalization_errors);
+    let secret_ref_evidence =
+        secret_ref_evidence_from_arguments(arguments, tool_name, &mut normalization_errors);
     let argument_digest = digest_json(&redacted_arguments);
-    let mut capabilities = infer_capabilities(tool_name);
+    let mut capabilities = infer_capabilities(registry, tool_name);
     if capabilities.is_empty()
         && tool_name != "ask_user"
         && registry.get(tool_name).is_some_and(|tool| tool.read_only())
@@ -201,12 +236,13 @@ fn normalize_tool_candidate(
     capabilities.sort_by_key(|capability| capability_label(*capability));
     capabilities.dedup();
     let target_refs = target_refs_from_arguments(&redacted_arguments);
-    let action_digest = digest_json(&json!({
-        "tool_name": tool_name,
-        "argument_digest": argument_digest,
-        "target_refs": target_refs,
-        "capabilities": capabilities,
-    }));
+    let action_digest = digest_json(&action_digest_material(
+        tool_name,
+        &argument_digest,
+        &target_refs,
+        &capabilities,
+        &secret_ref_evidence,
+    ));
     let snapshot_digest = digest_json(&json!({
         "permission_mode_snapshot": &input.permission_mode_snapshot,
         "containment_snapshot": &input.containment_snapshot,
@@ -231,13 +267,27 @@ fn normalize_tool_candidate(
             tool_name: tool_name.to_owned(),
         });
     }
-    let normalization_state = normalization_state(&normalization_errors);
     let action_id = action_id(
         tool_name,
         provider_tool_call_id.as_deref(),
         &action_digest,
         &snapshot_digest,
     );
+    let policy_safety_snapshot_ref = match policy_safety_snapshot_ref(
+        &input,
+        &capabilities,
+        input.containment_snapshot.clone(),
+        &action_digest,
+    ) {
+        Ok(reference) => Some(reference),
+        Err(error) => {
+            normalization_errors.push(ActionNormalizationError::PolicySafetySnapshotInvalid {
+                detail: redact_string(&error.to_string()),
+            });
+            None
+        }
+    };
+    let normalization_state = normalization_state(&normalization_errors);
 
     PermissionedAction {
         action_id,
@@ -250,13 +300,164 @@ fn normalize_tool_candidate(
         action_digest,
         argument_digest,
         snapshot_digest,
+        policy_safety_snapshot_ref,
         origin: input.origin,
         permission_mode_snapshot: input.permission_mode_snapshot,
         containment_snapshot: input.containment_snapshot,
         intent_snapshot: input.intent_snapshot,
         redacted_arguments,
+        secret_ref_evidence,
         normalization_state,
         normalization_errors,
+    }
+}
+
+fn action_digest_material(
+    tool_name: &str,
+    argument_digest: &str,
+    target_refs: &[TargetRef],
+    capabilities: &[SafetyCapability],
+    secret_ref_evidence: &[PermissionSecretRefEvidence],
+) -> Value {
+    let mut material = Map::from_iter([
+        ("tool_name".to_owned(), json!(tool_name)),
+        ("argument_digest".to_owned(), json!(argument_digest)),
+        ("target_refs".to_owned(), json!(target_refs)),
+        ("capabilities".to_owned(), json!(capabilities)),
+    ]);
+    if !secret_ref_evidence.is_empty() {
+        material.insert(
+            "secret_ref_evidence".to_owned(),
+            secret_ref_correlation_material(secret_ref_evidence),
+        );
+    }
+    Value::Object(material)
+}
+
+fn secret_ref_evidence_from_arguments(
+    arguments: &Value,
+    tool_name: &str,
+    normalization_errors: &mut Vec<ActionNormalizationError>,
+) -> Vec<PermissionSecretRefEvidence> {
+    let Some(secret_refs_value) = arguments.get("secret_refs") else {
+        return Vec::new();
+    };
+    let Some(secret_refs) = secret_refs_value.as_array() else {
+        normalization_errors.push(ActionNormalizationError::SecretRefMalformed {
+            detail: "secret_refs must be an array".to_owned(),
+        });
+        return Vec::new();
+    };
+    secret_refs
+        .iter()
+        .filter_map(|value| match SecretRef::from_value(value.clone()) {
+            Ok(secret_ref) => {
+                let status = secret_ref_status(&secret_ref);
+                let safe_summary_digest = digest_json(
+                    &serde_json::to_value(&secret_ref.safe_summary)
+                        .unwrap_or_else(|_| json!({ "summary": REDACTED })),
+                );
+                let evidence_id = RedactionEvidenceRef::new(format!(
+                    "red_{}_{}",
+                    secret_ref.ref_id.as_str(),
+                    safe_summary_digest.chars().take(12).collect::<String>()
+                ));
+                Some(PermissionSecretRefEvidence {
+                    redaction_evidence: RedactionEvidence::for_secret_ref(
+                        evidence_id,
+                        secret_ref.ref_id.clone(),
+                        "permission_action",
+                        safe_summary_digest,
+                    ),
+                    secret_ref,
+                    status,
+                    requested_consumer: format!("tool:{tool_name}"),
+                })
+            }
+            Err(error) => {
+                normalization_errors.push(ActionNormalizationError::SecretRefMalformed {
+                    detail: redact_string(&error.to_string()),
+                });
+                None
+            }
+        })
+        .collect()
+}
+
+fn secret_ref_status(_secret_ref: &SecretRef) -> PermissionSecretRefStatus {
+    PermissionSecretRefStatus::Unresolved
+}
+
+pub(crate) fn secret_ref_correlation_material(evidence: &[PermissionSecretRefEvidence]) -> Value {
+    Value::Array(
+        evidence
+            .iter()
+            .map(|item| {
+                json!({
+                    "ref_id": item.secret_ref.ref_id.as_str(),
+                    "source_kind": item.secret_ref.source_kind,
+                    "locator_digest": item.secret_ref.locator_digest,
+                    "staleness_token": item.secret_ref.staleness_token,
+                    "safe_summary": item.secret_ref.safe_summary,
+                    "redaction_evidence": item.redaction_evidence,
+                    "status": item.status,
+                    "requested_consumer": item.requested_consumer,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn policy_safety_snapshot_ref(
+    input: &PermissionedActionInput,
+    capabilities: &[SafetyCapability],
+    containment: Option<ContainmentSnapshotRef>,
+    action_digest: &str,
+) -> Result<PolicySafetySnapshotRef, PolicySafetySnapshotError> {
+    let snapshot = PolicySafetySnapshot::create(PolicySafetySnapshotInput {
+        snapshot_id: format!("permissioned_action_{action_digest}"),
+        created_at_unix_ms: 0,
+        expires_at_unix_ms: None,
+        permission_mode: input.permission_mode_snapshot.clone(),
+        capability_ceiling: CapabilityCeilingRef {
+            capabilities: capabilities.to_vec(),
+        },
+        containment,
+        source_refs: vec![
+            PolicySafetySourceRef {
+                kind: PolicySafetySourceKind::RuntimePolicy,
+                ref_id: "permission_action_normalization".to_owned(),
+                digest: Some(action_digest.to_owned()),
+            },
+            PolicySafetySourceRef {
+                kind: PolicySafetySourceKind::PermissionConfig,
+                ref_id: input
+                    .permission_mode_snapshot
+                    .scope_ref
+                    .clone()
+                    .unwrap_or_else(|| "default_scope".to_owned()),
+                digest: input.permission_mode_snapshot.source.clone(),
+            },
+        ],
+        provenance_refs: vec![PolicySafetyProvenanceRef {
+            kind: PolicySafetyProvenanceKind::RuntimeEventRef,
+            ref_id: policy_safety_provenance_ref_id(input),
+            digest: Some(input.session_id.clone()),
+        }],
+        creation_reason: PolicySafetySnapshotCreationReason::PermissionedAction,
+    });
+    snapshot.map(|snapshot| snapshot.reference())
+}
+
+fn policy_safety_provenance_ref_id(input: &PermissionedActionInput) -> String {
+    match &input.origin {
+        PermissionedActionOrigin::ChannelInbound { channel, .. } => format!("channel:{channel}"),
+        PermissionedActionOrigin::UserTurn
+        | PermissionedActionOrigin::Subagent { .. }
+        | PermissionedActionOrigin::CronWake { .. }
+        | PermissionedActionOrigin::AppTask { .. }
+        | PermissionedActionOrigin::LocalApi { .. }
+        | PermissionedActionOrigin::DeferredBridge { .. } => input.turn_id.clone(),
     }
 }
 
@@ -371,7 +572,13 @@ fn action_id(
     format!("action_{}", digest.chars().take(32).collect::<String>())
 }
 
-fn infer_capabilities(tool_name: &str) -> Vec<SafetyCapability> {
+fn infer_capabilities(registry: &ToolRegistry, tool_name: &str) -> Vec<SafetyCapability> {
+    if registry
+        .get(tool_name)
+        .is_some_and(|tool| tool.process_adapter_kind().is_some())
+    {
+        return vec![SafetyCapability::ProcExec];
+    }
     match tool_name {
         "read_file" | "list_dir" | "glob" | "grep" | "notebook_read" => {
             vec![SafetyCapability::FsRead]

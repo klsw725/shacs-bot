@@ -1,9 +1,8 @@
 use serde_json::{json, Map, Value};
 use shacs_config::{RememberedPermissionEffect, RememberedPermissionMatcher};
 use shacs_core::runtime::{
-    session_approval_context_digest, AgentLoop, AgentLoopConfig, ContextBuilder, MessageBus,
-    PermissionMode, PermissionModeSnapshot, PermissionedActionInput, PermissionedActionOrigin,
-    RuntimeToolCall, SessionManager,
+    AgentLoop, AgentLoopConfig, ContextBuilder, MessageBus, PermissionMode, PermissionModeSnapshot,
+    PermissionedActionInput, PermissionedActionOrigin, RuntimeToolCall, SessionManager,
 };
 use shacs_core::tools::{JsonMap, SchemaFragment, Tool, ToolParameters, ToolRegistry, ToolResult};
 use shacs_providers::{
@@ -207,5 +206,5 @@ fn legacy_context_digest(session_key: &str) -> String {
             intent_snapshot: None,
         },
     );
-    session_approval_context_digest(&action)
+    shacs_core::runtime::session_remembered_context_digest(&action)
 }

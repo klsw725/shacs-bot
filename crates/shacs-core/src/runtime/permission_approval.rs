@@ -1,3 +1,7 @@
+use crate::runtime::{
+    permission_action::secret_ref_correlation_material, PermissionSecretRefEvidence,
+    PermissionSecretRefStatus, PolicySafetySnapshotRef,
+};
 use serde::{Deserialize, Serialize};
 use shacs_config::{RememberedPermissionEffect, RememberedPermissionMatcher};
 
@@ -10,6 +14,10 @@ pub struct ApprovalRequest {
     pub risk_summary: String,
     pub allowed_decisions: Vec<ApprovalDecisionKind>,
     pub expires_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_safety_snapshot_ref: Option<PolicySafetySnapshotRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_ref_evidence: Vec<PermissionSecretRefEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +30,10 @@ pub struct ApprovalDecision {
     pub actor: ApprovalActor,
     pub decided_at_unix_ms: u64,
     pub consumed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_safety_snapshot_ref: Option<PolicySafetySnapshotRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_ref_evidence: Vec<PermissionSecretRefEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +224,11 @@ pub enum ApprovalCorrelationError {
     InspectOnly,
     Denied,
     DecisionNotAllowed,
+    PolicySafetySnapshotMismatch,
+    PolicySafetySnapshotMalformed,
+    PolicySafetySnapshotStale,
+    SecretRefEvidenceMismatch,
+    SecretRefEvidenceStale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +271,26 @@ pub fn correlate_approval(
     if request.snapshot_digest != decision.snapshot_digest {
         return ApprovalCorrelation::rejected(ApprovalCorrelationError::SnapshotMismatch);
     }
+    if let Err(error) = correlate_policy_safety_snapshot_ref(
+        request.policy_safety_snapshot_ref.as_ref(),
+        decision.policy_safety_snapshot_ref.as_ref(),
+        now_unix_ms,
+    ) {
+        return ApprovalCorrelation::rejected(error);
+    }
+    if secret_ref_correlation_material(&request.secret_ref_evidence)
+        != secret_ref_correlation_material(&decision.secret_ref_evidence)
+    {
+        return ApprovalCorrelation::rejected(ApprovalCorrelationError::SecretRefEvidenceMismatch);
+    }
+    if request
+        .secret_ref_evidence
+        .iter()
+        .chain(decision.secret_ref_evidence.iter())
+        .any(|evidence| evidence.status == PermissionSecretRefStatus::Stale)
+    {
+        return ApprovalCorrelation::rejected(ApprovalCorrelationError::SecretRefEvidenceStale);
+    }
     if request.requested_scope != decision.approved_scope {
         return ApprovalCorrelation::rejected(ApprovalCorrelationError::ScopeMismatch);
     }
@@ -285,6 +322,46 @@ pub fn correlate_approval(
     }
 }
 
+pub fn correlate_policy_safety_snapshot_ref(
+    expected: Option<&PolicySafetySnapshotRef>,
+    actual: Option<&PolicySafetySnapshotRef>,
+    now_unix_ms: u64,
+) -> Result<(), ApprovalCorrelationError> {
+    validate_policy_safety_snapshot_ref(expected, now_unix_ms)?;
+    validate_policy_safety_snapshot_ref(actual, now_unix_ms)?;
+    match (expected, actual) {
+        (None, None) => Ok(()),
+        (Some(expected), Some(actual)) if expected == actual => Ok(()),
+        (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => {
+            Err(ApprovalCorrelationError::PolicySafetySnapshotMismatch)
+        }
+    }
+}
+
+fn validate_policy_safety_snapshot_ref(
+    reference: Option<&PolicySafetySnapshotRef>,
+    now_unix_ms: u64,
+) -> Result<(), ApprovalCorrelationError> {
+    let Some(reference) = reference else {
+        return Ok(());
+    };
+    if reference.snapshot_id.0.trim().is_empty()
+        || !is_sha256_hex(&reference.policy_safety_digest.0)
+    {
+        return Err(ApprovalCorrelationError::PolicySafetySnapshotMalformed);
+    }
+    if let Some(expires_at_unix_ms) = reference.expires_at_unix_ms {
+        if now_unix_ms > expires_at_unix_ms {
+            return Err(ApprovalCorrelationError::PolicySafetySnapshotStale);
+        }
+    }
+    Ok(())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +375,8 @@ mod tests {
             risk_summary: "Run tool `exec`".to_owned(),
             allowed_decisions,
             expires_at_unix_ms: 2_000,
+            policy_safety_snapshot_ref: None,
+            secret_ref_evidence: Vec::new(),
         }
     }
 
@@ -314,6 +393,8 @@ mod tests {
             actor: ApprovalActor::LocalUser,
             decided_at_unix_ms,
             consumed: false,
+            policy_safety_snapshot_ref: None,
+            secret_ref_evidence: Vec::new(),
         }
     }
 

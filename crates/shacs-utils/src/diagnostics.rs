@@ -1,3 +1,4 @@
+use crate::diagnostics_sanitizer::sanitize_diagnostics_value;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -216,7 +217,7 @@ impl DiagnosticsSnapshot {
 
     pub fn redacted_value(&self) -> Value {
         match serde_json::to_value(self) {
-            Ok(value) => redact_value(&value),
+            Ok(value) => redact_value(&sanitize_diagnostics_value(&value)),
             Err(error) => json!({
                 "generated_at_ms": current_time_ms(),
                 "runtime": { "status": "serialization_error" },
@@ -237,6 +238,20 @@ pub fn write_diagnostics_bundle(
     path: impl AsRef<Path>,
     snapshot: &DiagnosticsSnapshot,
 ) -> io::Result<DiagnosticsBundleOutcome> {
+    write_diagnostics_bundle_value(path, &snapshot.redacted_value())
+}
+
+pub fn write_redacted_diagnostics_bundle(
+    path: impl AsRef<Path>,
+    redacted_snapshot: &Value,
+) -> io::Result<DiagnosticsBundleOutcome> {
+    write_diagnostics_bundle_value(path, redacted_snapshot)
+}
+
+fn write_diagnostics_bundle_value(
+    path: impl AsRef<Path>,
+    redacted_snapshot: &Value,
+) -> io::Result<DiagnosticsBundleOutcome> {
     let path = path.as_ref();
     let manifest = DiagnosticsBundleManifest {
         generated_at_ms: current_time_ms(),
@@ -254,7 +269,7 @@ pub fn write_diagnostics_bundle(
     archive
         .start_file("snapshot.json", options)
         .map_err(zip_io_error)?;
-    archive.write_all(&serde_json::to_vec_pretty(&snapshot.redacted_value())?)?;
+    archive.write_all(&serde_json::to_vec_pretty(redacted_snapshot)?)?;
     archive.finish().map_err(zip_io_error)?;
     Ok(DiagnosticsBundleOutcome {
         path: path.to_path_buf(),
@@ -375,6 +390,63 @@ mod tests {
             .unwrap_or_else(|error| panic!("snapshot read failed: {error}"));
 
         assert!(!snapshot_json.contains("sk-secret"));
+        assert!(snapshot_json.contains(REDACTED));
+    }
+
+    #[test]
+    fn spec030_baseline_bundle_redacts_secret_shaped_fixture_markers() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "shacs-spec030-diagnostics-test-{}",
+            current_time_ms()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap_or(());
+        let path = temp_dir.join("bundle.zip");
+        let snapshot = DiagnosticsSnapshot {
+            generated_at_ms: 1,
+            runtime: json!({
+                "apiKey": "spec030-raw-token",
+                "env": {"TOKEN": "spec030-inline-token"},
+                "privateKey": "-----BEGIN PRIVATE KEY-----\nspec030-private\n-----END PRIVATE KEY-----"
+            }),
+            operational_logs: vec![OperationalLogRecord {
+                timestamp_ms: 1,
+                severity: DiagnosticsSeverity::Warning,
+                kind: DiagnosticsKind::Configuration,
+                message: "Authorization: Bearer spec030-raw-token".to_owned(),
+                correlation: DiagnosticsCorrelation::default(),
+                fields: json!({ "safe_locator": "env:SPEC030_API_TOKEN" }),
+            }],
+            traces: Vec::new(),
+            diagnostics: vec![DiagnosticsRecord::safe_rejected_payload(
+                "spec030 unsafe diagnostic payload rejected",
+            )],
+            crash_evidence: Vec::new(),
+            recovery_evidence: Vec::new(),
+            provider_progress: vec![json!({ "payload": { "token": "spec030-provider-token" } })],
+            tool_progress: Vec::new(),
+            subagent_progress: Vec::new(),
+        };
+
+        let outcome = write_diagnostics_bundle(&path, &snapshot).unwrap_or_else(|error| {
+            panic!("bundle should be written: {error}");
+        });
+        let file =
+            File::open(&outcome.path).unwrap_or_else(|error| panic!("bundle open failed: {error}"));
+        let mut archive = zip::ZipArchive::new(file)
+            .unwrap_or_else(|error| panic!("bundle read failed: {error}"));
+        let mut snapshot_json = String::new();
+        let mut file = archive
+            .by_name("snapshot.json")
+            .unwrap_or_else(|error| panic!("snapshot entry read failed: {error}"));
+        file.read_to_string(&mut snapshot_json)
+            .unwrap_or_else(|error| panic!("snapshot read failed: {error}"));
+
+        assert_eq!(outcome.manifest.files, ["manifest.json", "snapshot.json"]);
+        assert!(!snapshot_json.contains("spec030-raw-token"));
+        assert!(!snapshot_json.contains("spec030-inline-token"));
+        assert!(!snapshot_json.contains("spec030-private"));
+        assert!(!snapshot_json.contains("spec030-provider-token"));
+        assert!(snapshot_json.contains("env:SPEC030_API_TOKEN"));
         assert!(snapshot_json.contains(REDACTED));
     }
 }

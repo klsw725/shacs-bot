@@ -884,7 +884,6 @@ fn bridge_handoff_execution_context(context: &ToolExecutionContext) -> ToolExecu
                 summary_available: true,
             }),
         },
-        permission_ceiling_snapshot: None,
         permission_evaluator: None,
         permission_approval_cache: None,
         ..context.clone()

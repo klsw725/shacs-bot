@@ -1,3 +1,4 @@
+use crate::runtime::{ProcessAdapterKind, ProcessGateInput};
 use serde_json::{json, Map, Number, Value};
 
 pub type JsonMap = Map<String, Value>;
@@ -70,6 +71,17 @@ pub struct ToolDefinition {
     pub parameters: Value,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCallExecutionContext {
+    pub(crate) process_gate_input: Option<ProcessGateInput>,
+}
+
+impl ToolCallExecutionContext {
+    pub fn new(process_gate_input: Option<ProcessGateInput>) -> Self {
+        Self { process_gate_input }
+    }
+}
+
 impl ToolDefinition {
     pub fn to_openai_schema(&self) -> Value {
         json!({
@@ -102,7 +114,19 @@ pub trait Tool: Send + Sync {
         self.read_only() && !self.exclusive()
     }
 
+    fn process_adapter_kind(&self) -> Option<ProcessAdapterKind> {
+        None
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult;
+
+    fn execute_with_context(
+        &self,
+        params: JsonMap,
+        _context: &ToolCallExecutionContext,
+    ) -> ToolResult {
+        self.execute(params)
+    }
 
     fn cast_params(&self, params: JsonMap) -> JsonMap {
         let schema = self.parameters();

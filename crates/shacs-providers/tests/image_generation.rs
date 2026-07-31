@@ -505,6 +505,7 @@ fn image_generation_resolver_returns_selected_model() -> Result<(), Box<dyn Erro
         "openai".to_owned(),
         ProviderConfig {
             api_key: Some("sk-test".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     );
@@ -529,6 +530,7 @@ fn image_generation_resolver_returns_selected_openrouter_model() -> Result<(), B
         "openrouter".to_owned(),
         ProviderConfig {
             api_key: Some("sk-or-test".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     );
@@ -560,6 +562,7 @@ fn image_generation_resolver_maps_openrouter_openai_default_to_openrouter_defaul
         "openrouter".to_owned(),
         ProviderConfig {
             api_key: Some("sk-or-test".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     );
@@ -585,6 +588,7 @@ fn image_generation_auto_prefers_openai_when_openrouter_is_also_configured(
         "openrouter".to_owned(),
         ProviderConfig {
             api_key: Some("sk-or-test".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     );
@@ -592,6 +596,7 @@ fn image_generation_auto_prefers_openai_when_openrouter_is_also_configured(
         "openai".to_owned(),
         ProviderConfig {
             api_key: Some("sk-test".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     );
@@ -616,6 +621,7 @@ fn image_generation_auto_uses_openrouter_when_openai_is_unconfigured() -> Result
         "openrouter".to_owned(),
         ProviderConfig {
             api_key: Some("sk-or-test".to_owned()),
+            api_key_ref: None,
             ..ProviderConfig::default()
         },
     );
