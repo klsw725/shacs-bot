@@ -1,6 +1,6 @@
 # PRD 002. approval, progress, and recovery parity
 
-Status: Planned
+Status: Implemented, closure blocked
 
 ## Goal
 
@@ -83,7 +83,7 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-core --all-targ
 1. Lifecycle scenario matrix: `.omo/evidence/spec031/prd002/lifecycle-parity.json`.
 2. Approval lineage audit: `.omo/evidence/spec031/prd002/approval-lineage-audit.md`.
 3. Recovery marker/checkpoint audit: `.omo/evidence/spec031/prd002/recovery-projection-audit.md`.
-4. Surface transcripts and cleanup receipt under `.omo/evidence/spec031/prd002/qa/`.
+4. Surface transcripts and cleanup receipt: `.omo/evidence/spec031/prd002/qa/manual-cli-transcript.md` and `.omo/evidence/spec031/prd002/qa/cleanup-receipt.md`.
 
 ## Exit Criteria
 

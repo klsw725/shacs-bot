@@ -35,9 +35,12 @@ Config와 workspace template을 생성하거나 갱신합니다:
 ```sh
 shacs-bot onboard --workspace /tmp/ws
 shacs-bot --config /tmp/shacs-config.json onboard --workspace /tmp/ws
+shacs-bot --config /tmp/shacs-config.json onboard --wizard --workspace /tmp/ws
 ```
 
-`onboard`는 JSON config를 쓰고, runtime directory를 준비하며, `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `memory/MEMORY.md`, `memory/history.jsonl`, `skills/` 같은 workspace template 파일을 만듭니다. 또한 active built-in skill을 `builtin_skills/` 아래에 materialize하지만, reference-only deferred built-in skill은 복사하지 않습니다. 이미 존재하는 workspace 파일은 덮어쓰지 않습니다. `onboard --wizard`는 아직 보류된 기능입니다.
+`onboard`는 JSON config를 쓰고, runtime directory를 준비하며, `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `memory/MEMORY.md`, `memory/history.jsonl`, `skills/` 같은 workspace template 파일을 만듭니다. 또한 active built-in skill을 `builtin_skills/` 아래에 materialize하지만, reference-only deferred built-in skill은 복사하지 않습니다. 이미 존재하는 workspace 파일은 덮어쓰지 않습니다.
+
+`onboard --wizard`는 raw secret 값을 묻거나 저장하지 않는 secret-ref-only line-driven wizard입니다. 현재 명령은 `provider <provider-id> env <ENV_VAR>`, `finish`, `cancel`, `restart`, `help`입니다. `provider` 명령은 ASCII uppercase letter로 시작하고 1..64자 범위이며 uppercase/digit/underscore만 포함하고, semantic word를 나누는 non-edge underscore가 하나 이상 있는 environment variable reference만 받습니다. 반복 underscore, edge underscore, lowercase, URL/userinfo, assignment, JWT/base64-like token, long alphanumeric token, raw secret-like word는 거부되며 입력값을 stdout/stderr/error/marker에 echo하지 않습니다. 기존 provider `apiKey`/`api_key` 또는 `apiKeyRef`/`api_key_ref`가 있으면 덮어쓰지 않고 실패합니다. `finish` 전 EOF는 partial로 끝나며 typed resume marker에 provider/env ref 진행 상태만 저장합니다. 완료 출력은 Spec031 readiness projection과 Spec030/Spec035 owner/capability/state/reason 구조의 typed `missing_external_owner_evidence` fact를 함께 표시하며, 문서 상태를 읽어 readiness success를 추론하지 않습니다.
 
 Config 문자열 값은 load 시 `${ENV_NAME}` 형태의 environment variable reference를 해석합니다. 예를 들어 provider key는 config에 `"apiKey": "${OPENROUTER_API_KEY}"`로 남겨두고 실행 환경에서 값을 제공할 수 있으며, migration write-back은 실제 secret 값을 config 파일에 저장하지 않습니다. 참조한 environment variable이 없으면 config load가 실패합니다.
 
@@ -74,7 +77,7 @@ shacs-bot runtime inspect --workspace /tmp/ws
 shacs-bot runtime diagnostics --bundle /tmp/shacs-diagnostics.zip --workspace /tmp/ws
 ```
 
-`runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, stored-data migration plan 요약, ownership status, stop request marker, update marker, runtime capability 요약, durable diagnostics evidence 요약, channel restart hint projection, containment contained/backend/snapshot digest, session 개수와 최신 session metadata, workflow recipe discovery count를 보고합니다. Durable diagnostics evidence는 redacted trace/log 보조 자료이며 event truth, replay 입력, writable admission 기준이 아닙니다. Channel restart projection은 cursor ref, pending inbound/outbound safe ref count, delivery status count만 표시하며 raw content나 session truth를 출력하지 않습니다. `runtime diagnostics` bundle에는 containment summary/digest와 durable diagnostics evidence가 redacted diagnostics field로 포함됩니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고되며, sandboxed라고 주장하지 않습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
+`runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, stored-data migration plan 요약, ownership status, stop request marker, update marker, runtime capability 요약, durable diagnostics evidence 요약, channel restart hint projection, containment contained/backend/snapshot digest, session 개수와 최신 session metadata, workflow recipe discovery count를 보고합니다. Durable diagnostics evidence는 redacted trace/log 보조 자료이며 event truth, replay 입력, writable admission 기준이 아닙니다. Channel restart projection은 cursor ref, pending inbound/outbound safe ref count, delivery status count만 표시하며 raw content나 session truth를 출력하지 않습니다. `runtime diagnostics` bundle에는 containment summary/digest와 durable diagnostics evidence가 redacted diagnostics field로 포함됩니다. 같은 readiness projection은 local API의 `GET /v1/readiness`와 `GET /v1/diagnostics`에서도 확인할 수 있습니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고되며, sandboxed라고 주장하지 않습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
 
 Workspace context file과 inline `@` reference가 어떻게 해석되는지 dry-run으로 확인합니다:
 
@@ -281,6 +284,19 @@ shacs-bot agent --message "hello" --session work --workspace /tmp/ws
 
 `ask`와 `agent -m/--message`는 같은 direct execution path를 사용합니다. Config를 로드하고, 설정된 provider/model을 resolve하고, `AgentLoop`를 만든 뒤 user turn 하나를 실행하고 assistant text를 stdout에 출력합니다.
 
+Message 없이 `shacs-bot agent`를 실행하면 같은 config/session boundary를 사용하는 interactive REPL이 시작됩니다. 일반 입력은 기존 `AgentLoop` session turn 경계로 실행되고, active turn 중 들어온 일반 입력이나 non-priority slash command는 current session의 pending follow-up으로 직렬화됩니다. `/status`, `/stop`, `/restart`는 command router의 priority decision을 그대로 사용하므로 active turn 중에도 먼저 처리됩니다. EOF는 active turn이 없으면 종료하고, active turn이 있으면 `/stop`을 요청한 뒤 종료합니다. Ctrl-C는 active turn에 `/stop`을 요청하고, 반복 Ctrl-C는 deterministic exit 경로로 들어갑니다. 출력은 canonical projection vocabulary로 요약되며 raw session id, raw provider payload, raw tool payload를 출력하지 않습니다.
+
+TUI는 별도 binary입니다. `--once`는 live projection을 한 번 읽어 plain text로 출력하고, interactive mode는 session selection, pending approval action, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 session store와 표시할 session이 먼저 필요하므로, workspace template을 준비하고 session을 만든 뒤 실행합니다:
+
+```sh
+shacs-bot onboard --workspace /tmp/ws
+shacs-bot session create --session cli:direct --workspace /tmp/ws
+shacs-tui --workspace /tmp/ws --session cli:direct --once
+shacs-tui --workspace /tmp/ws --session cli:direct
+```
+
+Approval action은 durable request가 기록되면 `Requested`로 남고, owner terminal event가 관찰되기 전에는 완료로 표시되지 않습니다. TUI와 REPL은 raw provider payload, raw tool payload, raw owner id를 표시하지 않습니다.
+
 복잡도가 높거나 병렬 검증, 큰 context 분할이 필요한 요청은 runtime이 deterministic read-only workflow admission을 통해 dynamic workflow로 실행할 수 있습니다. 명시적으로 제공된 typed write-capable workflow plan은 별도 승인과 isolated git worktree 정책을 통과해야 실행됩니다. Workflow는 typed harness plan, child/verifier execution, budget/checkpoint, verifier gate, and sanitized runtime metadata를 남깁니다. Write-capable workflow child는 승인된 isolated git worktree에서만 실행되고 parent checkout에는 자동 merge하지 않습니다. 결과에는 diff evidence와 parent-review merge handoff가 남으며, 사용자가 검토 후 별도로 적용해야 합니다. `/stop` 또는 runtime stop이 관찰되면 workflow parent cancellation token이 child/verifier execution까지 전달되고, cancelled workflow는 success로 표시되지 않습니다.
 
 Workflow 상태는 raw prompt나 secret 없이 session inspect/diagnostics, local API session detail/diagnostics, channel runtime projection, and TUI projection consumer에서 같은 bounded vocabulary로 표시됩니다. CLI에서는 session 명령의 metadata/runtime workflow section에서 workflow id, state, progress count, verifier status, blocked reason, resume availability를 확인할 수 있습니다. API는 `/v1/sessions/{session}`와 `/v1/sessions/{session}/diagnostics`에 sanitized `runtime_workflow` field를 포함합니다.
@@ -316,7 +332,7 @@ Command router는 priority, exact, prefix 경계를 분리합니다. `/status`, 
 - `--allow-side-effects`: 이 로컬 CLI turn에서 write/edit/exec tool을 명시적으로 허용합니다.
 - `--markdown` / `--no-markdown`: nanobot CLI 호환을 위해 받지만, 현재 Rust binary는 plain stdout text를 출력합니다.
 
-Message 없이 `shacs-bot agent`만 실행해도 아직 interactive REPL은 시작하지 않습니다. Interactive loop는 이후 runtime/channel slice로 남아 있습니다.
+Message가 `-`로 시작하는 `agent` direct message는 `--message`/`-m`로 전달하세요. `agent hello` 같은 positional direct message는 REPL 경로와 구분하기 위해 거절됩니다.
 
 ## Codex provider 인증
 
@@ -406,6 +422,7 @@ shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 구현된 endpoint:
 
 - `GET /health`
+- `GET /v1/readiness`
 - `GET /v1/models`
 - `GET /v1/diagnostics`
 - `GET /v1/permissions`
@@ -419,7 +436,7 @@ shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 
 `POST /v1/chat/completions`는 단일 user message, optional `session_id`, optional `temperature`, optional `max_tokens`, JSON text 또는 data-URL image content part, multipart upload, non-stream response, `stream=true` Server-Sent Events를 받습니다. Remote image URL은 거부합니다. Data URL과 uploaded file은 runtime media directory의 `attachments/api/` subtree 아래에 저장되며, 파일당 10 MiB 제한이 있습니다. 저장된 attachment는 provider/model이 native image input을 지원한다고 확인되는 경우 image block으로 라우팅되고, text/PDF/Office 계열은 가능한 경우 text note와 추출 텍스트로 라우팅됩니다. Provider나 model이 image input을 지원하지 않는 경우 image attachment는 raw 경로를 노출하지 않는 unsupported note로 전달됩니다. Audio attachment는 지원되는 analyzer가 runtime에 주입된 경우 bounded transcript 또는 summary text artifact로 라우팅되고, analyzer가 없거나 지원되지 않으면 내용을 들은 것처럼 처리하지 않고 unsupported 또는 extraction_failed note로 남습니다. Video attachment도 같은 capability-based 방식입니다. Runtime에 video analyzer가 주입된 경우에만 byte/duration cap 이후 bounded metadata, subtitle excerpt, scene/keyframe summary, PRD 003 audio analyzer를 재사용한 audio-track transcript/summary 후보를 만들고, analyzer가 없으면 deferred가 아니라 `video analyzer is not configured` unsupported note로 남깁니다. 기본 ffmpeg, built-in codec parser, native outbound video delivery는 제공하지 않습니다.
 
-`GET /v1/diagnostics`는 redacted runtime diagnostics snapshot과 supervision projection을 반환합니다. `GET /v1/permissions`는 CLI `permissions list`와 같은 remembered permission projection을 반환하고 mutation method는 거부합니다. `GET /v1/workflows/recipes`는 CLI `skills recipes`와 같은 `024WorkflowRecipeProjection.v1` read-only projection을 반환합니다. `/v1/sessions` family는 configured workspace의 session list, detail, filtered message history, diagnostics를 raw session file이나 provider payload 없이 조회하는 read-only local-owner surface입니다. Filtered history는 user/assistant의 `role`/`content`만 반환하고 provider hidden reasoning, tool call arguments, tool result payload는 반환하지 않습니다. 그래도 user/assistant message content 자체는 포함될 수 있으므로 non-loopback/remote bind는 reverse proxy/auth 같은 별도 보호 없이는 권장하지 않으며, 로컬 API bind 범위와 로그 보관 정책을 그에 맞게 다루세요. `/ws`는 JSON `message` frame을 local `AgentLoop`로 전달하고 `delta`, `stream_end`, final `message`, attach/ready/error event를 반환하는 WebSocket bridge입니다.
+`GET /v1/readiness`는 Spec031 readiness projection을 반환합니다. `GET /v1/diagnostics`는 redacted runtime diagnostics snapshot과 supervision projection을 반환합니다. `GET /v1/permissions`는 CLI `permissions list`와 같은 remembered permission projection을 반환하고 mutation method는 거부합니다. `GET /v1/workflows/recipes`는 CLI `skills recipes`와 같은 `024WorkflowRecipeProjection.v1` read-only projection을 반환합니다. `/v1/sessions` family는 configured workspace의 session list, detail, filtered message history, diagnostics를 raw session file이나 provider payload 없이 조회하는 read-only local-owner surface입니다. Filtered history는 user/assistant의 `role`/`content`만 반환하고 provider hidden reasoning, tool call arguments, tool result payload는 반환하지 않습니다. 그래도 user/assistant message content 자체는 포함될 수 있으므로 non-loopback/remote bind는 reverse proxy/auth 같은 별도 보호 없이는 권장하지 않으며, 로컬 API bind 범위와 로그 보관 정책을 그에 맞게 다루세요. `/ws`는 JSON `message` frame을 local `AgentLoop`로 전달하고 `delta`, `stream_end`, final `message`, attach/ready/error event를 반환하는 WebSocket bridge입니다. Server-Sent Events의 final delivery는 remote ACK/read receipt가 아니라 local stream state이며, current projection에서 pending 또는 unknown으로 남을 수 있습니다.
 
 같은 session key의 API request는 CLI/channel runtime과 같은 process-local `SessionTurnLock`으로 직렬화됩니다. `--timeout`은 HTTP wait timeout을 제어합니다. Timeout response가 반환되어도 in-flight turn은 blocking `AgentLoop` 작업이 끝날 때까지 해당 session lock을 계속 소유합니다.
 
@@ -432,7 +449,7 @@ shacs-bot channels list
 shacs-bot channels status --workspace /tmp/ws
 ```
 
-`channels list`는 built-in channel descriptor, config-enabled 상태, capability, worker boundary 개수를 보여줍니다. `channels status`는 configured channel plugin과 `channels.sendMemoryHints`, send retry count 같은 runtime default, channel restart hint projection, redacted supervision projection을 요약합니다. Delivery projection status는 `pending`, `sent_hint`, `failed_hint`, `unknown`, `dedupe_candidate`이며 session truth나 exactly-once delivery를 의미하지 않습니다. `sendMaxRetries`는 `ChannelManager`가 channel adapter로 메시지를 넘기는 dispatch/enqueue와 실제 transport send의 총 시도 횟수이며, 값은 최소 1회, 최대 10회로 제한됩니다. 이 명령들은 read-only diagnostics입니다. Runnable channel worker를 시작하려면 `run`을 사용하세요.
+`channels list`는 built-in channel descriptor, config-enabled 상태, capability, worker boundary 개수를 보여줍니다. `channels status`는 configured channel plugin과 `channels.sendMemoryHints`, send retry count 같은 runtime default, channel restart hint projection, redacted supervision projection을 요약합니다. Delivery projection status는 `pending`, `sent_hint`, `failed_hint`, `unknown`, `dedupe_candidate`이며 session truth, remote ACK/read receipt, replay 방지, exactly-once delivery를 의미하지 않습니다. `sendMaxRetries`는 `ChannelManager`가 channel adapter로 메시지를 넘기는 dispatch/enqueue와 실제 transport send의 총 시도 횟수이며, 값은 최소 1회, 최대 10회로 제한됩니다. 이 명령들은 read-only diagnostics입니다. Runnable channel worker를 시작하려면 `run`을 사용하세요.
 
 선택된 channel runtime을 시작합니다:
 
@@ -453,7 +470,23 @@ shacs-bot run --websocket-host 127.0.0.1 --websocket-port 8765 --workspace /tmp/
 - `channels.email`: `enabled`, `consentGranted: true`, inbound 허용 목록 `allowFrom`/`allowedSenders`가 필요합니다. `channels.email.smtp`: `host`/`smtpHost`, `port`, `from`/`fromAddress`, optional `username`/`smtpUsername`, `password`/`smtpPassword`, `security`, `timeoutSeconds`; `channels.email.imap`: `host`/`imapHost`, `port`, `username`/`imapUsername`, `password`/`imapPassword`, optional `mailbox`, `markSeen`(기본 true), `pollIntervalSeconds`, `timeoutSeconds`, `security`. 현재 IMAP polling은 TLS(`security: "tls"`)만 시작하며, inbound Email은 `Authentication-Results` header의 `spf=pass`/`dkim=pass`를 기본 확인합니다(`verifySpf`/`verifyDkim`로 비활성화 가능).
 - `channels.whatsapp`: `enabled`, `bridgeUrl`(WebSocket URL; 기존 `http://`/`https://` 값은 같은 host/path의 `ws://`/`wss://`로 호환 변환), optional `bridgeToken`, `groupPolicy`, `allowlist.allowedSenders`.
 
-외부 transport는 의도적으로 최소 adapter입니다. Telegram은 long polling, Discord는 Gateway worker(필요 시 configured channel REST polling mode), Slack은 Socket Mode inbound와 Web API outbound, Email은 SMTP/IMAP, WhatsApp은 로컬 bridge WebSocket과 통신합니다. 외부 transport inbound는 remote ACK/cursor 갱신 전에 durable work queue에 저장되고, outbound는 runtime `MessageBus`와 `ChannelManager` dispatch 경계를 통과합니다. Worker lifecycle은 channel adapter의 `start`/`stop`이 관리합니다. 외부 agent processor는 같은 session key의 turn을 동시에 실행하지 않고, durable queue에서 dispatch된 같은-session follow-up을 process-local coordinator에 보관한 뒤 현재 turn이 끝나면 이어 처리합니다. Coordinator 자체는 process-local이지만 아직 dispatch되지 않은 durable work와 retry/cancellation request는 restart 후 복원됩니다. 서로 다른 session은 transport processor 안에서 병렬 turn으로 처리될 수 있습니다. Telegram/Discord/Slack은 provider text delta를 채널에 보내지 않고 최종 assistant answer만 새 message로 전송하며 기존 message를 edit/update하지 않습니다. Platform message 길이 제한에 가까워지면 문단/줄/공백 경계에서 후속 message로 나눠 전송합니다. Background subagent가 시작되면 같은 channel/thread에 시작 알림을 보내고, Discord는 agent turn이 실행되는 동안 그리고 그 turn이 시작한 background subagent가 같은 session에서 계속 실행되는 동안 같은 channel/thread에 typing indicator를 best-effort로 반복 전송합니다. Slack Web API outbound에는 bot typing indicator 전송 API가 없어 fake “typing...” 메시지는 보내지 않습니다. Email/WhatsApp은 final-only transport로 유지됩니다. Telegram topic, Slack thread, Discord thread, Email subject/reply context는 outbound reply metadata로 이어집니다. 모두 로컬 `AgentLoop`와 같은 personal-use `shacs-bot run` process 안에서 실행됩니다. Telegram offset, Discord REST last message id, Discord Gateway resume state, Email IMAP seen UID + UIDVALIDITY hint, 실제 remote send를 시도한 outbound delivery의 pending/sent/failed status는 runtime metadata JSON에 best-effort로 저장됩니다. Provider stream marker는 external final-only transport에서 실제 send가 아니므로 delivery hint로 기록하지 않습니다. 이 metadata는 duplicate/replay를 줄이기 위한 cursor/dedupe/diagnostic hint이며 durable queue truth나 transaction, exactly-once delivery 보장이 아닙니다. ACK 전후 crash timing에서는 conservative replay 때문에 중복 전달이 발생할 수 있습니다.
+외부 transport는 의도적으로 최소 adapter입니다. Telegram은 long polling, Discord는 Gateway worker(필요 시 configured channel REST polling mode), Slack은 Socket Mode inbound와 Web API outbound, Email은 SMTP/IMAP, WhatsApp은 로컬 bridge WebSocket과 통신합니다. 외부 transport inbound는 remote ACK/cursor 갱신 전에 durable work queue에 저장되고, outbound는 runtime `MessageBus`와 `ChannelManager` dispatch 경계를 통과합니다. Worker lifecycle은 channel adapter의 `start`/`stop`이 관리합니다. 외부 agent processor는 같은 session key의 turn을 동시에 실행하지 않고, durable queue에서 dispatch된 같은-session follow-up을 process-local coordinator에 보관한 뒤 현재 turn이 끝나면 이어 처리합니다. Coordinator 자체는 process-local이지만 아직 dispatch되지 않은 durable work와 retry/cancellation request는 restart 후 복원됩니다. 서로 다른 session은 transport processor 안에서 병렬 turn으로 처리될 수 있습니다. Telegram/Discord/Slack은 provider text delta를 채널에 보내지 않고 최종 assistant answer만 새 message로 전송하며 기존 message를 edit/update하지 않습니다. Platform message 길이 제한에 가까워지면 문단/줄/공백 경계에서 후속 message로 나눠 전송합니다. Background subagent가 시작되면 같은 channel/thread에 시작 알림을 보내고, Discord는 agent turn이 실행되는 동안 그리고 그 turn이 시작한 background subagent가 같은 session에서 계속 실행되는 동안 같은 channel/thread에 typing indicator를 best-effort로 반복 전송합니다. Slack Web API outbound에는 bot typing indicator 전송 API가 없어 fake “typing...” 메시지는 보내지 않습니다. Email/WhatsApp은 final-only transport로 유지됩니다. Telegram topic, Slack thread, Discord thread, Email subject/reply context는 outbound reply metadata로 이어집니다. 모두 로컬 `AgentLoop`와 같은 personal-use `shacs-bot run` process 안에서 실행됩니다. Telegram offset, Discord REST last message id, Discord Gateway resume state, Email IMAP seen UID + UIDVALIDITY hint, 실제 remote send를 시도한 outbound delivery의 pending/sent/failed status는 runtime metadata JSON에 best-effort로 저장됩니다. Provider stream marker는 external final-only transport에서 실제 send가 아니므로 delivery hint로 기록하지 않습니다. 이 metadata는 duplicate/replay를 줄이기 위한 cursor/dedupe/diagnostic hint이며 durable queue truth, transaction, remote ACK/read receipt, replay 방지, exactly-once delivery 보장이 아닙니다. ACK 전후 crash timing에서는 conservative replay 때문에 중복 전달이 발생할 수 있습니다.
+
+## Spec031 release evidence
+
+Spec031 release runner는 현재 `shacs-projection` package의 binary로 제공됩니다. Current worktree closure run은 repository 상태와 외부 owner audit를 함께 검사하고, machine-readable `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`, human-readable `summary.md`를 evidence root에 씁니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root . --mode current-worktree
+```
+
+현재 판정에서는 56 coverage row와 Spec031-owned command/artifact row가 매핑되어 있지만 Specs030/032/033/034/035 external read audit가 blocked라서 runner는 nonzero로 끝납니다. Current dirty state가 있으면 `triage/dirty-worktree.json`도 기록되지만 `BlockedExternalEvidence`를 가리지 않습니다. Spec029 audit만 현재 PASS입니다.
+
+Runner 자체의 passing fixture는 아래처럼 실행할 수 있습니다. 이 fixture는 artifact writer와 validator의 success path를 확인할 뿐, 현재 checkout의 Spec031 closure를 뜻하지 않습니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root . --mode success-fixture
+```
 
 ## Docker Compose
 
@@ -502,4 +535,4 @@ Provider secret은 로컬 config/environment workflow로 제공하세요. Image 
 
 ## 아직 남은 명령 범위
 
-`plugins`와 `hooks`는 위의 plugin/hook 섹션에 설명된 관리 명령으로 구현되어 있습니다. Inspect/doctor 계열은 실행하지 않고, agent turn에서의 live hook 소비는 `tool:before` block-only 경계로 제한됩니다. Plugin command는 standalone dispatcher 경계에서만 실행되며 running session store를 직접 mutate하지 않습니다. TUI command와 shared projection 확장은 `031-ui-projection-diagnostics-and-release-evidence-parity`의 open 범위입니다. Local owner lease와 gateway supervision의 current scoped boundary는 `029-durable-runtime-recovery-and-data-migration`에서 완료됐으며, 자동 process reexec나 worker restart/backoff를 의미하지 않습니다. 구현된 Codex login 외 provider OAuth는 현재 지원 provider/auth 범위 밖의 비목표이며, ClawHub search/install/update도 remote marketplace 비목표로 닫았습니다. 위에서 구현된 것으로 명시하지 않은 command는 사용할 수 있는 기능으로 취급하지 마세요.
+`plugins`와 `hooks`는 위의 plugin/hook 섹션에 설명된 관리 명령으로 구현되어 있습니다. Inspect/doctor 계열은 실행하지 않고, agent turn에서의 live hook 소비는 `tool:before` block-only 경계로 제한됩니다. Plugin command는 standalone dispatcher 경계에서만 실행되며 running session store를 직접 mutate하지 않습니다. TUI, REPL, onboard wizard, shared projection, readiness, delivery hint, release runner surface는 Spec031 구현 증거가 있습니다. Spec031 문서 상태는 외부 owner evidence가 모두 통과할 때까지 Open으로 남습니다. Local owner lease와 gateway supervision의 current scoped boundary는 `029-durable-runtime-recovery-and-data-migration`에서 완료됐으며, 자동 process reexec나 worker restart/backoff를 의미하지 않습니다. 구현된 Codex login 외 provider OAuth는 현재 지원 provider/auth 범위 밖의 비목표이며, ClawHub search/install/update도 remote marketplace 비목표로 닫았습니다. 위에서 구현된 것으로 명시하지 않은 command는 사용할 수 있는 기능으로 취급하지 마세요.

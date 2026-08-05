@@ -1,6 +1,6 @@
 # PRD 004. context, extension, app, and media projection
 
-Status: Planned
+Status: Implemented, closure blocked
 
 ## Goal
 
@@ -83,9 +83,9 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-core --all-targ
 
 1. Capability/reason matrix: `.omo/evidence/spec031/prd004/capability-reason-matrix.json`.
 2. Cross-surface parity artifact: `.omo/evidence/spec031/prd004/projection-parity.json`.
-3. External owner read audits: `.omo/evidence/spec031/prd004/external/`.
+3. External owner read audits: `.omo/evidence/spec031/prd004/external/spec032-read-audit.json` and `.omo/evidence/spec031/prd004/external/spec034-read-audit.json`.
 4. Redaction and mixed-batch audit: `.omo/evidence/spec031/prd004/redaction-audit.md`.
-5. QA transcripts and cleanup receipts under `.omo/evidence/spec031/prd004/qa/`.
+5. QA transcripts and cleanup receipts: `.omo/evidence/spec031/prd004/qa/todo13-extension-cli-read-only-qa.json` and `.omo/evidence/spec031/prd004/qa/context-driver-cleanup.json`.
 
 ## Exit Criteria
 

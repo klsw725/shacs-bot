@@ -1,10 +1,10 @@
 # PRD 007. release runner and Spec 031 closure
 
-Status: Planned
+Status: Implemented, closure blocked
 
 ## Goal
 
-This PRD is the sole sequential integration and final closure gate for Spec 031. It orders PRDs 000 through 006 and defines the release runner, coverage matrix, lifecycle and projection parity smoke, failure triage, external-owner evidence, and exact conditions for changing Spec 031 from `Open` to `Complete (Scoped)`.
+This PRD is the sole sequential integration and final closure gate for Spec 031. It orders PRDs 000 through 006 and defines the release runner, coverage matrix, lifecycle and projection parity smoke, failure triage, external-owner evidence, and exact conditions for closing Spec 031.
 
 This PRD defines no new domain state, projection vocabulary, interactive behavior, delivery guarantee, or external-owner evidence.
 
@@ -22,7 +22,7 @@ This PRD defines no new domain state, projection vocabulary, interactive behavio
 1. No Rust implementation is owned by this PRD except the release runner shell and artifact assembly defined here.
 2. No partial closure, manual approval, prose-only, grep-only, screenshot-only, or cargo-test-only proof is accepted.
 3. Missing required owner evidence from Specs 029, 030, 032, 033, 034, or 035 remains a hard closure blocker for the capabilities that consume it.
-4. This authoring task keeps all PRDs `Status: Planned` and parent Spec 031 `Status: Open`.
+4. This status task keeps all PRDs implemented but closure blocked and keeps parent Spec 031 `Status: Open`.
 
 ## Dependency DAG
 
@@ -154,14 +154,25 @@ Shared acceptance rows name one primary contract owner and, where necessary, one
 
 | External owner | Must prove | Required local read audit |
 |---|---|---|
-| Spec 029 | recovery, queue, reconnect, channel delivery facts consumed without reinterpretation | `.omo/evidence/spec031/final/external/spec029-read-audit.md` |
-| Spec 030 | approval/policy/redaction/containment evidence remains authoritative and redacted | `.omo/evidence/spec031/final/external/spec030-read-audit.md` |
-| Spec 032 | app lifecycle/readiness/receipt facts exist for app projection | `.omo/evidence/spec031/final/external/spec032-read-audit.md` |
-| Spec 033 | automation/event/coverage facts exist where release or drop projection consumes them | `.omo/evidence/spec031/final/external/spec033-read-audit.md` |
-| Spec 034 | media/analyzer facts exist for media projection | `.omo/evidence/spec031/final/external/spec034-read-audit.md` |
-| Spec 035 | config/profile/secret-ref consumption facts exist for onboard projection without moving schema, migration, or persistence ownership into 031 | `.omo/evidence/spec031/final/external/spec035-read-audit.md` |
+| Spec 029 | recovery, queue, reconnect, channel delivery facts consumed without reinterpretation | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md` |
+| Spec 030 | approval/policy/redaction/containment evidence remains authoritative and redacted | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md` |
+| Spec 032 | app lifecycle/readiness/receipt facts exist for app projection | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` |
+| Spec 033 | automation/event/coverage facts exist where release or drop projection consumes them | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` |
+| Spec 034 | media/analyzer facts exist for media projection | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` |
+| Spec 035 | config/profile/secret-ref consumption facts exist for onboard projection without moving schema, migration, or persistence ownership into 031 | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` |
 
 A blocked external locator is useful implementation evidence but is not final `PASS`. Each passing locator records the source spec status observed by `Read`, exact owner-fact artifact paths, command transcripts where applicable, and an artifact-backed audit. It does not require the external spec itself to be closed.
+
+Current machine verdict indexed by `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/manifest.json`:
+
+| External owner | Current verdict | Current locator | Current blocker |
+|---|---|---|---|
+| Spec 029 | PASS | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md` | None. |
+| Spec 030 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md` | Spec030 remains `Status: Open`; final closure evidence is absent. |
+| Spec 032 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` | Spec032 remains `Status: Open`; closure facts are absent. |
+| Spec 033 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` | Spec033 remains `Status: Open`; closure facts are absent. |
+| Spec 034 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` | Spec034 remains `Status: Open`; closure facts are absent. |
+| Spec 035 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` | Spec035 remains `Status: Open`; closure facts are absent. |
 
 ## Release Runner Contract
 
@@ -174,6 +185,15 @@ One repository-owned command or script must:
 5. Return non-zero when any required gate, artifact, cleanup receipt, or external evidence is missing.
 6. Remain independent of a specific CI vendor.
 7. Record `package`, `filter`, `tests_run`, and `tests_failed` for every focused Cargo test gate; a required gate with `tests_run == 0` fails even when Cargo exits zero.
+
+Current command examples:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root . --mode current-worktree
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root . --mode success-fixture
+```
+
+`current-worktree` is the closure run shape. It returns nonzero while any required external owner audit is blocked, and it records dirty worktree state as separate triage when present. `success-fixture` proves the runner can assemble and validate a passing isolated fixture; it is not a Spec031 closure run.
 
 ## Cargo Gates
 
@@ -223,7 +243,7 @@ Before closure, verify:
 
 ## Final Closure Condition
 
-Spec 031 may change to `Status: Complete (Scoped)` and `docs/specs/README.md` may remove it from the open owner set only when:
+Spec 031 may leave `Status: Open` and `docs/specs/README.md` may remove it from the open owner set only when:
 
 1. PRDs 000 through 006 have passing focused gates, real-surface QA, artifacts, and cleanup receipts.
 2. All external read audits required by implemented capabilities have local `PASS` and no blocked owner remains.
@@ -236,6 +256,8 @@ Spec 031 may change to `Status: Complete (Scoped)` and `docs/specs/README.md` ma
 
 If any item is missing, Spec 031 remains `Status: Open`.
 
+Current result: the runner produced 56 coverage rows and all current Spec031-owned command/artifact rows are mapped. Spec029 external audit passes at `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md`. Specs030, 032, 033, 034, and 035 remain blocked at `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md`, `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md`, `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md`, `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md`, and `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md`, and `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/summary.md` reports `status: BLOCKED`. Therefore Spec031 remains `Status: Open`.
+
 ## Authoring Verification
 
-This PRD set authoring task changes documentation only, runs no Cargo implementation gates, keeps every PRD `Planned`, and keeps the parent spec `Open`.
+Todo22 changes documentation and status text only. It preserves implemented-but-closure-blocked PRD statuses and keeps the parent spec `Open` until the current-worktree release runner returns zero with every required external audit passing.

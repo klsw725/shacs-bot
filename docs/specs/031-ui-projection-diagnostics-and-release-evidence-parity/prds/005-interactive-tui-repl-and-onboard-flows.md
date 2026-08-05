@@ -1,10 +1,10 @@
 # PRD 005. interactive TUI, REPL, and onboard flows
 
-Status: Planned
+Status: Implemented, closure blocked
 
 ## Goal
 
-현재 partial TUI와 deferred REPL/onboard wizard를 실제 runtime projection과 shared command contract를 소비하는 interactive surface로 완성한다. Mock-only 화면이나 surface별 command semantics는 완료 증거가 될 수 없다.
+TUI, REPL, and onboard wizard surfaces consume actual runtime projection and the shared command contract. Mock-only 화면이나 surface별 command semantics는 closure 증거가 될 수 없다.
 
 ## Scope
 
@@ -33,6 +33,7 @@ Status: Planned
 1. TUI and REPL consume PRD 000 projection and existing shared command semantics.
 2. Onboard consumes Spec 030 secret-ref/redaction facts and Spec 035 config/profile/secret-ref consumption facts; it does not define config schema or migration, become a secret store, or become an app/plugin lifecycle owner.
 3. Recorded release fixtures may drive deterministic tests, but final QA must also consume a live runtime projection source.
+4. `runtime.surface_approval` is only the Spec031 surface IPC transport for TUI/REPL approval button decisions. Its durable work terminal means the runtime owner applied, rejected, superseded, or failed that transport request; it is not permission allow/deny truth. Approval truth remains the `AgentLoop`/session owner facts for the approval lineage. The request `target_owner_id` is an internal owner-generation fence and must not be displayed or documented as a user-facing owner identity.
 
 ## Required Interactive Flows
 
@@ -87,9 +88,9 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-cli --all-targe
 
 ## Closure Evidence
 
-1. TUI flow transcript and projection comparison: `.omo/evidence/spec031/prd005/tui/`.
+1. TUI flow transcript and projection comparison index: `.omo/evidence/spec031/prd005/tui/phase2/current/index.md`.
 2. REPL command parity matrix: `.omo/evidence/spec031/prd005/repl/command-parity.json`.
-3. Onboard config diff and secret audit: `.omo/evidence/spec031/prd005/onboard/`.
+3. Onboard config diff and secret audit manifest: `.omo/evidence/spec031/prd005/onboard/manifest.json`.
 4. Live-versus-recorded source audit: `.omo/evidence/spec031/prd005/runtime-source-audit.md`.
 
 ## Exit Criteria

@@ -1,6 +1,6 @@
 # PRD 001. surface adapter parity for CLI, API, WebSocket, and channels
 
-Status: Planned
+Status: Implemented, closure blocked
 
 ## Goal
 
@@ -79,10 +79,10 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-cli --all-targe
 
 ## Closure Evidence
 
-1. Cross-surface fixture registry: `.omo/evidence/spec031/prd001/fixture-registry.json`.
-2. Canonical field comparison: `.omo/evidence/spec031/prd001/parity-matrix.json`.
-3. CLI/API/WebSocket/channel transcripts and cleanup receipts under `.omo/evidence/spec031/prd001/qa/`.
-4. Redaction read audit: `.omo/evidence/spec031/prd001/surface-redaction-audit.md`.
+1. Cross-surface fixture registry: `.omo/evidence/spec031/prd001/parity/fixture-registry.json`.
+2. Canonical field comparison: `.omo/evidence/spec031/prd001/parity/parity-matrix.json`.
+3. CLI/API/WebSocket/channel transcripts and cleanup receipts: `.omo/evidence/spec031/prd001/cli/qa-summary.md`, `.omo/evidence/spec031/prd001/api/canonical-field-checks.json`, and `.omo/evidence/spec031/prd001/channel/todo7-verification.md`.
+4. Redaction read audit: `.omo/evidence/spec031/prd001/parity/qa-redaction.json`.
 
 ## Exit Criteria
 

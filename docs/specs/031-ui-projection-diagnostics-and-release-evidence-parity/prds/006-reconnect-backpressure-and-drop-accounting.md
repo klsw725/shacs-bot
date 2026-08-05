@@ -1,6 +1,6 @@
 # PRD 006. reconnect, backpressure, and drop accounting
 
-Status: Planned
+Status: Implemented, closure blocked
 
 ## Goal
 
@@ -87,7 +87,7 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-channels --all-
 1. Deterministic scenario results: `.omo/evidence/spec031/prd006/accounting-scenarios.json`.
 2. Cross-surface accounting comparison: `.omo/evidence/spec031/prd006/accounting-parity.json`.
 3. Reconnect and repeated interruption audit: `.omo/evidence/spec031/prd006/reconnect-audit.md`.
-4. QA transcripts and cleanup receipts under `.omo/evidence/spec031/prd006/qa/`.
+4. QA transcripts and cleanup receipts: `.omo/evidence/spec031/prd006/qa/frame-transcripts.json` and `.omo/evidence/spec031/prd006/qa/main-clean-final.txt`.
 
 ## Exit Criteria
 

@@ -1,6 +1,6 @@
 # PRD 003. readiness, degraded health, and diagnostics parity
 
-Status: Planned
+Status: Implemented, closure blocked
 
 ## Goal
 
@@ -90,10 +90,10 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-api --all-targe
 
 ## Closure Evidence
 
-1. Aggregation matrix: `.omo/evidence/spec031/prd003/readiness-aggregation.json`.
+1. Aggregation matrix: `.omo/evidence/spec031/prd003/task-10-readiness.json`.
 2. Cross-surface comparison: `.omo/evidence/spec031/prd003/readiness-parity.json`.
 3. Diagnostics bundle read audit: `.omo/evidence/spec031/prd003/diagnostics-bundle-audit.md`.
-4. QA transcripts and cleanup receipts under `.omo/evidence/spec031/prd003/qa/`.
+4. QA transcripts and cleanup receipts: `.omo/evidence/spec031/prd003/qa/manual-api-transcript.md` and `.omo/evidence/spec031/prd003/qa/cleanup-receipt.md`.
 
 ## Exit Criteria
 

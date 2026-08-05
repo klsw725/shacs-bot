@@ -1,6 +1,6 @@
 # PRD 000. shared projection model and vocabulary
 
-Status: Planned
+Status: Implemented, closure blocked
 
 ## Goal
 
@@ -79,10 +79,10 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-projection --al
 
 ## Closure Evidence
 
-1. Typed model and vocabulary symbols under `crates/shacs-projection/`.
-2. Vocabulary and serialization test transcript at `.omo/evidence/spec031/prd000/projection-schema-tests.txt`.
-3. Redaction audit at `.omo/evidence/spec031/prd000/projection-redaction-audit.md`.
-4. Consumer inventory showing no supported adapter defines a conflicting canonical state at `.omo/evidence/spec031/prd000/consumer-inventory.json`.
+1. Typed model and vocabulary symbol locator: `.omo/evidence/spec031/prd000/model/loc-report.txt`.
+2. Vocabulary and serialization test transcript: `.omo/evidence/spec031/prd000/model/full-package-test-transcript.txt`.
+3. Redaction audit: `.omo/evidence/spec031/prd000/redaction/sentinel-absence-audit.md`.
+4. Consumer inventory showing no supported adapter defines a conflicting canonical state: `.omo/evidence/spec031/wave0/baseline-inventory.json`.
 
 ## Exit Criteria
 
