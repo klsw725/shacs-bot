@@ -191,6 +191,27 @@ fn workflow_harness_plan_digest_is_stable_and_objective_sensitive(
 }
 
 #[test]
+fn workflow_projection_no_checkpoint_uses_owner_defined_zero_defaults(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let plan = sample_plan();
+    let run = admit_workflow_plan(&plan, 100)?;
+
+    let projection = workflow_projection(&run, &plan, None, &WorkflowVerificationGate::Passed, &[]);
+
+    assert_eq!(projection.progress_count, 0);
+    assert_eq!(projection.active_child_count, 0);
+    assert_eq!(projection.pending_barrier_count, 0);
+    assert_eq!(projection.budget_usage.known_tokens, 0);
+    assert_eq!(projection.budget_usage.estimated_tokens, 0);
+    assert_eq!(projection.budget_usage.child_runs, 0);
+    assert_eq!(projection.budget_usage.verifier_runs, 0);
+    assert_eq!(projection.budget_usage.heavy_commands, 0);
+    assert!(projection.worktree_refs.is_empty());
+    assert!(!projection.resume_available);
+    Ok(())
+}
+
+#[test]
 fn workflow_checkpoint_resume_requires_matching_plan_digest_and_nonterminal_state(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let plan = sample_plan();

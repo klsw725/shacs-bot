@@ -33,6 +33,7 @@ fn redacts_full_value(key: &str, value: &Value) -> bool {
     let normalized = normalize_key(key);
     if is_raw_diagnostic_material_key(&normalized)
         || (is_path_key(&normalized) && value_contains_absolute_host_path(value))
+        || is_process_identity_key(&normalized)
     {
         return true;
     }
@@ -85,6 +86,12 @@ fn is_path_key(normalized: &str) -> bool {
         normalized,
         "path" | "absolutepath" | "hostpath" | "absolutehostpath"
     ) || normalized.ends_with("path")
+}
+
+fn is_process_identity_key(normalized: &str) -> bool {
+    matches!(normalized, "pid" | "processid" | "ownerid" | "rawownerid")
+        || normalized.ends_with("pid")
+        || normalized.ends_with("ownerid")
 }
 
 fn value_contains_absolute_host_path(value: &Value) -> bool {

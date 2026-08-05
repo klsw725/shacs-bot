@@ -36,15 +36,16 @@ use crate::runtime::{
     RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
     SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
     SessionRememberedPermissionDiagnostic, SessionRememberedPermissionRule,
-    SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnLock,
-    SubagentExecutionConfig, SubagentOutcomeKind, SubagentRuntime, TokenConsolidationConfig,
-    ToolEventCallback, ToolExecutionContext, WorkflowAdmissionDecision, WorkflowAdmissionInput,
-    WorkflowBudgetPolicy, WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpointInput,
-    WorkflowCheckpointPolicy, WorkflowChildResult, WorkflowChildRunStatus, WorkflowChildSpec,
-    WorkflowContextPolicy, WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy,
-    WorkflowPattern, WorkflowPermissionPolicy, WorkflowQuarantinePolicy, WorkflowRecipeReadiness,
-    WorkflowResumeDecision, WorkflowResumePolicy, WorkflowRunState, WorkflowStep,
-    WorkflowStopCondition, WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
+    SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnCancelOutcome,
+    SessionTurnGuard, SessionTurnLock, SubagentExecutionConfig, SubagentOutcomeKind,
+    SubagentRuntime, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
+    WorkflowAdmissionDecision, WorkflowAdmissionInput, WorkflowBudgetPolicy, WorkflowBudgetSlice,
+    WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowCheckpointPolicy, WorkflowChildResult,
+    WorkflowChildRunStatus, WorkflowChildSpec, WorkflowContextPolicy, WorkflowHarnessPlan,
+    WorkflowMergePolicy, WorkflowModelRoutingPolicy, WorkflowPattern, WorkflowPermissionPolicy,
+    WorkflowQuarantinePolicy, WorkflowRecipeReadiness, WorkflowResumeDecision,
+    WorkflowResumePolicy, WorkflowRunState, WorkflowStep, WorkflowStopCondition,
+    WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
     DEFAULT_GOAL_TURN_BUDGET,
 };
 use crate::tools::{
@@ -608,6 +609,94 @@ impl<'a> AgentLoop<'a> {
         self.process_message(message)
     }
 
+    pub fn process_permission_approval_by_lineage(
+        &mut self,
+        session_key: &str,
+        lineage: &str,
+        approve: bool,
+    ) -> Result<crate::runtime::SurfaceActionOutcome, AgentLoopError> {
+        let turn_guard = self.turn_lock.acquire(session_key.to_owned())?;
+        let session = self.sessions.get_or_create(session_key);
+        if pending_recent_retry_approval(&session)
+            .is_some_and(|approval| approval.approval_request_id == lineage)
+        {
+            return Ok(crate::runtime::SurfaceActionOutcome {
+                kind: crate::runtime::SurfaceActionOutcomeKind::Unavailable,
+                changed: false,
+                detail:
+                    "recent retry approval is process-local; reply in the original session channel"
+                        .to_owned(),
+            });
+        }
+        let Some(approval) = pending_permission_approval(&session) else {
+            return Ok(crate::runtime::SurfaceActionOutcome {
+                kind: crate::runtime::SurfaceActionOutcomeKind::Unavailable,
+                changed: false,
+                detail: "no pending permission approval found".to_owned(),
+            });
+        };
+        if approval.approval_request_id != lineage {
+            return Ok(crate::runtime::SurfaceActionOutcome {
+                kind: crate::runtime::SurfaceActionOutcomeKind::StaleLineage,
+                changed: false,
+                detail: "pending approval lineage changed".to_owned(),
+            });
+        }
+        if approval.status == PendingPermissionApprovalStatus::Executing {
+            return Ok(crate::runtime::SurfaceActionOutcome {
+                kind: crate::runtime::SurfaceActionOutcomeKind::Unavailable,
+                changed: false,
+                detail: "permission approval is already executing".to_owned(),
+            });
+        }
+        let decision_kind = if approve {
+            ApprovalDecisionKind::Approved
+        } else {
+            ApprovalDecisionKind::Denied
+        };
+        let correlation = correlate_approval(
+            &approval.approval_request,
+            &approval_decision(&approval, decision_kind),
+            now_unix_ms(),
+        );
+        match (approve, correlation.error) {
+            (true, None) | (false, Some(crate::runtime::ApprovalCorrelationError::Denied)) => {}
+            (true, Some(crate::runtime::ApprovalCorrelationError::Expired)) => {
+                return Ok(crate::runtime::SurfaceActionOutcome {
+                    kind: crate::runtime::SurfaceActionOutcomeKind::Unavailable,
+                    changed: false,
+                    detail: "pending approval expired".to_owned(),
+                });
+            }
+            _ => {
+                return Ok(crate::runtime::SurfaceActionOutcome {
+                    kind: crate::runtime::SurfaceActionOutcomeKind::Unavailable,
+                    changed: false,
+                    detail: "pending approval correlation failed".to_owned(),
+                });
+            }
+        }
+        let reply = if approve { "approve" } else { "deny" };
+        let mut message = InboundMessage::new(
+            approval.channel.clone(),
+            approval.sender_id.clone(),
+            approval.chat_id.clone(),
+            reply,
+        );
+        message.session_key_override = Some(session_key.to_owned());
+        let result = self.process_message_with_turn_guard(
+            message,
+            session_key.to_owned(),
+            None,
+            turn_guard,
+        )?;
+        Ok(crate::runtime::SurfaceActionOutcome {
+            kind: crate::runtime::SurfaceActionOutcomeKind::Completed,
+            changed: true,
+            detail: format!("permission {reply} completed: {}", result.stop_reason),
+        })
+    }
+
     pub fn process_message(
         &mut self,
         message: InboundMessage,
@@ -619,28 +708,63 @@ impl<'a> AgentLoop<'a> {
             .as_ref()
             .filter(|route| route.parsed.kind == CommandKind::Priority)
         {
+            let stop_cancel = if matches!(&route.command, LoopCommand::Stop) {
+                Some(self.turn_lock.cancel_active_or_reserved(&session_key))
+            } else {
+                None
+            };
             return match self.turn_lock.acquire_priority(session_key.clone()) {
                 Ok(_turn_guard) => {
                     let mut session = self.sessions.get_or_create(&session_key);
                     materialize_recovery_markers(&mut session);
-                    self.handle_loop_command(route.command.clone(), &message, session, true)
+                    self.handle_loop_command(
+                        route.command.clone(),
+                        &message,
+                        session,
+                        true,
+                        stop_cancel,
+                    )
                 }
                 Err(SessionTurnAcquireError::AlreadyActive { .. }) => {
-                    if matches!(&route.command, LoopCommand::Stop) {
-                        self.turn_lock.cancel_active_or_reserved(&session_key);
-                    }
                     let session = self.sessions.get_or_create(&session_key);
-                    self.handle_loop_command(route.command.clone(), &message, session, false)
+                    self.handle_loop_command(
+                        route.command.clone(),
+                        &message,
+                        session,
+                        false,
+                        stop_cancel,
+                    )
+                }
+                Err(SessionTurnAcquireError::Cancelled { .. }) => {
+                    let session = self.sessions.get_or_create(&session_key);
+                    self.publish_cancelled_turn(&message, session)
                 }
             };
         }
 
-        let _turn_guard = self.turn_lock.acquire(session_key.clone())?;
+        let turn_guard = match self.turn_lock.acquire(session_key.clone()) {
+            Ok(guard) => guard,
+            Err(SessionTurnAcquireError::Cancelled { .. }) => {
+                let session = self.sessions.get_or_create(&session_key);
+                return self.publish_cancelled_turn(&message, session);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        self.process_message_with_turn_guard(message, session_key, routed_command, turn_guard)
+    }
+
+    fn process_message_with_turn_guard(
+        &mut self,
+        message: InboundMessage,
+        session_key: String,
+        routed_command: Option<shacs_command::RoutedLoopCommand>,
+        _turn_guard: SessionTurnGuard,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         let mut session = self.sessions.get_or_create(&session_key);
         materialize_recovery_markers(&mut session);
 
         if let Some(route) = routed_command {
-            return self.handle_loop_command(route.command, &message, session, true);
+            return self.handle_loop_command(route.command, &message, session, true, None);
         }
 
         if pending_permission_wizard(&session).is_some() {
@@ -1947,6 +2071,7 @@ impl<'a> AgentLoop<'a> {
         message: &InboundMessage,
         mut session: Session,
         save_session: bool,
+        stop_cancel: Option<SessionTurnCancelOutcome>,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         match command {
             LoopCommand::Status => {
@@ -1998,7 +2123,10 @@ impl<'a> AgentLoop<'a> {
                 )
             }
             LoopCommand::Stop => {
-                let synchronous_turn_cancelled = self
+                let synchronous_turn_cancelled = matches!(
+                    stop_cancel,
+                    Some(SessionTurnCancelOutcome::Active | SessionTurnCancelOutcome::Reserved)
+                ) || self
                     .turn_lock
                     .cancellation_token(&session.key)
                     .is_some_and(|token| token.is_cancelled());
@@ -2501,6 +2629,21 @@ impl<'a> AgentLoop<'a> {
         })
     }
 
+    fn publish_cancelled_turn(
+        &mut self,
+        message: &InboundMessage,
+        session: Session,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        self.publish_command_response(
+            message,
+            session,
+            "Turn cancelled before completion.",
+            None,
+            "cancelled",
+            true,
+        )
+    }
+
     fn publish_run_outbound(
         &self,
         message: &InboundMessage,
@@ -2868,6 +3011,9 @@ impl From<SessionTurnAcquireError> for AgentLoopError {
     fn from(error: SessionTurnAcquireError) -> Self {
         match error {
             SessionTurnAcquireError::AlreadyActive { session_key } => {
+                Self::DuplicateActiveTurn { session_key }
+            }
+            SessionTurnAcquireError::Cancelled { session_key } => {
                 Self::DuplicateActiveTurn { session_key }
             }
         }

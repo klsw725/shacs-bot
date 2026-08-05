@@ -1,6 +1,15 @@
 mod diagnostics_release;
+/// Spec031 envelopes must be parsed through the bounded public parse API.
+///
+/// ```compile_fail
+/// use shacs_projection::Spec031Envelope;
+///
+/// let _ = serde_json::from_str::<Spec031Envelope>("{}");
+/// ```
 mod projection;
 mod remembered_permissions;
+pub mod spec031;
+mod spec031_extension;
 
 pub use diagnostics_release::{
     build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
@@ -26,4 +35,12 @@ pub use remembered_permissions::{
     project_removed_remembered_permission_rule, RememberedPermissionProjection,
     RememberedPermissionProjectionInput, RememberedPermissionRulePrefixError,
     RememberedPermissionRuleProjection, RememberedPermissionStoreHealthInput,
+};
+pub use spec031::*;
+pub use spec031_extension::{
+    spec031_extension_catalog, spec031_extension_diagnostic, Spec031ExtensionCatalogProjection,
+    Spec031ExtensionDiagnostic, Spec031ExtensionDiagnosticSeverity, Spec031ExtensionEnabledState,
+    Spec031ExtensionProjection, Spec031ExtensionReadiness, Spec031ExtensionReason,
+    Spec031ExtensionSurfaceKind, Spec031ExtensionSurfaceProjection,
+    SPEC031_EXTENSION_SCHEMA_VERSION,
 };

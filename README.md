@@ -96,8 +96,33 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- serve --workspace /t
 실행 중인 로컬 API에서도 diagnostics를 확인할 수 있습니다. 응답은 민감한 값을 가린 형태입니다:
 
 ```sh
+curl http://127.0.0.1:8900/v1/readiness
 curl http://127.0.0.1:8900/v1/diagnostics
 ```
+
+Spec031 surface parity 범위에서 실제 QA를 통과한 표면은 TUI, `agent` REPL, secret-ref-only onboard wizard, readiness API/diagnostics, delivery hint projection, release runner artifact입니다. TUI는 live runtime projection을 읽어 session, approval, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 먼저 workspace template과 session store를 만들고, 표시할 session을 생성한 뒤 `--once` 또는 interactive TUI를 실행하세요:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- onboard --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- session create --session cli:direct --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-tui -- --workspace /tmp/shacs-ws --session cli:direct --once
+cargo run --manifest-path crates/Cargo.toml -p shacs-tui -- --workspace /tmp/shacs-ws --session cli:direct
+```
+
+Message 없이 `agent`를 실행하면 같은 command router를 쓰는 REPL이 시작됩니다. 일반 입력은 session turn으로 처리되고 `/status`, `/stop`, `/restart`는 priority command 의미를 보존합니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- agent --workspace /tmp/shacs-ws
+```
+
+Spec031 release runner는 machine-readable `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`과 human-readable `summary.md`를 씁니다. 현재 closure run은 Spec030/032/033/034/035 외부 owner evidence가 blocked라서 nonzero로 끝나야 합니다. Dirty worktree도 별도 triage로 기록되지만 외부 blocker를 가리지 않습니다. `success-fixture`는 runner 자체의 passing fixture이고, Spec031 closure 증거가 아닙니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root . --mode current-worktree
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root . --mode success-fixture
+```
+
+Delivery와 readiness projection은 보수적인 hint입니다. Remote ACK/read receipt, replay 방지, exactly-once delivery를 보장하지 않습니다. SSE final delivery는 현재 pending 또는 unknown으로 남을 수 있고, 외부 owner fact가 없으면 성공으로 합성하지 않습니다. Approval durable request는 owner terminal event가 기록되기 전까지 Requested로 표시됩니다.
 
 Docker Compose로 초기 설정과 장기 실행 서비스를 다룹니다. 이 경로가 현재 primary zero-setup containment path이며, 기본 Compose 설정은 Docker socket mount, privileged mode, host network를 사용하지 않습니다:
 
@@ -147,7 +172,7 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- channels list
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- channels status --workspace /tmp/shacs-ws
 ```
 
-Channel config는 원본 nanobot과 같은 `channels.<name>` 형태를 우선합니다. 예를 들어 `channels.sendMemoryHints`는 status에서 memory hint 설정으로 표시되고, `channels.sendMaxRetries`는 `ChannelManager` dispatch/enqueue와 실제 transport send의 총 시도 횟수로 적용됩니다. 값은 최소 1회, 최대 10회로 제한됩니다. WebSocket과 외부 transport outbound는 `ChannelManager` dispatch 정책을 통과하며, 외부 transport inbound/outbound는 runtime `MessageBus` 경계를 사용합니다. 외부 transport inbound는 remote ACK/cursor 갱신 전에 durable work queue에 저장되며 restart 후 다시 dispatch될 수 있습니다. Runtime은 Nanobot처럼 같은 session key의 turn을 process-local로 직렬화하고, durable queue에서 dispatch된 follow-up을 현재 turn 뒤에 이어서 처리합니다. Built-in slash command는 command router에서 priority/exact/prefix 경계로 분류되며, `/status`, `/stop`, `/restart` priority command만 active session turn 중에도 먼저 처리됩니다. 일반 turn과 exact/prefix command는 같은 process-local session turn lock을 공유합니다. `channels.sendProgress`가 enabled이면 WebSocket channel은 provider text deltas를 coalesce한 `delta` event와 `stream_end` event를 보낸 뒤 최종 `message` event를 유지합니다. Telegram/Discord/Slack external transport는 provider progress delta를 보내지 않고 최종 assistant answer만 새 message로 전송하며 기존 message를 edit/update하지 않습니다. WebSocket event delivery는 bounded queue로 socket writer에 넘겨져 느린 client에 대해 backpressure를 적용합니다. Telegram topic, Slack thread, Discord thread, Email subject/reply context는 outbound reply metadata로 이어집니다. Telegram offset, Discord REST last message id, Discord Gateway resume state, Email IMAP seen UID + UIDVALIDITY hint, outbound delivery pending/sent/failed/processed status는 runtime metadata JSON으로 best-effort 보존됩니다. 새 metadata는 typed restart envelope도 함께 기록하지만 기존 key와 호환됩니다. Inspect/status projection은 delivery를 `pending`, `sent_hint`, `failed_hint`, `unknown`, `dedupe_candidate`로 보수적으로 표시하며 raw content를 출력하지 않습니다. Channel metadata는 durable queue나 exactly-once delivery 보장이 아닙니다. Email은 `consentGranted: true`와 inbound `allowFrom`/`allowedSenders`가 있어야 IMAP polling을 시작하며, `smtpUsername`/`smtpPassword`, `imapUsername`/`imapPassword`, `fromAddress` alias를 함께 받습니다. IMAP polling은 현재 TLS만 지원하고, inbound Email은 기본적으로 `Authentication-Results`의 `spf=pass`/`dkim=pass`를 확인합니다.
+Channel config는 원본 nanobot과 같은 `channels.<name>` 형태를 우선합니다. 예를 들어 `channels.sendMemoryHints`는 status에서 memory hint 설정으로 표시되고, `channels.sendMaxRetries`는 `ChannelManager` dispatch/enqueue와 실제 transport send의 총 시도 횟수로 적용됩니다. 값은 최소 1회, 최대 10회로 제한됩니다. WebSocket과 외부 transport outbound는 `ChannelManager` dispatch 정책을 통과하며, 외부 transport inbound/outbound는 runtime `MessageBus` 경계를 사용합니다. 외부 transport inbound는 remote ACK/cursor 갱신 전에 durable work queue에 저장되며 restart 후 다시 dispatch될 수 있습니다. Runtime은 Nanobot처럼 같은 session key의 turn을 process-local로 직렬화하고, durable queue에서 dispatch된 follow-up을 현재 turn 뒤에 이어서 처리합니다. Built-in slash command는 command router에서 priority/exact/prefix 경계로 분류되며, `/status`, `/stop`, `/restart` priority command만 active session turn 중에도 먼저 처리됩니다. 일반 turn과 exact/prefix command는 같은 process-local session turn lock을 공유합니다. `channels.sendProgress`가 enabled이면 WebSocket channel은 provider text deltas를 coalesce한 `delta` event와 `stream_end` event를 보낸 뒤 최종 `message` event를 유지합니다. Telegram/Discord/Slack external transport는 provider progress delta를 보내지 않고 최종 assistant answer만 새 message로 전송하며 기존 message를 edit/update하지 않습니다. WebSocket event delivery는 bounded queue로 socket writer에 넘겨져 느린 client에 대해 backpressure를 적용합니다. Telegram topic, Slack thread, Discord thread, Email subject/reply context는 outbound reply metadata로 이어집니다. Telegram offset, Discord REST last message id, Discord Gateway resume state, Email IMAP seen UID + UIDVALIDITY hint, outbound delivery pending/sent/failed/processed status는 runtime metadata JSON으로 best-effort 보존됩니다. 새 metadata는 typed restart envelope도 함께 기록하지만 기존 key와 호환됩니다. Inspect/status projection은 delivery를 `pending`, `sent_hint`, `failed_hint`, `unknown`, `dedupe_candidate`로 보수적으로 표시하며 raw content를 출력하지 않습니다. Channel metadata는 remote read/ACK, durable queue truth, replay 방지, exactly-once delivery 보장이 아닙니다. SSE final delivery는 pending 또는 unknown으로 남을 수 있습니다. Email은 `consentGranted: true`와 inbound `allowFrom`/`allowedSenders`가 있어야 IMAP polling을 시작하며, `smtpUsername`/`smtpPassword`, `imapUsername`/`imapPassword`, `fromAddress` alias를 함께 받습니다. IMAP polling은 현재 TLS만 지원하고, inbound Email은 기본적으로 `Authentication-Results`의 `spf=pass`/`dkim=pass`를 확인합니다.
 
 ## 검증
 

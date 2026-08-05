@@ -1830,7 +1830,9 @@ while :; do /bin/sleep 30; done\n",
             }
         };
         let tail = match mode {
-            StdioFixtureMode::ParentExits => "exit 0\n",
+            StdioFixtureMode::ParentExits => {
+                "while IFS= read -r line; do case \"$line\" in *'\"method\":\"prompts/list\"'*) exit 0 ;; esac; done\n"
+            }
             StdioFixtureMode::Persistent => "while :; do /bin/sleep 30; done\n",
             StdioFixtureMode::Silent => unreachable!("silent mode returns before tail selection"),
         };

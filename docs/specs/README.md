@@ -15,6 +15,7 @@
 - `001`부터 `029`는 실제 Rust 구현과 테스트가 존재하는 현재 범위로 완료 처리했다. `029`는 Wave 1-8 baseline을 `Complete (Scoped)`로 닫았고, 최종 full workspace gate/manual review evidence는 별도 record로 남긴다.
 - `Complete (Scoped)`는 해당 owner가 정의한 현재 구현 범위가 닫혔음을 뜻한다.
 - `Complete (Baseline)`은 self-hosted/local 최소 기준이 닫혔음을 뜻한다.
+- `Open (implemented, closure blocked)` 또는 PRD의 `Implemented, closure blocked`는 구현과 현재 surface QA evidence가 존재하지만 release closure 조건이 아직 통과하지 않았음을 뜻한다.
 - 기존 문서의 미구현 accepted work는 `029`부터 `035`의 owner spec으로 이관했다. `028`과 `029`는 scoped implementation을 완료했고, 남은 open owner table은 `030`부터 `035`를 따른다.
 - 기존 문서 본문의 future 문구는 역사와 설계 근거로 보존하지만, 구현 owner는 각 문서 상단의 `Open work moved to:` ledger와 새 spec을 따른다.
 - SaaS/admin/fleet, 멀티유저 조직 운영, remote marketplace, complete kernel isolation 같은 명시적 비목표는 신규 backlog로 승격하지 않았다.
@@ -24,7 +25,7 @@
 | Spec | Owner scope | Origin specs |
 |---|---|---|
 | `030-policy-permission-redaction-and-containment-model` | current distributed permission, approval, redaction, containment, diagnostics, read-only skill baseline, explicit non-guarantees | 004, 005, 007, 010, 011, 022, 023 |
-| `031-ui-projection-diagnostics-and-release-evidence-parity` | shared projection, TUI/REPL/wizard, diagnostics parity, release runner | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
+| `031-ui-projection-diagnostics-and-release-evidence-parity` | implemented shared projection, TUI/REPL/wizard, diagnostics parity, release runner; closure blocked by external owner audits | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
 | `032-app-maker-runtime-and-extension-lifecycle` | app supervisor, process lifecycle, App Maker apply/install, extension provenance | 005, 017, 021, 025 |
 | `033-evaluation-automation-live-integration` | evaluator, automation, self-improvement, replay의 live product integration | 009, 012, 013, 014, 016, 018, 022 |
 | `034-generated-media-and-rich-file-context-expansion` | Codex image, edit/streaming/remote output, video projection/analyzer | 004, 019, 027 |

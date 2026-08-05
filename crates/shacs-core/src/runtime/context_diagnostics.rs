@@ -6,6 +6,7 @@ use super::context_refs::{
 };
 use super::context_safety::{ContextPermissionDecision, ContextSafetyReport, ContextTrustLabel};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use shacs_redaction::redact_string;
 use std::collections::BTreeMap;
 
@@ -211,7 +212,7 @@ fn summarize_references(parse: &ContextReferenceParse) -> ContextReferenceDiagno
             .iter()
             .map(|reference| ContextReferenceDiagnosticEntry {
                 kind: reference.kind,
-                source_label: safe_text(&reference.normalized_target),
+                source_label: source_ref(&reference.normalized_target),
                 start: reference.start,
                 end: reference.end,
             })
@@ -258,7 +259,7 @@ fn summarize_context_files(files: &[ContextFileProjection]) -> ContextFileDiagno
             .iter()
             .map(|file| ContextFileDiagnosticEntry {
                 order: file.order,
-                source_label: safe_text(&file.path.display().to_string()),
+                source_label: source_ref(&file.path.display().to_string()),
                 filename: safe_text(&file.filename),
                 source: format!("{:?}", file.source),
                 source_directory_depth: (file.source_directory_depth != usize::MAX)
@@ -310,8 +311,8 @@ fn summarize_artifacts(artifacts: &[ResolvedContextArtifact]) -> ContextArtifact
             .iter()
             .map(|artifact| ContextArtifactDiagnosticEntry {
                 kind: artifact.kind,
-                source_label: safe_text(&artifact.source),
-                display_label: safe_text(&artifact.display_name),
+                source_label: source_ref(&artifact.source),
+                display_label: source_ref(&artifact.display_name),
                 state: artifact.state,
                 digest: artifact.digest.clone(),
                 byte_count: artifact.byte_count,
@@ -358,7 +359,7 @@ fn summarize_safety(report: &ContextSafetyReport) -> ContextSafetyDiagnosticsSum
             .diagnostics
             .iter()
             .map(|diagnostic| ContextSafetyDiagnosticEntry {
-                source_label: safe_text(&diagnostic.source_label),
+                source_label: source_ref(&diagnostic.source_label),
                 permission_decision: diagnostic.permission_decision,
                 redaction_status: diagnostic.redaction_status,
                 trust_label: diagnostic.trust_label,
@@ -369,7 +370,7 @@ fn summarize_safety(report: &ContextSafetyReport) -> ContextSafetyDiagnosticsSum
             .replay_evidence
             .iter()
             .map(|evidence| ContextReplayDiagnosticEntry {
-                source_label: safe_text(&evidence.source_label),
+                source_label: source_ref(&evidence.source_label),
                 source_digest: evidence.source_digest.clone(),
                 resolution_metadata: safe_text(&evidence.resolution_metadata),
                 no_live_refetch: evidence.no_live_refetch,
@@ -416,7 +417,7 @@ fn summarize_budget(handoff: &ContextProviderHandoff) -> ContextBudgetDiagnostic
             .blocks
             .iter()
             .map(|block| ContextProviderBlockDiagnosticEntry {
-                source_label: safe_text(&block.source_label),
+                source_label: source_ref(&block.source_label),
                 trust_label: safe_text(&block.trust_label),
                 truncation_label: block.truncation_label.as_deref().map(safe_text),
                 digest: block.digest.clone(),
@@ -428,7 +429,7 @@ fn summarize_budget(handoff: &ContextProviderHandoff) -> ContextBudgetDiagnostic
             .evidence
             .iter()
             .map(|evidence| ContextBudgetDiagnosticEntry {
-                source_label: safe_text(&evidence.source_label),
+                source_label: source_ref(&evidence.source_label),
                 priority: format!("{:?}", evidence.priority),
                 decision: evidence.decision,
                 reason: evidence.reason.as_deref().map(safe_text),
@@ -452,6 +453,12 @@ fn counts(counts: BTreeMap<String, usize>) -> Vec<ContextDiagnosticsCount> {
 
 fn safe_text(value: &str) -> String {
     redact_string(value)
+}
+
+fn source_ref(value: &str) -> String {
+    let safe = safe_text(value);
+    let digest = Sha256::digest(safe.as_bytes());
+    format!("context-source:{:x}", digest)[..31].to_owned()
 }
 
 #[cfg(test)]
@@ -593,6 +600,15 @@ mod tests {
                 .map(|value| value.reference_count),
             Some(2)
         );
+        let reference_summary = summary.references.as_ref().expect("missing references");
+        assert!(reference_summary
+            .references
+            .iter()
+            .all(|reference| reference.source_label.starts_with("context-source:")));
+        assert!(reference_summary
+            .references
+            .iter()
+            .all(|reference| !reference.source_label.contains("src/lib.rs")));
         assert_eq!(summary.context_files.total_count, 4);
         assert_eq!(summary.context_files.included_count, 1);
         assert_eq!(summary.context_files.skipped_count, 1);

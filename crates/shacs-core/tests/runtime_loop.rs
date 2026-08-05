@@ -33,9 +33,9 @@ use shacs_core::runtime::{
     RuntimeSpec018ProjectionInput, RuntimeToolCall, RuntimeToolExecutor, Session, SessionManager,
     SessionTurnAcquireError, SessionTurnLock, StaticProviderSelector, SubagentExecutionConfig,
     SubagentMergeState, SubagentOutcomeKind, SubagentProgressUpdate, SubagentRuntime,
-    SubagentRuntimeConfig, ToolEvent, ToolExecutionContext, ToolSearchConfig, ToolSearchMode,
-    ToolSearchRuntimeInput, ToolStatus, PERSISTENT_GOAL_METADATA_KEY,
-    RECENT_AUTO_MODE_DENIAL_LIMIT,
+    SubagentRuntimeConfig, SurfaceActionOutcomeKind, ToolEvent, ToolExecutionContext,
+    ToolSearchConfig, ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
+    PERSISTENT_GOAL_METADATA_KEY, RECENT_AUTO_MODE_DENIAL_LIMIT,
 };
 use shacs_core::tools::{
     assemble_tool_surface, ActivationState, AskUserTool, JsonMap, MessageTool, SchemaFragment,
@@ -6415,6 +6415,322 @@ fn loop_permission_approval_executes_pending_tool_and_resumes() -> Result<(), Bo
 }
 
 #[test]
+fn loop_permission_approval_by_lineage_executes_pending_tool_after_restart(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-lineage",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("resumed after lineage approval".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    let first = loop_runtime.process_direct("start", Some("discord:lineage-approval"))?;
+    if first.stop_reason != "ask_user" || calls.load(Ordering::SeqCst) != 0 {
+        return Err(format!("permission approval did not pause: {first:?}").into());
+    }
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:lineage-approval")
+        .ok_or("missing pending approval session")?;
+    let lineage = raw["metadata"]["pending_permission_approval"]["approval_request_id"]
+        .as_str()
+        .ok_or("missing approval lineage")?
+        .to_owned();
+
+    drop(loop_runtime);
+    let restarted_client = MockProvider::new(vec![LlmResponse {
+        content: Some("resumed after lineage approval".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let mut restarted_config = AgentLoopConfig::new(workspace.path(), "test-model");
+    restarted_config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    restarted_config.permission_interactive = true;
+    let mut restarted = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &restarted_client,
+        restarted_config,
+    );
+
+    let outcome = restarted.process_permission_approval_by_lineage(
+        "discord:lineage-approval",
+        &lineage,
+        true,
+    )?;
+
+    assert_eq!(outcome.kind, SurfaceActionOutcomeKind::Completed);
+    assert!(outcome.changed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_by_lineage_rejects_stale_lineage() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![LlmResponse {
+        finish_reason: "tool_calls".to_owned(),
+        tool_calls: vec![ToolCallRequest::new(
+            "exec-stale-lineage",
+            "exec",
+            Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+        )],
+        ..LlmResponse::default()
+    }]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    loop_runtime.process_direct("start", Some("discord:stale-lineage"))?;
+    let outcome = loop_runtime.process_permission_approval_by_lineage(
+        "discord:stale-lineage",
+        "stale-lineage",
+        true,
+    )?;
+
+    assert_eq!(outcome.kind, SurfaceActionOutcomeKind::StaleLineage);
+    assert!(!outcome.changed);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_by_lineage_revalidates_replaced_pending_under_turn_lock(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "exec-replaced-lineage",
+                "exec",
+                Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("resumed after replaced lineage".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    loop_runtime.process_direct("start", Some("discord:lineage-race"))?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:lineage-race")
+        .ok_or("missing pending approval session")?;
+    let stale_lineage = raw["metadata"]["pending_permission_approval"]["approval_request_id"]
+        .as_str()
+        .ok_or("missing approval lineage")?
+        .to_owned();
+    replace_pending_approval_lineage(&mut loop_runtime, "discord:lineage-race", "approval-b")?;
+
+    let stale = loop_runtime.process_permission_approval_by_lineage(
+        "discord:lineage-race",
+        &stale_lineage,
+        true,
+    )?;
+
+    assert_eq!(stale.kind, SurfaceActionOutcomeKind::StaleLineage);
+    assert!(!stale.changed);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let still_pending = loop_runtime
+        .session_manager()
+        .read_session_file("discord:lineage-race")
+        .ok_or("missing pending approval session")?;
+    assert_eq!(
+        still_pending["metadata"]["pending_permission_approval"]["approval_request_id"],
+        json!("approval-b")
+    );
+
+    let accepted = loop_runtime.process_permission_approval_by_lineage(
+        "discord:lineage-race",
+        "approval-b",
+        true,
+    )?;
+
+    assert_eq!(accepted.kind, SurfaceActionOutcomeKind::Completed);
+    assert!(accepted.changed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[test]
+fn loop_permission_approval_by_lineage_rejects_expired_pending_under_turn_lock(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(ProcExecCountingTool {
+        calls: calls.clone(),
+    });
+    let client = MockProvider::new(vec![LlmResponse {
+        finish_reason: "tool_calls".to_owned(),
+        tool_calls: vec![ToolCallRequest::new(
+            "exec-expired-lineage",
+            "exec",
+            Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+        )],
+        ..LlmResponse::default()
+    }]);
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.permission_mode_snapshot = PermissionModeSnapshot {
+        mode: PermissionMode::Auto,
+        source: Some("test".to_owned()),
+        scope_ref: None,
+    };
+    config.permission_interactive = true;
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    );
+
+    loop_runtime.process_direct("start", Some("discord:expired-lineage"))?;
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("discord:expired-lineage")
+        .ok_or("missing pending approval session")?;
+    let lineage = raw["metadata"]["pending_permission_approval"]["approval_request_id"]
+        .as_str()
+        .ok_or("missing approval lineage")?
+        .to_owned();
+    expire_pending_approval(&mut loop_runtime, "discord:expired-lineage")?;
+
+    let expired = loop_runtime.process_permission_approval_by_lineage(
+        "discord:expired-lineage",
+        &lineage,
+        true,
+    )?;
+
+    assert_eq!(expired.kind, SurfaceActionOutcomeKind::Unavailable);
+    assert!(!expired.changed);
+    assert!(expired.detail.contains("expired"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+fn replace_pending_approval_lineage(
+    loop_runtime: &mut AgentLoop,
+    session_key: &str,
+    lineage: &str,
+) -> Result<(), Box<dyn Error>> {
+    let manager = loop_runtime.session_manager_mut();
+    let mut session = manager.get_or_create(session_key);
+    let approval = session
+        .metadata
+        .get_mut("pending_permission_approval")
+        .and_then(Value::as_object_mut)
+        .ok_or("missing pending approval")?;
+    approval.insert("approval_request_id".to_owned(), json!(lineage));
+    if let Some(request) = approval
+        .get_mut("approval_request")
+        .and_then(Value::as_object_mut)
+    {
+        request.insert("approval_request_id".to_owned(), json!(lineage));
+    }
+    manager.save(&session)?;
+    Ok(())
+}
+
+fn expire_pending_approval(
+    loop_runtime: &mut AgentLoop,
+    session_key: &str,
+) -> Result<(), Box<dyn Error>> {
+    let manager = loop_runtime.session_manager_mut();
+    let mut session = manager.get_or_create(session_key);
+    let approval = session
+        .metadata
+        .get_mut("pending_permission_approval")
+        .and_then(Value::as_object_mut)
+        .ok_or("missing pending approval")?;
+    if let Some(request) = approval
+        .get_mut("approval_request")
+        .and_then(Value::as_object_mut)
+    {
+        request.insert("expires_at_unix_ms".to_owned(), json!(1));
+    }
+    manager.save(&session)?;
+    Ok(())
+}
+
+#[test]
 fn loop_permission_approval_normalizes_artifact_and_records_tool_outcome(
 ) -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
@@ -8129,6 +8445,49 @@ fn loop_priority_status_bypasses_active_session_lock() -> Result<(), Box<dyn Err
 }
 
 #[test]
+fn loop_priority_restart_bypasses_active_session_lock() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let turn_lock = SessionTurnLock::new();
+    let _guard = turn_lock
+        .acquire("telegram:chat-1")
+        .map_err(|error| format!("test lock acquire failed: {error:?}"))?;
+    let mut sessions = SessionManager::new(workspace.path())?;
+    let mut active_session = Session::new("telegram:chat-1");
+    active_session
+        .metadata
+        .insert("pending_user_turn".to_owned(), json!(true));
+    sessions.save(&active_session)?;
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        sessions,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_session_turn_lock(turn_lock);
+
+    let result = loop_runtime.process_message(InboundMessage::new(
+        "telegram", "user-1", "chat-1", "/restart",
+    ))?;
+    assert_eq!(
+        result.command,
+        Some(AgentLoopCommandResult::RestartRequested)
+    );
+    assert_eq!(result.stop_reason, "restart_requested");
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("telegram:chat-1")
+        .ok_or("missing active session")?;
+    assert_eq!(raw["metadata"]["pending_user_turn"], true);
+    assert_eq!(raw["messages"].as_array().map(Vec::len), Some(0));
+    Ok(())
+}
+
+#[test]
 fn loop_priority_stop_cancels_active_session_turn() -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
     let bus = MessageBus::new();
@@ -8155,6 +8514,104 @@ fn loop_priority_stop_cancels_active_session_turn() -> Result<(), Box<dyn Error>
         .process_message(InboundMessage::new("telegram", "user-1", "chat-1", "/stop"))?;
     assert_eq!(result.command, Some(AgentLoopCommandResult::StopRequested));
     assert!(cancellation.is_cancelled());
+    Ok(())
+}
+
+#[test]
+fn loop_priority_stop_cancels_reserved_session_before_bind() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let turn_lock = SessionTurnLock::new();
+    let reservation = turn_lock.reserve("telegram:chat-1");
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("must not run".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_session_turn_lock(turn_lock.clone());
+
+    let stop = loop_runtime
+        .process_message(InboundMessage::new("telegram", "user-1", "chat-1", "/stop"))?;
+    assert_eq!(stop.command, Some(AgentLoopCommandResult::StopRequested));
+    reservation.bind_to_current_thread();
+    assert!(matches!(
+        turn_lock.acquire("telegram:chat-1"),
+        Err(SessionTurnAcquireError::Cancelled { ref session_key }) if session_key == "telegram:chat-1"
+    ));
+    assert_eq!(
+        client
+            .requests
+            .lock()
+            .map_err(|error| error.to_string())?
+            .len(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn loop_priority_status_and_restart_do_not_cancel_reserved_session() -> Result<(), Box<dyn Error>> {
+    for command in ["/status", "/restart"] {
+        let workspace = tempfile::tempdir()?;
+        let turn_lock = SessionTurnLock::new();
+        let reservation = turn_lock.reserve("telegram:chat-1");
+        let registry = ToolRegistry::new();
+        let client = MockProvider::new(Vec::new());
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            SessionManager::new(workspace.path())?,
+            ContextBuilder::new(workspace.path()),
+            &registry,
+            &client,
+            AgentLoopConfig::new(workspace.path(), "test-model"),
+        )
+        .with_session_turn_lock(turn_lock.clone());
+
+        let result = loop_runtime
+            .process_message(InboundMessage::new("telegram", "user-1", "chat-1", command))?;
+        assert!(matches!(
+            result.command,
+            Some(AgentLoopCommandResult::Status | AgentLoopCommandResult::RestartRequested)
+        ));
+        reservation.bind_to_current_thread();
+        let _guard = turn_lock
+            .acquire("telegram:chat-1")
+            .map_err(|error| format!("{command} should not cancel reservation: {error:?}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn loop_priority_stop_does_not_cancel_reserved_other_session() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let turn_lock = SessionTurnLock::new();
+    let reservation = turn_lock.reserve("telegram:chat-1");
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(Vec::new());
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_session_turn_lock(turn_lock.clone());
+
+    let stop = loop_runtime
+        .process_message(InboundMessage::new("telegram", "user-1", "chat-2", "/stop"))?;
+    assert_eq!(stop.command, Some(AgentLoopCommandResult::StopRequested));
+    reservation.bind_to_current_thread();
+    let _guard = turn_lock
+        .acquire("telegram:chat-1")
+        .map_err(|error| format!("wrong-session /stop should not cancel reservation: {error:?}"))?;
     Ok(())
 }
 

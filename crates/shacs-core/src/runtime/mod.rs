@@ -30,6 +30,7 @@ mod permission_remembered;
 mod permission_replay;
 mod permission_rules;
 mod plugin_discovery;
+mod plugin_extension_projection;
 mod plugin_hooks;
 mod plugin_runtime;
 mod plugin_surface;
@@ -40,7 +41,9 @@ mod replay;
 mod runner;
 mod self_improvement;
 mod skill_trust_permission;
+mod spec031_context;
 mod subagent;
+mod surface_action;
 mod tool_execution;
 mod tool_search;
 mod workflow;
@@ -148,7 +151,8 @@ pub use lifecycle::{
 pub use loop_control::{
     ActiveLoopTask, ActiveLoopTaskSnapshot, CancellationToken, LoopTaskCancelResult,
     LoopTaskRegisterResult, LoopTaskRegistry, LoopTaskStatus, SessionTurnAcquireError,
-    SessionTurnGuard, SessionTurnLock, StreamDeltaBatch, StreamDeltaCoalescer,
+    SessionTurnCancelOutcome, SessionTurnGuard, SessionTurnLock, SessionTurnReservation,
+    StreamDeltaBatch, StreamDeltaCoalescer,
 };
 pub use memory::{
     estimate_message_tokens, estimate_session_prompt_tokens, pick_consolidation_boundary,
@@ -231,6 +235,7 @@ pub use plugin_discovery::{
     discover_plugins, DiscoveredPlugin, PluginBlockReason, PluginDiscovery, PluginDiscoveryError,
     PluginManifest, PluginManifestSource, PluginState,
 };
+pub use plugin_extension_projection::build_spec031_extension_projection;
 pub use plugin_hooks::{
     plugin_hook_catalog, plugin_hook_error_diagnostic, plugin_hook_output_policy,
     plugin_hook_timeout_diagnostic, summarize_plugin_hook_dispatch, validate_plugin_hook_output,
@@ -319,12 +324,24 @@ pub use skill_trust_permission::{
     SkillTrustPermissionDecisionKind, SkillTrustPermissionInput, SkillTrustPermissionSchemaId,
     SkillTrustRejectionReason, TrustLifecycleStatus,
 };
+pub use spec031_context::{
+    project_spec031_context_evidence, Spec031ContextEvidenceInput,
+    Spec031ContextEvidenceProjection, Spec031ContextEvidenceReason, Spec031ContextEvidenceRow,
+    Spec031ContextEvidenceRowKind, Spec031ContextOwnerRef,
+};
 pub use subagent::{
     build_subagent_tool_registry, format_partial_progress,
     format_partial_progress_from_tool_events, ChildResultEnvelope, ChildResultStatus,
     MergeDecision, SpawnEnvelope, SubagentExecutionConfig, SubagentProgressUpdate, SubagentRuntime,
     SubagentRuntimeConfig, SubagentSpawnOutcome, SubagentState, SubagentStatus,
     SyntheticSubagentCommand,
+};
+pub use surface_action::{
+    recover_runtime_surface, request_runtime_control, request_surface_approval,
+    runtime_stop_request_marker_path, surface_approval_availability, SurfaceAction,
+    SurfaceActionError, SurfaceActionOutcome, SurfaceActionOutcomeKind, SurfaceActionRequestKind,
+    SurfaceApprovalAvailability, SurfaceApprovalDecision, SurfaceApprovalRequest,
+    SURFACE_APPROVAL_PAYLOAD_TYPE, SURFACE_APPROVAL_WORK_KIND,
 };
 pub use tool_execution::{
     session_approval_context_digest, session_approval_context_digest_for_input,

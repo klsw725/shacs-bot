@@ -9,3 +9,4 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 shacs-command = { path = "../shacs-command" }
+shacs-projection = { path = "../shacs-projection" }

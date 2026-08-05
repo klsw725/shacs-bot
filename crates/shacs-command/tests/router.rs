@@ -10,6 +10,18 @@ use std::error::Error;
 fn builtin_router_distinguishes_priority_exact_and_prefix_commands() -> Result<(), Box<dyn Error>> {
     let router = CommandRouter::builtin();
 
+    for (content, id) in [
+        ("  /STOP  ", CommandId::Stop),
+        ("  /RESTART  ", CommandId::Restart),
+        ("  /STATUS  ", CommandId::Status),
+    ] {
+        let priority = router
+            .dispatch_priority(content)
+            .ok_or("missing priority")?;
+        assert_eq!(priority.id, id);
+        assert_eq!(priority.kind, CommandKind::Priority);
+    }
+
     let priority = router
         .dispatch_priority("  /STATUS  ")
         .ok_or("missing status priority")?;
