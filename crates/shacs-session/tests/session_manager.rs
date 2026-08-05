@@ -444,6 +444,48 @@ fn session_ux_projects_runtime_execution_without_raw_ledger_values() -> Result<(
 }
 
 #[test]
+fn session_ux_runtime_workflow_preserves_explicit_zero_but_not_missing_values(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    let mut session = Session::new("cli:runtime-workflow-zero");
+    session.metadata.insert(
+        "runtime_workflow".to_owned(),
+        json!({
+            "projection": {
+                "schema_version": "024WorkflowProjection.v1",
+                "workflow_id": "wf-zero",
+                "progress_count": 0,
+                "active_child_count": 0,
+                "budget_usage": {"known_tokens": 0, "child_runs": 0},
+                "resume_available": false
+            }
+        }),
+    );
+    manager.save(&session)?;
+
+    let workflow = manager
+        .session_ux_detail("cli:runtime-workflow-zero")
+        .ok_or("missing UX detail")?
+        .runtime_workflow
+        .ok_or("missing runtime workflow projection")?;
+    let budget = workflow
+        .budget_usage
+        .ok_or("missing workflow budget projection")?;
+
+    assert_eq!(workflow.progress_count, Some(0));
+    assert_eq!(workflow.active_child_count, Some(0));
+    assert_eq!(workflow.pending_barrier_count, None);
+    assert_eq!(budget.known_tokens, Some(0));
+    assert_eq!(budget.child_runs, Some(0));
+    assert_eq!(budget.estimated_tokens, None);
+    assert_eq!(workflow.worktree_ref_count, 0);
+    assert_eq!(workflow.evidence_ref_count, 0);
+    assert!(!workflow.resume_available);
+    Ok(())
+}
+
+#[test]
 fn session_ux_ignores_absent_and_malformed_runtime_execution() -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
     let mut manager = SessionManager::new(workspace.path())?;

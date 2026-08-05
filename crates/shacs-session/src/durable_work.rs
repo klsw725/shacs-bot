@@ -451,8 +451,10 @@ fn apply_terminal(
     let payload = parse_payload::<WorkTerminal>(event)?;
     validate_identifier_at(event.sequence, "outcome_ref", &payload.outcome_ref)?;
     let item = open_item_mut(state, event.sequence, &payload.work_id)?;
-    if !matches!(payload.terminal_kind, WorkTerminalKind::Blocked)
-        && item.state != ReplayWorkState::Leased
+    if !matches!(
+        payload.terminal_kind,
+        WorkTerminalKind::Blocked | WorkTerminalKind::Superseded
+    ) && item.state != ReplayWorkState::Leased
     {
         return Err(invalid_transition(event.sequence, payload.work_id));
     }
