@@ -5,6 +5,13 @@ use shacs_command::{build_help_text, normalize_channel_command};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 
+mod spec031;
+
+pub use spec031::{
+    channel_delivery_observation_from_metadata, project_spec031_channel_event,
+    ChannelDeliveryObservation, ChannelSpec031ProjectionInput, ChannelSpec031ProjectionKind,
+};
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub channel: String,
