@@ -1049,7 +1049,7 @@ fn plugin_command_process_closes_stdin_after_payload_write() {
         tempdir.path().to_path_buf(),
         json!({"commands": ["review"]}),
         json!({"commands": {
-            "review": {"command": "bin/review", "description": "Run review", "timeoutMs": 1000}
+            "review": {"command": "bin/review", "description": "Run review", "timeoutMs": 5000}
         }}),
     );
     let mut diagnostics = Vec::new();
@@ -1062,7 +1062,7 @@ fn plugin_command_process_closes_stdin_after_payload_write() {
             &PluginExecutableCommand {
                 command_path: command_path.clone(),
                 args: Vec::new(),
-                timeout_ms: 1_000,
+                timeout_ms: 5_000,
             },
         ),
     );

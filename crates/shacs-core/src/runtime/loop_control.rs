@@ -50,10 +50,13 @@ impl SessionTurnLock {
         let mut state = recover_lock(&self.state);
         let pending_cancellation = if consume_pending_cancellation {
             match state.reserved_sessions.get(&session_key) {
-                Some(reservation) if reservation.owner == Some(std::thread::current().id()) => {
-                    let cancelled = reservation.cancelled;
+                Some(reservation) if reservation.cancelled => {
                     state.reserved_sessions.remove(&session_key);
-                    cancelled
+                    return Err(SessionTurnAcquireError::Cancelled { session_key });
+                }
+                Some(reservation) if reservation.owner == Some(std::thread::current().id()) => {
+                    state.reserved_sessions.remove(&session_key);
+                    false
                 }
                 Some(_) => {
                     return Err(SessionTurnAcquireError::AlreadyActive { session_key });
@@ -147,18 +150,25 @@ impl SessionTurnLock {
         }
     }
 
-    pub fn cancel_active_or_reserved(&self, session_key: &str) -> bool {
+    pub fn cancel_active_or_reserved(&self, session_key: &str) -> SessionTurnCancelOutcome {
         let mut state = recover_lock(&self.state);
         if let Some(token) = state.active_sessions.get(session_key) {
             token.cancel();
-            true
+            SessionTurnCancelOutcome::Active
         } else if let Some(reservation) = state.reserved_sessions.get_mut(session_key) {
             reservation.cancelled = true;
-            true
+            SessionTurnCancelOutcome::Reserved
         } else {
-            false
+            SessionTurnCancelOutcome::Idle
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTurnCancelOutcome {
+    Active,
+    Reserved,
+    Idle,
 }
 
 #[derive(Debug)]
@@ -172,7 +182,7 @@ impl SessionTurnReservation {
     pub fn bind_to_current_thread(&self) {
         let mut state = recover_lock(&self.state);
         if let Some(reservation) = state.reserved_sessions.get_mut(&self.session_key) {
-            if reservation.id == self.id {
+            if reservation.id == self.id && !reservation.cancelled {
                 reservation.owner = Some(std::thread::current().id());
             }
         }
@@ -195,6 +205,7 @@ impl Drop for SessionTurnReservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionTurnAcquireError {
     AlreadyActive { session_key: String },
+    Cancelled { session_key: String },
 }
 
 #[derive(Debug)]

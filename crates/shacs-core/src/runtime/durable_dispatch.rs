@@ -356,6 +356,42 @@ impl DurableWorkDispatcher {
         )
     }
 
+    pub fn lease_work(
+        &mut self,
+        item: &ReplayWorkItem,
+        now_ms: u64,
+    ) -> Result<DurableEventRecord, DurableDispatchError> {
+        if !matches!(
+            item.state,
+            ReplayWorkState::Pending | ReplayWorkState::WaitingRetry
+        ) {
+            return Err(DurableDispatchError::InvalidWork(format!(
+                "durable work {} is not leasable from state {:?}",
+                item.work_id, item.state
+            )));
+        }
+        let attempt = item.attempt.saturating_add(1);
+        self.append_for_item(
+            item,
+            WORK_LEASED,
+            &WorkLeased {
+                work_id: item.work_id.clone(),
+                lease_id: format!("lease-{}-{attempt}-{now_ms}", item.work_id),
+                lease_owner_ref: self.lease_owner_ref.clone(),
+                attempt,
+                leased_at_ms: now_ms,
+                lease_expires_at_ms: now_ms.saturating_add(self.lease_duration_ms),
+            },
+        )
+    }
+
+    pub fn read_payload_json(
+        &self,
+        item: &ReplayWorkItem,
+    ) -> Result<serde_json::Value, DurableDispatchError> {
+        Ok(self.payloads.read_json(&item.payload_ref)?)
+    }
+
     pub fn requeue_stale(
         &mut self,
         state: &DurableWorkReplayState,
