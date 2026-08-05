@@ -8,8 +8,11 @@ use axum::{Json, Router};
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use shacs_channels::WebSocketServerEvent;
-use shacs_projection::RememberedPermissionProjection;
+use shacs_channels::{
+    project_spec031_channel_event, ChannelDeliveryObservation, ChannelSpec031ProjectionInput,
+    WebSocketServerEvent,
+};
+use shacs_projection::{RememberedPermissionProjection, Spec031Envelope};
 use shacs_providers::{GenerationSettings, LlmResponse, ProviderEvent, ProviderRequest};
 use shacs_session::{
     build_session_diagnostics_aggregate, SessionManager, SessionProjectionOptions,
@@ -20,19 +23,22 @@ use shacs_utils::diagnostics::{
 };
 pub use shacs_utils::media_decode::{save_base64_data_url, MediaDecodeError, MAX_FILE_SIZE};
 pub use shacs_utils::runtime::EMPTY_FINAL_RESPONSE_MESSAGE;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{timeout, Duration};
+
+mod spec031_api;
+pub use spec031_api::{Spec031ApiProjection, READINESS_PATH, SUBAGENTS_PATH, TOOLS_PATH};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const MODELS_PATH: &str = "/v1/models";
@@ -50,6 +56,8 @@ pub const API_CHAT_ID: &str = "default";
 pub const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_REQUEST_BODY_BYTES: usize = 20 * 1024 * 1024;
 const DEFAULT_API_TIMEOUT_SECONDS: f64 = 120.0;
+const API_RECONNECT_TRACKER_CAPACITY: usize = 128;
+static NEXT_WS_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -283,6 +291,17 @@ pub trait ChatCompletionAdapter {
         self.diagnostics_snapshot().redacted_value()
     }
 
+    fn readiness_projection(&self) -> Option<Value> {
+        None
+    }
+
+    fn spec031_projection(
+        &self,
+        _projection: Spec031ApiProjection,
+    ) -> Result<Option<shacs_projection::Spec031Envelope>, ApiError> {
+        Ok(None)
+    }
+
     fn workflow_recipes_projection(&self) -> Option<Value> {
         None
     }
@@ -320,8 +339,12 @@ pub trait ChatCompletionAdapter {
 pub struct ApiRouterState {
     adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
     timeout: Duration,
-    session_locks: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    session_locks: Arc<AsyncMutex<SessionLockRegistry>>,
+    spec031_channel_observer: Option<Spec031ChannelProjectionObserver>,
+    reconnect_tracker: Arc<StdMutex<ApiReconnectTracker>>,
 }
+
+type Spec031ChannelProjectionObserver = Arc<dyn Fn(Spec031Envelope) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct WebUiRouterState {
@@ -344,9 +367,329 @@ impl ApiRouterState {
         Self {
             adapter,
             timeout,
-            session_locks: Arc::new(AsyncMutex::new(HashMap::new())),
+            session_locks: Arc::new(AsyncMutex::new(SessionLockRegistry::new(
+                API_RECONNECT_TRACKER_CAPACITY,
+            ))),
+            spec031_channel_observer: None,
+            reconnect_tracker: Arc::new(StdMutex::new(ApiReconnectTracker::new(
+                API_RECONNECT_TRACKER_CAPACITY,
+            ))),
         }
     }
+
+    #[cfg(test)]
+    fn with_spec031_channel_observer(mut self, observer: Spec031ChannelProjectionObserver) -> Self {
+        self.spec031_channel_observer = Some(observer);
+        self
+    }
+}
+
+#[derive(Debug)]
+struct SessionLockRegistry {
+    capacity: usize,
+    locks: HashMap<String, Arc<AsyncMutex<()>>>,
+    order: VecDeque<String>,
+}
+
+impl SessionLockRegistry {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            locks: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn lock_for(&mut self, session_key: &str) -> Arc<AsyncMutex<()>> {
+        let lock = self
+            .locks
+            .entry(session_key.to_owned())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone();
+        self.touch(session_key);
+        self.evict_inactive();
+        lock
+    }
+
+    fn touch(&mut self, session_key: &str) {
+        self.order.retain(|item| item != session_key);
+        self.order.push_back(session_key.to_owned());
+    }
+
+    fn evict_inactive(&mut self) {
+        let mut remaining_candidates = self.order.len();
+        while self.locks.len() > self.capacity && remaining_candidates > 0 {
+            let Some(candidate) = self.order.pop_front() else {
+                return;
+            };
+            remaining_candidates -= 1;
+            if self
+                .locks
+                .get(&candidate)
+                .is_some_and(|lock| Arc::strong_count(lock) == 1)
+            {
+                self.locks.remove(&candidate);
+            } else {
+                self.order.push_back(candidate);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.locks.len()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReconnectObservation {
+    generation: u64,
+    sequence: u64,
+    gap: bool,
+}
+
+#[derive(Debug, Clone)]
+struct StreamReconnectState {
+    generation: u64,
+    last_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct StreamConnectionState {
+    key: String,
+    generation: u64,
+    next_sequence: u64,
+    gap: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ApiReconnectTracker {
+    capacity: usize,
+    sse: HashMap<String, StreamReconnectState>,
+    ws: HashMap<String, StreamReconnectState>,
+    evicted_ws: HashSet<String>,
+    evicted_ws_order: VecDeque<String>,
+    order: VecDeque<String>,
+}
+
+impl ApiReconnectTracker {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            sse: HashMap::new(),
+            ws: HashMap::new(),
+            evicted_ws: HashSet::new(),
+            evicted_ws_order: VecDeque::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn connect_sse(&mut self, key: &str, last_event_id: Option<&str>) -> StreamConnectionState {
+        let prior = self.sse.get(key).cloned();
+        let parsed = last_event_id.and_then(parse_sse_event_id);
+        let gap = match (&prior, parsed) {
+            (Some(state), Some((generation, sequence))) => {
+                generation != state.generation || sequence != state.last_sequence
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => true,
+            (None, None) => false,
+        };
+        let generation = prior.map_or(1, |state| state.generation.saturating_add(1));
+        self.sse.insert(
+            key.to_owned(),
+            StreamReconnectState {
+                generation,
+                last_sequence: 0,
+            },
+        );
+        self.touch(format!("sse:{key}"));
+        StreamConnectionState {
+            key: key.to_owned(),
+            generation,
+            next_sequence: 1,
+            gap,
+        }
+    }
+
+    fn connect_ws(&mut self, key: &str) -> StreamConnectionState {
+        let prior = self.ws.get(key).cloned();
+        let was_evicted = self.evicted_ws.remove(key);
+        if was_evicted {
+            self.evicted_ws_order.retain(|item| item != key);
+        }
+        let generation = prior
+            .as_ref()
+            .map_or(1, |state| state.generation.saturating_add(1));
+        let gap = prior.is_some() || was_evicted;
+        self.ws.insert(
+            key.to_owned(),
+            StreamReconnectState {
+                generation,
+                last_sequence: 0,
+            },
+        );
+        self.touch(format!("ws:{key}"));
+        StreamConnectionState {
+            key: key.to_owned(),
+            generation,
+            next_sequence: 1,
+            gap,
+        }
+    }
+
+    fn record_sse(&mut self, state: &StreamConnectionState, sequence: u64) {
+        if let Some(stored) = self.sse.get_mut(&state.key) {
+            stored.last_sequence = sequence;
+        }
+    }
+
+    fn record_ws(&mut self, state: &StreamConnectionState, sequence: u64) {
+        if let Some(stored) = self.ws.get_mut(&state.key) {
+            stored.last_sequence = sequence;
+        }
+    }
+
+    fn touch(&mut self, key: String) {
+        self.order.retain(|item| item != &key);
+        self.order.push_back(key);
+        while self.order.len() > self.capacity {
+            if let Some(evicted) = self.order.pop_front() {
+                if let Some(key) = evicted.strip_prefix("sse:") {
+                    self.sse.remove(key);
+                } else if let Some(key) = evicted.strip_prefix("ws:") {
+                    self.ws.remove(key);
+                    self.remember_evicted_ws(key);
+                }
+            }
+        }
+    }
+
+    fn remember_evicted_ws(&mut self, key: &str) {
+        if !key.starts_with("ws-chat:") {
+            return;
+        }
+        if self.evicted_ws.insert(key.to_owned()) {
+            self.evicted_ws_order.push_back(key.to_owned());
+        } else {
+            self.evicted_ws_order.retain(|item| item != key);
+            self.evicted_ws_order.push_back(key.to_owned());
+        }
+        while self.evicted_ws_order.len() > self.capacity {
+            if let Some(evicted) = self.evicted_ws_order.pop_front() {
+                self.evicted_ws.remove(&evicted);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WebSocketReconnectScope {
+    connection_key: String,
+    by_key: HashMap<String, StreamConnectionState>,
+    order: VecDeque<String>,
+}
+
+impl WebSocketReconnectScope {
+    fn new(client_id: &str) -> Self {
+        let ordinal = NEXT_WS_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+        Self {
+            connection_key: format!(
+                "ws-connection:{}",
+                chat_completion_id(&format!("{client_id}:{ordinal}"))
+            ),
+            by_key: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn key_for(&self, event_chat_id: &str, fallback_chat_id: &str) -> String {
+        if event_chat_id == fallback_chat_id {
+            return self.connection_key.clone();
+        }
+        format!("ws-chat:{}", chat_completion_id(event_chat_id))
+    }
+
+    fn connection_for(
+        &mut self,
+        tracker: &Arc<StdMutex<ApiReconnectTracker>>,
+        event_chat_id: &str,
+        fallback_chat_id: &str,
+    ) -> &mut StreamConnectionState {
+        let key = self.key_for(event_chat_id, fallback_chat_id);
+        self.by_key.entry(key.clone()).or_insert_with(|| {
+            tracker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .connect_ws(&key)
+        });
+        self.touch(&key);
+        self.evict_oldest_except(&key);
+        match self.by_key.get_mut(&key) {
+            Some(connection) => connection,
+            None => unreachable!("websocket reconnect scope must retain the requested key"),
+        }
+    }
+
+    fn touch(&mut self, key: &str) {
+        self.order.retain(|item| item != key);
+        self.order.push_back(key.to_owned());
+    }
+
+    fn evict_oldest_except(&mut self, retained_key: &str) {
+        let mut remaining_candidates = self.order.len();
+        while self.by_key.len() > API_RECONNECT_TRACKER_CAPACITY && remaining_candidates > 0 {
+            let Some(candidate) = self.order.pop_front() else {
+                return;
+            };
+            remaining_candidates -= 1;
+            if candidate == retained_key {
+                self.order.push_back(candidate);
+            } else {
+                self.by_key.remove(&candidate);
+            }
+        }
+    }
+}
+
+impl StreamConnectionState {
+    fn next_observation(&mut self) -> ReconnectObservation {
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        ReconnectObservation {
+            generation: self.generation,
+            sequence,
+            gap: self.gap,
+        }
+    }
+}
+
+fn parse_sse_event_id(value: &str) -> Option<(u64, u64)> {
+    let (_, rest) = value.split_once(':')?;
+    let (generation, sequence) = rest.split_once(':')?;
+    Some((generation.parse().ok()?, sequence.parse().ok()?))
+}
+
+#[cfg(test)]
+fn api_router_with_observer(
+    adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
+    observer: Spec031ChannelProjectionObserver,
+) -> Router {
+    Router::new()
+        .route(HEALTH_PATH, any(axum_dispatch))
+        .route(MODELS_PATH, any(axum_dispatch))
+        .route(DIAGNOSTICS_PATH, any(axum_dispatch))
+        .route(SESSIONS_PATH, any(axum_dispatch))
+        .route(SUBAGENTS_PATH, any(axum_dispatch))
+        .route(TOOLS_PATH, any(axum_dispatch))
+        .route(READINESS_PATH, any(axum_dispatch))
+        .route(WORKFLOW_RECIPES_PATH, any(axum_dispatch))
+        .route(PERMISSIONS_PATH, any(axum_dispatch))
+        .route(CHAT_COMPLETIONS_PATH, any(axum_dispatch))
+        .route(WEBSOCKET_PATH, any(websocket_upgrade_axum))
+        .fallback(axum_dispatch)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .with_state(ApiRouterState::new(adapter).with_spec031_channel_observer(observer))
 }
 
 pub fn api_router(adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>) -> Router {
@@ -368,17 +711,28 @@ pub fn api_router_with_timeout_and_websocket_path(
     timeout: Duration,
     websocket_path: &str,
 ) -> Router {
+    api_router_with_state_and_websocket_path(
+        ApiRouterState::with_timeout(adapter, timeout),
+        websocket_path,
+    )
+}
+
+fn api_router_with_state_and_websocket_path(state: ApiRouterState, websocket_path: &str) -> Router {
     Router::new()
         .route(HEALTH_PATH, any(axum_dispatch))
         .route(MODELS_PATH, any(axum_dispatch))
         .route(DIAGNOSTICS_PATH, any(axum_dispatch))
+        .route(SESSIONS_PATH, any(axum_dispatch))
+        .route(SUBAGENTS_PATH, any(axum_dispatch))
+        .route(TOOLS_PATH, any(axum_dispatch))
+        .route(READINESS_PATH, any(axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(axum_dispatch))
         .route(PERMISSIONS_PATH, any(axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(axum_dispatch))
         .route(websocket_path, any(websocket_upgrade_axum))
         .fallback(axum_dispatch)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
-        .with_state(ApiRouterState::with_timeout(adapter, timeout))
+        .with_state(state)
 }
 
 pub fn create_app(
@@ -393,12 +747,19 @@ pub fn websocket_router_with_timeout_and_path(
     timeout: Duration,
     websocket_path: &str,
 ) -> Router {
+    websocket_router_with_state_and_path(
+        ApiRouterState::with_timeout(adapter, timeout),
+        websocket_path,
+    )
+}
+
+fn websocket_router_with_state_and_path(state: ApiRouterState, websocket_path: &str) -> Router {
     Router::new()
         .route(HEALTH_PATH, any(axum_dispatch))
         .route(websocket_path, any(websocket_upgrade_axum))
         .fallback(axum_not_found)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
-        .with_state(ApiRouterState::with_timeout(adapter, timeout))
+        .with_state(state)
 }
 
 pub fn web_ui_router_with_timeout_and_websocket_path(
@@ -411,6 +772,10 @@ pub fn web_ui_router_with_timeout_and_websocket_path(
         .route(HEALTH_PATH, any(webui_axum_dispatch))
         .route(MODELS_PATH, any(webui_axum_dispatch))
         .route(DIAGNOSTICS_PATH, any(webui_axum_dispatch))
+        .route(SESSIONS_PATH, any(webui_axum_dispatch))
+        .route(SUBAGENTS_PATH, any(webui_axum_dispatch))
+        .route(TOOLS_PATH, any(webui_axum_dispatch))
+        .route(READINESS_PATH, any(webui_axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(webui_axum_dispatch))
         .route(PERMISSIONS_PATH, any(webui_axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(webui_axum_dispatch))
@@ -691,26 +1056,40 @@ pub fn handle_api_request(
     request: ApiHttpRequest,
     adapter: &(impl ChatCompletionAdapter + ?Sized),
 ) -> ApiHttpResponse {
-    match (request.method, request.path.as_str()) {
+    let path = spec031_api::spec031_projection_path(&request.path);
+    match (request.method, path) {
         (ApiMethod::Get, HEALTH_PATH) => json_response(200, health_response()),
         (ApiMethod::Get, MODELS_PATH) => {
             json_response(200, models_response_with_owned_by(&adapter.models()))
         }
-        (ApiMethod::Get, DIAGNOSTICS_PATH) => json_response(200, adapter.diagnostics_projection()),
-        (ApiMethod::Get, WORKFLOW_RECIPES_PATH) => match adapter.workflow_recipes_projection() {
-            Some(projection) => json_response(200, projection),
-            None => error_response(ApiError::not_found(
-                "workflow recipe projection is not configured",
-            )),
-        },
-        (ApiMethod::Get, PERMISSIONS_PATH) => match adapter.remembered_permissions_projection() {
-            Some(projection) => json_response(200, json!(projection)),
-            None => error_response(ApiError::not_found(
-                "remembered permission projection is not configured",
-            )),
-        },
-        (ApiMethod::Get, path) if path == SESSIONS_PATH || path.starts_with("/v1/sessions/") => {
-            handle_session_query_request(path, adapter)
+        (ApiMethod::Get, SESSIONS_PATH) => handle_session_query_request(path, adapter),
+        (ApiMethod::Get, CHAT_COMPLETIONS_PATH) => error_response(ApiError::method_not_allowed(
+            "method is not supported for this endpoint",
+        )),
+        (ApiMethod::Get, _) => {
+            if let Some(response) =
+                spec031_api::handle_spec031_projection_request(&request.path, adapter)
+            {
+                return response;
+            }
+            match path {
+                WORKFLOW_RECIPES_PATH => match adapter.workflow_recipes_projection() {
+                    Some(projection) => json_response(200, projection),
+                    None => error_response(ApiError::not_found(
+                        "workflow recipe projection is not configured",
+                    )),
+                },
+                PERMISSIONS_PATH => match adapter.remembered_permissions_projection() {
+                    Some(projection) => json_response(200, json!(projection)),
+                    None => error_response(ApiError::not_found(
+                        "remembered permission projection is not configured",
+                    )),
+                },
+                _ if path.starts_with("/v1/sessions/") => {
+                    handle_session_query_request(path, adapter)
+                }
+                _ => error_response(ApiError::not_found("API route not found")),
+            }
         }
         (ApiMethod::Post, CHAT_COMPLETIONS_PATH) => {
             handle_chat_completion_request(request, adapter)
@@ -718,6 +1097,9 @@ pub fn handle_api_request(
         (_, HEALTH_PATH)
         | (_, MODELS_PATH)
         | (_, DIAGNOSTICS_PATH)
+        | (_, SUBAGENTS_PATH)
+        | (_, TOOLS_PATH)
+        | (_, READINESS_PATH)
         | (_, WORKFLOW_RECIPES_PATH)
         | (_, PERMISSIONS_PATH)
         | (_, CHAT_COMPLETIONS_PATH)
@@ -911,11 +1293,19 @@ pub fn handle_chat_completions(
 async fn axum_dispatch(State(state): State<ApiRouterState>, request: Request) -> Response {
     let method = api_method_from_axum(request.method());
     let path = request.uri().path().to_owned();
+    if let Err(error) = validate_local_http_headers(request.headers()) {
+        return axum_response_from_api(error_response(error));
+    }
     if method == ApiMethod::Post
         && path == CHAT_COMPLETIONS_PATH
         && is_multipart_header_map(request.headers())
     {
         return handle_multipart_chat_axum(state, request).await;
+    }
+    if method == ApiMethod::Post && path == CHAT_COMPLETIONS_PATH {
+        if let Err(error) = validate_json_chat_content_type(request.headers()) {
+            return axum_response_from_api(error_response(error));
+        }
     }
 
     let api_request = match api_request_from_axum(request).await {
@@ -1014,15 +1404,17 @@ async fn handle_websocket_connection(
     client_id: String,
     default_chat_id: String,
 ) {
+    let mut reconnect_scope = WebSocketReconnectScope::new(&client_id);
     while let Some(message) = socket.recv().await {
         let result = match websocket_frame_from_axum(message) {
             Ok(Some(frame)) => {
                 dispatch_websocket_frame(
-                    state.adapter.clone(),
+                    state.clone(),
                     frame,
                     client_id.clone(),
                     default_chat_id.clone(),
                     &mut socket,
+                    &mut reconnect_scope,
                 )
                 .await
             }
@@ -1035,6 +1427,9 @@ async fn handle_websocket_connection(
                         detail: Some(error.message),
                     },
                     &default_chat_id,
+                    state.spec031_channel_observer.as_ref(),
+                    state.reconnect_tracker.clone(),
+                    &mut reconnect_scope,
                 )
                 .await
             }
@@ -1044,9 +1439,16 @@ async fn handle_websocket_connection(
                 chat_id: Some(default_chat_id.clone()),
                 detail: Some(error.message),
             };
-            if send_websocket_event(&mut socket, fallback, &default_chat_id)
-                .await
-                .is_err()
+            if send_websocket_event(
+                &mut socket,
+                fallback,
+                &default_chat_id,
+                state.spec031_channel_observer.as_ref(),
+                state.reconnect_tracker.clone(),
+                &mut reconnect_scope,
+            )
+            .await
+            .is_err()
             {
                 return;
             }
@@ -1055,23 +1457,45 @@ async fn handle_websocket_connection(
 }
 
 async fn dispatch_websocket_frame(
-    adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
+    state: ApiRouterState,
     frame: Value,
     client_id: String,
     default_chat_id: String,
     socket: &mut WebSocket,
+    reconnect_scope: &mut WebSocketReconnectScope,
 ) -> Result<(), ApiError> {
     let fallback_chat_id = default_chat_id.clone();
     let (event_tx, mut event_rx) = mpsc::channel::<WebSocketServerEvent>(64);
+    let adapter = state.adapter.clone();
+    let spec031_channel_observer = state.spec031_channel_observer.clone();
     let task = tokio::task::spawn_blocking(move || {
         let mut emit = move |event| {
-            let _ = event_tx.blocking_send(event);
+            if event_tx.blocking_send(event).is_err() {
+                observe_progress_delivery(
+                    spec031_channel_observer.as_ref(),
+                    shacs_channels::WEBSOCKET_CHANNEL,
+                    shacs_projection::Spec031ProgressDelivery::Dropped,
+                    ChannelDeliveryObservation {
+                        dropped: Some(1),
+                        slow_consumer: Some(1),
+                        ..ChannelDeliveryObservation::unavailable()
+                    },
+                );
+            }
         };
         adapter.process_websocket_frame_streaming(frame, &client_id, &default_chat_id, &mut emit)
     });
 
     while let Some(event) = event_rx.recv().await {
-        send_websocket_event(socket, event, &fallback_chat_id).await?;
+        send_websocket_event(
+            socket,
+            event,
+            &fallback_chat_id,
+            state.spec031_channel_observer.as_ref(),
+            state.reconnect_tracker.clone(),
+            reconnect_scope,
+        )
+        .await?;
     }
 
     task.await
@@ -1082,7 +1506,13 @@ async fn send_websocket_event(
     socket: &mut WebSocket,
     event: WebSocketServerEvent,
     fallback_chat_id: &str,
+    spec031_channel_observer: Option<&Spec031ChannelProjectionObserver>,
+    reconnect_tracker: Arc<StdMutex<ApiReconnectTracker>>,
+    reconnect_scope: &mut WebSocketReconnectScope,
 ) -> Result<(), ApiError> {
+    let event_chat_id = websocket_event_chat_id(&event)
+        .unwrap_or(fallback_chat_id)
+        .to_owned();
     let payload = match serde_json::to_string(&event) {
         Ok(payload) => payload,
         Err(error) => {
@@ -1093,10 +1523,100 @@ async fn send_websocket_event(
             fallback_payload(&fallback)
         }
     };
-    socket
+    if socket
         .send(AxumWebSocketMessage::Text(payload.into()))
         .await
-        .map_err(|_| ApiError::internal("websocket client disconnected"))
+        .is_err()
+    {
+        observe_disconnected_spec031(spec031_channel_observer, &event_chat_id)?;
+        return Err(ApiError::internal("websocket client disconnected"));
+    }
+    let ws_connection =
+        reconnect_scope.connection_for(&reconnect_tracker, &event_chat_id, fallback_chat_id);
+    let reconnect_observation = ws_connection.next_observation();
+    let envelope = project_spec031_channel_event(
+        ChannelSpec031ProjectionInput::websocket_event(event).with_delivery_observation(
+            reconnect_observation_to_delivery_observation(reconnect_observation),
+        ),
+    )
+    .map_err(|error| ApiError::internal(format!("websocket Spec031 projection failed: {error}")))?;
+    let payload = serde_json::to_string(&envelope).map_err(|error| {
+        ApiError::internal(format!(
+            "websocket Spec031 envelope could not be serialized: {error}"
+        ))
+    })?;
+    if socket
+        .send(AxumWebSocketMessage::Text(payload.into()))
+        .await
+        .is_err()
+    {
+        observe_disconnected_spec031(spec031_channel_observer, &event_chat_id)?;
+        return Err(ApiError::internal("websocket client disconnected"));
+    }
+    observe_spec031_envelope(spec031_channel_observer, envelope);
+    reconnect_tracker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .record_ws(ws_connection, reconnect_observation.sequence);
+    Ok(())
+}
+
+fn observe_disconnected_spec031(
+    observer: Option<&Spec031ChannelProjectionObserver>,
+    chat_id: &str,
+) -> Result<(), ApiError> {
+    let envelope = project_spec031_channel_event(
+        ChannelSpec031ProjectionInput::disconnected(
+            shacs_channels::WEBSOCKET_CHANNEL,
+            Some(chat_id),
+        )
+        .with_delivery_observation(ChannelDeliveryObservation {
+            dropped: Some(1),
+            slow_consumer: Some(1),
+            ..ChannelDeliveryObservation::unavailable()
+        }),
+    )
+    .map_err(|error| {
+        ApiError::internal(format!(
+            "websocket Spec031 disconnect projection failed: {error}"
+        ))
+    })?;
+    observe_spec031_envelope(observer, envelope);
+    Ok(())
+}
+
+fn observe_progress_delivery(
+    observer: Option<&Spec031ChannelProjectionObserver>,
+    channel: &str,
+    delivery: shacs_projection::Spec031ProgressDelivery,
+    observation: ChannelDeliveryObservation,
+) {
+    if let Ok(envelope) = project_spec031_channel_event(
+        ChannelSpec031ProjectionInput::progress_delivery(channel, delivery, None)
+            .with_delivery_observation(observation),
+    ) {
+        observe_spec031_envelope(observer, envelope);
+    }
+}
+
+fn observe_spec031_envelope(
+    observer: Option<&Spec031ChannelProjectionObserver>,
+    envelope: Spec031Envelope,
+) {
+    if let Some(observer) = observer {
+        observer(envelope);
+    }
+}
+
+fn websocket_event_chat_id(event: &WebSocketServerEvent) -> Option<&str> {
+    match event {
+        WebSocketServerEvent::Ready { chat_id, .. }
+        | WebSocketServerEvent::Attached { chat_id }
+        | WebSocketServerEvent::Message { chat_id, .. }
+        | WebSocketServerEvent::Delta { chat_id, .. }
+        | WebSocketServerEvent::StreamEnd { chat_id, .. } => Some(chat_id),
+        WebSocketServerEvent::Error { chat_id, .. } => chat_id.as_deref(),
+    }
 }
 
 fn websocket_frame_from_axum(
@@ -1125,6 +1645,11 @@ fn websocket_json_from_bytes(bytes: &[u8]) -> Result<Option<Value>, ApiError> {
 }
 
 fn validate_websocket_origin(headers: &HeaderMap) -> Result<(), ApiError> {
+    if let Some(host) = header_str(headers, header::HOST) {
+        if !is_loopback_authority(host) {
+            return Err(ApiError::invalid_request("websocket origin is not allowed"));
+        }
+    }
     let Some(origin) = header_str(headers, header::ORIGIN) else {
         return Ok(());
     };
@@ -1145,16 +1670,53 @@ fn header_str(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
 }
 
 fn websocket_origin_matches_host(origin: &str, host: &str) -> bool {
+    if !is_loopback_authority(host) {
+        return false;
+    }
     let Some(authority) = origin
         .strip_prefix("http://")
         .or_else(|| origin.strip_prefix("https://"))
     else {
         return false;
     };
-    authority
-        .split('/')
-        .next()
-        .is_some_and(|origin_host| origin_host.eq_ignore_ascii_case(host))
+    authority.split('/').next().is_some_and(|origin_host| {
+        is_loopback_authority(origin_host) && origin_host.eq_ignore_ascii_case(host)
+    })
+}
+
+fn validate_local_http_headers(headers: &HeaderMap) -> Result<(), ApiError> {
+    let host = header_str(headers, header::HOST);
+    if host.is_some_and(|host| !is_loopback_authority(host)) {
+        return Err(ApiError::invalid_request("request host is not allowed"));
+    }
+    let Some(origin) = header_str(headers, header::ORIGIN) else {
+        return Ok(());
+    };
+    let Some(host) = host else {
+        return Err(ApiError::invalid_request(
+            "request origin requires a host header",
+        ));
+    };
+    if websocket_origin_matches_host(origin, host) {
+        Ok(())
+    } else {
+        Err(ApiError::invalid_request("request origin is not allowed"))
+    }
+}
+
+fn is_loopback_authority(authority: &str) -> bool {
+    let host = authority_host(authority);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn authority_host(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(authority);
+    }
+    authority.split(':').next().unwrap_or(authority)
 }
 
 fn fallback_payload(event: &WebSocketServerEvent) -> String {
@@ -1167,7 +1729,10 @@ async fn api_request_from_axum(request: Request) -> Result<ApiHttpRequest, ApiEr
     let (parts, body) = request.into_parts();
     let headers = headers_to_map(&parts.headers);
     let method = api_method_from_axum(&parts.method);
-    let path = parts.uri.path().to_owned();
+    let path = parts.uri.path_and_query().map_or_else(
+        || parts.uri.path().to_owned(),
+        |path| path.as_str().to_owned(),
+    );
     let body = if should_read_axum_body(method, &path, &headers) {
         let body_bytes = to_bytes(body, MAX_REQUEST_BODY_BYTES)
             .await
@@ -1222,6 +1787,26 @@ fn is_multipart_header_map(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+fn validate_json_chat_content_type(headers: &HeaderMap) -> Result<(), ApiError> {
+    validate_json_chat_content_type_value(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+fn validate_json_chat_content_type_value(content_type: Option<&str>) -> Result<(), ApiError> {
+    match content_type {
+        Some(value) if is_multipart_content_type(value) => Err(ApiError::unsupported_media(
+            "multipart chat completion requests require the axum API runtime",
+        )),
+        Some(value) if is_json_content_type(value) => Ok(()),
+        Some(_) | None => Err(ApiError::unsupported_media(
+            "chat completion JSON requests require application/json content-type",
+        )),
+    }
+}
+
 fn headers_to_map(headers: &HeaderMap) -> BTreeMap<String, String> {
     headers
         .iter()
@@ -1253,12 +1838,80 @@ fn axum_response_from_api(response: ApiHttpResponse) -> Response {
     axum_response
 }
 
-fn axum_sse_stream_response(rx: mpsc::Receiver<String>) -> Response {
-    let body_stream = stream::unfold(rx, |mut rx| async {
-        rx.recv()
-            .await
-            .map(|frame| (Ok::<Bytes, Infallible>(Bytes::from(frame)), rx))
-    });
+enum SseFrame {
+    OpenAi(String),
+    Spec031 {
+        event_id: String,
+        envelope: Box<Spec031Envelope>,
+    },
+}
+
+impl SseFrame {
+    fn render(self, spec031_stream: bool) -> Option<String> {
+        match self {
+            Self::OpenAi(frame) => Some(frame),
+            Self::Spec031 { event_id, envelope } if spec031_stream => {
+                serde_json::to_string(&envelope)
+                    .ok()
+                    .map(|payload| format!("id: {event_id}\nevent: spec031\ndata: {payload}\n\n"))
+            }
+            Self::Spec031 { .. } => None,
+        }
+    }
+
+    fn is_terminal_openai_done(&self) -> bool {
+        matches!(self, Self::OpenAi(frame) if frame == "data: [DONE]\n\n")
+    }
+}
+
+struct SseDropGuard {
+    observer: Option<Spec031ChannelProjectionObserver>,
+    armed: bool,
+    observation: ChannelDeliveryObservation,
+}
+
+impl SseDropGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SseDropGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            observe_progress_delivery(
+                self.observer.as_ref(),
+                "sse",
+                shacs_projection::Spec031ProgressDelivery::FinalFailed,
+                self.observation,
+            );
+        }
+    }
+}
+
+fn axum_sse_stream_response(
+    rx: mpsc::Receiver<SseFrame>,
+    spec031_stream: bool,
+    guard: SseDropGuard,
+) -> Response {
+    let body_stream = stream::unfold(
+        (rx, spec031_stream, guard),
+        |(mut rx, spec031_stream, mut guard)| async move {
+            while let Some(frame) = rx.recv().await {
+                let terminal = frame.is_terminal_openai_done();
+                if let Some(rendered) = frame.render(spec031_stream) {
+                    if terminal {
+                        guard.disarm();
+                    }
+                    return Some((
+                        Ok::<Bytes, Infallible>(Bytes::from(rendered)),
+                        (rx, spec031_stream, guard),
+                    ));
+                }
+            }
+            None
+        },
+    );
     let mut response = (StatusCode::OK, Body::from_stream(body_stream)).into_response();
     let headers = response.headers_mut();
     headers.insert(
@@ -1280,7 +1933,7 @@ async fn handle_json_chat_axum(state: ApiRouterState, request: ApiHttpRequest) -
         Ok(request) => request,
         Err(error) => return axum_response_from_api(error_response(error)),
     };
-    handle_chat_request_axum(state, chat_request, Vec::new()).await
+    handle_chat_request_axum(state, chat_request, Vec::new(), request.headers).await
 }
 
 async fn handle_multipart_chat_axum(state: ApiRouterState, request: Request) -> Response {
@@ -1297,13 +1950,20 @@ async fn handle_multipart_chat_axum(state: ApiRouterState, request: Request) -> 
         Err(error) => return axum_response_from_api(error_response(error)),
     };
     let chat_request = chat_request_from_multipart(&multipart_request);
-    handle_chat_request_axum(state, chat_request, multipart_request.files).await
+    handle_chat_request_axum(
+        state,
+        chat_request,
+        multipart_request.files,
+        BTreeMap::new(),
+    )
+    .await
 }
 
 async fn handle_chat_request_axum(
     state: ApiRouterState,
     chat_request: ChatCompletionRequest,
     uploaded_files: Vec<MultipartFile>,
+    request_headers: BTreeMap<String, String>,
 ) -> Response {
     let validated =
         match validate_chat_completion_request(&chat_request, state.adapter.configured_model()) {
@@ -1318,6 +1978,11 @@ async fn handle_chat_request_axum(
             chat_request,
             uploaded_files,
             validated.session_key,
+            spec031_sse_stream_requested(&request_headers),
+            request_headers
+                .get("last-event-id")
+                .map(String::as_str)
+                .map(str::to_owned),
         );
     }
     let session_guard = session_lock.lock_owned().await;
@@ -1381,6 +2046,8 @@ fn stream_chat_request_axum(
     chat_request: ChatCompletionRequest,
     uploaded_files: Vec<MultipartFile>,
     session_key: String,
+    spec031_stream: bool,
+    last_event_id: Option<String>,
 ) -> Response {
     let adapter = state.adapter.clone();
     let timeout_duration = state.timeout;
@@ -1392,10 +2059,24 @@ fn stream_chat_request_axum(
     ));
     let created = current_unix_timestamp();
     let model = adapter.configured_model().to_owned();
-    let (tx, rx) = mpsc::channel::<String>(16);
+    let (tx, rx) = mpsc::channel::<SseFrame>(16);
     let cancelled = Arc::new(AtomicBool::new(false));
+    let spec031_channel_observer = state.spec031_channel_observer.clone();
+    let worker_spec031_channel_observer = spec031_channel_observer.clone();
+    let reconnect_tracker = state.reconnect_tracker.clone();
+    let sse_connection = reconnect_tracker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .connect_sse(&session_key, last_event_id.as_deref());
+    let drop_observation = reconnect_observation_to_delivery_observation(ReconnectObservation {
+        generation: sse_connection.generation,
+        sequence: 0,
+        gap: sse_connection.gap,
+    })
+    .with_failed_drop();
     tokio::spawn({
         let cancelled = cancelled.clone();
+        let reconnect_tracker = reconnect_tracker.clone();
         async move {
             let session_guard = session_lock.lock_owned().await;
             let worker_cancelled = cancelled.clone();
@@ -1415,19 +2096,98 @@ fn stream_chat_request_axum(
                     if matches!(event, ProviderEvent::Finish { .. }) {
                         saw_finish = true;
                     }
-                    let frame = stream_event_frame(&event, &model, &request_id, created);
-                    let _ = tx.blocking_send(frame);
+                    let frame =
+                        SseFrame::OpenAi(stream_event_frame(&event, &model, &request_id, created));
+                    if tx.blocking_send(frame).is_err() {
+                        worker_cancelled.store(true, Ordering::SeqCst);
+                        observe_progress_delivery(
+                            worker_spec031_channel_observer.as_ref(),
+                            "sse",
+                            shacs_projection::Spec031ProgressDelivery::Dropped,
+                            ChannelDeliveryObservation {
+                                dropped: Some(1),
+                                slow_consumer: Some(1),
+                                ..ChannelDeliveryObservation::unavailable()
+                            },
+                        );
+                    }
                 })?;
                 if !worker_cancelled.load(Ordering::SeqCst) {
-                    if !saw_finish {
-                        let _ = tx.blocking_send(finish_stream_frame(
-                            &model,
-                            &request_id,
-                            created,
-                            &response.finish_reason,
-                        ));
+                    let missing_finish_failed = !saw_finish
+                        && tx
+                            .blocking_send(SseFrame::OpenAi(finish_stream_frame(
+                                &model,
+                                &request_id,
+                                created,
+                                &response.finish_reason,
+                            )))
+                            .is_err();
+                    if missing_finish_failed {
+                        worker_cancelled.store(true, Ordering::SeqCst);
+                        observe_progress_delivery(
+                            worker_spec031_channel_observer.as_ref(),
+                            "sse",
+                            shacs_projection::Spec031ProgressDelivery::FinalFailed,
+                            ChannelDeliveryObservation {
+                                dropped: Some(1),
+                                slow_consumer: Some(1),
+                                ..ChannelDeliveryObservation::unavailable()
+                            },
+                        );
+                        return Ok::<(), ApiError>(());
                     }
-                    let _ = tx.blocking_send(done_stream_frame());
+                    let mut sse_connection = sse_connection.clone();
+                    let reconnect_observation = sse_connection.next_observation();
+                    let delivery_observation =
+                        reconnect_observation_to_delivery_observation(reconnect_observation);
+                    if let Some(envelope) = progress_delivery_envelope(
+                        "sse",
+                        shacs_projection::Spec031ProgressDelivery::FinalPending,
+                        delivery_observation,
+                    ) {
+                        observe_spec031_envelope(
+                            worker_spec031_channel_observer.as_ref(),
+                            envelope.clone(),
+                        );
+                        if tx
+                            .blocking_send(SseFrame::Spec031 {
+                                event_id: sse_event_id(reconnect_observation),
+                                envelope: Box::new(envelope),
+                            })
+                            .is_err()
+                        {
+                            observe_progress_delivery(
+                                worker_spec031_channel_observer.as_ref(),
+                                "sse",
+                                shacs_projection::Spec031ProgressDelivery::FinalFailed,
+                                ChannelDeliveryObservation {
+                                    dropped: Some(1),
+                                    slow_consumer: Some(1),
+                                    ..ChannelDeliveryObservation::unavailable()
+                                },
+                            );
+                            return Ok::<(), ApiError>(());
+                        }
+                        reconnect_tracker
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .record_sse(&sse_connection, reconnect_observation.sequence);
+                    }
+                    if tx
+                        .blocking_send(SseFrame::OpenAi(done_stream_frame()))
+                        .is_err()
+                    {
+                        observe_progress_delivery(
+                            worker_spec031_channel_observer.as_ref(),
+                            "sse",
+                            shacs_projection::Spec031ProgressDelivery::FinalFailed,
+                            ChannelDeliveryObservation {
+                                dropped: Some(1),
+                                slow_consumer: Some(1),
+                                ..ChannelDeliveryObservation::unavailable()
+                            },
+                        );
+                    }
                 }
                 Ok::<(), ApiError>(())
             });
@@ -1439,15 +2199,65 @@ fn stream_chat_request_axum(
             }
         }
     });
-    axum_sse_stream_response(rx)
+    axum_sse_stream_response(
+        rx,
+        spec031_stream,
+        SseDropGuard {
+            observer: spec031_channel_observer,
+            armed: true,
+            observation: drop_observation,
+        },
+    )
+}
+
+fn spec031_sse_stream_requested(headers: &BTreeMap<String, String>) -> bool {
+    headers
+        .get("x-shacs-spec031")
+        .is_some_and(|value| value.eq_ignore_ascii_case("stream"))
+}
+
+fn progress_delivery_envelope(
+    channel: &str,
+    delivery: shacs_projection::Spec031ProgressDelivery,
+    observation: ChannelDeliveryObservation,
+) -> Option<Spec031Envelope> {
+    project_spec031_channel_event(
+        ChannelSpec031ProjectionInput::progress_delivery(channel, delivery, None)
+            .with_delivery_observation(observation),
+    )
+    .ok()
+}
+
+fn sse_event_id(observation: ReconnectObservation) -> String {
+    format!("sse:{}:{}", observation.generation, observation.sequence)
+}
+
+trait FailedDropObservation {
+    fn with_failed_drop(self) -> Self;
+}
+
+impl FailedDropObservation for ChannelDeliveryObservation {
+    fn with_failed_drop(mut self) -> Self {
+        self.dropped = Some(1);
+        self.slow_consumer = Some(1);
+        self
+    }
+}
+
+fn reconnect_observation_to_delivery_observation(
+    observation: ReconnectObservation,
+) -> ChannelDeliveryObservation {
+    ChannelDeliveryObservation {
+        emitted: Some(observation.sequence),
+        reconnect_generation: Some(observation.generation),
+        reconnect_gap: Some(observation.gap),
+        ..ChannelDeliveryObservation::unavailable()
+    }
 }
 
 async fn session_lock_for(state: &ApiRouterState, session_key: &str) -> Arc<AsyncMutex<()>> {
     let mut locks = state.session_locks.lock().await;
-    locks
-        .entry(session_key.to_owned())
-        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-        .clone()
+    locks.lock_for(session_key)
 }
 
 pub fn parse_chat_completion_request(body: &Value) -> Result<ChatCompletionRequest, ApiError> {
@@ -1723,10 +2533,8 @@ fn handle_chat_completion_request(
     request: ApiHttpRequest,
     adapter: &(impl ChatCompletionAdapter + ?Sized),
 ) -> ApiHttpResponse {
-    if let Some(content_type) = request.content_type() {
-        if let Some(error) = reject_multipart_request(content_type) {
-            return error_response(error);
-        }
+    if let Err(error) = validate_json_chat_content_type_value(request.content_type()) {
+        return error_response(error);
     }
     let Some(body) = request.body.as_ref() else {
         return error_response(ApiError::invalid_request("request body is required"));
@@ -1972,6 +2780,13 @@ fn is_multipart_content_type(content_type: &str) -> bool {
         .starts_with("multipart/form-data")
 }
 
+fn is_json_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case(JSON_CONTENT_TYPE))
+}
+
 fn usage_json(usage: &BTreeMap<String, u64>) -> Value {
     json!({
         "prompt_tokens": usage.get("prompt_tokens").copied().unwrap_or(0),
@@ -2004,13 +2819,21 @@ mod tests {
     use axum::body::Body;
     use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
-    use shacs_projection::RememberedPermissionProjection;
+    use shacs_projection::{
+        RememberedPermissionProjection, Spec031ActionRef, Spec031Availability, Spec031Capability,
+        Spec031DiagnosticsCapability, Spec031Envelope, Spec031EnvelopeInput, Spec031Freshness,
+        Spec031Lineage, Spec031ObservedAtUnixMs, Spec031ProjectionKind, Spec031ReadinessCapability,
+        Spec031Reason, Spec031ReasonCode, Spec031SafeSummary, Spec031SchemaVersion,
+        Spec031Severity, Spec031Source, Spec031SourceOwner, Spec031SubjectRef,
+        Spec031ToolCapability,
+    };
     use shacs_providers::types::{text_response, usage};
     use shacs_session::{Session, SessionManager};
+    use socket2::SockRef;
     use std::error::Error;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
     use std::time::Duration as StdDuration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2029,6 +2852,7 @@ mod tests {
         session_workspace: Option<PathBuf>,
         workflow_recipes_projection: Option<Value>,
         remembered_permissions_projection: Option<RememberedPermissionProjection>,
+        spec031_projection: Option<(Spec031ApiProjection, Spec031Envelope)>,
     }
 
     struct SlowAdapter {
@@ -2036,6 +2860,28 @@ mod tests {
         delay: StdDuration,
         active: Arc<AtomicUsize>,
         max_active: Arc<AtomicUsize>,
+    }
+
+    struct BarrierWebSocketAdapter {
+        reached: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    struct BarrierStreamAdapter {
+        reached: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl BarrierWebSocketAdapter {
+        fn new(reached: Arc<Barrier>, release: Arc<Barrier>) -> Self {
+            Self { reached, release }
+        }
+    }
+
+    impl BarrierStreamAdapter {
+        fn new(reached: Arc<Barrier>, release: Arc<Barrier>) -> Self {
+            Self { reached, release }
+        }
     }
 
     impl SlowAdapter {
@@ -2066,6 +2912,70 @@ mod tests {
         }
     }
 
+    impl ChatCompletionAdapter for BarrierWebSocketAdapter {
+        fn configured_model(&self) -> &str {
+            "gpt-5"
+        }
+
+        fn complete_chat(
+            &self,
+            _invocation: ChatCompletionInvocation,
+        ) -> Result<LlmResponse, ApiError> {
+            Ok(text_response("unused"))
+        }
+
+        fn process_websocket_frame_streaming(
+            &self,
+            frame: Value,
+            _client_id: &str,
+            default_chat_id: &str,
+            on_event: &mut dyn FnMut(WebSocketServerEvent),
+        ) -> Result<(), ApiError> {
+            let chat_id = frame
+                .get("chat_id")
+                .and_then(Value::as_str)
+                .unwrap_or(default_chat_id);
+            self.reached.wait();
+            self.release.wait();
+            on_event(WebSocketServerEvent::Message {
+                chat_id: chat_id.to_owned(),
+                text: "final after disconnect".to_owned(),
+                buttons: Vec::new(),
+                button_prompt: None,
+                media: Vec::new(),
+                reply_to: Some("reply-after-disconnect".to_owned()),
+                kind: None,
+            });
+            Ok(())
+        }
+    }
+
+    impl ChatCompletionAdapter for BarrierStreamAdapter {
+        fn configured_model(&self) -> &str {
+            "gpt-5"
+        }
+
+        fn complete_chat(
+            &self,
+            _invocation: ChatCompletionInvocation,
+        ) -> Result<LlmResponse, ApiError> {
+            Ok(text_response("barrier final"))
+        }
+
+        fn stream_chat(
+            &self,
+            _invocation: ChatCompletionInvocation,
+            on_event: &mut dyn FnMut(ProviderEvent),
+        ) -> Result<LlmResponse, ApiError> {
+            on_event(ProviderEvent::TextDelta {
+                text: "barrier-delta".to_owned(),
+            });
+            self.reached.wait();
+            self.release.wait();
+            Ok(text_response("barrier final"))
+        }
+    }
+
     impl FakeAdapter {
         fn new(model: &str, response: LlmResponse) -> Self {
             Self {
@@ -2077,6 +2987,7 @@ mod tests {
                 session_workspace: None,
                 workflow_recipes_projection: None,
                 remembered_permissions_projection: None,
+                spec031_projection: None,
             }
         }
 
@@ -2103,6 +3014,15 @@ mod tests {
             self
         }
 
+        fn with_spec031_projection(
+            mut self,
+            projection: Spec031ApiProjection,
+            envelope: Spec031Envelope,
+        ) -> Self {
+            self.spec031_projection = Some((projection, envelope));
+            self
+        }
+
         fn call_count(&self) -> usize {
             self.captured
                 .lock()
@@ -2122,6 +3042,37 @@ mod tests {
                 .lock()
                 .map(|frames| frames.len())
                 .unwrap_or(0)
+        }
+
+        fn fake_websocket_stream_events(&self, chat_id: &str) -> Vec<WebSocketServerEvent> {
+            let mut events = Vec::new();
+            for event in &self.stream_events {
+                match event {
+                    ProviderEvent::TextDelta { text } => events.push(WebSocketServerEvent::Delta {
+                        chat_id: chat_id.to_owned(),
+                        text: text.clone(),
+                        stream_id: Some("stream-a".to_owned()),
+                    }),
+                    ProviderEvent::Finish { .. } => events.push(WebSocketServerEvent::StreamEnd {
+                        chat_id: chat_id.to_owned(),
+                        stream_id: Some("stream-a".to_owned()),
+                    }),
+                    ProviderEvent::ReasoningDelta { .. }
+                    | ProviderEvent::ToolCallStart { .. }
+                    | ProviderEvent::ToolCallDelta { .. }
+                    | ProviderEvent::ToolCallReady { .. } => {}
+                }
+            }
+            events.push(WebSocketServerEvent::Message {
+                chat_id: chat_id.to_owned(),
+                text: self.response.content.clone().unwrap_or_default(),
+                buttons: Vec::new(),
+                button_prompt: None,
+                media: Vec::new(),
+                reply_to: Some("reply-a".to_owned()),
+                kind: None,
+            });
+            events
         }
     }
 
@@ -2202,6 +3153,17 @@ mod tests {
             self.remembered_permissions_projection.clone()
         }
 
+        fn spec031_projection(
+            &self,
+            projection: Spec031ApiProjection,
+        ) -> Result<Option<Spec031Envelope>, ApiError> {
+            Ok(self
+                .spec031_projection
+                .as_ref()
+                .filter(|(configured, _)| *configured == projection)
+                .map(|(_, envelope)| envelope.clone()))
+        }
+
         fn process_websocket_frame(
             &self,
             frame: Value,
@@ -2211,12 +3173,77 @@ mod tests {
             self.websocket_frames
                 .lock()
                 .map_err(|_| ApiError::internal("fake websocket frame lock failed"))?
-                .push(frame);
-            Ok(vec![WebSocketServerEvent::Ready {
-                chat_id: default_chat_id.to_owned(),
-                client_id: client_id.to_owned(),
-            }])
+                .push(frame.clone());
+            match frame.get("type").and_then(Value::as_str) {
+                Some("new_chat") => Ok(vec![WebSocketServerEvent::Ready {
+                    chat_id: default_chat_id.to_owned(),
+                    client_id: client_id.to_owned(),
+                }]),
+                Some("message") => Ok(self.fake_websocket_stream_events(
+                    frame
+                        .get("chat_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(default_chat_id),
+                )),
+                _ => Err(ApiError::not_implemented(
+                    "websocket frame handling is not configured for this adapter",
+                )),
+            }
         }
+    }
+
+    fn test_spec031_envelope(
+        projection: Spec031ApiProjection,
+        marker: &str,
+    ) -> Result<Spec031Envelope, Box<dyn Error>> {
+        let (kind, capability) = match projection {
+            Spec031ApiProjection::Diagnostics => (
+                Spec031ProjectionKind::Diagnostics,
+                Spec031Capability::Diagnostics(Spec031DiagnosticsCapability {
+                    component_count: None,
+                }),
+            ),
+            Spec031ApiProjection::Tool => (
+                Spec031ProjectionKind::Tool,
+                Spec031Capability::Tool(Spec031ToolCapability {
+                    attempt_count: None,
+                }),
+            ),
+            Spec031ApiProjection::Readiness => (
+                Spec031ProjectionKind::Readiness,
+                Spec031Capability::Readiness(Spec031ReadinessCapability {
+                    availability: Spec031Availability::Unavailable,
+                    component_count: None,
+                    queue_depth: None,
+                    queue_capacity: None,
+                    remediation: None,
+                }),
+            ),
+            Spec031ApiProjection::Subagent => return Err("unsupported test projection".into()),
+        };
+        Ok(Spec031Envelope::try_new(Spec031EnvelopeInput {
+            schema_version: Spec031SchemaVersion::CURRENT,
+            kind,
+            state: Spec031Availability::Unavailable,
+            severity: Spec031Severity::Warning,
+            reason: Spec031Reason {
+                code: Spec031ReasonCode::Unsupported,
+                safe_summary: Spec031SafeSummary::try_new(marker)?,
+            },
+            lineage: Spec031Lineage {
+                subject_ref: Spec031SubjectRef::try_new("subject:api:live-marker")?,
+                parent_ref: None,
+                action_ref: Some(Spec031ActionRef::try_new("action:api:live-marker")?),
+                digest: None,
+            },
+            source: Spec031Source {
+                owner: Spec031SourceOwner::Spec031,
+                observed_at_unix_ms: Some(Spec031ObservedAtUnixMs::new(6)),
+                freshness: Spec031Freshness::Current,
+            },
+            capability,
+            children: Vec::new(),
+        })?)
     }
 
     #[test]
@@ -2399,6 +3426,110 @@ mod tests {
         assert!(!serialized.contains("sk-raw-secret"));
         assert_eq!(adapter.call_count(), 0);
         assert_eq!(adapter.websocket_frame_count(), 0);
+    }
+
+    #[test]
+    fn spec031_projection_routes_use_adapter_supplied_live_envelopes() -> Result<(), Box<dyn Error>>
+    {
+        let diagnostics_marker = "diagnostics-live-marker-a";
+        let tool_marker = "tool-live-marker-b";
+        let diagnostics_adapter = FakeAdapter::new("gpt-5", text_response("unused"))
+            .with_spec031_projection(
+                Spec031ApiProjection::Diagnostics,
+                test_spec031_envelope(Spec031ApiProjection::Diagnostics, diagnostics_marker)?,
+            );
+        let tool_adapter = FakeAdapter::new("gpt-5", text_response("unused"))
+            .with_spec031_projection(
+                Spec031ApiProjection::Tool,
+                test_spec031_envelope(Spec031ApiProjection::Tool, tool_marker)?,
+            );
+
+        let health = handle_api_request(ApiHttpRequest::get(HEALTH_PATH), &diagnostics_adapter);
+        assert_eq!(health.status, 200);
+        assert_eq!(health.body, json!({"status": "ok"}));
+        assert!(health.body.get("schema_version").is_none());
+
+        let diagnostics =
+            handle_api_request(ApiHttpRequest::get(DIAGNOSTICS_PATH), &diagnostics_adapter);
+        assert_eq!(diagnostics.status, 200);
+        assert_eq!(diagnostics.body["schema_version"], 1);
+        assert_eq!(diagnostics.body["kind"], "diagnostics");
+        assert_eq!(
+            diagnostics.body["reason"]["safe_summary"],
+            diagnostics_marker
+        );
+
+        let tool = handle_api_request(ApiHttpRequest::get(TOOLS_PATH), &tool_adapter);
+        assert_eq!(tool.status, 200);
+        assert_eq!(tool.body["schema_version"], 1);
+        assert_eq!(tool.body["kind"], "tool");
+        assert_eq!(tool.body["reason"]["safe_summary"], tool_marker);
+        assert_ne!(tool.body["reason"]["safe_summary"], diagnostics_marker);
+        assert_eq!(tool_adapter.call_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn spec031_projection_routes_report_actual_absence_without_fixture_refs() {
+        let adapter = FakeAdapter::new("gpt-5", text_response("unused"));
+
+        for (path, kind) in [
+            (SUBAGENTS_PATH, "subagent"),
+            (TOOLS_PATH, "tool"),
+            (READINESS_PATH, "readiness"),
+        ] {
+            let response = handle_api_request(ApiHttpRequest::get(path), &adapter);
+            assert_eq!(response.status, 200, "{path}");
+            assert_eq!(response.body["schema_version"], 1, "{path}");
+            assert_eq!(response.body["kind"], kind, "{path}");
+            assert_eq!(response.body["state"], "unavailable", "{path}");
+            assert_eq!(response.body["reason"]["code"], "unsupported", "{path}");
+            let serialized = response.body.to_string();
+            assert!(!serialized.contains("canonical"), "{path}");
+            assert!(!serialized.contains("subject:tool:canonical"), "{path}");
+            assert!(
+                !serialized.contains("subject:readiness:canonical"),
+                "{path}"
+            );
+        }
+        assert_eq!(adapter.call_count(), 0);
+        assert_eq!(adapter.websocket_frame_count(), 0);
+    }
+
+    #[test]
+    fn spec031_projection_routes_reject_mutation_and_unknown_schema() {
+        let adapter = FakeAdapter::new("gpt-5", text_response("unused"));
+
+        for path in [
+            DIAGNOSTICS_PATH,
+            SESSIONS_PATH,
+            "/v1/subagents",
+            "/v1/tools",
+            "/v1/readiness",
+        ] {
+            let mutation = handle_api_request(
+                ApiHttpRequest {
+                    method: ApiMethod::Post,
+                    path: path.to_owned(),
+                    headers: BTreeMap::new(),
+                    body: None,
+                },
+                &adapter,
+            );
+            assert_eq!(mutation.status, 405, "{path}");
+            assert_eq!(mutation.body["error"]["type"], "method_not_allowed");
+        }
+
+        let unknown_schema = handle_api_request(
+            ApiHttpRequest::get("/v1/readiness?schema_version=spec031.v999"),
+            &adapter,
+        );
+        assert_eq!(unknown_schema.status, 400);
+        assert_eq!(
+            unknown_schema.body["error"]["type"],
+            "invalid_request_error"
+        );
+        assert_eq!(adapter.call_count(), 0);
     }
 
     #[test]
@@ -2945,6 +4076,7 @@ mod tests {
         );
         assert_eq!(wrong_method.status, 405);
         assert!(!workspace.join("sessions").exists());
+
         Ok(())
     }
 
@@ -3132,6 +4264,852 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn serve_websocket_listener_emits_spec031_for_progress_stream_end_and_final(
+    ) -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("final answer")).with_stream_events(vec![
+                ProviderEvent::TextDelta {
+                    text: "delta chunk".to_owned(),
+                },
+                ProviderEvent::Finish {
+                    usage: json!({"prompt_tokens": 1}),
+                    reason: "stop".to_owned(),
+                },
+            ]),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_websocket_listener_with_timeout_and_path(
+            listener,
+            adapter.clone(),
+            Duration::from_secs(30),
+            WEBSOCKET_PATH,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let (mut websocket, _) = connect_async(format!("ws://{addr}{WEBSOCKET_PATH}")).await?;
+        websocket
+            .send(TungsteniteMessage::Text(
+                json!({"type":"message","chat_id":"chat-a","text":"/Users/spec031-ws-prompt-secret"})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+
+        let frames = read_json_frames(&mut websocket, 6).await?;
+        assert_eq!(frames[0]["event"], "delta");
+        assert_eq!(frames[2]["event"], "stream_end");
+        assert_eq!(frames[4]["event"], "message");
+        assert_spec031_progress(&frames[1], "live", "degraded", "degraded")?;
+        assert_spec031_progress(&frames[3], "final_pending", "degraded", "degraded")?;
+        assert_spec031_progress(&frames[5], "final_delivered", "ready", "included")?;
+        assert_eq!(
+            frames[3]["lineage"]["parent_ref"],
+            "parent:channel:websocket:chat:chat-a"
+        );
+        assert_eq!(
+            frames[3]["lineage"]["action_ref"],
+            "action:channel:websocket:stream:stream-a"
+        );
+        assert!(!serde_json::to_string(&frames)?.contains("spec031-ws-prompt-secret"));
+        let _ = websocket.close(None).await;
+        let _ = shutdown_tx.send(());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn serve_websocket_listener_emits_spec031_for_malformed_and_unsupported(
+    ) -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(FakeAdapter::new("gpt-5", text_response("unused")));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_websocket_listener_with_timeout_and_path(
+            listener,
+            adapter,
+            Duration::from_secs(30),
+            WEBSOCKET_PATH,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let (mut websocket, _) = connect_async(format!("ws://{addr}{WEBSOCKET_PATH}")).await?;
+        websocket
+            .send(TungsteniteMessage::Text("{".to_owned().into()))
+            .await?;
+        let malformed = read_json_frames(&mut websocket, 2).await?;
+        assert_eq!(malformed[0]["event"], "error");
+        assert_spec031_progress(
+            &malformed[1],
+            "final_failed",
+            "blocked",
+            "extraction_failed",
+        )?;
+
+        websocket
+            .send(TungsteniteMessage::Text(
+                json!({"type":"unsupported_capability"}).to_string().into(),
+            ))
+            .await?;
+        let unsupported = read_json_frames(&mut websocket, 2).await?;
+        assert_eq!(unsupported[0]["event"], "error");
+        assert_spec031_progress(&unsupported[1], "final_failed", "blocked", "unsupported")?;
+        let _ = websocket.close(None).await;
+        let _ = shutdown_tx.send(());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn serve_websocket_listener_handles_disconnect_during_spec031_send(
+    ) -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("final")).with_stream_events(vec![
+                ProviderEvent::TextDelta {
+                    text: "delta".to_owned(),
+                },
+            ]),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_websocket_listener_with_timeout_and_path(
+            listener,
+            adapter.clone(),
+            Duration::from_secs(30),
+            WEBSOCKET_PATH,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let (mut websocket, _) = connect_async(format!("ws://{addr}{WEBSOCKET_PATH}")).await?;
+        websocket
+            .send(TungsteniteMessage::Text(
+                json!({"type":"message","text":"disconnect"})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        let first = read_json_frames(&mut websocket, 1).await?;
+        assert_eq!(first[0]["event"], "delta");
+        let _ = websocket.close(None).await;
+        let _ = shutdown_tx.send(());
+        server.await??;
+        assert_eq!(adapter.websocket_frame_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn serve_websocket_listener_observes_spec031_disconnect_after_client_abort(
+    ) -> Result<(), Box<dyn Error>> {
+        let reached = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let adapter = Arc::new(BarrierWebSocketAdapter::new(
+            reached.clone(),
+            release.clone(),
+        ));
+        let observed = Arc::new(Mutex::new(Vec::<Spec031Envelope>::new()));
+        let (disconnect_tx, disconnect_rx) = oneshot::channel::<()>();
+        let disconnect_tx = Arc::new(Mutex::new(Some(disconnect_tx)));
+        let observer = {
+            let observed = observed.clone();
+            let disconnect_tx = disconnect_tx.clone();
+            Arc::new(move |envelope| {
+                let is_disconnect = is_chat_abort_disconnect(&envelope);
+                if let Ok(mut observed) = observed.lock() {
+                    observed.push(envelope);
+                }
+                if is_disconnect {
+                    if let Ok(mut disconnect_tx) = disconnect_tx.lock() {
+                        if let Some(disconnect_tx) = disconnect_tx.take() {
+                            let _ = disconnect_tx.send(());
+                        }
+                    }
+                }
+            }) as Spec031ChannelProjectionObserver
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_websocket_listener_with_observer(
+            listener,
+            adapter,
+            Duration::from_secs(30),
+            WEBSOCKET_PATH,
+            observer,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let mut stream = raw_websocket_client(addr, WEBSOCKET_PATH).await?;
+        send_masked_text(
+            &mut stream,
+            &json!({"type":"message","chat_id":"chat-abort","text":"abort"}).to_string(),
+        )
+        .await?;
+        let reached_wait = reached.clone();
+        tokio::task::spawn_blocking(move || reached_wait.wait()).await?;
+        abort_tcp_stream(stream)?;
+        let release_wait = release.clone();
+        tokio::task::spawn_blocking(move || release_wait.wait()).await?;
+        timeout(Duration::from_secs(5), disconnect_rx)
+            .await
+            .map_err(|_| "server did not observe websocket disconnect projection")?
+            .map_err(|_| "disconnect observer was dropped before projection")?;
+        let _ = shutdown_tx.send(());
+        server.await??;
+
+        let observed = observed
+            .lock()
+            .map_err(|_| "observed Spec031 envelopes lock failed")?;
+        let observed_json = observed
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(observed_json.iter().any(|frame| {
+            frame["state"] == "blocked"
+                && frame["reason"]["code"] == "blocked"
+                && frame["capability"]["details"]["delivery"] == "final_failed"
+                && frame["capability"]["details"]["dropped"] == 1
+                && frame["capability"]["details"]["slow_consumer"] == 1
+                && frame["lineage"]["parent_ref"] == "parent:channel:websocket:chat:chat-abort"
+                && frame["reason"]["safe_summary"] == "client disconnected"
+        }));
+        assert!(!observed_json.iter().any(|frame| {
+            frame["lineage"]["parent_ref"] == "parent:channel:websocket:chat:chat-abort"
+                && frame["capability"]["details"]["delivery"] == "final_delivered"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn axum_router_observes_sse_final_pending_after_stream_send() -> Result<(), Box<dyn Error>>
+    {
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("hello")).with_stream_events(vec![
+                ProviderEvent::TextDelta {
+                    text: "hel".to_owned(),
+                },
+            ]),
+        );
+        let observed = Arc::new(Mutex::new(Vec::<Spec031Envelope>::new()));
+        let observer = {
+            let observed = observed.clone();
+            Arc::new(move |envelope| {
+                if let Ok(mut observed) = observed.lock() {
+                    observed.push(envelope);
+                }
+            }) as Spec031ChannelProjectionObserver
+        };
+        let app = api_router_with_observer(adapter.clone(), observer);
+
+        let response = app
+            .oneshot(json_request(
+                Method::POST,
+                CHAT_COMPLETIONS_PATH,
+                json!({
+                    "stream": true,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await?;
+        assert!(body.contains("data: [DONE]"));
+        assert!(!body.contains("event: spec031"));
+        let observed = observed
+            .lock()
+            .map_err(|_| "observed Spec031 envelopes lock failed")?;
+        let observed_json = observed
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(observed_json.iter().any(|frame| {
+            frame["lineage"]["subject_ref"] == "subject:channel:sse:progress"
+                && frame["capability"]["details"]["delivery"] == "final_pending"
+                && frame["capability"]["details"]["emitted"] == 1
+        }));
+        assert!(!observed_json.iter().any(|frame| {
+            frame["lineage"]["subject_ref"] == "subject:channel:sse:progress"
+                && frame["capability"]["details"]["delivery"] == "final_delivered"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn axum_router_streams_spec031_sse_frames_only_when_opted_in(
+    ) -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("hello")).with_stream_events(vec![
+                ProviderEvent::TextDelta {
+                    text: "hel".to_owned(),
+                },
+            ]),
+        );
+        let app = api_router(adapter.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(CHAT_COMPLETIONS_PATH)
+                    .header(header::CONTENT_TYPE, JSON_CONTENT_TYPE)
+                    .header("x-shacs-spec031", "stream")
+                    .body(Body::from(
+                        json!({
+                            "stream": true,
+                            "messages": [{"role": "user", "content": "hello"}]
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await?;
+        assert!(body.contains("chat.completion.chunk"));
+        assert!(body.contains("event: spec031"));
+        assert!(body.contains(r#""delivery":"final_pending""#));
+        assert!(!body.contains(r#""delivery":"final_delivered""#));
+        assert!(body.contains("data: [DONE]"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn serve_api_listener_observes_sse_drop_before_final_without_sleep(
+    ) -> Result<(), Box<dyn Error>> {
+        let reached = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let adapter = Arc::new(BarrierStreamAdapter::new(reached.clone(), release.clone()));
+        let observed = Arc::new(Mutex::new(Vec::<Spec031Envelope>::new()));
+        let (drop_tx, drop_rx) = oneshot::channel::<()>();
+        let drop_tx = Arc::new(Mutex::new(Some(drop_tx)));
+        let observer = {
+            let observed = observed.clone();
+            let drop_tx = drop_tx.clone();
+            Arc::new(move |envelope| {
+                let is_drop = serde_json::to_value(&envelope).is_ok_and(|frame| {
+                    frame["capability"]["details"]["delivery"] == "final_failed"
+                        && frame["capability"]["details"]["dropped"] == 1
+                        && frame["capability"]["details"]["slow_consumer"] == 1
+                });
+                if let Ok(mut observed) = observed.lock() {
+                    observed.push(envelope);
+                }
+                if is_drop {
+                    if let Ok(mut drop_tx) = drop_tx.lock() {
+                        if let Some(drop_tx) = drop_tx.take() {
+                            let _ = drop_tx.send(());
+                        }
+                    }
+                }
+            }) as Spec031ChannelProjectionObserver
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_api_listener_with_observer(
+            listener,
+            adapter,
+            Duration::from_secs(30),
+            observer,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let mut stream = TcpStream::connect(addr).await?;
+        let body = json!({
+            "stream": true,
+            "messages": [{"role":"user", "content":"hello"}]
+        })
+        .to_string();
+        let request = format!(
+            "POST {CHAT_COMPLETIONS_PATH} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: {JSON_CONTENT_TYPE}\r\nx-shacs-spec031: stream\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await?;
+        read_until_contains(&mut stream, "barrier-delta").await?;
+        let reached_wait = reached.clone();
+        tokio::task::spawn_blocking(move || reached_wait.wait()).await?;
+        abort_tcp_stream(stream)?;
+        let release_wait = release.clone();
+        tokio::task::spawn_blocking(move || release_wait.wait()).await?;
+        timeout(Duration::from_secs(5), drop_rx).await??;
+        let _ = shutdown_tx.send(());
+        server.await??;
+        let observed_json = observed
+            .lock()
+            .map_err(|_| "observed lock failed")?
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(!observed_json
+            .iter()
+            .any(|frame| { frame["capability"]["details"]["delivery"] == "final_delivered" }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn axum_router_marks_stale_last_event_id_reconnect_gap() -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("hello")).with_stream_events(vec![
+                ProviderEvent::TextDelta {
+                    text: "hel".to_owned(),
+                },
+            ]),
+        );
+        let app = api_router(adapter);
+
+        let first = app
+            .clone()
+            .oneshot(spec031_sse_request(None, "same-session")?)
+            .await?;
+        let first_body = response_text(first).await?;
+        assert!(first_body.contains("id: sse:1:1"));
+        assert!(first_body.contains(r#""reconnect_generation":1"#));
+        assert!(first_body.contains(r#""reconnect_gap":false"#));
+
+        let second = app
+            .oneshot(spec031_sse_request(Some("sse:1:0"), "same-session")?)
+            .await?;
+        let second_body = response_text(second).await?;
+        assert!(second_body.contains("id: sse:2:1"));
+        assert!(second_body.contains(r#""reconnect_generation":2"#));
+        assert!(second_body.contains(r#""reconnect_gap":true"#));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_lock_registry_bounds_attacker_selected_sessions() {
+        let state =
+            ApiRouterState::new(Arc::new(FakeAdapter::new("gpt-5", text_response("hello"))));
+
+        for index in 0..10_000 {
+            let _lock = session_lock_for(&state, &format!("attacker-session-{index}")).await;
+        }
+
+        let locks = state.session_locks.lock().await;
+        assert!(locks.len() <= API_RECONNECT_TRACKER_CAPACITY);
+    }
+
+    #[test]
+    fn websocket_reconnect_scope_bounds_attacker_selected_chat_ids() {
+        let tracker = Arc::new(StdMutex::new(ApiReconnectTracker::new(128)));
+        let mut scope = WebSocketReconnectScope::new("attacker-client");
+
+        for index in 0..10_000 {
+            let connection =
+                scope.connection_for(&tracker, &format!("attacker-chat-{index}"), "default");
+            let _observation = connection.next_observation();
+        }
+
+        assert!(scope.by_key.len() <= API_RECONNECT_TRACKER_CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn serve_websocket_listener_marks_reconnect_generation_gap() -> Result<(), Box<dyn Error>>
+    {
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("final answer")).with_stream_events(vec![
+                ProviderEvent::TextDelta {
+                    text: "delta".to_owned(),
+                },
+            ]),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_websocket_listener_with_timeout_and_path(
+            listener,
+            adapter,
+            Duration::from_secs(30),
+            WEBSOCKET_PATH,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let first_frames = websocket_message_roundtrip(addr, Some("chat-a")).await?;
+        let second_frames = websocket_message_roundtrip(addr, Some("chat-a")).await?;
+        assert!(first_frames.iter().any(|frame| {
+            frame["capability"]["details"]["reconnect_generation"] == 1
+                && frame["capability"]["details"]["reconnect_gap"] == false
+        }));
+        assert!(second_frames.iter().any(|frame| {
+            frame["capability"]["details"]["reconnect_generation"] == 2
+                && frame["capability"]["details"]["reconnect_gap"] == true
+        }));
+        let _ = shutdown_tx.send(());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn serve_websocket_listener_tracks_named_chats_without_default_contamination(
+    ) -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("final answer")).with_stream_events(vec![
+                ProviderEvent::TextDelta {
+                    text: "delta".to_owned(),
+                },
+            ]),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_websocket_listener_with_timeout_and_path(
+            listener,
+            adapter,
+            Duration::from_secs(30),
+            WEBSOCKET_PATH,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let chat_a_first = websocket_message_roundtrip(addr, Some("chat-a")).await?;
+        let chat_b_first = websocket_message_roundtrip(addr, Some("chat-b")).await?;
+        let malformed = websocket_malformed_roundtrip(addr).await?;
+        let default_scoped = websocket_message_roundtrip(addr, None).await?;
+        let chat_a_second = websocket_message_roundtrip(addr, Some("chat-a")).await?;
+        let chat_b_second = websocket_message_roundtrip(addr, Some("chat-b")).await?;
+
+        assert!(has_generation_gap(&chat_a_first, 1, false));
+        assert!(has_generation_gap(&chat_b_first, 1, false));
+        assert!(has_generation_gap(&chat_a_second, 2, true));
+        assert!(has_generation_gap(&chat_b_second, 2, true));
+        assert!(has_generation_gap(&malformed, 1, false));
+        assert!(has_generation_gap(&default_scoped, 1, false));
+        assert_named_chat_frame(&chat_a_first, "chat-a")?;
+        assert_named_chat_frame(&chat_b_first, "chat-b")?;
+        assert!(!serde_json::to_string(&malformed)?.contains("chat-a"));
+        assert!(!serde_json::to_string(&malformed)?.contains("chat-b"));
+        let _ = shutdown_tx.send(());
+        server.await??;
+        Ok(())
+    }
+
+    #[test]
+    fn api_reconnect_tracker_eviction_restarts_without_continuity_proof() {
+        let mut tracker = ApiReconnectTracker::new(2);
+        let first_a = tracker.connect_ws("ws-chat:a");
+        tracker.record_ws(&first_a, 1);
+        let first_b = tracker.connect_ws("ws-chat:b");
+        tracker.record_ws(&first_b, 1);
+        let first_c = tracker.connect_ws("ws-chat:c");
+        tracker.record_ws(&first_c, 1);
+
+        let retained_b = tracker.connect_ws("ws-chat:b");
+        let retained_c = tracker.connect_ws("ws-chat:c");
+        let evicted_a = tracker.connect_ws("ws-chat:a");
+
+        assert_eq!(retained_b.generation, 2);
+        assert!(retained_b.gap);
+        assert_eq!(retained_c.generation, 2);
+        assert!(retained_c.gap);
+        assert_eq!(evicted_a.generation, 1);
+        assert!(evicted_a.gap);
+    }
+
+    #[test]
+    fn api_reconnect_tracker_keeps_connection_key_attack_bounded() {
+        let mut tracker = ApiReconnectTracker::new(128);
+
+        for index in 0..10_000 {
+            let state = tracker.connect_ws(&format!("ws-connection:{index}"));
+            tracker.record_ws(&state, 1);
+        }
+
+        assert!(tracker.ws.len() <= tracker.capacity);
+        assert!(tracker.order.len() <= tracker.capacity);
+        assert!(tracker.evicted_ws.len() <= tracker.capacity);
+        assert!(tracker.evicted_ws_order.len() <= tracker.capacity);
+        assert!(tracker
+            .evicted_ws
+            .iter()
+            .all(|key| !key.starts_with("ws-connection:")));
+        let evicted_connection = tracker.connect_ws("ws-connection:0");
+        assert_eq!(evicted_connection.generation, 1);
+        assert!(!evicted_connection.gap);
+    }
+
+    #[test]
+    fn api_reconnect_tracker_bounds_named_chat_tombstones_without_cross_chat_contamination() {
+        let mut tracker = ApiReconnectTracker::new(128);
+
+        for index in 0..10_000 {
+            let state = tracker.connect_ws(&format!("ws-chat:{index}"));
+            tracker.record_ws(&state, 1);
+        }
+
+        assert!(tracker.ws.len() <= tracker.capacity);
+        assert!(tracker.order.len() <= tracker.capacity);
+        assert!(tracker.evicted_ws.len() <= tracker.capacity);
+        assert!(tracker.evicted_ws_order.len() <= tracker.capacity);
+        assert!(tracker
+            .evicted_ws
+            .iter()
+            .all(|key| key.starts_with("ws-chat:")));
+        let evicted_named_chat = tracker.connect_ws("ws-chat:9871");
+        let unrelated_named_chat = tracker.connect_ws("ws-chat:unrelated");
+        let default_connection = tracker.connect_ws("ws-connection:default");
+
+        assert_eq!(evicted_named_chat.generation, 1);
+        assert!(evicted_named_chat.gap);
+        assert_eq!(unrelated_named_chat.generation, 1);
+        assert!(!unrelated_named_chat.gap);
+        assert_eq!(default_connection.generation, 1);
+        assert!(!default_connection.gap);
+        assert!(tracker.ws.len() <= tracker.capacity);
+        assert!(tracker.order.len() <= tracker.capacity);
+        assert!(tracker.evicted_ws.len() <= tracker.capacity);
+        assert!(tracker.evicted_ws_order.len() <= tracker.capacity);
+    }
+
+    fn is_chat_abort_disconnect(envelope: &Spec031Envelope) -> bool {
+        serde_json::to_value(envelope).is_ok_and(|frame| {
+            frame["state"] == "blocked"
+                && frame["reason"]["code"] == "blocked"
+                && frame["capability"]["details"]["delivery"] == "final_failed"
+                && frame["lineage"]["parent_ref"] == "parent:channel:websocket:chat:chat-abort"
+                && frame["reason"]["safe_summary"] == "client disconnected"
+        })
+    }
+
+    fn abort_tcp_stream(stream: TcpStream) -> Result<(), Box<dyn Error>> {
+        let stream = stream.into_std()?;
+        SockRef::from(&stream).set_linger(Some(StdDuration::from_secs(0)))?;
+        drop(stream);
+        Ok(())
+    }
+
+    async fn raw_websocket_client(
+        addr: SocketAddr,
+        path: &str,
+    ) -> Result<TcpStream, Box<dyn Error>> {
+        let mut stream = TcpStream::connect(addr).await?;
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await?;
+        timeout(Duration::from_secs(5), async {
+            let mut response = Vec::new();
+            let mut buffer = [0_u8; 256];
+            loop {
+                let read = stream.read(&mut buffer).await?;
+                if read == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "websocket upgrade response closed",
+                    ));
+                }
+                response.extend_from_slice(&buffer[..read]);
+                if response.windows(4).any(|window| window == b"\r\n\r\n") {
+                    return Ok(());
+                }
+            }
+        })
+        .await??;
+        Ok(stream)
+    }
+
+    async fn send_masked_text(stream: &mut TcpStream, text: &str) -> Result<(), Box<dyn Error>> {
+        let payload = text.as_bytes();
+        let payload_len = u8::try_from(payload.len())?;
+        if payload_len > 125 {
+            return Err("test websocket frame payload is too large".into());
+        }
+        let mask = [1_u8, 2, 3, 4];
+        let mut frame = Vec::with_capacity(6 + payload.len());
+        frame.push(0x81);
+        frame.push(0x80 | payload_len);
+        frame.extend_from_slice(&mask);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % 4]),
+        );
+        stream.write_all(&frame).await?;
+        Ok(())
+    }
+
+    async fn read_until_contains(
+        stream: &mut TcpStream,
+        needle: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        timeout(Duration::from_secs(5), async {
+            let mut response = String::new();
+            let mut buffer = [0_u8; 256];
+            loop {
+                let read = stream.read(&mut buffer).await?;
+                if read == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "HTTP response closed before expected text",
+                    ));
+                }
+                response.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                if response.contains(needle) {
+                    return Ok(());
+                }
+            }
+        })
+        .await??;
+        Ok(())
+    }
+
+    fn spec031_sse_request(
+        last_event_id: Option<&str>,
+        session_id: &str,
+    ) -> Result<Request, Box<dyn Error>> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(CHAT_COMPLETIONS_PATH)
+            .header(header::CONTENT_TYPE, JSON_CONTENT_TYPE)
+            .header("x-shacs-spec031", "stream");
+        if let Some(last_event_id) = last_event_id {
+            builder = builder.header("last-event-id", last_event_id);
+        }
+        Ok(builder.body(Body::from(
+            json!({
+                "stream": true,
+                "session_id": session_id,
+                "messages": [{"role": "user", "content": "hello"}]
+            })
+            .to_string(),
+        ))?)
+    }
+
+    async fn websocket_message_roundtrip(
+        addr: SocketAddr,
+        chat_id: Option<&str>,
+    ) -> Result<Vec<Value>, Box<dyn Error>> {
+        let (mut websocket, _) = connect_async(format!("ws://{addr}{WEBSOCKET_PATH}")).await?;
+        let mut message = Map::new();
+        message.insert("type".to_owned(), json!("message"));
+        message.insert("text".to_owned(), json!("hello"));
+        if let Some(chat_id) = chat_id {
+            message.insert("chat_id".to_owned(), json!(chat_id));
+        }
+        websocket
+            .send(TungsteniteMessage::Text(
+                Value::Object(message).to_string().into(),
+            ))
+            .await?;
+        let frames = read_json_frames(&mut websocket, 4).await?;
+        let _ = websocket.close(None).await;
+        Ok(frames)
+    }
+
+    async fn websocket_malformed_roundtrip(addr: SocketAddr) -> Result<Vec<Value>, Box<dyn Error>> {
+        let (mut websocket, _) = connect_async(format!("ws://{addr}{WEBSOCKET_PATH}")).await?;
+        websocket
+            .send(TungsteniteMessage::Text("{".to_owned().into()))
+            .await?;
+        let frames = read_json_frames(&mut websocket, 2).await?;
+        let _ = websocket.close(None).await;
+        Ok(frames)
+    }
+
+    fn has_generation_gap(frames: &[Value], generation: u64, gap: bool) -> bool {
+        frames.iter().any(|frame| {
+            frame["kind"] == "progress"
+                && frame["capability"]["details"]["reconnect_generation"] == generation
+                && frame["capability"]["details"]["reconnect_gap"] == gap
+        })
+    }
+
+    fn assert_named_chat_frame(frames: &[Value], chat_id: &str) -> Result<(), Box<dyn Error>> {
+        let serialized = serde_json::to_string(frames)?;
+        assert!(serialized.contains(&format!("parent:channel:websocket:chat:{chat_id}")));
+        Ok(())
+    }
+
+    async fn serve_websocket_listener_with_observer(
+        listener: TcpListener,
+        adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
+        timeout: Duration,
+        websocket_path: &str,
+        observer: Spec031ChannelProjectionObserver,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> std::io::Result<()> {
+        let state =
+            ApiRouterState::with_timeout(adapter, timeout).with_spec031_channel_observer(observer);
+        axum::serve(
+            listener,
+            websocket_router_with_state_and_path(state, websocket_path),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+    }
+
+    async fn serve_api_listener_with_observer(
+        listener: TcpListener,
+        adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
+        timeout: Duration,
+        observer: Spec031ChannelProjectionObserver,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> std::io::Result<()> {
+        let state =
+            ApiRouterState::with_timeout(adapter, timeout).with_spec031_channel_observer(observer);
+        axum::serve(
+            listener,
+            api_router_with_state_and_websocket_path(state, WEBSOCKET_PATH),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+    }
+
+    async fn read_json_frames(
+        websocket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<TcpStream>,
+        >,
+        count: usize,
+    ) -> Result<Vec<Value>, Box<dyn Error>> {
+        let mut frames = Vec::with_capacity(count);
+        for _ in 0..count {
+            let Some(message) = timeout(Duration::from_secs(5), websocket.next())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "expected websocket frame {}/{count}, got {frames:?}",
+                        frames.len() + 1
+                    )
+                })?
+            else {
+                return Err(format!("expected websocket frame, got close after {frames:?}").into());
+            };
+            frames.push(serde_json::from_str(&message?.into_text()?)?);
+        }
+        Ok(frames)
+    }
+
+    fn assert_spec031_progress(
+        frame: &Value,
+        delivery: &str,
+        state: &str,
+        reason: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let envelope = Spec031Envelope::from_json_value(frame.clone())?;
+        assert_eq!(frame["kind"], "progress");
+        assert_eq!(frame["state"], state);
+        assert_eq!(frame["reason"]["code"], reason);
+        assert_eq!(frame["capability"]["details"]["delivery"], delivery);
+        assert_eq!(serde_json::to_value(envelope)?["state"], state);
+        Ok(())
+    }
+
     #[test]
     fn websocket_json_from_bytes_rejects_oversized_frames_before_parse() {
         let bytes = vec![b' '; MAX_REQUEST_BODY_BYTES + 1];
@@ -3169,6 +5147,39 @@ mod tests {
         assert_eq!(error.message, "websocket origin is not allowed");
     }
 
+    #[test]
+    fn websocket_origin_rejects_dns_rebound_host_even_when_origin_matches() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("evil.example:8900"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://evil.example:8900"),
+        );
+
+        let error = validate_websocket_origin(&headers).expect_err("rebound host should fail");
+
+        assert_eq!(error.status, 400);
+        assert_eq!(error.message, "websocket origin is not allowed");
+    }
+
+    #[test]
+    fn websocket_origin_allows_loopback_hosts_and_native_clients() -> Result<(), Box<dyn Error>> {
+        for host in ["127.0.0.1:8900", "localhost", "[::1]:8900"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_str(host)?);
+            assert!(validate_websocket_origin(&headers).is_ok(), "host {host}");
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("[::1]:8900"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://[::1]:8900"),
+        );
+        assert!(validate_websocket_origin(&headers).is_ok());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn axum_router_invokes_chat_adapter_once() -> Result<(), Box<dyn Error>> {
         let adapter = Arc::new(FakeAdapter::new("gpt-5", text_response("hello via axum")));
@@ -3196,6 +5207,158 @@ mod tests {
             .ok_or("adapter should capture provider invocation")?;
         assert_eq!(captured.session_key, "api:axum");
         assert_eq!(captured.provider_request.messages[0]["content"], "hello");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn axum_router_rejects_hostile_host_for_session_and_chat_routes(
+    ) -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(FakeAdapter::new("gpt-5", text_response("unused")));
+        let app = api_router(adapter.clone());
+
+        let session = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(SESSIONS_PATH)
+                    .header(header::HOST, "evil.example")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(session.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(session).await?["error"]["type"],
+            "invalid_request_error"
+        );
+
+        let chat = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(CHAT_COMPLETIONS_PATH)
+                    .header(header::HOST, "evil.example:8900")
+                    .header(header::CONTENT_TYPE, JSON_CONTENT_TYPE)
+                    .body(Body::from(
+                        json!({"messages": [{"role": "user", "content": "hello"}]}).to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(chat.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(adapter.call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn axum_router_rejects_hostile_origin_for_chat_route() -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(FakeAdapter::new("gpt-5", text_response("unused")));
+        let app = api_router(adapter.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(CHAT_COMPLETIONS_PATH)
+                    .header(header::HOST, "127.0.0.1:8900")
+                    .header(header::ORIGIN, "http://evil.example")
+                    .header(header::CONTENT_TYPE, JSON_CONTENT_TYPE)
+                    .body(Body::from(
+                        json!({"messages": [{"role": "user", "content": "hello"}]}).to_string(),
+                    ))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(adapter.call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn axum_router_allows_loopback_hosts_and_no_origin_native_chat_clients(
+    ) -> Result<(), Box<dyn Error>> {
+        for host in ["127.0.0.1:8900", "localhost", "[::1]:8900"] {
+            let adapter = Arc::new(FakeAdapter::new("gpt-5", text_response("ok")));
+            let app = api_router(adapter.clone());
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(CHAT_COMPLETIONS_PATH)
+                        .header(header::HOST, host)
+                        .header(header::CONTENT_TYPE, JSON_CONTENT_TYPE)
+                        .body(Body::from(
+                            json!({"messages": [{"role": "user", "content": "hello"}]}).to_string(),
+                        ))?,
+                )
+                .await?;
+
+            assert_eq!(response.status(), StatusCode::OK, "host {host}");
+            assert_eq!(adapter.call_count(), 1, "host {host}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn axum_router_requires_json_content_type_for_json_chat() -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(FakeAdapter::new("gpt-5", text_response("unused")));
+        let app = api_router(adapter.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(CHAT_COMPLETIONS_PATH)
+                    .header(header::HOST, "127.0.0.1:8900")
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from(
+                        json!({"messages": [{"role": "user", "content": "hello"}]}).to_string(),
+                    ))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(adapter.call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn serve_websocket_listener_rejects_hostile_websocket_host_and_origin(
+    ) -> Result<(), Box<dyn Error>> {
+        let adapter = Arc::new(FakeAdapter::new("gpt-5", text_response("unused")));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_websocket_listener_with_timeout_and_path(
+            listener,
+            adapter.clone(),
+            Duration::from_secs(30),
+            WEBSOCKET_PATH,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let rebound = raw_websocket_upgrade_response(
+            addr,
+            "evil.example:8900",
+            Some("http://evil.example:8900"),
+        )
+        .await?;
+        assert!(rebound.starts_with("HTTP/1.1 400 Bad Request"), "{rebound}");
+
+        let hostile_origin =
+            raw_websocket_upgrade_response(addr, "127.0.0.1:8900", Some("http://evil.example"))
+                .await?;
+        assert!(
+            hostile_origin.starts_with("HTTP/1.1 400 Bad Request"),
+            "{hostile_origin}"
+        );
+        assert_eq!(adapter.call_count(), 0);
+        let _ = shutdown_tx.send(());
+        timeout(Duration::from_secs(5), server)
+            .await
+            .map_err(|_| "websocket server did not shut down after hostile upgrade test")???;
         Ok(())
     }
 
@@ -3536,12 +5699,102 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn serve_api_listener_returns_spec031_adapter_envelope_over_tcp(
+    ) -> Result<(), Box<dyn Error>> {
+        let marker = "tcp-diagnostics-live-marker";
+        let adapter = Arc::new(
+            FakeAdapter::new("gpt-5", text_response("unused")).with_spec031_projection(
+                Spec031ApiProjection::Diagnostics,
+                test_spec031_envelope(Spec031ApiProjection::Diagnostics, marker)?,
+            ),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve_api_listener(listener, adapter, async {
+            let _ = shutdown_rx.await;
+        }));
+
+        let mut diagnostics_stream = TcpStream::connect(addr).await?;
+        diagnostics_stream
+            .write_all(
+                b"GET /v1/diagnostics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        let mut diagnostics_response = String::new();
+        diagnostics_stream
+            .read_to_string(&mut diagnostics_response)
+            .await?;
+
+        let mut tools_stream = TcpStream::connect(addr).await?;
+        tools_stream
+            .write_all(b"GET /v1/tools HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await?;
+        let mut tools_response = String::new();
+        tools_stream.read_to_string(&mut tools_response).await?;
+
+        assert!(
+            diagnostics_response.starts_with("HTTP/1.1 200 OK"),
+            "{diagnostics_response}"
+        );
+        assert!(
+            diagnostics_response.contains(marker),
+            "{diagnostics_response}"
+        );
+        assert!(
+            diagnostics_response.contains(r#""kind":"diagnostics""#),
+            "{diagnostics_response}"
+        );
+        assert!(
+            tools_response.starts_with("HTTP/1.1 200 OK"),
+            "{tools_response}"
+        );
+        assert!(
+            tools_response.contains(r#""state":"unavailable""#),
+            "{tools_response}"
+        );
+        assert!(!tools_response.contains("canonical"), "{tools_response}");
+        let _ = shutdown_tx.send(());
+        server.await??;
+        Ok(())
+    }
+
     fn json_request(method: Method, uri: &str, body: Value) -> Result<Request, Box<dyn Error>> {
         Ok(Request::builder()
             .method(method)
             .uri(uri)
             .header(header::CONTENT_TYPE, JSON_CONTENT_TYPE)
             .body(Body::from(body.to_string()))?)
+    }
+
+    async fn raw_websocket_upgrade_response(
+        addr: SocketAddr,
+        host: &str,
+        origin: Option<&str>,
+    ) -> Result<String, Box<dyn Error>> {
+        let mut stream = TcpStream::connect(addr).await?;
+        let origin_header =
+            origin.map_or_else(String::new, |origin| format!("Origin: {origin}\r\n"));
+        let request = format!(
+            "GET {WEBSOCKET_PATH} HTTP/1.1\r\nHost: {host}\r\n{origin_header}Upgrade: websocket\r\nConnection: Upgrade, close\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await?;
+        timeout(Duration::from_secs(5), async {
+            let mut response = Vec::new();
+            let mut buffer = [0_u8; 256];
+            loop {
+                let read = stream.read(&mut buffer).await?;
+                if read == 0 {
+                    return Ok(String::from_utf8(response)?);
+                }
+                response.extend_from_slice(&buffer[..read]);
+                if response.windows(4).any(|window| window == b"\r\n\r\n") {
+                    return Ok(String::from_utf8(response)?);
+                }
+            }
+        })
+        .await?
     }
 
     async fn response_json(response: Response) -> Result<Value, Box<dyn Error>> {
