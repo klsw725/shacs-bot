@@ -5,10 +5,9 @@ edition = "2021"
 rust-version = "1.75"
 
 [dependencies]
+cap-std = "4.0.2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 shacs-config = { path = "../shacs-config" }
 shacs-eval = { path = "../shacs-eval" }
 shacs-redaction = { path = "../shacs-redaction" }
-
-[dev-dependencies]
-serde_json = "1"
