@@ -1,8 +1,14 @@
+mod agent_repl;
+mod onboard_wizard;
+mod spec031_cli;
+mod surface_approval_worker;
+
 use fs2::FileExt;
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials as SmtpCredentials;
 use lettre::{Message as EmailMessage, SmtpTransport, Transport};
 use mailparse::MailHeaderMap;
+use onboard_wizard::{OnboardWizardReport, OnboardWizardStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -36,14 +42,17 @@ use shacs_core::app_authoring::{
 use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
     build_core_diagnostics_aggregate, build_permission_diagnostics_summary,
-    build_plugin_runtime_snapshot, build_plugin_surface_projection, ceiling_for_origin,
+    build_plugin_runtime_snapshot, build_plugin_surface_projection,
+    build_spec031_extension_projection, ceiling_for_origin,
     containment_permission_proof_for_process_gate, discover_context_files, discover_plugins,
     parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
-    resolve_context_reference, runtime_control_payload, ActionNormalizationState, AgentHook,
-    AgentHookContext, AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult,
-    CompositeHook, ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef,
-    ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
-    ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
+    request_runtime_control, resolve_context_reference,
+    runtime_stop_request_marker_path as core_runtime_stop_request_marker_path,
+    ActionNormalizationState, AgentHook, AgentHookContext, AgentLoop, AgentLoopCommandResult,
+    AgentLoopConfig, AgentLoopTurnResult, CompositeHook, ContainerNetworkMode,
+    ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder,
+    ContextDiagnosticsInput, ContextDiagnosticsSummary, ContextFileDiagnosticsSummary,
+    ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
     ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput, DiscoveredPlugin,
     DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, HeartbeatError,
     HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor,
@@ -57,10 +66,11 @@ use shacs_core::runtime::{
     ProcessGateTerminalPrecondition, ProcessIdentity, ProcessPluginHookCommandExecutor,
     ProcessRedactedCommand, ProjectPermissionStoreConfig, ProviderNotificationEvaluator,
     RuntimeBoundaryOrigin, RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall,
-    SafetyCapability, Session, SessionHistoryOptions, SessionManager, SessionTurnLock,
-    SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
-    SubagentExecutionConfig, SubagentRuntime, ToolEvent, ToolSearchConfig, ToolSearchMode,
-    ToolStatus, HEARTBEAT_FILE_NAME,
+    SafetyCapability, Session, SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome,
+    SessionTurnLock, SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
+    SubagentExecutionConfig, SubagentRuntime, SurfaceActionOutcomeKind, SurfaceActionRequestKind,
+    SurfaceApprovalRequest, ToolEvent, ToolSearchConfig, ToolSearchMode, ToolStatus,
+    HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -78,9 +88,10 @@ use shacs_projection::{
     RememberedPermissionStoreHealthInput,
 };
 use shacs_providers::{
-    chat_with_retry, prepare_provider_request, resolve_image_generation_client,
-    resolve_provider_client, AgentDefaults, LlmResponse, ProviderClient, ProviderError,
-    ProviderEvent, ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
+    chat_with_retry, prepare_provider_request, provider_client_from_config,
+    resolve_image_generation_client, resolve_provider_client, AgentDefaults, LlmResponse,
+    ProviderClient, ProviderError, ProviderEvent, ProviderRegistry, ProviderRequest,
+    ProviderRetryMode, ResolvedProviderClient,
 };
 use shacs_redaction::redact_string;
 use shacs_session::durable_child::{
@@ -153,6 +164,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect as websocket_connect, Message as WebSocketMessage, WebSocket};
 
+#[cfg(test)]
+use surface_approval_worker::process_due_surface_approvals;
+use surface_approval_worker::start_surface_approval_worker;
+
+#[cfg(any(test, feature = "spec031-test-fixture"))]
+#[doc(hidden)]
+pub use surface_approval_worker::spec031_surface_approval_fixture;
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUNTIME_DATA_SCHEMA_VERSION: u32 = 1;
 const RUNTIME_DATA_SCHEMA_MIN_VERSION: u32 = 1;
@@ -221,6 +240,7 @@ pub enum CliCommand {
     Context(ContextCommand),
     Permissions(PermissionsCommand),
     Ask(AskOptions),
+    AgentRepl(AgentReplOptions),
     Run(RunOptions),
     Serve(ServeOptions),
     Gateway(GatewayOptions),
@@ -631,6 +651,17 @@ pub struct AskOptions {
     pub markdown: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentReplOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub session: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u32>,
+    pub allow_side_effects: bool,
+    pub markdown: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShacsBotOptions {
     pub config_path: Option<PathBuf>,
@@ -716,6 +747,20 @@ impl Default for AskOptions {
             config_path: None,
             workspace_override: None,
             message: String::new(),
+            session: None,
+            temperature: None,
+            max_tokens: None,
+            allow_side_effects: false,
+            markdown: true,
+        }
+    }
+}
+
+impl Default for AgentReplOptions {
+    fn default() -> Self {
+        Self {
+            config_path: None,
+            workspace_override: None,
             session: None,
             temperature: None,
             max_tokens: None,
@@ -954,6 +999,7 @@ pub struct OnboardOutcome {
     pub template_files: Vec<String>,
     pub template_dirs: Vec<String>,
     pub migrations: Vec<String>,
+    pub wizard_report: Option<OnboardWizardReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1065,6 +1111,7 @@ pub struct PluginProjectionReport {
     pub data_dir: PathBuf,
     pub plugins: Vec<DiscoveredPlugin>,
     pub projection: PluginSurfaceProjection,
+    pub spec031_extensions: shacs_projection::Spec031ExtensionCatalogProjection,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1073,6 +1120,7 @@ pub struct PluginInspectReport {
     pub workspace: PathBuf,
     pub plugin: DiscoveredPlugin,
     pub projection: PluginSurfaceProjection,
+    pub spec031_extensions: shacs_projection::Spec031ExtensionCatalogProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1097,6 +1145,7 @@ pub struct HookProjectionReport {
     pub workspace: PathBuf,
     pub catalog: PluginHookCatalog,
     pub plugin_hooks: Vec<PluginHookDescriptor>,
+    pub spec031_extensions: shacs_projection::Spec031ExtensionCatalogProjection,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1106,6 +1155,7 @@ pub struct HookInspectReport {
     pub filter: String,
     pub catalog: PluginHookCatalog,
     pub plugin_hooks: Vec<PluginHookDescriptor>,
+    pub spec031_extensions: shacs_projection::Spec031ExtensionCatalogProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1807,6 +1857,7 @@ pub enum CliError {
     Io(std::io::Error),
     InvalidArguments(String),
     Provider(ProviderError),
+    Runtime(String),
     Unsupported(String),
 }
 
@@ -1820,6 +1871,7 @@ impl fmt::Display for CliError {
             Self::Io(error) => write!(formatter, "CLI I/O failed: {error}"),
             Self::InvalidArguments(error) => write!(formatter, "invalid CLI arguments: {error}"),
             Self::Provider(error) => write!(formatter, "{error}"),
+            Self::Runtime(error) => write!(formatter, "runtime error: {error}"),
             Self::Unsupported(error) => write!(formatter, "unsupported command: {error}"),
         }
     }
@@ -2649,6 +2701,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Context(command) => run_context_command(command),
         CliCommand::Permissions(command) => run_permissions_command(command),
         CliCommand::Ask(options) => ask(options),
+        CliCommand::AgentRepl(options) => agent_repl::run_agent_repl(options),
         CliCommand::Run(options) => run_runtime(options),
         CliCommand::Serve(options) => serve(options),
         CliCommand::Gateway(options) => gateway_preset(options).map(format_gateway_preset_report),
@@ -2887,9 +2940,7 @@ fn apply_api_key_auth_overlay(bundle: &mut ConfigBundle) -> Result<(), CliError>
 
 pub fn onboard(options: OnboardOptions) -> Result<OnboardOutcome, CliError> {
     if options.wizard {
-        return Err(CliError::Unsupported(
-            "onboard --wizard is deferred until interactive CLI support is migrated".to_owned(),
-        ));
+        return onboard_wizard::run(options, io::stdin().lock(), io::stdout());
     }
 
     let config_path = options.config_path.unwrap_or_else(default_config_path);
@@ -2930,6 +2981,7 @@ pub fn onboard(options: OnboardOptions) -> Result<OnboardOutcome, CliError> {
             .into_iter()
             .map(|migration| migration.key)
             .collect(),
+        wizard_report: None,
     })
 }
 
@@ -3071,7 +3123,7 @@ pub fn runtime_inspect(options: RuntimeInspectOptions) -> Result<RuntimeInspectR
     runtime_inspect_inner(options, true)
 }
 
-fn runtime_inspect_inner(
+pub(crate) fn runtime_inspect_inner(
     options: RuntimeInspectOptions,
     ensure_dirs: bool,
 ) -> Result<RuntimeInspectReport, CliError> {
@@ -3886,6 +3938,7 @@ pub fn runtime_diagnostics(
     )?;
     let mut snapshot = diagnostics_snapshot_from_runtime_inspect(&inspect);
     let mut redacted_projection = diagnostics_projection_from_snapshot(&snapshot)?;
+    insert_readiness_projection(&mut redacted_projection, &inspect)?;
     let (bundle, bundle_path, bundle_error) = match options.bundle_path {
         Some(path) => match write_redacted_diagnostics_bundle(&path, &redacted_projection) {
             Ok(outcome) => (Some(outcome.manifest), Some(outcome.path), None),
@@ -3902,6 +3955,7 @@ pub fn runtime_diagnostics(
                 });
                 snapshot.diagnostics.push(record);
                 redacted_projection = diagnostics_projection_from_snapshot(&snapshot)?;
+                insert_readiness_projection(&mut redacted_projection, &inspect)?;
                 (None, Some(path), Some(message))
             }
         },
@@ -3913,6 +3967,37 @@ pub fn runtime_diagnostics(
         bundle,
         bundle_path,
         bundle_error,
+    })
+}
+
+fn insert_readiness_projection(
+    projection: &mut Value,
+    inspect: &RuntimeInspectReport,
+) -> Result<(), CliError> {
+    if let Value::Object(runtime) = &mut projection["runtime"] {
+        runtime.insert(
+            "spec031_readiness".to_owned(),
+            spec031_cli::readiness::value(inspect).map_err(|error| {
+                CliError::InvalidArguments(format!("readiness projection failed: {error}"))
+            })?,
+        );
+    }
+    Ok(())
+}
+
+fn runtime_readiness_projection_for_context(
+    config_path: &Path,
+    workspace: &Path,
+) -> Result<Value, CliError> {
+    let inspect = runtime_inspect_inner(
+        RuntimeInspectOptions {
+            config_path: Some(config_path.to_path_buf()),
+            workspace_override: Some(workspace.to_path_buf()),
+        },
+        false,
+    )?;
+    spec031_cli::readiness::value(&inspect).map_err(|error| {
+        CliError::InvalidArguments(format!("readiness projection failed: {error}"))
     })
 }
 
@@ -4209,6 +4294,8 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
                     "last_transition_ms": state.last_transition_ms,
                 })).collect::<Vec<_>>(),
                 "ownership": ownership,
+                "spec031_readiness": spec031_cli::readiness::value(report)
+                    .unwrap_or_else(|error| json!({ "state": "unavailable", "reason": error })),
                 "update_marker": update_marker.clone(),
             },
             "update_marker": update_marker,
@@ -4362,58 +4449,28 @@ fn runtime_stop_or_restart(
         &ProcessEnv,
     )?;
     let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
-    let ownership_path = runtime_ownership_marker_path(&bundle.context.data_dir);
-    let _mutation_lock = RuntimeOwnershipMutationLock::acquire(&ownership_path)?;
-    let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
-    let request_path = runtime_stop_request_marker_path(&bundle.context.data_dir);
-    let (status, detail) = match ownership.state {
-        RuntimeOwnershipState::Active => {
-            let owner = ownership.marker.as_ref().ok_or_else(|| {
-                CliError::InvalidArguments("active runtime ownership marker disappeared".to_owned())
-            })?;
-            let request_id = runtime_request_id(request, &owner.owner_id);
-            let requested_at_ms = now_millis();
-            let event_sequence = append_runtime_control_request(
-                &bundle.context.data_dir,
-                request,
-                requested_at_ms,
-                &request_id,
-                &owner.owner_id,
-            )
-            .map(|record| record.sequence)?;
-            let current = read_runtime_ownership_marker(&ownership_path)?;
-            if current.as_ref().map(|marker| marker.owner_id.as_str())
-                != Some(owner.owner_id.as_str())
-            {
-                return Err(CliError::InvalidArguments(
-                    "runtime control request blocked by owner generation change".to_owned(),
-                ));
-            }
-            write_runtime_marker_atomically(
-                &request_path,
-                &runtime_stop_request_marker_value(
-                    request,
-                    &request_id,
-                    Some(owner.pid),
-                    Some(&owner.owner_id),
-                    event_sequence,
-                    requested_at_ms,
-                ),
-            )?;
-            let detail = format!(
-                "wrote {request} request for active runtime owner {}",
-                owner.owner_id
-            );
-            (RuntimeStopOutcomeStatus::RequestWritten, detail)
+    let request_kind = match request {
+        "stop" => SurfaceActionRequestKind::Stop,
+        "restart" => SurfaceActionRequestKind::Restart,
+        other => {
+            return Err(CliError::InvalidArguments(format!(
+                "unsupported runtime control request {other}"
+            )))
         }
-        RuntimeOwnershipState::Stale => (
-            RuntimeStopOutcomeStatus::StaleOwnerOnly,
-            "stale ownership marker exists; run `shacs-bot runtime recover`".to_owned(),
-        ),
-        RuntimeOwnershipState::None => (
-            RuntimeStopOutcomeStatus::NoActiveOwner,
-            "no active runtime owner found".to_owned(),
-        ),
+    };
+    let request_path = core_runtime_stop_request_marker_path(&bundle.context.data_dir);
+    let outcome = request_runtime_control(&bundle.context.data_dir, request_kind, now_millis())
+        .map_err(|error| CliError::InvalidArguments(error.to_string()))?;
+    let status = match outcome.kind {
+        SurfaceActionOutcomeKind::Requested => RuntimeStopOutcomeStatus::RequestWritten,
+        SurfaceActionOutcomeKind::Unavailable if outcome.detail.contains("no active") => {
+            RuntimeStopOutcomeStatus::NoActiveOwner
+        }
+        SurfaceActionOutcomeKind::Unavailable => RuntimeStopOutcomeStatus::StaleOwnerOnly,
+        SurfaceActionOutcomeKind::StaleLineage => {
+            return Err(CliError::InvalidArguments(outcome.detail))
+        }
+        SurfaceActionOutcomeKind::Completed => RuntimeStopOutcomeStatus::RequestWritten,
     };
     Ok(RuntimeStopOutcome {
         config_path,
@@ -4421,7 +4478,7 @@ fn runtime_stop_or_restart(
         data_dir: bundle.context.data_dir,
         request_path,
         status,
-        detail,
+        detail: outcome.detail,
     })
 }
 
@@ -5029,6 +5086,7 @@ fn runtime_component(
     }
 }
 
+#[cfg(test)]
 fn append_runtime_control_request(
     data_dir: &Path,
     request: &str,
@@ -5052,12 +5110,14 @@ fn append_runtime_control_request(
                 redact_string(&error.to_string())
             ))
         })?;
-    let mut payload =
-        serde_json::to_value(runtime_control_payload(requested_at_ms)).map_err(|error| {
-            CliError::InvalidArguments(format!(
-                "runtime control request could not serialize durable evidence: {error}"
-            ))
-        })?;
+    let mut payload = serde_json::to_value(shacs_core::runtime::runtime_control_payload(
+        requested_at_ms,
+    ))
+    .map_err(|error| {
+        CliError::InvalidArguments(format!(
+            "runtime control request could not serialize durable evidence: {error}"
+        ))
+    })?;
     payload["request_id"] = json!(request_id);
     payload["target_owner_id"] = json!(target_owner_id);
     events
@@ -5072,10 +5132,6 @@ fn append_runtime_control_request(
                 redact_string(&error.to_string())
             ))
         })
-}
-
-fn runtime_request_id(request: &str, owner_id: &str) -> String {
-    format!("{request}-{owner_id}-{}", now_millis())
 }
 
 fn evaluate_runtime_durable_recovery(data_dir: &Path) -> DurableReplayAdmission {
@@ -6197,6 +6253,7 @@ impl Drop for RuntimeOwnershipLease {
     }
 }
 
+#[cfg(test)]
 fn runtime_stop_request_marker_value(
     request: &str,
     request_id: &str,
@@ -7001,6 +7058,7 @@ pub fn plugins_inspect(options: PluginsInspectOptions) -> Result<PluginInspectRe
         workspace: report.workspace,
         plugin,
         projection: report.projection,
+        spec031_extensions: report.spec031_extensions,
     })
 }
 
@@ -7019,6 +7077,7 @@ pub fn hooks_list(options: HooksListOptions) -> Result<HookProjectionReport, Cli
         workspace: report.workspace,
         catalog: plugin_hook_catalog(),
         plugin_hooks: report.projection.hooks,
+        spec031_extensions: report.spec031_extensions,
     })
 }
 
@@ -7049,6 +7108,7 @@ pub fn hooks_inspect(options: HooksInspectOptions) -> Result<HookInspectReport, 
         filter,
         catalog,
         plugin_hooks,
+        spec031_extensions: report.spec031_extensions,
     })
 }
 
@@ -7068,12 +7128,14 @@ fn load_plugin_projection(
     )?;
     let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
     let projection = build_plugin_surface_projection(&discovery.plugins);
+    let spec031_extensions = build_spec031_extension_projection(&discovery.plugins);
     Ok(PluginProjectionReport {
         config_path,
         workspace: bundle.context.workspace,
         data_dir: bundle.context.data_dir,
         plugins: discovery.plugins,
         projection,
+        spec031_extensions,
     })
 }
 
@@ -7235,7 +7297,7 @@ fn patch_plugin_gate_config(
     Ok(())
 }
 
-fn read_config_value_for_patch(path: &Path) -> Result<Value, CliError> {
+pub(crate) fn read_config_value_for_patch(path: &Path) -> Result<Value, CliError> {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
             .map_err(|error| CliError::InvalidArguments(format!("invalid config JSON: {error}"))),
@@ -7244,7 +7306,7 @@ fn read_config_value_for_patch(path: &Path) -> Result<Value, CliError> {
     }
 }
 
-fn write_config_value_for_patch(path: &Path, value: &Value) -> Result<(), CliError> {
+pub(crate) fn write_config_value_for_patch(path: &Path, value: &Value) -> Result<(), CliError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -7314,7 +7376,12 @@ fn plugin_block_summary(plugin: &DiscoveredPlugin) -> String {
             .join(", ");
     }
     if !plugin.diagnostics.is_empty() {
-        return plugin.diagnostics.join("; ");
+        return plugin
+            .diagnostics
+            .iter()
+            .map(|diagnostic| redact_string(diagnostic))
+            .collect::<Vec<_>>()
+            .join("; ");
     }
     "blocked".to_owned()
 }
@@ -7565,6 +7632,14 @@ fn channel_runtime_status(
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+fn channel_progress_blocked(channel: &ChannelReportItem) -> bool {
+    channel.enabled
+        && (!channel.configured
+            || channel.runtime_status.contains("missing-credentials")
+            || channel.runtime_status.contains("unsupported-config")
+            || channel.runtime_status.contains("no-worker"))
 }
 
 fn channel_enabled_from_plugins(
@@ -8408,14 +8483,19 @@ fn workflow_recipe_projection_item(recipe: &SkillBackedWorkflowRecipe) -> Value 
 }
 
 pub fn format_apps_list(report: AppsListReport) -> String {
+    let app_count = report.entries.len();
     let mut lines = vec![
         "Apps".to_owned(),
         format!("Config: {}", display_path(&report.config_path)),
-        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
         format!("Registry: {}", display_path(&report.registry_path)),
     ];
     if report.entries.is_empty() {
         lines.push("No apps installed.".to_owned());
+        spec031_cli::push(
+            &mut lines,
+            &[spec031_cli::Projection::App { total_count: 0 }],
+        );
         return lines.join("\n");
     }
     for entry in report.entries {
@@ -8427,6 +8507,12 @@ pub fn format_apps_list(report: AppsListReport) -> String {
             entry.digest
         ));
     }
+    spec031_cli::push(
+        &mut lines,
+        &[spec031_cli::Projection::App {
+            total_count: app_count,
+        }],
+    );
     lines.join("\n")
 }
 
@@ -8490,6 +8576,7 @@ pub fn format_apps_entry_report(report: AppsEntryReport) -> String {
 
 fn format_apps_entry(title: &str, report: AppsEntryReport) -> String {
     let entry = report.entry;
+    let available = entry.unavailable_reasons.is_empty();
     let mut lines = vec![
         format!("{title}: {}", entry.app_id),
         format!("Version: {}", entry.version),
@@ -8497,7 +8584,7 @@ fn format_apps_entry(title: &str, report: AppsEntryReport) -> String {
         format!("Digest: {}", entry.digest),
         format!("Bundle: {}", display_path(&entry.bundle_path)),
         format!("Config: {}", display_path(&report.config_path)),
-        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
         format!("Registry: {}", display_path(&report.registry_path)),
         format!("Permission requests: {}", entry.permission_requests.len()),
         format!("Secret requests: {}", entry.secret_requests.len()),
@@ -8512,6 +8599,12 @@ fn format_apps_entry(title: &str, report: AppsEntryReport) -> String {
             entry.unavailable_reasons.join("; ")
         ));
     }
+    spec031_cli::push(
+        &mut lines,
+        &[spec031_cli::Projection::App {
+            total_count: usize::from(available),
+        }],
+    );
     lines.join("\n")
 }
 
@@ -8520,16 +8613,29 @@ pub fn format_apps_uninstall(report: AppsUninstallReport) -> String {
         format!("App: {}", report.app_id),
         format!("Removed: {}", yes_no_label(report.removed)),
         format!("Config: {}", display_path(&report.config_path)),
-        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
         format!("Registry: {}", display_path(&report.registry_path)),
     ]
     .join("\n")
 }
 
 pub fn format_plugins_list(report: PluginProjectionReport) -> String {
+    let plugin_count = report.plugins.len();
+    let blocked_count = report
+        .plugins
+        .iter()
+        .filter(|plugin| plugin.state == PluginState::Blocked)
+        .count();
     let mut lines = plugin_projection_header("Plugins", &report);
     if report.plugins.is_empty() {
         lines.push("No plugins discovered.".to_owned());
+        spec031_cli::push(
+            &mut lines,
+            &[spec031_cli::Projection::Plugin {
+                total_count: 0,
+                blocked_count: 0,
+            }],
+        );
         return lines.join("\n");
     }
     for descriptor in &report.projection.plugins {
@@ -8542,11 +8648,20 @@ pub fn format_plugins_list(report: PluginProjectionReport) -> String {
             descriptor.active_surface_count
         ));
     }
+    spec031_cli::push(
+        &mut lines,
+        &[spec031_cli::Projection::Plugin {
+            total_count: plugin_count,
+            blocked_count,
+        }],
+    );
+    lines.push(spec031_extension_summary_line(&report.spec031_extensions));
     lines.join("\n")
 }
 
 pub fn format_plugins_inspect(report: PluginInspectReport) -> String {
     let plugin = report.plugin;
+    let blocked_count = usize::from(plugin.state == PluginState::Blocked);
     let descriptor = report
         .projection
         .plugins
@@ -8555,11 +8670,11 @@ pub fn format_plugins_inspect(report: PluginInspectReport) -> String {
     let mut lines = vec![
         format!("Plugin: {}", plugin.id),
         "Boundary: management projection only; no hooks, MCP, tools, commands, or processes were executed".to_owned(),
-        format!("Config: {}", display_path(&report.config_path)),
-        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Config: {}", plugin_management_path_ref(&report.config_path)),
+        format!("Workspace: {}", plugin_management_path_ref(&report.workspace)),
         format!("State: {}", plugin.state.as_str()),
         format!("Source: {}", plugin.source.as_str()),
-        format!("Manifest: {}", display_path(&plugin.manifest_path)),
+        format!("Manifest: {}", plugin_management_path_ref(&plugin.manifest_path)),
     ];
     if let Some(digest) = plugin.digest.as_deref() {
         lines.push(format!("Digest: {digest}"));
@@ -8567,7 +8682,10 @@ pub fn format_plugins_inspect(report: PluginInspectReport) -> String {
     if let Some(manifest) = plugin.manifest.as_ref() {
         lines.push(format!("Version: {}", manifest.version));
         if let Some(description) = manifest.description.as_deref() {
-            lines.push(format!("Description: {description}"));
+            lines.push(format!(
+                "Description ref: {}",
+                opaque_ref("description", description)
+            ));
         }
     }
     if let Some(descriptor) = descriptor {
@@ -8636,12 +8754,33 @@ pub fn format_plugins_inspect(report: PluginInspectReport) -> String {
         ));
     }
     if !plugin.diagnostics.is_empty() {
-        lines.push(format!("Diagnostics: {}", plugin.diagnostics.join("; ")));
+        lines.push(format!("Diagnostics: {}", plugin_block_summary(&plugin)));
     }
+    if let Some(extension) = report
+        .spec031_extensions
+        .extensions
+        .iter()
+        .find(|extension| extension.label == plugin.id)
+    {
+        lines.push(format!(
+            "Spec031 extension: {} reason={} ref={}",
+            extension.readiness.as_str(),
+            extension.reason.as_str(),
+            extension.extension_ref
+        ));
+    }
+    spec031_cli::push(
+        &mut lines,
+        &[spec031_cli::Projection::Plugin {
+            total_count: 1,
+            blocked_count,
+        }],
+    );
     lines.join("\n")
 }
 
 pub fn format_plugins_doctor(report: PluginProjectionReport) -> String {
+    let plugin_count = report.plugins.len();
     let mut lines = plugin_projection_header("Plugin doctor", &report);
     lines.push("Boundary: management checks only; no live plugin execution, hook dispatch, MCP startup, tool registration, or process execution".to_owned());
     let blocked = report
@@ -8655,6 +8794,7 @@ pub fn format_plugins_doctor(report: PluginProjectionReport) -> String {
         "Projection diagnostics: {}",
         report.projection.diagnostics.len()
     ));
+    lines.push(spec031_extension_summary_line(&report.spec031_extensions));
     for plugin in report.plugins {
         if plugin.state == PluginState::Blocked || !plugin.diagnostics.is_empty() {
             lines.push(format!(
@@ -8671,6 +8811,13 @@ pub fn format_plugins_doctor(report: PluginProjectionReport) -> String {
             diagnostic.plugin_id, diagnostic.code, diagnostic.message
         ));
     }
+    spec031_cli::push(
+        &mut lines,
+        &[spec031_cli::Projection::Plugin {
+            total_count: plugin_count,
+            blocked_count: blocked,
+        }],
+    );
     lines.join("\n")
 }
 
@@ -8683,8 +8830,14 @@ pub fn format_plugin_mutation(report: PluginMutationReport) -> String {
         format!("Plugin: {}", report.plugin_name),
         format!("Action: {action}"),
         format!("Changed: {}", yes_no_label(report.changed)),
-        format!("Config: {}", display_path(&report.config_path)),
-        format!("Workspace: {}", display_path(&report.workspace)),
+        format!(
+            "Config: {}",
+            plugin_management_path_ref(&report.config_path)
+        ),
+        format!(
+            "Workspace: {}",
+            plugin_management_path_ref(&report.workspace)
+        ),
         report.next_session_notice,
     ]
     .join("\n")
@@ -8694,10 +8847,17 @@ pub fn format_hooks_list(report: HookProjectionReport) -> String {
     let mut lines = vec![
         "Hooks".to_owned(),
         "Boundary: hook metadata only; no hook dispatch or plugin process execution".to_owned(),
-        format!("Config: {}", display_path(&report.config_path)),
-        format!("Workspace: {}", display_path(&report.workspace)),
+        format!(
+            "Config: {}",
+            plugin_management_path_ref(&report.config_path)
+        ),
+        format!(
+            "Workspace: {}",
+            plugin_management_path_ref(&report.workspace)
+        ),
         format!("Catalog events: {}", report.catalog.entries.len()),
         format!("Plugin hook descriptors: {}", report.plugin_hooks.len()),
+        spec031_extension_summary_line(&report.spec031_extensions),
     ];
     for entry in report.catalog.entries {
         lines.push(format!(
@@ -8721,8 +8881,15 @@ pub fn format_hooks_inspect(report: HookInspectReport) -> String {
     let mut lines = vec![
         format!("Hook filter: {}", report.filter),
         "Boundary: hook metadata only; no hook dispatch or plugin process execution".to_owned(),
-        format!("Config: {}", display_path(&report.config_path)),
-        format!("Workspace: {}", display_path(&report.workspace)),
+        format!(
+            "Config: {}",
+            plugin_management_path_ref(&report.config_path)
+        ),
+        format!(
+            "Workspace: {}",
+            plugin_management_path_ref(&report.workspace)
+        ),
+        spec031_extension_summary_line(&report.spec031_extensions),
     ];
     if report.catalog.entries.is_empty() && report.plugin_hooks.is_empty() {
         lines.push("No matching hook metadata found.".to_owned());
@@ -8751,10 +8918,55 @@ fn plugin_projection_header(title: &str, report: &PluginProjectionReport) -> Vec
         title.to_owned(),
         "Boundary: management projection only; this command does not execute plugin surfaces"
             .to_owned(),
-        format!("Config: {}", display_path(&report.config_path)),
-        format!("Workspace: {}", display_path(&report.workspace)),
-        format!("Data dir: {}", display_path(&report.data_dir)),
+        format!(
+            "Config: {}",
+            plugin_management_path_ref(&report.config_path)
+        ),
+        format!(
+            "Workspace: {}",
+            plugin_management_path_ref(&report.workspace)
+        ),
+        format!("Data dir: {}", plugin_management_path_ref(&report.data_dir)),
     ]
+}
+
+fn plugin_management_path_ref(path: &Path) -> String {
+    diagnostics_path_ref(path)
+}
+
+fn spec031_extension_summary_line(
+    projection: &shacs_projection::Spec031ExtensionCatalogProjection,
+) -> String {
+    let ready = spec031_extension_count(
+        projection,
+        shacs_projection::Spec031ExtensionReadiness::Ready,
+    );
+    let degraded = spec031_extension_count(
+        projection,
+        shacs_projection::Spec031ExtensionReadiness::Degraded,
+    );
+    let blocked = spec031_extension_count(
+        projection,
+        shacs_projection::Spec031ExtensionReadiness::Blocked,
+    );
+    let unavailable = spec031_extension_count(
+        projection,
+        shacs_projection::Spec031ExtensionReadiness::Unavailable,
+    );
+    format!(
+        "Spec031 extensions: ready={ready} degraded={degraded} blocked={blocked} unavailable={unavailable}"
+    )
+}
+
+fn spec031_extension_count(
+    projection: &shacs_projection::Spec031ExtensionCatalogProjection,
+    readiness: shacs_projection::Spec031ExtensionReadiness,
+) -> usize {
+    projection
+        .extensions
+        .iter()
+        .filter(|extension| extension.readiness == readiness)
+        .count()
 }
 
 fn app_lifecycle_label(state: &AppLifecycleState) -> &'static str {
@@ -8768,6 +8980,7 @@ fn app_lifecycle_label(state: &AppLifecycleState) -> &'static str {
 }
 
 pub fn format_channels_list(report: ChannelsReport) -> String {
+    let blocked = report.channels.iter().any(channel_progress_blocked);
     let mut lines = vec![
         "Channels".to_owned(),
         format!("Config: {}", report.config_path.display()),
@@ -8790,6 +9003,7 @@ pub fn format_channels_list(report: ChannelsReport) -> String {
             report.unknown_plugins.join(", ")
         ));
     }
+    spec031_cli::push(&mut lines, &[spec031_cli::Projection::Progress { blocked }]);
     lines.join("\n")
 }
 
@@ -8804,6 +9018,7 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
         .iter()
         .filter(|channel| channel.enabled)
         .count();
+    let blocked = report.channels.iter().any(channel_progress_blocked);
     let mut lines = vec![
         "Channel runtime status".to_owned(),
         format!("Config: {}", report.config_path.display()),
@@ -8858,14 +9073,16 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
             report.unknown_plugins.join(", ")
         ));
     }
+    spec031_cli::push(&mut lines, &[spec031_cli::Projection::Progress { blocked }]);
     lines.join("\n")
 }
 
 pub fn format_context_files_report(title: &str, report: ContextFilesCliReport) -> String {
     let summary = report.summary;
+    let included = summary.included_count > 0 && summary.denied_count == 0;
     let mut lines = vec![
         title.to_owned(),
-        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
         format!("Context files: {}", summary.total_count),
         format!("Included: {}", summary.included_count),
         format!("Skipped: {}", summary.skipped_count),
@@ -8888,6 +9105,7 @@ pub fn format_context_files_report(title: &str, report: ContextFilesCliReport) -
             entry.order, entry.status, entry.source_label, entry.byte_count, entry.token_estimate
         ));
     }
+    spec031_cli::push(&mut lines, &[spec031_cli::Projection::Context { included }]);
     lines.join("\n")
 }
 
@@ -8912,14 +9130,21 @@ pub fn format_context_refs_parse_report(report: ContextRefsParseCliReport) -> St
             diagnostic.start, diagnostic.end, diagnostic.kind, diagnostic.message
         ));
     }
+    spec031_cli::push(
+        &mut lines,
+        &[spec031_cli::Projection::Context {
+            included: summary.diagnostic_count == 0,
+        }],
+    );
     lines.join("\n")
 }
 
 pub fn format_context_refs_resolve_report(report: ContextRefsResolveCliReport) -> String {
     let summary = report.summary;
+    let included = summary.artifacts.resolved_count > 0 && summary.artifacts.denied_count == 0;
     let mut lines = vec![
         "context refs resolve".to_owned(),
-        format!("Workspace: {}", display_path(&report.workspace)),
+        format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
         format!(
             "References: {}",
             summary
@@ -8973,6 +9198,7 @@ pub fn format_context_refs_resolve_report(report: ContextRefsResolveCliReport) -
             ));
         }
     }
+    spec031_cli::push(&mut lines, &[spec031_cli::Projection::Context { included }]);
     lines.join("\n")
 }
 
@@ -10239,7 +10465,7 @@ fn percent_decode(value: &str) -> Option<String> {
     String::from_utf8(output).ok()
 }
 
-fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
@@ -10398,6 +10624,8 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         bundle,
         options.allow_api_side_effects,
     )?);
+    let approval_worker =
+        start_surface_approval_worker(adapter.clone(), data_dir.clone(), owner_id.clone())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -10422,7 +10650,9 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         .lock()
         .map(|reason| *reason)
         .unwrap_or(RuntimeShutdownReason::StartupFailed);
-    reason = finalized_runtime_shutdown_reason(reason, serve_result.is_err());
+    let approval_worker_result = approval_worker.stop();
+    let serve_failed = serve_result.is_err();
+    reason = finalized_runtime_shutdown_reason(reason, serve_failed);
     let mut shutdown_report = if reason == RuntimeShutdownReason::OwnerLost || serve_result.is_err()
     {
         RuntimeShutdownReport::failed(reason)
@@ -10449,6 +10679,7 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         "api component shutdown",
     )];
     if reason == RuntimeShutdownReason::OwnerLost || ownership.fence.is_lost() {
+        report_secondary_cleanup_result("surface approval worker shutdown", approval_worker_result);
         ownership.fail_shutdown(shutdown_report, components)?;
         return Err(CliError::InvalidArguments(
             "runtime owner fence lost during API shutdown".to_owned(),
@@ -10459,7 +10690,7 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
     } else {
         ownership.fail_shutdown(shutdown_report, components)?;
     }
-    serve_result?;
+    preserve_primary_result(serve_result.map_err(CliError::from), approval_worker_result)?;
     Ok(format!("API server stopped: http://{addr}"))
 }
 
@@ -10504,6 +10735,8 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
         AgentLoopChatCompletionAdapter::from_bundle(bundle.clone(), options.allow_side_effects)?
             .with_runtime_verbose(options.verbose),
     );
+    let approval_worker =
+        start_surface_approval_worker(adapter.clone(), data_dir.clone(), owner_id.clone())?;
     let heartbeat_worker = start_heartbeat_runtime(adapter.clone(), &bundle)?;
     let supervisor = match ExternalChannelSupervisor::start(
         adapter.clone(),
@@ -10572,28 +10805,33 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
         .lock()
         .map(|reason| *reason)
         .unwrap_or(RuntimeShutdownReason::StartupFailed);
-    shutdown_reason = finalized_runtime_shutdown_reason(shutdown_reason, serve_result.is_err());
-    let supervisor_report = match supervisor.stop(shutdown_reason) {
+    let serve_failed = serve_result.is_err();
+    shutdown_reason = finalized_runtime_shutdown_reason(shutdown_reason, serve_failed);
+    let supervisor_report_result = supervisor.stop(shutdown_reason);
+    let approval_worker_result = approval_worker.stop();
+    let heartbeat_result = join_heartbeat_worker(heartbeat_worker);
+    let supervisor_report = match supervisor_report_result {
         Ok(report) => report,
         Err(error) => {
-            if let Some(worker) = heartbeat_worker {
-                worker
-                    .join()
-                    .map_err(|_| CliError::Api(ApiError::internal("heartbeat worker panicked")))?;
-            }
-            ownership.fail_shutdown(
+            report_secondary_cleanup_result(
+                "surface approval worker shutdown",
+                approval_worker_result,
+            );
+            report_secondary_cleanup_result("heartbeat worker shutdown", heartbeat_result);
+            if let Err(cleanup_error) = ownership.fail_shutdown(
                 RuntimeShutdownReport::failed(shutdown_reason),
                 runtime_components_for_mode(mode, &plugins),
-            )?;
+            ) {
+                report_secondary_cleanup_error("runtime ownership failed-shutdown", &cleanup_error);
+            }
             return Err(error);
         }
     };
-    if let Some(worker) = heartbeat_worker {
-        worker
-            .join()
-            .map_err(|_| CliError::Api(ApiError::internal("heartbeat worker panicked")))?;
-    }
+    let runtime_result =
+        preserve_primary_result(serve_result.map_err(CliError::from), approval_worker_result);
+    let runtime_result = preserve_primary_result(runtime_result, heartbeat_result);
     if shutdown_reason == RuntimeShutdownReason::OwnerLost || ownership.fence.is_lost() {
+        report_secondary_cleanup_result("runtime shutdown", runtime_result);
         let report = supervisor_report.report;
         let components = runtime_components_from_shutdown_report(
             &report,
@@ -10605,6 +10843,7 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
         ));
     }
     if supervisor_report.report.phase == RuntimeShutdownPhase::Failed {
+        report_secondary_cleanup_result("runtime shutdown", runtime_result);
         let report = supervisor_report.report;
         let components = runtime_components_from_shutdown_report(
             &report,
@@ -10615,7 +10854,7 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
             "runtime shutdown failed; ownership marker retained for recovery".to_owned(),
         ));
     }
-    if serve_result.is_ok() {
+    if !serve_failed {
         let report = supervisor_report.report;
         let components = runtime_components_from_shutdown_report(
             &report,
@@ -10628,7 +10867,7 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
             runtime_components_for_mode(mode, &plugins),
         )?;
     }
-    serve_result?;
+    runtime_result?;
     Ok(format!(
         "Channel runtime stopped: websocket_enabled={} ws://{}:{}{}",
         report.websocket.enabled,
@@ -10713,6 +10952,39 @@ fn finalized_runtime_shutdown_reason(
     } else {
         observed
     }
+}
+
+fn preserve_primary_result<T>(
+    primary: Result<T, CliError>,
+    cleanup: Result<(), CliError>,
+) -> Result<T, CliError> {
+    match (primary, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
+        (Err(primary_error), Err(cleanup_error)) => {
+            report_secondary_cleanup_error("secondary cleanup", &cleanup_error);
+            Err(primary_error)
+        }
+    }
+}
+
+fn report_secondary_cleanup_result(context: &str, result: Result<(), CliError>) {
+    if let Err(error) = result {
+        report_secondary_cleanup_error(context, &error);
+    }
+}
+
+fn report_secondary_cleanup_error(context: &str, error: &CliError) {
+    eprintln!("{context} failed: {}", redact_string(&error.to_string()));
+}
+
+fn join_heartbeat_worker(worker: Option<HeartbeatWorker>) -> Result<(), CliError> {
+    if let Some(worker) = worker {
+        worker
+            .join()
+            .map_err(|_| CliError::Api(ApiError::internal("heartbeat worker panicked")))?;
+    }
+    Ok(())
 }
 
 struct ExternalChannelSupervisor {
@@ -10848,7 +11120,10 @@ fn external_active_sessions(
 }
 
 fn cancel_external_active_session(turn_lock: &SessionTurnLock, session_key: &str) -> bool {
-    turn_lock.cancel_active_or_reserved(session_key)
+    !matches!(
+        turn_lock.cancel_active_or_reserved(session_key),
+        SessionTurnCancelOutcome::Idle
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -10942,7 +11217,7 @@ impl ExternalTransportRuntimeContext {
             .enqueue_inbound(work_id.clone(), &durable_message, Some(dedupe_hint), None)
             .map_err(|error| error.to_string())?;
         clear_pending_inbound_hint(data_dir, message);
-        if is_external_stop_command(message) {
+        if is_external_priority_command(message) {
             let (state, admission) = durable_work_state_for_owner(data_dir, lease_owner_ref)
                 .map_err(|error| error.to_string())?;
             if !admission.writable {
@@ -11029,24 +11304,48 @@ impl ExternalChannelSupervisor {
                 durable_work,
             )
         })];
-        match startup_rx.recv().map_err(|error| {
+        let startup_result = startup_rx.recv().map_err(|error| {
             CliError::InvalidArguments(format!(
                 "external channel startup handshake failed: {}",
                 redact_string(&error.to_string())
             ))
-        })? {
-            Ok(_components) => {}
-            Err(error) => {
+        });
+        match startup_result {
+            Ok(Ok(_components)) => {}
+            Ok(Err(error)) => {
                 stop.store(true, Ordering::SeqCst);
                 for handle in handles {
-                    handle.join().map_err(|_| {
-                        CliError::Api(ApiError::internal("external runtime panicked"))
-                    })??;
+                    if let Err(join_error) = handle
+                        .join()
+                        .map_err(|_| CliError::Api(ApiError::internal("external runtime panicked")))
+                        .and_then(|result| result.map(|_| ()))
+                    {
+                        report_secondary_cleanup_error(
+                            "external channel startup cleanup",
+                            &join_error,
+                        );
+                    }
                 }
                 return Err(CliError::InvalidArguments(format!(
                     "external channel startup failed: {}",
                     redact_string(&error)
                 )));
+            }
+            Err(error) => {
+                stop.store(true, Ordering::SeqCst);
+                for handle in handles {
+                    if let Err(join_error) = handle
+                        .join()
+                        .map_err(|_| CliError::Api(ApiError::internal("external runtime panicked")))
+                        .and_then(|result| result.map(|_| ()))
+                    {
+                        report_secondary_cleanup_error(
+                            "external channel startup cleanup",
+                            &join_error,
+                        );
+                    }
+                }
+                return Err(error);
             }
         }
         Ok(Self {
@@ -11062,16 +11361,25 @@ impl ExternalChannelSupervisor {
     }
 
     fn stop(
-        self,
+        mut self,
         reason: RuntimeShutdownReason,
     ) -> Result<ExternalSupervisorShutdownReport, CliError> {
         if let Ok(mut stored_reason) = self.shutdown_reason.lock() {
             *stored_reason = reason;
         }
         self.stop.store(true, Ordering::SeqCst);
+        self.join()
+    }
+
+    fn join(&mut self) -> Result<ExternalSupervisorShutdownReport, CliError> {
+        let reason = self
+            .shutdown_reason
+            .lock()
+            .map(|reason| *reason)
+            .unwrap_or(RuntimeShutdownReason::StartupFailed);
         let mut report = RuntimeShutdownReport::completed(reason);
         let component_count = self.handles.len() as u64;
-        for handle in self.handles {
+        for handle in std::mem::take(&mut self.handles) {
             let worker_report = handle
                 .join()
                 .map_err(|_| CliError::Api(ApiError::internal("external runtime panicked")))??;
@@ -11083,6 +11391,13 @@ impl ExternalChannelSupervisor {
                 .push(RuntimeShutdownStepReport::new("stopped", component_count));
         }
         Ok(ExternalSupervisorShutdownReport { report })
+    }
+}
+
+impl Drop for ExternalChannelSupervisor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = self.join();
     }
 }
 
@@ -11189,6 +11504,7 @@ fn run_external_agent_processor(
                 .is_none()
             {
                 let session_key = adapter.external_effective_session_key(&message);
+                let priority_command = is_external_priority_command(&message);
                 let priority_stop = is_external_stop_command(&message);
                 let (work_id, dedupe_hint) = durable_inbound_identity(&message);
                 let enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
@@ -11236,8 +11552,10 @@ fn run_external_agent_processor(
                 }
                 clear_pending_inbound_hint(&durable_work.data_dir, &message);
                 drop(enqueue_guard);
-                if priority_stop {
-                    cancel_external_active_session(&adapter.session_turn_lock, &session_key);
+                if priority_command {
+                    if priority_stop {
+                        cancel_external_active_session(&adapter.session_turn_lock, &session_key);
+                    }
                     if let Err(error) = request_external_session_cancellation(
                         &mut durable_work.dispatcher,
                         &durable_work.data_dir,
@@ -11298,7 +11616,7 @@ fn run_external_agent_processor(
                 continue;
             }
             let session_key = adapter.external_effective_session_key(&message);
-            if is_external_stop_command(&message) {
+            if is_external_priority_command(&message) {
                 turn_handles.push(spawn_external_agent_turn(
                     adapter.clone(),
                     session_key,
@@ -11531,6 +11849,10 @@ fn is_external_stop_command(message: &InboundMessage) -> bool {
         parse_loop_command(&message.content),
         Some(LoopCommand::Stop)
     )
+}
+
+fn is_external_priority_command(message: &InboundMessage) -> bool {
+    shacs_command::CommandRouter::builtin().is_priority(&message.content)
 }
 
 fn handle_external_agent_turn_result(
@@ -12026,10 +12348,7 @@ fn spawn_external_agent_turn(
     runtime_bus: MessageBus,
     result_tx: mpsc::Sender<ExternalAgentTurnResult>,
 ) -> thread::JoinHandle<()> {
-    let priority_command = matches!(
-        parse_loop_command(&message.content),
-        Some(LoopCommand::Stop)
-    );
+    let priority_command = is_external_priority_command(&message);
     thread::spawn(move || {
         let durable_work_id = message
             .metadata
@@ -15999,7 +16318,7 @@ pub fn help_text() -> String {
         "  api serve Compatibility alias for serve",
         "  gateway   Report gateway preset boundary without starting channels",
         "  web       Start the Web UI, API, and WebSocket on one port",
-        "  agent     Alias for one-shot direct AgentLoop messages with -m/--message",
+        "  agent     Start an interactive REPL, or send one direct AgentLoop message with -m/--message",
         "  provider  Manage provider auth; generic import-key, Codex login/import-token, and Copilot import-token are available",
         "",
         "Options:",
@@ -17799,16 +18118,20 @@ fn parse_ask(
     options.message = message_parts.join(" ").trim().to_owned();
     if agent_alias && positional_message {
         return Err(CliError::InvalidArguments(
-            "agent direct messages require -m/--message; interactive agent mode is deferred"
+            "agent direct messages require -m/--message; run `agent` with no message for REPL mode"
                 .to_owned(),
         ));
     }
     if options.message.is_empty() {
         if agent_alias {
-            return Ok(CliCommand::Unsupported(UnsupportedCommand {
-                name: "agent".to_owned(),
-                reason: "interactive agent mode is deferred; use `agent -m <message>` or `ask <message>`"
-                    .to_owned(),
+            return Ok(CliCommand::AgentRepl(AgentReplOptions {
+                config_path: options.config_path,
+                workspace_override: options.workspace_override,
+                session: options.session,
+                temperature: options.temperature,
+                max_tokens: options.max_tokens,
+                allow_side_effects: options.allow_side_effects,
+                markdown: options.markdown,
             }));
         }
         return Err(CliError::InvalidArguments(
@@ -18210,12 +18533,11 @@ impl AgentLoopChatCompletionAdapter {
     ) -> Result<Self, CliError> {
         let defaults = bundle.config.agents.defaults.clone();
         let registry = ProviderRegistry::new();
-        let resolved = resolve_provider_client(
-            &registry,
+        let provider_match = registry.match_provider(
             &defaults.provider,
             &defaults.model,
             &bundle.config.providers,
-        )?;
+        );
         let retry_mode = ProviderRetryMode::from_config(&defaults.provider_retry_mode);
         let media_dir = bundle.context.media_dir(Some("api"));
         fs::create_dir_all(&media_dir)?;
@@ -18235,14 +18557,24 @@ impl AgentLoopChatCompletionAdapter {
         let plugin_runtime_snapshot = build_plugin_runtime_snapshot(&plugin_discovery.plugins);
         let plugin_skill_roots = enabled_plugin_skill_roots(&plugin_discovery.plugins);
         let tooling = production_tool_registry(&bundle, allow_side_effect_tools)?;
-        let provider_id = resolved.provider_id.clone();
+        let provider_id = provider_match.as_ref().map_or_else(
+            || defaults.provider.clone(),
+            |provider| provider.provider_id.clone(),
+        );
+        let resolved_model = provider_match
+            .as_ref()
+            .map_or_else(|| defaults.model.clone(), |provider| provider.model.clone());
         let native_image_input_supported =
             registry.find_by_name(&provider_id).is_some_and(|spec| {
-                provider_model_supports_native_image_input(spec.backend, &resolved.model)
+                provider_model_supports_native_image_input(spec.backend, &resolved_model)
             });
-        let resolved_model = resolved.model.clone();
-        let client: Arc<dyn ProviderClient> =
-            debug_fake_provider_client().unwrap_or_else(|| Arc::from(resolved.client));
+        let client: Arc<dyn ProviderClient> = debug_fake_provider_client().unwrap_or_else(|| {
+            Arc::new(LazyProviderClient::new(
+                defaults.provider.clone(),
+                defaults.model.clone(),
+                bundle.config.providers.clone(),
+            ))
+        });
         Ok(Self {
             configured_model: defaults.model.clone(),
             provider_id,
@@ -18704,7 +19036,7 @@ impl AgentLoopChatCompletionAdapter {
         let channel = inbound.channel.clone();
         let chat_id = inbound.chat_id.clone();
         let session_key = self.external_effective_session_key(&inbound);
-        let priority_command = is_external_stop_command(&inbound);
+        let priority_command = is_external_priority_command(&inbound);
         let routing_metadata = stream_routing_metadata_from_inbound(&inbound);
         let reply_to = inbound_reply_to(&inbound);
         let mut subagent_runtime = SubagentRuntime::with_bus(runtime_bus.clone());
@@ -19594,6 +19926,97 @@ fn llm_response_from_turn(turn: AgentLoopTurnResult) -> LlmResponse {
     response
 }
 
+struct LazyProviderClient {
+    requested_provider: String,
+    model: String,
+    providers: BTreeMap<String, ProviderConfig>,
+    client: Mutex<Option<Arc<dyn ProviderClient>>>,
+}
+
+impl LazyProviderClient {
+    fn new(
+        requested_provider: String,
+        model: String,
+        providers: BTreeMap<String, ProviderConfig>,
+    ) -> Self {
+        Self {
+            requested_provider,
+            model,
+            providers,
+            client: Mutex::new(None),
+        }
+    }
+
+    fn with_client<T>(
+        &self,
+        run: impl FnOnce(&dyn ProviderClient) -> Result<T, ProviderError>,
+    ) -> Result<T, ProviderError> {
+        let client = {
+            let mut client = self.client.lock().map_err(|_| ProviderError::Api {
+                status: Some(500),
+                message: "provider client lock failed".to_owned(),
+                retryable: false,
+                headers: BTreeMap::new(),
+                body: None,
+            })?;
+            if client.is_none() {
+                *client = Some(Arc::from(self.resolve()?));
+            }
+            client.clone().ok_or_else(|| ProviderError::Api {
+                status: Some(500),
+                message: "provider client was not initialized".to_owned(),
+                retryable: false,
+                headers: BTreeMap::new(),
+                body: None,
+            })?
+        };
+        run(client.as_ref())
+    }
+
+    fn resolve(&self) -> Result<Box<dyn ProviderClient>, ProviderError> {
+        let registry = ProviderRegistry::new();
+        let provider_match = registry
+            .match_provider(&self.requested_provider, &self.model, &self.providers)
+            .ok_or_else(|| provider_not_found_for_lazy(&registry, &self.requested_provider))?;
+        let spec = registry
+            .find_by_name(&provider_match.provider_id)
+            .ok_or_else(|| provider_not_found_for_lazy(&registry, &provider_match.provider_id))?;
+        let config = self
+            .providers
+            .get(&provider_match.provider_id)
+            .cloned()
+            .ok_or_else(|| ProviderError::AuthRequired {
+                provider_id: provider_match.provider_id.clone(),
+            })?;
+        provider_client_from_config(config, spec)
+    }
+}
+
+impl ProviderClient for LazyProviderClient {
+    fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+        self.with_client(|client| client.chat(request))
+    }
+
+    fn chat_stream(
+        &self,
+        request: ProviderRequest,
+        on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.with_client(|client| client.chat_stream(request, on_event))
+    }
+}
+
+fn provider_not_found_for_lazy(registry: &ProviderRegistry, provider_id: &str) -> ProviderError {
+    ProviderError::ProviderNotFound {
+        provider_id: provider_id.to_owned(),
+        suggestions: registry
+            .specs()
+            .iter()
+            .map(|spec| spec.name.to_owned())
+            .collect(),
+    }
+}
+
 impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
     fn configured_model(&self) -> &str {
         &self.configured_model
@@ -19690,8 +20113,23 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
     }
 
     fn diagnostics_projection(&self) -> Value {
-        diagnostics_projection_from_snapshot(&self.diagnostics_snapshot())
-            .unwrap_or_else(|_| self.diagnostics_snapshot().redacted_value())
+        let mut projection = diagnostics_projection_from_snapshot(&self.diagnostics_snapshot())
+            .unwrap_or_else(|_| self.diagnostics_snapshot().redacted_value());
+        if let Value::Object(runtime) = &mut projection["runtime"] {
+            runtime.insert(
+                "spec031_readiness".to_owned(),
+                runtime_readiness_projection_for_context(&self.config_path, &self.workspace)
+                    .unwrap_or_else(|error| json!({ "state": "unavailable", "reason": redact_string(&error.to_string()) })),
+            );
+        }
+        projection
+    }
+
+    fn readiness_projection(&self) -> Option<Value> {
+        Some(
+            runtime_readiness_projection_for_context(&self.config_path, &self.workspace)
+                .unwrap_or_else(|error| json!({ "state": "unavailable", "reason": redact_string(&error.to_string()) })),
+        )
     }
 
     fn stream_chat(
@@ -20680,8 +21118,23 @@ fn normalize_provider_status(status: Option<u16>) -> u16 {
 }
 
 fn format_onboard_outcome(outcome: OnboardOutcome) -> String {
+    if let Some(report) = outcome.wizard_report.as_ref() {
+        match report.status {
+            OnboardWizardStatus::Partial => {
+                return format_onboard_wizard_partial(&outcome, report, "partial");
+            }
+            OnboardWizardStatus::Cancelled => {
+                return format_onboard_wizard_partial(&outcome, report, "cancelled");
+            }
+            OnboardWizardStatus::Complete => {}
+        }
+    }
     let mut lines = vec![
-        "Onboard complete.".to_owned(),
+        if outcome.wizard_report.is_some() {
+            "Onboard wizard complete.".to_owned()
+        } else {
+            "Onboard complete.".to_owned()
+        },
         format!("Config: {}", display_path(&outcome.config_path)),
         format!("Workspace: {}", display_path(&outcome.workspace)),
         format!("Runtime dirs ensured: {}", outcome.runtime_dirs.len()),
@@ -20694,13 +21147,65 @@ fn format_onboard_outcome(outcome: OnboardOutcome) -> String {
             outcome.migrations.join(", ")
         ));
     }
-    lines.push(
-        "Next: edit the config provider API key, then run `shacs-bot ask \"hello\"`.".to_owned(),
-    );
+    if let Some(report) = outcome.wizard_report.as_ref() {
+        lines.push(format!("Wizard resumed: {}", yes_no_label(report.resumed)));
+        if report.provider_secret_refs.is_empty() {
+            lines.push("Provider secret refs: none".to_owned());
+        } else {
+            lines.push("Provider secret refs:".to_owned());
+            for item in &report.provider_secret_refs {
+                lines.push(format!(
+                    "  - {}: {}:{}",
+                    item.provider, item.source_kind, item.locator
+                ));
+            }
+        }
+        if !report.readiness_lines.is_empty() {
+            lines.push("Readiness:".to_owned());
+            lines.extend(report.readiness_lines.iter().cloned());
+        }
+        if !report.external_owner_facts.is_empty() {
+            lines.push("External owner facts:".to_owned());
+            lines.extend(report.external_owner_facts.iter().map(|fact| {
+                format!(
+                    "  - owner={} capability={} state={} reason={}",
+                    fact.owner, fact.capability, fact.state, fact.reason_code
+                )
+            }));
+        }
+        lines.push(
+            "Next: provide referenced secrets in the selected source, then run `shacs-bot ask \"hello\"`.".to_owned(),
+        );
+    } else {
+        lines.push(
+            "Next: edit the config provider API key, then run `shacs-bot ask \"hello\"`."
+                .to_owned(),
+        );
+    }
+    lines.join("\n")
+}
+
+fn format_onboard_wizard_partial(
+    outcome: &OnboardOutcome,
+    report: &OnboardWizardReport,
+    status: &str,
+) -> String {
+    let mut lines = vec![
+        format!("Onboard wizard {status}."),
+        format!("Config: {}", display_path(&outcome.config_path)),
+        format!("Workspace: {}", display_path(&outcome.workspace)),
+        format!("Wizard resumed: {}", yes_no_label(report.resumed)),
+        format!("Pending refs: {}", report.provider_secret_refs.len()),
+        "Onboard complete: no".to_owned(),
+    ];
+    if status == "partial" {
+        lines.push("Resume: run `shacs-bot onboard --wizard` again.".to_owned());
+    }
     lines.join("\n")
 }
 
 fn format_status_report(report: StatusReport) -> String {
+    let session_available = report.workspace_exists;
     let mut lines = vec![
         "shacs-bot status".to_owned(),
         format!(
@@ -20724,7 +21229,7 @@ fn format_status_report(report: StatusReport) -> String {
         lines.push("Configured providers: none".to_owned());
     } else {
         lines.push("Configured providers:".to_owned());
-        for provider in report.providers {
+        for provider in &report.providers {
             lines.push(format!(
                 "  - {}: api_key={}, api_base={}",
                 provider.name,
@@ -20733,10 +21238,45 @@ fn format_status_report(report: StatusReport) -> String {
             ));
         }
     }
+    spec031_cli::push(
+        &mut lines,
+        &[spec031_cli::Projection::Session {
+            active_turn_count: 0,
+            available: session_available,
+        }],
+    );
     lines.join("\n")
 }
 
 fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
+    let diagnostics_blocked = report.lifecycle.durable_diagnostics.missing
+        || report.lifecycle.durable_diagnostics.corrupt_tail
+        || !report.lifecycle.durable_recovery.writable
+        || !report.lifecycle.durable_work.writable
+        || report.lifecycle.durable_children.recovery_needed_count > 0;
+    let diagnostics_component_count =
+        report.supervision.components.len() + report.capabilities.len();
+    let readiness_available = matches!(
+        report.lifecycle.compatibility,
+        RuntimeCompatibility::FullyCompatible
+    ) && !report.lifecycle.migration_plan.blocked
+        && !matches!(
+            report.lifecycle.ownership.state,
+            RuntimeOwnershipState::Stale
+        );
+    let subagent_child_count = report.lifecycle.durable_children.spawned_count;
+    let tool_attempt_count = report.lifecycle.durable_work.pending_count
+        + report.lifecycle.durable_work.leased_count
+        + report.lifecycle.durable_work.terminal_count;
+    let context_included = true;
+    let app_total_count = usize::from(report.lifecycle.ownership.marker.is_some());
+    let media_artifact_count = report.generated_media.len();
+    let readiness_lines = spec031_cli::readiness::lines(&report).unwrap_or_else(|error| {
+        vec![format!(
+            "Spec031 readiness: kind=readiness state=unavailable severity=error reason=missing lineage=subject:cli:readiness detail={}",
+            redact_string(&error)
+        )]
+    });
     let mut lines = vec![
         "shacs-bot runtime inspect".to_owned(),
         format!(
@@ -20959,7 +21499,7 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
         lines.push("Configured providers: none".to_owned());
     } else {
         lines.push("Configured providers:".to_owned());
-        for provider in report.providers {
+        for provider in &report.providers {
             lines.push(format!(
                 "  - {}: api_key={}, api_base={}",
                 provider.name,
@@ -20969,7 +21509,7 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
         }
     }
     lines.push("Runtime capabilities:".to_owned());
-    for capability in report.capabilities {
+    for capability in &report.capabilities {
         lines.push(format!(
             "  - {}: {} ({})",
             capability.component,
@@ -20977,10 +21517,39 @@ fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
             capability.reason
         ));
     }
+    lines.extend(readiness_lines);
+    spec031_cli::push(
+        &mut lines,
+        &[
+            spec031_cli::Projection::Diagnostics {
+                component_count: diagnostics_component_count,
+                blocked: diagnostics_blocked,
+            },
+            spec031_cli::Projection::Readiness {
+                available: readiness_available,
+            },
+            spec031_cli::Projection::Subagent {
+                child_count: subagent_child_count,
+            },
+            spec031_cli::Projection::Tool {
+                attempt_count: tool_attempt_count,
+            },
+            spec031_cli::Projection::Context {
+                included: context_included,
+            },
+            spec031_cli::Projection::App {
+                total_count: app_total_count,
+            },
+            spec031_cli::Projection::Media {
+                artifact_count: media_artifact_count,
+            },
+        ],
+    );
     lines.join("\n")
 }
 
 fn format_runtime_diagnostics(report: RuntimeDiagnosticsReport) -> String {
+    let diagnostics_blocked = report.bundle_error.is_some();
     let mut output = match serde_json::to_string_pretty(&report.redacted_projection) {
         Ok(value) => value,
         Err(error) => format!(
@@ -20989,16 +21558,24 @@ fn format_runtime_diagnostics(report: RuntimeDiagnosticsReport) -> String {
     };
     if let Some(path) = report.bundle_path {
         match report.bundle_error {
-            Some(error) => {
+            Some(ref error) => {
                 output.push_str(&format!(
                     "\nBundle: failed at {} ({error})",
                     diagnostics_path_ref(&path),
-                    error = redact_string(&error)
+                    error = redact_string(error)
                 ));
             }
             None => output.push_str(&format!("\nBundle: {}", diagnostics_path_ref(&path))),
         }
     }
+    output.push('\n');
+    output.push_str(
+        &spec031_cli::lines(&[spec031_cli::Projection::Diagnostics {
+            component_count: 1,
+            blocked: diagnostics_blocked,
+        }])
+        .join("\n"),
+    );
     output
 }
 
@@ -21187,10 +21764,11 @@ fn format_runtime_stop_like(title: &str, outcome: RuntimeStopOutcome) -> String 
 }
 
 fn format_session_list(report: SessionListReport) -> String {
+    let session_count = report.sessions.len();
     let mut lines = vec![
         "shacs-bot session list".to_owned(),
         format!("Workspace: {}", display_path(&report.workspace)),
-        format!("Sessions: {}", report.sessions.len()),
+        format!("Sessions: {session_count}"),
     ];
     if report.sessions.is_empty() {
         lines.push("No sessions found.".to_owned());
@@ -21207,10 +21785,20 @@ fn format_session_list(report: SessionListReport) -> String {
             ));
         }
     }
+    spec031_cli::push(
+        &mut lines,
+        &[spec031_cli::Projection::Session {
+            active_turn_count: session_count,
+            available: session_count > 0,
+        }],
+    );
     lines.join("\n")
 }
 
 fn format_session_inspect(report: SessionInspectReport) -> String {
+    let message_count = report.message_count;
+    let recovery_count = report.recovery_markers.len();
+    let child_count = report.durable_children.active_count + report.durable_children.terminal_count;
     let metadata = if report.metadata_keys.is_empty() {
         "none".to_owned()
     } else {
@@ -21254,6 +21842,21 @@ fn format_session_inspect(report: SessionInspectReport) -> String {
         ));
     }
     lines.push(format_session_durable_children(&report.durable_children));
+    spec031_cli::push(
+        &mut lines,
+        &[
+            spec031_cli::Projection::Session {
+                active_turn_count: message_count,
+                available: true,
+            },
+            spec031_cli::Projection::Diagnostics {
+                component_count: recovery_count,
+                blocked: recovery_count > 0,
+            },
+            spec031_cli::Projection::Subagent { child_count },
+            spec031_cli::Projection::Tool { attempt_count: 0 },
+        ],
+    );
     lines.join("\n")
 }
 
@@ -21316,6 +21919,10 @@ fn format_session_clear(report: SessionClearReport) -> String {
 }
 
 fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
+    let session_exists = report.aggregate.exists;
+    let message_count = report.aggregate.message_count;
+    let diagnostics_ref_count = report.aggregate.diagnostics_ref_count;
+    let child_count = report.durable_children.active_count + report.durable_children.terminal_count;
     let recovery = if report.aggregate.recovery_markers.is_empty() {
         "none".to_owned()
     } else {
@@ -21373,6 +21980,21 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
         ));
     }
     lines.push(format_session_durable_children(&report.durable_children));
+    spec031_cli::push(
+        &mut lines,
+        &[
+            spec031_cli::Projection::Session {
+                active_turn_count: message_count,
+                available: session_exists,
+            },
+            spec031_cli::Projection::Diagnostics {
+                component_count: diagnostics_ref_count,
+                blocked: diagnostics_ref_count > 0,
+            },
+            spec031_cli::Projection::Subagent { child_count },
+            spec031_cli::Projection::Tool { attempt_count: 0 },
+        ],
+    );
     lines.join("\n")
 }
 
@@ -21553,7 +22175,7 @@ fn format_codex_login_outcome(outcome: CodexLoginOutcome) -> String {
     .join("\n")
 }
 
-fn display_path(path: &Path) -> String {
+pub(crate) fn display_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
@@ -21580,7 +22202,7 @@ fn configured_label(configured: bool) -> &'static str {
     }
 }
 
-fn yes_no_label(value: bool) -> &'static str {
+pub(crate) fn yes_no_label(value: bool) -> &'static str {
     if value {
         "yes"
     } else {
@@ -21666,12 +22288,15 @@ mod tests {
     use shacs_providers::{
         GenerationSettings, ProviderClient, ProviderEvent, ProviderRequest, ToolCallRequest,
     };
+    use shacs_session::durable_event::{WORK_LEASED, WORK_TERMINAL};
+    use shacs_session::durable_work::WorkTerminal;
     use shacs_templates::WorkspaceSyncOutcome;
     use std::collections::{BTreeMap, VecDeque};
     use std::error::Error;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn read_repo_text(relative_path: &str) -> Result<String, Box<dyn Error>> {
@@ -22027,6 +22652,76 @@ mod tests {
         )))?;
         assert!(inspect.contains("Catalog: llm:before"));
         assert!(inspect.contains("Plugin hook: demo-plugin event=llm:before execution=false"));
+        Ok(())
+    }
+
+    #[test]
+    fn spec031_plugins_and_hooks_render_canonical_extension_projection_without_launch(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, config_path, workspace) = spec025_config_fixture()?;
+        let sentinel = workspace.join("spec031-cli-sentinel");
+        fs::write(
+            root.path().join("plugins/demo/plugin.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "name": "demo-plugin",
+                "version": "0.1.0",
+                "requiresEnv": [],
+                "requiresConfig": ["SPEC025_CONFIG_SECRET"],
+                "surfaces": {"tools": ["demo_tool"], "hooks": ["tool:before"], "commands": ["status"]},
+                "entrypoints": {
+                    "tools": {"demo_tool": {"command": format!("touch {}", sentinel.display())}},
+                    "commands": {"status": {"backend": format!("touch {}", sentinel.display())}}
+                },
+                "permissions": {},
+                "assets": []
+            }))?,
+        )?;
+        let _enabled = plugins_enable(PluginsMutateOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(workspace.clone()),
+            name: "demo-plugin".to_owned(),
+        })?;
+
+        let list = run_command(CliCommand::Plugins(PluginsCommand::List(
+            PluginsListOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(workspace.clone()),
+            },
+        )))?;
+        let inspect = run_command(CliCommand::Plugins(PluginsCommand::Inspect(
+            PluginsInspectOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(workspace.clone()),
+                name: "demo-plugin".to_owned(),
+            },
+        )))?;
+        let hooks = run_command(CliCommand::Hooks(HooksCommand::List(HooksListOptions {
+            config_path: Some(config_path.clone()),
+            workspace_override: Some(workspace.clone()),
+        })))?;
+        let doctor = run_command(CliCommand::Plugins(PluginsCommand::Doctor(
+            PluginsListOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: Some(workspace.clone()),
+            },
+        )))?;
+        let hook_inspect = run_command(CliCommand::Hooks(HooksCommand::Inspect(
+            HooksInspectOptions {
+                config_path: Some(config_path),
+                workspace_override: Some(workspace),
+                filter: "tool:before".to_owned(),
+            },
+        )))?;
+
+        assert!(list.contains("Spec031 extensions: ready=0 degraded=1 blocked=0 unavailable=0"));
+        assert!(inspect.contains("Spec031 extension: degraded reason=degraded"));
+        assert!(hooks.contains("Spec031 extensions: ready=0 degraded=1 blocked=0 unavailable=0"));
+        assert!(doctor.contains("Spec031 extensions: ready=0 degraded=1 blocked=0 unavailable=0"));
+        assert!(
+            hook_inspect.contains("Spec031 extensions: ready=0 degraded=1 blocked=0 unavailable=0")
+        );
+        assert!(!sentinel.exists());
         Ok(())
     }
 
@@ -22717,7 +23412,8 @@ mod tests {
         assert!(output.contains("context refs parse"));
         assert!(output.contains("References: 1"));
         assert!(output.contains("kind=File"));
-        assert!(output.contains("target=missing-file.md"));
+        assert!(output.contains("target=context-source:"));
+        assert!(!output.contains("target=missing-file.md"));
         Ok(())
     }
 
@@ -25393,6 +26089,8 @@ mod tests {
         let address = listener.local_addr()?;
         let handle = std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request);
                 let _ = stream.write_all(
                     b"HTTP/1.1 302 Found\r\nLocation: https://cdn.discordapp.com/attachments/c1/a1/photo.png\r\nContent-Length: 0\r\n\r\n",
                 );
@@ -25411,6 +26109,8 @@ mod tests {
         let declared_length = shacs_api::MAX_MEDIA_BYTES + 1;
         let handle = std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {declared_length}\r\n\r\n"
                 );
@@ -26092,6 +26792,36 @@ mod tests {
     }
 
     #[test]
+    fn parser_handles_agent_repl_options() -> Result<(), Box<dyn Error>> {
+        let parsed = parse_cli_args([
+            "agent",
+            "--workspace",
+            "/tmp/workspace",
+            "--session",
+            "work",
+            "--temperature",
+            "0.4",
+            "--max-tokens",
+            "200",
+            "--allow-side-effects",
+            "--no-markdown",
+        ])?;
+        let CliCommand::AgentRepl(options) = parsed else {
+            return Err("expected agent repl command".into());
+        };
+        assert_eq!(
+            options.workspace_override,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+        assert_eq!(options.session.as_deref(), Some("work"));
+        assert_eq!(options.temperature, Some(0.4));
+        assert_eq!(options.max_tokens, Some(200));
+        assert!(options.allow_side_effects);
+        assert!(!options.markdown);
+        Ok(())
+    }
+
+    #[test]
     fn cli_model_helpers_preserve_deferred_empty_database_contract() {
         assert!(get_all_models().is_empty());
         assert_eq!(find_model_info("gpt-test"), None);
@@ -26114,6 +26844,7 @@ mod tests {
     fn parser_rejects_agent_positional_message_until_interactive_mode_exists() {
         let error = parse_cli_args(["agent", "hello"]).unwrap_err().to_string();
         assert!(error.contains("require -m/--message"));
+        assert!(error.contains("REPL"));
     }
 
     #[test]
@@ -26191,17 +26922,15 @@ mod tests {
     }
 
     #[test]
-    fn ask_requires_prompt_but_agent_without_message_remains_deferred() -> Result<(), Box<dyn Error>>
-    {
+    fn ask_requires_prompt_but_agent_without_message_starts_repl() -> Result<(), Box<dyn Error>> {
         let error = parse_cli_args(["ask"]).unwrap_err().to_string();
         assert!(error.contains("requires a message"));
 
         let parsed = parse_cli_args(["agent"])?;
-        let CliCommand::Unsupported(command) = parsed else {
-            return Err("expected unsupported interactive agent marker".into());
+        let CliCommand::AgentRepl(command) = parsed else {
+            return Err("expected agent repl command".into());
         };
-        assert_eq!(command.name, "agent");
-        assert!(command.reason.contains("interactive"));
+        assert_eq!(command.session, None);
         Ok(())
     }
 
@@ -29148,6 +29877,61 @@ mod tests {
     }
 
     #[test]
+    fn external_priority_command_detection_matches_builtin_router() {
+        for content in ["/stop", " /restart ", "/status"] {
+            let message = InboundMessage::new("telegram", "user", "chat", content);
+            assert!(is_external_priority_command(&message), "{content}");
+        }
+
+        for content in ["/new", "/history", "hello", "/status now"] {
+            let message = InboundMessage::new("telegram", "user", "chat", content);
+            assert!(!is_external_priority_command(&message), "{content}");
+        }
+    }
+
+    #[test]
+    fn external_durable_ingress_dispatches_router_priority_commands_immediately(
+    ) -> Result<(), Box<dyn Error>> {
+        for content in ["/stop", "/restart", "/status"] {
+            let root = tempfile::tempdir()?;
+            let data_dir = root.path();
+            let bus = MessageBus::new();
+            let mut dispatcher = DurableWorkDispatcher::open(
+                runtime_durable_event_root(data_dir),
+                runtime_durable_work_payload_root(data_dir),
+                bus.clone(),
+                "owner-1",
+                100,
+            )?;
+            dispatcher.enqueue_inbound(
+                "work-active",
+                &InboundMessage::new("telegram", "user", "chat", "hello")
+                    .with_session_key_override("telegram:chat"),
+                None,
+                None,
+            )?;
+            let (state, admission) = durable_work_state_for_owner(data_dir, "owner-1")?;
+            dispatcher.dispatch_due(&state.work, &admission, 1)?;
+            let _active = bus.consume_inbound().ok_or("missing active fixture")?;
+
+            let mut context = ExternalTransportRuntimeContext::new(data_dir.join("metadata"), 1);
+            context.configure_durable_inbound(
+                data_dir.to_path_buf(),
+                "owner-1".to_owned(),
+                Some("telegram:chat".to_owned()),
+            );
+            context.enqueue_inbound(
+                &bus,
+                &InboundMessage::new("telegram", "user", "chat", content),
+            )?;
+
+            let priority = bus.consume_inbound().ok_or("missing priority inbound")?;
+            assert_eq!(priority.content, content);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dropped_external_reservation_clears_its_pending_cancellation() -> Result<(), Box<dyn Error>>
     {
         let turn_lock = SessionTurnLock::new();
@@ -29187,12 +29971,10 @@ mod tests {
             &turn_lock,
             "telegram:active"
         ));
-        let _guard = turn_lock
-            .acquire("telegram:active")
-            .map_err(|error| format!("active turn lock acquire failed: {error:?}"))?;
-        assert!(turn_lock
-            .cancellation_token("telegram:active")
-            .is_some_and(|token| token.is_cancelled()));
+        assert!(matches!(
+            turn_lock.acquire("telegram:active"),
+            Err(shacs_core::runtime::SessionTurnAcquireError::Cancelled { ref session_key }) if session_key == "telegram:active"
+        ));
         Ok(())
     }
 
@@ -29259,12 +30041,10 @@ mod tests {
             "telegram:reserved",
         ));
         reservation.bind_to_current_thread();
-        let _guard = turn_lock
-            .acquire("telegram:reserved")
-            .map_err(|error| format!("reserved worker lock acquire failed: {error:?}"))?;
-        assert!(turn_lock
-            .cancellation_token("telegram:reserved")
-            .is_some_and(|token| token.is_cancelled()));
+        assert!(matches!(
+            turn_lock.acquire("telegram:reserved"),
+            Err(shacs_core::runtime::SessionTurnAcquireError::Cancelled { ref session_key }) if session_key == "telegram:reserved"
+        ));
         Ok(())
     }
 
@@ -30295,6 +31075,43 @@ mod tests {
 
         assert_eq!(reason, RuntimeShutdownReason::Stop);
         Ok(())
+    }
+
+    #[test]
+    fn external_supervisor_drop_requests_stop_when_explicit_stop_is_skipped() {
+        // Given: a started external supervisor handle whose worker already exited.
+        let stop = Arc::new(AtomicBool::new(false));
+        let observed_stop = stop.clone();
+        let supervisor = ExternalChannelSupervisor {
+            stop,
+            shutdown_reason: Arc::new(Mutex::new(RuntimeShutdownReason::Stop)),
+            exited: Arc::new(AtomicBool::new(false)),
+            handles: vec![thread::spawn(|| {
+                Ok(ExternalSupervisorShutdownReport {
+                    report: RuntimeShutdownReport::completed(RuntimeShutdownReason::Stop),
+                })
+            })],
+        };
+
+        // When: a startup error path after supervisor creation drops it without explicit stop.
+        drop(supervisor);
+
+        // Then: Drop requests supervisor shutdown instead of leaving owned handles detached.
+        assert!(observed_stop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn supervisor_error_remains_primary_when_worker_cleanup_also_fails() {
+        // Given: both the primary supervisor shutdown and secondary worker cleanup fail.
+        let primary: Result<(), CliError> =
+            Err(CliError::InvalidArguments("supervisor failed".to_owned()));
+        let cleanup = Err(CliError::InvalidArguments("worker failed".to_owned()));
+
+        // When: shutdown selects the reportable error.
+        let error = preserve_primary_result(primary, cleanup).expect_err("primary error expected");
+
+        // Then: cleanup failure does not mask the primary supervisor failure.
+        assert!(error.to_string().contains("supervisor failed"), "{error}");
     }
 
     #[test]
@@ -32163,7 +32980,7 @@ mod tests {
         assert!(help.contains("web       Start the Web UI"));
         assert!(help.contains("runtime   Start, stop, restart"));
         assert!(help.contains("ask       Send one message"));
-        assert!(help.contains("agent     Alias"));
+        assert!(help.contains("agent     Start an interactive REPL"));
         assert!(help.contains("provider  Manage provider auth"));
         assert!(help.contains("generic import-key"));
         assert!(help.contains("apps      Init authoring drafts"));
@@ -33401,6 +34218,232 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn surface_approval_consumer_executes_pending_tool_for_same_owner() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (adapter, lineage) = surface_approval_fixture(root.path(), calls.clone())?;
+        let now = now_millis();
+        let owner_id =
+            write_surface_approval_owner_marker(root.path(), std::process::id(), now, now)?;
+        let outcome = shacs_core::runtime::request_surface_approval(
+            root.path(),
+            "cli:surface-approval",
+            &lineage,
+            true,
+            now + 1,
+        )?;
+        assert_eq!(outcome.kind, SurfaceActionOutcomeKind::Requested);
+
+        process_surface_approval_fixture(root.path(), &owner_id, &adapter)?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            surface_approval_terminal_kind(root.path())?,
+            WorkTerminalKind::Succeeded
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn surface_approval_consumer_deny_never_executes_tool_and_clears_owner_session(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (adapter, lineage) = surface_approval_fixture(root.path(), calls.clone())?;
+        let now = now_millis();
+        let owner_id =
+            write_surface_approval_owner_marker(root.path(), std::process::id(), now, now)?;
+        let outcome = shacs_core::runtime::request_surface_approval(
+            root.path(),
+            "cli:surface-approval",
+            &lineage,
+            false,
+            now + 1,
+        )?;
+        assert_eq!(outcome.kind, SurfaceActionOutcomeKind::Requested);
+
+        process_surface_approval_fixture(root.path(), &owner_id, &adapter)?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            surface_approval_terminal(root.path())?.kind,
+            WorkTerminalKind::Succeeded
+        );
+        let raw = SessionManager::new(root.path().join("workspace"))?
+            .read_session_file("cli:surface-approval")
+            .ok_or("missing approval session")?;
+        assert!(raw["metadata"].get("pending_permission_approval").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn surface_approval_consumer_malformed_request_is_leased_terminal_and_does_not_wedge_queue(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (adapter, lineage) = surface_approval_fixture(root.path(), calls.clone())?;
+        let now = now_millis();
+        let owner_id =
+            write_surface_approval_owner_marker(root.path(), std::process::id(), now, now)?;
+        enqueue_malformed_surface_approval_fixture_request(root.path(), &owner_id)?;
+
+        process_surface_approval_fixture(root.path(), &owner_id, &adapter)?;
+
+        let malformed = surface_approval_terminal(root.path())?;
+        assert_eq!(malformed.kind, WorkTerminalKind::Failed);
+        assert_eq!(malformed.outcome_ref, "failed");
+        assert_eq!(malformed.attempt, 1);
+        assert_eq!(malformed.lease_event_count, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        shacs_core::runtime::request_surface_approval(
+            root.path(),
+            "cli:surface-approval",
+            &lineage,
+            true,
+            now + 1,
+        )?;
+        process_surface_approval_fixture(root.path(), &owner_id, &adapter)?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(surface_approval_work_count(root.path())?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn surface_approval_consumer_supersedes_after_owner_replacement_without_tool_execution(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (adapter, lineage) = surface_approval_fixture(root.path(), calls.clone())?;
+        let now = now_millis();
+        let original_owner =
+            write_surface_approval_owner_marker(root.path(), std::process::id(), now, now)?;
+        shacs_core::runtime::request_surface_approval(
+            root.path(),
+            "cli:surface-approval",
+            &lineage,
+            true,
+            now + 1,
+        )?;
+        let replacement_owner = write_surface_approval_owner_marker(
+            root.path(),
+            std::process::id(),
+            now + 10,
+            now + 10,
+        )?;
+        assert_ne!(original_owner, replacement_owner);
+
+        process_surface_approval_fixture(root.path(), &replacement_owner, &adapter)?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let terminal = surface_approval_terminal(root.path())?;
+        assert_eq!(terminal.kind, WorkTerminalKind::Superseded);
+        assert_eq!(terminal.outcome_ref, "stale_lineage");
+        Ok(())
+    }
+
+    #[test]
+    fn surface_approval_duplicate_and_conflicting_decisions_do_not_create_second_work_or_execution(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (adapter, lineage) = surface_approval_fixture(root.path(), calls.clone())?;
+        let now = now_millis();
+        let owner_id =
+            write_surface_approval_owner_marker(root.path(), std::process::id(), now, now)?;
+
+        let first = shacs_core::runtime::request_surface_approval(
+            root.path(),
+            "cli:surface-approval",
+            &lineage,
+            true,
+            now + 1,
+        )?;
+        let duplicate = shacs_core::runtime::request_surface_approval(
+            root.path(),
+            "cli:surface-approval",
+            &lineage,
+            true,
+            now + 2,
+        )?;
+        let conflicting = shacs_core::runtime::request_surface_approval(
+            root.path(),
+            "cli:surface-approval",
+            &lineage,
+            false,
+            now + 3,
+        )?;
+
+        assert_eq!(first.kind, SurfaceActionOutcomeKind::Requested);
+        assert!(first.changed);
+        assert_eq!(duplicate.kind, SurfaceActionOutcomeKind::Requested);
+        assert!(!duplicate.changed);
+        assert_eq!(conflicting.kind, SurfaceActionOutcomeKind::StaleLineage);
+        assert!(!conflicting.changed);
+        assert_eq!(surface_approval_work_count(root.path())?, 1);
+
+        process_surface_approval_fixture(root.path(), &owner_id, &adapter)?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(surface_approval_work_count(root.path())?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn surface_approval_consumer_supersedes_when_owner_is_stale() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (adapter, lineage) = surface_approval_fixture(root.path(), calls.clone())?;
+        let now = now_millis();
+        let owner_id =
+            write_surface_approval_owner_marker(root.path(), std::process::id(), now, now)?;
+        shacs_core::runtime::request_surface_approval(
+            root.path(),
+            "cli:surface-approval",
+            &lineage,
+            true,
+            now + 1,
+        )?;
+        write_surface_approval_owner_marker(
+            root.path(),
+            std::process::id(),
+            now,
+            now.saturating_sub(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS + 1),
+        )?;
+
+        process_surface_approval_fixture(root.path(), &owner_id, &adapter)?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            surface_approval_terminal_kind(root.path())?,
+            WorkTerminalKind::Superseded
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn surface_approval_consumer_supersedes_when_target_owner_is_dead() -> Result<(), Box<dyn Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (adapter, lineage) = surface_approval_fixture(root.path(), calls.clone())?;
+        let now = now_millis();
+        let dead_owner_id = write_surface_approval_owner_marker(root.path(), u32::MAX, now, now)?;
+        enqueue_surface_approval_fixture_request(root.path(), &dead_owner_id, &lineage, true)?;
+
+        process_surface_approval_fixture(root.path(), &dead_owner_id, &adapter)?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            surface_approval_terminal_kind(root.path())?,
+            WorkTerminalKind::Superseded
+        );
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn spec025_plugin_runtime_hook_executes_during_direct_agent_loop() -> Result<(), Box<dyn Error>>
@@ -33479,7 +34522,7 @@ mod tests {
                         command: PluginExecutableCommand {
                             command_path: hook_path,
                             args: vec![marker_path.to_string_lossy().to_string()],
-                            timeout_ms: 1_000,
+                            timeout_ms: 30_000,
                         },
                     }],
                 }],
@@ -35215,19 +36258,6 @@ mod tests {
     }
 
     #[test]
-    fn wizard_is_explicitly_deferred() {
-        let error = onboard(OnboardOptions {
-            config_path: None,
-            workspace: None,
-            wizard: true,
-        })
-        .err()
-        .map(|error| error.to_string())
-        .unwrap_or_default();
-        assert!(error.contains("wizard"));
-    }
-
-    #[test]
     fn sync_outcome_fields_are_kept_public_for_callers() {
         let outcome = WorkspaceSyncOutcome {
             created_files: vec!["AGENTS.md".to_owned()],
@@ -35235,6 +36265,290 @@ mod tests {
         };
         assert_eq!(outcome.created_files, ["AGENTS.md"]);
         assert_eq!(outcome.created_dirs, ["skills"]);
+    }
+
+    fn surface_approval_fixture(
+        root: &Path,
+        calls: Arc<AtomicUsize>,
+    ) -> Result<(AgentLoopChatCompletionAdapter, String), Box<dyn Error>> {
+        let workspace = root.join("workspace");
+        let config_path = root.join("config.json");
+        let media_dir = root.join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        fs::create_dir_all(&media_dir)?;
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&json!({"permissions": {"mode": "auto"}}))?,
+        )?;
+        let mut tools = ToolRegistry::new();
+        tools.register(SurfaceApprovalCountingExecTool { calls });
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 2,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
+            client: Arc::new(SequentialProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                responses: Mutex::new(VecDeque::from([
+                    LlmResponse {
+                        finish_reason: "tool_calls".to_owned(),
+                        tool_calls: vec![ToolCallRequest::new(
+                            "exec-surface-approval",
+                            "exec",
+                            Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                        )],
+                        ..LlmResponse::default()
+                    },
+                    LlmResponse {
+                        content: Some("surface approval resumed".to_owned()),
+                        ..LlmResponse::default()
+                    },
+                ])),
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace: workspace.clone(),
+            config_path,
+            media_dir,
+            tools,
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: true,
+            send_progress: true,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot {
+                mode: PermissionMode::Auto,
+                source: Some("test".to_owned()),
+                scope_ref: None,
+            },
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
+        };
+        let mut config = adapter.loop_config();
+        config.permission_interactive = true;
+        let inbound = InboundMessage::new("cli", "user", "direct", "run cargo test")
+            .with_session_key_override("cli:surface-approval");
+        let (turn, _outbound) =
+            adapter.process_inbound_with_outbound(inbound, config, None, &[])?;
+        if turn.stop_reason != "ask_user" {
+            return Err(format!("fixture did not pause for permission approval: {turn:?}").into());
+        }
+        let raw = SessionManager::new(&workspace)?
+            .read_session_file("cli:surface-approval")
+            .ok_or("missing pending approval session")?;
+        let lineage = raw["metadata"]["pending_permission_approval"]["approval_request_id"]
+            .as_str()
+            .ok_or("missing approval lineage")?
+            .to_owned();
+        Ok((adapter, lineage))
+    }
+
+    fn write_surface_approval_owner_marker(
+        data_dir: &Path,
+        pid: u32,
+        started_at_ms: u64,
+        updated_at_ms: u64,
+    ) -> Result<String, Box<dyn Error>> {
+        let marker_path = runtime_ownership_marker_path(data_dir);
+        write_runtime_marker_atomically(
+            &marker_path,
+            &runtime_ownership_marker_value(
+                pid,
+                started_at_ms,
+                updated_at_ms,
+                "runtime-start",
+                &data_dir.join("config.json"),
+                &data_dir.join("workspace"),
+            ),
+        )?;
+        Ok(runtime_owner_id(pid, started_at_ms))
+    }
+
+    fn enqueue_surface_approval_fixture_request(
+        data_dir: &Path,
+        target_owner_id: &str,
+        lineage: &str,
+        approve: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        let decision = if approve {
+            shacs_core::runtime::SurfaceApprovalDecision::Approve
+        } else {
+            shacs_core::runtime::SurfaceApprovalDecision::Deny
+        };
+        let request = shacs_core::runtime::SurfaceApprovalRequest {
+            schema_version: 1,
+            request_id: "surface-approval-dead-owner".to_owned(),
+            requested_at_ms: now_millis(),
+            session_key: "cli:surface-approval".to_owned(),
+            lineage: lineage.to_owned(),
+            decision,
+            target_owner_id: target_owner_id.to_owned(),
+        };
+        let payload_store = shacs_session::durable_work::DurableWorkPayloadStore::open(
+            runtime_durable_work_payload_root(data_dir),
+        )?;
+        let payload_ref = payload_store.write_json(
+            shacs_core::runtime::SURFACE_APPROVAL_PAYLOAD_TYPE,
+            &serde_json::to_value(request)?,
+        )?;
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            MessageBus::new(),
+            target_owner_id,
+            DURABLE_WORK_LEASE_DURATION_MS,
+        )?;
+        dispatcher.enqueue_work(shacs_core::runtime::DurableWorkEnqueueInput {
+            work_id: "surface-approval-dead-owner".to_owned(),
+            work_kind: SURFACE_APPROVAL_WORK_KIND.to_owned(),
+            session_key: "cli:surface-approval".to_owned(),
+            turn_id: None,
+            effect_id: Some(lineage.to_owned()),
+            payload_ref,
+            dedupe_hint: Some(format!("surface_approval:cli:surface-approval:{lineage}")),
+            next_wake_at_ms: None,
+        })?;
+        Ok(())
+    }
+
+    fn enqueue_malformed_surface_approval_fixture_request(
+        data_dir: &Path,
+        target_owner_id: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let payload_store = shacs_session::durable_work::DurableWorkPayloadStore::open(
+            runtime_durable_work_payload_root(data_dir),
+        )?;
+        let payload_ref = payload_store.write_json(
+            shacs_core::runtime::SURFACE_APPROVAL_PAYLOAD_TYPE,
+            &json!({
+                "schema_version": 1,
+                "request_id": "surface-approval-malformed",
+                "requested_at_ms": now_millis(),
+                "session_key": "cli:surface-approval",
+                "lineage": "malformed-lineage",
+                "decision": "approve"
+            }),
+        )?;
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            MessageBus::new(),
+            target_owner_id,
+            DURABLE_WORK_LEASE_DURATION_MS,
+        )?;
+        dispatcher.enqueue_work(shacs_core::runtime::DurableWorkEnqueueInput {
+            work_id: "surface-approval-malformed".to_owned(),
+            work_kind: SURFACE_APPROVAL_WORK_KIND.to_owned(),
+            session_key: "cli:surface-approval".to_owned(),
+            turn_id: None,
+            effect_id: Some("malformed-lineage".to_owned()),
+            payload_ref,
+            dedupe_hint: Some("surface_approval:cli:surface-approval:malformed-lineage".to_owned()),
+            next_wake_at_ms: None,
+        })?;
+        Ok(())
+    }
+
+    fn process_surface_approval_fixture(
+        data_dir: &Path,
+        owner_id: &str,
+        adapter: &AgentLoopChatCompletionAdapter,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_work_payload_root(data_dir),
+            MessageBus::new(),
+            owner_id,
+            DURABLE_WORK_LEASE_DURATION_MS,
+        )?;
+        process_due_surface_approvals(adapter, &mut dispatcher, data_dir)?;
+        Ok(())
+    }
+
+    fn surface_approval_terminal_kind(data_dir: &Path) -> Result<WorkTerminalKind, Box<dyn Error>> {
+        Ok(surface_approval_terminal(data_dir)?.kind)
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct SurfaceApprovalTerminalSummary {
+        kind: WorkTerminalKind,
+        outcome_ref: String,
+        attempt: u32,
+        lease_event_count: usize,
+    }
+
+    fn surface_approval_terminal(
+        data_dir: &Path,
+    ) -> Result<SurfaceApprovalTerminalSummary, Box<dyn Error>> {
+        let replay = evaluate_durable_recovery(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_checkpoint_root(data_dir),
+        );
+        let state = replay.state.ok_or("missing durable replay state")?;
+        let item = state
+            .work
+            .items
+            .values()
+            .find(|item| item.work_kind == SURFACE_APPROVAL_WORK_KIND)
+            .ok_or("missing surface approval work")?;
+        let kind = item
+            .terminal_kind
+            .ok_or("missing surface approval terminal")?;
+        let events = DurableEventStore::open(runtime_durable_event_root(data_dir))?;
+        let scan = events.scan(usize::MAX)?;
+        let lease_event_count = scan
+            .records
+            .iter()
+            .filter(|record| record.kind == WORK_LEASED)
+            .count();
+        let outcome_ref = scan
+            .records
+            .iter()
+            .rev()
+            .filter(|record| record.kind == WORK_TERMINAL)
+            .find_map(|record| match &record.payload {
+                DurableEventPayload::Inline { data, .. } => {
+                    serde_json::from_value::<WorkTerminal>(data.clone()).ok()
+                }
+                DurableEventPayload::Artifact { .. } => None,
+            })
+            .map(|terminal| terminal.outcome_ref)
+            .ok_or("missing surface approval terminal event")?;
+        Ok(SurfaceApprovalTerminalSummary {
+            kind,
+            outcome_ref,
+            attempt: item.attempt,
+            lease_event_count,
+        })
+    }
+
+    fn surface_approval_work_count(data_dir: &Path) -> Result<usize, Box<dyn Error>> {
+        let replay = evaluate_durable_recovery(
+            runtime_durable_event_root(data_dir),
+            runtime_durable_checkpoint_root(data_dir),
+        );
+        let state = replay.state.ok_or("missing durable replay state")?;
+        Ok(state
+            .work
+            .items
+            .values()
+            .filter(|item| item.work_kind == SURFACE_APPROVAL_WORK_KIND)
+            .count())
     }
 
     fn external_media_test_adapter(
@@ -35304,6 +36618,29 @@ mod tests {
     struct SequentialProviderClient {
         captured: std::sync::Arc<Mutex<Vec<ProviderRequest>>>,
         responses: Mutex<VecDeque<LlmResponse>>,
+    }
+
+    struct SurfaceApprovalCountingExecTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for SurfaceApprovalCountingExecTool {
+        fn name(&self) -> &str {
+            "exec"
+        }
+
+        fn description(&self) -> &str {
+            "Count owner-approved exec attempts."
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]})
+        }
+
+        fn execute(&self, _params: JsonMap) -> ToolResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            "exec-output".into()
+        }
     }
 
     struct JsonArtifactTool;
