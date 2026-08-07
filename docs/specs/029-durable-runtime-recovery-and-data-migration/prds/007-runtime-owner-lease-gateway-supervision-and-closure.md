@@ -29,7 +29,7 @@ Status: Complete (Scoped). 이 PRD는 local single-user runtime lifecycle만 소
 1. 필수 선행 PRD: `006-stored-data-migration-runner.md`
 2. Lifecycle baseline: `../../015-packaging-process-lifecycle-and-upgrades/SPEC.md`
 3. Durable cancellation/work/channel/trace state는 PRD 002, 003, 005를 소비한다.
-4. Current runtime path helper를 소비한다. Formal runtime directory ownership과 physical marker location의 future owner는 `../../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md`이며, 035 구현 완료는 이 PRD의 선행 조건이 아니다.
+4. Current runtime path helper를 소비한다. Formal runtime directory ownership과 physical marker location의 future owner는 `../../031-configuration-runtime-layout-and-execution-snapshots/SPEC.md`이며, 031 구현 완료는 이 PRD의 선행 조건이 아니다.
 
 ## Dependency Cut
 
@@ -37,11 +37,11 @@ Status: Complete (Scoped). 이 PRD는 local single-user runtime lifecycle만 소
 2. Heartbeat 만료만으로 stale owner evidence를 삭제하지 않는다.
 3. Supervisor는 child process 상태를 관찰하지만 session truth를 직접 만들지 않는다.
 4. Safe shutdown은 pending work/cancellation/event flush 결과를 기록한다.
-5. 이 PRD는 lease/heartbeat/supervision 상태 전이를 소유한다. Runtime root layout, marker path, directory cleanup admission은 035가 소유한다.
+5. 이 PRD는 lease/heartbeat/supervision 상태 전이를 소유한다. Runtime root layout, marker path, directory cleanup admission은 031이 소유한다.
 
 ## 구현 요구사항
 
-1. Lease record는 owner generation, process evidence, acquired/renewed/expires time, lifecycle state, schema version을 가지며 035-owned runtime layout helper가 제공한 위치에 저장된다.
+1. Lease record는 owner generation, process evidence, acquired/renewed/expires time, lifecycle state, schema version을 가지며 031-owned runtime layout helper가 제공한 위치에 저장된다.
 2. Active owner conflict와 stale owner marker는 second writable start를 차단한다.
 3. Stale takeover는 prior owner evidence, heartbeat age, recovery admission을 확인하고, `runtime recover`가 owner lifecycle event를 먼저 기록한 뒤 marker를 정리한다.
 4. PID가 살아 있는데 heartbeat만 만료된 live-expired owner는 suspect로 보고 recover를 차단한다. 사용자는 먼저 stop 요청 또는 process kill로 실행 중 owner를 멈춰야 한다.
@@ -85,7 +85,7 @@ Status: Complete (Scoped). 이 PRD는 local single-user runtime lifecycle만 소
 2. `crates/shacs-cli/src/lib.rs`: `runtime_stop`, `runtime_restart`, `runtime_recover`, `classify_runtime_ownership_marker`, `remove_stale_runtime_ownership_marker_locked`, `append_runtime_owner_lifecycle`, `write_runtime_supervision_state`, `runtime_supervisor_projection`, `format_runtime_inspect`, `format_runtime_recover`.
 3. Focused PRD007 test evidence: `prd007_runtime_owner_marker_is_strict_v1_lease`, `prd007_stale_start_blocks_and_retains_marker`, `prd007_recover_records_owner_evidence_before_delete_and_blocks_live_expired`, `runtime_stop_and_restart_write_request_for_active_owner`, `prd007_owner_lost_shutdown_skips_checkpoint_and_keeps_marker`, `prd007_owner_lost_mismatched_generation_does_not_overwrite_supervision`, `prd007_owner_lost_processor_does_not_requeue_or_terminal_work`, `prd007_runtime_wait_observes_owner_fence_loss`, `prd007_runtime_wait_reports_processor_unexpected_exit`, `prd007_shutdown_timeout_report_is_bounded_and_unknown`, `runtime_stale_ownership_cleanup_rechecks_active_marker_before_removing`, `runtime_ownership_preserve_keeps_marker_for_failed_shutdown_recovery`, `runtime_recover_clears_stale_ownership_marker`, `prd007_runtime_final_shutdown_state_retains_owner_after_marker_cleanup`, `runtime_stop_reports_no_active_or_stale_owner`.
 4. Shared redacted projection evidence: `prd007_supervision_records_api_only_and_channel_components`, `prd007_component_report_uses_names_without_raw_secret`, `prd007_recover_and_session_diagnostics_project_redacted_supervision`, plus API diagnostics projection in `AgentLoopChatCompletionAdapter::diagnostics_snapshot`.
-5. Scope evidence: 029 keeps its closed durable redaction boundary, 030 owns trusted-runtime data disclosure, and 035 owns credential source plus physical runtime path/layout. PRD007 consumes the current shared redaction and path-helper boundaries only.
+5. Scope evidence: 029 keeps its closed durable redaction boundary, 030 owns trusted-runtime data disclosure, and 031 owns credential source plus physical runtime path/layout. PRD007 consumes the current shared redaction and path-helper boundaries only.
 
 ## 완료 기준
 

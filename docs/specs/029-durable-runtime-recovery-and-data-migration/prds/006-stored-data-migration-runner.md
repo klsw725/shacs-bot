@@ -2,9 +2,9 @@
 
 ## 목표
 
-Session metadata, event, checkpoint, queue, channel, child, trace, diagnostics artifact schema를 안전하게 변환하는 local migration runner를 만들고 partial migration에서 writable runtime을 차단한다. Config/profile transform은 Spec 035가 소유하며, 이 runner는 현재 config loader의 compatibility state만 통합 admission에서 소비한다. 이후 035 migration result는 같은 boundary를 확장하지만 029 closure의 선행 조건은 아니다.
+Session metadata, event, checkpoint, queue, channel, child, trace, diagnostics artifact schema를 안전하게 변환하는 local migration runner를 만들고 partial migration에서 writable runtime을 차단한다. Config/profile transform은 Spec 031이 소유하며, 이 runner는 현재 config loader의 compatibility state만 통합 admission에서 소비한다. 이후 031 migration result는 같은 boundary를 확장하지만 029 closure의 선행 조건은 아니다.
 
-Status: Complete (Scoped). `shacs-session/src/durable_migration.rs`가 현재 v1 durable family inventory와 명시적 v0 fixture transform runner를 제공하고, `shacs-cli`의 `runtime migrate`/admission이 이를 소비한다. Future schema migration은 새 versioned transform을 추가해야 하며 config/profile transform은 계속 Spec 035 소유다.
+Status: Complete (Scoped). `shacs-session/src/durable_migration.rs`가 현재 v1 durable family inventory와 명시적 v0 fixture transform runner를 제공하고, `shacs-cli`의 `runtime migrate`/admission이 이를 소비한다. Future schema migration은 새 versioned transform을 추가해야 하며 config/profile transform은 계속 Spec 031 소유다.
 
 ## 범위
 
@@ -29,7 +29,7 @@ Status: Complete (Scoped). `shacs-session/src/durable_migration.rs`가 현재 v1
 1. 필수 선행 PRD: `005-durable-trace-log-and-diagnostics-correlation.md`
 2. Lifecycle baseline: `../../015-packaging-process-lifecycle-and-upgrades/SPEC.md`
 3. PRD 000-005가 정의한 모든 schema family를 소비한다.
-4. Config/profile migration과 formal runtime layout owner는 `../../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md`다. 이 ownership reference는 035 구현 완료를 선행 조건으로 만들지 않는다.
+4. Config/profile migration과 formal runtime layout owner는 `../../031-configuration-runtime-layout-and-execution-snapshots/SPEC.md`다. 이 ownership reference는 031 구현 완료를 선행 조건으로 만들지 않는다.
 
 ## Dependency Cut
 
@@ -37,7 +37,7 @@ Status: Complete (Scoped). `shacs-session/src/durable_migration.rs`가 현재 v1
 2. Family별 transform은 독립 결과를 남기지만 overall completion 전 writable start를 허용하지 않는다.
 3. Rollback 불가능한 transform은 명시적으로 inspect-only/manual recovery를 선택한다.
 4. Migration runner는 application policy나 session content 의미를 임의 변경하지 않는다.
-5. 029 runner는 config/profile file을 transform하지 않는다. 현재 config loader가 산출하는 readable/incompatible 결과를 overall admission에 포함하고, 035는 나중에 같은 input을 current/legacy/future/partial migration result로 확장한다.
+5. 029 runner는 config/profile file을 transform하지 않는다. 현재 config loader가 산출하는 readable/incompatible 결과를 overall admission에 포함하고, 031은 나중에 같은 input을 current/legacy/future/partial migration result로 확장한다.
 6. Diagnostics artifact는 trace record와 별도 schema family로 inventory, plan, transform result를 가져야 한다.
 
 ## 구현 요구사항
@@ -51,7 +51,7 @@ Status: Complete (Scoped). `shacs-session/src/durable_migration.rs`가 현재 v1
 7. Backup/checkpoint strategy와 cleanup 시점을 명시한다.
 8. Migration diagnostics는 secret/raw payload를 노출하지 않는다.
 9. Schema inventory는 session metadata, event, checkpoint, queue, scheduler, channel, child, trace, diagnostics artifact family를 각각 구분한다.
-10. Config/profile family는 external compatibility result로 표시하며 029 transform 목록에 넣지 않는다. 029 tests는 current loader adapter를 사용하고 035 구현을 요구하지 않는다.
+10. Config/profile family는 external compatibility result로 표시하며 029 transform 목록에 넣지 않는다. 029 tests는 current loader adapter를 사용하고 031 구현을 요구하지 않는다.
 
 ## 정상 시퀀스
 
@@ -77,7 +77,7 @@ Status: Complete (Scoped). `shacs-session/src/durable_migration.rs`가 현재 v1
 4. Resume, rollback, inspect-only blocked path를 검증한다.
 5. Newer unknown schema와 missing path를 검증한다.
 6. Migration 후 replay/queue/channel/child/trace/diagnostics artifact compatibility를 확인한다.
-7. Current config compatibility adapter의 readable/incompatible 결과가 029 admission에서 각각 allow/block으로 결합되는지 확인한다. 035가 추가할 partial/future-unsupported 상태는 035 acceptance에서 같은 boundary로 검증한다.
+7. Current config compatibility adapter의 readable/incompatible 결과가 029 admission에서 각각 allow/block으로 결합되는지 확인한다. 031이 추가할 partial/future-unsupported 상태는 031 acceptance에서 같은 boundary로 검증한다.
 
 ## 완료 기준
 

@@ -12,8 +12,8 @@ Status: Complete (Scoped). 아래 순서는 권장 순서가 아니라 implement
 2. Session JSONL, process-local bus, runtime metadata hint는 baseline이며 durable truth로 승격하지 않는다.
 3. Event store 없이 replay, queue, migration, supervisor 완료를 주장하지 않는다.
 4. Distributed queue, fleet, multi-user admin workflow, general exactly-once delivery는 모든 wave에서 비범위다.
-5. Spec 030은 trusted-runtime data disclosure를, Spec 035는 config/profile auth source와 formal runtime layout/marker location을 소유한다. 029는 현재 shared redaction, config compatibility, runtime path-helper boundary를 소비해 독립적으로 닫았으며 후속 spec은 그 durable projection을 약화시키지 않는다.
-6. Spec 030 또는 035의 완료는 Wave 1-8이나 Spec 029 closure의 선행 조건이 아니다.
+5. Spec 030은 trusted-runtime data disclosure를, Spec 031은 config/profile auth source와 formal runtime layout/marker location을 소유한다. 029는 현재 shared redaction, config compatibility, runtime path-helper boundary를 소비해 독립적으로 닫았으며 후속 spec은 그 durable projection을 약화시키지 않는다.
+6. Spec 030 또는 031의 완료는 Wave 1-8이나 Spec 029 closure의 선행 조건이 아니다.
 
 ## 구현 순서
 
@@ -202,4 +202,4 @@ Concrete Wave 8 evidence mapping:
 3. `runtime inspect`, `runtime recover`, channel status, session diagnostics, API diagnostics는 같은 redacted recovery/supervision projection을 사용한다.
 4. Focused PRD007 test set 22개와 external focused test set 51개, workspace fmt/clippy/test와 `shacs-cli` build, isolated manual CLI lifecycle QA가 통과했다.
 5. [Spec 029](../SPEC.md)는 구현 evidence를 반영해 `Complete (Scoped)`로 변경한다.
-6. Spec 030/035 미완료는 029의 current boundary 검증을 막지 않으며, 후속 owner 구현은 029를 다시 열지 않고 adapter 결과를 확장한다. 030은 raw-content disclosure를, 035는 auth source와 physical path/layout ownership을 소유한다.
+6. Spec 030/031 미완료는 029의 current boundary 검증을 막지 않으며, 후속 owner 구현은 029를 다시 열지 않고 adapter 결과를 확장한다. 030은 raw-content disclosure를, 031은 auth source와 physical path/layout ownership을 소유한다.
