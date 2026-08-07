@@ -18,7 +18,7 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 
 1. 009는 `ContextBuilder`, memory, compaction, runner governance, provider shaping 기준의 context assembly mapping을 닫았다. Formal snapshot과 token budget model은 구현 완료가 아니다.
 2. 012는 process-local bus, session turn lock, active task cancellation, channel worker wiring, follow-up queue, runtime metadata JSON hint를 닫았다. Durable queue/scheduler, owner lease/supervision, durable trace는 029의 current scoped implementation을 소비하며 033이 재구현하지 않는다.
-3. 013은 CLI/session command UX, session projection/query model, local API session query, WebSocket/chat completion/streaming surface, web helper baseline을 갖는다. Shared projection, TUI/REPL/onboard, reconnect/backpressure는 031의 current implementation baseline과 planned revision을 소비한다.
+3. 013은 CLI/session command UX, session projection/query model, local API session query, WebSocket/chat completion/streaming surface, web helper baseline을 갖는다. Shared projection, TUI/REPL/onboard, reconnect/backpressure는 035의 current implementation baseline과 planned revision을 소비한다.
 4. 014는 local diagnostics snapshot, marker-based projection, projection-boundary diagnostics bundle, CLI/API diagnostics surface를 갖는다. 033 artifact transform은 이 baseline을 소비하지만 runtime trace 전체의 complete redaction을 주장하지 않는다.
 5. 016은 verification family, release gate language, spec coverage matrix, blocker와 waiver 원칙을 닫았다.
 6. 018은 PRD 000-014를 Rust contract, runtime helper, projection helper, release-gate helper 기준으로 닫았다. 이는 full live end-to-end product integration이 아니다.
@@ -48,7 +48,7 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 9. Goal review, QA review, code review, security review, docs review를 위한 reproducible review artifact.
 10. Hook veto, headless confirmation denial, missing hook evidence, process timeout/cleanup incomplete, sandbox fallback/failure, credential unavailable, snapshot missing/mismatch/source mutation, missing artifact redaction evidence, duplicate consumption, superseded consumption, recursion guard, delivery failure, replay mismatch edge regression.
 
-033은 하위 owner boundary를 소비하지만 대체하지 않는다. 009/012/013/014/016/018/022는 historical implementation baseline을, 029는 durable scheduling/recovery를, 030은 trusted runtime operational facts를, 035는 immutable execution snapshot을 제공한다. Shared UI adapter, surface parity smoke, release runner shell은 031이 소유한다. 033은 evaluation/automation domain state, goal accounting, coverage entry, review artifact와 edge-regression evidence를 생산한다.
+033은 하위 owner boundary를 소비하지만 대체하지 않는다. 009/012/013/014/016/018/022는 historical implementation baseline을, 029는 durable scheduling/recovery를, 030은 trusted runtime operational facts를, 031은 immutable execution snapshot을 제공한다. Shared UI adapter, surface parity smoke, release runner shell은 035가 소유한다. 033은 evaluation/automation domain state, goal accounting, coverage entry, review artifact와 edge-regression evidence를 생산한다.
 
 ## invariants
 
@@ -60,7 +60,7 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 6. Replay는 hook handler, confirmation prompt, credential refresh, process launch, sandbox initialization, destructive tool, plugin command, app process action, remote delivery, config mutation, self-improvement apply를 live-dispatch하지 않는다.
 7. Suppress는 user notification을 생략한다는 뜻이지 evidence deletion이 아니다.
 8. Missing artifact redaction/disclosure evidence는 033 release artifact의 blocker이며, 무시 가능한 warning이 아니다. 원본 session/log/trace 전체가 secret-safe하다는 뜻은 아니다.
-9. Live execution 직전에는 030 `tool:before` hook, 필요한 ephemeral confirmation, headless deny, adapter별 process capability, sandbox fallback disclosure, credential status와 035 immutable execution snapshot을 확인한다. 이 검사는 durable approval이나 replay authorization을 만들지 않는다.
+9. Live execution 직전에는 030 `tool:before` hook, 필요한 ephemeral confirmation, headless deny, adapter별 process capability, sandbox fallback disclosure, credential status와 031 immutable execution snapshot을 확인한다. 이 검사는 durable approval이나 replay authorization을 만들지 않는다.
 10. Self-improvement apply는 proposal target digest와 current target digest의 compare-and-swap을 통과해야 한다. Stale proposal은 side effect 전에 fail closed한다.
 11. Rollback은 universal automatic action이 아니다. Checkpoint availability, current hook/confirmation, process control, sandbox disclosure, user-visible evidence를 다시 통과하는 candidate action이며 timeout/kill이 side-effect rollback을 보장하지 않는다.
 12. 033이 생산하는 diagnostics/release artifact는 명시적 projection-boundary redaction/disclosure transform을 통과해야 하고 transform evidence가 없으면 blocked다.
@@ -72,8 +72,8 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 3. Normalized trigger, run state, timeout, idempotency key, recursion guard, execution snapshot id/digest, trusted runtime ref, hook status, adapter별 process control, sandbox/credential status, unattended/headless mode, delivery target, result policy를 갖는 scheduled automation integration.
 4. Channel worker, service job, subagent result, app task result, local API background result를 다루는 task outcome evaluator integration.
 5. Immutable execution snapshot, apply-time CAS, pre-tool hook, 필요한 ephemeral confirmation, checkpoint, apply, verify, record, rollback candidate를 거치는 self-improvement proposal store와 live flow.
-6. Goal, automation, evaluator, hook outcome, confirmation event, verify, rollback candidate의 domain state vocabulary와 projection input. CLI/local API/channel/TUI adapter parity는 031이 소유한다.
-7. Local trajectory를 선택하고 035 immutable execution snapshot과 recorded artifact를 읽고 expected verdict/outcome을 비교하며 live source 재조회와 destructive dispatch를 거부하는 replay runner.
+6. Goal, automation, evaluator, hook outcome, confirmation event, verify, rollback candidate의 domain state vocabulary와 projection input. CLI/local API/channel/TUI adapter parity는 035가 소유한다.
+7. Local trajectory를 선택하고 031 immutable execution snapshot과 recorded artifact를 읽고 expected verdict/outcome을 비교하며 live source 재조회와 destructive dispatch를 거부하는 replay runner.
 8. Goal id, automation job id, turn id, hook/confirmation event id, checkpoint id, trajectory id, execution snapshot id/digest, safe artifact reference를 연결하는 diagnostics receipt.
 9. 각 018 PRD 000-014 helper contract와 각 033 live integration path를 가리키는 release coverage entry.
 10. QA, goal adherence, code quality, security, docs consistency, release readiness를 위해 repo에 저장되는 reproducible review artifact.
@@ -100,10 +100,10 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 3. Scheduled automation can run at least one one-shot job, one recurring job, one no-agent maintenance job, and one skill-backed agent job under the same lifecycle contract. Headless confirmation-required step은 auto-allow하지 않고, trusted native fallback과 sandbox-required 차이를 evidence에 남긴다.
 4. Task outcome evaluator routes results to notify, suppress, continue, escalate, verify, rollback candidate without deleting evidence.
 5. Self-improvement proposal cannot apply without immutable execution snapshot, checkpoint handling, apply-time CAS, current hook result, and required ephemeral confirmation. Headless confirmation이 불가능하면 deny하고, failed verify는 evidence와 rollback candidate만 남긴다.
-6. Execution-sensitive automation과 self-improvement step은 030 hook/process/credential/sandbox contract와 035 execution snapshot을 소비한다. 022 approval correlation은 compatibility helper일 수 있으나 closure guarantee가 아니다.
+6. Execution-sensitive automation과 self-improvement step은 030 hook/process/credential/sandbox contract와 031 execution snapshot을 소비한다. 022 approval correlation은 compatibility helper일 수 있으나 closure guarantee가 아니다.
 7. Replay runner reproduces selected trajectories from local artifacts and fails closed when a case would require live destructive dispatch.
 8. Diagnostics bundle includes projection-redacted goal, automation, evaluator, hook/confirmation, checkpoint, execution snapshot, replay, projection evidence and transform status. 원본 runtime trace의 secret-safety를 주장하지 않으며 transform evidence가 없으면 release를 막는다.
-9. 033이 goal id/state/stop reason/continuation budget, automation run status, evaluator verdict, hook/confirmation outcome, verification result, rollback candidate의 domain vocabulary와 evidence를 생산하고, 031 adapter가 같은 의미로 투영한다.
+9. 033이 goal id/state/stop reason/continuation budget, automation run status, evaluator verdict, hook/confirmation outcome, verification result, rollback candidate의 domain vocabulary와 evidence를 생산하고, 035 adapter가 같은 의미로 투영한다.
 10. Release coverage entry lists 033 and maps code paths, tests, commands, artifacts, and remaining waivers. No waiver may hide MissingRedactionEvidence, missing hook evidence, headless denial, snapshot mismatch, sandbox/credential disclosure 누락.
 11. Review artifacts for QA, goal, code, security, docs are reproducible from stored commands or local artifacts and are referenced by release evidence.
 
@@ -111,7 +111,7 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 
 | origin spec | 닫힌 implemented scope | 033으로 넘어오는 open work |
 |---|---|---|
-| 009 context assembly and compaction input | Current context builder, memory, compaction, runner governance, provider shaping mapping | 035 snapshot에 포함될 evaluator input/context provenance와 safe source references |
+| 009 context assembly and compaction input | Current context builder, memory, compaction, runner governance, provider shaping mapping | 031 snapshot에 포함될 evaluator input/context provenance와 safe source references |
 | 012 runtime services | Process-local bus, lock, active task registry, channel runtime wiring, follow-up queue, metadata hints | Automation job lifecycle, scheduled wake integration, service result outcome routing, delivery/job state split |
 | 013 user interfaces and session UX | CLI/session projection, local API session query, WebSocket/chat surface, web helper baseline | Goal, automation, evaluator, hook/confirmation, verify, rollback candidate projection inputs |
 | 014 observability diagnostics and inspection | Local diagnostics, projection-boundary redaction points, runtime marker projection, diagnostics bundle | Evaluation ledger, automation receipt, replay artifact, review evidence, MissingRedactionEvidence blocker |
@@ -120,8 +120,8 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 | 022 auto approval permissions | Historical normalization/audit/replay helpers and closed implementation evidence | Compatibility input only. Central permission mode, durable approval correlation, replay authorization은 033 신규 보장이 아님 |
 | 029 durable runtime recovery | Durable queue/scheduler, owner lease/supervision, trace/recovery scoped baseline | Automation scheduling/recovery facts를 소비하고 별도 scheduler·lease·trace를 재구현하지 않음 |
 | 030 trusted agent runtime | Pre-tool veto, ephemeral confirmation/headless deny, adapter별 process control, credential/sandbox/resource/data disclosure | Live automation/self-improvement gate와 evidence, replay no-live-dispatch invariant |
-| 031 UI projection parity | Shared projection, TUI/REPL/onboard, reconnect/release baseline과 planned Tasks view | 033 goal/automation owner facts를 cross-surface adapter와 release evidence로 소비 |
-| 035 configuration and snapshots | Immutable config/context/provider/trusted-runtime execution snapshot과 provenance | Evaluator, automation, self-improvement, replay input과 diagnostics receipt |
+| 031 configuration and snapshots | Immutable config/context/provider/trusted-runtime execution snapshot과 provenance | Evaluator, automation, self-improvement, replay input과 diagnostics receipt |
+| 035 UI projection parity | Shared projection, TUI/REPL/onboard, reconnect/release baseline과 planned Tasks view | 033 goal/automation owner facts를 cross-surface adapter와 release evidence로 소비 |
 
 ## Implementation PRDs
 
@@ -131,8 +131,8 @@ Spec 033은 goal accounting에서 evaluator, automation, CAS self-improvement, r
 |---|---|---|
 | [PRD 000](prds/000-goal-accounting-and-projection-input.md) | Goal lifecycle, stop reason, continuation budget, projection owner facts | 018 goal baseline |
 | [PRD 001](prds/001-completion-evaluator-live-integration.md) | Completion evaluator consumption과 task outcome routing | PRD 000, 018 evaluator baseline |
-| [PRD 002](prds/002-automation-job-lifecycle-and-outcome-routing.md) | One-shot/recurring/no-agent/skill-backed automation lifecycle | PRD 001, Specs 029/030/035 fact contracts |
-| [PRD 003](prds/003-self-improvement-cas-apply-and-verify.md) | Proposal, immutable snapshot, apply-time CAS, hook/confirmation, checkpoint/apply/verify | PRDs 001-002, Specs 030/035 fact contracts |
+| [PRD 002](prds/002-automation-job-lifecycle-and-outcome-routing.md) | One-shot/recurring/no-agent/skill-backed automation lifecycle | PRD 001, Specs 029/030/031 fact contracts |
+| [PRD 003](prds/003-self-improvement-cas-apply-and-verify.md) | Proposal, immutable snapshot, apply-time CAS, hook/confirmation, checkpoint/apply/verify | PRDs 001-002, Specs 030/031 fact contracts |
 | [PRD 004](prds/004-snapshot-replay-review-and-release-evidence.md) | Snapshot-based replay, review artifacts, edge regression, coverage entry | PRDs 001-003, Specs 031/035 fact contracts |
 | [PRD 005](prds/005-sequential-integration-and-spec033-closure.md) | End-to-end integration, requirement mapping, final Spec033 closure | PRDs 000-004, required owner-fact audits |
 
@@ -149,7 +149,7 @@ Current PRD status:
 
 Dependency rules:
 
-1. Goal projection은 PRD 000 owner fact가 먼저 존재해야 하며 031 adapter가 goal truth를 만들지 않는다.
+1. Goal projection은 PRD 000 owner fact가 먼저 존재해야 하며 035 adapter가 goal truth를 만들지 않는다.
 2. Evaluator는 advisory output만 생산하고 PRD 002-003의 live action을 직접 실행하지 않는다.
 3. Replay PRD는 live hook, confirmation, credential, process, delivery, apply를 호출하지 않는다.
 4. PRD 005는 외부 spec status가 아니라 exact owner facts와 local artifacts만 검사한다.
@@ -163,7 +163,7 @@ Dependency rules:
 3. Edge 증거: HookVeto, HeadlessConfirmationDenied, MissingHookEvidence, ProcessTimeout, AbortCleanupIncomplete, sandbox/credential failure, snapshot missing/mismatch/source mutation, MissingRedactionEvidence, duplicate/superseded consumption, recursion guard, delivery failure, replay mismatch regression.
 4. Release 증거: 033 coverage entry와 018 PRD 000-014 live wiring direct entry. 각 entry는 local에서 다시 실행 가능한 command 또는 artifact를 가리켜야 한다.
 5. Review 증거: redacted, reproducible, release coverage에 연결된 stored QA, goal, code, security, docs review artifact.
-6. Interface 증거: goal id/state/stop reason/continuation budget, automation, evaluator verdict, hook/confirmation outcome, verify result, rollback candidate에 대한 CLI와 local API snapshot. 031 TUI/Tasks view는 완료 주장 전에 같은 projection 의미를 소비해야 한다.
+6. Interface 증거: goal id/state/stop reason/continuation budget, automation, evaluator verdict, hook/confirmation outcome, verify result, rollback candidate에 대한 CLI와 local API snapshot. 035 TUI/Tasks view는 완료 주장 전에 같은 projection 의미를 소비해야 한다.
 7. Diagnostics 증거: evaluator input, automation run, hook/confirmation event, checkpoint, execution snapshot, replay result, delivery result, review artifact에 projection-boundary transform을 적용하고 raw credential/full unnecessary payload를 artifact에 넣지 않았음을 증명하는 bundle 또는 fixture. 원본 trace 전체의 complete redaction을 주장하지 않는다.
 
 현재 closure evidence는 없다. 018 PRD 000-014 helper closure와 022 historical implementation은 baseline input일 뿐이며, 033 live integration closure가 아니다.

@@ -36,5 +36,5 @@ One-shot, recurring, no-agent, skill-backed, app-task automation을 같은 lifec
 ## Closure Evidence
 
 1. Automation lifecycle scenario matrix.
-2. Specs 029/030/035 owner-fact audits.
+2. Specs 029/030/031 owner-fact audits.
 3. Scheduler/service/channel real-surface transcripts and cleanup receipts.

@@ -4,7 +4,7 @@ Status: Planned
 
 ## Goal
 
-035 execution snapshot과 recorded trajectory로 destructive live dispatch 없는 replay를 수행하고 reproducible review/release artifacts를 만든다.
+031 execution snapshot과 recorded trajectory로 destructive live dispatch 없는 replay를 수행하고 reproducible review/release artifacts를 만든다.
 
 ## Scope
 

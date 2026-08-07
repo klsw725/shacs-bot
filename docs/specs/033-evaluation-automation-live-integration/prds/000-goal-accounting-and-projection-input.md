@@ -4,7 +4,7 @@ Status: Planned
 
 ## Goal
 
-Goal lifecycle과 continuation accounting을 typed owner facts로 만들고 Spec 031이 truth를 재구성하지 않고 투영할 수 있게 한다.
+Goal lifecycle과 continuation accounting을 typed owner facts로 만들고 Spec 035가 truth를 재구성하지 않고 투영할 수 있게 한다.
 
 ## Scope
 
@@ -16,7 +16,7 @@ Goal lifecycle과 continuation accounting을 typed owner facts로 만들고 Spec
 ## Non Scope
 
 1. Prime goal store나 별도 session truth를 도입하지 않는다.
-2. Projection adapter와 Tasks view는 031이 소유한다.
+2. Projection adapter와 Tasks view는 035가 소유한다.
 3. Goal state가 tool execution을 직접 허용하지 않는다.
 
 ## Parent Requirement Mapping
@@ -37,4 +37,4 @@ Goal lifecycle과 continuation accounting을 typed owner facts로 만들고 Spec
 
 1. Goal transition and accounting tests.
 2. CLI/local API parity transcript.
-3. 031 owner-fact fixture and no-separate-truth audit.
+3. 035 projection fixture and no-separate-truth audit.
