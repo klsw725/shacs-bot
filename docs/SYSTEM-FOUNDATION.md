@@ -72,7 +72,7 @@
 이는 다음 판단에 기반한다.
 
 - `nanobot` 계열의 장점: 작은 중심 루프, 읽기 쉬운 코어, 단순한 재진입 모델
-- `opencode` 계열의 장점: 세션 중심 오케스트레이션, 프로젝트/워크트리 경계, permission 요청과 응답의 공식 상태화
+- `opencode` 계열의 장점: 세션 중심 오케스트레이션, 프로젝트/워크트리 경계, 실행 전 사용자 interaction의 공식 상태화
 - `claude-code` / `OpenHarness` / `openclaw` 계열의 장점: 주변 서비스 분리, 스케줄링/메일박스/태스크, skill/MCP/app bundle을 하나의 사용자 활성화 단위로 묶는 경계 설정
 - `oh-my-opencode` 계열의 장점: 사용자는 intent를 주고 시스템은 계획, 위임, 검증, 복구를 끝까지 수행하는 낮은 인지 부하의 작업 경험
 
@@ -80,7 +80,7 @@
 
 - **코어는 `nanobot + opencode` 성격으로 가져간다.**
 - **주변 서비스와 app bundle 경계는 `claude-code`, `OpenHarness`, `openclaw`에서 아이디어만 가져온다.**
-- **검증 가능한 위임 경험은 `oh-my-opencode`에서 방향만 가져오되, 최종 상태와 권한은 이 프로젝트의 오케스트레이터 계약으로 재해석한다.**
+- **검증 가능한 위임 경험은 `oh-my-opencode`에서 방향만 가져오되, 최종 상태와 dispatch ordering은 이 프로젝트의 오케스트레이터 계약으로 재해석한다.**
 - **최종 상태 변경 권한은 메인 오케스트레이터에 남긴다.**
 
 ---
@@ -165,7 +165,7 @@ Interfaces
 MainOrchestrator
   - session kernel
   - turn loop
-  - policy / permission
+  - trusted runtime / hook ordering
   - tool roundtrip
   - subagent spawn / rejoin
         |
@@ -190,7 +190,7 @@ MainOrchestrator
 - `SessionState`의 진실 원천 유지
 - 한 턴의 실행 흐름 관리
 - provider/tool 호출 순서 결정
-- permission 판정
+- trusted runtime profile과 hook dispatch ordering 결정
 - retry / timeout / abort / compact 판단
 - subagent 생성 및 결과 재진입 규칙
 - event log append
@@ -217,16 +217,17 @@ MainOrchestrator
 
 ---
 
-## 스킬 시스템 방향
+## 스킬과 executable resource 방향
 
-스킬 시스템은 `OpenHarness`의 단순한 설치/로딩 UX를 참고하되, `shacs-bot`의 오케스트레이터 구조에 맞게 제한적으로 도입한다.
+2026-08-07의 [`Trusted local agent runtime 전환 결정`](TRUST-MODEL-DECISION.md)에 따라 skill/resource model은 read-only Markdown baseline과 trusted executable resource를 함께 지원한다.
 
 ### 채택할 원칙
 
-- 스킬은 코드가 아니라 **Markdown 기반 지식 팩**이다.
-- 스킬은 필요할 때만 로드되는 **on-demand context unit**이다.
-- 스킬은 오케스트레이터를 우회해 상태를 바꾸지 않는다.
-- 스킬은 read-only로 문맥을 보강하는 역할을 우선한다.
+- Markdown skill은 필요할 때 로드되는 **on-demand context unit**이다.
+- Python skill과 in-process extension은 활성화 뒤 현재 사용자 권한으로 실행되는 **trusted code**다.
+- Builtin·명시 configured resource는 활성 후보이며, project-local auto-discovered executable resource는 trusted workspace에서만 활성화한다.
+- Resource source, precedence, collision, parse/load 상태를 inspect할 수 있어야 한다.
+- Resource hash와 discovery status는 identity/provenance evidence이며 authorization 또는 sandbox proof가 아니다.
 
 ### 초기 디렉터리 규약
 
@@ -237,26 +238,21 @@ MainOrchestrator
 bundled-skills/<skill-name>/SKILL.md
 ```
 
-### 초기 스킬 로딩 우선순위
+### Resource 로딩 우선순위
 
 ```text
-bundled < user-global < workspace-local < app-provided
+explicit > project-configured > trusted-project-auto > user-configured > user-auto > package > builtin
 ```
 
-### 초기 범위
+### 범위
 
-초기에는 아래만 지원한다.
+- Markdown skill 목록·본문·context injection
+- Python skill package install/import
+- TypeScript/JavaScript extension import와 host API
+- Package·project·user·builtin source precedence와 diagnostics
+- Trusted-code disclosure와 inspect/disable/revoke lifecycle
 
-- 스킬 목록 조회
-- 스킬 본문 읽기
-- 디렉터리 또는 파일 기반 스킬 추가
-- 오케스트레이터가 필요 시 스킬 내용을 문맥에 주입
-
-초기에는 다음을 의도적으로 보류한다.
-
-- 원격 스킬 마켓플레이스
-- 복잡한 스킬 설치 프로토콜
-- 스킬 자체의 실행 권한 위임
+원격 marketplace, 조직 governance, signed public distribution은 기본 제품 범위가 아니다.
 
 ---
 
@@ -274,24 +270,26 @@ bundled < user-global < workspace-local < app-provided
 
 ---
 
-## 권한과 안전성 방향
+## Trusted runtime과 operational control 방향
 
-개인형 도구라 해도 기본 안전성은 필요하다.
+Shacs는 사용자가 직접 설치·운영하는 trusted local agent runtime을 기본으로 한다.
 
 ### 기본 원칙
 
-- 읽기와 쓰기는 구분한다.
-- 위험한 shell 실행은 명시적 정책을 거친다.
-- 파일 경로 제약, 명령 제약, 사용자 확인 정책을 둘 수 있어야 한다.
-- 권한 시스템은 오케스트레이터의 판단에 종속되어야 한다.
+- Model-generated Python, shell, project command는 기본적으로 현재 사용자 OS 권한으로 실행될 수 있다.
+- 기존 `tool:before` hook은 tool 실행 직전 block-only veto를 제공한다.
+- User confirmation은 현재 호출에만 적용하며 durable approval이나 permission grant로 표현하지 않는다.
+- Bash, exec, package, kernel, daemon, MCP는 경로별 timeout·abort·cleanup을 제공하며 universal process gate를 주장하지 않는다.
+- Daemon, worker, kernel, child session은 lifecycle isolation이며 security sandbox가 아니다.
+- Sandbox는 adapter별 선택 기능이고 active/disabled/unsupported/failed 상태를 표시한다.
+- Credential source와 raw session/log/trace 가능성을 사용자에게 공개한다.
 
-### 초기 모드 예시
+### Runtime profile
 
-- `default`: 쓰기/실행 전 확인
-- `auto`: 신뢰된 환경에서 자동 허용
-- `plan`: 쓰기 금지, 분석/계획 전용
+- `trusted_native_fallback`: sandbox가 unavailable이면 경고 뒤 native 실행 가능.
+- `sandbox_required`: sandbox가 active가 아니면 해당 adapter 실행 거부.
 
-초기에는 권한 모델을 과하게 세분화하지 않는다. 대신 **이해하기 쉬운 소수의 모드**로 시작한다.
+기존 permission mode, approval, redaction, containment primitive는 호환성 또는 닫힌 owner baseline으로 남을 수 있지만 이 foundation의 future 통합 모델은 아니다.
 
 ---
 
@@ -317,13 +315,13 @@ bundled < user-global < workspace-local < app-provided
 ### 논리 모듈 초안
 
 - `core`
-  - `Command`, `Event`, `Effect`, `SessionState`, `TurnState`, `Policy`, `MainOrchestrator`
+  - `Command`, `Event`, `Effect`, `SessionState`, `TurnState`, trusted-runtime decision state, `MainOrchestrator`
 - `session_store`
   - event log, checkpoint, resume metadata
 - `provider`
   - LLM provider abstraction
 - `tool_runtime`
-  - tool registry, execution envelope, permission bridge
+  - tool registry, execution boundary, pre-tool hook and operational-control bridge
 - `skills`
   - skill loader, registry, parser
 - `runtime_services`
@@ -357,7 +355,7 @@ bundled < user-global < workspace-local < app-provided
 
 - tool registry
 - 기본 read/write/shell/search 계열 툴
-- permission check
+- pre-tool hook, 필요한 ephemeral confirmation, adapter별 process control
 - tool result 재주입
 
 ### Phase 3. 세션 지속성
@@ -466,7 +464,7 @@ bundled < user-global < workspace-local < app-provided
 27. `docs/specs/027-channel-attachment-intake-and-file-context/SPEC.md`
 28. `docs/specs/028-formal-execution-reentry-and-outcome-contracts/SPEC.md`
 29. `docs/specs/029-durable-runtime-recovery-and-data-migration/SPEC.md`
-30. `docs/specs/030-policy-permission-redaction-and-containment-model/SPEC.md`
+30. `docs/specs/030-trusted-agent-runtime-and-operational-controls/SPEC.md`
 31. `docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md`
 32. `docs/specs/032-app-maker-runtime-and-extension-lifecycle/SPEC.md`
 33. `docs/specs/033-evaluation-automation-live-integration/SPEC.md`
@@ -477,7 +475,7 @@ bundled < user-global < workspace-local < app-provided
 
 `docs/product/cli-experience.md` 같은 제품 문서는 인터페이스 메모와 사용성 설명에 중요하지만, 위 architecture spec 세트를 대체하지 않는다.
 
-각 문서는 반드시 이 문서의 방향성과 충돌하지 않아야 한다. 충돌이 생기면 하위 문서를 바꾸는 것이 기본이고, 상위 방향 자체를 바꾸려면 별도 의사결정 문서를 추가한다.
+각 문서는 반드시 이 문서의 방향성과 충돌하지 않아야 한다. 2026-08-07 trust model 변경은 [`TRUST-MODEL-DECISION.md`](TRUST-MODEL-DECISION.md)에 기록했으며, 이후 충돌은 이 결정과 현재 foundation을 기준으로 정리한다.
 
 ---
 
@@ -504,7 +502,7 @@ bundled < user-global < workspace-local < app-provided
 - 메인 오케스트레이터가 상태 전이를 단일 통제
 - session kernel 중심 구조
 - queue/scheduler/mailbox/hooks는 주변 서비스
-- Markdown skill 기반 확장
+- Markdown skill과 trusted executable resource 기반 확장
 - 작은 코어를 먼저 안정화하고, 그 위에 기능을 단계적으로 얹는 방식
 
 이 방향을 기준으로 이후 상세 설계를 진행한다.

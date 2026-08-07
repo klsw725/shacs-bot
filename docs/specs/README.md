@@ -16,6 +16,8 @@
 - `Complete (Scoped)`는 해당 owner가 정의한 현재 구현 범위가 닫혔음을 뜻한다.
 - `Complete (Baseline)`은 self-hosted/local 최소 기준이 닫혔음을 뜻한다.
 - `Open (implemented, closure blocked)` 또는 PRD의 `Implemented, closure blocked`는 구현과 현재 surface QA evidence가 존재하지만 release closure 조건이 아직 통과하지 않았음을 뜻한다.
+- `Planned`는 accepted contract이지만 구현·surface evidence가 아직 없는 범위다. 기존 implemented evidence로 완료 처리하지 않는다.
+- `Planned revision (implemented baseline)`은 이전 계약의 구현 evidence는 존재하지만, 새로 확장된 계약은 아직 검증되지 않았다는 뜻이다.
 - 기존 문서의 미구현 accepted work는 `029`부터 `035`의 owner spec으로 이관했다. `028`과 `029`는 scoped implementation을 완료했고, 남은 open owner table은 `030`부터 `035`를 따른다.
 - 기존 문서 본문의 future 문구는 역사와 설계 근거로 보존하지만, 구현 owner는 각 문서 상단의 `Open work moved to:` ledger와 새 spec을 따른다.
 - SaaS/admin/fleet, 멀티유저 조직 운영, remote marketplace, complete kernel isolation 같은 명시적 비목표는 신규 backlog로 승격하지 않았다.
@@ -24,12 +26,12 @@
 
 | Spec | Owner scope | Origin specs |
 |---|---|---|
-| `030-policy-permission-redaction-and-containment-model` | current distributed permission, approval, redaction, containment, diagnostics, read-only skill baseline, explicit non-guarantees | 004, 005, 007, 010, 011, 022, 023 |
-| `031-ui-projection-diagnostics-and-release-evidence-parity` | implemented shared projection, TUI/REPL/wizard, diagnostics parity, release runner; closure blocked by external owner audits | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
-| `032-app-maker-runtime-and-extension-lifecycle` | app supervisor, process lifecycle, App Maker apply/install, extension provenance | 005, 017, 021, 025 |
-| `033-evaluation-automation-live-integration` | evaluator, automation, self-improvement, replay의 live product integration | 009, 012, 013, 014, 016, 018, 022 |
-| `034-generated-media-and-rich-file-context-expansion` | Codex image, edit/streaming/remote output, video projection/analyzer | 004, 019, 027 |
-| `035-configuration-runtime-layout-and-execution-snapshots` | config migration, profiles, runtime layout, execution snapshots, context wiring | 008, 009, 010, 015, 026 |
+| `030-trusted-agent-runtime-and-operational-controls` | trusted local agent profile, extension-defined pre-tool veto, path-specific process controls, credential lifecycle, optional sandbox, resource/data disclosure | 004, 005, 007, 010, 011, 022, 023, 025 |
+| `031-ui-projection-diagnostics-and-release-evidence-parity` | implemented shared projection/TUI/REPL/wizard/release baseline; planned transport negotiation, snapshot-first reconnect, owner-backed goal/Tasks projection | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
+| `032-app-maker-runtime-and-extension-lifecycle` | AppSupervisor/process lifecycle, current-user authoring/apply/install, app-level activation provenance and blockers | 005, 017, 021, 025 |
+| `033-evaluation-automation-live-integration` | goal accounting, evaluator/automation, apply-time CAS self-improvement, snapshot-based replay의 live integration | 009, 012, 013, 014, 016, 018, 022 |
+| `034-generated-media-and-rich-file-context-expansion` | Codex image, edit/streaming/remote output, video analyzer, artifact/sandbox/data-disclosure evidence | 004, 019, 027 |
+| `035-configuration-runtime-layout-and-execution-snapshots` | config migration, profiles, runtime layout, immutable diagnostic execution snapshots, context wiring | 008, 009, 010, 015, 026 |
 
 ## 읽는 순서 권장
 
@@ -65,7 +67,7 @@
 27. `027-channel-attachment-intake-and-file-context`
 28. `028-formal-execution-reentry-and-outcome-contracts`
 29. `029-durable-runtime-recovery-and-data-migration`
-30. `030-policy-permission-redaction-and-containment-model`
+30. `030-trusted-agent-runtime-and-operational-controls`
 31. `031-ui-projection-diagnostics-and-release-evidence-parity`
 32. `032-app-maker-runtime-and-extension-lifecycle`
 33. `033-evaluation-automation-live-integration`
