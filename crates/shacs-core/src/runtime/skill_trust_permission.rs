@@ -150,10 +150,10 @@ pub fn blocked_skill_trust_external_surface(
 ) -> SkillTrustPermissionDecision {
     let owner = match action_kind {
         SkillTrustActionKind::DependencyPreparation => {
-            "spec032_skill_trust_lifecycle+spec035_trust_persistence"
+            "spec032_skill_trust_lifecycle+spec031_trust_persistence"
         }
         SkillTrustActionKind::VerifiedEntrypoint => {
-            "spec032_verified_entrypoint_lifecycle+spec035_execution_snapshot"
+            "spec032_verified_entrypoint_lifecycle+spec031_execution_snapshot"
         }
     };
     SkillTrustPermissionDecision {
@@ -162,7 +162,7 @@ pub fn blocked_skill_trust_external_surface(
         blocked_external_surface: Some(BlockedExternalSurface {
             status: "BLOCKED_EXTERNAL_SURFACE".to_owned(),
             owner: owner.to_owned(),
-            evidence_reason: "Spec032/Spec035 producer evidence is absent".to_owned(),
+            evidence_reason: "Spec032/Spec031 producer evidence is absent".to_owned(),
             reason: BlockedExternalSurfaceReason::MissingOwnerEvidence,
         }),
         dispatch_count: 0,

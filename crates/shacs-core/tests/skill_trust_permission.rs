@@ -143,7 +143,7 @@ fn production_skill_trust_surface_blocks_without_external_owner_evidence(
         BlockedExternalSurfaceReason::MissingOwnerEvidence
     );
     assert!(blocked.owner.contains("spec032"));
-    assert!(blocked.owner.contains("spec035"));
+    assert!(blocked.owner.contains("spec031"));
     Ok(())
 }
 
