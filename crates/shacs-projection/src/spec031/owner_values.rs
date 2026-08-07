@@ -16,7 +16,7 @@ pub(super) fn source_owner(family: Spec031FixtureFamily) -> Spec031SourceOwner {
         | Spec031FixtureFamily::Approval => Spec031SourceOwner::Spec030,
         Spec031FixtureFamily::Recovery => Spec031SourceOwner::Spec029,
         Spec031FixtureFamily::Delivery => Spec031SourceOwner::Channel,
-        Spec031FixtureFamily::Readiness => Spec031SourceOwner::Spec035,
+        Spec031FixtureFamily::Readiness => Spec031SourceOwner::Spec031,
         Spec031FixtureFamily::ExternalAppOwner => Spec031SourceOwner::Spec032,
         Spec031FixtureFamily::ExternalMediaOwner => Spec031SourceOwner::Spec034,
         Spec031FixtureFamily::Context
@@ -27,7 +27,7 @@ pub(super) fn source_owner(family: Spec031FixtureFamily) -> Spec031SourceOwner {
 
 pub(super) fn external_owner(family: Spec031FixtureFamily) -> Spec031SourceOwner {
     match family {
-        Spec031FixtureFamily::Readiness => Spec031SourceOwner::Spec035,
+        Spec031FixtureFamily::Readiness => Spec031SourceOwner::Spec031,
         Spec031FixtureFamily::ExternalAppOwner => Spec031SourceOwner::Spec032,
         Spec031FixtureFamily::ExternalMediaOwner => Spec031SourceOwner::Spec034,
         Spec031FixtureFamily::Session

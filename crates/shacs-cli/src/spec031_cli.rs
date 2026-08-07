@@ -100,7 +100,7 @@ impl Projection {
             Self::Session { .. } => Spec031SourceOwner::Session,
             Self::Subagent { .. } | Self::Tool { .. } => Spec031SourceOwner::Spec030,
             Self::Diagnostics { .. } => Spec031SourceOwner::Spec029,
-            Self::Readiness { .. } => Spec031SourceOwner::Spec035,
+            Self::Readiness { .. } => Spec031SourceOwner::Spec031,
             Self::App { .. } => Spec031SourceOwner::Spec032,
             Self::Media { .. } => Spec031SourceOwner::Spec034,
             Self::Progress { .. } => Spec031SourceOwner::Channel,
