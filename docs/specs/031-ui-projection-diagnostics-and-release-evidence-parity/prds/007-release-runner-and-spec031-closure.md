@@ -1,10 +1,10 @@
 # PRD 007. release runner and Spec 031 closure
 
-Status: Implemented, closure blocked
+Status: Planned revision (implemented baseline)
 
 ## Goal
 
-This PRD is the sole sequential integration and final closure gate for Spec 031. It orders PRDs 000 through 006 and defines the release runner, coverage matrix, lifecycle and projection parity smoke, failure triage, external-owner evidence, and exact conditions for closing Spec 031.
+This PRD is the sequential integration and final closure gate for Spec 031. It orders planned revisions 000 through 007, which retain implemented baselines, and unimplemented planned PRDs 008 through 009 before final closure. It defines the release runner, coverage matrix, lifecycle and projection parity smoke, failure triage, external-owner evidence, and exact conditions for closing Spec 031.
 
 This PRD defines no new domain state, projection vocabulary, interactive behavior, delivery guarantee, or external-owner evidence.
 
@@ -22,7 +22,7 @@ This PRD defines no new domain state, projection vocabulary, interactive behavio
 1. No Rust implementation is owned by this PRD except the release runner shell and artifact assembly defined here.
 2. No partial closure, manual approval, prose-only, grep-only, screenshot-only, or cargo-test-only proof is accepted.
 3. Missing required owner evidence from Specs 029, 030, 032, 033, 034, or 035 remains a hard closure blocker for the capabilities that consume it.
-4. This status task keeps all PRDs implemented but closure blocked and keeps parent Spec 031 `Status: Open`.
+4. This revision preserves implementation evidence for PRDs 000-007 without treating their revised contracts as implemented. PRDs 008-009 remain unimplemented planned work, and parent Spec 031 stays `Status: Open`.
 
 ## Dependency DAG
 
@@ -31,12 +31,16 @@ PRD000_shared_projection
   -> PRD001_surface_adapters
   -> PRD002_approval_progress_recovery
   -> PRD003_readiness_diagnostics
+  -> PRD008_transport_snapshot_reconnect
+  -> PRD009_goal_tasks_projection
 
 PRD001_surface_adapters
   -> PRD002_approval_progress_recovery
   -> PRD003_readiness_diagnostics
   -> PRD004_context_extension_app_media
   -> PRD006_backpressure_accounting
+  -> PRD008_transport_snapshot_reconnect
+  -> PRD009_goal_tasks_projection
 
 PRD002_approval_progress_recovery
   -> PRD005_interactive_flows
@@ -49,7 +53,13 @@ PRD003_readiness_diagnostics
 PRD004_context_extension_app_media
   -> PRD005_interactive_flows
 
-Spec030_approval_redaction_containment_facts
+PRD005_interactive_flows
+  -> PRD009_goal_tasks_projection
+
+PRD006_backpressure_accounting
+  -> PRD008_transport_snapshot_reconnect
+
+Spec030_trusted_runtime_operational_facts
   -> PRD002_approval_progress_recovery
   -> PRD003_readiness_diagnostics
   -> PRD005_interactive_flows
@@ -62,14 +72,23 @@ Spec034_media_analyzer_facts
 
 Spec029_recovery_delivery_facts
   -> PRD006_backpressure_accounting
+  -> PRD008_transport_snapshot_reconnect
 
 Spec033_automation_event_facts
   -> PRD006_backpressure_accounting
+  -> PRD009_goal_tasks_projection
 
-Spec035_config_secret_ref_facts
+Spec035_config_auth_source_snapshot_facts
   -> PRD005_interactive_flows
+  -> PRD008_transport_snapshot_reconnect
 
-PRD000..PRD006
+PRD008_transport_snapshot_reconnect
+  -> PRD007_final_closure
+
+PRD009_goal_tasks_projection
+  -> PRD007_final_closure
+
+PRD000..PRD006,PRD008..PRD009
   -> PRD007_final_closure
 
 Required_external_owner_fact_audits
@@ -80,7 +99,7 @@ Forbidden edges:
 
 1. PRD 007 cannot redefine PRD 000 through 006 contracts.
 2. Spec 031 cannot create domain truth owned by Specs 029, 030, 032, 033, or 034.
-3. Spec 031 cannot define config/profile/secret-ref persistence or execution snapshot truth owned by Spec 035.
+3. Spec 031 cannot define config/profile auth-source persistence or execution snapshot truth owned by Spec 035.
 4. External specs cannot depend on Spec 031 already being closed to produce their typed owner records. A local external read audit may pass while an external spec remains open only when the exact required owner facts and artifact-backed evidence exist; an external spec closure status is not required and cannot create a cycle.
 
 ## Implementation Waves
@@ -107,13 +126,21 @@ Owner: PRD 004. Exit: context/plugin/app/media reason parity passes and required
 
 ### Wave 5. Interactive surfaces
 
-Owner: PRD 005. Exit: live TUI, REPL command parity, and secret-ref-only onboard wizard QA pass.
+Owner: PRD 005. Exit: live TUI, REPL command parity, and credential-source/status-only onboard wizard QA pass.
 
 ### Wave 6. Delivery accounting
 
 Owner: PRD 006. Exit: slow consumer, reconnect, coalescing, drops, and final delivery accounting pass.
 
-### Wave 7. Release and closure
+### Wave 7. Transport and reconnect coherence
+
+Owner: PRD 008. Exit: capability matrix, unsupported-mutation preflight rejection, snapshot-first reconnect ordering, generation/gap accounting이 통과한다.
+
+### Wave 8. Goal and read-only Tasks projection
+
+Owner: PRD 009. Exit: goal accounting parity, owner locator coverage, CLI/API/TUI read-only Tasks view가 통과한다.
+
+### Wave 9. Release and closure
 
 Owner: PRD 007. Entry requires all prior exit evidence and external locators. Exit requires every gate below in one release ledger.
 
@@ -130,7 +157,9 @@ Owner: PRD 007. Entry requires all prior exit evidence and external locators. Ex
 | Must Have 7 | PRD 004 | Specs 032 and 034 owner facts where required |
 | Must Have 8 | PRD 003 | Component owner observations |
 | Must Have 9 | PRD 006 | Specs 029 and 033 owner facts where required |
-| Must Have 10 | PRD 007 | PRDs 000-006 artifacts |
+| Must Have 10 | PRD 007 | PRDs 000-006 and 008-009 artifacts |
+| Must Have 11-12 | PRD 008 | PRDs 000-001 and 006, Specs 029 and 035 facts |
+| Must Have 13 | PRD 009 | PRDs 000-001 and 005, Spec 033 goal facts |
 | Acceptance 1 schema contract | PRD 000 | PRD 001 adapter proof |
 | Acceptance 1 adapter proof | PRD 001 | PRD 000 schema |
 | Acceptance 2 | PRD 002 | PRD 005 interactive proof |
@@ -147,6 +176,10 @@ Owner: PRD 007. Entry requires all prior exit evidence and external locators. Ex
 | Closure Evidence 5 | PRD 001 | API/WebSocket/channel QA |
 | Closure Evidence 6 | PRD 006 | Deterministic accounting QA |
 | Closure Evidence 7-8 | PRD 007 | Release and documentation audits |
+| Acceptance 10-11 | PRD 008 | Capability matrix and snapshot-first reconnect proof |
+| Acceptance 12 | PRD 009 | Goal accounting and owner-locator Tasks proof |
+| Closure Evidence 9 | PRD 008 | Transport/reconnect artifacts |
+| Closure Evidence 10 | PRD 009 | Goal/Tasks parity artifacts |
 
 Shared acceptance rows name one primary contract owner and, where necessary, one proof consumer. This does not duplicate domain ownership.
 
@@ -155,11 +188,11 @@ Shared acceptance rows name one primary contract owner and, where necessary, one
 | External owner | Must prove | Required local read audit |
 |---|---|---|
 | Spec 029 | recovery, queue, reconnect, channel delivery facts consumed without reinterpretation | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md` |
-| Spec 030 | approval/policy/redaction/containment evidence remains authoritative and redacted | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md` |
+| Spec 030 | trusted runtime profile, hook denial, path-specific process controls, sandbox mode, credential status, resource diagnostics, and data disclosures are rendered without inventing safety guarantees | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md` |
 | Spec 032 | app lifecycle/readiness/receipt facts exist for app projection | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` |
-| Spec 033 | automation/event/coverage facts exist where release or drop projection consumes them | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` |
+| Spec 033 | goal id/state/stop reason/continuation budget owner facts and automation/event/coverage facts exist where PRD 009, release, or drop projection consumes them | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` |
 | Spec 034 | media/analyzer facts exist for media projection | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` |
-| Spec 035 | config/profile/secret-ref consumption facts exist for onboard projection without moving schema, migration, or persistence ownership into 031 | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` |
+| Spec 035 | config/profile auth-source and execution-snapshot facts exist for onboard projection without moving schema, migration, or persistence ownership into 031 | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` |
 
 A blocked external locator is useful implementation evidence but is not final `PASS`. Each passing locator records the source spec status observed by `Read`, exact owner-fact artifact paths, command transcripts where applicable, and an artifact-backed audit. It does not require the external spec itself to be closed.
 
@@ -168,11 +201,11 @@ Current machine verdict indexed by `.omo/evidence/spec031/prd007/task-21-spec031
 | External owner | Current verdict | Current locator | Current blocker |
 |---|---|---|---|
 | Spec 029 | PASS | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md` | None. |
-| Spec 030 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md` | Spec030 remains `Status: Open`; final closure evidence is absent. |
-| Spec 032 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` | Spec032 remains `Status: Open`; closure facts are absent. |
-| Spec 033 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` | Spec033 remains `Status: Open`; closure facts are absent. |
-| Spec 034 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` | Spec034 remains `Status: Open`; closure facts are absent. |
-| Spec 035 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` | Spec035 remains `Status: Open`; closure facts are absent. |
+| Spec 030 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md` | Required trusted-runtime owner-fact artifacts and adapter evidence are absent. |
+| Spec 032 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` | Required app/resource lifecycle owner-fact artifacts are absent. |
+| Spec 033 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` | Required automation/evaluation owner-fact artifacts are absent. |
+| Spec 034 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` | Required media/analyzer owner-fact artifacts are absent. |
+| Spec 035 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` | Required config/auth-source/execution-snapshot owner-fact artifacts are absent. |
 
 ## Release Runner Contract
 
@@ -210,7 +243,7 @@ cargo build --manifest-path crates/Cargo.toml --locked -p shacs-tui
 1. CLI: status, diagnostics, session, subagent, tool, approval, recover, context/plugin/app/media projection.
 2. TUI: active session, approval, progress, degraded health, recovery action, invalid input, cancellation.
 3. REPL: ordinary turn, shared command, priority command, malformed input, EOF.
-4. Onboard: valid, cancelled, and resumed flow with secret-ref audit.
+4. Onboard: valid, cancelled, and resumed flow with masked auth handoff and credential-source audit.
 5. API: health/readiness, diagnostics, session, subagent, and tool projections where supported.
 6. WebSocket/channel: subagent/tool events where supported, progress, final outcome, unsupported/skipped integration, reconnect/slow consumer.
 7. Lifecycle: local install/onboard/start/diagnose/stop/recover using an isolated workspace and recorded cleanup.
@@ -220,9 +253,13 @@ cargo build --manifest-path crates/Cargo.toml --locked -p shacs-tui
 | Failure | Required result |
 |---|---|
 | unknown projection schema/state | explicit parse or compatibility failure |
-| raw secret/path/payload/process output | rejected or redacted before artifact persistence |
+| raw secret/credential-bearing path or URL/payload/process output | rejected or projection-redacted before artifact persistence; no runtime-wide redaction claim |
 | missing owner evidence | unavailable/unknown or blocked, never success |
 | approval expiry/retry | lineage preserved, no silent allow |
+| ephemeral confirmation or hook veto | separate state; no durable approval or remembered allow |
+| unsupported transport mutation | rejected before side effect |
+| reconnect delta before snapshot or stale generation | rejected with visible gap/generation reason |
+| task row without owner locator | rejected or unavailable, never synthetic success |
 | stale checkpoint/marker | no recovery success claim |
 | slow consumer/queue full | backpressure/drop visible |
 | reconnect gap | gap visible, no lossless claim |
@@ -237,7 +274,7 @@ cargo build --manifest-path crates/Cargo.toml --locked -p shacs-tui
 Before closure, verify:
 
 1. No visual design system, mobile app, SaaS/admin dashboard, CI vendor, fleet operation, or multi-user control is introduced as a requirement.
-2. No text claims exactly-once delivery, complete redaction, kernel isolation, or process-alive readiness.
+2. No text claims exactly-once delivery, complete redaction, universal sandbox/process envelope, kernel isolation, durable confirmation, typed secret reference, resource-digest authorization, or process-alive readiness.
 3. Old owner specs link to 031 only for projection parity and release rendering; their closed domain contracts remain unchanged.
 4. `README.md` and `docs/USAGE.md` describe new TUI/REPL/onboard/readiness/release surfaces only after real surface QA passes.
 
@@ -245,7 +282,7 @@ Before closure, verify:
 
 Spec 031 may leave `Status: Open` and `docs/specs/README.md` may remove it from the open owner set only when:
 
-1. PRDs 000 through 006 have passing focused gates, real-surface QA, artifacts, and cleanup receipts.
+1. PRDs 000 through 006 and PRDs 008 through 009 have passing focused gates, real-surface QA, artifacts, and cleanup receipts.
 2. All external read audits required by implemented capabilities have local `PASS` and no blocked owner remains.
 3. The dependency DAG is acyclic and every parent requirement is mapped.
 4. Full workspace Cargo gates pass with the workspace manifest.
@@ -256,8 +293,8 @@ Spec 031 may leave `Status: Open` and `docs/specs/README.md` may remove it from 
 
 If any item is missing, Spec 031 remains `Status: Open`.
 
-Current result: the runner produced 56 coverage rows and all current Spec031-owned command/artifact rows are mapped. Spec029 external audit passes at `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md`. Specs030, 032, 033, 034, and 035 remain blocked at `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md`, `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md`, `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md`, `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md`, and `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md`, and `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/summary.md` reports `status: BLOCKED`. Therefore Spec031 remains `Status: Open`.
+Current result: the existing runner produced 56 coverage rows and all prior Spec031-owned command/artifact rows are mapped. PRD 008-009 evidence는 아직 없고, Spec029 external audit만 PASS다. Specs030, 032, 033, 034, 035 owner-fact audit도 blocked 상태이므로 현재 summary는 `status: BLOCKED`이며 Spec031은 `Status: Open`을 유지한다.
 
 ## Authoring Verification
 
-Todo22 changes documentation and status text only. It preserves implemented-but-closure-blocked PRD statuses and keeps the parent spec `Open` until the current-worktree release runner returns zero with every required external audit passing.
+이번 revision은 기존 implemented-but-closure-blocked PRD 증거를 보존하고 PRD 008-009를 planned work로 추가한다. Parent는 새 PRD와 모든 required external audit이 통과한 current-worktree release runner가 zero를 반환할 때까지 `Open`이다.

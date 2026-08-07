@@ -1,6 +1,6 @@
 # PRD 006. reconnect, backpressure, and drop accounting
 
-Status: Implemented, closure blocked
+Status: Planned revision (implemented baseline)
 
 ## Goal
 
@@ -32,6 +32,7 @@ Reconnect, bounded queue, slow consumer, coalesced progress, dropped progress, f
 1. Runtime/channel owners produce queue and delivery facts; this PRD owns accounting vocabulary and adapters.
 2. Progress and terminal outcome semantics from PRD 002 remain authoritative.
 3. Missing owner counters are `unavailable`; adapters must not manufacture zero.
+4. `final_delivered`는 해당 projection surface의 owner delivery observation일 뿐 사용자 수신, remote acknowledgement, exactly-once를 뜻하지 않는다. Tool completion, confirmation, TUI acknowledgement로 추론하지 않는다.
 
 ## Accounting Contract
 
