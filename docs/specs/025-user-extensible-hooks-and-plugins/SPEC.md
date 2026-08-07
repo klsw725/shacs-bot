@@ -2,8 +2,8 @@
 
 Status: Complete (Scoped)
 Implemented scope: The self-hosted local-manifest plugin scope is closed for manifest discovery, descriptor projection, safety diagnostics, management CLI, bounded hook dispatch, command-backed plugin tools, production MCP startup projection, read-only skill roots, plugin command routing, and replay rejection.
-Open work moved to: [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md).
-Not carried forward: Python in-process loading, pip or Nix distribution, hosted plugin marketplaces, organization governance, and unlimited provider-family expansion are outside 025.
+Open work moved to: [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md).
+Not carried forward: pip or Nix public distribution, hosted plugin marketplaces, organization governance, and unlimited provider-family expansion are outside 025. Trusted Python skill과 in-process JS/TS extension loading은 025를 다시 열지 않고 030이 별도 executable resource family로 소유한다.
 
 ## 문서 목적
 
@@ -17,7 +17,14 @@ Hermes reference에서 가져올 것은 다음 제품 의미론이다.
 - plugin은 tool, hook, command, bundled skill 같은 여러 표면을 제공할 수 있지만, 각 표면은 기존 owner boundary를 통과한다.
 - gateway startup hook처럼 agent turn 또는 side effect를 유발하는 hook은 사용자가 명시적으로 설치/활성화한 경우에만 동작한다.
 
-그대로 가져오지 않을 것은 Python in-process plugin loader, pip/Nix 배포 모델, hosted plugin marketplace, 조직/fleet governance, provider family 무제한 확장이다. 초기 구현은 로컬 manifest, command-backed hook/tool bridge, MCP/server declaration, Markdown skill bundle처럼 audit 가능한 extension부터 시작한다.
+025 범위에서 가져오지 않은 것은 Python in-process plugin loader, pip/Nix 배포 모델, hosted plugin marketplace, 조직/fleet governance, provider family 무제한 확장이다. 025의 닫힌 구현은 로컬 manifest, command-backed hook/tool bridge, MCP/server declaration, Markdown skill bundle이다. 이후 trusted in-process loader는 030이 별도 activation과 disclosure 계약으로 소유한다.
+
+### 030 handoff
+
+1. 025의 `tool:before` name, deterministic first-block ordering, normalized tool error, hook panic/timeout/invalid-output fail-open diagnostics는 030 PRD 001의 baseline이다.
+2. Command-backed manifest plugin은 025 owner에 남는다.
+3. Python skill과 in-process JS/TS extension은 030 owner이며 explicit config 또는 trusted workspace assertion 뒤에만 활성화한다.
+4. 030 extension이 command-backed 025 plugin과 충돌하면 030의 global precedence와 diagnostics를 따른다.
 
 ---
 
