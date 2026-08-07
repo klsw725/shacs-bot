@@ -1,15 +1,15 @@
 # PRD 000. shared projection model and vocabulary
 
-Status: Implemented, closure blocked
+Status: Planned revision (implemented baseline)
 
 ## Goal
 
-Spec 031의 모든 사용자 표면이 소비할 typed projection model과 bounded status vocabulary를 `shacs-projection` 안에 정의한다. 이 PRD는 owner runtime record를 읽기 위한 view contract만 소유하며 session, approval, queue, app, media 같은 domain truth나 transition을 새로 만들지 않는다.
+Spec 031의 모든 사용자 표면이 소비할 typed projection model과 bounded status vocabulary를 `shacs-projection` 안에 정의한다. 이 PRD는 owner runtime record를 읽기 위한 view contract만 소유하며 session, durable approval, ephemeral confirmation, hook denial, queue, app, media 같은 domain truth나 transition을 새로 만들지 않는다.
 
 ## Scope
 
-1. Session, turn, subagent, approval, tool, context, plugin, app, media, diagnostics, release evidence를 표현하는 공통 envelope와 item vocabulary.
-2. Projection status, reason, severity, freshness, lineage, redacted reference의 공통 표현.
+1. Session, turn, subagent, durable approval, ephemeral confirmation, hook denial, tool, trusted runtime, process control, sandbox, credential, resource/data disclosure, context, plugin, app, media, diagnostics, release evidence를 표현하는 공통 envelope와 item vocabulary.
+2. Projection status, reason, severity, freshness, lineage, safe reference와 disclosure의 공통 표현.
 3. owner record에서 projection으로 변환할 때의 provenance와 unavailable/unknown 처리.
 4. CLI, TUI, API, WebSocket, channel adapter가 재사용할 serialization contract.
 
@@ -39,7 +39,7 @@ The implementation must provide one shared envelope with at least:
 1. Schema version and projection kind.
 2. Bounded state and severity.
 3. Stable opaque subject ref and optional parent/action/digest lineage.
-4. Redacted reason code plus safe summary; raw payload is forbidden.
+4. Safe reason code plus summary; raw credential, credential-bearing URL, environment map, raw tool arguments/output는 projection payload에서 금지한다.
 5. Source owner and observed-at/freshness metadata sufficient to distinguish current, stale, unavailable, and unknown evidence.
 6. Optional child items and capability-specific details represented by typed variants, not arbitrary surface JSON.
 
@@ -49,6 +49,9 @@ Required bounded vocabularies:
 |---|---|
 | Common availability | `ready`, `degraded`, `blocked`, `unavailable`, `unknown` |
 | Approval | `pending`, `allowed`, `denied`, `expired`, `skipped`, `retry_consumed` |
+| Ephemeral execution decision | `confirmation_required`, `confirmation_allowed`, `confirmation_denied`, `headless_confirmation_denied`, `hook_denied` |
+| Sandbox/runtime control | `active`, `disabled`, `unsupported`, `failed`, `native_fallback`, `not_applicable` |
+| Disclosure | `safe_summary`, `redacted_for_surface`, `raw_content_possible_elsewhere`, `remote_trace_opt_in` |
 | Inclusion/result reason | `included`, `skipped`, `blocked`, `degraded`, `missing`, `unsupported`, `extraction_failed` |
 | Progress delivery | `live`, `coalesced`, `dropped`, `reconnected`, `final_delivered`, `final_pending`, `final_failed` |
 
@@ -57,15 +60,17 @@ Capability-specific states may be added only when an owner contract requires the
 ## Failure Rules
 
 1. Unknown enum values or unsupported schema versions fail parsing explicitly.
-2. Raw path, secret, provider payload, tool arguments, environment map, process handle, raw stdout, or raw stderr must not enter the projection envelope.
+2. Raw credential, credential-bearing URL, provider payload, tool arguments, environment map, process handle, raw stdout, or raw stderr must not enter the projection envelope. Owner가 제공한 safe/opaque resource reference와 disclosure status는 보존할 수 있다.
 3. Missing evidence must not become `ready`, `allowed`, `included`, `final_delivered`, or numeric zero.
 4. Projection serialization must not mutate or persist owner records.
+5. Approval vocabulary는 durable approval owner fact에만 적용한다. Confirmation, hook denial, tool call id, resource digest를 approval 또는 authorization proof로 승격하지 않는다.
+6. Projection redaction은 이 envelope의 serialization boundary이며 session/log/trace/tool output 전체의 secret-safety를 보장하지 않는다.
 
 ## Verification
 
 1. Add round-trip and unknown-version tests in `shacs-projection`.
 2. Add table tests proving every required vocabulary value serializes identically for all adapter-facing formats.
-3. Add redaction tests with secret, absolute path, raw payload, process handle, stdout, and stderr fixtures.
+3. Add projection-boundary disclosure/redaction tests with secret, credential-bearing path/URL, raw payload, process handle, stdout, and stderr fixtures.
 4. Characterize existing session/workflow projection behavior before migration; preserve domain meaning while replacing duplicate surface vocabulary.
 
 Focused commands:

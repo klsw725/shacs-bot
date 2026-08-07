@@ -1,6 +1,6 @@
 # PRD 001. surface adapter parity for CLI, API, WebSocket, and channels
 
-Status: Implemented, closure blocked
+Status: Planned revision (implemented baseline)
 
 ## Goal
 
@@ -50,13 +50,14 @@ Subagent projection must preserve parent lineage, progress, terminal result, inh
 1. An adapter cannot rename `degraded` to success, `unknown` to ready, or `dropped` to delivered.
 2. Omitted canonical fields fail parity unless the surface is documented as not supporting that capability.
 3. Channel text must not claim lossless delivery when progress was coalesced or dropped.
-4. API/CLI diagnostics must apply the same redaction pass before serialization or rendering.
+4. API/CLI diagnostics must apply the same projection disclosure/redaction policy before serialization or rendering. 이는 underlying session/log/trace의 complete redaction을 뜻하지 않는다.
+5. Sandbox `active`의 adapter scope, `trusted_native_fallback` warning, hook denial, ephemeral confirmation, raw-content disclosure는 adapter가 success/approval로 재해석하면 안 된다.
 
 ## Verification
 
 1. Add fixture-driven parity tests for every implemented surface, including subagent progress/result/ceiling/failure and tool execution/result/error/redaction.
 2. Test supported and unsupported surface/capability pairs explicitly.
-3. Test raw path, secret, provider payload, and process handle absence in every output.
+3. Test raw credential, credential-bearing path/URL, provider payload, and process handle absence in every projection output while preserving safe owner references and disclosure status.
 4. Exercise real CLI and API surfaces from an isolated workspace; exercise WebSocket and one configured external-channel fixture through existing channel boundaries.
 
 Focused commands:
