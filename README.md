@@ -100,7 +100,7 @@ curl http://127.0.0.1:8900/v1/readiness
 curl http://127.0.0.1:8900/v1/diagnostics
 ```
 
-Spec031 surface parity 범위에서 실제 QA를 통과한 표면은 TUI, `agent` REPL, secret-ref-only onboard wizard, readiness API/diagnostics, delivery hint projection, release runner artifact입니다. TUI는 live runtime projection을 읽어 session, approval, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 먼저 workspace template과 session store를 만들고, 표시할 session을 생성한 뒤 `--once` 또는 interactive TUI를 실행하세요:
+Spec 035 surface parity 범위에서 실제 QA를 통과한 표면은 TUI, `agent` REPL, secret-ref-only onboard wizard, readiness API/diagnostics, delivery hint projection, release runner artifact입니다. TUI는 live runtime projection을 읽어 session, approval, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 먼저 workspace template과 session store를 만들고, 표시할 session을 생성한 뒤 `--once` 또는 interactive TUI를 실행하세요:
 
 ```sh
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- onboard --workspace /tmp/shacs-ws
@@ -115,7 +115,7 @@ Message 없이 `agent`를 실행하면 같은 command router를 쓰는 REPL이 �
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- agent --workspace /tmp/shacs-ws
 ```
 
-Spec031 release runner는 machine-readable `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`과 human-readable `summary.md`를 씁니다. 현재 closure run은 Spec030/032/033/034/035 외부 owner evidence가 blocked라서 nonzero로 끝나야 합니다. Dirty worktree도 별도 triage로 기록되지만 외부 blocker를 가리지 않습니다. `success-fixture`는 runner 자체의 passing fixture이고, Spec031 closure 증거가 아닙니다:
+Spec 035 release runner는 machine-readable `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`과 human-readable `summary.md`를 씁니다. 현재 closure run은 Spec030/031/032/033/034 외부 owner evidence가 blocked라서 nonzero로 끝나야 합니다. Dirty worktree도 별도 triage로 기록되지만 외부 blocker를 가리지 않습니다. `success-fixture`는 runner 자체의 passing fixture이고, semantic Spec 035 closure 증거가 아닙니다. `spec031-release-runner`와 `spec031-*` 인자는 기존 호환성 식별자이므로 그대로 사용합니다:
 
 ```sh
 cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root . --mode current-worktree
