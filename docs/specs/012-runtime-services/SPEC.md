@@ -4,7 +4,7 @@ Status: Complete (Scoped)
 
 Implemented scope: 현재 구현은 process-local `MessageBus`, session turn lock, active task cancellation and status, command router priority, local API and WebSocket surface, channel worker wiring, process-local follow-up queue, and runtime metadata hints를 local runtime services scope로 지원한다.
 
-Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
+Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md), [035 UI projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
 
 Not carried forward: distributed task queue, multi-node leader election, organization inbox, operator dashboard, multi-tenant webhook fan-out, public webhook hosting obligation, multi-user task distribution, vendor-specific queue or cron dependency, 현재 지원 목록 밖의 추가 channel은 이 closure에 포함하지 않는다.
 

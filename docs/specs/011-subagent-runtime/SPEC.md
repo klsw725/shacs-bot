@@ -4,7 +4,7 @@ Status: Complete (Scoped)
 
 Implemented scope: 현재 구현은 `SubagentRuntime`, spawn tool wiring, child lifecycle and correlation, stale discard, synthetic inbound reentry, bounded parallelism, cancellation cleanup, and restricted child tool registry를 current subagent runtime scope로 지원한다.
 
-Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
+Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [035 ui projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
 
 Not carried forward: remote agent fleet management, agent marketplace, agent billing, multi-user shared task board, remote team inbox, agent-to-agent direct negotiation, distributed consensus, unified inherited policy/safety snapshot proof는 제품 범위에 넣지 않는다. 030은 child가 별도 security boundary가 아니라는 disclosure만 소유한다.
 

@@ -4,7 +4,7 @@ Status: Complete (Baseline)
 
 Implemented scope: 현재 구현은 workspace filesystem guard, shell command guard, network SSRF guard, auth and diagnostics redaction, oversized tool result redaction, MCP default-deny registration, and bounded subagent tool inheritance의 local host safety baseline을 지원한다.
 
-Open work moved to: [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [035 configuration runtime layout and execution snapshots](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md)
+Open work moved to: [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [031 configuration runtime layout and execution snapshots](../031-configuration-runtime-layout-and-execution-snapshots/SPEC.md)
 
 Not carried forward: admin approval chain, central secret vault, organization policy engine or distribution, remote operator console, universal capability evaluator, typed `SecretRef`, 전 표면 redaction guarantee는 030의 후속 계약으로 가져가지 않는다. 010의 닫힌 local guard/redaction baseline은 유지하고 030은 credential lifecycle과 raw-data disclosure만 소유한다.
 
