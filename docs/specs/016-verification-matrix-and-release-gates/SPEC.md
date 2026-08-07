@@ -4,7 +4,7 @@ Status: Complete (Baseline)
 
 Implemented scope: 현재 구현은 Cargo workspace verification commands, verification family language, spec coverage matrix, release gate and blocker vocabulary, waiver rules, and demo versus full implementation distinction을 release baseline으로 고정한다.
 
-Open work moved to: [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
+Open work moved to: [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md), [035 ui projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
 
 Not carried forward: 특정 CI service, branch strategy, human organization approval line, marketing release plan, external vendor certification은 release gate 계약에 넣지 않는다.
 

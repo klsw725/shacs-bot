@@ -2,7 +2,7 @@
 
 Status: Complete (Scoped)
 Implemented scope: The official Docker/Compose containment evidence lane, native unknown fallback, exec workspace narrowing and fail-closed behavior, MCP/subagent snapshot inheritance, and release evidence lane are closed.
-Open work moved to: [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md).
+Open work moved to: [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [035 UI projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md).
 Not carried forward: A complete kernel-level isolation guarantee, mandatory user-installed host sandbox runtime, privileged Docker-in-Docker default, and organization policy or fleet administration are outside the follow-up scope. The closed official Docker/Compose fail-closed lane remains unchanged; Spec 030 native fallback applies only to future optional/native adapters and does not weaken this lane.
 
 ## 문서 목적

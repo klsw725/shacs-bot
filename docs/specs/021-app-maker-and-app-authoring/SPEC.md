@@ -2,7 +2,7 @@
 
 Status: Complete (Baseline)
 Implemented scope: The safe `apps init` authoring draft baseline from PRD 000 is closed in this owner scope.
-Open work moved to: [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md).
+Open work moved to: [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md), [035 UI projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md).
 Not carried forward: Remote marketplace, organization-admin authoring approval, fleet rollout, visual widget design, and secret vault backend are outside this follow-up scope.
 
 ## 문서 목적
