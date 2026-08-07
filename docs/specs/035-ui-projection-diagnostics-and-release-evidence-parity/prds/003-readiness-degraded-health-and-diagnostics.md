@@ -25,7 +25,7 @@ Process liveness와 분리된 bounded readiness model을 만들고 provider auth
 2. `crates/shacs-cli/src/lib.rs`, `crates/shacs-api/src/lib.rs`, `crates/shacs-session/src/diagnostics.rs`.
 3. `crates/shacs-utils/src/diagnostics.rs`, `crates/shacs-utils/src/diagnostics_sanitizer.rs`.
 4. Spec 030 owner records for trusted runtime, process control, sandbox mode, credential status, resource loading, and data-disclosure evidence.
-5. Parent Spec 031 `Invariants` 6-7, `Must Have` 5 and 8, `Acceptance Criteria` 6.
+5. Parent Spec 035 `Invariants` 6-7, `Must Have` 5 and 8, `Acceptance Criteria` 6.
 
 ## Dependency Cut
 

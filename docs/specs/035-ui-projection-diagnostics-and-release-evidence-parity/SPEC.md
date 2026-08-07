@@ -1,4 +1,4 @@
-# 031. UI projection, diagnostics, and release evidence parity 아키텍처 명세
+# 035. UI projection, diagnostics, and release evidence parity 아키텍처 명세
 
 Status: Open
 
@@ -41,11 +41,11 @@ Origin specs: 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027
 10. 026은 context file discovery와 inline reference live provider handoff의 current scope를 닫았다.
 11. 027은 attachment intake, stored attachment, media context routing, analyzer handoff의 v1 scope를 닫았다.
 
-이 기준선은 표면 parity가 자동으로 닫혔다는 뜻이 아니다. 031은 닫힌 runtime 사실을 shared projection model로 묶고, interactive TUI/REPL/onboard wizard, approval/progress/recovery parity, readiness/degraded health, reconnect/backpressure/drop accounting, release runner evidence를 구현 범위로 받았다. Prime에서 선택한 transport negotiation, snapshot-first reconnect, read-only Tasks/goal projection은 새 planned scope다. 최종 closure는 planned scope와 아래 외부 owner evidence가 모두 통과할 때까지 열려 있다.
+이 기준선은 표면 parity가 자동으로 닫혔다는 뜻이 아니다. 035는 닫힌 runtime 사실을 shared projection model로 묶고, interactive TUI/REPL/onboard wizard, approval/progress/recovery parity, readiness/degraded health, reconnect/backpressure/drop accounting, release runner evidence를 구현 범위로 받았다. Prime에서 선택한 transport negotiation, snapshot-first reconnect, read-only Tasks/goal projection은 새 planned scope다. 최종 closure는 planned scope와 아래 외부 owner evidence가 모두 통과할 때까지 열려 있다.
 
 ## 소유하는 open scope
 
-031은 다음 계약을 소유한다.
+035는 다음 계약을 소유한다.
 
 1. CLI, TUI, local API, WebSocket, external channel이 공유하는 projection schema와 status vocabulary.
 2. Interactive TUI, REPL, onboard wizard의 command flow, validation, recovery, cancellation semantics.
@@ -58,7 +58,7 @@ Origin specs: 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027
 9. 기존 owner record locator를 모으는 read-only Tasks/goal projection. 별도 task DB나 mutation authority는 만들지 않는다.
 10. Release runner, coverage matrix, lifecycle smoke evidence, projection parity smoke, local install/start/diagnose/recover evidence.
 
-Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime state와 durable redaction을, 030은 trusted runtime profile·hook denial·process control·sandbox mode·credential status·resource/data disclosure를, AgentLoop/session은 durable approval lineage를, 032는 app/resource lifecycle state와 receipt를, 033은 evaluation/automation state와 coverage entry/review artifact를, 034는 media/analyzer state와 evidence를, 035는 config/profile auth source와 execution snapshot을 생산한다. 031은 그 상태를 CLI/TUI/API/channel에 투영하는 shared adapter, parity smoke, release runner shell만 소유한다.
+Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime state와 durable redaction을, 030은 trusted runtime profile·hook denial·process control·sandbox mode·credential status·resource/data disclosure를, AgentLoop/session은 durable approval lineage를, 031은 config/profile auth source와 execution snapshot을, 032는 app/resource lifecycle state와 receipt를, 033은 evaluation/automation state와 coverage entry/review artifact를, 034는 media/analyzer state와 evidence를 생산한다. 035는 그 상태를 CLI/TUI/API/channel에 투영하는 shared adapter, parity smoke, release runner shell만 소유한다.
 
 ## Invariants
 
@@ -72,7 +72,7 @@ Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime 
 8. Backpressure와 dropped event는 무음 처리하지 않는다.
 9. Release evidence는 실제 사용자 surface를 통과한 smoke 결과와 coverage locator를 가져야 한다.
 10. Projection parity는 visual design system 완료를 뜻하지 않는다.
-11. Spec 031 redaction은 사용자-facing projection serialization boundary에 한정된다. Session, log, trace, tool output, extension data 전체가 secret-safe하다고 주장하지 않고 raw-content 가능성과 disclosure status를 숨기지 않는다.
+11. Spec 035 redaction은 사용자-facing projection serialization boundary에 한정된다. Session, log, trace, tool output, extension data 전체가 secret-safe하다고 주장하지 않고 raw-content 가능성과 disclosure status를 숨기지 않는다.
 12. Resource source, precedence, collision, digest, enabled/readiness는 provenance와 load 결과다. Permission approval, malicious-code absence, sandbox proof가 아니다.
 13. Snapshot-first reconnect는 owner snapshot을 새 truth로 만들지 않으며, read-only Tasks view는 모든 row에 owner locator를 가져야 한다.
 
@@ -94,7 +94,7 @@ Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime 
 
 ## Must Not Have
 
-1. Visual design system, theme polish, layout system을 031 완료 조건으로 삼지 않는다.
+1. Visual design system, theme polish, layout system을 035 완료 조건으로 삼지 않는다.
 2. Mobile app을 기본 표면으로 추가하지 않는다.
 3. SaaS dashboard 또는 관리자 dashboard를 기본 projection owner로 두지 않는다.
 4. 특정 CI vendor 선택을 release evidence 계약에 넣지 않는다.
@@ -116,14 +116,14 @@ Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime 
 6. Readiness endpoint와 diagnostics command가 provider auth, storage, adapter별 sandbox/runtime control, channel worker, plugin/app readiness, queue health를 같은 severity로 표현한다.
 7. Interactive TUI, REPL, onboard wizard는 mocked data가 아니라 runtime projection source 또는 recorded release fixture를 소비한다.
 8. Release runner가 coverage matrix, lifecycle smoke, projection parity smoke, failure triage summary를 artifact로 남긴다.
-9. Closure evidence가 old specs의 closed scope와 충돌하지 않고, 031이 표면 parity의 새 owner임을 old specs가 링크할 수 있다.
+9. Closure evidence가 old specs의 closed scope와 충돌하지 않고, 035가 표면 parity의 새 owner임을 old specs가 링크할 수 있다.
 10. Handshake matrix가 supported/unsupported capability를 구분하고 unsupported mutation을 side effect 전에 거부한다.
 11. Reconnect test가 snapshot-before-delta ordering, generation mismatch rejection, connection-local backpressure/drop accounting을 검증한다.
 12. Tasks/goal view가 owner locator 없는 상태를 만들지 않고 CLI, local API, TUI에서 같은 goal id, stop reason, continuation budget을 보존한다.
 
 ## Source Handoff Table
 
-| Origin spec | 닫힌 범위 | 031로 넘어온 open 계약 |
+| Origin spec | 닫힌 범위 | 035로 넘어온 open 계약 |
 |---|---|---|
 | 001 session kernel | Turn lock, checkpoint, session recovery mapping | Session and recovery projection parity across surfaces |
 | 011 subagent runtime | Child runtime inheritance and tool restriction | Subagent progress, result, ceiling, failure projection parity |
@@ -139,7 +139,9 @@ Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime 
 
 ## Implementation PRDs
 
-Spec 031은 아래 PRD를 구현하고 검증한다. PRD 007은 새 domain contract를 정의하지 않는 sequential integration and closure gate이며, planned PRD 008-009의 evidence도 소비한다.
+Spec 035는 아래 PRD를 구현하고 검증한다. PRD 007은 새 domain contract를 정의하지 않는 sequential integration and closure gate이며, planned PRD 008-009의 evidence도 소비한다.
+
+이 스펙의 기존 구현 식별자와 증거 locator(`Spec031*`, `spec031.*`, `spec031-release-runner`, `.omo/evidence/spec031/**`)는 shipped compatibility surface이므로 재번호화하지 않는다. 문서의 semantic owner 번호와 탐색 경로만 035로 바꾼다.
 
 | PRD | Sole owner scope | Depends on |
 |---|---|---|
@@ -148,10 +150,10 @@ Spec 031은 아래 PRD를 구현하고 검증한다. PRD 007은 새 domain contr
 | [PRD 002](prds/002-approval-progress-and-recovery-parity.md) | Approval lineage, hook denial, progress/final distinction, recovery projection parity | PRDs 000-001, Spec 029, AgentLoop/session approval facts, Spec 030 hook facts |
 | [PRD 003](prds/003-readiness-degraded-health-and-diagnostics.md) | Component readiness, degraded health aggregation, diagnostics parity | PRDs 000-001, component owner observations |
 | [PRD 004](prds/004-context-extension-app-and-media-projection.md) | Context, plugin/hook, app, attachment/media projection and reason parity | PRDs 000-001, 003, Specs 032 and 034 evidence |
-| [PRD 005](prds/005-interactive-tui-repl-and-onboard-flows.md) | Interactive TUI, REPL command parity, onboard credential-source/readiness flows | PRDs 000-004, Specs 030 and 035 owner facts |
+| [PRD 005](prds/005-interactive-tui-repl-and-onboard-flows.md) | Interactive TUI, REPL command parity, onboard credential-source/readiness flows | PRDs 000-004, Specs 030 and 031 owner facts |
 | [PRD 006](prds/006-reconnect-backpressure-and-drop-accounting.md) | Reconnect, backpressure, coalescing, drop, final-delivery accounting | PRDs 000-002, Specs 029 and 033 evidence |
-| [PRD 007](prds/007-release-runner-and-spec031-closure.md) | Release runner, coverage/lifecycle/parity smoke, failure triage, final closure | PRDs 000-006, 008-009 and all required external evidence |
-| [PRD 008](prds/008-transport-capability-and-snapshot-first-reconnect.md) | 최소 capability negotiation, snapshot-first reconnect ordering | PRDs 000-001, 006, Specs 029 and 035 facts |
+| [PRD 007](prds/007-release-runner-and-spec035-closure.md) | Release runner, coverage/lifecycle/parity smoke, failure triage, final closure | PRDs 000-006, 008-009 and all required external evidence |
+| [PRD 008](prds/008-transport-capability-and-snapshot-first-reconnect.md) | 최소 capability negotiation, snapshot-first reconnect ordering | PRDs 000-001, 006, Specs 029 and 031 facts |
 | [PRD 009](prds/009-goal-and-read-only-tasks-projection.md) | Goal accounting parity와 owner-backed read-only Tasks view | PRDs 000-001, 005, Spec 033 facts |
 
 Current PRD status:
@@ -174,13 +176,13 @@ Dependency rules:
 1. PRD 000의 canonical vocabulary가 닫히기 전에 surface adapter가 private status contract를 추가하면 안 된다.
 2. PRD 001은 interactive flow를 소유하지 않고, PRD 005는 adapter/domain contract를 재정의하지 않는다.
 3. PRD 002의 terminal outcome 의미와 PRD 006의 delivery accounting은 분리한다. Progress drop과 final delivery는 동시에 참일 수 있다.
-4. Spec 030/032/033/034/035가 생산해야 하는 evidence가 없으면 해당 adapter는 blocked 또는 unavailable 상태와 safe reason을 기록할 수 있지만 Spec 031 final closure는 통과할 수 없다. Spec 030의 evidence는 trusted runtime profile, hook denial, ephemeral confirmation, adapter별 process control, sandbox mode/scope, credential status, resource diagnostics/data disclosure이며 durable approval, complete redaction, universal containment로 재해석하지 않는다.
+4. Spec 030/031/032/033/034가 생산해야 하는 evidence가 없으면 해당 adapter는 blocked 또는 unavailable 상태와 safe reason을 기록할 수 있지만 Spec 035 final closure는 통과할 수 없다. Spec 030의 evidence는 trusted runtime profile, hook denial, ephemeral confirmation, adapter별 process control, sandbox mode/scope, credential status, resource diagnostics/data disclosure이며 durable approval, complete redaction, universal containment로 재해석하지 않는다.
 5. PRD 008은 기존 002/015 schema fence를 재소유하지 않고 입증된 transport gap만 닫는다. PRD 009는 owner state를 읽기만 하며 별도 task store를 만들지 않는다.
 6. PRD 007의 dependency DAG, requirement mapping, real-surface QA, artifact-backed audit가 모두 통과하기 전에는 이 문서의 status를 변경하지 않는다.
 
 ## Closure Evidence
 
-031은 아래 증거가 모두 연결될 때 닫을 수 있다.
+035는 아래 증거가 모두 연결될 때 닫을 수 있다.
 
 1. Projection schema evidence: shared typed projection model과 status vocabulary가 표면별 adapter보다 안쪽에 있다.
 2. CLI evidence: status, diagnostics, approval, recover, context/plugin/app/media projection command가 shared model을 출력한다.
@@ -189,7 +191,7 @@ Dependency rules:
 5. API and channel evidence: local API, WebSocket, external channel reply가 같은 projection status와 redacted reason을 보존한다.
 6. Backpressure evidence: reconnect, slow consumer, bounded queue, coalesced progress, dropped event counter, final outcome delivery case가 테스트된다.
 7. Release evidence: release runner artifact가 coverage matrix, lifecycle smoke, projection parity smoke, failure triage, command locator를 포함한다.
-8. Documentation evidence: old specs가 031을 open owner로 링크해도 UI mock, SaaS dashboard, mobile app, CI vendor 선택으로 범위가 넓어지지 않는다.
+8. Documentation evidence: old specs가 035를 open owner로 링크해도 UI mock, SaaS dashboard, mobile app, CI vendor 선택으로 범위가 넓어지지 않는다.
 9. Transport/reconnect evidence: capability matrix와 snapshot-before-delta ordering이 실제 adapter surface에서 검증된다.
 10. Goal/Tasks evidence: CLI, local API, TUI가 동일 goal accounting과 owner-backed read-only task rows를 표시한다.
 
@@ -204,6 +206,6 @@ The current closure evidence is indexed by `.omo/evidence/spec031/prd007/task-21
 | Spec 032 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` | Required app/resource lifecycle owner-fact artifacts are absent. |
 | Spec 033 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` | Required automation/evaluation owner-fact artifacts are absent. |
 | Spec 034 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` | Required media/analyzer owner-fact artifacts are absent. |
-| Spec 035 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` | Required config/auth-source/execution-snapshot owner-fact artifacts are absent. |
+| Spec 031 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` | Required config/auth-source/execution-snapshot owner-fact artifacts are absent. The historical artifact filename remains unchanged. |
 
-Release runner locator: `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/summary.md` reports `status: BLOCKED`. `failure-triage.json` lists `triage/dirty-worktree.json` and `triage/blocked-external-evidence.json`; the dirty state is recorded but does not mask the external evidence blocker. The success fixture at `.omo/evidence/spec031/prd007/task-20-spec031-implementation/success-fixture-final-20260804-05/summary.md` proves the runner can pass an isolated fixture, not that Spec031 closure has passed.
+Release runner locator: `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/summary.md` reports `status: BLOCKED`. `failure-triage.json` lists `triage/dirty-worktree.json` and `triage/blocked-external-evidence.json`; the dirty state is recorded but does not mask the external evidence blocker. The success fixture at `.omo/evidence/spec031/prd007/task-20-spec031-implementation/success-fixture-final-20260804-05/summary.md` proves the runner can pass an isolated fixture, not that semantic Spec 035 closure has passed.

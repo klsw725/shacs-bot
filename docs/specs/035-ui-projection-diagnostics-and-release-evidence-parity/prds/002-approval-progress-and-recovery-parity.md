@@ -24,7 +24,7 @@ Durable approval lifecycle, Spec 030의 ephemeral confirmation과 hook denial, p
 
 1. PRDs 000 and 001.
 2. `crates/shacs-session/src/lib.rs`, `crates/shacs-session/src/diagnostics.rs`, `crates/shacs-core/tests/runtime_loop.rs`, `crates/shacs-core/tests/runtime_agent.rs`.
-3. Parent Spec 031 `Invariants` 3-5, `Must Have` 3 and 6, `Acceptance Criteria` 2 and 4.
+3. Parent Spec 035 `Invariants` 3-5, `Must Have` 3 and 6, `Acceptance Criteria` 2 and 4.
 4. Spec 029 owner records for durable recovery and channel restart state.
 5. AgentLoop/session owner records for durable approval lineage, plus Spec 030 owner records for ephemeral hook denial and trusted runtime operational status.
 

@@ -4,7 +4,7 @@ Status: Planned revision (implemented baseline)
 
 ## Goal
 
-Spec 031의 모든 사용자 표면이 소비할 typed projection model과 bounded status vocabulary를 `shacs-projection` 안에 정의한다. 이 PRD는 owner runtime record를 읽기 위한 view contract만 소유하며 session, durable approval, ephemeral confirmation, hook denial, queue, app, media 같은 domain truth나 transition을 새로 만들지 않는다.
+Spec 035의 모든 사용자 표면이 소비할 typed projection model과 bounded status vocabulary를 `shacs-projection` 안에 정의한다. 이 PRD는 owner runtime record를 읽기 위한 view contract만 소유하며 session, durable approval, ephemeral confirmation, hook denial, queue, app, media 같은 domain truth나 transition을 새로 만들지 않는다.
 
 ## Scope
 
@@ -21,14 +21,14 @@ Spec 031의 모든 사용자 표면이 소비할 typed projection model과 bound
 
 ## SPEC Inputs
 
-1. Parent Spec 031의 `Invariants`, `Must Have` 1-2, `Acceptance Criteria` 1, `Closure Evidence` 1.
+1. Parent Spec 035의 `Invariants`, `Must Have` 1-2, `Acceptance Criteria` 1, `Closure Evidence` 1.
 2. Existing projection roots: `crates/shacs-projection/src/projection.rs`, `crates/shacs-projection/src/diagnostics_release.rs`.
 3. Existing domain projections: `crates/shacs-session/src/lib.rs`, `crates/shacs-session/src/diagnostics.rs`, `crates/shacs-workflow/src/lib.rs`.
 4. Redaction boundary: `crates/shacs-redaction/src/lib.rs`, `crates/shacs-utils/src/diagnostics_sanitizer.rs`.
 
 ## Dependency Cut
 
-1. This is the foundation PRD and has no Spec 031 predecessor.
+1. This is the foundation PRD and has no Spec 035 predecessor.
 2. Existing owner records remain authoritative. Missing owner evidence maps to `unavailable` or `unknown`; it must not be fabricated as success, empty, or zero.
 3. PRDs 001 through 007 consume this contract and must not add private surface-only status names.
 

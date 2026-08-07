@@ -25,7 +25,7 @@ Reconnect, bounded queue, slow consumer, coalesced progress, dropped progress, f
 1. PRDs 000 through 002 and PRD 001 adapter harness.
 2. `crates/shacs-bus/src/lib.rs`, `crates/shacs-core/tests/runtime_agent.rs`, `crates/shacs-core/tests/runtime_loop.rs`, `crates/shacs-channels/src/lib.rs`.
 3. Spec 029 reconnect/delivery owner evidence and Spec 033 automation/event evidence when produced.
-4. Parent Spec 031 `Invariants` 4 and 8, `Must Have` 9, `Acceptance Criteria` 3, `Closure Evidence` 6.
+4. Parent Spec 035 `Invariants` 4 and 8, `Must Have` 9, `Acceptance Criteria` 3, `Closure Evidence` 6.
 
 ## Dependency Cut
 

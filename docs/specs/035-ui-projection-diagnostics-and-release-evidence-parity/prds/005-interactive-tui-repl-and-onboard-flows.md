@@ -25,15 +25,15 @@ TUI, REPL, and onboard wizard surfaces consume actual runtime projection and the
 1. PRDs 000 through 004.
 2. `crates/shacs-tui/src/lib.rs`, `crates/shacs-tui/src/main.rs`, `crates/shacs-tui/src/remembered_permissions.rs`.
 3. Existing command routing and onboard baseline in `crates/shacs-cli/src/lib.rs`.
-4. Spec 030 credential status and raw-data disclosure contract, plus Spec 035 config/profile auth-source declaration owner contract.
-5. Parent Spec 031 `Must Have` 3-6, `Acceptance Criteria` 2, 4, 6, and 7, `Closure Evidence` 3-4.
+4. Spec 030 credential status and raw-data disclosure contract, plus Spec 031 config/profile auth-source declaration owner contract.
+5. Parent Spec 035 `Must Have` 3-6, `Acceptance Criteria` 2, 4, 6, and 7, `Closure Evidence` 3-4.
 
 ## Dependency Cut
 
 1. TUI and REPL consume PRD 000 projection and existing shared command semantics.
-2. Onboard consumes Spec 030 credential status/disclosure facts and Spec 035 config/profile auth-source facts; it does not define config schema or migration, become a secret store, promise central redaction, or become an app/plugin lifecycle owner.
+2. Onboard consumes Spec 030 credential status/disclosure facts and Spec 031 config/profile auth-source facts; it does not define config schema or migration, become a secret store, promise central redaction, or become an app/plugin lifecycle owner.
 3. Recorded release fixtures may drive deterministic tests, but final QA must also consume a live runtime projection source.
-4. `runtime.surface_approval` is only the Spec031 surface IPC transport for TUI/REPL approval button decisions. Its durable work terminal means the runtime owner applied, rejected, superseded, or failed that transport request; it is not permission allow/deny truth. Approval truth remains the `AgentLoop`/session owner facts for the approval lineage. The request `target_owner_id` is an internal owner-generation fence and must not be displayed or documented as a user-facing owner identity.
+4. `runtime.surface_approval` is only the Spec 035 surface IPC transport for TUI/REPL approval button decisions. Its durable work terminal means the runtime owner applied, rejected, superseded, or failed that transport request; it is not permission allow/deny truth. Approval truth remains the `AgentLoop`/session owner facts for the approval lineage. The request `target_owner_id` is an internal owner-generation fence and must not be displayed or documented as a user-facing owner identity.
 5. Spec 030 confirmation은 별도 ephemeral surface event다. Headless confirmation-required step은 auto-allow하지 않고 blocked/denied로 표시하며 `runtime.surface_approval` lineage에 저장하지 않는다. Hook veto도 approval denial로 변환하지 않는다.
 6. `remembered_permissions.rs` 같은 기존 artifact가 남아 있어도 Spec 030 trusted-runtime closure나 confirmation surface의 필수 보장으로 재사용하지 않는다.
 

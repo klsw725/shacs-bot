@@ -26,13 +26,13 @@ Context files, inline references, plugins, hooks, apps, attachments, generated/u
 2. `crates/shacs-core/src/runtime/context_diagnostics.rs`, `context_handoff.rs`, `context_safety.rs`.
 3. Existing CLI plugin/app/context surfaces in `crates/shacs-cli/src/lib.rs`.
 4. Spec 025 plugin/hook evidence, Spec 026 context evidence, Spec 027 attachment baseline, Specs 032 and 034 external owner contracts.
-5. Parent Spec 031 `Must Have` 4 and 7, `Acceptance Criteria` 5.
+5. Parent Spec 035 `Must Have` 4 and 7, `Acceptance Criteria` 5.
 
 ## Dependency Cut
 
 1. PRD 000 owns canonical vocabulary, PRD 001 owns adapter parity, PRD 003 owns readiness aggregation.
 2. Spec 032 owns app state and receipts; Spec 034 owns media/analyzer state and evidence.
-3. Missing external owner evidence is canonical state `blocked` or `unavailable` with safe reason code `missing_external_owner_evidence`; such a result cannot satisfy final Spec 031 closure.
+3. Missing external owner evidence is canonical state `blocked` or `unavailable` with safe reason code `missing_external_owner_evidence`; such a result cannot satisfy final Spec 035 closure.
 
 ## Projection Requirements
 

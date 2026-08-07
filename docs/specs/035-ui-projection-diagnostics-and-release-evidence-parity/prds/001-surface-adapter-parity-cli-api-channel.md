@@ -24,7 +24,7 @@ CLI output, local API responses, WebSocket events, and implemented external chan
 1. PRD 000 shared projection contract.
 2. `crates/shacs-cli/src/lib.rs`, `crates/shacs-api/src/lib.rs`, `crates/shacs-channels/src/lib.rs`.
 3. API dependency boundary in `crates/shacs-api/Cargo.toml` and CLI integration boundary in `crates/shacs-cli/Cargo.toml`.
-4. Parent Spec 031 `Must Have` 2, `Acceptance Criteria` 1, `Closure Evidence` 2 and 5.
+4. Parent Spec 035 `Must Have` 2, `Acceptance Criteria` 1, `Closure Evidence` 2 and 5.
 
 ## Dependency Cut
 

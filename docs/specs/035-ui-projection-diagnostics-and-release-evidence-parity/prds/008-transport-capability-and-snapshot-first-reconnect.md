@@ -25,7 +25,7 @@ Status: Planned
 2. Unsupported mutation은 runtime effect가 시작되기 전에 `unsupported` 또는 `blocked`로 끝나야 한다.
 3. Reconnect client는 owner snapshot과 generation을 확정하기 전 delta를 적용하지 않는다.
 4. Snapshot 이후에는 같은 generation에서 monotonic하게 관찰된 delta만 적용한다. Gap, stale generation, duplicate sequence는 명시적으로 표시한다.
-5. Snapshot은 connection bootstrap evidence이며 Spec 035 execution snapshot이나 session truth가 아니다.
+5. Snapshot은 connection bootstrap evidence이며 Spec 031 execution snapshot이나 session truth가 아니다.
 
 ## Acceptance Criteria
 
