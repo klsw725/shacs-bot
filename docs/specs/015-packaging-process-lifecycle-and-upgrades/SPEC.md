@@ -4,7 +4,7 @@ Status: Complete (Baseline)
 
 Implemented scope: 현재 구현은 Cargo and Docker local packaging path, `runtime start`, `runtime stop`, `runtime restart`, `runtime update`, `runtime recover`, ownership and stop/update markers, schema compatibility admission, and current no-op migration diagnostics evidence를 local lifecycle baseline으로 지원한다.
 
-Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [035 configuration runtime layout and execution snapshots](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md)
+Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [031 configuration runtime layout and execution snapshots](../031-configuration-runtime-layout-and-execution-snapshots/SPEC.md), [035 ui projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
 
 Not carried forward: OS package manager support, systemd, launchd, or Docker supervisor detail, organization deployment system, web installer, SaaS hosted updater, remote rolling upgrade, fleet management는 이 baseline에 포함하지 않는다.
 

@@ -4,7 +4,7 @@ Status: Complete (Scoped)
 
 Implemented scope: 현재 구현은 CLI session commands, `shacs-session` UX projection and query model, local API session query, WebSocket chat and streaming surface, command router, runtime loop command handling, and static web helper를 current interface scope로 지원한다.
 
-Open work moved to: [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
+Open work moved to: [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md), [035 ui projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
 
 Not carried forward: 특정 TUI widget library, HTTP framework or WebSocket frame 선택, branding or theme design, remote multi-client editing UX, mobile app, browser SaaS console, external channel adapter internals는 이 closure에 포함하지 않는다.
 

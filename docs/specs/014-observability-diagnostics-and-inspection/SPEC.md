@@ -4,7 +4,7 @@ Status: Complete (Baseline)
 
 Implemented scope: 현재 구현은 local status, runtime inspect, runtime diagnostics bundle, session diagnostics projection, runtime marker projection, shared redaction, and progress evidence helper를 self-hosted local diagnostics baseline으로 지원한다.
 
-Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
+Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md), [035 ui projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
 
 Not carried forward: remote observability SaaS, organization or admin dashboard, time-series metrics platform, SOC or audit portal, multi-tenant APM, distributed trace aggregation, long-term performance analytics product strategy는 self-hosted local baseline 밖에 둔다.
 
