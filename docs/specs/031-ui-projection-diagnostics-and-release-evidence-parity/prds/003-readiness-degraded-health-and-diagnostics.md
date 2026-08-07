@@ -1,10 +1,10 @@
 # PRD 003. readiness, degraded health, and diagnostics parity
 
-Status: Implemented, closure blocked
+Status: Planned revision (implemented baseline)
 
 ## Goal
 
-Process liveness와 분리된 bounded readiness model을 만들고 provider auth, storage, containment, channel worker, plugin/app readiness, queue health를 CLI diagnostics와 local API에서 같은 severity와 redacted reason으로 표시한다.
+Process liveness와 분리된 bounded readiness model을 만들고 provider auth, storage, adapter별 sandbox/runtime control, channel worker, plugin/app readiness, queue health를 CLI diagnostics와 local API에서 같은 severity와 safe reason으로 표시한다.
 
 ## Scope
 
@@ -15,7 +15,7 @@ Process liveness와 분리된 bounded readiness model을 만들고 provider auth
 
 ## Non Scope
 
-1. Provider authentication, storage repair, containment enforcement, channel supervision, plugin/app lifecycle 자체를 구현하지 않는다.
+1. Provider authentication, storage repair, sandbox/runtime-control enforcement, channel supervision, plugin/app lifecycle 자체를 구현하지 않는다.
 2. Process alive를 ready로 승격하지 않는다.
 3. Hosted monitoring, fleet health, administrator dashboard를 추가하지 않는다.
 
@@ -24,12 +24,12 @@ Process liveness와 분리된 bounded readiness model을 만들고 provider auth
 1. PRDs 000 and 001.
 2. `crates/shacs-cli/src/lib.rs`, `crates/shacs-api/src/lib.rs`, `crates/shacs-session/src/diagnostics.rs`.
 3. `crates/shacs-utils/src/diagnostics.rs`, `crates/shacs-utils/src/diagnostics_sanitizer.rs`.
-4. Spec 030 owner records for redaction and containment evidence.
+4. Spec 030 owner records for trusted runtime, process control, sandbox mode, credential status, resource loading, and data-disclosure evidence.
 5. Parent Spec 031 `Invariants` 6-7, `Must Have` 5 and 8, `Acceptance Criteria` 6.
 
 ## Dependency Cut
 
-1. Component owners supply observations; this PRD owns only projection and aggregation. Spec 030 remains the redaction and containment evidence owner.
+1. Component owners supply observations; this PRD owns only projection and aggregation. Spec 030 supplies trusted-runtime operational evidence and explicit non-guarantees, not universal redaction or containment truth.
 2. Missing external-owner observations remain `unknown` or `unavailable` and block final closure where the capability is required.
 3. PRD 004 adds context/extension/media component details; PRD 005 consumes readiness in interactive flows.
 
@@ -51,14 +51,15 @@ Required component families:
 |---|---|
 | provider auth | configured provider/auth readiness without raw credential |
 | storage | event/checkpoint/migration/space admission evidence |
-| containment | current containment evidence and non-guarantee |
+| sandbox/runtime controls | trusted profile, adapter-specific process control, sandbox mode/scope, fallback status, non-guarantee |
+| resource/data disclosure | source/provenance, trusted-code disclosure, raw-content/remote-trace status |
 | channel worker | configured, running, skipped, failed, restart/delivery hint |
 | plugin/app | discovery, enabled state, dependency/lifecycle readiness when owner exists |
 | queue | bounded depth/capacity, admission block, stale work summary |
 
 ## Failure Rules
 
-1. Raw token, env value, absolute path, owner id, PID, provider payload, or queue payload is forbidden.
+1. Raw token, env value, credential-bearing path/URL, owner id, PID, provider payload, or queue payload is forbidden. Safe opaque owner/resource references are allowed.
 2. `/health` success alone cannot prove component readiness.
 3. Diagnostics bundle and API must not disagree on component severity for the same observation set.
 4. A remediation hint cannot claim an action already succeeded.
@@ -66,7 +67,7 @@ Required component families:
 ## Verification
 
 1. Table-test all aggregation combinations and stale observations.
-2. Test absent credentials, blocked migration, unknown containment, failed channel, disabled plugin, unavailable app owner, and queue admission block.
+2. Test absent credentials, blocked migration, sandbox disabled/unsupported/failed, trusted native fallback, failed channel, disabled plugin, unavailable app owner, and queue admission block.
 3. Compare CLI, API, and bundle canonical fields from one fixture.
 4. Audit redaction and non-guarantee wording.
 
@@ -86,7 +87,7 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-api --all-targe
 1. Create one ready, one degraded, and one blocked isolated workspace fixture.
 2. Run CLI status and diagnostics, request API readiness/diagnostics, and create a diagnostics bundle for each.
 3. Read the artifacts and compare component state, severity, reason code, freshness, and remediation hint.
-4. Verify cleanup and absence of raw secrets/paths/process handles.
+4. Verify cleanup, projection-boundary raw secret/process-handle absence, and explicit raw-content-possible disclosure.
 
 ## Closure Evidence
 

@@ -1,10 +1,10 @@
 # PRD 004. context, extension, app, and media projection
 
-Status: Implemented, closure blocked
+Status: Planned revision (implemented baseline)
 
 ## Goal
 
-Context files, inline references, plugins, hooks, apps, attachments, generated/uploaded media, analyzer 결과의 owner evidence를 shared projection으로 변환하고 모든 지원 표면에서 inclusion/reason 의미와 redaction을 보존한다.
+Context files, inline references, plugins, hooks, apps, attachments, generated/uploaded media, analyzer 결과의 owner evidence를 shared projection으로 변환하고 모든 지원 표면에서 inclusion/reason, provenance, trusted-code, data-disclosure 의미를 보존한다.
 
 ## Scope
 
@@ -40,9 +40,9 @@ Context files, inline references, plugins, hooks, apps, attachments, generated/u
 |---|---|---|
 | context file | opaque ref, source kind, order, budget/result summary | included, skipped, blocked, missing |
 | inline reference | opaque ref, resolver kind, result summary | included, unsupported, extraction_failed, blocked |
-| plugin/hook | opaque extension ref, enabled/readiness state, safe diagnostic | ready, degraded, blocked, unavailable |
+| plugin/hook | opaque extension ref, source/provenance, precedence/collision/parse, trusted-code disclosure, enabled/readiness state, safe diagnostic | ready, degraded, blocked, unavailable |
 | app | opaque app ref, lifecycle/readiness state, receipt ref when owner provides it | ready, degraded, blocked, missing, unsupported |
-| attachment/media | opaque artifact ref, media kind, analysis/result summary | included, skipped, unsupported, extraction_failed, blocked |
+| attachment/media | opaque artifact ref, provenance kind, analysis/result summary, credential source status, analyzer source/trust, sandbox scope/status, data-disclosure status, remote-output mode | included, skipped, unsupported, extraction_failed, blocked |
 
 Reason codes must remain canonical across CLI, TUI, API, WebSocket, and channel presentation. Human summaries may differ only in formatting.
 
@@ -53,6 +53,8 @@ Reason codes must remain canonical across CLI, TUI, API, WebSocket, and channel 
 3. A blocked item cannot disappear from aggregate readiness or context diagnostics.
 4. Absolute host paths and raw URLs containing credentials fail redaction tests.
 5. Plugin/app/media output text cannot change permission or readiness state.
+6. Enabled/readiness, resource digest, redaction status는 permission approval, malicious-code absence, sandbox proof, complete redaction proof가 아니다.
+7. Hook veto는 `hook_denied`로 보존하고 durable approval denial로 변환하지 않는다.
 
 ## Verification
 
@@ -90,6 +92,6 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-core --all-targ
 ## Exit Criteria
 
 1. Every capability preserves canonical reason and opaque lineage.
-2. Raw path, secret, payload, and process output are absent.
+2. Projection payload에서 raw credential, credential-bearing path/URL, payload, process output은 빠지고 safe owner reference와 raw-content disclosure는 보존된다.
 3. Missing external-owner evidence remains a visible closure blocker.
 4. Focused gates and real-surface QA pass.
