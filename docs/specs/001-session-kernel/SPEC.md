@@ -2,7 +2,7 @@
 
 Status: Complete (Scoped)
 Implemented scope: 현재 구현의 `AgentLoop`, `AgentRunner`, `SessionManager`, `SessionTurnLock`, `runtime_checkpoint`, `pending_user_turn` marker를 session kernel과 turn lifecycle의 current architecture로 매핑하고 recovery evidence 경계를 닫았다.
-Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [031 ui projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
+Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [035 ui projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md)
 Not carried forward: 분산 실행, 멀티유저 동기화, 다중 오케스트레이터 협상, 별도 durable `TurnState`와 formal phase enum은 001 완료 범위에 포함하지 않는다.
 
 ## 문서 목적

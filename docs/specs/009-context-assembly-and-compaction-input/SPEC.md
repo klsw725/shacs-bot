@@ -2,7 +2,7 @@
 
 Status: Complete (Scoped)
 Implemented scope: `ContextBuilder`, memory, recent history, skill and media message injection, compaction, auto compact, runner message governance, provider shaping의 current context assembly 경계를 닫았다.
-Open work moved to: [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md), [035 configuration runtime layout and execution snapshots](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md)
+Open work moved to: [031 configuration runtime layout and execution snapshots](../031-configuration-runtime-layout-and-execution-snapshots/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md)
 Not carried forward: advanced semantic retrieval, multi-session ranking, UI reasoning display, multi-user context policy를 후속 owner 범위로 가져가지 않는다.
 
 ## 문서 목적

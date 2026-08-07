@@ -2,7 +2,7 @@
 
 Status: Complete (Scoped)
 Implemented scope: `.shacs-bot/config.json`, `.shacs-bot/auth.json`, JSON config loader, env placeholder resolution, auth store, path helper, current runtime dirs, skill discovery 연결을 current configuration/runtime layout으로 닫았다.
-Open work moved to: [035 configuration runtime layout and execution snapshots](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md)
+Open work moved to: [031 configuration runtime layout and execution snapshots](../031-configuration-runtime-layout-and-execution-snapshots/SPEC.md)
 Not carried forward: GUI config editor, remote config sync, cloud secret manager, multi-user RBAC, cluster runtime layout, marketplace profile distribution을 후속 owner 범위로 가져가지 않는다.
 
 ## 문서 목적
