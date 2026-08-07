@@ -33,7 +33,7 @@ Status: Complete (Scoped). `shacs-session/src/durable_trace.rs`의 formal durabl
 
 1. 필수 선행 PRD: `001-checkpoint-tail-replay-and-corruption-admission.md`, `002-durable-work-queue-scheduler-retry-and-cancellation.md`, `003-channel-restart-state-and-conservative-delivery.md`, `004-durable-child-task-recovery.md`
 2. Current diagnostics baseline: `../../014-observability-diagnostics-and-inspection/SPEC.md`
-3. Unified redaction과 typed secret ref의 owner는 `../../030-policy-permission-redaction-and-containment-model/SPEC.md`다.
+3. Trusted-runtime session/log/trace disclosure owner는 `../../030-trusted-agent-runtime-and-operational-controls/SPEC.md`다. 이 PRD의 durable redaction boundary는 029의 닫힌 계약으로 유지한다.
 
 ## Dependency Cut
 
@@ -41,8 +41,8 @@ Status: Complete (Scoped). `shacs-session/src/durable_trace.rs`의 formal durabl
 2. Trace record 누락은 replay fact를 삭제하지 않는다.
 3. Diagnostics export는 stored raw secret을 전제로 하지 않는다.
 4. Absolute host path와 transport/process handle은 public projection에서 제외한다.
-5. 이 PRD는 새 redaction taxonomy나 secret classification을 정의하지 않는다. 현재 shared redaction boundary를 소비하고, 030 구현 뒤에는 같은 typed model을 사용한다.
-6. 030 완료 여부와 무관하게 029 durable writer는 redaction boundary를 반드시 호출해야 하지만, 030의 policy/secret model 자체를 029 closure로 주장하지 않는다.
+5. 이 PRD는 새 redaction taxonomy나 secret classification을 정의하지 않는다. 현재 shared redaction boundary를 그대로 소비하며, 030의 raw-content disclosure가 이 durable projection을 약화시키지 않는다.
+6. 030 완료 여부와 무관하게 029 durable writer는 redaction boundary를 반드시 호출해야 하지만, 030의 trusted-runtime credential/data-disclosure model 자체를 029 closure로 주장하지 않는다.
 
 ## 구현 요구사항
 
