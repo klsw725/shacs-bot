@@ -1,10 +1,10 @@
-# PRD 005. sequential integration and Spec 035 closure
+# PRD 005. sequential integration and Spec 031 closure
 
 Status: Planned
 
 ## Goal
 
-PRD 000-004를 migration/layout/snapshot/context/activation flow로 통합하고 Spec 035 parent requirement와 closure evidence를 완전히 검증한다.
+PRD 000-004를 migration/layout/snapshot/context/activation flow로 통합하고 Spec 031 parent requirement와 closure evidence를 완전히 검증한다.
 
 ## Scope
 
@@ -59,4 +59,4 @@ Primary parent requirements owned by this PRD:
 1. Requirement/DAG and compatibility audit.
 2. End-to-end migration/layout/snapshot/context/activation transcript.
 3. External owner-fact audits and documentation evidence.
-4. Final Spec035 closure summary with commands, failures and cleanup receipts.
+4. Final Spec031 closure summary with commands, failures and cleanup receipts.

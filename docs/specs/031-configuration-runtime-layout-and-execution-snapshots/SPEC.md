@@ -1,4 +1,4 @@
-# 035. configuration runtime layout and execution snapshots 아키텍처 명세
+# 031. configuration runtime layout and execution snapshots 아키텍처 명세
 
 Status: Open
 
@@ -6,9 +6,9 @@ Origin specs: 008, 009, 010, 015, 026
 
 ## 문서 목적
 
-이 문서는 008, 009, 010, 015, 026이 구현 완료 범위를 닫은 뒤에도 남아 있는 configuration, runtime layout, execution snapshot 작업의 새 owner boundary를 고정한다. 008은 현재 `.shacs-bot/config.json`, `.shacs-bot/auth.json`, JSON config loader, env placeholder, legacy migration, path helper, current runtime dirs를 닫았다. 009는 현재 context assembly와 compaction input mapping을 닫았고, formal snapshot과 tokenizer-aware budget은 남겼다. 010은 local safety와 inspect redaction baseline을 닫았다. 030은 raw auth store lifecycle과 credential source resolution/status를 소유하고, 035는 config/profile source declaration schema와 migration을 소유한다. 015는 local process lifecycle baseline을 닫았고, config/profile stored-data transform migration과 더 엄격한 runtime directory ownership은 남겼다. Durable runtime family migration과 writable-start admission은 029가 소유한다. 026은 context files와 inline references의 CLI/core handoff를 닫았고, explicit config-provided extra context file live wiring은 닫지 않았다.
+이 문서는 008, 009, 010, 015, 026이 구현 완료 범위를 닫은 뒤에도 남아 있는 configuration, runtime layout, execution snapshot 작업의 새 owner boundary를 고정한다. 008은 현재 `.shacs-bot/config.json`, `.shacs-bot/auth.json`, JSON config loader, env placeholder, legacy migration, path helper, current runtime dirs를 닫았다. 009는 현재 context assembly와 compaction input mapping을 닫았고, formal snapshot과 tokenizer-aware budget은 남겼다. 010은 local safety와 inspect redaction baseline을 닫았다. 030은 raw auth store lifecycle과 credential source resolution/status를 소유하고, 031은 config/profile source declaration schema와 migration을 소유한다. 015는 local process lifecycle baseline을 닫았고, config/profile stored-data transform migration과 더 엄격한 runtime directory ownership은 남겼다. Durable runtime family migration과 writable-start admission은 029가 소유한다. 026은 context files와 inline references의 CLI/core handoff를 닫았고, explicit config-provided extra context file live wiring은 닫지 않았다.
 
-035의 목적은 이 잔여 작업을 하나의 실행 계약으로 묶는 것이다. 핵심은 schema-versioned config migration, profiles and auth source declarations, formal runtime directory ownership, config/context/provider execution snapshot과 030 trusted-runtime owner-fact reference, immutable diagnostic provenance, tokenizer-aware budget, explicit extra context config live wiring이다. Snapshot은 authorization이나 current live source truth가 아니다.
+031의 목적은 이 잔여 작업을 하나의 실행 계약으로 묶는 것이다. 핵심은 schema-versioned config migration, profiles and auth source declarations, formal runtime directory ownership, config/context/provider execution snapshot과 030 trusted-runtime owner-fact reference, immutable diagnostic provenance, tokenizer-aware budget, explicit extra context config live wiring이다. Snapshot은 authorization이나 current live source truth가 아니다.
 
 이 문서는 JSON 호환성을 보존한다. 명시적 migration 결정과 증거가 있기 전까지 TOML을 요구하지 않는다. TOML layered config가 더 낫다는 결정이 필요하다면, 사용자 데이터 호환성, migration path, rollback, tooling impact, 테스트 evidence가 먼저 있어야 한다.
 
@@ -22,15 +22,15 @@ Origin specs: 008, 009, 010, 015, 026
 4. 현재 provider 설정은 `ProviderConfig`의 `api_key`, `api_base`, `extra_headers`, `extra_body`를 중심으로 한다.
 5. 현재 context assembly는 `ContextBuilder`, memory, recent history, skill, media message, runner-side governance, provider shaping으로 구성된다.
 6. 현재 token governance는 formal `TokenBudget`이 아니라 compaction, microcompact, snip history, provider별 shaping이 나눠 가진 책임이다.
-7. 현재 credential handling과 projection redaction은 env placeholder, auth store, CLI auth, inspect, diagnostics 등 여러 지점에 분산되어 있다. 030은 raw credential lifecycle과 data disclosure를 소유하고 035는 declaration/reference만 저장한다.
+7. 현재 credential handling과 projection redaction은 env placeholder, auth store, CLI auth, inspect, diagnostics 등 여러 지점에 분산되어 있다. 030은 raw credential lifecycle과 data disclosure를 소유하고 031은 declaration/reference만 저장한다.
 8. 현재 lifecycle은 ownership marker, stop request marker, update marker, runtime inspect, recover baseline을 가진다.
 9. 현재 context file discovery는 default workspace/current-directory context files와 inline references를 live provider handoff에 연결하지만, explicit config-provided extra context files의 live wiring은 닫힌 범위가 아니다.
 
-이 기준선은 폐기 대상이 아니다. 035는 기존 JSON config와 current runtime layout을 끊지 않고, schema와 snapshot 계약을 그 위에 추가하는 방향이어야 한다.
+이 기준선은 폐기 대상이 아니다. 031은 기존 JSON config와 current runtime layout을 끊지 않고, schema와 snapshot 계약을 그 위에 추가하는 방향이어야 한다.
 
-## 035가 소유하는 열린 범위
+## 031이 소유하는 열린 범위
 
-035는 다음 작업을 소유한다.
+031은 다음 작업을 소유한다.
 
 1. Schema-versioned config format과 migration entrypoint.
 2. JSON compatibility-preserving migration과 rollback/recover evidence.
@@ -64,7 +64,7 @@ Origin specs: 008, 009, 010, 015, 026
 2. Migration은 dry run, apply, interrupted marker, recover path를 가져야 한다.
 3. JSON config file은 기존 사용자가 계속 읽을 수 있어야 하며, migration 없이는 TOML만 요구하면 안 된다.
 4. Profile model은 provider, trusted runtime, context 설정을 구분해야 한다.
-5. Config/profile의 auth field는 env, local auth store, literal, command-backed source 중 지원 source locator/declaration을 schema-versioned로 저장하고 030 runtime resolution에 전달해야 한다. 030이 precedence와 status를 결정하고 035는 non-secret result ref만 snapshot에 기록한다.
+5. Config/profile의 auth field는 env, local auth store, literal, command-backed source 중 지원 source locator/declaration을 schema-versioned로 저장하고 030 runtime resolution에 전달해야 한다. 030이 precedence와 status를 결정하고 031은 non-secret result ref만 snapshot에 기록한다.
 6. Runtime layout은 config, auth, sessions, media, logs, channels, skills, cache, tmp, snapshots 같은 directory ownership을 공식 문서와 code helper에서 일치시켜야 한다.
 7. Execution snapshot은 schema version/time, config source와 migration state, profile selection, trusted runtime profile ref, adapter-specific sandbox mode/fallback, credential source kind/status/fingerprint, context sources와 inclusion/truncation, selected tool/resource identities, resource activation refs, provider/model/shaping version, tokenizer/budget, data-disclosure warning, replay contract, provenance digest를 포함해야 한다. Selected identity는 capability grant가 아니다.
 8. Snapshot immutability test는 adapter가 snapshot 밖 source를 다시 읽지 않는지 확인해야 한다.
@@ -76,7 +76,7 @@ Origin specs: 008, 009, 010, 015, 026
 
 ## Must Not Have
 
-1. GUI config editor를 035 완료 조건으로 삼으면 안 된다.
+1. GUI config editor를 031 완료 조건으로 삼으면 안 된다.
 2. Cloud secret manager나 hosted vault를 요구하면 안 된다.
 3. Remote config sync를 요구하면 안 된다.
 4. Multi-user RBAC, admin workflow, 조직 정책 배포를 요구하면 안 된다.
@@ -86,7 +86,7 @@ Origin specs: 008, 009, 010, 015, 026
 8. Provider adapter가 snapshot 생성 뒤 config, policy, context source를 다시 읽으면 안 된다.
 9. Budget overflow를 silent drop으로 처리하면 안 된다.
 10. Explicit extra context files가 configured source precedence, path resolution, trusted-resource disclosure, token budget을 우회하면 안 된다.
-11. Resource activation record의 구체적인 storage path나 dependency 설치 directory를 035 closure 조건으로 고정하지 않는다. 035는 schema, ownership, mutation admission, snapshot provenance만 소유한다.
+11. Resource activation record의 구체적인 storage path나 dependency 설치 directory를 031 closure 조건으로 고정하지 않는다. 031은 schema, ownership, mutation admission, snapshot provenance만 소유한다.
 12. `PolicySafetySnapshot`, centralized permission snapshot, capability ceiling, action/snapshot authorization correlation을 execution snapshot으로 재도입하지 않는다.
 13. Snapshot id/digest를 permission grant, durable approval, remembered allow, replay authorization으로 사용하지 않는다.
 14. Ephemeral confirmation을 snapshot에 durable approval로 저장하거나 replay 시 auto-allow에 사용하지 않는다.
@@ -129,7 +129,7 @@ Snapshot은 중앙 permission/safety decision, durable approval, replay authoriz
 
 1. 032는 resource install proposal, app-level activation lifecycle transition/linkage, inspect/disable/revoke domain contract를 소유한다.
 2. 030은 activation eligibility, activated executable skill/extension의 trusted-code disclosure, resource precedence, dependency execution gate, load diagnostics를 소유한다.
-3. 035는 activation record의 schema version, persistence, migration, owner-safe mutation, execution snapshot reference를 소유한다.
+3. 031은 activation record의 schema version, persistence, migration, owner-safe mutation, execution snapshot reference를 소유한다.
 4. Activation record persistence에는 activation source, workspace trust ref, resource/source identity, content digest, dependency manifest digest, active/stale/disabled/revoked/removed status와 reason이 포함돼야 한다. 이 값은 immutable diagnostic provenance이지 permission grant나 verified-entrypoint authorization이 아니다.
 5. Raw credential, full environment, executable retry payload는 resource activation record에 저장하지 않는다.
 6. 구체적인 activation storage path와 dependency 설치 위치는 이 handoff에서 정의하지 않는다.
@@ -137,10 +137,10 @@ Snapshot은 중앙 permission/safety decision, durable approval, replay authoriz
 ## Open-owner handoff
 
 1. 030은 trusted runtime profile, sandbox adapter state, raw auth lifecycle, credential resolution/status, executable-resource eligibility와 data disclosure의 live truth다.
-2. 031은 config/profile/auth-source/snapshot fact를 CLI/TUI/API에 투영하고 unknown/unavailable을 안전으로 추론하지 않는다.
-3. 032는 app/resource install과 lifecycle transition을 소유하며 035는 persistence와 snapshot ref만 소유한다.
-4. 033 evaluator/automation/replay는 035 snapshot을 input evidence로 소비하되 authorization으로 재사용하지 않는다.
-5. 034 rich media/context는 source identity, digest, budget/truncation provenance를 제공하고 035가 snapshot에 기록한다.
+2. 035는 config/profile/auth-source/snapshot fact를 CLI/TUI/API에 투영하고 unknown/unavailable을 안전으로 추론하지 않는다.
+3. 032는 app/resource install과 lifecycle transition을 소유하며 031은 persistence와 snapshot ref만 소유한다.
+4. 033 evaluator/automation/replay는 031 snapshot을 input evidence로 소비하되 authorization으로 재사용하지 않는다.
+5. 034 rich media/context는 source identity, digest, budget/truncation provenance를 제공하고 031이 snapshot에 기록한다.
 
 ## Source Handoff Table
 
@@ -149,8 +149,8 @@ Snapshot은 중앙 permission/safety decision, durable approval, replay authoriz
     <tr>
       <th>Source spec</th>
       <th>닫힌 범위</th>
-      <th>035로 넘어온 범위</th>
-      <th>035의 처리 원칙</th>
+      <th>031로 넘어온 범위</th>
+      <th>031의 처리 원칙</th>
     </tr>
   </thead>
   <tbody>
@@ -170,13 +170,13 @@ Snapshot은 중앙 permission/safety decision, durable approval, replay authoriz
       <td>010 host safety permissions and secrets</td>
       <td>Local safety baseline, redaction points, auth handling, MCP default-deny</td>
       <td>030-owned credential source precedence의 config/profile consumption, status-only inspect, snapshot disclosure</td>
-      <td>Credential lifecycle과 raw auth store persistence·raw-data disclosure는 030이 소유하고, 035는 config/profile source-declaration persistence, migration, snapshot reference를 소유한다.</td>
+      <td>Credential lifecycle과 raw auth store persistence·raw-data disclosure는 030이 소유하고, 031은 config/profile source-declaration persistence, migration, snapshot reference를 소유한다.</td>
     </tr>
     <tr>
       <td>015 packaging process lifecycle and upgrades</td>
       <td>Local lifecycle baseline, ownership marker, update marker, recover baseline</td>
       <td>Config/profile transform migration과 schema marker, formal runtime directory ownership</td>
-      <td>Config/profile migration과 layout admission을 같은 evidence chain으로 설명하고, durable runtime family migration과 writable-start admission은 이미 닫힌 029 boundary를 소비한다. 035는 029 closure의 선행 조건이 아니다.</td>
+      <td>Config/profile migration과 layout admission을 같은 evidence chain으로 설명하고, durable runtime family migration과 writable-start admission은 이미 닫힌 029 boundary를 소비한다. 031은 029 closure의 선행 조건이 아니다.</td>
     </tr>
     <tr>
       <td>026 context files and inline references</td>
@@ -189,7 +189,9 @@ Snapshot은 중앙 permission/safety decision, durable approval, replay authoriz
 
 ## Implementation PRDs
 
-Spec 035는 config migration에서 runtime layout, immutable snapshot, context budget, activation persistence와 final closure까지 아래 단계로 구현한다. 각 PRD는 자신의 schema/evidence를 완결하며 외부 spec의 `Complete` 상태를 요구하지 않는다.
+Spec 031은 config migration에서 runtime layout, immutable snapshot, context budget, activation persistence와 final closure까지 아래 단계로 구현한다. 각 PRD는 자신의 schema/evidence를 완결하며 외부 spec의 `Complete` 상태를 요구하지 않는다.
+
+재번호화 이후 새 config writer는 `spec031-config-profile` owner와 `sha256:spec031-open` staleness token을 생성한다. 이미 저장된 `spec035-config-profile` owner와 `sha256:spec035-open` token은 persisted compatibility data로 계속 읽지만 새 데이터에는 생성하지 않는다.
 
 | PRD | Sole owner scope | Depends on |
 |---|---|---|
@@ -198,7 +200,7 @@ Spec 035는 config migration에서 runtime layout, immutable snapshot, context b
 | [PRD 002](prds/002-immutable-execution-snapshot-and-provenance.md) | Config/context/provider snapshot, trusted-runtime refs, immutability | PRD 000, Spec 030 fact contract |
 | [PRD 003](prds/003-token-budget-and-explicit-context-wiring.md) | Tokenizer-aware budget, truncation evidence, explicit extra-context live wiring | PRDs 000/002, 009/026 baselines |
 | [PRD 004](prds/004-activation-persistence-replay-and-diagnostics.md) | Activation persistence/migration, snapshot refs, diagnostic-only replay | PRDs 000/002, Specs 030/032 fact contracts |
-| [PRD 005](prds/005-sequential-integration-and-spec035-closure.md) | Migration/layout/snapshot/context/activation integration과 final Spec035 closure | PRDs 000-004, required owner-fact audits |
+| [PRD 005](prds/005-sequential-integration-and-spec031-closure.md) | Migration/layout/snapshot/context/activation integration과 final Spec031 closure | PRDs 000-004, required owner-fact audits |
 
 Current PRD status:
 
@@ -220,7 +222,7 @@ Dependency rules:
 
 ## Closure Evidence
 
-035를 닫으려면 아래 증거가 같은 변경 안에 있어야 한다.
+031을 닫으려면 아래 증거가 같은 변경 안에 있어야 한다.
 
 1. Config schema version, migration runner, migration marker, recover path를 검증하는 테스트.
 2. JSON compatibility와 env placeholder preservation을 검증하는 회귀 테스트.
@@ -235,4 +237,4 @@ Dependency rules:
 11. 닫는 문서에는 구현 파일, 테스트 이름, migration compatibility 판단, snapshot immutability evidence, TOML 결정 여부가 함께 기록되어야 한다.
 12. Executable resource activation schema, migration, mutation admission, inspect/disable/revoke, snapshot provenance evidence가 032 lifecycle 및 030 activation-eligibility/trusted-runtime evidence와 연결되고 permission provenance를 만들지 않아야 한다.
 
-현재 이 문서는 Open 상태다. 위 evidence가 없으면 035의 범위를 구현 완료로 닫을 수 없다.
+현재 이 문서는 Open 상태다. 위 evidence가 없으면 031의 범위를 구현 완료로 닫을 수 없다.
