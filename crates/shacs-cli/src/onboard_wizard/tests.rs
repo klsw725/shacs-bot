@@ -26,12 +26,20 @@ fn onboard_wizard_completes_with_secret_ref_and_owner_facts() -> Result<(), Box<
     let report = outcome.wizard_report.as_ref().ok_or("missing report")?;
     assert_eq!(report.status, OnboardWizardStatus::Complete);
     assert!(report.external_owner_facts.iter().any(
-        |fact| fact.owner == "spec035" && fact.reason_code == "missing_external_owner_evidence"
+        |fact| fact.owner == "spec031" && fact.reason_code == "missing_external_owner_evidence"
     ));
     let saved: Value = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     assert_eq!(
         saved["providers"]["openrouter"]["apiKeyRef"]["locator"]["name"],
         json!("OPENROUTER_API_KEY")
+    );
+    assert_eq!(
+        saved["providers"]["openrouter"]["apiKeyRef"]["owner"],
+        json!("spec031-config-profile")
+    );
+    assert_eq!(
+        saved["providers"]["openrouter"]["apiKeyRef"]["staleness_token"],
+        json!("sha256:spec031-open")
     );
     assert!(!fs::read_to_string(&config_path)?.contains("sk-live-secret"));
     let rendered = format_onboard_outcome(outcome);
@@ -185,7 +193,7 @@ fn onboard_wizard_owner_facts_are_canonical_missing_external_evidence() {
         .any(|fact| fact.owner == "spec030" && fact.capability == "approval"));
     assert!(facts
         .iter()
-        .any(|fact| fact.owner == "spec035" && fact.capability == "readiness"));
+        .any(|fact| fact.owner == "spec031" && fact.capability == "readiness"));
     assert!(facts
         .iter()
         .all(|fact| fact.state == "unavailable"

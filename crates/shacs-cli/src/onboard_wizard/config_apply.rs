@@ -112,10 +112,10 @@ fn secret_ref_value(provider: &str, env_var: &str) -> Value {
         "kind": "secret_ref", "schema_version": 1,
         "ref_id": format!("sec_onboard_{}_{}", provider.replace('-', "_"), env_var.to_ascii_lowercase()),
         "source_kind": "env", "locator": {"kind": "env_var", "name": env_var},
-        "owner": "spec035-config-profile", "scope": "provider-auth",
+        "owner": "spec031-config-profile", "scope": "provider-auth",
         "created_by": "onboard-wizard", "created_at_ms": crate::now_millis(),
         "locator_digest": format!("sha256:{:x}", Sha256::digest(format!("env:{env_var}").as_bytes())),
-        "staleness_token": "sha256:spec035-open", "safe_summary": {"label": format!("env:{env_var}"), "required": true}
+        "staleness_token": "sha256:spec031-open", "safe_summary": {"label": format!("env:{env_var}"), "required": true}
     })
 }
 

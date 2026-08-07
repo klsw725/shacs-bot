@@ -33,7 +33,7 @@ pub(crate) fn lines(config_path: &Path, workspace: &Path) -> Vec<String> {
 }
 
 pub(crate) fn external_owner_facts() -> Vec<OnboardWizardExternalOwnerFact> {
-    [spec030_absence(), spec035_absence()]
+    [spec030_absence(), spec031_absence()]
         .into_iter()
         .filter_map(Result::ok)
         .filter_map(|envelope| serde_json::to_value(envelope).ok())
@@ -62,7 +62,7 @@ fn spec030_absence(
     })
 }
 
-fn spec035_absence(
+fn spec031_absence(
 ) -> Result<shacs_projection::Spec031Envelope, shacs_projection::Spec031ConstructionError> {
     spec031_project_owner_record(Spec031OwnerRecordProjectionInput {
         family: Spec031FixtureFamily::Readiness,
@@ -72,7 +72,7 @@ fn spec035_absence(
             "action:readiness:external-owner",
         )?),
         digest: None,
-        owner: Spec031SourceOwner::Spec035,
+        owner: Spec031SourceOwner::Spec031,
         observed_at_unix_ms: None,
         freshness: Spec031Freshness::Unavailable,
         state: Spec031Availability::Unavailable,
