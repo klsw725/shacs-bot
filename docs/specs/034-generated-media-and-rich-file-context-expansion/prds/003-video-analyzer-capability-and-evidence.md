@@ -37,5 +37,5 @@ Video analyzer capability와 bounded metadata/subtitle/transcript/keyframe/scene
 
 1. Analyzer capability/status matrix.
 2. Codec/duration/truncation fixtures.
-3. 030/031/035 owner-fact and projection audits.
+3. 030/031 owner-fact and 035 projection audits.
 4. Bounded-evidence non-guarantee review.

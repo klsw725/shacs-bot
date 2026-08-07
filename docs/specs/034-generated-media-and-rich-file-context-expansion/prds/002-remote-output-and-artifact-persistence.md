@@ -31,11 +31,11 @@ Remote URL provider output을 safe local artifact, safe non-persisted reference,
 1. Private/link-local/loopback, redirect, scheme, byte/MIME, credential forwarding cases use exact owner evidence and fail closed.
 2. Persisted/reference/rejected outcomes remain distinct and user-visible.
 3. Metadata records relative path, digest, provider/model, source ids, retention and disclosure status without raw credential/URL payload.
-4. Replay reads 035 snapshot and recorded artifact evidence only.
+4. Replay reads 031 snapshot and recorded artifact evidence only.
 
 ## Closure Evidence
 
 1. Remote-output policy and SSRF handoff matrix.
 2. Persistence/provenance/retention tests.
-3. Specs 030/035 owner-fact audits.
+3. Specs 030/031 owner-fact audits.
 4. Replay no-live-URL transcript.

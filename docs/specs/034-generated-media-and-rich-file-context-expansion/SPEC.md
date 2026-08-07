@@ -34,9 +34,9 @@ Origin specs: 004, 019, 027
 3. Partial streaming images의 event 처리, 중간 산출물 표시, final artifact 확정 규칙.
 4. Provider가 remote URL output을 반환할 때의 다운로드, 거절, persisted reference 정책.
 5. Generated artifact persistence의 metadata, retention, provenance, replay, diagnostics 계약.
-6. Video analyzer/media domain state vocabulary, evidence와 projection input의 최소 필드. Local API/inspect/channel adapter parity는 031이 소유한다.
+6. Video analyzer/media domain state vocabulary, evidence와 projection input의 최소 필드. Local API/inspect/channel adapter parity는 035가 소유한다.
 7. Video analyzer capability의 provider/tool/runtime abstraction, bounded evidence, failure reason.
-8. Media/analyzer evidence가 030 credential·trusted-resource·sandbox·raw-content disclosure와 035 execution snapshot을 참조하는 계약.
+8. Media/analyzer evidence가 030 credential·trusted-resource·sandbox·raw-content disclosure와 031 execution snapshot을 참조하는 계약.
 
 이 범위는 019의 generated image 계약과 027의 inbound attachment 계약을 함께 소비한다. Generated artifact는 agent가 만든 산출물이고, stored attachment는 사용자가 보낸 입력이다. 두 종류가 같은 media root 아래 있을 수 있어도 provenance와 lifecycle은 섞이면 안 된다.
 
@@ -53,7 +53,7 @@ Origin specs: 004, 019, 027
 9. Generated artifact와 inbound attachment는 id namespace, metadata kind, diagnostics label에서 구분되어야 한다.
 10. 004의 tool runtime 경계를 우회해 provider나 analyzer가 session truth를 직접 수정하면 안 된다.
 11. Media-root admission과 path traversal 방지는 artifact path contract이지 전체 filesystem/process containment가 아니다.
-12. Analyzer는 trusted executable resource일 수 있다. Activation/source disclosure는 030, config/snapshot은 035를 소비하며 analyzer가 안전하거나 sandboxed라고 자동 추론하지 않는다.
+12. Analyzer는 trusted executable resource일 수 있다. Activation/source disclosure는 030, config/snapshot은 031을 소비하며 analyzer가 안전하거나 sandboxed라고 자동 추론하지 않는다.
 13. Bounded transcript/subtitle/scene summary는 extraction bound이며 semantic privacy redaction, 민감정보 제거, video 완전 이해를 보장하지 않는다.
 
 ## Must Have
@@ -65,9 +65,9 @@ Origin specs: 004, 019, 027
 5. Remote URL output policy는 최소 세 선택지를 명시해야 한다. Guard를 통과한 download 후 persisted artifact 저장, provider/domain·expiry-known·download-not-selected만 보존하는 safe remote reference, provider output 거절. 각 결과는 persistence/retention/retry 가능성을 과장하지 않는다.
 6. Generated artifact metadata는 artifact id, kind, media root relative path, MIME, byte length, sha256, provider id, model id, source artifact ids, generation options summary, created at, projection disclosure status를 포함해야 한다. Disclosure status는 redaction/exfiltration proof가 아니다.
 7. Diagnostics와 inspect는 artifact를 설명하되 raw payload와 credential을 projection에 포함하지 않고 `raw_content_possible_elsewhere` 같은 030 disclosure를 보존해야 한다.
-8. 034는 stored/generated video evidence의 처리 상태와 최소 필드를 생산하고, 031 shared adapter가 local API, inspect, channel status에서 같은 의미로 투영할 수 있어야 한다.
+8. 034는 stored/generated video evidence의 처리 상태와 최소 필드를 생산하고, 035 shared adapter가 local API, inspect, channel status에서 같은 의미로 투영할 수 있어야 한다.
 9. Video analyzer capability는 runtime에 주입 가능한 abstraction이어야 하며, analyzer missing/unsupported/failed, analyzer source/trusted-code, sandbox scope/status를 safe summary로 설명해야 한다.
-10. Replay는 live provider URL, credential store, current resource discovery를 다시 따라가지 않고 035 snapshot과 recorded artifact metadata/digest evidence를 사용해야 한다.
+10. Replay는 live provider URL, credential store, current resource discovery를 다시 따라가지 않고 031 snapshot과 recorded artifact metadata/digest evidence를 사용해야 한다.
 
 ## Must Not Have
 
@@ -96,12 +96,12 @@ Origin specs: 004, 019, 027
 4. Remote URL output test가 034 media policy와 existing network/SSRF guard의 owner evidence를 구분하며 private/link-local/loopback target 차단, redirect별 재검증, scheme allowlist, byte/MIME cap, credential/header 미전달, guard 부재 시 거절, persisted/reference/rejected 결과를 검증한다.
 5. Artifact persistence test가 metadata, digest, source chain, projection disclosure status를 검증한다.
 6. Diagnostics projection test가 raw base64, signed URL, token, provider raw response 전체가 빠지고 session/log/trace의 raw-content 가능성 disclosure가 보존되는지 확인한다.
-7. 034 domain state가 included, unsupported, extraction_failed, analyzer_missing, truncated를 구분하고 031 adapter parity test가 local API, inspect, channel status에서 그 의미를 보존한다.
+7. 034 domain state가 included, unsupported, extraction_failed, analyzer_missing, truncated를 구분하고 035 adapter parity test가 local API, inspect, channel status에서 그 의미를 보존한다.
 8. Analyzer capability test가 analyzer 주입, analyzer 부재, codec 미지원, duration cap 초과를 구분한다.
 9. Replay test가 remote URL 재요청 없이 artifact digest와 metadata evidence를 사용한다.
 10. 사용자 문서가 CDN, gallery, UI editor, all-provider parity, built-in ffmpeg, full codec understanding, arbitrary URL intake를 지원 기능으로 말하지 않는다.
 11. Projection parity가 credential source status, analyzer source/trust, sandbox mode/scope, data-disclosure status를 safe summary로 보존한다.
-12. Replay가 credential 재해석, live URL 재접속, current resource 재검색 없이 035 snapshot과 artifact evidence만 사용한다.
+12. Replay가 credential 재해석, live URL 재접속, current resource 재검색 없이 031 snapshot과 artifact evidence만 사용한다.
 
 ## Source Handoff Table
 
@@ -140,13 +140,13 @@ Origin specs: 004, 019, 027
       <td>034는 owner fact를 표시하되 universal containment, complete redaction, credential safety proof를 만들지 않는다.</td>
     </tr>
     <tr>
-      <td>031 UI projection parity</td>
+      <td>035 UI projection parity</td>
       <td>Shared projection vocabulary and cross-surface adapters</td>
       <td>Artifact/analyzer canonical state와 safe disclosure summary의 surface parity</td>
-      <td>034가 domain fact를 생산하고 031이 CLI/TUI/API/channel에 같은 의미로 표시한다.</td>
+      <td>034가 domain fact를 생산하고 035가 CLI/TUI/API/channel에 같은 의미로 표시한다.</td>
     </tr>
     <tr>
-      <td>035 configuration and execution snapshots</td>
+      <td>031 configuration and execution snapshots</td>
       <td>Provider/profile declaration, credential source reference, immutable execution snapshot</td>
       <td>Media/analyzer replay provenance와 snapshot reference</td>
       <td>034는 config/schema/auth persistence를 재소유하지 않고 snapshot/artifact evidence를 소비한다.</td>
@@ -162,7 +162,7 @@ Spec 034는 provider event normalization에서 artifact persistence, video analy
 |---|---|---|
 | [PRD 000](prds/000-codex-media-event-and-artifact-normalization.md) | Codex Responses image event normalization과 generated artifact handoff | 004/019 baselines |
 | [PRD 001](prds/001-image-edit-variation-and-streaming-lifecycle.md) | Edit/mask/variation model과 partial/final lifecycle | PRD 000 |
-| [PRD 002](prds/002-remote-output-and-artifact-persistence.md) | Remote URL policy, safe download/reference/reject, persistence/provenance | PRDs 000-001, Specs 030/035 fact contracts |
+| [PRD 002](prds/002-remote-output-and-artifact-persistence.md) | Remote URL policy, safe download/reference/reject, persistence/provenance | PRDs 000-001, Specs 030/031 fact contracts |
 | [PRD 003](prds/003-video-analyzer-capability-and-evidence.md) | Video analyzer capability, bounded evidence, projection input | 027 baseline, Specs 030/031/035 fact contracts |
 | [PRD 004](prds/004-sequential-integration-and-spec034-closure.md) | End-to-end media integration, requirement mapping, final Spec034 closure | PRDs 000-003, required owner-fact audits |
 
@@ -197,7 +197,7 @@ Dependency rules:
 8. README, usage, specs index 중 사용자에게 노출되는 문서가 실제 지원 범위와 비범위를 정확히 반영한다.
 9. 닫는 문서에는 구현 파일, 테스트 이름, 사용자 표면, 비범위 유지 여부가 함께 기록되어야 한다.
 10. 030 read audit가 current OS authority, credential status, sandbox adapter scope/fallback, trusted analyzer source, raw-content disclosure를 검증해야 한다.
-11. 031 parity audit와 035 snapshot audit가 artifact/analyzer safe summary와 replay provenance를 검증해야 한다.
+11. 035 parity audit와 031 snapshot audit가 artifact/analyzer safe summary와 replay provenance를 검증해야 한다.
 12. Redaction audit는 projection surface omission만 검증하고 complete redaction이나 exfiltration prevention을 주장하지 않아야 한다.
 
 현재 이 문서는 Open 상태다. 위 evidence가 없으면 034의 범위를 구현 완료로 닫을 수 없다.
