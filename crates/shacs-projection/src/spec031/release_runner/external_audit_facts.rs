@@ -28,8 +28,8 @@ pub(super) fn external_owner_facts() -> &'static [ExternalOwnerFactDescriptor] {
         ExternalOwnerFactDescriptor {
             owner: Spec031ExternalOwnerId::Spec030,
             slug: "spec030",
-            source_locator: "docs/specs/030-policy-permission-redaction-and-containment-model/SPEC.md",
-            source_status_locator: "docs/specs/030-policy-permission-redaction-and-containment-model/SPEC.md:3",
+            source_locator: "docs/specs/030-trusted-agent-runtime-and-operational-controls/SPEC.md",
+            source_status_locator: "docs/specs/030-trusted-agent-runtime-and-operational-controls/SPEC.md:3",
             fact_artifacts: &[".omo/evidence/spec030/closure-owner-facts.json#approval_policy_redaction_containment"],
             command_result_ids: &["spec031-test-projection-parity"],
             blocked_reason: "Spec030 exact approval/policy/redaction/containment facts are absent",
@@ -64,11 +64,11 @@ pub(super) fn external_owner_facts() -> &'static [ExternalOwnerFactDescriptor] {
         ExternalOwnerFactDescriptor {
             owner: Spec031ExternalOwnerId::Spec035,
             slug: "spec035",
-            source_locator: "docs/specs/035-configuration-runtime-layout-and-execution-snapshots/SPEC.md",
-            source_status_locator: "docs/specs/035-configuration-runtime-layout-and-execution-snapshots/SPEC.md:3",
+            source_locator: "docs/specs/031-configuration-runtime-layout-and-execution-snapshots/SPEC.md",
+            source_status_locator: "docs/specs/031-configuration-runtime-layout-and-execution-snapshots/SPEC.md:3",
             fact_artifacts: &[".omo/evidence/spec035/closure-owner-facts.json#config_profile_secret_ref_snapshot"],
             command_result_ids: &["spec031-test-lifecycle"],
-            blocked_reason: "Spec035 exact config/profile/secret-ref facts are absent",
+            blocked_reason: "Spec031 exact config/profile/secret-ref facts are absent",
         },
     ]
 }
