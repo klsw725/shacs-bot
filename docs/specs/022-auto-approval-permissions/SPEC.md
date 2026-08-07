@@ -2,8 +2,8 @@
 
 Status: Complete (Scoped)
 Implemented scope: Permission modes, capability taxonomy, runtime policy gate, approval correlation, audit diagnostics, replay evidence, recent denial visibility, exact one-shot retry, and guarded classifier-backed auto mode are closed.
-Open work moved to: [030 policy, permission, redaction, and containment model](../030-policy-permission-redaction-and-containment-model/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md).
-Not carried forward: Organization approval consoles, remote operator workflows, multi-user permission administration, hidden allow rules, and persistent permission widening are outside the follow-up scope.
+Open work moved to: [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [033 evaluation automation live integration](../033-evaluation-automation-live-integration/SPEC.md).
+Not carried forward: Organization approval consoles, remote operator workflows, multi-user permission administration, hidden allow rules, persistent permission widening, classifier routing/cost accounting의 확장은 후속 030 범위가 아니다. 022의 닫힌 permission/approval baseline은 호환성 사실로 남고 030은 이를 future 통합 계약으로 확장하지 않는다.
 
 ## 문서 목적
 
