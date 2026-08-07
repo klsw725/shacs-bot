@@ -15,7 +15,7 @@ Prime 방식의 credential source precedence, local persistence, refresh, finger
 5. Status-only inspect와 raw value 비표시.
 6. Environment, literal, command-backed config value resolution.
 
-Config/profile source declaration schema와 migration은 Spec 035가 소유한다. 이 PRD는 local auth file permission, raw credential read/write, source resolution, refresh, fingerprint, status projection을 소유한다.
+Config/profile source declaration schema와 migration은 Spec 031이 소유한다. 이 PRD는 local auth file permission, raw credential read/write, source resolution, refresh, fingerprint, status projection을 소유한다.
 
 ## Invariants
 

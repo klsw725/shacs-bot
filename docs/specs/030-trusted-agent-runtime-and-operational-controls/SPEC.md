@@ -37,7 +37,7 @@ Shacs는 신뢰된 로컬 agent runtime이다. 안전 경계는 숨은 보장이
 6. Optional sandbox adapter의 활성 범위, 설정, disabled/unsupported/failed 상태와 fallback disclosure.
 7. Skill, extension, prompt, context, package의 discovery·precedence·load diagnostics와 trusted-code disclosure.
 8. Session, log, trace, shell output이 중앙 secret redaction을 보장하지 않는다는 데이터 disclosure.
-9. CLI, TUI, local API, diagnostics가 trusted mode, active hooks, sandbox mode, credential status, resource diagnostics를 같은 의미로 표시하도록 Spec 031에 owner fact를 제공하는 계약.
+9. CLI, TUI, local API, diagnostics가 trusted mode, active hooks, sandbox mode, credential status, resource diagnostics를 같은 의미로 표시하도록 Spec 035에 owner fact를 제공하는 계약.
 
 ## 제거된 이전 계약
 
@@ -69,12 +69,12 @@ Shacs는 신뢰된 로컬 agent runtime이다. 안전 경계는 숨은 보장이
 
 | 계약 | Spec 030 PRD owner | 외부 owner boundary |
 |---|---|---|
-| Trusted runtime profile과 disclosure | PRD 000 | Spec 031이 사용자 surface에 투영 |
+| Trusted runtime profile과 disclosure | PRD 000 | Spec 035가 사용자 surface에 투영 |
 | Pre-tool hook과 confirmation | PRD 001 | Tool execution 자체는 Spec 004 계열 현재 구현 소비 |
-| Process lifecycle controls | PRD 002 | AppSupervisor는 032, physical layout은 035 |
-| Credential lifecycle | PRD 003 | Config/profile persistence는 035 |
+| Process lifecycle controls | PRD 002 | AppSupervisor는 032, physical layout은 031 |
+| Credential lifecycle | PRD 003 | Config/profile persistence는 031 |
 | Optional sandbox adapter | PRD 004 | 물리 sandbox implementation은 adapter 또는 외부 runtime |
-| Resource trust와 data disclosure | PRD 005 | App/skill lifecycle은 032, projection은 031 |
+| Resource trust와 data disclosure | PRD 005 | App/skill lifecycle은 032, projection은 035 |
 | 순차 통합과 closure | PRD 006 | 031·032·035 evidence 소비 |
 
 ## Invariants
@@ -134,14 +134,14 @@ Shacs는 신뢰된 로컬 agent runtime이다. 안전 경계는 숨은 보장이
 7. Sandbox active 상태에서 해당 adapter 정책이 적용되고 disabled, unsupported, initialization failure에서는 `trusted_native_fallback` 경고 또는 `sandbox_required` 실행 거부가 나타난다.
 8. Skill·extension discovery가 source, precedence, collision, parse diagnostics를 제공하며 trusted-code disclosure가 함께 표시된다.
 9. Local project resource가 builtin/package resource보다 우선할 수 있는 precedence가 테스트와 inspect output에 나타난다.
-10. 031 projection은 owner fact가 없을 때 안전을 추론하지 않고 `unknown` 또는 `unavailable`로 표시한다.
+10. 035 projection은 owner fact가 없을 때 안전을 추론하지 않고 `unknown` 또는 `unavailable`로 표시한다.
 11. 문서와 release evidence는 제거된 이전 계약을 현재 또는 future Spec 030 guarantee로 다시 주장하지 않는다.
 
 ## External dependency gates
 
-1. Spec 031은 trusted runtime status와 diagnostics projection parity를 소유한다.
+1. Spec 035는 trusted runtime status와 diagnostics projection parity를 소유한다.
 2. Spec 032는 app/executable-resource install, activation lifecycle, supervisor lifecycle을 소유하되 030의 trusted-code disclosure를 소비한다.
-3. Spec 035는 config/profile/auth locator persistence와 runtime layout을 소유하되 030의 raw credential lifecycle을 재정의하지 않는다.
+3. Spec 031은 config/profile/auth locator persistence와 runtime layout을 소유하되 030의 raw credential lifecycle을 재정의하지 않는다.
 
 ## Closure Evidence
 

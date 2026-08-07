@@ -11,7 +11,7 @@ Prime 방식의 trusted-input 실행 모델을 하나의 runtime profile과 disc
 1. `TrustedRuntimeProfile`의 enabled state와 source를 정의한다.
 2. Workspace, instruction, skill, extension, Python kernel, native command가 trusted input임을 표시한다.
 3. Daemon·worker·kernel lifecycle isolation과 security sandbox 비보장을 구분한다.
-4. CLI, TUI, API가 같은 profile status와 safe summary를 표시하도록 Spec 031 input을 제공한다.
+4. CLI, TUI, API가 같은 profile status와 safe summary를 표시하도록 Spec 035 input을 제공한다.
 
 ## Contract
 
