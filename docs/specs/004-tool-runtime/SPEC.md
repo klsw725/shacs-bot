@@ -2,8 +2,8 @@
 
 Status: Complete (Scoped)
 Implemented scope: `AgentRunner`, `RuntimeToolExecutor`, `ToolRegistry`, `RuntimeToolCall`, `ToolResult`, `RuntimeToolMessage`, `RuntimeToolExecutionReport`, `ToolEvent`, checkpoint callback의 current tool runtime 경계를 닫았다.
-Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [030 policy, permission, redaction, and containment model](../030-policy-permission-redaction-and-containment-model/SPEC.md), [034 generated media and rich file context expansion](../034-generated-media-and-rich-file-context-expansion/SPEC.md)
-Not carried forward: 개별 tool 내부 알고리즘, 원격 plugin marketplace, 모든 tool에 대한 완전한 host sandbox 보장을 004의 후속 owner 범위로 가져가지 않는다.
+Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [034 generated media and rich file context expansion](../034-generated-media-and-rich-file-context-expansion/SPEC.md)
+Not carried forward: 개별 tool 내부 알고리즘, 원격 plugin marketplace, 모든 tool에 대한 완전한 host sandbox, universal permission snapshot guard를 004의 후속 owner 범위로 가져가지 않는다. 030은 현재 tool runtime 위의 `tool:before` veto와 operational controls만 소유한다.
 
 ## 문서 목적
 
@@ -176,7 +176,7 @@ tool runtime은 다음을 할 수 없다.
 
 ## tool registry 명세
 
-현재 registry 항목은 tool 이름, 설명, 입력 schema 또는 parameter validator, executor 연결을 중심으로 구성된다. capability taxonomy, default timeout, permission profile 같은 풍부한 metadata는 후속 정책 owner가 필요할 때 확장할 수 있다.
+현재 registry 항목은 tool 이름, 설명, 입력 schema 또는 parameter validator, executor 연결을 중심으로 구성된다. capability taxonomy, default timeout, trusted-runtime annotation 같은 풍부한 metadata는 후속 runtime owner가 필요할 때 확장할 수 있다.
 
 권장 규칙은 다음과 같다.
 

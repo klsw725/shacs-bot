@@ -2,8 +2,8 @@
 
 Status: Complete (Scoped)
 Implemented scope: `AgentLoop`, `SessionTurnLock`, recovery marker cleanup, `AgentRunner` retry/abort, subagent stale discard, provider selection snapshot, context and spawn snapshot의 current policy boundary를 닫았다.
-Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [030 policy, permission, redaction, and containment model](../030-policy-permission-redaction-and-containment-model/SPEC.md)
-Not carried forward: 멀티유저 역할 정책, 원격 운영자 console, 외부 policy server, 조직 승인 체계, 통계 기반 자동 최적화를 후속 owner 범위로 가져가지 않는다.
+Open work moved to: [028 formal execution reentry and outcome contracts](../028-formal-execution-reentry-and-outcome-contracts/SPEC.md), [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md)
+Not carried forward: 멀티유저 역할 정책, 원격 운영자 console, 외부 policy server, 조직 승인 체계, centralized `PolicyDecisionEngine`, 통계 기반 자동 최적화를 후속 owner 범위로 가져가지 않는다. 030은 trusted runtime profile과 hook ordering만 소유한다.
 
 ## 문서 목적
 

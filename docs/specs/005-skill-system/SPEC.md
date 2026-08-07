@@ -2,8 +2,8 @@
 
 Status: Complete (Scoped)
 Implemented scope: Markdown skill discovery, source kind, registry status, descriptor, body hash, read-only context injection, CLI `skills list`/`skills show` inspect 표면을 current skill system으로 닫았다.
-Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md)
-Not carried forward: remote marketplace, signed distribution, executable plugin code sandbox, 고급 추천 ranking, skill 편집 UI는 후속 owner 범위로 가져가지 않는다.
+Open work moved to: [029 durable runtime recovery and data migration](../029-durable-runtime-recovery-and-data-migration/SPEC.md), [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md)
+Not carried forward: remote marketplace, signed public distribution, 고급 추천 ranking, skill 편집 UI는 후속 owner 범위로 가져가지 않는다. Python skill과 executable resource는 005를 다시 열지 않고 030이 별도 resource kind로 소유한다.
 
 ## 문서 목적
 
@@ -43,7 +43,7 @@ Not carried forward: remote marketplace, signed distribution, executable plugin 
 
 - formal per-turn registry snapshot과 replay/effect provenance snapshot은 현재 완료 조건이 아니다.
 - app bundle registry/lifecycle baseline은 `017-app-operating-environment/`와 `015-packaging-process-lifecycle-and-upgrades/`가 보존하고, 실제 app/extension lifecycle의 open owner는 `032-app-maker-runtime-and-extension-lifecycle/`이다.
-- 원격 marketplace, 서명된 배포 채널, 실행 가능한 plugin code는 이 문서의 현재 구현 범위가 아니다.
+- 원격 marketplace와 서명된 public distribution은 후속 범위가 아니다. 실행 가능한 Python skill과 in-process extension은 이 문서의 현재 완료 범위가 아니며 030이 별도 trusted resource로 소유한다.
 
 ---
 
@@ -57,6 +57,8 @@ Not carried forward: remote marketplace, signed distribution, executable plugin 
 - 스킬은 `OpenHarness`식의 단순한 설치 및 로딩 UX를 참고하되, `shacs-bot`에서는 어디까지나 오케스트레이터에 종속된 read-only 지식 팩이다.
 
 따라서 이 문서에서 말하는 스킬은 플러그인 코드 실행 단위가 아니다. 스킬은 Markdown 파일로 저장된 지식 묶음이며, 오케스트레이터가 문맥 구성 단계에서 필요할 때만 읽어 들이는 보조 입력이다.
+
+030의 Python skill은 이 문서의 `SkillDescriptor`와 Markdown read-only 의미를 변경하지 않는다. Executable resource는 activation source, package/import status, trusted-workspace assertion, runtime diagnostics를 갖는 별도 030 타입이며, 005 registry는 필요할 때 descriptor metadata만 제공한다.
 
 ---
 
