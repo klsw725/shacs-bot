@@ -51,4 +51,4 @@ Shacs의 기본 실행 모델을 중앙 permission-safety 계약 중심에서 Pr
 - Spec 030은 `trusted agent runtime and operational controls`로 대체한다.
 - Specs 005와 025의 닫힌 Markdown·command-backed baseline은 유지하고, executable resource와 in-process extension의 open work를 030으로 넘긴다.
 - Spec 032는 install·activation·inspect·revoke lifecycle을 소유하지만 permission provenance를 만들지 않는다.
-- Spec 035는 config/auth locator schema와 migration을 소유하고, raw auth store lifecycle은 030이 소유한다.
+- Spec 031은 config/auth locator schema와 migration을 소유하고, raw auth store lifecycle은 030이 소유한다.

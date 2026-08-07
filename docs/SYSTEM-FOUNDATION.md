@@ -465,11 +465,11 @@ Shacs는 사용자가 직접 설치·운영하는 trusted local agent runtime을
 28. `docs/specs/028-formal-execution-reentry-and-outcome-contracts/SPEC.md`
 29. `docs/specs/029-durable-runtime-recovery-and-data-migration/SPEC.md`
 30. `docs/specs/030-trusted-agent-runtime-and-operational-controls/SPEC.md`
-31. `docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md`
+31. `docs/specs/031-configuration-runtime-layout-and-execution-snapshots/SPEC.md`
 32. `docs/specs/032-app-maker-runtime-and-extension-lifecycle/SPEC.md`
 33. `docs/specs/033-evaluation-automation-live-integration/SPEC.md`
 34. `docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md`
-35. `docs/specs/035-configuration-runtime-layout-and-execution-snapshots/SPEC.md`
+35. `docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md`
 
 `001`부터 `027`은 2026-07-20 기준 실제 구현 범위로 완료 처리되었다. 각 문서에서 분리된 accepted open work는 `028`부터 `035`가 소유하며, 명시적 비목표와 미결정 아이디어는 자동으로 backlog에 포함하지 않는다.
 
