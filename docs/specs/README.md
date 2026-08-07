@@ -27,11 +27,11 @@
 | Spec | Owner scope | Origin specs |
 |---|---|---|
 | `030-trusted-agent-runtime-and-operational-controls` | trusted local agent profile, extension-defined pre-tool veto, path-specific process controls, credential lifecycle, optional sandbox, resource/data disclosure | 004, 005, 007, 010, 011, 022, 023, 025 |
-| `031-ui-projection-diagnostics-and-release-evidence-parity` | implemented shared projection/TUI/REPL/wizard/release baseline; planned transport negotiation, snapshot-first reconnect, owner-backed goal/Tasks projection | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
+| `031-configuration-runtime-layout-and-execution-snapshots` | config migration, profiles, runtime layout, immutable diagnostic execution snapshots, context wiring | 008, 009, 010, 015, 026 |
 | `032-app-maker-runtime-and-extension-lifecycle` | AppSupervisor/process lifecycle, current-user authoring/apply/install, app-level activation provenance and blockers | 005, 017, 021, 025 |
 | `033-evaluation-automation-live-integration` | goal accounting, evaluator/automation, apply-time CAS self-improvement, snapshot-based replay의 live integration | 009, 012, 013, 014, 016, 018, 022 |
 | `034-generated-media-and-rich-file-context-expansion` | Codex image, edit/streaming/remote output, video analyzer, artifact/sandbox/data-disclosure evidence | 004, 019, 027 |
-| `035-configuration-runtime-layout-and-execution-snapshots` | config migration, profiles, runtime layout, immutable diagnostic execution snapshots, context wiring | 008, 009, 010, 015, 026 |
+| `035-ui-projection-diagnostics-and-release-evidence-parity` | implemented shared projection/TUI/REPL/wizard/release baseline; planned transport negotiation, snapshot-first reconnect, owner-backed goal/Tasks projection | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
 
 ## 읽는 순서 권장
 
@@ -68,11 +68,11 @@
 28. `028-formal-execution-reentry-and-outcome-contracts`
 29. `029-durable-runtime-recovery-and-data-migration`
 30. `030-trusted-agent-runtime-and-operational-controls`
-31. `031-ui-projection-diagnostics-and-release-evidence-parity`
+31. `031-configuration-runtime-layout-and-execution-snapshots`
 32. `032-app-maker-runtime-and-extension-lifecycle`
 33. `033-evaluation-automation-live-integration`
 34. `034-generated-media-and-rich-file-context-expansion`
-35. `035-configuration-runtime-layout-and-execution-snapshots`
+35. `035-ui-projection-diagnostics-and-release-evidence-parity`
 
 ## 운영 원칙
 
