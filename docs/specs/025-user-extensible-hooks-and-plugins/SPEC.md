@@ -2,7 +2,7 @@
 
 Status: Complete (Scoped)
 Implemented scope: The self-hosted local-manifest plugin scope is closed for manifest discovery, descriptor projection, safety diagnostics, management CLI, bounded hook dispatch, command-backed plugin tools, production MCP startup projection, read-only skill roots, plugin command routing, and replay rejection.
-Open work moved to: [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md).
+Open work moved to: [030 trusted agent runtime and operational controls](../030-trusted-agent-runtime-and-operational-controls/SPEC.md), [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md), [035 UI projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md).
 Not carried forward: pip or Nix public distribution, hosted plugin marketplaces, organization governance, and unlimited provider-family expansion are outside 025. Trusted Python skill과 in-process JS/TS extension loading은 025를 다시 열지 않고 030이 별도 executable resource family로 소유한다.
 
 ## 문서 목적

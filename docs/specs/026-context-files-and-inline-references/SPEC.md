@@ -2,7 +2,7 @@
 
 Status: Complete (Scoped)
 Implemented scope: CLI/core context diagnostics, workspace and current-directory context file discovery, inline reference resolution, and live provider handoff are closed in this owner scope.
-Open work moved to: [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [035 configuration runtime layout and execution snapshots](../035-configuration-runtime-layout-and-execution-snapshots/SPEC.md).
+Open work moved to: [031 configuration runtime layout and execution snapshots](../031-configuration-runtime-layout-and-execution-snapshots/SPEC.md), [035 UI projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md).
 Not carried forward: Hosted workspace policy, team context rollout, remote reference marketplaces, and provider-specific prompt features are outside 026.
 
 ## 문서 목적

@@ -2,7 +2,7 @@
 
 Status: Complete (Scoped)
 Implemented scope: Channel-neutral v1 attachment storage, safe routing, and analyzer handoff into provider file context are closed in this owner scope.
-Open work moved to: [031 UI projection, diagnostics, and release evidence parity](../031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md), [034 generated media and rich file context expansion](../034-generated-media-and-rich-file-context-expansion/SPEC.md).
+Open work moved to: [034 generated media and rich file context expansion](../034-generated-media-and-rich-file-context-expansion/SPEC.md), [035 UI projection, diagnostics, and release evidence parity](../035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md).
 Not carried forward: Generated media asset management, durable channel delivery guarantees, and full video processing guarantees are outside 027.
 
 ## 문서 목적
