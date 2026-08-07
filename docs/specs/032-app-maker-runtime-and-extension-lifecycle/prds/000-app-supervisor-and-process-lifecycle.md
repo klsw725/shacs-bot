@@ -11,7 +11,7 @@ Installed app의 start, stop, restart, recover를 `AppSupervisor` typed state와
 1. App process id/state, lifecycle event, recovery input, shutdown reason.
 2. Registry lookup부터 process creation과 final receipt까지의 start flow.
 3. Graceful stop, timeout, cancellation, stale marker, interrupted recovery.
-4. Spec 030 process-control/sandbox/credential facts와 Spec 035 execution snapshot ref의 소비.
+4. Spec 030 process-control/sandbox/credential facts와 Spec 031 execution snapshot ref의 소비.
 
 ## Non Scope
 
@@ -46,4 +46,4 @@ Installed app의 start, stop, restart, recover를 `AppSupervisor` typed state와
 1. State-machine test와 command locator.
 2. Success/blocked/timeout/recover process receipts.
 3. CLI/local API real-surface transcript와 cleanup receipt.
-4. Specs 030/035 fact consumption read audit.
+4. Specs 030/031 fact consumption read audit.

@@ -10,13 +10,13 @@ App-owned skill, plugin, hook, command, MCP의 provenance를 연결하고 discov
 
 1. App id, manifest/source/content/dependency digest와 extension declaration linkage.
 2. 005 Markdown skill, 025 command-backed surface, 030 trusted executable resource 경계.
-3. 030 activation ref/status와 035 persistence/snapshot ref의 app-level consumption.
+3. 030 activation ref/status와 031 persistence/snapshot ref의 app-level consumption.
 4. Active, stale, disabled, revoked, removed, untrusted blocker와 historical receipt.
 
 ## Non Scope
 
 1. 030 activation eligibility, dependency execution gate, sandbox semantics를 재정의하지 않는다.
-2. 035 activation schema/storage/migration을 재소유하지 않는다.
+2. 031 activation schema/storage/migration을 재소유하지 않는다.
 3. Discovery 또는 install만으로 executable surface를 노출하지 않는다.
 
 ## Parent Requirement Mapping
@@ -39,11 +39,11 @@ App-owned skill, plugin, hook, command, MCP의 provenance를 연결하고 discov
 1. Discovery-only와 installed-only fixture가 executable exposure를 만들지 않는다.
 2. Activation status별 app start blocker와 projection input이 deterministic하다.
 3. Same-name/different-digest resource가 기존 activation을 재사용하지 않는다.
-4. 005/025/030/035 owner handoff read audit가 중복 ownership이 없음을 보인다.
+4. 005/025/030/031 owner handoff read audit가 중복 ownership이 없음을 보인다.
 
 ## Closure Evidence
 
 1. Extension provenance and blocker matrix.
 2. Digest mismatch/stale/disable/revoke/remove tests.
-3. App lifecycle receipt와 031 projection fixture.
-4. Specs 005/025/030/035 owner-boundary audit.
+3. App lifecycle receipt와 035 projection fixture.
+4. Specs 005/025/030/031 owner-boundary audit.

@@ -8,7 +8,7 @@ Origin specs: 005, 017, 021, 025
 
 이 문서는 기존 specs 005, 017, 021, 025가 implemented scope로 닫힌 뒤 남는 app product work의 owner boundary를 연다.
 
-핵심 목적은 App Maker가 만든 proposal과 현재 사용자의 authoring/apply decision을 설치 가능한 `.shacsapp` bundle, 실제 app process, AppSupervisor, extension lifecycle provenance로 연결하는 것이다. Install은 process start와 executable activation이 아니다. Executable resource의 activation eligibility와 trusted-code disclosure는 030을 소비하고, 032는 app-level lifecycle transition·blocker·receipt를, 035는 activation persistence와 snapshot reference를 소유한다.
+핵심 목적은 App Maker가 만든 proposal과 현재 사용자의 authoring/apply decision을 설치 가능한 `.shacsapp` bundle, 실제 app process, AppSupervisor, extension lifecycle provenance로 연결하는 것이다. Install은 process start와 executable activation이 아니다. Executable resource의 activation eligibility와 trusted-code disclosure는 030을 소비하고, 032는 app-level lifecycle transition·blocker·receipt를, 031은 activation persistence와 snapshot reference를 소유한다.
 
 이 문서는 기존 spec의 완료 선언을 되돌리지 않는다. 005는 read-only skill registry와 context injection, 017은 app manifest와 registry baseline, 021은 안전한 authoring draft baseline, 025는 self-hosted local plugin manifest와 제한된 executable surface를 닫은 것으로 본다. 032는 이 baseline을 소비하는 app lifecycle과 authoring-to-install 제품 흐름만 소유한다.
 
@@ -39,11 +39,11 @@ Origin specs: 005, 017, 021, 025
 4. AI-assisted app proposal, validation, receipt, apply, install flow.
 5. Existing app edit flow, read-only installed snapshot, draft diff, proposal, checkpoint, apply, verify, install 또는 update handoff.
 6. App lifecycle 안에서 발생하는 extension, skill, plugin, hook, command, MCP provenance의 소유 위치.
-7. App install, enable, start, stop, disable, uninstall, recover의 domain state vocabulary와 projection input contract. Shared surface adapter와 parity smoke는 031이 소유한다.
+7. App install, enable, start, stop, disable, uninstall, recover의 domain state vocabulary와 projection input contract. Shared surface adapter와 parity smoke는 035가 소유한다.
 8. App process와 extension action이 task ledger, diagnostics, replay evidence에 redacted receipt로 남는 규칙.
 9. App bundle이 선언한 executable resource metadata와 install provenance, 030 activation result를 소비하는 app-level lifecycle blocker, source invalidation, inspect/disable/revoke linkage.
 
-032가 다른 spec에서 소비하는 것과 다시 소유하지 않는 것은 명확히 분리한다. 004/005/010/012/013/014/016/017/021/022/025는 구현 baseline을 제공한다. 030은 trusted runtime profile, executable resource activation eligibility/disclosure, credential status, sandbox/data disclosure를 소유하고 035는 config/profile auth source와 activation persistence를 소유한다. Shared UI adapter와 parity smoke는 031이 소유하며 032는 app/resource lifecycle state와 receipt를 생산한다.
+032가 다른 spec에서 소비하는 것과 다시 소유하지 않는 것은 명확히 분리한다. 004/005/010/012/013/014/016/017/021/022/025는 구현 baseline을 제공한다. 030은 trusted runtime profile, executable resource activation eligibility/disclosure, credential status, sandbox/data disclosure를 소유하고 031은 config/profile auth source와 activation persistence를 소유한다. Shared UI adapter와 parity smoke는 035가 소유하며 032는 app/resource lifecycle state와 receipt를 생산한다.
 
 ## invariants
 
@@ -53,7 +53,7 @@ Origin specs: 005, 017, 021, 025
 4. App process start 전에는 현재 사용자가 선택한 config 또는 trusted-workspace state, trusted runtime profile, credential binding status, 030 activation result를 참조한 extension activation snapshot이 확정돼야 한다. AppSupervisor가 이를 새 권한이나 approval cache로 만들지 않는다.
 5. Secret value는 app bundle, manifest, receipt, ledger, diagnostics, provider prompt에 raw로 저장되지 않는다.
 6. App process는 start 시점의 manifest digest, trusted runtime profile ref, credential source names/status, extension activation set을 receipt에 남겨야 한다.
-7. Markdown skill은 005, command-backed plugin/hook은 025, trusted executable resource는 030, config/auth source persistence는 035 경계를 소비한다.
+7. Markdown skill은 005, command-backed plugin/hook은 025, trusted executable resource는 030, config/auth source persistence는 031 경계를 소비한다.
 8. Disabled, blocked, missing-credential, untrusted-workspace app은 active process, active executable skill, provider-visible tool, live hook, MCP startup을 만들 수 없다.
 9. Existing app edit은 installed bundle을 직접 덮어쓰지 않는다. Snapshot, draft, diff, proposal, checkpoint, apply, verify를 거쳐야 한다.
 10. Uninstall과 recover는 historical ledger와 session reference를 조용히 파괴하지 않는다.
@@ -62,7 +62,7 @@ Origin specs: 005, 017, 021, 025
 13. 활성 resource의 Python/Node package 준비·검증·entrypoint 실행은 030 trusted runtime profile과 adapter별 process/sandbox control 범위에서만 수행할 수 있다. 032는 결과와 blocker를 receipt에 기록한다.
 14. Skill content, dependency manifest, resolved version, source identity가 바뀌면 activation record는 stale이 되고 다음 session에서 재발견·재활성화해야 한다.
 15. Python/Node package 누락과 Python/Node runtime 자체 누락은 다른 상태다. Runtime 자체 누락은 managed runtime 또는 prerequisite로 처리하며 package trust로 임의 system installer를 허용하지 않는다.
-16. Executable resource activation lifecycle은 discovery registry와 분리된 inspectable·disable/revoke 가능한 state다. 030이 eligibility와 disclosure를, 032가 app-level transition/linkage를, 035가 persistence/migration을 소유하며 permission grant나 approval cache가 아니다.
+16. Executable resource activation lifecycle은 discovery registry와 분리된 inspectable·disable/revoke 가능한 state다. 030이 eligibility와 disclosure를, 032가 app-level transition/linkage를, 031이 persistence/migration을 소유하며 permission grant나 approval cache가 아니다.
 
 ## Must Have
 
@@ -70,17 +70,17 @@ Origin specs: 005, 017, 021, 025
 2. Start flow는 registry lookup, enabled state check, manifest digest check, missing credential check, trusted runtime profile check, extension activation snapshot, process creation, ledger receipt를 포함해야 한다.
 3. Stop flow는 user requested stop, graceful shutdown attempt, timeout result, cancellation evidence, final process state를 포함해야 한다.
 4. Recover flow는 interrupted process, stale marker, missing receipt, partial extension activation, device startup failure를 redacted diagnostics와 next action으로 보여줘야 한다.
-5. Credential binding handoff는 manifest declaration을 030/035 credential source request로 바꾸고 032 receipt에는 raw secret을 저장하지 않아야 한다.
+5. Credential binding handoff는 manifest declaration을 030/031 credential source request로 바꾸고 032 receipt에는 raw secret을 저장하지 않아야 한다.
 6. AI-assisted proposal flow는 user intent, generated candidates, validation report, risk summary, receipt, authoring/apply decision linkage, checkpoint linkage, apply result, install handoff를 추적해야 한다. 이 decision은 runtime authorization으로 재사용하지 않는다.
 7. Existing app edit flow는 installed snapshot digest, draft revision, manifest diff, extension diff, validation report, proposal, checkpoint, apply, verify, update handoff를 가져야 한다.
 8. Extension lifecycle provenance는 app이 제공한 skill, plugin, hook, command, MCP declaration의 source app id, manifest digest, enabled state, 030 activation ref/status, blocked reason을 inspect와 receipt에 남겨야 한다. Activation decision 자체는 032가 재결정하지 않는다.
-9. 032는 app registry state, process state, missing credential, untrusted workspace, extension blocker, last receipt의 domain vocabulary와 evidence를 생산해야 하며, 031의 shared adapter가 CLI, local API, future TUI에서 같은 의미로 투영할 수 있어야 한다.
+9. 032는 app registry state, process state, missing credential, untrusted workspace, extension blocker, last receipt의 domain vocabulary와 evidence를 생산해야 하며, 035의 shared adapter가 CLI, local API, future TUI에서 같은 의미로 투영할 수 있어야 한다.
 10. Release tests는 normal path, blocked path, untrusted workspace, missing credential, failed start, failed stop, recover after interruption, replay-safe diagnostics를 포함해야 한다.
 11. Executable resource proposal은 source identity, content digest, dependency manifest digest, dependency resolution, required runtime, lifecycle/native build 요구사항, trusted-code disclosure를 구조화해야 한다.
 12. Activation record는 activation source, workspace trust ref, source/content/dependency digest, active/stale/disabled/removed 상태와 사유를 가져야 한다.
 13. Resource 사용 전에는 현재 digest와 activation record를 대조하고, declared Python/Node package가 없으면 030 runtime profile이 허용한 manifest 범위와 process/sandbox control 안에서 준비한 뒤 expected package/version을 검증해야 한다.
 14. 사용자는 활성 executable resource, source, digest 일치 여부, stale/disabled reason을 inspect하고 개별 activation을 disable 또는 revoke할 수 있어야 한다.
-15. Resource install과 entrypoint execution은 030 trusted runtime diagnostics와 035 execution snapshot/lifecycle persistence에 연결하되 permission provenance를 만들지 않는다.
+15. Resource install과 entrypoint execution은 030 trusted runtime diagnostics와 031 execution snapshot/lifecycle persistence에 연결하되 permission provenance를 만들지 않는다.
 
 ## Must Not Have
 
@@ -106,11 +106,11 @@ Executable resource의 discovery, install, activation, execution은 다음 단�
 1. **Discover:** source와 manifest를 찾아 descriptor, source identity, content digest를 만든다. Executable surface는 아직 없다.
 2. **Propose:** App Maker 또는 installer가 candidate, dependency manifest, required runtime, lifecycle/native build 요구사항, trusted-code disclosure를 표시한다. Proposal은 authorization이 아니다.
 3. **Install:** current-user apply decision에 따라 bundle, manifest, resource metadata를 registry에 저장한다. Process, hook, tool, MCP, entrypoint를 시작하지 않는다.
-4. **Activate:** 030의 explicit config 또는 trusted workspace assertion과 source/content/dependency identity가 일치할 때 activation result가 생성·갱신되고 035가 persistence/migration한다.
+4. **Activate:** 030의 explicit config 또는 trusted workspace assertion과 source/content/dependency identity가 일치할 때 activation result가 생성·갱신되고 031이 persistence/migration한다.
 5. **Prepare and verify:** 030 trusted runtime profile이 허용한 declared dependency 범위에서만 준비·검증한다. Manifest 밖 network source, lifecycle script, native build, global mutation은 중단한다.
 6. **Execute:** expected package/version, digest, activation status, credential status, adapter별 process control, sandbox policy를 확인한 뒤 entrypoint를 실행한다.
 7. **Invalidate:** source/content/dependency digest 변경은 stale이며 다음 session에서 재검토·재활성화해야 한다.
-8. **Disable/revoke/remove:** 032는 app-level blocker와 historical receipt를 유지하고 030 activation semantics와 035 persistence를 소비한다.
+8. **Disable/revoke/remove:** 032는 app-level blocker와 historical receipt를 유지하고 030 activation semantics와 031 persistence를 소비한다.
 9. 구체적인 dependency 설치 위치와 filesystem layout은 이 lifecycle 계약의 범위가 아니다.
 
 ## acceptance criteria
@@ -129,7 +129,7 @@ Executable resource의 discovery, install, activation, execution은 다음 단�
 12. Declared Python/Node package 누락은 030 trusted runtime profile이 허용할 때만 준비·검증되며, manifest 밖 install은 새 proposal과 030 activation decision 전까지 멈춘다.
 13. 같은 skill 이름이어도 source/content/dependency digest가 바뀌면 기존 activation이 재사용되지 않는다.
 14. Python/Node runtime 자체 누락은 package 누락과 구분되어 prerequisite 또는 별도 managed runtime 상태로 표시된다.
-15. App start receipt가 030 activation ref, 035 execution snapshot ref, credential status를 연결하고 raw secret을 포함하지 않는다.
+15. App start receipt가 030 activation ref, 031 execution snapshot ref, credential status를 연결하고 raw secret을 포함하지 않는다.
 16. App-level active 상태가 adapter별 process control이나 sandbox 상태를 하나의 권한·격리 보장으로 뭉개지 않는다.
 
 ## source handoff table
@@ -141,8 +141,8 @@ Executable resource의 discovery, install, activation, execution은 다음 단�
 | 021 app maker and app authoring | `apps init` draft baseline, scaffold and manifest candidate, installed registry non-mutation | AI-assisted proposal, validation, receipt, authoring decision/checkpoint/apply/verify integration, install handoff, existing-app edit flow |
 | 025 user-extensible hooks and plugins | Local plugin manifest, activation gate, hook/tool/skill/MCP/command slice, replay live-dispatch rejection | App-owned extension provenance, app lifecycle tied enable/disable/start/recover evidence, extension blocker projection |
 | 030 trusted agent runtime | Trusted profile, activation eligibility/disclosure, credential status, path-specific controls, sandbox status | App start gate가 owner facts를 소비하고 activation/process blocker를 receipt에 연결 |
-| 035 configuration and snapshots | Config/profile/auth-source persistence, activation persistence, execution snapshot | App receipt가 snapshot/activation refs를 연결하되 schema·storage를 재소유하지 않음 |
-| 031 projection parity | Shared projection schema and adapters | App/resource lifecycle owner facts와 safe receipts를 projection input으로 생산 |
+| 031 configuration and snapshots | Config/profile/auth-source persistence, activation persistence, execution snapshot | App receipt가 snapshot/activation refs를 연결하되 schema·storage를 재소유하지 않음 |
+| 035 projection parity | Shared projection schema and adapters | App/resource lifecycle owner facts와 safe receipts를 projection input으로 생산 |
 
 ## Implementation PRDs
 
@@ -150,9 +150,9 @@ Spec 032는 app authoring에서 process lifecycle과 closure까지 아래 단계
 
 | PRD | Sole owner scope | Depends on |
 |---|---|---|
-| [PRD 000](prds/000-app-supervisor-and-process-lifecycle.md) | AppSupervisor, start/stop/restart/recover state와 process receipt | 017 baseline, Specs 030/035 fact contracts |
+| [PRD 000](prds/000-app-supervisor-and-process-lifecycle.md) | AppSupervisor, start/stop/restart/recover state와 process receipt | 017 baseline, Specs 030/031 fact contracts |
 | [PRD 001](prds/001-app-maker-proposal-apply-and-install.md) | Proposal, current-user authoring/apply decision, checkpoint, apply, verify, install/update | 021 baseline |
-| [PRD 002](prds/002-extension-provenance-and-activation-boundary.md) | App-owned extension provenance, discovery/install/activation/execution boundary, lifecycle blocker | PRDs 000-001, Specs 025/030/035 fact contracts |
+| [PRD 002](prds/002-extension-provenance-and-activation-boundary.md) | App-owned extension provenance, discovery/install/activation/execution boundary, lifecycle blocker | PRDs 000-001, Specs 025/030/031 fact contracts |
 | [PRD 003](prds/003-sequential-integration-and-spec032-closure.md) | End-to-end app lifecycle integration, coverage/evidence, final Spec032 closure | PRDs 000-002, required owner-fact audits |
 
 Current PRD status:
@@ -167,7 +167,7 @@ Current PRD status:
 Dependency rules:
 
 1. PRD 001은 app process를 시작하거나 executable activation을 만들지 않는다.
-2. PRD 002는 030 activation eligibility와 035 persistence를 소비하고 재정의하지 않는다.
+2. PRD 002는 030 activation eligibility와 031 persistence를 소비하고 재정의하지 않는다.
 3. PRD 003은 다른 spec closure status가 아니라 exact owner facts와 local evidence만 검사한다.
 4. PRD 003의 requirement mapping, real-surface QA, artifact audit가 통과하기 전에는 Spec 032를 닫지 않는다.
 
@@ -175,7 +175,7 @@ Dependency rules:
 
 032는 아직 open 상태다. 이 spec을 닫으려면 아래 evidence가 저장소에 있어야 한다.
 
-1. 코드 증거: `AppSupervisor`, app process lifecycle, app start/stop/recover command path, 030 credential/trusted-runtime owner-fact consumption, 035 snapshot linkage, extension provenance model.
+1. 코드 증거: `AppSupervisor`, app process lifecycle, app start/stop/recover command path, 030 credential/trusted-runtime owner-fact consumption, 031 snapshot linkage, extension provenance model.
 2. 테스트 증거: lifecycle state tests, missing credential and untrusted workspace tests, extension blocked tests, existing app edit tests, proposal/apply/install handoff tests, replay safety tests.
 3. 인터페이스 증거: registry, process, blocker, receipt, recover state에 대한 CLI와 local API output 또는 snapshot tests. Future TUI가 구현된 경우 같은 projection 의미를 써야 한다.
 4. Diagnostics 증거: redacted app process receipt, extension activation receipt, failed start/stop/recover diagnostics, no raw secret regression.
