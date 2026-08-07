@@ -110,7 +110,7 @@ fn push_external_rows(
             source_locator: audit
                 .map(|audit| audit.source_status_locator.clone())
                 .unwrap_or_else(|| {
-                    "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec031-closure.md:153".to_owned()
+                    "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec035-closure.md:3".to_owned()
                 }),
             owner: "spec031".to_owned(),
             status,
@@ -129,19 +129,19 @@ fn push_external_rows(
 
 fn command_source(command_id: &str) -> String {
     let line = match command_id {
-        "spec031-fmt" => 201,
-        "spec031-clippy-workspace" => 202,
-        "spec031-test-workspace" => 203,
-        "spec031-test-release-runner" => 182,
-        "spec031-test-lifecycle" => 216,
-        "spec031-test-projection-parity" => 214,
-        "spec031-test-surface-smoke" => 210,
-        "spec031-test-failure-injection" => 232,
-        "spec031-build-cli" => 204,
-        "spec031-build-tui" => 205,
-        _ => 179,
+        "spec031-fmt" => 234,
+        "spec031-clippy-workspace" => 235,
+        "spec031-test-workspace" => 236,
+        "spec031-test-release-runner" => 225,
+        "spec031-test-lifecycle" => 249,
+        "spec031-test-projection-parity" => 215,
+        "spec031-test-surface-smoke" => 243,
+        "spec031-test-failure-injection" => 215,
+        "spec031-build-cli" => 237,
+        "spec031-build-tui" => 238,
+        _ => 215,
     };
-    format!("docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec031-closure.md:{line}")
+    format!("docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec035-closure.md:{line}")
 }
 
 fn owner_slug(owner: super::coverage::Spec031ExternalOwnerId) -> &'static str {

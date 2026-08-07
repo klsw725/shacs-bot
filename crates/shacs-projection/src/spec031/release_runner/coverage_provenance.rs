@@ -18,35 +18,35 @@ pub(super) const REQUIRED_ARTIFACT_PROVENANCE: [ArtifactProvenance; 5] = [
     ArtifactProvenance {
         name: "manifest",
         artifact: "manifest.json",
-        source_locator: "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec031-closure.md:183",
+        source_locator: "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec035-closure.md:216",
         evidence_class: Spec031TypedEvidenceClass::ManifestJson,
         media_type: Spec031ArtifactMediaType::Json,
     },
     ArtifactProvenance {
         name: "coverage-matrix",
         artifact: "coverage-matrix.json",
-        source_locator: "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec031-closure.md:183",
+        source_locator: "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec035-closure.md:216",
         evidence_class: Spec031TypedEvidenceClass::CoverageMatrixJson,
         media_type: Spec031ArtifactMediaType::Json,
     },
     ArtifactProvenance {
         name: "results",
         artifact: "results.json",
-        source_locator: "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec031-closure.md:183",
+        source_locator: "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec035-closure.md:216",
         evidence_class: Spec031TypedEvidenceClass::CommandResultsJson,
         media_type: Spec031ArtifactMediaType::Json,
     },
     ArtifactProvenance {
         name: "failure-triage",
         artifact: "failure-triage.json",
-        source_locator: "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec031-closure.md:183",
+        source_locator: "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec035-closure.md:216",
         evidence_class: Spec031TypedEvidenceClass::FailureTriageJson,
         media_type: Spec031ArtifactMediaType::Json,
     },
     ArtifactProvenance {
         name: "summary",
         artifact: "summary.md",
-        source_locator: "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec031-closure.md:184",
+        source_locator: "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec035-closure.md:217",
         evidence_class: Spec031TypedEvidenceClass::SummaryMarkdown,
         media_type: Spec031ArtifactMediaType::Markdown,
     },
@@ -54,9 +54,9 @@ pub(super) const REQUIRED_ARTIFACT_PROVENANCE: [ArtifactProvenance; 5] = [
 
 pub(super) fn requirement_provenance() -> Vec<RequirementProvenance> {
     let mut rows = Vec::new();
-    push_numbered(&mut rows, "must", 10, 74, "results.json");
-    push_numbered(&mut rows, "acceptance", 9, 99, "results.json");
-    push_numbered(&mut rows, "closure", 8, 165, "results.json");
+    push_numbered(&mut rows, "must", 10, 81, "results.json");
+    push_numbered(&mut rows, "acceptance", 9, 111, "results.json");
+    push_numbered(&mut rows, "closure", 8, 187, "results.json");
     for index in 1..=8 {
         rows.push(RequirementProvenance {
             id: match index {
@@ -71,14 +71,14 @@ pub(super) fn requirement_provenance() -> Vec<RequirementProvenance> {
                 _ => unreachable!(),
             },
             source_locator: match index {
-                1 => "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:144".to_owned(),
-                2 => "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:145".to_owned(),
-                3 => "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:146".to_owned(),
-                4 => "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:147".to_owned(),
-                5 => "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:148".to_owned(),
-                6 => "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:149".to_owned(),
-                7 => "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:150".to_owned(),
-                8 => "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:151".to_owned(),
+                1 => "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:148".to_owned(),
+                2 => "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:149".to_owned(),
+                3 => "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:150".to_owned(),
+                4 => "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:151".to_owned(),
+                5 => "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:152".to_owned(),
+                6 => "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:153".to_owned(),
+                7 => "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:154".to_owned(),
+                8 => "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:155".to_owned(),
                 _ => unreachable!(),
             },
             artifact: "results.json",
@@ -94,7 +94,7 @@ fn push_numbered(
     first_line: usize,
     artifact: &'static str,
 ) {
-    let base = "docs/specs/031-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md";
+    let base = "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md";
     for index in 1..=count {
         rows.push(RequirementProvenance {
             id: format!("spec031:{prefix}:{index:02}"),
