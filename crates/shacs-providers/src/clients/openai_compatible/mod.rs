@@ -2382,7 +2382,7 @@ fn parse_responses_function_call(
         }
     };
     Ok(ToolCallRequest::new(
-        format!("{}|{}", call_id, item_id),
+        format!("{call_id}|{item_id}"),
         item.get("name").and_then(Value::as_str).unwrap_or_default(),
         arguments,
     ))

@@ -60,7 +60,7 @@ pub use clients::{
 pub use config::{interpolate_env, AgentDefaults, ProviderConfig, ProvidersConfig};
 pub use error::ProviderError;
 pub use model::{ModelCapabilities, ModelCost, ModelInfo, ModelLimits, ModelModalities};
-pub use provider::{Provider, ProviderClient, ProviderEvent, ProviderRequest};
+pub use provider::{Provider, ProviderClient, ProviderEvent, ProviderInvocation, ProviderRequest};
 pub use registry::{find_by_name, provider_specs, ProviderMatch, ProviderRegistry, ProviderSpec};
 pub use retry::{
     chat_stream_with_retry, chat_stream_with_retry_using_waiter, chat_with_retry,
