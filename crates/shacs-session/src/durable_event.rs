@@ -332,6 +332,7 @@ struct ProcessStoreState {
 struct FileStamp {
     length: u64,
     modified: Option<SystemTime>,
+    digest: [u8; 32],
 }
 
 impl DurableEventStore {
@@ -926,9 +927,20 @@ fn write_frame(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 fn file_stamp(path: &Path) -> std::io::Result<FileStamp> {
     let metadata = fs::metadata(path)?;
+    let mut reader = BufReader::new(open_read_file(path)?);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(FileStamp {
         length: metadata.len(),
         modified: metadata.modified().ok(),
+        digest: hasher.finalize().into(),
     })
 }
 

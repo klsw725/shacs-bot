@@ -789,15 +789,11 @@ fn inventory_family(
             .get("schema_version")
             .and_then(Value::as_u64)
             .ok_or_else(|| {
-                DurableMigrationError::Validation(format!(
-                    "{} fixture has no schema_version",
-                    family
-                ))
+                DurableMigrationError::Validation(format!("{family} fixture has no schema_version"))
             })?;
         let version = u32::try_from(raw_version).map_err(|_| {
             DurableMigrationError::Validation(format!(
-                "{} fixture schema_version exceeds u32",
-                family
+                "{family} fixture schema_version exceeds u32"
             ))
         })?;
         if version < CURRENT_STORED_DATA_SCHEMA_VERSION
@@ -817,8 +813,7 @@ fn inventory_family(
     let resource = family.physical_resource();
     let physical_precondition_digest = resource_digest(roots, resource)?;
     let evidence_digest = digest_text(&format!(
-        "{}:{}:{}",
-        logical_source_digest, resource, physical_precondition_digest
+        "{logical_source_digest}:{resource}:{physical_precondition_digest}"
     ));
     Ok(DurableMigrationInventoryEntry {
         family,
@@ -851,8 +846,7 @@ fn transform_v0_family(
     })?;
     if version != 0 {
         return Err(DurableMigrationError::Blocked(format!(
-            "{} has no v0->v1 migration path",
-            family
+            "{family} has no v0->v1 migration path"
         )));
     }
     match family {
@@ -1440,8 +1434,7 @@ fn verify_pending_preconditions(
         .unwrap_or_else(|| entry.physical_precondition_digest.clone());
     if current != expected {
         return Err(DurableMigrationError::Blocked(format!(
-            "{} physical resource changed since last migration step; manual recovery required",
-            resource
+            "{resource} physical resource changed since last migration step; manual recovery required"
         )));
     }
     Ok(())

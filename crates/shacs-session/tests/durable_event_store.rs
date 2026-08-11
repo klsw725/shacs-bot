@@ -289,7 +289,7 @@ fn durable_event_store_bounds_and_validates_the_complete_envelope() -> Result<()
     for index in 0..200 {
         provenance.skill_body_hashes.insert(
             format!("skill-{index}-{}", "x".repeat(800)),
-            format!("sha256:{:064x}", index),
+            format!("sha256:{index:064x}"),
         );
     }
     let mut oversized_record = input(SESSION_TURN_ACCEPTED, "bounded");

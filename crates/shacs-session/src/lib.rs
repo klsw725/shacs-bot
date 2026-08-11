@@ -1377,7 +1377,7 @@ fn add_digest_suffix(sanitized: &str, original: &str) -> String {
         sanitized
     };
     let digest = Sha256::digest(original.as_bytes());
-    format!("{prefix}-{:x}", digest)[..prefix.len() + 1 + 12].to_owned()
+    format!("{prefix}-{digest:x}")[..prefix.len() + 1 + 12].to_owned()
 }
 
 fn legacy_nanobot_safe_key(key: &str) -> String {

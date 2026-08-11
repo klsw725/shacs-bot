@@ -226,5 +226,5 @@ fn contains_windows_drive_path(text: &str) -> bool {
 
 fn opaque_ref(prefix: &str, value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
-    format!("{prefix}:sha256:{:x}", digest)[..prefix.len() + 8 + 16].to_owned()
+    format!("{prefix}:sha256:{digest:x}")[..prefix.len() + 8 + 16].to_owned()
 }
