@@ -12,7 +12,10 @@ use shacs_channels::{
     project_spec031_channel_event, ChannelDeliveryObservation, ChannelSpec031ProjectionInput,
     WebSocketServerEvent,
 };
-use shacs_projection::{RememberedPermissionProjection, Spec031Envelope};
+use shacs_projection::{
+    RememberedPermissionProjection, Spec030RuntimeProjection, Spec030UnavailableReason,
+    Spec031Envelope,
+};
 use shacs_providers::{GenerationSettings, LlmResponse, ProviderEvent, ProviderRequest};
 use shacs_session::{
     build_session_diagnostics_aggregate, SessionManager, SessionProjectionOptions,
@@ -37,7 +40,13 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{timeout, Duration};
 
+mod spec030_api;
+mod spec030_client;
 mod spec031_api;
+pub use spec030_api::TRUSTED_RUNTIME_PATH;
+pub use spec030_client::{
+    observe_trusted_runtime, TrustedRuntimeObservation, TrustedRuntimeProjectionSource,
+};
 pub use spec031_api::{Spec031ApiProjection, READINESS_PATH, SUBAGENTS_PATH, TOOLS_PATH};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
@@ -293,6 +302,10 @@ pub trait ChatCompletionAdapter {
 
     fn readiness_projection(&self) -> Option<Value> {
         None
+    }
+
+    fn trusted_runtime_projection(&self) -> Spec030RuntimeProjection {
+        Spec030RuntimeProjection::unavailable(Spec030UnavailableReason::OwnerFactsMissing)
     }
 
     fn spec031_projection(
@@ -683,6 +696,7 @@ fn api_router_with_observer(
         .route(SUBAGENTS_PATH, any(axum_dispatch))
         .route(TOOLS_PATH, any(axum_dispatch))
         .route(READINESS_PATH, any(axum_dispatch))
+        .route(TRUSTED_RUNTIME_PATH, any(axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(axum_dispatch))
         .route(PERMISSIONS_PATH, any(axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(axum_dispatch))
@@ -726,6 +740,7 @@ fn api_router_with_state_and_websocket_path(state: ApiRouterState, websocket_pat
         .route(SUBAGENTS_PATH, any(axum_dispatch))
         .route(TOOLS_PATH, any(axum_dispatch))
         .route(READINESS_PATH, any(axum_dispatch))
+        .route(TRUSTED_RUNTIME_PATH, any(axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(axum_dispatch))
         .route(PERMISSIONS_PATH, any(axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(axum_dispatch))
@@ -776,6 +791,7 @@ pub fn web_ui_router_with_timeout_and_websocket_path(
         .route(SUBAGENTS_PATH, any(webui_axum_dispatch))
         .route(TOOLS_PATH, any(webui_axum_dispatch))
         .route(READINESS_PATH, any(webui_axum_dispatch))
+        .route(TRUSTED_RUNTIME_PATH, any(webui_axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(webui_axum_dispatch))
         .route(PERMISSIONS_PATH, any(webui_axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(webui_axum_dispatch))
@@ -1068,6 +1084,11 @@ pub fn handle_api_request(
         )),
         (ApiMethod::Get, _) => {
             if let Some(response) =
+                spec030_api::handle_trusted_runtime_request(&request.path, adapter)
+            {
+                return response;
+            }
+            if let Some(response) =
                 spec031_api::handle_spec031_projection_request(&request.path, adapter)
             {
                 return response;
@@ -1100,6 +1121,7 @@ pub fn handle_api_request(
         | (_, SUBAGENTS_PATH)
         | (_, TOOLS_PATH)
         | (_, READINESS_PATH)
+        | (_, TRUSTED_RUNTIME_PATH)
         | (_, WORKFLOW_RECIPES_PATH)
         | (_, PERMISSIONS_PATH)
         | (_, CHAT_COMPLETIONS_PATH)
@@ -2337,8 +2359,7 @@ fn chat_completion_invocation_with_uploads(
     for file in uploaded_files {
         if file.bytes.len() > MAX_MEDIA_BYTES {
             return Err(ApiError::payload_too_large(format!(
-                "uploaded file exceeds {} bytes",
-                MAX_MEDIA_BYTES
+                "uploaded file exceeds {MAX_MEDIA_BYTES} bytes",
             )));
         }
         media_paths.push(adapter.persist_uploaded_file_for_session(
@@ -2712,8 +2733,7 @@ async fn read_multipart_bytes(
     })?;
     if bytes.len() > MAX_MEDIA_BYTES {
         return Err(ApiError::payload_too_large(format!(
-            "multipart field exceeds {} bytes",
-            MAX_MEDIA_BYTES
+            "multipart field exceeds {MAX_MEDIA_BYTES} bytes",
         )));
     }
     Ok(bytes.to_vec())
