@@ -8,6 +8,7 @@ rust-version = "1.75"
 cap-std = "4.0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 shacs-config = { path = "../shacs-config" }
 shacs-eval = { path = "../shacs-eval" }
 shacs-redaction = { path = "../shacs-redaction" }
