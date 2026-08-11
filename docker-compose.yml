@@ -47,6 +47,8 @@ services:
   shacs-api:
     container_name: shacs-api
     <<: *common-config
+    profiles:
+      - api
     command:
       - serve
       - --host
