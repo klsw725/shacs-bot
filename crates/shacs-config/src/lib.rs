@@ -10,10 +10,13 @@ use std::process;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod credential;
 mod permissions;
 mod remembered_permissions;
 mod secret_ref;
+mod trusted_runtime_config;
 
+pub use credential::*;
 pub use permissions::{
     AutoApprovalConfig, PermissionActivationContext, PermissionConfigDiagnostics,
     PermissionConfigSnapshot, PermissionMode, PermissionModeSource, PermissionsConfig,
@@ -26,6 +29,7 @@ pub use remembered_permissions::{
     RememberedPermissionStoreErrorKind, WorkspacePathScope, WorkspacePermissionId,
 };
 pub use secret_ref::{provider_secret_refs, ConfigSecretRef};
+pub use trusted_runtime_config::*;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -47,6 +51,12 @@ pub struct Config {
     pub plugins: PluginsConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(
+        default,
+        rename = "trustedRuntime",
+        skip_serializing_if = "TrustedRuntimeConfig::is_default"
+    )]
+    pub trusted_runtime: TrustedRuntimeConfig,
 }
 
 impl Config {
@@ -178,6 +188,12 @@ pub struct ProviderConfig {
     pub extra_headers: Option<BTreeMap<String, String>>,
     #[serde(default, alias = "extra_body", skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<Map<String, Value>>,
+    #[serde(
+        default,
+        alias = "credential_source",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_source: Option<ProviderCredentialSourceConfig>,
 }
 
 impl ProviderConfig {
@@ -187,6 +203,18 @@ impl ProviderConfig {
 }
 
 pub type ProvidersConfig = BTreeMap<String, ProviderConfig>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCredentialSourceConfig {
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    #[serde(default = "default_true")]
+    pub local_auth: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,11 +243,34 @@ impl PluginsConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AuthStore {
+    #[serde(
+        default,
+        rename = "_sourceFingerprints",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    source_fingerprints: BTreeMap<String, String>,
     #[serde(default, flatten)]
     pub providers: BTreeMap<String, ProviderAuth>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl AuthStore {
+    pub fn set_fingerprint(
+        &mut self,
+        provider_id: impl Into<String>,
+        fingerprint: CredentialFingerprint,
+    ) {
+        self.source_fingerprints
+            .insert(provider_id.into(), fingerprint.as_str().to_owned());
+    }
+
+    pub fn fingerprint(&self, provider_id: &str) -> Option<CredentialFingerprint> {
+        self.source_fingerprints
+            .get(provider_id)
+            .map(|value| CredentialFingerprint::from_stored(value.clone()))
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderAuth {
     #[serde(rename = "type")]
@@ -231,6 +282,19 @@ pub struct ProviderAuth {
     pub expires: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderAuth")
+            .field("kind", &self.kind)
+            .field("access", &"[REDACTED]")
+            .field("refresh", &self.refresh.as_ref().map(|_| "[REDACTED]"))
+            .field("expires", &self.expires)
+            .field("account_id", &self.account_id)
+            .finish()
+    }
 }
 
 impl ProviderAuth {
@@ -595,6 +659,8 @@ pub struct ExecToolConfig {
     pub path_append: String,
     #[serde(default)]
     pub sandbox: String,
+    #[serde(default, skip_serializing_if = "ExecSandboxPolicyConfig::is_default")]
+    pub sandbox_policy: ExecSandboxPolicyConfig,
     #[serde(default)]
     pub allowed_env_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -608,6 +674,7 @@ impl Default for ExecToolConfig {
             timeout: default_exec_timeout(),
             path_append: String::new(),
             sandbox: String::new(),
+            sandbox_policy: ExecSandboxPolicyConfig::default(),
             allowed_env_keys: Vec::new(),
             env: BTreeMap::new(),
         }
@@ -1737,6 +1804,31 @@ mod tests {
             Some("https://api.example.test")
         );
         assert_eq!(serde_json::to_value(ProviderConfig::default())?, json!({}));
+        Ok(())
+    }
+
+    #[test]
+    fn provider_config_parses_spec031_credential_source_declaration(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config: ProviderConfig = serde_json::from_value(json!({
+            "apiKey": "literal-compatible",
+            "credentialSource": {
+                "schemaVersion": 1,
+                "environment": "CUSTOM_API_KEY",
+                "localAuth": false,
+                "command": "printf command-value"
+            }
+        }))?;
+
+        let source = config
+            .credential_source
+            .as_ref()
+            .ok_or("credential source missing")?;
+        assert_eq!(source.schema_version, 1);
+        assert_eq!(source.environment.as_deref(), Some("CUSTOM_API_KEY"));
+        assert!(!source.local_auth);
+        assert_eq!(source.command.as_deref(), Some("printf command-value"));
+        assert_eq!(config.api_key.as_deref(), Some("literal-compatible"));
         Ok(())
     }
 
