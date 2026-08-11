@@ -18,7 +18,7 @@
 - `Open (implemented, closure blocked)` 또는 PRD의 `Implemented, closure blocked`는 구현과 현재 surface QA evidence가 존재하지만 release closure 조건이 아직 통과하지 않았음을 뜻한다.
 - `Planned`는 accepted contract이지만 구현·surface evidence가 아직 없는 범위다. 기존 implemented evidence로 완료 처리하지 않는다.
 - `Planned revision (implemented baseline)`은 이전 계약의 구현 evidence는 존재하지만, 새로 확장된 계약은 아직 검증되지 않았다는 뜻이다.
-- 기존 문서의 미구현 accepted work는 `029`부터 `035`의 owner spec으로 이관했다. `028`과 `029`는 scoped implementation을 완료했고, 남은 open owner table은 `030`부터 `035`를 따른다.
+- 기존 문서의 미구현 accepted work는 `029`부터 `035`의 owner spec으로 이관했다. `028`부터 `030`은 scoped implementation을 완료했고, 남은 open owner table은 `031`부터 `035`를 따른다.
 - 기존 문서 본문의 future 문구는 역사와 설계 근거로 보존하지만, 구현 owner는 각 문서 상단의 `Open work moved to:` ledger와 새 spec을 따른다.
 - SaaS/admin/fleet, 멀티유저 조직 운영, remote marketplace, complete kernel isolation 같은 명시적 비목표는 신규 backlog로 승격하지 않았다.
 
@@ -26,7 +26,6 @@
 
 | Spec | Owner scope | Origin specs |
 |---|---|---|
-| `030-trusted-agent-runtime-and-operational-controls` | trusted local agent profile, extension-defined pre-tool veto, path-specific process controls, credential lifecycle, optional sandbox, resource/data disclosure | 004, 005, 007, 010, 011, 022, 023, 025 |
 | `031-configuration-runtime-layout-and-execution-snapshots` | config migration, profiles, runtime layout, immutable diagnostic execution snapshots, context wiring | 008, 009, 010, 015, 026 |
 | `032-app-maker-runtime-and-extension-lifecycle` | AppSupervisor/process lifecycle, current-user authoring/apply/install, app-level activation provenance and blockers | 005, 017, 021, 025 |
 | `033-evaluation-automation-live-integration` | goal accounting, evaluator/automation, apply-time CAS self-improvement, snapshot-based replay의 live integration | 009, 012, 013, 014, 016, 018, 022 |
