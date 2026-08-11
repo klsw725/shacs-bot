@@ -3,6 +3,7 @@ pub mod input;
 pub mod live_source;
 mod remembered_permissions;
 pub mod state;
+pub mod trusted_runtime_view;
 pub mod update;
 pub mod view;
 pub mod workflow_view;

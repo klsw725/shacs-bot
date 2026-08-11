@@ -1,4 +1,5 @@
 use shacs_core::runtime::{SurfaceActionOutcome, SurfaceActionOutcomeKind};
+use shacs_projection::{Spec030RuntimeProjection, Spec030UnavailableReason};
 use shacs_session::{SessionRuntimeExecutionProjection, SessionRuntimeWorkflowProjection};
 use std::fmt;
 
@@ -102,6 +103,7 @@ pub struct TuiState {
     pub selected: usize,
     pub status: UiStatus,
     pub terminal_size: TerminalSize,
+    pub trusted_runtime: Spec030RuntimeProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +155,14 @@ impl TuiState {
                 columns: 100,
                 rows: 30,
             },
+            trusted_runtime: Spec030RuntimeProjection::unavailable(
+                Spec030UnavailableReason::OwnerFactsMissing,
+            ),
         }
+    }
+
+    pub fn set_trusted_runtime(&mut self, projection: Spec030RuntimeProjection) {
+        self.trusted_runtime = projection;
     }
 
     pub fn selected_session(&self) -> Option<&RuntimeSession> {

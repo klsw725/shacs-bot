@@ -1,6 +1,7 @@
 use crate::state::{
     action_outcome_label, ApprovalActionState, ApprovalStatus, RuntimeSession, TuiState, UiStatus,
 };
+use crate::trusted_runtime_view::trusted_runtime_lines;
 use crate::workflow_view::session_workflow_progress_view;
 use ratatui::{
     prelude::*,
@@ -60,6 +61,7 @@ pub fn render_lines_for_width(state: &TuiState, width: u16) -> Vec<String> {
     if let Some(session) = state.selected_session() {
         lines.extend(session_lines(session));
     }
+    lines.extend(trusted_runtime_lines(&state.trusted_runtime));
     lines.extend(key_help_lines(state));
     lines.into_iter().map(|line| clip(&line, width)).collect()
 }

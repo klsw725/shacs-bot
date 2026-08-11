@@ -10,9 +10,11 @@ use shacs_tui::{
     live_source::{RuntimeProjectionSource, SessionRuntimeSource},
     state::{SessionKey, TuiState, UiStatus},
     update::{apply_action_outcome, apply_input, apply_snapshot, UpdateEffect},
-    view::{draw_tui, render_lines},
+    view::draw_tui,
 };
 use std::{io, path::PathBuf, time::Duration};
+
+mod once;
 
 fn main() {
     if let Err(error) = run(std::env::args().skip(1)) {
@@ -39,26 +41,11 @@ where
 }
 
 fn render_once(options: &TuiOptions) -> Result<String, String> {
-    let source = SessionRuntimeSource::with_config(options.config_path.clone(), &options.workspace);
-    let preferred = options
-        .session
-        .as_ref()
-        .map(|value| SessionKey::new(value.clone()))
-        .transpose()
-        .map_err(|error| format!("invalid session key: {error}"))?;
-    let snapshot = source.load().map_err(|error| error.to_string())?;
-    if let Some(preferred) = &preferred {
-        if !snapshot
-            .sessions
-            .iter()
-            .any(|session| session.key == *preferred)
-        {
-            return Err(format!("session `{preferred}` was not found"));
-        }
-    }
-    let mut state = TuiState::from_snapshot(snapshot, preferred.as_ref());
-    state.terminal_size.columns = 120;
-    Ok(render_lines(&state).join("\n"))
+    once::render(
+        options.config_path.clone(),
+        &options.workspace,
+        options.session.as_deref(),
+    )
 }
 
 fn run_interactive(options: &TuiOptions) -> Result<(), String> {
@@ -73,6 +60,7 @@ fn run_interactive(options: &TuiOptions) -> Result<(), String> {
         source.load().map_err(|error| error.to_string())?,
         preferred.as_ref(),
     );
+    state.set_trusted_runtime(source.trusted_runtime_projection());
     enable_raw_mode().map_err(|error| format!("terminal raw mode failed: {error}"))?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)
@@ -113,7 +101,10 @@ fn event_loop<B: ratatui::backend::Backend>(
             };
         match apply_input(state, input) {
             UpdateEffect::RefreshRequested => match source.load() {
-                Ok(snapshot) => apply_snapshot(state, snapshot),
+                Ok(snapshot) => {
+                    apply_snapshot(state, snapshot);
+                    state.set_trusted_runtime(source.trusted_runtime_projection());
+                }
                 Err(error) => state.status = UiStatus::SourceError(error.to_string()),
             },
             UpdateEffect::RunAction(action) => {

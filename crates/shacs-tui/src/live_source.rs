@@ -5,6 +5,7 @@ use crate::state::{
 use serde_json::Value;
 use shacs_config::{config_context, default_config_path};
 use shacs_core::runtime::{surface_approval_availability, SurfaceApprovalAvailability};
+use shacs_projection::Spec030RuntimeProjection;
 use shacs_session::SessionManager;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,6 +35,11 @@ impl SessionRuntimeSource {
     pub fn config_path(&self) -> Option<&Path> {
         self.config_path.as_deref()
     }
+
+    pub fn trusted_runtime_projection(&self) -> Spec030RuntimeProjection {
+        shacs_api::observe_trusted_runtime(self.config_path.clone(), Some(self.workspace.clone()))
+            .projection
+    }
 }
 
 impl RuntimeProjectionSource for SessionRuntimeSource {
@@ -44,9 +50,13 @@ impl RuntimeProjectionSource for SessionRuntimeSource {
         )
         .data_dir;
         let now_ms = now_ms();
-        let manager = SessionManager::open_existing(&self.workspace)
-            .map_err(TuiSourceError::Store)?
-            .ok_or(TuiSourceError::StoreMissing)?;
+        let Some(manager) =
+            SessionManager::open_existing(&self.workspace).map_err(TuiSourceError::Store)?
+        else {
+            return Ok(RuntimeSnapshot {
+                sessions: Vec::new(),
+            });
+        };
         let summaries = manager.list_session_ux().map_err(TuiSourceError::Store)?;
         let sessions = summaries
             .into_iter()
