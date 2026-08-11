@@ -17,7 +17,7 @@ use super::runner_outputs::{
 use super::validate::validate_spec031_release_artifacts_with_repo_root;
 use super::writer::{write_json, write_spec031_release_artifacts_with};
 use super::REQUIRED_ARTIFACTS;
-use crate::spec031::evidence_writer::EvidenceWriter;
+use crate::release_evidence::EvidenceWriter;
 use std::path::Path;
 use std::process::Command;
 

@@ -1,7 +1,6 @@
 mod artifacts;
 mod capability;
 mod envelope;
-mod evidence_writer;
 mod external_fact;
 mod external_owner;
 mod external_refs;
@@ -63,16 +62,18 @@ pub use readiness::{
 };
 pub use readiness_input::Spec031ReadinessAggregationError;
 pub use redaction::{Spec031ConstructionError, Spec031ConstructionViolation};
+pub(crate) use release_runner::execute_spec031_release_command_with;
 pub use release_runner::{
     execute_spec031_release_command, parse_cargo_test_counts, run_spec031_release_runner,
     validate_spec031_release_artifacts, validate_spec031_release_artifacts_with_repo_root,
-    write_spec031_release_artifacts, Spec031ArtifactMediaType, Spec031CoverageEvidenceKind,
-    Spec031CoverageRequirementKind, Spec031CoverageStatus, Spec031ExternalAuditRow,
-    Spec031ExternalAuditStatus, Spec031ExternalOwnerId, Spec031ReleaseArtifactError,
-    Spec031ReleaseCommandRecord, Spec031ReleaseCommandSpec, Spec031ReleaseCommandStatus,
-    Spec031ReleaseCoverageEntry, Spec031ReleaseGateKind, Spec031ReleaseRunArtifacts,
-    Spec031ReleaseRunId, Spec031ReleaseRunnerConfig, Spec031ReleaseRunnerMode,
-    Spec031ReleaseTestCounts, Spec031TypedEvidenceClass, SPEC031_RELEASE_RUNNER_SCHEMA,
+    write_spec031_release_artifacts, Spec031ArtifactMediaType, Spec031CommandProcessReceipt,
+    Spec031CoverageEvidenceKind, Spec031CoverageRequirementKind, Spec031CoverageStatus,
+    Spec031ExternalAuditRow, Spec031ExternalAuditStatus, Spec031ExternalOwnerId,
+    Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseCommandSpec,
+    Spec031ReleaseCommandStatus, Spec031ReleaseCoverageEntry, Spec031ReleaseGateKind,
+    Spec031ReleaseRunArtifacts, Spec031ReleaseRunId, Spec031ReleaseRunnerConfig,
+    Spec031ReleaseRunnerMode, Spec031ReleaseTestCounts, Spec031TypedEvidenceClass,
+    SPEC031_RELEASE_RUNNER_SCHEMA,
 };
 pub use version::{Spec031SchemaVersion, Spec031VersionError, SPEC031_SCHEMA_VERSION};
 pub use vocabulary::{

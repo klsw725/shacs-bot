@@ -1,8 +1,8 @@
-use super::evidence_writer::EvidenceWriter;
 use super::external_owner::{
     blocker_file_name, read_audit_file_name, ExternalOwnerSpec, Spec031ExternalOwnerArtifactSet,
     Spec031ExternalOwnerProjection, Spec031ExternalOwnerReasonCode, Spec031ReadAuditArtifact,
 };
+use crate::release_evidence::EvidenceWriter;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 

@@ -1,6 +1,6 @@
 use super::model::Spec031ReleaseArtifactError;
 use super::writer::write_text;
-use crate::spec031::evidence_writer::EvidenceWriter;
+use crate::release_evidence::EvidenceWriter;
 
 pub(super) fn prepare_success_fixture_project(
     writer: &EvidenceWriter,

@@ -1,5 +1,5 @@
 use super::model::{Spec031ReleaseArtifactError, Spec031ReleaseRunArtifacts};
-use crate::spec031::evidence_writer::EvidenceWriter;
+use crate::release_evidence::EvidenceWriter;
 use serde::Serialize;
 use std::path::Path;
 

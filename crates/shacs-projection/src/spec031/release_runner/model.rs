@@ -8,7 +8,7 @@ use super::coverage::{Spec031ExternalAuditRow, Spec031ReleaseCoverageEntry};
 pub const SPEC031_RELEASE_RUNNER_SCHEMA: &str = "spec031.release_runner.v1";
 const MAX_SAFE_ID_LEN: usize = 80;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Spec031ReleaseRunId(String);
 
@@ -48,7 +48,7 @@ pub enum Spec031ReleaseCommandStatus {
     TimedOut,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec031ReleaseTestCounts {
     pub tests_run: u64,
@@ -70,6 +70,18 @@ pub struct Spec031ReleaseCommandRecord {
     pub stdout_path: String,
     pub stderr_path: String,
     pub tests: Option<Spec031ReleaseTestCounts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_receipt: Option<Spec031CommandProcessReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spec031CommandProcessReceipt {
+    pub pid: u32,
+    pub reaped: bool,
+    pub stdout_temp_path: String,
+    pub stderr_temp_path: String,
+    pub temp_paths_published: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

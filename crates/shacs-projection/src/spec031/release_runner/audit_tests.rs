@@ -75,6 +75,7 @@ fn passed_command(id: &str) -> Spec031ReleaseCommandRecord {
             tests_run: 1,
             tests_failed: 0,
         }),
+        process_receipt: None,
     }
 }
 

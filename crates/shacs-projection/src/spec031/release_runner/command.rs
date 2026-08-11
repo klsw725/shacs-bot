@@ -3,7 +3,7 @@ use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseCommandSpec,
     Spec031ReleaseCommandStatus, Spec031ReleaseTestCounts,
 };
-use crate::spec031::evidence_writer::EvidenceWriter;
+use crate::release_evidence::EvidenceWriter;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ pub fn execute_spec031_release_command(
     execute_command(&writer, spec, "")
 }
 
-pub(super) fn execute_spec031_release_command_with(
+pub(crate) fn execute_spec031_release_command_with(
     writer: &EvidenceWriter,
     spec: &Spec031ReleaseCommandSpec,
 ) -> Result<Spec031ReleaseCommandRecord, Spec031ReleaseArtifactError> {
@@ -55,6 +55,7 @@ fn execute_command(
     let mut child = command
         .spawn()
         .map_err(|_| Spec031ReleaseArtifactError::Io)?;
+    let pid = child.id();
     let (timed_out, exit_status) = wait_status_with_timeout(&mut child, spec.timeout)?;
     let status = command_status(timed_out, exit_status.success());
     let stdout = writer
@@ -84,6 +85,13 @@ fn execute_command(
         stdout_path,
         stderr_path,
         tests,
+        process_receipt: Some(super::model::Spec031CommandProcessReceipt {
+            pid,
+            reaped: true,
+            stdout_temp_path: stdout_temp_path.display().to_string(),
+            stderr_temp_path: stderr_temp_path.display().to_string(),
+            temp_paths_published: true,
+        }),
     })
 }
 

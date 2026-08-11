@@ -8,7 +8,7 @@ use super::model::{
     SPEC031_RELEASE_RUNNER_SCHEMA,
 };
 use super::writer::write_json;
-use crate::spec031::evidence_writer::EvidenceWriter;
+use crate::release_evidence::EvidenceWriter;
 
 pub(super) struct CleanupReceiptSpec<'a> {
     pub(super) file_name: &'a str,

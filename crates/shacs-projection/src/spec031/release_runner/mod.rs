@@ -22,6 +22,7 @@ mod runner_outputs;
 mod validate;
 mod writer;
 
+pub(crate) use command::execute_spec031_release_command_with;
 pub use command::{execute_spec031_release_command, parse_cargo_test_counts};
 pub use coverage::{
     Spec031ArtifactMediaType, Spec031CoverageEvidenceKind, Spec031CoverageRequirementKind,
@@ -29,10 +30,10 @@ pub use coverage::{
     Spec031ExternalOwnerId, Spec031ReleaseCoverageEntry, Spec031TypedEvidenceClass,
 };
 pub use model::{
-    Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseCommandSpec,
-    Spec031ReleaseCommandStatus, Spec031ReleaseGateKind, Spec031ReleaseRunArtifacts,
-    Spec031ReleaseRunId, Spec031ReleaseRunnerConfig, Spec031ReleaseRunnerMode,
-    Spec031ReleaseTestCounts, SPEC031_RELEASE_RUNNER_SCHEMA,
+    Spec031CommandProcessReceipt, Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord,
+    Spec031ReleaseCommandSpec, Spec031ReleaseCommandStatus, Spec031ReleaseGateKind,
+    Spec031ReleaseRunArtifacts, Spec031ReleaseRunId, Spec031ReleaseRunnerConfig,
+    Spec031ReleaseRunnerMode, Spec031ReleaseTestCounts, SPEC031_RELEASE_RUNNER_SCHEMA,
 };
 pub use runner::run_spec031_release_runner;
 pub use validate::{

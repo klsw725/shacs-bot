@@ -24,6 +24,7 @@ pub fn command(id: &str, tests_run: u64, tests_failed: u64) -> Spec031ReleaseCom
             tests_run,
             tests_failed,
         }),
+        process_receipt: None,
     }
 }
 

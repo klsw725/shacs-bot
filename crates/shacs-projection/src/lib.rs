@@ -7,7 +7,9 @@ mod diagnostics_release;
 /// let _ = serde_json::from_str::<Spec031Envelope>("{}");
 /// ```
 mod projection;
+mod release_evidence;
 mod remembered_permissions;
+pub mod spec030;
 pub mod spec031;
 mod spec031_extension;
 
@@ -36,6 +38,7 @@ pub use remembered_permissions::{
     RememberedPermissionProjectionInput, RememberedPermissionRulePrefixError,
     RememberedPermissionRuleProjection, RememberedPermissionStoreHealthInput,
 };
+pub use spec030::*;
 pub use spec031::*;
 pub use spec031_extension::{
     spec031_extension_catalog, spec031_extension_diagnostic, Spec031ExtensionCatalogProjection,

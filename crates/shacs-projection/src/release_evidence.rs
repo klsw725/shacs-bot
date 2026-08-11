@@ -7,31 +7,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
-pub(super) struct EvidenceWriter {
+pub(crate) struct EvidenceWriter {
     root: Dir,
 }
 
-pub(super) struct EvidenceTempFile {
+pub(crate) struct EvidenceTempFile {
     path: PathBuf,
     file: std::fs::File,
 }
 
 impl EvidenceWriter {
-    pub(super) fn open_new_run(root: &Path) -> io::Result<Self> {
+    pub(crate) fn open_new_run(root: &Path) -> io::Result<Self> {
         let writer = Self::open(root)?;
         writer.require_empty()?;
         Ok(writer)
     }
 
-    pub(super) fn open_existing(root: &Path) -> io::Result<Self> {
+    pub(crate) fn open_existing(root: &Path) -> io::Result<Self> {
         Self::open(root)
     }
 
-    pub(super) fn create_dir_all(&self, path: impl AsRef<Path>) -> io::Result<()> {
+    pub(crate) fn create_dir_all(&self, path: impl AsRef<Path>) -> io::Result<()> {
         self.open_dir_all(path.as_ref()).map(|_| ())
     }
 
-    pub(super) fn write_new(&self, path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn write_new(&self, path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
         let mut temp = self.create_temp_file(path.as_ref())?;
         temp.file.write_all(bytes)?;
         temp.file.sync_all()?;
@@ -39,7 +39,7 @@ impl EvidenceWriter {
         self.publish_temp(&temp.path, path.as_ref())
     }
 
-    pub(super) fn create_temp_file(&self, final_path: &Path) -> io::Result<EvidenceTempFile> {
+    pub(crate) fn create_temp_file(&self, final_path: &Path) -> io::Result<EvidenceTempFile> {
         let (parent_path, final_name) = split_relative_file(final_path)?;
         let parent = self.open_dir_all(&parent_path)?;
         ensure_missing(&parent, &final_name)?;
@@ -53,14 +53,14 @@ impl EvidenceWriter {
         })
     }
 
-    pub(super) fn publish_temp(&self, temp: &Path, final_path: &Path) -> io::Result<()> {
+    pub(crate) fn publish_temp(&self, temp: &Path, final_path: &Path) -> io::Result<()> {
         let (parent_path, final_name) = split_relative_file(final_path)?;
         let parent = self.open_dir_all(&parent_path)?;
         ensure_missing(&parent, &final_name)?;
         self.root.rename(temp, &self.root, final_path)
     }
 
-    pub(super) fn read_to_string(&self, path: impl AsRef<Path>) -> io::Result<String> {
+    pub(crate) fn read_to_string(&self, path: impl AsRef<Path>) -> io::Result<String> {
         let path = path.as_ref();
         reject_unsafe_relative(path)?;
         self.root.read_to_string(path)
@@ -118,11 +118,11 @@ impl EvidenceWriter {
 }
 
 impl EvidenceTempFile {
-    pub(super) fn into_std(self) -> std::fs::File {
+    pub(crate) fn into_std(self) -> std::fs::File {
         self.file
     }
 
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }

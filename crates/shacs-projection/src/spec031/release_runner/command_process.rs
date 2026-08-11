@@ -61,6 +61,7 @@ fn signal_process_group(signal: &str, child_id: u32) -> Result<(), Spec031Releas
     let group = format!("-{child_id}");
     Command::new("kill")
         .arg(signal)
+        .arg("--")
         .arg(&group)
         .status()
         .map_err(|_| Spec031ReleaseArtifactError::Io)?;

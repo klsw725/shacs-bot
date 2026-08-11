@@ -12,7 +12,7 @@ use super::model::{
     Spec031ReleaseRunnerConfig,
 };
 use super::writer::{write_json, write_text};
-use crate::spec031::evidence_writer::EvidenceWriter;
+use crate::release_evidence::EvidenceWriter;
 use std::fs;
 
 pub(super) fn add_external_audits(
