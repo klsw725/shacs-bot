@@ -1454,7 +1454,7 @@ mod tests {
             ChannelAttachmentAdapterFailureReason::MalformedDataUrl
         );
         assert!(!failure.diagnostic.message.contains(payload));
-        assert!(!format!("{:?}", failure).contains(payload));
+        assert!(!format!("{failure:?}").contains(payload));
     }
 
     #[test]
