@@ -188,7 +188,7 @@ Shared acceptance rows name one primary contract owner and, where necessary, one
 | External owner | Must prove | Required local read audit |
 |---|---|---|
 | Spec 029 | recovery, queue, reconnect, channel delivery facts consumed without reinterpretation | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md` |
-| Spec 030 | trusted runtime profile, hook denial, path-specific process controls, sandbox mode, credential status, resource diagnostics, and data disclosures are rendered without inventing safety guarantees | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md` |
+| Spec 030 | trusted runtime profile, hook denial, path-specific process controls, sandbox mode, credential status, resource diagnostics, and data disclosures are rendered without inventing safety guarantees | `.omo/evidence/spec030/prd006/current-worktree-final/closure-manifest.json` |
 | Spec 032 | app lifecycle/readiness/receipt facts exist for app projection | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` |
 | Spec 033 | goal id/state/stop reason/continuation budget owner facts and automation/event/coverage facts exist where PRD 009, release, or drop projection consumes them | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` |
 | Spec 034 | media/analyzer facts exist for media projection | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` |
@@ -196,12 +196,12 @@ Shared acceptance rows name one primary contract owner and, where necessary, one
 
 A blocked external locator is useful implementation evidence but is not final `PASS`. Each passing locator records the source spec status observed by `Read`, exact owner-fact artifact paths, command transcripts where applicable, and an artifact-backed audit. It does not require the external spec itself to be closed.
 
-Current machine verdict indexed by `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/manifest.json`:
+The historical 2026-08-04 machine verdict is indexed by `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/manifest.json`. The current Spec 030 row below supersedes its historical read-audit result:
 
 | External owner | Current verdict | Current locator | Current blocker |
 |---|---|---|---|
 | Spec 029 | PASS | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md` | None. |
-| Spec 030 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md` | Required trusted-runtime owner-fact artifacts and adapter evidence are absent. |
+| Spec 030 | PASS | `.omo/evidence/spec030/prd006/current-worktree-final/closure-manifest.json` | Source-bound trusted-runtime owner facts, surface parity, bwrap lifecycle, manual QA and cleanup evidence pass. |
 | Spec 032 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` | Required app/resource lifecycle owner-fact artifacts are absent. |
 | Spec 033 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` | Required automation/evaluation owner-fact artifacts are absent. |
 | Spec 034 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` | Required media/analyzer owner-fact artifacts are absent. |
@@ -293,7 +293,7 @@ Spec 035 may leave `Status: Open` and `docs/specs/README.md` may remove it from 
 
 If any item is missing, Spec 035 remains `Status: Open`.
 
-Current result: the existing runner produced 56 coverage rows and all historical Spec031-owned command/artifact rows are mapped. PRD 008-009 evidence는 아직 없고, Spec029 external audit만 PASS다. Specs030, 031, 032, 033, 034 owner-fact audit도 blocked 상태이므로 현재 summary는 `status: BLOCKED`이며 semantic Spec 035는 `Status: Open`을 유지한다.
+Current result: the existing runner produced 56 coverage rows and all historical Spec031-owned command/artifact rows are mapped. PRD 008-009 evidence는 아직 없고, Spec029와 Spec030 external audit는 PASS다. Specs031, 032, 033, 034 owner-fact audit는 blocked 상태이므로 현재 summary는 `status: BLOCKED`이며 semantic Spec 035는 `Status: Open`을 유지한다.
 
 ## Authoring Verification
 

@@ -197,15 +197,15 @@ Dependency rules:
 
 ## Current Closure Blockers
 
-The current closure evidence is indexed by `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/manifest.json`.
+The historical 2026-08-04 closure evidence is indexed by `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/manifest.json`. Spec 030의 current owner audit은 source-bound `.omo/evidence/spec030/prd006/current-worktree-final/closure-manifest.json`으로 갱신되었으며, 아래 표에서 historical Spec 030 row를 대체한다.
 
 | Owner | Verdict | Locator | Reason |
 |---|---|---|---|
 | Spec 029 | PASS | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md` | Artifact-backed exact fact audit passes. |
-| Spec 030 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec030-read-audit.md` | Required trusted-runtime owner-fact artifacts and adapter evidence are absent. |
+| Spec 030 | PASS | `.omo/evidence/spec030/prd006/current-worktree-final/closure-manifest.json` | Source-bound trusted-runtime owner facts, CLI/TUI/API parity, process controls, credential lifecycle, bwrap lifecycle, manual QA and cleanup gates pass. |
 | Spec 032 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` | Required app/resource lifecycle owner-fact artifacts are absent. |
 | Spec 033 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec033-read-audit.md` | Required automation/evaluation owner-fact artifacts are absent. |
 | Spec 034 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` | Required media/analyzer owner-fact artifacts are absent. |
 | Spec 031 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` | Required config/auth-source/execution-snapshot owner-fact artifacts are absent. The historical artifact filename remains unchanged. |
 
-Release runner locator: `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/summary.md` reports `status: BLOCKED`. `failure-triage.json` lists `triage/dirty-worktree.json` and `triage/blocked-external-evidence.json`; the dirty state is recorded but does not mask the external evidence blocker. The success fixture at `.omo/evidence/spec031/prd007/task-20-spec031-implementation/success-fixture-final-20260804-05/summary.md` proves the runner can pass an isolated fixture, not that semantic Spec 035 closure has passed.
+Historical release runner locator `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/summary.md` reports `status: BLOCKED`. Its historical Spec 030 read-audit row is superseded by the current PASS locator above; Specs031/032/033/034와 planned PRD 008-009는 계속 Spec 035 closure를 차단한다. `failure-triage.json`의 dirty state는 당시 기록이며 external evidence blocker를 가리지 않는다. The success fixture at `.omo/evidence/spec031/prd007/task-20-spec031-implementation/success-fixture-final-20260804-05/summary.md` proves the runner can pass an isolated fixture, not that semantic Spec 035 closure has passed.
