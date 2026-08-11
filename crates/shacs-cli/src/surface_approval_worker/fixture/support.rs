@@ -1,5 +1,6 @@
 use super::super::*;
 use shacs_core::tools::{JsonMap, Tool, ToolResult};
+use shacs_providers::ProviderRequest;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -46,13 +47,23 @@ pub(super) fn adapter(
         exec_env: BTreeMap::new(),
         tool_search: ToolSearchConfig::default(),
         containment_snapshot: None,
+        #[cfg(not(test))]
+        permission_rule_containment: runtime_permission_rule_containment_from_snapshot(None),
         permission_mode_snapshot: PermissionModeSnapshot {
             mode: PermissionMode::Auto,
             source: Some("spec031-test-fixture".to_owned()),
             scope_ref: None,
         },
         plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+        #[cfg(not(test))]
+        trusted_tool_before_handlers: Vec::new(),
         plugin_skill_roots: Vec::new(),
+        #[cfg(not(test))]
+        spec030_provider: shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider::new(
+            shacs_core::runtime::trusted_runtime::Spec030FactStore::new(
+                shacs_core::runtime::trusted_runtime::WorkspaceTrustObservation::Trusted,
+            ),
+        ),
     }
 }
 

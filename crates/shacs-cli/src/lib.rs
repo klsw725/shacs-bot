@@ -1,7 +1,10 @@
 mod agent_repl;
 mod onboard_wizard;
+pub mod spec030_cli;
+mod spec030_startup_facts;
 mod spec031_cli;
 mod surface_approval_worker;
+mod tool_before_interaction;
 
 use fs2::FileExt;
 use lettre::message::Mailbox;
@@ -31,8 +34,9 @@ use shacs_command::{parse_loop_command, LoopCommand};
 use shacs_config::{
     config_context, default_config_path, ensure_runtime_dirs, load_auth_store,
     load_config_with_env, resolve_config_env_refs, save_auth_store_to_path, save_config_to_path,
-    ApiConfig, ConfigBundle, ConfigError, EnvSource, LoadOptions, PermissionActivationContext,
-    PermissionConfigSnapshot, PermissionModeSource, ProcessEnv, ProviderAuth, ProviderConfig,
+    ApiConfig, ConfigBundle, ConfigError, EnvSource, LoadOptions, OAuthRefresh,
+    OAuthRefreshRequest, PermissionActivationContext, PermissionConfigSnapshot,
+    PermissionModeSource, ProcessEnv, ProviderAuth, ProviderConfig, RawCredential,
     RememberedPermissionFileStore, WorkspacePermissionId,
 };
 use shacs_core::app::{AppError, AppId, AppLifecycleState, AppRegistryEntry, AppRegistryStore};
@@ -53,21 +57,23 @@ use shacs_core::runtime::{
     ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder,
     ContextDiagnosticsInput, ContextDiagnosticsSummary, ContextFileDiagnosticsSummary,
     ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
-    ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput, DiscoveredPlugin,
-    DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, HeartbeatError,
-    HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor,
-    HeartbeatWorker, InboundMessage, InheritedPermissionContext, McpLifecycle, MessageBus,
-    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
-    PermissionedAction, PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError,
-    PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
+    ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput,
+    CredentialResolvingProviderClient, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
+    DurableWorkDispatcher, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
+    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage,
+    InheritedPermissionContext, McpLifecycle, MessageBus, PermissionCeilingSnapshot,
+    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
+    PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError, PluginHookCatalog,
+    PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
     PluginProcessPermissionContext, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
     PluginSurfaceProjection, ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
     ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
     ProcessGateTerminalPrecondition, ProcessIdentity, ProcessPluginHookCommandExecutor,
-    ProcessRedactedCommand, ProjectPermissionStoreConfig, ProviderNotificationEvaluator,
-    RuntimeBoundaryOrigin, RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall,
-    SafetyCapability, Session, SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome,
-    SessionTurnLock, SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
+    ProcessRedactedCommand, ProjectPermissionStoreConfig, ProviderClientResolutionRequest,
+    ProviderCredentialRuntime, ProviderNotificationEvaluator, RuntimeBoundaryOrigin,
+    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, SafetyCapability, Session,
+    SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome, SessionTurnLock,
+    SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
     SubagentExecutionConfig, SubagentRuntime, SurfaceActionOutcomeKind, SurfaceActionRequestKind,
     SurfaceApprovalRequest, ToolEvent, ToolSearchConfig, ToolSearchMode, ToolStatus,
     HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
@@ -88,10 +94,9 @@ use shacs_projection::{
     RememberedPermissionStoreHealthInput,
 };
 use shacs_providers::{
-    chat_with_retry, prepare_provider_request, provider_client_from_config,
-    resolve_image_generation_client, resolve_provider_client, AgentDefaults, LlmResponse,
-    ProviderClient, ProviderError, ProviderEvent, ProviderRegistry, ProviderRequest,
-    ProviderRetryMode, ResolvedProviderClient,
+    chat_with_retry, prepare_provider_request, resolve_image_generation_client, AgentDefaults,
+    LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRegistry, ProviderRetryMode,
+    ResolvedProviderClient,
 };
 use shacs_redaction::redact_string;
 use shacs_session::durable_child::{
@@ -149,7 +154,9 @@ use shacs_workflow::{WorkflowPattern, WorkflowRecipeReadiness};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, Write};
+#[cfg(any(test, debug_assertions))]
+use std::io::Seek;
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -224,6 +231,7 @@ pub enum CliCommand {
     Onboard(OnboardOptions),
     Status(StatusOptions),
     RuntimeInspect(RuntimeInspectOptions),
+    TrustedRuntimeInspect(RuntimeInspectOptions, spec030_cli::Spec030CliFormat),
     RuntimeDiagnostics(RuntimeDiagnosticsOptions),
     RuntimeUpdate(RuntimeUpdateOptions),
     RuntimeMigrate(RuntimeMigrateOptions),
@@ -1269,6 +1277,7 @@ pub struct RuntimeOwnershipMarker {
     pub mode: String,
     pub config_path: String,
     pub workspace: String,
+    pub lock_protocol: Option<String>,
     pub process_evidence: RuntimeOwnerProcessEvidence,
 }
 
@@ -2683,6 +2692,12 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Onboard(options) => onboard(options).map(format_onboard_outcome),
         CliCommand::Status(options) => status(options).map(format_status_report),
         CliCommand::RuntimeInspect(options) => runtime_inspect(options).map(format_runtime_inspect),
+        CliCommand::TrustedRuntimeInspect(options, format) => {
+            let observation =
+                shacs_api::observe_trusted_runtime(options.config_path, options.workspace_override);
+            spec030_cli::render_trusted_runtime_observation(&observation, format)
+                .map_err(|error| CliError::Runtime(redact_string(&error.to_string())))
+        }
         CliCommand::RuntimeDiagnostics(options) => {
             runtime_diagnostics(options).map(format_runtime_diagnostics)
         }
@@ -2725,10 +2740,19 @@ where
     }
 
     let mut parser = ArgParser::new(args);
-    let global_config = parse_global_config(&mut parser)?;
+    let (global_config, global_workspace) = parse_global_options(&mut parser)?;
     let Some(command) = parser.next() else {
         return Ok(CliCommand::Help);
     };
+    if let Some(workspace) = global_workspace {
+        let has_command_workspace = parser.args[parser.index..]
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--workspace" | "-w"));
+        if !has_command_workspace {
+            parser.args.push("--workspace".to_owned());
+            parser.args.push(workspace);
+        }
+    }
     match command.as_str() {
         "--help" | "-h" => Ok(CliCommand::Help),
         "--version" | "-v" => Ok(CliCommand::Version),
@@ -2781,7 +2805,7 @@ fn parse_runtime(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "runtime requires `start`, `stop`, `restart`, `inspect`, `diagnostics`, `update`, `migrate`, or `recover`".to_owned(),
+            "runtime requires `start`, `stop`, `restart`, `inspect`, `trusted-runtime`, `diagnostics`, `update`, `migrate`, or `recover`".to_owned(),
         ));
     };
     match action.as_str() {
@@ -2789,6 +2813,7 @@ fn parse_runtime(
         "stop" => parse_runtime_stop(parser, global_config, false),
         "restart" => parse_runtime_stop(parser, global_config, true),
         "inspect" => parse_runtime_inspect(parser, global_config),
+        "trusted-runtime" => parse_trusted_runtime_inspect(parser, global_config),
         "diagnostics" | "diagnose" => parse_runtime_diagnostics(parser, global_config),
         "update" => parse_runtime_update(parser, global_config),
         "migrate" => parse_runtime_migrate(parser, global_config),
@@ -2807,6 +2832,24 @@ pub fn load_runtime_config(options: RuntimeConfigOptions) -> Result<ConfigBundle
 pub fn load_runtime_config_with_env(
     options: RuntimeConfigOptions,
     env: &impl EnvSource,
+) -> Result<ConfigBundle, CliError> {
+    load_runtime_config_with_admission(options, env, RuntimeConfigAdmission::Mutation)
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeConfigAdmission {
+    Mutation,
+    OwnerAcquire,
+}
+
+fn load_runtime_owner_config(options: RuntimeConfigOptions) -> Result<ConfigBundle, CliError> {
+    load_runtime_config_with_admission(options, &ProcessEnv, RuntimeConfigAdmission::OwnerAcquire)
+}
+
+fn load_runtime_config_with_admission(
+    options: RuntimeConfigOptions,
+    env: &impl EnvSource,
+    admission: RuntimeConfigAdmission,
 ) -> Result<ConfigBundle, CliError> {
     let config_path = options.config_path;
     let workspace_override = options.workspace_override;
@@ -2833,17 +2876,75 @@ pub fn load_runtime_config_with_env(
         Some(bundle.context.config_path.clone()),
         Some(bundle.config.workspace_path()),
     );
-    guard_runtime_admission_for_roots(&bundle.context.data_dir, &bundle.context.workspace)?;
-    apply_codex_auth_overlay(&mut bundle)?;
-    apply_copilot_auth_overlay(&mut bundle)?;
-    apply_api_key_auth_overlay(&mut bundle)?;
+    match admission {
+        RuntimeConfigAdmission::Mutation => {
+            guard_runtime_admission_for_roots(&bundle.context.data_dir, &bundle.context.workspace)?
+        }
+        RuntimeConfigAdmission::OwnerAcquire => guard_runtime_ownership_acquire_admission(&bundle)?,
+    }
     Ok(bundle)
 }
 
-fn apply_codex_auth_overlay(bundle: &mut ConfigBundle) -> Result<(), CliError> {
-    apply_codex_auth_overlay_with_transport(bundle, &UreqCodexAuthTransport::default())
+struct CliOAuthCredentialRefresher;
+
+impl shacs_core::runtime::OAuthCredentialRefresher for CliOAuthCredentialRefresher {
+    fn refresh(
+        &self,
+        provider_id: &str,
+        request: &OAuthRefreshRequest<'_>,
+    ) -> Result<OAuthRefresh, String> {
+        if provider_id != CODEX_PROVIDER_ID {
+            return Err("OAuth refresh is unavailable for this provider".to_owned());
+        }
+        let refreshed =
+            refresh_codex_token(&UreqCodexAuthTransport::default(), request.refresh_token())
+                .map_err(|error| error.to_string())?;
+        Ok(OAuthRefresh::new(
+            refreshed.access,
+            refreshed.refresh,
+            refreshed.expires.unwrap_or(u64::MAX),
+        )
+        .with_account_id(refreshed.account_id))
+    }
 }
 
+fn spec030_fact_store_for_bundle(
+    bundle: &ConfigBundle,
+) -> shacs_core::runtime::trusted_runtime::Spec030FactStore {
+    let workspace_trust = if bundle
+        .config
+        .plugins
+        .trusts_workspace(&bundle.context.workspace)
+    {
+        shacs_core::runtime::trusted_runtime::WorkspaceTrustObservation::Trusted
+    } else {
+        shacs_core::runtime::trusted_runtime::WorkspaceTrustObservation::Untrusted
+    };
+    let facts = shacs_core::runtime::trusted_runtime::Spec030FactStore::new(workspace_trust);
+    if shacs_core::runtime::trusted_runtime::populate_local_spec030_facts(&facts, bundle).is_err() {
+        shacs_core::runtime::trusted_runtime::Spec030FactStore::unavailable(
+            shacs_projection::Spec030UnavailableReason::OwnerUnavailable,
+        )
+    } else {
+        facts
+    }
+}
+
+fn provider_credential_runtime(
+    bundle: &ConfigBundle,
+    facts: shacs_core::runtime::trusted_runtime::Spec030FactStore,
+) -> Arc<ProviderCredentialRuntime> {
+    Arc::new(
+        ProviderCredentialRuntime::new(
+            bundle.context.auth_path(),
+            &bundle.context.workspace,
+            facts,
+        )
+        .with_oauth_refresher(Arc::new(CliOAuthCredentialRefresher)),
+    )
+}
+
+#[cfg(test)]
 fn apply_codex_auth_overlay_with_transport(
     bundle: &mut ConfigBundle,
     transport: &impl CodexAuthTransport,
@@ -2892,31 +2993,10 @@ fn apply_codex_auth_overlay_with_transport(
     Ok(())
 }
 
+#[cfg(test)]
 fn codex_auth_is_expired(auth: &ProviderAuth) -> bool {
     auth.expires
         .is_some_and(|expires| expires <= now_millis().saturating_add(60_000))
-}
-
-fn apply_copilot_auth_overlay(bundle: &mut ConfigBundle) -> Result<(), CliError> {
-    let auth = load_auth_store(&bundle.context.auth_path())?;
-    let Some(copilot_auth) = auth.providers.get(GITHUB_COPILOT_PROVIDER_ID).cloned() else {
-        return Ok(());
-    };
-    if copilot_auth.kind != "oauth" {
-        return Ok(());
-    }
-    if codex_auth_is_expired(&copilot_auth) {
-        return Err(CliError::Provider(ProviderError::AuthRequired {
-            provider_id: GITHUB_COPILOT_PROVIDER_ID.to_owned(),
-        }));
-    }
-    let provider = bundle
-        .config
-        .providers
-        .entry(GITHUB_COPILOT_PROVIDER_ID.to_owned())
-        .or_insert_with(copilot_provider_config);
-    provider.api_key = Some(copilot_auth.access);
-    Ok(())
 }
 
 fn apply_api_key_auth_overlay(bundle: &mut ConfigBundle) -> Result<(), CliError> {
@@ -4496,6 +4576,13 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
     let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
     guard_runtime_migration_admission(&bundle.context.data_dir, &bundle.context.workspace)?;
     let ownership_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+    let _process_lock =
+        RuntimeOwnershipProcessLock::try_acquire(&ownership_path)?.ok_or_else(|| {
+            CliError::InvalidArguments(
+                "runtime recover blocked: active runtime owner holds the ownership process lock"
+                    .to_owned(),
+            )
+        })?;
     let _mutation_lock = RuntimeOwnershipMutationLock::acquire(&ownership_path)?;
     let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
     let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
@@ -5369,7 +5456,12 @@ fn runtime_ownership_mutation_lock_path(marker_path: &Path) -> PathBuf {
     marker_path.with_extension("json.lock")
 }
 
+fn runtime_ownership_process_lock_path(marker_path: &Path) -> PathBuf {
+    marker_path.with_extension("lease.lock")
+}
+
 const RUNTIME_MARKER_MAX_BYTES: u64 = 1024 * 1024;
+const RUNTIME_OWNERSHIP_LOCK_PROTOCOL: &str = "exclusive_file_v1";
 
 fn open_runtime_marker_file_nofollow(path: &Path) -> Result<Option<File>, CliError> {
     let mut options = fs::OpenOptions::new();
@@ -5420,6 +5512,40 @@ fn read_runtime_marker_json(path: &Path, label: &str) -> Result<Option<Value>, C
 
 struct RuntimeOwnershipMutationLock {
     _file: File,
+}
+
+struct RuntimeOwnershipProcessLock {
+    _file: File,
+}
+
+impl RuntimeOwnershipProcessLock {
+    fn try_acquire(marker_path: &Path) -> Result<Option<Self>, CliError> {
+        let path = runtime_ownership_process_lock_path(marker_path);
+        let parent = path.parent().ok_or_else(|| {
+            CliError::InvalidArguments(
+                "runtime ownership process lock path has no parent directory".to_owned(),
+            )
+        })?;
+        fs::create_dir_all(parent)?;
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(&path)?;
+        if !file.metadata()?.file_type().is_file() {
+            return Err(CliError::InvalidArguments(format!(
+                "runtime ownership process lock is not a regular file: {}",
+                display_path(&path)
+            )));
+        }
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(CliError::Io(error)),
+        }
+    }
 }
 
 impl RuntimeOwnershipMutationLock {
@@ -5482,6 +5608,7 @@ fn runtime_ownership_marker_value(
         "mode": mode,
         "config_path": config_path.to_string_lossy(),
         "workspace": workspace.to_string_lossy(),
+        "lock_protocol": RUNTIME_OWNERSHIP_LOCK_PROTOCOL,
         "process_evidence": {
             "pid": pid,
             "pid_alive": pid_is_alive(pid),
@@ -5521,6 +5648,7 @@ fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipM
             mode: required_marker_string(&value, "mode")?,
             config_path: required_marker_string(&value, "configPath")?,
             workspace: required_marker_string(&value, "workspace")?,
+            lock_protocol: None,
             process_evidence: RuntimeOwnerProcessEvidence {
                 pid,
                 pid_alive: pid_is_alive(pid),
@@ -5549,6 +5677,15 @@ fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipM
     let updated_at_ms = required_marker_u64(&value, "renewed_at_ms")?;
     let expires_at_ms = required_marker_u64(&value, "expires_at_ms")?;
     let lifecycle = required_marker_string(&value, "lifecycle")?;
+    let lock_protocol = marker_string(&value, "lock_protocol");
+    if lock_protocol
+        .as_deref()
+        .is_some_and(|protocol| protocol != RUNTIME_OWNERSHIP_LOCK_PROTOCOL)
+    {
+        return Err(CliError::InvalidArguments(
+            "runtime ownership marker has unsupported lock_protocol".to_owned(),
+        ));
+    }
     let process_evidence = value
         .get("process_evidence")
         .and_then(Value::as_object)
@@ -5607,6 +5744,7 @@ fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipM
             mode: marker_string(&value, "mode").unwrap_or_default(),
             config_path: marker_string(&value, "config_path").unwrap_or_default(),
             workspace: marker_string(&value, "workspace").unwrap_or_default(),
+            lock_protocol: lock_protocol.clone(),
             process_evidence: RuntimeOwnerProcessEvidence {
                 pid,
                 pid_alive: process_evidence_pid_alive,
@@ -5629,6 +5767,7 @@ fn read_runtime_ownership_marker(path: &Path) -> Result<Option<RuntimeOwnershipM
         mode: required_marker_string(&value, "mode")?,
         config_path: required_marker_string(&value, "config_path")?,
         workspace: required_marker_string(&value, "workspace")?,
+        lock_protocol,
         process_evidence: RuntimeOwnerProcessEvidence {
             pid,
             pid_alive,
@@ -5694,6 +5833,13 @@ fn runtime_ownership_marker_matches(
         && marker.owner_id == runtime_owner_id(pid, started_at_ms)
 }
 
+fn lock_aware_ownership_can_be_replaced(ownership: &RuntimeOwnershipStatus, now_ms: u64) -> bool {
+    ownership.marker.as_ref().is_some_and(|marker| {
+        marker.lock_protocol.as_deref() == Some(RUNTIME_OWNERSHIP_LOCK_PROTOCOL)
+            && (!marker.process_evidence.pid_alive || now_ms > marker.expires_at_ms)
+    })
+}
+
 fn active_runtime_ownership_error(ownership: &RuntimeOwnershipStatus) -> CliError {
     let owner = ownership
         .marker
@@ -5743,7 +5889,8 @@ fn acquire_runtime_ownership_marker(
     request_path: &Path,
 ) -> Result<(), CliError> {
     let _mutation_lock = RuntimeOwnershipMutationLock::acquire(path)?;
-    let ownership = inspect_runtime_ownership(data_dir, now_millis())?;
+    let now_ms = now_millis();
+    let ownership = inspect_runtime_ownership(data_dir, now_ms)?;
     match ownership.state {
         RuntimeOwnershipState::None => {
             if request_path.exists() {
@@ -5752,8 +5899,25 @@ fn acquire_runtime_ownership_marker(
             }
             write_runtime_marker_if_absent_or_concurrent(path, marker)?;
         }
-        RuntimeOwnershipState::Stale => return Err(active_runtime_ownership_error(&ownership)),
-        RuntimeOwnershipState::Active => return Err(active_runtime_ownership_error(&ownership)),
+        RuntimeOwnershipState::Stale
+            if lock_aware_ownership_can_be_replaced(&ownership, now_ms) =>
+        {
+            append_runtime_owner_lifecycle(
+                data_dir,
+                "startup_replaced_released_owner",
+                &ownership,
+            )?;
+            fs::remove_file(path)?;
+            sync_parent_dir(path)?;
+            if request_path.exists() {
+                fs::remove_file(request_path)?;
+                sync_parent_dir(request_path)?;
+            }
+            write_runtime_marker_if_absent_or_concurrent(path, marker)?;
+        }
+        RuntimeOwnershipState::Stale | RuntimeOwnershipState::Active => {
+            return Err(active_runtime_ownership_error(&ownership))
+        }
     }
     Ok(())
 }
@@ -5911,12 +6075,18 @@ struct RuntimeOwnershipLease {
     owner_id: String,
     remove_on_drop: bool,
     finalized: bool,
+    _process_lock: RuntimeOwnershipProcessLock,
 }
 
 impl RuntimeOwnershipLease {
     fn acquire(bundle: &ConfigBundle, mode: &str) -> Result<Self, CliError> {
-        guard_runtime_ownership_acquire_admission(bundle)?;
         let path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let process_lock = RuntimeOwnershipProcessLock::try_acquire(&path)?.ok_or_else(|| {
+            CliError::InvalidArguments(
+                "runtime mutation blocked by active runtime ownership process lock; request stop or inspect first".to_owned(),
+            )
+        })?;
+        guard_runtime_ownership_acquire_admission(bundle)?;
         let request_path = runtime_stop_request_marker_path(&bundle.context.data_dir);
         let pid = std::process::id();
         let started_at_ms = now_millis();
@@ -5943,6 +6113,7 @@ impl RuntimeOwnershipLease {
             owner_id,
             remove_on_drop: true,
             finalized: false,
+            _process_lock: process_lock,
         };
         let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
         let components = runtime_components_for_mode(mode, &bundle.config.channels.plugins);
@@ -9825,6 +9996,7 @@ fn codex_provider_config() -> ProviderConfig {
         api_base: Some("https://chatgpt.com/backend-api".to_owned()),
         extra_headers: None,
         extra_body: None,
+        credential_source: None,
     }
 }
 
@@ -9835,6 +10007,7 @@ fn copilot_provider_config() -> ProviderConfig {
         api_base: Some("https://api.githubcopilot.com".to_owned()),
         extra_headers: None,
         extra_body: None,
+        credential_source: None,
     }
 }
 
@@ -10603,7 +10776,7 @@ fn cli_session_key(session: Option<&str>) -> String {
 }
 
 pub fn serve(options: ServeOptions) -> Result<String, CliError> {
-    let bundle = load_runtime_config(RuntimeConfigOptions {
+    let bundle = load_runtime_owner_config(RuntimeConfigOptions {
         config_path: options.config_path.clone(),
         workspace_override: options.workspace_override.clone(),
         resolve_env: true,
@@ -10624,6 +10797,9 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         bundle,
         options.allow_api_side_effects,
     )?);
+    #[cfg(not(test))]
+    spec030_startup_facts::publish_daemon_started(&adapter.spec030_fact_store())
+        .map_err(|error| CliError::Runtime(error.to_string()))?;
     let approval_worker =
         start_surface_approval_worker(adapter.clone(), data_dir.clone(), owner_id.clone())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -10699,7 +10875,7 @@ pub fn run_runtime(options: RunOptions) -> Result<String, CliError> {
 }
 
 fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliError> {
-    let bundle = load_runtime_config(RuntimeConfigOptions {
+    let bundle = load_runtime_owner_config(RuntimeConfigOptions {
         config_path: options.config_path.clone(),
         workspace_override: options.workspace_override.clone(),
         resolve_env: true,
@@ -10735,6 +10911,9 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
         AgentLoopChatCompletionAdapter::from_bundle(bundle.clone(), options.allow_side_effects)?
             .with_runtime_verbose(options.verbose),
     );
+    #[cfg(not(test))]
+    spec030_startup_facts::publish_daemon_started(&adapter.spec030_fact_store())
+        .map_err(|error| CliError::Runtime(error.to_string()))?;
     let approval_worker =
         start_surface_approval_worker(adapter.clone(), data_dir.clone(), owner_id.clone())?;
     let heartbeat_worker = start_heartbeat_runtime(adapter.clone(), &bundle)?;
@@ -16303,7 +16482,7 @@ pub fn help_text() -> String {
         "Commands:",
         "  onboard   Create or refresh config and workspace templates",
         "  status    Show config, workspace, model, provider, and workflow recipe status",
-        "  runtime   Start, stop, restart, inspect, diagnose, update, or recover local runtime state",
+        "  runtime   Start, stop, restart, inspect, trusted-runtime, diagnose, update, or recover local runtime state",
         "  session   Manage local session files",
         "  skills    List skills, inspect entries, and discover workflow recipes",
         "  apps      Init authoring drafts; install, list, inspect, enable, disable, or uninstall local app bundles",
@@ -16358,8 +16537,11 @@ pub fn help_text() -> String {
     .join("\n")
 }
 
-fn parse_global_config(parser: &mut ArgParser) -> Result<Option<PathBuf>, CliError> {
+fn parse_global_options(
+    parser: &mut ArgParser,
+) -> Result<(Option<PathBuf>, Option<String>), CliError> {
     let mut config_path = None;
+    let mut workspace = None;
     loop {
         match parser.peek() {
             Some("--config") | Some("-c") => {
@@ -16370,7 +16552,15 @@ fn parse_global_config(parser: &mut ArgParser) -> Result<Option<PathBuf>, CliErr
                 };
                 config_path = Some(take_path(parser, &flag)?);
             }
-            _ => return Ok(config_path),
+            Some("--workspace") | Some("-w") => {
+                let Some(flag) = parser.next() else {
+                    return Err(CliError::InvalidArguments(
+                        "missing workspace flag while parsing global options".to_owned(),
+                    ));
+                };
+                workspace = Some(take_value(parser, &flag)?);
+            }
+            _ => return Ok((config_path, workspace)),
         }
     }
 }
@@ -16444,6 +16634,46 @@ fn parse_runtime_inspect(
         }
     }
     Ok(CliCommand::RuntimeInspect(options))
+}
+
+fn parse_trusted_runtime_inspect(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut options = RuntimeInspectOptions {
+        config_path: global_config,
+        workspace_override: None,
+    };
+    let mut format = spec030_cli::Spec030CliFormat::Human;
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--format" => {
+                let value = parser.next().ok_or_else(|| {
+                    CliError::InvalidArguments("--format requires human or json".to_owned())
+                })?;
+                format = match value.as_str() {
+                    "human" => spec030_cli::Spec030CliFormat::Human,
+                    "json" => spec030_cli::Spec030CliFormat::Json,
+                    _ => {
+                        return Err(CliError::InvalidArguments(
+                            "--format requires human or json".to_owned(),
+                        ))
+                    }
+                };
+            }
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown runtime trusted-runtime argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(CliCommand::TrustedRuntimeInspect(options, format))
 }
 
 fn parse_runtime_start(
@@ -18521,15 +18751,43 @@ pub struct AgentLoopChatCompletionAdapter {
     exec_env: BTreeMap<String, String>,
     tool_search: ToolSearchConfig,
     containment_snapshot: Option<ContainmentSnapshotRef>,
+    #[cfg(not(test))]
+    permission_rule_containment: DockerContainmentSnapshot,
     permission_mode_snapshot: PermissionModeSnapshot,
     plugin_runtime_snapshot: PluginRuntimeSnapshot,
+    #[cfg(not(test))]
+    trusted_tool_before_handlers: Vec<Arc<dyn shacs_core::runtime::ToolBeforeHandler>>,
     plugin_skill_roots: Vec<PathBuf>,
+    #[cfg(not(test))]
+    spec030_provider: shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider,
+}
+
+struct ProviderTurnInvocation {
+    chat: ChatCompletionInvocation,
+    runtime_override: Option<RawCredential>,
 }
 
 impl AgentLoopChatCompletionAdapter {
+    #[cfg(not(test))]
+    pub fn spec030_fact_store(&self) -> shacs_core::runtime::trusted_runtime::Spec030FactStore {
+        self.spec030_provider.fact_store()
+    }
+
     pub fn from_bundle(
         bundle: ConfigBundle,
         allow_side_effect_tools: bool,
+    ) -> Result<Self, CliError> {
+        Self::from_bundle_with_trusted_extensions(
+            bundle,
+            allow_side_effect_tools,
+            shacs_core::runtime::TrustedToolBeforeRegistry::new(),
+        )
+    }
+
+    pub fn from_bundle_with_trusted_extensions(
+        bundle: ConfigBundle,
+        allow_side_effect_tools: bool,
+        mut trusted_extensions: shacs_core::runtime::TrustedToolBeforeRegistry,
     ) -> Result<Self, CliError> {
         let defaults = bundle.config.agents.defaults.clone();
         let registry = ProviderRegistry::new();
@@ -18551,12 +18809,38 @@ impl AgentLoopChatCompletionAdapter {
         let permission_config_snapshot =
             agent_loop_permission_config_snapshot(&bundle, &containment);
         let containment_snapshot = Some(runtime_containment_snapshot_ref(&containment));
+        #[cfg(not(test))]
+        let permission_rule_containment =
+            runtime_permission_rule_containment_from_snapshot(containment_snapshot.as_ref());
         let permission_mode_snapshot =
             runtime_permission_mode_snapshot_for_workspace(&permission_config_snapshot, &workspace);
         let plugin_discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
+        shacs_core::runtime::register_trusted_javascript_tool_before_handlers(
+            &plugin_discovery.plugins,
+            &mut trusted_extensions,
+        );
         let plugin_runtime_snapshot = build_plugin_runtime_snapshot(&plugin_discovery.plugins);
+        #[cfg(not(test))]
+        let trusted_tool_before_handlers =
+            trusted_extensions.active_handlers(&plugin_discovery.plugins);
+        #[cfg(test)]
+        let _ = trusted_extensions;
+        let facts = spec030_fact_store_for_bundle(&bundle);
+        let credential_runtime = provider_credential_runtime(&bundle, facts.clone());
+        #[cfg(not(test))]
+        let spec030_provider = {
+            let hook_facts = PluginRuntimeHookAgentHook::new(plugin_runtime_snapshot.clone())
+                .with_trusted_handlers(trusted_tool_before_handlers.clone())
+                .hook_runtime_projection();
+            facts
+                .update_hooks(hook_facts)
+                .map_err(|error| CliError::Runtime(error.to_string()))?;
+            shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider::new(facts.clone())
+        };
         let plugin_skill_roots = enabled_plugin_skill_roots(&plugin_discovery.plugins);
-        let tooling = production_tool_registry(&bundle, allow_side_effect_tools)?;
+        let tooling = production_tool_registry(&bundle, allow_side_effect_tools, &facts)?;
+        spec030_startup_facts::publish_mcp_reports(&facts, &tooling.mcp_reports)
+            .map_err(|error| CliError::Runtime(error.to_string()))?;
         let provider_id = provider_match.as_ref().map_or_else(
             || defaults.provider.clone(),
             |provider| provider.provider_id.clone(),
@@ -18568,13 +18852,31 @@ impl AgentLoopChatCompletionAdapter {
             registry.find_by_name(&provider_id).is_some_and(|spec| {
                 provider_model_supports_native_image_input(spec.backend, &resolved_model)
             });
-        let client: Arc<dyn ProviderClient> = debug_fake_provider_client().unwrap_or_else(|| {
-            Arc::new(LazyProviderClient::new(
+        let debug_transport = debug_fake_provider_client();
+        let debug_resolves_credential = bundle
+            .config
+            .providers
+            .get(&provider_id)
+            .and_then(|provider| provider.credential_source.as_ref())
+            .is_some();
+        let client: Arc<dyn ProviderClient> = match (debug_transport, debug_resolves_credential) {
+            (Some(transport), true) => Arc::new(
+                CredentialResolvingProviderClient::new(
+                    defaults.provider.clone(),
+                    defaults.model.clone(),
+                    bundle.config.providers.clone(),
+                    credential_runtime,
+                )
+                .with_transport_override(transport),
+            ),
+            (Some(transport), false) => transport,
+            (None, _) => Arc::new(CredentialResolvingProviderClient::new(
                 defaults.provider.clone(),
                 defaults.model.clone(),
                 bundle.config.providers.clone(),
-            ))
-        });
+                credential_runtime,
+            )),
+        };
         Ok(Self {
             configured_model: defaults.model.clone(),
             provider_id,
@@ -18603,9 +18905,15 @@ impl AgentLoopChatCompletionAdapter {
             exec_env: configured_exec_env(&bundle.config),
             tool_search: runtime_tool_search_config(&bundle.config.tools.tool_search),
             containment_snapshot,
+            #[cfg(not(test))]
+            permission_rule_containment,
             permission_mode_snapshot,
             plugin_runtime_snapshot,
+            #[cfg(not(test))]
+            trusted_tool_before_handlers,
             plugin_skill_roots,
+            #[cfg(not(test))]
+            spec030_provider,
         })
     }
 
@@ -18668,8 +18976,17 @@ impl AgentLoopChatCompletionAdapter {
             vec![workspace_scope_ref],
             RuntimeBoundaryOrigin::UserTurn,
         ));
-        config.permission_rule_input.containment =
-            runtime_permission_rule_containment_from_snapshot(self.containment_snapshot.as_ref());
+        #[cfg(not(test))]
+        {
+            config.permission_rule_input.containment = self.permission_rule_containment.clone();
+        }
+        #[cfg(test)]
+        {
+            config.permission_rule_input.containment =
+                runtime_permission_rule_containment_from_snapshot(
+                    self.containment_snapshot.as_ref(),
+                );
+        }
         config.permission_rule_input.protected_targets =
             config.permission_auto_approval.protected_targets.clone();
         let config_context = shacs_config::config_context(
@@ -18749,8 +19066,29 @@ impl AgentLoopChatCompletionAdapter {
         on_event: Option<ApiProviderEventCallback>,
     ) -> Result<LlmResponse, ApiError> {
         self.run_agent_loop_with_origin(
-            invocation,
+            ProviderTurnInvocation {
+                chat: invocation,
+                runtime_override: None,
+            },
             on_event,
+            "api",
+            "user",
+            shacs_api::API_CHAT_ID,
+            &[],
+        )
+    }
+
+    pub fn complete_chat_with_provider_runtime_override(
+        &self,
+        invocation: ChatCompletionInvocation,
+        runtime_override: RawCredential,
+    ) -> Result<LlmResponse, ApiError> {
+        self.run_agent_loop_with_origin(
+            ProviderTurnInvocation {
+                chat: invocation,
+                runtime_override: Some(runtime_override),
+            },
+            None,
             "api",
             "user",
             shacs_api::API_CHAT_ID,
@@ -18764,7 +19102,10 @@ impl AgentLoopChatCompletionAdapter {
         observability_hooks: &[ShacsBotObservabilityHook],
     ) -> Result<RunResult, ApiError> {
         let turn = self.run_agent_loop_turn_with_origin(
-            invocation,
+            ProviderTurnInvocation {
+                chat: invocation,
+                runtime_override: None,
+            },
             None,
             "sdk",
             "user",
@@ -18787,7 +19128,7 @@ impl AgentLoopChatCompletionAdapter {
 
     fn run_agent_loop_with_origin(
         &self,
-        invocation: ChatCompletionInvocation,
+        invocation: ProviderTurnInvocation,
         on_event: Option<ApiProviderEventCallback>,
         channel: &str,
         sender_id: &str,
@@ -18807,18 +19148,23 @@ impl AgentLoopChatCompletionAdapter {
 
     fn run_agent_loop_turn_with_origin(
         &self,
-        invocation: ChatCompletionInvocation,
+        invocation: ProviderTurnInvocation,
         on_event: Option<ApiProviderEventCallback>,
         channel: &str,
         sender_id: &str,
         chat_id: &str,
         observability_hooks: &[ShacsBotObservabilityHook],
     ) -> Result<AgentLoopTurnResult, ApiError> {
+        let ProviderTurnInvocation {
+            chat: invocation,
+            runtime_override,
+        } = invocation;
         let mut config = self.loop_config();
         config.settings.temperature = invocation
             .temperature
             .unwrap_or(config.settings.temperature);
         config.settings.max_tokens = invocation.max_tokens.unwrap_or(config.settings.max_tokens);
+        config.provider_runtime_override = runtime_override;
         let message =
             InboundMessage::new(channel, sender_id, chat_id, invocation_text(&invocation))
                 .with_media(invocation.media_paths.clone())
@@ -19369,6 +19715,8 @@ impl AgentLoopChatCompletionAdapter {
         }
         let response_channel = message.channel.clone();
         let response_chat_id = message.chat_id.clone();
+        let tool_before_interaction =
+            tool_before_interaction::production_interaction(&message.channel, &message.chat_id);
         let sessions = SessionManager::new(&self.workspace).map_err(|error| {
             ApiError::internal(format!("session manager could not be initialized: {error}"))
         })?;
@@ -19498,22 +19846,33 @@ impl AgentLoopChatCompletionAdapter {
                 tool_event_callbacks.push(callback);
             }
         }
-        if self
-            .plugin_runtime_snapshot
-            .plugins
-            .iter()
-            .any(|plugin| !plugin.hooks.is_empty())
+        #[cfg(not(test))]
+        let has_trusted_tool_before_handlers = !self.trusted_tool_before_handlers.is_empty();
+        #[cfg(test)]
+        let has_trusted_tool_before_handlers = false;
+        if has_trusted_tool_before_handlers
+            || self
+                .plugin_runtime_snapshot
+                .plugins
+                .iter()
+                .any(|plugin| !plugin.hooks.is_empty())
         {
-            let plugin_hook: Arc<dyn AgentHook> = Arc::new(
-                PluginRuntimeHookAgentHook::with_executor(
-                    self.plugin_runtime_snapshot.clone(),
-                    shacs_core::runtime::PluginHookDispatchMode::LiveDiagnostics,
-                    Arc::new(ProcessPluginHookCommandExecutor::with_permission_context(
-                        plugin_process_permission_context,
-                    )),
-                )
-                .with_sink(plugin_notification_sink),
-            );
+            let plugin_hook = PluginRuntimeHookAgentHook::with_executor(
+                self.plugin_runtime_snapshot.clone(),
+                shacs_core::runtime::PluginHookDispatchMode::LiveDiagnostics,
+                Arc::new(ProcessPluginHookCommandExecutor::with_permission_context(
+                    plugin_process_permission_context,
+                )),
+            )
+            .with_interaction(tool_before_interaction);
+            #[cfg(not(test))]
+            let plugin_hook =
+                plugin_hook.with_trusted_handlers(self.trusted_tool_before_handlers.clone());
+            #[cfg(not(test))]
+            let plugin_hook =
+                plugin_hook.with_spec030_fact_store(self.spec030_provider.fact_store());
+            let plugin_hook: Arc<dyn AgentHook> =
+                Arc::new(plugin_hook.with_sink(plugin_notification_sink));
             agent_hook = Some(match agent_hook {
                 Some(existing) => Arc::new(CompositeHook::new(vec![existing, plugin_hook])),
                 None => plugin_hook,
@@ -19569,6 +19928,7 @@ impl AgentLoopChatCompletionAdapter {
         subagent.permission_rule_input = config.permission_rule_input.clone();
         subagent.permission_ceiling_snapshot = config.permission_ceiling_snapshot.clone();
         subagent.project_permission_store = config.project_permission_store.clone();
+        subagent.provider_runtime_override = config.provider_runtime_override.clone();
         subagent.max_iterations = config.max_iterations;
         subagent.max_tool_result_chars = config.max_tool_result_chars;
         subagent.fail_on_tool_error = true;
@@ -19926,97 +20286,6 @@ fn llm_response_from_turn(turn: AgentLoopTurnResult) -> LlmResponse {
     response
 }
 
-struct LazyProviderClient {
-    requested_provider: String,
-    model: String,
-    providers: BTreeMap<String, ProviderConfig>,
-    client: Mutex<Option<Arc<dyn ProviderClient>>>,
-}
-
-impl LazyProviderClient {
-    fn new(
-        requested_provider: String,
-        model: String,
-        providers: BTreeMap<String, ProviderConfig>,
-    ) -> Self {
-        Self {
-            requested_provider,
-            model,
-            providers,
-            client: Mutex::new(None),
-        }
-    }
-
-    fn with_client<T>(
-        &self,
-        run: impl FnOnce(&dyn ProviderClient) -> Result<T, ProviderError>,
-    ) -> Result<T, ProviderError> {
-        let client = {
-            let mut client = self.client.lock().map_err(|_| ProviderError::Api {
-                status: Some(500),
-                message: "provider client lock failed".to_owned(),
-                retryable: false,
-                headers: BTreeMap::new(),
-                body: None,
-            })?;
-            if client.is_none() {
-                *client = Some(Arc::from(self.resolve()?));
-            }
-            client.clone().ok_or_else(|| ProviderError::Api {
-                status: Some(500),
-                message: "provider client was not initialized".to_owned(),
-                retryable: false,
-                headers: BTreeMap::new(),
-                body: None,
-            })?
-        };
-        run(client.as_ref())
-    }
-
-    fn resolve(&self) -> Result<Box<dyn ProviderClient>, ProviderError> {
-        let registry = ProviderRegistry::new();
-        let provider_match = registry
-            .match_provider(&self.requested_provider, &self.model, &self.providers)
-            .ok_or_else(|| provider_not_found_for_lazy(&registry, &self.requested_provider))?;
-        let spec = registry
-            .find_by_name(&provider_match.provider_id)
-            .ok_or_else(|| provider_not_found_for_lazy(&registry, &provider_match.provider_id))?;
-        let config = self
-            .providers
-            .get(&provider_match.provider_id)
-            .cloned()
-            .ok_or_else(|| ProviderError::AuthRequired {
-                provider_id: provider_match.provider_id.clone(),
-            })?;
-        provider_client_from_config(config, spec)
-    }
-}
-
-impl ProviderClient for LazyProviderClient {
-    fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
-        self.with_client(|client| client.chat(request))
-    }
-
-    fn chat_stream(
-        &self,
-        request: ProviderRequest,
-        on_event: &mut dyn FnMut(ProviderEvent),
-    ) -> Result<LlmResponse, ProviderError> {
-        self.with_client(|client| client.chat_stream(request, on_event))
-    }
-}
-
-fn provider_not_found_for_lazy(registry: &ProviderRegistry, provider_id: &str) -> ProviderError {
-    ProviderError::ProviderNotFound {
-        provider_id: provider_id.to_owned(),
-        suggestions: registry
-            .specs()
-            .iter()
-            .map(|spec| spec.name.to_owned())
-            .collect(),
-    }
-}
-
 impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
     fn configured_model(&self) -> &str {
         &self.configured_model
@@ -20031,6 +20300,22 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
 
     fn complete_chat(&self, invocation: ChatCompletionInvocation) -> Result<LlmResponse, ApiError> {
         self.run_agent_loop(invocation, None)
+    }
+
+    fn trusted_runtime_projection(&self) -> shacs_projection::Spec030RuntimeProjection {
+        #[cfg(not(test))]
+        {
+            shacs_projection::Spec030ProjectionProvider::projection(&self.spec030_provider)
+        }
+        #[cfg(test)]
+        {
+            let provider =
+                shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider::load(
+                    Some(self.config_path.clone()),
+                    Some(self.workspace.clone()),
+                );
+            shacs_projection::Spec030ProjectionProvider::projection(&provider)
+        }
     }
 
     fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
@@ -20407,6 +20692,7 @@ struct ProductionTooling {
 fn production_tool_registry(
     bundle: &ConfigBundle,
     allow_side_effect_tools: bool,
+    spec030_facts: &shacs_core::runtime::trusted_runtime::Spec030FactStore,
 ) -> Result<ProductionTooling, CliError> {
     let workspace = &bundle.context.workspace;
     fs::create_dir_all(workspace)?;
@@ -20458,20 +20744,28 @@ fn production_tool_registry(
         exec_config.restrict_to_workspace = bundle.config.tools.restrict_to_workspace;
         exec_config.sandbox = non_empty(Some(bundle.config.tools.exec.sandbox.as_str()))
             .then(|| bundle.config.tools.exec.sandbox.clone());
+        exec_config.apply_sandbox_policy(&bundle.config.tools.exec.sandbox_policy, workspace);
         exec_config.path_append = non_empty(Some(bundle.config.tools.exec.path_append.as_str()))
             .then(|| bundle.config.tools.exec.path_append.clone());
         exec_config.allowed_env_keys = bundle.config.tools.exec.allowed_env_keys.clone();
         exec_config.env = configured_exec_env(&bundle.config);
-        registry.register(ExecTool::new(exec_config));
+        registry
+            .register(ExecTool::new(exec_config).with_spec030_fact_store(spec030_facts.clone()));
     }
     if allow_side_effect_tools && bundle.config.tools.image_generation.enable {
         let image_config = &bundle.config.tools.image_generation;
         let provider_registry = ProviderRegistry::new();
+        let mut providers = bundle.config.providers.clone();
+        for (provider_id, auth) in load_auth_store(&bundle.context.auth_path())?.providers {
+            if auth.kind == "apiKey" {
+                providers.entry(provider_id).or_default().api_key = Some(auth.access);
+            }
+        }
         let resolved = resolve_image_generation_client(
             &provider_registry,
             &image_config.provider,
             &image_config.model,
-            &bundle.config.providers,
+            &providers,
         )
         .map_err(|error| {
             CliError::Config(ConfigError::Env(format!(
@@ -20989,24 +21283,31 @@ pub struct ProviderChatCompletionAdapter {
     defaults: AgentDefaults,
     resolved: ResolvedProviderClient,
     retry_mode: ProviderRetryMode,
+    #[cfg(not(test))]
+    spec030_provider: shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider,
 }
 
 impl ProviderChatCompletionAdapter {
     pub fn from_bundle(bundle: ConfigBundle) -> Result<Self, CliError> {
         let defaults = bundle.config.agents.defaults.clone();
         let registry = ProviderRegistry::new();
-        let resolved = resolve_provider_client(
-            &registry,
-            &defaults.provider,
-            &defaults.model,
-            &bundle.config.providers,
-        )?;
+        let facts = spec030_fact_store_for_bundle(&bundle);
+        let runtime = provider_credential_runtime(&bundle, facts.clone());
+        let resolved = runtime.resolve_provider_client(ProviderClientResolutionRequest {
+            registry: &registry,
+            requested_provider: &defaults.provider,
+            model: &defaults.model,
+            providers: &bundle.config.providers,
+        })?;
         let retry_mode = ProviderRetryMode::from_config(&defaults.provider_retry_mode);
         Ok(Self {
             configured_model: defaults.model.clone(),
             defaults,
             resolved,
             retry_mode,
+            #[cfg(not(test))]
+            spec030_provider:
+                shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider::new(facts),
         })
     }
 
@@ -21050,6 +21351,21 @@ impl ChatCompletionAdapter for ProviderChatCompletionAdapter {
             return Err(api_error_from_provider_response(&response));
         }
         Ok(response)
+    }
+
+    fn trusted_runtime_projection(&self) -> shacs_projection::Spec030RuntimeProjection {
+        #[cfg(not(test))]
+        {
+            shacs_projection::Spec030ProjectionProvider::projection(&self.spec030_provider)
+        }
+        #[cfg(test)]
+        {
+            let provider =
+                shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider::load(
+                    None, None,
+                );
+            shacs_projection::Spec030ProjectionProvider::projection(&provider)
+        }
     }
 }
 
@@ -23148,7 +23464,7 @@ mod tests {
     fn apps_install_accepts_relative_bundle_path_inside_data_dir() -> Result<(), Box<dyn Error>> {
         let root = tempfile::Builder::new()
             .prefix("shacs-cli-apps-")
-            .tempdir_in(".")?;
+            .tempdir()?;
         let config_path = root.path().join("config.json");
         let workspace = root.path().join("workspace");
         let bundle = root.path().join("apps/demo.app.shacsapp");
@@ -23551,7 +23867,7 @@ mod tests {
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
-        assert!(error.contains("runtime requires `start`, `stop`, `restart`, `inspect`, `diagnostics`, `update`, `migrate`, or `recover`"));
+        assert!(error.contains("runtime requires `start`, `stop`, `restart`, `inspect`, `trusted-runtime`, `diagnostics`, `update`, `migrate`, or `recover`"));
 
         let error = parse_cli_args(["runtime", "update"])
             .err()
@@ -27392,7 +27708,8 @@ mod tests {
             migrations: Vec::new(),
         };
 
-        let tooling = production_tool_registry(&bundle, true)?;
+        let facts = spec030_fact_store_for_bundle(&bundle);
+        let tooling = production_tool_registry(&bundle, true, &facts)?;
         let call = tooling
             .registry
             .prepare_call(
@@ -27880,14 +28197,15 @@ mod tests {
             migrations: Vec::new(),
         };
 
-        let tooling = production_tool_registry(&bundle, true)?;
+        let facts = spec030_fact_store_for_bundle(&bundle);
+        let tooling = production_tool_registry(&bundle, true, &facts)?;
         assert!(tooling.registry.has("plugin_probe"));
         let result = tooling
             .registry
             .execute("plugin_probe", json!({"input": "hello"}))
             .into_text();
         assert!(result.contains("plugin"));
-        assert!(!production_tool_registry(&bundle, false)?
+        assert!(!production_tool_registry(&bundle, false, &facts)?
             .registry
             .has("plugin_probe"));
         Ok(())
@@ -27898,16 +28216,17 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let mut bundle = image_generation_test_bundle(root.path())?;
+        let facts = spec030_fact_store_for_bundle(&bundle);
 
-        let disabled_side_effects = production_tool_registry(&bundle, false)?;
+        let disabled_side_effects = production_tool_registry(&bundle, false, &facts)?;
         assert!(!disabled_side_effects.registry.has("image_generate"));
 
         bundle.config.tools.image_generation.enable = false;
-        let disabled_config = production_tool_registry(&bundle, true)?;
+        let disabled_config = production_tool_registry(&bundle, true, &facts)?;
         assert!(!disabled_config.registry.has("image_generate"));
 
         bundle.config.tools.image_generation.enable = true;
-        let enabled = production_tool_registry(&bundle, true)?;
+        let enabled = production_tool_registry(&bundle, true, &facts)?;
         assert!(enabled.registry.has("image_generate"));
         let schema_text = serde_json::to_string(&enabled.registry.definitions())?;
         for forbidden in ["apiKey", "endpoint", "baseUrl", "providerOptions"] {
@@ -27917,6 +28236,25 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn production_tool_registry_uses_image_provider_api_key_from_auth_store(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let mut bundle = image_generation_test_bundle(root.path())?;
+        bundle.config.tools.image_generation.provider = "openrouter".to_owned();
+        bundle.config.providers.clear();
+        let mut auth = AuthStore::default();
+        auth.providers
+            .insert("openrouter".to_owned(), ProviderAuth::api_key("sk-or-test"));
+        save_auth_store_to_path(&auth, &bundle.context.auth_path())?;
+        let facts = spec030_fact_store_for_bundle(&bundle);
+
+        let tooling = production_tool_registry(&bundle, true, &facts)?;
+
+        assert!(tooling.registry.has("image_generate"));
         Ok(())
     }
 
@@ -28566,6 +28904,7 @@ mod tests {
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
+                credential_source: None,
             },
         );
         config.agents.defaults.workspace = root
@@ -28774,6 +29113,7 @@ mod tests {
                 api_base: Some("https://example.invalid/v1".to_owned()),
                 extra_headers: None,
                 extra_body: None,
+                credential_source: None,
             },
         );
         save_config_to_path(&config, &config_path)?;
@@ -28839,6 +29179,7 @@ mod tests {
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
+                credential_source: None,
             },
         );
         config
@@ -30179,6 +30520,7 @@ mod tests {
                 api_base: Some("https://chatgpt.com/backend-api".to_owned()),
                 extra_headers: None,
                 extra_body: None,
+                credential_source: None,
             },
         );
         save_config_to_path(&config, &config_path)?;
@@ -30496,6 +30838,7 @@ mod tests {
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
+                credential_source: None,
             },
         );
         save_config_to_path(&config, &config_path)?;
@@ -30531,6 +30874,7 @@ mod tests {
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
+                credential_source: None,
             },
         );
         save_config_to_path(&config, &config_path)?;
@@ -30868,6 +31212,7 @@ mod tests {
             mode: mode.to_owned(),
             config_path: "/tmp/config.json".to_owned(),
             workspace: "/tmp/workspace".to_owned(),
+            lock_protocol: Some(RUNTIME_OWNERSHIP_LOCK_PROTOCOL.to_owned()),
             process_evidence: RuntimeOwnerProcessEvidence {
                 pid,
                 pid_alive,
@@ -30887,6 +31232,42 @@ mod tests {
         assert!(pid_is_alive_with(live_pid, &proc_root, &missing_kill));
         assert!(!pid_is_alive_with(43, &proc_root, &missing_kill));
         Ok(())
+    }
+
+    #[test]
+    fn ownership_process_lock_is_released_with_its_guard() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let marker_path = runtime_ownership_marker_path(root.path());
+        let first = RuntimeOwnershipProcessLock::try_acquire(&marker_path)?
+            .ok_or("first process lock was not acquired")?;
+
+        assert!(RuntimeOwnershipProcessLock::try_acquire(&marker_path)?.is_none());
+        drop(first);
+        assert!(RuntimeOwnershipProcessLock::try_acquire(&marker_path)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_lock_aware_heartbeat_blocks_pid_namespace_takeover() {
+        let now = now_millis();
+        let fresh = classify_runtime_ownership_marker(
+            runtime_marker_for_test(1, now.saturating_sub(10_000), now, "run", true, true),
+            now,
+        );
+        let expired = classify_runtime_ownership_marker(
+            runtime_marker_for_test(
+                1,
+                now.saturating_sub(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS + 10_000),
+                now.saturating_sub(RUNTIME_OWNERSHIP_HEARTBEAT_TTL_MS + 1),
+                "run",
+                true,
+                true,
+            ),
+            now,
+        );
+
+        assert!(!lock_aware_ownership_can_be_replaced(&fresh, now));
+        assert!(lock_aware_ownership_can_be_replaced(&expired, now));
     }
 
     #[test]
@@ -30957,6 +31338,8 @@ mod tests {
                 &workspace,
             ),
         )?;
+        let _process_lock = RuntimeOwnershipProcessLock::try_acquire(&marker_path)?
+            .ok_or("active owner process lock was not acquired")?;
 
         let error = run_runtime(RunOptions {
             config_path: Some(config_path),
@@ -31238,6 +31621,7 @@ mod tests {
                 api_base: None,
                 extra_headers: None,
                 extra_body: None,
+                credential_source: None,
             },
         );
         save_config_to_path(&config, &config_path)?;
@@ -31671,10 +32055,13 @@ mod tests {
         let before = fs::read_to_string(&supervision_path)?;
         let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
         let now = now_millis();
-        write_runtime_marker_atomically(
-            &marker_path,
-            &runtime_ownership_marker_value(999_999, now, now, "run", &config_path, &workspace),
-        )?;
+        let mut marker =
+            runtime_ownership_marker_value(999_999, now, now, "run", &config_path, &workspace);
+        marker
+            .as_object_mut()
+            .ok_or("ownership marker must be an object")?
+            .remove("lock_protocol");
+        write_runtime_marker_atomically(&marker_path, &marker)?;
 
         lease.fail_shutdown(
             RuntimeShutdownReport::failed(RuntimeShutdownReason::OwnerLost),
@@ -31781,10 +32168,13 @@ mod tests {
         )?;
         let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
         let now = now_millis();
-        write_runtime_marker_atomically(
-            &marker_path,
-            &runtime_ownership_marker_value(999_999, now, now, "run", &config_path, &workspace),
-        )?;
+        let mut marker =
+            runtime_ownership_marker_value(999_999, now, now, "run", &config_path, &workspace);
+        marker
+            .as_object_mut()
+            .ok_or("ownership marker must be an object")?
+            .remove("lock_protocol");
+        write_runtime_marker_atomically(&marker_path, &marker)?;
         let before = fs::read_to_string(&marker_path)?;
 
         let error = run_runtime(RunOptions {
@@ -31798,6 +32188,49 @@ mod tests {
 
         assert!(error.contains("stale runtime ownership"));
         assert_eq!(fs::read_to_string(&marker_path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn lock_aware_dead_owner_is_replaced_during_startup() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("config.json");
+        let workspace = root.path().join("workspace");
+        let mut config = Config::default();
+        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+        save_config_to_path(&config, &config_path)?;
+        let bundle = load_config_with_env(
+            LoadOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+                resolve_env: false,
+                write_back_migrations: false,
+            },
+            &BTreeMap::<String, String>::new(),
+        )?;
+        let marker_path = runtime_ownership_marker_path(&bundle.context.data_dir);
+        let mut marker = runtime_ownership_marker_value(
+            999_999,
+            now_millis(),
+            now_millis(),
+            "run",
+            &config_path,
+            &workspace,
+        );
+        marker["lock_protocol"] = json!("exclusive_file_v1");
+        write_runtime_marker_atomically(&marker_path, &marker)?;
+
+        let owner_bundle = load_runtime_owner_config(RuntimeConfigOptions {
+            config_path: Some(config_path),
+            workspace_override: Some(workspace),
+            resolve_env: false,
+        })?;
+        let lease = RuntimeOwnershipLease::acquire(&owner_bundle, "run")?;
+
+        let current = read_runtime_ownership_marker(&marker_path)?.ok_or("missing new owner")?;
+        assert_eq!(current.pid, std::process::id());
+        assert_ne!(current.owner_id, "owner-999999");
+        lease.cleanup()?;
         Ok(())
     }
 
@@ -36172,8 +36605,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_overlays_codex_auth_without_persisting_secret() -> Result<(), Box<dyn Error>>
-    {
+    fn runtime_config_keeps_codex_auth_out_of_provider_config() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
         let mut config = Config::default();
@@ -36199,22 +36631,18 @@ mod tests {
             .providers
             .get("openai_codex")
             .ok_or("missing provider")?;
-        assert_eq!(provider.api_key.as_deref(), Some("runtime-token"));
+        assert_eq!(provider.api_key, None);
+        assert_eq!(provider.extra_headers, None);
         assert_eq!(
-            provider
-                .extra_headers
-                .as_ref()
-                .and_then(|headers| headers.get("ChatGPT-Account-Id"))
-                .map(String::as_str),
-            Some("acct_runtime")
+            load_auth_store(&auth_path)?.providers["openai_codex"].access,
+            "runtime-token"
         );
         assert!(!fs::read_to_string(config_path)?.contains("runtime-token"));
         Ok(())
     }
 
     #[test]
-    fn runtime_config_overlays_copilot_auth_without_persisting_secret() -> Result<(), Box<dyn Error>>
-    {
+    fn runtime_config_keeps_copilot_auth_out_of_provider_config() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
         let mut config = Config::default();
@@ -36241,12 +36669,16 @@ mod tests {
             .providers
             .get(GITHUB_COPILOT_PROVIDER_ID)
             .ok_or("missing copilot provider")?;
-        assert_eq!(provider.api_key.as_deref(), Some("copilot-runtime-token"));
+        assert_eq!(provider.api_key, None);
         assert_eq!(
             provider.api_base.as_deref(),
             Some("https://api.githubcopilot.com")
         );
         assert!(!fs::read_to_string(config_path)?.contains("copilot-runtime-token"));
+        assert_eq!(
+            load_auth_store(&auth_path)?.providers[GITHUB_COPILOT_PROVIDER_ID].access,
+            "copilot-runtime-token"
+        );
         Ok(())
     }
 

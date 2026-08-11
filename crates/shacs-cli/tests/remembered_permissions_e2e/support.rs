@@ -43,6 +43,7 @@ pub fn write_config(root: &Path, workspace: &Path) -> Result<PathBuf, Box<dyn st
             api_base: Some("http://127.0.0.1:1/v1".to_owned()),
             extra_headers: None,
             extra_body: None,
+            credential_source: None,
         },
     );
     save_config_to_path(&config, &config_path)?;

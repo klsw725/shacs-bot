@@ -39,6 +39,7 @@ fn write_config(
             api_base: Some("https://example.invalid/v1".to_owned()),
             extra_headers: None,
             extra_body: None,
+            credential_source: None,
         },
     );
     config
@@ -67,6 +68,7 @@ fn write_providerless_config(
             api_base: Some("https://example.invalid/v1".to_owned()),
             extra_headers: None,
             extra_body: None,
+            credential_source: None,
         },
     );
     save_config_to_path(&config, &config_path)?;

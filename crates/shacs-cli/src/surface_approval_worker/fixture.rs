@@ -105,7 +105,7 @@ impl FixtureRuntime {
             .map(|item| json!({
                 "work_id": item.work_id,
                 "state": format!("{:?}", item.state),
-                "terminal_kind": item.terminal_kind.map(|kind| format!("{:?}", kind)),
+                "terminal_kind": item.terminal_kind.map(|kind| format!("{kind:?}")),
                 "terminal_sequence": item.terminal_sequence,
             }))
             .collect::<Vec<_>>()))
