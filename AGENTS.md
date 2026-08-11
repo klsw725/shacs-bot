@@ -16,6 +16,7 @@
 ## 툴링
 
 - **Rust는 `cargo`로만 다룬다**. 빌드/실행/테스트/체크를 다른 언어용 도구로 우회하지 말 것. 빠른 검증은 `cargo check`, 빌드는 `cargo build`, 배포용 빌드는 `cargo build --release`, 테스트는 `cargo test`를 기본으로 본다.
+- **빌드 전에는 기존 빌드 데이터를 정리한다**. 빌드 산출물이 과도하게 누적되지 않도록 `cargo clean --manifest-path crates/Cargo.toml`을 먼저 실행한 뒤 `cargo build --manifest-path crates/Cargo.toml`을 실행한다.
 - **포맷/린트는 Cargo 하위 명령 기준**. 포맷은 `cargo fmt`, 린트는 `cargo clippy`를 사용한다. 검증 단계에서는 가능하면 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`까지 확인할 것.
 - **Rust toolchain component를 전제로 생각하지 말 것**. `rustfmt`, `clippy`가 없다면 `rustup component add rustfmt clippy`가 먼저다.
 - **레포 루트 추측 실행 금지**. Rust workspace는 `crates/Cargo.toml`이므로 저장소 루트에서 `cargo --manifest-path crates/Cargo.toml ...` 형태로 명시 실행하라.
