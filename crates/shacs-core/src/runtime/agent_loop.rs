@@ -30,11 +30,12 @@ use crate::runtime::{
     PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
     PermissionedActionInput, PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus,
     PluginCommandDispatcher, PolicySafetySnapshotRef, ProviderArchiveConsolidator,
-    ProviderEventCallback, RecentAutoModeDenial, RecentAutoModeDenialStore,
-    RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenMatch,
-    RecentAutoModeRetryTokenStore, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
-    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
-    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
+    ProviderEventCallback, ProviderInvocationClient, RecentAutoModeDenial,
+    RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError,
+    RecentAutoModeRetryTokenMatch, RecentAutoModeRetryTokenStore, RuntimeContextTools,
+    RuntimeExecutionLedger, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport,
+    RuntimeToolExecutor, RuntimeToolMessage, Session, SessionApprovalCacheEntry,
+    SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
     SessionRememberedPermissionDiagnostic, SessionRememberedPermissionRule,
     SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnCancelOutcome,
     SessionTurnGuard, SessionTurnLock, SubagentExecutionConfig, SubagentOutcomeKind,
@@ -61,7 +62,7 @@ use shacs_command::{
     HistoryCommandArgs, LoopCommand, PermissionCommandArgs,
 };
 use shacs_config::{
-    AutoApprovalConfig, RememberedPermissionEffect, RememberedPermissionFileStore,
+    AutoApprovalConfig, RawCredential, RememberedPermissionEffect, RememberedPermissionFileStore,
     RememberedPermissionMatcher, RememberedPermissionRule, WorkspacePermissionId,
 };
 use shacs_projection::{
@@ -70,7 +71,9 @@ use shacs_projection::{
     project_remembered_permission_rule_by_prefix, project_removed_remembered_permission_rule,
     RememberedPermissionProjectionInput, RememberedPermissionStoreHealthInput,
 };
-use shacs_providers::{GenerationSettings, ProviderClient, ProviderError, ProviderRetryMode};
+use shacs_providers::{
+    GenerationSettings, ProviderClient, ProviderError, ProviderInvocation, ProviderRetryMode,
+};
 use shacs_session::durable_child::DurableChildRecorder;
 use shacs_session::durable_event::{
     DurableEventError, DurableEventInput, DurableEventPayload, DurableEventProvenance,
@@ -228,6 +231,7 @@ pub struct AgentLoopConfig {
     pub project_permission_store: Option<ProjectPermissionStoreConfig>,
     pub permission_mode_setter: Option<PermissionModeSetter>,
     pub durable_event_root: Option<PathBuf>,
+    pub provider_runtime_override: Option<RawCredential>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +269,7 @@ impl AgentLoopConfig {
             project_permission_store: None,
             permission_mode_setter: None,
             durable_event_root: None,
+            provider_runtime_override: None,
         }
     }
 }
@@ -1336,14 +1341,24 @@ impl<'a> AgentLoop<'a> {
             active_workspace: Some(self.config.workspace.clone()),
             in_cron_context: false,
             record_channel_delivery: self.config.record_channel_delivery,
+            cancellation_token: None,
         };
+        let cancellation_token = self
+            .task_registry
+            .cancellation_token(&session_key)
+            .or_else(|| self.turn_lock.cancellation_token(&session_key));
+        let provider_invocation = cancellation_token.as_ref().map_or_else(
+            || ProviderInvocation::uncancelled(self.config.provider_runtime_override.clone()),
+            |token| token.provider_invocation(self.config.provider_runtime_override.clone()),
+        );
+        let provider_client = ProviderInvocationClient::new(self.client, &provider_invocation);
         let mut spec = AgentRunSpec::new(
             initial_messages.clone(),
             self.tools,
-            self.client,
+            &provider_client,
             self.config.model.clone(),
         );
-        spec.permission_classifier_client = Some(self.client);
+        spec.permission_classifier_client = Some(&provider_client);
         spec.settings = self.config.settings.clone();
         spec.retry_mode = self.config.retry_mode;
         spec.max_iterations = self.config.max_iterations;
@@ -1357,12 +1372,12 @@ impl<'a> AgentLoop<'a> {
         spec.context_provider_handoff = context_provider_handoff;
         spec.concurrent_tools = self.config.concurrent_tools;
         spec.fail_on_tool_error = self.config.fail_on_tool_error;
-        spec.tool_context = tool_context.clone();
+        spec.tool_context = ToolExecutionContext {
+            cancellation_token: cancellation_token.clone(),
+            ..tool_context.clone()
+        };
         spec.context_tools = self.context_tools.clone();
-        spec.cancellation_token = self
-            .task_registry
-            .cancellation_token(&session_key)
-            .or_else(|| self.turn_lock.cancellation_token(&session_key));
+        spec.cancellation_token = cancellation_token;
         spec.execution_scope = Some(ExecutionScope::new(session_key.clone(), turn_id.clone()));
         spec.execution_ledger = Some(execution_ledger.clone());
         spec.tool_event_callback = self.tool_event_callback.clone();

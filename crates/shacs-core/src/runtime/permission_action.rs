@@ -189,7 +189,22 @@ pub fn normalize_runtime_tool_call(
     call: &RuntimeToolCall,
     input: PermissionedActionInput,
 ) -> PermissionedAction {
-    normalize_tool_candidate(registry, &call.id, &call.name, &call.arguments, input)
+    normalize_tool_candidate(
+        registry,
+        &call.id,
+        &call.name,
+        &call.arguments,
+        input,
+        false,
+    )
+}
+
+pub(crate) fn normalize_prepared_runtime_tool_call(
+    registry: &ToolRegistry,
+    call: &RuntimeToolCall,
+    input: PermissionedActionInput,
+) -> PermissionedAction {
+    normalize_tool_candidate(registry, &call.id, &call.name, &call.arguments, input, true)
 }
 
 pub fn normalize_resolved_deferred_tool_call(
@@ -210,6 +225,7 @@ pub fn normalize_resolved_deferred_tool_call(
         &call.underlying_name,
         &call.underlying_arguments,
         input,
+        false,
     )
 }
 
@@ -219,6 +235,7 @@ fn normalize_tool_candidate(
     tool_name: &str,
     arguments: &Value,
     input: PermissionedActionInput,
+    prepared: bool,
 ) -> PermissionedAction {
     let input = sanitize_input(input);
     let mut normalization_errors = Vec::new();
@@ -255,14 +272,14 @@ fn normalize_tool_candidate(
     if provider_tool_call_id.is_none() {
         normalization_errors.push(ActionNormalizationError::MissingToolCallId);
     }
-    if registry.has(tool_name) {
+    if !prepared && registry.has(tool_name) {
         if let Err(detail) = registry.prepare_call(tool_name, arguments.clone()) {
             normalization_errors.push(ActionNormalizationError::InvalidArguments {
                 tool_name: tool_name.to_owned(),
                 detail: redact_string(&detail),
             });
         }
-    } else {
+    } else if !prepared {
         normalization_errors.push(ActionNormalizationError::UnknownTool {
             tool_name: tool_name.to_owned(),
         });

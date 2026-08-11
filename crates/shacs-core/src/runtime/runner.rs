@@ -1,4 +1,3 @@
-use crate::runtime::normalize_runtime_tool_call;
 use crate::runtime::tool_execution::{
     effective_permission_rule_input, permission_decision_for_action,
     permissioned_action_input_from_context,
@@ -83,6 +82,10 @@ pub struct AgentHookContext {
 }
 
 pub trait AgentHook: Send + Sync {
+    fn receives_tool_arguments(&self) -> bool {
+        false
+    }
+
     fn wants_streaming(&self) -> bool {
         false
     }
@@ -134,6 +137,10 @@ impl CompositeHook {
 }
 
 impl AgentHook for CompositeHook {
+    fn receives_tool_arguments(&self) -> bool {
+        true
+    }
+
     fn wants_streaming(&self) -> bool {
         self.hooks.iter().any(|hook| hook.wants_streaming())
     }
@@ -169,7 +176,11 @@ impl AgentHook for CompositeHook {
     ) -> Vec<RuntimeToolMessage> {
         let mut messages = Vec::new();
         for hook in &self.hooks {
-            messages.extend(invoke_hook_block_tool_calls(hook.as_ref(), context, calls));
+            let blocked = invoke_hook_block_tool_calls(hook.as_ref(), context, calls);
+            if !blocked.is_empty() {
+                messages.extend(blocked);
+                break;
+            }
         }
         messages
     }
@@ -524,10 +535,28 @@ impl AgentRunner {
                         recent_auto_mode_retry_tokens,
                     ));
                 }
+                let preparation = executor.prepare_tool_calls(executable_calls, |call| {
+                    current_catalog.is_some() && is_bridge_tool_call(call)
+                });
+                executable_calls = preparation.calls;
+                for invalid_message in preparation.errors {
+                    let normalized = normalize_tool_message(&spec, invalid_message);
+                    record_tool_message_outcome(
+                        &spec,
+                        &normalized.message,
+                        ToolOutcomeKind::Failed {
+                            class: ToolFailureClass::Recoverable,
+                        },
+                        normalized.artifact_ref.clone(),
+                    );
+                    completed_tool_results.push(normalized.message.to_json());
+                    completed_tool_messages.push(normalized.message.clone());
+                    messages.push(normalized.message.to_json());
+                }
                 let blocked_tool_messages = invoke_agent_hook_before_execute_tools(
                     &spec,
                     &hook_context(iteration, &messages),
-                    &observable_tool_calls(&executable_calls),
+                    &executable_calls,
                 );
                 let blocked_tool_call_ids = blocked_tool_messages
                     .iter()
@@ -1394,11 +1423,8 @@ fn direct_runtime_report_with_classifier(
 
     for (index, call) in calls.iter().cloned().enumerate() {
         let context = tool_context_with_classifier_verdict(&call, spec, executor);
-        let action = normalize_runtime_tool_call(
-            executor.registry(),
-            &call,
-            permissioned_action_input_from_context(&context),
-        );
+        let action =
+            executor.normalize_tool_call(&call, permissioned_action_input_from_context(&context));
         let decision = permission_decision_for_action(&action, &context);
         emit_auto_permission_diagnostic(
             spec,
@@ -1481,11 +1507,8 @@ fn tool_context_with_classifier_verdict(
     let Some(classifier) = spec.permission_classifier_client else {
         return context;
     };
-    let action = normalize_runtime_tool_call(
-        executor.registry(),
-        call,
-        permissioned_action_input_from_context(&context),
-    );
+    let action =
+        executor.normalize_tool_call(call, permissioned_action_input_from_context(&context));
     let review_context = context_for_classifier_review(&action, &context);
     let decision = permission_decision_for_action(&action, &review_context);
     if !classifier_reviewable_policy_decision(&decision, &action) {
@@ -2477,6 +2500,13 @@ fn observable_provider_event(event: &ProviderEvent) -> ProviderEvent {
     }
 }
 
+fn observable_tool_arguments(name: &str, arguments: &Value) -> Value {
+    if permission_sensitive_observability_tool(name) {
+        return json!({ "redacted": true });
+    }
+    redact_value(arguments)
+}
+
 fn observable_tool_calls(calls: &[RuntimeToolCall]) -> Vec<RuntimeToolCall> {
     calls
         .iter()
@@ -2486,13 +2516,6 @@ fn observable_tool_calls(calls: &[RuntimeToolCall]) -> Vec<RuntimeToolCall> {
             arguments: observable_tool_arguments(&call.name, &call.arguments),
         })
         .collect()
-}
-
-fn observable_tool_arguments(name: &str, arguments: &Value) -> Value {
-    if permission_sensitive_observability_tool(name) {
-        return json!({ "redacted": true });
-    }
-    redact_value(arguments)
 }
 
 fn observable_llm_response(response: &LlmResponse) -> LlmResponse {
@@ -2584,6 +2607,13 @@ fn invoke_hook_block_tool_calls(
     context: &AgentHookContext,
     calls: &[RuntimeToolCall],
 ) -> Vec<RuntimeToolMessage> {
+    let observable_calls;
+    let calls = if hook.receives_tool_arguments() {
+        calls
+    } else {
+        observable_calls = observable_tool_calls(calls);
+        &observable_calls
+    };
     catch_unwind(AssertUnwindSafe(|| hook.block_tool_calls(context, calls))).unwrap_or_default()
 }
 

@@ -3,9 +3,9 @@ use crate::runtime::{
     ContextBuilder, ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact,
     ExecutionScope, InboundMessage, LateResultDecision, MessageBus, PendingExecution,
     PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionRuleInput,
-    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeExecutionLedger,
-    SessionRememberedPermissionRule, SubagentOutcomeKind, ToolEvent, ToolExecutionContext,
-    ToolStatus,
+    ProviderInvocationClient, RuntimeCapabilityReport, RuntimeCapabilityStatus,
+    RuntimeExecutionLedger, SessionRememberedPermissionRule, SubagentOutcomeKind, ToolEvent,
+    ToolExecutionContext, ToolStatus,
 };
 use crate::tools::{
     EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool, PathContext,
@@ -15,7 +15,7 @@ use crate::tools::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use shacs_config::AutoApprovalConfig;
+use shacs_config::{AutoApprovalConfig, RawCredential};
 use shacs_providers::{GenerationSettings, ProviderClient, ProviderRetryMode};
 use shacs_session::durable_child::{
     ChildCancelRequested, ChildResultDecisionKind, ChildResultRecorded, ChildRunning, ChildSpawned,
@@ -395,6 +395,7 @@ pub struct SubagentExecutionConfig {
     pub allowed_tools: Option<Vec<String>>,
     pub permission_session_remembered_rules: Vec<SessionRememberedPermissionRule>,
     pub project_permission_store: Option<crate::runtime::ProjectPermissionStoreConfig>,
+    pub provider_runtime_override: Option<RawCredential>,
 }
 
 impl SubagentExecutionConfig {
@@ -423,6 +424,7 @@ impl SubagentExecutionConfig {
             allowed_tools: None,
             permission_session_remembered_rules: Vec::new(),
             project_permission_store: None,
+            provider_runtime_override: None,
         }
     }
 }
@@ -875,7 +877,11 @@ impl SubagentRuntime {
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "user", "content": envelope.task_goal}),
         ];
-        let mut spec = AgentRunSpec::new(messages, &registry, client, config.model.clone());
+        let provider_invocation =
+            cancellation_token.provider_invocation(config.provider_runtime_override.clone());
+        let provider_client = ProviderInvocationClient::new(client, &provider_invocation);
+        let mut spec =
+            AgentRunSpec::new(messages, &registry, &provider_client, config.model.clone());
         spec.settings = config.settings.clone();
         spec.retry_mode = config.retry_mode;
         spec.max_iterations = config.max_iterations;
@@ -904,6 +910,7 @@ impl SubagentRuntime {
             active_workspace: Some(config.workspace.clone()),
             in_cron_context: false,
             record_channel_delivery: false,
+            cancellation_token: Some(cancellation_token.clone()),
         };
         spec.max_iterations_message =
             Some("Task completed but no final response was generated.".to_owned());

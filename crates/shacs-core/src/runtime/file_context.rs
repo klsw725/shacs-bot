@@ -1417,7 +1417,7 @@ fn is_truncated_text(text: &str) -> bool {
 
 fn sha256_prefix(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    format!("{:x}", digest).chars().take(12).collect()
+    format!("{digest:x}").chars().take(12).collect()
 }
 
 fn handoff_status_name(status: AttachmentHandoffStatus) -> &'static str {

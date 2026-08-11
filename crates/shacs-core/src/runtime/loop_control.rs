@@ -1,4 +1,6 @@
-use shacs_providers::ProviderEvent;
+use crate::controlled_child::ControlledChildAbort;
+use shacs_config::RawCredential;
+use shacs_providers::{ProviderEvent, ProviderInvocation};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -245,7 +247,26 @@ impl CancellationToken {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
+
+    pub(crate) fn controlled_child_abort(&self) -> ControlledChildAbort {
+        ControlledChildAbort::from_flag(self.cancelled.clone())
+    }
+
+    pub(crate) fn provider_invocation(
+        &self,
+        runtime_override: Option<RawCredential>,
+    ) -> ProviderInvocation {
+        ProviderInvocation::new(runtime_override, Arc::clone(&self.cancelled))
+    }
 }
+
+impl PartialEq for CancellationToken {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cancelled, &other.cancelled)
+    }
+}
+
+impl Eq for CancellationToken {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopTaskStatus {

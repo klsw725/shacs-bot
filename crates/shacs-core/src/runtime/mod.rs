@@ -34,18 +34,26 @@ mod plugin_extension_projection;
 mod plugin_hooks;
 mod plugin_runtime;
 mod plugin_surface;
+mod plugin_tool_before;
 mod policy_safety_snapshot;
 mod process_envelope;
 mod process_gate;
+mod provider_credentials;
 mod replay;
 mod runner;
+pub mod sandbox_adapter;
 mod self_improvement;
 mod skill_trust_permission;
 mod spec031_context;
 mod subagent;
 mod surface_action;
+mod tool_before;
 mod tool_execution;
 mod tool_search;
+mod trusted_javascript_tool_before;
+pub mod trusted_resources;
+pub mod trusted_runtime;
+mod trusted_tool_before_registry;
 mod workflow;
 
 pub use agent_loop::{
@@ -251,9 +259,8 @@ pub use plugin_runtime::{
     PluginCommandExecution, PluginCommandInvocation, PluginCommandToolInvocation,
     PluginExecutableCommand, PluginHookCommandExecutor, PluginHookCommandInvocation,
     PluginHookDispatchMode, PluginHookDispatchSink, PluginProcessPermissionContext,
-    PluginRuntimeCommand, PluginRuntimeDiagnostic, PluginRuntimeHook, PluginRuntimeHookAgentHook,
-    PluginRuntimePlugin, PluginRuntimeSnapshot, PluginRuntimeTool,
-    ProcessPluginHookCommandExecutor,
+    PluginRuntimeCommand, PluginRuntimeDiagnostic, PluginRuntimeHook, PluginRuntimePlugin,
+    PluginRuntimeSnapshot, PluginRuntimeTool, ProcessPluginHookCommandExecutor,
 };
 pub use plugin_surface::{
     build_plugin_surface_projection, evaluate_plugin_permission_ceiling,
@@ -266,6 +273,7 @@ pub use plugin_surface::{
     PluginSpec025ReleaseEvidenceChecklist, PluginSurfaceDiagnostic, PluginSurfaceProjection,
     PluginToolDescriptor,
 };
+pub use plugin_tool_before::PluginRuntimeHookAgentHook;
 pub use policy_safety_snapshot::{
     CapabilityCeilingRef, PolicySafetyDigest, PolicySafetyProvenanceKind,
     PolicySafetyProvenanceRef, PolicySafetySnapshot, PolicySafetySnapshotCreationReason,
@@ -282,6 +290,11 @@ pub use process_gate::{
     ProcessGateInput, ProcessGateTerminalPrecondition, ProcessRedactedSpawnSummary,
     ProcessRedactedStatus, ProcessRedactedStreamKind, ProcessRedactedStreamSummary,
     ProcessSpawnAuthorization, ProcessSpawnReport, ProcessTerminalOutcome,
+};
+pub(crate) use provider_credentials::ProviderInvocationClient;
+pub use provider_credentials::{
+    CredentialResolvingProviderClient, OAuthCredentialRefresher, ProviderClientResolutionRequest,
+    ProviderCredentialInvocation, ProviderCredentialRuntime,
 };
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub use runner::{
@@ -343,6 +356,11 @@ pub use surface_action::{
     SurfaceApprovalAvailability, SurfaceApprovalDecision, SurfaceApprovalRequest,
     SURFACE_APPROVAL_PAYLOAD_TYPE, SURFACE_APPROVAL_WORK_KIND,
 };
+pub use tool_before::{
+    HeadlessToolBeforeInteraction, ToolBeforeConfirmRequest, ToolBeforeConfirmation,
+    ToolBeforeContext, ToolBeforeDecision, ToolBeforeHandler, ToolBeforeInteraction,
+    ToolBeforeNotifyRequest, ToolBeforeOrderKey, ToolBeforeSelectRequest,
+};
 pub use tool_execution::{
     session_approval_context_digest, session_approval_context_digest_for_input,
     session_remembered_context_digest, session_remembered_context_digest_for_input,
@@ -356,6 +374,8 @@ pub use tool_search::{
     ResolvedDeferredToolCall, ToolCallScopeError, ToolDescribeEvidence, ToolSearchActivationReason,
     ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
 };
+pub use trusted_javascript_tool_before::register_trusted_javascript_tool_before_handlers;
+pub use trusted_tool_before_registry::TrustedToolBeforeRegistry;
 pub use workflow::{
     cancel_runtime_workflow, read_only_child_tool_names, run_live_runtime_workflow,
     run_live_runtime_workflow_with_checkpoint_callback, run_live_runtime_workflow_with_options,

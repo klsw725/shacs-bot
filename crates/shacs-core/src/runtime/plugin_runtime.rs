@@ -1,20 +1,18 @@
 use crate::runtime::{
-    containment_permission_proof_for_process_gate, plugin_hook_catalog,
-    summarize_plugin_hook_dispatch, ActionNormalizationState, AgentHook, AgentHookContext,
-    CapabilityCeilingRef, ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef,
-    DiscoveredPlugin, DockerContainmentSnapshot, InheritedPermissionContext, PermissionMode,
-    PermissionModeSnapshot, PermissionRuleInput, PermissionedAction, PermissionedActionOrigin,
-    PluginHookCallbackResult, PluginHookDispatchAttempt, PluginHookDispatchEffect,
-    PluginHookDispatchStatus, PluginHookDispatchSummary, PluginHookEvent, PluginManifestSource,
-    PluginState, PolicySafetyProvenanceKind, PolicySafetyProvenanceRef, PolicySafetySnapshot,
+    containment_permission_proof_for_process_gate, plugin_hook_catalog, ActionNormalizationState,
+    AgentHookContext, CapabilityCeilingRef, ContainerNetworkMode, ContainerRuntimeKind,
+    ContainmentSnapshotRef, DiscoveredPlugin, DockerContainmentSnapshot,
+    InheritedPermissionContext, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
+    PermissionedAction, PermissionedActionOrigin, PluginHookCallbackResult,
+    PluginHookDispatchSummary, PluginHookEvent, PluginManifestSource, PluginState,
+    PolicySafetyProvenanceKind, PolicySafetyProvenanceRef, PolicySafetySnapshot,
     PolicySafetySnapshotCreationReason, PolicySafetySnapshotInput, PolicySafetySourceKind,
     PolicySafetySourceRef, ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
     ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessExecutionReceipt, ProcessGate,
     ProcessGateError, ProcessGateInput, ProcessGateTerminalPrecondition, ProcessIdentity,
     ProcessRedactedCommand, ProcessRedactedSpawnSummary, ProcessRedactedStatus,
     ProcessRedactedStreamKind, ProcessRedactedStreamSummary, ProcessSpawnAuthorization,
-    ProcessSpawnReport, ProcessTerminalOutcome, RuntimeToolCall, RuntimeToolMessage,
-    SafetyCapability,
+    ProcessSpawnReport, ProcessTerminalOutcome, RuntimeToolCall, SafetyCapability,
 };
 use crate::tools::{JsonMap, Tool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
@@ -45,7 +43,6 @@ const MAX_HOOK_STDIO_READS_PER_TICK: usize = 4;
 const MAX_CONTEXT_PREVIEW_CHARS: usize = 240;
 const HOOK_CLEANUP_WAIT_GRACE: Duration = Duration::from_millis(200);
 const HOOK_STDIO_DRAIN_GRACE: Duration = Duration::from_millis(50);
-const TOOL_BLOCK_ERROR_HINT: &str = "\n\n[Analyze the error above and try a different approach.]";
 
 pub type PluginHookDispatchSink = Arc<dyn Fn(PluginHookDispatchSummary) + Send + Sync>;
 
@@ -623,150 +620,6 @@ impl PluginCommandDispatcher {
     }
 }
 
-#[derive(Clone)]
-pub struct PluginRuntimeHookAgentHook {
-    snapshot: PluginRuntimeSnapshot,
-    mode: PluginHookDispatchMode,
-    executor: Arc<dyn PluginHookCommandExecutor>,
-    sink: Option<PluginHookDispatchSink>,
-}
-
-impl PluginRuntimeHookAgentHook {
-    pub fn new(snapshot: PluginRuntimeSnapshot) -> Self {
-        Self::with_executor(
-            snapshot,
-            PluginHookDispatchMode::LiveDiagnostics,
-            Arc::new(ProcessPluginHookCommandExecutor::default()),
-        )
-    }
-
-    pub fn with_executor(
-        snapshot: PluginRuntimeSnapshot,
-        mode: PluginHookDispatchMode,
-        executor: Arc<dyn PluginHookCommandExecutor>,
-    ) -> Self {
-        Self {
-            snapshot,
-            mode,
-            executor,
-            sink: None,
-        }
-    }
-
-    pub fn with_sink(mut self, sink: PluginHookDispatchSink) -> Self {
-        self.sink = Some(sink);
-        self
-    }
-
-    pub fn dispatch_llm_after(
-        &self,
-        context: &AgentHookContext,
-        response: &LlmResponse,
-    ) -> Option<PluginHookDispatchSummary> {
-        self.dispatch_event(
-            PluginHookEvent::LlmAfter,
-            llm_after_context_payload(context, response),
-        )
-    }
-
-    pub fn dispatch_tool_before(
-        &self,
-        context: &AgentHookContext,
-        calls: &[RuntimeToolCall],
-    ) -> Option<PluginHookDispatchSummary> {
-        self.dispatch_event(
-            PluginHookEvent::ToolBefore,
-            tool_before_context_payload(context, calls),
-        )
-    }
-
-    pub fn blocked_tool_messages(
-        &self,
-        context: &AgentHookContext,
-        calls: &[RuntimeToolCall],
-    ) -> Vec<RuntimeToolMessage> {
-        let Some(summary) = self.dispatch_tool_before(context, calls) else {
-            return Vec::new();
-        };
-        let Some(blocking_record) = summary.records.iter().find(|record| {
-            record.status == PluginHookDispatchStatus::Succeeded
-                && record.effect == Some(PluginHookDispatchEffect::Blocked)
-        }) else {
-            return Vec::new();
-        };
-        calls
-            .iter()
-            .map(|call| RuntimeToolMessage {
-                tool_call_id: call.id.clone(),
-                name: call.name.clone(),
-                content: plugin_tool_block_content(
-                    &blocking_record.plugin_id,
-                    call,
-                    blocking_record
-                        .output_evidence
-                        .as_ref()
-                        .map(|evidence| evidence.redacted_preview.as_str()),
-                ),
-            })
-            .collect()
-    }
-
-    fn dispatch_event(
-        &self,
-        event: PluginHookEvent,
-        context_payload: Value,
-    ) -> Option<PluginHookDispatchSummary> {
-        let mut attempts = Vec::new();
-        for plugin in &self.snapshot.plugins {
-            for hook in plugin.hooks.iter().filter(|hook| hook.event == event) {
-                let result = match self.mode {
-                    PluginHookDispatchMode::LiveDiagnostics => {
-                        let invocation = hook_invocation(plugin, hook, context_payload.clone());
-                        self.executor.execute(&invocation)
-                    }
-                    PluginHookDispatchMode::Replay => PluginHookCallbackResult::ReplayRejected(
-                        "runtime replay does not execute live plugin hook commands".to_owned(),
-                    ),
-                };
-                attempts.push(PluginHookDispatchAttempt {
-                    plugin_id: hook.plugin_id.clone(),
-                    event,
-                    timeout_ms: hook.command.timeout_ms,
-                    result,
-                });
-            }
-        }
-
-        if attempts.is_empty() {
-            return None;
-        }
-
-        let summary = summarize_plugin_hook_dispatch(event, attempts);
-        if let Some(sink) = &self.sink {
-            sink(summary.clone());
-        }
-        Some(summary)
-    }
-}
-
-impl AgentHook for PluginRuntimeHookAgentHook {
-    fn before_execute_tools(&self, context: &AgentHookContext, calls: &[RuntimeToolCall]) {
-        let _ = self.dispatch_tool_before(context, calls);
-    }
-
-    fn block_tool_calls(
-        &self,
-        context: &AgentHookContext,
-        calls: &[RuntimeToolCall],
-    ) -> Vec<RuntimeToolMessage> {
-        self.blocked_tool_messages(context, calls)
-    }
-
-    fn after_response(&self, context: &AgentHookContext, response: &LlmResponse) {
-        let _ = self.dispatch_llm_after(context, response);
-    }
-}
-
 #[derive(Debug)]
 struct PluginProcessGateOptions<'a> {
     adapter: ProcessAdapterKind,
@@ -1336,24 +1189,6 @@ fn container_runtime_label(runtime: &ContainerRuntimeKind) -> &'static str {
     }
 }
 
-fn plugin_tool_block_content(
-    plugin_id: &str,
-    call: &RuntimeToolCall,
-    detail: Option<&str>,
-) -> String {
-    let mut content = format!(
-        "Error: Tool `{}` blocked by plugin hook `{}` for event `tool:before`.{}",
-        call.name, plugin_id, TOOL_BLOCK_ERROR_HINT
-    );
-    if let Some(detail) = detail.filter(|detail| !detail.trim().is_empty()) {
-        content = format!(
-            "Error: Tool `{}` blocked by plugin hook `{}` for event `tool:before`: {}{}",
-            call.name, plugin_id, detail, TOOL_BLOCK_ERROR_HINT
-        );
-    }
-    content
-}
-
 pub fn build_plugin_runtime_snapshot(plugins: &[DiscoveredPlugin]) -> PluginRuntimeSnapshot {
     let mut snapshot = PluginRuntimeSnapshot {
         plugins: Vec::new(),
@@ -1660,8 +1495,7 @@ fn plugin_hook_result_from_completed_process(
     let stderr = redacted_bounded_bytes(&stderr_bytes);
     if !status.success() {
         let mut message = format!(
-            "plugin hook process exited with status {}; stdout: {}; stderr: {}",
-            status, stdout, stderr
+            "plugin hook process exited with status {status}; stdout: {stdout}; stderr: {stderr}"
         );
         if let Some(error) = stdin_error.as_deref() {
             message.push_str(&format!("; stdin write: {error}"));
@@ -1672,8 +1506,7 @@ fn plugin_hook_result_from_completed_process(
         Ok(value) => PluginHookCallbackResult::Output(value),
         Err(error) => {
             let mut message = format!(
-                "plugin hook stdout was not valid JSON: {error}; stdout: {}; stderr: {}",
-                stdout, stderr
+                "plugin hook stdout was not valid JSON: {error}; stdout: {stdout}; stderr: {stderr}"
             );
             if let Some(error) = stdin_error.as_deref() {
                 message.push_str(&format!("; stdin write: {error}"));
@@ -1937,6 +1770,9 @@ fn drain_pending_output<R: Read>(pending: &mut Option<PendingHookOutput<R>>) {
     let Some(reader) = state.reader.as_mut() else {
         return;
     };
+    if state.output.len() >= MAX_HOOK_STDIO_BYTES {
+        return;
+    }
     let mut buffer = [0_u8; 4096];
     for _ in 0..MAX_HOOK_STDIO_READS_PER_TICK {
         match reader.read(&mut buffer) {
@@ -1950,6 +1786,9 @@ fn drain_pending_output<R: Read>(pending: &mut Option<PendingHookOutput<R>>) {
                     state
                         .output
                         .extend_from_slice(&buffer[..count.min(remaining)]);
+                    if state.output.len() == MAX_HOOK_STDIO_BYTES {
+                        return;
+                    }
                 }
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
@@ -2060,7 +1899,7 @@ fn cleanup_plugin_hook_child_group(child_id: u32) {
 #[cfg(not(unix))]
 fn cleanup_plugin_hook_child_group(_child_id: u32) {}
 
-fn hook_invocation(
+pub(crate) fn hook_invocation(
     plugin: &PluginRuntimePlugin,
     hook: &PluginRuntimeHook,
     context_payload: Value,
@@ -2085,7 +1924,10 @@ fn hook_invocation(
     }
 }
 
-fn llm_after_context_payload(context: &AgentHookContext, response: &LlmResponse) -> Value {
+pub(crate) fn llm_after_context_payload(
+    context: &AgentHookContext,
+    response: &LlmResponse,
+) -> Value {
     json!({
         "iteration": context.iteration,
         "message_count": context.messages.len(),
@@ -2099,13 +1941,17 @@ fn llm_after_context_payload(context: &AgentHookContext, response: &LlmResponse)
     })
 }
 
-fn tool_before_context_payload(context: &AgentHookContext, calls: &[RuntimeToolCall]) -> Value {
+pub(crate) fn tool_before_context_payload(
+    context: &AgentHookContext,
+    calls: &[RuntimeToolCall],
+) -> Value {
     let calls = calls
         .iter()
         .map(|call| {
             json!({
                 "id": truncate_chars(&redact_string(&call.id), MAX_CONTEXT_PREVIEW_CHARS),
                 "name": call.name,
+                "arguments": call.arguments,
                 "argument_keys": argument_keys(&call.arguments),
                 "arguments_preview": truncate_chars(
                     &redact_string(&call.arguments.to_string()),
@@ -2434,6 +2280,40 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
 
     static PLUGIN_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct CountingReader {
+        reads: usize,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            buffer.fill(b'x');
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn plugin_output_cap_stops_additional_pipe_reads() {
+        let mut pending = Some(PendingHookOutput {
+            reader: Some(CountingReader { reads: 0 }),
+            output: Vec::new(),
+        });
+
+        drain_pending_output(&mut pending);
+        let reads_at_limit = pending
+            .as_ref()
+            .and_then(|state| state.reader.as_ref())
+            .map_or(0, |reader| reader.reads);
+        drain_pending_output(&mut pending);
+
+        let state = pending.as_ref().expect("pending output remains available");
+        assert_eq!(state.output.len(), MAX_HOOK_STDIO_BYTES);
+        assert_eq!(
+            state.reader.as_ref().map_or(0, |reader| reader.reads),
+            reads_at_limit
+        );
+    }
 
     #[cfg(unix)]
     #[test]

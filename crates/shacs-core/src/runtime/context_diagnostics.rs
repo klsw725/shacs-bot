@@ -458,7 +458,7 @@ fn safe_text(value: &str) -> String {
 fn source_ref(value: &str) -> String {
     let safe = safe_text(value);
     let digest = Sha256::digest(safe.as_bytes());
-    format!("context-source:{:x}", digest)[..31].to_owned()
+    format!("context-source:{digest:x}")[..31].to_owned()
 }
 
 #[cfg(test)]

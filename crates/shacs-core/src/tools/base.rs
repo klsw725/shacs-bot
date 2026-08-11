@@ -1,3 +1,4 @@
+use crate::controlled_child::ControlledChildAbort;
 use crate::runtime::{ProcessAdapterKind, ProcessGateInput};
 use serde_json::{json, Map, Number, Value};
 
@@ -74,11 +75,20 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolCallExecutionContext {
     pub(crate) process_gate_input: Option<ProcessGateInput>,
+    pub(crate) process_abort: Option<ControlledChildAbort>,
 }
 
 impl ToolCallExecutionContext {
     pub fn new(process_gate_input: Option<ProcessGateInput>) -> Self {
-        Self { process_gate_input }
+        Self {
+            process_gate_input,
+            process_abort: None,
+        }
+    }
+
+    pub fn with_process_abort(mut self, process_abort: ControlledChildAbort) -> Self {
+        self.process_abort = Some(process_abort);
+        self
     }
 }
 

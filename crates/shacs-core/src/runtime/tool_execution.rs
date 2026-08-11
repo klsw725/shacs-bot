@@ -1,3 +1,4 @@
+use crate::runtime::permission_action::normalize_prepared_runtime_tool_call;
 use crate::runtime::permission_pattern::{
     session_approval_reuse_matches, session_approval_reuse_pattern,
 };
@@ -19,13 +20,15 @@ use crate::runtime::{
     StaticRuleDecisionKind,
 };
 use crate::tools::{
-    CronTool, MessageTool, SpawnTool, ToolCallExecutionContext, ToolRegistry, ToolResult,
+    CronTool, MessageTool, PreparedToolCall, SpawnTool, ToolCallExecutionContext, ToolRegistry,
+    ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use shacs_config::{AutoApprovalConfig, RememberedPermissionEffect, RememberedPermissionFileStore};
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -214,6 +217,8 @@ pub struct ToolExecutionContext {
     pub active_workspace: Option<PathBuf>,
     pub in_cron_context: bool,
     pub record_channel_delivery: bool,
+    #[serde(skip, default)]
+    pub cancellation_token: Option<crate::runtime::CancellationToken>,
 }
 
 impl Default for ToolExecutionContext {
@@ -238,6 +243,7 @@ impl Default for ToolExecutionContext {
             active_workspace: None,
             in_cron_context: false,
             record_channel_delivery: false,
+            cancellation_token: None,
         }
     }
 }
@@ -273,6 +279,17 @@ impl RuntimeContextTools {
 pub struct RuntimeToolExecutor<'a> {
     registry: &'a ToolRegistry,
     context_tools: RuntimeContextTools,
+    prepared_calls: Mutex<Vec<CachedPreparedCall>>,
+}
+
+struct CachedPreparedCall {
+    call: RuntimeToolCall,
+    prepared: PreparedToolCall,
+}
+
+pub(crate) struct RuntimeToolPreparation {
+    pub calls: Vec<RuntimeToolCall>,
+    pub errors: Vec<RuntimeToolMessage>,
 }
 
 impl<'a> RuntimeToolExecutor<'a> {
@@ -280,6 +297,7 @@ impl<'a> RuntimeToolExecutor<'a> {
         Self {
             registry,
             context_tools: RuntimeContextTools::new(),
+            prepared_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -290,11 +308,63 @@ impl<'a> RuntimeToolExecutor<'a> {
         Self {
             registry,
             context_tools,
+            prepared_calls: Mutex::new(Vec::new()),
         }
     }
 
     pub(crate) fn registry(&self) -> &ToolRegistry {
         self.registry
+    }
+
+    pub(crate) fn prepare_tool_calls(
+        &self,
+        calls: Vec<RuntimeToolCall>,
+        is_virtual: impl Fn(&RuntimeToolCall) -> bool,
+    ) -> RuntimeToolPreparation {
+        let mut prepared_calls = self.prepared_calls();
+        let mut prepared = Vec::new();
+        let mut errors = Vec::new();
+        for call in calls {
+            if is_virtual(&call) {
+                prepared.push(call);
+                continue;
+            }
+            match self.registry.prepare_call(&call.name, call.arguments) {
+                Ok(prepared_call) => {
+                    let call = RuntimeToolCall::new(
+                        call.id,
+                        call.name,
+                        Value::Object(prepared_call.params.clone()),
+                    );
+                    prepared_calls.push(CachedPreparedCall {
+                        call: call.clone(),
+                        prepared: prepared_call,
+                    });
+                    prepared.push(call);
+                }
+                Err(error) => errors.push(RuntimeToolMessage {
+                    tool_call_id: call.id,
+                    name: call.name,
+                    content: format!("{error}{ERROR_HINT}"),
+                }),
+            }
+        }
+        RuntimeToolPreparation {
+            calls: prepared,
+            errors,
+        }
+    }
+
+    pub(crate) fn normalize_tool_call(
+        &self,
+        call: &RuntimeToolCall,
+        input: PermissionedActionInput,
+    ) -> PermissionedAction {
+        if self.has_prepared(call) {
+            normalize_prepared_runtime_tool_call(self.registry, call, input)
+        } else {
+            normalize_runtime_tool_call(self.registry, call, input)
+        }
     }
 
     pub fn execute_tool_calls(
@@ -326,17 +396,14 @@ impl<'a> RuntimeToolExecutor<'a> {
         let mut permissioned_actions = Vec::new();
 
         for (original_index, call) in tool_calls.into_iter().enumerate() {
-            let action = normalize_runtime_tool_call(
-                self.registry,
-                &call,
-                permissioned_action_input_from_context(context),
-            );
+            let action =
+                self.normalize_tool_call(&call, permissioned_action_input_from_context(context));
             let evaluation = permission_evaluation_for_action(&action, context);
             let decision = evaluation.decision.clone();
             permissioned_actions.push(action.clone());
             if !decision.can_handoff_to_tool_runtime {
                 if let Some(report) = flush_allowed_batch(
-                    self.registry,
+                    self,
                     &mut pending_batch,
                     concurrent_tools,
                     &mut messages,
@@ -364,14 +431,14 @@ impl<'a> RuntimeToolExecutor<'a> {
             let entry = IndexedToolCall {
                 original_index,
                 call,
-                context: tool_call_execution_context(self.registry, &action, evaluation),
+                context: tool_call_execution_context(self.registry, &action, evaluation, context),
             };
             if concurrent_tools && can_batch_concurrently(self.registry, &entry.call) {
                 pending_batch.push(entry);
                 continue;
             }
             if let Some(report) = flush_allowed_batch(
-                self.registry,
+                self,
                 &mut pending_batch,
                 concurrent_tools,
                 &mut messages,
@@ -382,7 +449,7 @@ impl<'a> RuntimeToolExecutor<'a> {
             }
             pending_batch.push(entry);
             if let Some(report) = flush_allowed_batch(
-                self.registry,
+                self,
                 &mut pending_batch,
                 concurrent_tools,
                 &mut messages,
@@ -394,7 +461,7 @@ impl<'a> RuntimeToolExecutor<'a> {
         }
 
         if let Some(report) = flush_allowed_batch(
-            self.registry,
+            self,
             &mut pending_batch,
             concurrent_tools,
             &mut messages,
@@ -412,6 +479,24 @@ impl<'a> RuntimeToolExecutor<'a> {
             recent_auto_mode_denials: Vec::new(),
             recent_auto_mode_retry_tokens: Vec::new(),
         }
+    }
+
+    fn has_prepared(&self, call: &RuntimeToolCall) -> bool {
+        self.prepared_calls()
+            .iter()
+            .any(|cached| cached.call == *call)
+    }
+
+    fn take_prepared(&self, call: &RuntimeToolCall) -> Option<PreparedToolCall> {
+        let mut prepared = self.prepared_calls();
+        let index = prepared.iter().position(|cached| cached.call == *call)?;
+        Some(prepared.remove(index).prepared)
+    }
+
+    fn prepared_calls(&self) -> MutexGuard<'_, Vec<CachedPreparedCall>> {
+        self.prepared_calls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 }
 
@@ -1106,7 +1191,7 @@ struct ToolCallOutcome {
 }
 
 fn flush_allowed_batch(
-    registry: &ToolRegistry,
+    executor: &RuntimeToolExecutor<'_>,
     batch: &mut Vec<IndexedToolCall>,
     concurrent_tools: bool,
     messages: &mut Vec<RuntimeToolMessage>,
@@ -1117,9 +1202,9 @@ fn flush_allowed_batch(
         return None;
     }
     let results = if concurrent_tools && batch.len() > 1 {
-        execute_concurrent_batch(registry, batch)
+        execute_concurrent_batch(executor, batch)
     } else {
-        execute_sequential_batch(registry, batch)
+        execute_sequential_batch(executor, batch)
     };
     batch.clear();
     for result in results {
@@ -1161,12 +1246,12 @@ fn can_batch_concurrently(registry: &ToolRegistry, call: &RuntimeToolCall) -> bo
 }
 
 fn execute_sequential_batch(
-    registry: &ToolRegistry,
+    executor: &RuntimeToolExecutor<'_>,
     batch: &[IndexedToolCall],
 ) -> Vec<ToolCallOutcome> {
     let mut outcomes = Vec::new();
     for entry in batch {
-        let outcome = execute_one_tool(registry, &entry.call, &entry.context);
+        let outcome = execute_one_tool(executor, &entry.call, &entry.context);
         let is_interrupt = matches!(outcome, ToolResult::AskUserInterrupt { .. });
         outcomes.push(ToolCallOutcome {
             original_index: entry.original_index,
@@ -1181,7 +1266,7 @@ fn execute_sequential_batch(
 }
 
 fn execute_concurrent_batch(
-    registry: &ToolRegistry,
+    executor: &RuntimeToolExecutor<'_>,
     batch: &[IndexedToolCall],
 ) -> Vec<ToolCallOutcome> {
     let handles = batch
@@ -1191,7 +1276,14 @@ fn execute_concurrent_batch(
             let fallback_call = entry.call.clone();
             let call = entry.call.clone();
             let context = entry.context.clone();
-            let prepared = registry.prepare_call(&call.name, call.arguments.clone());
+            let prepared = executor.take_prepared(&call).map_or_else(
+                || {
+                    executor
+                        .registry
+                        .prepare_call(&call.name, call.arguments.clone())
+                },
+                Ok,
+            );
             let handle = thread::spawn(move || {
                 let outcome = match prepared {
                     Ok(prepared) => prepared
@@ -1225,11 +1317,18 @@ fn execute_concurrent_batch(
 }
 
 fn execute_one_tool(
-    registry: &ToolRegistry,
+    executor: &RuntimeToolExecutor<'_>,
     call: &RuntimeToolCall,
     context: &ToolCallExecutionContext,
 ) -> ToolResult {
-    match registry.prepare_call(&call.name, call.arguments.clone()) {
+    match executor.take_prepared(call).map_or_else(
+        || {
+            executor
+                .registry
+                .prepare_call(&call.name, call.arguments.clone())
+        },
+        Ok,
+    ) {
         Ok(prepared) => prepared.tool.execute_with_context(prepared.params, context),
         Err(error) => ToolResult::Text(format!("{error}{ERROR_HINT}")),
     }
@@ -1239,11 +1338,18 @@ fn tool_call_execution_context(
     registry: &ToolRegistry,
     action: &PermissionedAction,
     evaluation: PermissionEvaluation,
+    context: &ToolExecutionContext,
 ) -> ToolCallExecutionContext {
     if !action.capabilities.contains(&SafetyCapability::ProcExec) {
         return ToolCallExecutionContext::default();
     }
-    ToolCallExecutionContext::new(process_gate_input_for_action(registry, action, evaluation).ok())
+    let execution = ToolCallExecutionContext::new(
+        process_gate_input_for_action(registry, action, evaluation).ok(),
+    );
+    match context.cancellation_token.as_ref() {
+        Some(token) => execution.with_process_abort(token.controlled_child_abort()),
+        None => execution,
+    }
 }
 
 fn process_gate_input_for_action(

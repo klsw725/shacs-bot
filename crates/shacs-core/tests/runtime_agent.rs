@@ -856,7 +856,7 @@ fn runtime_context_injects_memory_recent_history_skills_and_helpers() -> Result<
         || !active_always.contains(&"my".to_owned())
         || active_always.contains(&"indexed".to_owned())
     {
-        return Err(format!("active always skill inventory drifted: {:?}", active_always).into());
+        return Err(format!("active always skill inventory drifted: {active_always:?}").into());
     }
     assert_eq!(
         context.skill_name_for_source_path("skills/always/SKILL.md"),

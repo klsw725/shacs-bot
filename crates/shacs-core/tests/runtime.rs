@@ -1,13 +1,17 @@
 use serde_json::{json, Value};
 use shacs_config::AutoApprovalConfig;
+#[cfg(unix)]
+use shacs_core::runtime::trusted_runtime::{
+    LocalSpec030ProjectionProvider, Spec030FactStore, WorkspaceTrustObservation,
+};
 use shacs_core::runtime::{
     dispatch_bridge_tool_call, dispatch_bridge_tool_calls, ActionNormalizationError,
     ActionNormalizationState, ApprovalActor, ApprovalCacheEntry, ApprovalCorrelationError,
-    ApprovalDecision, ApprovalDecisionKind, ContainerNetworkMode, ContainerRuntimeKind,
-    ContainmentSnapshotRef, DockerContainmentSnapshot, PermissionCeilingSnapshot, PermissionMode,
-    PermissionModeSnapshot, PermissionRuleInput, PermissionedActionOrigin, ProcExecSummary,
-    RuntimeBoundaryOrigin, RuntimeContextTools, RuntimeInterrupt, RuntimeToolCall,
-    RuntimeToolExecutor, SafetyCapability, ToolExecutionContext,
+    ApprovalDecision, ApprovalDecisionKind, CancellationToken, ContainerNetworkMode,
+    ContainerRuntimeKind, ContainmentSnapshotRef, DockerContainmentSnapshot,
+    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
+    PermissionedActionOrigin, ProcExecSummary, RuntimeBoundaryOrigin, RuntimeContextTools,
+    RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutor, SafetyCapability, ToolExecutionContext,
 };
 use shacs_core::tools::{
     AskUserTool, CronTool, DeferredToolCatalog, DeferredToolCatalogEntry, ExecTool, JsonMap,
@@ -20,6 +24,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 struct RepeatTool;
 
@@ -1117,6 +1123,132 @@ fn oracle_runtime_approved_exec_uses_actual_process_context() -> Result<(), Box<
         return Err(
             format!("approved runtime exec did not use process context: {report:?}").into(),
         );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn spec030_process_runtime_cancellation_aborts_exec_and_descendants() -> Result<(), Box<dyn Error>>
+{
+    use shacs_projection::{
+        ProcessAdapterKind, ProcessAdapterSupport, ProcessControlReason, ProcessControlScope,
+        ProcessTerminalOutcome, Spec030ProjectionProvider,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let facts = Spec030FactStore::new(WorkspaceTrustObservation::Trusted);
+    let mut registry = ToolRegistry::new();
+    registry.register(ExecTool::with_workspace(temp.path()).with_spec030_fact_store(facts.clone()));
+    let executor = RuntimeToolExecutor::new(&registry);
+    let cancellation = CancellationToken::new();
+    let context = ToolExecutionContext {
+        permission_mode_snapshot: PermissionModeSnapshot {
+            mode: PermissionMode::Auto,
+            source: Some("test".to_owned()),
+            scope_ref: Some("workspace".to_owned()),
+        },
+        permission_ceiling_snapshot: Some(PermissionCeilingSnapshot {
+            parent_mode: PermissionMode::Auto,
+            capability_ceiling: vec![SafetyCapability::ProcExec],
+            approved_scope_refs: vec!["workspace".to_owned()],
+            origin: RuntimeBoundaryOrigin::UserTurn,
+        }),
+        permission_interactive: true,
+        permission_rule_input: safe_proc_exec_rule_input(),
+        ..ToolExecutionContext::default()
+    };
+    let script = "trap '' TERM; sh -c 'trap \"\" TERM; echo $$ > descendant.pid; exec sleep 30' & touch started; wait";
+    let call = RuntimeToolCall::new(
+        "cancel-exec",
+        "exec",
+        json!({ "command": script, "timeout": 30 }),
+    );
+    let approval = executor.execute_tool_calls(vec![call.clone()], &context);
+    let approval_request = match approval.interrupt {
+        Some(RuntimeInterrupt::PermissionApproval {
+            approval_request, ..
+        }) => approval_request,
+        other => return Err(format!("missing approval before cancellable exec: {other:?}").into()),
+    };
+    let approved_at = approval_request.expires_at_unix_ms.saturating_sub(1);
+    let approved_context = ToolExecutionContext {
+        permission_approval_cache: Some(ApprovalCacheEntry {
+            request: (*approval_request).clone(),
+            decision: ApprovalDecision {
+                approval_request_id: approval_request.approval_request_id.clone(),
+                action_digest: approval_request.action_digest.clone(),
+                snapshot_digest: approval_request.snapshot_digest.clone(),
+                decision: ApprovalDecisionKind::Approved,
+                approved_scope: approval_request.requested_scope.clone(),
+                actor: ApprovalActor::LocalUser,
+                decided_at_unix_ms: approved_at,
+                consumed: false,
+                policy_safety_snapshot_ref: approval_request.policy_safety_snapshot_ref.clone(),
+                secret_ref_evidence: approval_request.secret_ref_evidence.clone(),
+            },
+        }),
+        cancellation_token: Some(cancellation.clone()),
+        ..context
+    };
+
+    let report = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
+        let execution = scope.spawn(|| executor.execute_tool_calls(vec![call], &approved_context));
+        let ready = wait_for_runtime_path(&temp.path().join("started"));
+        cancellation.cancel();
+        let report = execution
+            .join()
+            .map_err(|_| "runtime exec thread panicked")?;
+        if let Err(error) = ready {
+            return Err(format!("{error}; report={report:?}").into());
+        }
+        Ok(report)
+    })?;
+
+    assert!(report.messages[0].content.contains("Command aborted"));
+    let pid = std::fs::read_to_string(temp.path().join("descendant.pid"))?
+        .trim()
+        .parse::<i32>()?;
+    wait_for_runtime_process_exit(pid)?;
+    let projection = LocalSpec030ProjectionProvider::new(facts).projection();
+    let bash = projection
+        .process_adapters()
+        .iter()
+        .find(|row| row.adapter == ProcessAdapterKind::Bash)
+        .ok_or("missing Bash fact")?;
+    assert_eq!(bash.support, ProcessAdapterSupport::Supported);
+    assert_eq!(bash.control_scope, ProcessControlScope::ControlledChild);
+    assert_eq!(
+        bash.reason,
+        ProcessControlReason::ControlledChildObservedNoRollback
+    );
+    assert_eq!(
+        bash.recent_outcomes[0].outcome,
+        ProcessTerminalOutcome::Aborted
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_for_runtime_path(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            return Err(format!("timed out waiting for {}", path.display()).into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_for_runtime_process_exit(pid: i32) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok() {
+        if Instant::now() >= deadline {
+            return Err(format!("descendant {pid} survived runtime cancellation").into());
+        }
+        thread::sleep(Duration::from_millis(10));
     }
     Ok(())
 }
@@ -2554,6 +2686,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         active_workspace: None,
         in_cron_context: false,
         record_channel_delivery: true,
+        cancellation_token: None,
     };
 
     let report = executor.execute_tool_calls(

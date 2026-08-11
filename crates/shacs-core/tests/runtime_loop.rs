@@ -2607,6 +2607,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         active_workspace: None,
         in_cron_context: false,
         record_channel_delivery: false,
+        cancellation_token: None,
     };
 
     let report = RuntimeToolExecutor::new(&registry).execute_tool_calls(
