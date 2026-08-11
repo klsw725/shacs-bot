@@ -1,6 +1,8 @@
 # PRD 001. pre-tool hooks and user confirmation
 
-Status: Planned
+Status: Complete (Scoped)
+
+Implementation evidence: `crates/shacs-core/tests/spec030_tool_before.rs`, `spec030_tool_before_interaction.rs`, `spec030_tool_before_preparation.rs`, `spec030_tool_before_timeout.rs`와 `crates/shacs-cli/src/tool_before_interaction.rs`의 단위 테스트가 실제 Exec 전 block, first-block short-circuit, 단일 validated input preparation, ephemeral interactive/headless confirmation, timeout fail-open과 diagnostics를 검증한다.
 
 ## Goal
 

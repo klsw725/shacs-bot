@@ -1,6 +1,8 @@
 # PRD 003. auth source resolution and credential lifecycle
 
-Status: Planned
+Status: Complete (Scoped)
+
+Implementation evidence: `crates/shacs-config/tests/spec030_auth_resolution.rs`, `spec030_auth_lifecycle.rs`, `crates/shacs-projection/tests/spec030_auth_status_conversion.rs`.
 
 ## Goal
 

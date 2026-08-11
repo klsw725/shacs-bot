@@ -1,6 +1,6 @@
 # 030. trusted agent runtime and operational controls 아키텍처 명세
 
-Status: Open
+Status: Complete (Scoped)
 
 Origin specs: 004, 005, 007, 010, 011, 022, 023, 025
 
@@ -145,4 +145,6 @@ Shacs는 신뢰된 로컬 agent runtime이다. 안전 경계는 숨은 보장이
 
 ## Closure Evidence
 
-Spec 030은 PRD 000부터 005의 실제 runtime evidence와 PRD 006의 통합 gate가 모두 통과하기 전까지 Open이다. Closure는 보안 sandbox나 secret prevention을 증명하는 절차가 아니다. Trusted runtime의 실제 동작, 선택적 제어 범위, fallback과 비보장을 사용자가 정확히 이해할 수 있음을 증명하는 절차다.
+Spec 030은 PRD 000부터 005의 실제 runtime evidence와 PRD 006의 통합 gate를 통과해 `Complete (Scoped)`로 닫혔다. Closure는 보안 sandbox나 secret prevention을 증명하는 절차가 아니다. Trusted runtime의 실제 동작, 선택적 제어 범위, fallback과 비보장을 사용자가 정확히 이해할 수 있음을 증명하는 절차다.
+
+현재 구현은 `Spec030RuntimeProjection`, live trusted runtime owner facts, validated deterministic `tool:before`, process-local JS/TS trusted hook host, controlled child, production credential resolution과 cancellation, adapter-scoped sandbox, trusted resource inspection, CLI/TUI/API surface와 source-bound `spec030-release-runner`를 제공한다. Workspace Cargo gates, active owner surface QA, tamper-resistant evidence validation과 Linux `SHACS_REQUIRE_BWRAP=1` bwrap lifecycle lane을 closure evidence로 사용한다.

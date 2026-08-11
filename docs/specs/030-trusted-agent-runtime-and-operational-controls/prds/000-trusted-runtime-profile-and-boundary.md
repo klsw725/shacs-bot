@@ -1,6 +1,8 @@
 # PRD 000. trusted runtime profile and boundary
 
-Status: Planned
+Status: Complete (Scoped)
+
+Implementation evidence: `crates/shacs-projection/tests/spec030_projection.rs`, `crates/shacs-core/tests/spec030_trusted_runtime.rs`, `crates/shacs-cli/tests/spec030_cli.rs`, `crates/shacs-api/tests/spec030_api.rs`, `crates/shacs-tui/tests/spec030_shared_surfaces.rs`.
 
 ## Goal
 

@@ -1,6 +1,8 @@
 # PRD 004. optional sandbox adapters
 
-Status: Planned
+Status: Complete (Scoped)
+
+Implementation evidence: `crates/shacs-core/tests/spec030_sandbox_adapter.rs`가 fallback/required/policy/active fact를 검증하며, Linux active lane은 별도 strict record로 closure runner에 입력한다.
 
 ## Goal
 

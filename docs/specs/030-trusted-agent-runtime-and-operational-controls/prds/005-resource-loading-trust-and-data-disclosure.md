@@ -1,6 +1,8 @@
 # PRD 005. resource loading trust and data disclosure
 
-Status: Planned
+Status: Complete (Scoped)
+
+Implementation evidence: `crates/shacs-core/tests/spec030_resource_selection.rs`, `spec030_resource_load_checks.rs`와 shared CLI/TUI/API projection tests.
 
 ## Goal
 
@@ -34,11 +36,18 @@ Skill, extension, prompt, context, package를 trusted resource로 발견·로드
 6. Remote trace upload는 opt-in 상태와 전송 대상·크기·endpoint summary를 표시한다.
 7. Auto-discovered executable resource는 trusted workspace assertion이 사라지면 다음 session activation에서 제외한다.
 
+## Scoped baseline
+
+1. Python executable resource는 configured interpreter를 사용한 import check로 loadability를 검증한다. Shacs가 Python runtime이나 dependency를 설치·해결하지 않는다.
+2. Package install evidence는 사용자가 구성한 local `program + args` command의 실행 결과로 한정한다. 자동 dependency resolution과 global package mutation은 제공하지 않는다.
+3. JavaScript/TypeScript executable resource는 configured Node 또는 Bun subprocess의 module load check를 지원한다. Embedded process-local JavaScript host API는 현재 scoped baseline에서 `unsupported`다.
+4. Runtime executable이나 configured adapter가 없으면 `unsupported`와 reason을 inspect에 표시하며 load success로 추론하지 않는다.
+
 ## Acceptance Criteria
 
 1. Source precedence와 collision winner가 inspect output에 나타난다.
 2. Malformed skill/extension은 path와 reason을 진단한다.
-3. Python skill install/import와 extension load failure가 실제 runtime에서 검증된다.
+3. Configured package command, Python import, JavaScript module load와 각 failure가 실제 runtime에서 검증된다. 자동 dependency resolution과 embedded process-local JavaScript host API는 `unsupported`로 투영된다.
 4. Trusted-code disclosure가 install/load/inspect surface에 나타난다.
 5. Trace opt-in/off와 export preview가 검증되고 raw-content 가능성이 문서화된다.
 6. Resource diagnostics가 trust authorization이나 sandbox evidence로 오인되지 않는다.

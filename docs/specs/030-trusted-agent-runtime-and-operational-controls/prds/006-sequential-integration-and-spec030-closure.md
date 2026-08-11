@@ -1,6 +1,8 @@
 # PRD 006. sequential integration and Spec 030 closure
 
-Status: Planned
+Status: Complete (Scoped)
+
+Implementation evidence: `crates/shacs-projection/tests/spec030_release_runner.rs`, `spec030_bwrap_record.rs`, `crates/shacs-projection/src/spec030/release_runner/surface_owner_linux_tests.rs`와 `.omo/evidence/spec030/prd006/current-worktree-final/closure-manifest.json`의 source-bound current-worktree evidence tree.
 
 ## Goal
 
