@@ -12,7 +12,7 @@
 
 ## 상태 체계와 2026-07-20 migration
 
-- `001`부터 `029`는 실제 Rust 구현과 테스트가 존재하는 현재 범위로 완료 처리했다. `029`는 Wave 1-8 baseline을 `Complete (Scoped)`로 닫았고, 최종 full workspace gate/manual review evidence는 별도 record로 남긴다.
+- `001`부터 `031`은 실제 Rust 구현과 테스트가 존재하는 현재 범위로 완료 처리했다. `029`와 `031`은 각 owner 범위를 `Complete (Scoped)`로 닫았고, 최종 full workspace gate/manual review evidence는 별도 record로 남긴다.
 - `Complete (Scoped)`는 해당 owner가 정의한 현재 구현 범위가 닫혔음을 뜻한다.
 - `Complete (Baseline)`은 self-hosted/local 최소 기준이 닫혔음을 뜻한다.
 - `Open (implemented, closure blocked)` 또는 PRD의 `Implemented, closure blocked`는 구현과 현재 surface QA evidence가 존재하지만 release closure 조건이 아직 통과하지 않았음을 뜻한다.
@@ -26,7 +26,6 @@
 
 | Spec | Owner scope | Origin specs |
 |---|---|---|
-| `031-configuration-runtime-layout-and-execution-snapshots` | config migration, profiles, runtime layout, immutable diagnostic execution snapshots, context wiring | 008, 009, 010, 015, 026 |
 | `032-app-maker-runtime-and-extension-lifecycle` | AppSupervisor/process lifecycle, current-user authoring/apply/install, app-level activation provenance and blockers | 005, 017, 021, 025 |
 | `033-evaluation-automation-live-integration` | goal accounting, evaluator/automation, apply-time CAS self-improvement, snapshot-based replay의 live integration | 009, 012, 013, 014, 016, 018, 022 |
 | `034-generated-media-and-rich-file-context-expansion` | Codex image, edit/streaming/remote output, video analyzer, artifact/sandbox/data-disclosure evidence | 004, 019, 027 |
