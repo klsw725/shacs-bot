@@ -1,9 +1,10 @@
+use super::external_owner_commands::exact_owner_commands;
 use super::model::{Spec031ReleaseCommandSpec, Spec031ReleaseGateKind, Spec031ReleaseRunnerConfig};
 
-pub(super) fn required_worktree_commands(
+pub fn required_worktree_commands(
     config: &Spec031ReleaseRunnerConfig,
 ) -> Vec<Spec031ReleaseCommandSpec> {
-    vec![
+    let mut commands = vec![
         Spec031ReleaseCommandSpec {
             id: "spec031-fmt".to_owned(),
             gate: Spec031ReleaseGateKind::SurfaceSmoke,
@@ -73,48 +74,56 @@ pub(super) fn required_worktree_commands(
         focused_test(
             config,
             "spec031-test-lifecycle",
-            "shacs-tui",
-            "real_live_source_detects_owner_state_changes",
+            "shacs-config",
+            "Spec031 config migration and layout",
             &[
                 "--test",
-                "spec031_tui_live",
-                "real_live_source_detects_owner_state_changes",
+                "spec031_migration_transaction",
+                "--test",
+                "spec031_runtime_layout",
+                "--test",
+                "spec031_schema_profiles",
             ],
             Spec031ReleaseGateKind::FocusedCargoTest,
         ),
         focused_test(
             config,
             "spec031-test-projection-parity",
-            "shacs-cli",
-            "spec031_readiness_parity_uses_runtime_inspect_owner_source_for_api_cli_and_bundle",
+            "shacs-core",
+            "Spec031 immutable snapshot and explicit context",
             &[
                 "--test",
-                "spec031_cli_projection",
-                "spec031_readiness_parity_uses_runtime_inspect_owner_source_for_api_cli_and_bundle",
+                "spec031_execution_snapshot",
+                "--test",
+                "spec031_context_projection",
             ],
             Spec031ReleaseGateKind::FocusedCargoTest,
         ),
         focused_test(
             config,
             "spec031-test-surface-smoke",
-            "shacs-cli",
-            "spec031_black_box_qa_surfaces_are_reachable_safe_and_explicit",
+            "shacs-core",
+            "Spec031 activation and sequential integration",
             &[
                 "--test",
-                "spec031_black_box_qa",
-                "spec031_black_box_qa_surfaces_are_reachable_safe_and_explicit",
+                "spec031_activation_store",
+                "--test",
+                "spec031_activation_execution",
+                "--test",
+                "spec031_sequential_integration",
             ],
             Spec031ReleaseGateKind::SurfaceSmoke,
         ),
         focused_test(
             config,
             "spec031-test-failure-injection",
-            "shacs-projection",
-            "spec031_release_command_timeout_kills_descendant_process",
+            "shacs-cli",
+            "Spec031 management CLI and runtime admission",
             &[
                 "--test",
-                "spec031_release_runner",
-                "spec031_release_command_timeout_kills_descendant_process",
+                "spec031_management_cli",
+                "--test",
+                "spec031_runtime_layout_admission",
             ],
             Spec031ReleaseGateKind::FailureInjection,
         ),
@@ -152,10 +161,12 @@ pub(super) fn required_worktree_commands(
             cwd: config.repo_root.clone(),
             timeout: config.command_timeout,
         },
-    ]
+    ];
+    commands.extend(exact_owner_commands(config));
+    commands
 }
 
-fn focused_test(
+pub(super) fn focused_test(
     config: &Spec031ReleaseRunnerConfig,
     id: &str,
     package: &str,
