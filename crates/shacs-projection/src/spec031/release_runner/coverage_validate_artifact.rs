@@ -71,6 +71,16 @@ fn expected_class_for_entry(
     if entry.kind == Spec031CoverageRequirementKind::RequiredCommand {
         return Ok(Spec031TypedEvidenceClass::CommandStdout);
     }
+    if matches!(
+        entry.kind,
+        Spec031CoverageRequirementKind::ParentMustHave
+            | Spec031CoverageRequirementKind::AcceptanceCriterion
+            | Spec031CoverageRequirementKind::ClosureEvidence
+            | Spec031CoverageRequirementKind::PrdTask
+    ) && entry.artifact.starts_with("commands/")
+    {
+        return Ok(Spec031TypedEvidenceClass::CommandStdout);
+    }
     if entry.kind == Spec031CoverageRequirementKind::ExternalOwner {
         return Ok(Spec031TypedEvidenceClass::ExternalAuditMarkdown);
     }
