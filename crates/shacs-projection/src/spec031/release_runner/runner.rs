@@ -4,6 +4,7 @@ use super::coverage::Spec031CoverageStatus;
 use super::coverage_ids::required_command_ids;
 use super::coverage_matrix::coverage_entries;
 use super::current_commands::required_worktree_commands;
+use super::external_audit_facts::external_owner_facts;
 use super::fixture::prepare_success_fixture_project;
 use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseCommandSpec, Spec031ReleaseGateKind,
@@ -11,8 +12,7 @@ use super::model::{
     SPEC031_RELEASE_RUNNER_SCHEMA,
 };
 use super::runner_outputs::{
-    push_blocked_external_triage, push_cleanup, push_triage, write_evidence_index,
-    CleanupReceiptSpec,
+    push_blocked_external_triage, push_cleanup, write_evidence_index, CleanupReceiptSpec,
 };
 use super::validate::validate_spec031_release_artifacts_with_repo_root;
 use super::writer::{write_json, write_spec031_release_artifacts_with};
@@ -67,6 +67,7 @@ fn empty_artifacts(config: &Spec031ReleaseRunnerConfig) -> Spec031ReleaseRunArti
         coverage_matrix: Vec::new(),
         external_audits: Vec::new(),
         failure_triage: Vec::new(),
+        reproducibility_observations: Vec::new(),
     }
 }
 
@@ -83,6 +84,22 @@ fn add_success_fixture(
     for &(_, command_id) in required_command_ids() {
         let command = Spec031ReleaseCommandSpec {
             id: command_id.to_owned(),
+            gate: Spec031ReleaseGateKind::FocusedCargoTest,
+            package: Some("shacs-projection".to_owned()),
+            filter: Some("spec031_release_runner_success_fixture".to_owned()),
+            argv: vec!["cargo".to_owned(), "test".to_owned()],
+            cwd: fixture_root.clone(),
+            timeout: config.command_timeout,
+        };
+        let record = execute_spec031_release_command_with(writer, &command)?;
+        artifacts.command_registry.push(record);
+    }
+    for command_id in external_owner_facts()
+        .iter()
+        .flat_map(|descriptor| descriptor.command_result_ids)
+    {
+        let command = Spec031ReleaseCommandSpec {
+            id: (*command_id).to_owned(),
             gate: Spec031ReleaseGateKind::FocusedCargoTest,
             package: Some("shacs-projection".to_owned()),
             filter: Some("spec031_release_runner_success_fixture".to_owned()),
@@ -140,17 +157,16 @@ fn add_current_worktree_triage(
         }
     }
     if worktree_dirty(&config.repo_root)? {
-        push_triage(
-            config,
-            writer,
-            artifacts,
-            "dirty-worktree.json",
-            "dirty_worktree",
-            "current checkout has uncommitted changes",
-        )?;
+        super::runner_outputs::push_reproducibility_observation(config, writer, artifacts)?;
     }
     add_external_audits(config, writer, artifacts, false)?;
-    push_blocked_external_triage(config, writer, artifacts)?;
+    if artifacts
+        .external_audits
+        .iter()
+        .any(|audit| audit.status == super::coverage::Spec031ExternalAuditStatus::Blocked)
+    {
+        push_blocked_external_triage(config, writer, artifacts)?;
+    }
     push_cleanup(
         config,
         writer,
@@ -159,7 +175,7 @@ fn add_current_worktree_triage(
             file_name: "current-worktree-receipt.json",
             status: "verified",
             resource_id: "current-worktree",
-            check_artifact: "triage/blocked-external-evidence.json",
+            check_artifact: "commands/spec031-test-surface-smoke.stdout",
         },
     )?;
     write_evidence_index(config, writer, artifacts)?;
