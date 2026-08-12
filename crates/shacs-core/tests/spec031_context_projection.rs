@@ -65,9 +65,13 @@ fn handoff(
             reason: Some("safe budget summary".to_owned()),
             digest: Some("sha256:budget".to_owned()),
             estimated_tokens,
+            included_tokens: 0,
         }],
-        used_context_bytes: 0,
-        budget_bytes: 0,
+        used_context_tokens: 0,
+        budget_tokens: 0,
+        estimator: shacs_core::runtime::select_token_estimator("unknown", "unknown"),
+        required: Vec::new(),
+        required_overflow_tokens: 0,
     }
 }
 

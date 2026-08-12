@@ -1,3 +1,7 @@
+mod activation_execution;
+mod activation_record;
+mod activation_store;
+mod activation_wire;
 mod agent_loop;
 mod autocompact;
 mod automation;
@@ -13,6 +17,8 @@ mod context_safety;
 mod diagnostics;
 mod durable_dispatch;
 mod execution_contract;
+mod execution_snapshot;
+mod execution_snapshot_source;
 mod file_context;
 mod goal;
 mod lifecycle;
@@ -56,6 +62,20 @@ pub mod trusted_runtime;
 mod trusted_tool_before_registry;
 mod workflow;
 
+pub use activation_execution::{
+    admit_activation_for_execution, digest_reason, ActivationAdmissionError,
+    ActivationCurrentIdentity, ActivationLiveFacts, ActivationReplay, ActivationSnapshotCandidate,
+    ReplayDispatchCounters,
+};
+pub use activation_record::{
+    ActivationDiagnostic, ActivationDigestObservation, ActivationReason, ActivationRecord,
+    ActivationRecordInput, ActivationSource, ActivationStatus, WorkspaceTrustRef,
+    ACTIVATION_SCHEMA_VERSION,
+};
+pub use activation_store::{
+    ActivationMutation, ActivationMutationReceipt, ActivationMutationRequest, ActivationStore,
+    ActivationStoreError,
+};
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
     AgentLoopRunSummary, AgentLoopTurnResult, PermissionModeSetter, ProjectPermissionStoreConfig,
@@ -102,9 +122,10 @@ pub use context_files::{
     DEFAULT_CONTEXT_FILE_MAX_BYTES, DEFAULT_CONTEXT_FILE_NAMES,
 };
 pub use context_handoff::{
-    build_context_provider_handoff, ContextArtifactPriority, ContextBudgetDecision,
-    ContextBudgetEvidence, ContextBudgetInput, ContextProviderHandoff, ProviderContextBlock,
-    DEFAULT_CONTEXT_HANDOFF_BUDGET_BYTES,
+    build_context_provider_handoff, select_token_estimator, ContextArtifactPriority,
+    ContextBudgetDecision, ContextBudgetEvidence, ContextBudgetInput, ContextProviderHandoff,
+    ProviderContextBlock, RequiredBudgetEvidence, RequiredContextKind, TokenEstimatorSelection,
+    DEFAULT_CONTEXT_HANDOFF_BUDGET_TOKENS,
 };
 pub use context_refs::{
     parse_context_references, ContextPermissionEvidence, ContextPermissionStatus,
@@ -135,6 +156,15 @@ pub use execution_contract::{
     RuntimeExecutionLedger, SubagentOutcomeKind, ToolFailureClass, ToolInterruptKind,
     ToolOutcomeKind,
 };
+pub use execution_snapshot::{
+    trusted_runtime_fact_refs, AdapterSandboxRef, ConfigMigrationState, ConfigSnapshotRef,
+    ContextInclusion, ContextSourceSnapshot, CredentialSnapshotRef, DataDisclosureWarning,
+    ExecutionSnapshot, ExecutionSnapshotError, ExecutionSnapshotInput, ProfileSelectionSnapshot,
+    ProviderExecutionHandoff, ProviderInputSnapshot, ReplayContract, ResourceIdentitySnapshot,
+    SandboxMode, SelectedIdentitySnapshot, Spec030ExecutionRefs, TokenBudgetSnapshot,
+    TrustedRuntimeFactRef, EXECUTION_SNAPSHOT_SCHEMA_V1,
+};
+pub use execution_snapshot_source::LiveExecutionSnapshotSource;
 pub use file_context::{
     AudioAnalysisPolicy, AudioContextAnalysis, AudioContextAnalyzer, AudioContextError,
     AudioContextRequest, TranscriptionAudioAnalyzer, VideoAnalysisPolicy, VideoComponentFailure,
@@ -299,8 +329,9 @@ pub use provider_credentials::{
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub use runner::{
     AgentHook, AgentHookContext, AgentRunResult, AgentRunSpec, AgentRunner, CompositeHook,
-    MidTurnInjectionCallback, NoopAgentHook, ProviderEventCallback, RetryWaitCallback, ToolEvent,
-    ToolEventCallback, ToolSearchConfig, ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
+    ExecutionSnapshotCallback, ExecutionSnapshotResolver, MidTurnInjectionCallback, NoopAgentHook,
+    ProviderEventCallback, RetryWaitCallback, ToolEvent, ToolEventCallback, ToolSearchConfig,
+    ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
 };
 pub use self_improvement::{
     runtime_improvement_apply_readiness, runtime_improvement_apply_record,

@@ -13,8 +13,9 @@ use crate::runtime::{
     AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, CancellationToken, ClassifierAttemptStatus,
     ClassifierEvidenceInput, ClassifierFallbackCause, EvaluatorConfidence, EvaluatorScopeMatch,
     ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope,
-    PendingExecution, PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind,
-    PermissionPolicyReason, PermissionedAction, PromptInjectionSignal, ProviderOutcomeKind,
+    ExecutionSnapshot, ExecutionSnapshotInput, PendingExecution, PermissionMode,
+    PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyReason,
+    PermissionedAction, PromptInjectionSignal, ProviderExecutionHandoff, ProviderOutcomeKind,
     RecentAutoModeDenial, RecentAutoModeRetryToken, ResolvedDeferredToolCall,
     RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
     RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage,
@@ -74,6 +75,14 @@ pub type ProviderEventCallback = Arc<dyn Fn(&ProviderEvent) + Send + Sync>;
 pub type CheckpointCallback = Arc<dyn Fn(&Value) + Send + Sync>;
 pub type MidTurnInjectionCallback = Arc<dyn Fn() -> Vec<Value> + Send + Sync>;
 pub type RetryWaitCallback = Arc<dyn Fn(f64, &str) + Send + Sync>;
+pub type ExecutionSnapshotResolver = Arc<
+    dyn Fn(
+            &ProviderRequest,
+        ) -> Result<ExecutionSnapshotInput, crate::runtime::ExecutionSnapshotError>
+        + Send
+        + Sync,
+>;
+pub type ExecutionSnapshotCallback = Arc<dyn Fn(&ExecutionSnapshot) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct AgentHookContext {
@@ -238,6 +247,8 @@ pub struct AgentRunSpec<'a> {
     pub cancellation_token: Option<CancellationToken>,
     pub execution_scope: Option<ExecutionScope>,
     pub execution_ledger: Option<Arc<Mutex<RuntimeExecutionLedger>>>,
+    pub execution_snapshot_resolver: ExecutionSnapshotResolver,
+    pub execution_snapshot_callback: ExecutionSnapshotCallback,
 }
 
 impl<'a> AgentRunSpec<'a> {
@@ -279,6 +290,14 @@ impl<'a> AgentRunSpec<'a> {
             cancellation_token: None,
             execution_scope: None,
             execution_ledger: None,
+            execution_snapshot_resolver: Arc::new(|request| {
+                crate::runtime::LiveExecutionSnapshotSource::default().resolve(
+                    request,
+                    Vec::new(),
+                    None,
+                )
+            }),
+            execution_snapshot_callback: Arc::new(|_| {}),
         }
     }
 
@@ -425,6 +444,7 @@ impl AgentRunner {
                 settings: spec.settings.clone(),
                 tool_choice: None,
             };
+            let request = freeze_provider_handoff(&spec, request)?;
             let model = request_model(&spec, request, hook_context(iteration, &messages))?;
             let response = model.response;
             accumulate_usage(&mut usage, &response.usage);
@@ -2292,6 +2312,27 @@ fn request_model(
     }
 }
 
+fn freeze_provider_handoff(
+    spec: &AgentRunSpec<'_>,
+    request: ProviderRequest,
+) -> Result<ProviderRequest, ProviderError> {
+    let input = (spec.execution_snapshot_resolver)(&request).map_err(snapshot_provider_error)?;
+    let handoff =
+        ProviderExecutionHandoff::freeze(input, request).map_err(snapshot_provider_error)?;
+    (spec.execution_snapshot_callback)(handoff.snapshot());
+    Ok(handoff.into_request())
+}
+
+fn snapshot_provider_error(error: crate::runtime::ExecutionSnapshotError) -> ProviderError {
+    ProviderError::Api {
+        status: None,
+        message: error.to_string(),
+        retryable: false,
+        headers: BTreeMap::new(),
+        body: None,
+    }
+}
+
 fn provider_outcome_for_response(response: &LlmResponse) -> ProviderOutcomeKind {
     if response.should_execute_tools() {
         ProviderOutcomeKind::ToolRequested
@@ -3881,10 +3922,14 @@ mod tests {
                 digest: Some("digest".to_owned()),
                 byte_count: 82,
                 token_estimate: Some(8),
+                included_tokens: 21,
             }],
             evidence: Vec::new(),
-            used_context_bytes: 82,
-            budget_bytes: 128,
+            used_context_tokens: 21,
+            budget_tokens: 128,
+            estimator: crate::runtime::select_token_estimator("unknown", "model"),
+            required: Vec::new(),
+            required_overflow_tokens: 0,
         });
 
         let result = AgentRunner::new().run(spec)?;
@@ -3951,10 +3996,14 @@ mod tests {
                 digest: None,
                 byte_count: 58,
                 token_estimate: Some(6),
+                included_tokens: 15,
             }],
             evidence: Vec::new(),
-            used_context_bytes: 58,
-            budget_bytes: 128,
+            used_context_tokens: 15,
+            budget_tokens: 128,
+            estimator: crate::runtime::select_token_estimator("unknown", "model"),
+            required: Vec::new(),
+            required_overflow_tokens: 0,
         });
 
         let result = AgentRunner::new().run(spec)?;
@@ -4005,10 +4054,14 @@ mod tests {
                 digest: None,
                 byte_count: 58,
                 token_estimate: Some(6),
+                included_tokens: 15,
             }],
             evidence: Vec::new(),
-            used_context_bytes: 58,
-            budget_bytes: 128,
+            used_context_tokens: 15,
+            budget_tokens: 128,
+            estimator: crate::runtime::select_token_estimator("unknown", "model"),
+            required: Vec::new(),
+            required_overflow_tokens: 0,
         });
 
         let result = AgentRunner::new().run(spec)?;
