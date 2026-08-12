@@ -1,10 +1,15 @@
 mod agent_repl;
 mod onboard_wizard;
+mod runtime_cleanup;
 pub mod spec030_cli;
 mod spec030_startup_facts;
+#[cfg(not(test))]
+mod spec031_activation_provider;
 mod spec031_cli;
+mod spec031_management;
 mod surface_approval_worker;
 mod tool_before_interaction;
+pub use runtime_cleanup::{RemovedRuntimePath, RemovedRuntimePathKind, RuntimeCleanupReceipt};
 
 use fs2::FileExt;
 use lettre::message::Mailbox;
@@ -32,7 +37,7 @@ use shacs_channels::{
 };
 use shacs_command::{parse_loop_command, LoopCommand};
 use shacs_config::{
-    config_context, default_config_path, ensure_runtime_dirs, load_auth_store,
+    config_context, default_config_path, ensure_runtime_dirs, load_auth_store, load_config,
     load_config_with_env, resolve_config_env_refs, save_auth_store_to_path, save_config_to_path,
     ApiConfig, ConfigBundle, ConfigError, EnvSource, LoadOptions, OAuthRefresh,
     OAuthRefreshRequest, PermissionActivationContext, PermissionConfigSnapshot,
@@ -227,6 +232,7 @@ type ExternalTransportRunner = Arc<
 #[derive(Debug, Clone, PartialEq)]
 pub enum CliCommand {
     Help,
+    ManagementHelp(ManagementHelpTopic),
     Version,
     Onboard(OnboardOptions),
     Status(StatusOptions),
@@ -235,6 +241,9 @@ pub enum CliCommand {
     RuntimeDiagnostics(RuntimeDiagnosticsOptions),
     RuntimeUpdate(RuntimeUpdateOptions),
     RuntimeMigrate(RuntimeMigrateOptions),
+    ConfigMigrate(ConfigMigrateOptions),
+    SnapshotInspect(SnapshotInspectOptions),
+    ActivationInspect(ActivationInspectOptions),
     RuntimeRecover(RuntimeRecoverOptions),
     RuntimeStart(RuntimeStartOptions),
     RuntimeStop(RuntimeStopOptions),
@@ -255,6 +264,15 @@ pub enum CliCommand {
     Web(WebOptions),
     Provider(ProviderCommand),
     Unsupported(UnsupportedCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagementHelpTopic {
+    ConfigMigrate,
+    Snapshot,
+    SnapshotInspect,
+    Activation,
+    ActivationInspect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -302,6 +320,32 @@ pub enum RuntimeMigrateMode {
     DryRun,
     Apply,
     Resume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigMigrateOptions {
+    pub config_path: PathBuf,
+    pub mode: ConfigMigrationMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigMigrationMode {
+    #[default]
+    DryRun,
+    Apply,
+    Recover,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotInspectOptions {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivationInspectOptions {
+    pub store: PathBuf,
+    pub activation_ref: String,
+    pub owner: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1516,6 +1560,7 @@ pub struct RuntimeRecoverOutcome {
     pub durable_children: DurableChildInspect,
     pub durable_diagnostics: DurableDiagnosticsInspect,
     pub supervision: Value,
+    pub cleanup: RuntimeCleanupReceipt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2688,6 +2733,7 @@ pub fn run_from_env() -> Result<String, CliError> {
 pub fn run_command(command: CliCommand) -> Result<String, CliError> {
     match command {
         CliCommand::Help => Ok(help_text()),
+        CliCommand::ManagementHelp(topic) => Ok(management_help_text(topic)),
         CliCommand::Version => Ok(format!("shacs-bot {VERSION}")),
         CliCommand::Onboard(options) => onboard(options).map(format_onboard_outcome),
         CliCommand::Status(options) => status(options).map(format_status_report),
@@ -2703,6 +2749,13 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         }
         CliCommand::RuntimeUpdate(options) => runtime_update(options).map(format_runtime_update),
         CliCommand::RuntimeMigrate(options) => runtime_migrate(options).map(format_runtime_migrate),
+        CliCommand::ConfigMigrate(options) => {
+            spec031_management::config_migration(&options.config_path, options.mode)
+        }
+        CliCommand::SnapshotInspect(options) => spec031_management::snapshot(&options.path),
+        CliCommand::ActivationInspect(options) => {
+            spec031_management::activation(&options.store, &options.activation_ref, &options.owner)
+        }
         CliCommand::RuntimeRecover(options) => runtime_recover(options).map(format_runtime_recover),
         CliCommand::RuntimeStart(options) => runtime_start(options),
         CliCommand::RuntimeStop(options) => runtime_stop(options).map(format_runtime_stop),
@@ -2805,7 +2858,7 @@ fn parse_runtime(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "runtime requires `start`, `stop`, `restart`, `inspect`, `trusted-runtime`, `diagnostics`, `update`, `migrate`, or `recover`".to_owned(),
+            "runtime requires `start`, `stop`, `restart`, `inspect`, `trusted-runtime`, `diagnostics`, `update`, `migrate`, `config-migrate`, `snapshot`, `activation`, or `recover`".to_owned(),
         ));
     };
     match action.as_str() {
@@ -2817,6 +2870,9 @@ fn parse_runtime(
         "diagnostics" | "diagnose" => parse_runtime_diagnostics(parser, global_config),
         "update" => parse_runtime_update(parser, global_config),
         "migrate" => parse_runtime_migrate(parser, global_config),
+        "config-migrate" => parse_config_migrate(parser, global_config),
+        "snapshot" => parse_snapshot_inspect(parser),
+        "activation" => parse_activation_inspect(parser),
         "recover" => parse_runtime_recover(parser, global_config),
         "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(CliError::InvalidArguments(format!(
@@ -2851,12 +2907,13 @@ fn load_runtime_config_with_admission(
     env: &impl EnvSource,
     admission: RuntimeConfigAdmission,
 ) -> Result<ConfigBundle, CliError> {
-    let config_path = options.config_path;
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    guard_config_migration_admission(&config_path)?;
     let workspace_override = options.workspace_override;
     let resolve_env = options.resolve_env;
     let mut bundle = load_config_with_env(
         LoadOptions {
-            config_path,
+            config_path: Some(config_path),
             workspace_override: None,
             resolve_env: false,
             write_back_migrations: false,
@@ -4611,6 +4668,7 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
         }
     }
     let mut details = Vec::new();
+    let mut cleanup = RuntimeCleanupReceipt::default();
     let mut durable_recovery = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
     match durable_recovery.status {
         DurableRecoveryStatus::Healthy => {}
@@ -4904,6 +4962,10 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
     if let Some(marker) = update_marker {
         fs::remove_file(&marker_path)?;
         sync_parent_dir(&marker_path)?;
+        cleanup.removed.push(RemovedRuntimePath {
+            kind: RemovedRuntimePathKind::UpdateMarker,
+            path: marker_path.clone(),
+        });
         details.push(format!(
             "cleared runtime update marker phase={} target={}",
             marker.phase, marker.target_version
@@ -4920,6 +4982,10 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
             &ownership_path,
             now_millis(),
         )? {
+            cleanup.removed.push(RemovedRuntimePath {
+                kind: RemovedRuntimePathKind::OwnershipMarker,
+                path: ownership_path.clone(),
+            });
             details.push("cleared stale runtime ownership marker".to_owned());
         }
     }
@@ -4941,6 +5007,7 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
             durable_work,
             durable_diagnostics,
             supervision,
+            cleanup,
         });
     }
     Ok(RuntimeRecoverOutcome {
@@ -4957,6 +5024,7 @@ pub fn runtime_recover(options: RuntimeRecoverOptions) -> Result<RuntimeRecoverO
         durable_work,
         durable_diagnostics,
         supervision,
+        cleanup,
     })
 }
 
@@ -5365,6 +5433,16 @@ fn guard_runtime_ownership_acquire_admission(bundle: &ConfigBundle) -> Result<()
     ))?;
     guard_runtime_migration_admission(data_dir, &bundle.context.workspace)?;
     guard_runtime_durable_recovery_admission(data_dir)
+}
+
+fn guard_config_migration_admission(config_path: &Path) -> Result<(), CliError> {
+    let marker = shacs_config::config_migration_marker_path(config_path);
+    if marker.exists() {
+        return Err(CliError::Config(
+            shacs_config::ConfigError::MigrationInterrupted { marker },
+        ));
+    }
+    Ok(())
 }
 
 fn guard_runtime_update_marker_for_admission(data_dir: &Path) -> Result<(), CliError> {
@@ -6040,6 +6118,8 @@ fn owner_process_started_after_marker_with_ticks(
 }
 
 fn clock_ticks_per_second() -> Option<u64> {
+    // SAFETY: `_SC_CLK_TCK` is a valid `sysconf` selector, the call takes no pointers or
+    // borrowed memory, and the return value is validated before conversion to `u64`.
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     u64::try_from(ticks).ok().filter(|ticks| *ticks > 0)
 }
@@ -9333,8 +9413,8 @@ pub fn format_context_refs_resolve_report(report: ContextRefsResolveCliReport) -
     ];
     if let Some(budget) = summary.budget.as_ref() {
         lines.push(format!(
-            "Budget bytes: {}/{}",
-            budget.used_context_bytes, budget.budget_bytes
+            "Budget tokens: {}/{}",
+            budget.used_context_tokens, budget.budget_tokens
         ));
         lines.push(format!(
             "Budget decisions: included={} skipped={} truncated={}",
@@ -16482,7 +16562,7 @@ pub fn help_text() -> String {
         "Commands:",
         "  onboard   Create or refresh config and workspace templates",
         "  status    Show config, workspace, model, provider, and workflow recipe status",
-        "  runtime   Start, stop, restart, inspect, trusted-runtime, diagnose, update, or recover local runtime state",
+        "  runtime   Start, stop, restart, inspect trusted-runtime, migrate config/data, and inspect snapshot/activation diagnostics",
         "  session   Manage local session files",
         "  skills    List skills, inspect entries, and discover workflow recipes",
         "  apps      Init authoring drafts; install, list, inspect, enable, disable, or uninstall local app bundles",
@@ -16535,6 +16615,50 @@ pub fn help_text() -> String {
         "  -v, --version         Show version",
     ]
     .join("\n")
+}
+
+fn management_help_text(topic: ManagementHelpTopic) -> String {
+    match topic {
+        ManagementHelpTopic::ConfigMigrate => [
+            "Usage: shacs-bot runtime config-migrate [OPTIONS]",
+            "",
+            "Options:",
+            "  --dry-run            Preview JSON config migration",
+            "  --apply              Apply JSON config migration",
+            "  --recover            Restore an interrupted migration backup",
+            "  -c, --config <path>  Use an explicit config file",
+        ]
+        .join("\n"),
+        ManagementHelpTopic::Snapshot => [
+            "Usage: shacs-bot runtime snapshot <command>",
+            "",
+            "Commands:",
+            "  inspect <path>  Inspect a diagnostic execution snapshot",
+        ]
+        .join("\n"),
+        ManagementHelpTopic::SnapshotInspect => [
+            "Usage: shacs-bot runtime snapshot inspect <path>",
+            "",
+            "Arguments:",
+            "  <path>  Execution snapshot JSON path",
+        ]
+        .join("\n"),
+        ManagementHelpTopic::Activation => [
+            "Usage: shacs-bot runtime activation <command>",
+            "",
+            "Commands:",
+            "  inspect <ref>  Inspect a persisted activation record",
+        ]
+        .join("\n"),
+        ManagementHelpTopic::ActivationInspect => [
+            "Usage: shacs-bot runtime activation inspect <ref> --store <path> --owner <ref>",
+            "",
+            "Options:",
+            "  --store <path>  Activation store JSON path",
+            "  --owner <ref>   Workspace trust owner reference",
+        ]
+        .join("\n"),
+    }
 }
 
 fn parse_global_options(
@@ -16830,6 +16954,121 @@ fn parse_runtime_migrate(
         }
     }
     Ok(CliCommand::RuntimeMigrate(options))
+}
+
+fn parse_config_migrate(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut config_path = global_config;
+    let mut mode = ConfigMigrationMode::DryRun;
+    let mut mode_selected = false;
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                return Ok(CliCommand::ManagementHelp(
+                    ManagementHelpTopic::ConfigMigrate,
+                ))
+            }
+            "--config" | "-c" => config_path = Some(take_path(&mut parser, &arg)?),
+            "--dry-run" | "--apply" | "--recover" => {
+                if mode_selected {
+                    return Err(CliError::InvalidArguments(
+                        "runtime config-migrate accepts one action".to_owned(),
+                    ));
+                }
+                mode_selected = true;
+                mode = if arg == "--apply" {
+                    ConfigMigrationMode::Apply
+                } else if arg == "--recover" {
+                    ConfigMigrationMode::Recover
+                } else {
+                    ConfigMigrationMode::DryRun
+                };
+            }
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown runtime config-migrate argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(CliCommand::ConfigMigrate(ConfigMigrateOptions {
+        config_path: config_path.unwrap_or_else(default_config_path),
+        mode,
+    }))
+}
+
+fn parse_snapshot_inspect(mut parser: ArgParser) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "runtime snapshot requires `inspect <path>`".to_owned(),
+        ));
+    };
+    if matches!(action.as_str(), "--help" | "-h") {
+        return Ok(CliCommand::ManagementHelp(ManagementHelpTopic::Snapshot));
+    }
+    if action != "inspect" {
+        return Err(CliError::InvalidArguments(format!(
+            "unknown runtime snapshot action `{action}`"
+        )));
+    }
+    if matches!(parser.peek(), Some("--help") | Some("-h")) {
+        return Ok(CliCommand::ManagementHelp(
+            ManagementHelpTopic::SnapshotInspect,
+        ));
+    }
+    let path = take_path(&mut parser, "snapshot path")?;
+    if let Some(other) = parser.next() {
+        return Err(CliError::InvalidArguments(format!(
+            "unknown runtime snapshot argument `{other}`"
+        )));
+    }
+    Ok(CliCommand::SnapshotInspect(SnapshotInspectOptions { path }))
+}
+
+fn parse_activation_inspect(mut parser: ArgParser) -> Result<CliCommand, CliError> {
+    let Some(action) = parser.next() else {
+        return Err(CliError::InvalidArguments(
+            "runtime activation requires `inspect <ref>`".to_owned(),
+        ));
+    };
+    if matches!(action.as_str(), "--help" | "-h") {
+        return Ok(CliCommand::ManagementHelp(ManagementHelpTopic::Activation));
+    }
+    if action != "inspect" {
+        return Err(CliError::InvalidArguments(format!(
+            "unknown runtime activation action `{action}`"
+        )));
+    }
+    if matches!(parser.peek(), Some("--help") | Some("-h")) {
+        return Ok(CliCommand::ManagementHelp(
+            ManagementHelpTopic::ActivationInspect,
+        ));
+    }
+    let activation_ref = take_value(&mut parser, "activation ref")?;
+    let mut store = None;
+    let mut owner = None;
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--store" => store = Some(take_path(&mut parser, &arg)?),
+            "--owner" => owner = Some(take_value(&mut parser, &arg)?),
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown runtime activation argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(CliCommand::ActivationInspect(ActivationInspectOptions {
+        store: store.ok_or_else(|| {
+            CliError::InvalidArguments("runtime activation inspect requires --store".to_owned())
+        })?,
+        activation_ref,
+        owner: owner.ok_or_else(|| {
+            CliError::InvalidArguments("runtime activation inspect requires --owner".to_owned())
+        })?,
+    }))
 }
 
 fn parse_runtime_recover(
@@ -18922,6 +19161,53 @@ impl AgentLoopChatCompletionAdapter {
         self
     }
 
+    fn execution_snapshot_source(&self) -> shacs_core::runtime::LiveExecutionSnapshotSource {
+        let mut source = shacs_core::runtime::LiveExecutionSnapshotSource::default();
+        if let Ok(bundle) = load_config(LoadOptions {
+            config_path: Some(self.config_path.clone()),
+            workspace_override: Some(self.workspace.clone()),
+            resolve_env: false,
+            write_back_migrations: false,
+        }) {
+            source.config = shacs_core::runtime::ConfigSnapshotRef {
+                source_ref: format!(
+                    "config:sha256:{:x}",
+                    Sha256::digest(self.config_path.to_string_lossy().as_bytes())
+                ),
+                schema_version: bundle.config.schema_version,
+                migration_state: if bundle.migrations.is_empty() {
+                    shacs_core::runtime::ConfigMigrationState::Current
+                } else {
+                    shacs_core::runtime::ConfigMigrationState::Legacy
+                },
+            };
+            source.profiles = shacs_core::runtime::ProfileSelectionSnapshot {
+                provider: bundle.config.profiles.selection.provider,
+                trusted_runtime: bundle.config.profiles.selection.trusted_runtime,
+                context: bundle.config.profiles.selection.context,
+            };
+        }
+        source.provider_id.clone_from(&self.provider_id);
+        source.shaping_version = "provider-adapter.v1".to_owned();
+        source.estimator =
+            shacs_core::runtime::select_token_estimator(&self.provider_id, &self.resolved_model);
+        source.budget_tokens = u64::from(self.defaults.context_window_tokens);
+        #[cfg(not(test))]
+        {
+            let provider = self.spec030_provider.clone();
+            source = source.with_spec030_provider(Arc::new(move || {
+                shacs_projection::Spec030ProjectionProvider::projection(&provider)
+            }));
+            source = source.with_activation_provider(
+                spec031_activation_provider::production_activation_provider(
+                    self.config_path.clone(),
+                    self.workspace.clone(),
+                ),
+            );
+        }
+        source
+    }
+
     fn loop_config(&self) -> AgentLoopConfig {
         let mut config = AgentLoopConfig::new(&self.workspace, self.resolved_model.clone());
         if let Some(media_root) = self.media_dir.parent() {
@@ -18944,7 +19230,25 @@ impl AgentLoopChatCompletionAdapter {
             .defaults
             .context_block_limit
             .map(|value| value as usize);
+        config.provider_id.clone_from(&self.provider_id);
+        config.extra_context_files = load_config(LoadOptions {
+            config_path: Some(self.config_path.clone()),
+            workspace_override: Some(self.workspace.clone()),
+            resolve_env: false,
+            write_back_migrations: false,
+        })
+        .ok()
+        .and_then(|bundle| {
+            bundle
+                .config
+                .resolve_profiles()
+                .ok()
+                .and_then(|profiles| profiles.context)
+                .map(|profile| profile.value.files.iter().map(PathBuf::from).collect())
+        })
+        .unwrap_or_default();
         config.tool_search = self.tool_search;
+        config.execution_snapshot_source = self.execution_snapshot_source();
         config.history_options = SessionHistoryOptions {
             max_messages: self.defaults.max_messages as usize,
             max_tokens: replay_token_budget(
@@ -20844,7 +21148,7 @@ fn production_tool_registry(
             .as_ref()
             .map(|discovery| discovery.plugins.as_slice())
             .unwrap_or(&[]),
-    );
+    )?;
     let (mcp_runtime, mcp_reports) = if specs.is_empty() {
         (None, Vec::new())
     } else {
@@ -20910,7 +21214,7 @@ fn render_image_generation_provider_error(error: ProviderError) -> String {
     }
 }
 
-fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
+fn mcp_server_specs(bundle: &ConfigBundle) -> Result<Vec<McpServerSpec>, CliError> {
     let parent_containment_snapshot = Some(runtime_containment_snapshot_ref(
         &runtime_containment_inspect(bundle),
     ));
@@ -20921,7 +21225,7 @@ fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
         .iter()
         .map(|(name, config)| {
             let command = non_empty(Some(config.command.as_str())).then(|| config.command.clone());
-            McpServerSpec {
+            Ok(McpServerSpec {
                 name: name.clone(),
                 r#type: config.r#type.clone(),
                 command: command.clone(),
@@ -20941,10 +21245,13 @@ fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
                 timeout_seconds: u64::from(config.tool_timeout),
                 enabled_tools: config.enabled_tools.clone(),
                 parent_containment_snapshot: parent_containment_snapshot.clone(),
-                startup_gate: command.as_deref().map(|command| {
-                    mcp_startup_gate(bundle, name, command, parent_containment_snapshot.clone())
-                }),
-            }
+                startup_gate: command
+                    .as_deref()
+                    .map(|command| {
+                        mcp_startup_gate(bundle, name, command, parent_containment_snapshot.clone())
+                    })
+                    .transpose()?,
+            })
         })
         .collect()
 }
@@ -20952,10 +21259,10 @@ fn mcp_server_specs(bundle: &ConfigBundle) -> Vec<McpServerSpec> {
 fn production_mcp_server_specs(
     bundle: &ConfigBundle,
     plugins: &[DiscoveredPlugin],
-) -> Vec<McpServerSpec> {
-    let mut specs = mcp_server_specs(bundle);
-    specs.extend(plugin_mcp_server_specs(bundle, plugins));
-    specs
+) -> Result<Vec<McpServerSpec>, CliError> {
+    let mut specs = mcp_server_specs(bundle)?;
+    specs.extend(plugin_mcp_server_specs(bundle, plugins)?);
+    Ok(specs)
 }
 
 fn mcp_startup_gate(
@@ -20963,7 +21270,7 @@ fn mcp_startup_gate(
     server_name: &str,
     command: &str,
     parent_containment_snapshot: Option<ContainmentSnapshotRef>,
-) -> McpStartupGate {
+) -> Result<McpStartupGate, CliError> {
     let containment =
         runtime_permission_rule_containment_from_snapshot(parent_containment_snapshot.as_ref());
     let permission_config =
@@ -20991,7 +21298,7 @@ fn mcp_startup_gate(
         &action_digest,
         &permission_mode_snapshot,
         parent_containment_snapshot.clone(),
-    );
+    )?;
     let action = PermissionedAction {
         action_id: format!("mcp-startup-{server_name}"),
         provider_tool_call_id: Some(format!("mcp-startup-{server_name}")),
@@ -21024,7 +21331,7 @@ fn mcp_startup_gate(
             redacted_targets: Vec::new(),
         },
     })
-    .unwrap_or_else(|error| panic!("MCP startup envelope construction failed: {error}"));
+    .map_err(|error| CliError::Runtime(redact_string(&error.to_string())))?;
     let permission_rules = PermissionRuleInput {
         containment,
         protected_targets: Vec::new(),
@@ -21043,8 +21350,8 @@ fn mcp_startup_gate(
         Some(&inherited_context),
         0,
     )
-    .unwrap_or_else(|error| panic!("MCP startup containment proof construction failed: {error}"));
-    McpStartupGate {
+    .map_err(|error| CliError::Runtime(redact_string(&error.to_string())))?;
+    Ok(McpStartupGate {
         input: ProcessGateInput {
             envelope,
             permission_rules,
@@ -21056,7 +21363,7 @@ fn mcp_startup_gate(
             terminal_precondition: ProcessGateTerminalPrecondition::Ready,
             now_unix_ms: 0,
         },
-    }
+    })
 }
 
 fn mcp_command_family(command: &str) -> String {
@@ -21080,7 +21387,7 @@ fn mcp_policy_safety_ref(
     digest: &str,
     permission_mode: &PermissionModeSnapshot,
     containment: Option<ContainmentSnapshotRef>,
-) -> shacs_core::runtime::PolicySafetySnapshotRef {
+) -> Result<shacs_core::runtime::PolicySafetySnapshotRef, CliError> {
     shacs_core::runtime::PolicySafetySnapshot::create(
         shacs_core::runtime::PolicySafetySnapshotInput {
             snapshot_id: format!("mcp_stdio_startup_{server_name}"),
@@ -21106,13 +21413,13 @@ fn mcp_policy_safety_ref(
         },
     )
     .map(|snapshot| snapshot.reference())
-    .unwrap_or_else(|error| panic!("MCP policy snapshot construction failed: {error}"))
+    .map_err(|error| CliError::Runtime(redact_string(&error.to_string())))
 }
 
 fn plugin_mcp_server_specs(
     bundle: &ConfigBundle,
     plugins: &[DiscoveredPlugin],
-) -> Vec<McpServerSpec> {
+) -> Result<Vec<McpServerSpec>, CliError> {
     let parent_containment_snapshot = Some(runtime_containment_snapshot_ref(
         &runtime_containment_inspect(bundle),
     ));
@@ -21168,14 +21475,22 @@ fn plugin_mcp_server_specs(
                     .unwrap_or(30),
                 enabled_tools: string_array_field(entrypoint, "enabledTools"),
                 parent_containment_snapshot: parent_containment_snapshot.clone(),
-                startup_gate: command.as_deref().map(|command| {
-                    mcp_startup_gate(bundle, &name, command, parent_containment_snapshot.clone())
-                }),
+                startup_gate: command
+                    .as_deref()
+                    .map(|command| {
+                        mcp_startup_gate(
+                            bundle,
+                            &name,
+                            command,
+                            parent_containment_snapshot.clone(),
+                        )
+                    })
+                    .transpose()?,
             });
         }
     }
     specs.sort_by(|left, right| left.name.cmp(&right.name));
-    specs
+    Ok(specs)
 }
 
 fn enabled_plugin_skill_roots(plugins: &[DiscoveredPlugin]) -> Vec<PathBuf> {
@@ -23786,7 +24101,7 @@ mod tests {
         assert!(output.contains("context refs resolve"));
         assert!(output.contains("Resolved: 1"));
         assert!(output.contains("Redacted: 1"));
-        assert!(output.contains("Budget bytes:"));
+        assert!(output.contains("Budget tokens:"));
         assert!(!output.contains("sk-context-resolve-secret"));
         assert!(!output.contains("visible text"));
         Ok(())
@@ -23867,7 +24182,7 @@ mod tests {
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
-        assert!(error.contains("runtime requires `start`, `stop`, `restart`, `inspect`, `trusted-runtime`, `diagnostics`, `update`, `migrate`, or `recover`"));
+        assert!(error.contains("runtime requires `start`, `stop`, `restart`, `inspect`, `trusted-runtime`, `diagnostics`, `update`, `migrate`, `config-migrate`, `snapshot`, `activation`, or `recover`"));
 
         let error = parse_cli_args(["runtime", "update"])
             .err()
@@ -27364,7 +27679,7 @@ mod tests {
             migrations: Vec::new(),
         };
 
-        let specs = mcp_server_specs(&bundle);
+        let specs = mcp_server_specs(&bundle)?;
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "docs");
         assert_eq!(specs[0].command.as_deref(), Some("server"));
@@ -27422,8 +27737,8 @@ mod tests {
         };
         let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
 
-        assert!(mcp_server_specs(&bundle).is_empty());
-        let specs = production_mcp_server_specs(&bundle, &discovery.plugins);
+        assert!(mcp_server_specs(&bundle)?.is_empty());
+        let specs = production_mcp_server_specs(&bundle, &discovery.plugins)?;
 
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "plugin_mcp_plugin_docs");
@@ -33555,6 +33870,12 @@ mod tests {
             &json!({
                 "permissions": {
                     "mode": "auto"
+                },
+                "profiles": {
+                    "contexts": {
+                        "focused": {"files": ["notes/profile.md"]}
+                    },
+                    "selection": {"context": "focused"}
                 }
             }),
         )?;
@@ -33611,6 +33932,11 @@ mod tests {
         let config = adapter.loop_config();
         assert_eq!(config.tool_search.enabled, ToolSearchMode::On);
         assert_eq!(config.tool_search.threshold_pct, 42);
+        assert_eq!(
+            config.extra_context_files,
+            vec![PathBuf::from("notes/profile.md")]
+        );
+        assert_eq!(config.provider_id, "openai");
         assert_eq!(config.tool_search.search_default_limit, 3);
         assert_eq!(config.tool_search.max_search_limit, 9);
         assert_eq!(
