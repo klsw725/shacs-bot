@@ -63,6 +63,7 @@ pub use readiness::{
 pub use readiness_input::Spec031ReadinessAggregationError;
 pub use redaction::{Spec031ConstructionError, Spec031ConstructionViolation};
 pub(crate) use release_runner::execute_spec031_release_command_with;
+pub use release_runner::required_worktree_commands as canonical_current_command_specs;
 pub use release_runner::{
     execute_spec031_release_command, parse_cargo_test_counts, run_spec031_release_runner,
     validate_spec031_release_artifacts, validate_spec031_release_artifacts_with_repo_root,

@@ -41,6 +41,11 @@ pub(super) fn write_spec031_release_artifacts_with(
     write_json(writer, "coverage-matrix.json", &artifacts.coverage_matrix)?;
     write_json(writer, "results.json", &artifacts.command_registry)?;
     write_json(writer, "failure-triage.json", &artifacts.failure_triage)?;
+    write_json(
+        writer,
+        "reproducibility-observations.json",
+        &artifacts.reproducibility_observations,
+    )?;
     write_json(writer, "fixture-registry.json", &artifacts.fixture_registry)?;
     write_json(writer, "command-registry.json", &artifacts.command_registry)?;
     write_json(writer, "cleanup-registry.json", &artifacts.cleanup_registry)?;
@@ -87,6 +92,10 @@ fn render_summary(artifacts: &Spec031ReleaseRunArtifacts) -> String {
     summary.push_str("\n## Failure Triage\n");
     for triage in &artifacts.failure_triage {
         summary.push_str(&format!("- {triage}\n"));
+    }
+    summary.push_str("\n## Reproducibility Observations\n");
+    for observation in &artifacts.reproducibility_observations {
+        summary.push_str(&format!("- {observation}\n"));
     }
     summary.push_str(&format!(
         "\n## Coverage\n- rows: {}\n- pass: {}\n- blocked: {}\n",

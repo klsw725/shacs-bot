@@ -40,26 +40,27 @@ pub(super) fn push_cleanup(
     Ok(())
 }
 
-pub(super) fn push_triage(
+pub(super) fn push_reproducibility_observation(
     config: &Spec031ReleaseRunnerConfig,
     writer: &EvidenceWriter,
     artifacts: &mut Spec031ReleaseRunArtifacts,
-    file_name: &str,
-    code: &str,
-    message: &str,
 ) -> Result<(), Spec031ReleaseArtifactError> {
-    let triage = format!("triage/{file_name}");
+    writer
+        .create_dir_all("observations")
+        .map_err(|_| Spec031ReleaseArtifactError::Io)?;
+    let path = "observations/dirty-worktree.json";
     write_json(
         writer,
-        &triage,
+        path,
         &serde_json::json!({
-            "schema": SPEC031_RELEASE_RUNNER_SCHEMA,
+            "schema": "spec031.reproducibility_observation.v1",
             "run_id": config.run_id.as_str(),
-            "code": code,
-            "message": message
+            "kind": "dirty_worktree",
+            "semantic_blocker": false,
+            "message": "current checkout has uncommitted changes"
         }),
     )?;
-    artifacts.failure_triage.push(triage);
+    artifacts.reproducibility_observations.push(path.to_owned());
     Ok(())
 }
 
@@ -107,6 +108,7 @@ pub(super) fn write_evidence_index(
             "fixtures": artifacts.fixture_registry,
             "cleanup": artifacts.cleanup_registry,
             "failure_triage": artifacts.failure_triage,
+            "reproducibility_observations": artifacts.reproducibility_observations,
             "authoritative_sources": authoritative_sources()
         }),
     )?;
