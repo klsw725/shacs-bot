@@ -10,29 +10,44 @@ use std::process;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod auth_source;
+mod config_migration;
+mod config_migration_state;
 mod credential;
 mod permissions;
+mod profiles;
 mod remembered_permissions;
+mod runtime_layout;
+mod schema;
 mod secret_ref;
 mod trusted_runtime_config;
 
+pub use auth_source::*;
+pub use config_migration::*;
+pub use config_migration_state::{ConfigMigrationFileState, ConfigMigrationOperation};
 pub use credential::*;
 pub use permissions::{
     AutoApprovalConfig, PermissionActivationContext, PermissionConfigDiagnostics,
     PermissionConfigSnapshot, PermissionMode, PermissionModeSource, PermissionsConfig,
     SafetyCapability,
 };
+pub use profiles::*;
 pub use remembered_permissions::{
     RememberedPermissionEffect, RememberedPermissionFileStore, RememberedPermissionMatcher,
     RememberedPermissionRemoveByPrefixOutcome, RememberedPermissionRule,
     RememberedPermissionRuleId, RememberedPermissionStore, RememberedPermissionStoreError,
     RememberedPermissionStoreErrorKind, WorkspacePathScope, WorkspacePermissionId,
 };
+pub use runtime_layout::*;
+pub use schema::*;
 pub use secret_ref::{provider_secret_refs, ConfigSecretRef};
 pub use trusted_runtime_config::*;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
+    #[serde(default = "default_config_schema_version")]
+    pub schema_version: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -57,6 +72,27 @@ pub struct Config {
         skip_serializing_if = "TrustedRuntimeConfig::is_default"
     )]
     pub trusted_runtime: TrustedRuntimeConfig,
+    #[serde(default, skip_serializing_if = "ProfilesConfig::is_default")]
+    pub profiles: ProfilesConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            schema_version: CURRENT_CONFIG_SCHEMA_VERSION,
+            env: BTreeMap::new(),
+            agents: AgentsConfig::default(),
+            channels: ChannelsConfig::default(),
+            providers: ProvidersConfig::default(),
+            api: ApiConfig::default(),
+            gateway: GatewayConfig::default(),
+            permissions: PermissionsConfig::default(),
+            plugins: PluginsConfig::default(),
+            tools: ToolsConfig::default(),
+            trusted_runtime: TrustedRuntimeConfig::default(),
+            profiles: ProfilesConfig::default(),
+        }
+    }
 }
 
 impl Config {
@@ -65,6 +101,10 @@ impl Config {
             return default_workspace_path();
         }
         expand_home(&self.agents.defaults.workspace)
+    }
+
+    pub fn resolve_profiles(&self) -> Result<ResolvedProfiles<'_>, ProfileResolutionError> {
+        self.profiles.resolve()
     }
 }
 
@@ -203,18 +243,6 @@ impl ProviderConfig {
 }
 
 pub type ProvidersConfig = BTreeMap<String, ProviderConfig>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderCredentialSourceConfig {
-    pub schema_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<String>,
-    #[serde(default = "default_true")]
-    pub local_auth: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -807,6 +835,20 @@ pub enum ConfigError {
     Io(std::io::Error),
     Json(serde_json::Error),
     Env(String),
+    InvalidSchemaVersion,
+    UnsupportedSchema {
+        found: u32,
+        current: u32,
+    },
+    MigrationInterrupted {
+        marker: PathBuf,
+    },
+    MigrationRecovery(String),
+    MigrationConflict {
+        operation: ConfigMigrationOperation,
+        state: ConfigMigrationFileState,
+    },
+    MigrationBackupMismatch,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -815,6 +857,26 @@ impl std::fmt::Display for ConfigError {
             Self::Io(error) => write!(formatter, "config I/O failed: {error}"),
             Self::Json(error) => write!(formatter, "config JSON failed: {error}"),
             Self::Env(error) => write!(formatter, "config env resolution failed: {error}"),
+            Self::InvalidSchemaVersion => formatter.write_str("config schema version is invalid"),
+            Self::UnsupportedSchema { found, current } => write!(
+                formatter,
+                "config schema version {found} is newer than supported version {current}"
+            ),
+            Self::MigrationInterrupted { marker } => write!(
+                formatter,
+                "config migration is interrupted; recover marker {} first",
+                marker.display()
+            ),
+            Self::MigrationRecovery(error) => {
+                write!(formatter, "config migration recovery failed: {error}")
+            }
+            Self::MigrationConflict { operation, state } => write!(
+                formatter,
+                "config migration {operation:?} rejected current file state {state:?}"
+            ),
+            Self::MigrationBackupMismatch => {
+                formatter.write_str("config migration backup does not match transaction marker")
+            }
         }
     }
 }
@@ -964,6 +1026,15 @@ pub fn load_config_with_env(
     let (mut config, migrations, migrated_value) = if config_path.exists() {
         let raw = fs::read_to_string(&config_path)?;
         let mut value = serde_json::from_str::<Value>(&raw)?;
+        match classify_config_schema(&value).map_err(|_| ConfigError::InvalidSchemaVersion)? {
+            ConfigSchemaState::Legacy | ConfigSchemaState::Current => {}
+            ConfigSchemaState::FutureUnsupported { found } => {
+                return Err(ConfigError::UnsupportedSchema {
+                    found,
+                    current: CURRENT_CONFIG_SCHEMA_VERSION,
+                });
+            }
+        }
         let migrations = migrate_config_value(&mut value);
         let config = serde_json::from_value(value.clone())?;
         (config, migrations, Some(value))
@@ -1096,8 +1167,15 @@ fn save_config_value_to_path(value: &Value, path: &Path) -> Result<(), ConfigErr
         fs::create_dir_all(parent)?;
     }
     let text = serde_json::to_string_pretty(value)?;
-    fs::write(path, format!("{text}\n"))?;
+    write_atomic_file(path, format!("{text}\n").as_bytes())?;
     Ok(())
+}
+
+fn write_atomic_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_secret_file(path, bytes)
 }
 
 pub fn refresh_config(path: &Path) -> Result<ConfigBundle, ConfigError> {
@@ -1130,20 +1208,16 @@ pub fn config_context(
 }
 
 pub fn ensure_runtime_dirs(context: &ConfigContext) -> std::io::Result<Vec<PathBuf>> {
-    let dirs = [
-        context.data_dir.clone(),
-        context.workspace.clone(),
-        context.data_dir.join("media"),
-        context.data_dir.join("cron"),
-        context.data_dir.join("logs"),
-        context.data_dir.join("channels"),
-        context.data_dir.join("channels").join("worker-metadata"),
-        context.data_dir.join("skills"),
-    ];
+    let dirs = runtime_layout(context)
+        .into_iter()
+        .filter_map(|entry| (entry.kind == RuntimeLayoutEntryKind::Directory).then_some(entry.path))
+        .collect::<Vec<_>>();
     for dir in &dirs {
         fs::create_dir_all(dir)?;
     }
-    Ok(dirs.into_iter().collect())
+    fs::create_dir_all(context.data_dir.join("cron"))?;
+    fs::create_dir_all(context.data_dir.join("channels").join("worker-metadata"))?;
+    Ok(dirs)
 }
 
 pub fn resolve_config_env_refs(
@@ -1183,6 +1257,19 @@ pub fn interpolate_env_with_source(input: &str, env: &impl EnvSource) -> Result<
 
 pub fn migrate_config_value(value: &mut Value) -> Vec<Migration> {
     let mut migrations = Vec::new();
+    let schema_version = value.get("schemaVersion");
+    if schema_version.is_none() || schema_version.and_then(Value::as_u64) == Some(0) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "schemaVersion".to_owned(),
+                Value::from(CURRENT_CONFIG_SCHEMA_VERSION),
+            );
+            migrations.push(Migration {
+                key: "schemaVersion".to_owned(),
+                note: "initialized config schema version".to_owned(),
+            });
+        }
+    }
     migrate_tools(value, &mut migrations);
     migrate_agent_defaults(value, &mut migrations);
     migrations
@@ -1975,21 +2062,23 @@ mod tests {
         let context = config_context(Some(config_path), Some(workspace_path.clone()));
         let dirs = ensure_runtime_dirs(&context)?;
         let expected_dirs = vec![
-            root.path().join("instance"),
-            workspace_path,
+            workspace_path.join("sessions"),
             root.path().join("instance").join("media"),
-            root.path().join("instance").join("cron"),
             root.path().join("instance").join("logs"),
             root.path().join("instance").join("channels"),
-            root.path()
-                .join("instance")
-                .join("channels")
-                .join("worker-metadata"),
             root.path().join("instance").join("skills"),
+            root.path().join("instance").join("cache"),
+            root.path().join("instance").join("tmp"),
+            root.path().join("instance").join("snapshots"),
         ];
 
         assert_eq!(dirs, expected_dirs);
         assert!(dirs.iter().all(|dir| dir.is_dir()));
+        assert!(root.path().join("instance/cron").is_dir());
+        assert!(root
+            .path()
+            .join("instance/channels/worker-metadata")
+            .is_dir());
         Ok(())
     }
 
