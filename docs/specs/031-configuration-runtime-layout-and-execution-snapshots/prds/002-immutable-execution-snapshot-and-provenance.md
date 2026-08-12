@@ -1,6 +1,6 @@
 # PRD 002. immutable execution snapshot and provenance
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 

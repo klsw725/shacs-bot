@@ -1,6 +1,6 @@
 # PRD 000. config, profile, and auth-source migration
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
