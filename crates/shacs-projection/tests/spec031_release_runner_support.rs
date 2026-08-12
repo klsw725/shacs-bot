@@ -41,12 +41,14 @@ pub fn valid_artifacts() -> Spec031ReleaseRunArtifacts {
             "coverage-matrix.json".to_owned(),
             "results.json".to_owned(),
             "failure-triage.json".to_owned(),
+            "reproducibility-observations.json".to_owned(),
             "summary.md".to_owned(),
             "evidence-index.json".to_owned(),
         ],
         coverage_matrix: Vec::new(),
         external_audits: Vec::new(),
         failure_triage: Vec::new(),
+        reproducibility_observations: Vec::new(),
     }
 }
 
@@ -101,6 +103,7 @@ fn remove_manifest_files(root: &std::path::Path) -> Result<(), Box<dyn std::erro
         "coverage-matrix.json",
         "results.json",
         "failure-triage.json",
+        "reproducibility-observations.json",
         "fixture-registry.json",
         "command-registry.json",
         "cleanup-registry.json",

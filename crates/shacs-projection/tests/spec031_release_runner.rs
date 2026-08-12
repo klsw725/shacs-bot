@@ -1,8 +1,8 @@
 mod spec031_release_runner_support;
 
 use shacs_projection::{
-    execute_spec031_release_command, parse_cargo_test_counts, run_spec031_release_runner,
-    validate_spec031_release_artifacts, Spec031CoverageEvidenceKind,
+    canonical_current_command_specs, execute_spec031_release_command, parse_cargo_test_counts,
+    run_spec031_release_runner, validate_spec031_release_artifacts, Spec031CoverageEvidenceKind,
     Spec031CoverageRequirementKind, Spec031ExternalAuditStatus, Spec031ExternalOwnerId,
     Spec031ReleaseArtifactError, Spec031ReleaseCommandSpec, Spec031ReleaseCommandStatus,
     Spec031ReleaseGateKind, Spec031ReleaseRunArtifacts, Spec031ReleaseRunId,
@@ -14,6 +14,64 @@ use spec031_release_runner_support::{
 };
 use std::fs;
 use std::time::Duration;
+
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root exists")
+        .canonicalize()
+        .expect("workspace root canonicalizes")
+}
+
+fn command_from_spec(
+    root: &std::path::Path,
+    spec: Spec031ReleaseCommandSpec,
+) -> shacs_projection::Spec031ReleaseCommandRecord {
+    let is_test = matches!(spec.argv.get(1).map(String::as_str), Some("test"));
+    let stdout_path = format!("commands/{}.stdout", spec.id);
+    let stderr_path = format!("commands/{}.stderr", spec.id);
+    let separator = spec.argv.iter().position(|arg| arg == "--");
+    let exact_name = separator
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| spec.argv.get(index));
+    let stdout = exact_name.map_or_else(
+        || {
+            if is_test {
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n".to_owned()
+            } else {
+                String::new()
+            }
+        },
+        |name| format!("test {name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"),
+    );
+    let stderr = spec
+        .argv
+        .windows(2)
+        .filter_map(|pair| (pair[0] == "--test").then_some(pair[1].as_str()))
+        .map(|target| format!("Running tests/{target}.rs\n"))
+        .collect::<String>();
+    fs::write(root.join(&stdout_path), stdout).expect("stdout writes");
+    fs::write(root.join(&stderr_path), stderr).expect("stderr writes");
+    shacs_projection::Spec031ReleaseCommandRecord {
+        id: spec.id,
+        gate: spec.gate,
+        package: spec.package,
+        filter: spec.filter,
+        argv: spec.argv,
+        cwd: spec.cwd.display().to_string(),
+        status: Spec031ReleaseCommandStatus::Passed,
+        exit_code: Some(0),
+        duration_ms: 1,
+        stdout_path,
+        stderr_path,
+        tests: is_test.then_some(shacs_projection::Spec031ReleaseTestCounts {
+            tests_run: 1,
+            tests_failed: 0,
+        }),
+        process_receipt: None,
+    }
+}
 
 #[test]
 fn spec031_release_artifact_contract_accepts_success_fixture() {
@@ -274,26 +332,58 @@ fn spec031_release_runner_writes_all_success_fixture_artifacts(
 }
 
 #[test]
-fn spec031_release_runner_fails_dirty_temp_git_repo() -> Result<(), Box<dyn std::error::Error>> {
-    let repo = temp_path("dirty-repo");
-    fs::create_dir_all(&repo)?;
-    run_git(&repo, &["init"])?;
-    fs::write(repo.join("dirty.txt"), "untracked\n")?;
-    let evidence_root = temp_path("dirty-repo-evidence");
+fn spec031_release_artifact_contract_records_dirty_worktree_without_failing_semantics(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (root, mut artifacts) = valid_artifacts_on_disk("dirty-worktree-record")?;
+    fs::create_dir_all(root.join("observations"))?;
+    fs::write(
+        root.join("observations/dirty-worktree.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "spec031.reproducibility_observation.v1",
+            "run_id": artifacts.run_id.as_str(),
+            "kind": "dirty_worktree",
+            "semantic_blocker": false,
+            "message": "current checkout has uncommitted changes"
+        }))?,
+    )?;
+    artifacts
+        .reproducibility_observations
+        .push("observations/dirty-worktree.json".to_owned());
+    write_artifacts(&root, &artifacts)?;
 
-    let error = run_spec031_release_runner(&Spec031ReleaseRunnerConfig {
-        run_id: Spec031ReleaseRunId::try_new("dirty-repo-run")?,
-        evidence_root,
-        repo_root: repo,
-        mode: Spec031ReleaseRunnerMode::CurrentWorktree,
-        command_timeout: Duration::from_secs(1),
-    })
-    .expect_err("dirty repo fails release runner");
+    validate_spec031_release_artifacts(&artifacts)?;
+    assert!(artifacts.failure_triage.is_empty());
+    let summary = fs::read_to_string(root.join("summary.md"))?;
+    assert!(summary.contains("- status: PASS"));
+    assert!(summary.contains("## Reproducibility Observations"));
+    assert!(summary.contains("observations/dirty-worktree.json"));
+    Ok(())
+}
 
-    assert_eq!(
-        error,
-        Spec031ReleaseArtifactError::UnmappedCoverageRequirement
-    );
+#[test]
+fn spec031_release_artifact_contract_rejects_dirty_observation_marked_as_blocker(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (root, mut artifacts) = valid_artifacts_on_disk("dirty-observation-blocker")?;
+    fs::create_dir_all(root.join("observations"))?;
+    fs::write(
+        root.join("observations/dirty-worktree.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "spec031.reproducibility_observation.v1",
+            "run_id": artifacts.run_id.as_str(),
+            "kind": "dirty_worktree",
+            "semantic_blocker": true,
+            "message": "dirty"
+        }))?,
+    )?;
+    artifacts
+        .reproducibility_observations
+        .push("observations/dirty-worktree.json".to_owned());
+    write_artifacts(&root, &artifacts)?;
+
+    let error = validate_spec031_release_artifacts(&artifacts)
+        .expect_err("observation cannot claim semantic blocker status");
+
+    assert_eq!(error, Spec031ReleaseArtifactError::InvalidCommandEvidence);
     Ok(())
 }
 
@@ -417,6 +507,17 @@ fn spec031_current_artifact_rejects_missing_required_current_gate() {
     artifacts
         .fixture_registry
         .push("fixtures/current-worktree.json".to_owned());
+    let repo_root = workspace_root();
+    artifacts.command_registry = canonical_current_command_specs(&Spec031ReleaseRunnerConfig {
+        run_id: artifacts.run_id.clone(),
+        evidence_root: root.clone(),
+        repo_root,
+        mode: Spec031ReleaseRunnerMode::CurrentWorktree,
+        command_timeout: Duration::ZERO,
+    })
+    .into_iter()
+    .map(|spec| command_from_spec(&root, spec))
+    .collect();
     fs::write(
         root.join("fixtures/current-worktree.json"),
         serde_json::to_vec(&serde_json::json!({
