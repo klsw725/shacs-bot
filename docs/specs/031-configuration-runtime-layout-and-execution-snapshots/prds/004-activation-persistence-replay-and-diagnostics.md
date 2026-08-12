@@ -1,6 +1,6 @@
 # PRD 004. activation persistence, replay, and diagnostics
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
