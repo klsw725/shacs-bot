@@ -135,6 +135,21 @@ shacs-bot runtime migrate --resume --workspace /tmp/ws
 
 Migration runner는 session metadata, event, checkpoint, queue, scheduler, channel, child, trace, diagnostics artifact family를 분리해 inventory합니다. Real run은 첫 mutation 전에 ledger를 쓰고 family별 no-op/transformed/failed/blocked 결과를 남기며, bounded backup은 complete verification 뒤 정리합니다. Dry-run은 source data와 marker를 만들거나 바꾸지 않습니다. 현재 config/profile file은 029 runner가 변환하지 않고 readable/incompatible compatibility 결과만 admission에 결합합니다. CLI projection은 opaque refs와 digest만 표시하고 raw secret, payload, absolute host path를 migration detail로 출력하지 않습니다.
 
+Config/profile/auth-source declaration migration은 Spec 031의 별도 JSON-compatible command입니다. Dry-run/apply/recover는 env placeholder와 auth locator를 secret 값으로 writeback하지 않으며 TOML로 전환하지 않습니다:
+
+```sh
+shacs-bot runtime config-migrate --dry-run --config /tmp/config.json
+shacs-bot runtime config-migrate --apply --config /tmp/config.json
+shacs-bot runtime config-migrate --recover --config /tmp/config.json
+```
+
+Persisted snapshot과 activation record의 inspect 출력도 JSON입니다. Snapshot/replay는 diagnostic-only이고 current config/profile/auth/resource truth나 permission grant가 아닙니다. Activation inspect는 record를 변경하거나 entrypoint를 실행하지 않습니다:
+
+```sh
+shacs-bot runtime snapshot inspect /tmp/execution-snapshot.json
+shacs-bot runtime activation inspect activation:skill:formatter:v1 --store /tmp/activations.json --owner workspace:sha256:owner
+```
+
 소스 checkout/Cargo 기반 설치에서 새 binary를 빌드하거나 교체한 뒤 runtime upgrade evidence를 기록합니다. Stored-data transform은 `runtime update`가 자동 실행하지 않고 위의 `runtime migrate` 명령으로 분리되며, 실제 binary 교체나 `git pull`/`cargo install`은 사용자가 별도로 수행합니다:
 
 ```sh
@@ -496,20 +511,20 @@ cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin s
   --manual-record /path/to/spec030-manual-record.json
 ```
 
-## Spec 035 release evidence
+## Spec 031 release evidence
 
-Spec 035 release runner는 현재 `shacs-projection` package의 historical `spec031-release-runner` binary로 제공됩니다. Current worktree closure run은 repository 상태와 외부 owner audit를 함께 검사하고, machine-readable `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`, human-readable `summary.md`를 evidence root에 씁니다:
+Spec 031 release runner는 `shacs-projection` package의 `spec031-release-runner` binary로 제공됩니다. Current worktree closure run은 실제 Cargo command 결과와 exact external adapter fact를 검사하고 generated `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`, `reproducibility-observations.json`, `summary.md`를 evidence root에 씁니다:
 
 ```sh
-cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root . --mode current-worktree
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root "$(git rev-parse --show-toplevel)" --mode current-worktree
 ```
 
-현재 판정에서는 56 coverage row와 historical Spec031-owned command/artifact row가 매핑되어 있습니다. Spec 030 external owner evidence는 `.omo/evidence/spec030/prd006/current-worktree-final/closure-manifest.json`에서 PASS이며, Specs031/032/033/034의 남은 external read audit와 Spec 035 자체 planned revision 때문에 runner는 여전히 nonzero로 끝납니다. Current dirty state가 있으면 `triage/dirty-worktree.json`도 기록되지만 `BlockedExternalEvidence`를 가리지 않습니다. Spec029와 Spec030 audit가 현재 PASS입니다.
+Coverage row는 parent Must Have 13개, Acceptance 14개, Closure Evidence 12개와 PRD000-005를 실제 focused transcript에 일대일로 연결합니다. Specs 029/030/032/033/034/035의 전체 status는 closure 조건이 아니며, 031이 소비하는 adapter test fact와 통과 command만 요구합니다. Missing/unknown fact나 실패 command는 blocked이고 PASS를 합성하지 않습니다. Dirty worktree는 `observations/dirty-worktree.json`과 `reproducibility-observations.json`에 별도 typed observation으로 남으며 failure triage나 semantic verdict에 포함되지 않습니다.
 
-Runner 자체의 passing fixture는 아래처럼 실행할 수 있습니다. 이 fixture는 artifact writer와 validator의 success path를 확인할 뿐, 현재 checkout의 semantic Spec 035 closure를 뜻하지 않습니다:
+Runner 자체의 passing fixture는 아래처럼 실행할 수 있습니다. 이 fixture는 artifact writer와 validator의 success path를 확인할 뿐, 현재 checkout의 semantic Spec031 closure를 뜻하지 않습니다:
 
 ```sh
-cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root . --mode success-fixture
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root "$(git rev-parse --show-toplevel)" --mode success-fixture
 ```
 
 ## Docker Compose

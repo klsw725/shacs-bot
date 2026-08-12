@@ -25,6 +25,21 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- status
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime inspect --workspace /tmp/shacs-ws
 ```
 
+Spec 031 config migration은 기존 JSON을 유지하며 별도 dry-run/apply/recover 표면을 제공합니다. 기존 `runtime migrate`는 029 stored-data family용이고, 아래 명령은 config/profile/auth-source declaration transform만 수행합니다. TOML 전환은 하지 않습니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime config-migrate --dry-run --config /tmp/shacs-config.json
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime config-migrate --apply --config /tmp/shacs-config.json
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime config-migrate --recover --config /tmp/shacs-config.json
+```
+
+Persisted execution snapshot과 activation record는 JSON diagnostics로 inspect할 수 있습니다. 두 표면은 현재 authorization이나 live config/auth truth가 아니며 replay는 resource discovery, credential resolution, dependency preparation, entrypoint execution을 수행하지 않습니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime snapshot inspect /tmp/execution-snapshot.json
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime activation inspect activation:skill:formatter:v1 --store /tmp/activations.json --owner workspace:sha256:owner
+```
+
 Plugin과 hook manifest 상태는 management surface로 확인합니다. `plugin.json`과 `plugin.toml` manifest discovery/config gate를 지원하며, `plugins`/`hooks` inspect 계열 명령은 plugin command, hook callback, MCP server, process를 실행하지 않습니다. `enable`/`disable`은 config만 수정하고 다음 session/reload에 적용된다고 보고합니다. Agent runtime에서 enabled plugin의 typed hook entrypoint는 redacted diagnostics로 dispatch될 수 있고, 현재 behavior-affecting 소비 범위는 `tool:before`의 block-only 결과를 도구 실행 직전 normalized tool error로 반환하는 것뿐입니다. 이 block은 permission approval/allow/grant를 만들 수 없습니다. Enabled plugin의 command-backed tool은 기존 tool registry/executor 경계로 등록되고, plugin MCP declaration은 production MCP startup 경로에만 투영되며, plugin-provided skill은 read-only skill root로 agent context에 포함됩니다. Enabled plugin command는 builtin `CommandId`를 확장하지 않는 별도 plugin command router/dispatcher 경계에서만 실행됩니다:
 
 ```sh
@@ -115,11 +130,11 @@ Message 없이 `agent`를 실행하면 같은 command router를 쓰는 REPL이 �
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- agent --workspace /tmp/shacs-ws
 ```
 
-Spec 035 release runner는 machine-readable `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`과 human-readable `summary.md`를 씁니다. 현재 closure run은 Spec030/031/032/033/034 외부 owner evidence가 blocked라서 nonzero로 끝나야 합니다. Dirty worktree도 별도 triage로 기록되지만 외부 blocker를 가리지 않습니다. `success-fixture`는 runner 자체의 passing fixture이고, semantic Spec 035 closure 증거가 아닙니다. `spec031-release-runner`와 `spec031-*` 인자는 기존 호환성 식별자이므로 그대로 사용합니다:
+Spec 031 release runner는 generated machine-readable `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`, `reproducibility-observations.json`과 human-readable `summary.md`를 씁니다. Current-worktree mode는 실제 Cargo exit status와 transcript만으로 PASS를 만들고 dirty 상태를 `observations/dirty-worktree.json`에 별도 기록하되 failure triage나 의미 verdict에 포함하지 않습니다. Specs 029/030/032/033/034/035는 031이 요구하는 exact adapter fact만 검사하며 source spec 전체 Complete 상태를 요구하지 않습니다. Missing/unknown fact나 실패 command는 계속 blocked입니다. `success-fixture`는 runner 자체의 passing fixture일 뿐 semantic Spec031 closure 증거가 아닙니다:
 
 ```sh
-cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root . --mode current-worktree
-cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root . --mode success-fixture
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root "$(git rev-parse --show-toplevel)" --mode current-worktree
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root "$(git rev-parse --show-toplevel)" --mode success-fixture
 ```
 
 Delivery와 readiness projection은 보수적인 hint입니다. Remote ACK/read receipt, replay 방지, exactly-once delivery를 보장하지 않습니다. SSE final delivery는 현재 pending 또는 unknown으로 남을 수 있고, 외부 owner fact가 없으면 성공으로 합성하지 않습니다. Approval durable request는 owner terminal event가 기록되기 전까지 Requested로 표시됩니다.
