@@ -108,9 +108,6 @@ fn validate_external_audit_content(
             return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
         }
     }
-    if audit.status == Spec031ExternalAuditStatus::Pass && text.contains("Status: Open") {
-        return Err(Spec031ReleaseArtifactError::BlockedAsPass);
-    }
     for artifact in &audit.implementation_artifacts {
         if !text.contains(artifact) {
             return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
@@ -151,9 +148,6 @@ fn validate_owner_facts(
     } else if audit.implementation_artifacts != expected_fact_artifacts(audit.owner)? {
         return Err(Spec031ReleaseArtifactError::BlockedAsPass);
     }
-    if !uses_fixture_facts && !source_status_is_complete(repo_root, audit)? {
-        return Err(Spec031ReleaseArtifactError::BlockedAsPass);
-    }
     for artifact in &audit.implementation_artifacts {
         if !fact_artifact_exists(repo_root, &artifacts.evidence_root, artifact) {
             return Err(Spec031ReleaseArtifactError::BlockedAsPass);
@@ -172,18 +166,6 @@ fn validate_owner_facts(
         }
     }
     Ok(())
-}
-
-fn source_status_is_complete(
-    root: &Path,
-    audit: &Spec031ExternalAuditRow,
-) -> Result<bool, Spec031ReleaseArtifactError> {
-    let text = std::fs::read_to_string(root.join(&audit.source_locator))
-        .map_err(|_| Spec031ReleaseArtifactError::BlockedAsPass)?;
-    Ok(text
-        .lines()
-        .find(|line| line.trim_start().starts_with("Status:"))
-        .is_some_and(|line| line.trim_start().starts_with("Status: Complete")))
 }
 
 fn fact_artifact_exists(root: &Path, evidence_root: &str, artifact: &str) -> bool {

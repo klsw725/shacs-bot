@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
-fn external_audit_remains_blocked_when_source_status_is_open() {
+fn external_audit_blocks_source_only_owner_test_with_broad_command_pass() {
     let root = temp_path("source-open-external-audit");
     let repo = root.join("repo");
     let evidence = root.join("evidence");
@@ -22,8 +22,8 @@ fn external_audit_remains_blocked_when_source_status_is_open() {
         "# Spec030\n\nStatus: Open\n\nclosure remains external\n",
     );
     write_file(
-        repo.join(".omo/evidence/spec030/closure-owner-facts.json"),
-        "{\"approval_policy_redaction_containment\":true}\n",
+        repo.join("crates/shacs-core/tests/spec030_local_provider.rs"),
+        "fn local_spec030_provider_discovers_live_resources_diagnostics_and_trace() {}\n",
     );
     let writer = EvidenceWriter::open_new_run(&evidence).expect("evidence writer opens");
     let mut artifacts = Spec031ReleaseRunArtifacts {
@@ -31,12 +31,13 @@ fn external_audit_remains_blocked_when_source_status_is_open() {
         run_id: Spec031ReleaseRunId::try_new("source-open-external-audit").expect("safe run id"),
         evidence_root: evidence.display().to_string(),
         fixture_registry: Vec::new(),
-        command_registry: vec![passed_command("spec031-test-projection-parity")],
+        command_registry: vec![passed_command("spec031-test-workspace")],
         cleanup_registry: Vec::new(),
         manifest_files: Vec::new(),
         coverage_matrix: Vec::new(),
         external_audits: Vec::new(),
         failure_triage: Vec::new(),
+        reproducibility_observations: Vec::new(),
     };
     let config = Spec031ReleaseRunnerConfig {
         run_id: artifacts.run_id.clone(),
@@ -56,6 +57,72 @@ fn external_audit_remains_blocked_when_source_status_is_open() {
         .expect("spec030 audit exists");
     assert_eq!(spec030.status, Spec031ExternalAuditStatus::Blocked);
     assert!(spec030.command_result_ids.is_empty());
+}
+
+#[test]
+fn external_audit_passes_when_exact_owner_test_command_passes() {
+    let root = temp_path("exact-owner-audit");
+    let repo = root.join("repo");
+    let evidence = root.join("evidence");
+    let spec = external_owner_facts()
+        .iter()
+        .find(|descriptor| descriptor.slug == "spec030")
+        .expect("spec030 descriptor exists");
+    write_file(
+        repo.join(spec.source_locator),
+        "# Spec030\n\nStatus: Open\n",
+    );
+    write_file(
+        repo.join("crates/shacs-core/tests/spec030_local_provider.rs"),
+        "fn local_spec030_provider_discovers_live_resources_diagnostics_and_trace() {}\n",
+    );
+    let writer = EvidenceWriter::open_new_run(&evidence).expect("evidence writer opens");
+    let mut artifacts = artifacts_with_command(&evidence, passed_command("spec031-owner-spec030"));
+    let config = config(&artifacts, evidence, repo);
+
+    add_external_audits(&config, &writer, &mut artifacts, false)
+        .expect("external audits are generated");
+
+    let spec030 = artifacts
+        .external_audits
+        .iter()
+        .find(|row| row.owner == Spec031ExternalOwnerId::Spec030)
+        .expect("spec030 audit exists");
+    assert_eq!(spec030.status, Spec031ExternalAuditStatus::Pass);
+    assert_eq!(spec030.command_result_ids, ["spec031-owner-spec030"]);
+}
+
+fn artifacts_with_command(
+    evidence: &std::path::Path,
+    command: Spec031ReleaseCommandRecord,
+) -> Spec031ReleaseRunArtifacts {
+    Spec031ReleaseRunArtifacts {
+        schema: SPEC031_RELEASE_RUNNER_SCHEMA.to_owned(),
+        run_id: Spec031ReleaseRunId::try_new("external-audit-test").expect("safe run id"),
+        evidence_root: evidence.display().to_string(),
+        fixture_registry: Vec::new(),
+        command_registry: vec![command],
+        cleanup_registry: Vec::new(),
+        manifest_files: Vec::new(),
+        coverage_matrix: Vec::new(),
+        external_audits: Vec::new(),
+        failure_triage: Vec::new(),
+        reproducibility_observations: Vec::new(),
+    }
+}
+
+fn config(
+    artifacts: &Spec031ReleaseRunArtifacts,
+    evidence: PathBuf,
+    repo: PathBuf,
+) -> Spec031ReleaseRunnerConfig {
+    Spec031ReleaseRunnerConfig {
+        run_id: artifacts.run_id.clone(),
+        evidence_root: evidence,
+        repo_root: repo,
+        mode: Spec031ReleaseRunnerMode::CurrentWorktree,
+        command_timeout: Duration::from_secs(1),
+    }
 }
 
 fn passed_command(id: &str) -> Spec031ReleaseCommandRecord {
