@@ -1,6 +1,6 @@
 # PRD 000. AppSupervisor and process lifecycle
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
