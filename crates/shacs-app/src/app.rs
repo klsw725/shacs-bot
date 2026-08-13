@@ -120,6 +120,16 @@ pub struct AppManifest {
     pub permissions: Vec<PermissionRequestSummary>,
     #[serde(default)]
     pub secrets: Vec<SecretRequestSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<AppRuntimeDeclaration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRuntimeDeclaration {
+    pub command: Vec<String>,
+    #[serde(default = "default_app_runtime_timeout_seconds")]
+    pub timeout_seconds: u64,
 }
 
 impl AppManifest {
@@ -291,29 +301,17 @@ impl AppRegistryStore {
             }
             return Ok(existing.clone());
         }
-        let unavailable_reasons = missing_secret_reasons(&validated.manifest.secrets);
-        let lifecycle_state = if unavailable_reasons.is_empty() {
-            AppLifecycleState::Installed
-        } else {
-            AppLifecycleState::Unavailable
-        };
-        let grant_reference = grant_reference_summary(
-            &validated.manifest.id,
-            &validated.digest,
-            &validated.manifest.permissions,
-            &validated.manifest.secrets,
-        );
         let entry = AppRegistryEntry {
             app_id: validated.manifest.id.clone(),
             version: validated.manifest.version,
             digest: validated.digest,
             bundle_path: validated.bundle_path.as_path().to_path_buf(),
-            lifecycle_state,
+            lifecycle_state: AppLifecycleState::Installed,
             permission_requests: validated.manifest.permissions,
             secret_requests: validated.manifest.secrets,
             resource_summaries: validated.resource_summaries,
-            grant_reference,
-            unavailable_reasons,
+            grant_reference: None,
+            unavailable_reasons: Vec::new(),
             process_snapshots: Vec::new(),
             installed_at_unix_ms: unix_ms_now(),
         };
@@ -332,18 +330,24 @@ impl AppRegistryStore {
 
     pub fn enable(&self, app_id: &AppId) -> Result<AppRegistryEntry, AppError> {
         self.update_entry(app_id, |entry| {
-            entry.unavailable_reasons = missing_secret_reasons(&entry.secret_requests);
-            entry.lifecycle_state = if entry.unavailable_reasons.is_empty() {
-                AppLifecycleState::Enabled
-            } else {
-                AppLifecycleState::Unavailable
-            };
+            entry.unavailable_reasons.clear();
+            entry.lifecycle_state = AppLifecycleState::Enabled;
         })
     }
 
     pub fn disable(&self, app_id: &AppId) -> Result<AppRegistryEntry, AppError> {
         self.update_entry(app_id, |entry| {
             entry.lifecycle_state = AppLifecycleState::Disabled;
+        })
+    }
+
+    pub fn replace_process_snapshots(
+        &self,
+        app_id: &AppId,
+        snapshots: Vec<AppProcessSnapshot>,
+    ) -> Result<AppRegistryEntry, AppError> {
+        self.update_entry(app_id, |entry| {
+            entry.process_snapshots = snapshots;
         })
     }
 
@@ -612,13 +616,37 @@ fn validate_manifest_for_bundle(
         }
     }
     for secret in &manifest.secrets {
-        if secret.key.trim().is_empty() {
+        if !is_valid_env_name(&secret.key) {
             return Err(AppError::InvalidManifest(
-                "secret key is required".to_owned(),
+                "secret key must be a valid environment variable name".to_owned(),
+            ));
+        }
+    }
+    if let Some(runtime) = &manifest.runtime {
+        if runtime.command.is_empty() || runtime.command.iter().any(|part| part.is_empty()) {
+            return Err(AppError::InvalidManifest(
+                "runtime command requires non-empty argv".to_owned(),
+            ));
+        }
+        if runtime.timeout_seconds == 0 || runtime.timeout_seconds > 86_400 {
+            return Err(AppError::InvalidManifest(
+                "runtime timeoutSeconds must be between 1 and 86400".to_owned(),
             ));
         }
     }
     Ok(())
+}
+
+fn is_valid_env_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+const fn default_app_runtime_timeout_seconds() -> u64 {
+    300
 }
 
 fn canonical_bundle_root(bundle: &AppBundlePath) -> Result<PathBuf, AppError> {
@@ -695,23 +723,6 @@ fn summarize_declared_resources(
     Ok(summaries)
 }
 
-fn grant_reference_summary(
-    app_id: &AppId,
-    digest: &str,
-    permissions: &[PermissionRequestSummary],
-    secrets: &[SecretRequestSummary],
-) -> Option<String> {
-    if permissions.is_empty() && secrets.is_empty() {
-        return None;
-    }
-    let digest_prefix = if digest.len() > 12 {
-        &digest[..12]
-    } else {
-        digest
-    };
-    Some(format!("local-grant-request:{app_id}:{digest_prefix}"))
-}
-
 fn compute_app_digest(manifest_bytes: &[u8], resource_summaries: &[AppResourceSummary]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"shacs-app-digest-v1\nmanifest\n");
@@ -744,14 +755,6 @@ fn hex_string(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
-}
-
-fn missing_secret_reasons(secrets: &[SecretRequestSummary]) -> Vec<String> {
-    secrets
-        .iter()
-        .filter(|secret| secret.required)
-        .map(|secret| format!("required secret `{}` is unavailable", secret.key))
-        .collect()
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), AppError> {
