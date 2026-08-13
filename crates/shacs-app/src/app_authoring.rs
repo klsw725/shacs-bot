@@ -317,6 +317,7 @@ fn build_minimal_scaffold(
         resources: Vec::new(),
         permissions: Vec::new(),
         secrets: Vec::new(),
+        runtime: None,
     };
     let manifest_bytes = json_bytes(&manifest)?;
     let readme = format!(
