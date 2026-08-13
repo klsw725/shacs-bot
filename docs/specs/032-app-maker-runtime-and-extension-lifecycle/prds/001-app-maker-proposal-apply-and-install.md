@@ -1,6 +1,6 @@
 # PRD 001. App Maker proposal, apply, and install
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
