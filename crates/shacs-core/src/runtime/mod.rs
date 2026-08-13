@@ -3,6 +3,9 @@ mod activation_record;
 mod activation_store;
 mod activation_wire;
 mod agent_loop;
+mod app_extension_projection;
+mod app_extension_provenance;
+mod app_supervisor;
 mod autocompact;
 mod automation;
 mod classifier_evidence;
@@ -79,6 +82,15 @@ pub use activation_store::{
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
     AgentLoopRunSummary, AgentLoopTurnResult, PermissionModeSetter, ProjectPermissionStoreConfig,
+};
+pub use app_extension_projection::resolve_app_extension_provenance;
+pub use app_extension_provenance::{
+    AppExtensionBlocker, AppExtensionProvenanceProjection, AppExtensionReplayDispatchCounters,
+    AppExtensionReplayInput, AppExtensionSourceFacts, AppExtensionStatus,
+};
+pub use app_supervisor::{
+    AppProcessDriver, AppProcessRunOutcome, AppStartFacts, AppSupervisor, AppSupervisorError,
+    AppSupervisorRun, AppSupervisorTerminal,
 };
 pub use autocompact::{AutoCompact, AutoCompactArchiveOutcome, RECENT_SUFFIX_MESSAGES};
 pub use automation::{
