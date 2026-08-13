@@ -24,6 +24,9 @@ use shacs_api::{
     chat_completion_invocation, ApiChatMessage, ApiError, ApiMessageContent, ApiModel,
     ChatCompletionAdapter, ChatCompletionInvocation, ChatCompletionRequest,
 };
+use shacs_app::app_authoring_flow::{
+    ApplyError, AuthoringFlowStore, AuthoringProposal, InstallHandoff, VerificationOutcome,
+};
 use shacs_channels::{
     builtin_channel_default_configs, builtin_live_worker_descriptors, normalize_websocket_frame,
     normalize_whatsapp_bridge_message, runtime_workflow_projection_outbound,
@@ -48,6 +51,13 @@ use shacs_core::app::{AppError, AppId, AppLifecycleState, AppRegistryEntry, AppR
 use shacs_core::app_authoring::{
     AppAuthoringError, AppAuthoringInitOutcome, AppAuthoringInitReport, AppAuthoringStore,
 };
+use shacs_core::app_lifecycle::{
+    AppLifecycleAction, AppLifecycleBlocker, AppLifecycleError, AppLifecycleReceipt,
+    AppSupervisorJournal,
+};
+use shacs_core::controlled_child::{
+    run_generic_argv, ControlledChildAbort, ControlledChildCommand, ControlledChildOutcome,
+};
 use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
     build_core_diagnostics_aggregate, build_permission_diagnostics_summary,
@@ -57,14 +67,16 @@ use shacs_core::runtime::{
     parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
     request_runtime_control, resolve_context_reference,
     runtime_stop_request_marker_path as core_runtime_stop_request_marker_path,
-    ActionNormalizationState, AgentHook, AgentHookContext, AgentLoop, AgentLoopCommandResult,
-    AgentLoopConfig, AgentLoopTurnResult, CompositeHook, ContainerNetworkMode,
-    ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder,
-    ContextDiagnosticsInput, ContextDiagnosticsSummary, ContextFileDiagnosticsSummary,
-    ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
-    ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput,
-    CredentialResolvingProviderClient, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
-    DurableWorkDispatcher, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
+    ActionNormalizationState, ActivationStatus, ActivationStore, AgentHook, AgentHookContext,
+    AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult, AppProcessDriver,
+    AppProcessRunOutcome, AppStartFacts, AppSupervisor, AppSupervisorTerminal, CompositeHook,
+    ConfigMigrationState, ConfigSnapshotRef, ContainerNetworkMode, ContainerRuntimeKind,
+    ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput,
+    ContextDiagnosticsSummary, ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions,
+    ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig,
+    CoreDiagnosticsAggregateInput, CredentialResolvingProviderClient, DiscoveredPlugin,
+    DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, ExecutionSnapshot,
+    ExecutionSnapshotInput, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
     HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage,
     InheritedPermissionContext, McpLifecycle, MessageBus, PermissionCeilingSnapshot,
     PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
@@ -74,14 +86,15 @@ use shacs_core::runtime::{
     PluginSurfaceProjection, ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
     ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
     ProcessGateTerminalPrecondition, ProcessIdentity, ProcessPluginHookCommandExecutor,
-    ProcessRedactedCommand, ProjectPermissionStoreConfig, ProviderClientResolutionRequest,
-    ProviderCredentialRuntime, ProviderNotificationEvaluator, RuntimeBoundaryOrigin,
-    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, SafetyCapability, Session,
-    SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome, SessionTurnLock,
-    SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
-    SubagentExecutionConfig, SubagentRuntime, SurfaceActionOutcomeKind, SurfaceActionRequestKind,
-    SurfaceApprovalRequest, ToolEvent, ToolSearchConfig, ToolSearchMode, ToolStatus,
-    HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
+    ProcessRedactedCommand, ProfileSelectionSnapshot, ProjectPermissionStoreConfig,
+    ProviderClientResolutionRequest, ProviderCredentialRuntime, ProviderInputSnapshot,
+    ProviderNotificationEvaluator, ReplayContract, RuntimeBoundaryOrigin, RuntimeCapabilityReport,
+    RuntimeCapabilityStatus, RuntimeToolCall, SafetyCapability, Session, SessionHistoryOptions,
+    SessionManager, SessionTurnCancelOutcome, SessionTurnLock, SkillTrustActionKind,
+    SkillTrustPermissionDecision, StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime,
+    SurfaceActionOutcomeKind, SurfaceActionRequestKind, SurfaceApprovalRequest,
+    TokenBudgetSnapshot, ToolEvent, ToolSearchConfig, ToolSearchMode, ToolStatus,
+    WorkspaceTrustRef, HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
 };
 use shacs_core::tools::{
     AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -228,6 +241,7 @@ type ExternalTransportRunner = Arc<
         ) + Send
         + Sync,
 >;
+type AppActivationLink = (String, String);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CliCommand {
@@ -395,6 +409,12 @@ pub enum AppsCommand {
     Enable(AppsIdOptions),
     Disable(AppsIdOptions),
     Uninstall(AppsIdOptions),
+    Start(AppsIdOptions),
+    Stop(AppsIdOptions),
+    Restart(AppsIdOptions),
+    Recover(AppsIdOptions),
+    Propose(AppsAuthoringFlowOptions),
+    Apply(AppsAuthoringFlowOptions),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -519,6 +539,15 @@ pub struct AppsIdOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
     pub app_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppsAuthoringFlowOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub candidate_path: PathBuf,
+    pub intent: String,
+    pub update: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1906,6 +1935,8 @@ pub struct SessionDeleteReport {
 pub enum CliError {
     App(AppError),
     AppAuthoring(AppAuthoringError),
+    AppLifecycle(AppLifecycleError),
+    AppApply(ApplyError),
     Api(ApiError),
     Config(ConfigError),
     Io(std::io::Error),
@@ -1920,6 +1951,8 @@ impl fmt::Display for CliError {
         match self {
             Self::App(error) => write!(formatter, "{error}"),
             Self::AppAuthoring(error) => write!(formatter, "{error}"),
+            Self::AppLifecycle(error) => write!(formatter, "{error}"),
+            Self::AppApply(error) => write!(formatter, "{error}"),
             Self::Api(error) => write!(formatter, "{error}"),
             Self::Config(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "CLI I/O failed: {error}"),
@@ -1942,6 +1975,18 @@ impl From<AppError> for CliError {
 impl From<AppAuthoringError> for CliError {
     fn from(error: AppAuthoringError) -> Self {
         Self::AppAuthoring(error)
+    }
+}
+
+impl From<AppLifecycleError> for CliError {
+    fn from(error: AppLifecycleError) -> Self {
+        Self::AppLifecycle(error)
+    }
+}
+
+impl From<ApplyError> for CliError {
+    fn from(error: ApplyError) -> Self {
+        Self::AppApply(error)
     }
 }
 
@@ -2983,6 +3028,25 @@ fn spec030_fact_store_for_bundle(
             shacs_projection::Spec030UnavailableReason::OwnerUnavailable,
         )
     } else {
+        if cfg!(unix) {
+            let _ = facts.register_process_adapter(
+                shacs_core::runtime::trusted_runtime::ProcessAdapterRegistration {
+                    adapter: shacs_projection::ProcessAdapterKind::GenericExec,
+                    capabilities: shacs_projection::ProcessAdapterCapabilities {
+                        timeout: true,
+                        abort: true,
+                        cwd: true,
+                        env: true,
+                        bounded_output: true,
+                        descendant_cleanup: true,
+                        startup_readiness: false,
+                        generation_fencing: false,
+                    },
+                    reason:
+                        shacs_projection::ProcessControlReason::ControlledChildObservedNoRollback,
+                },
+            );
+        }
         facts
     }
 }
@@ -6882,6 +6946,16 @@ fn run_apps_command(command: AppsCommand) -> Result<String, CliError> {
         AppsCommand::Enable(options) => apps_enable(options).map(format_apps_entry_report),
         AppsCommand::Disable(options) => apps_disable(options).map(format_apps_entry_report),
         AppsCommand::Uninstall(options) => apps_uninstall(options).map(format_apps_uninstall),
+        AppsCommand::Start(options) => apps_start(options).map(format_apps_lifecycle),
+        AppsCommand::Stop(options) => {
+            apps_request(options, AppLifecycleAction::Stop).map(format_apps_lifecycle)
+        }
+        AppsCommand::Restart(options) => {
+            apps_request(options, AppLifecycleAction::Restart).map(format_apps_lifecycle)
+        }
+        AppsCommand::Recover(options) => apps_recover(options).map(format_apps_lifecycle),
+        AppsCommand::Propose(options) => apps_propose(options).map(format_apps_proposal),
+        AppsCommand::Apply(options) => apps_apply(options).map(format_apps_apply),
     }
 }
 
@@ -7166,6 +7240,24 @@ pub struct AppsInitReport {
     pub authoring: AppAuthoringInitReport,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppsLifecycleReport {
+    pub app_id: AppId,
+    pub receipt: AppLifecycleReceipt,
+    pub dispatch_count: usize,
+    pub restart_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppsProposalReport {
+    pub proposal: AuthoringProposal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppsApplyReport {
+    pub handoff: InstallHandoff,
+}
+
 pub fn apps_init(options: AppsInitOptions) -> Result<AppsInitReport, CliError> {
     let config_path = options.config_path.unwrap_or_else(default_config_path);
     let bundle = load_config_with_env(
@@ -7177,7 +7269,7 @@ pub fn apps_init(options: AppsInitOptions) -> Result<AppsInitReport, CliError> {
         },
         &ProcessEnv,
     )?;
-    let data_dir = bundle.context.data_dir;
+    let data_dir = bundle.context.data_dir.clone();
     let authoring = AppAuthoringStore::new(&data_dir).init_app(options.app_id)?;
     Ok(AppsInitReport {
         config_path,
@@ -7242,7 +7334,10 @@ pub fn apps_disable(options: AppsIdOptions) -> Result<AppsEntryReport, CliError>
     let app_id = AppId::parse(options.app_id)?;
     let (config_path, workspace, store) =
         apps_store(options.config_path, options.workspace_override)?;
-    let entry = store.disable(&app_id)?;
+    let entry =
+        with_inactive_app_lifecycle(&config_path, &workspace, &store, &app_id, "disable", || {
+            store.disable(&app_id).map_err(Into::into)
+        })?;
     Ok(AppsEntryReport {
         config_path,
         workspace,
@@ -7255,7 +7350,19 @@ pub fn apps_uninstall(options: AppsIdOptions) -> Result<AppsUninstallReport, Cli
     let app_id = AppId::parse(options.app_id.clone())?;
     let (config_path, workspace, store) =
         apps_store(options.config_path, options.workspace_override)?;
-    let removed = store.uninstall_local_app(&app_id)?.is_some();
+    let removed = with_inactive_app_lifecycle(
+        &config_path,
+        &workspace,
+        &store,
+        &app_id,
+        "uninstall",
+        || {
+            store
+                .uninstall_local_app(&app_id)
+                .map(|entry| entry.is_some())
+                .map_err(Into::into)
+        },
+    )?;
     Ok(AppsUninstallReport {
         config_path,
         workspace,
@@ -7263,6 +7370,582 @@ pub fn apps_uninstall(options: AppsIdOptions) -> Result<AppsUninstallReport, Cli
         app_id: options.app_id,
         removed,
     })
+}
+
+pub fn apps_start(options: AppsIdOptions) -> Result<AppsLifecycleReport, CliError> {
+    let app_id = AppId::parse(options.app_id)?;
+    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
+    let store = AppRegistryStore::new(&bundle.context.data_dir);
+    let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
+    let supervisor_root = bundle.context.runtime_subdir("apps");
+    let supervisor = AppSupervisor::new(&journal);
+    let mut start_request = journal.request(&app_id, AppLifecycleAction::Start)?;
+    let admission = (|| -> Result<_, CliError> {
+        let entry = store
+            .inspect(&app_id)?
+            .ok_or_else(|| AppError::UnknownApp(app_id.clone()))?;
+        let validated = shacs_core::app::AppManifest::load_from_bundle(
+            &shacs_core::app::AppBundlePath::new(&entry.bundle_path),
+        )?;
+        let runtime = validated.manifest.runtime.clone().ok_or_else(|| {
+            CliError::InvalidArguments(format!("app `{app_id}` has no runtime command declaration"))
+        })?;
+        let credential_statuses = entry
+            .secret_requests
+            .iter()
+            .map(|request| {
+                let status = if std::env::var_os(&request.key).is_some() {
+                    "resolved"
+                } else {
+                    "missing"
+                };
+                format!("{}:{status}:environment", request.key)
+            })
+            .collect::<Vec<_>>();
+        let missing_credentials = entry
+            .secret_requests
+            .iter()
+            .filter(|request| request.required && std::env::var_os(&request.key).is_none())
+            .map(|request| request.key.clone())
+            .collect::<Vec<_>>();
+        let process_environment = entry
+            .secret_requests
+            .iter()
+            .filter_map(|request| {
+                std::env::var_os(&request.key).map(|value| (request.key.clone().into(), value))
+            })
+            .collect::<Vec<_>>();
+        let workspace_trusted = bundle
+            .config
+            .plugins
+            .trusts_workspace(&bundle.context.workspace);
+        let trusted_projection =
+            shacs_core::runtime::trusted_runtime::build_trusted_runtime_projection(
+                spec030_fact_store_for_bundle(&bundle)
+                    .snapshot()
+                    .into_input(),
+            )
+            .map_err(|error| CliError::Runtime(error.to_string()))?;
+        let (activation_blockers, activation_links) =
+            app_activation_blockers(&bundle, &entry, trusted_projection.resources())?;
+        let activation_refs = activation_links
+            .iter()
+            .map(|(_, activation_ref)| activation_ref.clone())
+            .collect::<Vec<_>>();
+        Ok((
+            entry,
+            validated,
+            runtime,
+            credential_statuses,
+            missing_credentials,
+            process_environment,
+            workspace_trusted,
+            trusted_projection,
+            activation_blockers,
+            activation_links,
+            activation_refs,
+        ))
+    })();
+    let (
+        entry,
+        validated,
+        runtime,
+        credential_statuses,
+        missing_credentials,
+        process_environment,
+        workspace_trusted,
+        trusted_projection,
+        activation_blockers,
+        activation_links,
+        activation_refs,
+    ) = match admission {
+        Ok(values) => values,
+        Err(error) => {
+            let _ = journal.block(&start_request, vec![AppLifecycleBlocker::RecoveryRequired]);
+            return Err(error);
+        }
+    };
+    let mut restart_count = 0;
+    loop {
+        let execution_snapshot_ref = match persist_app_execution_snapshot(
+            &bundle,
+            &app_id,
+            &validated.digest,
+            start_request.generation,
+            &start_request.request_id,
+            &trusted_projection,
+            &activation_links,
+        ) {
+            Ok(snapshot_ref) => snapshot_ref,
+            Err(error) => {
+                let _ = journal.block(&start_request, vec![AppLifecycleBlocker::RecoveryRequired]);
+                return Err(error);
+            }
+        };
+        let mut driver = CliAppProcessDriver::new(
+            runtime.command.clone(),
+            entry.bundle_path.clone(),
+            runtime.timeout_seconds,
+            supervisor_root.clone(),
+            app_id.clone(),
+            process_environment.clone(),
+        );
+        let result = supervisor
+            .start_reserved(
+                start_request,
+                AppStartFacts {
+                    app_id: app_id.clone(),
+                    lifecycle: entry.lifecycle_state.clone(),
+                    expected_manifest_digest: entry.digest.clone(),
+                    current_manifest_digest: validated.digest.clone(),
+                    trusted_runtime_ref: workspace_trusted.then(|| {
+                        format!(
+                            "trusted-runtime:spec030:{}",
+                            trusted_projection.schema_version()
+                        )
+                    }),
+                    workspace_trusted,
+                    credential_source_statuses: credential_statuses.clone(),
+                    missing_credentials: missing_credentials.clone(),
+                    activation_blockers: activation_blockers.clone(),
+                    process_authorized: matches!(
+                        trusted_projection
+                            .process_adapters()
+                            .iter()
+                            .find(|adapter| {
+                                adapter.adapter == shacs_projection::ProcessAdapterKind::GenericExec
+                            }),
+                        Some(adapter)
+                            if adapter.control_scope
+                                == shacs_projection::ProcessControlScope::ControlledChild
+                                && adapter.capabilities.timeout
+                                && adapter.capabilities.abort
+                                && adapter.capabilities.cwd
+                                && adapter.capabilities.env
+                                && adapter.capabilities.bounded_output
+                    ),
+                    activation_refs: activation_refs.clone(),
+                    execution_snapshot_ref,
+                },
+                &mut driver,
+            )
+            .map_err(|error| CliError::Runtime(error.to_string()))?;
+        if result.restart_requested {
+            restart_count += 1;
+            start_request = journal.request(&app_id, AppLifecycleAction::Start)?;
+            continue;
+        }
+        return Ok(AppsLifecycleReport {
+            app_id,
+            receipt: result.terminal,
+            dispatch_count: result.dispatch_count,
+            restart_count,
+        });
+    }
+}
+
+fn app_activation_blockers(
+    bundle: &ConfigBundle,
+    entry: &AppRegistryEntry,
+    resources: &[shacs_projection::ResourceCandidateProjection],
+) -> Result<(Vec<AppLifecycleBlocker>, Vec<AppActivationLink>), CliError> {
+    let owner = WorkspaceTrustRef::new(bundle.context.workspace_permission_id()?.as_str());
+    let store = ActivationStore::new(
+        bundle
+            .context
+            .runtime_subdir("snapshots")
+            .join("activation-records.json"),
+    );
+    let mut blockers = Vec::new();
+    let mut activation_links = Vec::new();
+    for resource in entry
+        .resource_summaries
+        .iter()
+        .filter(|resource| resource.kind == "skill")
+    {
+        let canonical = entry.bundle_path.join(&resource.path).canonicalize()?;
+        let source_identity = format!("source:app:{}", canonical.to_string_lossy());
+        let resource_ref = resources
+            .iter()
+            .find(|candidate| {
+                Path::new(&candidate.canonical_path)
+                    .canonicalize()
+                    .is_ok_and(|path| path == canonical)
+            })
+            .map(|candidate| candidate.resource_ref.clone())
+            .unwrap_or_else(|| format!("skill:{}", resource.path));
+        match store
+            .find_current(&resource_ref, &owner, &source_identity)
+            .map_err(|error| CliError::Runtime(error.to_string()))?
+        {
+            None => blockers.push(AppLifecycleBlocker::ActivationMissing { resource_ref }),
+            Some(record) => match record.status() {
+                ActivationStatus::Active => {
+                    activation_links.push((
+                        record.resource_ref().to_owned(),
+                        record.activation_ref().to_owned(),
+                    ));
+                    if record.content_digest() != resource.sha256
+                        || record.dependency_manifest_digest() != entry.digest
+                    {
+                        blockers.push(AppLifecycleBlocker::ActivationStale {
+                            activation_ref: record.activation_ref().to_owned(),
+                        });
+                    }
+                }
+                ActivationStatus::Stale => blockers.push(AppLifecycleBlocker::ActivationStale {
+                    activation_ref: record.activation_ref().to_owned(),
+                }),
+                ActivationStatus::Disabled => {
+                    blockers.push(AppLifecycleBlocker::ActivationDisabled {
+                        activation_ref: record.activation_ref().to_owned(),
+                    })
+                }
+                ActivationStatus::Revoked => {
+                    blockers.push(AppLifecycleBlocker::ActivationRevoked {
+                        activation_ref: record.activation_ref().to_owned(),
+                    })
+                }
+                ActivationStatus::Removed => {
+                    blockers.push(AppLifecycleBlocker::ActivationRemoved {
+                        activation_ref: record.activation_ref().to_owned(),
+                    })
+                }
+            },
+        }
+    }
+    Ok((blockers, activation_links))
+}
+
+fn persist_app_execution_snapshot(
+    bundle: &ConfigBundle,
+    app_id: &AppId,
+    digest: &str,
+    generation: u64,
+    request_id: &str,
+    projection: &shacs_projection::Spec030RuntimeProjection,
+    activation_links: &[AppActivationLink],
+) -> Result<Option<String>, CliError> {
+    let refs = shacs_core::runtime::trusted_runtime_fact_refs(projection)
+        .map_err(|error| CliError::Runtime(error.to_string()))?;
+    let mut resources = refs.resources;
+    for resource in &mut resources {
+        resource.activation_ref = activation_links
+            .iter()
+            .find(|(resource_ref, _)| resource_ref == &resource.identity)
+            .map(|(_, activation_ref)| activation_ref.clone());
+    }
+    let snapshot_id = format!(
+        "app-{app_id}-g{generation}-{}-{}",
+        &digest[..digest.len().min(12)],
+        request_id.rsplit('-').next().unwrap_or("request")
+    );
+    let snapshot = ExecutionSnapshot::create(ExecutionSnapshotInput {
+        snapshot_id: snapshot_id.clone(),
+        created_at_unix_ms: u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX),
+        config: ConfigSnapshotRef {
+            source_ref: "config:app-start".to_owned(),
+            schema_version: 1,
+            migration_state: ConfigMigrationState::Current,
+        },
+        profiles: ProfileSelectionSnapshot {
+            provider: None,
+            trusted_runtime: Some("spec030".to_owned()),
+            context: Some("app-start".to_owned()),
+        },
+        trusted_runtime: refs.trusted_runtime,
+        sandbox: refs.sandbox,
+        credential: refs.credential,
+        context_sources: Vec::new(),
+        selected_tools: Vec::new(),
+        selected_resources: resources,
+        provider: ProviderInputSnapshot {
+            provider: "app-runtime".to_owned(),
+            model: "not-applicable".to_owned(),
+            shaping_version: "spec032-v1".to_owned(),
+            messages_digest: digest.to_owned(),
+            tools_digest: digest.to_owned(),
+        },
+        token_budget: TokenBudgetSnapshot {
+            tokenizer: "not-applicable".to_owned(),
+            estimator_uncertainty_percent: 0,
+            budget_tokens: 0,
+            reserved_tokens: 0,
+            used_context_tokens: 0,
+            estimated_input_tokens: 0,
+        },
+        disclosure: refs.disclosure,
+        replay: ReplayContract::diagnostic_only(),
+    })
+    .map_err(|error| CliError::Runtime(error.to_string()))?;
+    let path = bundle
+        .context
+        .runtime_subdir("snapshots")
+        .join("app-lifecycle")
+        .join(format!("{snapshot_id}.json"));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(&snapshot)
+        .map_err(|error| CliError::Runtime(error.to_string()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(Some(format!("snapshot:app:{snapshot_id}")))
+}
+
+pub fn apps_request(
+    options: AppsIdOptions,
+    action: AppLifecycleAction,
+) -> Result<AppsLifecycleReport, CliError> {
+    let app_id = AppId::parse(options.app_id)?;
+    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
+    let store = AppRegistryStore::new(&bundle.context.data_dir);
+    if store.inspect(&app_id)?.is_none() {
+        return Err(AppError::UnknownApp(app_id).into());
+    }
+    let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
+    let receipt = journal.request(&app_id, action)?;
+    Ok(AppsLifecycleReport {
+        app_id,
+        receipt,
+        dispatch_count: 0,
+        restart_count: 0,
+    })
+}
+
+pub fn apps_recover(options: AppsIdOptions) -> Result<AppsLifecycleReport, CliError> {
+    let app_id = AppId::parse(options.app_id)?;
+    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
+    if AppRegistryStore::new(&bundle.context.data_dir)
+        .inspect(&app_id)?
+        .is_none()
+    {
+        return Err(AppError::UnknownApp(app_id).into());
+    }
+    let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
+    let receipt = AppSupervisor::new(&journal)
+        .recover(&app_id, false)
+        .map_err(|error| CliError::Runtime(error.to_string()))?;
+    Ok(AppsLifecycleReport {
+        app_id,
+        receipt,
+        dispatch_count: 0,
+        restart_count: 0,
+    })
+}
+
+fn with_inactive_app_lifecycle<T>(
+    config_path: &Path,
+    workspace: &Path,
+    store: &AppRegistryStore,
+    app_id: &AppId,
+    action: &str,
+    mutation: impl FnOnce() -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    let bundle = apps_config_bundle(
+        Some(config_path.to_path_buf()),
+        Some(workspace.to_path_buf()),
+    )?;
+    let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
+    journal.with_locked_snapshot(app_id, |snapshot| {
+        match snapshot {
+            Some(snapshot)
+                if matches!(
+                    snapshot.state,
+                    shacs_core::app_lifecycle::AppProcessState::Starting
+                        | shacs_core::app_lifecycle::AppProcessState::Running
+                        | shacs_core::app_lifecycle::AppProcessState::Stopping
+                        | shacs_core::app_lifecycle::AppProcessState::RecoveryNeeded
+                ) =>
+            {
+                return Err(CliError::InvalidArguments(format!(
+                    "apps {action} requires the app process to be stopped or recovered first"
+                )))
+            }
+            Some(_) | None => {}
+        }
+        if store.inspect(app_id)?.is_none() {
+            return Err(AppError::UnknownApp(app_id.clone()).into());
+        }
+        mutation()
+    })
+}
+
+pub fn apps_propose(options: AppsAuthoringFlowOptions) -> Result<AppsProposalReport, CliError> {
+    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
+    let store = AuthoringFlowStore::new(bundle.context.data_dir);
+    let proposal = if options.update {
+        store.propose_update(&options.candidate_path, &options.intent)?
+    } else {
+        store.propose_new(&options.candidate_path, &options.intent)?
+    };
+    Ok(AppsProposalReport { proposal })
+}
+
+pub fn apps_apply(options: AppsAuthoringFlowOptions) -> Result<AppsApplyReport, CliError> {
+    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
+    let data_dir = bundle.context.data_dir.clone();
+    let store = AuthoringFlowStore::new(&data_dir);
+    let proposal = if options.update {
+        store.propose_update(&options.candidate_path, &options.intent)?
+    } else {
+        store.propose_new(&options.candidate_path, &options.intent)?
+    };
+    let run_apply = || -> Result<InstallHandoff, CliError> {
+        let checkpoint = store.checkpoint(&proposal)?;
+        let pending = store.apply(&checkpoint)?;
+        Ok(store.verify(pending, VerificationOutcome::Passed)?)
+    };
+    let handoff = if options.update {
+        let registry = AppRegistryStore::new(&data_dir);
+        let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
+        journal.with_locked_snapshot(&proposal.app_id, |snapshot| {
+            if snapshot.is_some_and(|snapshot| {
+                !matches!(
+                    snapshot.state,
+                    shacs_core::app_lifecycle::AppProcessState::Installed
+                        | shacs_core::app_lifecycle::AppProcessState::Stopped
+                        | shacs_core::app_lifecycle::AppProcessState::Failed
+                )
+            }) {
+                return Err(CliError::InvalidArguments(
+                    "apps apply --update requires a stopped app process".to_owned(),
+                ));
+            }
+            if registry.inspect(&proposal.app_id)?.is_none() {
+                return Err(AppError::UnknownApp(proposal.app_id.clone()).into());
+            }
+            run_apply()
+        })?
+    } else {
+        run_apply()?
+    };
+    Ok(AppsApplyReport { handoff })
+}
+
+struct CliAppProcessDriver {
+    command: Vec<String>,
+    cwd: PathBuf,
+    timeout_seconds: u64,
+    supervisor_root: PathBuf,
+    app_id: AppId,
+    process_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+impl CliAppProcessDriver {
+    fn new(
+        command: Vec<String>,
+        cwd: PathBuf,
+        timeout_seconds: u64,
+        supervisor_root: PathBuf,
+        app_id: AppId,
+        process_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    ) -> Self {
+        Self {
+            command,
+            cwd,
+            timeout_seconds,
+            supervisor_root,
+            app_id,
+            process_environment,
+        }
+    }
+}
+
+impl AppProcessDriver for CliAppProcessDriver {
+    fn run(&mut self) -> AppProcessRunOutcome {
+        let abort = ControlledChildAbort::new();
+        let watcher_abort = abort.clone();
+        let app_id = self.app_id.clone();
+        let runtime_root = self.supervisor_root.clone();
+        let watcher = thread::spawn(move || {
+            let journal = AppSupervisorJournal::new(runtime_root);
+            loop {
+                if watcher_abort.is_aborted() {
+                    return AppSupervisorTerminal::Stopped;
+                }
+                if journal
+                    .pending_request(&app_id, AppLifecycleAction::Restart)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    watcher_abort.abort();
+                    return AppSupervisorTerminal::RestartRequested;
+                }
+                if journal
+                    .pending_request(&app_id, AppLifecycleAction::Stop)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    watcher_abort.abort();
+                    return AppSupervisorTerminal::Stopped;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let command = ControlledChildCommand::new(
+            self.command.clone(),
+            &self.cwd,
+            Duration::from_secs(self.timeout_seconds),
+        );
+        let mut command = command;
+        command.inherit_env = false;
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env.insert("PATH".into(), path);
+        }
+        command.env.extend(self.process_environment.clone());
+        let outcome = run_generic_argv(&command, &abort);
+        if !abort.is_aborted() {
+            abort.abort();
+        }
+        let requested = watcher
+            .join()
+            .unwrap_or(AppSupervisorTerminal::RecoveryNeeded);
+        let terminal = match &outcome {
+            Ok(receipt) => match receipt.outcome {
+                ControlledChildOutcome::Succeeded { .. } => AppSupervisorTerminal::Stopped,
+                ControlledChildOutcome::Aborted => requested,
+                ControlledChildOutcome::TimedOut => AppSupervisorTerminal::RecoveryNeeded,
+                ControlledChildOutcome::Failed { .. } | ControlledChildOutcome::InvalidCwd => {
+                    AppSupervisorTerminal::Failed
+                }
+            },
+            Err(_) => AppSupervisorTerminal::RecoveryNeeded,
+        };
+        let evidence = outcome.map_or_else(
+            |_| shacs_core::app_lifecycle::AppProcessOutcomeEvidence {
+                outcome: "controlled_child_error".to_owned(),
+                duration_ms: 0,
+                cleanup_attempted: false,
+                descendant_cleanup_supported: cfg!(unix),
+            },
+            |receipt| shacs_core::app_lifecycle::AppProcessOutcomeEvidence {
+                outcome: format!("{:?}", receipt.outcome),
+                duration_ms: receipt.duration_ms,
+                cleanup_attempted: receipt.cleanup_attempted,
+                descendant_cleanup_supported: matches!(
+                    receipt.descendant_cleanup,
+                    shacs_core::controlled_child::DescendantCleanupCapability::Supported
+                ),
+            },
+        );
+        AppProcessRunOutcome { terminal, evidence }
+    }
 }
 
 fn apps_store(
@@ -7284,6 +7967,22 @@ fn apps_store(
         bundle.context.workspace,
         AppRegistryStore::new(bundle.context.data_dir),
     ))
+}
+
+fn apps_config_bundle(
+    config_path: Option<PathBuf>,
+    workspace_override: Option<PathBuf>,
+) -> Result<ConfigBundle, CliError> {
+    load_config_with_env(
+        LoadOptions {
+            config_path: Some(config_path.unwrap_or_else(default_config_path)),
+            workspace_override,
+            resolve_env: false,
+            write_back_migrations: false,
+        },
+        &ProcessEnv,
+    )
+    .map_err(Into::into)
 }
 
 pub fn plugins_list(options: PluginsListOptions) -> Result<PluginProjectionReport, CliError> {
@@ -8866,6 +9565,73 @@ pub fn format_apps_uninstall(report: AppsUninstallReport) -> String {
         format!("Config: {}", display_path(&report.config_path)),
         format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
         format!("Registry: {}", display_path(&report.registry_path)),
+    ]
+    .join("\n")
+}
+
+pub fn format_apps_lifecycle(report: AppsLifecycleReport) -> String {
+    let blockers = report
+        .receipt
+        .blockers
+        .iter()
+        .map(|blocker| match blocker {
+            AppLifecycleBlocker::CredentialMissing { name } => {
+                format!("credential_missing:{name}")
+            }
+            other => format!("{other:?}").to_ascii_lowercase(),
+        })
+        .collect::<Vec<_>>();
+    let process_outcome = report
+        .receipt
+        .process_outcome
+        .as_ref()
+        .map_or_else(|| "none".to_owned(), |evidence| evidence.outcome.clone());
+    [
+        format!("App: {}", report.app_id),
+        format!("Action: {:?}", report.receipt.action),
+        format!("State: {:?}", report.receipt.current_state),
+        format!("Completed: {}", yes_no_label(report.receipt.completed)),
+        format!("Receipt: {}", report.receipt.receipt_id),
+        format!("Process dispatches: {}", report.dispatch_count),
+        format!("Restarts: {}", report.restart_count),
+        format!("Process outcome: {process_outcome}"),
+        format!("Blockers: {}", blockers.join(", ")),
+    ]
+    .join("\n")
+}
+
+pub fn format_apps_proposal(report: AppsProposalReport) -> String {
+    [
+        format!("App proposal: {}", report.proposal.app_id),
+        format!("Proposal: {}", report.proposal.proposal_id),
+        format!("Kind: {:?}", report.proposal.kind),
+        format!("Revision: {}", report.proposal.revision_digest),
+        format!("Validation: {}", report.proposal.validation_summary),
+        format!("Risk: {}", report.proposal.risk_summary),
+        "Applied: no".to_owned(),
+        "Runtime authorization created: no".to_owned(),
+    ]
+    .join("\n")
+}
+
+pub fn format_apps_apply(report: AppsApplyReport) -> String {
+    [
+        format!("App apply: {}", report.handoff.app_id),
+        format!("Checkpoint: {}", report.handoff.checkpoint_id),
+        format!("Version: {}", report.handoff.version),
+        format!("Digest: {}", report.handoff.digest),
+        format!(
+            "Runtime authorization created: {}",
+            yes_no_label(report.handoff.runtime_authorization_created)
+        ),
+        format!(
+            "Executable activation created: {}",
+            yes_no_label(report.handoff.executable_activation_created)
+        ),
+        format!(
+            "Process started: {}",
+            yes_no_label(report.handoff.process_started)
+        ),
     ]
     .join("\n")
 }
@@ -16565,7 +17331,7 @@ pub fn help_text() -> String {
         "  runtime   Start, stop, restart, inspect trusted-runtime, migrate config/data, and inspect snapshot/activation diagnostics",
         "  session   Manage local session files",
         "  skills    List skills, inspect entries, and discover workflow recipes",
-        "  apps      Init authoring drafts; install, list, inspect, enable, disable, or uninstall local app bundles",
+        "  apps      Propose/apply app drafts and manage local app lifecycle start, stop, restart, and recover",
         "  plugins   List, inspect, doctor, enable, or disable plugin state and surfaces",
         "  hooks     List and inspect plugin hook metadata",
         "  permissions List, inspect, or revoke remembered permission rules",
@@ -17242,7 +18008,7 @@ fn parse_apps(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "apps requires `init`, `install`, `list`, `inspect`, `enable`, `disable`, or `uninstall`"
+            "apps requires `init`, `propose`, `apply`, `install`, `list`, `inspect`, `enable`, `disable`, `start`, `stop`, `restart`, `recover`, or `uninstall`"
                 .to_owned(),
         ));
     };
@@ -17253,12 +18019,73 @@ fn parse_apps(
         "inspect" | "show" => parse_apps_inspect(parser, global_config),
         "enable" => parse_apps_id_action(parser, global_config, "enable"),
         "disable" => parse_apps_id_action(parser, global_config, "disable"),
+        "start" => parse_apps_id_action(parser, global_config, "start"),
+        "stop" => parse_apps_id_action(parser, global_config, "stop"),
+        "restart" => parse_apps_id_action(parser, global_config, "restart"),
+        "recover" => parse_apps_id_action(parser, global_config, "recover"),
+        "propose" => parse_apps_authoring_flow(parser, global_config, false),
+        "apply" => parse_apps_authoring_flow(parser, global_config, true),
         "uninstall" | "remove" => parse_apps_id_action(parser, global_config, "uninstall"),
         "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(CliError::InvalidArguments(format!(
             "unknown apps subcommand `{other}`"
         ))),
     }
+}
+
+fn parse_apps_authoring_flow(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    apply: bool,
+) -> Result<CliCommand, CliError> {
+    let action = if apply { "apply" } else { "propose" };
+    let mut options = AppsAuthoringFlowOptions {
+        config_path: global_config,
+        workspace_override: None,
+        candidate_path: PathBuf::new(),
+        intent: String::new(),
+        update: false,
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--candidate" => options.candidate_path = take_path(&mut parser, &arg)?,
+            "--intent" => options.intent = take_value(&mut parser, &arg)?,
+            "--update" => options.update = true,
+            "--help" | "-h" => return Ok(CliCommand::Help),
+            other if other.starts_with('-') => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown apps {action} argument `{other}`"
+                )))
+            }
+            other if options.candidate_path.as_os_str().is_empty() => {
+                options.candidate_path = PathBuf::from(other)
+            }
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "apps {action} accepts exactly one candidate path; unexpected `{other}`"
+                )))
+            }
+        }
+    }
+    if options.candidate_path.as_os_str().is_empty() {
+        return Err(CliError::InvalidArguments(format!(
+            "apps {action} requires a candidate path"
+        )));
+    }
+    if options.intent.trim().is_empty() {
+        return Err(CliError::InvalidArguments(format!(
+            "apps {action} requires --intent"
+        )));
+    }
+    Ok(CliCommand::Apps(if apply {
+        AppsCommand::Apply(options)
+    } else {
+        AppsCommand::Propose(options)
+    }))
 }
 
 fn parse_apps_init(
@@ -17393,6 +18220,10 @@ fn parse_apps_id_action(
     match action {
         "enable" => Ok(CliCommand::Apps(AppsCommand::Enable(options))),
         "disable" => Ok(CliCommand::Apps(AppsCommand::Disable(options))),
+        "start" => Ok(CliCommand::Apps(AppsCommand::Start(options))),
+        "stop" => Ok(CliCommand::Apps(AppsCommand::Stop(options))),
+        "restart" => Ok(CliCommand::Apps(AppsCommand::Restart(options))),
+        "recover" => Ok(CliCommand::Apps(AppsCommand::Recover(options))),
         _ => Ok(CliCommand::Apps(AppsCommand::Uninstall(options))),
     }
 }
@@ -23534,6 +24365,58 @@ mod tests {
 
         let parsed = parse_cli_args(["apps", "disable", "--help"])?;
         assert!(matches!(parsed, CliCommand::Help));
+
+        for (action, expected) in [
+            ("start", "start"),
+            ("stop", "stop"),
+            ("restart", "restart"),
+            ("recover", "recover"),
+        ] {
+            let parsed = parse_cli_args(["apps", action, "demo.app"])?;
+            let matches_action = match parsed {
+                CliCommand::Apps(AppsCommand::Start(options)) => {
+                    expected == "start" && options.app_id == "demo.app"
+                }
+                CliCommand::Apps(AppsCommand::Stop(options)) => {
+                    expected == "stop" && options.app_id == "demo.app"
+                }
+                CliCommand::Apps(AppsCommand::Restart(options)) => {
+                    expected == "restart" && options.app_id == "demo.app"
+                }
+                CliCommand::Apps(AppsCommand::Recover(options)) => {
+                    expected == "recover" && options.app_id == "demo.app"
+                }
+                _ => false,
+            };
+            assert!(matches_action, "expected apps {action} command");
+        }
+
+        let proposed = parse_cli_args([
+            "apps",
+            "propose",
+            "/tmp/candidate",
+            "--intent",
+            "create app",
+        ])?;
+        let CliCommand::Apps(AppsCommand::Propose(options)) = proposed else {
+            return Err("expected apps propose command".into());
+        };
+        assert_eq!(options.candidate_path, PathBuf::from("/tmp/candidate"));
+        assert_eq!(options.intent, "create app");
+
+        let applied = parse_cli_args([
+            "apps",
+            "apply",
+            "--candidate",
+            "/tmp/candidate",
+            "--intent",
+            "update app",
+            "--update",
+        ])?;
+        let CliCommand::Apps(AppsCommand::Apply(options)) = applied else {
+            return Err("expected apps apply command".into());
+        };
+        assert!(options.update);
 
         let parsed = parse_cli_args(["apps", "uninstall", "demo.app"])?;
         let CliCommand::Apps(AppsCommand::Uninstall(options)) = parsed else {
@@ -33731,7 +34614,7 @@ mod tests {
         assert!(help.contains("agent     Start an interactive REPL"));
         assert!(help.contains("provider  Manage provider auth"));
         assert!(help.contains("generic import-key"));
-        assert!(help.contains("apps      Init authoring drafts"));
+        assert!(help.contains("apps      Propose/apply app drafts"));
         assert!(help.contains("channels  List channel"));
         assert!(!help.contains("channels  Reserved"));
         assert!(help.contains("-m, --message"));
