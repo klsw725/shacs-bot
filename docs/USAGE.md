@@ -135,6 +135,21 @@ shacs-bot runtime migrate --resume --workspace /tmp/ws
 
 Migration runner는 session metadata, event, checkpoint, queue, scheduler, channel, child, trace, diagnostics artifact family를 분리해 inventory합니다. Real run은 첫 mutation 전에 ledger를 쓰고 family별 no-op/transformed/failed/blocked 결과를 남기며, bounded backup은 complete verification 뒤 정리합니다. Dry-run은 source data와 marker를 만들거나 바꾸지 않습니다. 현재 config/profile file은 029 runner가 변환하지 않고 readable/incompatible compatibility 결과만 admission에 결합합니다. CLI projection은 opaque refs와 digest만 표시하고 raw secret, payload, absolute host path를 migration detail로 출력하지 않습니다.
 
+Config/profile/auth-source declaration migration은 Spec 031의 별도 JSON-compatible command입니다. Dry-run/apply/recover는 env placeholder와 auth locator를 secret 값으로 writeback하지 않으며 TOML로 전환하지 않습니다:
+
+```sh
+shacs-bot runtime config-migrate --dry-run --config /tmp/config.json
+shacs-bot runtime config-migrate --apply --config /tmp/config.json
+shacs-bot runtime config-migrate --recover --config /tmp/config.json
+```
+
+Persisted snapshot과 activation record의 inspect 출력도 JSON입니다. Snapshot/replay는 diagnostic-only이고 current config/profile/auth/resource truth나 permission grant가 아닙니다. Activation inspect는 record를 변경하거나 entrypoint를 실행하지 않습니다:
+
+```sh
+shacs-bot runtime snapshot inspect /tmp/execution-snapshot.json
+shacs-bot runtime activation inspect activation:skill:formatter:v1 --store /tmp/activations.json --owner workspace:sha256:owner
+```
+
 소스 checkout/Cargo 기반 설치에서 새 binary를 빌드하거나 교체한 뒤 runtime upgrade evidence를 기록합니다. Stored-data transform은 `runtime update`가 자동 실행하지 않고 위의 `runtime migrate` 명령으로 분리되며, 실제 binary 교체나 `git pull`/`cargo install`은 사용자가 별도로 수행합니다:
 
 ```sh
@@ -249,23 +264,31 @@ shacs-bot skills recipes --all --workspace /tmp/ws
 
 ## 앱
 
-현재 Rust CLI의 app 표면은 사용자가 local `.shacsapp` bundle을 registry에 등록하고 상태를 관찰하는 baseline입니다. `apps init`은 설치 전 authoring draft만 생성하며 install, enable, start를 수행하지 않습니다. Bundle은 config data dir의 `apps/<app-id>.shacsapp/` 경로에 있어야 하며, 기본 config 기준으로는 `~/.shacs-bot/apps/<app-id>.shacsapp/`입니다. Manifest의 `id`와 directory 이름은 일치해야 합니다.
+현재 Rust CLI의 app 표면은 local `.shacsapp` authoring proposal/apply와 foreground process lifecycle을 제공합니다. `apps init`은 설치 전 draft만 생성하며 install, enable, start를 수행하지 않습니다. Bundle은 config data dir의 `apps/<app-id>.shacsapp/` 경로에 있어야 하며, manifest의 `id`와 directory 이름은 일치해야 합니다.
 
 ```sh
 shacs-bot apps init demo.app --workspace /tmp/ws
+shacs-bot apps propose <candidate-dir> --intent "create demo app" --workspace /tmp/ws
+shacs-bot apps apply <candidate-dir> --intent "create demo app" --workspace /tmp/ws
 shacs-bot apps install ~/.shacs-bot/apps/demo.app.shacsapp --workspace /tmp/ws
 shacs-bot apps list --workspace /tmp/ws
 shacs-bot apps inspect demo.app --workspace /tmp/ws
 shacs-bot apps enable demo.app --workspace /tmp/ws
+shacs-bot apps start demo.app --workspace /tmp/ws
+shacs-bot apps stop demo.app --workspace /tmp/ws
+shacs-bot apps restart demo.app --workspace /tmp/ws
+shacs-bot apps recover demo.app --workspace /tmp/ws
 shacs-bot apps disable demo.app --workspace /tmp/ws
 shacs-bot apps uninstall demo.app --workspace /tmp/ws
 ```
 
 `apps init <app-id>`은 config data dir 아래 `authoring/apps/draft-<app-id>/`에 `draft.json`, `scaffold-plan.json`, `candidates/manifest.json`, `candidates/README.md`를 만듭니다. 이 명령은 app registry를 변경하지 않고, MCP/process/package/network 실행, secret read, grant 생성, active skill 주입을 하지 않습니다. 같은 내용의 draft가 이미 있으면 idempotent하게 기존 draft summary를 보여주며, 다른 내용이면 덮어쓰지 않고 conflict로 멈춥니다.
 
-`apps install`은 `--bundle <path>` 또는 positional bundle path를 받습니다. 상대 경로도 canonicalize 후 config data dir의 `apps/<app-id>.shacsapp/`로 해석되면 허용됩니다. Install은 manifest와 선언 resource/skill/entry file을 읽어 digest와 summary를 registry에 저장하지만, app process를 자동 실행하지 않고 permission grant나 secret 주입을 승인하지도 않습니다. Registry의 grant reference는 permission/secret request를 나중에 연결하기 위한 placeholder이며 승인 상태가 아닙니다.
+`apps propose`는 candidate를 정적으로 검증하고 revision/intent digest와 risk summary를 기록합니다. `apps apply`는 proposal revision과 installed digest를 다시 확인하고 checkpoint, verify, install/update handoff를 기록합니다. 두 명령 모두 permission/credential grant, executable activation, process start를 만들지 않습니다. Existing app update에는 `--update`를 사용합니다.
 
-`apps list`는 app id, version, lifecycle state, digest를 요약합니다. `apps inspect`/`apps show`는 bundle path, permission/secret request 개수, process snapshot 개수, unavailable reason, grant reference를 표시합니다. `apps enable`과 `apps disable`은 registry lifecycle state만 바꾸며 실행 중인 process를 시작하거나 중지하지 않습니다. `apps uninstall`은 registry entry와 config data dir 안의 해당 local bundle directory를 제거하며, persisted registry path가 data-dir/id convention과 맞지 않으면 임의 경로를 삭제하지 않습니다.
+`apps install`은 manifest와 선언 resource/skill/entry file의 digest와 summary만 registry에 저장합니다. Required secret을 선언해도 install/enable 단계에서 값을 읽거나 grant를 만들지 않으며, start admission에서 source 상태를 확인합니다.
+
+`apps start`는 enabled registry state, current bundle digest, trusted workspace, required credential source status, persisted activation status를 확인한 뒤 manifest `runtime.command`를 controlled child로 foreground 실행합니다. `apps stop`과 `apps restart`는 같은 AppSupervisor journal에 durable request를 남기고 foreground owner가 graceful cleanup 후 completed receipt를 기록합니다. Restart는 외부 daemon/reexec가 아니라 같은 foreground owner의 새 generation입니다. `apps recover`는 live-dispatch 없이 lifecycle evidence를 `stopped` 또는 `recovery-needed`로 조정합니다. `apps disable`/`uninstall`은 process가 stopped/recovered 상태일 때만 허용하며 historical receipts를 삭제하지 않습니다.
 
 ## 일회성 CLI 에이전트
 
@@ -496,20 +519,20 @@ cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin s
   --manual-record /path/to/spec030-manual-record.json
 ```
 
-## Spec 035 release evidence
+## Spec 031 release evidence
 
-Spec 035 release runner는 현재 `shacs-projection` package의 historical `spec031-release-runner` binary로 제공됩니다. Current worktree closure run은 repository 상태와 외부 owner audit를 함께 검사하고, machine-readable `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`, human-readable `summary.md`를 evidence root에 씁니다:
+Spec 031 release runner는 `shacs-projection` package의 `spec031-release-runner` binary로 제공됩니다. Current worktree closure run은 실제 Cargo command 결과와 exact external adapter fact를 검사하고 generated `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`, `reproducibility-observations.json`, `summary.md`를 evidence root에 씁니다:
 
 ```sh
-cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root . --mode current-worktree
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root "$(git rev-parse --show-toplevel)" --mode current-worktree
 ```
 
-현재 판정에서는 56 coverage row와 historical Spec031-owned command/artifact row가 매핑되어 있습니다. Spec 030 external owner evidence는 `.omo/evidence/spec030/prd006/current-worktree-final/closure-manifest.json`에서 PASS이며, Specs031/032/033/034의 남은 external read audit와 Spec 035 자체 planned revision 때문에 runner는 여전히 nonzero로 끝납니다. Current dirty state가 있으면 `triage/dirty-worktree.json`도 기록되지만 `BlockedExternalEvidence`를 가리지 않습니다. Spec029와 Spec030 audit가 현재 PASS입니다.
+Coverage row는 parent Must Have 13개, Acceptance 14개, Closure Evidence 12개와 PRD000-005를 실제 focused transcript에 일대일로 연결합니다. Specs 029/030/032/033/034/035의 전체 status는 closure 조건이 아니며, 031이 소비하는 adapter test fact와 통과 command만 요구합니다. Missing/unknown fact나 실패 command는 blocked이고 PASS를 합성하지 않습니다. Dirty worktree는 `observations/dirty-worktree.json`과 `reproducibility-observations.json`에 별도 typed observation으로 남으며 failure triage나 semantic verdict에 포함되지 않습니다.
 
-Runner 자체의 passing fixture는 아래처럼 실행할 수 있습니다. 이 fixture는 artifact writer와 validator의 success path를 확인할 뿐, 현재 checkout의 semantic Spec 035 closure를 뜻하지 않습니다:
+Runner 자체의 passing fixture는 아래처럼 실행할 수 있습니다. 이 fixture는 artifact writer와 validator의 success path를 확인할 뿐, 현재 checkout의 semantic Spec031 closure를 뜻하지 않습니다:
 
 ```sh
-cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root . --mode success-fixture
+cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root "$(git rev-parse --show-toplevel)" --mode success-fixture
 ```
 
 ## Docker Compose

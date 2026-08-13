@@ -1,6 +1,6 @@
 # PRD 005. sequential integration and Spec 031 closure
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
@@ -60,3 +60,16 @@ Primary parent requirements owned by this PRD:
 2. End-to-end migration/layout/snapshot/context/activation transcript.
 3. External owner-fact audits and documentation evidence.
 4. Final Spec031 closure summary with commands, failures and cleanup receipts.
+
+## Runnable Evidence Mapping
+
+| Scope | Command transcript | Primary tests/artifacts |
+|---|---|---|
+| PRD000 schema/profile/auth migration | `spec031-test-lifecycle` | `spec031_migration_transaction`, `spec031_schema_profiles` |
+| PRD001 layout/admission | `spec031-test-lifecycle` | `spec031_runtime_layout`, `spec031_runtime_layout_admission` |
+| PRD002 snapshot immutability | `spec031-test-projection-parity` | `spec031_execution_snapshot` |
+| PRD003 budget/explicit context | `spec031-test-projection-parity` | `spec031_context_projection` |
+| PRD004 activation/replay | `spec031-test-surface-smoke` | `spec031_activation_store`, `spec031_activation_execution` |
+| PRD005 sequential closure | `spec031-test-surface-smoke` | `spec031_sequential_integration`, generated `coverage-matrix.json` and `summary.md` |
+
+The current-worktree runner records dirty state as provenance, derives PASS only from actual exit status/transcripts, and validates exact external adapter facts without requiring the complete source-spec status. Missing facts and failed commands remain blocked. `success-fixture` remains a runner self-test only.

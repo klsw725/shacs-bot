@@ -161,7 +161,7 @@ fn enable_disable_lifecycle_projection_does_not_create_process_truth() -> Result
 }
 
 #[test]
-fn missing_secret_request_maps_to_unavailable_without_secret_value() -> Result<(), Box<dyn Error>> {
+fn install_records_secret_request_without_resolving_or_granting_it() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let store = AppRegistryStore::new(root.path().join("data"));
     let bundle = write_bundle(
@@ -173,13 +173,10 @@ fn missing_secret_request_maps_to_unavailable_without_secret_value() -> Result<(
     )?;
 
     let entry = store.install_local_bundle(bundle)?;
-    assert_eq!(entry.lifecycle_state, AppLifecycleState::Unavailable);
-    assert!(entry
-        .grant_reference
-        .as_deref()
-        .is_some_and(|reference| { reference.starts_with("local-grant-request:secret.app:") }));
+    assert_eq!(entry.lifecycle_state, AppLifecycleState::Installed);
+    assert!(entry.grant_reference.is_none());
     assert_eq!(entry.secret_requests[0].key, "OPENAI_API_KEY");
-    assert!(entry.unavailable_reasons[0].contains("OPENAI_API_KEY"));
+    assert!(entry.unavailable_reasons.is_empty());
     let encoded = serde_json::to_string(&entry)?;
     assert!(!encoded.contains("sk-secret-value"));
     Ok(())
@@ -198,10 +195,7 @@ fn denied_permission_receipt_is_redacted_and_registry_truth_is_preserved(
         }),
     )?;
     let entry = store.install_local_bundle(bundle)?;
-    assert!(entry
-        .grant_reference
-        .as_deref()
-        .is_some_and(|reference| { reference.starts_with("local-grant-request:ledger.app:") }));
+    assert!(entry.grant_reference.is_none());
     let app_id = entry.app_id;
 
     let receipt = TaskLedgerEntry {
@@ -351,6 +345,53 @@ fn manifest_required_field_omissions_fail() -> Result<(), Box<dyn Error>> {
             .err()
             .ok_or("expected missing required field failure")?;
         assert!(matches!(error, AppError::Json(_)));
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_declaration_is_static_and_requires_bounded_argv() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let bundle = write_bundle(
+        root.path(),
+        "runtime.app",
+        json!({"runtime": {"command": ["/bin/sh", "-c", "exit 0"], "timeoutSeconds": 5}}),
+    )?;
+    let validated = AppManifest::load_from_bundle(&AppBundlePath::new(&bundle))?;
+    assert_eq!(
+        validated
+            .manifest
+            .runtime
+            .ok_or("expected runtime")?
+            .command[0],
+        "/bin/sh"
+    );
+
+    write_manifest(
+        &bundle,
+        "runtime.app",
+        json!({"runtime": {"command": [], "timeoutSeconds": 5}}),
+    )?;
+    let error = AppManifest::load_from_bundle(&AppBundlePath::new(&bundle))
+        .err()
+        .ok_or("expected empty runtime argv rejection")?;
+    assert!(matches!(error, AppError::InvalidManifest(_)));
+    Ok(())
+}
+
+#[test]
+fn secret_request_rejects_non_environment_identifiers() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    for key in ["BAD=VALUE", "BAD\nVALUE", "1BAD", ""] {
+        let bundle = write_bundle(
+            root.path(),
+            "invalid-secret.app",
+            json!({"secrets": [{"key": key, "required": true}]}),
+        )?;
+        let error = AppManifest::load_from_bundle(&AppBundlePath::new(&bundle))
+            .err()
+            .ok_or("expected invalid secret identifier rejection")?;
+        assert!(matches!(error, AppError::InvalidManifest(_)));
     }
     Ok(())
 }

@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &artifacts,
         &discovery.entries,
         ContextBudgetInput {
-            max_context_bytes: Some(0),
+            max_context_tokens: Some(0),
             ..ContextBudgetInput::default()
         },
     );

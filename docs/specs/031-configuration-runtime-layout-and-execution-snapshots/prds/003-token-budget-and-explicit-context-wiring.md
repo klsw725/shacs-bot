@@ -1,6 +1,6 @@
 # PRD 003. token budget and explicit context wiring
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 

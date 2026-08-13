@@ -119,10 +119,10 @@ impl ProviderConfig {
         CredentialSourceDeclaration {
             family,
             environment: source
-                .and_then(|source| source.environment.clone())
+                .and_then(|source| source.environment_name().map(str::to_owned))
                 .or(environment),
             local_auth: source.map_or(true, |source| source.local_auth),
-            command: source.and_then(|source| source.command.clone()),
+            command: source.and_then(|source| source.command_line().map(str::to_owned)),
         }
     }
 }

@@ -11,7 +11,11 @@ use std::time::Duration;
 fn spec031_blocked_external_triage_matches_blocked_audit_rows_and_rejects_omission(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = temp_path("blocked-triage-repo");
-    fs::create_dir_all(&repo)?;
+    fs::create_dir_all(repo.join("crates"))?;
+    fs::write(
+        repo.join("crates/Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = []\n",
+    )?;
     let evidence_root = temp_path("blocked-triage-evidence");
 
     let error = run_spec031_release_runner(&Spec031ReleaseRunnerConfig {
@@ -22,10 +26,7 @@ fn spec031_blocked_external_triage_matches_blocked_audit_rows_and_rejects_omissi
         command_timeout: Duration::from_secs(1),
     })
     .expect_err("external blockers fail release runner");
-    assert_eq!(
-        error,
-        Spec031ReleaseArtifactError::UnmappedCoverageRequirement
-    );
+    assert_eq!(error, Spec031ReleaseArtifactError::CommandFailed);
 
     let artifacts: Spec031ReleaseRunArtifacts =
         serde_json::from_slice(&fs::read(evidence_root.join("manifest.json"))?)?;
@@ -44,10 +45,7 @@ fn spec031_blocked_external_triage_matches_blocked_audit_rows_and_rejects_omissi
 
     let error = validate_spec031_release_artifacts(&artifacts)
         .expect_err("omitted blocked audit owner fails triage validation");
-    assert_eq!(
-        error,
-        Spec031ReleaseArtifactError::UnmappedCoverageRequirement
-    );
+    assert_eq!(error, Spec031ReleaseArtifactError::CommandFailed);
     Ok(())
 }
 

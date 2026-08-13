@@ -35,6 +35,7 @@ pub(super) const fn reason_for_file(status: ContextFileReadStatus) -> Spec031Inc
         ContextFileReadStatus::SkippedMissing => Spec031InclusionReason::Missing,
         ContextFileReadStatus::DeniedBoundary => Spec031InclusionReason::Blocked,
         ContextFileReadStatus::ParseError => Spec031InclusionReason::ExtractionFailed,
+        ContextFileReadStatus::SkippedDuplicate => Spec031InclusionReason::Skipped,
     }
 }
 

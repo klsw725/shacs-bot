@@ -1,6 +1,6 @@
 # PRD 001. runtime layout ownership and admission
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 

@@ -14,6 +14,7 @@ mod coverage_validate;
 mod coverage_validate_artifact;
 mod current_commands;
 mod external_audit_facts;
+mod external_owner_commands;
 mod fixture;
 mod model;
 mod receipts;
@@ -29,6 +30,7 @@ pub use coverage::{
     Spec031CoverageStatus, Spec031ExternalAuditRow, Spec031ExternalAuditStatus,
     Spec031ExternalOwnerId, Spec031ReleaseCoverageEntry, Spec031TypedEvidenceClass,
 };
+pub use current_commands::required_worktree_commands;
 pub use model::{
     Spec031CommandProcessReceipt, Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord,
     Spec031ReleaseCommandSpec, Spec031ReleaseCommandStatus, Spec031ReleaseGateKind,
@@ -41,10 +43,11 @@ pub use validate::{
 };
 pub use writer::write_spec031_release_artifacts;
 
-const REQUIRED_ARTIFACTS: [&str; 5] = [
+const REQUIRED_ARTIFACTS: [&str; 6] = [
     "manifest.json",
     "coverage-matrix.json",
     "results.json",
     "failure-triage.json",
+    "reproducibility-observations.json",
     "summary.md",
 ];

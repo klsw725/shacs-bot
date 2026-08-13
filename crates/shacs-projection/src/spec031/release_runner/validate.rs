@@ -6,7 +6,9 @@ use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseRunArtifacts,
     SPEC031_RELEASE_RUNNER_SCHEMA,
 };
-use super::receipts::{validate_cleanup_receipts, validate_triage_receipts};
+use super::receipts::{
+    validate_cleanup_receipts, validate_reproducibility_observations, validate_triage_receipts,
+};
 use super::REQUIRED_ARTIFACTS;
 use std::collections::HashSet;
 use std::fs;
@@ -35,9 +37,10 @@ pub fn validate_spec031_release_artifacts_with_repo_root(
         return Err(Spec031ReleaseArtifactError::MissingCleanupReceipt);
     }
     validate_evidence_root(artifacts)?;
-    validate_command_registry(artifacts)?;
+    validate_command_registry(artifacts, repo_root)?;
     validate_external_audits(artifacts, repo_root)?;
     validate_cleanup_receipts(artifacts)?;
+    validate_reproducibility_observations(artifacts)?;
     validate_coverage_matrix(artifacts)?;
     let triage_codes = validate_triage_receipts(artifacts)?;
     if triage_codes
@@ -45,9 +48,6 @@ pub fn validate_spec031_release_artifacts_with_repo_root(
         .any(|code| code == "blocked_external_evidence")
     {
         return Err(Spec031ReleaseArtifactError::BlockedExternalEvidence);
-    }
-    if triage_codes.iter().any(|code| code == "dirty_worktree") {
-        return Err(Spec031ReleaseArtifactError::DirtyWorktree);
     }
     Ok(())
 }
@@ -89,6 +89,10 @@ fn validate_evidence_root(
     if triage != artifacts.failure_triage {
         return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
     }
+    let observations: Vec<String> = read_json(&root, "reproducibility-observations.json")?;
+    if observations != artifacts.reproducibility_observations {
+        return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
+    }
     let fixtures: Vec<String> = read_json(&root, "fixture-registry.json")?;
     if fixtures != artifacts.fixture_registry {
         return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
@@ -107,6 +111,10 @@ fn validate_evidence_root(
         require_safe_file(&root, entry)?;
     }
     for entry in &artifacts.failure_triage {
+        require_unique_path(&mut seen_paths, entry)?;
+        require_safe_file(&root, entry)?;
+    }
+    for entry in &artifacts.reproducibility_observations {
         require_unique_path(&mut seen_paths, entry)?;
         require_safe_file(&root, entry)?;
     }
@@ -132,6 +140,7 @@ fn validate_summary(
         "## Failure Triage",
         "## Coverage",
         "## External Audits",
+        "## Reproducibility Observations",
     ] {
         if !text.contains(required) {
             return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
@@ -156,6 +165,11 @@ fn validate_summary(
     }
     for triage in &artifacts.failure_triage {
         if !text.contains(triage) {
+            return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
+        }
+    }
+    for observation in &artifacts.reproducibility_observations {
+        if !text.contains(observation) {
             return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
         }
     }

@@ -4,7 +4,9 @@ use super::coverage::{
     Spec031ExternalAuditStatus, Spec031ReleaseCoverageEntry, Spec031TypedEvidenceClass,
 };
 use super::coverage_provenance::{requirement_provenance, ArtifactProvenance};
-use super::model::{Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord};
+use super::model::{
+    Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseCommandStatus,
+};
 use std::path::Path;
 
 pub(super) fn push_requirement_rows(
@@ -13,8 +15,7 @@ pub(super) fn push_requirement_rows(
     commands: &[Spec031ReleaseCommandRecord],
     audits: &[Spec031ExternalAuditRow],
 ) -> Result<(), Spec031ReleaseArtifactError> {
-    let _ = commands;
-    for spec in requirement_specs(audits) {
+    for spec in requirement_specs(audits, commands) {
         entries.push(requirement_row(root, spec)?);
     }
     Ok(())
@@ -42,15 +43,23 @@ fn requirement_row(
         } else {
             Spec031CoverageEvidenceKind::ImplementedArtifact
         },
-        evidence_class: if artifact == "results.json" {
-            Spec031TypedEvidenceClass::CommandResultsJson
+        evidence_class: if artifact.starts_with("commands/") {
+            Spec031TypedEvidenceClass::CommandStdout
         } else {
             Spec031TypedEvidenceClass::FailureTriageJson
         },
-        artifact_media_type: Spec031ArtifactMediaType::Json,
+        artifact_media_type: if artifact.starts_with("commands/") {
+            Spec031ArtifactMediaType::Text
+        } else {
+            Spec031ArtifactMediaType::Json
+        },
         artifact_hash: coverage_artifact_hash(root, artifact)?,
         artifact: artifact.to_owned(),
-        command_result_id: None,
+        command_result_id: if spec.status == Spec031CoverageStatus::Pass {
+            spec.command_id.map(str::to_owned)
+        } else {
+            None
+        },
         reason: spec.reason,
     })
 }
@@ -63,6 +72,7 @@ struct RequirementSpec {
     artifact: &'static str,
     status: Spec031CoverageStatus,
     reason: String,
+    command_id: Option<&'static str>,
 }
 
 impl RequirementSpec {
@@ -77,6 +87,7 @@ impl RequirementSpec {
                 "required artifact {} cites its exact generated file",
                 provenance.name
             ),
+            command_id: None,
         }
     }
 }
@@ -112,7 +123,7 @@ impl Spec031ReleaseCoverageEntrySeed {
             artifact_media_type: self.media_type,
             artifact_hash: coverage_artifact_hash(root, artifact)?,
             artifact: artifact.to_owned(),
-            command_result_id: None,
+            command_result_id: self.spec.command_id.map(str::to_owned),
             reason: self.spec.reason,
         })
     }
@@ -135,7 +146,10 @@ fn coverage_artifact_hash(
     artifact_hash(root, artifact)
 }
 
-fn requirement_specs(audits: &[Spec031ExternalAuditRow]) -> Vec<RequirementSpec> {
+fn requirement_specs(
+    audits: &[Spec031ExternalAuditRow],
+    commands: &[Spec031ReleaseCommandRecord],
+) -> Vec<RequirementSpec> {
     let closure_status = if audits
         .iter()
         .any(|audit| audit.status == Spec031ExternalAuditStatus::Blocked)
@@ -156,7 +170,13 @@ fn requirement_specs(audits: &[Spec031ExternalAuditRow]) -> Vec<RequirementSpec>
             } else {
                 Spec031CoverageRequirementKind::PrdTask
             };
-            let status = if kind == Spec031CoverageRequirementKind::ClosureEvidence {
+            let command_passed = commands.iter().any(|command| {
+                command.id == provenance.command_id
+                    && command.status == Spec031ReleaseCommandStatus::Passed
+            });
+            let status = if !command_passed {
+                Spec031CoverageStatus::Blocked
+            } else if kind == Spec031CoverageRequirementKind::ClosureEvidence {
                 closure_status
             } else {
                 Spec031CoverageStatus::Pass
@@ -173,6 +193,7 @@ fn requirement_specs(audits: &[Spec031ExternalAuditRow]) -> Vec<RequirementSpec>
                     "requirement is backed by exact source locator and typed artifact evidence"
                         .to_owned()
                 },
+                command_id: Some(provenance.command_id),
             }
         })
         .collect()

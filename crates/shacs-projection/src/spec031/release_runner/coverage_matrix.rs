@@ -68,7 +68,7 @@ fn push_command_rows(
             artifact,
             artifact_hash,
             command_result_id,
-            reason: "required 10-gate command result is mapped to its stdout transcript".to_owned(),
+            reason: "required Spec031 command result is mapped to its stdout transcript".to_owned(),
         });
     }
     Ok(())
@@ -129,19 +129,19 @@ fn push_external_rows(
 
 fn command_source(command_id: &str) -> String {
     let line = match command_id {
-        "spec031-fmt" => 234,
-        "spec031-clippy-workspace" => 235,
-        "spec031-test-workspace" => 236,
-        "spec031-test-release-runner" => 225,
-        "spec031-test-lifecycle" => 249,
-        "spec031-test-projection-parity" => 215,
-        "spec031-test-surface-smoke" => 243,
-        "spec031-test-failure-injection" => 215,
-        "spec031-build-cli" => 237,
-        "spec031-build-tui" => 238,
-        _ => 215,
+        "spec031-test-lifecycle" => 59,
+        "spec031-test-projection-parity" => 60,
+        "spec031-test-surface-smoke" => 61,
+        "spec031-test-failure-injection" => 62,
+        "spec031-fmt"
+        | "spec031-clippy-workspace"
+        | "spec031-test-workspace"
+        | "spec031-test-release-runner"
+        | "spec031-build-cli"
+        | "spec031-build-tui" => 62,
+        _ => 62,
     };
-    format!("docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/prds/007-release-runner-and-spec035-closure.md:{line}")
+    format!("docs/specs/031-configuration-runtime-layout-and-execution-snapshots/prds/005-sequential-integration-and-spec031-closure.md:{line}")
 }
 
 fn owner_slug(owner: super::coverage::Spec031ExternalOwnerId) -> &'static str {

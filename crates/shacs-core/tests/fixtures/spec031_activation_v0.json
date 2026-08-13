@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 0,
+  "records": [{
+    "activationRef": "activation:skill:formatter:v1",
+    "source": "trusted_workspace",
+    "workspaceTrustRef": "workspace:sha256:owner-a",
+    "resourceRef": "resource:skill:formatter",
+    "sourceIdentity": "source:project:.shacs/skills/formatter",
+    "contentDigest": "sha256:content-a",
+    "dependencyManifestDigest": "sha256:deps-a",
+    "status": "disabled",
+    "reason": "user_disabled",
+    "recordedAtUnixMs": 31004
+  }],
+  "receipts": []
+}

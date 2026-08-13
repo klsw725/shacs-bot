@@ -24,18 +24,18 @@ use crate::runtime::{
     AutoEvaluatorVerdict, ContainmentSnapshotRef, ContextBudgetInput, ContextBuildRequest,
     ContextBuilder, ContextFileDiscoveryOptions, ContextFileProjection, ContextProviderHandoff,
     ContextReferenceResolverConfig, DreamProcessor, DreamRunOutcome, ExecutionDomain,
-    ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope, GoalMetadataError,
-    InboundMessage, LateResultDecision, LoopTaskCancelResult, LoopTaskRegistry,
-    MemoryConsolidationError, MemoryStore, MessageBus, OutboundMessage, PermissionCeilingSnapshot,
-    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
-    PermissionedActionInput, PermissionedActionOrigin, PersistentGoal, PersistentGoalStatus,
-    PluginCommandDispatcher, PolicySafetySnapshotRef, ProviderArchiveConsolidator,
-    ProviderEventCallback, ProviderInvocationClient, RecentAutoModeDenial,
-    RecentAutoModeDenialStore, RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError,
-    RecentAutoModeRetryTokenMatch, RecentAutoModeRetryTokenStore, RuntimeContextTools,
-    RuntimeExecutionLedger, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport,
-    RuntimeToolExecutor, RuntimeToolMessage, Session, SessionApprovalCacheEntry,
-    SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
+    ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope, ExecutionSnapshot,
+    GoalMetadataError, InboundMessage, LateResultDecision, LiveExecutionSnapshotSource,
+    LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore, MessageBus,
+    OutboundMessage, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
+    PermissionRuleInput, PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
+    PersistentGoal, PersistentGoalStatus, PluginCommandDispatcher, PolicySafetySnapshotRef,
+    ProviderArchiveConsolidator, ProviderEventCallback, ProviderInvocationClient,
+    RecentAutoModeDenial, RecentAutoModeDenialStore, RecentAutoModeRetryToken,
+    RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenMatch,
+    RecentAutoModeRetryTokenStore, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
+    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
+    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
     SessionRememberedPermissionDiagnostic, SessionRememberedPermissionRule,
     SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnCancelOutcome,
     SessionTurnGuard, SessionTurnLock, SubagentExecutionConfig, SubagentOutcomeKind,
@@ -218,6 +218,8 @@ pub struct AgentLoopConfig {
     pub tool_search: crate::runtime::ToolSearchConfig,
     pub context_window_tokens: Option<usize>,
     pub context_block_limit: Option<usize>,
+    pub provider_id: String,
+    pub extra_context_files: Vec<PathBuf>,
     pub concurrent_tools: bool,
     pub fail_on_tool_error: bool,
     pub record_channel_delivery: bool,
@@ -232,6 +234,7 @@ pub struct AgentLoopConfig {
     pub permission_mode_setter: Option<PermissionModeSetter>,
     pub durable_event_root: Option<PathBuf>,
     pub provider_runtime_override: Option<RawCredential>,
+    pub execution_snapshot_source: LiveExecutionSnapshotSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +259,8 @@ impl AgentLoopConfig {
             tool_search: crate::runtime::ToolSearchConfig::default(),
             context_window_tokens: None,
             context_block_limit: None,
+            provider_id: "unknown".to_owned(),
+            extra_context_files: Vec::new(),
             concurrent_tools: false,
             fail_on_tool_error: false,
             record_channel_delivery: true,
@@ -270,6 +275,7 @@ impl AgentLoopConfig {
             permission_mode_setter: None,
             durable_event_root: None,
             provider_runtime_override: None,
+            execution_snapshot_source: LiveExecutionSnapshotSource::default(),
         }
     }
 }
@@ -326,6 +332,7 @@ pub struct AgentLoop<'a> {
     recent_retry_tokens: RecentAutoModeRetryTokenStore,
     durable_events: Option<DurableEventStore>,
     stopped: bool,
+    execution_snapshots: Arc<Mutex<Vec<ExecutionSnapshot>>>,
 }
 
 impl<'a> AgentLoop<'a> {
@@ -357,6 +364,7 @@ impl<'a> AgentLoop<'a> {
             recent_retry_tokens: RecentAutoModeRetryTokenStore::default(),
             durable_events: None,
             stopped: false,
+            execution_snapshots: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -526,6 +534,10 @@ impl<'a> AgentLoop<'a> {
 
     pub fn config_mut(&mut self) -> &mut AgentLoopConfig {
         &mut self.config
+    }
+
+    pub fn execution_snapshots(&self) -> Vec<ExecutionSnapshot> {
+        recover_lock(&self.execution_snapshots).clone()
     }
 
     pub fn active_session_keys(&self) -> Vec<String> {
@@ -930,7 +942,12 @@ impl<'a> AgentLoop<'a> {
                         &message.content,
                         &messages,
                         current_working_directory(),
-                        live_context_budget_bytes(self.config.context_block_limit),
+                        self.config.context_block_limit,
+                        crate::runtime::select_token_estimator(
+                            &self.config.provider_id,
+                            &self.config.model,
+                        ),
+                        &self.config.extra_context_files,
                     );
                     (messages, Some(context_provider_handoff))
                 }
@@ -1106,7 +1123,12 @@ impl<'a> AgentLoop<'a> {
                         &message.content,
                         &messages,
                         current_working_directory(),
-                        live_context_budget_bytes(self.config.context_block_limit),
+                        self.config.context_block_limit,
+                        crate::runtime::select_token_estimator(
+                            &self.config.provider_id,
+                            &self.config.model,
+                        ),
+                        &self.config.extra_context_files,
                     );
                     (messages, Some(context_provider_handoff))
                 }
@@ -1233,7 +1255,12 @@ impl<'a> AgentLoop<'a> {
                 &message.content,
                 &messages,
                 current_working_directory(),
-                live_context_budget_bytes(self.config.context_block_limit),
+                self.config.context_block_limit,
+                crate::runtime::select_token_estimator(
+                    &self.config.provider_id,
+                    &self.config.model,
+                ),
+                &self.config.extra_context_files,
             );
             (messages, Some(context_provider_handoff))
         } else {
@@ -1261,7 +1288,12 @@ impl<'a> AgentLoop<'a> {
                 &message.content,
                 &initial_messages,
                 current_working_directory(),
-                live_context_budget_bytes(self.config.context_block_limit),
+                self.config.context_block_limit,
+                crate::runtime::select_token_estimator(
+                    &self.config.provider_id,
+                    &self.config.model,
+                ),
+                &self.config.extra_context_files,
             );
             append_user_turn(&mut session, &message);
             let accepted_turn_id = turn_id_for_message(&message, &session);
@@ -1380,6 +1412,19 @@ impl<'a> AgentLoop<'a> {
         spec.cancellation_token = cancellation_token;
         spec.execution_scope = Some(ExecutionScope::new(session_key.clone(), turn_id.clone()));
         spec.execution_ledger = Some(execution_ledger.clone());
+        let snapshot_source = self.config.execution_snapshot_source.clone();
+        let snapshot_context = execution_context_sources(spec.context_provider_handoff.as_ref());
+        let snapshot_handoff = spec.context_provider_handoff.clone();
+        spec.execution_snapshot_resolver = Arc::new(move |request| {
+            snapshot_source.resolve(request, snapshot_context.clone(), snapshot_handoff.as_ref())
+        });
+        let execution_snapshots = self.execution_snapshots.clone();
+        let run_snapshot = Arc::new(Mutex::new(None));
+        let run_snapshot_capture = run_snapshot.clone();
+        spec.execution_snapshot_callback = Arc::new(move |snapshot| {
+            recover_lock(&execution_snapshots).push(snapshot.clone());
+            *recover_lock(&run_snapshot_capture) = Some(snapshot.clone());
+        });
         spec.tool_event_callback = self.tool_event_callback.clone();
         spec.provider_event_callback = self.provider_event_callback.clone();
         spec.agent_hook = self.agent_hook.clone();
@@ -1401,6 +1446,7 @@ impl<'a> AgentLoop<'a> {
         let run_result = match self.runner.run(spec) {
             Ok(result) => result,
             Err(error) => {
+                store_current_execution_snapshot(&mut session, &run_snapshot);
                 session.add_message("assistant", provider_error_text(&error), Map::new());
                 clear_runtime_markers(&mut session);
                 let execution_ledger = recover_lock(&execution_ledger);
@@ -1431,6 +1477,7 @@ impl<'a> AgentLoop<'a> {
             }
         };
         append_new_runner_messages(&mut session, &initial_messages, &run_result.messages);
+        store_current_execution_snapshot(&mut session, &run_snapshot);
         self.recent_retry_tokens
             .extend(run_result.recent_auto_mode_retry_tokens.clone());
         store_recent_auto_mode_denials(&mut session, run_result.recent_auto_mode_denials.clone());
@@ -3779,7 +3826,9 @@ fn build_live_context_provider_handoff(
     current_message: &str,
     initial_messages: &[Value],
     current_dir: Option<PathBuf>,
-    max_context_bytes: Option<usize>,
+    max_context_tokens: Option<usize>,
+    estimator: crate::runtime::TokenEstimatorSelection,
+    extra_context_files: &[PathBuf],
 ) -> ContextProviderHandoff {
     let parsed = parse_context_references(current_message);
     let resolver_config = ContextReferenceResolverConfig::new(workspace);
@@ -3793,6 +3842,7 @@ fn build_live_context_provider_handoff(
         workspace,
         ContextFileDiscoveryOptions {
             current_dir,
+            extra_context_files: extra_context_files.to_vec(),
             ..ContextFileDiscoveryOptions::default()
         },
     );
@@ -3801,9 +3851,10 @@ fn build_live_context_provider_handoff(
         &safety.artifacts,
         &context_file_entries,
         ContextBudgetInput {
-            reserved_user_message_bytes: current_message.len(),
-            reserved_runtime_instruction_bytes: runtime_instruction_bytes(initial_messages),
-            max_context_bytes,
+            active_user_message: current_message.to_owned(),
+            required_runtime_instructions: runtime_instructions(initial_messages),
+            max_context_tokens,
+            estimator,
         },
     )
 }
@@ -3828,17 +3879,73 @@ fn current_working_directory() -> Option<PathBuf> {
     std::env::current_dir().ok()
 }
 
-fn live_context_budget_bytes(context_block_limit_tokens: Option<usize>) -> Option<usize> {
-    context_block_limit_tokens.map(|tokens| tokens.saturating_mul(4))
+fn execution_context_sources(
+    handoff: Option<&ContextProviderHandoff>,
+) -> Vec<crate::runtime::ContextSourceSnapshot> {
+    handoff
+        .map(|handoff| {
+            handoff
+                .evidence
+                .iter()
+                .map(|evidence| {
+                    let included_bytes = handoff
+                        .blocks
+                        .iter()
+                        .find(|block| block.source_label == evidence.source_label)
+                        .map(|block| u64::try_from(block.byte_count).unwrap_or(u64::MAX))
+                        .unwrap_or_default();
+                    crate::runtime::ContextSourceSnapshot {
+                        source_ref: evidence.source_label.clone(),
+                        content_digest: evidence
+                            .digest
+                            .clone()
+                            .unwrap_or_else(|| "sha256:unavailable".to_owned()),
+                        inclusion: match evidence.decision {
+                            crate::runtime::ContextBudgetDecision::Included => {
+                                crate::runtime::ContextInclusion::Included
+                            }
+                            crate::runtime::ContextBudgetDecision::Truncated => {
+                                crate::runtime::ContextInclusion::Truncated
+                            }
+                            crate::runtime::ContextBudgetDecision::SkippedBudget
+                            | crate::runtime::ContextBudgetDecision::SkippedSafety
+                            | crate::runtime::ContextBudgetDecision::SkippedDuplicate => {
+                                crate::runtime::ContextInclusion::Skipped
+                            }
+                        },
+                        original_bytes: included_bytes,
+                        included_bytes,
+                        precedence: evidence.priority,
+                        decision: evidence.decision,
+                        estimated_tokens: evidence.estimated_tokens.unwrap_or_default() as u64,
+                        included_tokens: evidence.included_tokens as u64,
+                        reason: evidence.reason.clone(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-fn runtime_instruction_bytes(messages: &[Value]) -> usize {
+fn store_current_execution_snapshot(
+    session: &mut Session,
+    snapshot: &Arc<Mutex<Option<ExecutionSnapshot>>>,
+) {
+    let snapshot = recover_lock(snapshot).clone();
+    if let Some(snapshot) = snapshot.and_then(|snapshot| serde_json::to_value(snapshot).ok()) {
+        session
+            .metadata
+            .insert("spec031_execution_snapshot".to_owned(), snapshot);
+    }
+}
+
+fn runtime_instructions(messages: &[Value]) -> String {
     messages
         .iter()
         .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
         .filter_map(|message| message.get("content").and_then(Value::as_str))
-        .map(str::len)
-        .sum()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn mid_turn_injection_callback(
@@ -5495,6 +5602,8 @@ mod tests {
             &[json!({"role": "system", "content": "runtime instructions"})],
             Some(nested),
             None,
+            crate::runtime::select_token_estimator("unknown", "model"),
+            &[],
         );
         let provider_text = handoff
             .blocks
@@ -5522,6 +5631,8 @@ mod tests {
             &[json!({"role": "system", "content": "bootstrap-agents-body"})],
             Some(workspace.path().to_path_buf()),
             None,
+            crate::runtime::select_token_estimator("unknown", "model"),
+            &[],
         );
         let provider_text = handoff
             .blocks
@@ -5552,6 +5663,8 @@ mod tests {
             &[json!({"role": "system", "content": "aliased-bootstrap-body"})],
             Some(workspace.path().to_path_buf()),
             None,
+            crate::runtime::select_token_estimator("unknown", "model"),
+            &[],
         );
         let provider_text = handoff
             .blocks
@@ -5575,13 +5688,14 @@ mod tests {
             "read @note.txt",
             &[json!({"role": "system", "content": "runtime instructions"})],
             Some(workspace.path().to_path_buf()),
-            live_context_budget_bytes(Some(1)),
+            Some(1),
+            crate::runtime::select_token_estimator("unknown", "model"),
+            &[],
         );
 
-        assert_eq!(live_context_budget_bytes(Some(1)), Some(4));
-        assert_eq!(handoff.budget_bytes, 4);
+        assert_eq!(handoff.budget_tokens, 1);
         assert!(handoff.blocks.is_empty());
-        assert!(handoff.used_context_bytes <= 4);
+        assert!(handoff.used_context_tokens <= 1);
         Ok(())
     }
 
@@ -5592,6 +5706,10 @@ mod tests {
         fs::write(workspace.path().join("note.txt"), "inline-note-body")?;
         fs::write(workspace.path().join("AGENTS.md"), "bootstrap-system-body")?;
         fs::write(workspace.path().join(".shacs.md"), "workspace-context-body")?;
+        fs::write(
+            workspace.path().join("profile-context.md"),
+            "profile-context-body",
+        )?;
         let captured_requests = Arc::new(Mutex::new(Vec::new()));
         let client = CapturingProviderClient {
             responses: Mutex::new(VecDeque::from(vec![LlmResponse {
@@ -5602,13 +5720,19 @@ mod tests {
         };
         let tools = ToolRegistry::new();
         let sessions = SessionManager::new(workspace.path())?;
+        let mut config = AgentLoopConfig::new(workspace.path(), "model");
+        config.provider_id = "custom-provider".to_owned();
+        config.extra_context_files = vec![
+            PathBuf::from(".shacs.md"),
+            PathBuf::from("profile-context.md"),
+        ];
         let mut loop_runtime = AgentLoop::new(
             MessageBus::new(),
             sessions,
             ContextBuilder::new(workspace.path()),
             &tools,
             &client,
-            AgentLoopConfig::new(workspace.path(), "model"),
+            config,
         );
         let message = InboundMessage::new("direct", "user", "direct", "please read @note.txt");
 
@@ -5622,7 +5746,34 @@ mod tests {
         assert!(provider_text.contains("inline-note-body"));
         assert!(provider_text.contains("context-file:"));
         assert!(provider_text.contains("workspace-context-body"));
+        assert!(provider_text.contains("profile-context-body"));
+        assert_eq!(provider_text.matches("workspace-context-body").count(), 1);
         assert!(!provider_text.contains("bootstrap-system-body"));
+        assert!(provider_messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("user")
+                && message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| content.contains("please read @note.txt"))
+        }));
+        drop(requests);
+        let snapshot = loop_runtime
+            .execution_snapshots()
+            .pop()
+            .ok_or("snapshot missing")?;
+        assert_eq!(
+            snapshot.token_budget.tokenizer,
+            "estimator:generic_chars_v1"
+        );
+        assert!(snapshot.context_sources.iter().any(|source| {
+            source.source_ref.contains("profile-context.md")
+                && source.precedence == crate::runtime::ContextArtifactPriority::ConfiguredExtra
+                && source.decision == crate::runtime::ContextBudgetDecision::Included
+        }));
+        assert!(snapshot.context_sources.iter().any(|source| {
+            source.source_ref.contains(".shacs.md")
+                && source.decision == crate::runtime::ContextBudgetDecision::SkippedDuplicate
+        }));
 
         let session = loop_runtime
             .session_manager_mut()

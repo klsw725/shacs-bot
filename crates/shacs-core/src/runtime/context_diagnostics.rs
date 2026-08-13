@@ -141,8 +141,8 @@ pub struct ContextReplayDiagnosticEntry {
 pub struct ContextBudgetDiagnosticsSummary {
     pub block_count: usize,
     pub evidence_count: usize,
-    pub used_context_bytes: usize,
-    pub budget_bytes: usize,
+    pub used_context_tokens: usize,
+    pub budget_tokens: usize,
     pub included_count: usize,
     pub skipped_count: usize,
     pub truncated_count: usize,
@@ -390,8 +390,8 @@ fn summarize_budget(handoff: &ContextProviderHandoff) -> ContextBudgetDiagnostic
     ContextBudgetDiagnosticsSummary {
         block_count: handoff.blocks.len(),
         evidence_count: handoff.evidence.len(),
-        used_context_bytes: handoff.used_context_bytes,
-        budget_bytes: handoff.budget_bytes,
+        used_context_tokens: handoff.used_context_tokens,
+        budget_tokens: handoff.budget_tokens,
         included_count: handoff
             .evidence
             .iter()
@@ -403,7 +403,9 @@ fn summarize_budget(handoff: &ContextProviderHandoff) -> ContextBudgetDiagnostic
             .filter(|evidence| {
                 matches!(
                     evidence.decision,
-                    ContextBudgetDecision::SkippedBudget | ContextBudgetDecision::SkippedSafety
+                    ContextBudgetDecision::SkippedBudget
+                        | ContextBudgetDecision::SkippedSafety
+                        | ContextBudgetDecision::SkippedDuplicate
                 )
             })
             .count(),
@@ -580,7 +582,7 @@ mod tests {
             &safety.artifacts,
             &files,
             ContextBudgetInput {
-                max_context_bytes: Some(8),
+                max_context_tokens: Some(8),
                 ..ContextBudgetInput::default()
             },
         );

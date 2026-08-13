@@ -25,7 +25,7 @@ pub struct Spec030FactSnapshot {
 }
 
 impl Spec030FactSnapshot {
-    pub(super) fn into_input(self) -> TrustedRuntimeInput {
+    pub fn into_input(self) -> TrustedRuntimeInput {
         self.input
     }
 }

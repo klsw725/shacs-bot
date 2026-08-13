@@ -34,6 +34,24 @@ pub(super) fn validate_triage_receipts(
     Ok(codes)
 }
 
+pub(super) fn validate_reproducibility_observations(
+    artifacts: &Spec031ReleaseRunArtifacts,
+) -> Result<(), Spec031ReleaseArtifactError> {
+    let root = Path::new(&artifacts.evidence_root);
+    for path in &artifacts.reproducibility_observations {
+        let observation: ReproducibilityObservation = super::validate::read_json(root, path)?;
+        if observation.schema != "spec031.reproducibility_observation.v1"
+            || observation.run_id != artifacts.run_id.as_str()
+            || observation.kind != "dirty_worktree"
+            || observation.semantic_blocker
+            || observation.message.is_empty()
+        {
+            return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
+        }
+    }
+    Ok(())
+}
+
 fn validate_blocked_external_triage(
     artifacts: &Spec031ReleaseRunArtifacts,
     blockers: Option<&[BlockedExternalAuditReceipt]>,
@@ -130,6 +148,16 @@ struct TriageReceipt {
     code: String,
     message: String,
     blocked_external_audits: Option<Vec<BlockedExternalAuditReceipt>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReproducibilityObservation {
+    schema: String,
+    run_id: String,
+    kind: String,
+    semantic_blocker: bool,
+    message: String,
 }
 
 #[derive(Deserialize)]

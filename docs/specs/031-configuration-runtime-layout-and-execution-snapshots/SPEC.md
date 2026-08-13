@@ -1,6 +1,6 @@
 # 031. configuration runtime layout and execution snapshots 아키텍처 명세
 
-Status: Open
+Status: Complete (Scoped)
 
 Origin specs: 008, 009, 010, 015, 026
 
@@ -206,12 +206,12 @@ Current PRD status:
 
 | PRD | Status |
 |---|---|
-| PRD 000 | Planned |
-| PRD 001 | Planned |
-| PRD 002 | Planned |
-| PRD 003 | Planned |
-| PRD 004 | Planned |
-| PRD 005 | Planned |
+| PRD 000 | Complete (Scoped) |
+| PRD 001 | Complete (Scoped) |
+| PRD 002 | Complete (Scoped) |
+| PRD 003 | Complete (Scoped) |
+| PRD 004 | Complete (Scoped) |
+| PRD 005 | Complete (Scoped) |
 
 Dependency rules:
 
@@ -237,4 +237,10 @@ Dependency rules:
 11. 닫는 문서에는 구현 파일, 테스트 이름, migration compatibility 판단, snapshot immutability evidence, TOML 결정 여부가 함께 기록되어야 한다.
 12. Executable resource activation schema, migration, mutation admission, inspect/disable/revoke, snapshot provenance evidence가 032 lifecycle 및 030 activation-eligibility/trusted-runtime evidence와 연결되고 permission provenance를 만들지 않아야 한다.
 
-현재 이 문서는 Open 상태다. 위 evidence가 없으면 031의 범위를 구현 완료로 닫을 수 없다.
+## Scoped Closure Record
+
+Parent Must Have 1-6은 `spec031-test-lifecycle`, 7-11은 `spec031-test-projection-parity`, 12-13은 `spec031-test-surface-smoke` transcript가 일대일 primary evidence다. Acceptance 1-7, 8-13, 14와 Closure Evidence 1-4, 5-9, 10-12도 같은 세 command family에 각각 대응하며 `coverage-matrix.json`이 정확한 source line, command id, stdout hash를 기록한다. PRD005 통합 서사는 `spec031_sequential_integration`이 migration → layout admission → snapshot/context → activation ref → diagnostic replay 순서로 실행한다.
+
+현재 구현 결정은 JSON compatibility 유지이며 TOML 전환을 하지 않는다. `runtime config-migrate --dry-run|--apply|--recover`는 config transform을, 기존 `runtime migrate`는 029 stored-data family를 다룬다. Snapshot과 activation replay는 diagnostics 전용이고 permission grant, 현재 auth/config truth, 재실행 승인을 보장하지 않는다. Runtime directory ownership은 local mutation admission이지 sandbox/OS isolation이 아니다.
+
+외부 owner audit은 Specs 029/030/032/033/034/035 전체 완료 상태를 요구하지 않는다. 031이 소비하는 exact adapter test fact와 해당 Cargo command가 모두 존재하고 통과할 때만 PASS이며, unknown/missing fact는 계속 blocked다. 이 scoped closure는 Specs 032-035의 상태를 변경하지 않는다.

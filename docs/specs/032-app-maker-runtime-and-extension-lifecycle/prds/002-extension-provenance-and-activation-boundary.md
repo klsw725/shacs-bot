@@ -1,6 +1,6 @@
 # PRD 002. extension provenance and activation boundary
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 

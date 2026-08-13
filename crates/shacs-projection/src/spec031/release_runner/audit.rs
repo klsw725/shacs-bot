@@ -1,6 +1,6 @@
 #[cfg(test)]
-#[path = "audit_tests.rs"]
-mod audit_tests;
+#[path = "audit_test.rs"]
+mod audit_test;
 
 use super::coverage::{
     artifact_hash, Spec031ArtifactMediaType, Spec031ExternalAuditRow, Spec031ExternalAuditStatus,
@@ -34,13 +34,7 @@ pub(super) fn add_external_audits(
                 .map(|artifact| (*artifact).to_owned())
                 .collect()
         };
-        let status = if audit_passes(
-            config,
-            spec,
-            artifacts,
-            &implementation_artifacts,
-            all_pass || source_status_is_complete(&observed_source_status),
-        ) {
+        let status = if audit_passes(config, spec, artifacts, &implementation_artifacts) {
             Spec031ExternalAuditStatus::Pass
         } else {
             Spec031ExternalAuditStatus::Blocked
@@ -136,10 +130,8 @@ fn audit_passes(
     spec: &ExternalOwnerFactDescriptor,
     artifacts: &Spec031ReleaseRunArtifacts,
     implementation_artifacts: &[String],
-    source_complete: bool,
 ) -> bool {
-    source_complete
-        && !implementation_artifacts.is_empty()
+    !implementation_artifacts.is_empty()
         && implementation_artifacts
             .iter()
             .all(|artifact| fact_artifact_exists(config, artifact))
@@ -148,10 +140,6 @@ fn audit_passes(
                 record.id == *id && record.status == Spec031ReleaseCommandStatus::Passed
             })
         })
-}
-
-fn source_status_is_complete(status: &str) -> bool {
-    status.starts_with("Status: Complete")
 }
 
 fn fact_artifact_exists(config: &Spec031ReleaseRunnerConfig, artifact: &str) -> bool {

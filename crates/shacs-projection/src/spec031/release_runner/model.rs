@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::coverage::{Spec031ExternalAuditRow, Spec031ReleaseCoverageEntry};
 
-pub const SPEC031_RELEASE_RUNNER_SCHEMA: &str = "spec031.release_runner.v1";
+pub const SPEC031_RELEASE_RUNNER_SCHEMA: &str = "spec031.release_runner.v2";
 const MAX_SAFE_ID_LEN: usize = 80;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +97,7 @@ pub struct Spec031ReleaseRunArtifacts {
     pub coverage_matrix: Vec<Spec031ReleaseCoverageEntry>,
     pub external_audits: Vec<Spec031ExternalAuditRow>,
     pub failure_triage: Vec<String>,
+    pub reproducibility_observations: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
