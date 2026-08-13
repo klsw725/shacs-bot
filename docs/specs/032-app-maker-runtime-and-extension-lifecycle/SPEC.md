@@ -1,6 +1,6 @@
 # 032. App Maker runtime과 extension lifecycle 아키텍처 명세
 
-Status: Open
+Status: Complete (Scoped)
 
 Origin specs: 005, 017, 021, 025
 
@@ -159,10 +159,10 @@ Current PRD status:
 
 | PRD | Status |
 |---|---|
-| PRD 000 | Planned |
-| PRD 001 | Planned |
-| PRD 002 | Planned |
-| PRD 003 | Planned |
+| PRD 000 | Complete (Scoped) |
+| PRD 001 | Complete (Scoped) |
+| PRD 002 | Complete (Scoped) |
+| PRD 003 | Complete (Scoped) |
 
 Dependency rules:
 
@@ -173,7 +173,7 @@ Dependency rules:
 
 ## closure evidence
 
-032는 아직 open 상태다. 이 spec을 닫으려면 아래 evidence가 저장소에 있어야 한다.
+032의 local self-hosted scoped closure evidence는 [`CLOSURE.md`](CLOSURE.md)에 기록한다.
 
 1. 코드 증거: `AppSupervisor`, app process lifecycle, app start/stop/recover command path, 030 credential/trusted-runtime owner-fact consumption, 031 snapshot linkage, extension provenance model.
 2. 테스트 증거: lifecycle state tests, missing credential and untrusted workspace tests, extension blocked tests, existing app edit tests, proposal/apply/install handoff tests, replay safety tests.
@@ -183,4 +183,4 @@ Dependency rules:
 6. Documentation 증거: marketplace, dynamic ABI, SaaS/admin, fleet behavior를 구현 완료처럼 주장하지 않고 app start, stop, recover, edit, install handoff를 설명하는 user-facing docs.
 7. Resource lifecycle 증거: discovery/install/activation/execution 분리, app-level inspect/disable/revoke/stale/removed blocker, 030-controlled dependency preparation, manifest 밖 install 차단, runtime prerequisite 구분을 검증하는 코드·테스트·receipt.
 
-현재 closure evidence는 없다. 기존 specs 005, 017, 021, 025의 implemented evidence는 032의 baseline일 뿐이며, 032 completion evidence가 아니다.
+Detached daemon, managed language runtime 설치, live plugin reload, local API/TUI parity는 이 scoped closure에서 보장하지 않는다.
