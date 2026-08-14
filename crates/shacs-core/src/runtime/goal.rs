@@ -7,7 +7,13 @@ use shacs_eval::evaluator::{
 };
 use shacs_session::Session;
 
+use super::goal_accounting::{
+    ensure_legal_transition, transition_fact, GoalObservedState, GoalStopReason,
+    GoalTransitionError, GoalTransitionFact, GoalTransitionKind,
+};
+
 pub const PERSISTENT_GOAL_METADATA_KEY: &str = "persistent_goal";
+pub const GOAL_TRANSITION_HISTORY_METADATA_KEY: &str = "goal_transition_history";
 pub const DEFAULT_GOAL_TURN_BUDGET: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +30,10 @@ pub struct PersistentGoal {
     pub last_verdict: Option<GoalCompletionVerdict>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_transition: Option<GoalTransitionFact>,
+    #[serde(default)]
+    pub transitions: Vec<GoalTransitionFact>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +198,8 @@ impl RuntimePolicyGateResults {
 pub struct RuntimeContinuationDecision {
     pub goal_id: String,
     pub source_verdict_id: String,
+    pub source_turn_id: String,
+    pub expected_turns_used: u32,
     pub remaining_turns: u32,
     pub user_interrupted: bool,
     pub recursion_guard_passed: bool,
@@ -467,15 +479,18 @@ fn consume_goal_continue(
                 RuntimeSelectedAction::ContinueGoal,
                 None,
             );
-            decision.next_goal_state = Some(apply_completion_verdict(
+            decision.next_goal_state = apply_completion_verdict(
                 goal,
                 GoalCompletionVerdict::Continue,
                 None,
                 gates.now_ms.to_string(),
-            ));
+            )
+            .ok();
             decision.continuation = Some(RuntimeContinuationDecision {
                 goal_id: goal.id.clone(),
                 source_verdict_id: input.verdict_id.clone(),
+                source_turn_id: input.turn_id.clone().unwrap_or_default(),
+                expected_turns_used: goal.turns_used.saturating_add(1),
                 remaining_turns,
                 user_interrupted: gates.user_interrupted,
                 recursion_guard_passed: gates.recursion_guard_passed,
@@ -501,6 +516,9 @@ fn consume_goal_terminal(
     verdict: GoalCompletionVerdict,
     action: RuntimeSelectedAction,
 ) -> (RuntimeDecisionRecord, LedgerConsumptionRecord) {
+    if gates.user_interrupted || gates.runtime_cancelled {
+        return blocked_by_policy(input, current_goal, gates, "runtime is interrupted");
+    }
     let Some(goal) = current_goal else {
         return blocked_by_policy(input, current_goal, gates, "no persistent goal to update");
     };
@@ -525,12 +543,14 @@ fn consume_goal_terminal(
         action,
         input.blocked_reason.clone(),
     );
-    let next_goal = apply_completion_verdict(
+    let Ok(next_goal) = apply_completion_verdict(
         goal,
         verdict,
         input.blocked_reason.clone(),
         gates.now_ms.to_string(),
-    );
+    ) else {
+        return blocked_by_policy(input, current_goal, gates, "illegal goal transition");
+    };
     decision.next_goal_state = Some(next_goal);
     if verdict == GoalCompletionVerdict::Blocked {
         decision.unblock_hint = input
@@ -712,62 +732,167 @@ pub fn create_persistent_goal(
     let text = text.into();
     let now = now.into();
     let id = goal_id(&session_id, &text, &now);
-    PersistentGoal {
+    let mut goal = PersistentGoal {
         id,
         session_id,
         text,
         status: PersistentGoalStatus::Active,
         created_at: now.clone(),
-        updated_at: now,
+        updated_at: now.clone(),
         turn_budget,
         turns_used: 0,
         last_verdict: None,
         blocked_reason: None,
-    }
+        last_transition: None,
+        transitions: Vec::new(),
+    };
+    let fact = transition_fact(
+        &goal,
+        GoalObservedState::Unavailable,
+        GoalStopReason::GoalSet,
+        now,
+    );
+    goal.last_transition = Some(fact.clone());
+    goal.transitions.push(fact);
+    goal
 }
 
-pub fn pause_goal(goal: &PersistentGoal, now: impl Into<String>) -> PersistentGoal {
+pub fn pause_goal(
+    goal: &PersistentGoal,
+    now: impl Into<String>,
+) -> Result<PersistentGoal, GoalTransitionError> {
+    ensure_legal_transition(goal.status, GoalTransitionKind::Pause)?;
+    let now = now.into();
     let mut next = goal.clone();
     next.status = PersistentGoalStatus::Paused;
-    next.updated_at = now.into();
-    next
+    next.updated_at = now.clone();
+    append_transition(
+        &mut next,
+        goal.status.into(),
+        GoalStopReason::PausedByUser,
+        now,
+    );
+    Ok(next)
 }
 
-pub fn resume_goal(goal: &PersistentGoal, now: impl Into<String>) -> PersistentGoal {
+pub fn resume_goal(
+    goal: &PersistentGoal,
+    now: impl Into<String>,
+) -> Result<PersistentGoal, GoalTransitionError> {
+    ensure_legal_transition(goal.status, GoalTransitionKind::Resume)?;
+    let now = now.into();
     let mut next = goal.clone();
     next.status = PersistentGoalStatus::Active;
     next.blocked_reason = None;
-    next.updated_at = now.into();
-    next
+    next.updated_at = now.clone();
+    append_transition(
+        &mut next,
+        goal.status.into(),
+        GoalStopReason::ResumedByUser,
+        now,
+    );
+    Ok(next)
 }
 
-pub fn clear_goal(goal: &PersistentGoal, now: impl Into<String>) -> PersistentGoal {
+pub fn clear_goal(
+    goal: &PersistentGoal,
+    now: impl Into<String>,
+) -> Result<PersistentGoal, GoalTransitionError> {
+    ensure_legal_transition(goal.status, GoalTransitionKind::Clear)?;
+    let now = now.into();
     let mut next = goal.clone();
     next.status = PersistentGoalStatus::Cleared;
-    next.updated_at = now.into();
-    next
+    next.updated_at = now.clone();
+    append_transition(
+        &mut next,
+        goal.status.into(),
+        GoalStopReason::ClearedByUser,
+        now,
+    );
+    Ok(next)
 }
 
-pub fn mark_goal_done(goal: &PersistentGoal, now: impl Into<String>) -> PersistentGoal {
-    let mut next = goal.clone();
-    next.status = PersistentGoalStatus::Done;
-    next.last_verdict = Some(GoalCompletionVerdict::Done);
-    next.blocked_reason = None;
-    next.updated_at = now.into();
-    next
+pub fn mark_goal_done(
+    goal: &PersistentGoal,
+    now: impl Into<String>,
+) -> Result<PersistentGoal, GoalTransitionError> {
+    ensure_legal_transition(goal.status, GoalTransitionKind::MarkDoneByUser)?;
+    terminal_goal(
+        goal,
+        GoalCompletionVerdict::Done,
+        None,
+        GoalStopReason::MarkedDoneByUser,
+        now,
+    )
 }
 
 pub fn mark_goal_blocked(
     goal: &PersistentGoal,
     reason: impl Into<String>,
     now: impl Into<String>,
-) -> PersistentGoal {
+) -> Result<PersistentGoal, GoalTransitionError> {
+    ensure_legal_transition(goal.status, GoalTransitionKind::BlockByUser)?;
+    terminal_goal(
+        goal,
+        GoalCompletionVerdict::Blocked,
+        Some(reason.into()),
+        GoalStopReason::BlockedByUser,
+        now,
+    )
+}
+
+fn append_transition(
+    goal: &mut PersistentGoal,
+    prior_state: GoalObservedState,
+    stop_reason: GoalStopReason,
+    observed_at: String,
+) {
+    let fact = transition_fact(goal, prior_state, stop_reason, observed_at);
+    goal.last_transition = Some(fact.clone());
+    goal.transitions.push(fact);
+}
+
+fn terminal_goal(
+    goal: &PersistentGoal,
+    verdict: GoalCompletionVerdict,
+    blocked_reason: Option<String>,
+    stop_reason: GoalStopReason,
+    now: impl Into<String>,
+) -> Result<PersistentGoal, GoalTransitionError> {
+    let now = now.into();
     let mut next = goal.clone();
-    next.status = PersistentGoalStatus::Blocked;
-    next.last_verdict = Some(GoalCompletionVerdict::Blocked);
-    next.blocked_reason = Some(reason.into());
-    next.updated_at = now.into();
-    next
+    next.status = match verdict {
+        GoalCompletionVerdict::Done => PersistentGoalStatus::Done,
+        GoalCompletionVerdict::Blocked => PersistentGoalStatus::Blocked,
+        GoalCompletionVerdict::Continue => PersistentGoalStatus::Active,
+    };
+    next.last_verdict = Some(verdict);
+    next.blocked_reason = blocked_reason;
+    next.updated_at = now.clone();
+    append_transition(&mut next, goal.status.into(), stop_reason, now);
+    Ok(next)
+}
+
+pub fn record_goal_stop(
+    goal: &PersistentGoal,
+    stop_reason: GoalStopReason,
+    user_interrupted: bool,
+    now: impl Into<String>,
+) -> Result<PersistentGoal, GoalTransitionError> {
+    let kind = match stop_reason {
+        GoalStopReason::UserInterrupted => GoalTransitionKind::UserInterrupted,
+        GoalStopReason::ContinuationBudgetExhausted => {
+            GoalTransitionKind::ContinuationBudgetExhausted
+        }
+        _ => GoalTransitionKind::EvaluatorContinue,
+    };
+    ensure_legal_transition(goal.status, kind)?;
+    let mut next = goal.clone();
+    let mut fact = transition_fact(&next, goal.status.into(), stop_reason, now.into());
+    fact.user_interrupted = user_interrupted;
+    next.last_transition = Some(fact.clone());
+    next.transitions.push(fact);
+    Ok(next)
 }
 
 pub fn apply_completion_verdict(
@@ -775,24 +900,48 @@ pub fn apply_completion_verdict(
     verdict: GoalCompletionVerdict,
     blocked_reason: Option<String>,
     now: impl Into<String>,
-) -> PersistentGoal {
+) -> Result<PersistentGoal, GoalTransitionError> {
     let now = now.into();
     match verdict {
-        GoalCompletionVerdict::Done => mark_goal_done(goal, now),
-        GoalCompletionVerdict::Blocked => mark_goal_blocked(
-            goal,
-            blocked_reason
-                .unwrap_or_else(|| "Goal completion evaluator reported blocked.".to_owned()),
-            now,
-        ),
+        GoalCompletionVerdict::Done => {
+            ensure_legal_transition(goal.status, GoalTransitionKind::EvaluatorDone)?;
+            terminal_goal(
+                goal,
+                verdict,
+                None,
+                GoalStopReason::EvaluatorCompletionAccepted,
+                now,
+            )
+        }
+        GoalCompletionVerdict::Blocked => {
+            ensure_legal_transition(goal.status, GoalTransitionKind::EvaluatorBlocked)?;
+            terminal_goal(
+                goal,
+                verdict,
+                Some(
+                    blocked_reason.unwrap_or_else(|| {
+                        "Goal completion evaluator reported blocked.".to_owned()
+                    }),
+                ),
+                GoalStopReason::EvaluatorBlocked,
+                now,
+            )
+        }
         GoalCompletionVerdict::Continue => {
+            ensure_legal_transition(goal.status, GoalTransitionKind::EvaluatorContinue)?;
             let mut next = goal.clone();
             next.status = PersistentGoalStatus::Active;
             next.turns_used = next.turns_used.saturating_add(1);
             next.last_verdict = Some(GoalCompletionVerdict::Continue);
             next.blocked_reason = None;
-            next.updated_at = now;
-            next
+            next.updated_at = now.clone();
+            append_transition(
+                &mut next,
+                goal.status.into(),
+                GoalStopReason::EvaluatorContinuationAccepted,
+                now,
+            );
+            Ok(next)
         }
     }
 }
@@ -843,6 +992,18 @@ pub fn store_persistent_goal(
     session
         .metadata
         .insert(PERSISTENT_GOAL_METADATA_KEY.to_owned(), value);
+    let history = session
+        .metadata
+        .entry(GOAL_TRANSITION_HISTORY_METADATA_KEY.to_owned())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let Some(history) = history.as_array_mut() {
+        for transition in &goal.transitions {
+            let value = serde_json::to_value(transition).map_err(GoalMetadataError::Serialize)?;
+            if !history.contains(&value) {
+                history.push(value);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -926,22 +1087,24 @@ mod tests {
     #[test]
     fn helper_lifecycle_updates_state_without_losing_goal_identity() {
         let goal = create_persistent_goal("session-1", "ship it", "now", 2);
-        let paused = pause_goal(&goal, "later");
+        let paused = pause_goal(&goal, "later").expect("active goal pauses");
         assert_eq!(paused.id, goal.id);
         assert_eq!(paused.status, PersistentGoalStatus::Paused);
 
-        let resumed = resume_goal(&paused, "later-2");
+        let resumed = resume_goal(&paused, "later-2").expect("paused goal resumes");
         assert_eq!(resumed.status, PersistentGoalStatus::Active);
 
         let continued =
-            apply_completion_verdict(&resumed, GoalCompletionVerdict::Continue, None, "later-3");
+            apply_completion_verdict(&resumed, GoalCompletionVerdict::Continue, None, "later-3")
+                .expect("active goal continues");
         assert_eq!(continued.turns_used, 1);
         assert_eq!(
             continued.last_verdict,
             Some(GoalCompletionVerdict::Continue)
         );
 
-        let blocked = mark_goal_blocked(&continued, "needs input", "later-4");
+        let blocked =
+            mark_goal_blocked(&continued, "needs input", "later-4").expect("active goal blocks");
         assert_eq!(blocked.status, PersistentGoalStatus::Blocked);
         assert_eq!(blocked.blocked_reason.as_deref(), Some("needs input"));
     }
