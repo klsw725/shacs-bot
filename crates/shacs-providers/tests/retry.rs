@@ -4,12 +4,43 @@ use shacs_providers::{
     is_transient_response, retry_after_from_response, retry_decision_for_error,
     retry_decision_for_error_with_identical_count, retry_decision_for_response, GenerationSettings,
     LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest, ProviderRetryMode,
-    ProviderRetryWaiter, RetryStopReason,
+    ProviderRetryWaiter, RetryStopReason, ThreadRetryWaiter,
 };
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::error::Error;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+#[test]
+fn retry_waiter_stops_promptly_when_cancellation_is_requested() {
+    // Given
+    let cancellation = Arc::new(AtomicBool::new(true));
+    let mut waiter = ThreadRetryWaiter::new(Some(cancellation.clone()));
+    let started = Instant::now();
+
+    // When
+    waiter.wait(5.0, "cancelled retry");
+
+    // Then
+    assert!(cancellation.load(Ordering::SeqCst));
+    assert!(started.elapsed() < Duration::from_millis(100));
+}
+
+#[test]
+fn retry_waiter_clamps_backoff_to_invocation_deadline() {
+    // Given
+    let mut waiter =
+        ThreadRetryWaiter::with_deadline(None, Some(Instant::now() + Duration::from_millis(20)));
+    let started = Instant::now();
+
+    // When
+    waiter.wait(5.0, "deadline-bounded retry");
+
+    // Then
+    assert!(started.elapsed() < Duration::from_millis(150));
+}
 
 #[test]
 fn retry_policy_skips_non_error_responses() -> Result<(), Box<dyn Error>> {
