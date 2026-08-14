@@ -245,6 +245,7 @@ pub struct AgentRunSpec<'a> {
     pub agent_hook: Option<Arc<dyn AgentHook>>,
     pub context_tools: RuntimeContextTools,
     pub cancellation_token: Option<CancellationToken>,
+    pub deadline: Option<std::time::Instant>,
     pub execution_scope: Option<ExecutionScope>,
     pub execution_ledger: Option<Arc<Mutex<RuntimeExecutionLedger>>>,
     pub execution_snapshot_resolver: ExecutionSnapshotResolver,
@@ -288,6 +289,7 @@ impl<'a> AgentRunSpec<'a> {
             agent_hook: None,
             context_tools: RuntimeContextTools::new(),
             cancellation_token: None,
+            deadline: None,
             execution_scope: None,
             execution_ledger: None,
             execution_snapshot_resolver: Arc::new(|request| {
@@ -2200,7 +2202,11 @@ fn request_model(
         .agent_hook
         .as_ref()
         .is_some_and(|hook| hook.wants_streaming());
-    let mut waiter = RetryWaiter::new(spec.retry_wait_callback.as_ref());
+    let mut waiter = RetryWaiter::new(
+        spec.retry_wait_callback.as_ref(),
+        spec.cancellation_token.as_ref(),
+        spec.deadline,
+    );
     if spec.provider_event_callback.is_some() || hook_wants_streaming {
         let callback = spec.provider_event_callback.clone();
         let hook = spec.agent_hook.clone();
@@ -2399,14 +2405,19 @@ enum RetryWaiter<'a> {
 }
 
 impl<'a> RetryWaiter<'a> {
-    fn new(callback: Option<&'a RetryWaitCallback>) -> Self {
+    fn new(
+        callback: Option<&'a RetryWaitCallback>,
+        cancellation_token: Option<&CancellationToken>,
+        deadline: Option<std::time::Instant>,
+    ) -> Self {
+        let thread = ThreadRetryWaiter::with_deadline(
+            cancellation_token.map(CancellationToken::shared_flag),
+            deadline,
+        );
         if let Some(callback) = callback {
-            Self::Callback(CallbackRetryWaiter {
-                callback,
-                thread: ThreadRetryWaiter,
-            })
+            Self::Callback(CallbackRetryWaiter { callback, thread })
         } else {
-            Self::Thread(ThreadRetryWaiter)
+            Self::Thread(thread)
         }
     }
 }
