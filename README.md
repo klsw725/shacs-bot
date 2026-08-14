@@ -86,6 +86,23 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime recover --wo
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- ask "hello" --workspace /tmp/shacs-ws
 ```
 
+Spec 033 local goal owner는 CLI와 local API에서 같은 typed snapshot을 사용합니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- goal set "finish local verification" --workspace /tmp/shacs-ws --session cli:direct
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- goal status --workspace /tmp/shacs-ws --session cli:direct
+curl http://127.0.0.1:8900/v1/sessions/cli%3Adirect/goal-snapshot
+```
+
+사용자 소유 local artifact에 대한 CAS self-improvement는 `improve propose|inspect|apply|verify|candidate|rollback`으로 실행합니다. Target은 `--root` 아래 상대 경로만 허용하며 apply/rollback은 current hook, confirmation, process, sandbox, credential gate를 다시 확인합니다.
+
+Recorded-only trajectory와 release evidence는 다음 binary로 생성합니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- trajectory record --workspace /tmp/shacs-ws --store /tmp/shacs-trajectories --trajectory-id local-run-1 --instruction "record local no-provider automation"
+cargo run --manifest-path crates/Cargo.toml -p shacs-core --bin spec033-release-runner -- --run-id local-release-1 --repo-root . --evidence-root /tmp/shacs-spec033-release --trajectory-root /tmp/shacs-trajectories --trajectory-id local-run-1 --data-dir /tmp/shacs-spec033-data-v6 --mode current-worktree
+```
+
 Permission approval prompt는 한 번 승인/거절, session remembered 승인/거절, project remembered 승인/거절의 여섯 가지 선택을 지원합니다. Project remembered rule은 config data directory의 `permissions.json`에 현재 canonical workspace bucket별로 저장되며, `exec` arity prefix, workspace path exact/subtree, `web_fetch` origin, MCP tool name, exact action matcher 중 구현된 요약만 재사용합니다. 현재 rule은 CLI에서 read/revoke할 수 있고, slash/API/TUI projection도 같은 redacted rule summary를 소비합니다:
 
 ```sh
@@ -115,7 +132,7 @@ curl http://127.0.0.1:8900/v1/readiness
 curl http://127.0.0.1:8900/v1/diagnostics
 ```
 
-Spec 035 surface parity 범위에서 실제 QA를 통과한 표면은 TUI, `agent` REPL, secret-ref-only onboard wizard, readiness API/diagnostics, delivery hint projection, release runner artifact입니다. TUI는 live runtime projection을 읽어 session, approval, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 먼저 workspace template과 session store를 만들고, 표시할 session을 생성한 뒤 `--once` 또는 interactive TUI를 실행하세요:
+Spec 035 implemented baseline에서 기존 QA 기록이 있는 표면은 TUI, `agent` REPL, secret-ref-only onboard wizard, readiness API/diagnostics, delivery hint projection, release runner artifact입니다. 이는 현재 Spec 035 closure PASS 또는 planned Tasks/reconnect parity 완료를 뜻하지 않습니다. TUI는 live runtime projection을 읽어 session, approval, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 먼저 workspace template과 session store를 만들고, 표시할 session을 생성한 뒤 `--once` 또는 interactive TUI를 실행하세요:
 
 ```sh
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- onboard --workspace /tmp/shacs-ws

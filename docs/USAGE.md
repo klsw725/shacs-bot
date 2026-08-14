@@ -1,5 +1,28 @@
 # shacs-bot 사용 가이드
 
+## Spec 033 goal, improvement, replay
+
+Goal lifecycle은 session metadata owner를 사용하며 CLI와 local API가 같은 typed projection을 반환합니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- goal set "verify the workspace" --workspace /tmp/shacs-ws --session cli:direct
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- goal pause --workspace /tmp/shacs-ws --session cli:direct
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- goal resume --workspace /tmp/shacs-ws --session cli:direct
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- goal done --workspace /tmp/shacs-ws --session cli:direct
+curl http://127.0.0.1:8900/v1/sessions/cli%3Adirect/goal-snapshot
+```
+
+Local artifact 개선 흐름은 명시적 root, proposal ID, target, candidate, immutable snapshot, expected digest를 요구합니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- improve propose --root /tmp/shacs-improvement --proposal proposal-1 --target settings.json --candidate /tmp/candidate.json --snapshot /tmp/execution-snapshot.json --expected-digest sha256:<digest>
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- improve apply --root /tmp/shacs-improvement --proposal proposal-1
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- improve verify --root /tmp/shacs-improvement --proposal proposal-1
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- improve candidate --root /tmp/shacs-improvement --proposal proposal-1
+```
+
+Replay는 local recorded trajectory만 읽고 hook, confirmation, credential refresh, process, sandbox, delivery, config/apply를 실행하지 않습니다. 자세한 closure evidence와 non-guarantees는 [`specs/033-evaluation-automation-live-integration/CLOSURE.md`](specs/033-evaluation-automation-live-integration/CLOSURE.md)를 참고하세요.
+
 이 문서는 사용자가 자신의 workspace에서 `shacs-bot`을 로컬로 실행하는 경우를 기준으로 합니다. SaaS control plane, fleet operator, 별도 관리자 조직을 전제로 하지 않습니다.
 
 설계 계약과 invariant는 [docs/specs/README.md](specs/README.md)를 참고하세요. 이 문서는 현재 Rust CLI에서 실제 구현된 사용자-facing 표면을 설명합니다.
@@ -454,6 +477,19 @@ shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 - `GET /v1/sessions/{session}`
 - `GET /v1/sessions/{session}/history`
 - `GET /v1/sessions/{session}/diagnostics`
+- `GET /v1/sessions/{session}/goal-snapshot`
+- `POST /v1/sessions/{session}/goal/set`
+- `POST /v1/sessions/{session}/goal/pause`
+- `POST /v1/sessions/{session}/goal/resume`
+- `POST /v1/sessions/{session}/goal/clear`
+- `POST /v1/sessions/{session}/goal/done`
+- `POST /v1/sessions/{session}/goal/blocked`
+- `POST /v1/improvements/{proposal}/propose`
+- `GET /v1/improvements/{proposal}/inspect`
+- `POST /v1/improvements/{proposal}/apply`
+- `POST /v1/improvements/{proposal}/verify`
+- `GET /v1/improvements/{proposal}/candidate`
+- `POST /v1/improvements/{proposal}/rollback`
 - `POST /v1/chat/completions`
 - `GET /ws` 또는 configured WebSocket path when the server is started with WebSocket support
 
