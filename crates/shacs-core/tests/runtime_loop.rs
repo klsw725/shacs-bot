@@ -15,11 +15,12 @@ use shacs_core::runtime::{
     runtime_skill_list_disclosure, runtime_skill_reference_evidence, runtime_skill_view_disclosure,
     runtime_spec018_local_api_projection, ActiveLoopTask, AgentHook, AgentHookContext, AgentLoop,
     AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentRunSpec, AgentRunner,
-    AutoCompact, AutoEvaluatorVerdictKind, AutomationSourceEvent, AutomationSourceEventKind,
-    BridgeUnderlyingMappingEvidence, CancellationToken, ChildResultEnvelope, ChildResultStatus,
-    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBuilder,
-    DockerContainmentSnapshot, DreamLifecycle, EvaluatorConfidence, EvaluatorDecisionInput,
-    EvaluatorScopeMatch, ExecutionOutcome, GoalCompletionVerdict, InboundMessage,
+    AutoCompact, AutoEvaluatorVerdictKind, AutomationExecutionControl, AutomationSourceEvent,
+    AutomationSourceEventKind, BridgeUnderlyingMappingEvidence, CancellationToken,
+    ChildResultEnvelope, ChildResultStatus, ContainerNetworkMode, ContainerRuntimeKind,
+    ContainmentSnapshotRef, ContextBuilder, DockerContainmentSnapshot, DreamLifecycle,
+    DurableWorkDispatcher, EvaluatorConfidence, EvaluatorDecisionInput, EvaluatorScopeMatch,
+    ExecutionOutcome, GoalCompletionVerdict, GoalEvaluatorOutcome, InboundMessage,
     LateResultDecision, LedgerConsumptionStatus, LoopTaskRegisterResult, McpLifecycle,
     MergeDecision, MessageBus, PermissionMode, PermissionModeSnapshot, PermissionPolicyReason,
     PermissionRuleInput, PermissionSecretRefEvidence, PermissionSecretRefStatus,
@@ -35,27 +36,30 @@ use shacs_core::runtime::{
     SubagentMergeState, SubagentOutcomeKind, SubagentProgressUpdate, SubagentRuntime,
     SubagentRuntimeConfig, SurfaceActionOutcomeKind, ToolEvent, ToolExecutionContext,
     ToolSearchConfig, ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
-    PERSISTENT_GOAL_METADATA_KEY, RECENT_AUTO_MODE_DENIAL_LIMIT,
+    GOAL_EVALUATOR_BOUNDARY_METADATA_KEY, PERSISTENT_GOAL_METADATA_KEY,
+    RECENT_AUTO_MODE_DENIAL_LIMIT,
 };
 use shacs_core::tools::{
     assemble_tool_surface, ActivationState, AskUserTool, JsonMap, MessageTool, SchemaFragment,
     SpawnRequest, SpawnTool, Tool, ToolParameters, ToolRegistry, ToolResult,
     ToolSurfaceAssemblyInput,
 };
+use shacs_eval::completion_boundary::{EvaluatorRoute, OwnerResultLocator};
 use shacs_eval::evaluator::{
     ApprovalDecisionKind, ApprovalDecisionRef, ApprovalRequestRef, ApprovalRequestStatus,
     AuthoredSkillLifecycleState, AutomationExecutionMode, AutomationRecursionGuard,
     AuxiliaryJudgeRole, AuxiliaryJudgeRoute, AuxiliaryJudgeRouteFinalStatus,
     CheckpointGateDecision, CheckpointGateStatus, ConfidenceBand, CuratorActionProposed,
-    CuratorProposalFinalStatus, CuratorTargetKind, DeliverySeverity, EvaluatorKind, EvidenceKind,
-    EvidenceRef, ImprovementActorAuthority, ImprovementApplyRecord, ImprovementApproval,
-    ImprovementAuthorityAction, ImprovementCheckpoint, ImprovementProposal,
-    ImprovementProposalStatus, ImprovementRollbackResult, ImprovementVerificationNextAction,
-    JudgeFallbackReason, MemoryEvidenceOmittedReason, OwnerPrimitiveRef, ProjectionStatus,
-    ProjectionSurface, ProviderFallbackStep, ProviderModelSnapshot, ProviderRouteRole,
-    RedactionStatus, ReplayComparisonSeverity, ReplayComparisonStatus, ReplayDatasetItem,
-    ReplayRunStatus, ReplaySafeMockOutcome, ReplayToolOutcomePolicy, SuggestedNextAction,
-    TaskOutcomeClass, TrajectoryRecord, TrajectoryStats, VerdictKind,
+    CuratorProposalFinalStatus, CuratorTargetKind, DeliverySeverity, EvaluatorKind,
+    EvaluatorVerdictEnvelope, EvidenceKind, EvidenceRef, ImprovementActorAuthority,
+    ImprovementApplyRecord, ImprovementApproval, ImprovementAuthorityAction, ImprovementCheckpoint,
+    ImprovementProposal, ImprovementProposalStatus, ImprovementRollbackResult,
+    ImprovementVerificationNextAction, JudgeFallbackReason, MemoryEvidenceOmittedReason,
+    OwnerPrimitiveRef, ProjectionStatus, ProjectionSurface, ProviderFallbackStep,
+    ProviderModelSnapshot, ProviderRouteRole, RedactionStatus, ReplayComparisonSeverity,
+    ReplayComparisonStatus, ReplayDatasetItem, ReplayRunStatus, ReplaySafeMockOutcome,
+    ReplayToolOutcomePolicy, SuggestedNextAction, TaskOutcomeClass, TrajectoryRecord,
+    TrajectoryStats, VerdictKind,
 };
 use shacs_providers::{
     GenerationSettings, LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest,
@@ -68,6 +72,8 @@ use shacs_redaction::{
 use shacs_session::durable_event::{
     DurableEventStore, SESSION_TURN_ACCEPTED, SESSION_TURN_COMPLETED,
 };
+use shacs_session::durable_replay::evaluate_durable_recovery;
+use shacs_session::durable_work::evaluate_durable_work_recovery;
 use shacs_skills::{
     SkillDescriptor, SkillRegistry, SkillRegistryEntry, SkillRegistryStatus, SkillSourceKind,
 };
@@ -77,6 +83,7 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 struct ProcExecCountingTool {
     calls: Arc<AtomicUsize>,
@@ -1841,11 +1848,637 @@ fn loop_goal_lifecycle_persists_metadata_without_provider_call() -> Result<(), B
         raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["status"],
         serde_json::to_value(PersistentGoalStatus::Cleared)?
     );
+    assert_eq!(
+        raw["metadata"]["goal_transition_history"]
+            .as_array()
+            .map(Vec::len),
+        Some(8)
+    );
+    assert_ne!(
+        raw["metadata"]["goal_transition_history"][0]["goal_id"],
+        raw["metadata"]["goal_transition_history"][6]["goal_id"]
+    );
     assert!(client
         .requests
         .lock()
         .map_err(|error| error.to_string())?
         .is_empty());
+    Ok(())
+}
+
+#[test]
+fn conservative_production_evaluator_returns_unknown_without_provider() -> Result<(), Box<dyn Error>>
+{
+    let goal = create_persistent_goal("cli:conservative", "ship it", "1", 8);
+    let request = shacs_core::runtime::build_goal_completion_evaluation_request(
+        &goal,
+        shacs_eval::evaluator::EvaluationTriggerSource::SessionTurn,
+        1,
+    )?;
+    let evaluator = shacs_core::runtime::ConservativeGoalCompletionEvaluator;
+
+    let outcome = shacs_core::runtime::GoalCompletionEvaluator::evaluate(&evaluator, &request)?;
+
+    assert_eq!(outcome.output.verdict_kind, VerdictKind::LowConfidence);
+    assert_eq!(outcome.output.confidence, 0.0);
+    assert_eq!(outcome.advisory_verdict, None);
+    assert_eq!(outcome.requested_route, EvaluatorRoute::Notify);
+    Ok(())
+}
+
+#[test]
+fn loop_turn_end_records_advisory_evaluator_once_without_implicit_goal_mutation(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("turn complete".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls_capture = calls.clone();
+    let evaluator = Arc::new(
+        move |_request: &shacs_core::runtime::GoalEvaluationRequest| {
+            calls_capture.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(GoalEvaluatorOutcome {
+                output: EvaluatorVerdictEnvelope {
+                    verdict_kind: VerdictKind::Pass,
+                    reason: "complete".to_owned(),
+                    confidence: 1.0,
+                    evidence_refs: Vec::new(),
+                    suggested_next_action: SuggestedNextAction::None,
+                    expires_at_ms: None,
+                    redaction_status: RedactionStatus::AlreadySafe,
+                    evaluator_version: "test-v1".to_owned(),
+                },
+                requested_route: EvaluatorRoute::Notify,
+                owner_result_locator: OwnerResultLocator::new("session:cli:goal-eval:turn-1"),
+                advisory_verdict: None,
+            })
+        },
+    );
+    let mut loop_runtime = AgentLoop::new(
+        bus,
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_goal_completion_evaluator(evaluator);
+    loop_runtime.process_direct("/goal ship it", Some("cli:goal-eval"))?;
+
+    loop_runtime.process_direct("work", Some("cli:goal-eval"))?;
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:goal-eval")
+        .ok_or("missing persisted evaluator session")?;
+    assert_eq!(
+        raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["status"],
+        "active"
+    );
+    assert_eq!(
+        raw["metadata"][GOAL_EVALUATOR_BOUNDARY_METADATA_KEY]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        raw["metadata"][GOAL_EVALUATOR_BOUNDARY_METADATA_KEY][0]["route"],
+        "notify"
+    );
+    assert_eq!(
+        raw["metadata"][GOAL_EVALUATOR_BOUNDARY_METADATA_KEY][0]["owner_result_locator"],
+        "session:cli:goal-eval:turn-1"
+    );
+    Ok(())
+}
+
+#[test]
+fn evaluator_failure_preserves_successful_owner_turn() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("turn complete".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let evaluator = Arc::new(
+        |_request: &shacs_core::runtime::GoalEvaluationRequest| -> Result<
+            GoalEvaluatorOutcome,
+            String,
+        > { Err("evaluator unavailable".to_owned()) },
+    );
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_goal_completion_evaluator(evaluator);
+    loop_runtime.process_direct("/goal ship it", Some("cli:evaluator-failure"))?;
+
+    let result = loop_runtime.process_direct("work", Some("cli:evaluator-failure"))?;
+
+    assert_eq!(result.final_content.as_deref(), Some("turn complete"));
+    assert_eq!(result.stop_reason, "completed");
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:evaluator-failure")
+        .ok_or("missing persisted owner turn")?;
+    assert!(raw["messages"].as_array().is_some_and(|messages| {
+        messages
+            .iter()
+            .any(|message| message["content"] == "turn complete")
+    }));
+    assert_eq!(
+        raw["metadata"]["goal_evaluator_last_failure"]["status"],
+        "advisory_failed"
+    );
+    assert_eq!(
+        raw["metadata"]["goal_evaluator_last_failure"]["owner_turn_preserved"],
+        true
+    );
+    Ok(())
+}
+
+#[test]
+fn loop_turn_end_routes_explicit_advisory_verdict_through_runtime_policy(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("turn complete".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let evaluator = Arc::new(
+        move |_request: &shacs_core::runtime::GoalEvaluationRequest| {
+            Ok(GoalEvaluatorOutcome {
+                output: EvaluatorVerdictEnvelope {
+                    verdict_kind: VerdictKind::Pass,
+                    reason: "complete".to_owned(),
+                    confidence: 1.0,
+                    evidence_refs: Vec::new(),
+                    suggested_next_action: SuggestedNextAction::None,
+                    expires_at_ms: None,
+                    redaction_status: RedactionStatus::AlreadySafe,
+                    evaluator_version: "test-v1".to_owned(),
+                },
+                requested_route: EvaluatorRoute::Verify,
+                owner_result_locator: OwnerResultLocator::new("session:cli:goal-apply:turn-1"),
+                advisory_verdict: Some(GoalCompletionVerdict::Done),
+            })
+        },
+    );
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        AgentLoopConfig::new(workspace.path(), "test-model"),
+    )
+    .with_goal_completion_evaluator(evaluator);
+    loop_runtime.process_direct("/goal ship it", Some("cli:goal-apply"))?;
+
+    loop_runtime.process_direct("work", Some("cli:goal-apply"))?;
+
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:goal-apply")
+        .ok_or("missing applied evaluator session")?;
+    assert_eq!(
+        raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["status"],
+        "done"
+    );
+    assert_eq!(
+        raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["transitions"][1]["stop_reason"],
+        "evaluator_completion_accepted"
+    );
+    assert_eq!(
+        raw["metadata"]["goal_evaluator_runtime_decisions"][0]["selected_action"],
+        "complete_goal"
+    );
+    assert_eq!(
+        raw["metadata"]["goal_evaluator_consumptions"][0]["status"],
+        "consumed"
+    );
+    Ok(())
+}
+
+#[test]
+fn loop_turn_end_dispatches_goal_continuation_as_next_durable_turn() -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let event_root = workspace.path().join("runtime/durable-events");
+    let checkpoint_root = workspace.path().join("runtime/durable-checkpoints");
+    let payload_root = workspace.path().join("runtime/work-payloads");
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![
+        LlmResponse {
+            content: Some("first turn".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("continued turn".to_owned()),
+            ..LlmResponse::default()
+        },
+    ]);
+    let evaluations = Arc::new(AtomicUsize::new(0));
+    let evaluations_capture = Arc::clone(&evaluations);
+    let evaluator = Arc::new(
+        move |_request: &shacs_core::runtime::GoalEvaluationRequest| {
+            let verdict = if evaluations_capture.fetch_add(1, Ordering::SeqCst) == 0 {
+                GoalCompletionVerdict::Continue
+            } else {
+                GoalCompletionVerdict::Done
+            };
+            Ok(GoalEvaluatorOutcome {
+                output: EvaluatorVerdictEnvelope {
+                    verdict_kind: VerdictKind::Pass,
+                    reason: "test decision".to_owned(),
+                    confidence: 1.0,
+                    evidence_refs: Vec::new(),
+                    suggested_next_action: SuggestedNextAction::None,
+                    expires_at_ms: None,
+                    redaction_status: RedactionStatus::AlreadySafe,
+                    evaluator_version: "test-v1".to_owned(),
+                },
+                requested_route: EvaluatorRoute::Verify,
+                owner_result_locator: OwnerResultLocator::new(format!(
+                    "session:cli:goal-continue:turn-{}",
+                    evaluations_capture.load(Ordering::SeqCst)
+                )),
+                advisory_verdict: Some(verdict),
+            })
+        },
+    );
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.durable_event_root = Some(event_root.clone());
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    )
+    .with_goal_completion_evaluator(evaluator);
+    loop_runtime.process_direct("/goal ship it", Some("cli:goal-continue"))?;
+
+    loop_runtime.process_direct("start work", Some("cli:goal-continue"))?;
+
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let pending = replay.state.ok_or("missing durable continuation state")?;
+    let admission = evaluate_durable_work_recovery(&pending.work, &payload_root, 1);
+    assert_eq!(admission.due_work_ids.len(), 1);
+    let mut dispatcher =
+        DurableWorkDispatcher::open(&event_root, &payload_root, bus.clone(), "test-owner", 100)?;
+    dispatcher.dispatch_due(&pending.work, &admission, 1)?;
+    let follow_up = bus.consume_inbound().ok_or("missing durable follow-up")?;
+    assert_eq!(follow_up.session_key(), "cli:goal-continue");
+    assert_eq!(
+        follow_up.metadata["goal_continuation"]["remaining_turns"],
+        8
+    );
+
+    loop_runtime.process_message(follow_up)?;
+
+    assert_eq!(evaluations.load(Ordering::SeqCst), 2);
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:goal-continue")
+        .ok_or("missing continued goal session")?;
+    assert_eq!(
+        raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["status"],
+        "done"
+    );
+    let requests = client.requests.lock().map_err(|error| error.to_string())?;
+    assert_eq!(requests.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn continuation_enqueue_failure_does_not_persist_evaluator_accounting() -> Result<(), Box<dyn Error>>
+{
+    // Given
+    let workspace = tempfile::tempdir()?;
+    let event_root = workspace.path().join("runtime/durable-events");
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("owner turn complete".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let evaluator = Arc::new(|_request: &shacs_core::runtime::GoalEvaluationRequest| {
+        Ok(GoalEvaluatorOutcome {
+            output: EvaluatorVerdictEnvelope {
+                verdict_kind: VerdictKind::Pass,
+                reason: "continue".to_owned(),
+                confidence: 1.0,
+                evidence_refs: Vec::new(),
+                suggested_next_action: SuggestedNextAction::None,
+                expires_at_ms: None,
+                redaction_status: RedactionStatus::AlreadySafe,
+                evaluator_version: "test-v1".to_owned(),
+            },
+            requested_route: EvaluatorRoute::Continue,
+            owner_result_locator: OwnerResultLocator::new("session:cli:enqueue-failure:turn-1"),
+            advisory_verdict: Some(GoalCompletionVerdict::Continue),
+        })
+    });
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.durable_event_root = Some(event_root.clone());
+    let mut loop_runtime = AgentLoop::new(
+        MessageBus::new(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    )
+    .with_goal_completion_evaluator(evaluator);
+    loop_runtime.process_direct("/goal ship it", Some("cli:enqueue-failure"))?;
+    std::fs::write(workspace.path().join("runtime/work-payloads"), b"blocked")?;
+
+    // When
+    let result = loop_runtime.process_direct("work", Some("cli:enqueue-failure"))?;
+
+    // Then
+    assert_eq!(result.final_content.as_deref(), Some("owner turn complete"));
+    let raw = loop_runtime
+        .session_manager()
+        .read_session_file("cli:enqueue-failure")
+        .ok_or("missing persisted owner turn")?;
+    assert!(raw["metadata"]
+        .get(GOAL_EVALUATOR_BOUNDARY_METADATA_KEY)
+        .is_none());
+    assert!(raw["metadata"]
+        .get("goal_evaluator_runtime_decisions")
+        .is_none());
+    assert!(raw["metadata"].get("goal_evaluator_consumptions").is_none());
+    assert_eq!(
+        raw["metadata"][PERSISTENT_GOAL_METADATA_KEY]["turns_used"],
+        0
+    );
+    assert_eq!(
+        raw["metadata"]["goal_evaluator_last_failure"]["status"],
+        "advisory_failed"
+    );
+    Ok(())
+}
+
+#[test]
+fn paused_goal_suppresses_already_leased_continuation_before_provider_turn(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let event_root = workspace.path().join("runtime/durable-events");
+    let checkpoint_root = workspace.path().join("runtime/durable-checkpoints");
+    let payload_root = workspace.path().join("runtime/work-payloads");
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("first turn".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let evaluations = Arc::new(AtomicUsize::new(0));
+    let evaluations_capture = Arc::clone(&evaluations);
+    let evaluator = Arc::new(
+        move |_request: &shacs_core::runtime::GoalEvaluationRequest| {
+            evaluations_capture.fetch_add(1, Ordering::SeqCst);
+            Ok(GoalEvaluatorOutcome {
+                output: EvaluatorVerdictEnvelope {
+                    verdict_kind: VerdictKind::Pass,
+                    reason: "continue".to_owned(),
+                    confidence: 1.0,
+                    evidence_refs: Vec::new(),
+                    suggested_next_action: SuggestedNextAction::None,
+                    expires_at_ms: None,
+                    redaction_status: RedactionStatus::AlreadySafe,
+                    evaluator_version: "test-v1".to_owned(),
+                },
+                requested_route: EvaluatorRoute::Verify,
+                owner_result_locator: OwnerResultLocator::new("session:cli:stale:turn-1"),
+                advisory_verdict: Some(GoalCompletionVerdict::Continue),
+            })
+        },
+    );
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.durable_event_root = Some(event_root.clone());
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    )
+    .with_goal_completion_evaluator(evaluator);
+    loop_runtime.process_direct("/goal ship it", Some("cli:stale"))?;
+    loop_runtime.process_direct("start work", Some("cli:stale"))?;
+    let pending = evaluate_durable_recovery(&event_root, &checkpoint_root)
+        .state
+        .ok_or("missing continuation")?;
+    let admission = evaluate_durable_work_recovery(&pending.work, &payload_root, 1);
+    let mut dispatcher =
+        DurableWorkDispatcher::open(&event_root, &payload_root, bus.clone(), "owner", 100)?;
+    dispatcher.dispatch_due(&pending.work, &admission, 1)?;
+    let follow_up = bus.consume_inbound().ok_or("missing follow-up")?;
+    shacs_core::runtime::apply_goal_surface_action(
+        workspace.path(),
+        "cli:stale",
+        shacs_core::runtime::GoalSurfaceAction::Pause,
+        "2",
+    )?;
+
+    let result = loop_runtime.process_message(follow_up)?;
+
+    assert_eq!(result.stop_reason, "stale_goal_continuation");
+    assert_eq!(evaluations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        client
+            .requests
+            .lock()
+            .map_err(|error| error.to_string())?
+            .len(),
+        1
+    );
+    let terminal = evaluate_durable_recovery(&event_root, &checkpoint_root)
+        .state
+        .ok_or("missing terminal state")?;
+    assert_eq!(
+        terminal
+            .work
+            .items
+            .values()
+            .find(|item| item.work_id.starts_with("goal-continuation-"))
+            .ok_or("missing continuation work")?
+            .state,
+        shacs_session::durable_work::ReplayWorkState::Cancelled
+    );
+    Ok(())
+}
+
+#[test]
+fn interrupted_goal_suppresses_already_leased_continuation_before_provider_turn(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let event_root = workspace.path().join("runtime/durable-events");
+    let checkpoint_root = workspace.path().join("runtime/durable-checkpoints");
+    let payload_root = workspace.path().join("runtime/work-payloads");
+    let bus = MessageBus::new();
+    let registry = ToolRegistry::new();
+    let client = MockProvider::new(vec![LlmResponse {
+        content: Some("first turn".to_owned()),
+        ..LlmResponse::default()
+    }]);
+    let evaluator = Arc::new(|_request: &shacs_core::runtime::GoalEvaluationRequest| {
+        Ok(GoalEvaluatorOutcome {
+            output: EvaluatorVerdictEnvelope {
+                verdict_kind: VerdictKind::Pass,
+                reason: "continue".to_owned(),
+                confidence: 1.0,
+                evidence_refs: Vec::new(),
+                suggested_next_action: SuggestedNextAction::None,
+                expires_at_ms: None,
+                redaction_status: RedactionStatus::AlreadySafe,
+                evaluator_version: "test-v1".to_owned(),
+            },
+            requested_route: EvaluatorRoute::Verify,
+            owner_result_locator: OwnerResultLocator::new("session:cli:interrupted:turn-1"),
+            advisory_verdict: Some(GoalCompletionVerdict::Continue),
+        })
+    });
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.durable_event_root = Some(event_root.clone());
+    let mut loop_runtime = AgentLoop::new(
+        bus.clone(),
+        SessionManager::new(workspace.path())?,
+        ContextBuilder::new(workspace.path()),
+        &registry,
+        &client,
+        config,
+    )
+    .with_goal_completion_evaluator(evaluator);
+    loop_runtime.process_direct("/goal ship it", Some("cli:interrupted"))?;
+    loop_runtime.process_direct("start work", Some("cli:interrupted"))?;
+    let pending = evaluate_durable_recovery(&event_root, &checkpoint_root)
+        .state
+        .ok_or("missing continuation")?;
+    let admission = evaluate_durable_work_recovery(&pending.work, &payload_root, 1);
+    let mut dispatcher =
+        DurableWorkDispatcher::open(&event_root, &payload_root, bus.clone(), "owner", 100)?;
+    dispatcher.dispatch_due(&pending.work, &admission, 1)?;
+    let follow_up = bus.consume_inbound().ok_or("missing follow-up")?;
+    let mut session = loop_runtime
+        .session_manager()
+        .load_existing("cli:interrupted")
+        .ok_or("missing goal session")?;
+    let goal = shacs_core::runtime::persistent_goal_from_session(&session)
+        .ok_or("missing persistent goal")?;
+    let interrupted = shacs_core::runtime::record_goal_stop(
+        &goal,
+        shacs_core::runtime::GoalStopReason::UserInterrupted,
+        true,
+        "2",
+    )?;
+    shacs_core::runtime::store_persistent_goal(&mut session, &interrupted)?;
+    loop_runtime.session_manager_mut().save(&session)?;
+
+    let result = loop_runtime.process_message(follow_up)?;
+
+    assert_eq!(result.stop_reason, "stale_goal_continuation");
+    assert_eq!(
+        client
+            .requests
+            .lock()
+            .map_err(|error| error.to_string())?
+            .len(),
+        1
+    );
+    let terminal = evaluate_durable_recovery(&event_root, &checkpoint_root)
+        .state
+        .ok_or("missing terminal state")?;
+    assert_eq!(
+        terminal
+            .work
+            .items
+            .values()
+            .find(|item| item.work_id.starts_with("goal-continuation-"))
+            .ok_or("missing continuation work")?
+            .state,
+        shacs_session::durable_work::ReplayWorkState::Cancelled
+    );
+    Ok(())
+}
+
+#[test]
+fn goal_surface_mutation_waits_for_agent_turn_and_preserves_both_updates(
+) -> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let mut manager = SessionManager::new(workspace.path())?;
+    manager.save(&Session::new("cli:goal-race"))?;
+    shacs_core::runtime::apply_goal_surface_action(
+        workspace.path(),
+        "cli:goal-race",
+        shacs_core::runtime::GoalSurfaceAction::Set {
+            text: "ship it".to_owned(),
+            turn_budget: 8,
+        },
+        "1",
+    )?;
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let entered_provider = entered.clone();
+    let release_provider = release.clone();
+    let client = BlockingProvider {
+        entered: entered_provider,
+        release: release_provider,
+    };
+    let registry = ToolRegistry::new();
+    let workspace_path = workspace.path().to_path_buf();
+
+    std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+        let turn = scope.spawn(|| -> Result<(), AgentLoopError> {
+            let mut runtime = AgentLoop::new(
+                MessageBus::new(),
+                SessionManager::new(&workspace_path)?,
+                ContextBuilder::new(&workspace_path),
+                &registry,
+                &client,
+                AgentLoopConfig::new(&workspace_path, "test-model"),
+            );
+            runtime.process_direct("work", Some("cli:goal-race"))?;
+            Ok(())
+        });
+        entered.wait();
+        let mutation = scope.spawn(|| {
+            shacs_core::runtime::apply_goal_surface_action(
+                &workspace_path,
+                "cli:goal-race",
+                shacs_core::runtime::GoalSurfaceAction::Pause,
+                "2",
+            )
+        });
+        release.wait();
+        turn.join().map_err(|_| "turn panicked")??;
+        mutation.join().map_err(|_| "mutation panicked")??;
+        Ok(())
+    })?;
+
+    let session = SessionManager::open_existing(workspace.path())?
+        .and_then(|manager| manager.load_existing("cli:goal-race"))
+        .ok_or("missing raced session")?;
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(
+        shacs_core::runtime::persistent_goal_from_session(&session)
+            .ok_or("missing raced goal")?
+            .status,
+        PersistentGoalStatus::Paused
+    );
     Ok(())
 }
 
@@ -2677,6 +3310,11 @@ fn subagent_finish_publishes_synthetic_inbound_and_closes_active_task() -> Resul
         || inbound.metadata["injected_event"] != "subagent_result"
         || inbound.metadata["subagent_task_id"] != outcome.envelope.child_task_id
         || inbound.metadata["subagent_outcome"]["outcome"] != "completed"
+        || !matches!(
+            inbound.owner_accepted_automation_result(),
+            Some(shacs_core::runtime::OwnerAcceptedAutomationResult::SubagentTerminal { result_ref })
+                if result_ref == &outcome.envelope.child_task_id
+        )
         || inbound.metadata["late_result_decision"]["kind"] != "accepted"
         || inbound.metadata["execution_fact"]["outcome"]["domain"] != "subagent"
         || inbound.metadata["execution_fact"]["outcome"]["outcome"] != "completed"
@@ -2777,7 +3415,8 @@ fn subagent_failed_timedout_and_cancelled_finishes_record_formal_outcomes(
             origin_chat_id: "direct".to_owned(),
             session_key: format!("session-{status:?}"),
         })?;
-        let result = ChildResultEnvelope::from_spawn(&outcome.envelope, status, "case result");
+        let result =
+            ChildResultEnvelope::from_spawn(&outcome.envelope, status.clone(), "case result");
 
         let decision = runtime.publish_child_result(result);
         let inbound = bus.consume_inbound().ok_or("missing typed reentry")?;
@@ -2791,6 +3430,10 @@ fn subagent_failed_timedout_and_cancelled_finishes_record_formal_outcomes(
                 != Some(&ExecutionOutcome::Subagent(expected_outcome))
             || inbound.metadata["subagent_command"] != expected_command
             || inbound.metadata["late_result_decision"]["kind"] != "accepted"
+            || (status == ChildResultStatus::TimedOut
+                && inbound.owner_accepted_automation_result().is_some())
+            || (status != ChildResultStatus::TimedOut
+                && inbound.owner_accepted_automation_result().is_none())
         {
             return Err(format!(
                 "subagent terminal outcome drifted: decision={decision:?} inbound={inbound:?} ledger={ledger:?}"
@@ -6030,6 +6673,48 @@ fn subagent_second_delivery_is_classified_as_duplicate_without_republishing(
 }
 
 #[test]
+fn subagent_stale_and_duplicate_results_never_expose_terminal_automation_metadata(
+) -> Result<(), Box<dyn Error>> {
+    let bus = MessageBus::new();
+    let runtime = SubagentRuntime::with_bus(bus.clone());
+    let outcome = runtime.spawn_from_request(SpawnRequest {
+        task: "Accept once".to_owned(),
+        label: None,
+        origin_channel: "cli".to_owned(),
+        origin_chat_id: "direct".to_owned(),
+        session_key: "session-1".to_owned(),
+    })?;
+    let result = ChildResultEnvelope::from_spawn(
+        &outcome.envelope,
+        ChildResultStatus::Completed,
+        "Accepted summary",
+    );
+    assert_eq!(
+        runtime.publish_child_result(result.clone()),
+        MergeDecision::AcceptSummaryOnly
+    );
+    let accepted = bus.consume_inbound().ok_or("missing accepted reentry")?;
+    assert!(accepted.owner_accepted_automation_result().is_some());
+
+    assert!(matches!(
+        runtime.publish_child_result(result),
+        MergeDecision::DiscardAsDuplicate { .. }
+    ));
+    let mut stale = ChildResultEnvelope::from_spawn(
+        &outcome.envelope,
+        ChildResultStatus::Completed,
+        "Stale summary",
+    );
+    stale.parent_turn_id = "turn:stale".to_owned();
+    assert!(matches!(
+        runtime.publish_child_result(stale),
+        MergeDecision::DiscardAsStale { .. }
+    ));
+    assert!(bus.try_consume_inbound().is_none());
+    Ok(())
+}
+
+#[test]
 fn subagent_later_attempt_after_timeout_is_classified_as_late_without_republishing(
 ) -> Result<(), Box<dyn Error>> {
     let bus = MessageBus::new();
@@ -8727,13 +9412,18 @@ fn loop_observes_registered_cancellation_token_before_provider_call() -> Result<
     if register_result != LoopTaskRegisterResult::Registered {
         return Err(format!("task registration drifted: {register_result:?}").into());
     }
+    let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
+    config.execution_control = Some(AutomationExecutionControl::with_timeout(
+        "automation-test",
+        Duration::from_secs(1),
+    ));
     let mut loop_runtime = AgentLoop::new(
         bus,
         SessionManager::new(workspace.path())?,
         ContextBuilder::new(workspace.path()),
         &registry,
         &client,
-        AgentLoopConfig::new(workspace.path(), "test-model"),
+        config,
     )
     .with_loop_task_registry(loop_task_registry);
 
@@ -10367,6 +11057,30 @@ impl ProviderClient for MockProvider {
             .map_err(|error| provider_error(error.to_string()))?
             .pop_front()
             .ok_or_else(|| provider_error("no mock response"))
+    }
+
+    fn chat_stream(
+        &self,
+        request: ProviderRequest,
+        _on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat(request)
+    }
+}
+
+struct BlockingProvider {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+impl ProviderClient for BlockingProvider {
+    fn chat(&self, _request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+        self.entered.wait();
+        self.release.wait();
+        Ok(LlmResponse {
+            content: Some("turn complete".to_owned()),
+            ..LlmResponse::default()
+        })
     }
 
     fn chat_stream(

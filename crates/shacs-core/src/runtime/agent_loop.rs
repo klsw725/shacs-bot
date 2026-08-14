@@ -9,23 +9,25 @@ use crate::runtime::{
     resolve_context_reference,
 };
 use crate::runtime::{
+    build_goal_completion_evaluation_request, clear_goal, create_persistent_goal,
+    mark_goal_blocked, mark_goal_done, pause_goal, persistent_goal_from_session, record_goal_stop,
+    remove_persistent_goal, resume_goal, store_persistent_goal,
+};
+use crate::runtime::{
     build_workflow_checkpoint, decide_workflow_admission,
     run_live_runtime_workflow_with_checkpoint_callback, runtime_workflow_diagnostics,
     workflow_projection, RuntimeWorkflowLiveInput, RuntimeWorkflowLiveOptions,
     RuntimeWorkflowLiveWorktreeConfig,
 };
 use crate::runtime::{
-    clear_goal, create_persistent_goal, mark_goal_blocked, mark_goal_done, pause_goal,
-    persistent_goal_from_session, remove_persistent_goal, resume_goal, store_persistent_goal,
-};
-use crate::runtime::{
     AgentHook, AgentRunSpec, AgentRunner, ApprovalActor, ApprovalCacheEntry, ApprovalDecision,
     ApprovalDecisionKind, ApprovalRequest, AutoCompact, AutoCompactArchiveOutcome,
-    AutoEvaluatorVerdict, ContainmentSnapshotRef, ContextBudgetInput, ContextBuildRequest,
-    ContextBuilder, ContextFileDiscoveryOptions, ContextFileProjection, ContextProviderHandoff,
-    ContextReferenceResolverConfig, DreamProcessor, DreamRunOutcome, ExecutionDomain,
-    ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope, ExecutionSnapshot,
-    GoalMetadataError, InboundMessage, LateResultDecision, LiveExecutionSnapshotSource,
+    AutoEvaluatorVerdict, AutomationExecutionControl, ContainmentSnapshotRef, ContextBudgetInput,
+    ContextBuildRequest, ContextBuilder, ContextFileDiscoveryOptions, ContextFileProjection,
+    ContextProviderHandoff, ContextReferenceResolverConfig, DreamProcessor, DreamRunOutcome,
+    ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope,
+    ExecutionSnapshot, GoalCompletionEvaluator, GoalCompletionVerdict, GoalMetadataError,
+    GoalStopReason, InboundMessage, LateResultDecision, LiveExecutionSnapshotSource,
     LoopTaskCancelResult, LoopTaskRegistry, MemoryConsolidationError, MemoryStore, MessageBus,
     OutboundMessage, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
     PermissionRuleInput, PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
@@ -47,7 +49,7 @@ use crate::runtime::{
     WorkflowQuarantinePolicy, WorkflowRecipeReadiness, WorkflowResumeDecision,
     WorkflowResumePolicy, WorkflowRunState, WorkflowStep, WorkflowStopCondition,
     WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
-    DEFAULT_GOAL_TURN_BUDGET,
+    DEFAULT_GOAL_TURN_BUDGET, GOAL_EVALUATOR_BOUNDARY_METADATA_KEY,
 };
 use crate::tools::{
     ask_user_options_from_messages, ask_user_outbound, assemble_tool_surface, bridge_tool_names,
@@ -65,6 +67,7 @@ use shacs_config::{
     AutoApprovalConfig, RawCredential, RememberedPermissionEffect, RememberedPermissionFileStore,
     RememberedPermissionMatcher, RememberedPermissionRule, WorkspacePermissionId,
 };
+use shacs_eval::evaluator::EvaluationTriggerSource;
 use shacs_projection::{
     build_remembered_permission_projection, format_remembered_permission_projection,
     format_remembered_permission_rule, normalize_remembered_permission_rule_prefix,
@@ -235,6 +238,7 @@ pub struct AgentLoopConfig {
     pub durable_event_root: Option<PathBuf>,
     pub provider_runtime_override: Option<RawCredential>,
     pub execution_snapshot_source: LiveExecutionSnapshotSource,
+    pub execution_control: Option<AutomationExecutionControl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +280,7 @@ impl AgentLoopConfig {
             durable_event_root: None,
             provider_runtime_override: None,
             execution_snapshot_source: LiveExecutionSnapshotSource::default(),
+            execution_control: None,
         }
     }
 }
@@ -333,6 +338,7 @@ pub struct AgentLoop<'a> {
     durable_events: Option<DurableEventStore>,
     stopped: bool,
     execution_snapshots: Arc<Mutex<Vec<ExecutionSnapshot>>>,
+    goal_completion_evaluator: Option<Arc<dyn GoalCompletionEvaluator>>,
 }
 
 impl<'a> AgentLoop<'a> {
@@ -365,6 +371,7 @@ impl<'a> AgentLoop<'a> {
             durable_events: None,
             stopped: false,
             execution_snapshots: Arc::new(Mutex::new(Vec::new())),
+            goal_completion_evaluator: None,
         }
     }
 
@@ -385,6 +392,14 @@ impl<'a> AgentLoop<'a> {
 
     pub fn with_agent_hook(mut self, hook: Arc<dyn AgentHook>) -> Self {
         self.agent_hook = Some(hook);
+        self
+    }
+
+    pub fn with_goal_completion_evaluator(
+        mut self,
+        evaluator: Arc<dyn GoalCompletionEvaluator>,
+    ) -> Self {
+        self.goal_completion_evaluator = Some(evaluator);
         self
     }
 
@@ -777,8 +792,25 @@ impl<'a> AgentLoop<'a> {
         routed_command: Option<shacs_command::RoutedLoopCommand>,
         _turn_guard: SessionTurnGuard,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        let _mutation_guard =
+            shacs_session::SessionMutationGuard::acquire(&self.config.workspace, &session_key)?;
+        self.sessions.invalidate(&session_key);
         let mut session = self.sessions.get_or_create(&session_key);
         materialize_recovery_markers(&mut session);
+
+        if self.suppress_stale_goal_continuation(&message, &session)? {
+            return Ok(AgentLoopTurnResult {
+                session_key,
+                final_content: None,
+                stop_reason: "stale_goal_continuation".to_owned(),
+                tools_used: Vec::new(),
+                outbound_count: 0,
+                had_injections: false,
+                command: None,
+                ask_user_options: Vec::new(),
+                message_tool_delivery_configured: self.message_delivery_target.is_some(),
+            });
+        }
 
         if let Some(route) = routed_command {
             return self.handle_loop_command(route.command, &message, session, true, None);
@@ -1378,11 +1410,24 @@ impl<'a> AgentLoop<'a> {
         let cancellation_token = self
             .task_registry
             .cancellation_token(&session_key)
+            .or_else(|| {
+                self.config
+                    .execution_control
+                    .as_ref()
+                    .map(AutomationExecutionControl::cancellation_token)
+            })
             .or_else(|| self.turn_lock.cancellation_token(&session_key));
         let provider_invocation = cancellation_token.as_ref().map_or_else(
             || ProviderInvocation::uncancelled(self.config.provider_runtime_override.clone()),
             |token| token.provider_invocation(self.config.provider_runtime_override.clone()),
         );
+        let provider_invocation = self
+            .config
+            .execution_control
+            .as_ref()
+            .map_or(provider_invocation.clone(), |control| {
+                provider_invocation.with_deadline(control.deadline())
+            });
         let provider_client = ProviderInvocationClient::new(self.client, &provider_invocation);
         let mut spec = AgentRunSpec::new(
             initial_messages.clone(),
@@ -1410,6 +1455,11 @@ impl<'a> AgentLoop<'a> {
         };
         spec.context_tools = self.context_tools.clone();
         spec.cancellation_token = cancellation_token;
+        spec.deadline = self
+            .config
+            .execution_control
+            .as_ref()
+            .map(AutomationExecutionControl::deadline);
         spec.execution_scope = Some(ExecutionScope::new(session_key.clone(), turn_id.clone()));
         spec.execution_ledger = Some(execution_ledger.clone());
         let snapshot_source = self.config.execution_snapshot_source.clone();
@@ -1498,7 +1548,7 @@ impl<'a> AgentLoop<'a> {
         drop(execution_ledger);
         self.append_durable_fact(
             &session_key,
-            Some(turn_id),
+            Some(turn_id.clone()),
             SESSION_TURN_COMPLETED,
             json!({
                 "stop_reason": run_result.stop_reason.clone(),
@@ -1508,6 +1558,20 @@ impl<'a> AgentLoop<'a> {
             }),
             Some(provenance),
         )?;
+        self.sessions.save(&session)?;
+        if self
+            .evaluate_goal_at_turn_end(&message, &mut session, &turn_id, &run_result.stop_reason)
+            .is_err()
+        {
+            session.metadata.insert(
+                "goal_evaluator_last_failure".to_owned(),
+                json!({
+                    "turn_id": turn_id,
+                    "status": "advisory_failed",
+                    "owner_turn_preserved": true,
+                }),
+            );
+        }
         self.sessions.save(&session)?;
 
         let (outbound_count, ask_user_options) =
@@ -1527,6 +1591,254 @@ impl<'a> AgentLoop<'a> {
 
     fn effective_session_key(&self, message: &InboundMessage) -> String {
         effective_message_session_key(message, self.config.unified_session_key.as_deref())
+    }
+
+    fn evaluate_goal_at_turn_end(
+        &self,
+        message: &InboundMessage,
+        session: &mut Session,
+        turn_id: &str,
+        stop_reason: &str,
+    ) -> Result<(), AgentLoopError> {
+        let mut evaluated_session = session.clone();
+        let (Some(evaluator), Some(goal)) = (
+            self.goal_completion_evaluator.as_ref(),
+            persistent_goal_from_session(&evaluated_session),
+        ) else {
+            return Ok(());
+        };
+        if goal.status != PersistentGoalStatus::Active {
+            return Ok(());
+        }
+        let user_interrupted = matches!(stop_reason, "cancelled" | "interrupted");
+        let budget_exhausted =
+            stop_reason == "max_iterations" || goal.turns_used >= goal.turn_budget;
+        let request = build_goal_completion_evaluation_request(
+            &goal,
+            EvaluationTriggerSource::SessionTurn,
+            now_unix_ms(),
+        )?;
+        let mut request = request;
+        request.request.turn_id = Some(turn_id.to_owned());
+        let outcome = evaluator
+            .evaluate(&request)
+            .map_err(AgentLoopError::GoalEvaluator)?;
+        let boundary = crate::runtime::goal_evaluator::boundary_record(
+            request.clone(),
+            &outcome,
+            user_interrupted,
+            if budget_exhausted {
+                0
+            } else {
+                goal.turn_budget.saturating_sub(goal.turns_used)
+            },
+        );
+        let boundary_value =
+            serde_json::to_value(boundary).map_err(GoalMetadataError::Serialize)?;
+        if let Some(boundaries) = evaluated_session
+            .metadata
+            .entry(GOAL_EVALUATOR_BOUNDARY_METADATA_KEY.to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+        {
+            boundaries.push(boundary_value);
+        }
+
+        let next = if user_interrupted {
+            record_goal_stop(&goal, GoalStopReason::UserInterrupted, true, now_iso())?
+        } else if budget_exhausted {
+            record_goal_stop(
+                &goal,
+                GoalStopReason::ContinuationBudgetExhausted,
+                false,
+                now_iso(),
+            )?
+        } else if let Some(verdict) = outcome.advisory_verdict {
+            let input = crate::runtime::EvaluatorDecisionInput {
+                verdict_id: outcome.owner_result_locator.as_str().to_owned(),
+                evaluator_kind: shacs_eval::evaluator::EvaluatorKind::GoalCompletion,
+                evaluator_version: outcome.output.evaluator_version.clone(),
+                source_ledger_ref: format!(
+                    "session_metadata:{GOAL_EVALUATOR_BOUNDARY_METADATA_KEY}"
+                ),
+                frozen_snapshot_digest: request.request.snapshot_digest.clone(),
+                current_target_snapshot_digest: request.request.snapshot_digest.clone(),
+                goal_id: Some(goal.id.clone()),
+                turn_id: Some(turn_id.to_owned()),
+                expires_at_ms: outcome.output.expires_at_ms,
+                suggested_action: outcome.output.suggested_next_action.clone(),
+                confidence: outcome.output.confidence,
+                evidence_refs: outcome.output.evidence_refs.clone(),
+                redaction_status: outcome.output.redaction_status.clone(),
+                explicit_goal_completion_verdict: Some(verdict),
+                blocked_reason: (verdict == GoalCompletionVerdict::Blocked)
+                    .then(|| outcome.output.reason.clone()),
+                unblock_hint: None,
+                created_at_ms: now_unix_ms(),
+                correlation_id: request.request.correlation_id.clone(),
+                superseding_verdict_ref: None,
+                task_outcome_class: None,
+            };
+            let gates = crate::runtime::RuntimePolicyGateResults {
+                now_ms: input.created_at_ms,
+                user_interrupted,
+                runtime_cancelled: user_interrupted,
+                ..crate::runtime::RuntimePolicyGateResults::all_passed()
+            };
+            let existing: Vec<crate::runtime::LedgerConsumptionRecord> = evaluated_session
+                .metadata
+                .get("goal_evaluator_consumptions")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default();
+            let (decision, consumption) =
+                crate::runtime::consume_evaluator_decision(&input, Some(&goal), &existing, &gates);
+            evaluated_session.metadata.insert(
+                "goal_evaluator_runtime_decisions".to_owned(),
+                serde_json::to_value([decision.clone()]).map_err(GoalMetadataError::Serialize)?,
+            );
+            let mut consumptions = existing;
+            consumptions.push(consumption);
+            evaluated_session.metadata.insert(
+                "goal_evaluator_consumptions".to_owned(),
+                serde_json::to_value(consumptions).map_err(GoalMetadataError::Serialize)?,
+            );
+            if let Some(continuation) = decision.continuation.as_ref() {
+                self.enqueue_goal_continuation(message, &evaluated_session, turn_id, continuation)?;
+            }
+            decision.next_goal_state.unwrap_or(goal)
+        } else {
+            goal
+        };
+        store_persistent_goal(&mut evaluated_session, &next)?;
+        *session = evaluated_session;
+        Ok(())
+    }
+
+    fn enqueue_goal_continuation(
+        &self,
+        message: &InboundMessage,
+        session: &Session,
+        turn_id: &str,
+        continuation: &crate::runtime::RuntimeContinuationDecision,
+    ) -> Result<(), AgentLoopError> {
+        let Some(event_root) = self.config.durable_event_root.as_ref() else {
+            return Ok(());
+        };
+        let Some(runtime_root) = event_root.parent() else {
+            return Err(AgentLoopError::GoalEvaluator(
+                "durable event root has no runtime parent".to_owned(),
+            ));
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(continuation.goal_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(continuation.source_verdict_id.as_bytes());
+        let work_id = format!("goal-continuation-{:x}", hasher.finalize());
+        let mut follow_up = InboundMessage::new(
+            message.channel.clone(),
+            message.sender_id.clone(),
+            message.chat_id.clone(),
+            "Continue working toward the active persistent goal.",
+        )
+        .with_session_key_override(session.key.clone());
+        follow_up.metadata.insert(
+            "goal_continuation".to_owned(),
+            serde_json::to_value(continuation).map_err(GoalMetadataError::Serialize)?,
+        );
+        follow_up.metadata.insert(
+            "goal_continuation_turn_id".to_owned(),
+            Value::String(turn_id.to_owned()),
+        );
+        let mut dispatcher = crate::runtime::DurableWorkDispatcher::open(
+            event_root,
+            runtime_root.join("work-payloads"),
+            self.bus.clone(),
+            "goal-evaluator",
+            30_000,
+        )?;
+        if let Some(existing) = dispatcher.replay_work_state()?.items.get(&work_id) {
+            if existing.session_key == session.key
+                && existing.dedupe_hint.as_deref() == Some(continuation.source_verdict_id.as_str())
+            {
+                return Ok(());
+            }
+            return Err(AgentLoopError::GoalEvaluator(format!(
+                "durable goal continuation identity collision: {work_id}"
+            )));
+        }
+        dispatcher.enqueue_inbound(
+            work_id,
+            &follow_up,
+            Some(continuation.source_verdict_id.clone()),
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn suppress_stale_goal_continuation(
+        &self,
+        message: &InboundMessage,
+        session: &Session,
+    ) -> Result<bool, AgentLoopError> {
+        let Some(value) = message.metadata.get("goal_continuation") else {
+            return Ok(false);
+        };
+        let continuation =
+            serde_json::from_value::<crate::runtime::RuntimeContinuationDecision>(value.clone())
+                .ok();
+        let current = persistent_goal_from_session(session);
+        let valid = continuation.as_ref().is_some_and(|continuation| {
+            continuation.remaining_turns > 0
+                && message
+                    .metadata
+                    .get("goal_continuation_turn_id")
+                    .and_then(Value::as_str)
+                    == Some(continuation.source_turn_id.as_str())
+                && current.as_ref().is_some_and(|goal| {
+                    goal.id == continuation.goal_id
+                        && goal.status == PersistentGoalStatus::Active
+                        && goal.turns_used == continuation.expected_turns_used
+                        && goal.turns_used < goal.turn_budget
+                        && !goal
+                            .last_transition
+                            .as_ref()
+                            .is_some_and(|transition| transition.user_interrupted)
+                })
+        });
+        if valid {
+            return Ok(false);
+        }
+        let Some(work_id) = message
+            .metadata
+            .get("durable_work_id")
+            .and_then(Value::as_str)
+        else {
+            return Ok(true);
+        };
+        let Some(event_root) = self.config.durable_event_root.as_ref() else {
+            return Ok(true);
+        };
+        let Some(runtime_root) = event_root.parent() else {
+            return Err(AgentLoopError::GoalEvaluator(
+                "durable event root has no runtime parent".to_owned(),
+            ));
+        };
+        let mut dispatcher = crate::runtime::DurableWorkDispatcher::open(
+            event_root,
+            runtime_root.join("work-payloads"),
+            self.bus.clone(),
+            "goal-evaluator",
+            30_000,
+        )?;
+        let state = dispatcher.replay_work_state()?;
+        let item = state
+            .items
+            .get(work_id)
+            .ok_or_else(|| crate::runtime::DurableDispatchError::MissingWork(work_id.to_owned()))?;
+        dispatcher.request_cancellation(item, "stale_goal_continuation")?;
+        dispatcher.record_cancelled(item, "stale_goal_continuation")?;
+        Ok(true)
     }
 
     fn maybe_consolidate_session_by_tokens(
@@ -3021,8 +3333,11 @@ pub struct AgentLoopRunSummary {
 pub enum AgentLoopError {
     Session(std::io::Error),
     DurableEvent(DurableEventError),
+    DurableDispatch(crate::runtime::DurableDispatchError),
     Memory(MemoryConsolidationError),
     GoalMetadata(GoalMetadataError),
+    GoalTransition(crate::runtime::GoalTransitionError),
+    GoalEvaluator(String),
     PermissionModeSave(String),
     Workflow(String),
     DuplicateActiveTurn { session_key: String },
@@ -3033,8 +3348,11 @@ impl fmt::Display for AgentLoopError {
         match self {
             Self::Session(error) => write!(formatter, "session persistence failed: {error}"),
             Self::DurableEvent(error) => write!(formatter, "durable event append failed: {error}"),
+            Self::DurableDispatch(error) => write!(formatter, "durable dispatch failed: {error}"),
             Self::Memory(error) => write!(formatter, "memory consolidation failed: {error}"),
             Self::GoalMetadata(error) => write!(formatter, "goal metadata failed: {error}"),
+            Self::GoalTransition(error) => write!(formatter, "goal transition failed: {error}"),
+            Self::GoalEvaluator(error) => write!(formatter, "goal evaluator failed: {error}"),
             Self::PermissionModeSave(error) => {
                 write!(formatter, "permission mode save failed: {error}")
             }
@@ -3060,6 +3378,24 @@ impl From<std::io::Error> for AgentLoopError {
 impl From<DurableEventError> for AgentLoopError {
     fn from(error: DurableEventError) -> Self {
         Self::DurableEvent(error)
+    }
+}
+
+impl From<crate::runtime::DurableDispatchError> for AgentLoopError {
+    fn from(error: crate::runtime::DurableDispatchError) -> Self {
+        Self::DurableDispatch(error)
+    }
+}
+
+impl From<crate::runtime::GoalTransitionError> for AgentLoopError {
+    fn from(error: crate::runtime::GoalTransitionError) -> Self {
+        Self::GoalTransition(error)
+    }
+}
+
+impl From<GoalMetadataError> for AgentLoopError {
+    fn from(error: GoalMetadataError) -> Self {
+        Self::GoalMetadata(error)
     }
 }
 
@@ -4887,7 +5223,8 @@ fn handle_goal_command(
             let Some(goal) = persistent_goal_from_session(session) else {
                 return Ok("No persistent goal is set.".to_owned());
             };
-            let next = mark_goal_blocked(&goal, reason, now_iso());
+            let next = mark_goal_blocked(&goal, reason, now_iso())
+                .map_err(AgentLoopError::GoalTransition)?;
             store_persistent_goal(session, &next).map_err(AgentLoopError::GoalMetadata)?;
             Ok("Goal marked blocked.".to_owned())
         }
@@ -4915,13 +5252,16 @@ fn set_goal_command(session: &mut Session, text: String) -> Result<String, Agent
 
 fn update_existing_goal(
     session: &mut Session,
-    update: impl FnOnce(&PersistentGoal, String) -> PersistentGoal,
+    update: impl FnOnce(
+        &PersistentGoal,
+        String,
+    ) -> Result<PersistentGoal, crate::runtime::GoalTransitionError>,
     success: &str,
 ) -> Result<String, AgentLoopError> {
     let Some(goal) = persistent_goal_from_session(session) else {
         return Ok("No persistent goal is set.".to_owned());
     };
-    let next = update(&goal, now_iso());
+    let next = update(&goal, now_iso()).map_err(AgentLoopError::GoalTransition)?;
     store_persistent_goal(session, &next).map_err(AgentLoopError::GoalMetadata)?;
     Ok(success.to_owned())
 }
