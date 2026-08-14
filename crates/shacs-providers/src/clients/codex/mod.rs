@@ -4,7 +4,7 @@ use crate::clients::openai_compatible::{
 use crate::clients::sse::{read_sse_frame_texts, split_sse_frame_texts};
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
-use crate::provider::{ProviderClient, ProviderEvent, ProviderRequest};
+use crate::provider::{ProviderClient, ProviderEvent, ProviderInvocation, ProviderRequest};
 use crate::registry::ProviderSpec;
 use crate::types::LlmResponse;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,15 @@ pub trait CodexHttpTransport: Send + Sync {
         &self,
         request: CodexRequestParts,
         on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+    ) -> Result<CodexHttpStreamResponse, ProviderError> {
+        self.post_json_stream_frames_bounded(request, on_frame, None)
+    }
+
+    fn post_json_stream_frames_bounded(
+        &self,
+        request: CodexRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+        _timeout: Option<Duration>,
     ) -> Result<CodexHttpStreamResponse, ProviderError> {
         let response = self.post_json_stream(request)?;
         if (200..300).contains(&response.status) {
@@ -99,62 +108,23 @@ impl CodexHttpTransport for UreqCodexHttpTransport {
         &self,
         request: CodexRequestParts,
     ) -> Result<CodexHttpStreamResponse, ProviderError> {
-        let url = join_base_and_path(&self.base_url, &request.path)?;
-        let mut http_request = self
-            .agent
-            .post(&url)
-            .header("Accept", "text/event-stream")
-            .content_type("application/json");
-        for (key, value) in &request.headers {
-            if key.eq_ignore_ascii_case("accept") || key.eq_ignore_ascii_case("content-type") {
-                continue;
-            }
-            http_request = http_request.header(key, value);
-        }
-        let body = serde_json::to_string(&request.body).map_err(|error| api_error(None, error))?;
-        let mut response = http_request.send(body).map_err(map_ureq_error)?;
-        let status = response.status().as_u16();
-        let headers = response_headers(response.headers());
-        let body = if (200..300).contains(&status) {
-            read_sse_frame_texts(
-                response.body_mut().as_reader(),
-                |_| Ok(false),
-                |error| ProviderError::Api {
-                    status: Some(status),
-                    message: error.to_string(),
-                    retryable: false,
-                    headers: headers.clone(),
-                    body: None,
-                },
-            )?
-        } else {
-            response
-                .body_mut()
-                .read_to_string()
-                .map_err(|error| ProviderError::Api {
-                    status: Some(status),
-                    message: error.to_string(),
-                    retryable: false,
-                    headers: headers.clone(),
-                    body: None,
-                })?
-        };
-        Ok(CodexHttpStreamResponse {
-            status,
-            headers,
-            body,
-        })
+        let mut ignored_frames = |_frame: &str| -> Result<bool, ProviderError> { Ok(false) };
+        self.post_json_stream_frames_bounded(request, &mut ignored_frames, None)
     }
 
-    fn post_json_stream_frames(
+    fn post_json_stream_frames_bounded(
         &self,
         request: CodexRequestParts,
         on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+        timeout: Option<Duration>,
     ) -> Result<CodexHttpStreamResponse, ProviderError> {
         let url = join_base_and_path(&self.base_url, &request.path)?;
         let mut http_request = self
             .agent
             .post(&url)
+            .config()
+            .timeout_global(timeout)
+            .build()
             .header("Accept", "text/event-stream")
             .content_type("application/json");
         for (key, value) in &request.headers {
@@ -229,18 +199,53 @@ where
         self.chat_stream(request, &mut ignored_events)
     }
 
+    fn chat_with_invocation(
+        &self,
+        request: ProviderRequest,
+        invocation: &ProviderInvocation,
+    ) -> Result<LlmResponse, ProviderError> {
+        let mut ignored_events = |_| {};
+        self.chat_stream_with_invocation(request, &mut ignored_events, invocation)
+    }
+
     fn chat_stream(
         &self,
         request: ProviderRequest,
         on_event: &mut dyn FnMut(ProviderEvent),
     ) -> Result<LlmResponse, ProviderError> {
+        self.chat_stream_bounded(request, on_event, None)
+    }
+
+    fn chat_stream_with_invocation(
+        &self,
+        request: ProviderRequest,
+        on_event: &mut dyn FnMut(ProviderEvent),
+        invocation: &ProviderInvocation,
+    ) -> Result<LlmResponse, ProviderError> {
+        if invocation.is_cancelled() {
+            return Err(api_error(None, "provider invocation cancelled"));
+        }
+        self.chat_stream_bounded(request, on_event, invocation.remaining())
+    }
+}
+
+impl<T> CodexClient<T>
+where
+    T: CodexHttpTransport,
+{
+    fn chat_stream_bounded(
+        &self,
+        request: ProviderRequest,
+        on_event: &mut dyn FnMut(ProviderEvent),
+        timeout: Option<Duration>,
+    ) -> Result<LlmResponse, ProviderError> {
         let parts = build_codex_responses_request(&request, &self.config);
         let mut stream = OpenAiResponsesStreamState::default();
-        let response = self
-            .transport
-            .post_json_stream_frames(parts, &mut |frame| {
-                stream.process_frame_text(frame, on_event)
-            })?;
+        let response = self.transport.post_json_stream_frames_bounded(
+            parts,
+            &mut |frame| stream.process_frame_text(frame, on_event),
+            timeout,
+        )?;
         if (200..300).contains(&response.status) {
             stream.finish(on_event)
         } else {
