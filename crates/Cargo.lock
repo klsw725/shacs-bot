@@ -2793,12 +2793,14 @@ dependencies = [
  "serde_json",
  "shacs-channels",
  "shacs-config",
+ "shacs-core",
  "shacs-projection",
  "shacs-providers",
  "shacs-session",
  "shacs-utils",
  "shacs-web",
  "socket2 0.5.10",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tower",
@@ -2839,6 +2841,7 @@ dependencies = [
 name = "shacs-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "fs2",
  "imap",
  "lettre",
@@ -2854,6 +2857,8 @@ dependencies = [
  "shacs-command",
  "shacs-config",
  "shacs-core",
+ "shacs-cron",
+ "shacs-eval",
  "shacs-projection",
  "shacs-providers",
  "shacs-redaction",
@@ -2865,6 +2870,7 @@ dependencies = [
  "shacs-workflow",
  "tempfile",
  "tokio",
+ "tower",
  "tungstenite",
  "ureq",
 ]
@@ -2972,6 +2978,7 @@ dependencies = [
  "shacs-config",
  "shacs-eval",
  "shacs-redaction",
+ "tempfile",
 ]
 
 [[package]]
