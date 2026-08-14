@@ -248,6 +248,10 @@ impl CancellationToken {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn shared_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
     pub(crate) fn controlled_child_abort(&self) -> ControlledChildAbort {
         ControlledChildAbort::from_flag(self.cancelled.clone())
     }
