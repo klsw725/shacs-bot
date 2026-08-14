@@ -88,12 +88,34 @@ pub struct AutomationPrd008LinkageMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutomationCoordinationOutcome {
+    pub coordinated_request: AutomationRunRequest,
     pub request: Option<AutomationRunRequest>,
     pub run_state_record: Option<AutomationRunStateRecord>,
     pub delivery_record: Option<AutomationDeliveryRecord>,
+    pub suppression: Option<AutomationSuppressionReason>,
     pub suppress_reason: Option<String>,
     pub task_outcome_eligibility: AutomationTaskOutcomeEligibility,
     pub prd008_linkage: AutomationPrd008LinkageMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationSuppressionReason {
+    InactiveHeartbeat,
+    MalformedSource,
+    Duplicate,
+    RecursionGuard { detail: String },
+}
+
+impl AutomationSuppressionReason {
+    fn detail(&self) -> &str {
+        match self {
+            Self::InactiveHeartbeat => "heartbeat has no active goal or pending automation",
+            Self::MalformedSource => "automation source lacks required evidence",
+            Self::Duplicate => "duplicate automation wake idempotency key",
+            Self::RecursionGuard { detail } => detail,
+        }
+    }
 }
 
 pub fn coordinate_automation_run(
@@ -106,7 +128,7 @@ pub fn coordinate_automation_run(
     let run_id = format!("run-{idempotency_key}");
     let prd008_linkage = prd008_linkage(event, &run_id);
 
-    if let Some(suppress_reason) =
+    if let Some(suppression) =
         suppression_reason(event, existing_run_state_records, &run_id, &idempotency_key)
     {
         return suppressed_outcome(
@@ -114,7 +136,7 @@ pub fn coordinate_automation_run(
             trigger_kind,
             trigger_ref,
             idempotency_key,
-            suppress_reason,
+            suppression,
             prd008_linkage,
         );
     }
@@ -136,9 +158,11 @@ pub fn coordinate_automation_run(
         run_state_record(&request, AutomationRunState::Queued, idempotency_key, None);
 
     AutomationCoordinationOutcome {
+        coordinated_request: request.clone(),
         request: Some(request),
         run_state_record: Some(run_state_record),
         delivery_record: delivery_record(event, &run_id, None),
+        suppression: None,
         suppress_reason: None,
         task_outcome_eligibility: task_outcome_eligibility(event, true),
         prd008_linkage,
@@ -150,19 +174,19 @@ fn suppression_reason(
     existing_run_state_records: &[AutomationRunStateRecord],
     run_id: &str,
     idempotency_key: &str,
-) -> Option<String> {
+) -> Option<AutomationSuppressionReason> {
     if matches!(event.source, AutomationSourceEventKind::Heartbeat)
         && !event.active_goal
         && !event.pending_automation
     {
-        return Some("heartbeat has no active goal or pending automation".to_owned());
+        return Some(AutomationSuppressionReason::InactiveHeartbeat);
     }
 
     match &event.source {
         AutomationSourceEventKind::Cron {
             approved_automation_rule_ref,
         } if approved_automation_rule_ref.is_none() => {
-            return Some("cron wake lacks approved automation rule ref".to_owned());
+            return Some(AutomationSuppressionReason::MalformedSource);
         }
         AutomationSourceEventKind::SubagentResult { merge_state, .. }
             if !matches!(
@@ -170,7 +194,7 @@ fn suppression_reason(
                 SubagentMergeState::Terminal | SubagentMergeState::Reviewable
             ) =>
         {
-            return Some("subagent result merge state is not terminal or reviewable".to_owned());
+            return Some(AutomationSuppressionReason::MalformedSource);
         }
         AutomationSourceEventKind::AppTaskResult {
             app_task_id,
@@ -178,19 +202,17 @@ fn suppression_reason(
             capability_scope,
             ..
         } if app_task_id.is_none() || manifest_ref.is_none() || capability_scope.is_none() => {
-            return Some("app task result lacks required evidence fields".to_owned());
+            return Some(AutomationSuppressionReason::MalformedSource);
         }
         AutomationSourceEventKind::ChannelEvent { user_visible, .. } if !user_visible => {
-            return Some("channel event is not user-visible".to_owned());
+            return Some(AutomationSuppressionReason::MalformedSource);
         }
         AutomationSourceEventKind::LocalApiBackground {
             caller_auth_ref,
             redaction_profile_ref,
             ..
         } if caller_auth_ref.is_none() || redaction_profile_ref.is_none() => {
-            return Some(
-                "local API background request lacks auth or redaction profile ref".to_owned(),
-            );
+            return Some(AutomationSuppressionReason::MalformedSource);
         }
         _ => {}
     }
@@ -199,12 +221,16 @@ fn suppression_reason(
         .iter()
         .any(|record| record.idempotency_key == idempotency_key)
     {
-        return Some("duplicate automation wake idempotency key".to_owned());
+        return Some(AutomationSuppressionReason::Duplicate);
     }
 
     let guard_decision = event.recursion_guard.evaluate_next_run(run_id);
     if !guard_decision.allowed {
-        return guard_decision.blocked_reason;
+        return Some(AutomationSuppressionReason::RecursionGuard {
+            detail: guard_decision
+                .blocked_reason
+                .unwrap_or_else(|| "automation recursion guard denied the run".to_owned()),
+        });
     }
 
     None
@@ -215,7 +241,7 @@ fn suppressed_outcome(
     trigger_kind: AutomationRunTriggerKind,
     trigger_ref: AutomationTriggerRef,
     idempotency_key: String,
-    suppress_reason: String,
+    suppression: AutomationSuppressionReason,
     prd008_linkage: AutomationPrd008LinkageMetadata,
 ) -> AutomationCoordinationOutcome {
     let request = AutomationRunRequest {
@@ -231,22 +257,24 @@ fn suppressed_outcome(
         delivery_policy_ref: event.delivery_policy_ref.clone(),
         recursion_guard_token: event.recursion_guard.token.clone(),
     };
-    let run_state_record =
-        if suppress_reason == "heartbeat has no active goal or pending automation" {
-            None
-        } else {
-            Some(run_state_record(
-                &request,
-                AutomationRunState::Suppressed,
-                idempotency_key,
-                Some(suppress_reason.clone()),
-            ))
-        };
+    let suppress_reason = suppression.detail().to_owned();
+    let run_state_record = if suppression == AutomationSuppressionReason::InactiveHeartbeat {
+        None
+    } else {
+        Some(run_state_record(
+            &request,
+            AutomationRunState::Suppressed,
+            idempotency_key,
+            Some(suppress_reason.clone()),
+        ))
+    };
 
     AutomationCoordinationOutcome {
+        coordinated_request: request.clone(),
         request: None,
         run_state_record,
         delivery_record: delivery_record(event, &request.run_id, Some(suppress_reason.clone())),
+        suppression: Some(suppression),
         suppress_reason: Some(suppress_reason),
         task_outcome_eligibility: task_outcome_eligibility(event, false),
         prd008_linkage,
