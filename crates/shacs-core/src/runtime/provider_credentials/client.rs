@@ -114,8 +114,14 @@ impl CredentialResolvingProviderClient {
             None => self.resolve()?,
         };
         match &self.transport_override {
-            Some(transport) => transport.chat(request),
-            None => resolved.client.chat(request),
+            Some(transport) => match invocation {
+                Some(invocation) => transport.chat_with_invocation(request, invocation),
+                None => transport.chat(request),
+            },
+            None => match invocation {
+                Some(invocation) => resolved.client.chat_with_invocation(request, invocation),
+                None => resolved.client.chat(request),
+            },
         }
     }
 
@@ -130,8 +136,18 @@ impl CredentialResolvingProviderClient {
             None => self.resolve()?,
         };
         match &self.transport_override {
-            Some(transport) => transport.chat_stream(request, on_event),
-            None => resolved.client.chat_stream(request, on_event),
+            Some(transport) => match invocation {
+                Some(invocation) => {
+                    transport.chat_stream_with_invocation(request, on_event, invocation)
+                }
+                None => transport.chat_stream(request, on_event),
+            },
+            None => match invocation {
+                Some(invocation) => resolved
+                    .client
+                    .chat_stream_with_invocation(request, on_event, invocation),
+                None => resolved.client.chat_stream(request, on_event),
+            },
         }
     }
 }
