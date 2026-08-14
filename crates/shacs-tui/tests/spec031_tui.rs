@@ -1,4 +1,9 @@
 use shacs_core::runtime::SurfaceAction;
+use shacs_projection::{
+    Spec033AutomationFact, Spec033AutomationJobStatus, Spec033Availability, Spec033DeliveryStatus,
+    Spec033EvidenceSource, Spec033GoalBudgetFact, Spec033GoalFact, Spec033GoalOwner,
+    Spec033GoalStatus, Spec033Owner, Spec033OwnerFact, Spec033Snapshot,
+};
 use shacs_tui::{
     input::TuiInput,
     state::{ApprovalLineage, RuntimeSnapshot, SessionKey, TuiState},
@@ -47,7 +52,7 @@ fn state_reports_unavailable_actions_without_recording_local_success() -> Result
     assert!(!render_lines(&state).join("\n").contains("requested:"));
     assert!(render_lines(&state)
         .join("\n")
-        .contains("a approve / d deny"));
+        .contains("[a] approve [d] deny"));
 
     assert_eq!(
         apply_input(&mut state, TuiInput::Cancel),
@@ -106,7 +111,7 @@ fn approval_key_help_tracks_live_action_capability() -> Result<(), Box<dyn Error
     );
     assert!(render_lines(&actionable)
         .join("\n")
-        .contains("a approve / d deny"));
+        .contains("[a] approve [d] deny"));
     assert!(!render_lines(&actionable)
         .join("\n")
         .contains("owner-fixture"));
@@ -126,7 +131,7 @@ fn approval_key_help_tracks_live_action_capability() -> Result<(), Box<dyn Error
     );
     assert!(render_lines(&unavailable)
         .join("\n")
-        .contains("a/d unavailable (no active runtime owner found)"));
+        .contains("approval unavailable: no active runtime owner found"));
 
     let empty = TuiState::from_snapshot(
         RuntimeSnapshot {
@@ -136,7 +141,7 @@ fn approval_key_help_tracks_live_action_capability() -> Result<(), Box<dyn Error
     );
     assert!(render_lines(&empty)
         .join("\n")
-        .contains("a/d unavailable (no pending approval)"));
+        .contains("approval unavailable: no pending approval"));
     Ok(())
 }
 
@@ -195,6 +200,80 @@ fn workflow_view_keeps_blocked_next_and_cjk_safe_clipping() -> Result<(), Box<dy
     Ok(())
 }
 
+#[test]
+fn tasks_view_renders_spec033_goal_and_automation_owner_facts() -> Result<(), Box<dyn Error>> {
+    // Given
+    let mut session = fixture_session("cli:one", "approval-live", 1, 0);
+    let mut projection = Spec033Snapshot::unavailable("cli:one");
+    projection.goal = Spec033GoalOwner {
+        availability: Spec033Availability::Available,
+        fact: Some(Spec033GoalFact {
+            goal_id: "goal-1".to_owned(),
+            session_id: "cli:one".to_owned(),
+            status: Spec033GoalStatus::Blocked,
+            turn_budget: 8,
+            turns_used: 3,
+            last_verdict: None,
+            blocked: true,
+            stop_reason: Some("evaluator_blocked".to_owned()),
+            budget: Spec033GoalBudgetFact {
+                turn_budget: 8,
+                turns_used: 3,
+                remaining_turns: 5,
+            },
+            usage: shacs_projection::Spec033GoalUsageSummary {
+                turn_limit: 8,
+                turns_used: 3,
+                remaining_turns: 5,
+                exhausted: false,
+            },
+            user_interrupted: false,
+            latest_transition: None,
+        }),
+        lineage: shacs_projection::Spec033EvidenceLineage::new(
+            Spec033Owner::Goal,
+            Spec033EvidenceSource::SessionMetadata,
+            vec!["session_metadata:persistent_goal".to_owned()],
+        ),
+    };
+    projection.automation = Spec033OwnerFact::available(
+        Spec033Owner::Automation,
+        Spec033EvidenceSource::DurableStore,
+        Spec033AutomationFact {
+            work_id: "work-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            turn_id: None,
+            snapshot_id: None,
+            snapshot_digest: None,
+            checkpoint_id: None,
+            artifact_refs: Vec::new(),
+            job_status: Spec033AutomationJobStatus::Succeeded,
+            delivery_status: Spec033DeliveryStatus::Failed,
+        },
+        vec!["durable_work:work-1:terminal:7".to_owned()],
+    );
+    session.spec033 = projection;
+    let state = TuiState::from_snapshot(
+        RuntimeSnapshot {
+            sessions: vec![session],
+        },
+        None,
+    );
+
+    // When
+    let rendered = render_lines(&state).join("\n");
+
+    // Then
+    assert!(rendered
+        .contains("task goal: status=blocked stop=evaluator_blocked budget=3/8 remaining=5"));
+    assert!(rendered.contains("automation: job=succeeded delivery=failed"));
+    assert!(rendered.contains("workspace improvement: unavailable"));
+    assert!(rendered.contains("workspace verify: unavailable"));
+    assert!(rendered.contains("workspace replay: unavailable"));
+    Ok(())
+}
+
 fn fixture_session(
     key: &str,
     lineage: &str,
@@ -209,6 +288,7 @@ fn fixture_session(
         recovery_markers: Vec::new(),
         checkpoint_phase: None,
         diagnostics_ref_count: 0,
+        spec033: Spec033Snapshot::unavailable(key),
         workflow: Some(shacs_session::SessionRuntimeWorkflowProjection {
             schema_label: Some("024WorkflowProjection".to_owned()),
             schema_version: Some("024WorkflowProjection.v1".to_owned()),
