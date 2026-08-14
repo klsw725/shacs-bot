@@ -7,8 +7,8 @@ use shacs_providers::{
     parse_openai_responses_response, parse_openai_responses_stream,
     resolve_openai_compatible_api_base, GenerationSettings, OpenAiCompatibleClient,
     OpenAiCompatibleRequestParts, OpenAiHttpResponse, OpenAiHttpStreamResponse,
-    OpenAiHttpTransport, ProviderClient, ProviderConfig, ProviderEvent, ProviderRequest,
-    UreqOpenAiHttpTransport,
+    OpenAiHttpTransport, ProviderClient, ProviderConfig, ProviderEvent, ProviderInvocation,
+    ProviderRequest, UreqOpenAiHttpTransport,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -17,7 +17,44 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+#[test]
+fn invocation_deadline_bounds_supported_openai_http_operation() -> Result<(), Box<dyn Error>> {
+    // Given
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let server = thread::spawn(move || -> Result<(), String> {
+        let (_stream, _) = listener.accept().map_err(|error| error.to_string())?;
+        thread::sleep(Duration::from_millis(250));
+        Ok(())
+    });
+    let client = OpenAiCompatibleClient::new(
+        ProviderConfig::default(),
+        UreqOpenAiHttpTransport::with_timeout(format!("http://{address}"), Duration::from_secs(5)),
+    );
+    let invocation =
+        ProviderInvocation::default().with_deadline(Instant::now() + Duration::from_millis(40));
+    let started = Instant::now();
+
+    // When
+    let result = client.chat_with_invocation(
+        ProviderRequest {
+            model: "test-model".to_owned(),
+            messages: vec![json!({"role": "user", "content": "hello"})],
+            tools: Vec::new(),
+            settings: GenerationSettings::default(),
+            tool_choice: None,
+        },
+        &invocation,
+    );
+
+    // Then
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_millis(200));
+    server.join().map_err(|_| "server thread panicked")??;
+    Ok(())
+}
 
 type RequestCaptureHandle = thread::JoinHandle<Result<String, String>>;
 
