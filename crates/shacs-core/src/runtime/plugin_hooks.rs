@@ -131,6 +131,20 @@ pub struct PluginHookDispatchRecord {
     pub timeout: Option<PluginHookTimeoutDiagnostic>,
 }
 
+impl PluginHookDispatchRecord {
+    pub fn successful_noop() -> Self {
+        Self {
+            plugin_id: "runtime:no-configured-hook".to_owned(),
+            event: PluginHookEvent::ToolBefore,
+            status: PluginHookDispatchStatus::Succeeded,
+            effect: Some(PluginHookDispatchEffect::Observed),
+            output_evidence: None,
+            error: None,
+            timeout: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginHookDispatchEffect {
