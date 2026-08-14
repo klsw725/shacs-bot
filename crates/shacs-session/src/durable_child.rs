@@ -8,8 +8,9 @@ use crate::durable_trace::{
     DurableTraceStore,
 };
 use crate::durable_work::{
-    apply_durable_work_event, DurableWorkPayloadStore, DurableWorkReplayState, WorkCancellation,
-    WorkEnqueued, WorkLeased, WorkPayloadRef, WorkTerminal, WorkTerminalKind,
+    apply_durable_work_event, DurableWorkEnqueueInput, DurableWorkEnqueueJsonInput,
+    DurableWorkEnqueuer, DurableWorkPayloadStore, DurableWorkReplayState, WorkCancellation,
+    WorkLeased, WorkPayloadRef, WorkTerminal, WorkTerminalKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -445,6 +446,7 @@ impl DurableChildRecorder {
                 work_id,
                 terminal_kind,
                 outcome_ref: outcome_ref.to_owned(),
+                facts: None,
             })
             .map_err(|error| error.to_string())?,
         )
@@ -511,17 +513,27 @@ impl DurableChildRecorder {
         spawn_effect_id: &str,
         message: &Value,
     ) -> Result<(), String> {
-        let payload_ref = self.write_artifact("shacs.inbound_message.v1", message)?;
-        self.ensure_work(WorkEnsureInput {
-            session_id,
-            turn_id: Some(parent_turn_id),
-            work_id: child_reentry_work_id(child_task_id),
-            work_kind: "agent.inbound_turn".to_owned(),
-            payload_ref,
-            dedupe_hint: Some(format!("subagent.reentry:{session_id}:{child_task_id}")),
-            effect_id: Some(spawn_effect_id.to_owned()),
-            next_wake_at_ms: None,
-        })
+        let mut enqueuer =
+            DurableWorkEnqueuer::open(&self.event_root).map_err(|error| error.to_string())?;
+        let payloads =
+            DurableWorkPayloadStore::open(&self.payload_root).map_err(|error| error.to_string())?;
+        enqueuer
+            .enqueue_json(
+                &payloads,
+                "shacs.inbound_message.v1",
+                message,
+                DurableWorkEnqueueJsonInput {
+                    work_id: child_reentry_work_id(child_task_id),
+                    work_kind: "agent.inbound_turn".to_owned(),
+                    session_key: session_id.to_owned(),
+                    turn_id: Some(parent_turn_id.to_owned()),
+                    effect_id: Some(spawn_effect_id.to_owned()),
+                    dedupe_hint: Some(format!("subagent.reentry:{session_id}:{child_task_id}")),
+                    next_wake_at_ms: None,
+                },
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     pub fn enqueue_missing_accepted_reentries(&self) -> Result<usize, String> {
@@ -776,44 +788,20 @@ impl DurableChildRecorder {
     }
 
     fn ensure_work(&self, input: WorkEnsureInput<'_>) -> Result<(), String> {
-        let state = self.replay_work_state()?;
-        if let Some(existing) = state.items.get(&input.work_id) {
-            if existing.work_kind == input.work_kind
-                && existing.session_key == input.session_id
-                && existing.turn_id.as_deref() == input.turn_id
-                && existing.effect_id == input.effect_id
-                && existing.dedupe_hint == input.dedupe_hint
-                && existing.payload_ref == input.payload_ref
-            {
-                return Ok(());
-            }
-            return Err(format!(
-                "durable work {} already exists with different identity",
-                input.work_id
-            ));
-        }
-        let payload = WorkEnqueued {
-            work_id: input.work_id,
-            work_kind: input.work_kind,
-            payload_ref: input.payload_ref,
-            dedupe_hint: input.dedupe_hint,
-            next_wake_at_ms: input.next_wake_at_ms,
-            effect_id: input.effect_id,
-        };
-        let causation_id = payload.effect_id.clone();
-        self.append(
-            ChildEventAppend {
-                session_id: input.session_id,
-                turn_id: input.turn_id,
-                causation_id: causation_id.as_deref(),
-                correlation_id: None,
-                kind: WORK_ENQUEUED,
-                payload_type: "durable_work",
-            },
-            serde_json::to_value(payload).map_err(|error| error.to_string())?,
-        )
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        DurableWorkEnqueuer::open(&self.event_root)
+            .map_err(|error| error.to_string())?
+            .enqueue(DurableWorkEnqueueInput {
+                work_id: input.work_id,
+                work_kind: input.work_kind,
+                session_key: input.session_id.to_owned(),
+                turn_id: input.turn_id.map(str::to_owned),
+                effect_id: input.effect_id,
+                payload_ref: input.payload_ref,
+                dedupe_hint: input.dedupe_hint,
+                next_wake_at_ms: input.next_wake_at_ms,
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn replay_work_state(&self) -> Result<DurableWorkReplayState, String> {
