@@ -1,6 +1,6 @@
 # 033. evaluation automation live integration 아키텍처 명세
 
-Status: Open
+Status: Complete (Scoped)
 
 Origin specs: 009, 012, 013, 014, 016, 018, 022
 
@@ -8,9 +8,9 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 
 이 문서는 specs 009, 012, 013, 014, 016, 018, 022가 implemented scope로 닫힌 뒤에도 남는 evaluation, automation, self-improvement live integration work의 owner boundary를 연다.
 
-핵심 목적은 helper-level contract로 닫힌 evaluator, goal, automation, replay, projection, diagnostics 개념을 실제 AgentLoop, service runtime, channel worker, local API, future TUI, release evidence workflow에 end-to-end로 연결하는 것이다.
+핵심 목적은 helper-level contract로 닫힌 evaluator, goal, automation, replay, projection, diagnostics 개념을 현재 owner-terminal fact가 존재하는 AgentLoop와 local scheduler/service runtime에 연결하고, 나머지 표면이 소비할 domain projection input과 unavailable evidence를 제공하는 것이다.
 
-033은 새 중앙 evaluator나 policy 제품을 만드는 문서가 아니다. 현재 owner가 제공하는 trusted-runtime, scheduler, projection, execution-snapshot primitive를 live path에서 소비하고, goal accounting과 self-improvement apply-time CAS를 포함한 결과를 사용자가 재현 가능한 evidence로 검증하게 만드는 open spec이다.
+033은 새 중앙 evaluator나 policy 제품을 만드는 문서가 아니다. 현재 owner가 제공하는 trusted-runtime, scheduler, projection, execution-snapshot primitive를 live path에서 소비하고, goal accounting과 self-improvement apply-time CAS를 포함한 결과를 사용자가 재현 가능한 evidence로 검증하는 scoped spec이다.
 
 ## 현재 구현 baseline
 
@@ -26,21 +26,21 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 
 이 baseline은 아래를 완료로 주장하지 않는다.
 
-1. Goal evaluator가 live AgentLoop end-of-turn과 scheduled wake에서 일관되게 소비되는 path.
-2. Automation job lifecycle이 service/channel/local API/TUI projection과 연결되는 path.
+1. Goal evaluator가 live AgentLoop end-of-turn과 scheduled wake에서 일관되게 소비되는 path. 현재 구현된 producer는 AgentLoop turn end, heartbeat/cron, owner가 terminal로 수락한 subagent result다.
+2. Automation job lifecycle이 service/channel/local API/TUI projection과 연결되는 path. Channel/app/local-API background result producer는 현재 unavailable이며 synthetic terminal fact로 대체하지 않는다.
 3. Self-improvement proposal이 immutable snapshot, apply-time CAS, pre-tool hook, 필요한 ephemeral confirmation, checkpoint, apply, verify, record, rollback candidate까지 실제 owner primitive를 통과하는 path.
 4. Replay and evaluation dataset이 release coverage entry와 reproducible artifact로 남는 path.
 5. QA, goal, code, security, docs review가 저장소 안에서 재현 가능한 evidence로 남는 workflow.
 6. HookVeto, HeadlessConfirmationDenied, snapshot mismatch, MissingRedactionEvidence, duplicate consumption, superseded consumption 같은 release blocker edge regression.
 
-## owned open scope
+## owned scoped implementation
 
-033이 소유하는 open scope는 다음이다.
+033이 소유하는 scoped implementation은 다음이다.
 
-1. AgentLoop, service runtime, channel worker를 가로지르는 evaluator, goal, automation, self-improvement, replay, diagnostics의 live end-to-end wiring과 local API/TUI가 소비할 domain projection input.
+1. AgentLoop turn end, local heartbeat/cron service runtime, owner-accepted terminal subagent result를 가로지르는 evaluator, goal, automation, self-improvement, replay, diagnostics wiring과 local API/TUI가 소비할 domain projection input.
 2. Goal lifecycle: set, status, pause, resume, clear, done, blocked, continuation budget, user interruption priority.
-3. Completion evaluator consumption: turn end, scheduled wake, subagent result, app task result, channel result, local API background result.
-4. Automation job lifecycle: one-shot, recurring, skill-backed agent job, script-only job, no-agent maintenance job, app task job.
+3. Completion evaluator consumption: AgentLoop turn end, heartbeat/cron scheduled wake, owner-accepted terminal subagent result. App-task, channel result, local API background result는 typed source vocabulary만 존재하며 production owner-terminal producer가 없어 unavailable/fail-closed다.
+4. Automation job lifecycle: one-shot, recurring, skill-backed agent job, read-only no-agent maintenance job. Script-only와 app-task execution mode는 typed lifecycle에 포함되지만 production adapter가 없으므로 side effect 전에 fail closed한다.
 5. Task outcome evaluator live routing: notify, suppress, continue, escalate, verify, rollback candidate.
 6. Self-improvement live flow: proposal, immutable execution snapshot, apply-time compare-and-swap, pre-tool hook, 필요한 ephemeral confirmation, checkpoint, apply, verify, record, rollback candidate, diagnostics receipt.
 7. Live destructive dispatch 없이 selected trajectory를 재현할 수 있는 replay dataset과 local evaluation runner.
@@ -56,7 +56,7 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 2. `MainOrchestrator`는 session state, continuation, dispatch, apply lifecycle의 권한자로 남고 030의 hook/confirmation/process 결과를 소비한다. Evaluator는 이 결과를 생성하지 않는다.
 3. User interruption은 automated continuation보다 항상 우선한다.
 4. Automation은 goal state, job timeout, recursion guard, immutable execution snapshot, trusted runtime profile, active hook result, adapter별 process control, sandbox/credential status, delivery policy, cancellation state의 경계를 넘어설 수 없다.
-5. 모든 automation이 agent call을 요구하지는 않는다. Maintenance job과 script-only job은 계약상 model invocation이 필요 없으면 agent 없이 실행될 수 있다.
+5. 모든 automation이 agent call을 요구하지는 않는다. 현재 production no-agent 범위는 execution-sensitive하지 않은 maintenance check이며, script-only와 app-task는 adapter가 제공되기 전까지 실행되지 않는다.
 6. Replay는 hook handler, confirmation prompt, credential refresh, process launch, sandbox initialization, destructive tool, plugin command, app process action, remote delivery, config mutation, self-improvement apply를 live-dispatch하지 않는다.
 7. Suppress는 user notification을 생략한다는 뜻이지 evidence deletion이 아니다.
 8. Missing artifact redaction/disclosure evidence는 033 release artifact의 blocker이며, 무시 가능한 warning이 아니다. 원본 session/log/trace 전체가 secret-safe하다는 뜻은 아니다.
@@ -70,7 +70,7 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 1. Active, paused, blocked, done, cleared 상태와 latest evaluator verdict를 보여주는 goal command와 projection path.
 2. Evaluator에게 state authority를 주지 않으면서 정해진 경계에서 completion evaluator output을 실행하거나 소비하는 AgentLoop integration.
 3. Normalized trigger, run state, timeout, idempotency key, recursion guard, execution snapshot id/digest, trusted runtime ref, hook status, adapter별 process control, sandbox/credential status, unattended/headless mode, delivery target, result policy를 갖는 scheduled automation integration.
-4. Channel worker, service job, subagent result, app task result, local API background result를 다루는 task outcome evaluator integration.
+4. Local service job과 owner-accepted terminal subagent result를 다루는 task outcome evaluator integration. Channel, local API background, app-task outcome은 typed vocabulary와 unavailable evidence 범위이며 production result producer, app execution authority, success claim을 의미하지 않는다.
 5. Immutable execution snapshot, apply-time CAS, pre-tool hook, 필요한 ephemeral confirmation, checkpoint, apply, verify, record, rollback candidate를 거치는 self-improvement proposal store와 live flow.
 6. Goal, automation, evaluator, hook outcome, confirmation event, verify, rollback candidate의 domain state vocabulary와 projection input. CLI/local API/channel/TUI adapter parity는 035가 소유한다.
 7. Local trajectory를 선택하고 031 immutable execution snapshot과 recorded artifact를 읽고 expected verdict/outcome을 비교하며 live source 재조회와 destructive dispatch를 거부하는 replay runner.
@@ -96,8 +96,8 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 ## acceptance criteria
 
 1. Goal lifecycle can be exercised through CLI and local API, and the same state is visible through projections.
-2. AgentLoop records completion evaluator input and output at turn end, respects user interruption, and refuses unbounded continuation.
-3. Scheduled automation can run at least one one-shot job, one recurring job, one no-agent maintenance job, and one skill-backed agent job under the same lifecycle contract. Headless confirmation-required step은 auto-allow하지 않고, trusted native fallback과 sandbox-required 차이를 evidence에 남긴다.
+2. AgentLoop records completion evaluator input and output at turn end, respects user interruption, and refuses unbounded continuation. Heartbeat/cron과 owner-accepted terminal subagent result도 현재 production producer를 통해 durable automation으로 들어가며, app/channel/local-API result claim은 enqueue 전에 거부된다.
+3. Scheduled automation can run at least one one-shot job, one recurring job, one read-only no-agent maintenance job, and one skill-backed agent job under the same lifecycle contract. Script-only와 app-task execution mode는 unsupported adapter 결과로 fail closed한다. Headless confirmation-required step은 auto-allow하지 않고, trusted native fallback과 sandbox-required 차이를 evidence에 남긴다.
 4. Task outcome evaluator routes results to notify, suppress, continue, escalate, verify, rollback candidate without deleting evidence.
 5. Self-improvement proposal cannot apply without immutable execution snapshot, checkpoint handling, apply-time CAS, current hook result, and required ephemeral confirmation. Headless confirmation이 불가능하면 deny하고, failed verify는 evidence와 rollback candidate만 남긴다.
 6. Execution-sensitive automation과 self-improvement step은 030 hook/process/credential/sandbox contract와 031 execution snapshot을 소비한다. 022 approval correlation은 compatibility helper일 수 있으나 closure guarantee가 아니다.
@@ -116,7 +116,7 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 | 013 user interfaces and session UX | CLI/session projection, local API session query, WebSocket/chat surface, web helper baseline | Goal, automation, evaluator, hook/confirmation, verify, rollback candidate projection inputs |
 | 014 observability diagnostics and inspection | Local diagnostics, projection-boundary redaction points, runtime marker projection, diagnostics bundle | Evaluation ledger, automation receipt, replay artifact, review evidence, MissingRedactionEvidence blocker |
 | 016 verification matrix and release gates | Verification family, release gates, blocker language, coverage matrix | 033 release coverage entries, reproducible review artifacts, edge regression gate |
-| 018 evaluation automation and self-improvement | PRD 000-014 Rust contract/runtime-helper/projection-helper/release-gate-helper closure | Live AgentLoop/service/channel/API/TUI integration and end-to-end product closure |
+| 018 evaluation automation and self-improvement | PRD 000-014 Rust contract/runtime-helper/projection-helper/release-gate-helper closure | Supported AgentLoop/heartbeat/cron/owner-accepted terminal-subagent producer wiring plus CLI/local API domain projection input; unsupported app/channel/local-API background terminal producers remain unavailable/fail-closed; TUI/Tasks/cross-surface adapter parity and closure remain Spec035 |
 | 022 auto approval permissions | Historical normalization/audit/replay helpers and closed implementation evidence | Compatibility input only. Central permission mode, durable approval correlation, replay authorization은 033 신규 보장이 아님 |
 | 029 durable runtime recovery | Durable queue/scheduler, owner lease/supervision, trace/recovery scoped baseline | Automation scheduling/recovery facts를 소비하고 별도 scheduler·lease·trace를 재구현하지 않음 |
 | 030 trusted agent runtime | Pre-tool veto, ephemeral confirmation/headless deny, adapter별 process control, credential/sandbox/resource/data disclosure | Live automation/self-improvement gate와 evidence, replay no-live-dispatch invariant |
@@ -140,12 +140,12 @@ Current PRD status:
 
 | PRD | Status |
 |---|---|
-| PRD 000 | Planned |
-| PRD 001 | Planned |
-| PRD 002 | Planned |
-| PRD 003 | Planned |
-| PRD 004 | Planned |
-| PRD 005 | Planned |
+| PRD 000 | Complete (Scoped) |
+| PRD 001 | Complete (Scoped) |
+| PRD 002 | Complete (Scoped) |
+| PRD 003 | Complete (Scoped) |
+| PRD 004 | Complete (Scoped) |
+| PRD 005 | Complete (Scoped) |
 
 Dependency rules:
 
@@ -156,14 +156,14 @@ Dependency rules:
 
 ## closure evidence
 
-033는 아직 open 상태다. 이 spec을 닫으려면 아래 evidence가 저장소에 있어야 한다.
+033의 scoped closure는 아래 코드·테스트·재현 명령과 `CLOSURE.md`의 owner-fact audit으로 검증한다. `.omo/evidence` 아래 bulky 생성물은 로컬 재생성 결과이며 저장소에 포함된 증거로 간주하지 않는다. 새 checkout에서 읽을 수 있는 증거 계약, 현재 판정, 재생성 명령, cleanup과 non-guarantee는 [`evidence/index.json`](evidence/index.json)과 [`evidence/surface-history.md`](evidence/surface-history.md)에 추적한다. 현재 `Complete (Scoped)`의 QA/goal/code/security/docs 최종 판정과 final source-bound release execution은 모두 PASS다. 향후 실행 실패 또는 generated manifest locator 미생성은 shipping을 차단한다.
 
 1. 코드 증거: AgentLoop evaluator integration, goal lifecycle commands, automation job runtime, task outcome routing, self-improvement live flow, replay runner, projection builders, diagnostics artifact writer.
-2. 테스트 증거: goal accounting tests, automation lifecycle tests, service/channel/local API integration tests, hook/headless confirmation tests, apply-time CAS와 self-improvement verify tests, replay fail-closed tests, projection parity tests.
+2. 테스트 증거: goal accounting tests, automation lifecycle tests, heartbeat/cron service와 owner-accepted subagent integration tests, unsupported app/channel/local-API result pre-enqueue rejection tests, hook/headless confirmation tests, apply-time CAS와 self-improvement verify tests, replay fail-closed tests, projection parity tests.
 3. Edge 증거: HookVeto, HeadlessConfirmationDenied, MissingHookEvidence, ProcessTimeout, AbortCleanupIncomplete, sandbox/credential failure, snapshot missing/mismatch/source mutation, MissingRedactionEvidence, duplicate/superseded consumption, recursion guard, delivery failure, replay mismatch regression.
 4. Release 증거: 033 coverage entry와 018 PRD 000-014 live wiring direct entry. 각 entry는 local에서 다시 실행 가능한 command 또는 artifact를 가리켜야 한다.
 5. Review 증거: redacted, reproducible, release coverage에 연결된 stored QA, goal, code, security, docs review artifact.
-6. Interface 증거: goal id/state/stop reason/continuation budget, automation, evaluator verdict, hook/confirmation outcome, verify result, rollback candidate에 대한 CLI와 local API snapshot. 035 TUI/Tasks view는 완료 주장 전에 같은 projection 의미를 소비해야 한다.
+6. Interface 증거: goal id/state/stop reason/continuation budget, automation, evaluator verdict, hook/confirmation outcome, verify result, rollback candidate에 대한 CLI와 local API snapshot. TUI/Tasks adapter parity와 그 closure evidence는 035가 소유하며 033 완료 범위로 주장하지 않는다.
 7. Diagnostics 증거: evaluator input, automation run, hook/confirmation event, checkpoint, execution snapshot, replay result, delivery result, review artifact에 projection-boundary transform을 적용하고 raw credential/full unnecessary payload를 artifact에 넣지 않았음을 증명하는 bundle 또는 fixture. 원본 trace 전체의 complete redaction을 주장하지 않는다.
 
-현재 closure evidence는 없다. 018 PRD 000-014 helper closure와 022 historical implementation은 baseline input일 뿐이며, 033 live integration closure가 아니다.
+Scoped closure evidence는 [`CLOSURE.md`](CLOSURE.md)에 기록한다. 이 closure는 self-hosted/local owner 범위의 live integration을 닫으며 external adapter와 remote delivery 보장은 포함하지 않는다.

@@ -1,6 +1,6 @@
 # PRD 000. goal accounting and projection input
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
