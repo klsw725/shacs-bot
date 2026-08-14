@@ -1,6 +1,8 @@
 # PRD 009. goal and read-only Tasks projection
 
-Status: Planned
+Status: Planned revision (partial implemented baseline)
+
+Implemented partial baseline: TUI `SessionRuntimeSource` consumes the Spec033 snapshot and renders owner-backed goal status, stop reason, continuation budget plus automation job/delivery status. This is a read-only subset, not the canonical mixed Tasks view or full CLI/local API/TUI parity.
 
 ## Goal
 
@@ -39,3 +41,10 @@ Spec 033 goal accounting과 기존 child/workflow/recovery owner record를 별�
 2. Owner locator coverage audit.
 3. Mixed-state Tasks view fixture와 terminal TUI/API/CLI transcripts.
 4. 별도 truth store와 mutation authority가 없음을 확인하는 architecture read audit.
+
+## Deferred Work
+
+1. Child, workflow, automation, app, recovery row를 하나의 canonical mixed Tasks projection으로 집계한다.
+2. 모든 task row에 opaque owner locator, observed-at/freshness, bounded state를 보존한다.
+3. CLI와 local API가 TUI와 같은 Tasks fields를 소비하고 parity evidence를 남긴다.
+4. Tasks action을 기존 command owner로 route하고 owner terminal result 전에는 completed로 표시하지 않는다.
