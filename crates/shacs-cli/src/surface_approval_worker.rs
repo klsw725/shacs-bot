@@ -51,9 +51,13 @@ pub(crate) fn start_surface_approval_worker(
     let handle = thread::spawn(move || {
         while !worker_stop.load(Ordering::SeqCst) {
             process_due_surface_approvals(&adapter, &mut dispatcher, &data_dir)?;
+            automation_worker::process_due_automation(&mut dispatcher, &data_dir, adapter.as_ref())
+                .map_err(CliError::Runtime)?;
             sleep_with_stop(&worker_stop, Duration::from_millis(50));
         }
-        process_due_surface_approvals(&adapter, &mut dispatcher, &data_dir)
+        process_due_surface_approvals(&adapter, &mut dispatcher, &data_dir)?;
+        automation_worker::process_due_automation(&mut dispatcher, &data_dir, adapter.as_ref())
+            .map_err(CliError::Runtime)
     });
     Ok(SurfaceApprovalWorker {
         stop,
