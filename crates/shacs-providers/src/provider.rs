@@ -7,6 +7,7 @@ use shacs_config::RawCredential;
 use std::fmt;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderEvent {
@@ -48,6 +49,7 @@ pub struct ProviderRequest {
 pub struct ProviderInvocation {
     runtime_override: Option<RawCredential>,
     cancellation: Arc<AtomicBool>,
+    deadline: Option<Instant>,
 }
 
 impl ProviderInvocation {
@@ -55,7 +57,13 @@ impl ProviderInvocation {
         Self {
             runtime_override,
             cancellation,
+            deadline: None,
         }
+    }
+
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 
     pub fn runtime_override(&self) -> Option<&RawCredential> {
@@ -68,6 +76,19 @@ impl ProviderInvocation {
 
     pub fn cancellation_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancellation)
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    pub fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
