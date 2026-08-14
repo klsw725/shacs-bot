@@ -1,0 +1,113 @@
+{
+  "schema": "spec033.closure_evidence_index.v1",
+  "closure_status": "complete_scoped_final_source_bound_release_pass",
+  "tracked_contract": {
+    "release_manifest": ".omo/evidence/spec033-current/final-production-20260814-v6/manifest.json; generated and bound to source_manifest.digest",
+    "bulky_artifacts": "gitignored under .omo/evidence and reproducible with commands below",
+    "surface_transcript": "surface-history.md",
+    "redaction": "tracked files contain no raw credentials, provider payloads, or host paths"
+  },
+  "candidate": {
+    "trajectory_id": "spec033-production-no-provider-20260814-v6",
+    "trajectory_store": ".omo/evidence/spec033-current/production-trajectories-v6",
+    "trajectory_internal_digest": "sha256:2ecb1a26f54f181cc3fc02b0ed2961ea0d90e080cac18ba8e5fad8c6d0601702",
+    "trajectory_file_sha256": "96d99e23db43f64357a1865d1f84b6cd4b0bd2f34077a202e6289cd78bc6aae1",
+    "schemas": {
+      "projection": "v5",
+      "release": "v5",
+      "review": "v3"
+    },
+    "coverage": {
+      "requirement_rows": 37,
+      "blocker_rows": 17
+    },
+    "cargo_gates": {
+      "fmt": "pass",
+      "clippy": "pass",
+      "workspace_tests": {
+        "passed": 2357,
+        "failed": 0,
+        "ignored": 1
+      },
+      "clean_locked_workspace_build": "pass"
+    },
+    "surface_qa": {
+      "version": "v4",
+      "verdict": "pass"
+    },
+    "binary_sha256": {
+      "shacs-bot": "150bfcc0afc48c5670fd99fee76919231731594b9de84f9ae815aa8481e097b0",
+      "shacs-tui": "cc0e2ca476e795fd1aef8e67661e500cfe3f4627164d102c326a8c5cf90b0f63",
+      "spec033-release-runner": "a228e3ff4858264e7296b10822449b84066b7d11fcc7953c7adeb37547ad95e1"
+    }
+  },
+  "final_review": [
+    {
+      "kind": "qa",
+      "verdict": "pass",
+      "final": true,
+      "finding": "Surface QA v4 passed against the exact final candidate binaries listed in candidate.binary_sha256."
+    },
+    {
+      "kind": "goal",
+      "verdict": "pass",
+      "final": true,
+      "finding": "The current candidate satisfies the scoped Spec033 goal and owner boundaries."
+    },
+    {
+      "kind": "code",
+      "verdict": "pass",
+      "final": true,
+      "finding": "Code review passed after the final race and durability fixes, with 37 requirement rows and 17 exact blocker rows."
+    },
+    {
+      "kind": "security",
+      "verdict": "pass",
+      "final": true,
+      "finding": "Security review passed for the current closure candidate with no critical or high findings."
+    },
+    {
+      "kind": "docs",
+      "verdict": "pass",
+      "final": true,
+      "finding": "Docs consistency review passed and no tracked documentation blocker remains."
+    }
+  ],
+  "required_final_review": [
+    "qa",
+    "goal",
+    "code",
+    "security",
+    "docs"
+  ],
+  "remaining_blockers": [
+    "Future reruns that fail or omit the source-manifest-bound manifest artifact block shipping."
+  ],
+  "release_execution": {
+    "status": "passed",
+    "run_id": "final-production-20260814-v6",
+    "manifest_locator": ".omo/evidence/spec033-current/final-production-20260814-v6/manifest.json",
+    "command": "./crates/target/debug/spec033-release-runner --run-id final-production-20260814-v6 --repo-root . --evidence-root .omo/evidence/spec033-current/final-production-20260814-v6 --trajectory-root .omo/evidence/spec033-current/production-trajectories-v6 --trajectory-id spec033-production-no-provider-20260814-v6 --data-dir /tmp/shacs-spec033-data-v6 --mode current-worktree",
+    "result": "PASS; manifest_locator was generated and bound to this exact source tree.",
+    "shipping_gate": "Future rerun failure or missing manifest_locator blocks shipping."
+  },
+  "commands": [
+    "cargo test --manifest-path crates/Cargo.toml -p shacs-core --test spec033_release_runner",
+    "cargo test --manifest-path crates/Cargo.toml -p shacs-core --test spec033_release_closure",
+    "cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- trajectory record --workspace /tmp/shacs-ws --store .omo/evidence/spec033-current/production-trajectories-v6 --trajectory-id spec033-production-no-provider-20260814-v6 --instruction \"record local no-provider automation\"",
+    "./crates/target/debug/spec033-release-runner --run-id final-production-20260814-v6 --repo-root . --evidence-root .omo/evidence/spec033-current/final-production-20260814-v6 --trajectory-root .omo/evidence/spec033-current/production-trajectories-v6 --trajectory-id spec033-production-no-provider-20260814-v6 --data-dir /tmp/shacs-spec033-data-v6 --mode current-worktree"
+  ],
+  "cleanup": {
+    "raw_command_output": "RAII temporary directory removed on success and failure",
+    "staging": "atomically renamed on success and removed on failure",
+    "generated_evidence": "remove only the selected .omo/evidence/spec033-current/<run-id> after audit",
+    "release_data_dir": "remove /tmp/shacs-spec033-data-v6 after auditing the final release run"
+  },
+  "non_guarantees": [
+    "Cargo gates are not review verdicts.",
+    "Trajectory digests are not a final source manifest digest.",
+    "Recorded replay is not current authorization or live source truth.",
+    "Bounded release transcripts do not prove complete runtime redaction.",
+    "Spec033 owner facts do not close Spec035 PRDs 008-009 or its external audits."
+  ]
+}

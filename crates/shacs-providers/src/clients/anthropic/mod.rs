@@ -1,7 +1,7 @@
 use super::sse::{read_sse_frame_texts, split_sse_frame_texts};
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
-use crate::provider::{ProviderClient, ProviderEvent, ProviderRequest};
+use crate::provider::{ProviderClient, ProviderEvent, ProviderInvocation, ProviderRequest};
 use crate::registry::ProviderSpec;
 use crate::types::{LlmResponse, ToolCallRequest};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,14 @@ pub trait AnthropicHttpTransport: Send + Sync {
         request: AnthropicRequestParts,
     ) -> Result<AnthropicHttpResponse, ProviderError>;
 
+    fn post_json_bounded(
+        &self,
+        request: AnthropicRequestParts,
+        _timeout: Option<Duration>,
+    ) -> Result<AnthropicHttpResponse, ProviderError> {
+        self.post_json(request)
+    }
+
     fn post_json_stream(
         &self,
         _request: AnthropicRequestParts,
@@ -64,6 +72,15 @@ pub trait AnthropicHttpTransport: Send + Sync {
             }
         }
         Ok(response)
+    }
+
+    fn post_json_stream_frames_bounded(
+        &self,
+        request: AnthropicRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+        _timeout: Option<Duration>,
+    ) -> Result<AnthropicHttpStreamResponse, ProviderError> {
+        self.post_json_stream_frames(request, on_frame)
     }
 }
 
@@ -118,10 +135,21 @@ impl AnthropicHttpTransport for UreqAnthropicHttpTransport {
         &self,
         request: AnthropicRequestParts,
     ) -> Result<AnthropicHttpResponse, ProviderError> {
+        self.post_json_bounded(request, None)
+    }
+
+    fn post_json_bounded(
+        &self,
+        request: AnthropicRequestParts,
+        timeout: Option<Duration>,
+    ) -> Result<AnthropicHttpResponse, ProviderError> {
         let url = join_base_and_path(&self.base_url, &request.path)?;
         let mut http_request = self
             .agent
             .post(&url)
+            .config()
+            .timeout_global(timeout)
+            .build()
             .header("Accept", "application/json")
             .header("Content-Type", "application/json");
         for (key, value) in &request.headers {
@@ -202,10 +230,22 @@ impl AnthropicHttpTransport for UreqAnthropicHttpTransport {
         request: AnthropicRequestParts,
         on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
     ) -> Result<AnthropicHttpStreamResponse, ProviderError> {
+        self.post_json_stream_frames_bounded(request, on_frame, None)
+    }
+
+    fn post_json_stream_frames_bounded(
+        &self,
+        request: AnthropicRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+        timeout: Option<Duration>,
+    ) -> Result<AnthropicHttpStreamResponse, ProviderError> {
         let url = join_base_and_path(&self.base_url, &request.path)?;
         let mut http_request = self
             .stream_agent
             .post(&url)
+            .config()
+            .timeout_global(timeout)
+            .build()
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json");
         for (key, value) in &request.headers {
@@ -273,9 +313,18 @@ where
     T: AnthropicHttpTransport,
 {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
-        let parts = build_anthropic_messages_request(&request, &self.config, false);
-        let response = self.transport.post_json(parts)?;
-        parse_anthropic_http_response(response)
+        self.chat_bounded(request, None)
+    }
+
+    fn chat_with_invocation(
+        &self,
+        request: ProviderRequest,
+        invocation: &ProviderInvocation,
+    ) -> Result<LlmResponse, ProviderError> {
+        if invocation.is_cancelled() {
+            return Err(invocation_cancelled());
+        }
+        self.chat_bounded(request, invocation.remaining())
     }
 
     fn chat_stream(
@@ -283,11 +332,49 @@ where
         request: ProviderRequest,
         on_event: &mut dyn FnMut(ProviderEvent),
     ) -> Result<LlmResponse, ProviderError> {
+        self.chat_stream_bounded(request, on_event, None)
+    }
+
+    fn chat_stream_with_invocation(
+        &self,
+        request: ProviderRequest,
+        on_event: &mut dyn FnMut(ProviderEvent),
+        invocation: &ProviderInvocation,
+    ) -> Result<LlmResponse, ProviderError> {
+        if invocation.is_cancelled() {
+            return Err(invocation_cancelled());
+        }
+        self.chat_stream_bounded(request, on_event, invocation.remaining())
+    }
+}
+
+impl<T> AnthropicClient<T>
+where
+    T: AnthropicHttpTransport,
+{
+    fn chat_bounded(
+        &self,
+        request: ProviderRequest,
+        timeout: Option<Duration>,
+    ) -> Result<LlmResponse, ProviderError> {
+        let parts = build_anthropic_messages_request(&request, &self.config, false);
+        let response = self.transport.post_json_bounded(parts, timeout)?;
+        parse_anthropic_http_response(response)
+    }
+
+    fn chat_stream_bounded(
+        &self,
+        request: ProviderRequest,
+        on_event: &mut dyn FnMut(ProviderEvent),
+        timeout: Option<Duration>,
+    ) -> Result<LlmResponse, ProviderError> {
         let parts = build_anthropic_messages_request(&request, &self.config, true);
         let mut stream = AnthropicStreamState::default();
-        match self.transport.post_json_stream_frames(parts, &mut |frame| {
-            stream.process_frame_text(frame, on_event)
-        }) {
+        match self.transport.post_json_stream_frames_bounded(
+            parts,
+            &mut |frame| stream.process_frame_text(frame, on_event),
+            timeout,
+        ) {
             Ok(response) => {
                 if (200..300).contains(&response.status) {
                     stream.finish(on_event)
@@ -297,7 +384,7 @@ where
             }
             Err(error) if !is_streaming_transport_unsupported(&error) => Err(error),
             Err(_) => {
-                let response = self.chat(request)?;
+                let response = self.chat_bounded(request, timeout)?;
                 if let Some(content) = response
                     .content
                     .as_deref()
@@ -315,6 +402,10 @@ where
             }
         }
     }
+}
+
+fn invocation_cancelled() -> ProviderError {
+    api_error(None, "provider invocation cancelled")
 }
 
 pub fn anthropic_client_from_config(

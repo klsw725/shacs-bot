@@ -1,7 +1,7 @@
 use super::sse::{read_sse_frame_texts, split_sse_frame_texts};
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
-use crate::provider::{ProviderClient, ProviderEvent, ProviderRequest};
+use crate::provider::{ProviderClient, ProviderEvent, ProviderInvocation, ProviderRequest};
 use crate::registry::ProviderSpec;
 use crate::types::{finish_reason_from_openai_responses, LlmResponse, ToolCallRequest};
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,14 @@ pub trait OpenAiHttpTransport: Send + Sync {
         request: OpenAiCompatibleRequestParts,
     ) -> Result<OpenAiHttpResponse, ProviderError>;
 
+    fn post_json_bounded(
+        &self,
+        request: OpenAiCompatibleRequestParts,
+        _timeout: Option<Duration>,
+    ) -> Result<OpenAiHttpResponse, ProviderError> {
+        self.post_json(request)
+    }
+
     fn post_json_stream(
         &self,
         _request: OpenAiCompatibleRequestParts,
@@ -86,6 +94,15 @@ pub trait OpenAiHttpTransport: Send + Sync {
             }
         }
         Ok(response)
+    }
+
+    fn post_json_stream_frames_bounded(
+        &self,
+        request: OpenAiCompatibleRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+        _timeout: Option<Duration>,
+    ) -> Result<OpenAiHttpStreamResponse, ProviderError> {
+        self.post_json_stream_frames(request, on_frame)
     }
 }
 
@@ -140,10 +157,21 @@ impl OpenAiHttpTransport for UreqOpenAiHttpTransport {
         &self,
         request: OpenAiCompatibleRequestParts,
     ) -> Result<OpenAiHttpResponse, ProviderError> {
+        self.post_json_bounded(request, None)
+    }
+
+    fn post_json_bounded(
+        &self,
+        request: OpenAiCompatibleRequestParts,
+        timeout: Option<Duration>,
+    ) -> Result<OpenAiHttpResponse, ProviderError> {
         let url = join_base_and_path(&self.base_url, &request.path)?;
         let mut http_request = self
             .agent
             .post(&url)
+            .config()
+            .timeout_global(timeout)
+            .build()
             .header("Accept", "application/json")
             .header("Content-Type", "application/json");
         for (key, value) in &request.headers {
@@ -224,10 +252,22 @@ impl OpenAiHttpTransport for UreqOpenAiHttpTransport {
         request: OpenAiCompatibleRequestParts,
         on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
     ) -> Result<OpenAiHttpStreamResponse, ProviderError> {
+        self.post_json_stream_frames_bounded(request, on_frame, None)
+    }
+
+    fn post_json_stream_frames_bounded(
+        &self,
+        request: OpenAiCompatibleRequestParts,
+        on_frame: &mut dyn FnMut(&str) -> Result<bool, ProviderError>,
+        timeout: Option<Duration>,
+    ) -> Result<OpenAiHttpStreamResponse, ProviderError> {
         let url = join_base_and_path(&self.base_url, &request.path)?;
         let mut http_request = self
             .stream_agent
             .post(&url)
+            .config()
+            .timeout_global(timeout)
+            .build()
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json");
         for (key, value) in &request.headers {
@@ -449,19 +489,18 @@ where
     T: OpenAiHttpTransport,
 {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
-        if self.should_use_responses_api(&request) {
-            let responses_request = normalize_request_for_provider(&request, self.spec.as_ref());
-            let parts = build_responses_request(&responses_request, &self.config, false);
-            let response = self.transport.post_json(parts)?;
-            let parsed = parse_responses_http_response(response)?;
-            if parsed.finish_reason != "error" || !should_fallback_from_responses_response(&parsed)
-            {
-                return Ok(parsed);
-            }
+        self.chat_bounded(request, None)
+    }
+
+    fn chat_with_invocation(
+        &self,
+        request: ProviderRequest,
+        invocation: &ProviderInvocation,
+    ) -> Result<LlmResponse, ProviderError> {
+        if invocation.is_cancelled() {
+            return Err(invocation_cancelled());
         }
-        let parts = build_provider_chat_completions_request(&request, &self.config, self.spec);
-        let response = self.transport.post_json(parts)?;
-        parse_http_response_with_spec(response, self.spec.as_ref())
+        self.chat_bounded(request, invocation.remaining())
     }
 
     fn chat_stream(
@@ -469,13 +508,61 @@ where
         request: ProviderRequest,
         on_event: &mut dyn FnMut(ProviderEvent),
     ) -> Result<LlmResponse, ProviderError> {
+        self.chat_stream_bounded(request, on_event, None)
+    }
+
+    fn chat_stream_with_invocation(
+        &self,
+        request: ProviderRequest,
+        on_event: &mut dyn FnMut(ProviderEvent),
+        invocation: &ProviderInvocation,
+    ) -> Result<LlmResponse, ProviderError> {
+        if invocation.is_cancelled() {
+            return Err(invocation_cancelled());
+        }
+        self.chat_stream_bounded(request, on_event, invocation.remaining())
+    }
+}
+
+impl<T> OpenAiCompatibleClient<T>
+where
+    T: OpenAiHttpTransport,
+{
+    fn chat_bounded(
+        &self,
+        request: ProviderRequest,
+        timeout: Option<Duration>,
+    ) -> Result<LlmResponse, ProviderError> {
+        if self.should_use_responses_api(&request) {
+            let responses_request = normalize_request_for_provider(&request, self.spec.as_ref());
+            let parts = build_responses_request(&responses_request, &self.config, false);
+            let response = self.transport.post_json_bounded(parts, timeout)?;
+            let parsed = parse_responses_http_response(response)?;
+            if parsed.finish_reason != "error" || !should_fallback_from_responses_response(&parsed)
+            {
+                return Ok(parsed);
+            }
+        }
+        let parts = build_provider_chat_completions_request(&request, &self.config, self.spec);
+        let response = self.transport.post_json_bounded(parts, timeout)?;
+        parse_http_response_with_spec(response, self.spec.as_ref())
+    }
+
+    fn chat_stream_bounded(
+        &self,
+        request: ProviderRequest,
+        on_event: &mut dyn FnMut(ProviderEvent),
+        timeout: Option<Duration>,
+    ) -> Result<LlmResponse, ProviderError> {
         if self.should_use_responses_api(&request) {
             let responses_request = normalize_request_for_provider(&request, self.spec.as_ref());
             let parts = build_responses_request(&responses_request, &self.config, true);
             let mut stream = OpenAiResponsesStreamState::default();
-            match self.transport.post_json_stream_frames(parts, &mut |frame| {
-                stream.process_frame_text(frame, on_event)
-            }) {
+            match self.transport.post_json_stream_frames_bounded(
+                parts,
+                &mut |frame| stream.process_frame_text(frame, on_event),
+                timeout,
+            ) {
                 Ok(response) => {
                     let parsed = if (200..300).contains(&response.status) {
                         stream.finish(on_event)?
@@ -495,9 +582,11 @@ where
         let parts =
             build_provider_chat_completions_stream_request(&request, &self.config, self.spec);
         let mut stream = ChatCompletionsStreamState::default();
-        match self.transport.post_json_stream_frames(parts, &mut |frame| {
-            stream.process_frame_text(frame, on_event)
-        }) {
+        match self.transport.post_json_stream_frames_bounded(
+            parts,
+            &mut |frame| stream.process_frame_text(frame, on_event),
+            timeout,
+        ) {
             Ok(response) => {
                 let parsed = if (200..300).contains(&response.status) {
                     stream.finish(on_event)?
@@ -509,7 +598,7 @@ where
             Err(error) if !is_streaming_transport_unsupported(&error) => return Err(error),
             Err(_) => {}
         }
-        let response = self.chat(request)?;
+        let response = self.chat_bounded(request, timeout)?;
         if let Some(content) = response
             .content
             .as_deref()
@@ -524,6 +613,16 @@ where
             reason: response.finish_reason.clone(),
         });
         Ok(response)
+    }
+}
+
+fn invocation_cancelled() -> ProviderError {
+    ProviderError::Api {
+        status: None,
+        message: "provider invocation cancelled".to_owned(),
+        retryable: false,
+        headers: BTreeMap::new(),
+        body: None,
     }
 }
 

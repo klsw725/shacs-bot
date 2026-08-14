@@ -1,4 +1,4 @@
-pub use shacs_channels::{InboundMessage, OutboundMessage};
+pub use shacs_channels::{InboundMessage, OutboundMessage, OwnerAcceptedAutomationResult};
 
 mod accounting;
 

@@ -11,6 +11,8 @@ shacs-channels = { path = "../shacs-channels" }
 shacs-command = { path = "../shacs-command" }
 shacs-config = { path = "../shacs-config" }
 shacs-core = { path = "../shacs-core" }
+shacs-cron = { path = "../shacs-cron" }
+shacs-eval = { path = "../shacs-eval" }
 shacs-projection = { path = "../shacs-projection" }
 shacs-providers = { path = "../shacs-providers" }
 shacs-redaction = { path = "../shacs-redaction" }
@@ -37,7 +39,10 @@ fs2 = "0.4"
 spec031-test-fixture = []
 
 [dev-dependencies]
+axum = { version = "=0.8.4", default-features = false }
 tempfile = "3"
+tower = { version = "=0.5.2", features = ["util"] }
+tokio = { version = "=1.44.2", features = ["macros", "rt"] }
 
 [[bin]]
 name = "shacs-bot"

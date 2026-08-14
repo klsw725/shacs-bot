@@ -26,6 +26,13 @@ pub struct InboundMessage {
     pub metadata: Map<String, Value>,
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub session_key_override: Option<String>,
+    #[serde(skip)]
+    owner_accepted_automation_result: Option<OwnerAcceptedAutomationResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerAcceptedAutomationResult {
+    SubagentTerminal { result_ref: String },
 }
 
 impl InboundMessage {
@@ -44,6 +51,7 @@ impl InboundMessage {
             media: Vec::new(),
             metadata: Map::new(),
             session_key_override: None,
+            owner_accepted_automation_result: None,
         }
     }
 
@@ -66,6 +74,18 @@ impl InboundMessage {
     pub fn with_session_key_override(mut self, session_key: impl Into<String>) -> Self {
         self.session_key_override = Some(session_key.into());
         self
+    }
+
+    pub fn with_owner_accepted_automation_result(
+        mut self,
+        result: OwnerAcceptedAutomationResult,
+    ) -> Self {
+        self.owner_accepted_automation_result = Some(result);
+        self
+    }
+
+    pub fn owner_accepted_automation_result(&self) -> Option<&OwnerAcceptedAutomationResult> {
+        self.owner_accepted_automation_result.as_ref()
     }
 }
 
@@ -1681,6 +1701,7 @@ pub fn route_channel_command(request: ChannelCommandRequest) -> ChannelCommandAc
         media: Vec::new(),
         metadata: request.metadata,
         session_key_override: request.session_key_override,
+        owner_accepted_automation_result: None,
     };
     ChannelCommandAction::Forward(inbound)
 }

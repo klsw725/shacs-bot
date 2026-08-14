@@ -1,4 +1,4 @@
-use shacs_bus::{InboundMessage, MessageBus, MessageBusError};
+use shacs_bus::{InboundMessage, MessageBus, MessageBusError, OwnerAcceptedAutomationResult};
 use shacs_session::durable_event::{
     DurableEventError, DurableEventInput, DurableEventPayload, DurableEventRecord,
     DurableEventStore, WORK_CANCELLED, WORK_CANCEL_REQUESTED, WORK_ENQUEUED, WORK_LEASED,
@@ -9,9 +9,11 @@ use shacs_session::durable_trace::{
     DurableTraceStore,
 };
 use shacs_session::durable_work::{
-    DurableWorkAdmission, DurableWorkError, DurableWorkPayloadStore, DurableWorkReplayState,
-    ReplayWorkItem, ReplayWorkState, RuntimeControlRequested, WorkCancellation, WorkEnqueued,
-    WorkLeased, WorkPayloadRef, WorkRequeued, WorkRetryScheduled, WorkTerminal, WorkTerminalKind,
+    apply_durable_work_event, DurableWorkAdmission, DurableWorkEnqueueError,
+    DurableWorkEnqueueInput as SessionWorkEnqueueInput, DurableWorkEnqueueJsonInput,
+    DurableWorkEnqueuer, DurableWorkError, DurableWorkPayloadStore, DurableWorkReplayState,
+    ReplayWorkItem, ReplayWorkState, RuntimeControlRequested, WorkCancellation, WorkLeased,
+    WorkPayloadRef, WorkRequeued, WorkRetryScheduled, WorkTerminal, WorkTerminalKind,
     MAX_DURABLE_WORK_ATTEMPTS, MAX_WORK_PAYLOAD_BYTES,
 };
 use std::collections::BTreeSet;
@@ -23,7 +25,6 @@ use std::path::PathBuf;
 const INBOUND_WORK_KIND: &str = "agent.inbound_turn";
 const INBOUND_PAYLOAD_TYPE: &str = "shacs.inbound_message.v1";
 const DURABLE_WORK_ID_METADATA: &str = "durable_work_id";
-const MAX_DURABLE_WORK_EVENT_LOG_BYTES: u64 = 512 * 1024 * 1024;
 const PROCESS_LOCAL_BUS_RETRY_MS: u64 = 250;
 
 #[derive(Debug)]
@@ -35,6 +36,7 @@ pub enum DurableDispatchError {
     MissingWork(String),
     InvalidWork(String),
     UnsupportedWorkKind(String),
+    Enqueue(DurableWorkEnqueueError),
 }
 
 impl fmt::Display for DurableDispatchError {
@@ -49,6 +51,7 @@ impl fmt::Display for DurableDispatchError {
             Self::UnsupportedWorkKind(kind) => {
                 write!(formatter, "durable work kind {kind} is not dispatchable")
             }
+            Self::Enqueue(error) => error.fmt(formatter),
         }
     }
 }
@@ -79,6 +82,12 @@ impl From<MessageBusError> for DurableDispatchError {
     }
 }
 
+impl From<DurableWorkEnqueueError> for DurableDispatchError {
+    fn from(error: DurableWorkEnqueueError) -> Self {
+        Self::Enqueue(error)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableDispatchSummary {
     pub leased_work_ids: Vec<String>,
@@ -105,6 +114,7 @@ pub struct DurableWorkDispatcher {
     bus: MessageBus,
     lease_owner_ref: String,
     lease_duration_ms: u64,
+    enqueuer: DurableWorkEnqueuer,
 }
 
 #[derive(Debug, Clone)]
@@ -136,7 +146,8 @@ impl DurableWorkDispatcher {
         let event_root = event_root.as_ref().to_path_buf();
         Ok(Self {
             trace_root: default_trace_root(&event_root),
-            events: DurableEventStore::open(event_root)?,
+            events: DurableEventStore::open(&event_root)?,
+            enqueuer: DurableWorkEnqueuer::open(event_root)?,
             payloads: DurableWorkPayloadStore::open(payload_root)?,
             bus,
             lease_owner_ref: lease_owner_ref.into(),
@@ -151,19 +162,6 @@ impl DurableWorkDispatcher {
         dedupe_hint: Option<String>,
         next_wake_at_ms: Option<u64>,
     ) -> Result<DurableEventRecord, DurableDispatchError> {
-        if self
-            .events
-            .path()
-            .metadata()
-            .map_err(DurableWorkError::from)?
-            .len()
-            >= MAX_DURABLE_WORK_EVENT_LOG_BYTES
-        {
-            return Err(DurableWorkError::Validation(format!(
-                "durable event log exceeds {MAX_DURABLE_WORK_EVENT_LOG_BYTES} bytes"
-            ))
-            .into());
-        }
         let work_id = work_id.into();
         let message_value = serde_json::to_value(message)?;
         if serde_json::to_vec(&message_value)?.len() > MAX_WORK_PAYLOAD_BYTES {
@@ -172,19 +170,22 @@ impl DurableWorkDispatcher {
             ))
             .into());
         }
-        let payload_ref = self
-            .payloads
-            .write_json(INBOUND_PAYLOAD_TYPE, &message_value)?;
-        let payload = WorkEnqueued {
-            work_id,
-            work_kind: INBOUND_WORK_KIND.to_owned(),
-            payload_ref,
-            dedupe_hint,
-            next_wake_at_ms,
-            effect_id: None,
-        };
-        let record = self.append(message.session_key(), None, WORK_ENQUEUED, &payload)?;
-        self.append_channel_trace_after_commit(&record, &message.channel, &payload.work_id);
+        let trace_work_id = work_id.clone();
+        let record = self.enqueuer.enqueue_json(
+            &self.payloads,
+            INBOUND_PAYLOAD_TYPE,
+            &message_value,
+            DurableWorkEnqueueJsonInput {
+                work_id,
+                work_kind: INBOUND_WORK_KIND.to_owned(),
+                session_key: message.session_key(),
+                turn_id: None,
+                effect_id: None,
+                dedupe_hint,
+                next_wake_at_ms,
+            },
+        )?;
+        self.append_channel_trace_after_commit(&record, &message.channel, &trace_work_id);
         Ok(record)
     }
 
@@ -192,15 +193,32 @@ impl DurableWorkDispatcher {
         &mut self,
         input: DurableWorkEnqueueInput,
     ) -> Result<DurableEventRecord, DurableDispatchError> {
-        let payload = WorkEnqueued {
+        Ok(self.enqueuer.enqueue(SessionWorkEnqueueInput {
             work_id: input.work_id,
             work_kind: input.work_kind,
+            session_key: input.session_key,
+            turn_id: input.turn_id,
+            effect_id: input.effect_id,
             payload_ref: input.payload_ref,
             dedupe_hint: input.dedupe_hint,
             next_wake_at_ms: input.next_wake_at_ms,
-            effect_id: input.effect_id,
-        };
-        self.append(input.session_key, input.turn_id, WORK_ENQUEUED, &payload)
+        })?)
+    }
+
+    pub(crate) fn replay_work_state(&self) -> Result<DurableWorkReplayState, DurableDispatchError> {
+        let mut state = DurableWorkReplayState::default();
+        let mut reducer_error = None;
+        self.events.visit_from_sequence(0, |event| {
+            if reducer_error.is_none() {
+                if let Err(error) = apply_durable_work_event(&mut state, event) {
+                    reducer_error = Some(error.to_string());
+                }
+            }
+        })?;
+        if let Some(error) = reducer_error {
+            return Err(DurableDispatchError::InvalidWork(error));
+        }
+        Ok(state)
     }
 
     pub fn dispatch_due(
@@ -352,6 +370,7 @@ impl DurableWorkDispatcher {
                 work_id: item.work_id.clone(),
                 terminal_kind,
                 outcome_ref: outcome_ref.into(),
+                facts: None,
             },
         )
     }
@@ -361,22 +380,28 @@ impl DurableWorkDispatcher {
         item: &ReplayWorkItem,
         now_ms: u64,
     ) -> Result<DurableEventRecord, DurableDispatchError> {
+        let _lock = self.enqueuer.acquire_mutation_lock()?;
+        let state = self.replay_work_state()?;
+        let current = state
+            .items
+            .get(&item.work_id)
+            .ok_or_else(|| DurableDispatchError::MissingWork(item.work_id.clone()))?;
         if !matches!(
-            item.state,
+            current.state,
             ReplayWorkState::Pending | ReplayWorkState::WaitingRetry
         ) {
             return Err(DurableDispatchError::InvalidWork(format!(
                 "durable work {} is not leasable from state {:?}",
-                item.work_id, item.state
+                current.work_id, current.state
             )));
         }
-        let attempt = item.attempt.saturating_add(1);
+        let attempt = current.attempt.saturating_add(1);
         self.append_for_item(
-            item,
+            current,
             WORK_LEASED,
             &WorkLeased {
-                work_id: item.work_id.clone(),
-                lease_id: format!("lease-{}-{attempt}-{now_ms}", item.work_id),
+                work_id: current.work_id.clone(),
+                lease_id: format!("lease-{}-{attempt}-{now_ms}", current.work_id),
                 lease_owner_ref: self.lease_owner_ref.clone(),
                 attempt,
                 leased_at_ms: now_ms,
@@ -390,6 +415,58 @@ impl DurableWorkDispatcher {
         item: &ReplayWorkItem,
     ) -> Result<serde_json::Value, DurableDispatchError> {
         Ok(self.payloads.read_json(&item.payload_ref)?)
+    }
+
+    pub(crate) fn enqueue_json_work<T: serde::Serialize>(
+        &mut self,
+        payload_type: &str,
+        payload: &T,
+        input: DurableWorkEnqueueJsonInput,
+    ) -> Result<DurableEventRecord, DurableDispatchError> {
+        let value = serde_json::to_value(payload)?;
+        Ok(self
+            .enqueuer
+            .enqueue_json(&self.payloads, payload_type, &value, input)?)
+    }
+
+    pub(crate) fn read_work_payload<T: serde::de::DeserializeOwned>(
+        &self,
+        item: &ReplayWorkItem,
+    ) -> Result<T, DurableDispatchError> {
+        Ok(serde_json::from_value(
+            self.payloads.read_json(&item.payload_ref)?,
+        )?)
+    }
+
+    pub(crate) fn record_automation_terminal<T: serde::Serialize>(
+        &mut self,
+        item: &ReplayWorkItem,
+        terminal_kind: WorkTerminalKind,
+        facts: &T,
+    ) -> Result<DurableEventRecord, DurableDispatchError> {
+        self.append_for_item(
+            item,
+            WORK_TERMINAL,
+            &WorkTerminal {
+                work_id: item.work_id.clone(),
+                terminal_kind,
+                outcome_ref: "automation_lifecycle".to_owned(),
+                facts: Some(serde_json::to_value(facts)?),
+            },
+        )
+    }
+
+    pub(crate) fn cancellation_requested(
+        &self,
+        item: &ReplayWorkItem,
+    ) -> Result<bool, DurableDispatchError> {
+        Ok(self
+            .replay_work_state()?
+            .items
+            .get(&item.work_id)
+            .ok_or_else(|| DurableDispatchError::MissingWork(item.work_id.clone()))?
+            .cancellation_requested_sequence
+            .is_some())
     }
 
     pub fn requeue_stale(
@@ -409,6 +486,8 @@ impl DurableWorkDispatcher {
             if item.cancellation_requested_sequence.is_some() {
                 self.record_cancelled(item, "stale_lease_after_cancellation")?;
                 summary.cancelled_work_ids.push(work_id.clone());
+            } else if item.work_kind == super::AUTOMATION_WORK_KIND {
+                continue;
             } else {
                 self.requeue(item, "stale_lease")?;
                 summary.requeued_work_ids.push(work_id.clone());
@@ -448,6 +527,26 @@ impl DurableWorkDispatcher {
         }
         let mut message: InboundMessage =
             serde_json::from_value(self.payloads.read_json(&item.payload_ref)?)?;
+        if item.work_id.starts_with("child-reentry-")
+            && item
+                .dedupe_hint
+                .as_deref()
+                .is_some_and(|hint| hint.starts_with("subagent.reentry:"))
+        {
+            let result_ref = message
+                .metadata
+                .get("subagent_task_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    DurableDispatchError::InvalidWork(
+                        "subagent reentry lacks owner result reference".to_owned(),
+                    )
+                })?;
+            message = message.with_owner_accepted_automation_result(
+                OwnerAcceptedAutomationResult::SubagentTerminal { result_ref },
+            );
+        }
         message.session_key_override = Some(item.session_key.clone());
         message.metadata.insert(
             DURABLE_WORK_ID_METADATA.to_owned(),
@@ -477,6 +576,7 @@ impl DurableWorkDispatcher {
                     work_id: item.work_id.clone(),
                     terminal_kind: WorkTerminalKind::Exhausted,
                     outcome_ref: "process_local_bus_attempt_limit".to_owned(),
+                    facts: None,
                 },
             )?;
             return Ok(DispatchOutcome::Exhausted);

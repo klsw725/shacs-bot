@@ -1,4 +1,8 @@
 mod agent_repl;
+mod automation_outcome;
+mod automation_producer;
+mod automation_worker;
+mod improvement_cli;
 mod onboard_wizard;
 mod runtime_cleanup;
 pub mod spec030_cli;
@@ -7,8 +11,10 @@ mod spec030_startup_facts;
 mod spec031_activation_provider;
 mod spec031_cli;
 mod spec031_management;
+mod spec033_cli;
 mod surface_approval_worker;
 mod tool_before_interaction;
+mod trajectory_cli;
 pub use runtime_cleanup::{RemovedRuntimePath, RemovedRuntimePathKind, RuntimeCleanupReceipt};
 
 use fs2::FileExt;
@@ -97,12 +103,13 @@ use shacs_core::runtime::{
     WorkspaceTrustRef, HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
 };
 use shacs_core::tools::{
-    AskUserTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
+    AskUserTool, CronTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
     ImageGenerateTool, ImageGenerateToolConfig, ListDirTool, McpRuntime, McpServerConnectionReport,
     McpServerSpec, McpStartupGate, MessageTool, NetworkGuard, PathContext, ReadFileTool,
     SelfRuntimeState, SelfTool, SpawnTool, StdioMcpConnector, ToolRegistry, WebFetchConfig,
     WebFetchTool, WebSearchConfig, WebSearchTool, WriteFileTool,
 };
+use shacs_cron::{CronSupervisor, CronSupervisorConfig, PersistentCronService};
 use shacs_projection::{
     build_remembered_permission_projection, format_remembered_permission_projection,
     format_remembered_permission_rule, normalize_remembered_permission_rule_prefix,
@@ -142,6 +149,7 @@ use shacs_session::durable_trace::{
 use shacs_session::durable_work::{
     evaluate_durable_work_recovery, evaluate_durable_work_recovery_for_owner, DurableWorkAdmission,
     DurableWorkRecoveryStatus, ReplayWorkState, WorkTerminalKind, MAX_DURABLE_WORK_ATTEMPTS,
+    MAX_DURABLE_WORK_OPEN_ITEMS as DURABLE_WORK_MAX_OPEN_ITEMS,
 };
 use shacs_session::{
     build_session_diagnostics_aggregate, SessionDiagnosticsAggregate,
@@ -227,7 +235,6 @@ static DURABLE_INBOUND_ENQUEUE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static PROCESS_INSTANCE_REF: OnceLock<String> = OnceLock::new();
 const DURABLE_WORK_LEASE_DURATION_MS: u64 = 30_000;
 const DURABLE_WORK_BUSY_RETRY_MS: u64 = 250;
-const DURABLE_WORK_MAX_OPEN_ITEMS: usize = 1024;
 const EXTERNAL_RUNTIME_BUS_CAPACITY: usize = 256;
 const EXTERNAL_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 type ApiProviderEventCallback = Arc<dyn Fn(&shacs_providers::ProviderEvent) + Send + Sync>;
@@ -250,6 +257,9 @@ pub enum CliCommand {
     Version,
     Onboard(OnboardOptions),
     Status(StatusOptions),
+    Goal(GoalOptions),
+    Improve(ImprovementOptions),
+    Trajectory(trajectory_cli::TrajectoryOptions),
     RuntimeInspect(RuntimeInspectOptions),
     TrustedRuntimeInspect(RuntimeInspectOptions, spec030_cli::Spec030CliFormat),
     RuntimeDiagnostics(RuntimeDiagnosticsOptions),
@@ -299,6 +309,22 @@ pub struct OnboardOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StatusOptions {
     pub config_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalOptions {
+    pub workspace: PathBuf,
+    pub session_key: String,
+    pub action: spec033_cli::Action,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImprovementOptions {
+    pub config_path: Option<PathBuf>,
+    pub root: PathBuf,
+    pub proposal_id: String,
+    pub target_ref: Option<String>,
+    pub action: improvement_cli::ImprovementAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -2782,6 +2808,9 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Version => Ok(format!("shacs-bot {VERSION}")),
         CliCommand::Onboard(options) => onboard(options).map(format_onboard_outcome),
         CliCommand::Status(options) => status(options).map(format_status_report),
+        CliCommand::Goal(options) => spec033_cli::run(&options),
+        CliCommand::Improve(options) => improvement_cli::run(options),
+        CliCommand::Trajectory(options) => trajectory_cli::run(options),
         CliCommand::RuntimeInspect(options) => runtime_inspect(options).map(format_runtime_inspect),
         CliCommand::TrustedRuntimeInspect(options, format) => {
             let observation =
@@ -2856,6 +2885,9 @@ where
         "--version" | "-v" => Ok(CliCommand::Version),
         "onboard" => parse_onboard(parser, global_config),
         "status" => parse_status(parser, global_config),
+        "goal" => spec033_cli::parse(parser),
+        "improve" => improvement_cli::parse(parser, global_config),
+        "trajectory" => trajectory_cli::parse(parser, global_config),
         "runtime" => parse_runtime(parser, global_config),
         "session" | "sessions" => parse_session(parser, global_config),
         "skills" | "skill" => parse_skills(parser, global_config),
@@ -3049,6 +3081,52 @@ fn spec030_fact_store_for_bundle(
         }
         facts
     }
+}
+
+fn production_improvement_service(
+    config_path: Option<PathBuf>,
+    root: &Path,
+    channel: &str,
+) -> Result<shacs_core::runtime::LocalImprovementService, CliError> {
+    let bundle = load_config(LoadOptions {
+        config_path: Some(config_path.unwrap_or_else(default_config_path)),
+        workspace_override: Some(root.to_path_buf()),
+        resolve_env: true,
+        write_back_migrations: false,
+    })?;
+    if bundle.context.workspace != root
+        && fs::canonicalize(&bundle.context.workspace).ok().as_deref()
+            != fs::canonicalize(root).ok().as_deref()
+    {
+        return Err(CliError::InvalidArguments(
+            "improvement root must be the configured workspace".to_owned(),
+        ));
+    }
+    let facts = spec030_fact_store_for_bundle(&bundle);
+    let projection = Arc::new(
+        shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider::new(facts.clone()),
+    );
+    let discovery = discover_plugins(&bundle.config, &bundle.context, &ProcessEnv)?;
+    let mut registry = shacs_core::runtime::TrustedToolBeforeRegistry::new();
+    shacs_core::runtime::register_trusted_javascript_tool_before_handlers(
+        &discovery.plugins,
+        &mut registry,
+    );
+    let handlers = registry.active_handlers(&discovery.plugins);
+    let hooks = PluginRuntimeHookAgentHook::new(build_plugin_runtime_snapshot(&discovery.plugins))
+        .with_trusted_handlers(handlers)
+        .with_spec030_fact_store(facts);
+    let gates = shacs_core::runtime::ProductionLocalGateSource::new(
+        projection,
+        hooks,
+        tool_before_interaction::production_interaction(channel, "self-improvement"),
+    );
+    shacs_core::runtime::LocalImprovementService::open(root, Arc::new(gates))
+        .map_err(|error| CliError::Runtime(error.to_string()))
+}
+
+fn improvement_api_error(error: shacs_core::runtime::LocalImprovementBlock) -> ApiError {
+    ApiError::invalid_request(error.to_string())
 }
 
 fn provider_credential_runtime(
@@ -4239,6 +4317,32 @@ fn spec030_core_diagnostics_projection() -> Result<Value, CliError> {
 }
 
 fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> DiagnosticsSnapshot {
+    let spec033 = report
+        .sessions
+        .latest_key
+        .as_deref()
+        .and_then(|session_id| {
+            shacs_core::runtime::build_spec033_snapshot_from(
+                &report.workspace,
+                &report.data_dir,
+                session_id,
+            )
+            .ok()
+        })
+        .map_or_else(
+            || {
+                json!({
+                    "transform_status": "unavailable",
+                    "snapshot": shacs_projection::Spec033Snapshot::unavailable("unavailable"),
+                })
+            },
+            |snapshot| {
+                json!({
+                    "transform_status": "projection_redacted",
+                    "snapshot": snapshot,
+                })
+            },
+        );
     let providers = report
         .providers
         .iter()
@@ -4422,6 +4526,7 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
                 "digest": &report.containment.digest,
             },
             "generated_media": generated_media,
+            "spec033": spec033,
             "sessions": {
                 "count": report.sessions.count,
                 "latest_key": report.sessions.latest_key,
@@ -8893,6 +8998,20 @@ fn start_heartbeat_runtime(
         .map_err(|error| CliError::Api(ApiError::internal(error.to_string())))
 }
 
+fn start_automation_cron_runtime(
+    adapter: Arc<AgentLoopChatCompletionAdapter>,
+    data_dir: &Path,
+) -> Result<CronSupervisor, CliError> {
+    let service = Arc::new(
+        PersistentCronService::new(data_dir.join("runtime").join("cron").join("jobs.json"))
+            .map_err(CliError::Io)?,
+    );
+    let executor = Arc::new(move |job: &shacs_cron::CronJob| {
+        automation_producer::enqueue_cron(adapter.as_ref(), job).map(|_| None)
+    });
+    CronSupervisor::start(service, executor, CronSupervisorConfig::default()).map_err(CliError::Io)
+}
+
 fn telegram_runtime_config(plugins: &BTreeMap<String, Value>) -> Option<TelegramRuntimeConfig> {
     let object = plugin_object(plugins, TELEGRAM_CHANNEL)?;
     let token = plugin_string_alias(object, &["botToken", "bot_token", "token"])?;
@@ -11648,6 +11767,7 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
         .map_err(|error| CliError::Runtime(error.to_string()))?;
     let approval_worker =
         start_surface_approval_worker(adapter.clone(), data_dir.clone(), owner_id.clone())?;
+    let cron_worker = start_automation_cron_runtime(adapter.clone(), &data_dir)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -11656,23 +11776,36 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
     } else {
         eprintln!("Serving shacs-bot API on http://{addr}");
     }
-    let serve_result = runtime.block_on(shacs_api::serve_api_with_timeout(
-        addr,
-        adapter,
-        Duration::from_secs_f64(timeout_seconds),
-        async move {
-            let reason =
-                wait_for_ctrl_c_or_runtime_request(data_dir, owner_fence, owner_id, None).await;
-            if let Ok(mut stored_reason) = shutdown_reason_writer.lock() {
-                *stored_reason = reason;
-            }
-        },
-    ));
+    let shutdown = async move {
+        let reason =
+            wait_for_ctrl_c_or_runtime_request(data_dir, owner_fence, owner_id, None).await;
+        if let Ok(mut stored_reason) = shutdown_reason_writer.lock() {
+            *stored_reason = reason;
+        }
+    };
+    let serve_result = if api_mutations_enabled(&options, addr) {
+        runtime.block_on(shacs_api::serve_api_with_timeout_and_local_mutations(
+            addr,
+            adapter,
+            Duration::from_secs_f64(timeout_seconds),
+            shutdown,
+        ))
+    } else {
+        runtime.block_on(shacs_api::serve_api_with_timeout(
+            addr,
+            adapter,
+            Duration::from_secs_f64(timeout_seconds),
+            shutdown,
+        ))
+    };
     let mut reason = shutdown_reason
         .lock()
         .map(|reason| *reason)
         .unwrap_or(RuntimeShutdownReason::StartupFailed);
     let approval_worker_result = approval_worker.stop();
+    let cron_worker_result = cron_worker
+        .join()
+        .map_err(|_| CliError::Runtime("automation cron worker panicked".to_owned()));
     let serve_failed = serve_result.is_err();
     reason = finalized_runtime_shutdown_reason(reason, serve_failed);
     let mut shutdown_report = if reason == RuntimeShutdownReason::OwnerLost || serve_result.is_err()
@@ -11712,7 +11845,9 @@ pub fn serve(options: ServeOptions) -> Result<String, CliError> {
     } else {
         ownership.fail_shutdown(shutdown_report, components)?;
     }
-    preserve_primary_result(serve_result.map_err(CliError::from), approval_worker_result)?;
+    let serve_result =
+        preserve_primary_result(serve_result.map_err(CliError::from), approval_worker_result);
+    preserve_primary_result(serve_result, cron_worker_result)?;
     Ok(format!("API server stopped: http://{addr}"))
 }
 
@@ -11763,6 +11898,7 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
     let approval_worker =
         start_surface_approval_worker(adapter.clone(), data_dir.clone(), owner_id.clone())?;
     let heartbeat_worker = start_heartbeat_runtime(adapter.clone(), &bundle)?;
+    let cron_worker = start_automation_cron_runtime(adapter.clone(), &data_dir)?;
     let supervisor = match ExternalChannelSupervisor::start(
         adapter.clone(),
         specs,
@@ -11835,6 +11971,9 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
     let supervisor_report_result = supervisor.stop(shutdown_reason);
     let approval_worker_result = approval_worker.stop();
     let heartbeat_result = join_heartbeat_worker(heartbeat_worker);
+    let cron_result = cron_worker
+        .join()
+        .map_err(|_| CliError::Runtime("automation cron worker panicked".to_owned()));
     let supervisor_report = match supervisor_report_result {
         Ok(report) => report,
         Err(error) => {
@@ -11855,6 +11994,7 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
     let runtime_result =
         preserve_primary_result(serve_result.map_err(CliError::from), approval_worker_result);
     let runtime_result = preserve_primary_result(runtime_result, heartbeat_result);
+    let runtime_result = preserve_primary_result(runtime_result, cron_result);
     if shutdown_reason == RuntimeShutdownReason::OwnerLost || ownership.fence.is_lost() {
         report_secondary_cleanup_result("runtime shutdown", runtime_result);
         let report = supervisor_report.report;
@@ -12306,7 +12446,12 @@ impl ExternalChannelSupervisor {
                 redact_string(&error.to_string())
             ))
         })?;
-        dispatch_due_external_work(&mut durable_dispatcher, &data_dir, &BTreeSet::new())?;
+        dispatch_due_external_work(
+            &mut durable_dispatcher,
+            &data_dir,
+            &BTreeSet::new(),
+            adapter.as_ref(),
+        )?;
         let durable_work = ExternalDurableWorkRuntime {
             data_dir,
             dispatcher: durable_dispatcher,
@@ -12562,7 +12707,7 @@ fn run_external_agent_processor(
                 };
                 if open_work_count >= DURABLE_WORK_MAX_OPEN_ITEMS {
                     eprintln!(
-                        "external durable work enqueue rejected: open work limit {DURABLE_WORK_MAX_OPEN_ITEMS} reached"
+            "external durable work enqueue rejected: open work limit {DURABLE_WORK_MAX_OPEN_ITEMS} reached"
                     );
                     continue;
                 }
@@ -12633,6 +12778,7 @@ fn run_external_agent_processor(
                     &mut durable_work.dispatcher,
                     &durable_work.data_dir,
                     &unavailable_sessions,
+                    adapter.as_ref(),
                 ) {
                     eprintln!("external durable work dispatch failed: {error}");
                     shutdown.stop.store(true, Ordering::SeqCst);
@@ -12699,6 +12845,7 @@ fn run_external_agent_processor(
             &mut durable_work.dispatcher,
             &durable_work.data_dir,
             &unavailable_sessions,
+            adapter.as_ref(),
         ) {
             eprintln!("external durable work wake failed: {error}");
             shutdown.stop.store(true, Ordering::SeqCst);
@@ -13002,6 +13149,7 @@ fn dispatch_due_external_work(
     dispatcher: &mut DurableWorkDispatcher,
     data_dir: &Path,
     unavailable_sessions: &BTreeSet<String>,
+    adapter: &AgentLoopChatCompletionAdapter,
 ) -> Result<(), CliError> {
     let (state, admission) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())?;
     if !admission.writable {
@@ -13020,6 +13168,12 @@ fn dispatch_due_external_work(
                 redact_string(&error.to_string())
             ))
         })?;
+    automation_worker::process_due_automation(dispatcher, data_dir, adapter).map_err(|error| {
+        CliError::InvalidArguments(format!(
+            "external automation dispatch failed: {}",
+            redact_string(&error)
+        ))
+    })?;
     Ok(())
 }
 
@@ -13190,7 +13344,7 @@ fn enqueue_remaining_external_inbound(
             .count();
         if open_work_count >= DURABLE_WORK_MAX_OPEN_ITEMS {
             eprintln!(
-                "external durable work shutdown enqueue rejected: open work limit {DURABLE_WORK_MAX_OPEN_ITEMS} reached"
+            "external durable work shutdown enqueue rejected: open work limit {DURABLE_WORK_MAX_OPEN_ITEMS} reached"
             );
             continue;
         }
@@ -17328,6 +17482,15 @@ pub fn help_text() -> String {
         "Commands:",
         "  onboard   Create or refresh config and workspace templates",
         "  status    Show config, workspace, model, provider, and workflow recipe status",
+        "  goal      Manage and inspect the persistent goal for a session",
+        "            Actions: inspect/status, set, pause, resume, clear, done, blocked",
+        "            Flags: --workspace/-w, --session",
+        "  improve   Propose, inspect, apply, verify, inspect candidate, or rollback a configured local artifact",
+        "            Actions: propose, inspect, apply, verify, candidate, rollback",
+        "            Flags: --root, --proposal, --target, --candidate, --snapshot, --expected-digest",
+        "  trajectory Record a replayable local production automation trajectory",
+        "            Actions: record",
+        "            Flags: --workspace/-w, --store, --trajectory-id, --instruction",
         "  runtime   Start, stop, restart, inspect trusted-runtime, migrate config/data, and inspect snapshot/activation diagnostics",
         "  session   Manage local session files",
         "  skills    List skills, inspect entries, and discover workflow recipes",
@@ -19793,6 +19956,10 @@ fn validate_serve_security(options: &ServeOptions, addr: SocketAddr) -> Result<(
     Ok(())
 }
 
+fn api_mutations_enabled(options: &ServeOptions, addr: SocketAddr) -> bool {
+    options.allow_api_side_effects && addr.ip().is_loopback()
+}
+
 pub struct AgentLoopChatCompletionAdapter {
     configured_model: String,
     provider_id: String,
@@ -19835,6 +20002,12 @@ pub struct AgentLoopChatCompletionAdapter {
 struct ProviderTurnInvocation {
     chat: ChatCompletionInvocation,
     runtime_override: Option<RawCredential>,
+}
+
+struct ProviderTurnOrigin<'a> {
+    channel: &'a str,
+    sender_id: &'a str,
+    chat_id: &'a str,
 }
 
 impl AgentLoopChatCompletionAdapter {
@@ -20290,6 +20463,27 @@ impl AgentLoopChatCompletionAdapter {
         chat_id: &str,
         observability_hooks: &[ShacsBotObservabilityHook],
     ) -> Result<AgentLoopTurnResult, ApiError> {
+        self.run_agent_loop_turn_with_origin_control(
+            invocation,
+            on_event,
+            ProviderTurnOrigin {
+                channel,
+                sender_id,
+                chat_id,
+            },
+            observability_hooks,
+            None,
+        )
+    }
+
+    fn run_agent_loop_turn_with_origin_control(
+        &self,
+        invocation: ProviderTurnInvocation,
+        on_event: Option<ApiProviderEventCallback>,
+        origin: ProviderTurnOrigin<'_>,
+        observability_hooks: &[ShacsBotObservabilityHook],
+        execution_control: Option<shacs_core::runtime::AutomationExecutionControl>,
+    ) -> Result<AgentLoopTurnResult, ApiError> {
         let ProviderTurnInvocation {
             chat: invocation,
             runtime_override,
@@ -20300,10 +20494,15 @@ impl AgentLoopChatCompletionAdapter {
             .unwrap_or(config.settings.temperature);
         config.settings.max_tokens = invocation.max_tokens.unwrap_or(config.settings.max_tokens);
         config.provider_runtime_override = runtime_override;
-        let message =
-            InboundMessage::new(channel, sender_id, chat_id, invocation_text(&invocation))
-                .with_media(invocation.media_paths.clone())
-                .with_session_key_override(invocation.session_key.clone());
+        config.execution_control = execution_control;
+        let message = InboundMessage::new(
+            origin.channel,
+            origin.sender_id,
+            origin.chat_id,
+            invocation_text(&invocation),
+        )
+        .with_media(invocation.media_paths.clone())
+        .with_session_key_override(invocation.session_key.clone());
         let (result, _) =
             self.process_inbound_with_outbound(message, config, on_event, observability_hooks)?;
         Ok(result)
@@ -20840,6 +21039,7 @@ impl AgentLoopChatCompletionAdapter {
         live_notification_sink: Option<RuntimeNotificationSink>,
         subagent_runtime: Option<SubagentRuntime>,
     ) -> Result<(AgentLoopTurnResult, Vec<shacs_channels::OutboundMessage>), ApiError> {
+        automation_producer::enqueue_result(self, &message).map_err(ApiError::internal)?;
         if self.runtime_verbose {
             eprintln!(
                 "Processing message from {}:{}: {}",
@@ -20944,7 +21144,10 @@ impl AgentLoopChatCompletionAdapter {
             config,
         )
         .with_context_tools(shacs_core::runtime::RuntimeContextTools::new().with_spawn(spawn_tool))
-        .with_session_turn_lock(self.session_turn_lock.clone());
+        .with_session_turn_lock(self.session_turn_lock.clone())
+        .with_goal_completion_evaluator(Arc::new(
+            shacs_core::runtime::ConservativeGoalCompletionEvaluator,
+        ));
         if !self.plugin_runtime_snapshot.commands.is_empty() {
             loop_runtime = loop_runtime.with_plugin_command_dispatcher(
                 PluginCommandDispatcher::with_permission_context(
@@ -21080,12 +21283,8 @@ impl AgentLoopChatCompletionAdapter {
     }
 
     fn execute_heartbeat_tasks(&self, tasks: &str) -> Result<String, HeartbeatError> {
-        let message = InboundMessage::new("heartbeat", "system", "heartbeat", tasks.to_owned())
-            .with_session_key_override("heartbeat");
-        let (turn, _) = self
-            .process_inbound_with_outbound(message, self.loop_config(), None, &[])
-            .map_err(|error| HeartbeatError::Execute(error.to_string()))?;
-        Ok(turn.final_content.unwrap_or_default())
+        automation_producer::enqueue_heartbeat(self, tasks).map_err(HeartbeatError::Execute)?;
+        Ok("heartbeat automation queued".to_owned())
     }
 
     fn attachment_media_root(&self) -> Result<PathBuf, ApiError> {
@@ -21512,6 +21711,17 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
                 "durable_diagnostics_evidence": durable_diagnostics_projection(&durable_diagnostics),
                 "supervision": runtime_supervisor_projection(&supervision),
                 "stored_data_migration": stored_data_migration,
+                "spec033": shacs_core::runtime::build_spec033_snapshot_from(
+                    &self.workspace,
+                    self.config_path.parent().unwrap_or(&self.workspace),
+                    "api:default",
+                ).map(|snapshot| json!({
+                    "transform_status": "projection_redacted",
+                    "snapshot": snapshot,
+                })).unwrap_or_else(|_| json!({
+                    "transform_status": "unavailable",
+                    "snapshot": shacs_projection::Spec033Snapshot::unavailable("api:default"),
+                })),
             }),
             operational_logs: vec![OperationalLogRecord::new(
                 DiagnosticsSeverity::Info,
@@ -21589,6 +21799,74 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
 
     fn session_workspace(&self) -> Option<PathBuf> {
         Some(self.workspace.clone())
+    }
+
+    fn runtime_data_dir(&self) -> Option<PathBuf> {
+        self.config_path.parent().map(Path::to_path_buf)
+    }
+
+    fn local_improvement(
+        &self,
+        action: &str,
+        proposal_id: &str,
+        body: Value,
+    ) -> Result<Value, ApiError> {
+        let service =
+            production_improvement_service(Some(self.config_path.clone()), &self.workspace, "api")
+                .map_err(|error| ApiError::invalid_request(error.to_string()))?;
+        match action {
+            "propose" => {
+                let target_ref = body
+                    .get("target_ref")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ApiError::invalid_request("target_ref is required"))?;
+                let expected = body
+                    .get("expected_target_digest")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        ApiError::invalid_request("expected_target_digest is required")
+                    })?;
+                let candidate = body
+                    .get("candidate")
+                    .ok_or_else(|| ApiError::invalid_request("candidate is required"))?;
+                let snapshot = body
+                    .get("snapshot")
+                    .ok_or_else(|| ApiError::invalid_request("snapshot is required"))?;
+                serde_json::to_value(
+                    service
+                        .propose(
+                            proposal_id,
+                            target_ref,
+                            expected,
+                            &candidate.to_string(),
+                            &snapshot.to_string(),
+                            body.get("confirmation_required")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        )
+                        .map_err(improvement_api_error)?,
+                )
+            }
+            "inspect" => serde_json::to_value(
+                service
+                    .inspect(proposal_id)
+                    .map_err(improvement_api_error)?,
+            ),
+            "apply" => {
+                serde_json::to_value(service.apply(proposal_id).map_err(improvement_api_error)?)
+            }
+            "verify" => {
+                serde_json::to_value(service.verify(proposal_id).map_err(improvement_api_error)?)
+            }
+            "candidate" => serde_json::to_value(service.rollback_candidate(proposal_id)),
+            "rollback" => serde_json::to_value(
+                service
+                    .rollback(proposal_id)
+                    .map_err(improvement_api_error)?,
+            ),
+            _ => return Err(ApiError::not_found("improvement API route not found")),
+        }
+        .map_err(|error| ApiError::internal(error.to_string()))
     }
 
     fn workflow_recipes_projection(&self) -> Option<Value> {
@@ -21841,6 +22119,14 @@ fn production_tool_registry(
     };
     let file_state = Arc::new(Mutex::new(FileState::new()));
     let mut registry = ToolRegistry::new();
+    let cron_service = Arc::new(
+        PersistentCronService::new(bundle.context.runtime_subdir("cron").join("jobs.json"))
+            .map_err(CliError::Io)?,
+    );
+    registry.register(CronTool::with_timezone(
+        cron_service.clone(),
+        bundle.config.agents.defaults.timezone.clone(),
+    ));
     registry.register(ReadFileTool::with_file_state(
         path_context.clone(),
         file_state.clone(),
@@ -23821,6 +24107,32 @@ mod tests {
             return Err("expected status command".into());
         };
         assert_eq!(options.config_path, Some(PathBuf::from("/tmp/b.json")));
+        Ok(())
+    }
+
+    #[test]
+    fn spec033_subcommands_accept_help_and_show_actions_and_flags() -> Result<(), Box<dyn Error>> {
+        for (args, expected) in [
+            (
+                vec!["goal", "--help"],
+                vec!["goal", "inspect", "--workspace"],
+            ),
+            (
+                vec!["improve", "--help"],
+                vec!["improve", "propose", "--root"],
+            ),
+            (
+                vec!["trajectory", "--help"],
+                vec!["trajectory", "record", "--store"],
+            ),
+        ] {
+            let parsed = parse_cli_args(args)?;
+            assert_eq!(parsed, CliCommand::Help);
+            let help = run_command(parsed)?;
+            for token in expected {
+                assert!(help.contains(token), "help missing `{token}`");
+            }
+        }
         Ok(())
     }
 
@@ -26976,6 +27288,7 @@ mod tests {
                 lease_expires_at_ms: None,
                 cancellation_requested_sequence: None,
                 terminal_kind: None,
+                terminal_facts: None,
                 enqueued_sequence: 1,
                 updated_sequence: 1,
                 enqueued_at: "2026-07-22T00:00:00Z".to_owned(),
@@ -28469,6 +28782,31 @@ mod tests {
             },
             addr,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn serve_enables_api_mutations_only_for_explicit_loopback_opt_in() -> Result<(), Box<dyn Error>>
+    {
+        let loopback = "127.0.0.1:8900".parse()?;
+        let remote = "0.0.0.0:8900".parse()?;
+
+        assert!(!api_mutations_enabled(&ServeOptions::default(), loopback));
+        assert!(api_mutations_enabled(
+            &ServeOptions {
+                allow_api_side_effects: true,
+                ..ServeOptions::default()
+            },
+            loopback
+        ));
+        assert!(!api_mutations_enabled(
+            &ServeOptions {
+                allow_api_side_effects: true,
+                allow_remote: true,
+                ..ServeOptions::default()
+            },
+            remote
+        ));
         Ok(())
     }
 
@@ -31761,6 +32099,8 @@ mod tests {
         assert!(!workspace.exists());
         assert!(output.contains("local runtime diagnostics snapshot generated"));
         assert!(output.contains("generated_media"));
+        assert!(output.contains("\"spec033\""));
+        assert!(output.contains("\"transform_status\": \"unavailable\""));
         assert!(output.contains("img-test"));
         assert!(!output.contains("private prompt"));
         assert!(!output.contains("not real png"));

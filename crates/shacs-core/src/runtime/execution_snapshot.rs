@@ -110,6 +110,17 @@ impl ExecutionSnapshot {
             Err(ExecutionSnapshotError::ProvenanceMismatch)
         }
     }
+
+    pub fn semantic_compatibility_digest(&self) -> Result<String, ExecutionSnapshotError> {
+        let mut value = serde_json::to_value(self)
+            .map_err(|error| ExecutionSnapshotError::Malformed(error.to_string()))?;
+        if let Value::Object(object) = &mut value {
+            object.remove("snapshot_id");
+            object.remove("created_at_unix_ms");
+            object.remove("provenance_digest");
+        }
+        digest_value(&value)
+    }
 }
 
 impl ExecutionSnapshotInput {

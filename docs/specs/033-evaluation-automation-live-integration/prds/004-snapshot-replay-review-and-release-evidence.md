@@ -1,6 +1,6 @@
 # PRD 004. snapshot replay, review, and release evidence
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
@@ -39,3 +39,5 @@ Status: Planned
 2. Snapshot mismatch/source-mutation fixtures.
 3. Reproducible review artifacts and coverage entry.
 4. Projection-boundary transform audit.
+
+Closure state: source-manifest binding과 tracked evidence index는 구현되었고 현재 closure의 QA/goal/code/security/docs 최종 review와 `final-production-20260814-v6` source-bound release execution은 모두 PASS다. 향후 실행 실패 또는 generated manifest 미생성은 shipping을 차단한다. Cargo test gate는 review verdict로 취급하지 않는다.

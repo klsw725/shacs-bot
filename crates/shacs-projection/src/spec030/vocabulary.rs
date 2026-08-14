@@ -131,6 +131,7 @@ pub enum HookDenialReason {
     ExtensionBlocked,
     UserDenied,
     HeadlessConfirmationDenied,
+    HookFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

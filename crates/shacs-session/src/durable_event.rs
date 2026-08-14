@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::SystemTime;
 
+use crate::durable_work::{
+    apply_durable_work_event, durable_work_append_requires_normalization,
+    normalize_durable_work_append, DurableWorkReplayState,
+};
+
 pub const CURRENT_DURABLE_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const CURRENT_DURABLE_EVENT_FRAME_VERSION: u32 = 1;
 pub const MAX_INLINE_EVENT_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -302,6 +307,62 @@ impl From<serde_json::Error> for DurableEventError {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum DurableEventAppendError {
+    DefinitelyNotCommitted(DurableEventError),
+    CommitUnknown(DurableEventError),
+}
+
+#[derive(Debug)]
+pub(crate) struct DurableEventFrameDurable;
+
+impl fmt::Display for DurableEventAppendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DefinitelyNotCommitted(error) => {
+                write!(formatter, "durable event was not committed: {error}")
+            }
+            Self::CommitUnknown(error) => {
+                write!(formatter, "durable event commit is unknown: {error}")
+            }
+        }
+    }
+}
+
+impl Error for DurableEventAppendError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::DefinitelyNotCommitted(error) | Self::CommitUnknown(error) => Some(error),
+        }
+    }
+}
+
+impl DurableEventAppendError {
+    fn into_error(self) -> DurableEventError {
+        match self {
+            Self::DefinitelyNotCommitted(error) | Self::CommitUnknown(error) => error,
+        }
+    }
+}
+
+impl From<DurableEventError> for DurableEventAppendError {
+    fn from(error: DurableEventError) -> Self {
+        Self::DefinitelyNotCommitted(error)
+    }
+}
+
+impl From<std::io::Error> for DurableEventAppendError {
+    fn from(error: std::io::Error) -> Self {
+        Self::DefinitelyNotCommitted(DurableEventError::Io(error))
+    }
+}
+
+impl From<serde_json::Error> for DurableEventAppendError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::DefinitelyNotCommitted(DurableEventError::Serialization(error))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DurableEventFrame {
     frame_version: u32,
@@ -411,19 +472,27 @@ impl DurableEventStore {
         &mut self,
         input: DurableEventInput,
     ) -> Result<DurableEventRecord, DurableEventError> {
+        self.append_classified(input)
+            .map_err(DurableEventAppendError::into_error)
+    }
+
+    pub(crate) fn append_classified(
+        &mut self,
+        input: DurableEventInput,
+    ) -> Result<DurableEventRecord, DurableEventAppendError> {
         self.append_with_writer(input, write_frame)
     }
 
-    fn append_with_writer(
+    pub(crate) fn append_with_writer(
         &mut self,
         mut input: DurableEventInput,
-        writer: impl FnOnce(&Path, &[u8]) -> std::io::Result<()>,
-    ) -> Result<DurableEventRecord, DurableEventError> {
+        writer: impl FnOnce(&Path, &[u8]) -> std::io::Result<DurableEventFrameDurable>,
+    ) -> Result<DurableEventRecord, DurableEventAppendError> {
         if self.incomplete_tail {
-            return Err(DurableEventError::IncompleteTail);
+            return Err(DurableEventError::IncompleteTail.into());
         }
         if !self.compatibility.is_current() {
-            return Err(DurableEventError::ReadOnly(self.compatibility.clone()));
+            return Err(DurableEventError::ReadOnly(self.compatibility.clone()).into());
         }
         let mut guard = recover_lock(&self.process_lock);
         let _file_lock = acquire_file_lock(&self.lock_path)?;
@@ -432,17 +501,17 @@ impl DurableEventStore {
         self.incomplete_tail = current.incomplete_tail;
         self.next_sequence = current.last_sequence.unwrap_or(0).saturating_add(1);
         if self.incomplete_tail {
-            return Err(DurableEventError::IncompleteTail);
+            return Err(DurableEventError::IncompleteTail.into());
         }
         if !self.compatibility.is_current() {
-            return Err(DurableEventError::ReadOnly(self.compatibility.clone()));
+            return Err(DurableEventError::ReadOnly(self.compatibility.clone()).into());
         }
         validate_input(&input, &self.registry)?;
         if let DurableEventPayload::Inline { data, .. } = &mut input.payload {
             *data = redact_value(data);
         }
         let sequence = self.next_sequence;
-        let record = DurableEventRecord {
+        let mut record = DurableEventRecord {
             schema_version: CURRENT_DURABLE_EVENT_SCHEMA_VERSION,
             event_id: format!("event-{sequence:020}"),
             sequence,
@@ -455,11 +524,30 @@ impl DurableEventStore {
             provenance: input.provenance,
             recorded_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         };
+        if durable_work_append_requires_normalization(&record)
+            .map_err(|error| DurableEventError::Validation(error.to_string()))?
+        {
+            let mut work = DurableWorkReplayState::default();
+            let mut reducer_error = None;
+            visit_path(&self.path, &self.registry, 0, |persisted| {
+                if reducer_error.is_none() {
+                    if let Err(error) = apply_durable_work_event(&mut work, persisted) {
+                        reducer_error = Some(error.to_string());
+                    }
+                }
+            })?;
+            if let Some(error) = reducer_error {
+                return Err(DurableEventError::Validation(error).into());
+            }
+            normalize_durable_work_append(&work, &mut record)
+                .map_err(|error| DurableEventError::Validation(error.to_string()))?;
+        }
         let record_bytes = canonical_record_bytes(&record)?;
         if record_bytes.len() > MAX_DURABLE_EVENT_FRAME_BYTES {
             return Err(DurableEventError::Validation(format!(
                 "event record exceeds {MAX_DURABLE_EVENT_FRAME_BYTES} bytes"
-            )));
+            ))
+            .into());
         }
         let frame = DurableEventFrame {
             frame_version: CURRENT_DURABLE_EVENT_FRAME_VERSION,
@@ -471,18 +559,51 @@ impl DurableEventStore {
         if frame_bytes.len() > MAX_DURABLE_EVENT_FRAME_BYTES {
             return Err(DurableEventError::Validation(format!(
                 "event frame exceeds {MAX_DURABLE_EVENT_FRAME_BYTES} bytes"
-            )));
+            ))
+            .into());
         }
         frame_bytes.push(b'\n');
+        let frame_start = self.path.metadata()?.len();
         let write_result = writer(&self.path, &frame_bytes);
         if let Err(error) = write_result {
-            self.incomplete_tail = true;
-            guard.verified = false;
-            guard.stamp = None;
-            return Err(DurableEventError::Io(error));
+            match appended_frame_readback(&self.path, frame_start, &frame_bytes) {
+                AppendedFrameReadback::ExactFrame => {
+                    guard.verified = false;
+                    guard.stamp = None;
+                    return Err(DurableEventAppendError::CommitUnknown(
+                        DurableEventError::Io(error),
+                    ));
+                }
+                AppendedFrameReadback::DefinitelyNotPresent => {
+                    match read_tail_state(&self.path, &self.registry) {
+                        Ok(current) => {
+                            self.compatibility = current.compatibility;
+                            self.incomplete_tail = current.incomplete_tail;
+                            self.next_sequence =
+                                current.last_sequence.unwrap_or(0).saturating_add(1);
+                            let verified = !self.incomplete_tail && self.compatibility.is_current();
+                            refresh_process_stamp(&mut guard, &self.path, verified);
+                        }
+                        Err(_) => {
+                            self.incomplete_tail = true;
+                            guard.verified = false;
+                            guard.stamp = None;
+                        }
+                    }
+                    return Err(DurableEventAppendError::DefinitelyNotCommitted(
+                        DurableEventError::Io(error),
+                    ));
+                }
+                AppendedFrameReadback::Unknown(readback_error) => {
+                    guard.verified = false;
+                    guard.stamp = None;
+                    return Err(DurableEventAppendError::CommitUnknown(
+                        DurableEventError::Io(readback_error),
+                    ));
+                }
+            }
         }
-        guard.verified = true;
-        guard.stamp = Some(file_stamp(&self.path)?);
+        refresh_process_stamp(&mut guard, &self.path, true);
         self.next_sequence = self.next_sequence.saturating_add(1);
         Ok(record)
     }
@@ -918,11 +1039,72 @@ fn open_regular_file(path: &Path, mut options: OpenOptions) -> std::io::Result<F
     Ok(file)
 }
 
-fn write_frame(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_frame(path: &Path, bytes: &[u8]) -> std::io::Result<DurableEventFrameDurable> {
     let mut file = open_append_file(path)?;
     file.write_all(bytes)?;
     file.flush()?;
-    file.sync_all()
+    file.sync_all()?;
+    Ok(DurableEventFrameDurable)
+}
+
+#[derive(Debug)]
+enum AppendedFrameReadback {
+    ExactFrame,
+    DefinitelyNotPresent,
+    Unknown(std::io::Error),
+}
+
+fn appended_frame_readback(
+    path: &Path,
+    frame_start: u64,
+    expected: &[u8],
+) -> AppendedFrameReadback {
+    let mut file = match open_read_file(path) {
+        Ok(file) => file,
+        Err(error) => return AppendedFrameReadback::Unknown(error),
+    };
+    let expected_end = frame_start.saturating_add(expected.len() as u64);
+    let actual_end = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) => return AppendedFrameReadback::Unknown(error),
+    };
+    if actual_end < expected_end {
+        return AppendedFrameReadback::DefinitelyNotPresent;
+    }
+    if actual_end > expected_end {
+        return AppendedFrameReadback::Unknown(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "durable event append readback contains unexpected trailing bytes",
+        ));
+    }
+    if let Err(error) = file.seek(SeekFrom::Start(frame_start)) {
+        return AppendedFrameReadback::Unknown(error);
+    }
+    let mut actual = vec![0_u8; expected.len()];
+    if let Err(error) = file.read_exact(&mut actual) {
+        return AppendedFrameReadback::Unknown(error);
+    }
+    if actual == expected {
+        AppendedFrameReadback::ExactFrame
+    } else {
+        AppendedFrameReadback::Unknown(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "durable event append readback does not match the expected frame",
+        ))
+    }
+}
+
+fn refresh_process_stamp(state: &mut ProcessStoreState, path: &Path, verified: bool) {
+    match file_stamp(path) {
+        Ok(stamp) => {
+            state.verified = verified;
+            state.stamp = Some(stamp);
+        }
+        Err(_) => {
+            state.verified = false;
+            state.stamp = None;
+        }
+    }
 }
 
 fn file_stamp(path: &Path) -> std::io::Result<FileStamp> {
@@ -1005,7 +1187,10 @@ mod tests {
             })
             .err()
             .ok_or("expected injected write failure")?;
-        assert!(matches!(error, DurableEventError::Io(_)));
+        assert!(matches!(
+            error,
+            DurableEventAppendError::DefinitelyNotCommitted(DurableEventError::Io(_))
+        ));
         drop(unwritten);
         let unwritten = DurableEventStore::open(unwritten_root.path())?;
         let scan = unwritten.scan(10)?;
@@ -1025,7 +1210,10 @@ mod tests {
             })
             .err()
             .ok_or("expected injected partial failure")?;
-        assert!(matches!(error, DurableEventError::Io(_)));
+        assert!(matches!(
+            error,
+            DurableEventAppendError::DefinitelyNotCommitted(DurableEventError::Io(_))
+        ));
         drop(partial);
         let partial = DurableEventStore::open(partial_root.path())?;
         let scan = partial.scan(10)?;
@@ -1036,20 +1224,61 @@ mod tests {
         let committed_root = tempfile::tempdir()?;
         let mut committed = DurableEventStore::open(committed_root.path())?;
         committed.append(input("first"))?;
-        let error = committed
-            .append_with_writer(input("second"), |path, bytes| {
-                write_frame(path, bytes)?;
-                Err(std::io::Error::other("injected after durable write"))
-            })
-            .err()
-            .ok_or("expected injected post-write failure")?;
-        assert!(matches!(error, DurableEventError::Io(_)));
+        let record = committed.append_with_writer(input("second"), write_frame)?;
+        assert_eq!(record.sequence, 2);
         drop(committed);
         let committed = DurableEventStore::open(committed_root.path())?;
         let scan = committed.scan(10)?;
         assert_eq!(scan.records.len(), 2);
         assert!(!scan.incomplete_tail);
         assert!(committed.is_writable());
+        Ok(())
+    }
+
+    #[test]
+    fn append_sync_failure_with_exact_readback_is_commit_unknown() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let mut store = DurableEventStore::open(root.path())?;
+
+        let error = store
+            .append_with_writer(input("sync-unknown"), |path, bytes| {
+                let mut file = open_append_file(path)?;
+                file.write_all(bytes)?;
+                file.flush()?;
+                Err(std::io::Error::other("injected sync_all failure"))
+            })
+            .err()
+            .ok_or("expected sync failure to leave commit unknown")?;
+
+        assert!(matches!(
+            error,
+            DurableEventAppendError::CommitUnknown(DurableEventError::Io(_))
+        ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_succeeds_when_process_stamp_refresh_fails_after_commit() -> Result<(), Box<dyn Error>>
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir()?;
+        let mut store = DurableEventStore::open(root.path())?;
+        let path = store.path().to_path_buf();
+
+        let result = store.append_with_writer(input("committed"), |path, bytes| {
+            let durable = write_frame(path, bytes)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o200))?;
+            Ok(durable)
+        });
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        let record = result?;
+
+        assert_eq!(record.sequence, 1);
+        drop(store);
+        let reopened = DurableEventStore::open(root.path())?;
+        assert_eq!(reopened.scan(10)?.records, vec![record]);
         Ok(())
     }
 }

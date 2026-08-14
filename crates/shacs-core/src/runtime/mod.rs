@@ -8,6 +8,12 @@ mod app_extension_provenance;
 mod app_supervisor;
 mod autocompact;
 mod automation;
+mod automation_adapter;
+mod automation_dispatch;
+mod automation_gates;
+mod automation_lifecycle;
+mod automation_payload;
+mod automation_production;
 mod classifier_evidence;
 mod containment_permission;
 mod context;
@@ -24,6 +30,9 @@ mod execution_snapshot;
 mod execution_snapshot_source;
 mod file_context;
 mod goal;
+mod goal_accounting;
+mod goal_evaluator;
+mod goal_surface;
 mod lifecycle;
 mod loop_control;
 mod memory;
@@ -52,13 +61,18 @@ mod replay;
 mod runner;
 pub mod sandbox_adapter;
 mod self_improvement;
+mod self_improvement_live;
 mod skill_trust_permission;
+mod snapshot_replay;
 mod spec031_context;
+mod spec033_projection;
+mod spec033_release;
 mod subagent;
 mod surface_action;
 mod tool_before;
 mod tool_execution;
 mod tool_search;
+mod trajectory_store;
 mod trusted_javascript_tool_before;
 pub mod trusted_resources;
 pub mod trusted_runtime;
@@ -95,8 +109,30 @@ pub use app_supervisor::{
 pub use autocompact::{AutoCompact, AutoCompactArchiveOutcome, RECENT_SUFFIX_MESSAGES};
 pub use automation::{
     coordinate_automation_run, AutomationCoordinationOutcome, AutomationPrd008LinkageMetadata,
-    AutomationSourceEvent, AutomationSourceEventKind, AutomationTaskOutcomeEligibility,
-    SubagentMergeState,
+    AutomationSourceEvent, AutomationSourceEventKind, AutomationSuppressionReason,
+    AutomationTaskOutcomeEligibility, SubagentMergeState,
+};
+pub use automation_adapter::{
+    AutomationDispatchRequest, AutomationExecutionControl, AutomationExecutionReceipt,
+    AutomationExecutionTerminalFact, AutomationExecutor, AutomationGateResolution,
+    AutomationGateResolver, AutomationHookEvaluation, AutomationProcessCleanupFact,
+    AUTOMATION_RUNTIME_DEFAULT_TIMEOUT,
+};
+pub use automation_dispatch::{
+    AutomationDispatchSummary, AutomationWorkEnqueueInput, AutomationWorkEnvelope,
+    AUTOMATION_WORK_KIND,
+};
+pub use automation_lifecycle::{
+    own_automation_lifecycle, AutomationConfirmationFact, AutomationDeliveryResult,
+    AutomationExecutionRequirements, AutomationGateRecord, AutomationJobResult,
+    AutomationLifecycleInput, AutomationLifecycleOutcome, AutomationLifecycleRecord,
+    AutomationNoDispatchReason, AutomationScheduleKind,
+};
+pub use automation_production::{
+    enqueue_production_automation, route_task_outcome, AutomationOutcomePolicy,
+    AutomationOwnerEffect, AutomationProductionJob, AutomationRouteEvidence, AutomationRouteOwners,
+    AutomationTaskOutcomeDecision, AutomationTaskOutcomeEvaluator, AutomationTaskOutcomeInput,
+    AutomationTaskOutcomeRecord, ConservativeAutomationTaskOutcomeEvaluator,
 };
 pub use classifier_evidence::{
     classifier_decision_evidence, skipped_classifier_evidence, AccountingState,
@@ -187,12 +223,25 @@ pub use goal::{
     apply_completion_verdict, build_goal_completion_evaluation_request, clear_goal,
     consume_evaluator_decision, continuation_decision, create_persistent_goal,
     evaluator_consumption_idempotency_key, mark_goal_blocked, mark_goal_done, pause_goal,
-    persistent_goal_from_session, remove_persistent_goal, resume_goal, store_persistent_goal,
-    EvaluatorDecisionInput, GoalCompletionVerdict, GoalContinuationDecision,
+    persistent_goal_from_session, record_goal_stop, remove_persistent_goal, resume_goal,
+    store_persistent_goal, EvaluatorDecisionInput, GoalCompletionVerdict, GoalContinuationDecision,
     GoalContinuationStopReason, GoalEvaluationRequest, GoalMetadataError, LedgerConsumptionRecord,
     LedgerConsumptionStatus, PersistentGoal, PersistentGoalStatus, RuntimeContinuationDecision,
     RuntimeDecisionKind, RuntimeDecisionRecord, RuntimePolicyGateResults, RuntimeSelectedAction,
-    StaleVerdictRecord, DEFAULT_GOAL_TURN_BUDGET, PERSISTENT_GOAL_METADATA_KEY,
+    StaleVerdictRecord, DEFAULT_GOAL_TURN_BUDGET, GOAL_TRANSITION_HISTORY_METADATA_KEY,
+    PERSISTENT_GOAL_METADATA_KEY,
+};
+pub use goal_accounting::{
+    GoalBudgetAccounting, GoalEvidenceAvailability, GoalObservedState, GoalStopReason,
+    GoalTransitionError, GoalTransitionFact, GoalTransitionKind,
+};
+pub use goal_evaluator::{
+    ConservativeGoalCompletionEvaluator, GoalCompletionEvaluator, GoalEvaluatorOutcome,
+    GOAL_EVALUATOR_BOUNDARY_METADATA_KEY,
+};
+pub use goal_surface::{
+    apply_goal_surface_action, build_spec033_snapshot, build_spec033_snapshot_from,
+    GoalSurfaceAction, GoalSurfaceError,
 };
 pub use lifecycle::{
     DreamLifecycle, McpLifecycle, ProviderHotSwapResult, ProviderSelectionSnapshot,
@@ -352,7 +401,20 @@ pub use self_improvement::{
     runtime_improvement_verification_record, runtime_mcp_exposure_projection,
     SelfImprovementApplyReadiness, SelfImprovementRollbackProjection,
 };
-pub use shacs_bus::{InboundMessage, MessageBus, MessageBusError, OutboundMessage};
+pub use self_improvement_live::{
+    ApplyBlock, ApplyGateDecision, ApplyGateReceipt, ApplyReceipt, CheckpointReceipt,
+    CurrentGateEvidence, CurrentImprovementGates, CurrentSpec030Receipts, ExecutionSnapshotRef,
+    ImprovementOwner, ImprovementVerifier, InMemoryImprovementStore, LocalApplyReceipt,
+    LocalArtifactOwner, LocalDigestVerifier, LocalGateSource, LocalImprovementBlock,
+    LocalImprovementProposal, LocalImprovementRuntime, LocalImprovementService,
+    LocalImprovementStatus, LocalImprovementStore, LocalImprovementVerifier,
+    LocalRollbackCandidate, LocalRollbackReceipt, OwnerApplyEvidence, OwnerRollbackEvidence,
+    ProductionLocalGateSource, RollbackCandidate, RollbackReceipt, SelfImprovementCoordinator,
+    SelfImprovementProposal, VerificationEvidence,
+};
+pub use shacs_bus::{
+    InboundMessage, MessageBus, MessageBusError, OutboundMessage, OwnerAcceptedAutomationResult,
+};
 pub use shacs_heartbeat::{
     build_decision_request, current_time_str, heartbeat_tool_schema, is_deliverable,
     parse_decision_response, read_heartbeat_file, HeartbeatAction, HeartbeatDecision,
@@ -380,10 +442,21 @@ pub use skill_trust_permission::{
     SkillTrustPermissionDecisionKind, SkillTrustPermissionInput, SkillTrustPermissionSchemaId,
     SkillTrustRejectionReason, TrustLifecycleStatus,
 };
+pub use snapshot_replay::{
+    replay_recorded_trajectory, RecordedTrajectoryReplayError, RecordedTrajectoryReplayReceipt,
+};
 pub use spec031_context::{
     project_spec031_context_evidence, Spec031ContextEvidenceInput,
     Spec031ContextEvidenceProjection, Spec031ContextEvidenceReason, Spec031ContextEvidenceRow,
     Spec031ContextEvidenceRowKind, Spec031ContextOwnerRef,
+};
+pub use spec033_release::{
+    collect_spec033_replay_evidence, redact_spec033_artifact, run_spec033_release_runner,
+    validate_spec033_release_artifacts, validate_spec033_release_artifacts_against,
+    validate_spec033_release_coverage, Spec033RedactionReceipt, Spec033ReleaseArtifactError,
+    Spec033ReleaseCheck, Spec033ReleaseCommandEvidence, Spec033ReleaseConfig,
+    Spec033ReleaseEvidenceError, Spec033ReleaseManifest, Spec033ReleaseMode, Spec033SourceManifest,
+    Spec033TrajectoryProvenance,
 };
 pub use subagent::{
     build_subagent_tool_registry, format_partial_progress,
@@ -416,6 +489,11 @@ pub use tool_search::{
     BridgeToolCall, BridgeToolExecutionReport, BridgeToolResult, BridgeUnderlyingMappingEvidence,
     ResolvedDeferredToolCall, ToolCallScopeError, ToolDescribeEvidence, ToolSearchActivationReason,
     ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
+};
+pub use trajectory_store::{
+    RecordedArtifactRef, RecordedBoundaryRequirement, RecordedSourceArtifact,
+    RecordedSourceArtifactInput, RecordedTrajectoryInput, RecordedTrajectoryOrigin,
+    RecordedTrajectoryRecord, RecordedTrajectoryStore, RecordedTrajectoryStoreError,
 };
 pub use trusted_javascript_tool_before::register_trusted_javascript_tool_before_handlers;
 pub use trusted_tool_before_registry::TrustedToolBeforeRegistry;

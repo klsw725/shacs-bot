@@ -109,7 +109,7 @@ reference는 질문을 돕는 지도다. 최종 설계의 source of truth는 num
 
 Full live product closure 전에 남은 대표 범위:
 
-- evaluator, automation, self-improvement, replay, projection, diagnostics가 실제 AgentLoop/service/channel/API/TUI surface에서 end-to-end로 소비되는 live wiring.
+- evaluator, automation, self-improvement, replay, projection, diagnostics가 지원되는 `AgentLoop` turn-end, local heartbeat/cron, terminal `SubagentRuntime` producer와 domain input에서 소비되는 scoped live wiring. Channel/API/TUI surface와 Tasks adapter parity는 Spec035가 소유한다.
 - PRD 000-014 각각을 직접 추적하는 release coverage entry와 dedicated release runner/evidence artifact.
 - `BlockedApproval`, `MissingRedactionEvidence`, duplicate/superseded consumption 같은 release blocker 및 ledger edge-case regression 보강.
 - QA/goal/code/security/docs review 결과를 저장소 안에서 재현 가능한 artifact로 남기는 review evidence workflow.

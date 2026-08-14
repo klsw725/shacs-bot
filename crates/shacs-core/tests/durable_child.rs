@@ -335,12 +335,24 @@ fn accepted_result_ref_resolves_to_reentry_artifact_and_enqueues_parent_after_ev
         })
         .ok_or("missing parent reentry work")?;
     assert!(result_sequence < parent_work.enqueued_sequence);
+    let admission =
+        shacs_session::durable_work::evaluate_durable_work_recovery(&state.work, &payload_root, 1);
+    let mut dispatcher = shacs_core::runtime::DurableWorkDispatcher::open(
+        &event_root,
+        &payload_root,
+        bus.clone(),
+        "test-owner",
+        100,
+    )?;
+    dispatcher.dispatch_due(&state.work, &admission, 1)?;
+    let inbound = bus.consume_inbound().ok_or("missing durable reentry")?;
+    assert!(matches!(
+        inbound.owner_accepted_automation_result(),
+        Some(shacs_core::runtime::OwnerAcceptedAutomationResult::SubagentTerminal { result_ref })
+            if result_ref == "child-reentry"
+    ));
     let events = std::fs::read_to_string(event_root.join("events.log"))?;
     assert!(!events.contains("raw child result must live only in the payload artifact"));
-    assert!(
-        bus.consume_inbound().is_none(),
-        "durable child reentry must be delivered only through its durable inbound work"
-    );
     Ok(())
 }
 

@@ -46,12 +46,52 @@ pub trait ProviderRetryWaiter {
     fn wait(&mut self, delay_s: f64, message: &str);
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ThreadRetryWaiter;
+#[derive(Debug, Clone, Default)]
+pub struct ThreadRetryWaiter {
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    deadline: Option<std::time::Instant>,
+}
+
+impl ThreadRetryWaiter {
+    pub fn new(cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Self {
+        Self {
+            cancellation,
+            deadline: None,
+        }
+    }
+
+    pub fn with_deadline(
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        deadline: Option<std::time::Instant>,
+    ) -> Self {
+        Self {
+            cancellation,
+            deadline,
+        }
+    }
+}
 
 impl ProviderRetryWaiter for ThreadRetryWaiter {
     fn wait(&mut self, delay_s: f64, _message: &str) {
-        thread::sleep(Duration::from_secs_f64(delay_s.max(0.0)));
+        let requested_deadline =
+            std::time::Instant::now() + Duration::from_secs_f64(delay_s.max(0.0));
+        let deadline = self.deadline.map_or(requested_deadline, |deadline| {
+            deadline.min(requested_deadline)
+        });
+        while std::time::Instant::now() < deadline {
+            if self
+                .cancellation
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+            {
+                return;
+            }
+            thread::sleep(
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(Duration::from_millis(10)),
+            );
+        }
     }
 }
 
@@ -60,7 +100,7 @@ pub fn chat_with_retry(
     request: ProviderRequest,
     mode: ProviderRetryMode,
 ) -> Result<LlmResponse, ProviderError> {
-    let mut waiter = ThreadRetryWaiter;
+    let mut waiter = ThreadRetryWaiter::default();
     chat_with_retry_using_waiter(client, request, mode, &mut waiter)
 }
 
@@ -140,7 +180,7 @@ pub fn chat_stream_with_retry(
     mode: ProviderRetryMode,
     on_event: &mut dyn FnMut(ProviderEvent),
 ) -> Result<LlmResponse, ProviderError> {
-    let mut waiter = ThreadRetryWaiter;
+    let mut waiter = ThreadRetryWaiter::default();
     chat_stream_with_retry_using_waiter(client, request, mode, on_event, &mut waiter)
 }
 

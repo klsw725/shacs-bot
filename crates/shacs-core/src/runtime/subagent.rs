@@ -1,8 +1,8 @@
 use crate::runtime::{
     AgentRunResult, AgentRunSpec, AgentRunner, CancellationToken, ContainmentSnapshotRef,
     ContextBuilder, ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact,
-    ExecutionScope, InboundMessage, LateResultDecision, MessageBus, PendingExecution,
-    PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionRuleInput,
+    ExecutionScope, InboundMessage, LateResultDecision, MessageBus, OwnerAcceptedAutomationResult,
+    PendingExecution, PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionRuleInput,
     ProviderInvocationClient, RuntimeCapabilityReport, RuntimeCapabilityStatus,
     RuntimeExecutionLedger, SessionRememberedPermissionRule, SubagentOutcomeKind, ToolEvent,
     ToolExecutionContext, ToolStatus,
@@ -1050,6 +1050,13 @@ impl SubagentRuntime {
             "execution_fact".to_owned(),
             serde_json::to_value(execution_fact).unwrap_or(Value::Null),
         );
+        if terminal_automation_result(decision) {
+            message = message.with_owner_accepted_automation_result(
+                OwnerAcceptedAutomationResult::SubagentTerminal {
+                    result_ref: result.child_task_id.clone(),
+                },
+            );
+        }
         message
     }
 
@@ -1518,6 +1525,16 @@ fn should_publish_decision(decision: &MergeDecision) -> bool {
         MergeDecision::DiscardAsStale { .. }
             | MergeDecision::DiscardAsDuplicate { .. }
             | MergeDecision::DiscardAsLate { .. }
+    )
+}
+
+fn terminal_automation_result(decision: &MergeDecision) -> bool {
+    matches!(
+        decision,
+        MergeDecision::AcceptFull
+            | MergeDecision::AcceptSummaryOnly
+            | MergeDecision::AcceptFailureFact
+            | MergeDecision::AcceptCancellationFact
     )
 }
 

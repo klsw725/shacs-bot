@@ -41,6 +41,42 @@ fn cjk_rendering_keeps_right_border_intact_at_small_sizes() -> Result<(), Box<dy
     Ok(())
 }
 
+#[test]
+fn full_runtime_at_120x30_keeps_overflow_and_controls_visible() -> Result<(), Box<dyn Error>> {
+    let state = cjk_state(120, 30)?;
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| draw_tui(frame, &state))?;
+
+    let buffer = terminal.backend().buffer();
+    let rendered = (0..30)
+        .map(|y| {
+            (0..120)
+                .map(|x| buffer.get(x, y).symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("more lines hidden"));
+    assert!(rendered.contains("[r] refresh"));
+    assert!(rendered.contains("[x] cancel"));
+    assert!(rendered.contains("[a] approve [d] deny"));
+    Ok(())
+}
+
+#[test]
+fn clipped_content_has_visible_truncation_marker() -> Result<(), Box<dyn Error>> {
+    let state = cjk_state(48, 12)?;
+    let rendered = render_lines_for_width(&state, 20);
+
+    assert!(rendered.iter().any(|line| line.ends_with('…')));
+    assert!(rendered
+        .iter()
+        .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 20));
+    Ok(())
+}
+
 fn right_pane_inner(columns: u16, rows: u16) -> Rect {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -69,6 +105,7 @@ fn cjk_session() -> Result<shacs_tui::state::RuntimeSession, Box<dyn Error>> {
         recovery_markers: vec!["복구요청".to_owned(), "런타임진행".to_owned()],
         checkpoint_phase: None,
         diagnostics_ref_count: 0,
+        spec033: shacs_projection::Spec033Snapshot::unavailable("cli:cjk"),
         workflow: Some(shacs_session::SessionRuntimeWorkflowProjection {
             schema_label: Some("024WorkflowProjection".to_owned()),
             schema_version: Some("024WorkflowProjection.v1".to_owned()),

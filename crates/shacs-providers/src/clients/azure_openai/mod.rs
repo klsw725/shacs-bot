@@ -1,12 +1,12 @@
 use crate::config::ProviderConfig;
 use crate::error::ProviderError;
-use crate::provider::{ProviderClient, ProviderEvent, ProviderRequest};
+use crate::provider::{ProviderClient, ProviderEvent, ProviderInvocation, ProviderRequest};
 use crate::registry::ProviderSpec;
 use crate::types::LlmResponse;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::openai_compatible::{
     build_headers, build_responses_request, parse_openai_responses_response,
@@ -58,19 +58,64 @@ where
     T: OpenAiHttpTransport,
 {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
-        let parts = build_azure_openai_responses_request(
-            &request,
-            &self.config,
-            false,
-            &self.session_affinity,
-        );
-        parse_azure_http_response(self.transport.post_json(parts)?)
+        self.chat_bounded(request, None)
+    }
+
+    fn chat_with_invocation(
+        &self,
+        request: ProviderRequest,
+        invocation: &ProviderInvocation,
+    ) -> Result<LlmResponse, ProviderError> {
+        if invocation.is_cancelled() {
+            return Err(api_error("provider invocation cancelled"));
+        }
+        self.chat_bounded(request, invocation.remaining())
     }
 
     fn chat_stream(
         &self,
         request: ProviderRequest,
         on_event: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat_stream_bounded(request, on_event, None)
+    }
+
+    fn chat_stream_with_invocation(
+        &self,
+        request: ProviderRequest,
+        on_event: &mut dyn FnMut(ProviderEvent),
+        invocation: &ProviderInvocation,
+    ) -> Result<LlmResponse, ProviderError> {
+        if invocation.is_cancelled() {
+            return Err(api_error("provider invocation cancelled"));
+        }
+        self.chat_stream_bounded(request, on_event, invocation.remaining())
+    }
+}
+
+impl<T> AzureOpenAiClient<T>
+where
+    T: OpenAiHttpTransport,
+{
+    fn chat_bounded(
+        &self,
+        request: ProviderRequest,
+        timeout: Option<Duration>,
+    ) -> Result<LlmResponse, ProviderError> {
+        let parts = build_azure_openai_responses_request(
+            &request,
+            &self.config,
+            false,
+            &self.session_affinity,
+        );
+        parse_azure_http_response(self.transport.post_json_bounded(parts, timeout)?)
+    }
+
+    fn chat_stream_bounded(
+        &self,
+        request: ProviderRequest,
+        on_event: &mut dyn FnMut(ProviderEvent),
+        timeout: Option<Duration>,
     ) -> Result<LlmResponse, ProviderError> {
         let parts = build_azure_openai_responses_request(
             &request,
@@ -79,9 +124,11 @@ where
             &self.session_affinity,
         );
         let mut stream = OpenAiResponsesStreamState::default();
-        match self.transport.post_json_stream_frames(parts, &mut |frame| {
-            stream.process_frame_text(frame, on_event)
-        }) {
+        match self.transport.post_json_stream_frames_bounded(
+            parts,
+            &mut |frame| stream.process_frame_text(frame, on_event),
+            timeout,
+        ) {
             Ok(response) => {
                 if (200..300).contains(&response.status) {
                     stream.finish(on_event)
@@ -90,7 +137,7 @@ where
                 }
             }
             Err(error) if error.to_string().contains(STREAMING_NOT_IMPLEMENTED) => {
-                self.chat(request)
+                self.chat_bounded(request, timeout)
             }
             Err(error) => Err(error),
         }

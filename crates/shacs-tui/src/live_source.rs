@@ -64,12 +64,20 @@ impl RuntimeProjectionSource for SessionRuntimeSource {
                 let detail = manager.session_ux_detail(&summary.key)?;
                 let raw = manager.read_session_payload(&summary.key);
                 Some(RuntimeSession {
-                    key: SessionKey::new(detail.key).ok()?,
+                    key: SessionKey::new(detail.key.clone()).ok()?,
                     updated_at: detail.updated_at,
                     message_count: detail.message_count,
                     recovery_markers: detail.recovery_markers,
                     checkpoint_phase: detail.checkpoint_phase,
                     diagnostics_ref_count: detail.diagnostics_refs.len(),
+                    spec033: shacs_core::runtime::build_spec033_snapshot_from(
+                        &self.workspace,
+                        &data_dir,
+                        &detail.key,
+                    )
+                    .unwrap_or_else(|_| {
+                        shacs_projection::Spec033Snapshot::unavailable(&detail.key)
+                    }),
                     workflow: detail.runtime_workflow,
                     execution: detail.runtime_execution,
                     pending_approval: raw

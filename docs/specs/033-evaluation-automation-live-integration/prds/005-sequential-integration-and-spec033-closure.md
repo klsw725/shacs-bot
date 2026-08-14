@@ -1,6 +1,6 @@
 # PRD 005. sequential integration and Spec 033 closure
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
@@ -61,3 +61,5 @@ Primary parent requirements owned by this PRD:
 2. End-to-end goal/automation/self-improvement transcript.
 3. Replay/review/coverage artifacts.
 4. External owner-fact audits and final Spec033 closure summary.
+
+Closure state: tracked evidence contract는 [`../evidence/index.json`](../evidence/index.json)에 있고 QA/goal/code/security/docs final review와 `final-production-20260814-v6` source-bound release execution은 모두 PASS다. 향후 실행 실패 또는 manifest 미생성은 shipping을 차단한다. 035의 TUI/Tasks parity와 planned PRDs 008-009는 이 PRD가 닫지 않는다.

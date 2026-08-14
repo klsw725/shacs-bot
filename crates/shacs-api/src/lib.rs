@@ -55,6 +55,8 @@ pub const SESSIONS_PATH: &str = "/v1/sessions";
 pub const DIAGNOSTICS_PATH: &str = "/v1/diagnostics";
 pub const WORKFLOW_RECIPES_PATH: &str = "/v1/workflows/recipes";
 pub const PERMISSIONS_PATH: &str = "/v1/permissions";
+pub const SPEC033_SNAPSHOT_SUFFIX: &str = "goal-snapshot";
+pub const IMPROVEMENTS_PATH: &str = "/v1/improvements";
 pub const HEALTH_PATH: &str = "/health";
 pub const WEBSOCKET_PATH: &str = "/ws";
 pub const JSON_CONTENT_TYPE: &str = "application/json";
@@ -284,6 +286,21 @@ pub trait ChatCompletionAdapter {
         None
     }
 
+    fn runtime_data_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn local_improvement(
+        &self,
+        _action: &str,
+        _proposal_id: &str,
+        _body: Value,
+    ) -> Result<Value, ApiError> {
+        Err(ApiError::not_found(
+            "local improvement surface is not configured",
+        ))
+    }
+
     fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
         let mut snapshot = DiagnosticsSnapshot::unavailable(
             "runtime diagnostics are not configured for this adapter",
@@ -352,6 +369,7 @@ pub trait ChatCompletionAdapter {
 pub struct ApiRouterState {
     adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
     timeout: Duration,
+    local_mutations_enabled: bool,
     session_locks: Arc<AsyncMutex<SessionLockRegistry>>,
     spec031_channel_observer: Option<Spec031ChannelProjectionObserver>,
     reconnect_tracker: Arc<StdMutex<ApiReconnectTracker>>,
@@ -380,6 +398,7 @@ impl ApiRouterState {
         Self {
             adapter,
             timeout,
+            local_mutations_enabled: false,
             session_locks: Arc::new(AsyncMutex::new(SessionLockRegistry::new(
                 API_RECONNECT_TRACKER_CAPACITY,
             ))),
@@ -393,6 +412,11 @@ impl ApiRouterState {
     #[cfg(test)]
     fn with_spec031_channel_observer(mut self, observer: Spec031ChannelProjectionObserver) -> Self {
         self.spec031_channel_observer = Some(observer);
+        self
+    }
+
+    fn with_local_mutations(mut self) -> Self {
+        self.local_mutations_enabled = true;
         self
     }
 }
@@ -713,6 +737,15 @@ pub fn api_router(adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>) -> Rout
     )
 }
 
+pub fn api_router_with_local_mutations(
+    adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
+) -> Router {
+    api_router_with_state_and_websocket_path(
+        ApiRouterState::new(adapter).with_local_mutations(),
+        WEBSOCKET_PATH,
+    )
+}
+
 pub fn api_router_with_timeout(
     adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
     timeout: Duration,
@@ -868,6 +901,24 @@ pub async fn serve_api_with_timeout(
     serve_api_listener_with_timeout(listener, adapter, timeout, shutdown).await
 }
 
+pub async fn serve_api_with_timeout_and_local_mutations(
+    addr: SocketAddr,
+    adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
+    timeout: Duration,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    axum::serve(
+        listener,
+        api_router_with_state_and_websocket_path(
+            ApiRouterState::with_timeout(adapter, timeout).with_local_mutations(),
+            WEBSOCKET_PATH,
+        ),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+}
+
 pub async fn serve_api_with_timeout_and_websocket_path(
     addr: SocketAddr,
     adapter: Arc<dyn ChatCompletionAdapter + Send + Sync>,
@@ -1019,6 +1070,14 @@ impl ApiError {
             error_type: "not_implemented".to_owned(),
         }
     }
+
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: 403,
+            message: message.into(),
+            error_type: "forbidden".to_owned(),
+        }
+    }
 }
 
 impl fmt::Display for ApiError {
@@ -1106,7 +1165,13 @@ pub fn handle_api_request(
                         "remembered permission projection is not configured",
                     )),
                 },
+                _ if path.starts_with("/v1/improvements/") => {
+                    handle_local_improvement(request, adapter)
+                }
                 _ if path.starts_with("/v1/sessions/") => {
+                    if let Some(session_key) = spec033_snapshot_session_key(path) {
+                        return spec033_snapshot_response(adapter, &session_key);
+                    }
                     handle_session_query_request(path, adapter)
                 }
                 _ => error_response(ApiError::not_found("API route not found")),
@@ -1114,6 +1179,12 @@ pub fn handle_api_request(
         }
         (ApiMethod::Post, CHAT_COMPLETIONS_PATH) => {
             handle_chat_completion_request(request, adapter)
+        }
+        (ApiMethod::Post, _) if path.starts_with("/v1/improvements/") => {
+            handle_local_improvement(request, adapter)
+        }
+        (ApiMethod::Post, _) if path.starts_with("/v1/sessions/") => {
+            handle_spec033_goal_action(request, adapter)
         }
         (_, HEALTH_PATH)
         | (_, MODELS_PATH)
@@ -1133,6 +1204,121 @@ pub fn handle_api_request(
         ),
         _ => error_response(ApiError::not_found("API route not found")),
     }
+}
+
+fn handle_local_improvement(
+    request: ApiHttpRequest,
+    adapter: &(impl ChatCompletionAdapter + ?Sized),
+) -> ApiHttpResponse {
+    let Some(suffix) = request.path.strip_prefix("/v1/improvements/") else {
+        return error_response(ApiError::not_found("improvement API route not found"));
+    };
+    let Some((proposal_id, action)) = suffix.split_once('/') else {
+        return error_response(ApiError::not_found("improvement API route not found"));
+    };
+    if proposal_id.is_empty() || action.is_empty() || action.contains('/') {
+        return error_response(ApiError::not_found("improvement API route not found"));
+    }
+    let action = match request.method {
+        ApiMethod::Get if action == "inspect" || action == "candidate" => action,
+        ApiMethod::Post if matches!(action, "propose" | "apply" | "verify" | "rollback") => action,
+        ApiMethod::Get | ApiMethod::Post | ApiMethod::Other => {
+            return error_response(ApiError::method_not_allowed(
+                "method is not supported for this endpoint",
+            ))
+        }
+    };
+    match adapter.local_improvement(
+        action,
+        proposal_id,
+        request.body.unwrap_or_else(|| json!({})),
+    ) {
+        Ok(value) => json_response(200, value),
+        Err(error) => error_response(error),
+    }
+}
+
+fn spec033_snapshot_session_key(path: &str) -> Option<String> {
+    let suffix = path.strip_prefix("/v1/sessions/")?;
+    let encoded = suffix.strip_suffix(&format!("/{SPEC033_SNAPSHOT_SUFFIX}"))?;
+    if encoded.contains('/') {
+        return None;
+    }
+    decode_path_segment(encoded)
+}
+
+fn spec033_snapshot_response(
+    adapter: &(impl ChatCompletionAdapter + ?Sized),
+    session_key: &str,
+) -> ApiHttpResponse {
+    let Some(workspace) = adapter.session_workspace() else {
+        return error_response(ApiError::not_found(
+            "session query surface is not configured",
+        ));
+    };
+    let data_dir = adapter
+        .runtime_data_dir()
+        .unwrap_or_else(|| workspace.clone());
+    match shacs_core::runtime::build_spec033_snapshot_from(&workspace, &data_dir, session_key) {
+        Ok(snapshot) => json_response(200, json!(snapshot)),
+        Err(error) => error_response(ApiError::internal(error.to_string())),
+    }
+}
+
+fn handle_spec033_goal_action(
+    request: ApiHttpRequest,
+    adapter: &(impl ChatCompletionAdapter + ?Sized),
+) -> ApiHttpResponse {
+    let Some((session_key, action)) = spec033_goal_action_route(&request.path, request.body) else {
+        return error_response(ApiError::not_found("goal API route not found"));
+    };
+    let Some(workspace) = adapter.session_workspace() else {
+        return error_response(ApiError::not_found(
+            "session query surface is not configured",
+        ));
+    };
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_default();
+    match shacs_core::runtime::apply_goal_surface_action(
+        &workspace,
+        &session_key,
+        action,
+        &observed_at,
+    ) {
+        Ok(snapshot) => json_response(200, json!(snapshot)),
+        Err(error) => error_response(ApiError::invalid_request(error.to_string())),
+    }
+}
+
+fn spec033_goal_action_route(
+    path: &str,
+    body: Option<Value>,
+) -> Option<(String, shacs_core::runtime::GoalSurfaceAction)> {
+    let suffix = path.strip_prefix("/v1/sessions/")?;
+    let (encoded, action) = suffix.split_once("/goal/")?;
+    if encoded.contains('/') || action.contains('/') {
+        return None;
+    }
+    let body = body
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let action = match action {
+        "set" => shacs_core::runtime::GoalSurfaceAction::Set {
+            text: body.get("text")?.as_str()?.to_owned(),
+            turn_budget: shacs_core::runtime::DEFAULT_GOAL_TURN_BUDGET,
+        },
+        "pause" => shacs_core::runtime::GoalSurfaceAction::Pause,
+        "resume" => shacs_core::runtime::GoalSurfaceAction::Resume,
+        "clear" => shacs_core::runtime::GoalSurfaceAction::Clear,
+        "done" => shacs_core::runtime::GoalSurfaceAction::Done,
+        "blocked" => shacs_core::runtime::GoalSurfaceAction::Blocked {
+            reason: body.get("reason")?.as_str()?.to_owned(),
+        },
+        _ => return None,
+    };
+    Some((decode_path_segment(encoded)?, action))
 }
 
 fn handle_session_query_request(
@@ -1318,6 +1504,11 @@ async fn axum_dispatch(State(state): State<ApiRouterState>, request: Request) ->
     if let Err(error) = validate_local_http_headers(request.headers()) {
         return axum_response_from_api(error_response(error));
     }
+    if !state.local_mutations_enabled && is_local_mutation_request(method, &path) {
+        return axum_response_from_api(error_response(ApiError::forbidden(
+            "local API mutations require explicit loopback opt-in",
+        )));
+    }
     if method == ApiMethod::Post
         && path == CHAT_COMPLETIONS_PATH
         && is_multipart_header_map(request.headers())
@@ -1343,6 +1534,12 @@ async fn axum_dispatch(State(state): State<ApiRouterState>, request: Request) ->
             .await
             .unwrap_or_else(|_| error_response(ApiError::internal("API request task failed")));
     axum_response_from_api(response)
+}
+
+fn is_local_mutation_request(method: ApiMethod, path: &str) -> bool {
+    method == ApiMethod::Post
+        && (path.starts_with("/v1/improvements/")
+            || (path.starts_with("/v1/sessions/") && path.contains("/goal/")))
 }
 
 async fn webui_axum_dispatch(State(state): State<WebUiRouterState>, request: Request) -> Response {
@@ -1779,7 +1976,11 @@ fn should_read_axum_body(
     path: &str,
     headers: &BTreeMap<String, String>,
 ) -> bool {
-    method == ApiMethod::Post && path == CHAT_COMPLETIONS_PATH && !is_multipart_headers(headers)
+    method == ApiMethod::Post
+        && (path == CHAT_COMPLETIONS_PATH
+            || path.contains("/goal/")
+            || path.starts_with("/v1/improvements/"))
+        && !is_multipart_headers(headers)
 }
 
 fn body_value_from_bytes(body_bytes: Bytes) -> Result<Option<Value>, ApiError> {

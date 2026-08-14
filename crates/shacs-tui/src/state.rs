@@ -1,5 +1,5 @@
 use shacs_core::runtime::{SurfaceActionOutcome, SurfaceActionOutcomeKind};
-use shacs_projection::{Spec030RuntimeProjection, Spec030UnavailableReason};
+use shacs_projection::{Spec030RuntimeProjection, Spec030UnavailableReason, Spec033Snapshot};
 use shacs_session::{SessionRuntimeExecutionProjection, SessionRuntimeWorkflowProjection};
 use std::fmt;
 
@@ -62,6 +62,7 @@ pub struct RuntimeSession {
     pub recovery_markers: Vec<String>,
     pub checkpoint_phase: Option<String>,
     pub diagnostics_ref_count: usize,
+    pub spec033: Spec033Snapshot,
     pub workflow: Option<SessionRuntimeWorkflowProjection>,
     pub execution: Option<SessionRuntimeExecutionProjection>,
     pub pending_approval: Option<PendingApproval>,

@@ -7,14 +7,17 @@ use shacs_session::durable_event::{
 };
 use shacs_session::durable_replay::evaluate_durable_recovery;
 use shacs_session::durable_work::{
-    evaluate_durable_work_recovery, evaluate_durable_work_recovery_for_owner,
-    DurableWorkPayloadStore, DurableWorkRecoveryIssueKind, DurableWorkRecoveryStatus,
+    apply_durable_work_event, evaluate_durable_work_recovery,
+    evaluate_durable_work_recovery_for_owner, DurableWorkPayloadStore,
+    DurableWorkRecoveryIssueKind, DurableWorkRecoveryStatus, DurableWorkReplayState,
     ReplayWorkState, RuntimeControlRequested, WorkCancellation, WorkEnqueued, WorkLeased,
     WorkPayloadRef, WorkRequeued, WorkRetryScheduled, WorkTerminal, WorkTerminalKind,
     MAX_RETAINED_RUNTIME_REQUESTS, MAX_RETAINED_TERMINAL_WORK_ITEMS,
 };
 use std::error::Error;
 use std::fs;
+use std::sync::mpsc;
+use std::thread;
 
 fn append(
     events: &mut DurableEventStore,
@@ -52,6 +55,48 @@ fn leased(work_id: &str) -> WorkLeased {
         leased_at_ms: 100,
         lease_expires_at_ms: 200,
     }
+}
+
+#[test]
+fn completed_dedupe_lineage_is_superseded_without_reexecution() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let checkpoint_root = root.path().join("checkpoints");
+    let mut events = DurableEventStore::open(&event_root)?;
+    append(
+        &mut events,
+        WORK_ENQUEUED,
+        &enqueued("completed", Some("same"))?,
+    )?;
+    append(&mut events, WORK_LEASED, &leased("completed"))?;
+    append(
+        &mut events,
+        WORK_TERMINAL,
+        &WorkTerminal {
+            work_id: "completed".to_owned(),
+            terminal_kind: WorkTerminalKind::Succeeded,
+            outcome_ref: "completed".to_owned(),
+            facts: Some(json!({"job_result": "succeeded"})),
+        },
+    )?;
+    append(
+        &mut events,
+        WORK_ENQUEUED,
+        &enqueued("duplicate", Some("same"))?,
+    )?;
+
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let state = replay.state.ok_or("missing replay state")?;
+    let duplicate = &state.work.items["duplicate"];
+    assert_eq!(duplicate.terminal_kind, Some(WorkTerminalKind::Superseded));
+    assert_eq!(
+        duplicate
+            .terminal_facts
+            .as_ref()
+            .and_then(|facts| facts["supersedes_work_id"].as_str()),
+        Some("completed")
+    );
+    Ok(())
 }
 
 #[test]
@@ -226,8 +271,7 @@ fn durable_work_blocks_missing_or_corrupt_artifact_payloads() -> Result<(), Box<
 }
 
 #[test]
-fn durable_work_cancellation_and_completion_races_preserve_event_order(
-) -> Result<(), Box<dyn Error>> {
+fn durable_work_success_before_cancellation_remains_successful() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let event_root = root.path().join("events");
     let checkpoint_root = root.path().join("checkpoints");
@@ -245,6 +289,7 @@ fn durable_work_cancellation_and_completion_races_preserve_event_order(
             work_id: "terminal-first".to_owned(),
             terminal_kind: WorkTerminalKind::Succeeded,
             outcome_ref: "accepted_outcome".to_owned(),
+            facts: None,
         },
     )?;
     append(
@@ -255,34 +300,129 @@ fn durable_work_cancellation_and_completion_races_preserve_event_order(
             reason: "late_cancel".to_owned(),
         },
     )?;
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let state = replay.state.ok_or("missing race replay state")?;
+    let item = &state.work.items["terminal-first"];
+    assert_eq!(item.state, ReplayWorkState::Terminal);
+    assert_eq!(item.terminal_kind, Some(WorkTerminalKind::Succeeded));
+    assert!(item.cancellation_requested_sequence.is_some());
+    Ok(())
+}
+
+#[test]
+fn concurrent_cancellation_before_success_resolves_cancelled() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let checkpoint_root = root.path().join("checkpoints");
+    let mut events = DurableEventStore::open(&event_root)?;
     append(&mut events, WORK_ENQUEUED, &enqueued("cancel-first", None)?)?;
     append(&mut events, WORK_LEASED, &leased("cancel-first"))?;
+    let (cancel_committed, terminal_waits) = mpsc::channel();
+    let cancel_root = event_root.clone();
+    let cancel_writer = thread::spawn(move || -> Result<(), String> {
+        let mut events = DurableEventStore::open(cancel_root).map_err(|error| error.to_string())?;
+        append(
+            &mut events,
+            WORK_CANCEL_REQUESTED,
+            &WorkCancellation {
+                work_id: "cancel-first".to_owned(),
+                reason: "user_stop".to_owned(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        cancel_committed.send(()).map_err(|error| error.to_string())
+    });
+    let terminal_root = event_root.clone();
+    let terminal_writer = thread::spawn(move || -> Result<String, String> {
+        terminal_waits.recv().map_err(|error| error.to_string())?;
+        let mut events =
+            DurableEventStore::open(terminal_root).map_err(|error| error.to_string())?;
+        events
+            .append(DurableEventInput::new(
+                "session-1",
+                WORK_TERMINAL,
+                DurableEventPayload::inline(
+                    "durable_work",
+                    serde_json::to_value(WorkTerminal {
+                        work_id: "cancel-first".to_owned(),
+                        terminal_kind: WorkTerminalKind::Succeeded,
+                        outcome_ref: "already_completed".to_owned(),
+                        facts: None,
+                    })
+                    .map_err(|error| error.to_string())?,
+                ),
+            ))
+            .map(|record| record.kind)
+            .map_err(|error| error.to_string())
+    });
+    cancel_writer
+        .join()
+        .map_err(|_| "cancellation writer panicked")??;
+    let terminal_kind = terminal_writer
+        .join()
+        .map_err(|_| "terminal writer panicked")??;
+
+    assert_eq!(terminal_kind, WORK_CANCELLED);
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let state = replay.state.ok_or("missing race replay state")?;
+    let item = &state.work.items["cancel-first"];
+    assert_eq!(item.state, ReplayWorkState::Cancelled);
+    assert_eq!(item.terminal_kind, None);
+    let scan = events.scan(usize::MAX)?;
+    assert!(!scan.records.iter().any(|record| {
+        record.kind == WORK_TERMINAL
+            && matches!(
+                &record.payload,
+                DurableEventPayload::Inline { data, .. }
+                    if data.get("work_id").and_then(serde_json::Value::as_str)
+                        == Some("cancel-first")
+            )
+    }));
+    Ok(())
+}
+
+#[test]
+fn persisted_cancel_before_success_history_replays_cancelled() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let mut events = DurableEventStore::open(&event_root)?;
+    append(&mut events, WORK_ENQUEUED, &enqueued("legacy-race", None)?)?;
+    append(&mut events, WORK_LEASED, &leased("legacy-race"))?;
     append(
         &mut events,
         WORK_CANCEL_REQUESTED,
         &WorkCancellation {
-            work_id: "cancel-first".to_owned(),
+            work_id: "legacy-race".to_owned(),
             reason: "user_stop".to_owned(),
         },
     )?;
-    append(
-        &mut events,
-        WORK_TERMINAL,
-        &WorkTerminal {
-            work_id: "cancel-first".to_owned(),
+    let mut persisted = events.scan(usize::MAX)?.records;
+    let mut legacy_success = persisted
+        .last()
+        .cloned()
+        .ok_or("missing cancellation request")?;
+    legacy_success.sequence += 1;
+    legacy_success.event_id = format!("event-{:020}", legacy_success.sequence);
+    legacy_success.kind = WORK_TERMINAL.to_owned();
+    legacy_success.payload = DurableEventPayload::inline(
+        "durable_work",
+        serde_json::to_value(WorkTerminal {
+            work_id: "legacy-race".to_owned(),
             terminal_kind: WorkTerminalKind::Succeeded,
-            outcome_ref: "already_completed".to_owned(),
-        },
-    )?;
+            outcome_ref: "legacy_success".to_owned(),
+            facts: None,
+        })?,
+    );
+    persisted.push(legacy_success);
 
-    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
-    let state = replay.state.ok_or("missing race replay state")?;
-    for work_id in ["terminal-first", "cancel-first"] {
-        let item = &state.work.items[work_id];
-        assert_eq!(item.state, ReplayWorkState::Terminal);
-        assert_eq!(item.terminal_kind, Some(WorkTerminalKind::Succeeded));
-        assert!(item.cancellation_requested_sequence.is_some());
+    let mut state = DurableWorkReplayState::default();
+    for event in &persisted {
+        apply_durable_work_event(&mut state, event)?;
     }
+
+    let item = &state.items["legacy-race"];
+    assert_eq!(item.state, ReplayWorkState::Cancelled);
+    assert_eq!(item.terminal_kind, None);
     Ok(())
 }
 
@@ -317,6 +457,13 @@ fn durable_work_dedupe_retention_and_runtime_requests_are_bounded() -> Result<()
         Some(WorkTerminalKind::Superseded)
     );
     assert_eq!(
+        dedupe_state.work.items["duplicate"]
+            .terminal_facts
+            .as_ref()
+            .and_then(|facts| facts["supersedes_work_id"].as_str()),
+        Some("pending")
+    );
+    assert_eq!(
         dedupe_state.work.items["other-session"].state,
         ReplayWorkState::Pending
     );
@@ -331,6 +478,7 @@ fn durable_work_dedupe_retention_and_runtime_requests_are_bounded() -> Result<()
                 work_id,
                 terminal_kind: WorkTerminalKind::Exhausted,
                 outcome_ref: "attempt_limit".to_owned(),
+                facts: None,
             },
         )?;
     }
@@ -385,6 +533,7 @@ fn durable_work_rejects_forged_terminal_and_cancellation_outcomes() -> Result<()
                 work_id: "work-1".to_owned(),
                 terminal_kind: WorkTerminalKind::Succeeded,
                 outcome_ref: "forged_success".to_owned(),
+                facts: None,
             })?,
         ),
     ] {
