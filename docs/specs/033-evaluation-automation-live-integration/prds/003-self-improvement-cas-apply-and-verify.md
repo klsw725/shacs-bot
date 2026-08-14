@@ -1,6 +1,6 @@
 # PRD 003. self-improvement CAS, apply, and verify
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
