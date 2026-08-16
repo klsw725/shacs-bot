@@ -1,3 +1,4 @@
+use super::runner_spec034::*;
 use crate::runtime::tool_execution::{
     effective_permission_rule_input, permission_decision_for_action,
     permissioned_action_input_from_context,
@@ -32,15 +33,12 @@ use shacs_providers::{
     LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest, ProviderRetryMode,
     ProviderRetryWaiter, ThreadRetryWaiter,
 };
-use shacs_redaction::{redact_string, redact_value};
-use shacs_utils::tool_results::{
-    maybe_persist_text_tool_result_with_artifact, ToolResultArtifactRef,
-};
 use std::collections::{BTreeMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+// allow: SIZE_OK — preexisting agent runner; Spec034 delegates media result semantics through five focused module hooks
 
 const DEFAULT_ERROR_MESSAGE: &str = "Sorry, I encountered an error calling the AI model.";
 const MODEL_ERROR_PLACEHOLDER: &str = "[Assistant reply unavailable due to model error.]";
@@ -50,7 +48,6 @@ const FINALIZATION_RETRY_PROMPT: &str =
 const LENGTH_RECOVERY_PROMPT: &str = "Output limit reached. Continue exactly where you left off — no recap, no apology. Break remaining work into smaller steps if needed.";
 const MAX_EMPTY_RETRIES: usize = 2;
 const MAX_LENGTH_RECOVERIES: usize = 3;
-const MAX_INJECTION_CYCLES: usize = 5;
 const MICROCOMPACT_KEEP_RECENT: usize = 10;
 const MICROCOMPACT_MIN_CHARS: usize = 500;
 const SNIP_SAFETY_BUFFER: usize = 1024;
@@ -366,7 +363,7 @@ pub struct ToolEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentRunResult {
+pub(crate) struct AgentRunResult {
     pub final_content: Option<String>,
     pub messages: Vec<Value>,
     pub tools_used: Vec<String>,
@@ -391,8 +388,8 @@ impl AgentRunner {
         Self
     }
 
-    pub fn run(&self, spec: AgentRunSpec<'_>) -> Result<AgentRunResult, ProviderError> {
-        let mut messages = spec.initial_messages.clone();
+    pub(crate) fn run_core(&self, spec: AgentRunSpec<'_>) -> Result<AgentRunResult, ProviderError> {
+        let (spec, mut messages) = prepare_run(spec);
         let mut tools_used = Vec::new();
         let mut usage = BTreeMap::new();
         let executor =
@@ -813,7 +810,7 @@ impl AgentRunner {
                 .clone()
                 .map(|content| content.trim().to_owned());
             let is_blank = final_content.as_deref().map_or(true, str::is_empty);
-            if is_blank {
+            if is_blank && !has_generated_artifacts() {
                 empty_content_retries += 1;
                 if model.hook_streamed {
                     invoke_agent_hook_stream_end(&spec, &hook_context(iteration, &messages), false);
@@ -1106,53 +1103,6 @@ struct ModelResponse {
     hook_streamed: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct ProviderStreamCounts {
-    text_delta: usize,
-    reasoning_delta: usize,
-    tool_call_start: usize,
-    tool_call_delta: usize,
-    tool_call_ready: usize,
-    finish: usize,
-}
-
-impl ProviderStreamCounts {
-    fn observe(&mut self, event: &ProviderEvent) {
-        match event {
-            ProviderEvent::TextDelta { .. } => self.text_delta += 1,
-            ProviderEvent::ReasoningDelta { .. } => self.reasoning_delta += 1,
-            ProviderEvent::ToolCallStart { .. } => self.tool_call_start += 1,
-            ProviderEvent::ToolCallDelta { .. } => self.tool_call_delta += 1,
-            ProviderEvent::ToolCallReady { .. } => self.tool_call_ready += 1,
-            ProviderEvent::Finish { .. } => self.finish += 1,
-        }
-    }
-
-    fn total(self) -> usize {
-        self.text_delta
-            + self.reasoning_delta
-            + self.tool_call_start
-            + self.tool_call_delta
-            + self.tool_call_ready
-            + self.finish
-    }
-
-    fn detail(self) -> String {
-        json!({
-            "stream_events": {
-                "total": self.total(),
-                "text_delta": self.text_delta,
-                "reasoning_delta": self.reasoning_delta,
-                "tool_call_start": self.tool_call_start,
-                "tool_call_delta": self.tool_call_delta,
-                "tool_call_ready": self.tool_call_ready,
-                "finish": self.finish,
-            }
-        })
-        .to_string()
-    }
-}
-
 struct ToolDispatchReport {
     messages: Vec<RuntimeToolMessage>,
     interrupt: Option<RuntimeInterrupt>,
@@ -1160,11 +1110,6 @@ struct ToolDispatchReport {
     resolved_bridge_calls: Vec<ResolvedDeferredToolCall>,
     recent_auto_mode_denials: Vec<RecentAutoModeDenial>,
     recent_auto_mode_retry_tokens: Vec<RecentAutoModeRetryToken>,
-}
-
-struct NormalizedToolMessage {
-    message: RuntimeToolMessage,
-    artifact_ref: Option<ToolResultArtifactRef>,
 }
 
 struct IterationToolUse {
@@ -2435,40 +2380,6 @@ impl ProviderRetryWaiter for CallbackRetryWaiter<'_> {
     }
 }
 
-fn drain_mid_turn_injections(spec: &AgentRunSpec<'_>, injection_cycles: &mut usize) -> Vec<Value> {
-    if *injection_cycles >= MAX_INJECTION_CYCLES {
-        return Vec::new();
-    }
-    let injections = spec
-        .mid_turn_injection_callback
-        .as_ref()
-        .map(|callback| {
-            catch_unwind(AssertUnwindSafe(|| callback()))
-                .ok()
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
-    if !injections.is_empty() {
-        *injection_cycles += 1;
-    }
-    injections
-}
-
-fn append_mid_turn_injections(
-    spec: &AgentRunSpec<'_>,
-    messages: &mut Vec<Value>,
-    had_injections: &mut bool,
-    injection_cycles: &mut usize,
-) -> bool {
-    let injections = drain_mid_turn_injections(spec, injection_cycles);
-    if injections.is_empty() {
-        return false;
-    }
-    *had_injections = true;
-    messages.extend(injections);
-    true
-}
-
 fn emit_checkpoint(
     spec: &AgentRunSpec<'_>,
     phase: &str,
@@ -2524,77 +2435,6 @@ fn sanitize_checkpoint_assistant_message(mut message: Value) -> Value {
 
 fn invoke_provider_event_callback(callback: &ProviderEventCallback, event: &ProviderEvent) {
     let _ = catch_unwind(AssertUnwindSafe(|| callback(event)));
-}
-
-fn observable_provider_event(event: &ProviderEvent) -> ProviderEvent {
-    match event {
-        ProviderEvent::TextDelta { text } => ProviderEvent::TextDelta { text: text.clone() },
-        ProviderEvent::ReasoningDelta { text } => {
-            ProviderEvent::ReasoningDelta { text: text.clone() }
-        }
-        ProviderEvent::ToolCallStart { id, name } => ProviderEvent::ToolCallStart {
-            id: id.clone(),
-            name: name.clone(),
-        },
-        ProviderEvent::ToolCallDelta { id, .. } => ProviderEvent::ToolCallDelta {
-            id: id.clone(),
-            delta: "<redacted>".to_owned(),
-        },
-        ProviderEvent::ToolCallReady { id, name, input } => ProviderEvent::ToolCallReady {
-            id: id.clone(),
-            name: name.clone(),
-            input: observable_tool_arguments(name, input),
-        },
-        ProviderEvent::Finish { usage, reason } => ProviderEvent::Finish {
-            usage: usage.clone(),
-            reason: reason.clone(),
-        },
-    }
-}
-
-fn observable_tool_arguments(name: &str, arguments: &Value) -> Value {
-    if permission_sensitive_observability_tool(name) {
-        return json!({ "redacted": true });
-    }
-    redact_value(arguments)
-}
-
-fn observable_tool_calls(calls: &[RuntimeToolCall]) -> Vec<RuntimeToolCall> {
-    calls
-        .iter()
-        .map(|call| RuntimeToolCall {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            arguments: observable_tool_arguments(&call.name, &call.arguments),
-        })
-        .collect()
-}
-
-fn observable_llm_response(response: &LlmResponse) -> LlmResponse {
-    let mut observable = response.clone();
-    for call in &mut observable.tool_calls {
-        let arguments =
-            observable_tool_arguments(&call.name, &Value::Object(call.arguments.clone()));
-        call.arguments = match arguments {
-            Value::Object(arguments) => arguments,
-            _ => Map::new(),
-        };
-    }
-    observable
-}
-
-fn permission_sensitive_observability_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "exec"
-            | "spawn"
-            | "message"
-            | "write_file"
-            | "edit_file"
-            | "notebook_edit"
-            | "cron"
-            | "tool_call"
-    ) || name.starts_with("mcp_")
 }
 
 fn invoke_checkpoint_callback(callback: &CheckpointCallback, checkpoint: &Value) {
@@ -3225,33 +3065,6 @@ fn external_lookup_signature(call: &RuntimeToolCall) -> Option<String> {
     }
 }
 
-fn normalize_tool_message(
-    spec: &AgentRunSpec<'_>,
-    mut message: RuntimeToolMessage,
-) -> NormalizedToolMessage {
-    if message.content.trim().is_empty() {
-        message.content = format!("({} completed with no output)", message.name);
-    }
-    let artifact_outcome = maybe_persist_text_tool_result_with_artifact(
-        spec.workspace.as_deref(),
-        spec.session_key.as_deref(),
-        &message.tool_call_id,
-        &message.content,
-        spec.max_tool_result_chars,
-    );
-    let artifact_ref = artifact_outcome
-        .as_ref()
-        .and_then(|outcome| outcome.artifact.clone());
-    message.content = artifact_outcome
-        .map(|outcome| outcome.content)
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| truncate_text(&message.content, spec.max_tool_result_chars));
-    NormalizedToolMessage {
-        message,
-        artifact_ref,
-    }
-}
-
 pub(super) fn finalize_tool_message(
     spec: &AgentRunSpec<'_>,
     raw_message: RuntimeToolMessage,
@@ -3270,15 +3083,6 @@ pub(super) fn finalize_tool_message(
         begin_spawned_subagent_execution(spec, &raw_message);
     }
     (normalized.message, fatal)
-}
-
-fn truncate_text(content: &str, max_chars: usize) -> String {
-    if max_chars == 0 || content.chars().count() <= max_chars {
-        return content.to_owned();
-    }
-    let mut truncated = content.chars().take(max_chars).collect::<String>();
-    truncated.push_str("\n... (truncated)");
-    truncated
 }
 
 fn tool_search_activation_event(summary: ToolSearchDiagnosticsSummary) -> ToolEvent {

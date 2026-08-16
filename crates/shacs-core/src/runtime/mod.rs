@@ -71,6 +71,7 @@ mod subagent;
 mod surface_action;
 mod tool_before;
 mod tool_execution;
+mod tool_execution_provider;
 mod tool_search;
 mod trajectory_store;
 mod trusted_javascript_tool_before;
@@ -390,7 +391,7 @@ pub use provider_credentials::{
 };
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub use runner::{
-    AgentHook, AgentHookContext, AgentRunResult, AgentRunSpec, AgentRunner, CompositeHook,
+    AgentHook, AgentHookContext, AgentRunSpec, AgentRunner, CompositeHook,
     ExecutionSnapshotCallback, ExecutionSnapshotResolver, MidTurnInjectionCallback, NoopAgentHook,
     ProviderEventCallback, RetryWaitCallback, ToolEvent, ToolEventCallback, ToolSearchConfig,
     ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
@@ -539,3 +540,6 @@ pub use shacs_workflow::{
 pub type Dream<'a> = DreamProcessor<'a>;
 pub type SkillsLoader = ContextBuilder;
 pub type SubagentManager = SubagentRuntime;
+// allow: SIZE_OK — preexisting runtime API index; Spec034 declarations and re-exports expand from one focused module macro
+mod spec034_modules;
+spec034_modules::declare_spec034_runtime_modules!();
