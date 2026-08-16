@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "acceptance_criterion": "034-AC010",
+  "spec_status": "complete_scoped",
+  "unsupported_claims": {
+    "cdn": false,
+    "gallery": false,
+    "ui_editor": false,
+    "all_provider_parity": false,
+    "built_in_ffmpeg": false,
+    "full_codec_understanding": false,
+    "arbitrary_url_intake": false
+  },
+  "scoped_non_guarantees": [
+    "bounded_evidence_is_not_complete_video_understanding",
+    "media_root_is_not_universal_filesystem_or_process_containment",
+    "projection_omission_is_not_complete_redaction",
+    "remote_reference_is_not_permanent_or_re_downloadable_artifact"
+  ]
+}
