@@ -2,7 +2,7 @@
 
 Status: Open
 
-Current machine verdict: 기존 PRD 000-007 implementation surfaces와 56개 release coverage row는 존재하지만 external owner evidence가 없어 closure가 blocked 상태다. Transport capability negotiation과 snapshot-first reconnect는 PRD 008의 planned work다. PRD 009는 TUI가 Spec033 goal/automation snapshot의 일부를 읽어 표시하는 partial baseline만 있으며, owner-backed mixed Tasks aggregation과 CLI/API/TUI parity는 미구현이므로 완료 처리하지 않는다.
+Current machine verdict: 기존 PRD 000-007 implementation surfaces와 66개 release coverage row(45 requirement, 10 command, 5 artifact, 6 external owner)는 존재한다. Spec034 remediation과 candidate2 Todo 14에서 22/22 media/analyzer owner facts와 현재 adapter evidence가 PASS했지만, 035는 이를 read-only로 소비할 뿐 재소유하지 않으며 이 사실이나 향후 Spec034 final review verdict로 035 closure를 통과하지 않는다. Transport capability negotiation과 snapshot-first reconnect는 PRD 008의 planned work다. PRD 009는 TUI가 Spec033 goal/automation snapshot의 일부를 읽어 표시하는 partial baseline만 있으며, owner-backed mixed Tasks aggregation과 CLI/API/TUI parity는 미구현이므로 완료 처리하지 않는다.
 
 Origin specs: 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027
 
@@ -50,7 +50,7 @@ Origin specs: 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027
 1. CLI, TUI, local API, WebSocket, external channel이 공유하는 projection schema와 status vocabulary.
 2. Interactive TUI, REPL, onboard wizard의 command flow, validation, recovery, cancellation semantics.
 3. Durable approval prompt, ephemeral confirmation, hook denial, progress event, stop/restart/recover state, pending follow-up, degraded state의 surface parity.
-4. Context file, inline reference, plugin, hook, app, attachment, generated or uploaded media projection.
+4. Context file, inline reference, plugin, hook, app, attachment와 Spec034가 생산한 generated/uploaded media fact의 read-only adapter consumption 및 projection.
 5. Readiness and degraded health model for local runtime, channel worker, provider auth, plugin/app readiness, adapter별 sandbox/runtime control, storage, queue state.
 6. 029/033이 생산하는 reconnect, backpressure, bounded queue, dropped event, channel delivery 상태의 projection과 accounting vocabulary.
 7. 입증된 transport gap에 대한 handshake/capability negotiation과 unsupported mutation의 실행 전 차단.
@@ -197,15 +197,15 @@ Dependency rules:
 
 ## Current Closure Blockers
 
-The historical 2026-08-04 closure evidence is indexed by `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/manifest.json`. Spec 030의 current owner audit은 source-bound `.omo/evidence/spec030/prd006/current-worktree-final/closure-manifest.json`으로 갱신되었으며, 아래 표에서 historical Spec 030 row를 대체한다.
+The historical 2026-08-04 closure artifacts are unavailable in this checkout and are not used as evidence. Current tracked or reproducible owner evidence is listed below; unavailable historical artifacts do not receive a locator.
 
 | Owner | Verdict | Locator | Reason |
 |---|---|---|---|
-| Spec 029 | PASS | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec029-read-audit.md` | Artifact-backed exact fact audit passes. |
-| Spec 030 | PASS | `.omo/evidence/spec030/prd006/current-worktree-final/closure-manifest.json` | Source-bound trusted-runtime owner facts, CLI/TUI/API parity, process controls, credential lifecycle, bwrap lifecycle, manual QA and cleanup gates pass. |
-| Spec 032 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec032-read-audit.md` | Required app/resource lifecycle owner-fact artifacts are absent. |
-| Spec 033 | BLOCKED | `docs/specs/033-evaluation-automation-live-integration/CLOSURE.md`, `docs/specs/033-evaluation-automation-live-integration/evidence/index.json` | Owner implementation and domain facts exist; QA/goal/code/security review는 PASS이고 Spec033 docs review, final source-bound release, regenerated Spec035 external audit가 남았다. PRD 009 partial TUI rendering does not close full Tasks parity. |
-| Spec 034 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec034-read-audit.md` | Required media/analyzer owner-fact artifacts are absent. |
-| Spec 031 | BLOCKED | `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/external/spec035-read-audit.md` | Required config/auth-source/execution-snapshot owner-fact artifacts are absent. The historical artifact filename remains unchanged. |
+| Spec 029 | BLOCKED | Unavailable in this checkout. | Historical read audit is absent and no tracked replacement was verified. |
+| Spec 030 | BLOCKED | Unavailable in this checkout. | The previously cited source-bound manifest is absent and no tracked replacement was verified. |
+| Spec 032 | BLOCKED | Unavailable in this checkout. | Historical read audit and required app/resource lifecycle owner-fact artifacts are absent. |
+| Spec 033 | BLOCKED | `docs/specs/033-evaluation-automation-live-integration/CLOSURE.md`, `docs/specs/033-evaluation-automation-live-integration/evidence/index.json` | Spec033 owner implementation은 QA/goal/code/security/docs final review와 final source-bound release execution을 모두 통과했다. 이 행은 Spec035가 아직 regenerated external read audit를 만들지 않아 `BLOCKED`이며, PRD 009 partial TUI rendering도 full Tasks parity를 닫지 않는다. |
+| Spec 034 | PASS (owner facts only) | `docs/specs/034-generated-media-and-rich-file-context-expansion/CLOSURE.md`, `.omo/evidence/spec034/remediation/PASS.json`, `.omo/evidence/spec034/task-11-parity.json`, `.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json` | Remediation과 candidate2 Todo 14에서 22/22 media/analyzer owner facts 및 current adapter evidence가 PASS했다. Candidate2 Todo 14는 QA-only이고 Spec035는 이 fact를 read-only로 소비하므로, Spec035는 PRD 008-009와 다른 closure gate가 남은 `Open` 상태다. |
+| Spec 031 | BLOCKED | Unavailable in this checkout. | Historical read audit is absent; required config/auth-source/execution-snapshot owner facts remain unverified. |
 
-Historical release runner locator `.omo/evidence/spec031/prd007/task-21-spec031-implementation/current-final-20260804-12/summary.md` reports `status: BLOCKED`. Its historical Spec 030 read-audit row is superseded by the current PASS locator above; Specs031/032/033/034, planned PRD 008, PRD 009의 deferred parity는 계속 Spec 035 closure를 차단한다. `failure-triage.json`의 dirty state는 당시 기록이며 external evidence blocker를 가리지 않는다. The success fixture at `.omo/evidence/spec031/prd007/task-20-spec031-implementation/success-fixture-final-20260804-05/summary.md` proves the runner can pass an isolated fixture, not that semantic Spec 035 closure has passed.
+The historical release-runner summary and success-fixture summary are unavailable in this checkout, so neither is cited as evidence. Specs 029/030/031/032/033, planned PRD 008, PRD 009의 deferred parity와 나머지 closure gate는 계속 Spec 035 closure를 차단한다. The current Spec034 owner-fact row does not close semantic Spec035 closure, and no candidate2 final review or committed manifest claim is imported into Spec035.

@@ -1,6 +1,6 @@
 # PRD 004. sequential integration and Spec 034 closure
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
@@ -57,3 +57,5 @@ Primary parent requirements owned by this PRD:
 2. Generated-media and analyzer real-surface artifacts.
 3. External owner-fact/projection/snapshot audits.
 4. Documentation and final Spec034 closure summary.
+
+Completion evidence: [Todo 12 sequential integration](../../../../.omo/evidence/spec034/task-12-integration.json), [Todo 13 runner mechanics](../../../../.omo/evidence/spec034/task-13-release/summary.json), [review remediation PASS](../../../../.omo/evidence/spec034/remediation/PASS.json), [candidate2 Todo 14 QA baseline](../../../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json), and [Spec034 closure mapping](../CLOSURE.md). Todo 12와 Todo 14 baseline은 정확한 10개 Must Have와 12개 Acceptance Criteria의 22/22 매핑을 검증하고, Todo 12는 AC010의 structured `complete_scoped` policy와 실제 `Complete (Scoped)` index status를 검증한다. Todo 13은 runner-mechanics-only이고 Todo 14는 해당 source의 QA-only baseline이므로, 최신 frozen source의 최종 5개 review receipt나 closure-eligible committed-tree manifest를 대신하지 않는다.
