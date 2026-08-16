@@ -2,13 +2,13 @@
 
 Status: Complete (Scoped)
 
-Spec034의 현재 self-hosted/personal-use 범위는 구현, 정확한 22/22 요구사항 통합, review remediation과 실제 CLI/API/WebSocket/channel/TUI/artifact 표면 QA baseline까지 완료되었다. 이 기록은 구현 범위의 완료를 설명하며, 최신 frozen source의 최종 5개 리뷰나 closure-eligible committed-tree source seal을 통과했다고 주장하지 않는다.
+Spec034의 현재 self-hosted/personal-use 범위는 구현, 정확한 22/22 요구사항 통합, review remediation과 실제 CLI/API/WebSocket/channel/TUI/artifact 표면 QA baseline까지 완료되었다. 이 기록은 구현 범위와 final seal 판정 계약을 설명한다. 최신 release 상태는 [canonical final manifest](../../../.omo/evidence/spec034/task-15-closure/final-committed/manifest.json)만 판정하며, 이 문서의 고정 문구에서 추론하지 않는다.
 
 ## Scope boundary
 
 - Domain owner: Codex generated-media event, edit/mask/variation 계약, partial/final lifecycle, guarded remote output, local artifact persistence, bounded video analyzer, recorded-only replay와 media/analyzer owner facts.
 - Adapter consumer: Spec035는 이미 생산된 canonical media/analyzer fact를 CLI/TUI/API/WebSocket/channel에 read-only로 투영한다. Spec035의 transport negotiation, reconnect와 Tasks parity는 계속 Open이다.
-- Release boundary: [Remediation PASS](../../../.omo/evidence/spec034/remediation/PASS.json)는 failed candidate1의 blocker를 닫고 fresh QA와 새 source freeze를 요구했다. Todo 13은 `runner-mechanics-only`, `closure_eligible: false`다. [Todo 14 QA baseline](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)은 QA PASS지만 `closureClaimed: false`이고 surface receipt도 `final_release_evidence: false`다. 이후 source 변경은 새 frozen manifest와 변경 범위 재검증이 필요하며, 최신 source의 최종 review receipt와 closure-eligible committed-tree manifest는 이 기록에 존재하지 않는다.
+- Release boundary: [Remediation PASS](../../../.omo/evidence/spec034/remediation/PASS.json)는 failed candidate1의 blocker를 닫고 fresh QA와 새 source freeze를 요구했다. Todo 13은 `runner-mechanics-only`, `closure_eligible: false`다. [Todo 14 QA baseline](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)은 QA PASS지만 `closureClaimed: false`이고 surface receipt도 `final_release_evidence: false`다. 이후 source 변경은 새 frozen manifest와 변경 범위 재검증이 필요하다. Canonical final manifest가 현재 committed source digest, 최종 5개 PASS receipt, clean-tree runner evidence를 모두 결합하고 자체 verdict를 PASS로 기록한 경우에만 closure-eligible final seal이다.
 
 ## Must Have mapping
 
@@ -66,7 +66,7 @@ Canonical catalog와 sequential integration은 정확히 10개 Must Have와 12�
 - Credential source/status는 credential 자체, typed secret reference 또는 vault guarantee가 아니다.
 - Trusted local profile은 untrusted file/repository를 자동 격리하지 않는다.
 
-## Verification and remaining mechanical seal
+## Verification and mechanical seal
 
 [Candidate2 Todo 14 Cargo receipt](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/cargo/receipt.json)은 전체 gate baseline에서 다음 명령이 모두 exit 0이었음을 기록한다. 이후 source 변경은 새 frozen manifest와 해당 변경 범위의 재검증으로 별도 결합해야 한다.
 
@@ -80,4 +80,4 @@ cargo build --manifest-path crates/Cargo.toml --workspace --locked
 
 [Candidate2 Todo 14 surface receipt](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/surfaces/PASS.json)은 실제 CLI, loopback HTTP/WebSocket, channel, persisted artifact와 invalid-input 표면 및 sequential 22/22 PASS를 기록하고, [candidate2 TUI receipt](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/tui/receipt.json)은 26개 TUI 테스트와 5개 상태 x 3개 geometry의 15개 capture PASS를 기록한다. [Remediation PASS](../../../.omo/evidence/spec034/remediation/PASS.json)의 code, security, docs, production mapper verifier도 모두 PASS다.
 
-이 문서 이후의 release 절차는 최신 frozen source bytes에 대해 QA, goal, code, security, docs의 최종 5개 리뷰를 실행하고, 모두 PASS인 경우에만 동일한 reviewed bytes를 커밋한 뒤 committed-tree source-bound release evidence를 생성하는 것이다. 이전 candidate의 QA나 review receipt는 변경된 source의 최종 PASS를 대신하지 않는다. 이 두 단계는 현재 CLOSURE에 포함되어 있지 않고 이미 통과했다고 주장하지 않는다.
+Release 절차는 최신 frozen source bytes에 대해 QA, goal, code, security, docs의 최종 5개 리뷰를 실행하고, 모두 PASS인 경우에만 동일한 reviewed bytes를 커밋한 뒤 committed-tree source-bound release evidence를 생성한다. 이전 candidate의 QA나 review receipt는 변경된 source의 최종 PASS를 대신하지 않는다. [Canonical final manifest](../../../.omo/evidence/spec034/task-15-closure/final-committed/manifest.json)가 이 결합을 검증해 최신 상태를 판정하며, manifest가 없거나 현재 HEAD/source digest와 불일치하거나 자체 verdict가 PASS가 아니면 final seal이 아니다.
