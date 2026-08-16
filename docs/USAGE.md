@@ -489,6 +489,7 @@ shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 - `GET /v1/readiness`
 - `GET /v1/models`
 - `GET /v1/diagnostics`
+- `GET /v1/media/diagnostics`
 - `GET /v1/permissions`
 - `GET /v1/workflows/recipes`
 - `GET /v1/sessions`
@@ -512,6 +513,21 @@ shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 - `GET /ws` 또는 configured WebSocket path when the server is started with WebSocket support
 
 `POST /v1/chat/completions`는 단일 user message, optional `session_id`, optional `temperature`, optional `max_tokens`, JSON text 또는 data-URL image content part, multipart upload, non-stream response, `stream=true` Server-Sent Events를 받습니다. Remote image URL은 거부합니다. Data URL과 uploaded file은 runtime media directory의 `attachments/api/` subtree 아래에 저장되며, 파일당 10 MiB 제한이 있습니다. 저장된 attachment는 provider/model이 native image input을 지원한다고 확인되는 경우 image block으로 라우팅되고, text/PDF/Office 계열은 가능한 경우 text note와 추출 텍스트로 라우팅됩니다. Provider나 model이 image input을 지원하지 않는 경우 image attachment는 raw 경로를 노출하지 않는 unsupported note로 전달됩니다. Audio attachment는 지원되는 analyzer가 runtime에 주입된 경우 bounded transcript 또는 summary text artifact로 라우팅되고, analyzer가 없거나 지원되지 않으면 내용을 들은 것처럼 처리하지 않고 unsupported 또는 extraction_failed note로 남습니다. Video attachment도 같은 capability-based 방식입니다. Runtime에 video analyzer가 주입된 경우에만 byte/duration cap 이후 bounded metadata, subtitle excerpt, scene/keyframe summary, PRD 003 audio analyzer를 재사용한 audio-track transcript/summary 후보를 만들고, analyzer가 없으면 deferred가 아니라 `video analyzer is not configured` unsupported note로 남깁니다. 기본 ffmpeg, built-in codec parser, native outbound video delivery는 제공하지 않습니다.
+
+### Spec 034 generated media와 analyzer diagnostics
+
+Agent runtime의 approved `image_generate` path는 Codex Responses image event를 text와 분리하고 final bytes가 local media root에 commit된 뒤 relative artifact ref만 runtime result에 남깁니다. Provider-neutral edit/mask/variation 계약은 존재하지만 현재 capability는 provider별로 다르며 unsupported operation은 provider 호출 전에 명시적으로 거부될 수 있습니다. Partial image는 상태 evidence일 뿐 final artifact로 자동 승격되지 않습니다.
+
+```sh
+shacs-bot runtime inspect --workspace /tmp/ws
+curl --fail-with-body http://127.0.0.1:8900/v1/media/diagnostics
+```
+
+`runtime inspect`는 data directory의 bounded canonical projection record를 읽으며 record가 없으면 unavailable로 표시합니다. `GET /v1/media/diagnostics`는 configured canonical projection을 JSON으로 반환하고 projection이 없으면 404입니다. WebSocket `/ws`에 `{"type":"media_projection"}`을 보내면 같은 configured projection을 받습니다. External channel adapter도 같은 envelope를 소비하지만 remote ACK나 delivery success를 합성하지 않습니다. TUI는 session metadata의 `media_capability`를 읽어 state, safe reason, freshness, lineage와 disclosure를 표시하고 malformed 또는 stale-success record를 unavailable로 접습니다.
+
+Generated artifact는 selected media root의 `artifacts/<artifact-id>/` 아래 `record.json`과 payload로 atomic commit되며 record는 relative path, MIME, byte length, SHA-256, provider/model, source ids, normalized options, retention과 disclosure status를 보존합니다. Remote provider output은 guarded local persistence, provider/domain/expiry만 담은 non-persisted reference, rejection 중 하나이며 arbitrary user URL intake가 아닙니다. Remote reference는 영구 접근이나 재다운로드를 보장하지 않습니다.
+
+Video analyzer는 runtime에 injected/configured된 경우에만 bounded evidence를 만들고 missing, unsupported codec, extraction failure, duration cap, truncation, timeout/cancellation을 구분합니다. 이 evidence는 complete video understanding이나 privacy redaction이 아닙니다. Media-root admission은 universal filesystem/process containment가 아니고, projection omission은 complete redaction이나 secret exfiltration prevention proof가 아닙니다. CDN/public gallery/editor, built-in ffmpeg, full codec coverage와 all-provider parity도 지원 범위가 아닙니다. 정확한 22/22 mapping, [review remediation PASS](../.omo/evidence/spec034/remediation/PASS.json), [Todo 14 QA baseline](../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)은 구현과 회귀 baseline을 검증하지만 이후 변경된 source의 최종 5개 리뷰나 closure-eligible committed-tree manifest의 PASS를 뜻하지 않습니다. 전체 non-guarantee와 최신 source-bound release 조건은 [Spec 034 closure record](specs/034-generated-media-and-rich-file-context-expansion/CLOSURE.md)를 참고하세요.
 
 `GET /v1/readiness`는 Spec 035 readiness projection을 반환합니다. `GET /v1/diagnostics`는 redacted runtime diagnostics snapshot과 supervision projection을 반환합니다. `GET /v1/permissions`는 CLI `permissions list`와 같은 remembered permission projection을 반환하고 mutation method는 거부합니다. `GET /v1/workflows/recipes`는 CLI `skills recipes`와 같은 `024WorkflowRecipeProjection.v1` read-only projection을 반환합니다. `/v1/sessions` family는 configured workspace의 session list, detail, filtered message history, diagnostics를 raw session file이나 provider payload 없이 조회하는 read-only local-owner surface입니다. Filtered history는 user/assistant의 `role`/`content`만 반환하고 provider hidden reasoning, tool call arguments, tool result payload는 반환하지 않습니다. 그래도 user/assistant message content 자체는 포함될 수 있으므로 non-loopback/remote bind는 reverse proxy/auth 같은 별도 보호 없이는 권장하지 않으며, 로컬 API bind 범위와 로그 보관 정책을 그에 맞게 다루세요. `/ws`는 JSON `message` frame을 local `AgentLoop`로 전달하고 `delta`, `stream_end`, final `message`, attach/ready/error event를 반환하는 WebSocket bridge입니다. Server-Sent Events의 final delivery는 remote ACK/read receipt가 아니라 local stream state이며, current projection에서 pending 또는 unknown으로 남을 수 있습니다.
 

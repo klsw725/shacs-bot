@@ -148,6 +148,15 @@ curl http://127.0.0.1:8900/v1/readiness
 curl http://127.0.0.1:8900/v1/diagnostics
 ```
 
+Spec 034 generated media와 video analyzer 상태는 기존 runtime/API/TUI/channel 표면에서 확인합니다. 별도 image editor CLI는 없습니다. `image_generate`의 Codex final output과 검증된 edit/mask output은 local media root에 commit된 뒤 relative artifact ref로 노출되며, provider별 미지원 edit/mask/variation은 `unsupported`가 될 수 있습니다. `runtime inspect`는 canonical media projection이 없을 때 성공을 합성하지 않고 unavailable로 표시합니다. API adapter에 projection이 configured된 경우 media diagnostics를 반환하고, 없으면 404입니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime inspect --workspace /tmp/shacs-ws
+curl --fail-with-body http://127.0.0.1:8900/v1/media/diagnostics
+```
+
+Video analyzer는 runtime에 주입된 경우에만 bounded metadata/transcript/scene/keyframe evidence를 만들며, analyzer missing, unsupported codec, extraction failure, truncation과 timeout/cancellation을 성공으로 표시하지 않습니다. Built-in ffmpeg, full codec understanding, CDN/gallery/editor, all-provider parity, arbitrary URL intake, permanent remote reference, universal containment와 complete redaction은 제공하거나 보장하지 않습니다. Spec034의 정확한 22/22 mapping, [review remediation PASS](.omo/evidence/spec034/remediation/PASS.json), [Todo 14 QA baseline](.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)은 구현과 회귀 baseline을 검증하지만 이후 변경된 source의 최종 5개 리뷰나 closure-eligible committed-tree manifest의 PASS를 뜻하지 않습니다. 상세 범위와 최신 source-bound release 조건은 [`Spec 034 CLOSURE`](docs/specs/034-generated-media-and-rich-file-context-expansion/CLOSURE.md)를 참고하세요.
+
 Spec 035 implemented baseline에서 기존 QA 기록이 있는 표면은 TUI, `agent` REPL, secret-ref-only onboard wizard, readiness API/diagnostics, delivery hint projection, release runner artifact입니다. 이는 현재 Spec 035 closure PASS 또는 planned Tasks/reconnect parity 완료를 뜻하지 않습니다. TUI는 live runtime projection을 읽어 session, approval, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 먼저 workspace template과 session store를 만들고, 표시할 session을 생성한 뒤 `--once` 또는 interactive TUI를 실행하세요:
 
 ```sh
