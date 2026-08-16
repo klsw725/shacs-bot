@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting runtime-agent suite; Spec034 diff is three compile-contract media fixture hooks
 use serde_json::{json, Map, Value};
 use shacs_core::runtime::{
     pick_consolidation_boundary, AgentHook, AgentHookContext, AgentRunSpec, AgentRunner,
@@ -394,6 +395,7 @@ fn runtime_context_builds_system_runtime_and_media_messages() -> Result<(), Box<
         chat_id: Some("direct"),
         current_role: "user",
         session_summary: Some("summary"),
+        analyzer_invocation: None,
     });
     if messages[0]["role"] != "system"
         || !messages[0]["content"]
@@ -463,6 +465,7 @@ fn runtime_context_routes_media_root_stored_attachments_and_keeps_workspace_imag
         chat_id: Some("direct"),
         current_role: "user",
         session_summary: None,
+        analyzer_invocation: None,
     });
 
     let blocks = messages[1]["content"]
@@ -535,6 +538,7 @@ struct RuntimeVideoAnalyzer;
 impl VideoContextAnalyzer for RuntimeVideoAnalyzer {
     fn analyze(
         &self,
+        _invocation: &shacs_core::runtime::AnalyzerInvocation,
         request: VideoContextRequest,
     ) -> Result<VideoContextAnalysis, shacs_core::runtime::VideoContextError> {
         if request.detected_mime != "video/mp4" {

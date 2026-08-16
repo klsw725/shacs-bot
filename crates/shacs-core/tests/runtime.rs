@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting runtime integration suite; Spec034 diff is one test-fixture deadline field hook
 use serde_json::{json, Value};
 use shacs_config::AutoApprovalConfig;
 #[cfg(unix)]
@@ -2687,6 +2688,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         in_cron_context: false,
         record_channel_delivery: true,
         cancellation_token: None,
+        deadline: None,
     };
 
     let report = executor.execute_tool_calls(
