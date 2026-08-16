@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting TUI fixture suite; Spec034 diff is one media-view fixture field hook
 use shacs_core::runtime::SurfaceAction;
 use shacs_projection::{
     Spec033AutomationFact, Spec033AutomationJobStatus, Spec033Availability, Spec033DeliveryStatus,
@@ -326,5 +327,6 @@ fn fixture_session(
                 target_owner_id: "owner-fixture".to_owned(),
             },
         }),
+        media: shacs_tui::media_view::MediaProjectionView::unavailable(),
     }
 }

@@ -133,5 +133,6 @@ fn cjk_session() -> Result<shacs_tui::state::RuntimeSession, Box<dyn Error>> {
                 target_owner_id: "owner-fixture".to_owned(),
             },
         }),
+        media: shacs_tui::media_view::MediaProjectionView::unavailable(),
     })
 }
