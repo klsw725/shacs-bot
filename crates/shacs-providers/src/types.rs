@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
+use crate::ProviderMediaCandidate;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerationSettings {
     pub temperature: f64,
@@ -111,6 +113,8 @@ pub struct LlmResponse {
     pub error_retry_after_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_should_retry: Option<bool>,
+    #[serde(skip)]
+    pub media_candidates: Vec<ProviderMediaCandidate>,
 }
 
 impl Default for LlmResponse {
@@ -129,6 +133,7 @@ impl Default for LlmResponse {
             error_code: None,
             error_retry_after_s: None,
             error_should_retry: None,
+            media_candidates: Vec::new(),
         }
     }
 }
