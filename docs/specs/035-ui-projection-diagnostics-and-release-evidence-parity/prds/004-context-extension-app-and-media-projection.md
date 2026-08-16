@@ -83,11 +83,13 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-core --all-targ
 
 ## Closure Evidence
 
-1. Capability/reason matrix: `.omo/evidence/spec031/prd004/capability-reason-matrix.json`.
-2. Cross-surface parity artifact: `.omo/evidence/spec031/prd004/projection-parity.json`.
-3. External owner read audits: `.omo/evidence/spec031/prd004/external/spec032-read-audit.json` and `.omo/evidence/spec031/prd004/external/spec034-read-audit.json`.
-4. Redaction and mixed-batch audit: `.omo/evidence/spec031/prd004/redaction-audit.md`.
-5. QA transcripts and cleanup receipts: `.omo/evidence/spec031/prd004/qa/todo13-extension-cli-read-only-qa.json` and `.omo/evidence/spec031/prd004/qa/context-driver-cleanup.json`.
+The following historical artifact names are retained for auditability, but every listed file is **Unavailable** in this checkout and therefore does not prove current closure. Current Spec034 owner facts are linked separately from these missing historical Spec031-owned artifacts.
+
+1. **Unavailable** - capability/reason matrix `.omo/evidence/spec031/prd004/capability-reason-matrix.json` is absent; regenerate it before asserting capability coverage.
+2. **Unavailable** - cross-surface parity artifact `.omo/evidence/spec031/prd004/projection-parity.json` is absent; regenerate it before asserting adapter parity.
+3. **Unavailable** - external owner audits `.omo/evidence/spec031/prd004/external/spec032-read-audit.json` and `.omo/evidence/spec031/prd004/external/spec034-read-audit.json` are absent; regenerate source-bound audits rather than inferring owner-fact status from these names.
+4. **Unavailable** - redaction and mixed-batch audit `.omo/evidence/spec031/prd004/redaction-audit.md` is absent; regenerate it before asserting projection-boundary coverage.
+5. **Unavailable** - QA artifact `.omo/evidence/spec031/prd004/qa/todo13-extension-cli-read-only-qa.json` and cleanup receipt `.omo/evidence/spec031/prd004/qa/context-driver-cleanup.json` are absent; rerun QA and cleanup before using these names as evidence.
 
 ## Exit Criteria
 

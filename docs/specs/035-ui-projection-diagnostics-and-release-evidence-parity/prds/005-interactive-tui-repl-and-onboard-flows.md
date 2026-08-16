@@ -92,10 +92,12 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-cli --all-targe
 
 ## Closure Evidence
 
-1. TUI flow transcript and projection comparison index: `.omo/evidence/spec031/prd005/tui/phase2/current/index.md`.
-2. REPL command parity matrix: `.omo/evidence/spec031/prd005/repl/command-parity.json`.
-3. Onboard config diff and secret audit manifest: `.omo/evidence/spec031/prd005/onboard/manifest.json`.
-4. Live-versus-recorded source audit: `.omo/evidence/spec031/prd005/runtime-source-audit.md`.
+The following historical artifact names are retained for auditability, but every listed file is **Unavailable** in this checkout and therefore does not prove current closure.
+
+1. **Unavailable** - TUI flow and comparison index `.omo/evidence/spec031/prd005/tui/phase2/current/index.md` is absent; rerun terminal QA before using it as evidence.
+2. **Unavailable** - REPL command parity matrix `.omo/evidence/spec031/prd005/repl/command-parity.json` is absent; regenerate it before asserting command parity.
+3. **Unavailable** - onboard config and secret audit manifest `.omo/evidence/spec031/prd005/onboard/manifest.json` is absent; rerun onboard QA before using it as evidence.
+4. **Unavailable** - live-versus-recorded source audit `.omo/evidence/spec031/prd005/runtime-source-audit.md` is absent; regenerate it before asserting runtime-source coverage.
 
 ## Exit Criteria
 
