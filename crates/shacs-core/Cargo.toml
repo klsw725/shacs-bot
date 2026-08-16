@@ -5,11 +5,13 @@ edition = "2021"
 rust-version = "1.75"
 
 [dependencies]
+cap-primitives = "4.0.2"
 glob = "0.3"
 libc = "0.2"
 fs2 = "0.4"
 nix = { version = "0.30", features = ["process", "signal"] }
 regex = "1"
+rustix = { version = "1.1.4", features = ["fs"] }
 base64 = "0.22"
 boa_engine = "=0.21.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

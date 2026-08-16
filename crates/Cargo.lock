@@ -2901,6 +2901,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "boa_engine",
+ "cap-primitives",
  "chrono",
  "chrono-tz",
  "deno_ast",
@@ -2910,6 +2911,7 @@ dependencies = [
  "libc",
  "nix",
  "regex",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
