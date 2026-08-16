@@ -219,6 +219,8 @@ pub struct ToolExecutionContext {
     pub record_channel_delivery: bool,
     #[serde(skip, default)]
     pub cancellation_token: Option<crate::runtime::CancellationToken>,
+    #[serde(skip, default)]
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Default for ToolExecutionContext {
@@ -244,6 +246,7 @@ impl Default for ToolExecutionContext {
             in_cron_context: false,
             record_channel_delivery: false,
             cancellation_token: None,
+            deadline: None,
         }
     }
 }
@@ -558,7 +561,7 @@ pub(crate) fn permission_decision_for_action(
 }
 
 #[derive(Debug, Clone)]
-struct PermissionEvaluation {
+pub(super) struct PermissionEvaluation {
     rule_input: PermissionRuleInput,
     evaluator: Option<AutoEvaluatorVerdict>,
     approval: Option<ApprovalCorrelation>,
@@ -1334,25 +1337,7 @@ fn execute_one_tool(
     }
 }
 
-fn tool_call_execution_context(
-    registry: &ToolRegistry,
-    action: &PermissionedAction,
-    evaluation: PermissionEvaluation,
-    context: &ToolExecutionContext,
-) -> ToolCallExecutionContext {
-    if !action.capabilities.contains(&SafetyCapability::ProcExec) {
-        return ToolCallExecutionContext::default();
-    }
-    let execution = ToolCallExecutionContext::new(
-        process_gate_input_for_action(registry, action, evaluation).ok(),
-    );
-    match context.cancellation_token.as_ref() {
-        Some(token) => execution.with_process_abort(token.controlled_child_abort()),
-        None => execution,
-    }
-}
-
-fn process_gate_input_for_action(
+pub(super) fn process_gate_input_for_action(
     registry: &ToolRegistry,
     action: &PermissionedAction,
     evaluation: PermissionEvaluation,
@@ -1492,3 +1477,5 @@ impl Drop for AppliedToolContext<'_> {
         }
     }
 }
+// allow: SIZE_OK — preexisting tool executor; Spec034 keeps two context fields and delegates provider invocation assembly
+use super::tool_execution_provider::tool_call_execution_context;
