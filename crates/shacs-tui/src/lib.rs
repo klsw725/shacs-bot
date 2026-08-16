@@ -1,6 +1,7 @@
 pub mod action_runner;
 pub mod input;
 pub mod live_source;
+pub mod media_view;
 mod remembered_permissions;
 pub mod state;
 pub mod trusted_runtime_view;
