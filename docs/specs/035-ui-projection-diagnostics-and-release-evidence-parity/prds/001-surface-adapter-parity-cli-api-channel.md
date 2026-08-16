@@ -80,10 +80,12 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-cli --all-targe
 
 ## Closure Evidence
 
-1. Cross-surface fixture registry: `.omo/evidence/spec031/prd001/parity/fixture-registry.json`.
-2. Canonical field comparison: `.omo/evidence/spec031/prd001/parity/parity-matrix.json`.
-3. CLI/API/WebSocket/channel transcripts and cleanup receipts: `.omo/evidence/spec031/prd001/cli/qa-summary.md`, `.omo/evidence/spec031/prd001/api/canonical-field-checks.json`, and `.omo/evidence/spec031/prd001/channel/todo7-verification.md`.
-4. Redaction read audit: `.omo/evidence/spec031/prd001/parity/qa-redaction.json`.
+The following historical artifact names are retained for auditability, but every listed file is **Unavailable** in this checkout and therefore does not prove current closure.
+
+1. **Unavailable** - cross-surface fixture registry `.omo/evidence/spec031/prd001/parity/fixture-registry.json` is absent; regenerate it before using it as evidence.
+2. **Unavailable** - canonical field comparison `.omo/evidence/spec031/prd001/parity/parity-matrix.json` is absent; regenerate it before asserting parity.
+3. **Unavailable** - CLI/API/WebSocket/channel artifacts `.omo/evidence/spec031/prd001/cli/qa-summary.md`, `.omo/evidence/spec031/prd001/api/canonical-field-checks.json`, and `.omo/evidence/spec031/prd001/channel/todo7-verification.md` are absent; rerun the surface QA and cleanup checks before using these names as evidence.
+4. **Unavailable** - redaction read audit `.omo/evidence/spec031/prd001/parity/qa-redaction.json` is absent; regenerate it before asserting projection-boundary redaction coverage.
 
 ## Exit Criteria
 
