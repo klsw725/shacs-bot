@@ -11,5 +11,6 @@ pub mod app_lifecycle {
 }
 
 pub mod controlled_child;
+pub mod generated_media;
 pub mod runtime;
 pub mod tools;
