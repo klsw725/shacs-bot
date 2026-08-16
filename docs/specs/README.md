@@ -28,8 +28,8 @@
 |---|---|---|
 | `032-app-maker-runtime-and-extension-lifecycle` | `Complete (Scoped)`: foreground AppSupervisor/process lifecycle, current-user authoring/apply/install, app-level activation provenance and blockers | 005, 017, 021, 025 |
 | `033-evaluation-automation-live-integration` | `Complete (Scoped)`: local goal/evaluator, durable automation routing, CAS self-improvement, recorded-only replay, domain projection input과 source-bound release evidence 구현; QA/goal/code/security/docs final PASS 및 final source-bound release execution PASS | 009, 012, 013, 014, 016, 018, 022 |
-| `034-generated-media-and-rich-file-context-expansion` | Codex image, edit/streaming/remote output, video analyzer, artifact/sandbox/data-disclosure evidence | 004, 019, 027 |
-| `035-ui-projection-diagnostics-and-release-evidence-parity` | implemented shared projection/TUI/REPL/wizard/release baseline; partial TUI goal/automation rendering; planned transport negotiation, snapshot-first reconnect, full owner-backed Tasks parity | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
+| `034-generated-media-and-rich-file-context-expansion` | `Complete (Scoped)`: Codex image event, edit/mask/variation 계약, streaming/remote-output 정책, generated artifact, bounded video analyzer와 media-domain evidence; [remediation PASS](../../.omo/evidence/spec034/remediation/PASS.json)와 [Todo 14 QA baseline](../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)에서 22/22 검증. 최신 frozen source의 최종 리뷰와 closure-eligible committed-tree seal은 별도 기계적 release 단계이며 이전 candidate receipt로 대체하지 않음 | 004, 019, 027 |
+| `035-ui-projection-diagnostics-and-release-evidence-parity` | `Open`: implemented shared projection/TUI/REPL/wizard/release baseline; Spec034 media/analyzer fact의 adapter consumption; planned transport negotiation, snapshot-first reconnect, full owner-backed Tasks parity | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
 
 ## 읽는 순서 권장
 
