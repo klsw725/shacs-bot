@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting channel catalog; Spec034 diff only registers and re-exports the focused spec035 media adapter
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -6,10 +7,14 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 
 mod spec031;
+mod spec035;
 
 pub use spec031::{
     channel_delivery_observation_from_metadata, project_spec031_channel_event,
     ChannelDeliveryObservation, ChannelSpec031ProjectionInput, ChannelSpec031ProjectionKind,
+};
+pub use spec035::{
+    project_spec035_media_for_channel, ChannelSpec035MediaDelivery, ChannelSpec035MediaProjection,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
