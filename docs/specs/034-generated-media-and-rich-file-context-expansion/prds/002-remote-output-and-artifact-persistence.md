@@ -1,6 +1,6 @@
 # PRD 002. remote output and artifact persistence
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
@@ -39,3 +39,5 @@ Remote URL provider output을 safe local artifact, safe non-persisted reference,
 2. Persistence/provenance/retention tests.
 3. Specs 030/031 owner-fact audits.
 4. Replay no-live-URL transcript.
+
+Completion evidence: [Todo 3 remote-policy receipt](../../../../.omo/evidence/spec034/task-3-remote-policy.json), [Todo 8 persistence receipt](../../../../.omo/evidence/spec034/task-8-persistence.json), [Todo 10 replay receipt](../../../../.omo/evidence/spec034/task-10-diagnostics-replay.json), and [Spec034 closure mapping](../CLOSURE.md).
