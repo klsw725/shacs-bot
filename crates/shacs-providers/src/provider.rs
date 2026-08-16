@@ -2,6 +2,7 @@ use crate::config::ProviderConfig;
 use crate::error::ProviderError;
 use crate::model::ModelInfo;
 use crate::types::{GenerationSettings, LlmResponse};
+use crate::ProviderMediaLifecycleObservation;
 use serde_json::Value;
 use shacs_config::RawCredential;
 use std::fmt;
@@ -34,6 +35,7 @@ pub enum ProviderEvent {
         usage: Value,
         reason: String,
     },
+    MediaLifecycle(ProviderMediaLifecycleObservation),
 }
 
 #[derive(Debug, Clone, PartialEq)]

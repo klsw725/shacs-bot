@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting provider catalog; Spec034 diff is one Codex image-generation capability index flag
 use crate::config::{ProviderConfig, ProvidersConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
