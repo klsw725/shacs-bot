@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting TUI renderer; Spec034 diff is one focused media-view projection hook
 use crate::state::{
     action_outcome_label, ApprovalActionState, ApprovalStatus, RuntimeSession, TuiState, UiStatus,
 };
@@ -125,6 +126,7 @@ fn session_lines(session: &RuntimeSession) -> Vec<String> {
     } else {
         lines.push("approval: none".to_owned());
     }
+    lines.extend(session.media.lines().iter().cloned());
     lines.extend(spec033_lines(session));
     lines
 }

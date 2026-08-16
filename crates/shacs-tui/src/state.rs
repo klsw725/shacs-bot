@@ -3,6 +3,8 @@ use shacs_projection::{Spec030RuntimeProjection, Spec030UnavailableReason, Spec0
 use shacs_session::{SessionRuntimeExecutionProjection, SessionRuntimeWorkflowProjection};
 use std::fmt;
 
+use crate::media_view::MediaProjectionView;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionKey(String);
 
@@ -66,6 +68,7 @@ pub struct RuntimeSession {
     pub workflow: Option<SessionRuntimeWorkflowProjection>,
     pub execution: Option<SessionRuntimeExecutionProjection>,
     pub pending_approval: Option<PendingApproval>,
+    pub media: MediaProjectionView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
