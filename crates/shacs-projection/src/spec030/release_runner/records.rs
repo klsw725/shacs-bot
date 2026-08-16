@@ -6,6 +6,7 @@ use super::{
     Spec030ManualQaRecord, SPEC030_MANUAL_QA_SCHEMA,
 };
 use crate::release_evidence::EvidenceWriter;
+use std::path::Path;
 use std::process::Command;
 
 pub(super) fn add_environment_blockers(
@@ -43,8 +44,7 @@ pub(super) fn add_records(
 ) -> Result<(), Spec030ReleaseArtifactError> {
     let extra_removed = match config.mode {
         Spec030ReleaseRunnerMode::SuccessFixture => {
-            std::fs::remove_dir_all(config.evidence_root.join("fixtures/success/target"))
-                .map_err(|_| Spec030ReleaseArtifactError::Io)?;
+            remove_fixture_target(&config.evidence_root)?;
             1
         }
         Spec030ReleaseRunnerMode::CurrentWorktree => 0,
@@ -59,6 +59,14 @@ pub(super) fn add_records(
     match config.mode {
         Spec030ReleaseRunnerMode::SuccessFixture => add_fixture_manual(writer, artifacts),
         Spec030ReleaseRunnerMode::CurrentWorktree => add_manual_records(config, writer, artifacts),
+    }
+}
+
+fn remove_fixture_target(evidence_root: &Path) -> Result<(), Spec030ReleaseArtifactError> {
+    match std::fs::remove_dir_all(evidence_root.join("fixtures/success/target")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(Spec030ReleaseArtifactError::Io),
     }
 }
 
@@ -127,4 +135,21 @@ fn required_non_guarantees() -> Vec<String> {
     .into_iter()
     .map(str::to_owned)
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_fixture_target;
+
+    #[test]
+    fn fixture_cleanup_succeeds_when_external_cargo_target_leaves_local_target_absent() {
+        // Given
+        let evidence_root = tempfile::tempdir().expect("temporary evidence root");
+
+        // When
+        let result = remove_fixture_target(evidence_root.path());
+
+        // Then
+        assert_eq!(result, Ok(()));
+    }
 }

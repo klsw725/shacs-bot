@@ -13,6 +13,8 @@ pub mod spec030;
 pub mod spec031;
 mod spec031_extension;
 mod spec033;
+mod spec034;
+mod spec035;
 
 pub use diagnostics_release::{
     build_spec018_diagnostics_manifest, build_spec018_ledger_inspect_result,
@@ -49,3 +51,5 @@ pub use spec031_extension::{
     SPEC031_EXTENSION_SCHEMA_VERSION,
 };
 pub use spec033::*;
+pub use spec034::*;
+pub use spec035::*;
