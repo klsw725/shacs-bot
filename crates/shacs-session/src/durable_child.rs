@@ -8,7 +8,7 @@ use crate::durable_trace::{
     DurableTraceStore,
 };
 use crate::durable_work::{
-    apply_durable_work_event, DurableWorkEnqueueInput, DurableWorkEnqueueJsonInput,
+    apply_persisted_durable_work_event, DurableWorkEnqueueInput, DurableWorkEnqueueJsonInput,
     DurableWorkEnqueuer, DurableWorkPayloadStore, DurableWorkReplayState, WorkCancellation,
     WorkLeased, WorkPayloadRef, WorkTerminal, WorkTerminalKind,
 };
@@ -811,7 +811,7 @@ impl DurableChildRecorder {
         store
             .visit_from_sequence(0, |event| {
                 if reducer_error.is_none() {
-                    if let Err(error) = apply_durable_work_event(&mut state, event) {
+                    if let Err(error) = apply_persisted_durable_work_event(&mut state, event) {
                         reducer_error = Some(error.to_string());
                     }
                 }
