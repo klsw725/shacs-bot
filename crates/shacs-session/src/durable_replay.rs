@@ -4,7 +4,7 @@ use crate::durable_event::{
     WORKFLOW_FAILED, WORKFLOW_PLANNED,
 };
 use crate::durable_work::{
-    apply_durable_work_event, DurableWorkReducerError, DurableWorkReplayState,
+    apply_persisted_durable_work_event, DurableWorkReducerError, DurableWorkReplayState,
 };
 use chrono::{SecondsFormat, Utc};
 use fs4::FileExt;
@@ -195,7 +195,7 @@ pub fn apply_durable_event(
             found: event.sequence,
         });
     }
-    if apply_durable_work_event(&mut state.work, event)? {
+    if apply_persisted_durable_work_event(&mut state.work, event)? {
         state.applied_through = Some(event.sequence);
         return Ok(());
     }

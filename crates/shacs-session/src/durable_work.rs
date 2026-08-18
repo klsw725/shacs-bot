@@ -289,6 +289,16 @@ pub fn apply_durable_work_event(
     Ok(true)
 }
 
+pub fn apply_persisted_durable_work_event(
+    state: &mut DurableWorkReplayState,
+    event: &DurableEventRecord,
+) -> Result<bool, DurableWorkReducerError> {
+    if crate::durable_work_compat::apply_legacy_v1_owner_terminal(state, event)? {
+        return Ok(true);
+    }
+    apply_durable_work_event(state, event)
+}
+
 pub(crate) fn normalize_durable_work_append(
     state: &DurableWorkReplayState,
     event: &mut DurableEventRecord,
@@ -532,6 +542,16 @@ fn apply_terminal(
     {
         return Err(invalid_transition(event.sequence, payload.work_id));
     }
+    project_terminal_item(item, event, payload);
+    prune_terminal_items(state);
+    Ok(())
+}
+
+pub(crate) fn project_terminal_item(
+    item: &mut ReplayWorkItem,
+    event: &DurableEventRecord,
+    payload: WorkTerminal,
+) {
     item.state = ReplayWorkState::Terminal;
     item.terminal_kind = Some(payload.terminal_kind);
     item.terminal_facts = payload.facts;
@@ -541,8 +561,6 @@ fn apply_terminal(
     item.terminal_at = Some(event.recorded_at.clone());
     item.next_wake_at_ms = None;
     clear_lease(item);
-    prune_terminal_items(state);
-    Ok(())
 }
 
 fn apply_runtime_request(
@@ -611,7 +629,7 @@ fn clear_lease(item: &mut ReplayWorkItem) {
     item.lease_expires_at_ms = None;
 }
 
-fn prune_terminal_items(state: &mut DurableWorkReplayState) {
+pub(crate) fn prune_terminal_items(state: &mut DurableWorkReplayState) {
     let mut terminal = state
         .items
         .values()
@@ -1441,7 +1459,7 @@ fn replay_work_state(
     let mut reducer_error = None;
     events.visit_from_sequence(0, |event| {
         if reducer_error.is_none() {
-            reducer_error = apply_durable_work_event(&mut state, event).err();
+            reducer_error = apply_persisted_durable_work_event(&mut state, event).err();
         }
     })?;
     if let Some(error) = reducer_error {

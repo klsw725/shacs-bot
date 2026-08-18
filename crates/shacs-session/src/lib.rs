@@ -15,6 +15,7 @@ pub mod durable_migration;
 pub mod durable_replay;
 pub mod durable_trace;
 pub mod durable_work;
+mod durable_work_compat;
 mod session_mutation_lock;
 
 pub use session_mutation_lock::SessionMutationGuard;
