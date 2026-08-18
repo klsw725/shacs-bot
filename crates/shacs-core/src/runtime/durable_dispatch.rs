@@ -9,7 +9,7 @@ use shacs_session::durable_trace::{
     DurableTraceStore,
 };
 use shacs_session::durable_work::{
-    apply_durable_work_event, DurableWorkAdmission, DurableWorkEnqueueError,
+    apply_persisted_durable_work_event, DurableWorkAdmission, DurableWorkEnqueueError,
     DurableWorkEnqueueInput as SessionWorkEnqueueInput, DurableWorkEnqueueJsonInput,
     DurableWorkEnqueuer, DurableWorkError, DurableWorkPayloadStore, DurableWorkReplayState,
     ReplayWorkItem, ReplayWorkState, RuntimeControlRequested, WorkCancellation, WorkLeased,
@@ -210,7 +210,7 @@ impl DurableWorkDispatcher {
         let mut reducer_error = None;
         self.events.visit_from_sequence(0, |event| {
             if reducer_error.is_none() {
-                if let Err(error) = apply_durable_work_event(&mut state, event) {
+                if let Err(error) = apply_persisted_durable_work_event(&mut state, event) {
                     reducer_error = Some(error.to_string());
                 }
             }
