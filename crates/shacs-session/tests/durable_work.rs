@@ -542,15 +542,17 @@ fn durable_work_rejects_forged_terminal_and_cancellation_outcomes() -> Result<()
         let checkpoint_root = root.path().join("checkpoints");
         let mut events = DurableEventStore::open(&event_root)?;
         append(&mut events, WORK_ENQUEUED, &enqueued("work-1", None)?)?;
-        events.append(DurableEventInput::new(
+        let result = events.append(DurableEventInput::new(
             "session-1",
             kind,
             DurableEventPayload::inline("durable_work", payload),
-        ))?;
+        ));
+        assert!(result.is_err());
+        assert_eq!(events.scan(usize::MAX)?.records.len(), 1);
         let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
         assert_eq!(
             replay.status,
-            shacs_session::durable_replay::DurableRecoveryStatus::Blocked
+            shacs_session::durable_replay::DurableRecoveryStatus::Healthy
         );
         let state = replay.state.ok_or("missing valid replay prefix")?;
         assert_eq!(state.work.items["work-1"].state, ReplayWorkState::Pending);
@@ -574,7 +576,7 @@ fn durable_work_rejects_retry_after_cancellation_request() -> Result<(), Box<dyn
             reason: "user_stop".to_owned(),
         },
     )?;
-    append(
+    let result = append(
         &mut events,
         WORK_RETRY_SCHEDULED,
         &WorkRetryScheduled {
@@ -584,12 +586,14 @@ fn durable_work_rejects_retry_after_cancellation_request() -> Result<(), Box<dyn
             backoff_ms: 300,
             reason_ref: "retryable".to_owned(),
         },
-    )?;
+    );
+    assert!(result.is_err());
+    assert_eq!(events.scan(usize::MAX)?.records.len(), 3);
 
     let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
     assert_eq!(
         replay.status,
-        shacs_session::durable_replay::DurableRecoveryStatus::Blocked
+        shacs_session::durable_replay::DurableRecoveryStatus::Healthy
     );
     let state = replay.state.ok_or("missing valid replay prefix")?;
     assert_eq!(state.work.items["work-1"].state, ReplayWorkState::Leased);

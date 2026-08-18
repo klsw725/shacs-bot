@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::SystemTime;
 
 use crate::durable_work::{
-    apply_durable_work_event, durable_work_append_requires_normalization,
-    normalize_durable_work_append, DurableWorkReplayState,
+    apply_durable_work_event, apply_persisted_durable_work_event,
+    durable_work_append_requires_normalization, normalize_durable_work_append,
+    DurableWorkReplayState,
 };
 
 pub const CURRENT_DURABLE_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -387,6 +388,7 @@ pub struct DurableEventStore {
 struct ProcessStoreState {
     verified: bool,
     stamp: Option<FileStamp>,
+    work_state: Option<DurableWorkReplayState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,6 +431,9 @@ impl DurableEventStore {
         }
         let current_stamp = file_stamp(&path)?;
         let unchanged = guard.stamp.as_ref() == Some(&current_stamp);
+        if !unchanged {
+            guard.work_state = None;
+        }
         let (compatibility, incomplete_tail, last_sequence) =
             if guard.verified && unchanged && !created {
                 let tail = read_tail_state(&path, &registry)?;
@@ -497,6 +502,9 @@ impl DurableEventStore {
         let mut guard = recover_lock(&self.process_lock);
         let _file_lock = acquire_file_lock(&self.lock_path)?;
         let current = read_tail_state(&self.path, &self.registry)?;
+        if !file_metadata_matches_stamp(&self.path, guard.stamp.as_ref())? {
+            guard.work_state = None;
+        }
         self.compatibility = current.compatibility;
         self.incomplete_tail = current.incomplete_tail;
         self.next_sequence = current.last_sequence.unwrap_or(0).saturating_add(1);
@@ -524,23 +532,28 @@ impl DurableEventStore {
             provenance: input.provenance,
             recorded_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         };
-        if durable_work_append_requires_normalization(&record)
-            .map_err(|error| DurableEventError::Validation(error.to_string()))?
-        {
-            let mut work = DurableWorkReplayState::default();
-            let mut reducer_error = None;
-            visit_path(&self.path, &self.registry, 0, |persisted| {
-                if reducer_error.is_none() {
-                    if let Err(error) = apply_durable_work_event(&mut work, persisted) {
-                        reducer_error = Some(error.to_string());
-                    }
-                }
-            })?;
-            if let Some(error) = reducer_error {
-                return Err(DurableEventError::Validation(error).into());
+        let mut appended_work_state = None;
+        if record.kind.starts_with("work.") {
+            let mut work = match guard.work_state.clone() {
+                Some(work) => work,
+                None => replay_persisted_work(&self.path, &self.registry)?,
+            };
+            if durable_work_append_requires_normalization(&record)
+                .map_err(|error| DurableEventError::Validation(error.to_string()))?
+            {
+                normalize_durable_work_append(&work, &mut record)
+                    .map_err(|error| DurableEventError::Validation(error.to_string()))?;
             }
-            normalize_durable_work_append(&work, &mut record)
-                .map_err(|error| DurableEventError::Validation(error.to_string()))?;
+            if !apply_durable_work_event(&mut work, &record)
+                .map_err(|error| DurableEventError::Validation(error.to_string()))?
+            {
+                return Err(DurableEventError::Validation(format!(
+                    "unregistered durable work event kind {}",
+                    record.kind
+                ))
+                .into());
+            }
+            appended_work_state = Some(work);
         }
         let record_bytes = canonical_record_bytes(&record)?;
         if record_bytes.len() > MAX_DURABLE_EVENT_FRAME_BYTES {
@@ -570,6 +583,7 @@ impl DurableEventStore {
                 AppendedFrameReadback::ExactFrame => {
                     guard.verified = false;
                     guard.stamp = None;
+                    guard.work_state = None;
                     return Err(DurableEventAppendError::CommitUnknown(
                         DurableEventError::Io(error),
                     ));
@@ -588,6 +602,7 @@ impl DurableEventStore {
                             self.incomplete_tail = true;
                             guard.verified = false;
                             guard.stamp = None;
+                            guard.work_state = None;
                         }
                     }
                     return Err(DurableEventAppendError::DefinitelyNotCommitted(
@@ -597,6 +612,7 @@ impl DurableEventStore {
                 AppendedFrameReadback::Unknown(readback_error) => {
                     guard.verified = false;
                     guard.stamp = None;
+                    guard.work_state = None;
                     return Err(DurableEventAppendError::CommitUnknown(
                         DurableEventError::Io(readback_error),
                     ));
@@ -604,6 +620,9 @@ impl DurableEventStore {
             }
         }
         refresh_process_stamp(&mut guard, &self.path, true);
+        if let Some(work) = appended_work_state {
+            guard.work_state = Some(work);
+        }
         self.next_sequence = self.next_sequence.saturating_add(1);
         Ok(record)
     }
@@ -612,8 +631,12 @@ impl DurableEventStore {
         let mut guard = recover_lock(&self.process_lock);
         let _file_lock = acquire_file_lock(&self.lock_path)?;
         let scan = scan_path(&self.path, &self.registry, max_records)?;
+        let stamp = file_stamp(&self.path)?;
+        if guard.stamp.as_ref() != Some(&stamp) {
+            guard.work_state = None;
+        }
         guard.verified = !scan.incomplete_tail && scan.compatibility.is_current();
-        guard.stamp = Some(file_stamp(&self.path)?);
+        guard.stamp = Some(stamp);
         Ok(scan)
     }
 
@@ -625,10 +648,31 @@ impl DurableEventStore {
         let mut guard = recover_lock(&self.process_lock);
         let _file_lock = acquire_file_lock(&self.lock_path)?;
         let summary = visit_path(&self.path, &self.registry, after_sequence, visitor)?;
+        let stamp = file_stamp(&self.path)?;
+        if guard.stamp.as_ref() != Some(&stamp) {
+            guard.work_state = None;
+        }
         guard.verified = !summary.incomplete_tail && summary.compatibility.is_current();
-        guard.stamp = Some(file_stamp(&self.path)?);
+        guard.stamp = Some(stamp);
         Ok(summary)
     }
+}
+
+fn replay_persisted_work(
+    path: &Path,
+    registry: &DurableEventSchemaRegistry,
+) -> Result<DurableWorkReplayState, DurableEventError> {
+    let mut work = DurableWorkReplayState::default();
+    let mut reducer_error = None;
+    visit_path(path, registry, 0, |persisted| {
+        if reducer_error.is_none() {
+            reducer_error = apply_persisted_durable_work_event(&mut work, persisted).err();
+        }
+    })?;
+    if let Some(error) = reducer_error {
+        return Err(DurableEventError::Validation(error.to_string()));
+    }
+    Ok(work)
 }
 
 fn validate_input(
@@ -1103,6 +1147,7 @@ fn refresh_process_stamp(state: &mut ProcessStoreState, path: &Path, verified: b
         Err(_) => {
             state.verified = false;
             state.stamp = None;
+            state.work_state = None;
         }
     }
 }
@@ -1124,6 +1169,14 @@ fn file_stamp(path: &Path) -> std::io::Result<FileStamp> {
         modified: metadata.modified().ok(),
         digest: hasher.finalize().into(),
     })
+}
+
+fn file_metadata_matches_stamp(path: &Path, stamp: Option<&FileStamp>) -> std::io::Result<bool> {
+    let Some(stamp) = stamp else {
+        return Ok(false);
+    };
+    let metadata = fs::metadata(path)?;
+    Ok(metadata.len() == stamp.length && metadata.modified().ok() == stamp.modified)
 }
 
 fn reject_symlink(path: &Path) -> std::io::Result<()> {
