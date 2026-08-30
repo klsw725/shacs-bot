@@ -2,6 +2,7 @@ mod agent_repl;
 mod automation_outcome;
 mod automation_producer;
 mod automation_worker;
+mod discord_outbound;
 mod improvement_cli;
 mod onboard_wizard;
 mod runtime_cleanup;
@@ -15998,24 +15999,10 @@ fn send_discord_message(
         }
         return Ok(());
     }
-    let url = format!(
-        "https://discord.com/api/v10/channels/{}/messages",
-        message.chat_id
-    );
     if message_is_stream_delta(&message) || message_is_stream_end(&message) {
         return Ok(());
     }
-    for (index, chunk) in discord_message_chunks(&message.content)
-        .into_iter()
-        .enumerate()
-    {
-        let reply_to = (index == 0)
-            .then_some(message.reply_to.as_deref())
-            .flatten();
-        let body = discord_message_body(&message.chat_id, &chunk, reply_to);
-        post_json(agent, &url, Some(discord_auth_header(&config.token)), body)?;
-    }
-    Ok(())
+    discord_outbound::send_message(agent, &config.token, message)
 }
 
 fn discord_message_body(channel_id: &str, content: &str, reply_to: Option<&str>) -> Value {
