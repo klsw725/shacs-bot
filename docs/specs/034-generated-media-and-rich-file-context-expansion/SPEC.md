@@ -168,6 +168,8 @@ Spec 034는 provider event normalization에서 artifact persistence, video analy
 
 Current PRD status:
 
+Codex OAuth를 사용하는 `/codex/images/generations` provider slice는 구현되어 기존 `image_generate` artifact 저장 경계에 연결됐다. 이는 PRD 000이 요구하는 Codex Responses stream event normalization을 완료한 것이 아니므로 아래 PRD 상태는 유지한다.
+
 | PRD | Status |
 |---|---|
 | PRD 000 | Planned |
