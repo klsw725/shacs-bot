@@ -22165,8 +22165,21 @@ fn production_tool_registry(
         let provider_registry = ProviderRegistry::new();
         let mut providers = bundle.config.providers.clone();
         for (provider_id, auth) in load_auth_store(&bundle.context.auth_path())?.providers {
-            if auth.kind == "apiKey" {
-                providers.entry(provider_id).or_default().api_key = Some(auth.access);
+            match auth.kind.as_str() {
+                "apiKey" => {
+                    providers.entry(provider_id).or_default().api_key = Some(auth.access);
+                }
+                "oauth" if provider_id == CODEX_PROVIDER_ID => {
+                    let provider = providers.entry(provider_id).or_default();
+                    provider.api_key = Some(auth.access);
+                    if let Some(account_id) = auth.account_id {
+                        provider
+                            .extra_headers
+                            .get_or_insert_with(Default::default)
+                            .insert("ChatGPT-Account-Id".to_owned(), account_id);
+                    }
+                }
+                _ => {}
             }
         }
         let resolved = resolve_image_generation_client(
@@ -29772,6 +29785,26 @@ mod tests {
         let mut auth = AuthStore::default();
         auth.providers
             .insert("openrouter".to_owned(), ProviderAuth::api_key("sk-or-test"));
+        save_auth_store_to_path(&auth, &bundle.context.auth_path())?;
+        let facts = spec030_fact_store_for_bundle(&bundle);
+
+        let tooling = production_tool_registry(&bundle, true, &facts)?;
+
+        assert!(tooling.registry.has("image_generate"));
+        Ok(())
+    }
+
+    #[test]
+    fn production_tool_registry_uses_codex_oauth_from_auth_store() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let mut bundle = image_generation_test_bundle(root.path())?;
+        bundle.config.tools.image_generation.provider = "openai_codex".to_owned();
+        bundle.config.providers.clear();
+        let mut auth = AuthStore::default();
+        auth.providers.insert(
+            "openai_codex".to_owned(),
+            ProviderAuth::oauth_access("oauth-test", Some("acct-test".to_owned())),
+        );
         save_auth_store_to_path(&auth, &bundle.context.auth_path())?;
         let facts = spec030_fact_store_for_bundle(&bundle);
 
