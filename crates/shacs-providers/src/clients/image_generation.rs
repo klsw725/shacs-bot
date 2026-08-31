@@ -1,3 +1,4 @@
+use crate::clients::codex_image_generation::codex_image_generation_client_from_config;
 use crate::config::{ProviderConfig, ProvidersConfig};
 use crate::error::ProviderError;
 use crate::registry::{ProviderRegistry, ProviderSpec};
@@ -95,7 +96,9 @@ impl fmt::Debug for ImageGenerationRequestParts {
             .headers
             .iter()
             .map(|(key, value)| {
-                let value = if key.eq_ignore_ascii_case("authorization") {
+                let value = if key.eq_ignore_ascii_case("authorization")
+                    || key.eq_ignore_ascii_case("chatgpt-account-id")
+                {
                     "<redacted>".to_owned()
                 } else {
                     value.clone()
@@ -383,6 +386,7 @@ pub fn image_generation_client_from_config(
     config: ProviderConfig,
 ) -> Result<Box<dyn ImageGenerationClient>, ProviderError> {
     match provider_id {
+        "openai_codex" => Ok(Box::new(codex_image_generation_client_from_config(config)?)),
         "openai" => Ok(Box::new(openai_image_generation_client_from_config(
             config,
         )?)),

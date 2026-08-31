@@ -23,6 +23,10 @@ pub use clients::codex::{
     parse_codex_stream, CodexClient, CodexHttpStreamResponse, CodexHttpTransport,
     CodexRequestParts, UreqCodexHttpTransport,
 };
+pub use clients::codex_image_generation::{
+    build_codex_image_generation_request, codex_image_generation_client_from_config,
+    CodexImageGenerationClient,
+};
 pub use clients::image_generation::{
     build_openai_image_generation_request, build_openrouter_image_generation_request,
     image_generation_client_from_config, openai_image_generation_capability,

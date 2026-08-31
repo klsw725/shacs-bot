@@ -1,14 +1,14 @@
 use serde_json::{json, Map};
 use shacs_providers::{
-    build_openai_image_generation_request, build_openrouter_image_generation_request, find_by_name,
-    image_generation_client_from_config, openai_compatible_client_from_config,
-    openai_image_generation_capability, parse_openai_image_generation_response,
-    parse_openrouter_image_generation_response, resolve_image_generation_api_base,
-    resolve_image_generation_client, DefaultModelImageGenerationClient, GeneratedImage,
-    ImageGenerationClient, ImageGenerationHttpResponse, ImageGenerationRequest,
-    ImageGenerationRequestParts, ImageGenerationResult, OpenAiImageGenerationClient,
-    OpenRouterImageGenerationClient, ProviderConfig, ProviderError, ProviderRegistry,
-    ProvidersConfig,
+    build_codex_image_generation_request, build_openai_image_generation_request,
+    build_openrouter_image_generation_request, find_by_name, image_generation_client_from_config,
+    openai_compatible_client_from_config, openai_image_generation_capability,
+    parse_openai_image_generation_response, parse_openrouter_image_generation_response,
+    resolve_image_generation_api_base, resolve_image_generation_client, CodexImageGenerationClient,
+    DefaultModelImageGenerationClient, GeneratedImage, ImageGenerationClient,
+    ImageGenerationHttpResponse, ImageGenerationRequest, ImageGenerationRequestParts,
+    ImageGenerationResult, OpenAiImageGenerationClient, OpenRouterImageGenerationClient,
+    ProviderConfig, ProviderError, ProviderRegistry, ProvidersConfig,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -79,6 +79,122 @@ fn openai_image_generation_request_builder_serializes_options() -> Result<(), Bo
             })
     {
         return Err("image request builder drifted".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn codex_image_generation_request_builder_uses_codex_contract() -> Result<(), Box<dyn Error>> {
+    let mut request = ImageGenerationRequest::new("paint a small robot");
+    request.size = Some("1024x1024".to_owned());
+    request.quality = Some("high".to_owned());
+    request.output_format = Some("webp".to_owned());
+    request.background = Some("opaque".to_owned());
+    request.count = Some(1);
+    let extra_headers = BTreeMap::from([
+        ("ChatGPT-Account-Id".to_owned(), "acct-test".to_owned()),
+        ("originator".to_owned(), "shacs-bot-test".to_owned()),
+    ]);
+
+    let parts = build_codex_image_generation_request(
+        "oauth-test",
+        &extra_headers,
+        "turn-test",
+        &request,
+        "gpt-image-2",
+    );
+
+    if parts.path != "/codex/images/generations"
+        || parts.headers.get("Authorization").map(String::as_str) != Some("Bearer oauth-test")
+        || parts.headers.get("ChatGPT-Account-Id").map(String::as_str) != Some("acct-test")
+        || parts
+            .headers
+            .get("x-codex-image-turn-id")
+            .map(String::as_str)
+            != Some("turn-test")
+        || parts.headers.get("originator").map(String::as_str) != Some("shacs-bot-test")
+        || parts.body
+            != json!({
+                "model": "gpt-image-2",
+                "prompt": "paint a small robot",
+                "size": "1024x1024",
+                "quality": "high",
+                "background": "opaque",
+                "n": 1
+            })
+    {
+        return Err(format!("Codex image request builder drifted: {parts:?}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn codex_image_generation_request_debug_redacts_auth_identity() -> Result<(), Box<dyn Error>> {
+    let parts = build_codex_image_generation_request(
+        "oauth-secret",
+        &BTreeMap::from([("ChatGPT-Account-Id".to_owned(), "acct-secret".to_owned())]),
+        "turn-test",
+        &ImageGenerationRequest::new("paint a small robot"),
+        "gpt-image-2",
+    );
+
+    let debug = format!("{parts:?}");
+    if debug.contains("oauth-secret")
+        || debug.contains("acct-secret")
+        || debug.matches("<redacted>").count() != 2
+    {
+        return Err(format!("Codex image auth identity leaked in debug output: {debug}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn codex_image_generation_client_normalizes_codex_response() -> Result<(), Box<dyn Error>> {
+    let captured = Arc::new(Mutex::new(Vec::<ImageGenerationRequestParts>::new()));
+    let captured_transport = captured.clone();
+    let client = CodexImageGenerationClient::new(
+        "oauth-test",
+        BTreeMap::from([("ChatGPT-Account-Id".to_owned(), "acct-test".to_owned())]),
+        "gpt-image-2",
+        move |request: ImageGenerationRequestParts| {
+            captured_transport
+                .lock()
+                .map_err(|error| ProviderError::Api {
+                    status: None,
+                    message: error.to_string(),
+                    retryable: false,
+                    headers: BTreeMap::new(),
+                    body: None,
+                })?
+                .push(request);
+            Ok(ImageGenerationHttpResponse {
+                status: 200,
+                headers: BTreeMap::from([(
+                    "x-codex-imagegen-request-id".to_owned(),
+                    "codex-req-1".to_owned(),
+                )]),
+                body: json!({"data": [{"b64_json": "aGk="}]}),
+            })
+        },
+    );
+
+    let result = client.generate_image(ImageGenerationRequest::new("say hi"))?;
+    let captured = captured.lock().map_err(|error| error.to_string())?;
+    let parts = captured.first().ok_or("missing Codex image request")?;
+    let image = result.images.first().ok_or("missing generated image")?;
+    if parts.path != "/codex/images/generations"
+        || parts
+            .headers
+            .get("x-codex-image-turn-id")
+            .is_none_or(String::is_empty)
+        || result.provider_id != "openai_codex"
+        || result.request_id.as_deref() != Some("codex-req-1")
+        || image.bytes.as_slice() != b"hi"
+        || image.mime_type != "image/png"
+    {
+        return Err(
+            format!("Codex image client drifted: parts={parts:?} result={result:?}").into(),
+        );
     }
     Ok(())
 }
@@ -515,6 +631,34 @@ fn image_generation_resolver_returns_selected_model() -> Result<(), Box<dyn Erro
     if resolved.provider_id != "openai" || resolved.model != "custom-image-model" {
         return Err(format!(
             "unexpected resolver success result: provider={} model={}",
+            resolved.provider_id, resolved.model
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn image_generation_resolver_accepts_codex_oauth_config() -> Result<(), Box<dyn Error>> {
+    let registry = ProviderRegistry::new();
+    let providers = ProvidersConfig::from([(
+        "openai_codex".to_owned(),
+        ProviderConfig {
+            api_key: Some("oauth-test".to_owned()),
+            extra_headers: Some(BTreeMap::from([(
+                "ChatGPT-Account-Id".to_owned(),
+                "acct-test".to_owned(),
+            )])),
+            ..ProviderConfig::default()
+        },
+    )]);
+
+    let resolved =
+        resolve_image_generation_client(&registry, "openai_codex", "gpt-image-2", &providers)?;
+
+    if resolved.provider_id != "openai_codex" || resolved.model != "gpt-image-2" {
+        return Err(format!(
+            "unexpected Codex resolver result: provider={} model={}",
             resolved.provider_id, resolved.model
         )
         .into());

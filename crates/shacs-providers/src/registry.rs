@@ -340,6 +340,7 @@ const PROVIDERS: &[ProviderSpec] = &[
         detect_by_base_keyword: Some("codex"),
         default_api_base: Some("https://chatgpt.com/backend-api"),
         is_oauth: true,
+        supports_image_generation: true,
         ..provider(
             "openai_codex",
             &["openai-codex"],
