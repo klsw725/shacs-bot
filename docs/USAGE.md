@@ -406,6 +406,24 @@ Login에 성공하면 `auth.json`에 `access`, `refresh`, `expires`, optional `a
 
 `gpt-5.4`는 ChatGPT account Codex의 보수적인 기본값입니다. `gpt-5.5` 같은 더 새로운 Codex model slug는 계정 rollout 또는 entitlement가 필요할 수 있습니다. `openai/gpt-5.5` 같은 provider-qualified id는 ChatGPT Codex backend로 보내기 전에 정규화됩니다.
 
+같은 Codex OAuth 인증으로 `image_generate`를 사용하려면 `config.json`에 다음 설정을 추가합니다:
+
+```json
+{
+  "tools": {
+    "imageGeneration": {
+      "enable": true,
+      "provider": "openai_codex",
+      "model": "gpt-image-2",
+      "defaultFormat": "png",
+      "maxCount": 1
+    }
+  }
+}
+```
+
+`openai_codex` image provider는 `auth.json`의 OAuth access token과 optional `accountId`를 사용해 Codex backend의 `/codex/images/generations`를 호출합니다. 생성 결과는 raw base64가 아니라 data directory 아래 local media artifact로 저장됩니다. 이 경로는 Codex account plan과 server-side image-generation entitlement에 따라 거절될 수 있고, 공개 OpenAI Images API의 안정성 계약을 따르지 않습니다. 공개 API가 필요한 경우 기존 `openai` image provider와 `OPENAI_API_KEY`를 사용하세요.
+
 stdin에서 token을 import합니다:
 
 ```sh
