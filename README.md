@@ -86,6 +86,22 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime recover --wo
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- ask "hello" --workspace /tmp/shacs-ws
 ```
 
+Codex OAuth 로그인을 이미지 생성 provider에도 사용할 수 있습니다. 로그인 후 `config.json`에서 `tools.imageGeneration`을 활성화하면 `image_generate`가 Codex의 `gpt-image-2` backend를 호출하고 생성 파일을 local media artifact로 저장합니다:
+
+```json
+{
+  "tools": {
+    "imageGeneration": {
+      "enable": true,
+      "provider": "openai_codex",
+      "model": "gpt-image-2"
+    }
+  }
+}
+```
+
+이 경로는 Codex 계정의 image-generation entitlement가 필요하며 공개 OpenAI Images API가 아닌 Codex backend 계약을 사용합니다. 자세한 인증 절차와 제한은 [`docs/USAGE.md`](docs/USAGE.md)를 참고하세요.
+
 Spec 033 local goal owner는 CLI와 local API에서 같은 typed snapshot을 사용합니다:
 
 ```sh
