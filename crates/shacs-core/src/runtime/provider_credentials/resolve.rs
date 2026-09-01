@@ -1,6 +1,7 @@
 use super::command::runtime_error;
 use super::{
-    ProviderClientResolutionRequest, ProviderCredentialInvocation, ProviderCredentialRuntime,
+    ProviderClientResolutionRequest, ProviderConfigResolutionRequest, ProviderCredentialInvocation,
+    ProviderCredentialRuntime, ResolvedProviderConfig,
 };
 use shacs_config::{
     CredentialFamily, CredentialFingerprintStatus, CredentialResolutionInput, CredentialSource,
@@ -31,14 +32,49 @@ impl ProviderCredentialRuntime {
         request: ProviderClientResolutionRequest<'_>,
         invocation: &ProviderCredentialInvocation,
     ) -> Result<ResolvedProviderClient, ProviderError> {
-        let selection = self.selection_providers(request.providers);
+        let selection = self.providers_for_selection(request.providers);
         let provider_match = request
             .registry
             .match_provider(request.requested_provider, request.model, &selection)
             .ok_or_else(|| provider_not_found(request.registry, request.requested_provider))?;
+        let resolved = self.resolve_provider_config_for_invocation(
+            ProviderConfigResolutionRequest {
+                registry: request.registry,
+                provider_match,
+                providers: request.providers,
+            },
+            invocation,
+        )?;
+        Ok(ResolvedProviderClient {
+            provider_id: resolved.provider_id,
+            model: resolved.model,
+            client: provider_client_from_config(resolved.config, &resolved.spec)?,
+        })
+    }
+
+    pub(crate) fn resolve_provider_config(
+        &self,
+        request: ProviderConfigResolutionRequest<'_>,
+    ) -> Result<ResolvedProviderConfig, ProviderError> {
+        self.resolve_provider_config_for_invocation(
+            request,
+            &ProviderCredentialInvocation {
+                runtime_override: None,
+                command_abort: self.command_abort.clone(),
+            },
+        )
+    }
+
+    pub(crate) fn resolve_provider_config_for_invocation(
+        &self,
+        request: ProviderConfigResolutionRequest<'_>,
+        invocation: &ProviderCredentialInvocation,
+    ) -> Result<ResolvedProviderConfig, ProviderError> {
+        let provider_match = request.provider_match;
         let spec = request
             .registry
             .find_by_name(&provider_match.provider_id)
+            .copied()
             .ok_or_else(|| provider_not_found(request.registry, &provider_match.provider_id))?;
         let config = request
             .providers
@@ -68,31 +104,29 @@ impl ProviderCredentialRuntime {
         match resolved {
             Ok(resolved) => {
                 let status = resolved.status();
+                let account_id = resolved.account_id().map(str::to_owned);
                 let mut config = config;
                 config.api_key = Some(resolved.transport().value().to_owned());
-                if provider_match.provider_id == "openai_codex"
-                    && status.source == Some(CredentialSource::LocalAuthStore)
-                {
-                    if let Ok(auth) = LocalAuthStore::new(self.auth_path()).load() {
-                        if let Some(account_id) = auth
-                            .providers
-                            .get(&provider_match.provider_id)
-                            .and_then(|entry| entry.account_id.as_ref())
-                        {
-                            config
-                                .extra_headers
-                                .get_or_insert_with(Default::default)
-                                .insert("ChatGPT-Account-Id".to_owned(), account_id.clone());
+                if let Some(headers) = config.extra_headers.as_mut() {
+                    headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
+                }
+                if provider_match.provider_id == "openai_codex" {
+                    let headers = config.extra_headers.get_or_insert_with(Default::default);
+                    headers.retain(|name, _| !name.eq_ignore_ascii_case("chatgpt-account-id"));
+                    if status.source == Some(CredentialSource::LocalAuthStore) {
+                        if let Some(account_id) = account_id {
+                            headers.insert("ChatGPT-Account-Id".to_owned(), account_id);
                         }
                     }
                 }
                 self.facts
                     .record_credential_status(status)
                     .map_err(|_| runtime_error("credential fact update failed"))?;
-                Ok(ResolvedProviderClient {
+                Ok(ResolvedProviderConfig {
                     provider_id: provider_match.provider_id,
                     model: provider_match.model,
-                    client: provider_client_from_config(config, spec)?,
+                    spec,
+                    config,
                 })
             }
             Err(error) => {
@@ -176,7 +210,7 @@ impl ProviderCredentialRuntime {
         declaration.resolve(config, CredentialResolutionInput::default())
     }
 
-    fn selection_providers(
+    pub(crate) fn providers_for_selection(
         &self,
         providers: &shacs_providers::ProvidersConfig,
     ) -> shacs_providers::ProvidersConfig {

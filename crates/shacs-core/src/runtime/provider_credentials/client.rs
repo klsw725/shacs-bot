@@ -1,5 +1,6 @@
 use super::{
-    ProviderClientResolutionRequest, ProviderCredentialInvocation, ProviderCredentialRuntime,
+    ProviderClientResolutionRequest, ProviderCredentialClientConfig, ProviderCredentialInvocation,
+    ProviderCredentialRuntime,
 };
 use shacs_providers::{
     LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderInvocation,
@@ -8,9 +9,7 @@ use shacs_providers::{
 use std::sync::Arc;
 
 pub struct CredentialResolvingProviderClient {
-    requested_provider: String,
-    model: String,
-    providers: ProvidersConfig,
+    config: ProviderCredentialClientConfig,
     runtime: Arc<ProviderCredentialRuntime>,
     invocation: ProviderCredentialInvocation,
     transport_override: Option<Arc<dyn ProviderClient>>,
@@ -52,10 +51,22 @@ impl CredentialResolvingProviderClient {
         providers: ProvidersConfig,
         runtime: Arc<ProviderCredentialRuntime>,
     ) -> Self {
+        Self::from_config(
+            ProviderCredentialClientConfig {
+                requested_provider: requested_provider.into(),
+                model: model.into(),
+                providers,
+            },
+            runtime,
+        )
+    }
+
+    fn from_config(
+        config: ProviderCredentialClientConfig,
+        runtime: Arc<ProviderCredentialRuntime>,
+    ) -> Self {
         Self {
-            requested_provider: requested_provider.into(),
-            model: model.into(),
-            providers,
+            config,
             runtime,
             invocation: ProviderCredentialInvocation::default(),
             transport_override: None,
@@ -96,9 +107,9 @@ impl CredentialResolvingProviderClient {
         self.runtime.resolve_provider_client_for_invocation(
             ProviderClientResolutionRequest {
                 registry: &registry,
-                requested_provider: &self.requested_provider,
-                model: &self.model,
-                providers: &self.providers,
+                requested_provider: &self.config.requested_provider,
+                model: &self.config.model,
+                providers: &self.config.providers,
             },
             invocation,
         )

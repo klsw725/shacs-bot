@@ -1,10 +1,13 @@
 mod client;
 mod command;
+mod image;
 mod local;
 mod resolve;
 
 use shacs_config::{CredentialSourceDeclaration, OAuthRefresh, OAuthRefreshRequest, RawCredential};
-use shacs_providers::{ProviderRegistry, ProvidersConfig};
+use shacs_providers::{
+    ProviderConfig, ProviderMatch, ProviderRegistry, ProviderSpec, ProvidersConfig,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -15,6 +18,7 @@ use crate::controlled_child::ControlledChildAbort;
 
 pub use client::CredentialResolvingProviderClient;
 pub(crate) use client::ProviderInvocationClient;
+pub use image::CredentialResolvingImageGenerationClient;
 
 pub trait OAuthCredentialRefresher: Send + Sync {
     fn refresh(
@@ -29,6 +33,25 @@ pub struct ProviderClientResolutionRequest<'a> {
     pub requested_provider: &'a str,
     pub model: &'a str,
     pub providers: &'a ProvidersConfig,
+}
+
+pub(crate) struct ProviderConfigResolutionRequest<'a> {
+    pub registry: &'a ProviderRegistry,
+    pub provider_match: ProviderMatch,
+    pub providers: &'a ProvidersConfig,
+}
+
+pub(crate) struct ResolvedProviderConfig {
+    pub provider_id: String,
+    pub model: String,
+    pub spec: ProviderSpec,
+    pub config: ProviderConfig,
+}
+
+pub struct ProviderCredentialClientConfig {
+    pub requested_provider: String,
+    pub model: String,
+    pub providers: ProvidersConfig,
 }
 
 #[derive(Debug, Clone, Default)]
