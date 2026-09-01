@@ -384,7 +384,8 @@ pub use process_gate::{
 };
 pub(crate) use provider_credentials::ProviderInvocationClient;
 pub use provider_credentials::{
-    CredentialResolvingProviderClient, OAuthCredentialRefresher, ProviderClientResolutionRequest,
+    CredentialResolvingImageGenerationClient, CredentialResolvingProviderClient,
+    OAuthCredentialRefresher, ProviderClientResolutionRequest, ProviderCredentialClientConfig,
     ProviderCredentialInvocation, ProviderCredentialRuntime,
 };
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
