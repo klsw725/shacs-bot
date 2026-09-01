@@ -81,27 +81,27 @@ use shacs_core::runtime::{
     ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput,
     ContextDiagnosticsSummary, ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions,
     ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig,
-    CoreDiagnosticsAggregateInput, CredentialResolvingProviderClient, DiscoveredPlugin,
-    DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, ExecutionSnapshot,
-    ExecutionSnapshotInput, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
-    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage,
-    InheritedPermissionContext, McpLifecycle, MessageBus, PermissionCeilingSnapshot,
-    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
-    PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError, PluginHookCatalog,
-    PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
+    CoreDiagnosticsAggregateInput, CredentialResolvingImageGenerationClient,
+    CredentialResolvingProviderClient, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
+    DurableWorkDispatcher, ExecutionSnapshot, ExecutionSnapshotInput, HeartbeatError,
+    HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor,
+    HeartbeatWorker, InboundMessage, InheritedPermissionContext, McpLifecycle, MessageBus,
+    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
+    PermissionedAction, PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError,
+    PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
     PluginProcessPermissionContext, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
     PluginSurfaceProjection, ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
     ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
     ProcessGateTerminalPrecondition, ProcessIdentity, ProcessPluginHookCommandExecutor,
     ProcessRedactedCommand, ProfileSelectionSnapshot, ProjectPermissionStoreConfig,
-    ProviderClientResolutionRequest, ProviderCredentialRuntime, ProviderInputSnapshot,
-    ProviderNotificationEvaluator, ReplayContract, RuntimeBoundaryOrigin, RuntimeCapabilityReport,
-    RuntimeCapabilityStatus, RuntimeToolCall, SafetyCapability, Session, SessionHistoryOptions,
-    SessionManager, SessionTurnCancelOutcome, SessionTurnLock, SkillTrustActionKind,
-    SkillTrustPermissionDecision, StreamDeltaCoalescer, SubagentExecutionConfig, SubagentRuntime,
-    SurfaceActionOutcomeKind, SurfaceActionRequestKind, SurfaceApprovalRequest,
-    TokenBudgetSnapshot, ToolEvent, ToolSearchConfig, ToolSearchMode, ToolStatus,
-    WorkspaceTrustRef, HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
+    ProviderClientResolutionRequest, ProviderCredentialClientConfig, ProviderCredentialRuntime,
+    ProviderInputSnapshot, ProviderNotificationEvaluator, ReplayContract, RuntimeBoundaryOrigin,
+    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, SafetyCapability, Session,
+    SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome, SessionTurnLock,
+    SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
+    SubagentExecutionConfig, SubagentRuntime, SurfaceActionOutcomeKind, SurfaceActionRequestKind,
+    SurfaceApprovalRequest, TokenBudgetSnapshot, ToolEvent, ToolSearchConfig, ToolSearchMode,
+    ToolStatus, WorkspaceTrustRef, HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
 };
 use shacs_core::tools::{
     AskUserTool, CronTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -120,9 +120,9 @@ use shacs_projection::{
     RememberedPermissionStoreHealthInput,
 };
 use shacs_providers::{
-    chat_with_retry, prepare_provider_request, resolve_image_generation_client, AgentDefaults,
-    LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRegistry, ProviderRetryMode,
-    ResolvedProviderClient,
+    chat_with_retry, prepare_provider_request, resolve_image_generation_provider, AgentDefaults,
+    ImageGenerationResolutionRequest, LlmResponse, ProviderClient, ProviderError, ProviderEvent,
+    ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
 };
 use shacs_redaction::redact_string;
 use shacs_session::durable_child::{
@@ -20068,7 +20068,8 @@ impl AgentLoopChatCompletionAdapter {
             shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider::new(facts.clone())
         };
         let plugin_skill_roots = enabled_plugin_skill_roots(&plugin_discovery.plugins);
-        let tooling = production_tool_registry(&bundle, allow_side_effect_tools, &facts)?;
+        let tooling =
+            production_tool_registry(&bundle, allow_side_effect_tools, &credential_runtime)?;
         spec030_startup_facts::publish_mcp_reports(&facts, &tooling.mcp_reports)
             .map_err(|error| CliError::Runtime(error.to_string()))?;
         let provider_id = provider_match.as_ref().map_or_else(
@@ -22092,7 +22093,7 @@ struct ProductionTooling {
 fn production_tool_registry(
     bundle: &ConfigBundle,
     allow_side_effect_tools: bool,
-    spec030_facts: &shacs_core::runtime::trusted_runtime::Spec030FactStore,
+    credential_runtime: &Arc<ProviderCredentialRuntime>,
 ) -> Result<ProductionTooling, CliError> {
     let workspace = &bundle.context.workspace;
     fs::create_dir_all(workspace)?;
@@ -22157,51 +22158,57 @@ fn production_tool_registry(
             .then(|| bundle.config.tools.exec.path_append.clone());
         exec_config.allowed_env_keys = bundle.config.tools.exec.allowed_env_keys.clone();
         exec_config.env = configured_exec_env(&bundle.config);
-        registry
-            .register(ExecTool::new(exec_config).with_spec030_fact_store(spec030_facts.clone()));
+        registry.register(
+            ExecTool::new(exec_config).with_spec030_fact_store(credential_runtime.facts()),
+        );
     }
     if allow_side_effect_tools && bundle.config.tools.image_generation.enable {
         let image_config = &bundle.config.tools.image_generation;
         let provider_registry = ProviderRegistry::new();
-        let mut providers = bundle.config.providers.clone();
-        for (provider_id, auth) in load_auth_store(&bundle.context.auth_path())?.providers {
-            match auth.kind.as_str() {
-                "apiKey" => {
-                    providers.entry(provider_id).or_default().api_key = Some(auth.access);
+        let image_providers = bundle
+            .config
+            .providers
+            .iter()
+            .filter(|(provider_id, _)| {
+                if image_config.provider == "auto" {
+                    provider_registry
+                        .find_by_name(provider_id)
+                        .is_some_and(|spec| spec.supports_image_generation)
+                } else {
+                    provider_id.as_str() == image_config.provider
                 }
-                "oauth" if provider_id == CODEX_PROVIDER_ID => {
-                    let provider = providers.entry(provider_id).or_default();
-                    provider.api_key = Some(auth.access);
-                    if let Some(account_id) = auth.account_id {
-                        provider
-                            .extra_headers
-                            .get_or_insert_with(Default::default)
-                            .insert("ChatGPT-Account-Id".to_owned(), account_id);
-                    }
-                }
-                _ => {}
-            }
+            })
+            .map(|(provider_id, config)| (provider_id.clone(), config.clone()))
+            .collect();
+        if image_config.provider != "auto" {
+            resolve_image_generation_provider(&ImageGenerationResolutionRequest {
+                registry: &provider_registry,
+                requested_provider: &image_config.provider,
+                model: &image_config.model,
+                providers: &image_providers,
+            })
+            .map_err(|error| {
+                CliError::Config(ConfigError::Env(format!(
+                    "image_generate provider could not be configured: {}",
+                    render_image_generation_provider_error(error)
+                )))
+            })?;
         }
-        let resolved = resolve_image_generation_client(
-            &provider_registry,
-            &image_config.provider,
-            &image_config.model,
-            &providers,
-        )
-        .map_err(|error| {
-            CliError::Config(ConfigError::Env(format!(
-                "image_generate provider could not be configured: {}",
-                render_image_generation_provider_error(error)
-            )))
-        })?;
         let image_media_dir = bundle.context.media_dir(Some("image-generation"));
         fs::create_dir_all(&image_media_dir)?;
         registry.register(ImageGenerateTool::new(
-            resolved.client,
+            Box::new(CredentialResolvingImageGenerationClient::new(
+                ProviderCredentialClientConfig {
+                    requested_provider: image_config.provider.clone(),
+                    model: image_config.model.clone(),
+                    providers: image_providers,
+                },
+                Arc::clone(credential_runtime),
+            )),
             image_media_dir,
             ImageGenerateToolConfig {
-                provider_id: resolved.provider_id,
-                model_id: resolved.model,
+                provider_id: image_config.provider.clone(),
+                model_id: image_config.model.clone(),
                 default_format: image_config.default_format.clone(),
                 max_count: image_config.max_count,
                 max_bytes: image_config.max_bytes,
@@ -29245,7 +29252,8 @@ mod tests {
         };
 
         let facts = spec030_fact_store_for_bundle(&bundle);
-        let tooling = production_tool_registry(&bundle, true, &facts)?;
+        let credential_runtime = provider_credential_runtime(&bundle, facts);
+        let tooling = production_tool_registry(&bundle, true, &credential_runtime)?;
         let call = tooling
             .registry
             .prepare_call(
@@ -29734,16 +29742,19 @@ mod tests {
         };
 
         let facts = spec030_fact_store_for_bundle(&bundle);
-        let tooling = production_tool_registry(&bundle, true, &facts)?;
+        let credential_runtime = provider_credential_runtime(&bundle, facts);
+        let tooling = production_tool_registry(&bundle, true, &credential_runtime)?;
         assert!(tooling.registry.has("plugin_probe"));
         let result = tooling
             .registry
             .execute("plugin_probe", json!({"input": "hello"}))
             .into_text();
         assert!(result.contains("plugin"));
-        assert!(!production_tool_registry(&bundle, false, &facts)?
-            .registry
-            .has("plugin_probe"));
+        assert!(
+            !production_tool_registry(&bundle, false, &credential_runtime)?
+                .registry
+                .has("plugin_probe")
+        );
         Ok(())
     }
 
@@ -29753,16 +29764,17 @@ mod tests {
         let root = tempfile::tempdir()?;
         let mut bundle = image_generation_test_bundle(root.path())?;
         let facts = spec030_fact_store_for_bundle(&bundle);
+        let credential_runtime = provider_credential_runtime(&bundle, facts);
 
-        let disabled_side_effects = production_tool_registry(&bundle, false, &facts)?;
+        let disabled_side_effects = production_tool_registry(&bundle, false, &credential_runtime)?;
         assert!(!disabled_side_effects.registry.has("image_generate"));
 
         bundle.config.tools.image_generation.enable = false;
-        let disabled_config = production_tool_registry(&bundle, true, &facts)?;
+        let disabled_config = production_tool_registry(&bundle, true, &credential_runtime)?;
         assert!(!disabled_config.registry.has("image_generate"));
 
         bundle.config.tools.image_generation.enable = true;
-        let enabled = production_tool_registry(&bundle, true, &facts)?;
+        let enabled = production_tool_registry(&bundle, true, &credential_runtime)?;
         assert!(enabled.registry.has("image_generate"));
         let schema_text = serde_json::to_string(&enabled.registry.definitions())?;
         for forbidden in ["apiKey", "endpoint", "baseUrl", "providerOptions"] {
@@ -29787,8 +29799,9 @@ mod tests {
             .insert("openrouter".to_owned(), ProviderAuth::api_key("sk-or-test"));
         save_auth_store_to_path(&auth, &bundle.context.auth_path())?;
         let facts = spec030_fact_store_for_bundle(&bundle);
+        let credential_runtime = provider_credential_runtime(&bundle, facts);
 
-        let tooling = production_tool_registry(&bundle, true, &facts)?;
+        let tooling = production_tool_registry(&bundle, true, &credential_runtime)?;
 
         assert!(tooling.registry.has("image_generate"));
         Ok(())
@@ -29807,10 +29820,66 @@ mod tests {
         );
         save_auth_store_to_path(&auth, &bundle.context.auth_path())?;
         let facts = spec030_fact_store_for_bundle(&bundle);
+        let credential_runtime = provider_credential_runtime(&bundle, facts);
 
-        let tooling = production_tool_registry(&bundle, true, &facts)?;
+        let tooling = production_tool_registry(&bundle, true, &credential_runtime)?;
 
         assert!(tooling.registry.has("image_generate"));
+        Ok(())
+    }
+
+    #[test]
+    fn production_tool_registry_uses_replaced_image_auth_without_rebuild(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let mut bundle = image_generation_test_bundle(root.path())?;
+        let (api_base, capture) = serve_test_image_responses(2)?;
+        bundle
+            .config
+            .providers
+            .get_mut("openai")
+            .ok_or("missing OpenAI provider")?
+            .api_base = Some(api_base);
+        let mut auth = AuthStore::default();
+        auth.providers.insert(
+            "openai".to_owned(),
+            ProviderAuth::api_key("image-token-old"),
+        );
+        save_auth_store_to_path(&auth, &bundle.context.auth_path())?;
+        let facts = spec030_fact_store_for_bundle(&bundle);
+        let credential_runtime = provider_credential_runtime(&bundle, facts);
+        let tooling = production_tool_registry(&bundle, true, &credential_runtime)?;
+
+        let first = tooling
+            .registry
+            .execute("image_generate", json!({"prompt": "first"}))
+            .into_text();
+        assert!(!first.starts_with("Error:"), "{first}");
+        auth.providers.insert(
+            "openai".to_owned(),
+            ProviderAuth::api_key("image-token-new"),
+        );
+        save_auth_store_to_path(&auth, &bundle.context.auth_path())?;
+        let second = tooling
+            .registry
+            .execute("image_generate", json!({"prompt": "second"}))
+            .into_text();
+        assert!(!second.starts_with("Error:"), "{second}");
+        let captured = capture.join().map_err(|_| "capture thread panicked")??;
+
+        let captured = captured.to_ascii_lowercase();
+        assert_eq!(
+            captured
+                .matches("authorization: bearer image-token-old")
+                .count(),
+            1
+        );
+        assert_eq!(
+            captured
+                .matches("authorization: bearer image-token-new")
+                .count(),
+            1
+        );
         Ok(())
     }
 
@@ -29836,6 +29905,62 @@ mod tests {
             },
             migrations: Vec::new(),
         })
+    }
+
+    type TestHttpCapture = std::thread::JoinHandle<Result<String, String>>;
+
+    fn serve_test_image_responses(
+        count: usize,
+    ) -> Result<(String, TestHttpCapture), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let capture = std::thread::spawn(move || {
+            let mut requests = String::new();
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+                requests.push_str(&read_test_http_request(&mut stream)?);
+                let body = r#"{"data":[{"b64_json":"aGk="}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(requests)
+        });
+        Ok((format!("http://{address}"), capture))
+    }
+
+    fn read_test_http_request(stream: &mut TcpStream) -> Result<String, String> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| error.to_string())?;
+        let mut bytes = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 512];
+            let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8(bytes[..header_end].to_vec())
+                .map_err(|error| error.to_string())?;
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if bytes.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        String::from_utf8(bytes).map_err(|error| error.to_string())
     }
 
     #[test]
