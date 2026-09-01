@@ -77,11 +77,14 @@ impl ImageGenerateTool {
         let request = self.build_request(&params).map_err(|error| {
             format!("Error: Image generation unsupported/config failure: {error}")
         })?;
-        let request_summary = request_option_summary(&request);
+        let mut request_summary = request_option_summary(&request);
         let result = self
             .client
             .generate_image(request)
             .map_err(render_provider_error)?;
+        if let Some(summary) = request_summary.as_object_mut() {
+            summary.insert("model".to_owned(), Value::String(result.model.clone()));
+        }
         if result.images.len() > self.config.max_count as usize {
             return Err(format!(
                 "Error: Image generation provider failure: provider returned {} images, exceeding configured maxCount {}",
@@ -427,7 +430,7 @@ mod tests {
                 requests: requests.clone(),
                 response: Ok(ImageGenerationResult {
                     provider_id: "openai".to_owned(),
-                    model: "gpt-image-2".to_owned(),
+                    model: "resolved-image-model".to_owned(),
                     images: vec![GeneratedImage {
                         index: 0,
                         mime_type: "image/png".to_owned(),
@@ -602,6 +605,11 @@ mod tests {
         if !metadata.contains("requestOptionSummary") || !metadata.contains("revisedPrompt") {
             return Err(format!("metadata missing required summary: {metadata}").into());
         }
+        let metadata: Value = serde_json::from_str(&metadata)?;
+        assert_eq!(
+            metadata.pointer("/requestOptionSummary/model"),
+            Some(&Value::String("resolved-image-model".to_owned()))
+        );
         Ok(())
     }
 
