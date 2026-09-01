@@ -148,8 +148,16 @@ impl OAuthRefresh {
 }
 
 fn local_resolved(auth: ProviderAuth) -> ResolvedCredential {
+    let ProviderAuth {
+        access,
+        refresh,
+        expires,
+        account_id,
+        ..
+    } = auth;
     ResolvedCredential {
-        raw: RawCredential::oauth(auth.access, auth.refresh, auth.expires),
+        raw: RawCredential::oauth(access, refresh, expires),
+        account_id,
         source: CredentialSource::LocalAuthStore,
         fingerprint: CredentialFingerprintStatus::Current,
         refresh_serialization: RefreshSerializationStatus::Active,

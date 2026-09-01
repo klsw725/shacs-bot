@@ -183,6 +183,7 @@ const fn command_error() -> CredentialError {
 fn resolved(raw: RawCredential, source: CredentialSource) -> ResolvedCredential {
     ResolvedCredential {
         raw,
+        account_id: None,
         source,
         fingerprint: CredentialFingerprintStatus::Current,
         refresh_serialization: RefreshSerializationStatus::Inactive,

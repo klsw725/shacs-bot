@@ -151,6 +151,7 @@ impl CredentialTransport<'_> {
 
 pub struct ResolvedCredential {
     pub(crate) raw: RawCredential,
+    pub(crate) account_id: Option<String>,
     pub(crate) source: CredentialSource,
     pub(crate) fingerprint: CredentialFingerprintStatus,
     pub(crate) refresh_serialization: RefreshSerializationStatus,
@@ -165,6 +166,10 @@ impl ResolvedCredential {
         CredentialTransport {
             value: self.raw.access(),
         }
+    }
+
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
     }
 
     pub const fn status(&self) -> CredentialStatusSnapshot {
