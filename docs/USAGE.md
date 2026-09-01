@@ -422,7 +422,7 @@ Login에 성공하면 `auth.json`에 `access`, `refresh`, `expires`, optional `a
 }
 ```
 
-`openai_codex` image provider는 `auth.json`의 OAuth access token과 optional `accountId`를 사용해 Codex backend의 `/codex/images/generations`를 호출합니다. 생성 결과는 raw base64가 아니라 data directory 아래 local media artifact로 저장됩니다. 이 경로는 Codex account plan과 server-side image-generation entitlement에 따라 거절될 수 있고, 공개 OpenAI Images API의 안정성 계약을 따르지 않습니다. 공개 API가 필요한 경우 기존 `openai` image provider와 `OPENAI_API_KEY`를 사용하세요.
+`openai_codex` image provider는 `auth.json`의 OAuth access token과 optional `accountId`를 사용해 Codex backend의 `/codex/images/generations`를 호출합니다. 이미지 인증은 `image_generate`를 실행할 때마다 공통 provider credential runtime에서 다시 해석되므로, access token 교체와 OAuth refresh는 runtime이나 tool registry를 다시 시작하지 않아도 다음 호출부터 반영됩니다. 로그아웃으로 등록된 인증을 제거하면 다음 호출은 이전 token을 재사용하지 않고 인증 필요 오류를 반환합니다. 생성 결과는 raw base64가 아니라 data directory 아래 local media artifact로 저장됩니다. 이 경로는 Codex account plan과 server-side image-generation entitlement에 따라 거절될 수 있고, 공개 OpenAI Images API의 안정성 계약을 따르지 않습니다. 공개 API가 필요한 경우 기존 `openai` image provider와 `OPENAI_API_KEY`를 사용하세요.
 
 stdin에서 token을 import합니다:
 
