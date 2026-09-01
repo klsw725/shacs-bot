@@ -4,11 +4,13 @@ use shacs_providers::{
     build_openrouter_image_generation_request, find_by_name, image_generation_client_from_config,
     openai_compatible_client_from_config, openai_image_generation_capability,
     parse_openai_image_generation_response, parse_openrouter_image_generation_response,
-    resolve_image_generation_api_base, resolve_image_generation_client, CodexImageGenerationClient,
+    resolve_image_generation_api_base, resolve_image_generation_client_with_request,
+    resolve_image_generation_provider, CodexImageGenerationClient,
     DefaultModelImageGenerationClient, GeneratedImage, ImageGenerationClient,
     ImageGenerationHttpResponse, ImageGenerationRequest, ImageGenerationRequestParts,
-    ImageGenerationResult, OpenAiImageGenerationClient, OpenRouterImageGenerationClient,
-    ProviderConfig, ProviderError, ProviderRegistry, ProvidersConfig,
+    ImageGenerationResolutionRequest, ImageGenerationResult, OpenAiImageGenerationClient,
+    OpenRouterImageGenerationClient, ProviderConfig, ProviderError, ProviderRegistry,
+    ProvidersConfig,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -583,7 +585,12 @@ fn image_generation_resolver_rejects_unsupported_provider() -> Result<(), Box<dy
     let registry = ProviderRegistry::new();
     let providers = ProvidersConfig::new();
     let error =
-        match resolve_image_generation_client(&registry, "anthropic", "gpt-image-2", &providers) {
+        match resolve_image_generation_client_with_request(ImageGenerationResolutionRequest {
+            registry: &registry,
+            requested_provider: "anthropic",
+            model: "gpt-image-2",
+            providers: &providers,
+        }) {
             Ok(_) => return Err("unsupported provider unexpectedly resolved".into()),
             Err(error) => error,
         };
@@ -602,7 +609,12 @@ fn image_generation_resolver_requires_configured_auth() -> Result<(), Box<dyn Er
     let registry = ProviderRegistry::new();
     let providers = ProvidersConfig::new();
     let error =
-        match resolve_image_generation_client(&registry, "openai", "gpt-image-2", &providers) {
+        match resolve_image_generation_client_with_request(ImageGenerationResolutionRequest {
+            registry: &registry,
+            requested_provider: "openai",
+            model: "gpt-image-2",
+            providers: &providers,
+        }) {
             Ok(_) => return Err("missing provider config unexpectedly resolved".into()),
             Err(error) => error,
         };
@@ -610,6 +622,24 @@ fn image_generation_resolver_requires_configured_auth() -> Result<(), Box<dyn Er
         ProviderError::AuthRequired { provider_id } if provider_id == "openai" => {}
         other => return Err(format!("unexpected missing auth error: {other:?}").into()),
     }
+    Ok(())
+}
+
+#[test]
+fn image_generation_auto_without_config_selects_openai_for_auth_resolution(
+) -> Result<(), Box<dyn Error>> {
+    let registry = ProviderRegistry::new();
+    let providers = ProvidersConfig::new();
+
+    let resolved = resolve_image_generation_provider(&ImageGenerationResolutionRequest {
+        registry: &registry,
+        requested_provider: "auto",
+        model: "gpt-image-2",
+        providers: &providers,
+    })?;
+
+    assert_eq!(resolved.provider_id, "openai");
+    assert_eq!(resolved.model, "gpt-image-2");
     Ok(())
 }
 
@@ -627,7 +657,12 @@ fn image_generation_resolver_returns_selected_model() -> Result<(), Box<dyn Erro
     );
 
     let resolved =
-        resolve_image_generation_client(&registry, "openai", "custom-image-model", &providers)?;
+        resolve_image_generation_client_with_request(ImageGenerationResolutionRequest {
+            registry: &registry,
+            requested_provider: "openai",
+            model: "custom-image-model",
+            providers: &providers,
+        })?;
     if resolved.provider_id != "openai" || resolved.model != "custom-image-model" {
         return Err(format!(
             "unexpected resolver success result: provider={} model={}",
@@ -654,7 +689,12 @@ fn image_generation_resolver_accepts_codex_oauth_config() -> Result<(), Box<dyn 
     )]);
 
     let resolved =
-        resolve_image_generation_client(&registry, "openai_codex", "gpt-image-2", &providers)?;
+        resolve_image_generation_client_with_request(ImageGenerationResolutionRequest {
+            registry: &registry,
+            requested_provider: "openai_codex",
+            model: "gpt-image-2",
+            providers: &providers,
+        })?;
 
     if resolved.provider_id != "openai_codex" || resolved.model != "gpt-image-2" {
         return Err(format!(
@@ -679,12 +719,13 @@ fn image_generation_resolver_returns_selected_openrouter_model() -> Result<(), B
         },
     );
 
-    let resolved = resolve_image_generation_client(
-        &registry,
-        "openrouter",
-        "google/gemini-2.5-flash-image-preview",
-        &providers,
-    )?;
+    let resolved =
+        resolve_image_generation_client_with_request(ImageGenerationResolutionRequest {
+            registry: &registry,
+            requested_provider: "openrouter",
+            model: "google/gemini-2.5-flash-image-preview",
+            providers: &providers,
+        })?;
     if resolved.provider_id != "openrouter"
         || resolved.model != "google/gemini-2.5-flash-image-preview"
     {
@@ -712,7 +753,12 @@ fn image_generation_resolver_maps_openrouter_openai_default_to_openrouter_defaul
     );
 
     let resolved =
-        resolve_image_generation_client(&registry, "openrouter", "gpt-image-2", &providers)?;
+        resolve_image_generation_client_with_request(ImageGenerationResolutionRequest {
+            registry: &registry,
+            requested_provider: "openrouter",
+            model: "gpt-image-2",
+            providers: &providers,
+        })?;
     if resolved.provider_id != "openrouter" || resolved.model != "openai/gpt-5.4-image-2" {
         return Err(format!(
             "OpenRouter default model mapping drifted: provider={} model={}",
@@ -745,7 +791,13 @@ fn image_generation_auto_prefers_openai_when_openrouter_is_also_configured(
         },
     );
 
-    let resolved = resolve_image_generation_client(&registry, "auto", "gpt-image-2", &providers)?;
+    let resolved =
+        resolve_image_generation_client_with_request(ImageGenerationResolutionRequest {
+            registry: &registry,
+            requested_provider: "auto",
+            model: "gpt-image-2",
+            providers: &providers,
+        })?;
     if resolved.provider_id != "openai" || resolved.model != "gpt-image-2" {
         return Err(format!(
             "auto image resolver should prefer OpenAI: provider={} model={}",
@@ -770,7 +822,13 @@ fn image_generation_auto_uses_openrouter_when_openai_is_unconfigured() -> Result
         },
     );
 
-    let resolved = resolve_image_generation_client(&registry, "auto", "gpt-image-2", &providers)?;
+    let resolved =
+        resolve_image_generation_client_with_request(ImageGenerationResolutionRequest {
+            registry: &registry,
+            requested_provider: "auto",
+            model: "gpt-image-2",
+            providers: &providers,
+        })?;
     if resolved.provider_id != "openrouter" || resolved.model != "openai/gpt-5.4-image-2" {
         return Err(format!(
             "auto image resolver should fallback to OpenRouter: provider={} model={}",
