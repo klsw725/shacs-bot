@@ -65,10 +65,18 @@ Canonical catalog와 sequential integration은 정확히 10개 Must Have와 12�
 - Bounded evidence와 projection omission은 privacy, semantic redaction, complete redaction 또는 exfiltration prevention proof가 아니다.
 - Credential source/status는 credential 자체, typed secret reference 또는 vault guarantee가 아니다.
 - Trusted local profile은 untrusted file/repository를 자동 격리하지 않는다.
+- `spec034-release-runner` 성공 stdout은 runner가 반환한 lowercase `sha256:<64 hex>` committed publication digest 한 줄이며 stderr는 비어 있다. 실패 stdout은 비어 있고 stderr는 `spec034 release runner failed: `로 시작한다.
+- `success-fixture`는 runner mechanics만 검증하며 Spec034 closure가 아니다. Dirty current-worktree 실행은 source provenance를 기록하지만 final closure가 아니다.
+- Structural audit는 expected manifest/run ID/content digest 결합을 검사하지만 execution attestation 자체가 아니다.
+- Darwin APFS vnode ledger와 suspended child static/live CDHash 검증에서 감지된 실행 closure tamper는 fresh attestation과 publication을 fail closed한다.
+- Cleanup v2 receipt는 exact retained isolation-root identity에 결합된 cleanup digest와 cleanup 이후 관측한 raw-evidence 삭제·bounded leak 사실만 기록한다. Atomic publication 승인은 cleanup 문서의 자기 선언이 아니라 final validation, approved marker, post-rename status가 순서대로 확정한다.
+- Cleanup은 root와 nested pathname의 device/inode/owner를 destructive `unlinkat` 직전에 재검증하고 감지된 identity 또는 event 불일치에서 publication을 차단한다. POSIX conditional unlink를 제공하지 않으므로 지속적으로 악의적인 same-UID process가 재검증과 syscall 사이에 pathname을 교체하는 경우 unrelated replacement의 원자적 보존과 isolation root의 보장된 회수는 보장하지 않는다. Post-unlink retained inode link-count/event 검사는 이 final syscall gap을 통과한 race를 계속 감지한다.
+- Public API poll 사이의 악의적인 same-UID Darwin double-fork/setsid reparent escape는 원자적으로 추적한다고 주장하지 않는다. Zero-instruction prevention과 universal sandbox/process containment도 보장하지 않는다.
+- Spec035의 상태는 계속 Open이다.
 
 ## Verification and mechanical seal
 
-[Candidate2 Todo 14 Cargo receipt](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/cargo/receipt.json)은 전체 gate baseline에서 다음 명령이 모두 exit 0이었음을 기록한다. 이후 source 변경은 새 frozen manifest와 해당 변경 범위의 재검증으로 별도 결합해야 한다.
+[Candidate2 Todo 14 Cargo receipt](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/cargo/receipt.json)은 전체 gate baseline에서 format, workspace clippy/test, clean build가 exit 0이었음을 기록한다. 명시적 `spec034_release_runner` gate는 이후 hardened candidate에서 별도로 실행하며, 최신 frozen manifest와 해당 변경 범위의 재검증으로 결합한다.
 
 ```sh
 cargo fmt --manifest-path crates/Cargo.toml --all -- --check
@@ -76,6 +84,12 @@ cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets --locke
 cargo test --manifest-path crates/Cargo.toml --workspace --locked
 cargo clean --manifest-path crates/Cargo.toml
 cargo build --manifest-path crates/Cargo.toml --workspace --locked
+```
+
+`spec034_release_runner`는 격리된 Cargo build와 tamper 검증을 포함하는 별도 명시적 release gate다. Plain workspace test의 중복 실행 대상에서는 제외되며, hardened candidate 검증에서 다음 명령으로 6개 scenario를 실행한다.
+
+```sh
+cargo test --manifest-path crates/Cargo.toml --locked -p shacs-core --test spec034_release_runner
 ```
 
 [Candidate2 Todo 14 surface receipt](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/surfaces/PASS.json)은 실제 CLI, loopback HTTP/WebSocket, channel, persisted artifact와 invalid-input 표면 및 sequential 22/22 PASS를 기록하고, [candidate2 TUI receipt](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/tui/receipt.json)은 26개 TUI 테스트와 5개 상태 x 3개 geometry의 15개 capture PASS를 기록한다. [Remediation PASS](../../../.omo/evidence/spec034/remediation/PASS.json)의 code, security, docs, production mapper verifier도 모두 PASS다.
