@@ -47,6 +47,13 @@ pub fn run(repo: &Path) -> Result<DocumentationPolicyReport, Box<dyn Error>> {
         "media_root_is_not_universal_filesystem_or_process_containment",
         "projection_omission_is_not_complete_redaction",
         "remote_reference_is_not_permanent_or_re_downloadable_artifact",
+        "success_fixture_is_runner_only_not_spec034_closure",
+        "dirty_current_worktree_records_provenance_not_final_closure",
+        "portable_command_booleans_and_digests_are_structural_audit_not_external_execution_attestation",
+        "detected_execution_closure_tamper_fails_attestation_not_zero_instruction_prevention",
+        "darwin_same_uid_double_fork_reparent_escape_is_not_atomically_tracked",
+        "same_uid_cleanup_path_replacement_between_identity_check_and_unlink_is_not_atomically_prevented",
+        "release_runner_is_not_universal_sandbox_or_process_containment",
     ];
     let policy_identity = policy.schema_version == 1
         && policy.acceptance_criterion == "034-AC010"

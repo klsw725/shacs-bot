@@ -4,6 +4,7 @@ mod scenario;
 use shacs_projection::SPEC034_REQUIREMENTS;
 use std::collections::BTreeSet;
 use std::error::Error;
+use std::path::Path;
 
 const EXPANDED_RECEIPTS: &[(&str, &[&str])] = &[
     (
@@ -111,10 +112,9 @@ const EXPANDED_RECEIPTS: &[(&str, &[&str])] = &[
 #[test]
 fn documentation_policy_observes_complete_scoped_contract() -> Result<(), Box<dyn Error>> {
     // Given
-    let current_dir = std::env::current_dir()?;
-    let repo = current_dir
-        .ancestors()
-        .find(|path| path.join("crates/Cargo.toml").is_file())
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
         .ok_or("repository root not found")?;
 
     // When
