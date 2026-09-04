@@ -1,17 +1,23 @@
 use serde::{Deserialize, Serialize};
-use shacs_projection::{
-    Spec031ReleaseCommandRecord, Spec034OwnerFactKind, Spec034PrimaryPrd, Spec034ReviewKind,
-};
+use shacs_projection::{Spec034OwnerFactKind, Spec034PrimaryPrd, Spec034ReviewKind};
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub const RELEASE_SCHEMA: &str = "spec034.release_runner.v1";
+pub const RELEASE_SCHEMA: &str = "spec034.release_runner.v2";
+pub const PUBLICATION_STATUS_SCHEMA: &str = "spec034.publication_status.v1";
+
+#[path = "command_model.rs"]
+mod command_model;
+pub use command_model::{
+    CommandStreamSummary, PortableCommandRecord, PortableProcessReceipt, PortableToolIdentity,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec034ReleaseConfig {
     pub run_id: String,
     pub repo_root: PathBuf,
     pub evidence_root: PathBuf,
+    pub cache_root: Option<PathBuf>,
     pub mode: Spec034ReleaseMode,
     pub command_timeout: Duration,
 }
@@ -34,9 +40,17 @@ pub struct DigestRow {
 #[serde(deny_unknown_fields)]
 pub struct SourceFile {
     pub locator: String,
-    pub digest: String,
+    pub digest: Option<String>,
     pub tracked: bool,
     pub modified: bool,
+    pub state: SourceFileState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceFileState {
+    Present,
+    Deleted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +67,12 @@ pub struct SourceManifest {
 #[serde(deny_unknown_fields)]
 pub struct CommandEvidence {
     pub kind: String,
-    pub command: Spec031ReleaseCommandRecord,
+    pub source_digest: String,
+    pub tool: PortableToolIdentity,
+    pub rustc: PortableToolIdentity,
+    pub environment_policy: String,
+    pub command: PortableCommandRecord,
+    pub portable_process_receipt: PortableProcessReceipt,
     pub stdout_digest: String,
     pub stderr_digest: String,
 }
@@ -66,6 +85,8 @@ pub struct ResultsDocument {
     pub mode: Spec034ReleaseMode,
     pub runner_passed: bool,
     pub closure_eligible: bool,
+    pub execution_attested: bool,
+    pub structural_only: bool,
     pub commands: Vec<CommandEvidence>,
 }
 
@@ -135,8 +156,24 @@ pub struct CleanupReceipt {
     pub schema: String,
     pub run_id: String,
     pub raw_evidence_cleaned: bool,
-    pub staging_atomically_published: bool,
-    pub leaked_paths: Vec<String>,
+    pub leak_count: u8,
+    pub leak_summary: Vec<String>,
+    pub cleanup_binding_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationStatusDocument {
+    pub schema: String,
+    pub run_id: String,
+    pub status: PublicationStatus,
+    pub content_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationStatus {
+    Validated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +203,8 @@ pub struct SummaryDocument {
     pub label: String,
     pub runner_passed: bool,
     pub closure_eligible: bool,
+    pub execution_attested: bool,
+    pub structural_only: bool,
     pub non_guarantees: Vec<String>,
 }
 
@@ -185,24 +224,22 @@ pub struct Spec034ReleaseManifest {
     pub runner_passed: bool,
     pub runner_only: bool,
     pub closure_eligible: bool,
+    pub execution_attested: bool,
+    pub structural_only: bool,
     pub non_guarantees: Vec<String>,
 }
 
-#[derive(Debug)]
-pub enum Spec034ReleaseArtifactError {
-    InvalidConfig,
-    CommandFailed,
-    InvalidEvidence,
-    DigestMismatch,
-    Io(std::io::Error),
-    Json(serde_json::Error),
-    Command(shacs_projection::Spec031ReleaseArtifactError),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationStage {
+    MarkerCreate,
+    MarkerWrite,
+    FileSync,
+    DirectorySync,
+    MarkerRename,
+    DestinationIdentity,
+    QuarantineFailure,
 }
 
-impl std::fmt::Display for Spec034ReleaseArtifactError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
-    }
-}
-
-impl std::error::Error for Spec034ReleaseArtifactError {}
+#[path = "model_error.rs"]
+mod error;
+pub use error::{Spec034ReleaseArtifactError, Spec034StructuralAudit};
