@@ -1,91 +1,33 @@
-use super::super::artifacts::{digest_file, write_json};
+use super::super::artifacts::write_json;
 use super::super::catalog;
 use super::super::model::*;
-use super::super::source;
-use shacs_projection::{
-    execute_spec031_release_command, Spec031ReleaseCommandSpec, Spec031ReleaseCommandStatus,
-    Spec031ReleaseGateKind,
-};
+use shacs_projection::Spec031ReleaseCommandStatus;
 use std::path::Path;
+#[cfg(not(test))]
+use super::super::source::MaterializedSource;
 
-struct CommandSpec {
-    kind: &'static str,
-    package: &'static str,
-    target: &'static str,
-}
-
+#[cfg(not(test))]
 pub fn run_results(
     config: &Spec034ReleaseConfig,
     output: &Path,
+    execution: &MaterializedSource,
+    source_digest: &str,
+    toolchain: &super::super::tools::ResolvedToolchain,
 ) -> Result<ResultsDocument, Spec034ReleaseArtifactError> {
-    let output = output
-        .canonicalize()
-        .map_err(Spec034ReleaseArtifactError::Io)?;
-    let specs = [
-        CommandSpec {
-            kind: "schema-contract",
-            package: "shacs-projection",
-            target: "spec034_evidence_schema",
-        },
-        CommandSpec {
-            kind: "sequential-integration",
-            package: "shacs-core",
-            target: "spec034_sequential_integration",
-        },
-    ];
-    let commands = specs
-        .into_iter()
-        .map(|spec| run_command(config, &output, spec))
-        .collect::<Result<Vec<_>, _>>()?;
+    let commands =
+        super::command_execution::run(config, output, execution, source_digest, toolchain)?;
     if commands.iter().any(|command| !command_passed(command)) {
         return Err(Spec034ReleaseArtifactError::CommandFailed);
     }
     Ok(ResultsDocument {
-        schema: "spec034.results.v1".to_owned(),
+        schema: "spec034.results.v2".to_owned(),
         run_id: config.run_id.clone(),
         mode: config.mode,
         runner_passed: true,
         closure_eligible: false,
+        execution_attested: false,
+        structural_only: true,
         commands,
-    })
-}
-
-fn run_command(
-    config: &Spec034ReleaseConfig,
-    output: &Path,
-    spec: CommandSpec,
-) -> Result<CommandEvidence, Spec034ReleaseArtifactError> {
-    let argv = [
-        "cargo",
-        "test",
-        "--manifest-path",
-        "crates/Cargo.toml",
-        "--locked",
-        "-p",
-        spec.package,
-        "--test",
-        spec.target,
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    let command = execute_spec031_release_command(
-        &Spec031ReleaseCommandSpec {
-            id: format!("spec034-{}", spec.kind),
-            gate: Spec031ReleaseGateKind::FocusedCargoTest,
-            package: Some(spec.package.to_owned()),
-            filter: None,
-            argv,
-            cwd: config.repo_root.clone(),
-            timeout: config.command_timeout,
-        },
-        output,
-    )
-    .map_err(Spec034ReleaseArtifactError::Command)?;
-    Ok(CommandEvidence {
-        kind: spec.kind.to_owned(),
-        stdout_digest: digest_file(&output.join(&command.stdout_path))?,
-        stderr_digest: digest_file(&output.join(&command.stderr_path))?,
-        command,
     })
 }
 
@@ -154,17 +96,6 @@ pub fn write_documents(
     )?;
     write_json(
         root,
-        "cleanup-receipt.json",
-        &CleanupReceipt {
-            schema: "spec034.cleanup.v1".to_owned(),
-            run_id: config.run_id.clone(),
-            raw_evidence_cleaned: true,
-            staging_atomically_published: true,
-            leaked_paths: Vec::new(),
-        },
-    )?;
-    write_json(
-        root,
         "summary.json",
         &SummaryDocument {
             schema: "spec034.summary.v1".to_owned(),
@@ -172,22 +103,19 @@ pub fn write_documents(
             label: "runner-mechanics-only".to_owned(),
             runner_passed: true,
             closure_eligible: false,
+            execution_attested: false,
+            structural_only: true,
             non_guarantees: catalog::non_guarantees(),
         },
     )
 }
 
-pub fn fixture_digests(repo: &Path) -> Result<Vec<DigestRow>, Spec034ReleaseArtifactError> {
-    catalog::FIXTURES
-        .iter()
-        .map(|locator| {
-            source::validate_locator(locator)?;
-            Ok(DigestRow {
-                locator: (*locator).to_owned(),
-                digest: digest_file(&repo.join(locator))?,
-            })
-        })
-        .collect()
+pub(super) fn write_cleanup_receipt(
+    config: &Spec034ReleaseConfig,
+    root: &Path,
+    cleanup: &super::isolation::CompletedIsolationCleanup,
+) -> Result<(), Spec034ReleaseArtifactError> {
+    write_json(root, "cleanup-receipt.json", &cleanup.receipt(&config.run_id))
 }
 
 pub fn command_ref(
@@ -213,3 +141,28 @@ pub fn command_passed(command: &CommandEvidence) -> bool {
             .as_ref()
             .is_some_and(|tests| tests.tests_run > 0 && tests.tests_failed == 0)
 }
+
+pub(super) fn write_summary(
+    output: &Path,
+    locator: &str,
+    raw: &[u8],
+) -> Result<String, Spec034ReleaseArtifactError> {
+    let summary = CommandStreamSummary {
+        schema: "spec034.command_stream_summary.v1".to_owned(),
+        byte_count: raw.len() as u64,
+        digest: super::super::artifacts::digest_bytes(raw),
+    };
+    let bytes = serde_json::to_vec_pretty(&summary).map_err(Spec034ReleaseArtifactError::Json)?;
+    super::super::artifacts::durable_write(&output.join(locator), &bytes)?;
+    Ok(super::super::artifacts::digest_bytes(&bytes))
+}
+
+#[cfg(test)]
+#[path = "generation_fixture.rs"]
+mod fixture_results;
+#[cfg(test)]
+pub(super) use fixture_results::fixture_results;
+
+#[cfg(test)]
+#[path = "generation_test.rs"]
+mod tests;
