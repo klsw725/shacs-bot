@@ -1,114 +1,209 @@
-use super::artifacts::digest_file;
 use super::model::*;
+use super::path_chain::PathChainSeal;
+#[cfg(test)]
+use super::tools::release_tempdir;
+use std::path::{Component, Path, PathBuf};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
-use std::path::{Component, Path};
-use std::process::Command;
 
-const MAX_SOURCE_FILES: usize = 4_096;
+#[path = "source_seal.rs"]
+mod source_seal;
+use source_seal::ExecutionSeal;
+
 const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 
-pub fn collect(repo_root: &Path) -> Result<SourceManifest, Spec034ReleaseArtifactError> {
-    let canonical = repo_root
-        .canonicalize()
-        .map_err(Spec034ReleaseArtifactError::Io)?;
-    let head_oid = git(&canonical, &["rev-parse", "HEAD"])?;
-    let tracked = nul_paths(&git_bytes(&canonical, &["ls-files", "-z"])?);
-    let untracked = nul_paths(&git_bytes(
-        &canonical,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )?);
-    let modified = nul_paths(&git_bytes(&canonical, &["diff", "--name-only", "-z"])?);
-    let staged = nul_paths(&git_bytes(
-        &canonical,
-        &["diff", "--cached", "--name-only", "-z"],
-    )?);
-    let modified = modified.union(&staged).cloned().collect::<BTreeSet<_>>();
-    let mut locators = tracked.union(&untracked).cloned().collect::<Vec<_>>();
-    locators.retain(|locator| is_source(locator));
-    locators.sort();
-    if locators.len() > MAX_SOURCE_FILES {
-        return Err(Spec034ReleaseArtifactError::InvalidEvidence);
+#[path = "source_manifest.rs"]
+mod source_manifest;
+#[cfg(test)]
+use source_manifest::nul_paths_for_test as nul_paths;
+
+#[path = "source_reader.rs"]
+mod source_reader;
+pub(in crate::runtime::spec034_release) use source_reader::ConfinedSourceReader;
+
+#[path = "source_fixture.rs"]
+mod source_fixture;
+
+#[path = "source_root.rs"]
+mod source_root;
+pub(in crate::runtime::spec034_release) use source_root::SourceRootContext;
+
+#[derive(PartialEq, Eq)]
+pub(super) struct SourceSnapshot {
+    pub manifest: SourceManifest,
+    files: Vec<(String, Vec<u8>)>,
+}
+
+pub(super) struct MaterializedSource {
+    directory: PathBuf,
+    _root: Option<tempfile::TempDir>,
+    seal: ExecutionSeal,
+    path_seal: PathChainSeal,
+    remove_on_drop: bool,
+}
+
+impl MaterializedSource {
+    pub fn path(&self) -> &Path {
+        &self.directory
     }
-    let mut files = Vec::with_capacity(locators.len());
-    let mut total_bytes = 0_u64;
-    for locator in locators {
-        validate_locator(&locator)?;
-        let path = canonical.join(&locator);
-        let metadata = std::fs::symlink_metadata(&path).map_err(Spec034ReleaseArtifactError::Io)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(Spec034ReleaseArtifactError::InvalidConfig);
+
+    pub fn verify(&self) -> Result<(), Spec034ReleaseArtifactError> {
+        self.path_seal.verify()?;
+        self.seal.verify(self.path())
+    }
+
+    #[cfg(test)]
+    fn task_parent_path(&self) -> &Path {
+        self.directory.parent().unwrap_or_else(|| Path::new(""))
+    }
+}
+
+impl Drop for MaterializedSource {
+    fn drop(&mut self) {
+        let _ = source_seal::set_read_only(&self.directory, false);
+        if self.remove_on_drop {
+            let _ = std::fs::remove_dir_all(&self.directory);
         }
-        total_bytes = total_bytes
-            .checked_add(metadata.len())
+    }
+}
+
+impl SourceSnapshot {
+    pub fn include(
+        &mut self,
+        context: &SourceRootContext,
+        locator: &str,
+    ) -> Result<(), Spec034ReleaseArtifactError> {
+        if self.files.iter().any(|(name, _)| name == locator) {
+            return Ok(());
+        }
+        validate_locator(locator)?;
+        context.verify()?;
+        let reader = ConfinedSourceReader::open(context.root())?;
+        let bytes = reader
+            .read(locator, MAX_SOURCE_BYTES)?
             .ok_or(Spec034ReleaseArtifactError::InvalidEvidence)?;
-        if total_bytes > MAX_SOURCE_BYTES {
-            return Err(Spec034ReleaseArtifactError::InvalidEvidence);
+        context.verify()?;
+        self.files.push((locator.to_owned(), bytes));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn materialize(&self) -> Result<MaterializedSource, Spec034ReleaseArtifactError> {
+        let root = release_tempdir("source-root")?;
+        let source_parent = root.path().join("source");
+        std::fs::create_dir(&source_parent).map_err(Spec034ReleaseArtifactError::Io)?;
+        let mut materialized = self.materialize_at(&source_parent)?;
+        materialized._root = Some(root);
+        materialized.remove_on_drop = true;
+        Ok(materialized)
+    }
+
+    pub(super) fn materialize_at(
+        &self,
+        source_parent: &Path,
+    ) -> Result<MaterializedSource, Spec034ReleaseArtifactError> {
+        let materialization_digest = self.materialization_digest();
+        let digest = materialization_digest
+            .strip_prefix("sha256:")
+            .ok_or(Spec034ReleaseArtifactError::InvalidEvidence)?;
+        let directory = source_parent.join(digest).join("snapshot");
+        if directory.exists() {
+            source_seal::set_read_only(&directory, true)?;
+            let seal = ExecutionSeal::capture(&directory)?;
+            if !seal.matches_files(&self.files) {
+                return Err(Spec034ReleaseArtifactError::DigestMismatch);
+            }
+            let path_seal = PathChainSeal::capture_controlled(&directory)?;
+            return Ok(MaterializedSource {
+                directory,
+                _root: None,
+                seal,
+                path_seal,
+                remove_on_drop: false,
+            });
         }
-        files.push(SourceFile {
-            digest: digest_file(&path)?,
-            tracked: tracked.contains(&locator),
-            modified: modified.contains(&locator) || untracked.contains(&locator),
-            locator,
-        });
-    }
-    let mut digest = Sha256::new();
-    for file in &files {
-        digest.update(file.locator.as_bytes());
-        digest.update([0]);
-        digest.update(file.digest.as_bytes());
-        digest.update([u8::from(file.tracked), u8::from(file.modified)]);
-        digest.update(b"\n");
-    }
-    Ok(SourceManifest {
-        repo_root: canonical.display().to_string(),
-        head_oid: head_oid.trim().to_owned(),
-        worktree_dirty: files.iter().any(|file| file.modified),
-        digest: format!("sha256:{:x}", digest.finalize()),
-        files,
-    })
-}
-
-fn git(repo: &Path, args: &[&str]) -> Result<String, Spec034ReleaseArtifactError> {
-    let bytes = git_bytes(repo, args)?;
-    String::from_utf8(bytes).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)
-}
-
-fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, Spec034ReleaseArtifactError> {
-    let output = Command::new("git")
-        .env("GIT_MASTER", "1")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .map_err(Spec034ReleaseArtifactError::Io)?;
-    if !output.status.success() {
-        return Err(Spec034ReleaseArtifactError::InvalidConfig);
-    }
-    Ok(output.stdout)
-}
-
-fn nul_paths(bytes: &[u8]) -> BTreeSet<String> {
-    bytes
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .map(|part| String::from_utf8_lossy(part).into_owned())
-        .collect()
-}
-
-fn is_source(locator: &str) -> bool {
-    let path = Path::new(locator);
-    let rooted = locator == "README.md"
-        || locator == "Cargo.toml"
-        || locator == "crates/Cargo.lock"
-        || locator.starts_with("crates/")
-        || locator.starts_with("docs/");
-    rooted
-        && !locator.contains("/target/")
-        && matches!(
-            path.extension().and_then(|value| value.to_str()),
-            Some("rs" | "toml" | "lock" | "md" | "json" | "yml" | "yaml" | "sh")
+        std::fs::create_dir_all(
+            directory
+                .parent()
+                .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?,
         )
+        .map_err(Spec034ReleaseArtifactError::Io)?;
+        std::fs::create_dir(&directory).map_err(Spec034ReleaseArtifactError::Io)?;
+        for (locator, bytes) in &self.files {
+            let path = directory.join(locator);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(Spec034ReleaseArtifactError::Io)?;
+            }
+            std::fs::write(path, bytes).map_err(Spec034ReleaseArtifactError::Io)?;
+        }
+        source_seal::set_read_only(&directory, true)?;
+        let seal = ExecutionSeal::capture(&directory)?;
+        let path_seal = PathChainSeal::capture_controlled(&directory)?;
+        Ok(MaterializedSource {
+            directory,
+            _root: None,
+            seal,
+            path_seal,
+            remove_on_drop: false,
+        })
+    }
+
+    pub fn bytes(&self, locator: &str) -> Option<&[u8]> {
+        self.files
+            .iter()
+            .find(|(name, _)| name == locator)
+            .map(|(_, bytes)| bytes.as_slice())
+    }
+
+    fn materialization_digest(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"spec034.materialized-source.v1\0");
+        digest.update(self.manifest.digest.as_bytes());
+        for (locator, bytes) in &self.files {
+            digest.update([0]);
+            digest.update(locator.as_bytes());
+            digest.update([0]);
+            digest.update(super::artifacts::digest_bytes(bytes).as_bytes());
+        }
+        format!("sha256:{:x}", digest.finalize())
+    }
+}
+
+#[cfg(test)]
+pub fn collect(repo_root: &Path) -> Result<SourceManifest, Spec034ReleaseArtifactError> {
+    let context = SourceRootContext::resolve(repo_root)?;
+    Ok(capture_context(&context)?.manifest)
+}
+
+pub(super) fn collect_context(
+    context: &SourceRootContext,
+) -> Result<SourceManifest, Spec034ReleaseArtifactError> {
+    Ok(source_manifest::capture_context(context)?.manifest)
+}
+
+#[cfg(test)]
+pub(super) fn capture(repo_root: &Path) -> Result<SourceSnapshot, Spec034ReleaseArtifactError> {
+    let context = SourceRootContext::resolve(repo_root)?;
+    capture_context(&context)
+}
+
+pub(super) fn capture_context(
+    context: &SourceRootContext,
+) -> Result<SourceSnapshot, Spec034ReleaseArtifactError> {
+    let first = source_manifest::capture_context(context)?;
+    let second = source_manifest::capture_context(context)?;
+    (first == second)
+        .then_some(first)
+        .ok_or(Spec034ReleaseArtifactError::DigestMismatch)
+}
+
+#[cfg(test)]
+fn capture_with_git_after_enumeration_for_test(
+    repo_root: &Path,
+    git: super::tools::ResolvedTool,
+    after_enumeration: impl FnOnce(),
+) -> Result<SourceSnapshot, Spec034ReleaseArtifactError> {
+    let context = SourceRootContext::with_git_for_test(repo_root, git)?;
+    source_manifest::capture_after_enumeration_for_test(&context, after_enumeration)
 }
 
 pub fn validate_locator(locator: &str) -> Result<(), Spec034ReleaseArtifactError> {
@@ -121,3 +216,32 @@ pub fn validate_locator(locator: &str) -> Result<(), Spec034ReleaseArtifactError
     }
     Ok(())
 }
+
+#[cfg(test)]
+fn digest_source_for_test(
+    root: &Path,
+    locator: &str,
+    after_ancestor_open: impl FnOnce(),
+) -> Result<String, Spec034ReleaseArtifactError> {
+    let reader = ConfinedSourceReader::open(root)?;
+    let bytes = reader
+        .read_with(locator, MAX_SOURCE_BYTES, after_ancestor_open)?
+        .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
+    Ok(super::artifacts::digest_bytes(&bytes))
+}
+
+#[cfg(test)]
+#[path = "source_test.rs"]
+mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "source_ancestor_test.rs"]
+mod ancestor_tests;
+
+#[cfg(all(test, unix))]
+#[path = "source_root_test.rs"]
+mod root_tests;
+
+#[cfg(all(test, unix))]
+#[path = "source_snapshot_test.rs"]
+mod snapshot_tests;
