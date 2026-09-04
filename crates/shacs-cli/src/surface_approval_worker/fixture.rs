@@ -57,6 +57,12 @@ impl FixtureRuntime {
         self.calls.load(Ordering::SeqCst)
     }
 
+    pub fn session_busy(&self) -> bool {
+        self.adapter
+            .session_turn_lock
+            .is_busy("cli:surface-approval")
+    }
+
     pub fn pending_lineage(&self) -> Result<Option<String>, Box<dyn Error>> {
         let raw = SessionManager::new(&self.workspace)?.read_session_file("cli:surface-approval");
         Ok(raw.and_then(|value| {
