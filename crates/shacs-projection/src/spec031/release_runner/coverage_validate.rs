@@ -1,16 +1,22 @@
 use super::coverage::{
     Spec031CoverageEvidenceKind, Spec031CoverageRequirementKind, Spec031CoverageStatus,
-    Spec031ExternalAuditStatus, Spec031ReleaseCoverageEntry,
+    Spec031ReleaseCoverageEntry,
 };
 use super::coverage_ids::required_command_ids;
-use super::coverage_owner::owner_from_requirement;
 use super::coverage_validate_artifact::validate_coverage_artifact;
 use super::model::{
-    Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseCommandStatus,
-    Spec031ReleaseRunArtifacts,
+    Spec031ReleaseArtifactError, Spec031ReleaseCommandStatus, Spec031ReleaseRunArtifacts,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+mod command_lookup;
+mod status;
+use command_lookup::find_command;
+use status::{
+    validate_blocked_closure_status, validate_external_coverage_status,
+    validate_requirement_command_dependency,
+};
 
 pub(super) fn validate_coverage_matrix(
     artifacts: &Spec031ReleaseRunArtifacts,
@@ -158,7 +164,7 @@ fn source_line_matches(line: &str, requirement_id: &str) -> bool {
 }
 
 fn number_as_usize(value: &str) -> usize {
-    value.parse::<usize>().map_or(0, |number| number)
+    value.parse::<usize>().unwrap_or(0)
 }
 
 fn validate_command_coverage(
@@ -192,75 +198,4 @@ fn validate_command_coverage(
         }
         (Spec031CoverageStatus::Blocked, _) => Ok(()),
     }
-}
-
-fn validate_external_coverage_status(
-    artifacts: &Spec031ReleaseRunArtifacts,
-    entry: &Spec031ReleaseCoverageEntry,
-) -> Result<(), Spec031ReleaseArtifactError> {
-    if entry.kind != Spec031CoverageRequirementKind::ExternalOwner {
-        return Ok(());
-    }
-    let owner = owner_from_requirement(&entry.requirement_id)?;
-    let audit = artifacts
-        .external_audits
-        .iter()
-        .find(|audit| audit.owner == owner)
-        .ok_or(Spec031ReleaseArtifactError::UnmappedCoverageRequirement)?;
-    let expected = match audit.status {
-        Spec031ExternalAuditStatus::Pass => Spec031CoverageStatus::Pass,
-        Spec031ExternalAuditStatus::Blocked => Spec031CoverageStatus::Blocked,
-    };
-    if entry.status != expected || entry.artifact != audit.artifact {
-        return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
-    }
-    Ok(())
-}
-
-fn validate_requirement_command_dependency(
-    artifacts: &Spec031ReleaseRunArtifacts,
-    entry: &Spec031ReleaseCoverageEntry,
-) -> Result<(), Spec031ReleaseArtifactError> {
-    if matches!(
-        entry.kind,
-        Spec031CoverageRequirementKind::RequiredCommand
-            | Spec031CoverageRequirementKind::ExternalOwner
-    ) {
-        return Ok(());
-    }
-    let Some(command_id) = entry.command_result_id.as_deref() else {
-        return Ok(());
-    };
-    let command = find_command(&artifacts.command_registry, command_id)?;
-    if command.status != Spec031ReleaseCommandStatus::Passed {
-        return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
-    }
-    Ok(())
-}
-
-fn validate_blocked_closure_status(
-    artifacts: &Spec031ReleaseRunArtifacts,
-    entry: &Spec031ReleaseCoverageEntry,
-) -> Result<(), Spec031ReleaseArtifactError> {
-    if entry.kind != Spec031CoverageRequirementKind::ClosureEvidence {
-        return Ok(());
-    }
-    let has_blocked_external = artifacts
-        .external_audits
-        .iter()
-        .any(|audit| audit.status == Spec031ExternalAuditStatus::Blocked);
-    if has_blocked_external && entry.status == Spec031CoverageStatus::Pass {
-        return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
-    }
-    Ok(())
-}
-
-fn find_command<'a>(
-    commands: &'a [Spec031ReleaseCommandRecord],
-    id: &str,
-) -> Result<&'a Spec031ReleaseCommandRecord, Spec031ReleaseArtifactError> {
-    commands
-        .iter()
-        .find(|command| command.id == id)
-        .ok_or(Spec031ReleaseArtifactError::UnmappedCoverageRequirement)
 }
