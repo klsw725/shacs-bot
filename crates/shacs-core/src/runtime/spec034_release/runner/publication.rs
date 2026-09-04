@@ -1,18 +1,37 @@
-use super::super::model::Spec034ReleaseArtifactError;
+use super::super::model::{
+    PublicationStage, PublicationStatus, PublicationStatusDocument, Spec034ReleaseArtifactError,
+    PUBLICATION_STATUS_SCHEMA,
+};
+use super::super::CommittedPublicationIdentity;
 use std::path::Path;
+
+#[path = "publication/binding.rs"]
+mod binding;
+pub(super) use binding::FinalSourceBinding;
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 mod platform {
     use super::*;
-    use cap_primitives::fs::remove_dir_all;
-    use rustix::fd::OwnedFd;
     use rustix::fs::{
-        fstat, fsync, mkdirat, openat, renameat_with, statat, AtFlags, Mode, OFlags, RenameFlags,
-        CWD,
+        fsync, mkdirat, renameat_with, statat, unlinkat, AtFlags, Mode, OFlags, RenameFlags,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs::File;
-    use std::path::Component;
+
+    mod aggregate;
+    mod components;
+    mod marker;
+    mod path;
+    mod quarantine;
+    mod seal;
+    mod staging;
+    use path::{open_anchor, open_child, parse};
+    use staging::{same_handle, same_handle_path};
+    #[cfg(test)]
+    pub use staging::StagingDirectory;
+    pub use staging::ValidatedStagingDirectory;
+    #[cfg(test)]
+    use marker::MarkerSyncFailure;
 
     const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
         .union(OFlags::DIRECTORY)
@@ -31,10 +50,19 @@ mod platform {
         created: Vec<CreatedComponent>,
         leaf: OsString,
         published: bool,
+        #[cfg(test)]
+        destination_sync_failure: bool,
     }
 
     impl EvidenceDestination {
         pub fn prepare(path: &Path) -> Result<Self, Spec034ReleaseArtifactError> {
+            Self::prepare_with(path, |_| Ok(()))
+        }
+
+        fn prepare_with(
+            path: &Path,
+            mut after_mkdir: impl FnMut(&OsStr) -> Result<(), Spec034ReleaseArtifactError>,
+        ) -> Result<Self, Spec034ReleaseArtifactError> {
             let (absolute, mut components) = parse(path)?;
             let leaf = components
                 .pop()
@@ -47,76 +75,138 @@ mod platform {
                 created: Vec::new(),
                 leaf,
                 published: false,
+                #[cfg(test)]
+                destination_sync_failure: false,
             };
-            destination.open_components()?;
+            destination.open_components(&mut after_mkdir)?;
             destination.require_leaf_missing()?;
             Ok(destination)
         }
 
-        pub fn publish(&mut self, staging: &Path) -> Result<(), Spec034ReleaseArtifactError> {
-            self.publish_with(staging, || {})
+        #[cfg(test)]
+        pub fn publish(
+            &mut self,
+            staging: ValidatedStagingDirectory,
+        ) -> Result<CommittedPublicationIdentity, Spec034ReleaseArtifactError> {
+            self.publish_with_runner_hooks(staging, || {}, || {})
         }
 
+        pub(in crate::runtime::spec034_release::runner) fn publish_with_runner_hooks(
+            &mut self,
+            mut staging: ValidatedStagingDirectory,
+            before_final_verification: impl FnOnce(),
+            after_final_verification: impl FnOnce(),
+        ) -> Result<CommittedPublicationIdentity, Spec034ReleaseArtifactError> {
+            let identity = self.publish_with_hooks(
+                &staging,
+                before_final_verification,
+                after_final_verification,
+                || {},
+                || {},
+            )?;
+            staging.disarm_cleanup();
+            Ok(identity)
+        }
+
+        #[cfg(test)]
         fn publish_with(
             &mut self,
-            staging: &Path,
-            before_rename: impl FnOnce(),
+            staging: &ValidatedStagingDirectory,
+            after_final_verification: impl FnOnce(),
+        ) -> Result<CommittedPublicationIdentity, Spec034ReleaseArtifactError> {
+            self.publish_with_hooks(staging, || {}, after_final_verification, || {}, || {})
+        }
+
+        #[cfg(test)]
+        fn publish_with_post_rename_hook(
+            &mut self,
+            staging: &ValidatedStagingDirectory,
+            after_rename: impl FnOnce(),
+        ) -> Result<CommittedPublicationIdentity, Spec034ReleaseArtifactError> {
+            self.publish_with_hooks(staging, || {}, || {}, after_rename, || {})
+        }
+
+        #[cfg(test)]
+        fn publish_with_post_fsync_hook(
+            &mut self,
+            staging: &ValidatedStagingDirectory,
+            after_fsync: impl FnOnce(),
+        ) -> Result<CommittedPublicationIdentity, Spec034ReleaseArtifactError> {
+            self.publish_with_hooks(staging, || {}, || {}, || {}, after_fsync)
+        }
+
+        fn publish_with_hooks(
+            &mut self,
+            staging: &ValidatedStagingDirectory,
+            before_final_verification: impl FnOnce(),
+            after_final_verification: impl FnOnce(),
+            after_rename: impl FnOnce(),
+            after_fsync: impl FnOnce(),
+        ) -> Result<CommittedPublicationIdentity, Spec034ReleaseArtifactError> {
+            self.verify_chain()?;
+            staging.verify_for(self.parent())?;
+            before_final_verification();
+            staging
+                .seal
+                .verify(staging.handle())
+                .map_err(|_| unknown_commit())?;
+            after_final_verification();
+            staging.binding.verify()?;
+            staging
+                .seal
+                .verify(staging.handle())
+                .map_err(|_| unknown_commit())?;
+            self.verify_chain().map_err(|_| unknown_commit())?;
+            self.require_leaf_missing().map_err(|_| unknown_commit())?;
+            staging
+                .verify_for(self.parent())
+                .map_err(|_| unknown_commit())?;
+            self.rename_verified(staging)?;
+            after_rename();
+            let verified = staging
+                .seal
+                .verify_post_rename(staging.handle(), self.parent(), &self.leaf)
+                .and_then(|()| self.verify_chain())
+                .and_then(|()| staging.binding.verify());
+            if verified.is_err() {
+                quarantine::quarantine_visible(self.parent(), &self.leaf)?;
+                return Err(unknown_commit());
+            }
+            #[cfg(test)]
+            if self.destination_sync_failure {
+                return Err(Spec034ReleaseArtifactError::CommitStatusUnknown(
+                    PublicationStage::DirectorySync,
+                ));
+            }
+            fsync(self.parent()).map_err(|_| {
+                Spec034ReleaseArtifactError::CommitStatusUnknown(PublicationStage::DirectorySync)
+            })?;
+            let first = self.capture_final_aggregate(staging);
+            after_fsync();
+            let second = self.capture_final_aggregate(staging);
+            let aggregate = match (first, second) {
+                (Ok(first), Ok(second)) if first == second => second,
+                _ => {
+                    quarantine::quarantine_visible(self.parent(), &self.leaf)?;
+                    return Err(unknown_commit());
+                }
+            };
+            Ok(aggregate.into_identity(staging.seal.content_digest().to_owned()))
+        }
+
+        fn rename_verified(
+            &mut self,
+            staging: &ValidatedStagingDirectory,
         ) -> Result<(), Spec034ReleaseArtifactError> {
-            self.verify_chain()?;
-            let source_parent = staging
-                .parent()
-                .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
-            let source_name = staging
-                .file_name()
-                .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
-            let source_parent =
-                File::open(source_parent).map_err(Spec034ReleaseArtifactError::Io)?;
-            before_rename();
-            self.verify_chain()?;
-            self.require_leaf_missing()?;
             renameat_with(
-                &source_parent,
-                source_name,
+                staging.parent(),
+                staging.name(),
                 self.parent(),
                 &self.leaf,
                 RenameFlags::NOREPLACE,
             )
             .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
-            if fsync(self.parent()).is_err() {
-                let _ = remove_dir_all(self.parent(), Path::new(&self.leaf));
-                return Err(Spec034ReleaseArtifactError::InvalidConfig);
-            }
-            if let Err(error) = self.verify_chain() {
-                let _ = remove_dir_all(self.parent(), Path::new(&self.leaf));
-                return Err(error);
-            }
             self.published = true;
-            Ok(())
-        }
-
-        fn open_components(&mut self) -> Result<(), Spec034ReleaseArtifactError> {
-            for name in &self.components {
-                let parent_index = self.handles.len() - 1;
-                let child = match open_child(&self.handles[parent_index], name) {
-                    Ok(child) => child,
-                    Err(error) if error == rustix::io::Errno::NOENT => {
-                        mkdirat(
-                            &self.handles[parent_index],
-                            name,
-                            Mode::from_raw_mode(0o700),
-                        )
-                        .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
-                        self.created.push(CreatedComponent {
-                            parent_index,
-                            name: name.clone(),
-                        });
-                        open_child(&self.handles[parent_index], name)
-                            .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?
-                    }
-                    Err(_) => return Err(Spec034ReleaseArtifactError::InvalidConfig),
-                };
-                self.handles.push(child.into());
-            }
             Ok(())
         }
 
@@ -143,79 +233,30 @@ mod platform {
         fn parent(&self) -> &File {
             &self.handles[self.handles.len() - 1]
         }
-    }
 
-    impl Drop for EvidenceDestination {
-        fn drop(&mut self) {
-            if self.published {
-                return;
-            }
-            for created in self.created.iter().rev() {
-                let parent = &self.handles[created.parent_index];
-                if same_handle_path(
-                    parent,
-                    &created.name,
-                    &self.handles[created.parent_index + 1],
-                ) {
-                    let _ = remove_dir_all(parent, Path::new(&created.name));
-                }
-            }
+        #[cfg(test)]
+        pub(super) fn inject_destination_sync_failure(&mut self) {
+            self.destination_sync_failure = true;
         }
+
     }
 
-    fn parse(path: &Path) -> Result<(bool, Vec<OsString>), Spec034ReleaseArtifactError> {
-        let mut absolute = false;
-        let mut components = Vec::new();
-        for component in path.components() {
-            match component {
-                Component::RootDir if components.is_empty() => absolute = true,
-                Component::Normal(value) => components.push(value.to_os_string()),
-                Component::CurDir if components.is_empty() => {}
-                Component::RootDir
-                | Component::CurDir
-                | Component::ParentDir
-                | Component::Prefix(_) => {
-                    return Err(Spec034ReleaseArtifactError::InvalidConfig);
-                }
-            }
-        }
-        Ok((absolute, components))
+    fn unknown_commit() -> Spec034ReleaseArtifactError {
+        Spec034ReleaseArtifactError::CommitStatusUnknown(PublicationStage::DestinationIdentity)
     }
 
-    fn open_anchor(absolute: bool) -> Result<OwnedFd, Spec034ReleaseArtifactError> {
-        let path = if absolute {
-            Path::new("/")
-        } else {
-            Path::new(".")
-        };
-        openat(CWD, path, DIRECTORY_FLAGS, Mode::empty())
-            .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)
-    }
-
-    fn open_child(parent: &File, name: &OsStr) -> rustix::io::Result<OwnedFd> {
-        openat(parent, name, DIRECTORY_FLAGS, Mode::empty())
-    }
-
-    fn same_handle(left: &OwnedFd, right: &File) -> Result<(), Spec034ReleaseArtifactError> {
-        let left = fstat(left).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
-        let right = fstat(right).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
-        if left.st_dev == right.st_dev && left.st_ino == right.st_ino {
-            Ok(())
-        } else {
-            Err(Spec034ReleaseArtifactError::InvalidConfig)
-        }
-    }
-
-    fn same_handle_path(parent: &File, name: &OsStr, handle: &File) -> bool {
-        let Ok(path) = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) else {
-            return false;
-        };
-        let Ok(opened) = fstat(handle) else {
-            return false;
-        };
-        path.st_dev == opened.st_dev && path.st_ino == opened.st_ino
-    }
-
+    #[cfg(all(test, unix))]
+    mod durability_tests;
+    #[cfg(all(test, unix))]
+    mod race_tests;
+    #[cfg(all(test, unix))]
+    mod race_snapshot_tests;
+    #[cfg(all(test, unix))]
+    mod quarantine_tests;
+    #[cfg(all(test, unix))]
+    mod toolchain_binding_tests;
+    #[cfg(all(test, unix))]
+    mod approved_snapshot_tests;
     #[cfg(all(test, unix))]
     mod tests;
 }
@@ -224,15 +265,10 @@ mod platform {
 pub use platform::EvidenceDestination;
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
-pub struct EvidenceDestination;
-
+#[path = "publication/unsupported.rs"]
+mod unsupported;
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
+#[path = "publication/unsupported.rs"]
+mod unsupported_contract;
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
-impl EvidenceDestination {
-    pub fn prepare(_path: &Path) -> Result<Self, Spec034ReleaseArtifactError> {
-        Err(Spec034ReleaseArtifactError::InvalidConfig)
-    }
-
-    pub fn publish(&mut self, _staging: &Path) -> Result<(), Spec034ReleaseArtifactError> {
-        Err(Spec034ReleaseArtifactError::InvalidConfig)
-    }
-}
+pub use unsupported::EvidenceDestination;
