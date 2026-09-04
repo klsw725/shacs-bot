@@ -21,9 +21,12 @@ macro_rules! declare_spec034_runtime_modules {
         };
         pub use runner_spec034::public_result::AgentRunResult;
         pub use spec034_release::{
-            run_spec034_release_runner, validate_spec034_release_artifacts_against,
-            Spec034ReleaseArtifactError, Spec034ReleaseConfig, Spec034ReleaseManifest,
-            Spec034ReleaseMode,
+            audit_spec034_release_artifacts_against,
+            audit_spec034_release_artifacts_against_expected, run_spec034_linker_wrapper,
+            run_spec034_release_runner, run_spec034_release_runner_with_linker_image,
+            CommittedPublicationIdentity, CommittedPublicationResult, Spec034ReleaseArtifactError,
+            Spec034ReleaseConfig, Spec034ReleaseManifest, Spec034ReleaseMode,
+            Spec034StructuralAudit,
         };
         pub use video_analyzer_disclosure::{
             VideoAnalyzerDisclosureProjection, VideoAnalyzerTraceDisclosureProjection,
