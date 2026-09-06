@@ -22,6 +22,13 @@ pub(super) fn static_cdhash(
     darwin::static_cdhash(path)
 }
 
+#[cfg(not(target_vendor = "apple"))]
+pub(super) fn static_cdhash(
+    _path: &std::path::Path,
+) -> Result<Vec<u8>, Spec034ReleaseArtifactError> {
+    Err(Spec034ReleaseArtifactError::InvalidConfig)
+}
+
 #[cfg(target_vendor = "apple")]
 pub(super) fn live_cdhash(pid: libc::pid_t) -> Result<Vec<u8>, Spec034ReleaseArtifactError> {
     darwin::live_cdhash(pid)

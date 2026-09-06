@@ -1,5 +1,9 @@
-use super::{digest_bytes, Spec034ReleaseArtifactError};
-use std::path::{Path, PathBuf};
+use super::Spec034ReleaseArtifactError;
+#[cfg(target_vendor = "apple")]
+use super::digest_bytes;
+#[cfg(target_vendor = "apple")]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[cfg(target_vendor = "apple")]
 #[path = "monitor/descriptor_limit.rs"]

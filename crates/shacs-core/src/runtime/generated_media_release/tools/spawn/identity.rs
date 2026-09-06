@@ -1,6 +1,11 @@
-use super::{live_cdhash, process_executable, static_cdhash, Spec034ReleaseArtifactError};
+use super::{static_cdhash, Spec034ReleaseArtifactError};
+#[cfg(target_vendor = "apple")]
+use super::{live_cdhash, process_executable};
+#[cfg(target_vendor = "apple")]
 use crate::runtime::generated_media_release::artifacts::digest_bytes;
+#[cfg(target_vendor = "apple")]
 use std::fs::File;
+#[cfg(target_vendor = "apple")]
 use std::io::Read;
 use std::path::PathBuf;
 

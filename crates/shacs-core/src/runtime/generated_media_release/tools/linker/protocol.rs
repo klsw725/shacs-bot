@@ -6,6 +6,7 @@ use crate::runtime::generated_media_release::tools::{
 };
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(target_vendor = "apple")]
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
@@ -40,7 +41,10 @@ impl LinkerReceipts {
         compiler: spawn::ProcessIdentity,
     ) -> Result<Self, Spec034ReleaseArtifactError> {
         #[cfg(not(target_vendor = "apple"))]
-        return Err(Spec034ReleaseArtifactError::InvalidConfig);
+        {
+            let _ = (target, wrapper, compiler);
+            return Err(Spec034ReleaseArtifactError::InvalidConfig);
+        }
         #[cfg(target_vendor = "apple")]
         {
             let target = target.canonicalize().map_err(Spec034ReleaseArtifactError::Io)?;
