@@ -11,7 +11,7 @@ pub(crate) struct ProductionTooling {
 pub(crate) fn production_tool_registry(
     bundle: &ConfigBundle,
     allow_side_effect_tools: bool,
-    spec030_facts: &shacs_core::runtime::trusted_runtime::Spec030FactStore,
+    credential_runtime: &Arc<ProviderCredentialRuntime>,
 ) -> Result<ProductionTooling, CliError> {
     let workspace = &bundle.context.workspace;
     fs::create_dir_all(workspace)?;
@@ -76,24 +76,34 @@ pub(crate) fn production_tool_registry(
             .then(|| bundle.config.tools.exec.path_append.clone());
         exec_config.allowed_env_keys = bundle.config.tools.exec.allowed_env_keys.clone();
         exec_config.env = configured_exec_env(&bundle.config);
-        registry
-            .register(ExecTool::new(exec_config).with_spec030_fact_store(spec030_facts.clone()));
+        registry.register(
+            ExecTool::new(exec_config).with_spec030_fact_store(credential_runtime.facts()),
+        );
     }
     if allow_side_effect_tools && bundle.config.tools.image_generation.enable {
         let image_config = &bundle.config.tools.image_generation;
         let provider_registry = ProviderRegistry::new();
-        let mut providers = bundle.config.providers.clone();
-        for (provider_id, auth) in load_auth_store(&bundle.context.auth_path())?.providers {
-            if auth.kind == "apiKey" {
-                providers.entry(provider_id).or_default().api_key = Some(auth.access);
-            }
-        }
-        let resolved = resolve_image_generation_client(
-            &provider_registry,
-            &image_config.provider,
-            &image_config.model,
-            &providers,
-        )
+        let image_providers = bundle
+            .config
+            .providers
+            .iter()
+            .filter(|(provider_id, _)| {
+                if image_config.provider == "auto" {
+                    provider_registry
+                        .find_by_name(provider_id)
+                        .is_some_and(|spec| spec.supports_image_generation)
+                } else {
+                    provider_id.as_str() == image_config.provider
+                }
+            })
+            .map(|(provider_id, config)| (provider_id.clone(), config.clone()))
+            .collect();
+        let resolved = resolve_image_generation_provider(&ImageGenerationResolutionRequest {
+            registry: &provider_registry,
+            requested_provider: &image_config.provider,
+            model: &image_config.model,
+            providers: &image_providers,
+        })
         .map_err(|error| {
             CliError::Config(ConfigError::Env(format!(
                 "image_generate provider could not be configured: {}",
@@ -104,11 +114,18 @@ pub(crate) fn production_tool_registry(
         fs::create_dir_all(&image_media_dir)?;
         let codex_native_media = resolved.provider_id == "openai_codex";
         let mut image_tool = ImageGenerateTool::new(
-            resolved.client,
+            Box::new(CredentialResolvingImageGenerationClient::new(
+                ProviderCredentialClientConfig {
+                    requested_provider: image_config.provider.clone(),
+                    model: image_config.model.clone(),
+                    providers: image_providers,
+                },
+                Arc::clone(credential_runtime),
+            )),
             image_media_dir,
             ImageGenerateToolConfig {
-                provider_id: resolved.provider_id,
-                model_id: resolved.model,
+                provider_id: image_config.provider.clone(),
+                model_id: image_config.model.clone(),
                 default_format: image_config.default_format.clone(),
                 max_count: image_config.max_count,
                 max_bytes: image_config.max_bytes,
