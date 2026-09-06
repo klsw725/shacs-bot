@@ -33,6 +33,8 @@ pub use resolution::{
     image_generation_client_from_config, openai_image_generation_capability,
     openai_image_generation_client_from_config, openrouter_image_generation_client_from_config,
     resolve_image_generation_api_base, resolve_image_generation_client,
+    resolve_image_generation_client_with_request, resolve_image_generation_provider,
+    ImageGenerationResolutionRequest,
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

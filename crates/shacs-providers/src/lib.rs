@@ -42,8 +42,8 @@ pub use clients::image_generation::{
     ImageGenerationItemId, ImageGenerationRequest, ImageGenerationRequestId,
     ImageGenerationRequestParts, ImageGenerationResolutionRequest, ImageGenerationResult,
     ImageGenerationUsage, ImageMimeType, OpenAiImageGenerationClient,
-    OpenRouterImageGenerationClient, ResolvedImageGenerationClient, UreqImageGenerationHttpTransport,
-    IMAGE_GENERATION_PROVIDER_ERROR_CODE,
+    OpenRouterImageGenerationClient, ResolvedImageGenerationClient,
+    UreqImageGenerationHttpTransport, IMAGE_GENERATION_PROVIDER_ERROR_CODE,
     IMAGE_GENERATION_RESPONSE_BODY_TOO_LARGE_CODE, IMAGE_GENERATION_RESPONSE_MAX_BYTES,
     IMAGE_GENERATION_RESPONSE_READ_LIMIT,
 };

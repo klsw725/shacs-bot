@@ -7,8 +7,42 @@ use super::{
 };
 use crate::config::{ProviderConfig, ProvidersConfig};
 use crate::error::ProviderError;
-use crate::registry::{ProviderRegistry, ProviderSpec};
+use crate::registry::{ProviderMatch, ProviderRegistry, ProviderSpec};
 use std::env;
+
+pub struct ImageGenerationResolutionRequest<'a> {
+    pub registry: &'a ProviderRegistry,
+    pub requested_provider: &'a str,
+    pub model: &'a str,
+    pub providers: &'a ProvidersConfig,
+}
+
+pub fn resolve_image_generation_provider(
+    request: &ImageGenerationResolutionRequest<'_>,
+) -> Result<ProviderMatch, ProviderError> {
+    let spec = if request.requested_provider == "auto" {
+        resolve_auto_image_generation_provider(request.registry, request.providers)
+            .ok_or_else(|| unsupported_image_generation(request.requested_provider))?
+    } else {
+        request
+            .registry
+            .find_by_name(request.requested_provider)
+            .ok_or_else(|| ProviderError::ProviderNotFound {
+                provider_id: request.requested_provider.to_owned(),
+                suggestions: request
+                    .registry
+                    .specs()
+                    .iter()
+                    .map(|spec| spec.name.to_owned())
+                    .collect(),
+            })?
+    };
+    ensure_image_generation_supported(spec)?;
+    Ok(ProviderMatch {
+        provider_id: spec.name.to_owned(),
+        model: default_image_generation_model(spec, request.model).to_owned(),
+    })
+}
 
 pub fn resolve_image_generation_client(
     registry: &ProviderRegistry,
@@ -16,35 +50,31 @@ pub fn resolve_image_generation_client(
     model: &str,
     providers: &ProvidersConfig,
 ) -> Result<ResolvedImageGenerationClient, ProviderError> {
-    let spec = if requested_provider == "auto" {
-        resolve_auto_image_generation_provider(registry, providers)
-            .ok_or_else(|| unsupported_image_generation(requested_provider))?
-    } else {
-        registry.find_by_name(requested_provider).ok_or_else(|| {
-            ProviderError::ProviderNotFound {
-                provider_id: requested_provider.to_owned(),
-                suggestions: registry
-                    .specs()
-                    .iter()
-                    .map(|spec| spec.name.to_owned())
-                    .collect(),
-            }
-        })?
-    };
-    ensure_image_generation_supported(spec)?;
-    let config = providers
-        .get(spec.name)
+    resolve_image_generation_client_with_request(ImageGenerationResolutionRequest {
+        registry,
+        requested_provider,
+        model,
+        providers,
+    })
+}
+
+pub fn resolve_image_generation_client_with_request(
+    request: ImageGenerationResolutionRequest<'_>,
+) -> Result<ResolvedImageGenerationClient, ProviderError> {
+    let provider_match = resolve_image_generation_provider(&request)?;
+    let config = request
+        .providers
+        .get(&provider_match.provider_id)
         .cloned()
         .ok_or_else(|| ProviderError::AuthRequired {
-            provider_id: spec.name.to_owned(),
+            provider_id: provider_match.provider_id.clone(),
         })?;
-    let selected_model = default_image_generation_model(spec, model);
-    let client = image_generation_client_from_config(spec.name, config)?;
+    let client = image_generation_client_from_config(&provider_match.provider_id, config)?;
     Ok(ResolvedImageGenerationClient {
-        provider_id: spec.name.to_owned(),
-        model: selected_model.to_owned(),
+        provider_id: provider_match.provider_id,
+        model: provider_match.model.clone(),
         client: Box::new(DefaultModelImageGenerationClient::new(
-            selected_model,
+            provider_match.model,
             client,
         )),
     })
@@ -158,6 +188,11 @@ fn resolve_auto_image_generation_provider<'a>(
                 .specs()
                 .iter()
                 .find(|spec| spec.supports_image_generation && providers.contains_key(spec.name))
+        })
+        .or_else(|| {
+            registry
+                .find_by_name("openai")
+                .filter(|spec| spec.supports_image_generation)
         })
 }
 

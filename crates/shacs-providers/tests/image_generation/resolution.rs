@@ -1,5 +1,6 @@
 use shacs_providers::{
-    resolve_image_generation_client, ProviderConfig, ProviderError, ProviderRegistry,
+    resolve_image_generation_client, resolve_image_generation_provider,
+    ImageGenerationResolutionRequest, ProviderConfig, ProviderError, ProviderRegistry,
     ProvidersConfig,
 };
 use std::error::Error;
@@ -36,6 +37,24 @@ fn image_generation_resolver_requires_configured_auth() -> Result<(), Box<dyn Er
         ProviderError::AuthRequired { provider_id } if provider_id == "openai" => {}
         other => return Err(format!("unexpected missing auth error: {other:?}").into()),
     }
+    Ok(())
+}
+
+#[test]
+fn image_generation_auto_without_config_selects_openai_for_auth_resolution(
+) -> Result<(), Box<dyn Error>> {
+    let registry = ProviderRegistry::new();
+    let providers = ProvidersConfig::new();
+
+    let resolved = resolve_image_generation_provider(&ImageGenerationResolutionRequest {
+        registry: &registry,
+        requested_provider: "auto",
+        model: "gpt-image-2",
+        providers: &providers,
+    })?;
+
+    assert_eq!(resolved.provider_id, "openai");
+    assert_eq!(resolved.model, "gpt-image-2");
     Ok(())
 }
 
