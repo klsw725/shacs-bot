@@ -1,6 +1,6 @@
 # PRD 000. Codex media event and artifact normalization
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
@@ -38,3 +38,5 @@ Codex Responses image-generation event를 chat text와 분리해 provider-neutra
 1. Provider event parser fixtures.
 2. Tool/runtime handoff contract tests.
 3. Projection-boundary payload absence audit.
+
+Completion evidence: [Todo 6 Codex event receipt](../../../../.omo/evidence/spec034/task-6-codex-events.json), [Todo 8 persistence receipt](../../../../.omo/evidence/spec034/task-8-persistence.json), and [Spec034 closure mapping](../CLOSURE.md).

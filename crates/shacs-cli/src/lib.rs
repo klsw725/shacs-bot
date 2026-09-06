@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting CLI composition root; Spec034 retains five typed module/field/diagnostics fixture hooks
 mod agent_repl;
 mod automation_outcome;
 mod automation_producer;
@@ -13,10 +14,12 @@ mod spec031_activation_provider;
 mod spec031_cli;
 mod spec031_management;
 mod spec033_cli;
+mod spec035_cli_media;
 mod surface_approval_worker;
 mod tool_before_interaction;
 mod trajectory_cli;
 pub use runtime_cleanup::{RemovedRuntimePath, RemovedRuntimePathKind, RuntimeCleanupReceipt};
+use spec035_cli_media::wiring::*;
 
 use fs2::FileExt;
 use lettre::message::Mailbox;
@@ -1141,6 +1144,7 @@ pub struct RuntimeInspectReport {
     pub provider: String,
     pub providers: Vec<ProviderStatus>,
     pub generated_media: Vec<GeneratedMediaArtifactInspect>,
+    pub media_projections: Vec<shacs_projection::Spec035MediaProjection>,
     pub capabilities: Vec<RuntimeCapabilityReport>,
     pub sessions: RuntimeSessionInspect,
     pub lifecycle: RuntimeLifecycleInspect,
@@ -3403,103 +3407,6 @@ pub fn runtime_inspect(options: RuntimeInspectOptions) -> Result<RuntimeInspectR
     runtime_inspect_inner(options, true)
 }
 
-pub(crate) fn runtime_inspect_inner(
-    options: RuntimeInspectOptions,
-    ensure_dirs: bool,
-) -> Result<RuntimeInspectReport, CliError> {
-    let config_path = options.config_path.unwrap_or_else(default_config_path);
-    let config_exists = config_path.exists();
-    let mut bundle = load_config_with_env(
-        LoadOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override: options.workspace_override,
-            resolve_env: false,
-            write_back_migrations: false,
-        },
-        &ProcessEnv,
-    )?;
-    apply_api_key_auth_overlay(&mut bundle)?;
-    if ensure_dirs {
-        let _runtime_dirs = ensure_runtime_dirs(&bundle.context)?;
-    }
-    let workspace = bundle.context.workspace.clone();
-    let workspace_exists = workspace.exists();
-    let mut providers = bundle
-        .config
-        .providers
-        .iter()
-        .map(|(name, config)| ProviderStatus {
-            name: name.clone(),
-            has_api_key: non_empty(config.api_key.as_deref()),
-            has_api_base: non_empty(config.api_base.as_deref()),
-        })
-        .collect::<Vec<_>>();
-    providers.sort_by(|left, right| left.name.cmp(&right.name));
-    let generated_media =
-        inspect_generated_media(&bundle.context.media_dir(Some("image-generation")))?;
-    let capabilities = runtime_capabilities(&bundle);
-    let sessions = inspect_runtime_sessions(&workspace)?;
-    let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
-    let update_marker = read_runtime_update_marker(&marker_path)?;
-    let ownership = inspect_runtime_ownership(&bundle.context.data_dir, now_millis())?;
-    let stop_request = read_runtime_stop_request_marker(&runtime_stop_request_marker_path(
-        &bundle.context.data_dir,
-    ))?;
-    let compatibility = evaluate_runtime_compatibility(RUNTIME_DATA_SCHEMA_VERSION);
-    let migration_plan = plan_durable_migration_for_roots(
-        &bundle.context.data_dir,
-        &bundle.context.workspace,
-        DurableConfigCompatibility::Readable,
-    )
-    .map_err(|error| CliError::InvalidArguments(redact_string(&error.to_string())))?;
-    let migration_ledger = inspect_durable_migration_ledger(&bundle.context.data_dir);
-    let durable_recovery = evaluate_runtime_durable_recovery(&bundle.context.data_dir);
-    let durable_work = evaluate_runtime_durable_work(&bundle.context.data_dir, &durable_recovery);
-    let durable_children =
-        durable_child_inspect(durable_recovery.state.as_ref().map(|state| &state.children));
-    let durable_diagnostics = inspect_durable_diagnostics(&bundle.context.data_dir);
-    let supervision = read_runtime_supervision_state(&bundle.context.data_dir)?;
-    let channel_restart = inspect_channel_restart_states(
-        &bundle.context.data_dir,
-        durable_recovery.state.as_ref().map(|state| &state.work),
-    );
-    let containment = runtime_containment_inspect(&bundle);
-    let workflow_recipes = workflow_recipes_for_bundle(&bundle)?;
-
-    Ok(RuntimeInspectReport {
-        config_path,
-        config_exists,
-        workspace,
-        workspace_exists,
-        data_dir: bundle.context.data_dir,
-        model: bundle.config.agents.defaults.model,
-        provider: bundle.config.agents.defaults.provider,
-        providers,
-        generated_media,
-        capabilities,
-        sessions,
-        lifecycle: RuntimeLifecycleInspect {
-            binary_version: VERSION.to_owned(),
-            data_schema_version: RUNTIME_DATA_SCHEMA_VERSION,
-            data_schema_min_version: RUNTIME_DATA_SCHEMA_MIN_VERSION,
-            compatibility,
-            ownership,
-            stop_request,
-            update_marker,
-            migration_plan,
-            migration_ledger,
-            durable_recovery,
-            durable_work,
-            durable_children,
-            durable_diagnostics,
-        },
-        supervision,
-        channel_restart,
-        containment,
-        workflow_recipes,
-    })
-}
-
 fn inspect_durable_diagnostics(data_dir: &Path) -> DurableDiagnosticsInspect {
     let root = runtime_durable_trace_root(data_dir);
     let mut inspect = DurableDiagnosticsInspect {
@@ -4527,6 +4434,7 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
                 "digest": &report.containment.digest,
             },
             "generated_media": generated_media,
+            "spec035_media_projections": json!(&report.media_projections),
             "spec033": spec033,
             "sessions": {
                 "count": report.sessions.count,
@@ -13709,70 +13617,6 @@ impl ExternalTransportChannelAdapter {
     }
 }
 
-impl ChannelAdapter for ExternalTransportChannelAdapter {
-    fn name(&self) -> &str {
-        &self.channel
-    }
-
-    fn supports_streaming(&self) -> bool {
-        self.spec.supports_streaming()
-    }
-
-    fn start(&mut self) -> Result<(), ChannelError> {
-        if self.handle.is_some() {
-            return Ok(());
-        }
-        let spec = self.spec.clone();
-        let inbound_bus = self.inbound_bus.clone();
-        let transport_context = self.transport_context.clone();
-        let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundMessage>();
-        let runner = self.runner.clone();
-        let stop = Arc::new(AtomicBool::new(false));
-        self.outbound_tx = Some(outbound_tx);
-        self.worker_stop = Some(stop.clone());
-        self.handle = Some(thread::spawn(move || {
-            runner(spec, inbound_bus, outbound_rx, stop, transport_context);
-        }));
-        Ok(())
-    }
-
-    fn stop(&mut self) -> Result<(), ChannelError> {
-        if let Some(stop) = self.worker_stop.take() {
-            stop.store(true, Ordering::SeqCst);
-        }
-        self.outbound_tx = None;
-        if let Some(handle) = self.handle.take() {
-            handle.join().map_err(|_| {
-                ChannelError::Delivery(format!("channel worker panicked: {}", self.channel))
-            })?;
-        }
-        Ok(())
-    }
-
-    fn send(&self, message: OutboundMessage) -> Result<(), ChannelError> {
-        self.outbound_tx
-            .as_ref()
-            .ok_or_else(|| {
-                ChannelError::Delivery(format!("channel worker is not started: {}", self.channel))
-            })?
-            .send(message)
-            .map_err(|error| ChannelError::Delivery(error.to_string()))
-    }
-
-    fn send_delta(
-        &self,
-        chat_id: &str,
-        delta: &str,
-        metadata: Map<String, Value>,
-    ) -> Result<(), ChannelError> {
-        let reply_to = metadata_string(&metadata, "reply_to");
-        let mut message =
-            OutboundMessage::new(&self.channel, chat_id, delta).with_metadata(metadata);
-        message.reply_to = reply_to;
-        self.send(message)
-    }
-}
-
 #[derive(Clone, Default)]
 struct WebSocketEventSink {
     events: Arc<Mutex<Vec<WebSocketServerEvent>>>,
@@ -20328,26 +20172,6 @@ impl AgentLoopChatCompletionAdapter {
         })
     }
 
-    fn context_builder(&self) -> ContextBuilder {
-        let mut extra_roots = Vec::new();
-        let media_root = self.media_dir.parent().map(Path::to_path_buf);
-        if let Some(data_dir) = self
-            .media_dir
-            .parent()
-            .and_then(|media_dir| media_dir.parent())
-        {
-            extra_roots.push(data_dir.join("skills"));
-        }
-        extra_roots.extend(self.plugin_skill_roots.clone());
-        ContextBuilder::new(&self.workspace)
-            .with_timezone(self.defaults.timezone.clone())
-            .with_disabled_skills(self.defaults.disabled_skills.clone())
-            .with_skill_roots(extra_roots)
-            .with_media_roots(media_root)
-            .with_native_image_input_supported(self.native_image_input_supported)
-            .with_configured_env(self.exec_env.clone())
-    }
-
     fn external_effective_session_key(&self, message: &InboundMessage) -> String {
         effective_external_session_key(&self.loop_config(), message)
     }
@@ -22083,211 +21907,6 @@ fn invocation_text(invocation: &ChatCompletionInvocation) -> String {
         .join(" ")
 }
 
-struct ProductionTooling {
-    registry: ToolRegistry,
-    message_tool: Option<MessageTool>,
-    mcp_runtime: Option<McpRuntime>,
-    mcp_reports: Vec<McpServerConnectionReport>,
-}
-
-fn production_tool_registry(
-    bundle: &ConfigBundle,
-    allow_side_effect_tools: bool,
-    credential_runtime: &Arc<ProviderCredentialRuntime>,
-) -> Result<ProductionTooling, CliError> {
-    let workspace = &bundle.context.workspace;
-    fs::create_dir_all(workspace)?;
-    let media_dir = bundle.context.media_dir(Some("api"));
-    fs::create_dir_all(&media_dir)?;
-    let path_context = PathContext {
-        workspace: Some(workspace.clone()),
-        allowed_dir: Some(workspace.clone()),
-        media_dir: Some(media_dir),
-        extra_allowed_dirs: Vec::new(),
-    };
-    let file_state = Arc::new(Mutex::new(FileState::new()));
-    let mut registry = ToolRegistry::new();
-    let cron_service = Arc::new(
-        PersistentCronService::new(bundle.context.runtime_subdir("cron").join("jobs.json"))
-            .map_err(CliError::Io)?,
-    );
-    registry.register(CronTool::with_timezone(
-        cron_service.clone(),
-        bundle.config.agents.defaults.timezone.clone(),
-    ));
-    registry.register(ReadFileTool::with_file_state(
-        path_context.clone(),
-        file_state.clone(),
-    ));
-    if allow_side_effect_tools {
-        registry.register(WriteFileTool::with_file_state(
-            path_context.clone(),
-            file_state.clone(),
-        ));
-        registry.register(EditFileTool::with_file_state(
-            path_context.clone(),
-            file_state,
-        ));
-    }
-    registry.register(ListDirTool::new(path_context.clone()));
-    registry.register(GlobTool::new(path_context.clone()));
-    registry.register(GrepTool::new(path_context.clone()));
-    let message_tool = if allow_side_effect_tools {
-        let tool = MessageTool::new(workspace).with_media_roots([bundle.context.media_dir(None)]);
-        registry.register(tool.clone());
-        Some(tool)
-    } else {
-        None
-    };
-    if allow_side_effect_tools && bundle.config.tools.exec.enable {
-        let mut exec_config = ExecConfig::new(path_context.clone());
-        exec_config.network_guard = NetworkGuard::with_ssrf_whitelist(
-            bundle
-                .config
-                .tools
-                .ssrf_whitelist
-                .iter()
-                .map(String::as_str),
-        );
-        exec_config.timeout_seconds = u64::from(bundle.config.tools.exec.timeout);
-        exec_config.restrict_to_workspace = bundle.config.tools.restrict_to_workspace;
-        exec_config.sandbox = non_empty(Some(bundle.config.tools.exec.sandbox.as_str()))
-            .then(|| bundle.config.tools.exec.sandbox.clone());
-        exec_config.apply_sandbox_policy(&bundle.config.tools.exec.sandbox_policy, workspace);
-        exec_config.path_append = non_empty(Some(bundle.config.tools.exec.path_append.as_str()))
-            .then(|| bundle.config.tools.exec.path_append.clone());
-        exec_config.allowed_env_keys = bundle.config.tools.exec.allowed_env_keys.clone();
-        exec_config.env = configured_exec_env(&bundle.config);
-        registry.register(
-            ExecTool::new(exec_config).with_spec030_fact_store(credential_runtime.facts()),
-        );
-    }
-    if allow_side_effect_tools && bundle.config.tools.image_generation.enable {
-        let image_config = &bundle.config.tools.image_generation;
-        let provider_registry = ProviderRegistry::new();
-        let image_providers = bundle
-            .config
-            .providers
-            .iter()
-            .filter(|(provider_id, _)| {
-                if image_config.provider == "auto" {
-                    provider_registry
-                        .find_by_name(provider_id)
-                        .is_some_and(|spec| spec.supports_image_generation)
-                } else {
-                    provider_id.as_str() == image_config.provider
-                }
-            })
-            .map(|(provider_id, config)| (provider_id.clone(), config.clone()))
-            .collect();
-        if image_config.provider != "auto" {
-            resolve_image_generation_provider(&ImageGenerationResolutionRequest {
-                registry: &provider_registry,
-                requested_provider: &image_config.provider,
-                model: &image_config.model,
-                providers: &image_providers,
-            })
-            .map_err(|error| {
-                CliError::Config(ConfigError::Env(format!(
-                    "image_generate provider could not be configured: {}",
-                    render_image_generation_provider_error(error)
-                )))
-            })?;
-        }
-        let image_media_dir = bundle.context.media_dir(Some("image-generation"));
-        fs::create_dir_all(&image_media_dir)?;
-        registry.register(ImageGenerateTool::new(
-            Box::new(CredentialResolvingImageGenerationClient::new(
-                ProviderCredentialClientConfig {
-                    requested_provider: image_config.provider.clone(),
-                    model: image_config.model.clone(),
-                    providers: image_providers,
-                },
-                Arc::clone(credential_runtime),
-            )),
-            image_media_dir,
-            ImageGenerateToolConfig {
-                provider_id: image_config.provider.clone(),
-                model_id: image_config.model.clone(),
-                default_format: image_config.default_format.clone(),
-                max_count: image_config.max_count,
-                max_bytes: image_config.max_bytes,
-            },
-        ));
-    }
-    if bundle.config.tools.web.enable {
-        let network_guard = NetworkGuard::with_ssrf_whitelist(
-            bundle
-                .config
-                .tools
-                .ssrf_whitelist
-                .iter()
-                .map(String::as_str),
-        );
-        let user_agent = bundle
-            .config
-            .tools
-            .web
-            .user_agent
-            .clone()
-            .unwrap_or_else(|| "Mozilla/5.0 (shacs-bot)".to_owned());
-        registry.register(WebFetchTool::with_config(
-            WebFetchConfig {
-                user_agent: user_agent.clone(),
-                network_guard: network_guard.clone(),
-                ..WebFetchConfig::default()
-            },
-            Arc::new(shacs_core::tools::UreqWebClient),
-        ));
-        registry.register(WebSearchTool::new(WebSearchConfig {
-            provider: bundle.config.tools.web.search.provider.clone(),
-            api_key: bundle.config.tools.web.search.api_key.clone(),
-            base_url: bundle.config.tools.web.search.base_url.clone(),
-            max_results: bundle.config.tools.web.search.max_results as usize,
-            timeout: Duration::from_secs(u64::from(bundle.config.tools.web.search.timeout)),
-            user_agent,
-            network_guard,
-        }));
-    }
-    registry.register(AskUserTool::new());
-    registry.register(SelfTool::with_modify_allowed(
-        Arc::new(Mutex::new(SelfRuntimeState::new())),
-        allow_side_effect_tools && bundle.config.tools.my.allow_set,
-    ));
-    let plugin_discovery = if allow_side_effect_tools {
-        Some(discover_plugins(
-            &bundle.config,
-            &bundle.context,
-            &ProcessEnv,
-        )?)
-    } else {
-        None
-    };
-    if let Some(discovery) = &plugin_discovery {
-        let _diagnostics = register_plugin_runtime_tools(&mut registry, &discovery.plugins);
-    }
-    let specs = production_mcp_server_specs(
-        bundle,
-        plugin_discovery
-            .as_ref()
-            .map(|discovery| discovery.plugins.as_slice())
-            .unwrap_or(&[]),
-    )?;
-    let (mcp_runtime, mcp_reports) = if specs.is_empty() {
-        (None, Vec::new())
-    } else {
-        let runtime = McpRuntime::new(Some(Arc::new(StdioMcpConnector::new())));
-        let reports = runtime.connect_and_register(&mut registry, &specs);
-        (Some(runtime), reports)
-    };
-    Ok(ProductionTooling {
-        registry,
-        message_tool,
-        mcp_runtime,
-        mcp_reports,
-    })
-}
-
 fn configured_exec_env(config: &shacs_config::Config) -> BTreeMap<String, String> {
     let mut env = config.env.clone();
     env.extend(config.tools.exec.env.clone());
@@ -22999,306 +22618,6 @@ fn format_status_report(report: StatusReport) -> String {
             active_turn_count: 0,
             available: session_available,
         }],
-    );
-    lines.join("\n")
-}
-
-fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
-    let diagnostics_blocked = report.lifecycle.durable_diagnostics.missing
-        || report.lifecycle.durable_diagnostics.corrupt_tail
-        || !report.lifecycle.durable_recovery.writable
-        || !report.lifecycle.durable_work.writable
-        || report.lifecycle.durable_children.recovery_needed_count > 0;
-    let diagnostics_component_count =
-        report.supervision.components.len() + report.capabilities.len();
-    let readiness_available = matches!(
-        report.lifecycle.compatibility,
-        RuntimeCompatibility::FullyCompatible
-    ) && !report.lifecycle.migration_plan.blocked
-        && !matches!(
-            report.lifecycle.ownership.state,
-            RuntimeOwnershipState::Stale
-        );
-    let subagent_child_count = report.lifecycle.durable_children.spawned_count;
-    let tool_attempt_count = report.lifecycle.durable_work.pending_count
-        + report.lifecycle.durable_work.leased_count
-        + report.lifecycle.durable_work.terminal_count;
-    let context_included = true;
-    let app_total_count = usize::from(report.lifecycle.ownership.marker.is_some());
-    let media_artifact_count = report.generated_media.len();
-    let readiness_lines = spec031_cli::readiness::lines(&report).unwrap_or_else(|error| {
-        vec![format!(
-            "Spec031 readiness: kind=readiness state=unavailable severity=error reason=missing lineage=subject:cli:readiness detail={}",
-            redact_string(&error)
-        )]
-    });
-    let mut lines = vec![
-        "shacs-bot runtime inspect".to_owned(),
-        format!(
-            "Config: {} ({})",
-            display_path(&report.config_path),
-            exists_label(report.config_exists)
-        ),
-        format!(
-            "Workspace: {} ({})",
-            display_path(&report.workspace),
-            exists_label(report.workspace_exists)
-        ),
-        format!("Data dir: {}", display_path(&report.data_dir)),
-        format!("Provider: {}", report.provider),
-        format!("Model: {}", report.model),
-        format!("Binary version: {}", report.lifecycle.binary_version),
-        format!(
-            "Data schema: {} (min {})",
-            report.lifecycle.data_schema_version, report.lifecycle.data_schema_min_version
-        ),
-        format!("Compatibility: {}", report.lifecycle.compatibility.as_str()),
-        format!(
-            "Stored-data migration: blocked={} transforms={} families={} ledger_phase={} manual_recovery={}",
-            report.lifecycle.migration_plan.blocked,
-            report
-                .lifecycle
-                .migration_plan
-                .entries
-                .iter()
-                .filter(|entry| entry.action == DurableMigrationAction::Transform)
-                .count(),
-            report.lifecycle.migration_plan.entries.len(),
-            report
-                .lifecycle
-                .migration_ledger
-                .phase
-                .as_deref()
-                .unwrap_or("none"),
-            report.lifecycle.migration_ledger.manual_recovery_required,
-        ),
-        format!(
-            "Durable recovery: {} (writable={}, checkpoint={}, replayed_events={})",
-            report.lifecycle.durable_recovery.status.as_str(),
-            report.lifecycle.durable_recovery.writable,
-            report
-                .lifecycle
-                .durable_recovery
-                .checkpoint_used
-                .as_deref()
-                .unwrap_or("none"),
-            report.lifecycle.durable_recovery.replayed_event_count
-        ),
-        format!(
-            "Durable work: {} (writable={}, pending={}, leased={}, retry_waiting={}, cancel_requested={}, terminal={}, evicted={})",
-            report.lifecycle.durable_work.status.as_str(),
-            report.lifecycle.durable_work.writable,
-            report.lifecycle.durable_work.pending_count,
-            report.lifecycle.durable_work.leased_count,
-            report.lifecycle.durable_work.waiting_retry_count,
-            report.lifecycle.durable_work.cancellation_requested_count,
-            report.lifecycle.durable_work.terminal_count,
-            report.lifecycle.durable_work.terminal_evicted_count,
-        ),
-        format!(
-            "Durable children: spawned={} recovery_needed={} cancel_requested={} terminal={} stale={} duplicate={} late={} evicted={}/{}",
-            report.lifecycle.durable_children.spawned_count,
-            report.lifecycle.durable_children.recovery_needed_count,
-            report.lifecycle.durable_children.cancellation_requested_count,
-            report.lifecycle.durable_children.terminal_count,
-            report.lifecycle.durable_children.stale_decision_count,
-            report.lifecycle.durable_children.duplicate_decision_count,
-            report.lifecycle.durable_children.late_decision_count,
-            report.lifecycle.durable_children.terminal_evicted_count,
-            report.lifecycle.durable_children.decision_evicted_count,
-        ),
-        format!(
-            "Durable diagnostics evidence: schema={}.v{} missing={} corrupt_tail={} evidence={} active_recovery={} terminal={} latest_event_sequence={} refs={}",
-            report.lifecycle.durable_diagnostics.schema_family,
-            report.lifecycle.durable_diagnostics.schema_version,
-            report.lifecycle.durable_diagnostics.missing,
-            report.lifecycle.durable_diagnostics.corrupt_tail,
-            report.lifecycle.durable_diagnostics.evidence_count,
-            report.lifecycle.durable_diagnostics.active_recovery_count,
-            report.lifecycle.durable_diagnostics.terminal_count,
-            report.lifecycle.durable_diagnostics.latest_event_sequence.map(|value| value.to_string()).unwrap_or_else(|| "none".to_owned()),
-            report.lifecycle.durable_diagnostics.recent_trace_refs.len(),
-        ),
-        format!(
-            "Ownership: {} ({})",
-            report.lifecycle.ownership.state.as_str(),
-            report.lifecycle.ownership.reason
-        ),
-        format!("Sessions: {}", report.sessions.count),
-        format!("Workflow recipes: {}", report.workflow_recipes.len()),
-    ];
-    if let Some(marker) = &report.lifecycle.ownership.marker {
-        lines.push(format!(
-            "Owner: ref={} mode={} renewed_at_ms={} expires_at_ms={}",
-            opaque_ref("owner", &marker.owner_id),
-            marker.mode,
-            marker.updated_at_ms,
-            marker.expires_at_ms
-        ));
-    }
-    lines.push(format!(
-        "Supervision: schema=v{} owner={} components={} shutdown=reason={:?} phase={:?}",
-        report.supervision.schema_version,
-        report
-            .supervision
-            .owner
-            .as_ref()
-            .map(|owner| opaque_ref("owner", &owner.owner_id))
-            .unwrap_or_else(|| "none".to_owned()),
-        report.supervision.components.len(),
-        report.supervision.shutdown.reason,
-        report.supervision.shutdown.phase
-    ));
-    for component in &report.supervision.components {
-        lines.push(format!(
-            "Supervision component {}: {} ({})",
-            component.name,
-            component.state,
-            opaque_ref("supervision-detail", &component.detail)
-        ));
-    }
-    if let Some(request) = &report.lifecycle.stop_request {
-        lines.push(format!(
-            "Stop request: {} request_id={} requested_at_ms={} owner_ref={} target_owner_ref={} event_sequence={}",
-            request.request,
-            request.request_id,
-            request.requested_at_ms,
-            request
-                .owner_pid
-                .map(|pid| opaque_ref("pid", &pid.to_string()))
-                .unwrap_or_else(|| "unknown".to_owned()),
-            request
-                .target_owner_id
-                .as_deref()
-                .map(|owner| opaque_ref("owner", owner))
-                .unwrap_or_else(|| "unknown".to_owned()),
-            request
-                .event_sequence
-                .map(|sequence| sequence.to_string())
-                .unwrap_or_else(|| "unknown".to_owned())
-        ));
-    } else {
-        lines.push("Stop request: none".to_owned());
-    }
-    match report.lifecycle.update_marker {
-        Some(marker) => lines.push(format!(
-            "Update marker: {} {} -> {} (migration_required={})",
-            marker.phase, marker.from_version, marker.target_version, marker.migration_required
-        )),
-        None => lines.push("Update marker: none".to_owned()),
-    }
-    for entry in &report.lifecycle.migration_plan.entries {
-        if entry.action != DurableMigrationAction::NoOp {
-            lines.push(format!(
-                "Stored-data migration plan {}: {:?} {} -> {} detail_ref={}",
-                entry.family,
-                entry.action,
-                entry.source_version,
-                entry.target_version,
-                entry.detail_ref
-            ));
-        }
-    }
-    for issue in &report.lifecycle.durable_recovery.issues {
-        lines.push(format!(
-            "Durable recovery issue: {} detail_ref={}",
-            issue.kind.as_str(),
-            opaque_ref("recovery-detail", &issue.detail)
-        ));
-    }
-    for hint in &report.lifecycle.durable_recovery.recovery_hints {
-        lines.push(format!("Durable recovery hint: {}", hint.as_str()));
-    }
-    for issue in &report.lifecycle.durable_work.issues {
-        lines.push(format!(
-            "Durable work issue: {} work_ref={} detail={}",
-            issue.kind.as_str(),
-            opaque_ref("work", &issue.work_id),
-            redact_string(&issue.detail)
-        ));
-    }
-    for child_ref in &report.lifecycle.durable_children.active_child_refs {
-        lines.push(format!("Durable child active: {child_ref}"));
-    }
-    if let Some(latest_key) = report.sessions.latest_key {
-        let updated = report
-            .sessions
-            .latest_updated_at
-            .unwrap_or_else(|| "unknown".to_owned());
-        lines.push(format!("Latest session: {latest_key} ({updated})"));
-    }
-    lines.push(format!(
-        "Runtime containment: contained={} backend={} snapshot_digest={}",
-        optional_bool_label(report.containment.contained),
-        report.containment.backend.as_deref().unwrap_or("none"),
-        report.containment.digest.as_deref().unwrap_or("none")
-    ));
-    lines.push(format!(
-        "Generated image artifacts: {}",
-        report.generated_media.len()
-    ));
-    for artifact in &report.generated_media {
-        lines.push(format!(
-            "  - {}: {} {} bytes redacted={}",
-            artifact.artifact_id, artifact.mime_type, artifact.byte_len, artifact.redacted
-        ));
-    }
-    lines.push(format!(
-        "Channel restart states: {} (hint projection; not session truth)",
-        report.channel_restart.len()
-    ));
-    for state in &report.channel_restart {
-        lines.push(format_channel_restart_state_line(state));
-    }
-    if report.providers.is_empty() {
-        lines.push("Configured providers: none".to_owned());
-    } else {
-        lines.push("Configured providers:".to_owned());
-        for provider in &report.providers {
-            lines.push(format!(
-                "  - {}: api_key={}, api_base={}",
-                provider.name,
-                configured_label(provider.has_api_key),
-                configured_label(provider.has_api_base)
-            ));
-        }
-    }
-    lines.push("Runtime capabilities:".to_owned());
-    for capability in &report.capabilities {
-        lines.push(format!(
-            "  - {}: {} ({})",
-            capability.component,
-            runtime_capability_label(&capability.status),
-            capability.reason
-        ));
-    }
-    lines.extend(readiness_lines);
-    spec031_cli::push(
-        &mut lines,
-        &[
-            spec031_cli::Projection::Diagnostics {
-                component_count: diagnostics_component_count,
-                blocked: diagnostics_blocked,
-            },
-            spec031_cli::Projection::Readiness {
-                available: readiness_available,
-            },
-            spec031_cli::Projection::Subagent {
-                child_count: subagent_child_count,
-            },
-            spec031_cli::Projection::Tool {
-                attempt_count: tool_attempt_count,
-            },
-            spec031_cli::Projection::Context {
-                included: context_included,
-            },
-            spec031_cli::Projection::App {
-                total_count: app_total_count,
-            },
-            spec031_cli::Projection::Media {
-                artifact_count: media_artifact_count,
-            },
-        ],
     );
     lines.join("\n")
 }
@@ -26990,6 +26309,7 @@ mod tests {
                     chat_id: Some("default"),
                     current_role: "user",
                     session_summary: None,
+                    analyzer_invocation: None,
                 });
         let request_json = serde_json::to_string(&messages)?;
 

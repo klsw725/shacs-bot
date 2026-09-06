@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting stream coalescer; Spec034 diff is one exhaustive media lifecycle integration arm
 use crate::controlled_child::ControlledChildAbort;
 use shacs_config::RawCredential;
 use shacs_providers::{ProviderEvent, ProviderInvocation};
@@ -428,7 +429,8 @@ impl StreamDeltaCoalescer {
             ProviderEvent::Finish { .. }
             | ProviderEvent::ToolCallStart { .. }
             | ProviderEvent::ToolCallDelta { .. }
-            | ProviderEvent::ToolCallReady { .. } => self.flush(),
+            | ProviderEvent::ToolCallReady { .. }
+            | ProviderEvent::MediaLifecycle(_) => self.flush(),
         }
     }
 

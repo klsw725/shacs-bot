@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting runtime-loop suite; Spec034 diff is one test-fixture deadline field hook
 use serde_json::{json, Map, Value};
 use sha2::Digest;
 use shacs_config::AutoApprovalConfig;
@@ -3241,6 +3242,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         in_cron_context: false,
         record_channel_delivery: false,
         cancellation_token: None,
+        deadline: None,
     };
 
     let report = RuntimeToolExecutor::new(&registry).execute_tool_calls(

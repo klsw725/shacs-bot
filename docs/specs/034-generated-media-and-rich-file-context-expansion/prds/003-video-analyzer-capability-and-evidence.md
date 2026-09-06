@@ -1,6 +1,6 @@
 # PRD 003. video analyzer capability and evidence
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
@@ -39,3 +39,5 @@ Video analyzer capability와 bounded metadata/subtitle/transcript/keyframe/scene
 2. Codec/duration/truncation fixtures.
 3. 030/031 owner-fact and 035 projection audits.
 4. Bounded-evidence non-guarantee review.
+
+Completion evidence: [Todo 4 analyzer receipt](../../../../.omo/evidence/spec034/task-4-analyzer.json), [Todo 9 runtime receipt](../../../../.omo/evidence/spec034/task-9-video-runtime.json), [Todo 11 parity receipt](../../../../.omo/evidence/spec034/task-11-parity.json), and [Spec034 closure mapping](../CLOSURE.md).

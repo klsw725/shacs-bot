@@ -148,6 +148,21 @@ curl http://127.0.0.1:8900/v1/readiness
 curl http://127.0.0.1:8900/v1/diagnostics
 ```
 
+Spec 034 generated media와 video analyzer 상태는 기존 runtime/API/TUI/channel 표면에서 확인합니다. 별도 image editor CLI는 없습니다. `image_generate`의 Codex final output과 검증된 edit/mask output은 local media root에 commit된 뒤 relative artifact ref로 노출되며, provider별 미지원 edit/mask/variation은 `unsupported`가 될 수 있습니다. `runtime inspect`는 canonical media projection이 없을 때 성공을 합성하지 않고 unavailable로 표시합니다. API adapter에 projection이 configured된 경우 media diagnostics를 반환하고, 없으면 404입니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime inspect --workspace /tmp/shacs-ws
+curl --fail-with-body http://127.0.0.1:8900/v1/media/diagnostics
+```
+
+Video analyzer는 runtime에 주입된 경우에만 bounded metadata/transcript/scene/keyframe evidence를 만들며, analyzer missing, unsupported codec, extraction failure, truncation과 timeout/cancellation을 성공으로 표시하지 않습니다. Built-in ffmpeg, full codec understanding, CDN/gallery/editor, all-provider parity, arbitrary URL intake, permanent remote reference, universal containment와 complete redaction은 제공하거나 보장하지 않습니다. Spec034의 정확한 22/22 mapping, [review remediation PASS](.omo/evidence/spec034/remediation/PASS.json), [Todo 14 QA baseline](.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)은 구현과 회귀 baseline입니다. 최신 source-bound release 상태는 [canonical final manifest](.omo/evidence/spec034/task-15-closure/final-committed/manifest.json)가 현재 committed source와 최종 5개 리뷰를 결합해 판정하며, manifest가 없거나 검증에 실패하면 final seal이 아닙니다. 상세 범위와 판정 계약은 [`Spec 034 CLOSURE`](docs/specs/034-generated-media-and-rich-file-context-expansion/CLOSURE.md)를 참고하세요.
+
+`spec034-release-runner` 성공 stdout은 runner가 반환한 committed publication digest인 lowercase `sha256:<64 hex>` 한 줄뿐이며 stderr는 비어 있습니다. 실패 시 stdout은 비어 있고 stderr는 `spec034 release runner failed: `로 시작하며 non-zero로 종료합니다.
+
+검증된 Rust tool closure의 영속 캐시는 Cargo build target과 분리됩니다. Darwin 기본 위치는 `~/Library/Caches/shacs-bot/spec034-release`이고, 테스트나 격리 실행은 절대 경로 `SHACS_SPEC034_RELEASE_CACHE_ROOT`로 별도 사용자 소유 cache root를 지정할 수 있습니다. Cache root는 Cargo target 내부, symlink leaf, repository 소유자와 다른 디렉터리를 거부합니다. 캐시는 검증된 tool binary와 digest manifest만 보관하며 credential, environment secret, 실행별 source copy는 보관하지 않습니다.
+
+이 digest의 structural audit는 artifact 구조와 expected manifest/run ID/digest 결합을 검사하지만 외부 실행 attestation 자체는 아닙니다. `success-fixture` 성공은 runner mechanics만 검증하며 Spec034 closure가 아니고, dirty current-worktree 실행은 provenance를 기록할 뿐 final closure가 아닙니다. Darwin APFS vnode ledger와 suspended-process CDHash 검증에서 감지된 실행 중 tool/runtime tamper는 fresh execution attestation과 publication을 fail closed합니다. Cleanup은 root와 nested pathname identity를 destructive unlink 직전에 다시 확인하며 감지된 교체나 event 불일치는 publication을 차단합니다. 다만 지속적으로 악의적인 same-UID process가 identity 확인과 unlink syscall 사이에 pathname을 다시 교체할 수 있으므로 unrelated replacement의 원자적 보존과 isolation root의 보장된 회수는 제공하지 않습니다. Public-API polling 사이의 double-fork/setsid 후 reparent 원자적 추적, 승인되지 않은 descendant의 zero-instruction 실행 방지, universal sandbox/process containment도 보장하지 않습니다.
+
 Spec 035 implemented baseline에서 기존 QA 기록이 있는 표면은 TUI, `agent` REPL, secret-ref-only onboard wizard, readiness API/diagnostics, delivery hint projection, release runner artifact입니다. 이는 현재 Spec 035 closure PASS 또는 planned Tasks/reconnect parity 완료를 뜻하지 않습니다. TUI는 live runtime projection을 읽어 session, approval, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 먼저 workspace template과 session store를 만들고, 표시할 session을 생성한 뒤 `--once` 또는 interactive TUI를 실행하세요:
 
 ```sh

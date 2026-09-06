@@ -1,6 +1,7 @@
 pub mod clients;
 pub mod config;
 pub mod error;
+pub mod media;
 pub mod model;
 pub mod provider;
 pub mod registry;
@@ -20,8 +21,10 @@ pub use clients::azure_openai::{
 };
 pub use clients::codex::{
     build_codex_headers, build_codex_responses_request, codex_client_from_config,
-    parse_codex_stream, CodexClient, CodexHttpStreamResponse, CodexHttpTransport,
-    CodexRequestParts, UreqCodexHttpTransport,
+    parse_codex_media_stream, parse_codex_stream, CodexClient, CodexHttpStreamResponse,
+    CodexHttpTransport, CodexRequestParts, UreqCodexHttpTransport, CODEX_ERROR_RESPONSE_MAX_BYTES,
+    CODEX_ERROR_RESPONSE_READ_LIMIT, CODEX_SSE_MAX_AGGREGATE_BYTES, CODEX_SSE_MAX_FRAME_BYTES,
+    CODEX_SSE_MAX_LINE_BYTES, CODEX_SSE_MAX_PARTIAL_IMAGES,
 };
 pub use clients::codex_image_generation::{
     build_codex_image_generation_request, codex_image_generation_client_from_config,
@@ -36,9 +39,20 @@ pub use clients::image_generation::{
     resolve_image_generation_client_with_request, resolve_image_generation_provider,
     DefaultModelImageGenerationClient, GeneratedImage, ImageGenerationCapability,
     ImageGenerationClient, ImageGenerationHttpResponse, ImageGenerationHttpTransport,
-    ImageGenerationRequest, ImageGenerationRequestParts, ImageGenerationResolutionRequest,
-    ImageGenerationResult, OpenAiImageGenerationClient, OpenRouterImageGenerationClient,
-    ResolvedImageGenerationClient, UreqImageGenerationHttpTransport,
+    ImageGenerationItemId, ImageGenerationRequest, ImageGenerationRequestId,
+    ImageGenerationRequestParts, ImageGenerationResolutionRequest, ImageGenerationResult,
+    ImageGenerationUsage, ImageMimeType, OpenAiImageGenerationClient,
+    OpenRouterImageGenerationClient, ResolvedImageGenerationClient,
+    UreqImageGenerationHttpTransport, IMAGE_GENERATION_PROVIDER_ERROR_CODE,
+    IMAGE_GENERATION_RESPONSE_BODY_TOO_LARGE_CODE, IMAGE_GENERATION_RESPONSE_MAX_BYTES,
+    IMAGE_GENERATION_RESPONSE_READ_LIMIT,
+};
+pub use clients::image_operations::{
+    image_operation_capabilities, ImageEditRequest, ImageFileInput, ImageLifecycleError,
+    ImageMaskRequest, ImageMultipartRequestParts, ImageOperation, ImageOperationCapabilities,
+    ImageOperationContractError, ImageOperationLifecycle, ImageOperationLifecycleState,
+    ImageOperationOptions, ImageOperationRequest, ImageOperationResult, ImageVariationRequest,
+    MAX_IMAGE_OPERATION_INPUT_BYTES,
 };
 pub use clients::openai_compatible::{
     build_chat_completions_request, build_chat_completions_stream_request, build_headers,
@@ -64,6 +78,12 @@ pub use clients::{
 };
 pub use config::{interpolate_env, AgentDefaults, ProviderConfig, ProvidersConfig};
 pub use error::ProviderError;
+pub use media::{
+    ProviderLocalMediaCandidate, ProviderMediaBytes, ProviderMediaCandidate,
+    ProviderMediaCandidateId, ProviderMediaContractError, ProviderMediaLifecycleObservation,
+    ProviderMediaLifecycleStatus, ProviderMediaOrigin, ProviderRemoteMedia,
+    ProviderRemoteMediaCandidate,
+};
 pub use model::{ModelCapabilities, ModelCost, ModelInfo, ModelLimits, ModelModalities};
 pub use provider::{Provider, ProviderClient, ProviderEvent, ProviderInvocation, ProviderRequest};
 pub use registry::{find_by_name, provider_specs, ProviderMatch, ProviderRegistry, ProviderSpec};

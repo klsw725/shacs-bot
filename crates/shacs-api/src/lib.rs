@@ -40,9 +40,12 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{timeout, Duration};
 
+// allow: SIZE_OK — preexisting API facade; new media behavior lives in focused media_api modules
+mod media_api;
 mod spec030_api;
 mod spec030_client;
 mod spec031_api;
+pub use media_api::*;
 pub use spec030_api::TRUSTED_RUNTIME_PATH;
 pub use spec030_client::{
     observe_trusted_runtime, TrustedRuntimeObservation, TrustedRuntimeProjectionSource,
@@ -215,154 +218,6 @@ pub struct MultipartChatRequest {
 pub struct MultipartFile {
     pub filename: Option<String>,
     pub bytes: Vec<u8>,
-}
-
-pub trait ChatCompletionAdapter {
-    fn configured_model(&self) -> &str;
-
-    fn models(&self) -> Vec<ApiModel> {
-        vec![ApiModel {
-            id: self.configured_model().to_owned(),
-            owned_by: "shacs-bot".to_owned(),
-        }]
-    }
-
-    fn complete_chat(&self, invocation: ChatCompletionInvocation) -> Result<LlmResponse, ApiError>;
-
-    fn stream_chat(
-        &self,
-        invocation: ChatCompletionInvocation,
-        on_event: &mut dyn FnMut(ProviderEvent),
-    ) -> Result<LlmResponse, ApiError> {
-        let response = self.complete_chat(invocation)?;
-        if let Some(content) = response
-            .content
-            .as_ref()
-            .filter(|content| !content.is_empty())
-        {
-            on_event(ProviderEvent::TextDelta {
-                text: content.clone(),
-            });
-        }
-        on_event(ProviderEvent::Finish {
-            usage: json!(response.usage),
-            reason: response.finish_reason.clone(),
-        });
-        Ok(response)
-    }
-
-    fn persist_media_data_urls(&self, data_urls: &[String]) -> Result<Vec<String>, ApiError> {
-        Ok(data_urls.to_vec())
-    }
-
-    fn persist_media_data_urls_for_session(
-        &self,
-        _session_key: &str,
-        data_urls: &[String],
-    ) -> Result<Vec<String>, ApiError> {
-        self.persist_media_data_urls(data_urls)
-    }
-
-    fn persist_uploaded_file(
-        &self,
-        _filename: Option<&str>,
-        _bytes: &[u8],
-    ) -> Result<String, ApiError> {
-        Err(ApiError::unsupported_media(
-            "multipart file persistence is not configured for this adapter",
-        ))
-    }
-
-    fn persist_uploaded_file_for_session(
-        &self,
-        _session_key: &str,
-        filename: Option<&str>,
-        bytes: &[u8],
-    ) -> Result<String, ApiError> {
-        self.persist_uploaded_file(filename, bytes)
-    }
-
-    fn session_workspace(&self) -> Option<PathBuf> {
-        None
-    }
-
-    fn runtime_data_dir(&self) -> Option<PathBuf> {
-        None
-    }
-
-    fn local_improvement(
-        &self,
-        _action: &str,
-        _proposal_id: &str,
-        _body: Value,
-    ) -> Result<Value, ApiError> {
-        Err(ApiError::not_found(
-            "local improvement surface is not configured",
-        ))
-    }
-
-    fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
-        let mut snapshot = DiagnosticsSnapshot::unavailable(
-            "runtime diagnostics are not configured for this adapter",
-        );
-        snapshot.diagnostics.push(DiagnosticsRecord::new(
-            DiagnosticsSeverity::Info,
-            DiagnosticsKind::Api,
-            "diagnostics request was read-only",
-        ));
-        snapshot
-    }
-
-    fn diagnostics_projection(&self) -> Value {
-        self.diagnostics_snapshot().redacted_value()
-    }
-
-    fn readiness_projection(&self) -> Option<Value> {
-        None
-    }
-
-    fn trusted_runtime_projection(&self) -> Spec030RuntimeProjection {
-        Spec030RuntimeProjection::unavailable(Spec030UnavailableReason::OwnerFactsMissing)
-    }
-
-    fn spec031_projection(
-        &self,
-        _projection: Spec031ApiProjection,
-    ) -> Result<Option<shacs_projection::Spec031Envelope>, ApiError> {
-        Ok(None)
-    }
-
-    fn workflow_recipes_projection(&self) -> Option<Value> {
-        None
-    }
-
-    fn remembered_permissions_projection(&self) -> Option<RememberedPermissionProjection> {
-        None
-    }
-
-    fn process_websocket_frame(
-        &self,
-        _frame: Value,
-        _client_id: &str,
-        _default_chat_id: &str,
-    ) -> Result<Vec<WebSocketServerEvent>, ApiError> {
-        Err(ApiError::not_implemented(
-            "websocket frame handling is not configured for this adapter",
-        ))
-    }
-
-    fn process_websocket_frame_streaming(
-        &self,
-        frame: Value,
-        client_id: &str,
-        default_chat_id: &str,
-        on_event: &mut dyn FnMut(WebSocketServerEvent),
-    ) -> Result<(), ApiError> {
-        for event in self.process_websocket_frame(frame, client_id, default_chat_id)? {
-            on_event(event);
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone)]
@@ -1127,85 +982,6 @@ pub fn api_error_response(error: &ApiError) -> Value {
     })
 }
 
-pub fn handle_api_request(
-    request: ApiHttpRequest,
-    adapter: &(impl ChatCompletionAdapter + ?Sized),
-) -> ApiHttpResponse {
-    let path = spec031_api::spec031_projection_path(&request.path);
-    match (request.method, path) {
-        (ApiMethod::Get, HEALTH_PATH) => json_response(200, health_response()),
-        (ApiMethod::Get, MODELS_PATH) => {
-            json_response(200, models_response_with_owned_by(&adapter.models()))
-        }
-        (ApiMethod::Get, SESSIONS_PATH) => handle_session_query_request(path, adapter),
-        (ApiMethod::Get, CHAT_COMPLETIONS_PATH) => error_response(ApiError::method_not_allowed(
-            "method is not supported for this endpoint",
-        )),
-        (ApiMethod::Get, _) => {
-            if let Some(response) =
-                spec030_api::handle_trusted_runtime_request(&request.path, adapter)
-            {
-                return response;
-            }
-            if let Some(response) =
-                spec031_api::handle_spec031_projection_request(&request.path, adapter)
-            {
-                return response;
-            }
-            match path {
-                WORKFLOW_RECIPES_PATH => match adapter.workflow_recipes_projection() {
-                    Some(projection) => json_response(200, projection),
-                    None => error_response(ApiError::not_found(
-                        "workflow recipe projection is not configured",
-                    )),
-                },
-                PERMISSIONS_PATH => match adapter.remembered_permissions_projection() {
-                    Some(projection) => json_response(200, json!(projection)),
-                    None => error_response(ApiError::not_found(
-                        "remembered permission projection is not configured",
-                    )),
-                },
-                _ if path.starts_with("/v1/improvements/") => {
-                    handle_local_improvement(request, adapter)
-                }
-                _ if path.starts_with("/v1/sessions/") => {
-                    if let Some(session_key) = spec033_snapshot_session_key(path) {
-                        return spec033_snapshot_response(adapter, &session_key);
-                    }
-                    handle_session_query_request(path, adapter)
-                }
-                _ => error_response(ApiError::not_found("API route not found")),
-            }
-        }
-        (ApiMethod::Post, CHAT_COMPLETIONS_PATH) => {
-            handle_chat_completion_request(request, adapter)
-        }
-        (ApiMethod::Post, _) if path.starts_with("/v1/improvements/") => {
-            handle_local_improvement(request, adapter)
-        }
-        (ApiMethod::Post, _) if path.starts_with("/v1/sessions/") => {
-            handle_spec033_goal_action(request, adapter)
-        }
-        (_, HEALTH_PATH)
-        | (_, MODELS_PATH)
-        | (_, DIAGNOSTICS_PATH)
-        | (_, SUBAGENTS_PATH)
-        | (_, TOOLS_PATH)
-        | (_, READINESS_PATH)
-        | (_, TRUSTED_RUNTIME_PATH)
-        | (_, WORKFLOW_RECIPES_PATH)
-        | (_, PERMISSIONS_PATH)
-        | (_, CHAT_COMPLETIONS_PATH)
-        | (_, SESSIONS_PATH) => error_response(ApiError::method_not_allowed(
-            "method is not supported for this endpoint",
-        )),
-        (_, path) if path.starts_with("/v1/sessions/") => error_response(
-            ApiError::method_not_allowed("method is not supported for this endpoint"),
-        ),
-        _ => error_response(ApiError::not_found("API route not found")),
-    }
-}
-
 fn handle_local_improvement(
     request: ApiHttpRequest,
     adapter: &(impl ChatCompletionAdapter + ?Sized),
@@ -1627,7 +1403,7 @@ async fn handle_websocket_connection(
     while let Some(message) = socket.recv().await {
         let result = match websocket_frame_from_axum(message) {
             Ok(Some(frame)) => {
-                dispatch_websocket_frame(
+                media_api::dispatch_websocket_frame(
                     state.clone(),
                     frame,
                     client_id.clone(),
@@ -1673,52 +1449,6 @@ async fn handle_websocket_connection(
             }
         }
     }
-}
-
-async fn dispatch_websocket_frame(
-    state: ApiRouterState,
-    frame: Value,
-    client_id: String,
-    default_chat_id: String,
-    socket: &mut WebSocket,
-    reconnect_scope: &mut WebSocketReconnectScope,
-) -> Result<(), ApiError> {
-    let fallback_chat_id = default_chat_id.clone();
-    let (event_tx, mut event_rx) = mpsc::channel::<WebSocketServerEvent>(64);
-    let adapter = state.adapter.clone();
-    let spec031_channel_observer = state.spec031_channel_observer.clone();
-    let task = tokio::task::spawn_blocking(move || {
-        let mut emit = move |event| {
-            if event_tx.blocking_send(event).is_err() {
-                observe_progress_delivery(
-                    spec031_channel_observer.as_ref(),
-                    shacs_channels::WEBSOCKET_CHANNEL,
-                    shacs_projection::Spec031ProgressDelivery::Dropped,
-                    ChannelDeliveryObservation {
-                        dropped: Some(1),
-                        slow_consumer: Some(1),
-                        ..ChannelDeliveryObservation::unavailable()
-                    },
-                );
-            }
-        };
-        adapter.process_websocket_frame_streaming(frame, &client_id, &default_chat_id, &mut emit)
-    });
-
-    while let Some(event) = event_rx.recv().await {
-        send_websocket_event(
-            socket,
-            event,
-            &fallback_chat_id,
-            state.spec031_channel_observer.as_ref(),
-            state.reconnect_tracker.clone(),
-            reconnect_scope,
-        )
-        .await?;
-    }
-
-    task.await
-        .unwrap_or_else(|_| Err(ApiError::internal("websocket frame task failed")))
 }
 
 async fn send_websocket_event(
@@ -2667,55 +2397,6 @@ pub fn chat_completion_response(
     })
 }
 
-pub fn stream_event_frame(
-    event: &ProviderEvent,
-    model: &str,
-    request_id: &str,
-    created: u64,
-) -> String {
-    let chunk = match event {
-        ProviderEvent::TextDelta { text } => json!({
-            "id": request_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {"content": text},
-                "finish_reason": Value::Null,
-            }],
-        }),
-        ProviderEvent::ReasoningDelta { text } => json!({
-            "id": request_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {"reasoning_content": text},
-                "finish_reason": Value::Null,
-            }],
-        }),
-        ProviderEvent::Finish { reason, .. } => {
-            finish_stream_chunk(model, request_id, created, reason)
-        }
-        ProviderEvent::ToolCallStart { .. }
-        | ProviderEvent::ToolCallDelta { .. }
-        | ProviderEvent::ToolCallReady { .. } => json!({
-            "id": request_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": Value::Null,
-            }],
-        }),
-    };
-    sse_data_frame(&chunk)
-}
-
 pub fn finish_stream_frame(model: &str, request_id: &str, created: u64, reason: &str) -> String {
     sse_data_frame(&finish_stream_chunk(model, request_id, created, reason))
 }
@@ -3278,10 +2959,7 @@ mod tests {
                         chat_id: chat_id.to_owned(),
                         stream_id: Some("stream-a".to_owned()),
                     }),
-                    ProviderEvent::ReasoningDelta { .. }
-                    | ProviderEvent::ToolCallStart { .. }
-                    | ProviderEvent::ToolCallDelta { .. }
-                    | ProviderEvent::ToolCallReady { .. } => {}
+                    _ => {}
                 }
             }
             events.push(WebSocketServerEvent::Message {

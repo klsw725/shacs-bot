@@ -136,6 +136,7 @@ fn action_runner_approval_reaches_production_consumer_once() -> Result<(), Box<d
     assert_eq!(duplicate.kind, SurfaceActionOutcomeKind::Requested);
     thread::yield_now();
     assert_eq!(runtime.execution_count(), 1);
+    wait_until(|| !runtime.session_busy())?;
 
     let deny_lineage = runtime.create_pending()?;
     let denied = run_surface_action(

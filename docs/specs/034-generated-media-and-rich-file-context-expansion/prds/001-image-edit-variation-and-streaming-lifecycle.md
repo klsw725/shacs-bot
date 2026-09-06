@@ -1,6 +1,6 @@
 # PRD 001. image edit, variation, and streaming lifecycle
 
-Status: Planned
+Status: Complete (Scoped)
 
 ## Goal
 
@@ -38,3 +38,5 @@ Image edit, mask, variation request와 partial/final streaming state를 provider
 1. Provider-neutral model tests and one adapter fixture.
 2. Source/mask admission failure matrix.
 3. Partial/final/cancel/failure lifecycle artifacts.
+
+Completion evidence: [Todo 2 provider-operation receipt](../../../../.omo/evidence/spec034/task-2-provider-operations.json), [Todo 7 admission receipt](../../../../.omo/evidence/spec034/task-7-image-edit.json), and [Spec034 closure mapping](../CLOSURE.md).

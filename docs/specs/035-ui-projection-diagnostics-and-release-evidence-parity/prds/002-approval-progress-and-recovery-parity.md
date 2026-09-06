@@ -86,10 +86,12 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-core --all-targ
 
 ## Closure Evidence
 
-1. Lifecycle scenario matrix: `.omo/evidence/spec031/prd002/lifecycle-parity.json`.
-2. Approval lineage audit: `.omo/evidence/spec031/prd002/approval-lineage-audit.md`.
-3. Recovery marker/checkpoint audit: `.omo/evidence/spec031/prd002/recovery-projection-audit.md`.
-4. Surface transcripts and cleanup receipt: `.omo/evidence/spec031/prd002/qa/manual-cli-transcript.md` and `.omo/evidence/spec031/prd002/qa/cleanup-receipt.md`.
+The following historical artifact names are retained for auditability, but every listed file is **Unavailable** in this checkout and therefore does not prove current closure.
+
+1. **Unavailable** - lifecycle scenario matrix `.omo/evidence/spec031/prd002/lifecycle-parity.json` is absent; regenerate it before asserting lifecycle parity.
+2. **Unavailable** - approval lineage audit `.omo/evidence/spec031/prd002/approval-lineage-audit.md` is absent; regenerate it before asserting lineage coverage.
+3. **Unavailable** - recovery marker/checkpoint audit `.omo/evidence/spec031/prd002/recovery-projection-audit.md` is absent; regenerate it before asserting recovery projection coverage.
+4. **Unavailable** - surface transcript `.omo/evidence/spec031/prd002/qa/manual-cli-transcript.md` and cleanup receipt `.omo/evidence/spec031/prd002/qa/cleanup-receipt.md` are absent; rerun manual CLI QA and cleanup before using these names as evidence.
 
 ## Exit Criteria
 

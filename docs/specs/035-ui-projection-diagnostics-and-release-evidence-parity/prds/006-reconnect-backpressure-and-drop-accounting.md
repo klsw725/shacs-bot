@@ -85,10 +85,12 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-channels --all-
 
 ## Closure Evidence
 
-1. Deterministic scenario results: `.omo/evidence/spec031/prd006/accounting-scenarios.json`.
-2. Cross-surface accounting comparison: `.omo/evidence/spec031/prd006/accounting-parity.json`.
-3. Reconnect and repeated interruption audit: `.omo/evidence/spec031/prd006/reconnect-audit.md`.
-4. QA transcripts and cleanup receipts: `.omo/evidence/spec031/prd006/qa/frame-transcripts.json` and `.omo/evidence/spec031/prd006/qa/main-clean-final.txt`.
+The following historical artifact names are retained for auditability, but every listed file is **Unavailable** in this checkout and therefore does not prove current closure.
+
+1. **Unavailable** - deterministic scenario results `.omo/evidence/spec031/prd006/accounting-scenarios.json` are absent; regenerate them before asserting accounting coverage.
+2. **Unavailable** - cross-surface accounting comparison `.omo/evidence/spec031/prd006/accounting-parity.json` is absent; regenerate it before asserting accounting parity.
+3. **Unavailable** - reconnect and repeated interruption audit `.omo/evidence/spec031/prd006/reconnect-audit.md` is absent; regenerate it before asserting reconnect coverage.
+4. **Unavailable** - QA transcript `.omo/evidence/spec031/prd006/qa/frame-transcripts.json` and cleanup receipt `.omo/evidence/spec031/prd006/qa/main-clean-final.txt` are absent; rerun frame QA and cleanup before using these names as evidence.
 
 ## Exit Criteria
 

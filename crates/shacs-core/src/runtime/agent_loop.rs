@@ -850,6 +850,7 @@ impl<'a> AgentLoop<'a> {
         let pending_permission_approval = pending_permission_approval(&session);
         let pending_ask_id = pending_ask_user_id(&session.messages);
         let execution_ledger = Arc::new(Mutex::new(execution_ledger_for_turn(&message, &session)));
+        let mut media_turn = super::turn!(self, &session_key, MAX_INJECTIONS_PER_TURN);
         let turn_provenance =
             durable_event_provenance(&self.context_builder, &recover_lock(&execution_ledger));
         let (initial_messages, context_provider_handoff) = if let Some(approval) =
@@ -1314,6 +1315,7 @@ impl<'a> AgentLoop<'a> {
                 chat_id: Some(&message.chat_id),
                 current_role: "user",
                 session_summary: session_summary.as_deref(),
+                analyzer_invocation: Some(media_turn.analyzer()),
             });
             let context_provider_handoff = build_live_context_provider_handoff(
                 &self.config.workspace,
@@ -1406,28 +1408,9 @@ impl<'a> AgentLoop<'a> {
             in_cron_context: false,
             record_channel_delivery: self.config.record_channel_delivery,
             cancellation_token: None,
+            deadline: None,
         };
-        let cancellation_token = self
-            .task_registry
-            .cancellation_token(&session_key)
-            .or_else(|| {
-                self.config
-                    .execution_control
-                    .as_ref()
-                    .map(AutomationExecutionControl::cancellation_token)
-            })
-            .or_else(|| self.turn_lock.cancellation_token(&session_key));
-        let provider_invocation = cancellation_token.as_ref().map_or_else(
-            || ProviderInvocation::uncancelled(self.config.provider_runtime_override.clone()),
-            |token| token.provider_invocation(self.config.provider_runtime_override.clone()),
-        );
-        let provider_invocation = self
-            .config
-            .execution_control
-            .as_ref()
-            .map_or(provider_invocation.clone(), |control| {
-                provider_invocation.with_deadline(control.deadline())
-            });
+        let provider_invocation: ProviderInvocation = media_turn.invoke(is_builtin_command);
         let provider_client = ProviderInvocationClient::new(self.client, &provider_invocation);
         let mut spec = AgentRunSpec::new(
             initial_messages.clone(),
@@ -1449,17 +1432,8 @@ impl<'a> AgentLoop<'a> {
         spec.context_provider_handoff = context_provider_handoff;
         spec.concurrent_tools = self.config.concurrent_tools;
         spec.fail_on_tool_error = self.config.fail_on_tool_error;
-        spec.tool_context = ToolExecutionContext {
-            cancellation_token: cancellation_token.clone(),
-            ..tool_context.clone()
-        };
+        media_turn.apply(&mut spec, tool_context.clone());
         spec.context_tools = self.context_tools.clone();
-        spec.cancellation_token = cancellation_token;
-        spec.deadline = self
-            .config
-            .execution_control
-            .as_ref()
-            .map(AutomationExecutionControl::deadline);
         spec.execution_scope = Some(ExecutionScope::new(session_key.clone(), turn_id.clone()));
         spec.execution_ledger = Some(execution_ledger.clone());
         let snapshot_source = self.config.execution_snapshot_source.clone();
@@ -1478,12 +1452,6 @@ impl<'a> AgentLoop<'a> {
         spec.tool_event_callback = self.tool_event_callback.clone();
         spec.provider_event_callback = self.provider_event_callback.clone();
         spec.agent_hook = self.agent_hook.clone();
-        spec.mid_turn_injection_callback = Some(mid_turn_injection_callback(
-            self.bus.clone(),
-            session_key.clone(),
-            self.config.unified_session_key.clone(),
-            self.context_builder.clone(),
-        ));
         spec.checkpoint_callback = Some(Arc::new(move |checkpoint| {
             let mut session = recover_lock(&checkpoint_capture);
             session
@@ -4284,23 +4252,6 @@ fn runtime_instructions(messages: &[Value]) -> String {
         .join("\n")
 }
 
-fn mid_turn_injection_callback(
-    bus: MessageBus,
-    session_key: String,
-    unified_session_key: Option<String>,
-    context_builder: ContextBuilder,
-) -> Arc<dyn Fn() -> Vec<Value> + Send + Sync> {
-    Arc::new(move || {
-        bus.drain_inbound_matching(MAX_INJECTIONS_PER_TURN, |message| {
-            effective_message_session_key(message, unified_session_key.as_deref()) == session_key
-                && !is_builtin_command(&message.content)
-        })
-        .into_iter()
-        .map(|message| inbound_to_injected_user_message(&context_builder, &message))
-        .collect()
-    })
-}
-
 fn effective_message_session_key(
     message: &InboundMessage,
     unified_session_key: Option<&str>,
@@ -4312,22 +4263,6 @@ fn effective_message_session_key(
             .map(str::to_owned)
             .unwrap_or_else(|| message.session_key())
     }
-}
-
-fn inbound_to_injected_user_message(builder: &ContextBuilder, message: &InboundMessage) -> Value {
-    builder
-        .build_messages(ContextBuildRequest {
-            history: Vec::new(),
-            current_message: &message.content,
-            media: &message.media,
-            channel: Some(&message.channel),
-            chat_id: Some(&message.chat_id),
-            current_role: "user",
-            session_summary: None,
-        })
-        .into_iter()
-        .find(|candidate| candidate.get("role").and_then(Value::as_str) == Some("user"))
-        .unwrap_or_else(|| json!({"role": "user", "content": message.content}))
 }
 
 fn append_ask_user_resume(session: &mut Session, tool_call_id: &str, content: &str) {
@@ -6776,3 +6711,4 @@ mod tests {
         Ok(skill_file)
     }
 }
+// allow: SIZE_OK — preexisting agent loop; Spec034 turn control is delegated through five facade hooks

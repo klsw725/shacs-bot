@@ -91,10 +91,12 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-api --all-targe
 
 ## Closure Evidence
 
-1. Aggregation matrix: `.omo/evidence/spec031/prd003/task-10-readiness.json`.
-2. Cross-surface comparison: `.omo/evidence/spec031/prd003/readiness-parity.json`.
-3. Diagnostics bundle read audit: `.omo/evidence/spec031/prd003/diagnostics-bundle-audit.md`.
-4. QA transcripts and cleanup receipts: `.omo/evidence/spec031/prd003/qa/manual-api-transcript.md` and `.omo/evidence/spec031/prd003/qa/cleanup-receipt.md`.
+The following historical artifact names are retained for auditability, but every listed file is **Unavailable** in this checkout and therefore does not prove current closure.
+
+1. **Unavailable** - aggregation matrix `.omo/evidence/spec031/prd003/task-10-readiness.json` is absent; regenerate it before asserting readiness aggregation coverage.
+2. **Unavailable** - cross-surface comparison `.omo/evidence/spec031/prd003/readiness-parity.json` is absent; regenerate it before asserting readiness parity.
+3. **Unavailable** - diagnostics bundle read audit `.omo/evidence/spec031/prd003/diagnostics-bundle-audit.md` is absent; regenerate it before asserting bundle coverage.
+4. **Unavailable** - QA transcript `.omo/evidence/spec031/prd003/qa/manual-api-transcript.md` and cleanup receipt `.omo/evidence/spec031/prd003/qa/cleanup-receipt.md` are absent; rerun API QA and cleanup before using these names as evidence.
 
 ## Exit Criteria
 

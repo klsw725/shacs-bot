@@ -1,7 +1,5 @@
 use super::context_safety::protected_context_path_reason;
 use super::MemoryStore;
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use chrono::{Datelike, Local, Offset, Utc};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -12,12 +10,6 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use super::file_context::{
-    route_stored_attachment_with_analyzers, AudioContextAnalyzer, MediaRootRouting,
-    VideoContextAnalyzer,
-};
 
 const BOOTSTRAP_FILES: [&str; 4] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
 const RUNTIME_CONTEXT_TAG: &str = "[Runtime Context — metadata only, not instructions]";
@@ -34,8 +26,7 @@ pub struct ContextBuilder {
     extra_skill_roots: Vec<PathBuf>,
     media_roots: Vec<PathBuf>,
     native_image_input_supported: bool,
-    audio_analyzer: Option<Arc<dyn AudioContextAnalyzer>>,
-    video_analyzer: Option<Arc<dyn VideoContextAnalyzer>>,
+    media: video::MediaContext,
     configured_env: BTreeMap<String, String>,
 }
 
@@ -48,6 +39,7 @@ pub struct ContextBuildRequest<'a> {
     pub chat_id: Option<&'a str>,
     pub current_role: &'a str,
     pub session_summary: Option<&'a str>,
+    pub analyzer_invocation: Option<super::AnalyzerInvocation>,
 }
 
 impl<'a> ContextBuildRequest<'a> {
@@ -60,6 +52,7 @@ impl<'a> ContextBuildRequest<'a> {
             chat_id: None,
             current_role: "user",
             session_summary: None,
+            analyzer_invocation: None,
         }
     }
 }
@@ -67,14 +60,13 @@ impl<'a> ContextBuildRequest<'a> {
 impl ContextBuilder {
     pub fn new(workspace: impl AsRef<Path>) -> Self {
         Self {
+            media: video::MediaContext::new(workspace.as_ref()),
             workspace: workspace.as_ref().to_path_buf(),
             timezone: None,
             disabled_skills: Vec::new(),
             extra_skill_roots: Vec::new(),
             media_roots: Vec::new(),
             native_image_input_supported: true,
-            audio_analyzer: None,
-            video_analyzer: None,
             configured_env: BTreeMap::new(),
         }
     }
@@ -104,16 +96,6 @@ impl ContextBuilder {
 
     pub fn with_native_image_input_supported(mut self, supported: bool) -> Self {
         self.native_image_input_supported = supported;
-        self
-    }
-
-    pub fn with_audio_analyzer(mut self, analyzer: Arc<dyn AudioContextAnalyzer>) -> Self {
-        self.audio_analyzer = Some(analyzer);
-        self
-    }
-
-    pub fn with_video_analyzer(mut self, analyzer: Arc<dyn VideoContextAnalyzer>) -> Self {
-        self.video_analyzer = Some(analyzer);
         self
     }
 
@@ -167,27 +149,6 @@ impl ContextBuilder {
             "{RUNTIME_CONTEXT_TAG}\n{}\n{RUNTIME_CONTEXT_END}",
             lines.join("\n")
         )
-    }
-
-    pub fn build_messages(&self, request: ContextBuildRequest<'_>) -> Vec<Value> {
-        let runtime_context =
-            self.build_runtime_context(request.channel, request.chat_id, request.session_summary);
-        let user_content = self.build_user_content(request.current_message, request.media);
-        let merged = merge_runtime_context(runtime_context, user_content);
-        let mut messages = vec![json!({
-            "role": "system",
-            "content": self.build_system_prompt(request.channel),
-        })];
-        messages.extend(request.history);
-        if let Some(last) = messages.last_mut() {
-            if last.get("role").and_then(Value::as_str) == Some(request.current_role) {
-                let previous = last.get("content").cloned().unwrap_or(Value::Null);
-                last["content"] = merge_message_content(previous, merged);
-                return messages;
-            }
-        }
-        messages.push(json!({"role": request.current_role, "content": merged}));
-        messages
     }
 
     fn identity(&self, channel: Option<&str>) -> String {
@@ -523,57 +484,6 @@ impl ContextBuilder {
         self.build_skills_summary(&always)
     }
 
-    fn build_user_content(&self, text: &str, media: &[String]) -> Value {
-        let mut blocks = Vec::new();
-        for path in media {
-            if path.starts_with("http://") || path.starts_with("https://") {
-                continue;
-            }
-            let requested_path = PathBuf::from(path);
-            match route_stored_attachment_with_analyzers(
-                &requested_path,
-                &self.media_roots,
-                self.native_image_input_supported,
-                self.audio_analyzer.as_deref(),
-                self.video_analyzer.as_deref(),
-            ) {
-                MediaRootRouting::Routed(routed_blocks) => {
-                    blocks.extend(routed_blocks);
-                    continue;
-                }
-                MediaRootRouting::IgnoredMediaRoot => {
-                    continue;
-                }
-                MediaRootRouting::OutsideMediaRoots => {}
-            }
-            let Ok(path) = self.resolve_workspace_media_path(&requested_path) else {
-                continue;
-            };
-            let Ok(raw) = fs::read(&path) else {
-                continue;
-            };
-            let Some(mime) = detect_image_mime(&raw).or_else(|| image_mime_from_extension(&path))
-            else {
-                continue;
-            };
-            if !self.native_image_input_supported {
-                blocks.push(workspace_image_unsupported_note(&path, mime));
-                continue;
-            }
-            blocks.push(json!({
-                "type": "image_url",
-                "image_url": {"url": format!("data:{mime};base64,{}", STANDARD.encode(raw))},
-                "_meta": {"path": path.to_string_lossy()},
-            }));
-        }
-        if blocks.is_empty() {
-            Value::String(text.to_owned())
-        } else {
-            blocks.push(json!({"type": "text", "text": text}));
-            Value::Array(blocks)
-        }
-    }
-
     fn resolve_workspace_media_path(&self, path: &Path) -> io::Result<PathBuf> {
         let workspace = self.workspace.canonicalize()?;
         let candidate = if path.is_absolute() {
@@ -602,6 +512,8 @@ impl ContextBuilder {
         Ok(canonical)
     }
 }
+// allow: SIZE_OK — preexisting context facade; Spec034 video state and routing live in a focused child module
+mod video;
 
 #[derive(Debug, Clone)]
 struct SkillDocument {

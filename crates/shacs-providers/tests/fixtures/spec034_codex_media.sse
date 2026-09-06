@@ -1,0 +1,13 @@
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"sequence_number":0,"item":{"type":"image_generation_call","id":"AKIAIOSFODNN7EXAMPLE","status":"in_progress"}}
+
+event: response.image_generation_call.partial_image
+data: {"type":"response.image_generation_call.partial_image","output_index":0,"item_id":"AKIAIOSFODNN7EXAMPLE","sequence_number":1,"partial_image_index":0,"partial_image_b64":"cGFydGlhbA=="}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":{"type":"image_generation_call","id":"AKIAIOSFODNN7EXAMPLE","status":"completed","result":"ZmluYWwtaW1hZ2U="}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":3,"response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9},"output":[{"type":"image_generation_call","id":"AKIAIOSFODNN7EXAMPLE","status":"completed","result":"ZmluYWwtaW1hZ2U="}]}}
+
+data: [DONE]

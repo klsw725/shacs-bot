@@ -84,10 +84,12 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-projection --al
 
 ## Closure Evidence
 
-1. Typed model and vocabulary symbol locator: `.omo/evidence/spec031/prd000/model/loc-report.txt`.
-2. Vocabulary and serialization test transcript: `.omo/evidence/spec031/prd000/model/full-package-test-transcript.txt`.
-3. Redaction audit: `.omo/evidence/spec031/prd000/redaction/sentinel-absence-audit.md`.
-4. Consumer inventory showing no supported adapter defines a conflicting canonical state: `.omo/evidence/spec031/wave0/baseline-inventory.json`.
+The following historical artifact names are retained for auditability, but every listed file is **Unavailable** in this checkout and therefore does not prove current closure.
+
+1. **Unavailable** - typed model and vocabulary symbol locator `.omo/evidence/spec031/prd000/model/loc-report.txt` is absent; regenerate it from the current source before using it as evidence.
+2. **Unavailable** - vocabulary and serialization test transcript `.omo/evidence/spec031/prd000/model/full-package-test-transcript.txt` is absent; rerun the focused package tests before using it as evidence.
+3. **Unavailable** - redaction audit `.omo/evidence/spec031/prd000/redaction/sentinel-absence-audit.md` is absent; regenerate the audit before using it as evidence.
+4. **Unavailable** - consumer inventory `.omo/evidence/spec031/wave0/baseline-inventory.json` is absent; regenerate the inventory before asserting adapter consistency.
 
 ## Exit Criteria
 

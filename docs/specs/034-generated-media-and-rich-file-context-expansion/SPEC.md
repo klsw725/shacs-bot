@@ -1,6 +1,6 @@
 # 034. generated media and rich file context expansion 아키텍처 명세
 
-Status: Open
+Status: Complete (Scoped)
 
 Origin specs: 004, 019, 027
 
@@ -25,7 +25,7 @@ Origin specs: 004, 019, 027
 
 이 기준선은 이미 구현된 storage, routing, handoff를 존중한다. 034는 같은 기능을 다시 설계하거나 이름만 바꿔 재구현하지 않는다.
 
-## 034가 소유하는 열린 범위
+## 034가 소유하는 완료 범위
 
 034는 다음 작업을 소유한다.
 
@@ -172,11 +172,11 @@ Codex OAuth를 사용하는 `/codex/images/generations` provider slice는 구현
 
 | PRD | Status |
 |---|---|
-| PRD 000 | Planned |
-| PRD 001 | Planned |
-| PRD 002 | Planned |
-| PRD 003 | Planned |
-| PRD 004 | Planned |
+| PRD 000 | Complete (Scoped) |
+| PRD 001 | Complete (Scoped) |
+| PRD 002 | Complete (Scoped) |
+| PRD 003 | Complete (Scoped) |
+| PRD 004 | Complete (Scoped) |
 
 Dependency rules:
 
@@ -202,4 +202,4 @@ Dependency rules:
 11. 035 parity audit와 031 snapshot audit가 artifact/analyzer safe summary와 replay provenance를 검증해야 한다.
 12. Redaction audit는 projection surface omission만 검증하고 complete redaction이나 exfiltration prevention을 주장하지 않아야 한다.
 
-현재 이 문서는 Open 상태다. 위 evidence가 없으면 034의 범위를 구현 완료로 닫을 수 없다.
+위 evidence와 정확한 10개 Must Have/12개 Acceptance Criteria의 22/22 매핑은 [CLOSURE.md](CLOSURE.md)에 기록한다. [Review remediation](../../../.omo/evidence/spec034/remediation/PASS.json)과 [candidate2 Todo 14 QA baseline](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)는 PASS이고 Spec034 구현 범위는 `Complete (Scoped)`다. Todo 14 receipt는 해당 source의 QA-only baseline이며 이후 변경된 frozen source의 최종 review나 closure를 대신하지 않는다. 최신 source-bound release 상태는 [canonical final manifest](../../../.omo/evidence/spec034/task-15-closure/final-committed/manifest.json)가 현재 committed source bytes, 최종 5개 리뷰와 clean-tree runner evidence를 결합해 판정한다.

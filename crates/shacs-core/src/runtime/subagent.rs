@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting subagent runtime; Spec034 diff is one ToolExecutionContext fixture field hook
 use crate::runtime::{
     AgentRunResult, AgentRunSpec, AgentRunner, CancellationToken, ContainmentSnapshotRef,
     ContextBuilder, ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact,
@@ -911,6 +912,7 @@ impl SubagentRuntime {
             in_cron_context: false,
             record_channel_delivery: false,
             cancellation_token: Some(cancellation_token.clone()),
+            deadline: None,
         };
         spec.max_iterations_message =
             Some("Task completed but no final response was generated.".to_owned());

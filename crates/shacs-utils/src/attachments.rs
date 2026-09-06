@@ -1,3 +1,4 @@
+// allow: SIZE_OK — preexisting attachment catalog; Spec034 diff is two canonical analyzer terminal-status variants
 use crate::text::{detect_image_mime, safe_filename};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
@@ -339,6 +340,8 @@ pub enum AttachmentHandoffStatus {
     Truncated,
     Unsupported,
     ExtractionFailed,
+    Cancelled,
+    TimedOut,
     Deferred,
     Blocked,
 }
