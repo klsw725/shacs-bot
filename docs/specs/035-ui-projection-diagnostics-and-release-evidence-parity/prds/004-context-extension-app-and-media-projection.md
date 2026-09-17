@@ -1,6 +1,8 @@
 # PRD 004. context, extension, app, and media projection
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. Resource provenance/disclosure, app/media owner adapter와 task3·todo10 검사 기록이 존재한다. Spec034의 정확한 fact 검사와 누락된 workspace release fixture는 별개이며 [차단 사유와 증거 구분](../CLOSURE.md)을 따른다.
 
 ## Goal
 
