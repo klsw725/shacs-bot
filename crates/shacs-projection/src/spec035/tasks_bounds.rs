@@ -1,0 +1,2 @@
+pub const SPEC035_TASKS_SCHEMA_VERSION: u32 = 1;
+pub const SPEC035_TASKS_ROWS_MAX: usize = 128;
