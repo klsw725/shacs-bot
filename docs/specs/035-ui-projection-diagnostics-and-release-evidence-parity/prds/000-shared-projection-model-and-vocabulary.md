@@ -1,6 +1,8 @@
 # PRD 000. shared projection model and vocabulary
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. Revised owner 모델과 공통 vocabulary 구현 및 task3·todo10 검사 기록이 존재한다. 현재 소스에 대한 최종 PASS는 아니며 [차단 사유와 증거 구분](../CLOSURE.md)을 따른다. 아래 과거 `.omo/evidence/spec031/` 위치는 현재 증거와 구분한다.
 
 ## Goal
 
