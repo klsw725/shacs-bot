@@ -1,6 +1,8 @@
 # PRD 003. readiness, degraded health, and diagnostics parity
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. Readiness/diagnostics 및 adapter 범위 runtime control projection과 task3·todo10 검사 기록이 존재한다. [차단 사유와 증거 구분](../CLOSURE.md)을 따르며 process liveness나 과거 검사로 현재 readiness/closure 성공을 추론하지 않는다.
 
 ## Goal
 
