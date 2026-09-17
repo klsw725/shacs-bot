@@ -3,7 +3,7 @@ use std::{fs, io};
 
 use serde_json::{json, Value};
 
-use super::{config_apply, io_loop, readiness, resume, OnboardWizardStatus};
+use super::{config_apply, io_loop, resume, OnboardWizardStatus};
 use crate::{format_onboard_outcome, OnboardOptions};
 
 #[test]
@@ -25,9 +25,9 @@ fn onboard_wizard_completes_with_secret_ref_and_owner_facts() -> Result<(), Box<
 
     let report = outcome.wizard_report.as_ref().ok_or("missing report")?;
     assert_eq!(report.status, OnboardWizardStatus::Complete);
-    assert!(report.external_owner_facts.iter().any(
-        |fact| fact.owner == "spec031" && fact.reason_code == "missing_external_owner_evidence"
-    ));
+    let facts = serde_json::to_value(&report.external_owner_facts)?;
+    assert_eq!(facts[1]["declarations"][0]["secret_ref"], true);
+    assert_eq!(facts[1]["declarations"][0]["environment"], true);
     let saved: Value = serde_json::from_str(&fs::read_to_string(&config_path)?)?;
     assert_eq!(
         saved["providers"]["openrouter"]["apiKeyRef"]["locator"]["name"],
@@ -183,21 +183,6 @@ fn onboard_wizard_accepts_bounded_semantic_env_refs() -> Result<(), Box<dyn Erro
         config_apply::parse_env_ref(valid_ref)?;
     }
     Ok(())
-}
-
-#[test]
-fn onboard_wizard_owner_facts_are_canonical_missing_external_evidence() {
-    let facts = readiness::external_owner_facts();
-    assert!(facts
-        .iter()
-        .any(|fact| fact.owner == "spec030" && fact.capability == "approval"));
-    assert!(facts
-        .iter()
-        .any(|fact| fact.owner == "spec031" && fact.capability == "readiness"));
-    assert!(facts
-        .iter()
-        .all(|fact| fact.state == "unavailable"
-            && fact.reason_code == "missing_external_owner_evidence"));
 }
 
 #[test]

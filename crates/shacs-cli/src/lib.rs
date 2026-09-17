@@ -15,11 +15,17 @@ mod spec031_cli;
 mod spec031_management;
 mod spec033_cli;
 mod spec035_cli_media;
+mod spec035_revised;
+mod spec035_tasks_cli;
 mod surface_approval_worker;
 mod tool_before_interaction;
 mod trajectory_cli;
 pub use runtime_cleanup::{RemovedRuntimePath, RemovedRuntimePathKind, RuntimeCleanupReceipt};
 use spec035_cli_media::wiring::*;
+pub use spec035_revised::{
+    render_spec035_revised_json, render_spec035_revised_projection,
+    render_spec035_transport_rejection,
+};
 
 use fs2::FileExt;
 use lettre::message::Mailbox;
@@ -33,6 +39,7 @@ use sha2::{Digest, Sha256};
 use shacs_api::{
     chat_completion_invocation, ApiChatMessage, ApiError, ApiMessageContent, ApiModel,
     ChatCompletionAdapter, ChatCompletionInvocation, ChatCompletionRequest,
+    Spec035TasksStreamEvent,
 };
 use shacs_app::app_authoring_flow::{
     ApplyError, AuthoringFlowStore, AuthoringProposal, InstallHandoff, VerificationOutcome,
@@ -40,13 +47,13 @@ use shacs_app::app_authoring_flow::{
 use shacs_channels::{
     builtin_channel_default_configs, builtin_live_worker_descriptors, normalize_websocket_frame,
     normalize_whatsapp_bridge_message, runtime_workflow_projection_outbound,
-    websocket_event_from_outbound, whatsapp_outbound_frames, ChannelAdapter, ChannelCapabilities,
-    ChannelDescriptor, ChannelError, ChannelManager, ChannelRegistry, ChannelRetryPolicy,
-    DiscordInbound, EmailInbound, LiveChannelWorkerDescriptor, LiveChannelWorkerKind,
-    OutboundMessage, RecentMessageIds, SlackInbound, TelegramInbound, WebSocketInboundAction,
-    WebSocketServerEvent, WhatsAppBridgeMessage, WhatsAppChannelConfig, WhatsAppGroupPolicy,
-    WhatsAppOutboundFrame, DISCORD_CHANNEL, EMAIL_CHANNEL, SLACK_CHANNEL, TELEGRAM_CHANNEL,
-    WEBSOCKET_CHANNEL, WHATSAPP_CHANNEL,
+    spec035_channel_worker_hello, websocket_event_from_outbound, whatsapp_outbound_frames,
+    ChannelAdapter, ChannelCapabilities, ChannelDescriptor, ChannelError, ChannelManager,
+    ChannelRegistry, ChannelRetryPolicy, DiscordInbound, EmailInbound, LiveChannelWorkerDescriptor,
+    LiveChannelWorkerKind, OutboundMessage, RecentMessageIds, SlackInbound, TelegramInbound,
+    WebSocketInboundAction, WebSocketServerEvent, WhatsAppBridgeMessage, WhatsAppChannelConfig,
+    WhatsAppGroupPolicy, WhatsAppOutboundFrame, DISCORD_CHANNEL, EMAIL_CHANNEL, SLACK_CHANNEL,
+    TELEGRAM_CHANNEL, WEBSOCKET_CHANNEL, WHATSAPP_CHANNEL,
 };
 use shacs_command::{parse_loop_command, LoopCommand};
 use shacs_config::{
@@ -72,26 +79,27 @@ use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
     build_core_diagnostics_aggregate, build_permission_diagnostics_summary,
     build_plugin_runtime_snapshot, build_plugin_surface_projection,
-    build_spec031_extension_projection, ceiling_for_origin,
+    build_spec031_extension_projection, build_spec035_tasks_projection, ceiling_for_origin,
     containment_permission_proof_for_process_gate, discover_context_files, discover_plugins,
     parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
     request_runtime_control, resolve_context_reference,
     runtime_stop_request_marker_path as core_runtime_stop_request_marker_path,
-    ActionNormalizationState, ActivationStatus, ActivationStore, AgentHook, AgentHookContext,
-    AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult, AppProcessDriver,
-    AppProcessRunOutcome, AppStartFacts, AppSupervisor, AppSupervisorTerminal, CompositeHook,
-    ConfigMigrationState, ConfigSnapshotRef, ContainerNetworkMode, ContainerRuntimeKind,
-    ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput,
-    ContextDiagnosticsSummary, ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions,
-    ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig,
-    CoreDiagnosticsAggregateInput, CredentialResolvingImageGenerationClient,
-    CredentialResolvingProviderClient, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
-    DurableWorkDispatcher, ExecutionSnapshot, ExecutionSnapshotInput, HeartbeatError,
-    HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor,
-    HeartbeatWorker, InboundMessage, InheritedPermissionContext, McpLifecycle, MessageBus,
-    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
-    PermissionedAction, PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError,
-    PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
+    serialize_spec035_tasks_projection, ActionNormalizationState, ActivationStatus,
+    ActivationStore, AgentHook, AgentHookContext, AgentLoop, AgentLoopCommandResult,
+    AgentLoopConfig, AgentLoopTurnResult, AppProcessDriver, AppProcessRunOutcome, AppStartFacts,
+    AppSupervisor, AppSupervisorTerminal, CompositeHook, ConfigMigrationState, ConfigSnapshotRef,
+    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput,
+    ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
+    ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
+    ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput,
+    CredentialResolvingImageGenerationClient, CredentialResolvingProviderClient, DiscoveredPlugin,
+    DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, ExecutionSnapshot,
+    ExecutionSnapshotInput, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
+    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage,
+    InheritedPermissionContext, McpLifecycle, MessageBus, PermissionCeilingSnapshot,
+    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
+    PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError, PluginHookCatalog,
+    PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
     PluginProcessPermissionContext, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
     PluginSurfaceProjection, ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
     ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
@@ -262,6 +270,7 @@ pub enum CliCommand {
     Onboard(OnboardOptions),
     Status(StatusOptions),
     Goal(GoalOptions),
+    Tasks(spec035_tasks_cli::TasksOptions),
     Improve(ImprovementOptions),
     Trajectory(trajectory_cli::TrajectoryOptions),
     RuntimeInspect(RuntimeInspectOptions),
@@ -1145,6 +1154,7 @@ pub struct RuntimeInspectReport {
     pub providers: Vec<ProviderStatus>,
     pub generated_media: Vec<GeneratedMediaArtifactInspect>,
     pub media_projections: Vec<shacs_projection::Spec035MediaProjection>,
+    pub spec035_revised: shacs_projection::Spec035RevisedProjection,
     pub capabilities: Vec<RuntimeCapabilityReport>,
     pub sessions: RuntimeSessionInspect,
     pub lifecycle: RuntimeLifecycleInspect,
@@ -1974,6 +1984,7 @@ pub enum CliError {
     InvalidArguments(String),
     Provider(ProviderError),
     Runtime(String),
+    TransportRejected(shacs_projection::Spec035TransportMutationRejection),
     Unsupported(String),
 }
 
@@ -1990,6 +2001,9 @@ impl fmt::Display for CliError {
             Self::InvalidArguments(error) => write!(formatter, "invalid CLI arguments: {error}"),
             Self::Provider(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "runtime error: {error}"),
+            Self::TransportRejected(rejection) => {
+                formatter.write_str(&render_spec035_transport_rejection(rejection))
+            }
             Self::Unsupported(error) => write!(formatter, "unsupported command: {error}"),
         }
     }
@@ -2814,6 +2828,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Onboard(options) => onboard(options).map(format_onboard_outcome),
         CliCommand::Status(options) => status(options).map(format_status_report),
         CliCommand::Goal(options) => spec033_cli::run(&options),
+        CliCommand::Tasks(options) => spec035_tasks_cli::run(options),
         CliCommand::Improve(options) => improvement_cli::run(options),
         CliCommand::Trajectory(options) => trajectory_cli::run(options),
         CliCommand::RuntimeInspect(options) => runtime_inspect(options).map(format_runtime_inspect),
@@ -2891,6 +2906,7 @@ where
         "onboard" => parse_onboard(parser, global_config),
         "status" => parse_status(parser, global_config),
         "goal" => spec033_cli::parse(parser),
+        "tasks" => spec035_tasks_cli::parse(parser, global_config),
         "improve" => improvement_cli::parse(parser, global_config),
         "trajectory" => trajectory_cli::parse(parser, global_config),
         "runtime" => parse_runtime(parser, global_config),
@@ -12207,6 +12223,7 @@ struct ExternalTransportRuntimeContext {
     durable_data_dir: Option<PathBuf>,
     lease_owner_ref: Option<String>,
     unified_session_key: Option<String>,
+    spec035_hello: fn() -> Result<shacs_projection::Spec035TransportClientHello, String>,
 }
 
 struct ExternalDurableWorkRuntime {
@@ -12222,6 +12239,7 @@ impl ExternalTransportRuntimeContext {
             durable_data_dir: None,
             lease_owner_ref: None,
             unified_session_key: None,
+            spec035_hello: || spec035_channel_worker_hello().map_err(|error| error.to_string()),
         }
     }
 
@@ -12310,6 +12328,27 @@ impl ExternalTransportRuntimeContext {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    fn enqueue_inbound_with_hint(
+        &self,
+        runtime_bus: &MessageBus,
+        message: &InboundMessage,
+        metadata_path: &Path,
+    ) -> Result<(), String> {
+        if is_external_stop_command(message) {
+            let hello = (self.spec035_hello)()
+                .map_err(|error| format!("external channel capability hello failed: {error}"))?;
+            ChannelManager::new()
+                .dispatch_spec035_mutation(
+                    &hello,
+                    shacs_projection::Spec035TransportCapability::TaskStop,
+                    |_| (),
+                )
+                .map_err(|error| format!("external channel mutation rejected: {error}"))?;
+        }
+        record_pending_inbound_hint(metadata_path, message)?;
+        self.enqueue_inbound(runtime_bus, message)
     }
 }
 
@@ -12505,6 +12544,7 @@ fn run_external_agent_processor(
     transport_context: ExternalTransportRuntimeContext,
     mut durable_work: ExternalDurableWorkRuntime,
 ) -> Result<ExternalSupervisorShutdownReport, CliError> {
+    let spec035_hello = transport_context.spec035_hello;
     let mut channels = external_transport_channel_manager(
         specs,
         runtime_bus.clone(),
@@ -12585,6 +12625,24 @@ fn run_external_agent_processor(
                 let session_key = adapter.external_effective_session_key(&message);
                 let priority_command = is_external_priority_command(&message);
                 let priority_stop = is_external_stop_command(&message);
+                if priority_stop {
+                    let hello = spec035_hello().map_err(|error| {
+                        CliError::InvalidArguments(format!(
+                            "external channel capability hello failed: {error}"
+                        ))
+                    })?;
+                    channels
+                        .dispatch_spec035_mutation(
+                            &hello,
+                            shacs_projection::Spec035TransportCapability::TaskStop,
+                            |_| (),
+                        )
+                        .map_err(|error| {
+                            CliError::InvalidArguments(format!(
+                                "external channel mutation rejected: {error}"
+                            ))
+                        })?;
+                }
                 let (work_id, dedupe_hint) = durable_inbound_identity(&message);
                 let enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
                     .get_or_init(|| Mutex::new(()))
@@ -14942,12 +15000,8 @@ fn publish_external_inbound_with_hint(
     metadata_path: &Path,
     runtime_context: &ExternalTransportRuntimeContext,
 ) -> bool {
-    if let Err(error) = record_pending_inbound_hint(metadata_path, &message) {
-        eprintln!("channel pending inbound metadata save failed: {error}");
-        return false;
-    }
-    if let Err(error) = runtime_context.enqueue_inbound(bus, &message) {
-        eprintln!("external durable inbound enqueue failed: {error}");
+    if let Err(error) = runtime_context.enqueue_inbound_with_hint(bus, &message, metadata_path) {
+        eprintln!("external inbound intake failed: {error}");
         return false;
     }
     true
@@ -15952,8 +16006,11 @@ fn run_slack_socket_mode_session(
                 let inbound =
                     slack_socket_envelope_to_inbound_with_download(config, agent, &envelope);
                 if let Some(inbound) = inbound.as_ref() {
-                    record_pending_inbound_hint(&metadata_path, inbound)?;
-                    runtime_context.enqueue_inbound(inbound_bus, inbound)?;
+                    runtime_context.enqueue_inbound_with_hint(
+                        inbound_bus,
+                        inbound,
+                        &metadata_path,
+                    )?;
                 }
                 if let Some(ack) = slack_socket_ack_frame(&envelope) {
                     send_websocket_json(&mut socket, ack)?;
@@ -16375,8 +16432,11 @@ fn run_email_transport(
         if let Some(imap) = config.imap.as_ref() {
             if last_poll.elapsed() >= Duration::from_secs(imap.poll_interval_seconds) {
                 match poll_email_inbox(&config, imap, &mut seen_state, |inbound| {
-                    record_pending_inbound_hint(&metadata_path, inbound)?;
-                    transport_context.enqueue_inbound(&inbound_bus, inbound)
+                    transport_context.enqueue_inbound_with_hint(
+                        &inbound_bus,
+                        inbound,
+                        &metadata_path,
+                    )
                 }) {
                     Ok(_) => {
                         save_email_seen_uid_state(
@@ -17316,6 +17376,9 @@ pub fn help_text() -> String {
         "  goal      Manage and inspect the persistent goal for a session",
         "            Actions: inspect/status, set, pause, resume, clear, done, blocked",
         "            Flags: --workspace/-w, --session",
+        "  tasks     Print the canonical owner-backed task projection as JSON",
+        "            Flags: --workspace/-w, --data-dir, --session, --json",
+        "            Actions: --owner, --action, --locator, --transport-hello",
         "  improve   Propose, inspect, apply, verify, inspect candidate, or rollback a configured local artifact",
         "            Actions: propose, inspect, apply, verify, candidate, rollback",
         "            Flags: --root, --proposal, --target, --candidate, --snapshot, --expected-digest",
@@ -21597,6 +21660,22 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         Ok(response)
     }
 
+    fn stream_spec035_tasks_events(
+        &self,
+        session_id: &str,
+        on_event: &mut dyn FnMut(Spec035TasksStreamEvent),
+    ) -> Result<(), ApiError> {
+        let data_dir = self.config_path.parent().unwrap_or(&self.workspace);
+        let projection = build_spec035_tasks_projection(&self.workspace, data_dir, session_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let encoded = serialize_spec035_tasks_projection(&projection)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let payload = serde_json::from_str(&encoded)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        on_event(Spec035TasksStreamEvent::owner_projection(payload));
+        Ok(())
+    }
+
     fn persist_media_data_urls(&self, data_urls: &[String]) -> Result<Vec<String>, ApiError> {
         self.persist_media_data_urls_with_context("api:default", "api", data_urls, &[])
     }
@@ -22540,12 +22619,7 @@ fn format_onboard_outcome(outcome: OnboardOutcome) -> String {
         }
         if !report.external_owner_facts.is_empty() {
             lines.push("External owner facts:".to_owned());
-            lines.extend(report.external_owner_facts.iter().map(|fact| {
-                format!(
-                    "  - owner={} capability={} state={} reason={}",
-                    fact.owner, fact.capability, fact.state, fact.reason_code
-                )
-            }));
+            lines.extend(report.external_owner_facts.iter().map(ToString::to_string));
         }
         lines.push(
             "Next: provide referenced secrets in the selected source, then run `shacs-bot ask \"hello\"`.".to_owned(),
@@ -26859,6 +26933,161 @@ mod tests {
                 .count(),
             1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_external_stop_at_production_intake_has_no_durable_or_adapter_side_effects(
+    ) -> Result<(), Box<dyn Error>> {
+        fn unsupported_hello() -> Result<shacs_projection::Spec035TransportClientHello, String> {
+            shacs_projection::Spec035TransportClientHello::parse_json(
+                r#"{"client_id":"client:unsupported-channel","schema_versions":[1],"mutation_capabilities":[]}"#,
+            )
+            .map_err(|error| error.to_string())
+        }
+
+        // Given
+        let root = tempfile::tempdir()?;
+        let bus = MessageBus::new();
+        let dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(root.path()),
+            runtime_durable_work_payload_root(root.path()),
+            bus.clone(),
+            "owner-unsupported-stop",
+            100,
+        )?;
+        let event_path = runtime_durable_event_root(root.path()).join("events.log");
+        let events_before = fs::read(&event_path)?;
+        assert!(events_before.is_empty());
+        let captured = Arc::new(Mutex::new(Vec::<ProviderRequest>::new()));
+        let adapter = Arc::new(external_media_test_adapter(root.path(), captured.clone())?);
+        let mut transport_context =
+            ExternalTransportRuntimeContext::new(root.path().join("metadata"), 1);
+        transport_context.spec035_hello = unsupported_hello;
+        transport_context.configure_durable_inbound(
+            root.path().to_path_buf(),
+            "owner-unsupported-stop".to_owned(),
+            None,
+        );
+        let metadata_path = transport_context.metadata_path("telegram");
+
+        // When
+        let published = publish_external_inbound_with_hint(
+            &bus,
+            InboundMessage::new(TELEGRAM_CHANNEL, "user", "chat", "/stop"),
+            &metadata_path,
+            &transport_context,
+        );
+
+        // Then
+        assert!(
+            !published,
+            "unsupported hello must reject production intake"
+        );
+        assert_eq!(fs::read(event_path)?, events_before);
+        let (state, admission) =
+            durable_work_state_for_owner(root.path(), dispatcher.lease_owner_ref())?;
+        assert!(admission.writable);
+        assert!(state.work.items.is_empty());
+        assert!(bus.try_consume_inbound().is_none());
+        assert!(channel_restart_state_from_metadata(
+            TELEGRAM_CHANNEL,
+            &metadata_path,
+            &load_metadata_json(&metadata_path),
+        )
+        .pending_inbound_refs
+        .is_empty());
+        assert!(captured
+            .lock()
+            .map_err(|_| io::Error::other("captured request lock was poisoned"))?
+            .is_empty());
+
+        // When: only the hello capability changes to the production-supported value.
+        transport_context.spec035_hello =
+            || spec035_channel_worker_hello().map_err(|error| error.to_string());
+        assert!(publish_external_inbound_with_hint(
+            &bus,
+            InboundMessage::new(TELEGRAM_CHANNEL, "user", "chat", "/stop"),
+            &metadata_path,
+            &transport_context,
+        ));
+        let processor_stop = Arc::new(AtomicBool::new(false));
+        let processor_stop_handle = processor_stop.clone();
+        let data_dir = root.path().to_path_buf();
+        let processor = thread::spawn(move || {
+            run_external_agent_processor(
+                adapter,
+                bus,
+                Vec::new(),
+                1,
+                ExternalProcessorShutdownControl {
+                    stop: processor_stop_handle,
+                    reason: Arc::new(Mutex::new(RuntimeShutdownReason::Stop)),
+                    exited: Arc::new(AtomicBool::new(false)),
+                    startup_tx: None,
+                },
+                transport_context,
+                ExternalDurableWorkRuntime {
+                    data_dir,
+                    dispatcher,
+                },
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let (state, _) = durable_work_state_for_owner(root.path(), "owner-unsupported-stop")?;
+            if state
+                .work
+                .items
+                .values()
+                .all(|item| item.state.is_terminal())
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("supported external stop did not reach terminal state".into());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        processor_stop.store(true, Ordering::SeqCst);
+        processor
+            .join()
+            .map_err(|_| io::Error::other("external processor panicked"))??;
+
+        // Then: the existing durable path executes exactly once without a provider call.
+        let (state, _) = durable_work_state_for_owner(root.path(), "owner-unsupported-stop")?;
+        assert_eq!(state.work.items.len(), 1);
+        let item = state
+            .work
+            .items
+            .values()
+            .next()
+            .ok_or_else(|| io::Error::other("supported durable work is missing"))?;
+        assert_eq!(item.attempt, 1);
+        assert!(item.state.is_terminal());
+        assert!(item.cancellation_requested_sequence.is_none());
+        let events =
+            DurableEventStore::open(runtime_durable_event_root(root.path()))?.scan(usize::MAX)?;
+        assert_eq!(
+            events
+                .records
+                .iter()
+                .filter(|record| record.kind == WORK_LEASED)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .records
+                .iter()
+                .filter(|record| record.kind == WORK_TERMINAL)
+                .count(),
+            1
+        );
+        assert!(captured
+            .lock()
+            .map_err(|_| io::Error::other("captured request lock was poisoned"))?
+            .is_empty());
         Ok(())
     }
 
@@ -37995,6 +38224,18 @@ mod tests {
             .values()
             .filter(|item| item.work_kind == SURFACE_APPROVAL_WORK_KIND)
             .count())
+    }
+
+    #[test]
+    fn production_adapter_streams_current_tasks_projection() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let adapter = external_media_test_adapter(root.path(), Arc::new(Mutex::new(Vec::new())))?;
+        let mut events = Vec::new();
+
+        adapter.stream_spec035_tasks_events("api:qa", &mut |event| events.push(event))?;
+
+        assert_eq!(events.len(), 1);
+        Ok(())
     }
 
     fn external_media_test_adapter(

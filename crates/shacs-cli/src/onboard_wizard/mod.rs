@@ -1,6 +1,7 @@
 mod config_apply;
 mod format;
 mod io_loop;
+mod owner_facts;
 mod readiness;
 mod resume;
 
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
 use crate::{CliError, OnboardOptions, OnboardOutcome};
+pub use owner_facts::OnboardWizardExternalOwnerFact;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnboardWizardReport {
@@ -30,14 +32,6 @@ pub struct OnboardWizardProviderRef {
     pub provider: String,
     pub source_kind: String,
     pub locator: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OnboardWizardExternalOwnerFact {
-    pub owner: String,
-    pub capability: String,
-    pub state: String,
-    pub reason_code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -71,3 +65,9 @@ pub(crate) fn partial_outcome(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod owner_tests;
+
+#[cfg(test)]
+mod owner_mapping_tests;

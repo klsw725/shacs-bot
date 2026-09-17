@@ -72,6 +72,19 @@ pub(crate) fn runtime_inspect_inner(
     );
     let containment = runtime_containment_inspect(&bundle);
     let workflow_recipes = workflow_recipes_for_bundle(&bundle)?;
+    let trusted_runtime = shacs_core::runtime::trusted_runtime::build_trusted_runtime_projection(
+        spec030_fact_store_for_bundle(&bundle)
+            .snapshot()
+            .into_input(),
+    )
+    .map_err(|error| CliError::Runtime(error.to_string()))?;
+    let spec035_revised = shacs_projection::project_spec035_revised_owner_facts(
+        shacs_projection::Spec035RevisedOwnerFacts::new(
+            shacs_projection::Spec035OwnerSurface::Cli,
+            &trusted_runtime,
+        ),
+    )
+    .map_err(|error| CliError::Runtime(error.to_string()))?;
 
     Ok(RuntimeInspectReport {
         config_path,
@@ -84,6 +97,7 @@ pub(crate) fn runtime_inspect_inner(
         providers,
         generated_media,
         media_projections,
+        spec035_revised,
         capabilities,
         sessions,
         lifecycle: RuntimeLifecycleInspect {

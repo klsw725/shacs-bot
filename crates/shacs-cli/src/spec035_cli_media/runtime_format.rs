@@ -135,6 +135,10 @@ pub(crate) fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
         }
     }
     lines.push(format!(
+        "Spec035 revised projection: {}",
+        serde_json::json!(report.spec035_revised)
+    ));
+    lines.push(format!(
         "Channel restart states: {} (hint projection; not session truth)",
         report.channel_restart.len()
     ));

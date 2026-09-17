@@ -137,6 +137,7 @@ fn runtime_inspect_reads_the_runtime_owned_canonical_media_record() -> Result<()
 
     assert!(output.contains("Spec035 media projections: 1"));
     assert!(output.contains("Spec035 media: state=included reason=included"));
+    assert!(output.contains("Spec035 revised projection:"));
     let machine = output
         .lines()
         .filter_map(|line| line.strip_prefix("Spec035 media JSON: "))
