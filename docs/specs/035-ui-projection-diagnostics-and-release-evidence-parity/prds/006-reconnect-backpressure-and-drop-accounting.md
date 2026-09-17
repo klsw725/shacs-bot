@@ -1,6 +1,8 @@
 # PRD 006. reconnect, backpressure, and drop accounting
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. Task9·todo10은 bounded queue, coalesced/dropped progress, reconnect 및 독립적인 final delivery 관측을 기록한다. Process-local accounting은 durable replay나 remote ACK가 아니며 [차단 사유와 증거 구분](../CLOSURE.md)을 따른다.
 
 ## Goal
 
