@@ -6,6 +6,11 @@ mod media_owner_facts;
 mod media_references;
 mod media_validation;
 mod media_vocabulary;
+mod revised_delivery;
+mod revised_model;
+mod revised_owner;
+mod revised_runtime;
+mod revised_vocabulary;
 
 pub use media_bounds::*;
 pub use media_errors::*;
@@ -13,3 +18,6 @@ pub use media_model::*;
 pub use media_owner_facts::*;
 pub use media_references::*;
 pub use media_vocabulary::*;
+pub use revised_model::*;
+pub use revised_owner::*;
+pub use revised_vocabulary::*;
