@@ -1,6 +1,8 @@
 # PRD 001. surface adapter parity for CLI, API, WebSocket, and channels
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. CLI/API/TUI/channel의 revised owner adapter와 canonical parity 검사 기록이 존재한다. Todo10의 역사적 결속을 현재 소스 PASS로 승격하지 않으며 [차단 사유와 증거 구분](../CLOSURE.md)을 따른다.
 
 ## Goal
 
