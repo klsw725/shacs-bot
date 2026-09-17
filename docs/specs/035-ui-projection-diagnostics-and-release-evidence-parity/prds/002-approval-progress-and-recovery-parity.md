@@ -1,6 +1,8 @@
 # PRD 002. approval, progress, and recovery parity
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. Durable approval과 ephemeral confirmation/hook denial 분리, progress/final 및 recovery 관측 구현과 task3·todo10 기록이 존재한다. [차단 사유와 증거 구분](../CLOSURE.md)을 따르며 현재 최종 PASS로 해석하지 않는다.
 
 ## Goal
 
