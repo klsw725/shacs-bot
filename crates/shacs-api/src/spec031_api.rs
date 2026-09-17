@@ -1,5 +1,5 @@
 use crate::{error_response, json_response, ApiError, ApiHttpResponse, ChatCompletionAdapter};
-use serde_json::json;
+use serde_json::{json, Value};
 use shacs_projection::{
     Spec031ActionRef, Spec031Availability, Spec031Capability, Spec031ConstructionError,
     Spec031Count, Spec031Envelope, Spec031EnvelopeInput, Spec031Freshness, Spec031Lineage,
@@ -64,7 +64,7 @@ fn spec031_projection_response(
     match adapter.spec031_projection(projection) {
         Ok(Some(envelope)) => json_response(200, json!(envelope)),
         Ok(None) if projection == Spec031ApiProjection::Diagnostics => {
-            json_response(200, adapter.diagnostics_projection())
+            diagnostics_response(adapter)
         }
         Ok(None) => match unavailable_projection(projection) {
             Ok(envelope) => json_response(200, json!(envelope)),
@@ -72,6 +72,35 @@ fn spec031_projection_response(
         },
         Err(error) => error_response(error),
     }
+}
+
+fn diagnostics_response(adapter: &(impl ChatCompletionAdapter + ?Sized)) -> ApiHttpResponse {
+    let mut diagnostics = adapter.diagnostics_projection();
+    let revised = match adapter.spec035_revised_projection() {
+        Ok(revised) => revised,
+        Err(error) => {
+            return error_response(ApiError::internal(format!(
+                "Spec035 projection could not be built: {error}"
+            )))
+        }
+    };
+    match &mut diagnostics {
+        Value::Object(root) => match root.get_mut("runtime") {
+            Some(Value::Object(runtime)) => {
+                runtime.insert("spec035_revised".to_owned(), json!(revised));
+            }
+            Some(_) | None => {
+                root.insert("spec035_revised".to_owned(), json!(revised));
+            }
+        },
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) => {
+            diagnostics = json!({
+                "diagnostics": diagnostics,
+                "spec035_revised": revised,
+            });
+        }
+    }
+    json_response(200, diagnostics)
 }
 
 fn unavailable_projection(

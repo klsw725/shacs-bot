@@ -1,11 +1,16 @@
-use crate::{ApiError, ApiModel, ChatCompletionInvocation, Spec031ApiProjection};
+use crate::{
+    ApiError, ApiModel, ChatCompletionInvocation, Spec031ApiProjection, Spec035TasksStreamEvent,
+};
 use crate::{
     DiagnosticsKind, DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot,
     RememberedPermissionProjection, Spec030RuntimeProjection, Spec030UnavailableReason,
 };
 use serde_json::{json, Value};
 use shacs_channels::WebSocketServerEvent;
-use shacs_projection::Spec035MediaProjection;
+use shacs_projection::{
+    project_spec035_revised_owner_facts, Spec031ConstructionError, Spec035MediaProjection,
+    Spec035OwnerSurface, Spec035RevisedOwnerFacts, Spec035RevisedProjection,
+};
 use shacs_providers::{LlmResponse, ProviderEvent};
 use std::path::PathBuf;
 
@@ -82,6 +87,14 @@ pub trait ChatCompletionAdapter {
         None
     }
 
+    fn stream_spec035_tasks_events(
+        &self,
+        _session_id: &str,
+        _on_event: &mut dyn FnMut(Spec035TasksStreamEvent),
+    ) -> Result<(), ApiError> {
+        Ok(())
+    }
+
     fn local_improvement(
         &self,
         _action: &str,
@@ -123,6 +136,16 @@ pub trait ChatCompletionAdapter {
 
     fn trusted_runtime_projection(&self) -> Spec030RuntimeProjection {
         Spec030RuntimeProjection::unavailable(Spec030UnavailableReason::OwnerFactsMissing)
+    }
+
+    fn spec035_revised_projection(
+        &self,
+    ) -> Result<Spec035RevisedProjection, Spec031ConstructionError> {
+        let trusted_runtime = self.trusted_runtime_projection();
+        project_spec035_revised_owner_facts(Spec035RevisedOwnerFacts::new(
+            Spec035OwnerSurface::Api,
+            &trusted_runtime,
+        ))
     }
 
     fn spec031_projection(
