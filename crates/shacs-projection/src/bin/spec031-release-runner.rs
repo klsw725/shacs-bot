@@ -1,7 +1,9 @@
 use shacs_projection::{
-    run_spec031_release_runner, Spec031ReleaseRunId, Spec031ReleaseRunnerConfig,
-    Spec031ReleaseRunnerMode,
+    run_spec031_release_runner, Spec031ExternalAuditStatus, Spec031ExternalOwnerId,
+    Spec031ReleaseArtifactError, Spec031ReleaseRunArtifacts, Spec031ReleaseRunId,
+    Spec031ReleaseRunnerConfig, Spec031ReleaseRunnerMode,
 };
+use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,17 +15,44 @@ fn main() {
         print_usage();
         return;
     }
-    match parse_config().and_then(|config| {
+    let result = parse_config().and_then(|config| {
         run_spec031_release_runner(&config)
             .map(|_| ())
-            .map_err(|error| format!("{error:?}"))
-    }) {
+            .map_err(|error| render_runner_error(&config, &error))
+    });
+    match result {
         Ok(()) => {}
         Err(error) => {
-            eprintln!("spec031 release runner failed: {error:?}");
+            eprintln!("spec031 release runner failed: {error}");
             std::process::exit(1);
         }
     }
+}
+
+fn render_runner_error(
+    config: &Spec031ReleaseRunnerConfig,
+    error: &Spec031ReleaseArtifactError,
+) -> String {
+    let category = error.to_string();
+    if *error != Spec031ReleaseArtifactError::BlockedExternalEvidence {
+        return category;
+    }
+    let Ok(bytes) = fs::read(config.evidence_root.join("manifest.json")) else {
+        return category;
+    };
+    let Ok(artifacts) = serde_json::from_slice::<Spec031ReleaseRunArtifacts>(&bytes) else {
+        return category;
+    };
+    let Some(reason) = artifacts.external_audits.iter().find_map(|audit| {
+        (audit.owner == Spec031ExternalOwnerId::Spec035
+            && audit.status == Spec031ExternalAuditStatus::Blocked
+            && audit.reason.starts_with("Spec035 evidence rejected: ")
+            && !audit.reason.chars().any(char::is_control))
+        .then_some(audit.reason.as_str())
+    }) else {
+        return category;
+    };
+    format!("{category}: {reason}")
 }
 
 fn print_usage() {
