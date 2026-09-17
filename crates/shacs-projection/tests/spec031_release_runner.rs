@@ -704,10 +704,7 @@ fn spec031_current_runner_reports_external_blockers_before_dirty_masking(
     })
     .expect_err("required external blockers win over dirty-only masking");
 
-    assert_eq!(
-        error,
-        Spec031ReleaseArtifactError::UnmappedCoverageRequirement
-    );
+    assert_eq!(error, Spec031ReleaseArtifactError::BlockedExternalEvidence);
     Ok(())
 }
 

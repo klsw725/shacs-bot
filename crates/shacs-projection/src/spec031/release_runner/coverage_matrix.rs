@@ -13,7 +13,7 @@ use std::path::Path;
 
 pub(super) fn coverage_entries(
     root: &Path,
-    _artifact: &str,
+    repo_root: &Path,
     external_status: Spec031CoverageStatus,
     commands: &[Spec031ReleaseCommandRecord],
     audits: &[Spec031ExternalAuditRow],
@@ -23,6 +23,9 @@ pub(super) fn coverage_entries(
     push_command_rows(root, &mut entries, commands)?;
     push_artifact_rows(root, &mut entries, commands)?;
     push_external_rows(root, &mut entries, external_status, audits)?;
+    entries.extend(super::spec035_coverage::coverage_rows(
+        root, audits, repo_root,
+    )?);
     Ok(entries)
 }
 

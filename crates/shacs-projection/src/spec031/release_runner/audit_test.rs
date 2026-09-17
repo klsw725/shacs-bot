@@ -47,7 +47,7 @@ fn external_audit_blocks_source_only_owner_test_with_broad_command_pass() {
         command_timeout: Duration::from_secs(1),
     };
 
-    add_external_audits(&config, &writer, &mut artifacts, false)
+    add_external_audits(&config, &writer, &mut artifacts, false, None)
         .expect("external audits are generated");
 
     let spec030 = artifacts
@@ -80,7 +80,7 @@ fn external_audit_passes_when_exact_owner_test_command_passes() {
     let mut artifacts = artifacts_with_command(&evidence, passed_command("spec031-owner-spec030"));
     let config = config(&artifacts, evidence, repo);
 
-    add_external_audits(&config, &writer, &mut artifacts, false)
+    add_external_audits(&config, &writer, &mut artifacts, false, None)
         .expect("external audits are generated");
 
     let spec030 = artifacts

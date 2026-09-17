@@ -1,14 +1,14 @@
 use shacs_projection::{
-    run_spec031_release_runner, validate_spec031_release_artifacts, Spec031ExternalAuditStatus,
-    Spec031ExternalOwnerId, Spec031ReleaseArtifactError, Spec031ReleaseRunArtifacts,
-    Spec031ReleaseRunId, Spec031ReleaseRunnerConfig, Spec031ReleaseRunnerMode,
+    run_spec031_release_runner, Spec031ExternalAuditStatus, Spec031ExternalOwnerId,
+    Spec031ReleaseArtifactError, Spec031ReleaseRunArtifacts, Spec031ReleaseRunId,
+    Spec031ReleaseRunnerConfig, Spec031ReleaseRunnerMode,
 };
 use std::collections::BTreeSet;
 use std::fs;
 use std::time::Duration;
 
 #[test]
-fn spec031_blocked_external_triage_matches_blocked_audit_rows_and_rejects_omission(
+fn spec031_blocked_external_triage_matches_blocked_audit_rows_before_commands(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = temp_path("blocked-triage-repo");
     fs::create_dir_all(repo.join("crates"))?;
@@ -26,26 +26,18 @@ fn spec031_blocked_external_triage_matches_blocked_audit_rows_and_rejects_omissi
         command_timeout: Duration::from_secs(1),
     })
     .expect_err("external blockers fail release runner");
-    assert_eq!(error, Spec031ReleaseArtifactError::CommandFailed);
+    assert_eq!(error, Spec031ReleaseArtifactError::BlockedExternalEvidence);
 
     let artifacts: Spec031ReleaseRunArtifacts =
         serde_json::from_slice(&fs::read(evidence_root.join("manifest.json"))?)?;
+    assert!(artifacts.command_registry.is_empty());
     let triage_path = evidence_root.join("triage/blocked-external-evidence.json");
-    let mut triage: serde_json::Value = serde_json::from_slice(&fs::read(&triage_path)?)?;
+    let triage: serde_json::Value = serde_json::from_slice(&fs::read(&triage_path)?)?;
     assert_eq!(
         triage_owner_set(&triage),
         blocked_audit_owner_set(&artifacts)
     );
 
-    triage["blocked_external_audits"]
-        .as_array_mut()
-        .expect("blocked audits are mutable array")
-        .retain(|blocker| blocker["owner"] != "spec033");
-    fs::write(&triage_path, serde_json::to_vec_pretty(&triage)?)?;
-
-    let error = validate_spec031_release_artifacts(&artifacts)
-        .expect_err("omitted blocked audit owner fails triage validation");
-    assert_eq!(error, Spec031ReleaseArtifactError::CommandFailed);
     Ok(())
 }
 

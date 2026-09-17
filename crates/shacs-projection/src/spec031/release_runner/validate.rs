@@ -37,18 +37,21 @@ pub fn validate_spec031_release_artifacts_with_repo_root(
         return Err(Spec031ReleaseArtifactError::MissingCleanupReceipt);
     }
     validate_evidence_root(artifacts)?;
-    validate_command_registry(artifacts, repo_root)?;
-    validate_external_audits(artifacts, repo_root)?;
-    validate_cleanup_receipts(artifacts)?;
-    validate_reproducibility_observations(artifacts)?;
-    validate_coverage_matrix(artifacts)?;
     let triage_codes = validate_triage_receipts(artifacts)?;
     if triage_codes
         .iter()
         .any(|code| code == "blocked_external_evidence")
     {
+        validate_external_audits(artifacts, repo_root)?;
+        validate_cleanup_receipts(artifacts)?;
+        validate_reproducibility_observations(artifacts)?;
         return Err(Spec031ReleaseArtifactError::BlockedExternalEvidence);
     }
+    validate_command_registry(artifacts, repo_root)?;
+    validate_external_audits(artifacts, repo_root)?;
+    validate_cleanup_receipts(artifacts)?;
+    validate_reproducibility_observations(artifacts)?;
+    validate_coverage_matrix(artifacts, repo_root)?;
     Ok(())
 }
 

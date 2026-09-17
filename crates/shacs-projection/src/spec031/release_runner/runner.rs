@@ -14,6 +14,7 @@ use super::model::{
 use super::runner_outputs::{
     push_blocked_external_triage, push_cleanup, write_evidence_index, CleanupReceiptSpec,
 };
+use super::spec035_execution;
 use super::validate::validate_spec031_release_artifacts_with_repo_root;
 use super::writer::{write_json, write_spec031_release_artifacts_with};
 use super::REQUIRED_ARTIFACTS;
@@ -121,11 +122,11 @@ fn add_success_fixture(
             check_artifact: "commands/spec031-test-release-runner.stdout",
         },
     )?;
-    add_external_audits(config, writer, artifacts, true)?;
+    add_external_audits(config, writer, artifacts, true, None)?;
     write_evidence_index(config, writer, artifacts)?;
     artifacts.coverage_matrix = coverage_entries(
         &config.evidence_root,
-        "results.json",
+        &config.repo_root,
         Spec031CoverageStatus::Pass,
         &artifacts.command_registry,
         &artifacts.external_audits,
@@ -150,7 +151,15 @@ fn add_current_worktree_triage(
             "resource_id": "current-worktree"
         }),
     )?;
-    if config.repo_root.join("crates/Cargo.toml").is_file() {
+    let spec035_evidence = spec035_execution::admit(&config.repo_root);
+    if let Ok(execution) = &spec035_evidence {
+        write_json(writer, spec035_execution::BINDING, &execution.binding)?;
+        artifacts
+            .manifest_files
+            .push(spec035_execution::BINDING.to_owned());
+    }
+    let spec035_evidence_ready = spec035_evidence.is_ok();
+    if spec035_evidence_ready && config.repo_root.join("crates/Cargo.toml").is_file() {
         for command in required_worktree_commands(config) {
             let record = execute_spec031_release_command_with(writer, &command)?;
             artifacts.command_registry.push(record);
@@ -159,7 +168,15 @@ fn add_current_worktree_triage(
     if worktree_dirty(&config.repo_root)? {
         super::runner_outputs::push_reproducibility_observation(config, writer, artifacts)?;
     }
-    add_external_audits(config, writer, artifacts, false)?;
+    let spec035_evidence = spec035_evidence
+        .and_then(|_| spec035_execution::validate_bound(&config.repo_root, &config.evidence_root));
+    add_external_audits(
+        config,
+        writer,
+        artifacts,
+        false,
+        spec035_evidence.as_ref().err(),
+    )?;
     if artifacts
         .external_audits
         .iter()
@@ -167,6 +184,11 @@ fn add_current_worktree_triage(
     {
         push_blocked_external_triage(config, writer, artifacts)?;
     }
+    let cleanup_check_artifact = if spec035_evidence_ready {
+        "commands/spec031-test-surface-smoke.stdout"
+    } else {
+        "fixtures/current-worktree.json"
+    };
     push_cleanup(
         config,
         writer,
@@ -175,13 +197,13 @@ fn add_current_worktree_triage(
             file_name: "current-worktree-receipt.json",
             status: "verified",
             resource_id: "current-worktree",
-            check_artifact: "commands/spec031-test-surface-smoke.stdout",
+            check_artifact: cleanup_check_artifact,
         },
     )?;
     write_evidence_index(config, writer, artifacts)?;
     artifacts.coverage_matrix = coverage_entries(
         &config.evidence_root,
-        "failure-triage.json",
+        &config.repo_root,
         Spec031CoverageStatus::Blocked,
         &artifacts.command_registry,
         &artifacts.external_audits,

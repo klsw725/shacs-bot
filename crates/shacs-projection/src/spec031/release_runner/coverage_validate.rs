@@ -20,18 +20,22 @@ use status::{
 
 pub(super) fn validate_coverage_matrix(
     artifacts: &Spec031ReleaseRunArtifacts,
+    repo_root: &Path,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     if artifacts.command_registry.is_empty() {
         return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
     }
     let mut seen = HashSet::new();
-    let expected_entries = super::coverage_matrix::coverage_entries(
+    let mut expected_entries = super::coverage_matrix::coverage_entries(
         &PathBuf::from(&artifacts.evidence_root),
-        "results.json",
+        repo_root,
         Spec031CoverageStatus::Blocked,
         &artifacts.command_registry,
         &artifacts.external_audits,
     )?;
+    if !super::spec035_coverage::has_catalog(artifacts)? {
+        expected_entries.retain(|entry| !entry.requirement_id.starts_with("spec035:"));
+    }
     let required_ids: HashSet<String> = expected_entries
         .iter()
         .map(|entry| entry.requirement_id.clone())
@@ -57,6 +61,12 @@ pub(super) fn validate_coverage_matrix(
     }
     if !required_ids.is_subset(&seen) {
         return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
+    }
+    if artifacts.coverage_matrix.iter().any(|entry| {
+        entry.requirement_id.starts_with("spec035:")
+            && entry.status == Spec031CoverageStatus::Blocked
+    }) {
+        return Err(Spec031ReleaseArtifactError::BlockedExternalEvidence);
     }
     Ok(())
 }
@@ -117,6 +127,12 @@ fn validate_source_locator(
 }
 
 fn source_line_matches(line: &str, requirement_id: &str) -> bool {
+    if requirement_id.starts_with("spec035:") {
+        let number = requirement_id.rsplit([':', '-']).next().unwrap_or("");
+        return line
+            .trim_start()
+            .starts_with(&format!("{}. ", number_as_usize(number)));
+    }
     if let Some(number) = requirement_id.strip_prefix("spec031:must:") {
         return line
             .trim_start()

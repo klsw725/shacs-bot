@@ -109,7 +109,8 @@ pub(super) fn write_evidence_index(
             "cleanup": artifacts.cleanup_registry,
             "failure_triage": artifacts.failure_triage,
             "reproducibility_observations": artifacts.reproducibility_observations,
-            "authoritative_sources": authoritative_sources()
+            "authoritative_sources": authoritative_sources(),
+            "spec035_catalog": super::spec035_catalog::catalog()
         }),
     )?;
     if !artifacts.manifest_files.iter().any(|file| file == path) {
@@ -123,6 +124,11 @@ fn authoritative_sources() -> Vec<String> {
         .into_iter()
         .map(|row| row.source_locator)
         .collect();
+    sources.extend(
+        super::spec035_catalog::catalog()
+            .into_iter()
+            .map(|row| row.source_locator),
+    );
     sources.extend(
         REQUIRED_ARTIFACT_PROVENANCE
             .iter()

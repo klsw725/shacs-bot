@@ -53,7 +53,11 @@ pub(super) fn write_spec031_release_artifacts_with(
 }
 
 fn render_summary(artifacts: &Spec031ReleaseRunArtifacts) -> String {
-    let status = if artifacts.failure_triage.is_empty() {
+    let status = if artifacts.failure_triage.is_empty()
+        && !artifacts.coverage_matrix.iter().any(|row| {
+            row.requirement_id.starts_with("spec035:")
+                && row.status == super::coverage::Spec031CoverageStatus::Blocked
+        }) {
         "PASS"
     } else {
         "BLOCKED"

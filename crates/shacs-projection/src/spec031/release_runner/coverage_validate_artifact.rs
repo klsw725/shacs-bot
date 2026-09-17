@@ -62,6 +62,9 @@ fn validate_coverage_hash(
 fn expected_class_for_entry(
     entry: &Spec031ReleaseCoverageEntry,
 ) -> Result<Spec031TypedEvidenceClass, Spec031ReleaseArtifactError> {
+    if entry.requirement_id.starts_with("spec035:") {
+        return Ok(Spec031TypedEvidenceClass::ExternalAuditMarkdown);
+    }
     if entry.kind == Spec031CoverageRequirementKind::RequiredCommand
         && entry.status == Spec031CoverageStatus::Blocked
         && entry.command_result_id.is_none()
