@@ -1,5 +1,8 @@
 use shacs_core::runtime::{SurfaceActionOutcome, SurfaceActionOutcomeKind};
-use shacs_projection::{Spec030RuntimeProjection, Spec030UnavailableReason, Spec033Snapshot};
+use shacs_projection::{
+    Spec030RuntimeProjection, Spec030UnavailableReason, Spec033Snapshot, Spec035TasksProjection,
+    Spec035TransportMutationRejection,
+};
 use shacs_session::{SessionRuntimeExecutionProjection, SessionRuntimeWorkflowProjection};
 use std::fmt;
 
@@ -69,6 +72,7 @@ pub struct RuntimeSession {
     pub execution: Option<SessionRuntimeExecutionProjection>,
     pub pending_approval: Option<PendingApproval>,
     pub media: MediaProjectionView,
+    pub tasks: Option<Spec035TasksProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +121,7 @@ pub enum UiStatus {
     InvalidAction(String),
     ActionUnavailable(String),
     ActionOutcome(SurfaceActionOutcome),
+    TransportRejected(Spec035TransportMutationRejection),
     SourceError(String),
     Exiting,
 }
