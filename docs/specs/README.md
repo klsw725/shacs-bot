@@ -16,7 +16,7 @@
 - `Complete (Scoped)`는 해당 owner가 정의한 현재 구현 범위가 닫혔음을 뜻한다.
 - Source-bound release seal은 재현 가능한 명령으로 생성하는 로컬 `.omo` evidence이며 source로 추적하지 않는다. 해당 manifest가 현재 checkout에 없거나 검증되지 않으면 그 checkout에는 local final seal이 없는 것으로 판정한다.
 - `Complete (Baseline)`은 self-hosted/local 최소 기준이 닫혔음을 뜻한다.
-- `Open (implemented, closure blocked)` 또는 PRD의 `Implemented, closure blocked`는 구현과 현재 surface QA evidence가 존재하지만 release closure 조건이 아직 통과하지 않았음을 뜻한다.
+- `Open (implemented, closure blocked)` 또는 PRD의 `Implemented, closure blocked`는 구현과 제한된 검증 기록이 존재하지만 release closure 조건이 아직 통과하지 않았음을 뜻한다. 과거 QA 기록만으로 현재 소스의 QA나 전체 승인까지 주장하지 않는다.
 - `Planned`는 accepted contract이지만 구현·surface evidence가 아직 없는 범위다. 기존 implemented evidence로 완료 처리하지 않는다.
 - `Planned revision (implemented baseline)`은 이전 계약의 구현 evidence는 존재하지만, 새로 확장된 계약은 아직 검증되지 않았다는 뜻이다.
 - 기존 문서의 미구현 accepted work는 `029`부터 `035`의 owner spec으로 이관했다. `028`부터 `031`은 scoped implementation을 완료했고, `032`부터 `035`의 현재 상태는 아래 numbered owner table을 따른다.
@@ -30,7 +30,9 @@
 | `032-app-maker-runtime-and-extension-lifecycle` | `Complete (Scoped)`: foreground AppSupervisor/process lifecycle, current-user authoring/apply/install, app-level activation provenance and blockers | 005, 017, 021, 025 |
 | `033-evaluation-automation-live-integration` | `Complete (Scoped)`: local goal/evaluator, durable automation routing, CAS self-improvement, recorded-only replay, domain projection input과 source-bound release evidence 구현; QA/goal/code/security/docs final PASS 및 final source-bound release execution PASS | 009, 012, 013, 014, 016, 018, 022 |
 | `034-generated-media-and-rich-file-context-expansion` | `Complete (Scoped)`: Codex image event, edit/mask/variation 계약, streaming/remote-output 정책, generated artifact, bounded video analyzer와 media-domain evidence; [remediation PASS](../../.omo/evidence/spec034/remediation/PASS.json)와 [Todo 14 QA baseline](../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)에서 22/22 검증. 최신 source-bound release 상태는 [local canonical final manifest](../../.omo/evidence/spec034/task-15-closure/final-committed/manifest.json)가 현재 committed source와 최종 5개 리뷰를 결합해 판정하며 이전 candidate receipt로 대체하지 않음 | 004, 019, 027 |
-| `035-ui-projection-diagnostics-and-release-evidence-parity` | `Open`: implemented shared projection/TUI/REPL/wizard/release baseline; Spec034 media/analyzer fact의 adapter consumption; planned transport negotiation, snapshot-first reconnect, full owner-backed Tasks parity | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
+| `035-ui-projection-diagnostics-and-release-evidence-parity` | `Open`: shared projection/TUI/REPL/wizard, owner 기반 Tasks CLI/API/TUI, capability 협상, snapshot-first reconnect, accounting 및 release evidence 검증 구현. Closure는 `BLOCKED`: todo11 이후 낡은 todo10 소스 결속, Spec034 fixture 누락, 소유권 불명 경로 288개, 미해결 설정 재작성 사고. [차단 기록](035-ui-projection-diagnostics-and-release-evidence-parity/CLOSURE.md) 참조 | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
+
+Spec035의 카탈로그는 Spec031 66행과 Spec035 80행을 구분한 총 146행이며 runner 원본은 보존됐다. 실제 execution 증거 수용 경로와 경로 별칭 차단은 구현·제한적 재검토를 마쳤고, 최종 compiled QA에서 encoded WebSocket 재접속도 통과했다. 다만 canonical 종료 조건 45행과 owner 6개는 모두 `BLOCKED`이며 F1의 baseline·정확한 owner fact·전체 의미 증거가 부족하다. 원래 네 F2 결함의 scoped confirmed와 compiled QA 성공은 전체 F1/F4 승인이나 `Complete` 전환이 아니다. 최신 범위와 차단은 [Spec035 CLOSURE](035-ui-projection-diagnostics-and-release-evidence-parity/CLOSURE.md)를 따른다.
 
 ## 읽는 순서 권장
 
