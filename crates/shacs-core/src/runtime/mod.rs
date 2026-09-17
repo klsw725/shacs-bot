@@ -67,6 +67,8 @@ mod snapshot_replay;
 mod spec031_context;
 mod spec033_projection;
 mod spec033_release;
+mod spec035_tasks_assembler;
+mod spec035_tasks_source;
 mod subagent;
 mod surface_action;
 mod tool_before;
@@ -459,6 +461,16 @@ pub use spec033_release::{
     Spec033ReleaseCheck, Spec033ReleaseCommandEvidence, Spec033ReleaseConfig,
     Spec033ReleaseEvidenceError, Spec033ReleaseManifest, Spec033ReleaseMode, Spec033SourceManifest,
     Spec033TrajectoryProvenance,
+};
+pub use spec035_tasks_assembler::{
+    assemble_spec035_tasks, Spec035LocatedOwnerFact, Spec035RecoveryOwnerFact,
+    Spec035TasksAssemblerError, Spec035TasksAssemblerErrorKind, Spec035TasksOwnerSnapshots,
+    Spec035TasksOwnerSource,
+};
+pub use spec035_tasks_source::{
+    accept_spec035_surface_action_outcome, build_spec035_tasks_projection,
+    serialize_spec035_tasks_projection, validate_spec035_task_action, Spec035TasksSemanticAction,
+    Spec035TasksSourceError,
 };
 pub use subagent::{
     build_subagent_tool_registry, format_partial_progress,
