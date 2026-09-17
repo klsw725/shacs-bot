@@ -1,6 +1,10 @@
 # PRD 008. transport capability and snapshot-first reconnect
 
-Status: Planned
+Status: Open
+
+구현 상태: 구현됨, closure 차단. Capability 협상, owner 접근 전 mutation 거절, snapshot-first reconnect 및 generation/sequence 검사가 CLI/API/TUI와 API WebSocket/SSE 경계에 구현되어 있다. Task7-9 및 todo10의 capability/failure-injection/실제 표면/owner audit 기록은 존재하나 todo11 이후 낡은 역사적 결속이다. [현재 차단 기록](../CLOSURE.md)을 따른다.
+
+CLI Tasks 변경은 `--transport-hello`, API `POST /v1/tasks/actions`는 `transport_hello`를 매 요청에 요구한다. `POST /v1/transport/hello`는 호환성 조회이지 인증·권한 부여가 아니며 API의 loopback mutation opt-in과 owner 검증을 대체하지 않는다. 정확한 JSON과 조회의 URL 인코딩은 [사용법](../../../USAGE.md#tasks-조회와-owner-변경-요청)을 따른다.
 
 ## Goal
 
@@ -8,7 +12,7 @@ Status: Planned
 
 ## Scope
 
-1. CLI, daemon, worker, local API/WebSocket 사이의 최소 capability handshake matrix.
+1. CLI/TUI의 로컬 owner 호출, 기존 runtime/worker 경계와 local API/WebSocket 사이의 최소 capability handshake matrix. 여기서 daemon/worker는 기존 로컬 실행 경계를 뜻하며 새 범용 daemon RPC, fleet control plane이나 자동 reexec 서비스가 아니다.
 2. Unsupported mutation의 side effect 전 거부와 user-visible reason.
 3. Opaque generation/sequence를 사용하는 snapshot-first reconnect ordering.
 4. Connection-local backpressure, coalescing, drop accounting과 reconnect gap의 결합.
@@ -40,3 +44,5 @@ Status: Planned
 2. Snapshot-first reconnect ordering test와 failure injection artifact.
 3. CLI/API/WebSocket real-surface transcript와 cleanup receipt.
 4. 기존 Specs 002, 015, 029, 035 owner truth를 재소유하지 않는 read audit.
+
+현재 snapshot-first 발행 경로와 순서 검사 모델은 구현되어 있지만 별도 production reconnect client를 제공한다는 뜻은 아니다. F2는 client/session identity 충돌, 이전 generation의 final 관측 덮어쓰기 및 stale 비동기 queue 역방향 사례의 보정을 제한된 재검토 범위에서 확인했다. 과거 F3에서 URL 인코딩된 query가 HTTP 400으로 실패한 뒤 query decoding을 수정했고, 최종 compiled QA에서 encoded client/session으로 snapshot generation 1→2를 확인했다. 이 scoped QA는 전체 의미 증거나 release closure PASS가 아니며 최신 근거는 [CLOSURE](../CLOSURE.md)를 따른다.
