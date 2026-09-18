@@ -10,7 +10,7 @@ use shacs_core::runtime::{
     ProviderCredentialClientConfig, ProviderCredentialRuntime,
 };
 use shacs_providers::{ImageGenerationClient, ImageGenerationRequest, ProviderError};
-use spec030_provider_credential_image_support::serve_image_responses;
+use spec030_provider_credential_image_support::{serve_image_responses, ImageResponse};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,7 +40,7 @@ fn spec030_image_client_uses_replaced_local_auth_without_rebuild() -> Result<(),
     let auth_path = root.path().join("auth.json");
     let store = LocalAuthStore::new(&auth_path);
     store.save(&auth_store("image-token-old"))?;
-    let (api_base, capture) = serve_image_responses(2)?;
+    let (api_base, capture) = serve_image_responses(2, ImageResponse::OpenAi)?;
     let runtime = Arc::new(ProviderCredentialRuntime::new(
         auth_path,
         root.path(),
@@ -91,7 +91,7 @@ fn spec030_image_client_rejects_logout_without_rebuild() -> Result<(), Box<dyn E
     let auth_path = root.path().join("auth.json");
     let store = LocalAuthStore::new(&auth_path);
     store.save(&auth_store("image-token"))?;
-    let (api_base, capture) = serve_image_responses(1)?;
+    let (api_base, capture) = serve_image_responses(1, ImageResponse::OpenAi)?;
     let runtime = Arc::new(ProviderCredentialRuntime::new(
         auth_path,
         root.path(),
@@ -148,7 +148,7 @@ fn spec030_image_client_refreshes_expired_codex_oauth_without_rebuild() -> Resul
         },
     );
     store.save(&auth)?;
-    let (api_base, capture) = serve_image_responses(2)?;
+    let (api_base, capture) = serve_image_responses(2, ImageResponse::Codex)?;
     let refresher = Arc::new(ImageOAuthRefresher(AtomicUsize::new(0)));
     let runtime = Arc::new(
         ProviderCredentialRuntime::new(
@@ -178,7 +178,7 @@ fn spec030_image_client_refreshes_expired_codex_oauth_without_rebuild() -> Resul
     );
 
     // When
-    client.generate_image(ImageGenerationRequest::new("first"))?;
+    let first = client.generate_image(ImageGenerationRequest::new("first"))?;
     let mut expired = store.load()?;
     expired
         .providers
@@ -186,12 +186,15 @@ fn spec030_image_client_refreshes_expired_codex_oauth_without_rebuild() -> Resul
         .ok_or("Codex auth missing")?
         .expires = Some(1);
     store.save(&expired)?;
-    client.generate_image(ImageGenerationRequest::new("second"))?;
+    let second = client.generate_image(ImageGenerationRequest::new("second"))?;
     let captured = capture.join().map_err(|_| "capture thread panicked")??;
 
     // Then
     let captured = captured.to_ascii_lowercase();
     assert_eq!(refresher.0.load(Ordering::SeqCst), 1);
+    assert_eq!(first.images[0].bytes, b"hi");
+    assert_eq!(second.images[0].bytes, b"ho");
+    assert_eq!(captured.matches("post /codex/responses ").count(), 2);
     assert!(captured.contains("authorization: bearer oauth-initial"));
     assert!(captured.contains("authorization: bearer oauth-renewed"));
     assert!(captured.contains("chatgpt-account-id: account-initial"));
@@ -206,7 +209,7 @@ fn spec030_codex_runtime_override_removes_stale_config_auth_headers() -> Result<
 {
     // Given
     let root = tempfile::tempdir()?;
-    let (api_base, capture) = serve_image_responses(1)?;
+    let (api_base, capture) = serve_image_responses(1, ImageResponse::Codex)?;
     let runtime = Arc::new(
         ProviderCredentialRuntime::new(
             root.path().join("auth.json"),
@@ -238,11 +241,13 @@ fn spec030_codex_runtime_override_removes_stale_config_auth_headers() -> Result<
     );
 
     // When
-    client.generate_image(ImageGenerationRequest::new("runtime override"))?;
+    let result = client.generate_image(ImageGenerationRequest::new("runtime override"))?;
     let captured = capture.join().map_err(|_| "capture thread panicked")??;
 
     // Then
     let captured = captured.to_ascii_lowercase();
+    assert_eq!(result.images[0].bytes, b"hi");
+    assert_eq!(captured.matches("post /codex/responses ").count(), 1);
     assert!(captured.contains("authorization: bearer oauth-runtime"));
     assert!(!captured.contains("oauth-stale"));
     assert!(!captured.contains("chatgpt-account-id"));
