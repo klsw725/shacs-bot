@@ -79,6 +79,7 @@ impl Fixture {
             fs::create_dir_all(target.parent().expect("parent")).expect("authority directory");
             fs::copy(actual.join(path), target).expect("authority fixture copies");
         }
+        super::spec035_postrun_fixture::copy_runner_sources(repo.path(), actual);
         let files = source_files(repo.path());
         write_json(&root.join("source-before.json"), &json!(files));
         fs::copy(
@@ -112,7 +113,8 @@ impl Fixture {
             }
             json!({"id":id,"kind":kind,"argv":argv,"package":package,"filter":filter,"tests":tests,"exit_code":0,"run_id":"constructed-execution","source_sha256":source_hash,"stdout":file_ref(&root,&stdout),"stderr":file_ref(&root,&stderr)})
         }).collect();
-        let requirements: Vec<_> = catalog()
+        let requirements: Vec<_> = super::spec035_catalog::catalog_at(repo.path())
+            .expect("current authority")
             .into_iter()
             .map(|authority| {
                 let receipt = receipt(&root, &source_hash, &authority.id, "focused");

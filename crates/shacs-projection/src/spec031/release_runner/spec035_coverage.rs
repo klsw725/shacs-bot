@@ -8,6 +8,7 @@ use std::path::Path;
 
 pub(super) fn has_catalog(
     artifacts: &Spec031ReleaseRunArtifacts,
+    repo: &Path,
 ) -> Result<bool, Spec031ReleaseArtifactError> {
     if !artifacts
         .manifest_files
@@ -24,7 +25,7 @@ pub(super) fn has_catalog(
         super::validate::read_json(Path::new(&artifacts.evidence_root), "evidence-index.json")?;
     match index.spec035_catalog {
         None => Ok(false),
-        Some(catalog) if catalog == super::spec035_catalog::catalog() => Ok(true),
+        Some(catalog) if catalog == super::spec035_catalog::catalog_at(repo)? => Ok(true),
         Some(_) => Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence),
     }
 }
@@ -45,19 +46,27 @@ pub(super) fn coverage_rows(
             && audit.status == Spec031ExternalAuditStatus::Pass
             && audit.implementation_artifacts == [super::spec035_execution::MANIFEST]
     }) {
-        super::spec035_execution::validate_bound(repo, root).ok()
+        super::spec035_execution::preflight_bound(repo, root).ok()
     } else {
         None
     };
     let artifact = "external/spec035-read-audit.md";
     let hash = artifact_hash(root, artifact)?;
-    Ok(super::spec035_catalog::catalog()
+    let catalog = if execution.is_some()
+        || fixture_pass
+        || repo.join(super::spec035_catalog::SPEC_ROOT).is_dir()
+    {
+        super::spec035_catalog::catalog_at(repo)?
+    } else {
+        super::spec035_catalog::catalog()
+    };
+    Ok(catalog
         .into_iter()
         .map(|row| {
             let proof = execution.as_ref().and_then(|execution| execution.proof_for(&row));
             let reason = match (&execution, proof) {
                 (Some(execution), Some(proof)) => format!(
-                    "validated execution {}; manifest sha256:{}; source sha256:{}; row proof {} sha256:{}",
+                    "validated preflight {}; manifest sha256:{}; source sha256:{}; row proof {} sha256:{}; pending-final-audit",
                     execution.binding.run_id, execution.binding.manifest_sha256,
                     execution.binding.source_sha256, proof.path, proof.sha256
                 ),

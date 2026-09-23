@@ -79,9 +79,18 @@ fn spec035_execution_production_audit_and_coverage_use_current_proof_not_fixture
     )
     .expect("rows");
     assert_eq!(rows.len(), 80);
-    assert!(rows
-        .iter()
-        .all(|row| row.status == Spec031CoverageStatus::Pass));
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.status == Spec031CoverageStatus::Pass)
+            .count(),
+        74
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.status == Spec031CoverageStatus::Blocked)
+            .count(),
+        6
+    );
 
     fs::write(
         fixture.repo.path().join("crates/probe.rs"),

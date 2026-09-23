@@ -97,6 +97,16 @@ pub(super) fn write_evidence_index(
     artifacts: &mut Spec031ReleaseRunArtifacts,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     let path = "evidence-index.json";
+    let catalog = if artifacts
+        .manifest_files
+        .iter()
+        .any(|file| file == super::spec035_execution::BINDING)
+        || artifacts.fixture_registry == ["fixtures/success-fixture/Cargo.toml"]
+    {
+        super::spec035_catalog::catalog_at(&config.repo_root)?
+    } else {
+        super::spec035_catalog::catalog()
+    };
     write_json(
         writer,
         path,
@@ -109,8 +119,8 @@ pub(super) fn write_evidence_index(
             "cleanup": artifacts.cleanup_registry,
             "failure_triage": artifacts.failure_triage,
             "reproducibility_observations": artifacts.reproducibility_observations,
-            "authoritative_sources": authoritative_sources(),
-            "spec035_catalog": super::spec035_catalog::catalog()
+            "authoritative_sources": authoritative_sources(&catalog),
+            "spec035_catalog": catalog
         }),
     )?;
     if !artifacts.manifest_files.iter().any(|file| file == path) {
@@ -119,16 +129,12 @@ pub(super) fn write_evidence_index(
     Ok(())
 }
 
-fn authoritative_sources() -> Vec<String> {
+fn authoritative_sources(catalog: &[super::spec035_catalog::Requirement]) -> Vec<String> {
     let mut sources: Vec<String> = requirement_provenance()
         .into_iter()
         .map(|row| row.source_locator)
         .collect();
-    sources.extend(
-        super::spec035_catalog::catalog()
-            .into_iter()
-            .map(|row| row.source_locator),
-    );
+    sources.extend(catalog.iter().map(|row| row.source_locator.clone()));
     sources.extend(
         REQUIRED_ARTIFACT_PROVENANCE
             .iter()

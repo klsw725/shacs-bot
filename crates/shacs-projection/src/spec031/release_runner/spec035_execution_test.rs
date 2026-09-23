@@ -59,9 +59,18 @@ fn spec035_execution_admits_real_coverage_without_success_fixture_facts() {
         .expect("coverage");
 
     assert_eq!(rows.len(), 80);
-    assert!(rows
-        .iter()
-        .all(|row| row.status == Spec031CoverageStatus::Pass));
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.status == Spec031CoverageStatus::Pass)
+            .count(),
+        74
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.status == Spec031CoverageStatus::Blocked)
+            .count(),
+        6
+    );
 }
 
 #[test]

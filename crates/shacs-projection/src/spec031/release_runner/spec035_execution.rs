@@ -1,5 +1,5 @@
 use super::model::{Spec031ReleaseArtifactError as Error, Spec031ReleaseRunId};
-use super::spec035_catalog::{catalog, Requirement};
+use super::spec035_catalog::{catalog_at, postrun_ids, Requirement};
 use super::spec035_classification_model::ClosureDocument;
 use super::spec035_evidence_io::sha256;
 use super::spec035_execution_contract::{GATES, INCIDENTS, OWNERS};
@@ -15,6 +15,54 @@ pub(super) const BINDING: &str = "spec035-execution-binding.json";
 pub(super) struct ValidatedExecution {
     pub(super) binding: ExecutionBinding,
     requirements: HashMap<String, FileRef>,
+}
+
+pub(super) struct Preflight {
+    pub(super) binding: ExecutionBinding,
+    requirements: HashMap<String, FileRef>,
+}
+
+impl Preflight {
+    pub(super) fn proof_for(&self, row: &Requirement) -> Option<&FileRef> {
+        self.requirements.get(&row.id)
+    }
+
+    pub(super) fn finish(
+        mut self,
+        supplements: HashMap<String, FileRef>,
+    ) -> Result<ValidatedExecution, Error> {
+        if supplements.keys().cloned().collect::<HashSet<_>>() != postrun_ids() {
+            return Err(Error::UnmappedCoverageRequirement);
+        }
+        self.requirements.extend(supplements);
+        Ok(ValidatedExecution {
+            binding: self.binding,
+            requirements: self.requirements,
+        })
+    }
+}
+
+pub(super) fn preflight(repo: &Path) -> Result<Preflight, Error> {
+    let bytes = std::fs::read(super::validate::require_safe_file(repo, MANIFEST)?)
+        .map_err(|_| Error::MissingRequiredArtifact)?;
+    let ClosureDocument::CurrentExecution(execution) = decode(&bytes)? else {
+        admit(repo)?;
+        return Err(Error::BlockedExternalEvidence);
+    };
+    let (binding, requirements) = validate(repo, &execution, sha256(&bytes), true)?;
+    Ok(Preflight {
+        binding,
+        requirements,
+    })
+}
+
+pub(super) fn preflight_bound(repo: &Path, output: &Path) -> Result<Preflight, Error> {
+    let binding: ExecutionBinding = super::validate::read_json(output, BINDING)?;
+    let preflight = preflight(repo)?;
+    if binding != preflight.binding {
+        return Err(Error::ArtifactMismatch);
+    }
+    Ok(preflight)
 }
 
 impl ValidatedExecution {
@@ -34,7 +82,13 @@ pub(super) fn admit(repo: &Path) -> Result<ValidatedExecution, Error> {
     let bytes = std::fs::read(super::validate::require_safe_file(repo, MANIFEST)?)
         .map_err(|_| Error::MissingRequiredArtifact)?;
     match decode(&bytes)? {
-        ClosureDocument::CurrentExecution(execution) => validate(repo, &execution, sha256(&bytes)),
+        ClosureDocument::CurrentExecution(execution) => {
+            let (binding, requirements) = validate(repo, &execution, sha256(&bytes), false)?;
+            Ok(ValidatedExecution {
+                binding,
+                requirements,
+            })
+        }
         ClosureDocument::ClassificationV2(classification) => {
             super::spec035_classification::validate_classification(repo, &classification)?;
             Err(Error::BlockedExternalEvidence)
@@ -46,6 +100,7 @@ pub(super) fn admit(repo: &Path) -> Result<ValidatedExecution, Error> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn validate_bound(repo: &Path, output: &Path) -> Result<ValidatedExecution, Error> {
     let binding: ExecutionBinding = super::validate::read_json(output, BINDING)?;
     let execution = admit(repo)?;
@@ -59,12 +114,14 @@ fn validate(
     repo: &Path,
     execution: &Execution,
     manifest_sha256: String,
-) -> Result<ValidatedExecution, Error> {
+    preflight: bool,
+) -> Result<(ExecutionBinding, HashMap<String, FileRef>), Error> {
     Spec031ReleaseRunId::try_new(&execution.run_id)?;
     let root = repo.join(".omo/evidence/spec035/prd000-009");
     let evidence = Evidence::open(repo, &root, execution)?;
     super::spec035_execution_commands::validate_commands(&evidence)?;
-    let expected = catalog();
+    let expected = catalog_at(repo)?;
+    let deferred = postrun_ids();
     let mut requirements = HashMap::new();
     for row in &execution.requirements {
         if !expected.contains(&row.authority)
@@ -75,10 +132,18 @@ fn validate(
             return Err(Error::InvalidCoverageEvidence);
         }
         evidence.source_locator(&row.authority.source_locator)?;
-        validate_receipt(&evidence, &row.receipt, &row.authority.id)?;
+        super::spec035_execution_receipts::validate_receipt_phase(
+            &evidence,
+            &row.receipt,
+            &row.authority.id,
+            preflight && deferred.contains(&row.authority.id),
+        )?;
     }
     if requirements.len() != expected.len() {
         return Err(Error::UnmappedCoverageRequirement);
+    }
+    if preflight {
+        requirements.retain(|id, _| !deferred.contains(id));
     }
     validate_owners(&evidence)?;
     validate_gates(&evidence)?;
@@ -93,14 +158,14 @@ fn validate(
     if incidents.len() != INCIDENTS.len() {
         return Err(Error::BlockedExternalEvidence);
     }
-    Ok(ValidatedExecution {
-        binding: ExecutionBinding {
+    Ok((
+        ExecutionBinding {
             run_id: execution.run_id.clone(),
             manifest_sha256,
             source_sha256: execution.source.before.sha256.clone(),
         },
         requirements,
-    })
+    ))
 }
 
 fn validate_owners(evidence: &Evidence<'_>) -> Result<(), Error> {

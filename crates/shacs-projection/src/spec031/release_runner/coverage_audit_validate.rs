@@ -147,7 +147,7 @@ fn validate_owner_facts(
         }
     } else if audit.owner == Spec031ExternalOwnerId::Spec035 {
         if audit.implementation_artifacts != [super::spec035_execution::MANIFEST]
-            || super::spec035_execution::validate_bound(
+            || super::spec035_execution::preflight_bound(
                 repo_root,
                 Path::new(&artifacts.evidence_root),
             )

@@ -14,7 +14,7 @@ fn fixture() -> (tempfile::TempDir, Spec031ReleaseRunArtifacts) {
             .canonicalize()
             .expect("canonical fixture root")
             .join("run"),
-        repo_root: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        repo_root: repo_root(),
         mode: Spec031ReleaseRunnerMode::SuccessFixture,
         command_timeout: std::time::Duration::from_secs(30),
     })
@@ -30,7 +30,7 @@ fn spec035_catalog_rejects_omission_even_when_all_new_rows_are_removed() {
         .retain(|row| !row.requirement_id.starts_with("spec035:"));
 
     assert_eq!(
-        validate_coverage_matrix(&artifacts, _root.path()),
+        validate_coverage_matrix(&artifacts, &repo_root()),
         Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement)
     );
 }
@@ -46,7 +46,7 @@ fn spec035_catalog_blocked_rows_prevent_success_from_legacy_audit() {
     audit.implementation_artifacts = vec!["historical-v1-manifest.json".to_owned()];
     artifacts.coverage_matrix = super::coverage_matrix::coverage_entries(
         &root.path().join("run"),
-        root.path(),
+        &repo_root(),
         Spec031CoverageStatus::Pass,
         &artifacts.command_registry,
         &artifacts.external_audits,
@@ -54,7 +54,15 @@ fn spec035_catalog_blocked_rows_prevent_success_from_legacy_audit() {
     .expect("catalog rows");
 
     assert_eq!(
-        validate_coverage_matrix(&artifacts, root.path()),
+        validate_coverage_matrix(&artifacts, &repo_root()),
         Err(Spec031ReleaseArtifactError::BlockedExternalEvidence)
     );
+}
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("repo")
+        .to_owned()
 }

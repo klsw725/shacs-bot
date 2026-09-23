@@ -22,6 +22,14 @@ pub(super) fn validate_coverage_matrix(
     artifacts: &Spec031ReleaseRunArtifacts,
     repo_root: &Path,
 ) -> Result<(), Spec031ReleaseArtifactError> {
+    validate_matrix_phase(artifacts, repo_root, false)
+}
+
+pub(super) fn validate_matrix_phase(
+    artifacts: &Spec031ReleaseRunArtifacts,
+    repo_root: &Path,
+    pending: bool,
+) -> Result<(), Spec031ReleaseArtifactError> {
     if artifacts.command_registry.is_empty() {
         return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
     }
@@ -33,7 +41,10 @@ pub(super) fn validate_coverage_matrix(
         &artifacts.command_registry,
         &artifacts.external_audits,
     )?;
-    if !super::spec035_coverage::has_catalog(artifacts)? {
+    if !super::spec035_coverage::has_catalog(artifacts, repo_root)? {
+        if artifacts.fixture_registry != ["fixtures/success-fixture/Cargo.toml"] {
+            return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
+        }
         expected_entries.retain(|entry| !entry.requirement_id.starts_with("spec035:"));
     }
     let required_ids: HashSet<String> = expected_entries
@@ -51,7 +62,7 @@ pub(super) fn validate_coverage_matrix(
         if !seen.insert(entry.requirement_id.clone()) {
             return Err(Spec031ReleaseArtifactError::DuplicateCoverageRequirement);
         }
-        validate_coverage_entry(artifacts, entry)?;
+        validate_coverage_entry(artifacts, entry, repo_root)?;
         let expected = expected_by_id
             .get(&entry.requirement_id)
             .ok_or(Spec031ReleaseArtifactError::UnknownCoverageRequirement)?;
@@ -62,9 +73,11 @@ pub(super) fn validate_coverage_matrix(
     if !required_ids.is_subset(&seen) {
         return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
     }
+    let deferred = super::spec035_catalog::postrun_ids();
     if artifacts.coverage_matrix.iter().any(|entry| {
         entry.requirement_id.starts_with("spec035:")
             && entry.status == Spec031CoverageStatus::Blocked
+            && !(pending && deferred.contains(&entry.requirement_id))
     }) {
         return Err(Spec031ReleaseArtifactError::BlockedExternalEvidence);
     }
@@ -74,6 +87,7 @@ pub(super) fn validate_coverage_matrix(
 fn validate_coverage_entry(
     artifacts: &Spec031ReleaseRunArtifacts,
     entry: &Spec031ReleaseCoverageEntry,
+    repo_root: &Path,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     if entry.source_locator.is_empty() || entry.owner.is_empty() || entry.reason.is_empty() {
         return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
@@ -93,7 +107,7 @@ fn validate_coverage_entry(
         return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
     }
     validate_coverage_artifact(artifacts, entry)?;
-    validate_source_locator(&entry.source_locator, &entry.requirement_id)?;
+    validate_source_locator(&entry.source_locator, &entry.requirement_id, repo_root)?;
     validate_command_coverage(artifacts, entry)?;
     validate_external_coverage_status(artifacts, entry)?;
     validate_requirement_command_dependency(artifacts, entry)?;
@@ -104,6 +118,7 @@ fn validate_coverage_entry(
 fn validate_source_locator(
     locator: &str,
     requirement_id: &str,
+    root: &Path,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     let Some((relative, line)) = locator.rsplit_once(':') else {
         return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
@@ -111,10 +126,6 @@ fn validate_source_locator(
     let line = line
         .parse::<usize>()
         .map_err(|_| Spec031ReleaseArtifactError::InvalidCoverageEvidence)?;
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .ok_or(Spec031ReleaseArtifactError::InvalidCoverageEvidence)?;
     let text = std::fs::read_to_string(root.join(relative))
         .map_err(|_| Spec031ReleaseArtifactError::InvalidCoverageEvidence)?;
     let Some(source_line) = text.lines().nth(line.saturating_sub(1)) else {
@@ -131,7 +142,8 @@ fn source_line_matches(line: &str, requirement_id: &str) -> bool {
         let number = requirement_id.rsplit([':', '-']).next().unwrap_or("");
         return line
             .trim_start()
-            .starts_with(&format!("{}. ", number_as_usize(number)));
+            .strip_prefix(&format!("{}.", number_as_usize(number)))
+            .is_some_and(|body| body.starts_with(char::is_whitespace) && !body.trim().is_empty());
     }
     if let Some(number) = requirement_id.strip_prefix("spec031:must:") {
         return line

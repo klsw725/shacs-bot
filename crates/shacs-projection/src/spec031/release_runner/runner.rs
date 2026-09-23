@@ -15,7 +15,6 @@ use super::runner_outputs::{
     push_blocked_external_triage, push_cleanup, write_evidence_index, CleanupReceiptSpec,
 };
 use super::spec035_execution;
-use super::validate::validate_spec031_release_artifacts_with_repo_root;
 use super::writer::{write_json, write_spec031_release_artifacts_with};
 use super::REQUIRED_ARTIFACTS;
 use crate::release_evidence::EvidenceWriter;
@@ -49,7 +48,28 @@ pub fn run_spec031_release_runner(
         }
     }
     write_spec031_release_artifacts_with(&writer, &artifacts)?;
-    validate_spec031_release_artifacts_with_repo_root(&artifacts, &config.repo_root)?;
+    match config.mode {
+        Spec031ReleaseRunnerMode::SuccessFixture => {
+            super::validate::validate_spec031_release_artifacts_with_repo_root(
+                &artifacts,
+                &config.repo_root,
+            )?
+        }
+        Spec031ReleaseRunnerMode::CurrentWorktree => {
+            if artifacts
+                .manifest_files
+                .iter()
+                .any(|file| file == spec035_execution::BINDING)
+            {
+                super::validate::validate_pending_artifacts(&artifacts, &config.repo_root)?;
+            } else {
+                super::validate::validate_spec031_release_artifacts_with_repo_root(
+                    &artifacts,
+                    &config.repo_root,
+                )?;
+            }
+        }
+    }
     Ok(artifacts)
 }
 
@@ -151,7 +171,12 @@ fn add_current_worktree_triage(
             "resource_id": "current-worktree"
         }),
     )?;
-    let spec035_evidence = spec035_execution::admit(&config.repo_root);
+    let spec035_evidence = spec035_execution::preflight(&config.repo_root).and_then(|preflight| {
+        if preflight.binding.run_id != config.run_id.as_str() {
+            return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
+        }
+        Ok(preflight)
+    });
     if let Ok(execution) = &spec035_evidence {
         write_json(writer, spec035_execution::BINDING, &execution.binding)?;
         artifacts
@@ -169,7 +194,7 @@ fn add_current_worktree_triage(
         super::runner_outputs::push_reproducibility_observation(config, writer, artifacts)?;
     }
     let spec035_evidence = spec035_evidence
-        .and_then(|_| spec035_execution::validate_bound(&config.repo_root, &config.evidence_root));
+        .and_then(|_| spec035_execution::preflight_bound(&config.repo_root, &config.evidence_root));
     add_external_audits(
         config,
         writer,

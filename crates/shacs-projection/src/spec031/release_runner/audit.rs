@@ -36,7 +36,7 @@ pub(super) fn add_external_audits(
         let implementation_artifacts = if all_pass {
             write_success_fixture_facts(writer, spec)?
         } else if spec.slug == "spec035"
-            && super::spec035_execution::validate_bound(&config.repo_root, &config.evidence_root)
+            && super::spec035_execution::preflight_bound(&config.repo_root, &config.evidence_root)
                 .is_ok()
         {
             vec![super::spec035_execution::MANIFEST.to_owned()]
@@ -160,7 +160,7 @@ fn audit_passes(
         if let Some(error) = spec035_evidence_error {
             return Err(error.clone());
         }
-        super::spec035_execution::validate_bound(&config.repo_root, &config.evidence_root)?;
+        super::spec035_execution::preflight_bound(&config.repo_root, &config.evidence_root)?;
     }
     if implementation_artifacts.is_empty()
         || !implementation_artifacts

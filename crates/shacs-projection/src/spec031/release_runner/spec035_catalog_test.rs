@@ -94,7 +94,7 @@ fn spec035_catalog_source_locations_match_numbered_authority_sections() {
         .parent()
         .and_then(std::path::Path::parent)
         .expect("repository");
-    let rows = super::spec035_catalog::catalog();
+    let rows = super::spec035_catalog::catalog_at(repo).expect("current authority");
     for row in &rows {
         let (file, line) = row.source_locator.rsplit_once(':').expect("source locator");
         let line: usize = line.parse().expect("line number");

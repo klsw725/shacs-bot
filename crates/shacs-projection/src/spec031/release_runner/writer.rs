@@ -52,16 +52,45 @@ pub(super) fn write_spec031_release_artifacts_with(
     write_text(writer, "summary.md", &render_summary(artifacts))
 }
 
-fn render_summary(artifacts: &Spec031ReleaseRunArtifacts) -> String {
-    let status = if artifacts.failure_triage.is_empty()
-        && !artifacts.coverage_matrix.iter().any(|row| {
-            row.requirement_id.starts_with("spec035:")
-                && row.status == super::coverage::Spec031CoverageStatus::Blocked
-        }) {
+pub(super) fn summary_status(artifacts: &Spec031ReleaseRunArtifacts) -> &'static str {
+    if !artifacts.failure_triage.is_empty()
+        || artifacts.command_registry.is_empty()
+        || artifacts.command_registry.iter().any(|command| {
+            command.status != super::model::Spec031ReleaseCommandStatus::Passed
+                || command.exit_code != Some(0)
+        })
+        || artifacts.external_audits.len() != 6
+        || artifacts
+            .external_audits
+            .iter()
+            .any(|audit| audit.status != super::coverage::Spec031ExternalAuditStatus::Pass)
+        || artifacts.coverage_matrix.is_empty()
+    {
+        return "BLOCKED";
+    }
+    let blocked: std::collections::HashSet<_> = artifacts
+        .coverage_matrix
+        .iter()
+        .filter(|row| row.status == super::coverage::Spec031CoverageStatus::Blocked)
+        .map(|row| row.requirement_id.clone())
+        .collect();
+    if artifacts.fixture_registry == ["fixtures/current-worktree.json"] {
+        if blocked == super::spec035_catalog::postrun_ids() {
+            "pending-final-audit"
+        } else {
+            "BLOCKED"
+        }
+    } else if blocked.is_empty()
+        && artifacts.fixture_registry == ["fixtures/success-fixture/Cargo.toml"]
+    {
         "PASS"
     } else {
         "BLOCKED"
-    };
+    }
+}
+
+pub(super) fn render_summary(artifacts: &Spec031ReleaseRunArtifacts) -> String {
+    let status = summary_status(artifacts);
     let mut summary = format!(
         "# Spec031 Release Runner Summary\n\n- schema: {}\n- run_id: {}\n- status: {}\n- commands: {}\n- cleanup receipts: {}\n- failures: {}\n",
         artifacts.schema,

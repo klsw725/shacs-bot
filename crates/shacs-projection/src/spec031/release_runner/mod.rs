@@ -24,6 +24,7 @@ mod spec035_admission;
 mod spec035_admission_incident;
 mod spec035_admission_model;
 mod spec035_admission_source;
+mod spec035_authority;
 mod spec035_catalog;
 mod spec035_classification;
 mod spec035_classification_model;
@@ -39,6 +40,9 @@ mod spec035_execution_contract;
 mod spec035_execution_io;
 mod spec035_execution_model;
 mod spec035_execution_receipts;
+mod spec035_postrun;
+mod spec035_postrun_model;
+mod spec035_postrun_process;
 mod spec035_test_counts;
 mod validate;
 mod writer;
@@ -68,6 +72,12 @@ mod spec035_execution_path_test;
 mod spec035_execution_probe;
 #[cfg(test)]
 mod spec035_execution_test;
+#[cfg(test)]
+mod spec035_postrun_fixture;
+#[cfg(test)]
+mod spec035_postrun_test;
+#[cfg(test)]
+mod spec035_preflight_test;
 
 pub(crate) use command::execute_spec031_release_command_with;
 pub use command::{execute_spec031_release_command, parse_cargo_test_counts};

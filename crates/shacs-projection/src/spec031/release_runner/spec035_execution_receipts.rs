@@ -36,28 +36,48 @@ pub(super) fn validate_receipt(
     file: &FileRef,
     subject: &str,
 ) -> Result<Vec<String>, Error> {
+    validate_receipt_phase(evidence, file, subject, false)
+}
+
+pub(super) fn validate_receipt_phase(
+    evidence: &Evidence<'_>,
+    file: &FileRef,
+    subject: &str,
+    pending_allowed: bool,
+) -> Result<Vec<String>, Error> {
     let receipt: Receipt = evidence.json(file)?;
     evidence.identity(&receipt.run_id, &receipt.source_sha256)?;
     if receipt.subject != subject || receipt.checks.is_empty() {
         return Err(Error::InvalidCoverageEvidence);
     }
-    if receipt.verdict != Verdict::Pass {
+    if receipt.verdict == Verdict::Failed
+        || (receipt.verdict == Verdict::Blocked && !pending_allowed)
+    {
         return Err(Error::BlockedExternalEvidence);
     }
     let mut seen = HashSet::new();
     let mut commands = Vec::new();
+    let mut pending = false;
     for check in receipt.checks {
-        if check.id.is_empty()
-            || !seen.insert(check.id)
-            || check.commands.is_empty()
-            || check.artifacts.is_empty()
-        {
+        if check.id.is_empty() || !seen.insert(check.id) {
             return Err(Error::InvalidCoverageEvidence);
         }
-        if check.verdict != Verdict::Pass {
-            return Err(Error::BlockedExternalEvidence);
-        }
         evidence.source_locator(&check.producer)?;
+        match check.verdict {
+            Verdict::Failed => return Err(Error::BlockedExternalEvidence),
+            Verdict::Blocked => {
+                if !pending_allowed || !check.commands.is_empty() || !check.artifacts.is_empty() {
+                    return Err(Error::BlockedExternalEvidence);
+                }
+                pending = true;
+                continue;
+            }
+            Verdict::Pass => {
+                if check.commands.is_empty() || check.artifacts.is_empty() {
+                    return Err(Error::InvalidCoverageEvidence);
+                }
+            }
+        }
         for command in &check.commands {
             if !evidence
                 .execution
@@ -72,6 +92,9 @@ pub(super) fn validate_receipt(
             evidence.bytes(&artifact)?;
         }
         commands.extend(check.commands);
+    }
+    if pending != (receipt.verdict == Verdict::Blocked) {
+        return Err(Error::InvalidCoverageEvidence);
     }
     Ok(commands)
 }

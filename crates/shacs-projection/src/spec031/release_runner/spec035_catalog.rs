@@ -38,7 +38,7 @@ pub(super) const PRDS: [PrdAuthority; 10] = [
         file: "003-readiness-degraded-health-and-diagnostics.md",
         section: "Closure Evidence",
         tag: "CE",
-        first_line: 98,
+        first_line: 100,
         count: 4,
     },
     PrdAuthority {
@@ -153,5 +153,15 @@ pub(super) fn prd_closure_ids(prd: usize) -> Vec<String> {
     let authority = &PRDS[prd];
     (1..=authority.count)
         .map(|item| format!("PRD{prd:03}-{}-{item}", authority.tag))
+        .collect()
+}
+
+pub(super) use super::spec035_authority::catalog_at;
+
+pub(super) fn postrun_ids() -> std::collections::HashSet<String> {
+    catalog()
+        .into_iter()
+        .filter(|row| row.closure_ids.iter().any(|id| id == "PRD007-FC-5"))
+        .map(|row| row.id)
         .collect()
 }
