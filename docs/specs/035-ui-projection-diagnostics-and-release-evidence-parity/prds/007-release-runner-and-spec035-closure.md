@@ -198,7 +198,7 @@ Todo10의 [외부 owner 감사](../../../../.omo/evidence/spec035/prd000-009/ext
 | Spec033 | User-visible automation channel event의 delivery projection | `commands/024-ext-spec033.txt`; 1개 통과 |
 | Spec034 | 주입된 analyzer를 통한 stored video runtime context routing | `commands/025-ext-spec034.txt`; 1개 통과 |
 
-위 상대 경로의 기준은 `.omo/evidence/spec035/prd000-009/`다. Spec034의 정확한 adapter 검사 통과는 누락된 `.omo/evidence/spec034/task-12-integration.json` 때문에 실패한 별도 workspace fixture 검사를 대체하지 않는다. 상세 차단과 artifact 위치는 [CLOSURE.md](../CLOSURE.md)를 따른다.
+위 상대 경로의 기준은 `.omo/evidence/spec035/prd000-009/`다. Spec034 adapter 검사와 당시 fixture 누락 실패는 별도 역사 기록이다. `.omo/evidence/spec034/task-12-integration.json`은 이후 실제 producer로 재생성됐고 22 receipts, SHA-256 `ebdc42aa9f9f0dc6fe90e40ff892b52430568eb8f7a9ea0d68590da72ba6a3c4`를 확인했다. 최신 3003 PASS workspace 및 G1-G6의 13 exact fact 대응은 [CLOSURE.md](../CLOSURE.md)를 따른다.
 
 ## Release Runner Contract
 
@@ -286,9 +286,9 @@ Spec 035 may leave `Status: Open` and `docs/specs/README.md` may remove it from 
 
 If any item is missing, Spec 035 remains `Status: Open`.
 
-현재 결과: PRD000-009 구현과 todo10 증거는 존재한다. 그러나 todo11 runner 수정 이후 todo10의 역사적 source binding은 낡았고 current-worktree는 `BLOCKED`다. Workspace fixture 누락, 소유권 불명 경로 288개, 미해결 기본 설정 재작성 사고도 독립 차단이다. 과거 PASS 행이나 success-fixture로 이를 해소하지 않으며 Spec035는 `Status: Open`을 유지한다.
+현재 결과: PRD000-009 구현과 G1-G6 후속 증거, 최신 workspace 3003 PASS / 0 FAIL / 8 ignored 및 fmt/clippy exit 0이 존재한다. Fixture는 실제 재생성, 해당 실행 cleanup은 0, 설정은 한계 있는 사용자 baseline 수용이다. 역사적 288개 provenance와 todo10의 낡은 binding은 보존한다. 문서 freeze 이후 74개 prerequisite/13 fact/19 gate의 정확한 source/run 조립·수용과 runner·postrun 감사 전이므로 `Status: Open`을 유지한다.
 
-카탈로그 열거, 원본 산출물 보존, F1-R01 execution 수용 경로 및 R01-A01 경로 별칭 차단은 구현과 제한적 재검증을 마쳤다. 원래 네 F2 결함과 stale 비동기 queue 역방향 사례도 scoped confirmed다. 최종 compiled QA는 encoded WebSocket query를 포함한 실제 표면 검증을 통과했으며, 과거 URL 실패와 바이너리 부재 기록은 역사 자료다. 그러나 F1의 baseline·정확한 owner fact·전체 의미 증거와 외부 차단은 남아 있다. 최종 전체 F1/F4 승인을 부여하거나 canonical BLOCKED 행을 PASS로 바꾸지 않는다. 최신 실행 근거는 [CLOSURE](../CLOSURE.md)를 따른다.
+카탈로그 열거, 원본 보존, F1-R01/R01-A01 보정과 F2 scoped confirmed는 유지한다. G7 preflight/run/finalize는 FC5 및 그 의존 parent 5행만 postrun으로 분리한다. 나머지 74행을 넓게 skip하지 않으며 기존 receipt의 run/source를 새 identity로 고치지 않는다. 실제 run의 exit 0과 `pending-final-audit`는 최종 승인이 아니고 독립 artifact read audit와 finalize가 필요하다. [G7 계약](../../../../.omo/evidence/spec035/closure/finalization/g7-remediation/CONTRACT.md), [전체 preparation 감사](../../../../.omo/evidence/spec035/closure/finalization/g7-final-preparation/REPORT.md), [CLOSURE](../CLOSURE.md)를 따른다.
 
 ## Authoring Verification
 
