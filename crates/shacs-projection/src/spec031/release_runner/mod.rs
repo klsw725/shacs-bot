@@ -20,6 +20,10 @@ mod model;
 mod receipts;
 mod runner;
 mod runner_outputs;
+mod spec035_admission;
+mod spec035_admission_incident;
+mod spec035_admission_model;
+mod spec035_admission_source;
 mod spec035_catalog;
 mod spec035_classification;
 mod spec035_classification_model;
@@ -35,8 +39,16 @@ mod spec035_execution_contract;
 mod spec035_execution_io;
 mod spec035_execution_model;
 mod spec035_execution_receipts;
+mod spec035_test_counts;
 mod validate;
 mod writer;
+
+#[cfg(test)]
+mod spec035_admission_boundary_test;
+#[cfg(test)]
+mod spec035_admission_commands_test;
+#[cfg(test)]
+mod spec035_admission_test;
 
 #[cfg(test)]
 mod spec035_catalog_gate_test;
@@ -72,6 +84,8 @@ pub use model::{
     Spec031ReleaseRunnerMode, Spec031ReleaseTestCounts, SPEC031_RELEASE_RUNNER_SCHEMA,
 };
 pub use runner::run_spec031_release_runner;
+pub use spec035_admission::inspect_spec035_receipt_admission;
+pub use spec035_admission_model::Spec035ReceiptAdmissionReport;
 pub use validate::{
     validate_spec031_release_artifacts, validate_spec031_release_artifacts_with_repo_root,
 };

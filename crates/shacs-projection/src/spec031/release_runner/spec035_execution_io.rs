@@ -138,7 +138,7 @@ pub(super) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, 
     serde_json::from_slice(bytes).map_err(|_| Error::InvalidCommandEvidence)
 }
 
-fn source_paths(repo: &Path) -> Result<BTreeSet<String>, Error> {
+pub(super) fn source_paths(repo: &Path) -> Result<BTreeSet<String>, Error> {
     let output = std::process::Command::new("git")
         .args([
             "ls-files",

@@ -107,6 +107,9 @@ impl Fixture {
             let stderr = format!("commands/{id}.stderr");
             fs::copy(root.join(if tests.is_null(){"observation.json"}else{"test.stdout"}), root.join(&stdout)).expect("constructed command transcript");
             fs::copy(root.join("empty.stderr"),root.join(&stderr)).expect("command stderr");
+            if *kind == "workspace_test" {
+                fs::write(root.join(&stderr), &probe().stderr).expect("actual target headers");
+            }
             json!({"id":id,"kind":kind,"argv":argv,"package":package,"filter":filter,"tests":tests,"exit_code":0,"run_id":"constructed-execution","source_sha256":source_hash,"stdout":file_ref(&root,&stdout),"stderr":file_ref(&root,&stderr)})
         }).collect();
         let requirements: Vec<_> = catalog()

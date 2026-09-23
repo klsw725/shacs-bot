@@ -65,15 +65,16 @@ pub use redaction::{Spec031ConstructionError, Spec031ConstructionViolation};
 pub(crate) use release_runner::execute_spec031_release_command_with;
 pub use release_runner::required_worktree_commands as canonical_current_command_specs;
 pub use release_runner::{
-    execute_spec031_release_command, parse_cargo_test_counts, run_spec031_release_runner,
-    validate_spec031_release_artifacts, validate_spec031_release_artifacts_with_repo_root,
-    write_spec031_release_artifacts, Spec031ArtifactMediaType, Spec031CommandProcessReceipt,
-    Spec031CoverageEvidenceKind, Spec031CoverageRequirementKind, Spec031CoverageStatus,
-    Spec031ExternalAuditRow, Spec031ExternalAuditStatus, Spec031ExternalOwnerId,
-    Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseCommandSpec,
-    Spec031ReleaseCommandStatus, Spec031ReleaseCoverageEntry, Spec031ReleaseGateKind,
-    Spec031ReleaseRunArtifacts, Spec031ReleaseRunId, Spec031ReleaseRunnerConfig,
-    Spec031ReleaseRunnerMode, Spec031ReleaseTestCounts, Spec031TypedEvidenceClass,
+    execute_spec031_release_command, inspect_spec035_receipt_admission, parse_cargo_test_counts,
+    run_spec031_release_runner, validate_spec031_release_artifacts,
+    validate_spec031_release_artifacts_with_repo_root, write_spec031_release_artifacts,
+    Spec031ArtifactMediaType, Spec031CommandProcessReceipt, Spec031CoverageEvidenceKind,
+    Spec031CoverageRequirementKind, Spec031CoverageStatus, Spec031ExternalAuditRow,
+    Spec031ExternalAuditStatus, Spec031ExternalOwnerId, Spec031ReleaseArtifactError,
+    Spec031ReleaseCommandRecord, Spec031ReleaseCommandSpec, Spec031ReleaseCommandStatus,
+    Spec031ReleaseCoverageEntry, Spec031ReleaseGateKind, Spec031ReleaseRunArtifacts,
+    Spec031ReleaseRunId, Spec031ReleaseRunnerConfig, Spec031ReleaseRunnerMode,
+    Spec031ReleaseTestCounts, Spec031TypedEvidenceClass, Spec035ReceiptAdmissionReport,
     SPEC031_RELEASE_RUNNER_SCHEMA,
 };
 pub use version::{Spec031SchemaVersion, Spec031VersionError, SPEC031_SCHEMA_VERSION};

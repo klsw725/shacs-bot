@@ -5,7 +5,7 @@ use super::spec035_evidence_io::sha256;
 use super::spec035_execution_contract::{GATES, INCIDENTS, OWNERS};
 use super::spec035_execution_io::{decode, Evidence};
 use super::spec035_execution_model::{Execution, ExecutionBinding, FileRef};
-use super::spec035_execution_receipts::{validate_cleanup, validate_receipt};
+use super::spec035_execution_receipts::{validate_cleanup, validate_incident, validate_receipt};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -88,7 +88,7 @@ fn validate(
         if !INCIDENTS.contains(&incident.id.as_str()) || !incidents.insert(incident.id.as_str()) {
             return Err(Error::InvalidCoverageEvidence);
         }
-        validate_receipt(&evidence, &incident.receipt, &incident.id)?;
+        validate_incident(&evidence, incident)?;
     }
     if incidents.len() != INCIDENTS.len() {
         return Err(Error::BlockedExternalEvidence);

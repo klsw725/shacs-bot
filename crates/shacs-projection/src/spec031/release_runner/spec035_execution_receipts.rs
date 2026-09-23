@@ -1,9 +1,35 @@
 use super::model::Spec031ReleaseArtifactError as Error;
 use super::spec035_execution_io::Evidence;
 use super::spec035_execution_model::{
-    AbsenceProof, Cleanup, Disposition, FileRef, Receipt, Verdict,
+    AbsenceProof, Cleanup, Disposition, FileRef, IncidentDisposition, IncidentEvidence,
+    IncidentReceipt, IncidentSchema, Receipt, Verdict,
 };
 use std::collections::HashSet;
+
+pub(super) fn validate_incident(
+    evidence: &Evidence<'_>,
+    incident: &IncidentEvidence,
+) -> Result<(), Error> {
+    match incident.disposition {
+        None => {
+            validate_receipt(evidence, &incident.receipt, &incident.id)?;
+        }
+        Some(IncidentDisposition::UserAcceptedRepairedBaseline) => {
+            let receipt: IncidentReceipt = evidence.json(&incident.receipt)?;
+            match receipt.schema {
+                IncidentSchema::V1 => {}
+            }
+            evidence.identity(&receipt.run_id, &receipt.source_sha256)?;
+            if incident.id != "default-config-rewrite" || receipt.subject != incident.id {
+                return Err(Error::InvalidCoverageEvidence);
+            }
+            super::spec035_admission_incident::accepted_incident(
+                &evidence.bytes(&receipt.acceptance)?,
+            )?;
+        }
+    }
+    Ok(())
+}
 
 pub(super) fn validate_receipt(
     evidence: &Evidence<'_>,

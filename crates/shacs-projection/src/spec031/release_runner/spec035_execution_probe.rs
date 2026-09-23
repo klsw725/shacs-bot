@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 pub(super) struct Probe {
     pub(super) stdout: String,
+    pub(super) stderr: Vec<u8>,
     pub(super) manifest: String,
     pub(super) source: String,
     pub(super) lock: Vec<u8>,
@@ -19,6 +20,6 @@ pub(super) fn probe() -> &'static Probe {
         fs::write(root.path().join("probe.rs"),source).expect("probe test");
         let output = Command::new("cargo").args(["test","--manifest-path"]).arg(root.path().join("Cargo.toml")).args(["--lib","evidence_probe","--","--exact"]).output().expect("focused Cargo probe");
         assert!(output.status.success());
-        Probe {stdout:String::from_utf8(output.stdout).expect("Cargo stdout"),manifest:manifest.to_owned(),source:source.to_owned(),lock:fs::read(root.path().join("Cargo.lock")).expect("Cargo-generated lock")}
+        Probe {stdout:String::from_utf8(output.stdout).expect("Cargo stdout"),stderr:output.stderr,manifest:manifest.to_owned(),source:source.to_owned(),lock:fs::read(root.path().join("Cargo.lock")).expect("Cargo-generated lock")}
     })
 }

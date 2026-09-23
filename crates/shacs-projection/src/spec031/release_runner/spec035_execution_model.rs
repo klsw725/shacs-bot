@@ -12,7 +12,7 @@ pub(super) struct Execution {
     pub(super) gates: Vec<SubjectEvidence>,
     pub(super) resources: Vec<String>,
     pub(super) cleanup: FileRef,
-    pub(super) incidents: Vec<SubjectEvidence>,
+    pub(super) incidents: Vec<IncidentEvidence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -45,6 +45,36 @@ pub(super) struct SubjectEvidence {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct IncidentEvidence {
+    pub(super) id: String,
+    pub(super) receipt: FileRef,
+    pub(super) disposition: Option<IncidentDisposition>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum IncidentDisposition {
+    UserAcceptedRepairedBaseline,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct IncidentReceipt {
+    pub(super) schema: IncidentSchema,
+    pub(super) run_id: String,
+    pub(super) source_sha256: String,
+    pub(super) subject: String,
+    pub(super) acceptance: FileRef,
+}
+
+#[derive(Deserialize)]
+pub(super) enum IncidentSchema {
+    #[serde(rename = "spec035.incident_disposition.v1")]
+    V1,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct OwnerEvidence {
     pub(super) owner: String,
     pub(super) facts: Vec<SubjectEvidence>,
@@ -61,6 +91,7 @@ pub(super) struct CommandEvidence {
     pub(super) package: Option<String>,
     pub(super) filter: Option<String>,
     pub(super) tests: Option<super::model::Spec031ReleaseTestCounts>,
+    pub(super) test_accounting: Option<FileRef>,
     pub(super) exit_code: i32,
     pub(super) stdout: FileRef,
     pub(super) stderr: FileRef,
@@ -78,7 +109,7 @@ pub(super) enum CommandKind {
     Review,
 }
 
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(super) enum Verdict {
     Pass,
