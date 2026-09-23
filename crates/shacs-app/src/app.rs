@@ -264,12 +264,18 @@ impl AppRegistryStore {
     }
 
     pub fn load(&self) -> Result<AppRegistry, AppError> {
-        let path = self.registry_path();
-        if !path.exists() {
-            return Ok(AppRegistry::default());
-        }
-        let bytes = fs::read(path).map_err(AppError::Io)?;
-        serde_json::from_slice(&bytes).map_err(AppError::Json)
+        Ok(self.load_existing()?.unwrap_or_default())
+    }
+
+    pub fn load_existing(&self) -> Result<Option<AppRegistry>, AppError> {
+        let bytes = match fs::read(self.registry_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(AppError::Io(error)),
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(AppError::Json)
     }
 
     pub fn save(&self, registry: &AppRegistry) -> Result<(), AppError> {
