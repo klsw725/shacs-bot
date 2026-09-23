@@ -1,4 +1,6 @@
 use shacs_config::{config_context, default_config_path};
+use shacs_core::app::AppRegistryStore;
+use shacs_core::app_lifecycle::AppSupervisorJournal;
 use shacs_core::runtime::{
     apply_goal_surface_action, build_spec035_tasks_projection, recover_runtime_surface,
     request_runtime_control, request_surface_approval, validate_spec035_task_action, AppSupervisor,
@@ -148,7 +150,7 @@ fn dispatch_tasks_action(
             |_| tasks_completed("goal resume completed"),
         ),
         Spec035TasksSemanticAction::AppStop { app_id } => {
-            shacs_core::app_lifecycle::AppSupervisorJournal::new(data_dir.join("runtime/apps"))
+            AppSupervisorJournal::new(AppRegistryStore::new(data_dir).apps_dir())
                 .request(&app_id, shacs_core::app_lifecycle::AppLifecycleAction::Stop)
                 .map_or_else(
                     |error| tasks_unavailable(error.to_string()),
@@ -160,8 +162,7 @@ fn dispatch_tasks_action(
                 )
         }
         Spec035TasksSemanticAction::AppRecover { app_id } => {
-            let journal =
-                shacs_core::app_lifecycle::AppSupervisorJournal::new(data_dir.join("runtime/apps"));
+            let journal = AppSupervisorJournal::new(AppRegistryStore::new(data_dir).apps_dir());
             AppSupervisor::new(&journal)
                 .recover(&app_id, false)
                 .map_or_else(
