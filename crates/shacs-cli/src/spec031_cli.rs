@@ -3,14 +3,17 @@ use shacs_projection::{
     Spec031Severity, Spec031SourceOwner,
 };
 
+pub(crate) mod app;
 mod build;
+pub(crate) mod child;
 #[cfg(test)]
 mod parity;
 pub(crate) mod readiness;
 mod readiness_observation;
 mod readiness_queue;
 mod readiness_render;
-mod render;
+pub(crate) mod render;
+pub(crate) mod tool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Projection {

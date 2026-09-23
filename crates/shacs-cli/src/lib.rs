@@ -1903,7 +1903,9 @@ pub struct SessionInspectReport {
     pub diagnostics_refs: Vec<String>,
     pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
     pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
+    pub permission_approval_receipts: Vec<shacs_session::PermissionApprovalReceipt>,
     pub durable_children: DurableChildSessionInspect,
+    pub tool_projection_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1914,6 +1916,8 @@ pub struct DurableChildSessionInspect {
     pub duplicate_decision_count: usize,
     pub late_decision_count: usize,
     pub child_refs: Vec<String>,
+    #[serde(default)]
+    pub owner_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1952,6 +1956,7 @@ pub struct SessionDiagnosticsReport {
     pub aggregate: SessionDiagnosticsAggregate,
     pub durable_children: DurableChildSessionInspect,
     pub supervision: Value,
+    pub tool_projection_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7146,6 +7151,7 @@ pub fn format_permissions_revoke(report: PermissionsRuleReport) -> String {
 pub struct ContextFilesCliReport {
     pub workspace: PathBuf,
     pub summary: ContextFileDiagnosticsSummary,
+    pub evidence: shacs_core::runtime::Spec031ContextEvidenceProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7157,6 +7163,7 @@ pub struct ContextRefsParseCliReport {
 pub struct ContextRefsResolveCliReport {
     pub workspace: PathBuf,
     pub summary: ContextDiagnosticsSummary,
+    pub evidence: shacs_core::runtime::Spec031ContextEvidenceProjection,
 }
 
 pub fn context_files_report(
@@ -7172,7 +7179,21 @@ pub fn context_files_report(
         provider_handoff: None,
     })
     .context_files;
-    Ok(ContextFilesCliReport { workspace, summary })
+    let evidence = shacs_core::runtime::project_spec031_context_evidence(
+        shacs_core::runtime::Spec031ContextEvidenceInput {
+            batch_ref: None,
+            owner_freshness: shacs_projection::Spec031Freshness::Current,
+            inline_artifacts: &[],
+            context_files: &discovery.entries,
+            provider_handoff: None,
+        },
+    )
+    .map_err(|error| CliError::InvalidArguments(error.to_string()))?;
+    Ok(ContextFilesCliReport {
+        workspace,
+        summary,
+        evidence,
+    })
 }
 
 pub fn context_refs_parse(
@@ -7226,7 +7247,21 @@ pub fn context_refs_resolve(
         safety_report: Some(&safety),
         provider_handoff: Some(&handoff),
     });
-    Ok(ContextRefsResolveCliReport { workspace, summary })
+    let evidence = shacs_core::runtime::project_spec031_context_evidence(
+        shacs_core::runtime::Spec031ContextEvidenceInput {
+            batch_ref: None,
+            owner_freshness: shacs_projection::Spec031Freshness::Current,
+            inline_artifacts: &safety.artifacts,
+            context_files: &discovery.entries,
+            provider_handoff: Some(&handoff),
+        },
+    )
+    .map_err(|error| CliError::InvalidArguments(error.to_string()))?;
+    Ok(ContextRefsResolveCliReport {
+        workspace,
+        summary,
+        evidence,
+    })
 }
 
 pub fn channels_list(options: ChannelsListOptions) -> Result<ChannelsReport, CliError> {
@@ -7243,6 +7278,7 @@ pub struct AppsEntryReport {
     pub workspace: PathBuf,
     pub registry_path: PathBuf,
     pub entry: AppRegistryEntry,
+    pub lifecycle_receipt: Option<AppLifecycleReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7251,6 +7287,7 @@ pub struct AppsListReport {
     pub workspace: PathBuf,
     pub registry_path: PathBuf,
     pub entries: Vec<AppRegistryEntry>,
+    pub lifecycle_receipts: Vec<AppLifecycleReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7314,6 +7351,7 @@ pub fn apps_install(options: AppsInstallOptions) -> Result<AppsEntryReport, CliE
         apps_store(options.config_path, options.workspace_override)?;
     let entry = store.install_local_bundle(options.bundle_path)?;
     Ok(AppsEntryReport {
+        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &entry.app_id)?,
         config_path,
         workspace,
         registry_path: store.registry_path(),
@@ -7324,11 +7362,20 @@ pub fn apps_install(options: AppsInstallOptions) -> Result<AppsEntryReport, CliE
 pub fn apps_list(options: AppsListOptions) -> Result<AppsListReport, CliError> {
     let (config_path, workspace, store) =
         apps_store(options.config_path, options.workspace_override)?;
+    let entries = store.list()?;
+    let lifecycle_receipts = entries
+        .iter()
+        .map(|entry| spec031_cli::app::read_receipt(&store, &entry.app_id))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     Ok(AppsListReport {
         config_path,
         workspace,
         registry_path: store.registry_path(),
-        entries: store.list()?,
+        entries,
+        lifecycle_receipts,
     })
 }
 
@@ -7340,6 +7387,7 @@ pub fn apps_inspect(options: AppsInspectOptions) -> Result<AppsEntryReport, CliE
         .inspect(&app_id)?
         .ok_or_else(|| AppError::UnknownApp(app_id.clone()))?;
     Ok(AppsEntryReport {
+        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &app_id)?,
         config_path,
         workspace,
         registry_path: store.registry_path(),
@@ -7353,6 +7401,7 @@ pub fn apps_enable(options: AppsIdOptions) -> Result<AppsEntryReport, CliError> 
         apps_store(options.config_path, options.workspace_override)?;
     let entry = store.enable(&app_id)?;
     Ok(AppsEntryReport {
+        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &app_id)?,
         config_path,
         workspace,
         registry_path: store.registry_path(),
@@ -7369,6 +7418,7 @@ pub fn apps_disable(options: AppsIdOptions) -> Result<AppsEntryReport, CliError>
             store.disable(&app_id).map_err(Into::into)
         })?;
     Ok(AppsEntryReport {
+        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &app_id)?,
         config_path,
         workspace,
         registry_path: store.registry_path(),
@@ -9477,12 +9527,11 @@ fn workflow_recipe_projection_item(recipe: &SkillBackedWorkflowRecipe) -> Value 
 }
 
 pub fn format_apps_list(report: AppsListReport) -> String {
-    let app_count = report.entries.len();
     let mut lines = vec![
         "Apps".to_owned(),
-        format!("Config: {}", display_path(&report.config_path)),
+        format!("Config: {}", diagnostics_path_ref(&report.config_path)),
         format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
-        format!("Registry: {}", display_path(&report.registry_path)),
+        format!("Registry: {}", diagnostics_path_ref(&report.registry_path)),
     ];
     if report.entries.is_empty() {
         lines.push("No apps installed.".to_owned());
@@ -9500,13 +9549,14 @@ pub fn format_apps_list(report: AppsListReport) -> String {
             app_lifecycle_label(&entry.lifecycle_state),
             entry.digest
         ));
+        lines.extend(spec031_cli::app::lines(
+            &entry,
+            report
+                .lifecycle_receipts
+                .iter()
+                .find(|receipt| receipt.app_id == entry.app_id),
+        ));
     }
-    spec031_cli::push(
-        &mut lines,
-        &[spec031_cli::Projection::App {
-            total_count: app_count,
-        }],
-    );
     lines.join("\n")
 }
 
@@ -9570,16 +9620,18 @@ pub fn format_apps_entry_report(report: AppsEntryReport) -> String {
 
 fn format_apps_entry(title: &str, report: AppsEntryReport) -> String {
     let entry = report.entry;
-    let available = entry.unavailable_reasons.is_empty();
     let mut lines = vec![
         format!("{title}: {}", entry.app_id),
         format!("Version: {}", entry.version),
-        format!("State: {}", app_lifecycle_label(&entry.lifecycle_state)),
+        format!(
+            "Registry state: {}",
+            app_lifecycle_label(&entry.lifecycle_state)
+        ),
         format!("Digest: {}", entry.digest),
-        format!("Bundle: {}", display_path(&entry.bundle_path)),
-        format!("Config: {}", display_path(&report.config_path)),
+        format!("Bundle: {}", diagnostics_path_ref(&entry.bundle_path)),
+        format!("Config: {}", diagnostics_path_ref(&report.config_path)),
         format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
-        format!("Registry: {}", display_path(&report.registry_path)),
+        format!("Registry: {}", diagnostics_path_ref(&report.registry_path)),
         format!("Permission requests: {}", entry.permission_requests.len()),
         format!("Secret requests: {}", entry.secret_requests.len()),
         format!("Process snapshots: {}", entry.process_snapshots.len()),
@@ -9593,12 +9645,10 @@ fn format_apps_entry(title: &str, report: AppsEntryReport) -> String {
             entry.unavailable_reasons.join("; ")
         ));
     }
-    spec031_cli::push(
-        &mut lines,
-        &[spec031_cli::Projection::App {
-            total_count: usize::from(available),
-        }],
-    );
+    lines.extend(spec031_cli::app::lines(
+        &entry,
+        report.lifecycle_receipt.as_ref(),
+    ));
     lines.join("\n")
 }
 
@@ -10140,7 +10190,6 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
 
 pub fn format_context_files_report(title: &str, report: ContextFilesCliReport) -> String {
     let summary = report.summary;
-    let included = summary.included_count > 0 && summary.denied_count == 0;
     let mut lines = vec![
         title.to_owned(),
         format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
@@ -10166,7 +10215,13 @@ pub fn format_context_files_report(title: &str, report: ContextFilesCliReport) -
             entry.order, entry.status, entry.source_label, entry.byte_count, entry.token_estimate
         ));
     }
-    spec031_cli::push(&mut lines, &[spec031_cli::Projection::Context { included }]);
+    lines.extend(
+        report
+            .evidence
+            .envelopes
+            .iter()
+            .map(|envelope| spec031_cli::render::envelope_line("context", envelope)),
+    );
     lines.join("\n")
 }
 
@@ -10202,7 +10257,6 @@ pub fn format_context_refs_parse_report(report: ContextRefsParseCliReport) -> St
 
 pub fn format_context_refs_resolve_report(report: ContextRefsResolveCliReport) -> String {
     let summary = report.summary;
-    let included = summary.artifacts.resolved_count > 0 && summary.artifacts.denied_count == 0;
     let mut lines = vec![
         "context refs resolve".to_owned(),
         format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
@@ -10259,7 +10313,13 @@ pub fn format_context_refs_resolve_report(report: ContextRefsResolveCliReport) -
             ));
         }
     }
-    spec031_cli::push(&mut lines, &[spec031_cli::Projection::Context { included }]);
+    lines.extend(
+        report
+            .evidence
+            .envelopes
+            .iter()
+            .map(|envelope| spec031_cli::render::envelope_line("context", envelope)),
+    );
     lines.join("\n")
 }
 
@@ -10329,6 +10389,7 @@ pub fn session_inspect(options: SessionInspectOptions) -> Result<SessionInspectR
     })?;
 
     Ok(SessionInspectReport {
+        tool_projection_lines: spec031_cli::tool::read(&manager, &options.session),
         workspace,
         key: detail.key,
         path: detail.path,
@@ -10342,6 +10403,7 @@ pub fn session_inspect(options: SessionInspectOptions) -> Result<SessionInspectR
         diagnostics_refs: detail.diagnostics_refs,
         runtime_workflow: detail.runtime_workflow,
         runtime_execution: detail.runtime_execution,
+        permission_approval_receipts: detail.permission_approval_receipts,
         durable_children: inspect_session_durable_children(&data_dir, &options.session),
     })
 }
@@ -10511,6 +10573,7 @@ pub fn session_diagnostics(
             legal_start: 0,
         };
         return Ok(SessionDiagnosticsReport {
+            tool_projection_lines: spec031_cli::tool::lines(None),
             aggregate: session_diagnostics_aggregate_for_surface(&diagnostics)?,
             durable_children,
             supervision,
@@ -10519,6 +10582,7 @@ pub fn session_diagnostics(
     let manager = SessionManager::new(&workspace)?;
     let diagnostics = manager.session_ux_diagnostics(&options.session);
     Ok(SessionDiagnosticsReport {
+        tool_projection_lines: spec031_cli::tool::read(&manager, &options.session),
         aggregate: session_diagnostics_aggregate_for_surface(&diagnostics)?,
         durable_children,
         supervision,
@@ -10705,6 +10769,7 @@ fn inspect_session_durable_children(
         inspect
             .child_refs
             .push(opaque_ref("child", &item.child_task_id));
+        inspect.owner_lines.push(spec031_cli::child::line(item));
     }
     for decision in state
         .children
@@ -22946,7 +23011,6 @@ fn format_session_list(report: SessionListReport) -> String {
 fn format_session_inspect(report: SessionInspectReport) -> String {
     let message_count = report.message_count;
     let recovery_count = report.recovery_markers.len();
-    let child_count = report.durable_children.active_count + report.durable_children.terminal_count;
     let metadata = if report.metadata_keys.is_empty() {
         "none".to_owned()
     } else {
@@ -22989,6 +23053,12 @@ fn format_session_inspect(report: SessionInspectReport) -> String {
             format_runtime_execution_projection(execution)
         ));
     }
+    for receipt in &report.permission_approval_receipts {
+        lines.push(format!(
+            "Permission approval receipt: {}",
+            serde_json::json!(receipt)
+        ));
+    }
     lines.push(format_session_durable_children(&report.durable_children));
     spec031_cli::push(
         &mut lines,
@@ -23001,10 +23071,9 @@ fn format_session_inspect(report: SessionInspectReport) -> String {
                 component_count: recovery_count,
                 blocked: recovery_count > 0,
             },
-            spec031_cli::Projection::Subagent { child_count },
-            spec031_cli::Projection::Tool { attempt_count: 0 },
         ],
     );
+    lines.extend(report.tool_projection_lines);
     lines.join("\n")
 }
 
@@ -23070,7 +23139,6 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
     let session_exists = report.aggregate.exists;
     let message_count = report.aggregate.message_count;
     let diagnostics_ref_count = report.aggregate.diagnostics_ref_count;
-    let child_count = report.durable_children.active_count + report.durable_children.terminal_count;
     let recovery = if report.aggregate.recovery_markers.is_empty() {
         "none".to_owned()
     } else {
@@ -23139,16 +23207,15 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
                 component_count: diagnostics_ref_count,
                 blocked: diagnostics_ref_count > 0,
             },
-            spec031_cli::Projection::Subagent { child_count },
-            spec031_cli::Projection::Tool { attempt_count: 0 },
         ],
     );
+    lines.extend(report.tool_projection_lines);
     lines.join("\n")
 }
 
 fn format_session_durable_children(children: &DurableChildSessionInspect) -> String {
     format!(
-        "Durable children: active={} terminal={} stale={} duplicate={} late={} refs={}",
+        "Durable children: active={} terminal={} stale={} duplicate={} late={} refs={}\n{}",
         children.active_count,
         children.terminal_count,
         children.stale_decision_count,
@@ -23158,6 +23225,11 @@ fn format_session_durable_children(children: &DurableChildSessionInspect) -> Str
             "none".to_owned()
         } else {
             children.child_refs.join(",")
+        },
+        if children.owner_lines.is_empty() {
+            "Spec031 subagent: state=unavailable reason=missing_external_owner_evidence freshness=unavailable".to_owned()
+        } else {
+            children.owner_lines.join("\n")
         }
     )
 }
@@ -34533,6 +34605,8 @@ mod tests {
         assert!(diagnostics_output.contains("Session ref: session:sha256:"));
         assert!(diagnostics_output.contains("Diagnostics refs: diagnostics:sha256:"));
         assert!(diagnostics_output.contains("Checkpoint phase: awaiting_tools"));
+        assert!(diagnostics_output
+            .contains("Spec031 tool: state=unavailable reason=unsupported attempts=unknown"));
         assert!(diagnostics_output.contains("Workflow state: Running"));
         assert!(diagnostics_output.contains(
             "Runtime execution: pending=2 outcomes=3 accepted=1 stale=1 safe_artifacts=1"
