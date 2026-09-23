@@ -1,9 +1,10 @@
+use super::live_tests::read_json;
 use super::live_tests::write_artifact;
 use crate::{
     api_router_with_observer, ApiError, ChatCompletionAdapter, ChatCompletionInvocation,
     Spec031ChannelProjectionObserver,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use serde_json::{json, Value};
 use shacs_channels::WebSocketServerEvent;
 use shacs_projection::Spec031Envelope;
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
 
@@ -70,8 +71,7 @@ async fn progress_send_failure_does_not_synthesize_terminal_failure(
         release: release.clone(),
     });
     let observations = Arc::new(Mutex::new(Vec::<Spec031Envelope>::new()));
-    let (dropped_tx, dropped_rx) = oneshot::channel();
-    let dropped_tx = Arc::new(Mutex::new(Some(dropped_tx)));
+    let (dropped_tx, mut dropped_rx) = mpsc::channel(4);
     let observer = {
         let observations = observations.clone();
         Arc::new(move |envelope: Spec031Envelope| {
@@ -81,11 +81,7 @@ async fn progress_send_failure_does_not_synthesize_terminal_failure(
                 observations.push(envelope);
             }
             if is_dropped {
-                if let Ok(mut sender) = dropped_tx.lock() {
-                    if let Some(sender) = sender.take() {
-                        let _ = sender.send(());
-                    }
-                }
+                dropped_tx.try_send(()).expect("bounded drop observations");
             }
         }) as Spec031ChannelProjectionObserver
     };
@@ -101,7 +97,9 @@ async fn progress_send_failure_does_not_synthesize_terminal_failure(
     });
 
     let mut first = connect(addr).await?;
-    let _ = read_json(&mut first).await?;
+    let first_snapshot = read_json(&mut first).await?;
+    assert_eq!(first_snapshot["metadata"]["generation"], "generation:1");
+    let mut ports = vec![first.get_ref().local_addr()?.port()];
     first
         .send(Message::Text(
             json!({"type":"message","text":"progress-only"})
@@ -113,11 +111,16 @@ async fn progress_send_failure_does_not_synthesize_terminal_failure(
     tokio::task::spawn_blocking(move || reached_wait.wait()).await?;
     SockRef::from(first.get_ref()).set_linger(Some(Duration::ZERO))?;
     drop(first);
-    tokio::task::spawn_blocking(move || release.wait()).await?;
-    timeout(Duration::from_secs(5), dropped_rx).await??;
+    let release_wait = release.clone();
+    tokio::task::spawn_blocking(move || release_wait.wait()).await?;
+    timeout(Duration::from_secs(5), dropped_rx.recv())
+        .await?
+        .ok_or("missing progress drop")?;
 
     let mut second = connect(addr).await?;
     let snapshot = read_json(&mut second).await?;
+    ports.push(second.get_ref().local_addr()?.port());
+    assert_eq!(snapshot["metadata"]["generation"], "generation:2");
     let observed = observations
         .lock()
         .map_err(|_| "observations lock failed")?
@@ -134,14 +137,67 @@ async fn progress_send_failure_does_not_synthesize_terminal_failure(
         snapshot["delivery_accounting"]["delivery"]["final_delivery"]["state"],
         "unknown"
     );
-    write_artifact(
-        "progress-failure-websocket.json",
-        &json!({"observed_accounting": observed, "reconnect_snapshot": snapshot}),
-    )?;
-
+    let mut snapshots = vec![first_snapshot, snapshot.clone()];
+    for generation in 3..=4 {
+        second
+            .send(Message::Text(
+                json!({"type":"message","text":"progress-only"})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        let reached_wait = reached.clone();
+        tokio::task::spawn_blocking(move || reached_wait.wait()).await?;
+        SockRef::from(second.get_ref()).set_linger(Some(Duration::ZERO))?;
+        drop(second);
+        let release_wait = release.clone();
+        tokio::task::spawn_blocking(move || release_wait.wait()).await?;
+        timeout(Duration::from_secs(5), dropped_rx.recv())
+            .await?
+            .ok_or("missing repeated progress drop")?;
+        second = connect(addr).await?;
+        ports.push(second.get_ref().local_addr()?.port());
+        let next = read_json(&mut second).await?;
+        assert_eq!(next["type"], "tasks_snapshot");
+        assert_eq!(
+            next["metadata"]["generation"],
+            format!("generation:{generation}")
+        );
+        assert_eq!(next["reconnect_gap"], true);
+        let delivery = &next["delivery_accounting"]["delivery"];
+        assert_eq!(delivery["dropped_count"]["value"], generation - 1);
+        for counter in ["accepted_count", "emitted_count", "coalesced_count"] {
+            assert_eq!(
+                delivery[counter],
+                snapshot["delivery_accounting"]["delivery"][counter]
+            );
+            assert_eq!(delivery[counter]["availability"], "unavailable");
+        }
+        assert_eq!(delivery["final_delivery"]["state"], "unknown");
+        snapshots.push(next);
+    }
     second.close(None).await?;
     let _ = shutdown_tx.send(());
     server.await??;
+    let all_observed = observations
+        .lock()
+        .map_err(|_| "observations lock failed")?
+        .clone();
+    assert_eq!(all_observed.len(), 3);
+    for envelope in &all_observed {
+        assert_eq!(
+            serde_json::to_value(envelope)?["capability"]["details"]["delivery"],
+            "dropped"
+        );
+    }
+    write_artifact(
+        "progress-failure-websocket.json",
+        &json!({"observed_accounting": observed, "reconnect_snapshot": snapshot,
+            "server": addr.to_string(), "source_ports": ports,
+            "client_id": "client:progress-failure", "session_id": "qa", "stream_id": "stream:progress-failure",
+            "all_observed_accounting": all_observed, "snapshots": snapshots, "server_shutdown_awaited": true}),
+    )?;
+
     Ok(())
 }
 
@@ -151,13 +207,4 @@ async fn connect(
     let stream = TcpStream::connect(addr).await?;
     let url = format!("ws://{addr}/ws?client_id=client:progress-failure&session_id=qa");
     Ok(client_async(url, stream).await?.0)
-}
-
-async fn read_json(
-    socket: &mut WebSocketStream<TcpStream>,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    match socket.next().await.ok_or("websocket closed")?? {
-        Message::Text(text) => Ok(serde_json::from_str(&text)?),
-        _ => Err("expected text frame".into()),
-    }
 }
