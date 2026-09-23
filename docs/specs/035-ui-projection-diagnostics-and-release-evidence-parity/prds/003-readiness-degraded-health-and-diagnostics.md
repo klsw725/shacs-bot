@@ -2,7 +2,7 @@
 
 Status: Open
 
-구현 상태: 구현됨, closure 차단. Readiness/diagnostics 및 adapter 범위 runtime control projection과 task3·todo10 검사 기록이 존재한다. [차단 사유와 증거 구분](../CLOSURE.md)을 따르며 process liveness나 과거 검사로 현재 readiness/closure 성공을 추론하지 않는다.
+구현 상태: 구현됨, closure 차단. G3 owner mapping 보정과 실제 `g3-owner-final` container 관측에서 bash 실행 뒤 required Ready / disabled Degraded 및 CLI/API/ZIP 전체 readiness 일치를 확인했다. Daemon은 lifecycle-only, sandbox active는 bash adapter에 한정되며 rawContentPossible과 빈 app 구성의 한계를 유지한다. Source/run 결속과 최종 admission은 [closure 기록](../CLOSURE.md)을 따르며 process liveness만으로 성공을 추론하지 않는다.
 
 ## Goal
 
@@ -56,8 +56,14 @@ Required component families:
 | sandbox/runtime controls | trusted profile, adapter-specific process control, sandbox mode/scope, fallback status, non-guarantee |
 | resource/data disclosure | source/provenance, trusted-code disclosure, raw-content/remote-trace status |
 | channel worker | configured, running, skipped, failed, restart/delivery hint |
-| plugin/app | discovery, enabled state, dependency/lifecycle readiness when owner exists |
+| plugin/app | always required; successful owner enumeration (including empty collections), plugin discovery/runtime diagnostics, app registry and supervisor lifecycle receipts |
 | queue | bounded depth/capacity, admission block, stale work summary |
+
+Plugin/app is never optional. A successfully read empty plugin directory and persisted empty app registry are healthy; missing owner roots/registry, failed lookup, or missing evidence for a configured target are not empty success. Plugin discovery gates report blocked, runtime descriptor limitations report degraded, and enabled apps require supervisor lifecycle evidence. Running is a bounded owner-reported lifecycle status, not an independent process-liveness or external-service probe. Runtime owner lease activity alone cannot establish plugin/app health. The plugin/app observation reads owner state without executing plugin/app entrypoints or provider requests, and cannot grant authorization.
+
+The shared readiness component vocabulary includes required `runtime_controls` and `resource_disclosure` observations in addition to the existing six required observations, including independent generic `containment`. Readiness JSON carries their exact common `Spec030RuntimeProjection` input as `trusted_runtime`; CLI inspect renders that same owner detail. CLI uses the existing configured active-owner HTTP client. API injects its local Spec030 provider directly, without self-HTTP or the legacy empty `spec030_core` aggregate. Missing owner facts remain unavailable; trusted-profile `active` does not establish execution health. Initial sandbox unknown remains unknown until an owner execution observation exists. Observed optional sandbox disabled/unsupported or trusted native fallback is degraded rather than globally blocked; execution-denied fallback is blocked. Applied sandbox scope/policy needs its corresponding adapter observation. Unsupported unused adapters remain visible without becoming new mandatory execution paths. Known resource limitations are degraded; missing trace disclosure is unavailable. Raw-content possibility and trace destination remain explicit even when the disclosure observation is ready: this is disclosure availability, not complete redaction. The projection has no owner timestamp, so collection does not invent an observed-at time; freshness describes the collected observation or its missing/unknown state.
+
+For a supported daemon worker, `LifecycleOnly` is its expected scope rather than an inherent degradation: readiness requires an active daemon lifecycle observation, startup readiness, and generation fencing; explicit degradation and missing lifecycle evidence remain degraded and unknown/unavailable respectively, without relaxing independent containment or sandbox requirements.
 
 ## Failure Rules
 
