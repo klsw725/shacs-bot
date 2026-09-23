@@ -2,7 +2,7 @@
 
 Status: Open
 
-구현 상태: 구현됨, closure 차단. 실제 TUI/REPL과 secret-ref-only wizard 및 표면 QA 기록이 존재한다. Wizard는 environment reference만 입력받고 완료 시 실제 local Spec030 credential/disclosure 관측과 Spec031 config/profile 선언을 소비한다. 선언은 credential 존재·해석 성공·readiness·권한 부여가 아니며, 미관측 runtime credential은 unavailable로 남는다. Resolved/denied mapper fixture는 live credential·승인 QA가 아니다. 이전 기본 설정 재작성 사고는 미해결이며 [차단 사유와 증거 구분](../CLOSURE.md)을 따른다.
+구현 상태: 구현됨, closure 차단. 실제 TUI/REPL과 secret-ref-only wizard 및 G4 production REPL·wizard finish 관측이 존재한다. Wizard는 environment reference만 입력받고 완료 시 실제 local Spec030 credential/disclosure 관측과 Spec031 config/profile 선언을 소비한다. 선언은 credential 존재·해석 성공·readiness·권한 부여가 아니며 미관측 credential은 unavailable로 남는다. 이전 설정 사고는 원본 전체 복원·credential 유효성 미증명 한계를 둔 사용자 baseline 수용이다. G2의 reader/renderer와 실제 terminal interaction 구분, G4의 active status 제한 및 source 결속은 [closure 기록](../CLOSURE.md)을 따른다.
 
 ## Goal
 
