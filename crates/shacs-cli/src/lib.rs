@@ -35622,6 +35622,13 @@ mod tests {
         assert_eq!(end.content, "");
         assert_eq!(end.metadata["_stream_end"], json!(true));
         assert!(bus.try_consume_outbound().is_none());
+        if let Some(output) = std::env::var_os("SPEC035_ACCOUNTING_ARTIFACT_DIR") {
+            fs::create_dir_all(&output)?;
+            fs::write(
+                PathBuf::from(output).join("channel-owner-coalesced.json"),
+                serde_json::to_vec_pretty(&json!({"delta": delta, "stream_end": end}))?,
+            )?;
+        }
         Ok(())
     }
 
