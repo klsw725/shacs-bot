@@ -148,7 +148,7 @@ fn populate_app_owners(
     if !store.registry_path().exists() {
         return Ok(());
     }
-    let journal = AppSupervisorJournal::new(data_dir.join("runtime/apps"));
+    let journal = AppSupervisorJournal::new(store.apps_dir());
     let mut facts = Vec::new();
     for app in store
         .list()
