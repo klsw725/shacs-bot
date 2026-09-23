@@ -943,6 +943,15 @@ impl<'a> AgentLoop<'a> {
                     set_pending_recent_retry_approval(&mut session, &executing_approval);
                     self.sessions.save(&session)?;
                     let report = self.execute_approved_permission_payload(&token, approval_cache);
+                    session.record_permission_approval_receipt(
+                        shacs_session::PermissionApprovalReceipt {
+                            approval_request_id: approval.approval_request_id.clone(),
+                            action_digest: approval.action_digest.clone(),
+                            snapshot_digest: approval.snapshot_digest.clone(),
+                            state: shacs_session::PermissionApprovalTerminalState::Consumed,
+                            recorded_at_unix_ms: now_unix_ms(),
+                        },
+                    );
                     let fatal_error = self.append_approved_tool_messages(
                         &message,
                         &session_key,
