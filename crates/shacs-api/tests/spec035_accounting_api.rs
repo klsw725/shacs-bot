@@ -1,3 +1,4 @@
+mod spec035_accounting_support;
 mod spec035_reconnect_support;
 
 use futures_util::{SinkExt, StreamExt};
@@ -27,6 +28,8 @@ async fn normal_websocket_reconnect_preserves_progress_and_final_accounting(
     let mut first = connect(addr).await?;
     let first_snapshot = read_json(&mut first).await?;
     assert_eq!(first_snapshot["type"], "tasks_snapshot");
+    assert_eq!(first_snapshot["metadata"]["generation"], "generation:1");
+    let mut ports = vec![first.get_ref().local_addr()?.port()];
     first
         .send(Message::Text(
             json!({"type":"message","text":"run"}).to_string().into(),
@@ -39,6 +42,7 @@ async fn normal_websocket_reconnect_preserves_progress_and_final_accounting(
 
     let mut second = connect(addr).await?;
     let snapshot = read_json(&mut second).await?;
+    ports.push(second.get_ref().local_addr()?.port());
 
     // Then: snapshot remains first and prior accounting is not reset or inferred.
     assert_eq!(frames[0]["event"], "delta");
@@ -61,16 +65,57 @@ async fn normal_websocket_reconnect_preserves_progress_and_final_accounting(
         snapshot["delivery_accounting"]["delivery"]["final_delivery"]["state"],
         "final_delivered"
     );
-    write_artifact(
-        "normal-websocket.json",
-        &json!({"first_connection": frames, "reconnect_snapshot": snapshot}),
-    )?;
-
+    assert_eq!(
+        snapshot["delivery_accounting"]["delivery"]["coalesced_count"]["availability"],
+        "unavailable"
+    );
+    let mut snapshots = vec![first_snapshot, snapshot.clone()];
+    let mut rounds = vec![frames.clone()];
+    for generation in 3..=4 {
+        second
+            .send(Message::Text(
+                json!({"type":"message","text":"run"}).to_string().into(),
+            ))
+            .await?;
+        let current = read_many(&mut second, 4).await?;
+        assert_eq!(current[0]["stream_id"], "stream:accounting");
+        assert_eq!(current[2]["event"], "message");
+        rounds.push(current);
+        release_events(&fixture.reached, &fixture.release).await?;
+        let _ = read_many(&mut second, 2).await?;
+        second.close(None).await?;
+        second = connect(addr).await?;
+        ports.push(second.get_ref().local_addr()?.port());
+        let next = read_json(&mut second).await?;
+        assert_eq!(next["type"], "tasks_snapshot");
+        assert_eq!(
+            next["metadata"]["generation"],
+            format!("generation:{generation}")
+        );
+        assert_eq!(next["reconnect_gap"], true);
+        let delivery = &next["delivery_accounting"]["delivery"];
+        assert_eq!(delivery["accepted_count"]["value"], generation - 1);
+        assert_eq!(delivery["emitted_count"]["value"], generation - 1);
+        assert_eq!(delivery["dropped_count"]["value"], 0);
+        assert_eq!(
+            delivery["coalesced_count"],
+            snapshot["delivery_accounting"]["delivery"]["coalesced_count"]
+        );
+        assert_eq!(delivery["final_delivery"]["state"], "final_delivered");
+        snapshots.push(next);
+    }
     release_events(&fixture.reached, &fixture.release).await?;
     let _ = read_many(&mut second, 2).await?;
     second.close(None).await?;
     let _ = shutdown_tx.send(());
     server.await??;
+    write_artifact(
+        "normal-websocket.json",
+        &json!({"server": addr.to_string(), "source_ports": ports,
+            "client_id": "client:accounting", "session_id": "qa", "stream_id": "stream:accounting",
+            "first_connection": frames, "reconnect_snapshot": snapshot,
+            "rounds": rounds, "snapshots": snapshots, "server_shutdown_awaited": true}),
+    )?;
     Ok(())
 }
 
@@ -109,7 +154,10 @@ async fn read_json(
     socket: &mut WebSocketStream<TcpStream>,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     match socket.next().await.ok_or("websocket closed")?? {
-        Message::Text(text) => Ok(serde_json::from_str(&text)?),
+        Message::Text(text) => {
+            spec035_accounting_support::capture_payload(socket, &text)?;
+            Ok(serde_json::from_str(&text)?)
+        }
         _ => Err("expected text frame".into()),
     }
 }
