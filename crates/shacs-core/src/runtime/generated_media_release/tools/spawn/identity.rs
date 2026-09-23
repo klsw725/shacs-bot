@@ -171,3 +171,11 @@ pub(crate) fn capture_static_identity(
 ) -> Result<ProcessIdentity, Spec034ReleaseArtifactError> {
     Err(Spec034ReleaseArtifactError::InvalidConfig)
 }
+
+#[cfg(all(test, not(target_vendor = "apple")))]
+#[test]
+fn static_cdhash_rejects_unsupported_platform() {
+    let executable = std::path::Path::new("/bin/sh");
+    let result = static_cdhash(executable);
+    assert!(matches!(result, Err(Spec034ReleaseArtifactError::InvalidConfig)));
+}
