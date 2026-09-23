@@ -2,7 +2,7 @@
 
 Status: Open
 
-구현 상태: 구현됨, closure 차단. Task9·todo10은 bounded queue, coalesced/dropped progress, reconnect 및 독립적인 final delivery 관측을 기록한다. Process-local accounting은 durable replay나 remote ACK가 아니며 [차단 사유와 증거 구분](../CLOSURE.md)을 따른다.
+구현 상태: 구현됨, closure 차단. 과거 task9·todo10 외에 G5 final의 `verified/`가 네 production listener별 generation 1-4, 세 반복 round, 실제 progress drop/final-failure와 438 text payload를 보존한다. 실제 channel owner coalescing과 API numeric coalescing unavailable을 구분한다. Durable replay·remote ACK·exactly-once를 주장하지 않으며 source/run과 최종 수용은 [closure 기록](../CLOSURE.md)을 따른다.
 
 ## Goal
 
