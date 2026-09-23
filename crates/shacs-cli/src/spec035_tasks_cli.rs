@@ -156,13 +156,13 @@ fn dispatch(
             .map_err(|error| CliError::Runtime(error.to_string()))
         }
         Spec035TasksSemanticAction::AppStop { app_id } => {
-            AppSupervisorJournal::new(data_dir.join("runtime/apps"))
+            AppSupervisorJournal::new(AppRegistryStore::new(data_dir).apps_dir())
                 .request(&app_id, AppLifecycleAction::Stop)
                 .map(|_| ())
                 .map_err(Into::into)
         }
         Spec035TasksSemanticAction::AppRecover { app_id } => {
-            let journal = AppSupervisorJournal::new(data_dir.join("runtime/apps"));
+            let journal = AppSupervisorJournal::new(AppRegistryStore::new(data_dir).apps_dir());
             AppSupervisor::new(&journal)
                 .recover(&app_id, false)
                 .map(|_| ())
