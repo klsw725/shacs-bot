@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod approval_receipts;
 pub mod diagnostics;
 pub mod durable_child;
 pub mod durable_event;
@@ -18,6 +19,9 @@ pub mod durable_work;
 mod durable_work_compat;
 mod session_mutation_lock;
 
+pub use approval_receipts::{
+    PermissionApprovalReceipt, PermissionApprovalTerminalState, MAX_PERMISSION_APPROVAL_RECEIPTS,
+};
 pub use session_mutation_lock::SessionMutationGuard;
 
 pub const FILE_MAX_MESSAGES: usize = 2000;
@@ -238,6 +242,8 @@ pub struct SessionUxDetail {
     pub diagnostics_refs: Vec<String>,
     pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
     pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
+    #[serde(default)]
+    pub permission_approval_receipts: Vec<PermissionApprovalReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -827,7 +833,9 @@ fn session_payload(session: &Session) -> Value {
 
 fn session_ux_detail_from_session(session: Session, path: PathBuf) -> SessionUxDetail {
     let metadata = session_ux_metadata(&session.metadata);
+    let permission_approval_receipts = session.permission_approval_receipts();
     SessionUxDetail {
+        permission_approval_receipts,
         key: session.key,
         created_at: Some(session.created_at),
         updated_at: Some(session.updated_at),
