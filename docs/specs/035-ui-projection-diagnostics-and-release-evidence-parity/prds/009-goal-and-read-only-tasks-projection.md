@@ -2,7 +2,7 @@
 
 Status: Open
 
-구현 상태: 구현됨, closure 차단. Core assembler가 goal/child/workflow/automation/app/recovery owner를 `Spec035TasksProjection`으로 모으고 CLI `tasks --json`, API `GET /v1/tasks`, TUI가 이를 소비한다. Locator·freshness·goal accounting과 제한된 owner action 전달이 구현되어 있다. Task4-6 및 todo10의 goal parity/locator/mixed-state/read audit 기록은 존재하지만 현재 source-bound 최종 PASS는 아니다. [현재 차단 기록](../CLOSURE.md)을 따른다.
+구현 상태: 구현됨, closure 차단. Core assembler가 goal/child/workflow/automation/app/recovery owner를 `Spec035TasksProjection`으로 모으고 CLI `tasks --json`, API `GET /v1/tasks`, TUI가 이를 소비한다. Task4-6·todo10 외에 G1/G6의 실제 child/automation/goal owner 및 app consumer 보정, 같은 recovery history의 HTTP readback과 최신 workspace 증거가 있다. 여섯 live owner나 새 truth store를 주장하지 않으며 최종 source/run 수용은 [closure 기록](../CLOSURE.md)을 따른다.
 
 ## Goal
 
