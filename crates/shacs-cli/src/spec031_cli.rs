@@ -10,8 +10,14 @@ pub(crate) mod child;
 mod parity;
 pub(crate) mod readiness;
 mod readiness_observation;
+#[cfg(test)]
+mod readiness_owner_tests;
+pub(crate) mod readiness_plugin_app;
 mod readiness_queue;
 mod readiness_render;
+mod readiness_runtime;
+#[cfg(test)]
+mod readiness_runtime_tests;
 pub(crate) mod render;
 pub(crate) mod tool;
 
@@ -30,9 +36,6 @@ pub(crate) enum Projection {
     Diagnostics {
         component_count: usize,
         blocked: bool,
-    },
-    Readiness {
-        available: bool,
     },
     Context {
         included: bool,
@@ -59,7 +62,6 @@ impl Projection {
             Self::Subagent { .. } => "subagent",
             Self::Tool { .. } => "tool",
             Self::Diagnostics { .. } => "diagnostics",
-            Self::Readiness { .. } => "readiness",
             Self::Context { .. } => "context",
             Self::Plugin { .. } => "plugin",
             Self::App { .. } => "app",
@@ -74,7 +76,6 @@ impl Projection {
             Self::Subagent { .. } => Spec031ProjectionKind::Subagent,
             Self::Tool { .. } => Spec031ProjectionKind::Tool,
             Self::Diagnostics { .. } => Spec031ProjectionKind::Diagnostics,
-            Self::Readiness { .. } => Spec031ProjectionKind::Readiness,
             Self::Context { .. } => Spec031ProjectionKind::Context,
             Self::Plugin { .. } => Spec031ProjectionKind::Plugin,
             Self::App { .. } => Spec031ProjectionKind::App,
@@ -89,7 +90,6 @@ impl Projection {
             Self::Subagent { .. } => "subject:cli:subagent",
             Self::Tool { .. } => "subject:cli:tool",
             Self::Diagnostics { .. } => "subject:cli:diagnostics",
-            Self::Readiness { .. } => "subject:cli:readiness",
             Self::Context { .. } => "subject:cli:context",
             Self::Plugin { .. } => "subject:cli:plugin",
             Self::App { .. } => "subject:cli:app-owner",
@@ -103,7 +103,6 @@ impl Projection {
             Self::Session { .. } => Spec031SourceOwner::Session,
             Self::Subagent { .. } | Self::Tool { .. } => Spec031SourceOwner::Spec030,
             Self::Diagnostics { .. } => Spec031SourceOwner::Spec029,
-            Self::Readiness { .. } => Spec031SourceOwner::Spec031,
             Self::App { .. } => Spec031SourceOwner::Spec032,
             Self::Media { .. } => Spec031SourceOwner::Spec034,
             Self::Progress { .. } => Spec031SourceOwner::Channel,
@@ -129,12 +128,12 @@ impl Projection {
             | Self::Tool { .. }
             | Self::Context { included: false }
             | Self::Progress { blocked: true } => Spec031Availability::Blocked,
-            Self::Diagnostics { blocked: false, .. }
-            | Self::Readiness { available: true }
-            | Self::Progress { blocked: false } => Spec031Availability::Ready,
-            Self::Readiness { available: false }
-            | Self::App { total_count: 0 }
-            | Self::Media { artifact_count: 0 } => Spec031Availability::Unavailable,
+            Self::Diagnostics { blocked: false, .. } | Self::Progress { blocked: false } => {
+                Spec031Availability::Ready
+            }
+            Self::App { total_count: 0 } | Self::Media { artifact_count: 0 } => {
+                Spec031Availability::Unavailable
+            }
             Self::App { .. } | Self::Media { .. } => Spec031Availability::Ready,
         }
     }

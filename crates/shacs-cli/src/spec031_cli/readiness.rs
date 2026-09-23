@@ -1,4 +1,4 @@
-use crate::{RuntimeCompatibility, RuntimeInspectReport, RuntimeOwnershipState};
+use crate::{RuntimeCompatibility, RuntimeInspectReport};
 use serde_json::Value;
 use shacs_projection::{
     spec031_aggregate_readiness, Spec031Availability, Spec031ReadinessComponentKind,
@@ -6,19 +6,26 @@ use shacs_projection::{
 };
 
 pub(crate) fn report(inspect: &RuntimeInspectReport) -> Result<Spec031ReadinessReport, String> {
+    let [runtime_controls, resource_disclosure] =
+        super::readiness_runtime::observations(&inspect.trusted_runtime)?;
     spec031_aggregate_readiness(&[
         provider_auth(inspect)?,
         storage(inspect)?,
         containment(inspect)?,
         channel_worker(inspect)?,
-        plugin_app(inspect)?,
+        inspect.plugin_app_readiness.clone(),
         super::readiness_queue::queue(inspect)?,
+        runtime_controls,
+        resource_disclosure,
     ])
     .map_err(|error| error.to_string())
 }
 
 pub(crate) fn value(inspect: &RuntimeInspectReport) -> Result<Value, String> {
-    serde_json::to_value(report(inspect)?).map_err(|error| error.to_string())
+    let mut value = serde_json::to_value(report(inspect)?).map_err(|error| error.to_string())?;
+    value["trusted_runtime"] =
+        serde_json::to_value(&inspect.trusted_runtime).map_err(|error| error.to_string())?;
+    Ok(value)
 }
 
 pub(crate) fn lines(inspect: &RuntimeInspectReport) -> Result<Vec<String>, String> {
@@ -33,6 +40,9 @@ pub(crate) fn lines(inspect: &RuntimeInspectReport) -> Result<Vec<String>, Strin
                 super::readiness_render::component_line(component, envelope)
             }),
     );
+    lines.push(shacs_projection::render_spec030_runtime(
+        &inspect.trusted_runtime,
+    ));
     Ok(lines)
 }
 
@@ -167,22 +177,5 @@ fn channel_worker(inspect: &RuntimeInspectReport) -> Result<Spec031ReadinessObse
         state,
         code,
         summary,
-    )
-}
-
-fn plugin_app(inspect: &RuntimeInspectReport) -> Result<Spec031ReadinessObservation, String> {
-    if inspect.lifecycle.ownership.state == RuntimeOwnershipState::Active {
-        return super::readiness_observation::observation(
-            Spec031ReadinessComponentKind::PluginApp,
-            Spec031Availability::Degraded,
-            Spec031ReasonCode::MissingExternalOwnerEvidence,
-            "runtime owner exists but plugin and app lifecycle evidence is partial",
-        );
-    }
-    super::readiness_observation::observation(
-        Spec031ReadinessComponentKind::PluginApp,
-        Spec031Availability::Unavailable,
-        Spec031ReasonCode::MissingExternalOwnerEvidence,
-        "plugin and app owner observation is unavailable",
     )
 }

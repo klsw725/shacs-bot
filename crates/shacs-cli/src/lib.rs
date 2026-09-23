@@ -1160,6 +1160,8 @@ pub struct RuntimeInspectReport {
     pub lifecycle: RuntimeLifecycleInspect,
     pub supervision: RuntimeSupervisionState,
     pub channel_restart: Vec<ChannelRestartStateInspect>,
+    pub plugin_app_readiness: shacs_projection::Spec031ReadinessObservation,
+    pub trusted_runtime: shacs_projection::Spec030RuntimeProjection,
     pub containment: RuntimeContainmentInspect,
     pub workflow_recipes: Vec<SkillBackedWorkflowRecipe>,
 }
@@ -4196,13 +4198,15 @@ fn insert_readiness_projection(
 fn runtime_readiness_projection_for_context(
     config_path: &Path,
     workspace: &Path,
+    owner: shacs_projection::Spec030RuntimeProjection,
 ) -> Result<Value, CliError> {
-    let inspect = runtime_inspect_inner(
+    let inspect = runtime_inspect_with_owner(
         RuntimeInspectOptions {
             config_path: Some(config_path.to_path_buf()),
             workspace_override: Some(workspace.to_path_buf()),
         },
         false,
+        owner,
     )?;
     spec031_cli::readiness::value(&inspect).map_err(|error| {
         CliError::InvalidArguments(format!("readiness projection failed: {error}"))
@@ -21688,7 +21692,7 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         if let Value::Object(runtime) = &mut projection["runtime"] {
             runtime.insert(
                 "spec031_readiness".to_owned(),
-                runtime_readiness_projection_for_context(&self.config_path, &self.workspace)
+                runtime_readiness_projection_for_context(&self.config_path, &self.workspace, self.trusted_runtime_projection())
                     .unwrap_or_else(|error| json!({ "state": "unavailable", "reason": redact_string(&error.to_string()) })),
             );
         }
@@ -21697,7 +21701,7 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
 
     fn readiness_projection(&self) -> Option<Value> {
         Some(
-            runtime_readiness_projection_for_context(&self.config_path, &self.workspace)
+            runtime_readiness_projection_for_context(&self.config_path, &self.workspace, self.trusted_runtime_projection())
                 .unwrap_or_else(|error| json!({ "state": "unavailable", "reason": redact_string(&error.to_string()) })),
         )
     }

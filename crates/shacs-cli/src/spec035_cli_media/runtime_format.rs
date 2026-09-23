@@ -175,9 +175,6 @@ pub(crate) fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
                 component_count: state.diagnostics_component_count,
                 blocked: state.diagnostics_blocked,
             },
-            spec031_cli::Projection::Readiness {
-                available: state.readiness_available,
-            },
             spec031_cli::Projection::Subagent {
                 child_count: state.subagent_child_count,
             },
