@@ -1096,7 +1096,7 @@ fn session_approval_cache_correlation(
     ))
 }
 
-fn approval_cache_correlation(
+pub(super) fn approval_cache_correlation(
     entry: &ApprovalCacheEntry,
     action: &PermissionedAction,
 ) -> ApprovalCorrelation {

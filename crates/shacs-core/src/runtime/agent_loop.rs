@@ -1073,27 +1073,69 @@ impl<'a> AgentLoop<'a> {
                     executing_approval.status = PendingPermissionApprovalStatus::Executing;
                     set_pending_permission_approval(&mut session, &executing_approval);
                     self.sessions.save(&session)?;
-                    let approval_is_valid = correlate_approval(
-                        &approval_cache.request,
-                        &approval_cache.decision,
-                        now_unix_ms(),
-                    )
-                    .is_approved();
-                    let approved_action = crate::runtime::normalize_runtime_tool_call(
-                        self.tools,
-                        &approval.tool_call,
-                        permissioned_action_input_from_context(&approval.tool_context),
+                    let action_input =
+                        permissioned_action_input_from_context(&approval.tool_context);
+                    let approved_action =
+                        if bridge_tool_names().contains(&approval.tool_call.name.as_str()) {
+                            let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
+                                definitions: self.tools.definitions(),
+                                runtime: crate::runtime::ToolSearchRuntimeInput {
+                                    config: self.config.tool_search,
+                                    context_window_tokens: self.config.context_window_tokens,
+                                },
+                            });
+                            match super::tool_search::resolve_bridge_call(
+                                &crate::runtime::BridgeToolCall::from_runtime(&approval.tool_call),
+                                tool_surface.catalog.as_ref(),
+                                self.tools,
+                            ) {
+                                super::tool_search::BridgeAction::Execute(resolved) => {
+                                    Some(crate::runtime::normalize_resolved_deferred_tool_call(
+                                        self.tools,
+                                        &resolved,
+                                        action_input,
+                                    ))
+                                }
+                                super::tool_search::BridgeAction::Immediate(_)
+                                | super::tool_search::BridgeAction::Error(_) => None,
+                            }
+                        } else {
+                            Some(crate::runtime::normalize_runtime_tool_call(
+                                self.tools,
+                                &approval.tool_call,
+                                action_input,
+                            ))
+                        };
+                    let correlation = approved_action.as_ref().map_or_else(
+                        || {
+                            crate::runtime::ApprovalCorrelation::rejected(
+                                crate::runtime::ApprovalCorrelationError::ActionMismatch,
+                            )
+                        },
+                        |action| {
+                            super::tool_execution::approval_cache_correlation(
+                                &approval_cache,
+                                action,
+                            )
+                        },
                     );
+                    let approval_is_valid = correlation.is_approved();
                     let project_persist_failed =
                         matches!(reply, PermissionApprovalReply::ApproveProject)
                             && approval_is_valid
-                            && self
-                                .store_project_remembered_permission_rule(
+                            && approved_action.as_ref().is_some_and(|action| {
+                                self.store_project_remembered_permission_rule(
                                     RememberedPermissionEffect::Allow,
-                                    &approved_action,
+                                    action,
                                 )
-                                .is_err();
+                                .is_err()
+                            });
                     if project_persist_failed {
+                        record_permission_approval_terminal(
+                            &mut session,
+                            &approval,
+                            shacs_session::PermissionApprovalTerminalState::Rejected,
+                        );
                         session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
                         return self.publish_command_response(
                             &message,
@@ -1106,6 +1148,16 @@ impl<'a> AgentLoop<'a> {
                     }
                     let report =
                         self.execute_approved_permission_tool(&approval, approval_cache.clone());
+                    let terminal_state = if approval_is_valid {
+                        shacs_session::PermissionApprovalTerminalState::Consumed
+                    } else if correlation.error
+                        == Some(crate::runtime::ApprovalCorrelationError::Expired)
+                    {
+                        shacs_session::PermissionApprovalTerminalState::Expired
+                    } else {
+                        shacs_session::PermissionApprovalTerminalState::Rejected
+                    };
+                    record_permission_approval_terminal(&mut session, &approval, terminal_state);
                     let executed_action = report.permissioned_actions.first().cloned();
                     let fatal_error = self.append_approved_tool_messages(
                         &message,
@@ -1145,6 +1197,7 @@ impl<'a> AgentLoop<'a> {
                             true,
                         );
                     }
+                    self.sessions.save(&session)?;
                     let history = session.get_history_with_options(self.config.history_options);
                     let mut messages = vec![json!({
                         "role": "system",
@@ -1226,6 +1279,8 @@ impl<'a> AgentLoop<'a> {
                                         )
                                         .is_err()
                                     {
+                                        record_permission_approval_terminal(&mut session, &approval,
+                                            shacs_session::PermissionApprovalTerminalState::Rejected);
                                         session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
                                         return self.publish_command_response(
                                             &message,
@@ -1245,6 +1300,15 @@ impl<'a> AgentLoop<'a> {
                             }
                         }
                     }
+                    record_permission_approval_terminal(
+                        &mut session,
+                        &approval,
+                        if now_unix_ms() > approval.approval_request.expires_at_unix_ms {
+                            shacs_session::PermissionApprovalTerminalState::Expired
+                        } else {
+                            shacs_session::PermissionApprovalTerminalState::Denied
+                        },
+                    );
                     append_session_message(
                         &mut session,
                         RuntimeToolMessage {
@@ -4586,6 +4650,20 @@ fn set_pending_permission_approval(session: &mut Session, approval: &PendingPerm
     if let Ok(value) = serde_json::to_value(approval) {
         set_pending_permission_approval_value(session, value);
     }
+}
+
+fn record_permission_approval_terminal(
+    session: &mut Session,
+    approval: &PendingPermissionApproval,
+    state: shacs_session::PermissionApprovalTerminalState,
+) {
+    session.record_permission_approval_receipt(shacs_session::PermissionApprovalReceipt {
+        approval_request_id: approval.approval_request.approval_request_id.clone(),
+        action_digest: approval.approval_request.action_digest.clone(),
+        snapshot_digest: approval.approval_request.snapshot_digest.clone(),
+        state,
+        recorded_at_unix_ms: now_unix_ms(),
+    });
 }
 
 fn set_pending_permission_approval_value(session: &mut Session, value: Value) {
