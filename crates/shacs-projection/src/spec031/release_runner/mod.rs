@@ -73,6 +73,8 @@ mod spec035_execution_probe;
 #[cfg(test)]
 mod spec035_execution_test;
 #[cfg(test)]
+mod spec035_helper_surface_test;
+#[cfg(test)]
 mod spec035_postrun_fixture;
 #[cfg(test)]
 mod spec035_postrun_test;
