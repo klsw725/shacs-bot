@@ -52,6 +52,7 @@ fn revised_owner_facts_keep_ephemeral_decisions_out_of_durable_approval(
         .with_durable_approval(Spec035DurableApprovalProjection {
             state: Spec031ApprovalState::Pending,
             approval_ref: Spec031ActionRef::try_new("action:approval:owner-request")?,
+            action_digest: None,
             expires_at_unix_ms: None,
             retry_count: None,
             remembered_allow: None,

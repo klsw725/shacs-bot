@@ -22,6 +22,8 @@ pub struct Spec035DurableApprovalProjection {
     pub state: Spec031ApprovalState,
     pub approval_ref: Spec031ActionRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_digest: Option<crate::Spec031Digest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_unix_ms: Option<Spec031ObservedAtUnixMs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_count: Option<Spec031Count>,
