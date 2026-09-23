@@ -2,7 +2,7 @@
 
 Status: Open
 
-구현 상태: 구현됨, closure 차단. Capability 협상, owner 접근 전 mutation 거절, snapshot-first reconnect 및 generation/sequence 검사가 CLI/API/TUI와 API WebSocket/SSE 경계에 구현되어 있다. Task7-9 및 todo10의 capability/failure-injection/실제 표면/owner audit 기록은 존재하나 todo11 이후 낡은 역사적 결속이다. [현재 차단 기록](../CLOSURE.md)을 따른다.
+구현 상태: 구현됨, closure 차단. Capability 협상, owner 접근 전 mutation 거절, snapshot-first reconnect 및 generation/sequence 검사가 CLI/API/TUI와 API WebSocket/SSE 경계에 구현되어 있다. Task7-9·todo10은 역사적 결속으로 보존하고 encoded URL QA, G5 final 반복 production reconnect 및 최신 workspace 증거를 별도로 소비한다. 최종 동일 source/run admission과 독립 감사는 [closure 기록](../CLOSURE.md)을 따른다.
 
 CLI Tasks 변경은 `--transport-hello`, API `POST /v1/tasks/actions`는 `transport_hello`를 매 요청에 요구한다. `POST /v1/transport/hello`는 호환성 조회이지 인증·권한 부여가 아니며 API의 loopback mutation opt-in과 owner 검증을 대체하지 않는다. 정확한 JSON과 조회의 URL 인코딩은 [사용법](../../../USAGE.md#tasks-조회와-owner-변경-요청)을 따른다.
 
