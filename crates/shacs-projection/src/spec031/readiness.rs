@@ -15,17 +15,21 @@ pub enum Spec031ReadinessComponentKind {
     ChannelWorker,
     PluginApp,
     Queue,
+    RuntimeControls,
+    ResourceDisclosure,
     ExternalIntegration,
 }
 
 impl Spec031ReadinessComponentKind {
-    pub const REQUIRED: [Self; 6] = [
+    pub const REQUIRED: [Self; 8] = [
         Self::ProviderAuth,
         Self::Storage,
         Self::Containment,
         Self::ChannelWorker,
         Self::PluginApp,
         Self::Queue,
+        Self::RuntimeControls,
+        Self::ResourceDisclosure,
     ];
 
     pub(super) const fn subject_slug(self) -> &'static str {
@@ -36,6 +40,8 @@ impl Spec031ReadinessComponentKind {
             Self::ChannelWorker => "channel-worker",
             Self::PluginApp => "plugin-app",
             Self::Queue => "queue",
+            Self::RuntimeControls => "runtime-controls",
+            Self::ResourceDisclosure => "resource-disclosure",
             Self::ExternalIntegration => "external-integration",
         }
     }

@@ -33,6 +33,8 @@ fn component_label(kind: Spec031ReadinessComponentKind) -> &'static str {
         Spec031ReadinessComponentKind::ChannelWorker => "channel_worker",
         Spec031ReadinessComponentKind::PluginApp => "plugin_app",
         Spec031ReadinessComponentKind::Queue => "queue",
+        Spec031ReadinessComponentKind::RuntimeControls => "runtime_controls",
+        Spec031ReadinessComponentKind::ResourceDisclosure => "resource_disclosure",
         Spec031ReadinessComponentKind::ExternalIntegration => "external_integration",
     }
 }
