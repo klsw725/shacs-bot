@@ -174,8 +174,7 @@ async fn app_stop_action_stays_requested_until_owner_terminal_receipt(
         )]),
     };
     shacs_core::app::AppRegistryStore::new(&data_dir).save(&registry)?;
-    let journal =
-        shacs_core::app_lifecycle::AppSupervisorJournal::new(data_dir.join("runtime/apps"));
+    let journal = shacs_core::app_lifecycle::AppSupervisorJournal::new(data_dir.join("apps"));
     let started = journal.request(
         &app_id,
         shacs_core::app_lifecycle::AppLifecycleAction::Start,

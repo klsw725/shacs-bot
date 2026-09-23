@@ -3,6 +3,8 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use shacs_core::app::AppRegistryStore;
+use shacs_core::app_lifecycle::AppSupervisorJournal;
 use shacs_core::runtime::{
     accept_spec035_surface_action_outcome, build_spec035_tasks_projection, recover_runtime_surface,
     serialize_spec035_tasks_projection, validate_spec035_task_action, Spec035TasksSemanticAction,
@@ -120,14 +122,13 @@ fn dispatch_action(
             .map_err(|error| error.to_string())
         }
         Spec035TasksSemanticAction::AppStop { app_id } => {
-            shacs_core::app_lifecycle::AppSupervisorJournal::new(data_dir.join("runtime/apps"))
+            AppSupervisorJournal::new(AppRegistryStore::new(data_dir).apps_dir())
                 .request(&app_id, shacs_core::app_lifecycle::AppLifecycleAction::Stop)
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         }
         Spec035TasksSemanticAction::AppRecover { app_id } => {
-            let journal =
-                shacs_core::app_lifecycle::AppSupervisorJournal::new(data_dir.join("runtime/apps"));
+            let journal = AppSupervisorJournal::new(AppRegistryStore::new(data_dir).apps_dir());
             shacs_core::runtime::AppSupervisor::new(&journal)
                 .recover(&app_id, false)
                 .map(|_| ())
