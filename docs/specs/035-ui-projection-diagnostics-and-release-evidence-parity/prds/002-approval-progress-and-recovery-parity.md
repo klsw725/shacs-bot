@@ -2,7 +2,7 @@
 
 Status: Open
 
-구현 상태: 구현됨, closure 차단. Durable approval과 ephemeral confirmation/hook denial 분리, progress/final 및 recovery 관측 구현과 task3·todo10 기록이 존재한다. [차단 사유와 증거 구분](../CLOSURE.md)을 따르며 현재 최종 PASS로 해석하지 않는다.
+구현 상태: 구현됨, closure 차단. 기존 approval allow/consumed·recovery 기록에 G2의 denied/controlled-expired/confirmation-denied/headless/hook 관측과 recent-retry terminal 보정 및 scoped 독립 CONFIRMED가 추가됐다. Reader/renderer 증거를 실제 terminal key 입력으로 바꾸지 않으며 소비 receipt는 권한이나 도구 성공이 아니다. [closure 기록](../CLOSURE.md)의 잔여 matrix/interaction 및 최종 admission 경계를 따른다.
 
 ## Goal
 
