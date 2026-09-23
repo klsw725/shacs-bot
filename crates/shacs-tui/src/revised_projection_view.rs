@@ -24,11 +24,18 @@ pub fn spec035_revised_json_view(input: &str) -> Result<String, Spec035RevisedPa
 pub fn spec035_revised_tui_view(
     trusted_runtime: &Spec030RuntimeProjection,
     pending_approval: Option<&PendingApproval>,
+    terminal_approval: Option<&shacs_session::PermissionApprovalReceipt>,
 ) -> Result<String, Spec031ConstructionError> {
     let facts = Spec035RevisedOwnerFacts::new(Spec035OwnerSurface::Tui, trusted_runtime);
-    let facts = match pending_approval.and_then(durable_approval) {
-        Some(approval) => facts.with_durable_approval(approval?),
-        None => facts,
+    let facts = match pending_approval {
+        Some(pending) => match durable_approval(pending) {
+            Some(approval) => facts.with_durable_approval(approval?),
+            None => facts,
+        },
+        None => match terminal_approval {
+            Some(receipt) => facts.with_durable_approval(terminal_projection(receipt)?),
+            None => facts,
+        },
     };
     Ok(serde_json::json!(project_spec035_revised_owner_facts(facts)?).to_string())
 }
@@ -37,8 +44,7 @@ fn durable_approval(
     approval: &PendingApproval,
 ) -> Option<Result<Spec035DurableApprovalProjection, Spec031ConstructionError>> {
     let state = match approval.status {
-        ApprovalStatus::Pending => Spec031ApprovalState::Pending,
-        ApprovalStatus::Executing => Spec031ApprovalState::Allowed,
+        ApprovalStatus::Pending | ApprovalStatus::Executing => Spec031ApprovalState::Pending,
         ApprovalStatus::Unknown => return None,
     };
     Some(
@@ -51,7 +57,29 @@ fn durable_approval(
                     .map(Spec031ObservedAtUnixMs::new),
                 retry_count: None,
                 remembered_allow: None,
+                action_digest: None,
             }
         }),
     )
+}
+
+fn terminal_projection(
+    receipt: &shacs_session::PermissionApprovalReceipt,
+) -> Result<Spec035DurableApprovalProjection, Spec031ConstructionError> {
+    use shacs_session::PermissionApprovalTerminalState;
+    Ok(Spec035DurableApprovalProjection {
+        state: match receipt.state {
+            PermissionApprovalTerminalState::Consumed => Spec031ApprovalState::Consumed,
+            PermissionApprovalTerminalState::Denied => Spec031ApprovalState::Denied,
+            PermissionApprovalTerminalState::Expired => Spec031ApprovalState::Expired,
+            PermissionApprovalTerminalState::Rejected => Spec031ApprovalState::Skipped,
+        },
+        approval_ref: Spec031ActionRef::try_new(&receipt.approval_request_id)?,
+        action_digest: Some(shacs_projection::Spec031Digest::try_new(
+            &receipt.action_digest,
+        )?),
+        expires_at_unix_ms: None,
+        retry_count: None,
+        remembered_allow: None,
+    })
 }

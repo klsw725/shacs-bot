@@ -71,6 +71,7 @@ pub struct RuntimeSession {
     pub workflow: Option<SessionRuntimeWorkflowProjection>,
     pub execution: Option<SessionRuntimeExecutionProjection>,
     pub pending_approval: Option<PendingApproval>,
+    pub permission_approval_receipts: Vec<shacs_session::PermissionApprovalReceipt>,
     pub media: MediaProjectionView,
     pub tasks: Option<Spec035TasksProjection>,
 }

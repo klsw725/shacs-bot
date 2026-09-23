@@ -72,6 +72,9 @@ pub fn render_lines_for_width(state: &TuiState, width: u16) -> Vec<String> {
         state
             .selected_session()
             .and_then(|session| session.pending_approval.as_ref()),
+        state
+            .selected_session()
+            .and_then(|session| session.permission_approval_receipts.last()),
     ) {
         Ok(projection) => lines.push(format!("Spec035 revised projection: {projection}")),
         Err(_) => lines.push("Spec035 revised projection: unavailable".to_owned()),
@@ -135,6 +138,13 @@ fn session_lines(session: &RuntimeSession) -> Vec<String> {
                 .expires_at_unix_ms
                 .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
         ));
+    } else if let Some(receipt) = session.permission_approval_receipts.last() {
+        lines.push(format!(
+            "approval terminal: status={} lineage={}",
+            serde_json::json!(receipt.state),
+            receipt.approval_request_id
+        ));
+        lines.push(format!("approval action digest: {}", receipt.action_digest));
     } else {
         lines.push("approval: none".to_owned());
     }

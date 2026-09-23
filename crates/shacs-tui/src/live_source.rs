@@ -88,6 +88,7 @@ impl RuntimeProjectionSource for SessionRuntimeSource {
                     }),
                     workflow: detail.runtime_workflow,
                     execution: detail.runtime_execution,
+                    permission_approval_receipts: detail.permission_approval_receipts,
                     pending_approval: raw
                         .as_ref()
                         .and_then(|payload| pending_approval(payload, &data_dir, now_ms)),

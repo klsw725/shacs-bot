@@ -3,6 +3,7 @@ use shacs_tui::state::{ApprovalLineage, ApprovalStatus, RuntimeSession, SessionK
 
 pub fn fixture_session(key: &str, lineage: &str, progress: u64, outcomes: u64) -> RuntimeSession {
     RuntimeSession {
+        permission_approval_receipts: Vec::new(),
         key: SessionKey::new(key)
             .unwrap_or_else(|error| panic!("fixture session key failed: {error:?}")),
         updated_at: Some("2026-08-02T00:00:00Z".to_owned()),

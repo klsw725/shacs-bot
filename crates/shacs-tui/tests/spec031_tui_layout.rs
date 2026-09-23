@@ -99,6 +99,7 @@ fn cjk_state(columns: u16, rows: u16) -> Result<TuiState, Box<dyn Error>> {
 
 fn cjk_session() -> Result<shacs_tui::state::RuntimeSession, Box<dyn Error>> {
     Ok(shacs_tui::state::RuntimeSession {
+        permission_approval_receipts: Vec::new(),
         key: SessionKey::new("cli:cjk")?,
         updated_at: Some("2026-08-02T00:00:00Z".to_owned()),
         message_count: 2,
