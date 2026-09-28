@@ -15,6 +15,7 @@ mod tool_registry;
 pub(crate) mod wiring {
     pub(crate) use super::runtime_format::format_runtime_inspect;
     pub(crate) use super::runtime_inspect::runtime_inspect_inner;
+    pub(crate) use super::runtime_inspect::runtime_inspect_with_owner;
     pub(crate) use super::tool_registry::production_tool_registry;
 }
 

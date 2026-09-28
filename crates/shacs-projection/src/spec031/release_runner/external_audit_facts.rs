@@ -69,9 +69,18 @@ pub(super) fn external_owner_facts() -> &'static [ExternalOwnerFactDescriptor] {
             slug: "spec035",
             source_locator: "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md",
             source_status_locator: "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:3",
-            fact_artifacts: &["crates/shacs-cli/tests/spec031_cli_projection.rs#spec031_readiness_parity_uses_runtime_inspect_owner_source_for_api_cli_and_bundle"],
+            fact_artifacts: &[
+                ".omo/evidence/spec035/prd000-009/manifest.json",
+                ".omo/evidence/spec035/prd000-009/artifact-hashes.sha256",
+                ".omo/evidence/spec035/prd000-009/command-registry.json",
+                ".omo/evidence/spec035/prd000-009/external-owner-audits.json",
+                ".omo/evidence/spec035/prd000-009/cleanup-registry.json",
+                ".omo/evidence/spec035/prd000-009/incident-registry.json",
+                ".omo/evidence/spec035/prd000-009/workspace-failure-triage.json",
+                ".omo/evidence/spec035/prd000-009/source-audits/correction-source-binding.json",
+            ],
             command_result_ids: &["spec031-owner-spec035"],
-            blocked_reason: "Spec035 projection adapter fact is absent or failed",
+            blocked_reason: "Spec035 generated closure evidence is missing, stale, tampered, or blocked",
         },
     ]
 }

@@ -120,6 +120,7 @@ pub enum Spec031ReleaseArtifactError {
     DuplicateCoverageRequirement,
     UnmappedCoverageRequirement,
     BlockedAsPass,
+    Spec035Evidence(String),
     Io,
     EmptyCommand,
 }

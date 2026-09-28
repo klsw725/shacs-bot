@@ -1,12 +1,14 @@
 use serde_json::{json, Map, Value};
 use shacs_channels::{
     channel_delivery_observation_from_metadata, project_spec031_channel_event,
-    ChannelDeliveryObservation, ChannelSpec031ProjectionInput, ChannelSpec031ProjectionKind,
-    OutboundMessage, WebSocketServerEvent, WEBSOCKET_CHANNEL,
+    project_spec035_revised_channel_event, ChannelDeliveryObservation,
+    ChannelSpec031ProjectionInput, ChannelSpec031ProjectionKind, OutboundMessage,
+    WebSocketServerEvent, WEBSOCKET_CHANNEL,
 };
 use shacs_projection::spec031::{
     Spec031Availability, Spec031ProgressDelivery, Spec031ReasonCode, Spec031Severity,
 };
+use shacs_projection::{Spec030RuntimeProjection, Spec030UnavailableReason};
 use std::error::Error;
 
 #[test]
@@ -81,6 +83,40 @@ fn spec031_websocket_progress_and_final_are_distinct() -> Result<(), Box<dyn Err
     assert_eq!(
         final_json["capability"]["details"]["delivery"],
         json!("final_delivered")
+    );
+    Ok(())
+}
+
+#[test]
+fn spec035_channel_projection_consumes_actual_spec031_final_delivery() -> Result<(), Box<dyn Error>>
+{
+    // Given: the existing WebSocket projector observes a final message.
+    let owner_delivery = project_spec031_channel_event(
+        ChannelSpec031ProjectionInput::websocket_event(WebSocketServerEvent::Message {
+            chat_id: "chat-a".to_owned(),
+            text: "final".to_owned(),
+            buttons: Vec::new(),
+            button_prompt: None,
+            media: Vec::new(),
+            reply_to: None,
+            kind: None,
+        }),
+    )?;
+    let trusted_runtime =
+        Spec030RuntimeProjection::unavailable(Spec030UnavailableReason::OwnerFactsMissing);
+
+    // When: the Spec035 channel adapter consumes that owner envelope.
+    let projected = project_spec035_revised_channel_event(&trusted_runtime, &owner_delivery)?;
+    let value = serde_json::to_value(projected)?;
+
+    // Then: final delivery comes from the existing channel owner observation.
+    assert_eq!(
+        value["delivery"]["final_delivery"]["state"],
+        "final_delivered"
+    );
+    assert_eq!(
+        value["delivery"]["final_delivery"]["owner_surface"],
+        "websocket"
     );
     Ok(())
 }

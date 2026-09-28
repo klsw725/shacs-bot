@@ -14,7 +14,10 @@ pub use spec031::{
     ChannelDeliveryObservation, ChannelSpec031ProjectionInput, ChannelSpec031ProjectionKind,
 };
 pub use spec035::{
-    project_spec035_media_for_channel, ChannelSpec035MediaDelivery, ChannelSpec035MediaProjection,
+    negotiate_spec035_channel_hello, project_spec035_media_for_channel,
+    project_spec035_revised_channel_event, project_spec035_revised_json_for_channel,
+    spec035_channel_worker_hello, ChannelSpec035MediaDelivery, ChannelSpec035MediaProjection,
+    ChannelSpec035MutationError,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -616,6 +619,7 @@ pub struct ChannelManager {
     adapters: BTreeMap<String, Box<dyn ChannelAdapter>>,
     statuses: BTreeMap<String, ChannelStatus>,
     retry_policy: ChannelRetryPolicy,
+    latest_spec035_revised: Option<shacs_projection::Spec035RevisedProjection>,
 }
 
 impl ChannelManager {
@@ -655,6 +659,21 @@ impl ChannelManager {
 
     pub fn status_report(&self) -> BTreeMap<String, ChannelStatus> {
         self.statuses.clone()
+    }
+
+    pub fn latest_spec035_revised_projection(
+        &self,
+    ) -> Option<&shacs_projection::Spec035RevisedProjection> {
+        self.latest_spec035_revised.as_ref()
+    }
+
+    pub fn dispatch_spec035_mutation<T>(
+        &mut self,
+        client: &shacs_projection::Spec035TransportClientHello,
+        capability: shacs_projection::Spec035TransportCapability,
+        handler: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, ChannelSpec035MutationError> {
+        spec035::dispatch_spec035_channel_mutation(client, capability, || handler(self))
     }
 
     pub fn start_all(&mut self) -> Result<(), ChannelError> {
@@ -735,6 +754,10 @@ impl ChannelManager {
             };
             match result {
                 Ok(()) => {
+                    self.latest_spec035_revised = Some(
+                        spec035::project_successful_outbound(&message)
+                            .map_err(|error| ChannelError::Protocol(error.to_string()))?,
+                    );
                     self.clear_last_error(&channel);
                     return Ok(());
                 }

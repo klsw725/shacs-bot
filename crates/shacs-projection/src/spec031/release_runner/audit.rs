@@ -1,6 +1,12 @@
 #[cfg(test)]
 #[path = "audit_test.rs"]
 mod audit_test;
+#[cfg(test)]
+#[path = "spec035_evidence_test.rs"]
+mod spec035_evidence_test;
+#[cfg(test)]
+#[path = "spec035_ingestion_gap_test.rs"]
+mod spec035_ingestion_gap_test;
 
 use super::coverage::{
     artifact_hash, Spec031ArtifactMediaType, Spec031ExternalAuditRow, Spec031ExternalAuditStatus,
@@ -20,6 +26,7 @@ pub(super) fn add_external_audits(
     writer: &EvidenceWriter,
     artifacts: &mut Spec031ReleaseRunArtifacts,
     all_pass: bool,
+    spec035_evidence_error: Option<&Spec031ReleaseArtifactError>,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     writer
         .create_dir_all("external")
@@ -28,21 +35,36 @@ pub(super) fn add_external_audits(
         let observed_source_status = observed_status(config, spec)?;
         let implementation_artifacts = if all_pass {
             write_success_fixture_facts(writer, spec)?
+        } else if spec.slug == "spec035"
+            && super::spec035_execution::preflight_bound(&config.repo_root, &config.evidence_root)
+                .is_ok()
+        {
+            vec![super::spec035_execution::MANIFEST.to_owned()]
         } else {
             spec.fact_artifacts
                 .iter()
                 .map(|artifact| (*artifact).to_owned())
                 .collect()
         };
-        let status = if audit_passes(config, spec, artifacts, &implementation_artifacts) {
-            Spec031ExternalAuditStatus::Pass
-        } else {
-            Spec031ExternalAuditStatus::Blocked
-        };
-        let reason = if status == Spec031ExternalAuditStatus::Pass {
-            "artifact-backed exact fact audit passes"
-        } else {
-            spec.blocked_reason
+        let (status, reason) = match audit_passes(
+            config,
+            spec,
+            artifacts,
+            &implementation_artifacts,
+            spec035_evidence_error,
+        ) {
+            Ok(()) => (
+                Spec031ExternalAuditStatus::Pass,
+                "artifact-backed exact fact audit passes".to_owned(),
+            ),
+            Err(error) => (
+                Spec031ExternalAuditStatus::Blocked,
+                if spec.slug == "spec035" {
+                    format!("Spec035 evidence rejected: {error}")
+                } else {
+                    spec.blocked_reason.to_owned()
+                },
+            ),
         };
         let source_status = if all_pass {
             "Status: Complete (Success Fixture)"
@@ -65,7 +87,7 @@ pub(super) fn add_external_audits(
                 spec,
                 status,
                 source_status,
-                reason,
+                &reason,
                 &implementation_artifacts,
                 &audit_command_ids,
             ),
@@ -81,7 +103,7 @@ pub(super) fn add_external_audits(
             artifact_media_type: Spec031ArtifactMediaType::Markdown,
             evidence_class: Spec031TypedEvidenceClass::ExternalAuditMarkdown,
             artifact_hash: artifact_hash(&config.evidence_root, &artifact)?,
-            reason: reason.to_owned(),
+            reason,
         });
     }
     Ok(())
@@ -130,16 +152,32 @@ fn audit_passes(
     spec: &ExternalOwnerFactDescriptor,
     artifacts: &Spec031ReleaseRunArtifacts,
     implementation_artifacts: &[String],
-) -> bool {
-    !implementation_artifacts.is_empty()
-        && implementation_artifacts
+    spec035_evidence_error: Option<&Spec031ReleaseArtifactError>,
+) -> Result<(), Spec031ReleaseArtifactError> {
+    if spec.slug == "spec035"
+        && artifacts.fixture_registry != ["fixtures/success-fixture/Cargo.toml".to_owned()]
+    {
+        if let Some(error) = spec035_evidence_error {
+            return Err(error.clone());
+        }
+        super::spec035_execution::preflight_bound(&config.repo_root, &config.evidence_root)?;
+    }
+    if implementation_artifacts.is_empty()
+        || !implementation_artifacts
             .iter()
             .all(|artifact| fact_artifact_exists(config, artifact))
-        && spec.command_result_ids.iter().all(|id| {
-            artifacts.command_registry.iter().any(|record| {
-                record.id == *id && record.status == Spec031ReleaseCommandStatus::Passed
-            })
-        })
+    {
+        return Err(Spec031ReleaseArtifactError::MissingRequiredArtifact);
+    }
+    if !spec.command_result_ids.iter().all(|id| {
+        artifacts
+            .command_registry
+            .iter()
+            .any(|record| record.id == *id && record.status == Spec031ReleaseCommandStatus::Passed)
+    }) {
+        return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
+    }
+    Ok(())
 }
 
 fn fact_artifact_exists(config: &Spec031ReleaseRunnerConfig, artifact: &str) -> bool {

@@ -15,11 +15,17 @@ mod spec031_cli;
 mod spec031_management;
 mod spec033_cli;
 mod spec035_cli_media;
+mod spec035_revised;
+mod spec035_tasks_cli;
 mod surface_approval_worker;
 mod tool_before_interaction;
 mod trajectory_cli;
 pub use runtime_cleanup::{RemovedRuntimePath, RemovedRuntimePathKind, RuntimeCleanupReceipt};
 use spec035_cli_media::wiring::*;
+pub use spec035_revised::{
+    render_spec035_revised_json, render_spec035_revised_projection,
+    render_spec035_transport_rejection,
+};
 
 use fs2::FileExt;
 use lettre::message::Mailbox;
@@ -33,6 +39,7 @@ use sha2::{Digest, Sha256};
 use shacs_api::{
     chat_completion_invocation, ApiChatMessage, ApiError, ApiMessageContent, ApiModel,
     ChatCompletionAdapter, ChatCompletionInvocation, ChatCompletionRequest,
+    Spec035TasksStreamEvent,
 };
 use shacs_app::app_authoring_flow::{
     ApplyError, AuthoringFlowStore, AuthoringProposal, InstallHandoff, VerificationOutcome,
@@ -40,13 +47,13 @@ use shacs_app::app_authoring_flow::{
 use shacs_channels::{
     builtin_channel_default_configs, builtin_live_worker_descriptors, normalize_websocket_frame,
     normalize_whatsapp_bridge_message, runtime_workflow_projection_outbound,
-    websocket_event_from_outbound, whatsapp_outbound_frames, ChannelAdapter, ChannelCapabilities,
-    ChannelDescriptor, ChannelError, ChannelManager, ChannelRegistry, ChannelRetryPolicy,
-    DiscordInbound, EmailInbound, LiveChannelWorkerDescriptor, LiveChannelWorkerKind,
-    OutboundMessage, RecentMessageIds, SlackInbound, TelegramInbound, WebSocketInboundAction,
-    WebSocketServerEvent, WhatsAppBridgeMessage, WhatsAppChannelConfig, WhatsAppGroupPolicy,
-    WhatsAppOutboundFrame, DISCORD_CHANNEL, EMAIL_CHANNEL, SLACK_CHANNEL, TELEGRAM_CHANNEL,
-    WEBSOCKET_CHANNEL, WHATSAPP_CHANNEL,
+    spec035_channel_worker_hello, websocket_event_from_outbound, whatsapp_outbound_frames,
+    ChannelAdapter, ChannelCapabilities, ChannelDescriptor, ChannelError, ChannelManager,
+    ChannelRegistry, ChannelRetryPolicy, DiscordInbound, EmailInbound, LiveChannelWorkerDescriptor,
+    LiveChannelWorkerKind, OutboundMessage, RecentMessageIds, SlackInbound, TelegramInbound,
+    WebSocketInboundAction, WebSocketServerEvent, WhatsAppBridgeMessage, WhatsAppChannelConfig,
+    WhatsAppGroupPolicy, WhatsAppOutboundFrame, DISCORD_CHANNEL, EMAIL_CHANNEL, SLACK_CHANNEL,
+    TELEGRAM_CHANNEL, WEBSOCKET_CHANNEL, WHATSAPP_CHANNEL,
 };
 use shacs_command::{parse_loop_command, LoopCommand};
 use shacs_config::{
@@ -72,26 +79,27 @@ use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
     build_core_diagnostics_aggregate, build_permission_diagnostics_summary,
     build_plugin_runtime_snapshot, build_plugin_surface_projection,
-    build_spec031_extension_projection, ceiling_for_origin,
+    build_spec031_extension_projection, build_spec035_tasks_projection, ceiling_for_origin,
     containment_permission_proof_for_process_gate, discover_context_files, discover_plugins,
     parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
     request_runtime_control, resolve_context_reference,
     runtime_stop_request_marker_path as core_runtime_stop_request_marker_path,
-    ActionNormalizationState, ActivationStatus, ActivationStore, AgentHook, AgentHookContext,
-    AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult, AppProcessDriver,
-    AppProcessRunOutcome, AppStartFacts, AppSupervisor, AppSupervisorTerminal, CompositeHook,
-    ConfigMigrationState, ConfigSnapshotRef, ContainerNetworkMode, ContainerRuntimeKind,
-    ContainmentSnapshotRef, ContextBudgetInput, ContextBuilder, ContextDiagnosticsInput,
-    ContextDiagnosticsSummary, ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions,
-    ContextReferenceDiagnosticsSummary, ContextReferenceResolverConfig,
-    CoreDiagnosticsAggregateInput, CredentialResolvingImageGenerationClient,
-    CredentialResolvingProviderClient, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
-    DurableWorkDispatcher, ExecutionSnapshot, ExecutionSnapshotInput, HeartbeatError,
-    HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor,
-    HeartbeatWorker, InboundMessage, InheritedPermissionContext, McpLifecycle, MessageBus,
-    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
-    PermissionedAction, PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError,
-    PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
+    serialize_spec035_tasks_projection, ActionNormalizationState, ActivationStatus,
+    ActivationStore, AgentHook, AgentHookContext, AgentLoop, AgentLoopCommandResult,
+    AgentLoopConfig, AgentLoopTurnResult, AppProcessDriver, AppProcessRunOutcome, AppStartFacts,
+    AppSupervisor, AppSupervisorTerminal, CompositeHook, ConfigMigrationState, ConfigSnapshotRef,
+    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput,
+    ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
+    ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
+    ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput,
+    CredentialResolvingImageGenerationClient, CredentialResolvingProviderClient, DiscoveredPlugin,
+    DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, ExecutionSnapshot,
+    ExecutionSnapshotInput, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
+    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage,
+    InheritedPermissionContext, McpLifecycle, MessageBus, PermissionCeilingSnapshot,
+    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
+    PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError, PluginHookCatalog,
+    PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
     PluginProcessPermissionContext, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
     PluginSurfaceProjection, ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
     ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
@@ -262,6 +270,7 @@ pub enum CliCommand {
     Onboard(OnboardOptions),
     Status(StatusOptions),
     Goal(GoalOptions),
+    Tasks(spec035_tasks_cli::TasksOptions),
     Improve(ImprovementOptions),
     Trajectory(trajectory_cli::TrajectoryOptions),
     RuntimeInspect(RuntimeInspectOptions),
@@ -1145,11 +1154,14 @@ pub struct RuntimeInspectReport {
     pub providers: Vec<ProviderStatus>,
     pub generated_media: Vec<GeneratedMediaArtifactInspect>,
     pub media_projections: Vec<shacs_projection::Spec035MediaProjection>,
+    pub spec035_revised: shacs_projection::Spec035RevisedProjection,
     pub capabilities: Vec<RuntimeCapabilityReport>,
     pub sessions: RuntimeSessionInspect,
     pub lifecycle: RuntimeLifecycleInspect,
     pub supervision: RuntimeSupervisionState,
     pub channel_restart: Vec<ChannelRestartStateInspect>,
+    pub plugin_app_readiness: shacs_projection::Spec031ReadinessObservation,
+    pub trusted_runtime: shacs_projection::Spec030RuntimeProjection,
     pub containment: RuntimeContainmentInspect,
     pub workflow_recipes: Vec<SkillBackedWorkflowRecipe>,
 }
@@ -1893,7 +1905,9 @@ pub struct SessionInspectReport {
     pub diagnostics_refs: Vec<String>,
     pub runtime_workflow: Option<SessionRuntimeWorkflowProjection>,
     pub runtime_execution: Option<SessionRuntimeExecutionProjection>,
+    pub permission_approval_receipts: Vec<shacs_session::PermissionApprovalReceipt>,
     pub durable_children: DurableChildSessionInspect,
+    pub tool_projection_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1904,6 +1918,8 @@ pub struct DurableChildSessionInspect {
     pub duplicate_decision_count: usize,
     pub late_decision_count: usize,
     pub child_refs: Vec<String>,
+    #[serde(default)]
+    pub owner_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1942,6 +1958,7 @@ pub struct SessionDiagnosticsReport {
     pub aggregate: SessionDiagnosticsAggregate,
     pub durable_children: DurableChildSessionInspect,
     pub supervision: Value,
+    pub tool_projection_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1974,6 +1991,7 @@ pub enum CliError {
     InvalidArguments(String),
     Provider(ProviderError),
     Runtime(String),
+    TransportRejected(shacs_projection::Spec035TransportMutationRejection),
     Unsupported(String),
 }
 
@@ -1990,6 +2008,9 @@ impl fmt::Display for CliError {
             Self::InvalidArguments(error) => write!(formatter, "invalid CLI arguments: {error}"),
             Self::Provider(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "runtime error: {error}"),
+            Self::TransportRejected(rejection) => {
+                formatter.write_str(&render_spec035_transport_rejection(rejection))
+            }
             Self::Unsupported(error) => write!(formatter, "unsupported command: {error}"),
         }
     }
@@ -2814,6 +2835,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Onboard(options) => onboard(options).map(format_onboard_outcome),
         CliCommand::Status(options) => status(options).map(format_status_report),
         CliCommand::Goal(options) => spec033_cli::run(&options),
+        CliCommand::Tasks(options) => spec035_tasks_cli::run(options),
         CliCommand::Improve(options) => improvement_cli::run(options),
         CliCommand::Trajectory(options) => trajectory_cli::run(options),
         CliCommand::RuntimeInspect(options) => runtime_inspect(options).map(format_runtime_inspect),
@@ -2891,6 +2913,7 @@ where
         "onboard" => parse_onboard(parser, global_config),
         "status" => parse_status(parser, global_config),
         "goal" => spec033_cli::parse(parser),
+        "tasks" => spec035_tasks_cli::parse(parser, global_config),
         "improve" => improvement_cli::parse(parser, global_config),
         "trajectory" => trajectory_cli::parse(parser, global_config),
         "runtime" => parse_runtime(parser, global_config),
@@ -4175,13 +4198,15 @@ fn insert_readiness_projection(
 fn runtime_readiness_projection_for_context(
     config_path: &Path,
     workspace: &Path,
+    owner: shacs_projection::Spec030RuntimeProjection,
 ) -> Result<Value, CliError> {
-    let inspect = runtime_inspect_inner(
+    let inspect = runtime_inspect_with_owner(
         RuntimeInspectOptions {
             config_path: Some(config_path.to_path_buf()),
             workspace_override: Some(workspace.to_path_buf()),
         },
         false,
+        owner,
     )?;
     spec031_cli::readiness::value(&inspect).map_err(|error| {
         CliError::InvalidArguments(format!("readiness projection failed: {error}"))
@@ -7130,6 +7155,7 @@ pub fn format_permissions_revoke(report: PermissionsRuleReport) -> String {
 pub struct ContextFilesCliReport {
     pub workspace: PathBuf,
     pub summary: ContextFileDiagnosticsSummary,
+    pub evidence: shacs_core::runtime::Spec031ContextEvidenceProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7141,6 +7167,7 @@ pub struct ContextRefsParseCliReport {
 pub struct ContextRefsResolveCliReport {
     pub workspace: PathBuf,
     pub summary: ContextDiagnosticsSummary,
+    pub evidence: shacs_core::runtime::Spec031ContextEvidenceProjection,
 }
 
 pub fn context_files_report(
@@ -7156,7 +7183,21 @@ pub fn context_files_report(
         provider_handoff: None,
     })
     .context_files;
-    Ok(ContextFilesCliReport { workspace, summary })
+    let evidence = shacs_core::runtime::project_spec031_context_evidence(
+        shacs_core::runtime::Spec031ContextEvidenceInput {
+            batch_ref: None,
+            owner_freshness: shacs_projection::Spec031Freshness::Current,
+            inline_artifacts: &[],
+            context_files: &discovery.entries,
+            provider_handoff: None,
+        },
+    )
+    .map_err(|error| CliError::InvalidArguments(error.to_string()))?;
+    Ok(ContextFilesCliReport {
+        workspace,
+        summary,
+        evidence,
+    })
 }
 
 pub fn context_refs_parse(
@@ -7210,7 +7251,21 @@ pub fn context_refs_resolve(
         safety_report: Some(&safety),
         provider_handoff: Some(&handoff),
     });
-    Ok(ContextRefsResolveCliReport { workspace, summary })
+    let evidence = shacs_core::runtime::project_spec031_context_evidence(
+        shacs_core::runtime::Spec031ContextEvidenceInput {
+            batch_ref: None,
+            owner_freshness: shacs_projection::Spec031Freshness::Current,
+            inline_artifacts: &safety.artifacts,
+            context_files: &discovery.entries,
+            provider_handoff: Some(&handoff),
+        },
+    )
+    .map_err(|error| CliError::InvalidArguments(error.to_string()))?;
+    Ok(ContextRefsResolveCliReport {
+        workspace,
+        summary,
+        evidence,
+    })
 }
 
 pub fn channels_list(options: ChannelsListOptions) -> Result<ChannelsReport, CliError> {
@@ -7227,6 +7282,7 @@ pub struct AppsEntryReport {
     pub workspace: PathBuf,
     pub registry_path: PathBuf,
     pub entry: AppRegistryEntry,
+    pub lifecycle_receipt: Option<AppLifecycleReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7235,6 +7291,7 @@ pub struct AppsListReport {
     pub workspace: PathBuf,
     pub registry_path: PathBuf,
     pub entries: Vec<AppRegistryEntry>,
+    pub lifecycle_receipts: Vec<AppLifecycleReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7298,6 +7355,7 @@ pub fn apps_install(options: AppsInstallOptions) -> Result<AppsEntryReport, CliE
         apps_store(options.config_path, options.workspace_override)?;
     let entry = store.install_local_bundle(options.bundle_path)?;
     Ok(AppsEntryReport {
+        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &entry.app_id)?,
         config_path,
         workspace,
         registry_path: store.registry_path(),
@@ -7308,11 +7366,20 @@ pub fn apps_install(options: AppsInstallOptions) -> Result<AppsEntryReport, CliE
 pub fn apps_list(options: AppsListOptions) -> Result<AppsListReport, CliError> {
     let (config_path, workspace, store) =
         apps_store(options.config_path, options.workspace_override)?;
+    let entries = store.list()?;
+    let lifecycle_receipts = entries
+        .iter()
+        .map(|entry| spec031_cli::app::read_receipt(&store, &entry.app_id))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     Ok(AppsListReport {
         config_path,
         workspace,
         registry_path: store.registry_path(),
-        entries: store.list()?,
+        entries,
+        lifecycle_receipts,
     })
 }
 
@@ -7324,6 +7391,7 @@ pub fn apps_inspect(options: AppsInspectOptions) -> Result<AppsEntryReport, CliE
         .inspect(&app_id)?
         .ok_or_else(|| AppError::UnknownApp(app_id.clone()))?;
     Ok(AppsEntryReport {
+        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &app_id)?,
         config_path,
         workspace,
         registry_path: store.registry_path(),
@@ -7337,6 +7405,7 @@ pub fn apps_enable(options: AppsIdOptions) -> Result<AppsEntryReport, CliError> 
         apps_store(options.config_path, options.workspace_override)?;
     let entry = store.enable(&app_id)?;
     Ok(AppsEntryReport {
+        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &app_id)?,
         config_path,
         workspace,
         registry_path: store.registry_path(),
@@ -7353,6 +7422,7 @@ pub fn apps_disable(options: AppsIdOptions) -> Result<AppsEntryReport, CliError>
             store.disable(&app_id).map_err(Into::into)
         })?;
     Ok(AppsEntryReport {
+        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &app_id)?,
         config_path,
         workspace,
         registry_path: store.registry_path(),
@@ -9461,12 +9531,11 @@ fn workflow_recipe_projection_item(recipe: &SkillBackedWorkflowRecipe) -> Value 
 }
 
 pub fn format_apps_list(report: AppsListReport) -> String {
-    let app_count = report.entries.len();
     let mut lines = vec![
         "Apps".to_owned(),
-        format!("Config: {}", display_path(&report.config_path)),
+        format!("Config: {}", diagnostics_path_ref(&report.config_path)),
         format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
-        format!("Registry: {}", display_path(&report.registry_path)),
+        format!("Registry: {}", diagnostics_path_ref(&report.registry_path)),
     ];
     if report.entries.is_empty() {
         lines.push("No apps installed.".to_owned());
@@ -9484,13 +9553,14 @@ pub fn format_apps_list(report: AppsListReport) -> String {
             app_lifecycle_label(&entry.lifecycle_state),
             entry.digest
         ));
+        lines.extend(spec031_cli::app::lines(
+            &entry,
+            report
+                .lifecycle_receipts
+                .iter()
+                .find(|receipt| receipt.app_id == entry.app_id),
+        ));
     }
-    spec031_cli::push(
-        &mut lines,
-        &[spec031_cli::Projection::App {
-            total_count: app_count,
-        }],
-    );
     lines.join("\n")
 }
 
@@ -9554,16 +9624,18 @@ pub fn format_apps_entry_report(report: AppsEntryReport) -> String {
 
 fn format_apps_entry(title: &str, report: AppsEntryReport) -> String {
     let entry = report.entry;
-    let available = entry.unavailable_reasons.is_empty();
     let mut lines = vec![
         format!("{title}: {}", entry.app_id),
         format!("Version: {}", entry.version),
-        format!("State: {}", app_lifecycle_label(&entry.lifecycle_state)),
+        format!(
+            "Registry state: {}",
+            app_lifecycle_label(&entry.lifecycle_state)
+        ),
         format!("Digest: {}", entry.digest),
-        format!("Bundle: {}", display_path(&entry.bundle_path)),
-        format!("Config: {}", display_path(&report.config_path)),
+        format!("Bundle: {}", diagnostics_path_ref(&entry.bundle_path)),
+        format!("Config: {}", diagnostics_path_ref(&report.config_path)),
         format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
-        format!("Registry: {}", display_path(&report.registry_path)),
+        format!("Registry: {}", diagnostics_path_ref(&report.registry_path)),
         format!("Permission requests: {}", entry.permission_requests.len()),
         format!("Secret requests: {}", entry.secret_requests.len()),
         format!("Process snapshots: {}", entry.process_snapshots.len()),
@@ -9577,12 +9649,10 @@ fn format_apps_entry(title: &str, report: AppsEntryReport) -> String {
             entry.unavailable_reasons.join("; ")
         ));
     }
-    spec031_cli::push(
-        &mut lines,
-        &[spec031_cli::Projection::App {
-            total_count: usize::from(available),
-        }],
-    );
+    lines.extend(spec031_cli::app::lines(
+        &entry,
+        report.lifecycle_receipt.as_ref(),
+    ));
     lines.join("\n")
 }
 
@@ -10124,7 +10194,6 @@ pub fn format_channels_status(report: ChannelsReport) -> String {
 
 pub fn format_context_files_report(title: &str, report: ContextFilesCliReport) -> String {
     let summary = report.summary;
-    let included = summary.included_count > 0 && summary.denied_count == 0;
     let mut lines = vec![
         title.to_owned(),
         format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
@@ -10150,7 +10219,13 @@ pub fn format_context_files_report(title: &str, report: ContextFilesCliReport) -
             entry.order, entry.status, entry.source_label, entry.byte_count, entry.token_estimate
         ));
     }
-    spec031_cli::push(&mut lines, &[spec031_cli::Projection::Context { included }]);
+    lines.extend(
+        report
+            .evidence
+            .envelopes
+            .iter()
+            .map(|envelope| spec031_cli::render::envelope_line("context", envelope)),
+    );
     lines.join("\n")
 }
 
@@ -10186,7 +10261,6 @@ pub fn format_context_refs_parse_report(report: ContextRefsParseCliReport) -> St
 
 pub fn format_context_refs_resolve_report(report: ContextRefsResolveCliReport) -> String {
     let summary = report.summary;
-    let included = summary.artifacts.resolved_count > 0 && summary.artifacts.denied_count == 0;
     let mut lines = vec![
         "context refs resolve".to_owned(),
         format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
@@ -10243,7 +10317,13 @@ pub fn format_context_refs_resolve_report(report: ContextRefsResolveCliReport) -
             ));
         }
     }
-    spec031_cli::push(&mut lines, &[spec031_cli::Projection::Context { included }]);
+    lines.extend(
+        report
+            .evidence
+            .envelopes
+            .iter()
+            .map(|envelope| spec031_cli::render::envelope_line("context", envelope)),
+    );
     lines.join("\n")
 }
 
@@ -10313,6 +10393,7 @@ pub fn session_inspect(options: SessionInspectOptions) -> Result<SessionInspectR
     })?;
 
     Ok(SessionInspectReport {
+        tool_projection_lines: spec031_cli::tool::read(&manager, &options.session),
         workspace,
         key: detail.key,
         path: detail.path,
@@ -10326,6 +10407,7 @@ pub fn session_inspect(options: SessionInspectOptions) -> Result<SessionInspectR
         diagnostics_refs: detail.diagnostics_refs,
         runtime_workflow: detail.runtime_workflow,
         runtime_execution: detail.runtime_execution,
+        permission_approval_receipts: detail.permission_approval_receipts,
         durable_children: inspect_session_durable_children(&data_dir, &options.session),
     })
 }
@@ -10495,6 +10577,7 @@ pub fn session_diagnostics(
             legal_start: 0,
         };
         return Ok(SessionDiagnosticsReport {
+            tool_projection_lines: spec031_cli::tool::lines(None),
             aggregate: session_diagnostics_aggregate_for_surface(&diagnostics)?,
             durable_children,
             supervision,
@@ -10503,6 +10586,7 @@ pub fn session_diagnostics(
     let manager = SessionManager::new(&workspace)?;
     let diagnostics = manager.session_ux_diagnostics(&options.session);
     Ok(SessionDiagnosticsReport {
+        tool_projection_lines: spec031_cli::tool::read(&manager, &options.session),
         aggregate: session_diagnostics_aggregate_for_surface(&diagnostics)?,
         durable_children,
         supervision,
@@ -10689,6 +10773,7 @@ fn inspect_session_durable_children(
         inspect
             .child_refs
             .push(opaque_ref("child", &item.child_task_id));
+        inspect.owner_lines.push(spec031_cli::child::line(item));
     }
     for decision in state
         .children
@@ -12207,6 +12292,7 @@ struct ExternalTransportRuntimeContext {
     durable_data_dir: Option<PathBuf>,
     lease_owner_ref: Option<String>,
     unified_session_key: Option<String>,
+    spec035_hello: fn() -> Result<shacs_projection::Spec035TransportClientHello, String>,
 }
 
 struct ExternalDurableWorkRuntime {
@@ -12222,6 +12308,7 @@ impl ExternalTransportRuntimeContext {
             durable_data_dir: None,
             lease_owner_ref: None,
             unified_session_key: None,
+            spec035_hello: || spec035_channel_worker_hello().map_err(|error| error.to_string()),
         }
     }
 
@@ -12310,6 +12397,27 @@ impl ExternalTransportRuntimeContext {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    fn enqueue_inbound_with_hint(
+        &self,
+        runtime_bus: &MessageBus,
+        message: &InboundMessage,
+        metadata_path: &Path,
+    ) -> Result<(), String> {
+        if is_external_stop_command(message) {
+            let hello = (self.spec035_hello)()
+                .map_err(|error| format!("external channel capability hello failed: {error}"))?;
+            ChannelManager::new()
+                .dispatch_spec035_mutation(
+                    &hello,
+                    shacs_projection::Spec035TransportCapability::TaskStop,
+                    |_| (),
+                )
+                .map_err(|error| format!("external channel mutation rejected: {error}"))?;
+        }
+        record_pending_inbound_hint(metadata_path, message)?;
+        self.enqueue_inbound(runtime_bus, message)
     }
 }
 
@@ -12505,6 +12613,7 @@ fn run_external_agent_processor(
     transport_context: ExternalTransportRuntimeContext,
     mut durable_work: ExternalDurableWorkRuntime,
 ) -> Result<ExternalSupervisorShutdownReport, CliError> {
+    let spec035_hello = transport_context.spec035_hello;
     let mut channels = external_transport_channel_manager(
         specs,
         runtime_bus.clone(),
@@ -12585,6 +12694,24 @@ fn run_external_agent_processor(
                 let session_key = adapter.external_effective_session_key(&message);
                 let priority_command = is_external_priority_command(&message);
                 let priority_stop = is_external_stop_command(&message);
+                if priority_stop {
+                    let hello = spec035_hello().map_err(|error| {
+                        CliError::InvalidArguments(format!(
+                            "external channel capability hello failed: {error}"
+                        ))
+                    })?;
+                    channels
+                        .dispatch_spec035_mutation(
+                            &hello,
+                            shacs_projection::Spec035TransportCapability::TaskStop,
+                            |_| (),
+                        )
+                        .map_err(|error| {
+                            CliError::InvalidArguments(format!(
+                                "external channel mutation rejected: {error}"
+                            ))
+                        })?;
+                }
                 let (work_id, dedupe_hint) = durable_inbound_identity(&message);
                 let enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
                     .get_or_init(|| Mutex::new(()))
@@ -14942,12 +15069,8 @@ fn publish_external_inbound_with_hint(
     metadata_path: &Path,
     runtime_context: &ExternalTransportRuntimeContext,
 ) -> bool {
-    if let Err(error) = record_pending_inbound_hint(metadata_path, &message) {
-        eprintln!("channel pending inbound metadata save failed: {error}");
-        return false;
-    }
-    if let Err(error) = runtime_context.enqueue_inbound(bus, &message) {
-        eprintln!("external durable inbound enqueue failed: {error}");
+    if let Err(error) = runtime_context.enqueue_inbound_with_hint(bus, &message, metadata_path) {
+        eprintln!("external inbound intake failed: {error}");
         return false;
     }
     true
@@ -15952,8 +16075,11 @@ fn run_slack_socket_mode_session(
                 let inbound =
                     slack_socket_envelope_to_inbound_with_download(config, agent, &envelope);
                 if let Some(inbound) = inbound.as_ref() {
-                    record_pending_inbound_hint(&metadata_path, inbound)?;
-                    runtime_context.enqueue_inbound(inbound_bus, inbound)?;
+                    runtime_context.enqueue_inbound_with_hint(
+                        inbound_bus,
+                        inbound,
+                        &metadata_path,
+                    )?;
                 }
                 if let Some(ack) = slack_socket_ack_frame(&envelope) {
                     send_websocket_json(&mut socket, ack)?;
@@ -16375,8 +16501,11 @@ fn run_email_transport(
         if let Some(imap) = config.imap.as_ref() {
             if last_poll.elapsed() >= Duration::from_secs(imap.poll_interval_seconds) {
                 match poll_email_inbox(&config, imap, &mut seen_state, |inbound| {
-                    record_pending_inbound_hint(&metadata_path, inbound)?;
-                    transport_context.enqueue_inbound(&inbound_bus, inbound)
+                    transport_context.enqueue_inbound_with_hint(
+                        &inbound_bus,
+                        inbound,
+                        &metadata_path,
+                    )
                 }) {
                     Ok(_) => {
                         save_email_seen_uid_state(
@@ -17316,6 +17445,9 @@ pub fn help_text() -> String {
         "  goal      Manage and inspect the persistent goal for a session",
         "            Actions: inspect/status, set, pause, resume, clear, done, blocked",
         "            Flags: --workspace/-w, --session",
+        "  tasks     Print the canonical owner-backed task projection as JSON",
+        "            Flags: --workspace/-w, --data-dir, --session, --json",
+        "            Actions: --owner, --action, --locator, --transport-hello",
         "  improve   Propose, inspect, apply, verify, inspect candidate, or rollback a configured local artifact",
         "            Actions: propose, inspect, apply, verify, candidate, rollback",
         "            Flags: --root, --proposal, --target, --candidate, --snapshot, --expected-digest",
@@ -21560,7 +21692,7 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         if let Value::Object(runtime) = &mut projection["runtime"] {
             runtime.insert(
                 "spec031_readiness".to_owned(),
-                runtime_readiness_projection_for_context(&self.config_path, &self.workspace)
+                runtime_readiness_projection_for_context(&self.config_path, &self.workspace, self.trusted_runtime_projection())
                     .unwrap_or_else(|error| json!({ "state": "unavailable", "reason": redact_string(&error.to_string()) })),
             );
         }
@@ -21569,7 +21701,7 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
 
     fn readiness_projection(&self) -> Option<Value> {
         Some(
-            runtime_readiness_projection_for_context(&self.config_path, &self.workspace)
+            runtime_readiness_projection_for_context(&self.config_path, &self.workspace, self.trusted_runtime_projection())
                 .unwrap_or_else(|error| json!({ "state": "unavailable", "reason": redact_string(&error.to_string()) })),
         )
     }
@@ -21595,6 +21727,22 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         });
         let response = result?;
         Ok(response)
+    }
+
+    fn stream_spec035_tasks_events(
+        &self,
+        session_id: &str,
+        on_event: &mut dyn FnMut(Spec035TasksStreamEvent),
+    ) -> Result<(), ApiError> {
+        let data_dir = self.config_path.parent().unwrap_or(&self.workspace);
+        let projection = build_spec035_tasks_projection(&self.workspace, data_dir, session_id)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let encoded = serialize_spec035_tasks_projection(&projection)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let payload = serde_json::from_str(&encoded)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        on_event(Spec035TasksStreamEvent::owner_projection(payload));
+        Ok(())
     }
 
     fn persist_media_data_urls(&self, data_urls: &[String]) -> Result<Vec<String>, ApiError> {
@@ -22540,12 +22688,7 @@ fn format_onboard_outcome(outcome: OnboardOutcome) -> String {
         }
         if !report.external_owner_facts.is_empty() {
             lines.push("External owner facts:".to_owned());
-            lines.extend(report.external_owner_facts.iter().map(|fact| {
-                format!(
-                    "  - owner={} capability={} state={} reason={}",
-                    fact.owner, fact.capability, fact.state, fact.reason_code
-                )
-            }));
+            lines.extend(report.external_owner_facts.iter().map(ToString::to_string));
         }
         lines.push(
             "Next: provide referenced secrets in the selected source, then run `shacs-bot ask \"hello\"`.".to_owned(),
@@ -22872,7 +23015,6 @@ fn format_session_list(report: SessionListReport) -> String {
 fn format_session_inspect(report: SessionInspectReport) -> String {
     let message_count = report.message_count;
     let recovery_count = report.recovery_markers.len();
-    let child_count = report.durable_children.active_count + report.durable_children.terminal_count;
     let metadata = if report.metadata_keys.is_empty() {
         "none".to_owned()
     } else {
@@ -22915,6 +23057,12 @@ fn format_session_inspect(report: SessionInspectReport) -> String {
             format_runtime_execution_projection(execution)
         ));
     }
+    for receipt in &report.permission_approval_receipts {
+        lines.push(format!(
+            "Permission approval receipt: {}",
+            serde_json::json!(receipt)
+        ));
+    }
     lines.push(format_session_durable_children(&report.durable_children));
     spec031_cli::push(
         &mut lines,
@@ -22927,10 +23075,9 @@ fn format_session_inspect(report: SessionInspectReport) -> String {
                 component_count: recovery_count,
                 blocked: recovery_count > 0,
             },
-            spec031_cli::Projection::Subagent { child_count },
-            spec031_cli::Projection::Tool { attempt_count: 0 },
         ],
     );
+    lines.extend(report.tool_projection_lines);
     lines.join("\n")
 }
 
@@ -22996,7 +23143,6 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
     let session_exists = report.aggregate.exists;
     let message_count = report.aggregate.message_count;
     let diagnostics_ref_count = report.aggregate.diagnostics_ref_count;
-    let child_count = report.durable_children.active_count + report.durable_children.terminal_count;
     let recovery = if report.aggregate.recovery_markers.is_empty() {
         "none".to_owned()
     } else {
@@ -23065,16 +23211,15 @@ fn format_session_diagnostics(report: SessionDiagnosticsReport) -> String {
                 component_count: diagnostics_ref_count,
                 blocked: diagnostics_ref_count > 0,
             },
-            spec031_cli::Projection::Subagent { child_count },
-            spec031_cli::Projection::Tool { attempt_count: 0 },
         ],
     );
+    lines.extend(report.tool_projection_lines);
     lines.join("\n")
 }
 
 fn format_session_durable_children(children: &DurableChildSessionInspect) -> String {
     format!(
-        "Durable children: active={} terminal={} stale={} duplicate={} late={} refs={}",
+        "Durable children: active={} terminal={} stale={} duplicate={} late={} refs={}\n{}",
         children.active_count,
         children.terminal_count,
         children.stale_decision_count,
@@ -23084,6 +23229,11 @@ fn format_session_durable_children(children: &DurableChildSessionInspect) -> Str
             "none".to_owned()
         } else {
             children.child_refs.join(",")
+        },
+        if children.owner_lines.is_empty() {
+            "Spec031 subagent: state=unavailable reason=missing_external_owner_evidence freshness=unavailable".to_owned()
+        } else {
+            children.owner_lines.join("\n")
         }
     )
 }
@@ -26859,6 +27009,161 @@ mod tests {
                 .count(),
             1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_external_stop_at_production_intake_has_no_durable_or_adapter_side_effects(
+    ) -> Result<(), Box<dyn Error>> {
+        fn unsupported_hello() -> Result<shacs_projection::Spec035TransportClientHello, String> {
+            shacs_projection::Spec035TransportClientHello::parse_json(
+                r#"{"client_id":"client:unsupported-channel","schema_versions":[1],"mutation_capabilities":[]}"#,
+            )
+            .map_err(|error| error.to_string())
+        }
+
+        // Given
+        let root = tempfile::tempdir()?;
+        let bus = MessageBus::new();
+        let dispatcher = DurableWorkDispatcher::open(
+            runtime_durable_event_root(root.path()),
+            runtime_durable_work_payload_root(root.path()),
+            bus.clone(),
+            "owner-unsupported-stop",
+            100,
+        )?;
+        let event_path = runtime_durable_event_root(root.path()).join("events.log");
+        let events_before = fs::read(&event_path)?;
+        assert!(events_before.is_empty());
+        let captured = Arc::new(Mutex::new(Vec::<ProviderRequest>::new()));
+        let adapter = Arc::new(external_media_test_adapter(root.path(), captured.clone())?);
+        let mut transport_context =
+            ExternalTransportRuntimeContext::new(root.path().join("metadata"), 1);
+        transport_context.spec035_hello = unsupported_hello;
+        transport_context.configure_durable_inbound(
+            root.path().to_path_buf(),
+            "owner-unsupported-stop".to_owned(),
+            None,
+        );
+        let metadata_path = transport_context.metadata_path("telegram");
+
+        // When
+        let published = publish_external_inbound_with_hint(
+            &bus,
+            InboundMessage::new(TELEGRAM_CHANNEL, "user", "chat", "/stop"),
+            &metadata_path,
+            &transport_context,
+        );
+
+        // Then
+        assert!(
+            !published,
+            "unsupported hello must reject production intake"
+        );
+        assert_eq!(fs::read(event_path)?, events_before);
+        let (state, admission) =
+            durable_work_state_for_owner(root.path(), dispatcher.lease_owner_ref())?;
+        assert!(admission.writable);
+        assert!(state.work.items.is_empty());
+        assert!(bus.try_consume_inbound().is_none());
+        assert!(channel_restart_state_from_metadata(
+            TELEGRAM_CHANNEL,
+            &metadata_path,
+            &load_metadata_json(&metadata_path),
+        )
+        .pending_inbound_refs
+        .is_empty());
+        assert!(captured
+            .lock()
+            .map_err(|_| io::Error::other("captured request lock was poisoned"))?
+            .is_empty());
+
+        // When: only the hello capability changes to the production-supported value.
+        transport_context.spec035_hello =
+            || spec035_channel_worker_hello().map_err(|error| error.to_string());
+        assert!(publish_external_inbound_with_hint(
+            &bus,
+            InboundMessage::new(TELEGRAM_CHANNEL, "user", "chat", "/stop"),
+            &metadata_path,
+            &transport_context,
+        ));
+        let processor_stop = Arc::new(AtomicBool::new(false));
+        let processor_stop_handle = processor_stop.clone();
+        let data_dir = root.path().to_path_buf();
+        let processor = thread::spawn(move || {
+            run_external_agent_processor(
+                adapter,
+                bus,
+                Vec::new(),
+                1,
+                ExternalProcessorShutdownControl {
+                    stop: processor_stop_handle,
+                    reason: Arc::new(Mutex::new(RuntimeShutdownReason::Stop)),
+                    exited: Arc::new(AtomicBool::new(false)),
+                    startup_tx: None,
+                },
+                transport_context,
+                ExternalDurableWorkRuntime {
+                    data_dir,
+                    dispatcher,
+                },
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let (state, _) = durable_work_state_for_owner(root.path(), "owner-unsupported-stop")?;
+            if state
+                .work
+                .items
+                .values()
+                .all(|item| item.state.is_terminal())
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("supported external stop did not reach terminal state".into());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        processor_stop.store(true, Ordering::SeqCst);
+        processor
+            .join()
+            .map_err(|_| io::Error::other("external processor panicked"))??;
+
+        // Then: the existing durable path executes exactly once without a provider call.
+        let (state, _) = durable_work_state_for_owner(root.path(), "owner-unsupported-stop")?;
+        assert_eq!(state.work.items.len(), 1);
+        let item = state
+            .work
+            .items
+            .values()
+            .next()
+            .ok_or_else(|| io::Error::other("supported durable work is missing"))?;
+        assert_eq!(item.attempt, 1);
+        assert!(item.state.is_terminal());
+        assert!(item.cancellation_requested_sequence.is_none());
+        let events =
+            DurableEventStore::open(runtime_durable_event_root(root.path()))?.scan(usize::MAX)?;
+        assert_eq!(
+            events
+                .records
+                .iter()
+                .filter(|record| record.kind == WORK_LEASED)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .records
+                .iter()
+                .filter(|record| record.kind == WORK_TERMINAL)
+                .count(),
+            1
+        );
+        assert!(captured
+            .lock()
+            .map_err(|_| io::Error::other("captured request lock was poisoned"))?
+            .is_empty());
         Ok(())
     }
 
@@ -34304,6 +34609,8 @@ mod tests {
         assert!(diagnostics_output.contains("Session ref: session:sha256:"));
         assert!(diagnostics_output.contains("Diagnostics refs: diagnostics:sha256:"));
         assert!(diagnostics_output.contains("Checkpoint phase: awaiting_tools"));
+        assert!(diagnostics_output
+            .contains("Spec031 tool: state=unavailable reason=unsupported attempts=unknown"));
         assert!(diagnostics_output.contains("Workflow state: Running"));
         assert!(diagnostics_output.contains(
             "Runtime execution: pending=2 outcomes=3 accepted=1 stale=1 safe_artifacts=1"
@@ -35315,6 +35622,13 @@ mod tests {
         assert_eq!(end.content, "");
         assert_eq!(end.metadata["_stream_end"], json!(true));
         assert!(bus.try_consume_outbound().is_none());
+        if let Some(output) = std::env::var_os("SPEC035_ACCOUNTING_ARTIFACT_DIR") {
+            fs::create_dir_all(&output)?;
+            fs::write(
+                PathBuf::from(output).join("channel-owner-coalesced.json"),
+                serde_json::to_vec_pretty(&json!({"delta": delta, "stream_end": end}))?,
+            )?;
+        }
         Ok(())
     }
 
@@ -37995,6 +38309,18 @@ mod tests {
             .values()
             .filter(|item| item.work_kind == SURFACE_APPROVAL_WORK_KIND)
             .count())
+    }
+
+    #[test]
+    fn production_adapter_streams_current_tasks_projection() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let adapter = external_media_test_adapter(root.path(), Arc::new(Mutex::new(Vec::new())))?;
+        let mut events = Vec::new();
+
+        adapter.stream_spec035_tasks_events("api:qa", &mut |event| events.push(event))?;
+
+        assert_eq!(events.len(), 1);
+        Ok(())
     }
 
     fn external_media_test_adapter(

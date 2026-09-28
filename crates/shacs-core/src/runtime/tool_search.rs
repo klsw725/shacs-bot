@@ -464,13 +464,13 @@ struct PendingResolvedCall {
     execution_context: Option<ToolExecutionContext>,
 }
 
-enum BridgeAction {
+pub(super) enum BridgeAction {
     Immediate(RuntimeToolMessage),
     Execute(ResolvedDeferredToolCall),
     Error(ToolCallScopeError),
 }
 
-fn resolve_bridge_call(
+pub(super) fn resolve_bridge_call(
     call: &BridgeToolCall,
     catalog: Option<&DeferredToolCatalog>,
     registry: &ToolRegistry,

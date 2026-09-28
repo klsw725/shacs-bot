@@ -4,6 +4,19 @@ pub(crate) fn runtime_inspect_inner(
     options: RuntimeInspectOptions,
     ensure_dirs: bool,
 ) -> Result<RuntimeInspectReport, CliError> {
+    let owner = shacs_api::observe_trusted_runtime(
+        options.config_path.clone(),
+        options.workspace_override.clone(),
+    )
+    .projection;
+    runtime_inspect_with_owner(options, ensure_dirs, owner)
+}
+
+pub(crate) fn runtime_inspect_with_owner(
+    options: RuntimeInspectOptions,
+    ensure_dirs: bool,
+    owner: shacs_projection::Spec030RuntimeProjection,
+) -> Result<RuntimeInspectReport, CliError> {
     let config_path = options.config_path.unwrap_or_else(default_config_path);
     let config_exists = config_path.exists();
     let mut bundle = load_config_with_env(
@@ -71,7 +84,22 @@ pub(crate) fn runtime_inspect_inner(
         durable_recovery.state.as_ref().map(|state| &state.work),
     );
     let containment = runtime_containment_inspect(&bundle);
+    let plugin_app_readiness =
+        spec031_cli::readiness_plugin_app::observe(&bundle).map_err(CliError::Runtime)?;
     let workflow_recipes = workflow_recipes_for_bundle(&bundle)?;
+    let trusted_runtime = shacs_core::runtime::trusted_runtime::build_trusted_runtime_projection(
+        spec030_fact_store_for_bundle(&bundle)
+            .snapshot()
+            .into_input(),
+    )
+    .map_err(|error| CliError::Runtime(error.to_string()))?;
+    let spec035_revised = shacs_projection::project_spec035_revised_owner_facts(
+        shacs_projection::Spec035RevisedOwnerFacts::new(
+            shacs_projection::Spec035OwnerSurface::Cli,
+            &trusted_runtime,
+        ),
+    )
+    .map_err(|error| CliError::Runtime(error.to_string()))?;
 
     Ok(RuntimeInspectReport {
         config_path,
@@ -84,6 +112,7 @@ pub(crate) fn runtime_inspect_inner(
         providers,
         generated_media,
         media_projections,
+        spec035_revised,
         capabilities,
         sessions,
         lifecycle: RuntimeLifecycleInspect {
@@ -103,6 +132,8 @@ pub(crate) fn runtime_inspect_inner(
         },
         supervision,
         channel_restart,
+        plugin_app_readiness,
+        trusted_runtime: owner,
         containment,
         workflow_recipes,
     })

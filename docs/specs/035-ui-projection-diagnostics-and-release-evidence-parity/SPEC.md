@@ -2,7 +2,9 @@
 
 Status: Open
 
-Current machine verdict: 기존 PRD 000-007 implementation surfaces와 66개 release coverage row(45 requirement, 10 command, 5 artifact, 6 external owner)는 존재한다. Spec034 remediation과 candidate2 Todo 14에서 22/22 media/analyzer owner facts와 현재 adapter evidence가 PASS했지만, 035는 이를 read-only로 소비할 뿐 재소유하지 않으며 이 사실이나 향후 Spec034 final review verdict로 035 closure를 통과하지 않는다. Transport capability negotiation과 snapshot-first reconnect는 PRD 008의 planned work다. PRD 009는 TUI가 Spec033 goal/automation snapshot의 일부를 읽어 표시하는 partial baseline만 있으며, owner-backed mixed Tasks aggregation과 CLI/API/TUI parity는 미구현이므로 완료 처리하지 않는다.
+현재 판정: `BLOCKED`. PRD 000-009 구현과 기존 Spec031 66행 + Spec035 80행(parent 35 + 종료 조건 45)의 카탈로그가 존재한다. Canonical 45행/6 owner BLOCKED classification은 보존된 비실행 입력이다. 최신 [09-23 workspace](../../../.omo/evidence/spec035/closure/finalization/final-workspace/summary.md)는 3003 PASS / 0 FAIL / 8 ignored, 305 top-level target이며 fmt/clippy도 exit 0이다. 1,897개 source file-list SHA-256은 `3f5881770b18de184a61b65195e9720bd34e32686db9eaff6df5a9daff3d7522`이고 이번 문서 delta를 포함하지 않는다. Todo10 및 과거 실행 결속은 고치지 않는다. [G7 preparation](../../../.omo/evidence/spec035/closure/finalization/g7-final-preparation/REPORT.md)은 최신 G1-G6 증거를 74개 prerequisite와 정확히 6개 postrun 행으로 구분하며 [CLOSURE.md](CLOSURE.md)에 최종 수용 전 경계를 기록한다.
+
+여기서 구현됨은 모든 계약의 충족이나 결함 부재를 뜻하지 않는다. 원래 네 F2 결함과 stale queue, F1-R01/R01-A01의 scoped confirmed 및 encoded WebSocket generation 1·2 QA는 보존한다. Runtime 소스·assets·manifests/lock이 동일한 범위에서만 과거 QA를 재사용하며 새 실행으로 재결속하지 않는다. Fixture 누락은 실제 재생성으로 해소됐고 현재 cleanup은 0, 설정은 원본 전체 복원 미증명 한계를 둔 사용자 baseline 수용이다. Baseline 표면/정확한 owner fact의 남은 evidence mapping과 최종 독립 승인은 미완료다. 아래 완료 조건은 유지하며 workspace green을 전체 closure로 승격하지 않는다.
 
 Origin specs: 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027
 
@@ -41,7 +43,7 @@ Origin specs: 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027
 10. 026은 context file discovery와 inline reference live provider handoff의 current scope를 닫았다.
 11. 027은 attachment intake, stored attachment, media context routing, analyzer handoff의 v1 scope를 닫았다.
 
-이 기준선은 표면 parity가 자동으로 닫혔다는 뜻이 아니다. 035는 닫힌 runtime 사실을 shared projection model로 묶고, interactive TUI/REPL/onboard wizard, approval/progress/recovery parity, readiness/degraded health, reconnect/backpressure/drop accounting, release runner evidence를 구현 범위로 받았다. Prime에서 선택한 transport negotiation, snapshot-first reconnect, read-only Tasks/goal projection은 새 planned scope다. 최종 closure는 planned scope와 아래 외부 owner evidence가 모두 통과할 때까지 열려 있다.
+이 기준선은 표면 parity가 자동으로 닫혔다는 뜻이 아니다. 035는 닫힌 runtime 사실을 shared projection model로 묶고, interactive TUI/REPL/onboard wizard, approval/progress/recovery parity, readiness/degraded health, reconnect/backpressure/drop accounting, release runner evidence를 구현 범위로 받았다. Transport negotiation, snapshot-first reconnect, owner 기반 Tasks/goal projection도 구현되어 있다. 최신 suite의 실행 당시 worktree 바이트 결속·테스트 통과·cleanup과 한계 있는 사고 수용을 인정하되, 개별 증거의 완결성과 authentic runner/독립 감사가 충족되기 전까지 열려 있다.
 
 ## 소유하는 open scope
 
@@ -139,7 +141,7 @@ Domain owner와 projection owner는 분리한다. 029는 queue/recovery runtime 
 
 ## Implementation PRDs
 
-Spec 035는 아래 PRD를 구현하고 검증한다. PRD 007은 새 domain contract를 정의하지 않는 sequential integration and closure gate이며, planned PRD 008-009의 evidence도 소비한다.
+Spec 035는 아래 PRD를 구현하고 검증한다. PRD 007은 새 domain contract를 정의하지 않는 순차 통합 및 closure gate이며, 구현된 PRD 008-009의 evidence도 소비한다.
 
 이 스펙의 기존 구현 식별자와 증거 locator(`Spec031*`, `spec031.*`, `spec031-release-runner`, `.omo/evidence/spec031/**`)는 shipped compatibility surface이므로 재번호화하지 않는다. 문서의 semantic owner 번호와 탐색 경로만 035로 바꾼다.
 
@@ -156,20 +158,22 @@ Spec 035는 아래 PRD를 구현하고 검증한다. PRD 007은 새 domain contr
 | [PRD 008](prds/008-transport-capability-and-snapshot-first-reconnect.md) | 최소 capability negotiation, snapshot-first reconnect ordering | PRDs 000-001, 006, Specs 029 and 031 facts |
 | [PRD 009](prds/009-goal-and-read-only-tasks-projection.md) | Goal accounting parity와 owner-backed read-only Tasks view | PRDs 000-001, 005, Spec 033 facts |
 
-Current PRD status:
+현재 PRD 상태:
 
 | PRD | Status | Evidence |
 |---|---|---|
-| PRD 000 | Planned revision (implemented baseline) | Existing shared model evidence remains; confirmation/hook/runtime-disclosure vocabulary revision is unverified. |
-| PRD 001 | Planned revision (implemented baseline) | Existing adapter parity evidence remains; new disclosure/sandbox-scope parity is unverified. |
-| PRD 002 | Planned revision (implemented baseline) | Existing approval/progress/recovery evidence remains; confirmation/hook separation is unverified. |
-| PRD 003 | Planned revision (implemented baseline) | Existing readiness evidence remains; adapter-scoped sandbox/runtime-control revision is unverified. |
-| PRD 004 | Planned revision (implemented baseline) | Existing context/extension/media evidence remains; provenance/trusted-code/disclosure fields are unverified. |
-| PRD 005 | Planned revision (implemented baseline) | Existing TUI/REPL/onboard evidence remains; ephemeral confirmation and expanded diagnostics are unverified. |
-| PRD 006 | Planned revision (implemented baseline) | Existing accounting evidence remains; owner-scoped final-delivery wording requires revision verification. |
-| PRD 007 | Planned revision (implemented baseline) | Existing runner artifacts remain; PRD 008-009 and revised owner facts are not integrated. |
-| PRD 008 | Planned | Prime 분석이 확인한 protocol gap 검증과 snapshot-first reconnect 계약. |
-| PRD 009 | Planned revision (partial implemented baseline) | TUI의 Spec033 goal/automation read-only rendering은 존재한다. Child/workflow/app/recovery mixed aggregation, row별 owner locator/freshness, CLI/API/TUI Tasks parity와 action routing은 planned work다. |
+| PRD 000 | 구현됨, closure 차단 | 공통 모델 및 revised owner projection; task3와 todo10의 과거 focused 검사 기록. |
+| PRD 001 | 구현됨, closure 차단 | CLI/API/TUI/channel adapter 및 canonical parity 검사 기록. |
+| PRD 002 | 구현됨, closure 차단 | Durable approval과 ephemeral confirmation/hook denial 분리, recovery/terminal 관측. |
+| PRD 003 | 구현됨, closure 차단 | Readiness/diagnostics와 adapter 범위 runtime control 표시. |
+| PRD 004 | 구현됨, closure 차단 | Resource provenance/disclosure 및 app/media owner fact 소비. |
+| PRD 005 | 구현됨, closure 차단 | 실제 TUI/REPL, secret-ref-only wizard의 local owner·config/profile 선언 소비; 미관측 credential은 unavailable. 설정은 사용자 baseline 수용이며 원본 전체 복원 증명은 아님. |
+| PRD 006 | 구현됨, closure 차단 | Progress/final 분리 및 bounded queue/reconnect accounting; task9·todo10 기록. |
+| PRD 007 | 카탈로그·분류·실행 증거 검증 구현, closure 차단 | 146행 및 별도 current execution 수용 구현의 제한적 보정 확인. 최종 바이너리의 current-worktree는 classification 입력 때문에 commands 0·exit 1이며 실제 전체 실행 증거는 미완료다. |
+| PRD 008 | 구현됨, closure 차단 | Capability preflight, snapshot-first ordering, CLI/API/WebSocket 기록과 owner read audit. |
+| PRD 009 | 구현됨, closure 차단 | 여섯 owner 종류의 mixed Tasks와 CLI/API/TUI, locator 검증 및 기존 owner action 전달. |
+
+이 표는 구현 위치와 기록의 존재를 설명하며 PRD별 최종 PASS 선언이 아니다. 후속 G1/G6 보정, G2 owner 관측, G3 실제 container Ready/Degraded, G4 REPL·wizard, G5 반복 reconnect/accounting의 증거와 source/run 한계는 [closure 기록](CLOSURE.md)을 따른다.
 
 Dependency rules:
 
@@ -193,19 +197,18 @@ Dependency rules:
 7. Release evidence: release runner artifact가 coverage matrix, lifecycle smoke, projection parity smoke, failure triage, command locator를 포함한다.
 8. Documentation evidence: old specs가 035를 open owner로 링크해도 UI mock, SaaS dashboard, mobile app, CI vendor 선택으로 범위가 넓어지지 않는다.
 9. Transport/reconnect evidence: capability matrix와 snapshot-before-delta ordering이 실제 adapter surface에서 검증된다.
-10. Goal/Tasks evidence: 현재 TUI partial baseline은 Spec033 goal status, stop reason, budget과 automation job/delivery status를 owner snapshot에서 읽는다. Closure에는 CLI, local API, TUI가 동일 goal accounting과 owner-backed read-only task rows를 표시하는 추가 evidence가 필요하다.
+10. Goal/Tasks evidence: CLI, local API, TUI의 동일 goal accounting과 owner 기반 mixed task rows를 검증해야 한다. 구현과 todo10의 parity/locator/mixed-state/read audit 기록은 존재하지만 최종 closure에는 현재 소스와 결속된 통과 증거가 필요하다.
 
 ## Current Closure Blockers
 
-The historical 2026-08-04 closure artifacts are unavailable in this checkout and are not used as evidence. Current tracked or reproducible owner evidence is listed below; unavailable historical artifacts do not receive a locator.
+Todo10의 [외부 owner 감사](../../../.omo/evidence/spec035/prd000-009/external-owner-audits.json)는 과거 scoped 기록으로 보존한다. 최신 preparation은 여섯 owner의 13개 exact fact에 G1/G6 보정, G2/G3 실제 owner, G4/G5 및 기존 bounded media/recovery 증거를 대응하고 원래 source/run과 현재 dependency 차이를 구분한다. 외부 스펙 전체 완료는 요구하지 않으며 일부 owner 근거나 workspace green만으로 최종 source-bound release를 승인하지 않는다.
 
-| Owner | Verdict | Locator | Reason |
-|---|---|---|---|
-| Spec 029 | BLOCKED | Unavailable in this checkout. | Historical read audit is absent and no tracked replacement was verified. |
-| Spec 030 | BLOCKED | Unavailable in this checkout. | The previously cited source-bound manifest is absent and no tracked replacement was verified. |
-| Spec 032 | BLOCKED | Unavailable in this checkout. | Historical read audit and required app/resource lifecycle owner-fact artifacts are absent. |
-| Spec 033 | BLOCKED | `docs/specs/033-evaluation-automation-live-integration/CLOSURE.md`, `docs/specs/033-evaluation-automation-live-integration/evidence/index.json` | Spec033 owner implementation은 QA/goal/code/security/docs final review와 final source-bound release execution을 모두 통과했다. 이 행은 Spec035가 아직 regenerated external read audit를 만들지 않아 `BLOCKED`이며, PRD 009 partial TUI rendering도 full Tasks parity를 닫지 않는다. |
-| Spec 034 | PASS (owner facts only) | `docs/specs/034-generated-media-and-rich-file-context-expansion/CLOSURE.md`, `.omo/evidence/spec034/remediation/PASS.json`, `.omo/evidence/spec034/task-11-parity.json`, `.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json` | Remediation과 candidate2 Todo 14에서 22/22 media/analyzer owner facts 및 current adapter evidence가 PASS했다. Candidate2 Todo 14는 QA-only이고 Spec035는 이 fact를 read-only로 소비하므로, Spec035는 PRD 008-009와 다른 closure gate가 남은 `Open` 상태다. |
-| Spec 031 | BLOCKED | Unavailable in this checkout. | Historical read audit is absent; required config/auth-source/execution-snapshot owner facts remain unverified. |
+| 차단 항목 | 상태 | 근거 |
+|---|---|---|
+| 최신 source/suite 대응 | `RESOLVED_SCOPED` | 09-23 full-suite 전후 1,897개 source bytes가 동일하며 이번 문서 편집 직전과 일치했다. Doc delta 이후 새 freeze가 필요하다. Todo10과 G1-G6의 원래 run/source identity는 보존한다. |
+| Workspace test / fixture | `RESOLVED_SCOPED` | Task12 실제 producer 22 receipts와 exact digest 검증, 09-23 전체 `--locked --no-fail-fast` exit 0, 일반 2999 + doc 4 PASS 및 fmt/clippy exit 0. Ignored 8과 `test=false` target 1은 통과로 세지 않는다. 별도 build gate 및 freeze 이후 ledger 수용은 남아 있다. |
+| 현재 cleanup / 역사적 288개 | `RESOLVED / LIMITED_PROVENANCE` | 승인된 현재 경로 정리와 마지막 full-run 전후 external roots 0, 종료 owned process 0을 인정한다. 역사적 288개의 생성·소멸 이력을 증명하거나 전부 삭제했다고 주장하지 않는다. |
+| 이전 설정 재작성 사고 | `USER_ACCEPTED_REPAIRED_BASELINE` | 승인된 workspace/model 복구 뒤 사용자 수용을 기록했다. 사고 전 backup 부재로 원본 전체 동등 복원은 미증명이며 credential 유효성도 미검증이다. |
+| 전체 coverage / evidence admission / 독립 검토 | `BLOCKED` | Validator는 `--no-fail-fast`, nested accounting과 한계 있는 incident 수용을 지원한다. 최신 74행 감사의 잔여 사실·동일 source/run command 결속·13 fact/19 gate 조립 후 authentic runner와 postrun 6행 독립 감사를 수행해야 한다. 이전 실행의 source hash를 갱신하지 않으며 [CLOSURE.md](CLOSURE.md)를 따른다. |
 
-The historical release-runner summary and success-fixture summary are unavailable in this checkout, so neither is cited as evidence. Specs 029/030/031/032/033, planned PRD 008, PRD 009의 deferred parity와 나머지 closure gate는 계속 Spec 035 closure를 차단한다. The current Spec034 owner-fact row does not close semantic Spec035 closure, and no candidate2 final review or committed manifest claim is imported into Spec035.
+[Task11 기록](../../../.omo/evidence/spec035/closure/task-11-release-runner.json)의 66행 중 PASS 5/BLOCKED 61과 과거 F3 원본은 역사적 결과다. 보존된 [compiled current-worktree 원본](../../../.omo/evidence/spec035/closure/final-compiled-runner-current/summary.md)은 146행 중 PASS 5/BLOCKED 141, Spec035 PASS 0/BLOCKED 80, commands 0·exit 1이고 [fixture 원본](../../../.omo/evidence/spec035/closure/final-compiled-runner-fixture/summary.md)은 commands 17·exit 0이다. Classification v2는 여전히 비실행이며 fixture 성공도 semantic closure가 아니다. 이번 evidence-only 재조정은 테스트·build·runtime을 재실행하지 않았고 과거 receipt/hash/HEAD를 바꾸지 않았다. 현재 문서 prose delta를 suite가 실행한 것으로 주장하지 않으며 최종 독립 감사와 authentic release 증거 전에는 `Status: Open`을 유지한다.

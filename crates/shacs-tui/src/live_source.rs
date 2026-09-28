@@ -4,7 +4,9 @@ use crate::state::{
 };
 use serde_json::Value;
 use shacs_config::{config_context, default_config_path};
-use shacs_core::runtime::{surface_approval_availability, SurfaceApprovalAvailability};
+use shacs_core::runtime::{
+    build_spec035_tasks_projection, surface_approval_availability, SurfaceApprovalAvailability,
+};
 use shacs_projection::Spec030RuntimeProjection;
 use shacs_session::SessionManager;
 use std::path::{Path, PathBuf};
@@ -86,6 +88,7 @@ impl RuntimeProjectionSource for SessionRuntimeSource {
                     }),
                     workflow: detail.runtime_workflow,
                     execution: detail.runtime_execution,
+                    permission_approval_receipts: detail.permission_approval_receipts,
                     pending_approval: raw
                         .as_ref()
                         .and_then(|payload| pending_approval(payload, &data_dir, now_ms)),
@@ -93,6 +96,8 @@ impl RuntimeProjectionSource for SessionRuntimeSource {
                         .as_ref()
                         .map(MediaProjectionView::from_projection)
                         .unwrap_or_else(MediaProjectionView::unavailable),
+                    tasks: build_spec035_tasks_projection(&self.workspace, &data_dir, &detail.key)
+                        .ok(),
                 })
             })
             .collect();

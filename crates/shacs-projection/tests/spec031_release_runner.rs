@@ -299,7 +299,7 @@ fn spec031_release_runner_writes_all_success_fixture_artifacts(
     let artifacts = run_spec031_release_runner(&Spec031ReleaseRunnerConfig {
         run_id: Spec031ReleaseRunId::try_new("success-fixture-run")?,
         evidence_root: evidence_root.clone(),
-        repo_root: std::env::current_dir()?,
+        repo_root: workspace_root(),
         mode: Spec031ReleaseRunnerMode::SuccessFixture,
         command_timeout: Duration::from_secs(30),
     })?;
@@ -704,10 +704,7 @@ fn spec031_current_runner_reports_external_blockers_before_dirty_masking(
     })
     .expect_err("required external blockers win over dirty-only masking");
 
-    assert_eq!(
-        error,
-        Spec031ReleaseArtifactError::UnmappedCoverageRequirement
-    );
+    assert_eq!(error, Spec031ReleaseArtifactError::BlockedExternalEvidence);
     Ok(())
 }
 

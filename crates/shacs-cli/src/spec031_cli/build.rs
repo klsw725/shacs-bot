@@ -3,9 +3,9 @@ use shacs_projection::{
     Spec031AppCapability, Spec031Capability, Spec031ConstructionError, Spec031ContextCapability,
     Spec031Count, Spec031DiagnosticsCapability, Spec031Envelope, Spec031EnvelopeInput,
     Spec031InclusionReason, Spec031Lineage, Spec031MediaCapability, Spec031PluginCapability,
-    Spec031ProgressCapability, Spec031ProgressDelivery, Spec031ReadinessCapability, Spec031Reason,
-    Spec031SafeSummary, Spec031SchemaVersion, Spec031SessionCapability, Spec031Source,
-    Spec031SubagentCapability, Spec031SubjectRef, Spec031ToolCapability,
+    Spec031ProgressCapability, Spec031ProgressDelivery, Spec031Reason, Spec031SafeSummary,
+    Spec031SchemaVersion, Spec031SessionCapability, Spec031Source, Spec031SubagentCapability,
+    Spec031SubjectRef, Spec031ToolCapability,
 };
 
 pub(super) fn envelope(
@@ -55,13 +55,6 @@ fn capability(projection: Projection) -> Spec031Capability {
             component_count, ..
         } => Spec031Capability::Diagnostics(Spec031DiagnosticsCapability {
             component_count: Some(count(component_count)),
-        }),
-        Projection::Readiness { .. } => Spec031Capability::Readiness(Spec031ReadinessCapability {
-            availability: projection.availability(),
-            component_count: None,
-            queue_depth: None,
-            queue_capacity: None,
-            remediation: None,
         }),
         Projection::Context { included } => Spec031Capability::Context(Spec031ContextCapability {
             reason: inclusion_reason(included),

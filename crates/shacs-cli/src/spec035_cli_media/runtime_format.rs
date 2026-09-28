@@ -135,6 +135,10 @@ pub(crate) fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
         }
     }
     lines.push(format!(
+        "Spec035 revised projection: {}",
+        serde_json::json!(report.spec035_revised)
+    ));
+    lines.push(format!(
         "Channel restart states: {} (hint projection; not session truth)",
         report.channel_restart.len()
     ));
@@ -170,9 +174,6 @@ pub(crate) fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
             spec031_cli::Projection::Diagnostics {
                 component_count: state.diagnostics_component_count,
                 blocked: state.diagnostics_blocked,
-            },
-            spec031_cli::Projection::Readiness {
-                available: state.readiness_available,
             },
             spec031_cli::Projection::Subagent {
                 child_count: state.subagent_child_count,

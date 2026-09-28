@@ -14,6 +14,8 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- --help
 
 설정 파일과 workspace template을 생성하거나 갱신합니다. `onboard`는 built-in channel별 기본 config stub도 생성하며, 기존 channel 값과 secret/env placeholder는 보존하고 누락된 기본 key만 병합합니다:
 
+아래처럼 `--config` 없이 실행하면 기본 사용자 설정을 사용합니다. `--workspace`만 바꿔도 config/auth/data directory는 격리되지 않습니다. 임시 검증은 사용자 소유의 별도 directory에 config를 두고 모든 관련 명령에 같은 `--config`를 지정하세요. [설정 격리 주의사항](docs/USAGE.md#설정)을 참고하세요.
+
 ```sh
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- onboard --workspace /tmp/shacs-ws
 ```
@@ -43,9 +45,9 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- runtime activation i
 Plugin과 hook manifest 상태는 management surface로 확인합니다. `plugin.json`과 `plugin.toml` manifest discovery/config gate를 지원하며, `plugins`/`hooks` inspect 계열 명령은 plugin command, hook callback, MCP server, process를 실행하지 않습니다. `enable`/`disable`은 config만 수정하고 다음 session/reload에 적용된다고 보고합니다. Agent runtime에서 enabled plugin의 typed hook entrypoint는 redacted diagnostics로 dispatch될 수 있고, 현재 behavior-affecting 소비 범위는 `tool:before`의 block-only 결과를 도구 실행 직전 normalized tool error로 반환하는 것뿐입니다. 이 block은 permission approval/allow/grant를 만들 수 없습니다. Enabled plugin의 command-backed tool은 기존 tool registry/executor 경계로 등록되고, plugin MCP declaration은 production MCP startup 경로에만 투영되며, plugin-provided skill은 read-only skill root로 agent context에 포함됩니다. Enabled plugin command는 builtin `CommandId`를 확장하지 않는 별도 plugin command router/dispatcher 경계에서만 실행됩니다:
 
 ```sh
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- plugins list --workspace /tmp/shacs-ws
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- plugins doctor --workspace /tmp/shacs-ws
-cargo run --manifest-path crates/shacs-cli/Cargo.toml -- hooks list --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- plugins list --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- plugins doctor --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- hooks list --workspace /tmp/shacs-ws
 ```
 
 공식 로컬 runtime lifecycle 진입점은 `runtime start/stop/restart`입니다. `runtime start`는 channel runtime foreground 경로를 실행하며, strict v1 local owner lease를 획득한 뒤 API/WebSocket/external channel processor/component supervision 상태를 기록합니다. `runtime stop`과 `runtime restart`는 실행 중인 로컬 owner generation에 연결된 durable request와 stop-request marker를 기록합니다. `runtime restart`는 안전 종료 의도만 남기며, process를 자동으로 reexec하거나 외부 process manager를 대신하지 않습니다. 다음 start는 사용자가 다시 실행하거나 Docker Compose 같은 외부 supervisor가 수행해야 합니다:
@@ -163,20 +165,31 @@ Video analyzer는 runtime에 주입된 경우에만 bounded metadata/transcript/
 
 이 digest의 structural audit는 artifact 구조와 expected manifest/run ID/digest 결합을 검사하지만 외부 실행 attestation 자체는 아닙니다. `success-fixture` 성공은 runner mechanics만 검증하며 Spec034 closure가 아니고, dirty current-worktree 실행은 provenance를 기록할 뿐 final closure가 아닙니다. Darwin APFS vnode ledger와 suspended-process CDHash 검증에서 감지된 실행 중 tool/runtime tamper는 fresh execution attestation과 publication을 fail closed합니다. Cleanup은 root와 nested pathname identity를 destructive unlink 직전에 다시 확인하며 감지된 교체나 event 불일치는 publication을 차단합니다. 다만 지속적으로 악의적인 same-UID process가 identity 확인과 unlink syscall 사이에 pathname을 다시 교체할 수 있으므로 unrelated replacement의 원자적 보존과 isolation root의 보장된 회수는 제공하지 않습니다. Public-API polling 사이의 double-fork/setsid 후 reparent 원자적 추적, 승인되지 않은 descendant의 zero-instruction 실행 방지, universal sandbox/process containment도 보장하지 않습니다.
 
-Spec 035 implemented baseline에서 기존 QA 기록이 있는 표면은 TUI, `agent` REPL, secret-ref-only onboard wizard, readiness API/diagnostics, delivery hint projection, release runner artifact입니다. 이는 현재 Spec 035 closure PASS 또는 planned Tasks/reconnect parity 완료를 뜻하지 않습니다. TUI는 live runtime projection을 읽어 session, approval, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 먼저 workspace template과 session store를 만들고, 표시할 session을 생성한 뒤 `--once` 또는 interactive TUI를 실행하세요:
+Spec 035에는 TUI, `agent` REPL, secret-ref-only onboard wizard, readiness/diagnostics, owner 기반 Tasks, capability 협상, snapshot-first reconnect와 delivery accounting이 구현되어 있습니다. Spec 035는 최종 실행 증거 조립과 독립 감사 전이므로 `Open`, closure는 `BLOCKED`입니다. Spec034 fixture는 실제 producer로 재생성됐고, 최신 workspace 검증은 3003 PASS / 0 FAIL / 8 ignored이며 fmt/clippy도 통과했습니다. 그 실행 전후 external tool root는 0개이고 설정 사고는 원본 전체 복원·credential 유효성 미증명 한계를 둔 사용자 baseline 수용입니다. 역사적 288개 경로의 provenance와 todo10의 낡은 소스 결속은 그대로 보존합니다. 이 문서 갱신을 과거 실행 소스에 재결속하지 않으며 상세 근거와 남은 gate는 [Spec 035 closure 기록](docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/CLOSURE.md)을 참고하세요. TUI는 실제 runtime projection을 읽어 session, Tasks, approval, degraded readiness, stop/restart/recover action을 표시합니다. 새 workspace에서는 먼저 workspace template과 session store를 만들고, 표시할 session을 생성한 뒤 `--once` 또는 interactive TUI를 실행하세요:
 
 ```sh
-cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- onboard --workspace /tmp/shacs-ws
-cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- session create --session cli:direct --workspace /tmp/shacs-ws
-cargo run --manifest-path crates/Cargo.toml -p shacs-tui -- --workspace /tmp/shacs-ws --session cli:direct --once
-cargo run --manifest-path crates/Cargo.toml -p shacs-tui -- --workspace /tmp/shacs-ws --session cli:direct
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- --config /tmp/shacs-data/config.json onboard --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- --config /tmp/shacs-data/config.json session create --session cli:direct --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-tui -- --config /tmp/shacs-data/config.json --workspace /tmp/shacs-ws --session cli:direct --once
+cargo run --manifest-path crates/Cargo.toml -p shacs-tui -- --config /tmp/shacs-data/config.json --workspace /tmp/shacs-ws --session cli:direct
 ```
 
 Message 없이 `agent`를 실행하면 같은 command router를 쓰는 REPL이 시작됩니다. 일반 입력은 session turn으로 처리되고 `/status`, `/stop`, `/restart`는 priority command 의미를 보존합니다:
 
 ```sh
-cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- agent --workspace /tmp/shacs-ws
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- --config /tmp/shacs-data/config.json agent --workspace /tmp/shacs-ws
 ```
+
+Tasks 조회에는 `--json`이 필수입니다. CLI 기본 session은 `cli:direct`, API 기본 session은 `api:default`이므로 같은 행을 비교할 때 session을 명시하세요. API의 `session_id`는 URL 인코딩합니다. `--data-dir`에는 실행 중인 owner의 실제 data directory를 지정해야 하며, CLI에서 이를 생략하고 `--workspace`만 주면 workspace를 data directory로도 사용합니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- tasks --json --workspace /tmp/shacs-ws --data-dir /tmp/shacs-data --session cli:direct
+curl --fail-with-body 'http://127.0.0.1:8900/v1/tasks?session_id=cli%3Adirect'
+```
+
+Tasks는 별도 task 저장소가 아니라 goal/child/workflow/automation/app/recovery owner 상태의 조회 결과입니다. 변경 요청은 기존 owner로 전달하며 CLI의 `--transport-hello` 또는 API 요청의 `transport_hello`가 필요합니다. Capability 지원은 인증·권한·승인이 아니며 API 변경에는 별도의 loopback opt-in도 필요합니다. Snapshot-first reconnect는 손실 복구, remote ACK, exactly-once 전달을 보장하지 않고, progress drop과 최종 전달 관측은 독립적입니다. 정확한 요청 형식과 거절 조건은 [Tasks 사용법](docs/USAGE.md#tasks-조회와-owner-변경-요청)을 참고하세요.
+
+위 `/tmp/shacs-data`와 `/tmp/shacs-ws`는 사용자 소유의 서로 분리된 예시 경로입니다. 실제 검증에서는 새로 확보한 경로로 바꾸고 기존 config/auth를 복사하지 마세요. F2의 원래 네 결함과 stale 비동기 queue 역방향 사례는 제한된 재검토 범위에서 `confirmed`입니다. 과거 F3에서 실패한 URL 인코딩 WebSocket 식별자는 [보존된 compiled QA](.omo/evidence/spec035/closure/final-compiled-qa.json)에서 실제 문서 URL의 snapshot generation 1·2를 확인했습니다. 이후 G1/G2 owner 관측, G3 실제 container Ready/Degraded, G4 production REPL·wizard, G5 반복 reconnect/accounting 증거가 추가됐습니다. 각 실행의 소스·범위 제한은 [최신 준비 감사](.omo/evidence/spec035/closure/finalization/g7-final-preparation/REPORT.md)에 분리합니다. 보존 canonical classification의 45개 종료 조건과 6개 owner BLOCKED는 실행 verdict가 아닙니다. G7은 80행 중 74개 prerequisite와 FC5 의존 postrun 6행을 구분하며, 기존 PASS·fixture 성공·문서 정정을 최종 release 승인으로 승격하지 않습니다.
 
 Spec 031 release runner는 generated machine-readable `manifest.json`, `coverage-matrix.json`, `results.json`, `failure-triage.json`, `reproducibility-observations.json`과 human-readable `summary.md`를 씁니다. Current-worktree mode는 실제 Cargo exit status와 transcript만으로 PASS를 만들고 dirty 상태를 `observations/dirty-worktree.json`에 별도 기록하되 failure triage나 의미 verdict에 포함하지 않습니다. Specs 029/030/032/033/034/035는 031이 요구하는 exact adapter fact만 검사하며 source spec 전체 Complete 상태를 요구하지 않습니다. Missing/unknown fact나 실패 command는 계속 blocked입니다. `success-fixture`는 runner 자체의 passing fixture일 뿐 semantic Spec031 closure 증거가 아닙니다:
 
@@ -211,6 +224,7 @@ Compose는 host의 `~/.shacs-bot`을 container의 `/home/shacs/.shacs-bot`에 mo
 CLI binary를 빌드해서 실행합니다:
 
 ```sh
+cargo clean --manifest-path crates/Cargo.toml
 cargo build --manifest-path crates/Cargo.toml -p shacs-cli
 ./crates/target/debug/shacs-bot --help
 ```
@@ -245,6 +259,7 @@ Cargo 명령은 `crates/Cargo.toml` workspace manifest를 명시해서 실행합
 cargo fmt --manifest-path crates/Cargo.toml --all -- --check
 cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings
 cargo test --manifest-path crates/Cargo.toml --workspace
+cargo clean --manifest-path crates/Cargo.toml
 cargo build --manifest-path crates/Cargo.toml -p shacs-cli
 ```
 
@@ -254,6 +269,7 @@ Channel crate를 수정한 경우:
 cargo fmt --manifest-path crates/Cargo.toml -p shacs-channels -- --check
 cargo clippy --manifest-path crates/Cargo.toml -p shacs-channels --all-targets -- -D warnings
 cargo test --manifest-path crates/Cargo.toml -p shacs-channels
+cargo clean --manifest-path crates/Cargo.toml
 cargo build --manifest-path crates/Cargo.toml -p shacs-channels
 ```
 

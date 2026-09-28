@@ -20,9 +20,53 @@ pub fn validate_spec031_release_artifacts(
     validate_spec031_release_artifacts_with_repo_root(artifacts, &default_repo_root()?)
 }
 
+pub(super) fn validate_pending_artifacts(
+    artifacts: &Spec031ReleaseRunArtifacts,
+    repo_root: &Path,
+) -> Result<(), Spec031ReleaseArtifactError> {
+    let preflight =
+        super::spec035_execution::preflight_bound(repo_root, Path::new(&artifacts.evidence_root))?;
+    if preflight.binding.run_id != artifacts.run_id.as_str()
+        || artifacts.fixture_registry != ["fixtures/current-worktree.json"]
+    {
+        return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
+    }
+    let blocked: HashSet<_> = artifacts
+        .coverage_matrix
+        .iter()
+        .filter(|row| row.status == super::coverage::Spec031CoverageStatus::Blocked)
+        .map(|row| row.requirement_id.clone())
+        .collect();
+    if blocked != super::spec035_catalog::postrun_ids()
+        || !artifacts.failure_triage.is_empty()
+        || artifacts
+            .external_audits
+            .iter()
+            .any(|audit| audit.status != super::coverage::Spec031ExternalAuditStatus::Pass)
+    {
+        return Err(Spec031ReleaseArtifactError::BlockedExternalEvidence);
+    }
+    validate_phase(artifacts, repo_root, true)
+}
+
 pub fn validate_spec031_release_artifacts_with_repo_root(
     artifacts: &Spec031ReleaseRunArtifacts,
     repo_root: &Path,
+) -> Result<(), Spec031ReleaseArtifactError> {
+    if artifacts.fixture_registry == ["fixtures/current-worktree.json"]
+        && Path::new(&artifacts.evidence_root)
+            .join(super::spec035_postrun::SEAL)
+            .exists()
+    {
+        return super::spec035_postrun::validate_seal(artifacts, repo_root);
+    }
+    validate_phase(artifacts, repo_root, false)
+}
+
+fn validate_phase(
+    artifacts: &Spec031ReleaseRunArtifacts,
+    repo_root: &Path,
+    pending: bool,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     if artifacts.schema != SPEC031_RELEASE_RUNNER_SCHEMA {
         return Err(Spec031ReleaseArtifactError::UnsupportedSchema);
@@ -37,17 +81,24 @@ pub fn validate_spec031_release_artifacts_with_repo_root(
         return Err(Spec031ReleaseArtifactError::MissingCleanupReceipt);
     }
     validate_evidence_root(artifacts)?;
-    validate_command_registry(artifacts, repo_root)?;
-    validate_external_audits(artifacts, repo_root)?;
-    validate_cleanup_receipts(artifacts)?;
-    validate_reproducibility_observations(artifacts)?;
-    validate_coverage_matrix(artifacts)?;
     let triage_codes = validate_triage_receipts(artifacts)?;
     if triage_codes
         .iter()
         .any(|code| code == "blocked_external_evidence")
     {
+        validate_external_audits(artifacts, repo_root)?;
+        validate_cleanup_receipts(artifacts)?;
+        validate_reproducibility_observations(artifacts)?;
         return Err(Spec031ReleaseArtifactError::BlockedExternalEvidence);
+    }
+    validate_command_registry(artifacts, repo_root)?;
+    validate_external_audits(artifacts, repo_root)?;
+    validate_cleanup_receipts(artifacts)?;
+    validate_reproducibility_observations(artifacts)?;
+    if pending {
+        super::coverage_validate::validate_matrix_phase(artifacts, repo_root, true)?;
+    } else {
+        validate_coverage_matrix(artifacts, repo_root)?;
     }
     Ok(())
 }
@@ -134,49 +185,8 @@ fn validate_summary(
     let path = require_safe_file(root, "summary.md")?;
     let text = fs::read_to_string(path)
         .map_err(|_| Spec031ReleaseArtifactError::MissingRequiredArtifact)?;
-    for required in [
-        "## Commands",
-        "## Cleanup Receipts",
-        "## Failure Triage",
-        "## Coverage",
-        "## External Audits",
-        "## Reproducibility Observations",
-    ] {
-        if !text.contains(required) {
-            return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
-        }
-    }
-    for command in &artifacts.command_registry {
-        for required in [
-            command.id.as_str(),
-            command.cwd.as_str(),
-            command.stdout_path.as_str(),
-            command.stderr_path.as_str(),
-        ] {
-            if !text.contains(required) {
-                return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
-            }
-        }
-    }
-    for receipt in &artifacts.cleanup_registry {
-        if !text.contains(receipt) {
-            return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
-        }
-    }
-    for triage in &artifacts.failure_triage {
-        if !text.contains(triage) {
-            return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
-        }
-    }
-    for observation in &artifacts.reproducibility_observations {
-        if !text.contains(observation) {
-            return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
-        }
-    }
-    for audit in &artifacts.external_audits {
-        if !text.contains(&audit.artifact) || !text.contains(&audit.source_status_locator) {
-            return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
-        }
+    if text != super::writer::render_summary(artifacts) {
+        return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
     }
     Ok(())
 }

@@ -1,6 +1,6 @@
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::ws::{Message as AxumWebSocketMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -26,7 +26,7 @@ use shacs_utils::diagnostics::{
 };
 pub use shacs_utils::media_decode::{save_base64_data_url, MediaDecodeError, MAX_FILE_SIZE};
 pub use shacs_utils::runtime::EMPTY_FINAL_RESPONSE_MESSAGE;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
@@ -45,12 +45,23 @@ mod media_api;
 mod spec030_api;
 mod spec030_client;
 mod spec031_api;
+mod spec035_accounting;
+mod spec035_reconnect;
+mod spec035_revised;
+mod spec035_tasks;
+mod spec035_transport;
 pub use media_api::*;
 pub use spec030_api::TRUSTED_RUNTIME_PATH;
 pub use spec030_client::{
     observe_trusted_runtime, TrustedRuntimeObservation, TrustedRuntimeProjectionSource,
 };
 pub use spec031_api::{Spec031ApiProjection, READINESS_PATH, SUBAGENTS_PATH, TOOLS_PATH};
+pub use spec035_reconnect::{Spec035TasksStreamEvent, SPEC035_CLIENT_ID_HEADER};
+pub use spec035_revised::{
+    spec035_revised_projection_json_response, spec035_revised_projection_response,
+};
+pub use spec035_tasks::{TASKS_ACTIONS_PATH, TASKS_PATH};
+pub use spec035_transport::{transport_hello_response, TRANSPORT_HELLO_PATH};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const MODELS_PATH: &str = "/v1/models";
@@ -344,6 +355,7 @@ struct ReconnectObservation {
 struct StreamReconnectState {
     generation: u64,
     last_sequence: u64,
+    delivery: spec035_accounting::ReconnectDeliveryAccounting,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +364,7 @@ struct StreamConnectionState {
     generation: u64,
     next_sequence: u64,
     gap: bool,
+    delivery: spec035_accounting::ReconnectDeliveryAccounting,
 }
 
 #[derive(Debug, Clone)]
@@ -359,8 +372,8 @@ struct ApiReconnectTracker {
     capacity: usize,
     sse: HashMap<String, StreamReconnectState>,
     ws: HashMap<String, StreamReconnectState>,
-    evicted_ws: HashSet<String>,
-    evicted_ws_order: VecDeque<String>,
+    evicted: HashMap<String, StreamReconnectState>,
+    evicted_order: VecDeque<String>,
     order: VecDeque<String>,
 }
 
@@ -370,29 +383,36 @@ impl ApiReconnectTracker {
             capacity,
             sse: HashMap::new(),
             ws: HashMap::new(),
-            evicted_ws: HashSet::new(),
-            evicted_ws_order: VecDeque::new(),
+            evicted: HashMap::new(),
+            evicted_order: VecDeque::new(),
             order: VecDeque::new(),
         }
     }
 
     fn connect_sse(&mut self, key: &str, last_event_id: Option<&str>) -> StreamConnectionState {
         let prior = self.sse.get(key).cloned();
+        let evicted = self.take_evicted(&format!("sse:{key}"));
         let parsed = last_event_id.and_then(parse_sse_event_id);
-        let gap = match (&prior, parsed) {
-            (Some(state), Some((generation, sequence))) => {
-                generation != state.generation || sequence != state.last_sequence
-            }
-            (Some(_), None) => true,
-            (None, Some(_)) => true,
-            (None, None) => false,
-        };
-        let generation = prior.map_or(1, |state| state.generation.saturating_add(1));
+        let gap = evicted.is_some()
+            || match (&prior, parsed) {
+                (Some(state), Some((generation, sequence))) => {
+                    generation != state.generation || sequence != state.last_sequence
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => true,
+                (None, None) => false,
+            };
+        let continuity = prior.or(evicted);
+        let generation = continuity
+            .as_ref()
+            .map_or(1, |state| state.generation.saturating_add(1));
+        let delivery = continuity.map(|state| state.delivery).unwrap_or_default();
         self.sse.insert(
             key.to_owned(),
             StreamReconnectState {
                 generation,
                 last_sequence: 0,
+                delivery: delivery.clone(),
             },
         );
         self.touch(format!("sse:{key}"));
@@ -401,24 +421,28 @@ impl ApiReconnectTracker {
             generation,
             next_sequence: 1,
             gap,
+            delivery,
         }
     }
 
     fn connect_ws(&mut self, key: &str) -> StreamConnectionState {
         let prior = self.ws.get(key).cloned();
-        let was_evicted = self.evicted_ws.remove(key);
-        if was_evicted {
-            self.evicted_ws_order.retain(|item| item != key);
-        }
+        let evicted = self.take_evicted(&format!("ws:{key}"));
         let generation = prior
             .as_ref()
+            .or(evicted.as_ref())
             .map_or(1, |state| state.generation.saturating_add(1));
-        let gap = prior.is_some() || was_evicted;
+        let gap = prior.is_some() || evicted.is_some();
+        let delivery = prior
+            .or(evicted)
+            .map(|state| state.delivery)
+            .unwrap_or_default();
         self.ws.insert(
             key.to_owned(),
             StreamReconnectState {
                 generation,
                 last_sequence: 0,
+                delivery: delivery.clone(),
             },
         );
         self.touch(format!("ws:{key}"));
@@ -427,19 +451,52 @@ impl ApiReconnectTracker {
             generation,
             next_sequence: 1,
             gap,
+            delivery,
         }
     }
 
     fn record_sse(&mut self, state: &StreamConnectionState, sequence: u64) {
-        if let Some(stored) = self.sse.get_mut(&state.key) {
+        if let Some(stored) = self
+            .sse
+            .get_mut(&state.key)
+            .filter(|stored| stored.generation == state.generation)
+        {
             stored.last_sequence = sequence;
+            stored.delivery = state.delivery.clone();
         }
     }
 
     fn record_ws(&mut self, state: &StreamConnectionState, sequence: u64) {
-        if let Some(stored) = self.ws.get_mut(&state.key) {
+        if let Some(stored) = self
+            .ws
+            .get_mut(&state.key)
+            .filter(|stored| stored.generation == state.generation)
+        {
             stored.last_sequence = sequence;
+            stored.delivery.merge_from(&state.delivery);
         }
+    }
+
+    fn observe_ws_delivery(
+        &mut self,
+        key: &str,
+        delivery: shacs_projection::Spec031ProgressDelivery,
+        update: ChannelDeliveryObservation,
+    ) -> Result<Option<Spec031Envelope>, ApiError> {
+        let Some(stored) = self
+            .ws
+            .get_mut(key)
+            .filter(|stored| update.reconnect_generation == Some(stored.generation))
+        else {
+            return Ok(None);
+        };
+        let observation = stored.delivery.accumulated_observation(update);
+        let envelope =
+            stored
+                .delivery
+                .observe(shacs_channels::WEBSOCKET_CHANNEL, delivery, observation)?;
+        self.touch(format!("ws:{key}"));
+        Ok(Some(envelope))
     }
 
     fn touch(&mut self, key: String) {
@@ -448,28 +505,33 @@ impl ApiReconnectTracker {
         while self.order.len() > self.capacity {
             if let Some(evicted) = self.order.pop_front() {
                 if let Some(key) = evicted.strip_prefix("sse:") {
-                    self.sse.remove(key);
+                    if let Some(state) = self.sse.remove(key) {
+                        self.remember_evicted(evicted, state);
+                    }
                 } else if let Some(key) = evicted.strip_prefix("ws:") {
-                    self.ws.remove(key);
-                    self.remember_evicted_ws(key);
+                    if let Some(state) = self.ws.remove(key) {
+                        self.remember_evicted(evicted, state);
+                    }
                 }
             }
         }
     }
 
-    fn remember_evicted_ws(&mut self, key: &str) {
-        if !key.starts_with("ws-chat:") {
-            return;
+    fn take_evicted(&mut self, key: &str) -> Option<StreamReconnectState> {
+        let state = self.evicted.remove(key);
+        if state.is_some() {
+            self.evicted_order.retain(|item| item != key);
         }
-        if self.evicted_ws.insert(key.to_owned()) {
-            self.evicted_ws_order.push_back(key.to_owned());
-        } else {
-            self.evicted_ws_order.retain(|item| item != key);
-            self.evicted_ws_order.push_back(key.to_owned());
-        }
-        while self.evicted_ws_order.len() > self.capacity {
-            if let Some(evicted) = self.evicted_ws_order.pop_front() {
-                self.evicted_ws.remove(&evicted);
+        state
+    }
+
+    fn remember_evicted(&mut self, key: String, state: StreamReconnectState) {
+        self.evicted_order.retain(|item| item != &key);
+        self.evicted_order.push_back(key.clone());
+        self.evicted.insert(key, state);
+        while self.evicted_order.len() > self.capacity {
+            if let Some(evicted) = self.evicted_order.pop_front() {
+                self.evicted.remove(&evicted);
             }
         }
     }
@@ -478,19 +540,78 @@ impl ApiReconnectTracker {
 #[derive(Debug, Clone)]
 struct WebSocketReconnectScope {
     connection_key: String,
+    client_id: String,
     by_key: HashMap<String, StreamConnectionState>,
+    registered: Arc<StdMutex<HashMap<String, StreamConnectionState>>>,
     order: VecDeque<String>,
 }
 
-impl WebSocketReconnectScope {
-    fn new(client_id: &str) -> Self {
-        let ordinal = NEXT_WS_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+#[derive(Clone)]
+pub(crate) struct WebSocketQueueAccounting {
+    observer: Option<Spec031ChannelProjectionObserver>,
+    tracker: Arc<StdMutex<ApiReconnectTracker>>,
+    scope: WebSocketReconnectScope,
+    fallback_chat_id: String,
+}
+
+impl WebSocketQueueAccounting {
+    fn new(
+        state: &ApiRouterState,
+        scope: &WebSocketReconnectScope,
+        fallback_chat_id: &str,
+    ) -> Self {
         Self {
-            connection_key: format!(
-                "ws-connection:{}",
-                chat_completion_id(&format!("{client_id}:{ordinal}"))
-            ),
+            observer: state.spec031_channel_observer.clone(),
+            tracker: state.reconnect_tracker.clone(),
+            scope: scope.clone(),
+            fallback_chat_id: fallback_chat_id.to_owned(),
+        }
+    }
+
+    pub(crate) fn generation_for(&mut self, event: &WebSocketServerEvent) -> u64 {
+        let event_chat_id = websocket_event_chat_id(event).unwrap_or(&self.fallback_chat_id);
+        self.scope
+            .connection_for(&self.tracker, event_chat_id, &self.fallback_chat_id)
+            .generation
+    }
+
+    pub(crate) fn observe_failure(
+        &self,
+        event: &WebSocketServerEvent,
+        observation: ChannelDeliveryObservation,
+    ) {
+        let event_chat_id = websocket_event_chat_id(event).unwrap_or(&self.fallback_chat_id);
+        let key = self.scope.key_for(event_chat_id, &self.fallback_chat_id);
+        if let Some(delivery) = spec035_accounting::websocket_send_failure_delivery(event) {
+            let envelope = self
+                .tracker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .observe_ws_delivery(&key, delivery, observation);
+            if let Ok(Some(envelope)) = envelope {
+                observe_spec031_envelope(self.observer.as_ref(), envelope);
+            }
+        }
+    }
+}
+
+impl WebSocketReconnectScope {
+    fn new(client_id: &str, stable_session_id: Option<&str>) -> Self {
+        let ordinal = NEXT_WS_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+        let connection_key = stable_session_id.map_or_else(
+            || {
+                format!(
+                    "ws-connection:{}",
+                    chat_completion_id(&format!("{client_id}:{ordinal}"))
+                )
+            },
+            |session_id| spec035_reconnect::stable_reconnect_key(client_id, session_id),
+        );
+        Self {
+            connection_key,
+            client_id: client_id.to_owned(),
             by_key: HashMap::new(),
+            registered: Arc::new(StdMutex::new(HashMap::new())),
             order: VecDeque::new(),
         }
     }
@@ -499,7 +620,19 @@ impl WebSocketReconnectScope {
         if event_chat_id == fallback_chat_id {
             return self.connection_key.clone();
         }
-        format!("ws-chat:{}", chat_completion_id(event_chat_id))
+        format!(
+            "ws-chat:{}",
+            spec035_reconnect::stable_reconnect_key(&self.client_id, event_chat_id)
+        )
+    }
+
+    fn prime(&mut self, connection: StreamConnectionState) {
+        self.registered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(connection.key.clone(), connection.clone());
+        self.touch(&connection.key);
+        self.by_key.insert(connection.key.clone(), connection);
     }
 
     fn connection_for(
@@ -510,10 +643,17 @@ impl WebSocketReconnectScope {
     ) -> &mut StreamConnectionState {
         let key = self.key_for(event_chat_id, fallback_chat_id);
         self.by_key.entry(key.clone()).or_insert_with(|| {
-            tracker
+            self.registered
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .connect_ws(&key)
+                .entry(key.clone())
+                .or_insert_with(|| {
+                    tracker
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .connect_ws(&key)
+                })
+                .clone()
         });
         self.touch(&key);
         self.evict_oldest_except(&key);
@@ -539,6 +679,10 @@ impl WebSocketReconnectScope {
                 self.order.push_back(candidate);
             } else {
                 self.by_key.remove(&candidate);
+                self.registered
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&candidate);
             }
         }
     }
@@ -578,6 +722,9 @@ fn api_router_with_observer(
         .route(TRUSTED_RUNTIME_PATH, any(axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(axum_dispatch))
         .route(PERMISSIONS_PATH, any(axum_dispatch))
+        .route(TASKS_PATH, any(axum_dispatch))
+        .route(TASKS_ACTIONS_PATH, any(axum_dispatch))
+        .route(TRANSPORT_HELLO_PATH, any(axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(axum_dispatch))
         .route(WEBSOCKET_PATH, any(websocket_upgrade_axum))
         .fallback(axum_dispatch)
@@ -631,6 +778,9 @@ fn api_router_with_state_and_websocket_path(state: ApiRouterState, websocket_pat
         .route(TRUSTED_RUNTIME_PATH, any(axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(axum_dispatch))
         .route(PERMISSIONS_PATH, any(axum_dispatch))
+        .route(TASKS_PATH, any(axum_dispatch))
+        .route(TASKS_ACTIONS_PATH, any(axum_dispatch))
+        .route(TRANSPORT_HELLO_PATH, any(axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(axum_dispatch))
         .route(websocket_path, any(websocket_upgrade_axum))
         .fallback(axum_dispatch)
@@ -682,6 +832,9 @@ pub fn web_ui_router_with_timeout_and_websocket_path(
         .route(TRUSTED_RUNTIME_PATH, any(webui_axum_dispatch))
         .route(WORKFLOW_RECIPES_PATH, any(webui_axum_dispatch))
         .route(PERMISSIONS_PATH, any(webui_axum_dispatch))
+        .route(TASKS_PATH, any(webui_axum_dispatch))
+        .route(TASKS_ACTIONS_PATH, any(webui_axum_dispatch))
+        .route(TRANSPORT_HELLO_PATH, any(webui_axum_dispatch))
         .route(CHAT_COMPLETIONS_PATH, any(webui_axum_dispatch))
         .route(websocket_path, any(webui_websocket_upgrade_axum))
         .fallback(webui_static_or_api_fallback)
@@ -1315,6 +1468,7 @@ async fn axum_dispatch(State(state): State<ApiRouterState>, request: Request) ->
 fn is_local_mutation_request(method: ApiMethod, path: &str) -> bool {
     method == ApiMethod::Post
         && (path.starts_with("/v1/improvements/")
+            || path == TASKS_ACTIONS_PATH
             || (path.starts_with("/v1/sessions/") && path.contains("/goal/")))
 }
 
@@ -1324,10 +1478,11 @@ async fn webui_axum_dispatch(State(state): State<WebUiRouterState>, request: Req
 
 async fn webui_websocket_upgrade_axum(
     State(state): State<WebUiRouterState>,
+    query: RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    websocket_upgrade_axum(State(state.api), headers, ws).await
+    websocket_upgrade_axum(State(state.api), query, headers, ws).await
 }
 
 async fn webui_static_or_api_fallback(
@@ -1381,26 +1536,146 @@ async fn axum_not_found() -> Response {
 
 async fn websocket_upgrade_axum(
     State(state): State<ApiRouterState>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     if let Err(error) = validate_websocket_origin(&headers) {
         return axum_response_from_api(error_response(error));
     }
-    let client_id = "websocket-client".to_owned();
+    let identity = match spec035_websocket_identity(query.as_deref()) {
+        Ok(identity) => identity,
+        Err(error) => return axum_response_from_api(error_response(error)),
+    };
+    let client_id = identity
+        .as_ref()
+        .map_or_else(|| "websocket-client".to_owned(), |value| value.0.clone());
+    let session_id = identity.as_ref().map(|value| value.1.clone());
     let chat_id = "default".to_owned();
-    ws.on_upgrade(move |socket| handle_websocket_connection(state, socket, client_id, chat_id))
-        .into_response()
+    ws.on_upgrade(move |socket| {
+        handle_websocket_connection(state, socket, client_id, session_id, chat_id)
+    })
+    .into_response()
+}
+
+fn spec035_websocket_identity(query: Option<&str>) -> Result<Option<(String, String)>, ApiError> {
+    let Some(query) = query else {
+        return Ok(None);
+    };
+    let mut client_id = None;
+    let mut session_id = None;
+    for pair in query.split('&') {
+        let Some((name, value)) = pair.split_once('=') else {
+            return Err(ApiError::invalid_request(
+                "invalid WebSocket reconnect query",
+            ));
+        };
+        let name = decode_path_segment(&name.replace('+', " "))
+            .ok_or_else(|| ApiError::invalid_request("invalid WebSocket reconnect query"))?;
+        let value = decode_path_segment(&value.replace('+', " "))
+            .ok_or_else(|| ApiError::invalid_request("invalid WebSocket reconnect query"))?;
+        match name.as_str() {
+            "client_id" if client_id.is_none() => client_id = Some(value),
+            "session_id" if session_id.is_none() => session_id = Some(value),
+            "client_id" | "session_id" => {
+                return Err(ApiError::invalid_request(
+                    "duplicate WebSocket reconnect query",
+                ));
+            }
+            _ => continue,
+        }
+    }
+    match (client_id, session_id) {
+        (None, None) => Ok(None),
+        (Some(client_id), Some(session_id)) => {
+            let client_id = spec035_reconnect::parse_client_id(&client_id)?;
+            let session_id = spec035_reconnect::parse_client_id(&session_id)
+                .map_err(|_| ApiError::invalid_request("invalid Spec035 session id"))?;
+            Ok(Some((
+                client_id.as_str().to_owned(),
+                session_id.as_str().to_owned(),
+            )))
+        }
+        (Some(_), None) | (None, Some(_)) => Err(ApiError::invalid_request(
+            "WebSocket reconnect requires client_id and session_id",
+        )),
+    }
 }
 
 async fn handle_websocket_connection(
     state: ApiRouterState,
     mut socket: WebSocket,
     client_id: String,
+    session_id: Option<String>,
     default_chat_id: String,
 ) {
-    let mut reconnect_scope = WebSocketReconnectScope::new(&client_id);
-    while let Some(message) = socket.recv().await {
+    let mut reconnect_scope = WebSocketReconnectScope::new(&client_id, session_id.as_deref());
+    let (tasks_tx, mut tasks_rx) = mpsc::channel::<Spec035TasksStreamEvent>(16);
+    let mut tasks_connection = if let Some(session_id) = session_id {
+        let key = spec035_reconnect::stable_reconnect_key(&client_id, &session_id);
+        let connection = state
+            .reconnect_tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .connect_ws(&key);
+        let generation = connection.generation;
+        let reconnect_gap = connection.gap;
+        let delivery_accounting = match connection.delivery.projection() {
+            Ok(projection) => projection,
+            Err(_) => return,
+        };
+        reconnect_scope.prime(connection);
+        match spec035_reconnect::Spec035ReconnectConnection::bootstrap(
+            state.adapter.as_ref(),
+            &session_id,
+            generation,
+            reconnect_gap,
+        ) {
+            Ok((ordering, mut snapshot)) => {
+                if let Some(delivery_accounting) = delivery_accounting {
+                    snapshot["delivery_accounting"] = delivery_accounting;
+                }
+                if socket
+                    .send(AxumWebSocketMessage::Text(snapshot.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let adapter = state.adapter.clone();
+                tokio::task::spawn_blocking(move || {
+                    adapter.stream_spec035_tasks_events(&session_id, &mut |event| {
+                        let _ = tasks_tx.blocking_send(event);
+                    })
+                });
+                Some(ordering)
+            }
+            Err(_) => return,
+        }
+    } else {
+        None
+    };
+    loop {
+        let message = tokio::select! {
+            event = tasks_rx.recv(), if tasks_connection.is_some() => {
+                let Some(event) = event else {
+                    tasks_connection = None;
+                    continue;
+                };
+                let frame = match tasks_connection.as_mut() {
+                    Some(connection) => connection.observe_owner_projection(event),
+                    None => continue,
+                };
+                if socket.send(AxumWebSocketMessage::Text(frame.to_string().into())).await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            message = socket.recv() => message,
+        };
+        let Some(message) = message else {
+            return;
+        };
         let result = match websocket_frame_from_axum(message) {
             Ok(Some(frame)) => {
                 media_api::dispatch_websocket_frame(
@@ -1459,9 +1734,33 @@ async fn send_websocket_event(
     reconnect_tracker: Arc<StdMutex<ApiReconnectTracker>>,
     reconnect_scope: &mut WebSocketReconnectScope,
 ) -> Result<(), ApiError> {
+    send_websocket_event_with_observation(
+        socket,
+        event,
+        fallback_chat_id,
+        spec031_channel_observer,
+        reconnect_tracker,
+        reconnect_scope,
+        ChannelDeliveryObservation::unavailable(),
+    )
+    .await
+}
+
+async fn send_websocket_event_with_observation(
+    socket: &mut WebSocket,
+    event: WebSocketServerEvent,
+    fallback_chat_id: &str,
+    spec031_channel_observer: Option<&Spec031ChannelProjectionObserver>,
+    reconnect_tracker: Arc<StdMutex<ApiReconnectTracker>>,
+    reconnect_scope: &mut WebSocketReconnectScope,
+    queue_observation: ChannelDeliveryObservation,
+) -> Result<(), ApiError> {
     let event_chat_id = websocket_event_chat_id(&event)
         .unwrap_or(fallback_chat_id)
         .to_owned();
+    let ws_connection =
+        reconnect_scope.connection_for(&reconnect_tracker, &event_chat_id, fallback_chat_id);
+    let reconnect_observation = ws_connection.next_observation();
     let payload = match serde_json::to_string(&event) {
         Ok(payload) => payload,
         Err(error) => {
@@ -1477,18 +1776,43 @@ async fn send_websocket_event(
         .await
         .is_err()
     {
-        observe_disconnected_spec031(spec031_channel_observer, &event_chat_id)?;
+        let failed = ws_connection
+            .delivery
+            .failed_observation(reconnect_observation);
+        let envelope = match &event {
+            WebSocketServerEvent::Message { .. } => {
+                let envelope = disconnected_spec031_envelope(&event_chat_id, failed)?;
+                ws_connection.delivery.observe_envelope(envelope.clone());
+                Some(envelope)
+            }
+            _ => spec035_accounting::websocket_send_failure_delivery(&event)
+                .map(|delivery| {
+                    ws_connection.delivery.observe(
+                        shacs_channels::WEBSOCKET_CHANNEL,
+                        delivery,
+                        failed,
+                    )
+                })
+                .transpose()?,
+        };
+        if let Some(envelope) = envelope {
+            observe_spec031_envelope(spec031_channel_observer, envelope);
+        }
+        reconnect_tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_ws(ws_connection, reconnect_observation.sequence);
         return Err(ApiError::internal("websocket client disconnected"));
     }
-    let ws_connection =
-        reconnect_scope.connection_for(&reconnect_tracker, &event_chat_id, fallback_chat_id);
-    let reconnect_observation = ws_connection.next_observation();
+    let observation = ws_connection
+        .delivery
+        .sent_observation(queue_observation, reconnect_observation);
     let envelope = project_spec031_channel_event(
-        ChannelSpec031ProjectionInput::websocket_event(event).with_delivery_observation(
-            reconnect_observation_to_delivery_observation(reconnect_observation),
-        ),
+        ChannelSpec031ProjectionInput::websocket_event(event)
+            .with_delivery_observation(observation),
     )
     .map_err(|error| ApiError::internal(format!("websocket Spec031 projection failed: {error}")))?;
+    ws_connection.delivery.observe_envelope(envelope.clone());
     let payload = serde_json::to_string(&envelope).map_err(|error| {
         ApiError::internal(format!(
             "websocket Spec031 envelope could not be serialized: {error}"
@@ -1499,39 +1823,46 @@ async fn send_websocket_event(
         .await
         .is_err()
     {
-        observe_disconnected_spec031(spec031_channel_observer, &event_chat_id)?;
+        observe_spec031_envelope(spec031_channel_observer, envelope);
+        let failed = ws_connection
+            .delivery
+            .failed_observation(reconnect_observation);
+        let envelope = ws_connection.delivery.observe(
+            shacs_channels::WEBSOCKET_CHANNEL,
+            shacs_projection::Spec031ProgressDelivery::Dropped,
+            failed,
+        )?;
+        observe_spec031_envelope(spec031_channel_observer, envelope);
+        reconnect_tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_ws(ws_connection, reconnect_observation.sequence);
         return Err(ApiError::internal("websocket client disconnected"));
     }
-    observe_spec031_envelope(spec031_channel_observer, envelope);
     reconnect_tracker
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .record_ws(ws_connection, reconnect_observation.sequence);
+    observe_spec031_envelope(spec031_channel_observer, envelope);
     Ok(())
 }
 
-fn observe_disconnected_spec031(
-    observer: Option<&Spec031ChannelProjectionObserver>,
+fn disconnected_spec031_envelope(
     chat_id: &str,
-) -> Result<(), ApiError> {
-    let envelope = project_spec031_channel_event(
+    observation: ChannelDeliveryObservation,
+) -> Result<Spec031Envelope, ApiError> {
+    project_spec031_channel_event(
         ChannelSpec031ProjectionInput::disconnected(
             shacs_channels::WEBSOCKET_CHANNEL,
             Some(chat_id),
         )
-        .with_delivery_observation(ChannelDeliveryObservation {
-            dropped: Some(1),
-            slow_consumer: Some(1),
-            ..ChannelDeliveryObservation::unavailable()
-        }),
+        .with_delivery_observation(observation),
     )
     .map_err(|error| {
         ApiError::internal(format!(
             "websocket Spec031 disconnect projection failed: {error}"
         ))
-    })?;
-    observe_spec031_envelope(observer, envelope);
-    Ok(())
+    })
 }
 
 fn observe_progress_delivery(
@@ -1709,6 +2040,8 @@ fn should_read_axum_body(
     method == ApiMethod::Post
         && (path == CHAT_COMPLETIONS_PATH
             || path.contains("/goal/")
+            || path == TASKS_ACTIONS_PATH
+            || path == TRANSPORT_HELLO_PATH
             || path.starts_with("/v1/improvements/"))
         && !is_multipart_headers(headers)
 }
@@ -1793,6 +2126,7 @@ fn axum_response_from_api(response: ApiHttpResponse) -> Response {
 
 enum SseFrame {
     OpenAi(String),
+    Spec035(Value),
     Spec031 {
         event_id: String,
         envelope: Box<Spec031Envelope>,
@@ -1803,6 +2137,9 @@ impl SseFrame {
     fn render(self, spec031_stream: bool) -> Option<String> {
         match self {
             Self::OpenAi(frame) => Some(frame),
+            Self::Spec035(frame) => serde_json::to_string(&frame)
+                .ok()
+                .map(|payload| format!("event: spec035\ndata: {payload}\n\n")),
             Self::Spec031 { event_id, envelope } if spec031_stream => {
                 serde_json::to_string(&envelope)
                     .ok()
@@ -1925,17 +2262,28 @@ async fn handle_chat_request_axum(
         };
     let session_lock = session_lock_for(&state, &validated.session_key).await;
     if chat_request.stream {
+        let spec035_client_id =
+            match request_headers.get(spec035_reconnect::SPEC035_CLIENT_ID_HEADER) {
+                Some(value) => match spec035_reconnect::parse_client_id(value) {
+                    Ok(client_id) => Some(client_id.as_str().to_owned()),
+                    Err(error) => return axum_response_from_api(error_response(error)),
+                },
+                None => None,
+            };
         return stream_chat_request_axum(
             state,
             session_lock,
             chat_request,
             uploaded_files,
             validated.session_key,
-            spec031_sse_stream_requested(&request_headers),
-            request_headers
-                .get("last-event-id")
-                .map(String::as_str)
-                .map(str::to_owned),
+            SseReconnectRequest {
+                spec031_stream: spec031_sse_stream_requested(&request_headers),
+                last_event_id: request_headers
+                    .get("last-event-id")
+                    .map(String::as_str)
+                    .map(str::to_owned),
+                spec035_client_id,
+            },
         );
     }
     let session_guard = session_lock.lock_owned().await;
@@ -1993,14 +2341,19 @@ enum ChatOperationResult {
     Completion(LlmResponse),
 }
 
+struct SseReconnectRequest {
+    spec031_stream: bool,
+    last_event_id: Option<String>,
+    spec035_client_id: Option<String>,
+}
+
 fn stream_chat_request_axum(
     state: ApiRouterState,
     session_lock: Arc<AsyncMutex<()>>,
     chat_request: ChatCompletionRequest,
     uploaded_files: Vec<MultipartFile>,
     session_key: String,
-    spec031_stream: bool,
-    last_event_id: Option<String>,
+    reconnect: SseReconnectRequest,
 ) -> Response {
     let adapter = state.adapter.clone();
     let timeout_duration = state.timeout;
@@ -2017,10 +2370,27 @@ fn stream_chat_request_axum(
     let spec031_channel_observer = state.spec031_channel_observer.clone();
     let worker_spec031_channel_observer = spec031_channel_observer.clone();
     let reconnect_tracker = state.reconnect_tracker.clone();
+    let reconnect_key = reconnect
+        .spec035_client_id
+        .as_deref()
+        .map(|client_id| spec035_reconnect::stable_reconnect_key(client_id, &session_key))
+        .unwrap_or_else(|| session_key.clone());
     let sse_connection = reconnect_tracker
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .connect_sse(&session_key, last_event_id.as_deref());
+        .connect_sse(&reconnect_key, reconnect.last_event_id.as_deref());
+    let spec035_bootstrap = match reconnect.spec035_client_id {
+        Some(_) => match spec035_reconnect::Spec035ReconnectConnection::bootstrap(
+            adapter.as_ref(),
+            &session_key,
+            sse_connection.generation,
+            sse_connection.gap,
+        ) {
+            Ok(bootstrap) => Some(bootstrap),
+            Err(error) => return axum_response_from_api(error_response(error)),
+        },
+        None => None,
+    };
     let drop_observation = reconnect_observation_to_delivery_observation(ReconnectObservation {
         generation: sse_connection.generation,
         sequence: 0,
@@ -2035,6 +2405,15 @@ fn stream_chat_request_axum(
             let worker_cancelled = cancelled.clone();
             let operation = tokio::task::spawn_blocking(move || {
                 let _session_guard = session_guard;
+                let mut spec035_connection = if let Some((connection, snapshot)) = spec035_bootstrap
+                {
+                    if tx.blocking_send(SseFrame::Spec035(snapshot)).is_err() {
+                        return Ok::<(), ApiError>(());
+                    }
+                    Some(connection)
+                } else {
+                    None
+                };
                 let invocation = chat_completion_invocation_with_uploads(
                     &chat_request,
                     adapter.configured_model(),
@@ -2065,6 +2444,12 @@ fn stream_chat_request_axum(
                         );
                     }
                 })?;
+                if let Some(connection) = spec035_connection.as_mut() {
+                    adapter.stream_spec035_tasks_events(&session_key, &mut |event| {
+                        let frame = connection.observe_owner_projection(event);
+                        let _ = tx.blocking_send(SseFrame::Spec035(frame));
+                    })?;
+                }
                 if !worker_cancelled.load(Ordering::SeqCst) {
                     let missing_finish_failed = !saw_finish
                         && tx
@@ -2154,7 +2539,7 @@ fn stream_chat_request_axum(
     });
     axum_sse_stream_response(
         rx,
-        spec031_stream,
+        reconnect.spec031_stream,
         SseDropGuard {
             observer: spec031_channel_observer,
             armed: true,
@@ -3316,9 +3701,14 @@ mod tests {
         let response = handle_api_request(ApiHttpRequest::get(DIAGNOSTICS_PATH), &adapter);
 
         assert_eq!(response.status, 200);
+        let mut baseline = response.body.clone();
+        if let Some(runtime) = baseline["runtime"].as_object_mut() {
+            drop(runtime.remove("spec035_revised"));
+        }
+        assert_eq!(baseline, adapter.diagnostics_snapshot().redacted_value());
         assert_eq!(
-            response.body,
-            adapter.diagnostics_snapshot().redacted_value()
+            response.body["runtime"]["spec035_revised"]["schema_version"],
+            1
         );
         assert_eq!(response.body["runtime"]["api_key"], "[REDACTED]");
         let serialized = serde_json::to_string(&response.body).unwrap_or_default();
@@ -4604,7 +4994,7 @@ mod tests {
     #[test]
     fn websocket_reconnect_scope_bounds_attacker_selected_chat_ids() {
         let tracker = Arc::new(StdMutex::new(ApiReconnectTracker::new(128)));
-        let mut scope = WebSocketReconnectScope::new("attacker-client");
+        let mut scope = WebSocketReconnectScope::new("attacker-client", None);
 
         for index in 0..10_000 {
             let connection =
@@ -4699,24 +5089,32 @@ mod tests {
     }
 
     #[test]
-    fn api_reconnect_tracker_eviction_restarts_without_continuity_proof() {
+    fn api_reconnect_tracker_preserves_spec035_ws_generation_across_eviction() {
         let mut tracker = ApiReconnectTracker::new(2);
-        let first_a = tracker.connect_ws("ws-chat:a");
+        let first_a = tracker.connect_ws("spec035:a");
         tracker.record_ws(&first_a, 1);
-        let first_b = tracker.connect_ws("ws-chat:b");
+        let first_b = tracker.connect_ws("spec035:b");
         tracker.record_ws(&first_b, 1);
-        let first_c = tracker.connect_ws("ws-chat:c");
+        let first_c = tracker.connect_ws("spec035:c");
         tracker.record_ws(&first_c, 1);
 
-        let retained_b = tracker.connect_ws("ws-chat:b");
-        let retained_c = tracker.connect_ws("ws-chat:c");
-        let evicted_a = tracker.connect_ws("ws-chat:a");
+        let evicted_a = tracker.connect_ws("spec035:a");
 
-        assert_eq!(retained_b.generation, 2);
-        assert!(retained_b.gap);
-        assert_eq!(retained_c.generation, 2);
-        assert!(retained_c.gap);
-        assert_eq!(evicted_a.generation, 1);
+        assert_eq!(evicted_a.generation, 2);
+        assert!(evicted_a.gap);
+    }
+
+    #[test]
+    fn api_reconnect_tracker_preserves_spec035_sse_generation_across_eviction() {
+        let mut tracker = ApiReconnectTracker::new(2);
+        let first_a = tracker.connect_sse("spec035:a", None);
+        tracker.record_sse(&first_a, 1);
+        tracker.connect_sse("spec035:b", None);
+        tracker.connect_sse("spec035:c", None);
+
+        let evicted_a = tracker.connect_sse("spec035:a", Some("sse:1:1"));
+
+        assert_eq!(evicted_a.generation, 2);
         assert!(evicted_a.gap);
     }
 
@@ -4731,12 +5129,8 @@ mod tests {
 
         assert!(tracker.ws.len() <= tracker.capacity);
         assert!(tracker.order.len() <= tracker.capacity);
-        assert!(tracker.evicted_ws.len() <= tracker.capacity);
-        assert!(tracker.evicted_ws_order.len() <= tracker.capacity);
-        assert!(tracker
-            .evicted_ws
-            .iter()
-            .all(|key| !key.starts_with("ws-connection:")));
+        assert!(tracker.evicted.len() <= tracker.capacity);
+        assert!(tracker.evicted_order.len() <= tracker.capacity);
         let evicted_connection = tracker.connect_ws("ws-connection:0");
         assert_eq!(evicted_connection.generation, 1);
         assert!(!evicted_connection.gap);
@@ -4753,17 +5147,17 @@ mod tests {
 
         assert!(tracker.ws.len() <= tracker.capacity);
         assert!(tracker.order.len() <= tracker.capacity);
-        assert!(tracker.evicted_ws.len() <= tracker.capacity);
-        assert!(tracker.evicted_ws_order.len() <= tracker.capacity);
+        assert!(tracker.evicted.len() <= tracker.capacity);
+        assert!(tracker.evicted_order.len() <= tracker.capacity);
         assert!(tracker
-            .evicted_ws
-            .iter()
-            .all(|key| key.starts_with("ws-chat:")));
+            .evicted
+            .keys()
+            .all(|key| key.starts_with("ws:ws-chat:")));
         let evicted_named_chat = tracker.connect_ws("ws-chat:9871");
         let unrelated_named_chat = tracker.connect_ws("ws-chat:unrelated");
         let default_connection = tracker.connect_ws("ws-connection:default");
 
-        assert_eq!(evicted_named_chat.generation, 1);
+        assert_eq!(evicted_named_chat.generation, 2);
         assert!(evicted_named_chat.gap);
         assert_eq!(unrelated_named_chat.generation, 1);
         assert!(!unrelated_named_chat.gap);
@@ -4771,8 +5165,8 @@ mod tests {
         assert!(!default_connection.gap);
         assert!(tracker.ws.len() <= tracker.capacity);
         assert!(tracker.order.len() <= tracker.capacity);
-        assert!(tracker.evicted_ws.len() <= tracker.capacity);
-        assert!(tracker.evicted_ws_order.len() <= tracker.capacity);
+        assert!(tracker.evicted.len() <= tracker.capacity);
+        assert!(tracker.evicted_order.len() <= tracker.capacity);
     }
 
     fn is_chat_abort_disconnect(envelope: &Spec031Envelope) -> bool {

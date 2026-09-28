@@ -11,13 +11,14 @@ pub(super) const fn availability_for_approval(state: Spec031ApprovalState) -> Sp
         | Spec031ApprovalState::Denied
         | Spec031ApprovalState::Expired
         | Spec031ApprovalState::Skipped
+        | Spec031ApprovalState::Consumed
         | Spec031ApprovalState::RetryConsumed => Spec031Availability::Blocked,
     }
 }
 
 pub(super) const fn severity_for_approval(state: Spec031ApprovalState) -> Spec031Severity {
     match state {
-        Spec031ApprovalState::Allowed => Spec031Severity::Info,
+        Spec031ApprovalState::Allowed | Spec031ApprovalState::Consumed => Spec031Severity::Info,
         Spec031ApprovalState::Pending => Spec031Severity::Warning,
         Spec031ApprovalState::Denied
         | Spec031ApprovalState::Expired
@@ -29,7 +30,9 @@ pub(super) const fn severity_for_approval(state: Spec031ApprovalState) -> Spec03
 pub(super) const fn reason_for_approval(state: Spec031ApprovalState) -> Spec031ReasonCode {
     match state {
         Spec031ApprovalState::Pending => Spec031ReasonCode::Requested,
-        Spec031ApprovalState::Allowed => Spec031ReasonCode::Completed,
+        Spec031ApprovalState::Allowed | Spec031ApprovalState::Consumed => {
+            Spec031ReasonCode::Completed
+        }
         Spec031ApprovalState::Denied => Spec031ReasonCode::Blocked,
         Spec031ApprovalState::Expired => Spec031ReasonCode::Missing,
         Spec031ApprovalState::Skipped => Spec031ReasonCode::Skipped,

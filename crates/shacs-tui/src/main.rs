@@ -5,16 +5,21 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use shacs_tui::{
-    action_runner::run_surface_action,
+    action_runner::{run_surface_action, run_tasks_action, TasksActionRequest},
     input::{key_to_input, TuiInput},
     live_source::{RuntimeProjectionSource, SessionRuntimeSource},
     state::{SessionKey, TuiState, UiStatus},
-    update::{apply_action_outcome, apply_input, apply_snapshot, UpdateEffect},
+    update::{
+        apply_action_outcome, apply_input, apply_snapshot, apply_task_action_result, UpdateEffect,
+    },
     view::draw_tui,
 };
-use std::{io, path::PathBuf, time::Duration};
+use std::{io, time::Duration};
 
+mod cli_options;
 mod once;
+
+use cli_options::{help_text, TuiOptions};
 
 fn main() {
     if let Err(error) = run(std::env::args().skip(1)) {
@@ -67,7 +72,13 @@ fn run_interactive(options: &TuiOptions) -> Result<(), String> {
         .map_err(|error| format!("terminal alternate screen failed: {error}"))?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))
         .map_err(|error| format!("terminal could not start: {error}"))?;
-    let result = event_loop(&mut terminal, &source, &options.workspace, &mut state);
+    let result = event_loop(
+        &mut terminal,
+        &source,
+        &options.workspace,
+        &options.transport_hello,
+        &mut state,
+    );
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     result
@@ -77,6 +88,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     source: &SessionRuntimeSource,
     workspace: &std::path::Path,
+    transport_hello: &shacs_projection::Spec035TransportClientHello,
     state: &mut TuiState,
 ) -> Result<(), String> {
     loop {
@@ -113,6 +125,27 @@ fn event_loop<B: ratatui::backend::Backend>(
                 if let Ok(snapshot) = source.load() {
                     let status = state.status.clone();
                     apply_snapshot(state, snapshot);
+                    state.set_trusted_runtime(source.trusted_runtime_projection());
+                    state.status = status;
+                }
+            }
+            UpdateEffect::RunTaskAction(action) => {
+                let session_id = state
+                    .selected_session()
+                    .map(|session| session.key.as_str().to_owned())
+                    .ok_or_else(|| "tasks action requires a selected session".to_owned())?;
+                let outcome = run_tasks_action(TasksActionRequest {
+                    config_path: source.config_path(),
+                    workspace,
+                    session_id: &session_id,
+                    action,
+                    transport_hello: Some(transport_hello),
+                });
+                apply_task_action_result(state, outcome);
+                if let Ok(snapshot) = source.load() {
+                    let status = state.status.clone();
+                    apply_snapshot(state, snapshot);
+                    state.set_trusted_runtime(source.trusted_runtime_projection());
                     state.status = status;
                 }
             }
@@ -122,102 +155,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TuiOptions {
-    config_path: Option<PathBuf>,
-    workspace: PathBuf,
-    session: Option<String>,
-    once: bool,
-    help: bool,
-}
-
-impl TuiOptions {
-    fn parse<I, S>(args: I) -> Result<Self, String>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let mut args = args.into_iter().map(Into::into);
-        let mut config_path = None;
-        let mut workspace = std::env::current_dir()
-            .map_err(|error| format!("current directory could not be read: {error}"))?;
-        let mut session = None;
-        let mut once = false;
-        let mut help = false;
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--workspace" | "-w" => workspace = PathBuf::from(take_value(&mut args, &arg)?),
-                "--config" | "-c" => {
-                    config_path = Some(PathBuf::from(take_value(&mut args, &arg)?))
-                }
-                "--session" | "-s" => session = Some(take_value(&mut args, &arg)?),
-                "--once" => once = true,
-                "--help" | "-h" => help = true,
-                other => return Err(format!("unknown shacs-tui argument `{other}`")),
-            }
-        }
-        Ok(Self {
-            config_path,
-            workspace,
-            session,
-            once,
-            help,
-        })
-    }
-}
-
-fn take_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
-    args.next()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| format!("{flag} requires a value"))
-}
-
-fn help_text() -> String {
-    [
-        "shacs-tui",
-        "",
-        "Usage:",
-        "  shacs-tui --workspace <path> [--session <key>]",
-        "  shacs-tui --workspace <path> --once [--session <key>]",
-        "",
-        "Options:",
-        "  -c, --config <path>     Config path whose parent is the runtime data dir",
-        "  -w, --workspace <path>  Workspace containing local sessions",
-        "  -s, --session <key>     Prefer a session key",
-        "      --once              Render once and exit",
-        "  -h, --help              Show help",
-    ]
-    .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parser_accepts_workspace_without_session_for_interactive_tui() -> Result<(), String> {
-        let options = TuiOptions::parse(["--workspace", "/tmp/ws"])?;
-        assert_eq!(options.config_path, None);
-        assert_eq!(options.workspace, PathBuf::from("/tmp/ws"));
-        assert_eq!(options.session, None);
-        Ok(())
-    }
-
-    #[test]
-    fn parser_accepts_config_for_runtime_data_dir() -> Result<(), String> {
-        let options = TuiOptions::parse([
-            "--config",
-            "/tmp/data/config.json",
-            "--workspace",
-            "/tmp/ws",
-        ])?;
-        assert_eq!(
-            options.config_path,
-            Some(PathBuf::from("/tmp/data/config.json"))
-        );
-        assert_eq!(options.workspace, PathBuf::from("/tmp/ws"));
-        Ok(())
-    }
 
     #[test]
     fn once_renders_preferred_session_without_workflow_projection() -> Result<(), String> {

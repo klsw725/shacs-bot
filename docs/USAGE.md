@@ -32,6 +32,7 @@ Replay는 local recorded trajectory만 읽고 hook, confirmation, credential ref
 저장소 루트에서 실행합니다:
 
 ```sh
+cargo clean --manifest-path crates/Cargo.toml
 cargo build --manifest-path crates/Cargo.toml -p shacs-cli --locked
 ```
 
@@ -53,6 +54,8 @@ $HOME/.shacs-bot/config.json
 
 각 config 파일의 parent directory가 해당 instance의 data directory입니다. 예를 들어 `/tmp/a/config.json`와 `/tmp/b/config.json`를 따로 쓰면 `auth.json`, `media/`, `cron/`, `logs/`, `channels/worker-metadata/`, `skills/`도 각각 `/tmp/a/`, `/tmp/b/` 아래로 분리됩니다. workspace는 config 값 또는 `--workspace` override로 별도 지정할 수 있지만, runtime metadata는 config별 data directory를 기준으로 유지됩니다.
 
+**`--workspace`만으로 설정·인증은 격리되지 않습니다.** `onboard`는 선택된 config를 쓰므로 `--config`를 생략한 예시는 기본 사용자 설정을 생성·갱신합니다. 임시 검증에는 새로 확보한 사용자 소유 data directory의 `config.json`과 별도 workspace를 쓰고 CLI/TUI/API 시작·provider 인증 명령 모두에 같은 `--config`를 지정하세요. 같은 parent 아래 config 파일 이름만 바꾸면 `auth.json`과 runtime data를 공유합니다. 실제 config/auth를 임시 검증 경로에 복사하지 마세요. 아래 `/tmp` 경로는 예시일 뿐 기존 경로의 소유권이나 안전한 삭제 권한을 뜻하지 않습니다.
+
 Config와 workspace template을 생성하거나 갱신합니다:
 
 ```sh
@@ -63,7 +66,7 @@ shacs-bot --config /tmp/shacs-config.json onboard --wizard --workspace /tmp/ws
 
 `onboard`는 JSON config를 쓰고, runtime directory를 준비하며, `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `memory/MEMORY.md`, `memory/history.jsonl`, `skills/` 같은 workspace template 파일을 만듭니다. 또한 active built-in skill을 `builtin_skills/` 아래에 materialize하지만, reference-only deferred built-in skill은 복사하지 않습니다. 이미 존재하는 workspace 파일은 덮어쓰지 않습니다.
 
-`onboard --wizard`는 raw secret 값을 묻거나 저장하지 않는 secret-ref-only line-driven wizard입니다. 현재 명령은 `provider <provider-id> env <ENV_VAR>`, `finish`, `cancel`, `restart`, `help`입니다. `provider` 명령은 ASCII uppercase letter로 시작하고 1..64자 범위이며 uppercase/digit/underscore만 포함하고, semantic word를 나누는 non-edge underscore가 하나 이상 있는 environment variable reference만 받습니다. 반복 underscore, edge underscore, lowercase, URL/userinfo, assignment, JWT/base64-like token, long alphanumeric token, raw secret-like word는 거부되며 입력값을 stdout/stderr/error/marker에 echo하지 않습니다. 기존 provider `apiKey`/`api_key` 또는 `apiKeyRef`/`api_key_ref`가 있으면 덮어쓰지 않고 실패합니다. `finish` 전 EOF는 partial로 끝나며 typed resume marker에 provider/env ref 진행 상태만 저장합니다. 완료 출력은 Spec 035 readiness projection과 Spec030/Spec031 owner/capability/state/reason 구조의 typed `missing_external_owner_evidence` fact를 함께 표시하며, 문서 상태를 읽어 readiness success를 추론하지 않습니다.
+`onboard --wizard`는 raw secret 값을 묻거나 저장하지 않는 secret-ref-only line-driven wizard입니다. 현재 명령은 `provider <provider-id> env <ENV_VAR>`, `finish`, `cancel`, `restart`, `help`입니다. `provider` 명령은 ASCII uppercase letter로 시작하고 1..64자 범위이며 uppercase/digit/underscore만 포함하고, semantic word를 나누는 non-edge underscore가 하나 이상 있는 environment variable reference만 받습니다. 반복 underscore, edge underscore, lowercase, URL/userinfo, assignment, JWT/base64-like token, long alphanumeric token, raw secret-like word는 거부되며 입력값을 stdout/stderr/error/marker에 echo하지 않습니다. 기존 provider `apiKey`/`api_key` 또는 `apiKeyRef`/`api_key_ref`가 있으면 덮어쓰지 않고 실패합니다. `finish` 전 EOF는 partial로 끝나며 typed resume marker에 provider/env ref 진행 상태만 저장합니다. 완료 출력은 별도 aggregate readiness와 함께 실제 local Spec030 owner의 credential/disclosure/decision 관측 및 Spec031 config/profile의 `credential_declarations`, profile selection과 source flag를 표시합니다. 선언은 credential 존재·해석 성공·readiness·권한 부여의 증거가 아닙니다. 이 경로는 environment secret 해석, credential command 실행이나 OAuth refresh를 하지 않으며, 관측하지 못한 runtime credential 상태는 `unavailable`로 유지합니다. [Wizard 보정 증거](../.omo/evidence/spec035/closure/f1-wizard-owner-remediation.json)의 resolved/denied mapper fixture는 live credential·승인 QA가 아닙니다.
 
 Config 문자열 값은 load 시 `${ENV_NAME}` 형태의 environment variable reference를 해석합니다. 예를 들어 provider key는 config에 `"apiKey": "${OPENROUTER_API_KEY}"`로 남겨두고 실행 환경에서 값을 제공할 수 있으며, migration write-back은 실제 secret 값을 config 파일에 저장하지 않습니다. 참조한 environment variable이 없으면 config load가 실패합니다.
 
@@ -101,6 +104,10 @@ shacs-bot runtime diagnostics --bundle /tmp/shacs-diagnostics.zip --workspace /t
 ```
 
 `runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, stored-data migration plan 요약, ownership status, stop request marker, update marker, runtime capability 요약, durable diagnostics evidence 요약, channel restart hint projection, containment contained/backend/snapshot digest, session 개수와 최신 session metadata, workflow recipe discovery count를 보고합니다. Durable diagnostics evidence는 redacted trace/log 보조 자료이며 event truth, replay 입력, writable admission 기준이 아닙니다. Channel restart projection은 cursor ref, pending inbound/outbound safe ref count, delivery status count만 표시하며 raw content나 session truth를 출력하지 않습니다. `runtime diagnostics` bundle에는 containment summary/digest와 durable diagnostics evidence가 redacted diagnostics field로 포함됩니다. 같은 readiness projection은 local API의 `GET /v1/readiness`와 `GET /v1/diagnostics`에서도 확인할 수 있습니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고되며, sandboxed라고 주장하지 않습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
+
+Plugin/app readiness는 항상 필수입니다. 실제 plugin 디렉터리의 discovery와 저장된 app registry 조회가 성공해 둘 다 비어 있으면 `ready`입니다. Owner 경로/registry 누락, 조회 실패, configured plugin의 manifest 누락이나 enabled app의 lifecycle 근거 누락은 빈 성공이 아니라 `unavailable`입니다. Plugin gate 차단과 app 실패/복구 필요 상태는 `blocked`, plugin runtime descriptor 진단과 app 시작/종료 전이는 `degraded`로 표시합니다. App의 `running`은 기존 supervisor journal이 보고한 lifecycle 상태이며 독립적인 process 생존·외부 서비스 health probe가 아닙니다. Runtime owner가 active라는 사실만으로 plugin/app을 정상으로 간주하지 않으며, 조회가 plugin/app을 실행하거나 자격 증명을 만들어 주지는 않습니다.
+
+Readiness의 필수 `runtime_controls`와 `resource_disclosure`는 실제 Spec030 owner 관측을 사용하며, JSON의 `trusted_runtime`에 같은 profile·adapter·sandbox·resource·disclosure 상세를 포함합니다. CLI는 config의 API 주소로 실행 중인 owner를 조회하고 API는 자신의 local provider를 직접 읽습니다. Owner가 없으면 `unavailable`, 실행 관측 전 sandbox는 `unknown`이며, optional sandbox disabled/native fallback은 `degraded`, execution denied는 `blocked`입니다. 별도의 필수 containment 조건은 그대로 유지됩니다. Disclosure가 `ready`여도 `rawContentPossible`과 trace destination은 숨기지 않으며 완전한 redaction을 뜻하지 않습니다.
 
 Workspace context file과 inline `@` reference가 어떻게 해석되는지 dry-run으로 확인합니다:
 
@@ -335,13 +342,15 @@ Message 없이 `shacs-bot agent`를 실행하면 같은 config/session boundary�
 TUI는 별도 binary입니다. `--once`는 live projection을 한 번 읽어 plain text로 출력하고, interactive mode는 session selection, pending approval action, degraded readiness, stop/restart/recover action을 표시합니다. Fresh workspace에서는 session store와 표시할 session이 먼저 필요하므로, workspace template을 준비하고 session을 만든 뒤 실행합니다:
 
 ```sh
-shacs-bot onboard --workspace /tmp/ws
-shacs-bot session create --session cli:direct --workspace /tmp/ws
-shacs-tui --workspace /tmp/ws --session cli:direct --once
-shacs-tui --workspace /tmp/ws --session cli:direct
+shacs-bot --config /tmp/shacs-data/config.json onboard --workspace /tmp/ws
+shacs-bot --config /tmp/shacs-data/config.json session create --session cli:direct --workspace /tmp/ws
+shacs-tui --config /tmp/shacs-data/config.json --workspace /tmp/ws --session cli:direct --once
+shacs-tui --config /tmp/shacs-data/config.json --workspace /tmp/ws --session cli:direct
 ```
 
 Approval action은 durable request가 기록되면 `Requested`로 남고, owner terminal event가 관찰되기 전에는 완료로 표시되지 않습니다. TUI와 REPL은 raw provider payload, raw tool payload, raw owner id를 표시하지 않습니다.
+
+Formal permission approval의 pending 항목이 처리되어 제거되면 기존 session owner는 `permission_approval_receipts` v1 metadata에 최근 종료 이력 최대 32개를 보존합니다. `session inspect`, `GET /v1/sessions/{session_id}`의 `permission_approval_receipts`, TUI 새로고침은 같은 request ID/action digest/snapshot digest와 `consumed`, `denied`, `expired`, `rejected` 상태를 읽습니다. TUI는 최신 종료 이력을 표시하며 승인 키를 다시 활성화하지 않습니다. `consumed`는 상관관계가 검증된 승인 시도가 소진되었다는 기록이지 도구 성공, 현재 permission allow, remembered rule, exactly-once 실행 보장이 아닙니다. IPC work의 `Succeeded`는 요청 처리 결과일 뿐 이 permission receipt를 대신하지 않습니다. Raw tool 인자·secret은 receipt에 저장하지 않고, 오래된 이력은 최신 32개에서 밀려나며 알 수 없는 schema/잘못된 session binding은 조회에서 제외됩니다. Reload는 receipt를 pending이나 재사용 승인으로 복원하지 않습니다. 기존 process-local recent retry의 일회성·재시작 제한은 바뀌지 않습니다. 만료된 surface 요청의 기존 사전 거절 경로는 pending을 그대로 두며, 실제로 pending을 종료하는 owner 경로만 종료 receipt를 남깁니다.
 
 복잡도가 높거나 병렬 검증, 큰 context 분할이 필요한 요청은 runtime이 deterministic read-only workflow admission을 통해 dynamic workflow로 실행할 수 있습니다. 명시적으로 제공된 typed write-capable workflow plan은 별도 승인과 isolated git worktree 정책을 통과해야 실행됩니다. Workflow는 typed harness plan, child/verifier execution, budget/checkpoint, verifier gate, and sanitized runtime metadata를 남깁니다. Write-capable workflow child는 승인된 isolated git worktree에서만 실행되고 parent checkout에는 자동 merge하지 않습니다. 결과에는 diff evidence와 parent-review merge handoff가 남으며, 사용자가 검토 후 별도로 적용해야 합니다. `/stop` 또는 runtime stop이 관찰되면 workflow parent cancellation token이 child/verifier execution까지 전달되고, cancelled workflow는 success로 표시되지 않습니다.
 
@@ -355,7 +364,7 @@ Provider 호출 전에 built-in slash command는 로컬에서 처리됩니다:
 - `/restart`: 로컬 restart 요청을 acknowledge합니다. Rust CLI는 현재 process를 in-place로 교체하지 않고, runtime lifecycle의 `runtime restart`도 안전 종료 의도만 남깁니다. 새 process 시작은 다음 명시적 start나 외부 OS supervisor의 책임입니다.
 - `/goal [status|pause|resume|clear|done|blocked <reason>|<text>]`: 현재 session의 persistent goal metadata를 설정하거나 상태를 바꿉니다. 새 목표를 설정하려면 기존 active goal을 먼저 `/goal clear`로 정리해야 합니다.
 - `/permission`: `permissions.mode`를 `default`, `auto`, `bypass_permissions` 중 하나로 저장하는 대화형 wizard를 시작합니다. 현재 `auto`를 선택하면 `permissions.mode: "auto"`가 저장되고, 런타임은 이를 auto approval opt-in으로 해석해 정적 안전 규칙과 local capability allowlist를 통과한 낮은 위험 action을 먼저 자동 승인합니다. `permissions.autoApproval`은 protected target과 exec containment 같은 세부 옵션을 조정하는 블록입니다. 이 local fast path로 해결되지 않은 direct tool action과 resolved deferred bridge tool action 중 current user message로 scope 판단이 가능하고 classifier capability ceiling을 통과한 action은 같은 provider/model을 사용하는 auto-mode classifier 평가를 거쳐 high-confidence requested-scope allow일 때만 실행됩니다. `proc_exec`가 command summary unavailable 또는 containment unknown으로 `ask`가 된 경우는 classifier allow 대상이 아니며 approval prompt로 남습니다. Classifier 오류, 낮은 confidence, scope 불일치, parse failure, user scope 부재, classifier ceiling 밖 capability는 interactive session에서는 permission prompt로, non-interactive 경로에서는 deny로 접힙니다. `bypass_permissions`는 먼저 선택한 뒤 정확히 `confirm bypass_permissions`로 한 번 더 확인해야 저장되며, 저장된 값은 이후 turn의 permission snapshot에 반영됩니다. `cancel`은 진행 중인 wizard를 취소합니다.
-- `/permission recent`: 최근 auto-mode classifier denial을 sanitized summary로 보여줍니다. `/permission recent retry <denial_id>`는 interactive channel에서 같은 denied action을 한 번 실행하기 위한 formal approval을 만들며, raw payload를 session metadata에 저장하지 않습니다.
+- `/permission recent`: 최근 auto-mode classifier denial을 sanitized summary로 보여줍니다. `/permission recent retry <denial_id>`는 interactive channel에서 같은 denied action을 한 번 실행하기 위한 formal approval을 만들며, raw payload를 session metadata에 저장하지 않습니다. 같은 owner가 일회성 token을 소비하고 승인 상관관계를 검증한 뒤 executor에 전달한 경우, 기존 terminal receipt에 `recent_retry_<denial_id>`의 `consumed` 사실을 별도로 남깁니다. 원래 approval의 `denied` 이력은 유지되며, TUI는 최신 retry lineage를 표시합니다. 이 기록은 도구 성공이나 재사용 권한이 아니고 token을 저장·복원하지 않습니다. TUI의 recent retry 승인 버튼은 계속 unavailable이며 원래 session channel에서 응답해야 합니다.
 - `/permission rules`: 현재 project remembered permission rule을 list합니다. `/permission inspect <rule-id-prefix>`와 `/permission revoke <rule-id-prefix>`는 CLI `permissions inspect`/`permissions revoke`와 같은 current workspace bucket projection/revoke semantics를 사용합니다.
 - `/history [n]`: 최근 visible user/assistant message를 보여줍니다. 기본값은 10, 최대값은 50입니다.
 - `/dream`: 설정된 Dream memory consolidation을 한 번 실행합니다.
@@ -380,9 +389,66 @@ Command router는 priority, exact, prefix 경계를 분리합니다. `/status`, 
 
 Message가 `-`로 시작하는 `agent` direct message는 `--message`/`-m`로 전달하세요. `agent hello` 같은 positional direct message는 REPL 경로와 구분하기 위해 거절됩니다.
 
+## Tasks 조회와 owner 변경 요청
+
+Spec 035의 Tasks CLI, local API, TUI는 같은 `Spec035TasksProjection`을 소비합니다. Goal, child, workflow, automation, app, recovery 행은 기존 owner record의 locator·freshness·상태·goal budget을 보존하며 별도 task DB를 만들지 않습니다. Owner 자료 누락은 `unavailable`로 표현하며 빈 행을 성공으로 해석하면 안 됩니다. 손상된 durable replay에 child state가 없으면 child coverage는 `unavailable`, 정상 replay의 빈 집합은 `available(0)`으로 구분하도록 보정됐고 F2 재검토에서 확인됐습니다. Recovery 진단은 독립적으로 보존되며 child 수만으로 전체 건강 상태를 판단하지 마세요. App/recovery는 data directory 범위의 관측도 포함하므로 session별 작업 목록으로만 해석하지 마세요.
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- tasks --json --workspace /tmp/shacs-ws --data-dir /tmp/shacs-data --session cli:direct
+curl --fail-with-body 'http://127.0.0.1:8900/v1/tasks?session_id=cli%3Adirect'
+```
+
+`tasks`에는 조회·변경 모두 `--json`이 필수이며 `--session` 기본값은 `cli:direct`입니다. `--workspace`와 `--data-dir`를 함께 지정하면 해당 경로를 직접 사용합니다. `--workspace`만 지정하면 같은 경로를 data directory로 사용하고, `--data-dir`만 지정하면 오류입니다. 둘 다 생략하면 설정에서 경로를 읽습니다. API는 실행 중인 adapter의 workspace/data directory를 사용하므로 CLI와 비교하려면 실제 owner 경로를 맞추세요.
+
+`GET /v1/tasks`의 기본 session은 `api:default`입니다. CLI와 같은 session을 보려면 `session_id=cli%3Adirect`처럼 값 전체를 URL 인코딩하세요. 현재 parser는 `session_id` 하나만 받으며 빈 값, 추가 query 항목, 잘못된 percent encoding을 거부합니다. 이 조회에는 transport hello가 필요하지 않습니다.
+
+변경 요청은 현재 행이 광고한 action과 locator에 한해 기존 owner handler로 전달됩니다. 지원 조합은 goal `pause`/`resume`, app `stop`/`recover`, recovery `recover`입니다. Child/workflow/automation 변경이나 범용 retry/cancel은 Tasks action으로 지원하지 않습니다. 아래 `OWNER_LOCATOR`에는 조회한 goal 행의 실제 locator를 넣으세요. 이 예시는 해당 goal을 일시 정지하므로 조회 명령이 아닙니다:
+
+```sh
+cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- tasks --json --workspace /tmp/shacs-ws --data-dir /tmp/shacs-data --session cli:direct --owner goal --action pause --locator "$OWNER_LOCATOR" --transport-hello '{"client_id":"client:cli","schema_versions":[1],"mutation_capabilities":["task_pause"]}'
+```
+
+`--owner`, `--action`, `--locator`는 모두 필요합니다. 변경에는 `--transport-hello`도 필요하며 지원하지 않는 capability는 owner 접근 전에 `capability_unavailable`, schema 불일치는 `schema_mismatch`로 거부됩니다. 지원 협상 이후에도 현재 owner 행과 action 가용성을 다시 검사하므로 오래된 locator나 더 이상 사용 가능하지 않은 action은 실패합니다.
+
+API에서 협상 결과만 확인하려면 다음 요청을 사용합니다. `task_pause`, `task_resume`, `task_stop`, `task_recover`는 지원하고 `task_retry`는 미지원으로 응답합니다:
+
+```sh
+curl --fail-with-body -H 'Content-Type: application/json' -d '{"client_id":"client:api","schema_versions":[1],"mutation_capabilities":["task_pause","task_retry"]}' http://127.0.0.1:8900/v1/transport/hello
+```
+
+실제 변경은 `POST /v1/tasks/actions`에 아래 JSON을 보냅니다. `locator` 예시를 현재 조회 결과로 교체하세요. `transport_hello`는 매 요청에 포함하며 앞선 `/v1/transport/hello` 호출이 인증 세션이나 권한을 만들지는 않습니다:
+
+```json
+{
+  "owner": "goal",
+  "action": "pause",
+  "locator": "goal:replace-with-current-owner-locator",
+  "session_id": "cli:direct",
+  "transport_hello": {
+    "client_id": "client:api",
+    "schema_versions": [1],
+    "mutation_capabilities": ["task_pause"]
+  }
+}
+```
+
+API 변경에는 `shacs-bot --config /tmp/shacs-data/config.json serve --workspace /tmp/shacs-ws --bind 127.0.0.1:8900 --allow-api-side-effects`로 활성화한 별도 loopback opt-in이 필요하며 없으면 403입니다. 이 option은 다른 API side effect도 허용하므로 조회만 할 때 켜지 마세요. Opt-in gate를 통과한 뒤 hello 누락·잘못된 요청·schema 불일치는 400, 지원되지 않는 mutation capability는 422입니다. `/v1/transport/hello` 자체는 mutation opt-in 없이 조회할 수 있습니다. **Capability는 호환성 정보이지 인증, permission approval, sandbox 증거가 아닙니다.** 현재 local API에는 인증이 없으며 owner 검증과 기존 권한 경계도 없어지지 않습니다. HTTP 200이나 요청 접수만으로 비동기 app stop의 완료를 추정하지 말고 반환된 owner 상태를 확인하세요.
+
+### Reconnect와 전달 관측의 한계
+
+API WebSocket은 stable client/session을 지정하면 Tasks snapshot을 먼저 보내는 계약입니다. 문서 예시 `/ws?client_id=client%3Aapi&session_id=cli%3Adirect`는 [최종 compiled QA](../.omo/evidence/spec035/closure/final-compiled-qa.json)에서 새 바이너리의 실제 연결·재연결로 snapshot generation 1·2, sequence 1, reconnect gap false·true를 확인했습니다. [과거 F3의 HTTP 400](../.omo/evidence/spec035/closure/f3-manual-qa.json)은 보정 전 역사 기록으로 보존하며 현재 성공 증거로 덮어쓰지 않습니다. SSE chat stream은 `x-shacs-spec035-client-id: client:api`로 이 경로를 선택하며 요청의 session을 동일하게 유지해야 합니다. 이후 delta는 같은 generation의 순서 검사에 따르며 snapshot 전 delta, 오래된 generation, 중복, gap을 별도 거절·관측합니다. 이 snapshot은 연결 초기화용 조회 결과이지 Spec031 execution snapshot이나 새로운 session truth가 아닙니다.
+
+Reconnect tracker와 accounting은 process-local의 제한된 기록입니다. 재시작 후 지속성, 끊긴 구간의 재생, 무손실 전달, remote ACK/read receipt, exactly-once 실행·전달은 보장하지 않습니다. Accepted/emitted/coalesced/dropped 값은 독립적이며 누락 값은 0으로 합성하지 않습니다. Progress drop은 최종 전달 관측으로 상쇄되지 않고, `final_delivered`도 해당 owner 표면의 관측일 뿐 사용자 수신 증거가 아닙니다. SSE 최종 전달은 pending/unknown일 수 있습니다.
+
+Spec 035는 최종 실행 증거 조립과 독립 감사 전이므로 `Open`, closure는 `BLOCKED`입니다. Spec034 fixture는 실제 producer로 재생성됐고 최신 workspace는 3003 PASS / 0 FAIL / 8 ignored, fmt/clippy exit 0입니다. 해당 실행 전후 external tool root는 0개이며 설정 사고는 원본 전체 복원·credential 유효성 미증명 한계를 둔 `USER_ACCEPTED_REPAIRED_BASELINE`입니다. 역사적 288개 경로의 provenance와 todo10의 낡은 source binding은 보존하며 새 실행으로 바꾸지 않습니다. G1/G2/G3/G4/G5의 후속 관측, 문서 변경과 실행 소스의 차이, 정확한 잔여 gate는 [closure 기록과 증거 범위](specs/035-ui-projection-diagnostics-and-release-evidence-parity/CLOSURE.md)를 참고하세요.
+
+F2는 원래 네 결함인 reconnect identity 충돌·이전 generation의 final 관측 덮어쓰기·child 누락 처리·실패 owner transcript 수용과 stale 비동기 queue 역방향 사례의 보정을 제한된 재검토 범위에서 `confirmed`로 기록했습니다. 이는 wizard/runner 변경이나 전체 release 승인이 아닙니다. 과거 F3의 `FAIL_DOCUMENTED_WEBSOCKET_RECONNECT_URL`과 이전 `BLOCKED_BUILD_REQUIRED`는 역사적 시도이며, 최종 compiled QA는 encoded query와 CLI/API/TUI smoke, REPL·wizard 취소를 별도로 통과했습니다. [F1-R01/R01-A01 재검토](../.omo/evidence/spec035/closure/final-r01-recheck.json)는 실행 증거 수용 구현의 제한적 확인일 뿐 전체 F1 승인이 아닙니다. 전체 의미 증거와 최종 독립 승인 gate는 남아 있고 F4의 `finalApproval=false`도 덮어쓰지 않습니다.
+
 ## Codex provider 인증
 
 Codex request/stream 지원은 provider id `openai_codex` 아래에 구현되어 있습니다. 인증은 `config.json` 옆의 OpenCode-style `auth.json` 파일을 사용합니다.
+
+아래 `--config` 없는 인증 예시는 기본 사용자 저장소를 대상으로 합니다. 별도 instance에 인증하려면 예를 들어 `shacs-bot --config /tmp/shacs-data/config.json provider codex login --no-browser`처럼 지정하세요. Token import도 `shacs-bot --config /tmp/shacs-data/config.json provider codex import-token --token-env CODEX_TOKEN --no-select`처럼 같은 config를 지정합니다. `--no-select`는 provider/model 선택을 유지하는 옵션이지 auth write를 금지하는 옵션이 아닙니다. Provider 인증은 transport hello나 local API 접근 인증과 별개이며 문서·UI QA를 위해 실제 token을 import할 필요는 없습니다.
 
 브라우저 OAuth login을 시작합니다:
 
@@ -489,6 +555,9 @@ shacs-bot serve --allow-api-side-effects --workspace /tmp/ws
 - `GET /v1/readiness`
 - `GET /v1/models`
 - `GET /v1/diagnostics`
+- `GET /v1/tasks?session_id=cli%3Adirect`
+- `POST /v1/tasks/actions`
+- `POST /v1/transport/hello`
 - `GET /v1/media/diagnostics`
 - `GET /v1/permissions`
 - `GET /v1/workflows/recipes`
@@ -523,7 +592,7 @@ shacs-bot runtime inspect --workspace /tmp/ws
 curl --fail-with-body http://127.0.0.1:8900/v1/media/diagnostics
 ```
 
-`runtime inspect`는 data directory의 bounded canonical projection record를 읽으며 record가 없으면 unavailable로 표시합니다. `GET /v1/media/diagnostics`는 configured canonical projection을 JSON으로 반환하고 projection이 없으면 404입니다. WebSocket `/ws`에 `{"type":"media_projection"}`을 보내면 같은 configured projection을 받습니다. External channel adapter도 같은 envelope를 소비하지만 remote ACK나 delivery success를 합성하지 않습니다. TUI는 session metadata의 `media_capability`를 읽어 state, safe reason, freshness, lineage와 disclosure를 표시하고 malformed 또는 stale-success record를 unavailable로 접습니다.
+`runtime inspect`는 data directory의 bounded canonical projection record를 읽으며 record가 없으면 unavailable로 표시합니다. `GET /v1/media/diagnostics`는 configured canonical projection을 JSON으로 반환하고 projection이 없으면 404입니다. WebSocket `/ws`에 `{"type":"media_projection"}`을 보내면 같은 configured projection을 받습니다. External channel adapter도 같은 envelope를 소비하지만 remote ACK나 delivery success를 합성하지 않습니다. Live TUI는 `--config`의 parent data directory에서 `Spec035MediaProjectionStore`의 `media/projections/current.json`을 읽고 canonical projection의 state, safe reason, freshness, lineage와 disclosure를 표시합니다. Session metadata의 `media_capability`를 원천으로 사용하지 않습니다. Record가 없거나 읽기·검증에 실패하면 unavailable로 표시하며 이 media 관측은 session별 새 truth store가 아닙니다.
 
 Generated artifact는 selected media root의 `artifacts/<artifact-id>/` 아래 `record.json`과 payload로 atomic commit되며 record는 relative path, MIME, byte length, SHA-256, provider/model, source ids, normalized options, retention과 disclosure status를 보존합니다. Remote provider output은 guarded local persistence, provider/domain/expiry만 담은 non-persisted reference, rejection 중 하나이며 arbitrary user URL intake가 아닙니다. Remote reference는 영구 접근이나 재다운로드를 보장하지 않습니다.
 
@@ -603,7 +672,9 @@ Spec 031 release runner는 `shacs-projection` package의 `spec031-release-runner
 cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root "$(git rev-parse --show-toplevel)" --mode current-worktree
 ```
 
-Coverage row는 parent Must Have 13개, Acceptance 14개, Closure Evidence 12개와 PRD000-005를 실제 focused transcript에 일대일로 연결합니다. Specs 029/030/032/033/034/035의 전체 status는 closure 조건이 아니며, 031이 소비하는 adapter test fact와 통과 command만 요구합니다. Missing/unknown fact나 실패 command는 blocked이고 PASS를 합성하지 않습니다. Dirty worktree는 `observations/dirty-worktree.json`과 `reproducibility-observations.json`에 별도 typed observation으로 남으며 failure triage나 semantic verdict에 포함되지 않습니다.
+기존 Spec031 coverage 66행은 보존되며 parent Must Have 13개, Acceptance 14개, Closure Evidence 12개와 PRD000-005의 원래 요구사항을 포함합니다. 여기에 별도 Spec035 parent 35행과 PRD 종료 조건 45행의 80행을 추가해 총 146행을 열거합니다. 행의 존재는 실행 증거 통과가 아닙니다. Specs 029/030/032/033/034/035의 전체 status는 closure 조건이 아니며, 소비하는 정확한 owner fact와 통과 증거가 필요합니다. Missing/unknown fact나 실패 command는 blocked이고 PASS를 합성하지 않습니다. Dirty worktree는 `observations/dirty-worktree.json`과 `reproducibility-observations.json`에 별도 typed observation으로 남으며 failure triage나 semantic verdict에 포함되지 않습니다.
+
+현재 canonical Spec035 입력 `.omo/evidence/spec035/prd000-009/manifest.json`은 45행과 owner 6개 모두 `BLOCKED`인 classification v2입니다. Runner는 정확한 행·owner 집합과 분류 구조·inventory를 검사한 뒤 실행 receipt가 아니므로 `BlockedExternalEvidence`로 차단합니다. 이는 과거 v1의 40행 PASS나 source/command/cleanup/incident 실행 검증 통과가 아닙니다. 최종 바이너리 원본은 [current-worktree](../.omo/evidence/spec035/closure/final-compiled-runner-current/summary.md)에 146행 중 PASS 5/BLOCKED 141, Spec035 80행 전부 BLOCKED, commands 0·exit 1로, [success-fixture](../.omo/evidence/spec035/closure/final-compiled-runner-fixture/summary.md)에 commands 17·exit 0으로 보존되어 있습니다. Fixture는 runner mechanics만 검증합니다. 별도 current execution schema의 수용 구현과 경로 alias 보정은 [제한적 재검토](../.omo/evidence/spec035/closure/final-r01-recheck.json)에서 확인됐지만, 실제 전체 요구사항·owner·gate·cleanup·incident 증거가 생산됐다는 뜻은 아닙니다. 현재 차단은 수용 경로 미구현이 아니라 실제 canonical 입력이 실행 증거가 아닌 데서 발생합니다. Todo11의 66행 결과, 과거 F3 원본과 낡은 todo10 결속은 별도 역사 기록으로 보존합니다.
 
 Runner 자체의 passing fixture는 아래처럼 실행할 수 있습니다. 이 fixture는 artifact writer와 validator의 success path를 확인할 뿐, 현재 checkout의 semantic Spec031 closure를 뜻하지 않습니다:
 
@@ -658,4 +729,4 @@ Provider secret은 로컬 config/environment workflow로 제공하세요. Image 
 
 ## 아직 남은 명령 범위
 
-`plugins`와 `hooks`는 위의 plugin/hook 섹션에 설명된 관리 명령으로 구현되어 있습니다. Inspect/doctor 계열은 실행하지 않고, agent turn에서의 live hook 소비는 `tool:before` block-only 경계로 제한됩니다. Plugin command는 standalone dispatcher 경계에서만 실행되며 running session store를 직접 mutate하지 않습니다. TUI, REPL, onboard wizard, shared projection, readiness, delivery hint, release runner surface는 semantic Spec 035의 기존 Spec031 구현 증거가 있습니다. Spec 035 문서 상태는 외부 owner evidence가 모두 통과할 때까지 Open으로 남습니다. Local owner lease와 gateway supervision의 current scoped boundary는 `029-durable-runtime-recovery-and-data-migration`에서 완료됐으며, 자동 process reexec나 worker restart/backoff를 의미하지 않습니다. 구현된 Codex login 외 provider OAuth는 현재 지원 provider/auth 범위 밖의 비목표이며, ClawHub search/install/update도 remote marketplace 비목표로 닫았습니다. 위에서 구현된 것으로 명시하지 않은 command는 사용할 수 있는 기능으로 취급하지 마세요.
+`plugins`와 `hooks`는 위의 plugin/hook 섹션에 설명된 관리 명령으로 구현되어 있습니다. Inspect/doctor 계열은 실행하지 않고, agent turn에서의 live hook 소비는 `tool:before` block-only 경계로 제한됩니다. Plugin command는 standalone dispatcher 경계에서만 실행되며 running session store를 직접 mutate하지 않습니다. Spec 035의 TUI/REPL/wizard, projection/readiness, Tasks, capability/reconnect/accounting 및 release evidence 검증은 구현되어 있습니다. Fixture 재생성, 최신 workspace 3003 PASS / 0 FAIL / 8 ignored, 현재 cleanup 0과 한계 있는 설정 baseline 수용은 확보됐지만, 문서 freeze 이후 동일 source/run의 74개 prerequisite 수용과 runner·postrun 6행의 최종 감사가 남아 `Open` 및 closure `BLOCKED`를 유지합니다. Local owner lease와 gateway supervision의 current scoped boundary는 `029-durable-runtime-recovery-and-data-migration`에서 완료됐으며, 자동 process reexec나 worker restart/backoff를 의미하지 않습니다. 구현된 Codex login 외 provider OAuth는 현재 지원 provider/auth 범위 밖의 비목표이며, ClawHub search/install/update도 remote marketplace 비목표로 닫았습니다. 위에서 구현된 것으로 명시하지 않은 command는 사용할 수 있는 기능으로 취급하지 마세요.

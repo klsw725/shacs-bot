@@ -1,6 +1,8 @@
 # PRD 005. interactive TUI, REPL, and onboard flows
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. 실제 TUI/REPL과 secret-ref-only wizard 및 G4 production REPL·wizard finish 관측이 존재한다. Wizard는 environment reference만 입력받고 완료 시 실제 local Spec030 credential/disclosure 관측과 Spec031 config/profile 선언을 소비한다. 선언은 credential 존재·해석 성공·readiness·권한 부여가 아니며 미관측 credential은 unavailable로 남는다. 이전 설정 사고는 원본 전체 복원·credential 유효성 미증명 한계를 둔 사용자 baseline 수용이다. G2의 reader/renderer와 실제 terminal interaction 구분, G4의 active status 제한 및 source 결속은 [closure 기록](../CLOSURE.md)을 따른다.
 
 ## Goal
 
@@ -17,7 +19,7 @@ TUI, REPL, and onboard wizard surfaces consume actual runtime projection and the
 ## Non Scope
 
 1. Theme polish, visual design system, layout framework, mobile UI를 closure 조건으로 삼지 않는다.
-2. Wizard는 masked credential input을 auth owner에 전달할 수 있지만 projection, fixture, diagnostics, wizard persistence에는 저장하지 않는다. Handoff 이후 local auth persistence는 Spec 030이 소유한다.
+2. Raw credential handoff가 필요한 경우에는 auth owner 경계를 따라야 하며 projection, fixture, diagnostics, wizard persistence에는 저장하면 안 된다. 현재 wizard는 secret-ref-only이므로 masked raw credential 입력을 구현한 것으로 주장하지 않는다. Local auth persistence는 Spec 030이 소유한다.
 3. REPL 또는 TUI가 CLI/API와 다른 command, permission, recovery contract를 만들지 않는다.
 
 ## SPEC Inputs
@@ -60,7 +62,7 @@ TUI, REPL, and onboard wizard surfaces consume actual runtime projection and the
 ### Onboard wizard
 
 1. Generate or merge config stubs without overwriting existing values.
-2. Display credential source and local auth entry status separately from masked credential input; hand raw input directly to the auth owner without retaining it in wizard state.
+2. Credential source와 local auth 상태를 표시한다. 현재 wizard는 environment reference만 입력받으며 raw credential은 받지 않는다. Raw credential의 입력·저장은 별도 auth owner 경계이며 wizard의 구현 기능으로 주장하지 않는다.
 3. Show channel/app/plugin readiness and missing requirements using PRD 003 states.
 4. Support cancel and restart without claiming partial configuration is complete.
 
@@ -69,7 +71,7 @@ TUI, REPL, and onboard wizard surfaces consume actual runtime projection and the
 1. State-machine tests cover every flow and invalid transition.
 2. Command parity tests feed identical commands to CLI and REPL routers and compare normalized outcomes.
 3. TUI tests consume recorded owner projections, then manual QA drives the compiled TUI against a live isolated workspace.
-4. Wizard tests prove masked credential input is not retained in projection, fixture, diagnostics, or wizard persistence after auth-owner handoff; auth owner storage policy is tested in Spec 030 rather than redefined here.
+4. Wizard 검사는 secret-ref-only 입력과 raw secret 거절, 취소·재개·상태 표시를 검증한다. Auth owner의 credential 저장 정책은 Spec030에서 검증하며 wizard가 재정의하지 않는다.
 5. Confirmation and hook tests prove ephemeral allow/deny/veto never becomes durable approval or remembered permission.
 
 Focused commands:
@@ -87,7 +89,7 @@ cargo clippy --manifest-path crates/Cargo.toml --locked -p shacs-cli --all-targe
 
 1. Launch the TUI in a terminal session, navigate active session/readiness views, exercise one approval, one recovery request, one cancellation, and one invalid action.
 2. Launch the REPL, run help, an ordinary turn fixture, a priority command during an active turn, malformed input, and EOF.
-3. Launch the onboard wizard in an isolated workspace, complete one valid flow, cancel one flow, and inspect resulting config for preservation and absence of raw secrets.
+3. Onboard wizard QA는 새로 확보한 사용자 소유 data directory의 명시적 `--config`와 별도 `--workspace`로 정상·취소 흐름을 확인한다. Workspace만 바꾸면 config/auth는 격리되지 않으며 실제 사용자 config/auth를 읽거나 복사하지 않는다. 생성된 검증용 config만 기존 값 보존·raw secret 부재를 확인한다.
 4. Save terminal transcripts or screenshots, normalized projection artifacts, exit codes, and cleanup receipts.
 
 ## Closure Evidence
@@ -103,6 +105,6 @@ The following historical artifact names are retained for auditability, but every
 
 1. TUI exposes all required interactive states and actions from runtime projection.
 2. REPL preserves CLI command semantics and priority behavior.
-3. Wizard guides readiness through credential sources and status-only projection; masked input is discarded after auth-owner handoff.
+3. Wizard는 credential source reference와 상태 projection으로 readiness를 안내하며 raw secret을 입력받거나 보존하지 않는다.
 4. Invalid, cancelled, and interrupted flows are evidenced.
 5. Focused gates and terminal QA pass.

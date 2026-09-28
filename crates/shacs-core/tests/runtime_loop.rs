@@ -86,6 +86,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[path = "runtime_loop/approval_terminal.rs"]
+mod approval_terminal;
+
 struct ProcExecCountingTool {
     calls: Arc<AtomicUsize>,
 }
@@ -7186,6 +7189,27 @@ fn loop_permission_approval_by_lineage_executes_pending_tool_after_restart(
     assert_eq!(outcome.kind, SurfaceActionOutcomeKind::Completed);
     assert!(outcome.changed);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let terminal = restarted
+        .session_manager()
+        .read_session_file("discord:lineage-approval")
+        .ok_or("missing terminal session")?;
+    let receipt = &terminal["metadata"]["permission_approval_receipts"]["receipts"][0];
+    assert_eq!(receipt["approval_request_id"], lineage);
+    assert_eq!(
+        receipt["action_digest"],
+        raw["metadata"]["pending_permission_approval"]["approval_request"]["action_digest"]
+    );
+    assert_eq!(receipt["state"], "consumed");
+    assert!(terminal["metadata"]
+        .get("pending_permission_approval")
+        .is_none());
+    let repeated = restarted.process_permission_approval_by_lineage(
+        "discord:lineage-approval",
+        &lineage,
+        true,
+    )?;
+    assert!(!repeated.changed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
@@ -7543,11 +7567,24 @@ fn loop_permission_approval_stops_after_fatal_tool_outcome() -> Result<(), Box<d
     }));
 
     let first = loop_runtime.process_direct("start", Some("cli:approved-fatal"))?;
+    let pending = loop_runtime
+        .session_manager()
+        .read_session_file("cli:approved-fatal")
+        .ok_or("missing pending fatal approval")?;
     let second = loop_runtime.process_direct("approve", Some("cli:approved-fatal"))?;
     let raw = loop_runtime
         .session_manager()
         .read_session_file("cli:approved-fatal")
         .ok_or("missing approved fatal session")?;
+    let receipt = &raw["metadata"]["permission_approval_receipts"]["receipts"][0];
+    let request = &pending["metadata"]["pending_permission_approval"]["approval_request"];
+    assert_eq!(receipt["state"], "consumed");
+    assert_eq!(
+        receipt["approval_request_id"],
+        request["approval_request_id"]
+    );
+    assert_eq!(receipt["action_digest"], request["action_digest"]);
+    assert!(raw["metadata"].get("pending_permission_approval").is_none());
     let requests = client.requests.lock().map_err(|error| error.to_string())?;
     let events = events.lock().map_err(|error| error.to_string())?;
     if first.stop_reason != "ask_user"
@@ -8419,6 +8456,34 @@ fn loop_permission_approval_resumes_deferred_tool_search_bridge_with_bridge_mapp
             content: Some("resumed after bridge exec".to_owned()),
             ..LlmResponse::default()
         },
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "bridge-exec-again",
+                "tool_call",
+                Map::from_iter([
+                    ("name".to_owned(), json!("mcp_exec")),
+                    ("arguments".to_owned(), json!(r#"{"command":"cargo test"}"#)),
+                ]),
+            )],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            content: Some("reused bridge approval".to_owned()),
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            finish_reason: "tool_calls".to_owned(),
+            tool_calls: vec![ToolCallRequest::new(
+                "bridge-exec-without-grant",
+                "tool_call",
+                Map::from_iter([
+                    ("name".to_owned(), json!("mcp_exec")),
+                    ("arguments".to_owned(), json!({"command": "cargo test"})),
+                ]),
+            )],
+            ..LlmResponse::default()
+        },
     ]);
     let mut config = AgentLoopConfig::new(workspace.path(), "test-model");
     config.permission_mode_snapshot = PermissionModeSnapshot {
@@ -8455,12 +8520,16 @@ fn loop_permission_approval_resumes_deferred_tool_search_bridge_with_bridge_mapp
     let _approval_outbound = bus
         .consume_outbound()
         .ok_or("missing bridge approval outbound")?;
+    let pending = loop_runtime
+        .session_manager()
+        .read_session_file("discord:chat-bridge")
+        .ok_or("missing pending bridge approval")?;
 
     let second = loop_runtime.process_message(inbound_with_message_id(
         "discord",
         "user-1",
         "chat-bridge",
-        "approve",
+        "approve_session",
         "bridge-msg-2",
     ))?;
     let raw_after_approval = loop_runtime
@@ -8477,6 +8546,45 @@ fn loop_permission_approval_resumes_deferred_tool_search_bridge_with_bridge_mapp
         .into());
     }
     let raw = raw_after_approval;
+    let reused = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-bridge",
+        "again",
+        "bridge-msg-1",
+    ))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_ne!(reused.stop_reason, "ask_user");
+    assert_eq!(
+        reused.final_content.as_deref(),
+        Some("reused bridge approval")
+    );
+    let receipt = &raw["metadata"]["permission_approval_receipts"]["receipts"][0];
+    let request = &pending["metadata"]["pending_permission_approval"]["approval_request"];
+    assert_eq!(receipt["state"], "consumed");
+    assert_eq!(
+        receipt["approval_request_id"],
+        request["approval_request_id"]
+    );
+    assert_eq!(receipt["action_digest"], request["action_digest"]);
+    assert!(raw["metadata"].get("pending_permission_approval").is_none());
+    assert_eq!(
+        raw["metadata"]["session_permission_approvals"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert!(
+        raw["metadata"]["session_remembered_permissions_v1"]["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|rule| {
+                rule["effect"] == "allow"
+                    && rule["matcher"]["kind"] == "mcp_tool"
+                    && rule["matcher"]["tool_name"] == "mcp_exec"
+            })
+    );
     if !raw["messages"]
         .as_array()
         .into_iter()
@@ -8492,6 +8600,20 @@ fn loop_permission_approval_resumes_deferred_tool_search_bridge_with_bridge_mapp
     {
         return Err(format!("bridge result mapping was not persisted: {raw:?}").into());
     }
+    let manager = loop_runtime.session_manager_mut();
+    let mut session = manager.get_or_create("discord:chat-bridge");
+    session.metadata.remove("session_permission_approvals");
+    session.metadata.remove("session_remembered_permissions_v1");
+    manager.save(&session)?;
+    let receipt_only = loop_runtime.process_message(inbound_with_message_id(
+        "discord",
+        "user-1",
+        "chat-bridge",
+        "again",
+        "bridge-msg-1",
+    ))?;
+    assert_eq!(receipt_only.stop_reason, "ask_user");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
 

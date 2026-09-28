@@ -4,8 +4,8 @@ use crate::{
     handle_session_query_request, handle_spec033_goal_action, json_response, spec030_api,
     spec031_api, spec033_snapshot_response, spec033_snapshot_session_key, ApiError, ApiHttpRequest,
     ApiHttpResponse, ApiMethod, CHAT_COMPLETIONS_PATH, DIAGNOSTICS_PATH, HEALTH_PATH, MODELS_PATH,
-    PERMISSIONS_PATH, READINESS_PATH, SESSIONS_PATH, SUBAGENTS_PATH, TOOLS_PATH,
-    TRUSTED_RUNTIME_PATH, WORKFLOW_RECIPES_PATH,
+    PERMISSIONS_PATH, READINESS_PATH, SESSIONS_PATH, SUBAGENTS_PATH, TASKS_ACTIONS_PATH,
+    TASKS_PATH, TOOLS_PATH, TRANSPORT_HELLO_PATH, TRUSTED_RUNTIME_PATH, WORKFLOW_RECIPES_PATH,
 };
 use serde_json::json;
 
@@ -23,6 +23,7 @@ pub fn handle_api_request(
             Some(projection) => json_response(200, json!(projection)),
             None => error_response(ApiError::not_found("media projection is unavailable")),
         },
+        (ApiMethod::Get, TASKS_PATH) => crate::spec035_tasks::tasks_response(&request, adapter),
         (ApiMethod::Get, SESSIONS_PATH) => handle_session_query_request(path, adapter),
         (ApiMethod::Get, CHAT_COMPLETIONS_PATH) => error_response(ApiError::method_not_allowed(
             "method is not supported for this endpoint",
@@ -66,6 +67,12 @@ pub fn handle_api_request(
         (ApiMethod::Post, CHAT_COMPLETIONS_PATH) => {
             handle_chat_completion_request(request, adapter)
         }
+        (ApiMethod::Post, TASKS_ACTIONS_PATH) => {
+            crate::spec035_tasks::tasks_action_response(request, adapter)
+        }
+        (ApiMethod::Post, TRANSPORT_HELLO_PATH) => {
+            crate::spec035_transport::transport_hello_response(request.body.as_ref())
+        }
         (ApiMethod::Post, _) if path.starts_with("/v1/improvements/") => {
             handle_local_improvement(request, adapter)
         }
@@ -82,6 +89,9 @@ pub fn handle_api_request(
         | (_, TRUSTED_RUNTIME_PATH)
         | (_, WORKFLOW_RECIPES_PATH)
         | (_, PERMISSIONS_PATH)
+        | (_, TASKS_PATH)
+        | (_, TASKS_ACTIONS_PATH)
+        | (_, TRANSPORT_HELLO_PATH)
         | (_, CHAT_COMPLETIONS_PATH)
         | (_, SESSIONS_PATH) => error_response(ApiError::method_not_allowed(
             "method is not supported for this endpoint",

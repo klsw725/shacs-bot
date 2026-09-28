@@ -1,14 +1,16 @@
+use crate::action_runner::TasksActionResult;
 use crate::input::TuiInput;
 use crate::state::{
     ApprovalActionState, ApprovalLineage, RuntimeSnapshot, SessionKey, TuiState, UiStatus,
 };
-use shacs_core::runtime::{SurfaceAction, SurfaceActionOutcome};
+use shacs_core::runtime::{Spec035TasksSemanticAction, SurfaceAction, SurfaceActionOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateEffect {
     None,
     RefreshRequested,
     RunAction(SurfaceAction),
+    RunTaskAction(Spec035TasksSemanticAction),
     ExitRequested,
 }
 
@@ -31,6 +33,7 @@ pub fn apply_input(state: &mut TuiState, input: TuiInput) -> UpdateEffect {
         TuiInput::Stop => UpdateEffect::RunAction(SurfaceAction::Stop),
         TuiInput::Restart => UpdateEffect::RunAction(SurfaceAction::Restart),
         TuiInput::Recover => UpdateEffect::RunAction(SurfaceAction::Recover),
+        TuiInput::TaskAction => task_action(state),
         TuiInput::Cancel => unavailable(
             state,
             "lineage cancel is unavailable; send /stop in the original session channel",
@@ -51,14 +54,53 @@ pub fn apply_input(state: &mut TuiState, input: TuiInput) -> UpdateEffect {
     }
 }
 
+fn task_action(state: &mut TuiState) -> UpdateEffect {
+    let Some(session) = state.selected_session() else {
+        return unavailable(state, "no active session");
+    };
+    let Some(tasks) = session.tasks.as_ref() else {
+        return unavailable(state, "tasks projection is unavailable");
+    };
+    let selected = tasks
+        .rows()
+        .iter()
+        .filter_map(|row| row.action().map(|action| (row, action)))
+        .find(|(_, action)| action.status == shacs_projection::Spec035TaskActionStatus::Available)
+        .or_else(|| {
+            tasks
+                .rows()
+                .iter()
+                .find_map(|row| row.action().map(|action| (row, action)))
+        });
+    let Some((row, action)) = selected else {
+        return unavailable(state, "tasks action is not advertised");
+    };
+    match Spec035TasksSemanticAction::parse(
+        crate::tasks_view::owner_kind_label(row.owner().kind()),
+        crate::tasks_view::action_kind_label(action.kind),
+        row.owner().locator().as_str(),
+    ) {
+        Ok(action) => UpdateEffect::RunTaskAction(action),
+        Err(error) => unavailable(state, &error.to_string()),
+    }
+}
+
 pub fn apply_action_outcome(state: &mut TuiState, outcome: SurfaceActionOutcome) {
     state.status = UiStatus::ActionOutcome(outcome);
+}
+
+pub fn apply_task_action_result(state: &mut TuiState, result: TasksActionResult) {
+    state.status = match result {
+        TasksActionResult::Owner(outcome) => UiStatus::ActionOutcome(outcome),
+        TasksActionResult::Rejected(rejection) => UiStatus::TransportRejected(rejection),
+    };
 }
 
 pub fn apply_snapshot(state: &mut TuiState, snapshot: RuntimeSnapshot) {
     let preferred = state.selected_session().map(|session| session.key.clone());
     let mut next = TuiState::from_snapshot(snapshot, preferred.as_ref());
     next.terminal_size = state.terminal_size;
+    next.trusted_runtime = state.trusted_runtime.clone();
     *state = next;
 }
 

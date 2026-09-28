@@ -61,11 +61,25 @@ pub(crate) fn run<R: BufRead, W: Write>(
                     workspace: Some(workspace.clone()),
                     wizard: false,
                 })?;
+                let bundle = shacs_config::load_config(shacs_config::LoadOptions {
+                    config_path: Some(config_path.clone()),
+                    workspace_override: Some(workspace.clone()),
+                    resolve_env: false,
+                    write_back_migrations: false,
+                })?;
+                let projection =
+                    shacs_core::runtime::trusted_runtime::build_trusted_runtime_projection(
+                        crate::spec030_fact_store_for_bundle(&bundle)
+                            .snapshot()
+                            .into_input(),
+                    )
+                    .map_err(|error| CliError::Runtime(error.to_string()))?;
                 outcome.wizard_report = Some(format::report(
                     super::OnboardWizardStatus::Complete,
                     resumed,
                     state,
-                    readiness::external_owner_facts(),
+                    readiness::external_owner_facts(&bundle.config, &projection)
+                        .map_err(|error| CliError::Runtime(error.to_string()))?,
                     readiness::lines(&config_path, &workspace),
                 ));
                 return Ok(outcome);

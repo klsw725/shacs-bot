@@ -113,8 +113,14 @@ pub fn parse_cargo_test_counts_strict(
         }
         let summary = parse_cargo_test_line(line)?;
         found = true;
-        counts.tests_run += summary.tests_run;
-        counts.tests_failed += summary.tests_failed;
+        counts.tests_run = counts
+            .tests_run
+            .checked_add(summary.tests_run)
+            .ok_or(Spec031ReleaseArtifactError::InvalidCommandEvidence)?;
+        counts.tests_failed = counts
+            .tests_failed
+            .checked_add(summary.tests_failed)
+            .ok_or(Spec031ReleaseArtifactError::InvalidCommandEvidence)?;
     }
     if !found {
         return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
@@ -152,7 +158,9 @@ fn parse_cargo_test_line(
         return Err(Spec031ReleaseArtifactError::InvalidCommandEvidence);
     }
     Ok(Spec031ReleaseTestCounts {
-        tests_run: passed + failed,
+        tests_run: passed
+            .checked_add(failed)
+            .ok_or(Spec031ReleaseArtifactError::InvalidCommandEvidence)?,
         tests_failed: failed,
     })
 }

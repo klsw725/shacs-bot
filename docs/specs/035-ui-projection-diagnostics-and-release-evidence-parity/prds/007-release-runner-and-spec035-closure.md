@@ -1,10 +1,12 @@
 # PRD 007. release runner and Spec 035 closure
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 카탈로그·분류 검증 및 별도 execution 증거 수용 경로 구현, closure 차단. 기존 `spec031-release-runner`는 Spec031 66행과 Spec035 80행의 총 146행 및 typed classification v2를 구분한다. Classification은 실행 증거가 아니므로 최신 보존 current-worktree 원본은 commands 0·exit 1, `BLOCKED`이며 [차단 기록](../CLOSURE.md)을 따른다.
 
 ## Goal
 
-This PRD is the sequential integration and final closure gate for Spec 035. It orders planned revisions 000 through 007, which retain implemented baselines, and unimplemented planned PRDs 008 through 009 before final closure. It defines the release runner, coverage matrix, lifecycle and projection parity smoke, failure triage, external-owner evidence, and exact conditions for closing Spec 035.
+이 PRD는 Spec035의 순차 통합 및 최종 closure gate다. 구현된 PRD000-009의 검증을 통합하며 release runner, coverage matrix, lifecycle/projection parity smoke, 실패 분류, 외부 owner 증거와 최종 판정 조건을 정의한다. 구현과 과거 QA가 존재해도 현재 소스 결속과 독립 gate가 충족되지 않으면 닫지 않는다.
 
 This PRD defines no new domain state, projection vocabulary, interactive behavior, delivery guarantee, or external-owner evidence.
 
@@ -22,7 +24,7 @@ This PRD defines no new domain state, projection vocabulary, interactive behavio
 1. No Rust implementation is owned by this PRD except the release runner shell and artifact assembly defined here.
 2. No partial closure, manual approval, prose-only, grep-only, screenshot-only, or cargo-test-only proof is accepted.
 3. Missing required owner evidence from Specs 029 through 034 remains a hard closure blocker for the capabilities that consume it.
-4. This revision preserves implementation evidence for PRDs 000-007 without treating their revised contracts as implemented. PRD 008 remains unimplemented planned work. PRD 009 has only partial TUI goal/automation rendering; its mixed Tasks and cross-surface contract remains planned, and parent Spec 035 stays `Status: Open`.
+4. PRD008 transport/reconnect와 PRD009 mixed Tasks CLI/API/TUI는 구현되어 있다. 과거 검사 기록을 현재 release PASS로 승격하지 않으며 parent Spec035는 `Status: Open`을 유지한다.
 
 ## Dependency DAG
 
@@ -183,29 +185,20 @@ Owner: PRD 007. Entry requires all prior exit evidence and external locators. Ex
 
 Shared acceptance rows name one primary contract owner and, where necessary, one proof consumer. This does not duplicate domain ownership.
 
-## External Evidence Locators
+## 외부 증거 위치와 유효 범위
 
-| External owner | Must prove | Required local read audit |
+Todo10의 [외부 owner 감사](../../../../.omo/evidence/spec035/prd000-009/external-owner-audits.json)는 아래 선택된 검사 7개의 PASS를 기록한다. 이는 외부 스펙 전체 완료나 모든 필수 소비 fact의 검증, 현재 source-bound release PASS를 뜻하지 않는다. F1은 요구 fact 전체와 이 검사들의 대응이 충분하지 않다고 보고했다. 현재 검증을 위해서는 낡은 todo10 결속을 보존한 채 필요한 fact별 새 실행 증거가 필요하다.
+
+| Owner | 실제 기록된 검사 범위 | Todo10 검사 기록 |
 |---|---|---|
-| Spec 029 | recovery, queue, reconnect, channel delivery facts consumed without reinterpretation | Unavailable in this checkout; regenerate a source-bound owner audit. |
-| Spec 030 | trusted runtime profile, hook denial, path-specific process controls, sandbox mode, credential status, resource diagnostics, and data disclosures are rendered without inventing safety guarantees | Unavailable in this checkout; regenerate a source-bound owner audit. |
-| Spec 032 | app lifecycle/readiness/receipt facts exist for app projection | Unavailable in this checkout; regenerate a source-bound owner audit. |
-| Spec 033 | goal id/state/stop reason/continuation budget owner facts and automation/event/coverage facts exist where PRD 009, release, or drop projection consumes them | `docs/specs/033-evaluation-automation-live-integration/CLOSURE.md`, `docs/specs/033-evaluation-automation-live-integration/evidence/index.json`; a regenerated Spec035 external audit is still required |
-| Spec 034 | media/analyzer facts exist for media projection | `docs/specs/034-generated-media-and-rich-file-context-expansion/CLOSURE.md`, `.omo/evidence/spec034/task-11-parity.json` |
-| Spec 031 | config/profile auth-source and execution-snapshot facts exist for onboard projection without moving schema, migration, or persistence ownership into 035 | Unavailable in this checkout; regenerate a source-bound owner audit. |
+| Spec029 | Durable inbound 복원·stale lease requeue, durable cancellation 뒤 child late success 거절 | `commands/020-ext-spec029-dispatch.txt`, `commands/021-ext-spec029-child.txt`; 2개 통과 |
+| Spec030 | Local provider의 live resource·diagnostics·trace discovery | `commands/022-ext-spec030.txt`; 1개 통과 |
+| Spec031 | Runtime inspect owner source의 API/CLI/bundle readiness parity; config/auth/snapshot 전체 증거는 아님 | `commands/026-ext-spec031-exact-adapter.txt`; 1개 통과 |
+| Spec032 | Enable/disable projection이 process truth를 생성하지 않음 | `commands/023-ext-spec032.txt`; 1개 통과 |
+| Spec033 | User-visible automation channel event의 delivery projection | `commands/024-ext-spec033.txt`; 1개 통과 |
+| Spec034 | 주입된 analyzer를 통한 stored video runtime context routing | `commands/025-ext-spec034.txt`; 1개 통과 |
 
-A blocked external locator is useful implementation evidence but is not final `PASS`. Each passing locator records the source spec status observed by `Read`, exact owner-fact artifact paths, command transcripts where applicable, and an artifact-backed audit. It does not require the external spec itself to be closed.
-
-The historical 2026-08-04 machine-verdict artifacts are unavailable in this checkout and are not used as evidence. Current tracked or reproducible owner evidence is listed below:
-
-| External owner | Current verdict | Current locator | Current blocker |
-|---|---|---|---|
-| Spec 029 | BLOCKED | Unavailable in this checkout. | Historical read audit is absent and no tracked replacement was verified. |
-| Spec 030 | BLOCKED | Unavailable in this checkout. | The previously cited source-bound manifest is absent and no tracked replacement was verified. |
-| Spec 032 | BLOCKED | Unavailable in this checkout. | Historical read audit and required app/resource lifecycle owner-fact artifacts are absent. |
-| Spec 033 | BLOCKED | `docs/specs/033-evaluation-automation-live-integration/CLOSURE.md`, `docs/specs/033-evaluation-automation-live-integration/evidence/index.json` | Spec033 owner implementation은 QA/goal/code/security/docs final review와 final source-bound release execution을 모두 통과했다. 이 행은 Spec035가 아직 regenerated external read audit를 만들지 않아 `BLOCKED`이며, PRD 008 또는 deferred PRD 009 parity를 닫지 않는다. |
-| Spec 034 | PASS (owner facts only) | `docs/specs/034-generated-media-and-rich-file-context-expansion/CLOSURE.md`, `.omo/evidence/spec034/task-11-parity.json` | Current media/analyzer owner facts exist; this does not close Spec035 or PRD 008-009. |
-| Spec 031 | BLOCKED | Unavailable in this checkout. | Historical read audit is absent; required config/auth-source/execution-snapshot owner facts remain unverified. |
+위 상대 경로의 기준은 `.omo/evidence/spec035/prd000-009/`다. Spec034 adapter 검사와 당시 fixture 누락 실패는 별도 역사 기록이다. `.omo/evidence/spec034/task-12-integration.json`은 이후 실제 producer로 재생성됐고 22 receipts, SHA-256 `ebdc42aa9f9f0dc6fe90e40ff892b52430568eb8f7a9ea0d68590da72ba6a3c4`를 확인했다. 최신 3003 PASS workspace 및 G1-G6의 13 exact fact 대응은 [CLOSURE.md](../CLOSURE.md)를 따른다.
 
 ## Release Runner Contract
 
@@ -226,7 +219,7 @@ cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin s
 cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-success-fixture --evidence-root /tmp/spec031-success-fixture --repo-root . --mode success-fixture
 ```
 
-`current-worktree` is the closure run shape. It returns nonzero while any required external owner audit is blocked, and it records dirty worktree state as separate triage when present. `success-fixture` proves the runner can assemble and validate a passing isolated fixture; it is not a semantic Spec 035 closure run. The `spec031-*` command, schema, and evidence names are shipped compatibility identifiers and remain unchanged after this document renumbering.
+`current-worktree`의 최신 canonical 입력은 종료 조건 45행 모두 BLOCKED인 classification v2다. 정확한 행·owner 집합, 분류 구조와 inventory를 검증한 뒤 실행 receipt가 아니므로 `BlockedExternalEvidence`로 차단하며 required command를 실행하지 않는다. 역사적 v1의 40행 검증과 혼동하지 않는다. 별도 `spec035.prd000_009_closure_execution.v1` 경로는 요구사항·owner·gate·명령 transcript·전후 소스 결속을 검증해 coverage를 산출한다. 구성 증거를 사용한 수용 테스트는 실제 제품 closure 증명이 아니다. Dirty worktree 자체는 별도 provenance 관측이지 자동 실패가 아니며 source binding 불일치와 구분한다. `success-fixture`도 격리된 runner 동작 검사일 뿐 semantic closure가 아니다. 기존 binary `spec031-release-runner`, schema `spec031.release_runner.v2`와 mode 식별자는 유지한다. 최종 [current-worktree 원본](../../../../.omo/evidence/spec035/closure/final-compiled-runner-current/summary.md)은 146행 중 PASS 5/BLOCKED 141, Spec035 PASS 0/BLOCKED 80, commands 0·exit 1이고 [fixture 원본](../../../../.omo/evidence/spec035/closure/final-compiled-runner-fixture/summary.md)은 commands 17·exit 0이다. Todo11의 source digest 불일치와 66행 결과는 별도 역사 기록이다.
 
 ## Cargo Gates
 
@@ -234,8 +227,8 @@ cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin s
 cargo fmt --manifest-path crates/Cargo.toml --all -- --check
 cargo clippy --manifest-path crates/Cargo.toml --locked --workspace --all-targets -- -D warnings
 cargo test --manifest-path crates/Cargo.toml --locked --workspace
-cargo build --manifest-path crates/Cargo.toml --locked -p shacs-cli
-cargo build --manifest-path crates/Cargo.toml --locked -p shacs-tui
+cargo clean --manifest-path crates/Cargo.toml
+cargo build --manifest-path crates/Cargo.toml --locked -p shacs-cli -p shacs-tui
 ```
 
 ## Required Surface Smoke
@@ -243,7 +236,7 @@ cargo build --manifest-path crates/Cargo.toml --locked -p shacs-tui
 1. CLI: status, diagnostics, session, subagent, tool, approval, recover, context/plugin/app/media projection.
 2. TUI: active session, approval, progress, degraded health, recovery action, invalid input, cancellation.
 3. REPL: ordinary turn, shared command, priority command, malformed input, EOF.
-4. Onboard: valid, cancelled, and resumed flow with masked auth handoff and credential-source audit.
+4. Onboard: secret-ref-only 입력의 정상·취소·재개, raw secret 거절 및 credential-source 감사.
 5. API: health/readiness, diagnostics, session, subagent, and tool projections where supported.
 6. WebSocket/channel: subagent/tool events where supported, progress, final outcome, unsupported/skipped integration, reconnect/slow consumer.
 7. Lifecycle: local install/onboard/start/diagnose/stop/recover using an isolated workspace and recorded cleanup.
@@ -267,7 +260,7 @@ cargo build --manifest-path crates/Cargo.toml --locked -p shacs-tui
 | misleading success text | typed owner outcome wins |
 | repeated cancellation/interruption | idempotent terminal projection, no duplicate action |
 | hung command | bounded timeout and cleanup receipt |
-| dirty worktree | unrelated mutations fail the release run |
+| dirty worktree | 별도 provenance 관측으로 기록하며 source binding 불일치는 차단 |
 
 ## Documentation and Non-Guarantee Review
 
@@ -293,8 +286,10 @@ Spec 035 may leave `Status: Open` and `docs/specs/README.md` may remove it from 
 
 If any item is missing, Spec 035 remains `Status: Open`.
 
-Current result: historical PRD 000-006 artifact locators are unavailable in this checkout and do not satisfy current evidence requirements. PRD 008 evidence와 PRD 009 full parity evidence는 아직 없고, Spec029, Spec030, Spec031, Spec032, Spec033 audit는 `BLOCKED`다. Spec034는 current media/analyzer owner facts만 `PASS (owner facts only)`이며 Spec035 closure를 통과시키지 않는다. 따라서 current closure verdict는 `BLOCKED`이고 semantic Spec035는 `Status: Open`을 유지한다.
+현재 결과: PRD000-009 구현과 G1-G6 후속 증거, 최신 workspace 3003 PASS / 0 FAIL / 8 ignored 및 fmt/clippy exit 0이 존재한다. Fixture는 실제 재생성, 해당 실행 cleanup은 0, 설정은 한계 있는 사용자 baseline 수용이다. 역사적 288개 provenance와 todo10의 낡은 binding은 보존한다. 문서 freeze 이후 74개 prerequisite/13 fact/19 gate의 정확한 source/run 조립·수용과 runner·postrun 감사 전이므로 `Status: Open`을 유지한다.
+
+카탈로그 열거, 원본 보존, F1-R01/R01-A01 보정과 F2 scoped confirmed는 유지한다. G7 preflight/run/finalize는 FC5 및 그 의존 parent 5행만 postrun으로 분리한다. 나머지 74행을 넓게 skip하지 않으며 기존 receipt의 run/source를 새 identity로 고치지 않는다. 실제 run의 exit 0과 `pending-final-audit`는 최종 승인이 아니고 독립 artifact read audit와 finalize가 필요하다. [G7 계약](../../../../.omo/evidence/spec035/closure/finalization/g7-remediation/CONTRACT.md), [전체 preparation 감사](../../../../.omo/evidence/spec035/closure/finalization/g7-final-preparation/REPORT.md), [CLOSURE](../CLOSURE.md)를 따른다.
 
 ## Authoring Verification
 
-이번 revision은 기존 implemented-but-closure-blocked PRD 증거를 보존하고 PRD 008-009를 planned work로 추가한다. Parent는 새 PRD와 모든 required external audit이 통과한 current-worktree release runner가 zero를 반환할 때까지 `Open`이다.
+이번 문서 갱신은 실제 구현, 과거 QA 기록, 현재 release 유효성을 구분한다. Todo10·11 artifact와 역사적 hash는 수정하지 않는다. 문서 감사는 제품 재검증이나 최종 독립 감사를 대체하지 않으며 parent는 모든 필수 gate가 통과할 때까지 `Open`이다.

@@ -29,16 +29,18 @@ pub enum Spec031ApprovalState {
     Expired,
     Skipped,
     RetryConsumed,
+    Consumed,
 }
 
 impl Spec031ApprovalState {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Pending,
         Self::Allowed,
         Self::Denied,
         Self::Expired,
         Self::Skipped,
         Self::RetryConsumed,
+        Self::Consumed,
     ];
 }
 

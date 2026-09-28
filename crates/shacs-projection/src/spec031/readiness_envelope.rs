@@ -163,6 +163,12 @@ fn component_remediation(
             super::Spec031ReadinessComponentKind::Queue => {
                 "clear or recover blocked durable work before admitting more runtime work"
             }
+            super::Spec031ReadinessComponentKind::RuntimeControls => {
+                "inspect owner sandbox execution denial and adapter controls before retrying"
+            }
+            super::Spec031ReadinessComponentKind::ResourceDisclosure => {
+                "inspect owner resource provenance and data disclosure before retrying"
+            }
             super::Spec031ReadinessComponentKind::ExternalIntegration => {
                 "configure the optional integration before using that feature"
             }
@@ -185,6 +191,12 @@ fn component_remediation(
             }
             super::Spec031ReadinessComponentKind::Queue => {
                 "collect queue depth and admission evidence later"
+            }
+            super::Spec031ReadinessComponentKind::RuntimeControls => {
+                "collect active owner profile and actual adapter sandbox execution observations"
+            }
+            super::Spec031ReadinessComponentKind::ResourceDisclosure => {
+                "collect active owner resource and trace disclosure observations"
             }
             super::Spec031ReadinessComponentKind::ExternalIntegration => {
                 "configure the optional integration before using that feature"

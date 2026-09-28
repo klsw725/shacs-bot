@@ -145,6 +145,16 @@ fn validate_owner_facts(
         if audit.implementation_artifacts != expected_fixture_fact_artifacts(audit.owner) {
             return Err(Spec031ReleaseArtifactError::BlockedAsPass);
         }
+    } else if audit.owner == Spec031ExternalOwnerId::Spec035 {
+        if audit.implementation_artifacts != [super::spec035_execution::MANIFEST]
+            || super::spec035_execution::preflight_bound(
+                repo_root,
+                Path::new(&artifacts.evidence_root),
+            )
+            .is_err()
+        {
+            return Err(Spec031ReleaseArtifactError::BlockedAsPass);
+        }
     } else if audit.implementation_artifacts != expected_fact_artifacts(audit.owner)? {
         return Err(Spec031ReleaseArtifactError::BlockedAsPass);
     }

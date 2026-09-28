@@ -1,6 +1,8 @@
 # PRD 001. surface adapter parity for CLI, API, WebSocket, and channels
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. CLI/API/TUI/channel adapter와 G1/G6의 app/context/child/tool consumer 보정, G2/G3 owner 관측, G5 실제 WebSocket/channel 경계 증거가 존재한다. Supported/unsupported, in-process renderer와 live transport를 구분하며 todo10의 역사적 결속을 현재 PASS로 승격하지 않는다. 아래 과거 부재 경로와 새 artifact의 대응은 [closure 기록](../CLOSURE.md)을 따른다.
 
 ## Goal
 

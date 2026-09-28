@@ -1,6 +1,8 @@
 # PRD 000. shared projection model and vocabulary
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. Revised owner 모델과 공통 vocabulary, G1/G6 consumer 보정, G2 terminal lineage 및 최신 3003 PASS workspace 기록이 존재한다. 최종 source-bound PASS는 아니며 [closure 기록](../CLOSURE.md)의 행별 preparation을 따른다. 아래 과거 `.omo/evidence/spec031/`의 부재 경로는 그대로 보존하며 새 artifact의 부재를 뜻하지 않는다.
 
 ## Goal
 

@@ -555,6 +555,9 @@ fn spec031_readiness_parity_uses_runtime_inspect_owner_source_for_api_cli_and_bu
     let (config_path, workspace) = write_config(root.path())?;
     let bundle_path = root.path().join("readiness-diagnostics.zip");
     let port = reserve_port()?;
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&config_path)?)?;
+    config["api"] = serde_json::json!({"host": "127.0.0.1", "port": port});
+    fs::write(&config_path, serde_json::to_vec(&config)?)?;
     let _serve = start_serve(&config_path, &workspace, port)?;
     write_migration_blocker(root.path())?;
 

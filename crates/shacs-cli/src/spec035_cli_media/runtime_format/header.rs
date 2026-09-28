@@ -3,7 +3,6 @@ use super::super::super::*;
 pub(super) struct RuntimeInspectFormatState {
     pub(super) diagnostics_blocked: bool,
     pub(super) diagnostics_component_count: usize,
-    pub(super) readiness_available: bool,
     pub(super) subagent_child_count: usize,
     pub(super) tool_attempt_count: usize,
     pub(super) app_total_count: usize,
@@ -20,14 +19,6 @@ pub(super) fn runtime_inspect_header(report: &RuntimeInspectReport) -> RuntimeIn
         || report.lifecycle.durable_children.recovery_needed_count > 0;
     let diagnostics_component_count =
         report.supervision.components.len() + report.capabilities.len();
-    let readiness_available = matches!(
-        report.lifecycle.compatibility,
-        RuntimeCompatibility::FullyCompatible
-    ) && !report.lifecycle.migration_plan.blocked
-        && !matches!(
-            report.lifecycle.ownership.state,
-            RuntimeOwnershipState::Stale
-        );
     let readiness_lines = spec031_cli::readiness::lines(report).unwrap_or_else(|error| {
         vec![format!(
             "Spec031 readiness: kind=readiness state=unavailable severity=error reason=missing lineage=subject:cli:readiness detail={}",
@@ -116,7 +107,6 @@ pub(super) fn runtime_inspect_header(report: &RuntimeInspectReport) -> RuntimeIn
     RuntimeInspectFormatState {
         diagnostics_blocked,
         diagnostics_component_count,
-        readiness_available,
         subagent_child_count: report.lifecycle.durable_children.spawned_count,
         tool_attempt_count: report.lifecycle.durable_work.pending_count
             + report.lifecycle.durable_work.leased_count

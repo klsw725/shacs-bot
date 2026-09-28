@@ -1,6 +1,8 @@
 # PRD 004. context, extension, app, and media projection
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. Resource provenance/disclosure, app/media owner adapter와 task3·todo10 기록에 G1/G6의 app/context consumer 보정이 추가됐다. Spec034 workspace fixture는 실제 producer 22 receipts로 재생성됐으며 bounded media fact와 전체 release seal은 별개다. 최신 증거와 source/run 제한은 [closure 기록](../CLOSURE.md)을 따른다.
 
 ## Goal
 

@@ -1,6 +1,8 @@
 # PRD 002. approval, progress, and recovery parity
 
-Status: Planned revision (implemented baseline)
+Status: Open
+
+구현 상태: 구현됨, closure 차단. 기존 approval allow/consumed·recovery 기록에 G2의 denied/controlled-expired/confirmation-denied/headless/hook 관측과 recent-retry terminal 보정 및 scoped 독립 CONFIRMED가 추가됐다. Reader/renderer 증거를 실제 terminal key 입력으로 바꾸지 않으며 소비 receipt는 권한이나 도구 성공이 아니다. [closure 기록](../CLOSURE.md)의 잔여 matrix/interaction 및 최종 admission 경계를 따른다.
 
 ## Goal
 

@@ -6,7 +6,15 @@ use std::time::Duration;
 
 pub type Capture = thread::JoinHandle<Result<String, String>>;
 
-pub fn serve_image_responses(count: usize) -> Result<(String, Capture), Box<dyn Error>> {
+pub enum ImageResponse {
+    OpenAi,
+    Codex,
+}
+
+pub fn serve_image_responses(
+    count: usize,
+    response: ImageResponse,
+) -> Result<(String, Capture), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     let handle = thread::spawn(move || {
@@ -15,9 +23,20 @@ pub fn serve_image_responses(count: usize) -> Result<(String, Capture), Box<dyn 
             let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
             requests.push_str(&read_request(&mut stream)?);
             let image = if index == 0 { "aGk=" } else { "aG8=" };
-            let body = format!(r#"{{"data":[{{"b64_json":"{image}"}}]}}"#);
+            let (content_type, body) = match response {
+                ImageResponse::OpenAi => (
+                    "application/json",
+                    format!(r#"{{"data":[{{"b64_json":"{image}"}}]}}"#),
+                ),
+                ImageResponse::Codex => (
+                    "text/event-stream",
+                    format!(
+                        "event: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\",\"output\":[{{\"type\":\"image_generation_call\",\"id\":\"ig_{index}\",\"status\":\"completed\",\"result\":\"{image}\"}}]}}}}\n\n"
+                    ),
+                ),
+            };
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream
