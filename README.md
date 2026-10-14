@@ -275,5 +275,6 @@ cargo build --manifest-path crates/Cargo.toml -p shacs-channels
 
 ## 추가 문서
 
+- 제품 의도: [`intent.md`](intent.md)
 - 사용자 가이드: [`docs/USAGE.md`](docs/USAGE.md)
 - 스펙 인덱스: [`docs/specs/README.md`](docs/specs/README.md)
