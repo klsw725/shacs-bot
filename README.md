@@ -1,6 +1,6 @@
 # shacs-bot
 
-`shacs-bot`은 `nanobot`의 Rust porting이며, 개인 사용/자체 호스팅 운영을 기본으로 하는 Rust 에이전트 런타임입니다. 로컬 CLI, OpenAI 호환 HTTP API, 세션/런타임 유틸리티, provider adapter, tool, skill, template, 그리고 선택된 channel worker를 제공합니다.
+`shacs-bot`은 사용자가 직접 설치하고 운영하는 개인용 어시스턴트를 지향합니다. 사용자가 맡긴 일의 맥락을 이어받고 의미 있는 변화가 있을 때 근거 있는 도움을 먼저 가져오는 것이 [제품 의도](intent.md)입니다. 현재 구현은 `nanobot`에서 출발한 Rust 에이전트 런타임으로, 로컬 CLI, OpenAI 호환 HTTP API, 세션/런타임 유틸리티, provider adapter, tool, skill, template, 그리고 선택된 channel worker를 제공합니다. 제품 의도는 아래 기능 목록이 모두 구현됐다는 뜻이 아닙니다.
 
 - 원본 nanobot 저장소: <https://github.com/HKUDS/nanobot>
 
