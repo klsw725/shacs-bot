@@ -8,7 +8,7 @@
 
 ## 현재 제품 범위 요약
 
-스펙 세트 전체는 self-hosted / personal-use assistant runtime을 기본으로 하며, 사용자가 설치한 AI app을 실행·관찰·복구하는 개인용 AI Operating System을 장기 제품 방향으로 둔다. 공식 인터페이스 표면은 CLI, TUI, local API다. 외부 채널은 Slack, Discord, Telegram, Email, WhatsApp bridge를 지원 대상으로 본다.
+스펙 세트 전체는 사용자가 직접 운영하는 self-hosted / personal-use assistant runtime을 기본으로 한다. [제품 의도](../../intent.md)의 중심은 사용자가 맡긴 일을 이어받고 의미 있는 변화에 근거 있는 도움을 먼저 가져오는 경험이다. AI app, 하네스, 도구와 채널은 이를 위한 수단이다. 공식 인터페이스 표면은 CLI, TUI, local API이며, 외부 채널은 Slack, Discord, Telegram, Email, WhatsApp bridge를 지원 대상으로 본다. 제품 방향은 기존 구현의 완료 선언이 아니다.
 
 ## 상태 체계와 2026-07-20 migration
 
@@ -18,9 +18,10 @@
 - `Complete (Baseline)`은 self-hosted/local 최소 기준이 닫혔음을 뜻한다.
 - `Open (implemented, closure blocked)` 또는 PRD의 `Implemented, closure blocked`는 구현과 제한된 검증 기록이 존재하지만 release closure 조건이 아직 통과하지 않았음을 뜻한다. 과거 QA 기록만으로 현재 소스의 QA나 전체 승인까지 주장하지 않는다.
 - `Planned`는 accepted contract이지만 구현·surface evidence가 아직 없는 범위다. 기존 implemented evidence로 완료 처리하지 않는다.
+- `Planned (Decision only)`는 삭제나 변경을 미리 승인한 상태가 아니다. 사용 경로·자료·대체 검증의 근거로 유지/축소/제거를 결정할 범위이며, 결정이 내려져도 실제 코드 변경은 별도다. 결정문과 필요한 증거가 갖춰지면 `Complete (Decision)`으로 닫을 수 있고, 이는 기능 구현 완료를 뜻하지 않는다.
 - `Planned revision (implemented baseline)`은 이전 계약의 구현 evidence는 존재하지만, 새로 확장된 계약은 아직 검증되지 않았다는 뜻이다.
-- 기존 문서의 미구현 accepted work는 `029`부터 `035`의 owner spec으로 이관했다. `028`부터 `031`은 scoped implementation을 완료했고, `032`부터 `035`의 현재 상태는 아래 numbered owner table을 따른다.
-- 기존 문서 본문의 future 문구는 역사와 설계 근거로 보존하지만, 구현 owner는 각 문서 상단의 `Open work moved to:` ledger와 새 spec을 따른다.
+- 기존 문서의 미구현 accepted work는 후속 owner spec으로 이관했다. `028`부터 `031`은 scoped implementation을 완료했고, `032`부터 `034`는 아래 표에 완료 범위를 기록한다. 미완료였던 `035` owner 문서는 현재 스펙 세트에서 제거했으며, 구현된 기능 자체와 보존된 실행 증거의 상태를 완료로 재분류하지 않는다. 새 제품 경험은 역사적 `035` 번호를 재사용하지 않고 `036`부터 독립적인 계약으로 정의한다.
+- 기존 문서 본문의 future 문구는 역사와 설계 근거로 남기되 `035`로 향하던 이관 링크는 제거했다. 당시 원문은 [비활성 보관 자료](../archive/spec035/README.md)에 있으며 현재 스펙 세트의 owner가 아니다.
 - SaaS/admin/fleet, 멀티유저 조직 운영, remote marketplace, complete kernel isolation 같은 명시적 비목표는 신규 backlog로 승격하지 않았다.
 
 ## 현재 numbered owner specs
@@ -30,10 +31,12 @@
 | `032-app-maker-runtime-and-extension-lifecycle` | `Complete (Scoped)`: foreground AppSupervisor/process lifecycle, current-user authoring/apply/install, app-level activation provenance and blockers | 005, 017, 021, 025 |
 | `033-evaluation-automation-live-integration` | `Complete (Scoped)`: local goal/evaluator, durable automation routing, CAS self-improvement, recorded-only replay, domain projection input과 source-bound release evidence 구현; QA/goal/code/security/docs final PASS 및 final source-bound release execution PASS | 009, 012, 013, 014, 016, 018, 022 |
 | `034-generated-media-and-rich-file-context-expansion` | `Complete (Scoped)`: Codex image event, edit/mask/variation 계약, streaming/remote-output 정책, generated artifact, bounded video analyzer와 media-domain evidence; [remediation PASS](../../.omo/evidence/spec034/remediation/PASS.json)와 [Todo 14 QA baseline](../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)에서 22/22 검증. 최신 source-bound release 상태는 [local canonical final manifest](../../.omo/evidence/spec034/task-15-closure/final-committed/manifest.json)가 현재 committed source와 최종 5개 리뷰를 결합해 판정하며 이전 candidate receipt로 대체하지 않음 | 004, 019, 027 |
-| `035-ui-projection-diagnostics-and-release-evidence-parity` | `Open`: shared projection/TUI/REPL/wizard, owner 기반 Tasks CLI/API/TUI, capability 협상, snapshot-first reconnect, accounting 및 release evidence 검증 구현. Fixture 실제 재생성, 최신 workspace 3003 PASS / 0 FAIL / 8 ignored 및 fmt/clippy 통과, 해당 실행 cleanup 0, 한계 있는 사용자 설정 baseline 수용. Closure는 동일 source/run의 authentic assembly·runner·최종 독립 감사 전이므로 `BLOCKED`; 역사적 288개 provenance와 todo10 binding은 갱신하지 않음. [closure 기록](035-ui-projection-diagnostics-and-release-evidence-parity/CLOSURE.md) 참조 | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
 | [`036-entrusted-work-continuity-and-change-notification`](036-entrusted-work-continuity-and-change-notification/SPEC.md) | `Complete (Scoped)`: 명시적 위임·조건 수정·goal-bound 관측·조건별 변화 통지와 사용자 결정의 로컬 Email 수직 흐름. 네 PRD 및 통합 Oracle PASS; 전체 출시 seal 아님 | 029, 030, 031, 033 |
-
-Spec035의 카탈로그는 Spec031 66행과 Spec035 80행을 구분한 총 146행이며 runner 원본은 보존됐다. G7 preflight는 74개 prerequisite와 FC5 의존 postrun 6행을 구분한다. G1/G6 보정, G2 owner 관측, G3 실제 container Ready/Degraded, G4 production REPL·wizard, G5 반복 reconnect의 최신 근거가 있지만 서로 다른 source/run을 하나의 실행으로 재표기하지 않는다. Canonical 45행/6 owner `BLOCKED` classification은 그대로 보존한 비실행 입력이다. 원래 F2 scoped confirmed와 후속 관측·workspace 통과는 전체 F1/F4 승인이나 `Complete` 전환이 아니다. 최신 행별 assembly mapping과 잔여 gate는 [Spec035 CLOSURE](035-ui-projection-diagnostics-and-release-evidence-parity/CLOSURE.md)를 따른다.
+| [`037-task-specific-assistant-methods`](037-task-specific-assistant-methods/SPEC.md) | `Planned`: 한 요청에서 수행 방식 선택·사용자 변경과 계산·보고서·이미지의 결과 확인. 024 실행 엔진 재소유 없음 | 004, 005, 024, 030, 034 |
+| [`038-evidence-backed-method-learning`](038-evidence-backed-method-learning/SPEC.md) | `Planned`: 작업 결과·피드백에서 방법 후보를 만들고 확인·재사용·수정·철회. 036/037 완료와 독립 | 005, 018, 024, 030, 033 |
+| [`039-app-capability-disposition`](039-app-capability-disposition/SPEC.md) | `Planned (Decision only)`: app authoring/lifecycle의 사용자 자료와 호출 경로를 조사해 유지·축소·제거 판정. 변경 실행은 별도 | 021, 030, 032 |
+| [`040-video-analyzer-capability-disposition`](040-video-analyzer-capability-disposition/SPEC.md) | `Planned (Decision only)`: 선택적 video analyzer의 실제 사용·첨부·projection 영향을 조사해 유지·축소·제거 판정 | 027, 030, 031, 034 |
+| [`041-release-evidence-tooling-disposition`](041-release-evidence-tooling-disposition/SPEC.md) | `Planned (Decision only)`: Spec031 release runner의 소비자·증거/호환 계약을 조사해 유지·축소·제거 판정 | 016, 031, 033, 034 |
 
 ## 읽는 순서 권장
 
@@ -74,12 +77,18 @@ Spec035의 카탈로그는 Spec031 66행과 Spec035 80행을 구분한 총 146�
 32. `032-app-maker-runtime-and-extension-lifecycle`
 33. `033-evaluation-automation-live-integration`
 34. `034-generated-media-and-rich-file-context-expansion`
-35. `035-ui-projection-diagnostics-and-release-evidence-parity`
+35. 이전 `035` owner는 [비활성 보관 자료](../archive/spec035/README.md)로 이동했으며 새 구현 owner가 아니다.
 36. `036-entrusted-work-continuity-and-change-notification`
+37. `037-task-specific-assistant-methods`
+38. `038-evidence-backed-method-learning`
+39. `039-app-capability-disposition`
+40. `040-video-analyzer-capability-disposition`
+41. `041-release-evidence-tooling-disposition`
 
 ## 운영 원칙
 
 - 새 요구사항은 먼저 owner spec에 반영하고, 필요하면 해당 PRD에 실행 범위와 검증 기준을 추가한다.
 - 교차 문서 개념은 한 문서가 의미를 소유하고, 다른 문서는 그것을 소비하는 구조를 유지한다.
+- 번호가 낮은 스펙의 기존 계약은 소비할 수 있지만, 각 스펙의 수용 조건과 완료 판정은 번호가 높은 스펙의 구현·완료에 의존하지 않는다. 독립적으로 닫을 수 없는 범위는 현재 스펙 안에 포함하거나 별도의 완결된 계약으로 다시 나눈다.
 - 구현이 문서와 충돌하면 코드를 밀어붙이기보다 문서 계약부터 다시 점검한다.
 - `001`부터 `027`의 완료 범위를 확장해야 하는 요구는 기존 문서를 다시 열지 않고 `028` 이후 owner spec에서 다룬다.

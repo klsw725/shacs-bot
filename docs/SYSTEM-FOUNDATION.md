@@ -473,9 +473,14 @@ Shacs는 사용자가 직접 설치·운영하는 trusted local agent runtime을
 32. `docs/specs/032-app-maker-runtime-and-extension-lifecycle/SPEC.md`
 33. `docs/specs/033-evaluation-automation-live-integration/SPEC.md`
 34. `docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md`
-35. `docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md`
+36. `docs/specs/036-entrusted-work-continuity-and-change-notification/SPEC.md` (Complete (Scoped))
+37. `docs/specs/037-task-specific-assistant-methods/SPEC.md` (Planned)
+38. `docs/specs/038-evidence-backed-method-learning/SPEC.md` (Planned)
+39. `docs/specs/039-app-capability-disposition/SPEC.md` (Planned, decision only)
+40. `docs/specs/040-video-analyzer-capability-disposition/SPEC.md` (Planned, decision only)
+41. `docs/specs/041-release-evidence-tooling-disposition/SPEC.md` (Planned, decision only)
 
-`001`부터 `027`은 2026-07-20 기준 실제 구현 범위로 완료 처리되었다. 각 문서에서 분리된 accepted open work는 `028`부터 `035`가 소유하며, 명시적 비목표와 미결정 아이디어는 자동으로 backlog에 포함하지 않는다.
+`001`부터 `027`은 2026-07-20 기준 실제 구현 범위로 완료 처리되었다. 각 문서에서 분리된 후속 owner 중 완료된 범위는 `028`부터 `034`가 기록한다. 미완료였던 `035` 문서는 현재 스펙 세트에서 제거했으며, 구현 상태와 완료 판정을 변경한 것은 아니다. `036`은 새 제품 방향의 독립적인 scoped 구현을 완료했고 `037`·`038`은 Planned 계약이다. 이들은 이전 `035`의 구현·QA·closure를 계승하지 않는다. `039`부터 `041`은 기존 기능을 삭제한다고 가정하지 않는 독립 판정 계약이다. 명시적 비목표와 미결정 아이디어는 자동으로 backlog에 포함하지 않는다.
 
 [`../intent.md`](../intent.md)는 제품 경험의 방향을 정하고, 위 architecture spec 세트는 각 설계 계약과 완료 기준을 정의한다. 어느 쪽도 다른 문서의 구현 사실이나 완료 판정을 자동으로 바꾸지 않는다.
 
