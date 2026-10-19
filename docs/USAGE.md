@@ -1,5 +1,151 @@
 # shacs-bot 사용 가이드
 
+## 명시적으로 맡긴 작업
+
+먼저 분리된 workspace에서 `onboard`와 `session create --session cli:direct --workspace /tmp/shacs-ws`를 실행하세요. `/work create <목표>`는 대화 중 사용자가 직접 지속 위임할 때 사용합니다. 일반 질문이나 모호한 요청은 자동으로 위임으로 저장하지 않습니다. 어시스턴트가 `propose_entrusted_work` 도구로 제안한 경우에도 같은 대화·발신자에게 표시된 `/work accept <proposal-id>`를 명시적으로 보내야 생성됩니다. `/work decline <proposal-id>` 또는 일반적인 `yes`는 위임 동의가 아닙니다. 대화에서는 `/work read <work-id>`, `/work edit <work-id> <expected-revision> <instructions>`, `/work pause|resume|done|clear <work-id>`를 사용할 수 있습니다. 대화의 `edit`는 이전 예산·결정·남은 질문을 보존하고 지시 내용만 교체합니다.
+
+CLI는 사용자 소유의 기존 session을 대상으로 구조화된 조건과 동의 근거를 직접 기록합니다. 반환되는 JSON의 `work.work_id`를 후속 명령의 `<work-id>`로 사용하세요:
+
+```sh
+shacs-bot session create --session cli:direct --workspace /tmp/shacs-ws
+shacs-bot work create "track release readiness" --workspace /tmp/shacs-ws --session cli:direct --consent explicit-request --evidence-ref cli:explicit-request --instructions "report verified changes" --budget "daily" --prior-decision "use official sources" --remaining-question "which release?" --linked-target channel:alerts
+shacs-bot work read "<work-id>" --workspace /tmp/shacs-ws --session cli:direct
+shacs-bot work revise "<work-id>" --workspace /tmp/shacs-ws --session cli:direct --expected-revision 1 --instructions "report verified release changes" --budget "daily" --prior-decision "use official sources" --remaining-question "which release?"
+shacs-bot work revise "<work-id>" --workspace /tmp/shacs-ws --session cli:direct --expected-revision 2 --instructions "report verified release changes" --budget "daily" --prior-decision "use official sources" --remaining-question "which release?" --linked-target channel:new-alerts
+shacs-bot work pause "<work-id>" --workspace /tmp/shacs-ws --session cli:direct
+shacs-bot work resume "<work-id>" --workspace /tmp/shacs-ws --session cli:direct
+shacs-bot work done "<work-id>" --workspace /tmp/shacs-ws --session cli:direct
+```
+
+CLI `revise`와 API `revise`는 조건 전체를 교체하므로 유지할 예산·결정·질문도 다시 보내야 합니다. 연결 대상은 생략하면 유지하며, CLI의 `--linked-target`(반복 가능) 또는 API `linked_targets` 배열을 지정하면 교체합니다. 전체 연결을 해제하려면 CLI `--clear-linked-targets` 또는 API 빈 배열을 사용하세요. 변경 전후 연결 대상은 revision 이력에도 기록됩니다. 이전 revision으로 수정하면 최신 조건·연결을 덮지 않고 거절합니다. 명시적으로 연결된 대상은 CLI에서 `--session channel:alerts --owner-session cli:direct`로 조회·수정할 수 있으며, 미연결 대상은 거절됩니다. 저장된 과거 goal은 자동으로 위임으로 승격하지 않습니다. `goal` 명령으로 별도 변경한 결과와 위임의 마지막 참조 전이가 어긋나면 안전을 위해 work 읽기·수정을 거절합니다.
+
+`--allow-api-side-effects`를 지정해 loopback에 띄운 local API에서는 `POST /v1/sessions/cli%3Adirect/entrusted-work`로 생성하고 `GET /v1/sessions/cli%3Adirect/entrusted-work/<work-id>`로 읽습니다. 생성 본문은 `goal_text`, `consent` (`kind`, `evidence_ref`, `recorded_at`), `conditions` (`instructions`, 선택적인 `budget`, `prior_decisions`, `remaining_questions`), `observed_at`을 포함합니다. `POST .../<work-id>/revise`는 `expected_revision`, 전체 `conditions`, `changed_at`, 선택적인 `linked_targets`를 받고, `POST .../<work-id>/pause|resume|done|clear`는 `observed_at`을 받습니다. 연결 대상은 `/v1/sessions/<requester>/entrusted-work/<owner>/<work-id>` 경로를 사용합니다. 이 동의는 도구 권한·예약·구매·사용자를 대신한 외부 확정 행동의 승인이 아닙니다. 로컬 파일 관측과 명시적 정수 조건 비교, 아래에 명시한 Email 변경 알림을 지원합니다.
+
+### 알림 없는 로컬 파일 예약 관측 (PRD 010)
+
+활성 위임에 사용자 소유 workspace의 상대 파일 경로와 확인 주기(5~86,400초)를 설정할 수 있습니다. `observe`는 조건 revision을 하나 증가시키는 CAS 설정 명령이며 직접 읽기나 메시지 전송을 하지 않습니다. Unix의 일반 파일만 지원하고 source 상대 경로 component의 symlink, workspace 밖 경로, 실행 사용자가 소유하지 않은 workspace/파일, 64 KiB 초과 자료는 읽지 않습니다. 비교 설정이 없으면 SHA-256 근거 ref와 byte 수만 저장하며 원문을 저장하거나 provider에 보내지 않습니다. 이 digest는 의미 변화 판정이 아닙니다.
+
+아래의 `DATA`는 **실제로 사용할 config가 있는 directory**, `WS`는 별도 workspace입니다. 기존 사용자 config/auth를 복사하지 말고 새 경로를 사용하세요. `onboard` 후 해당 config에서 기존 provider 설정 절차를 마쳐야 `serve`를 시작할 수 있지만, 관측 자체는 provider를 호출하지 않습니다. 예시의 `WORK`는 `work create` 출력의 실제 ID로 바꾸세요.
+
+```sh
+DATA=/tmp/shacs-observation-data
+WS=/tmp/shacs-observation-workspace
+shacs-bot --config "$DATA/config.json" onboard --workspace "$WS"
+shacs-bot --config "$DATA/config.json" session create --workspace "$WS" --session cli:direct
+printf 'controlled evidence A\n' > "$WS/source.txt"
+shacs-bot work create "watch my local source" --workspace "$WS" --session cli:direct --consent explicit-request --evidence-ref cli:user --instructions "observe only"
+WORK='<work-id-from-create>'
+shacs-bot work observe "$WORK" --workspace "$WS" --session cli:direct --expected-revision 1 --source source.txt --cadence-seconds 15
+shacs-bot work observations "$WORK" --workspace "$WS" --session cli:direct --data-dir "$DATA"
+shacs-bot --config "$DATA/config.json" serve --workspace "$WS" --port 8900 --allow-api-side-effects
+```
+
+`serve` 또는 channel `runtime start`의 기존 production worker가 029 queue에 `entrusted.observation` work를 등록하고 due 시 실행합니다. 별도 cron job이나 새 scheduler를 만들지 않습니다. worker를 실행하지 않으면 `awaiting_enqueue`, 등록되면 `queued`와 실제 work ID·due 시각이 보입니다. 최초 관측 전 `current_observation: null`은 아직 모른다는 뜻이지 성공/무변화가 아닙니다. `leased`는 queue lease 사실이지 관측 성공이 아닙니다.
+
+다른 터미널에서 동일한 `DATA`, `WS`, `WORK`를 사용하여 조회합니다. API의 session은 URL 인코딩하며 아래 POST는 기존 loopback mutation opt-in이 필요합니다. 조회는 GET입니다:
+
+```sh
+shacs-bot work observations "$WORK" --workspace "$WS" --session cli:direct --data-dir "$DATA"
+curl --fail-with-body "http://127.0.0.1:8900/v1/sessions/cli%3Adirect/entrusted-work/$WORK/observations"
+curl --fail-with-body -X POST "http://127.0.0.1:8900/v1/sessions/cli%3Adirect/entrusted-work/$WORK/observations" \
+  -H 'content-type: application/json' \
+  -d '{"expected_revision":2,"source":{"kind":"local_file","relative_path":"source.txt"},"cadence_seconds":30}'
+shacs-bot work pause "$WORK" --workspace "$WS" --session cli:direct
+```
+
+성공한 `observed` 기록과 다음 확인 **의도**는 같은 durable terminal event에 저장됩니다. 다음 enqueue는 별도 029 event이므로 crash 사이에는 `awaiting_enqueue`로 복원될 수 있습니다. 이력은 최근 32개를 조회하며 현재 revision의 마지막 기록을 따로 표시합니다. 원래 029 event log가 근거이고 별도 관측 DB/queue는 없습니다. 프로세스를 Ctrl-C로 정상 종료한 뒤 같은 `serve` 명령으로 재시작하면 pending wake와 관측이 복원됩니다. 비정상 종료의 stale lease는 성공으로 처리하지 않으며 기존 `runtime inspect` / `runtime recover` 후 다시 시작하는 절차를 따릅니다.
+
+enqueue 전, due 읽기 직전, commit 직전에 033 goal·동의·조건 revision·goal transition을 확인합니다. pause/done/clear, stale goal binding 또는 철회된 동의의 wake는 029 취소 사실로 끝나며 새 관측을 남기지 않습니다. 조건 수정과 resume 후에는 새 lineage만 사용하고 종료한 일의 이력은 계속 읽을 수 있습니다. 읽기 실패/누락/미지원은 `unavailable`, 현재 snapshot/hook/permission gate 거절은 `blocked`로 기록하고 다음 확인을 `stopped`로 표시합니다. 문제를 고친 뒤 현재 revision으로 `observe`를 다시 실행해야 재예약합니다. 현재 permission과 headless hook confirmation을 그대로 적용하며 위임만으로 승인이나 grant를 만들지 않습니다. 로컬 읽기에는 process 실행·외부 credential·provider disclosure가 없고, native-host containment를 보장하지 않습니다. 일반 cron/heartbeat와 goal continuation은 이 설정으로 위임 작업으로 바뀌지 않습니다. 비교 설정 없는 digest 관측은 알림·요약을 만들지 않습니다. 외부 확정 행동은 실행하지 않습니다.
+
+### 사용자 조건에 따른 변화 판정 (PRD 020)
+
+사용자가 **정수값이 상한 이하인지를 선택 기준으로 명시**하면 같은 조건 revision의 관측을 비교합니다. 일반 텍스트 diff, Cron 출처, 성공 exit code, 모델의 중요도 주장은 Notify 근거가 아닙니다. 자유 형식 `instructions`나 `budget`을 수치로 추론하지 않습니다. 가격·통화 변환·여행 추천·범용 JSON 비교는 지원하지 않으며, 값과 상한은 사용자가 같은 단위로 준비해야 합니다.
+
+비교 source는 다음 세 필드만 있는 UTF-8 JSON입니다. `value`는 signed 64-bit 정수이며 소수·문자열·추가 필드·다른 schema는 비교할 수 없습니다. `as_of_ms`는 자료를 만든 사용자가 명시한 Unix millisecond 시각입니다. 파일 읽기와 digest는 확인하지만 이 시각이나 외부 세계의 사실을 별도로 검증하지 않습니다. 원문 대신 이 고정 크기 수치 요약, digest, byte 수, snapshot ref만 판정 근거로 보존합니다. 파일에는 credential을 넣지 마세요.
+
+```json
+{"schema":"integer_v1","value":120,"as_of_ms":1792400000000}
+```
+
+`as_of_ms`를 실제 자료 시각으로 바꾸고, 기존 `WORK`의 최신 revision을 확인한 뒤 설정하세요. `--at-most`와 `--max-age-seconds`는 함께 필요합니다. 최대 자료 나이는 5~86,400초이며 새 자료와 이전 기준 모두에 적용됩니다. 정기 요약 선호는 기본 false이고 `--regular-summary true`로만 켭니다. 비교 판정 자체는 메시지를 보내지 않으며 아래 Email 알림 경로가 그 사실을 소비합니다.
+
+```sh
+shacs-bot work observe "$WORK" --workspace "$WS" --session cli:direct \
+  --expected-revision 2 --source source.json --cadence-seconds 15 \
+  --at-most 100 --max-age-seconds 3600 --regular-summary false
+shacs-bot work observations "$WORK" --workspace "$WS" --session cli:direct --data-dir "$DATA"
+curl --fail-with-body "http://127.0.0.1:8900/v1/sessions/cli%3Adirect/entrusted-work/$WORK/observations"
+curl --fail-with-body -X POST "http://127.0.0.1:8900/v1/sessions/cli%3Adirect/entrusted-work/$WORK/observations" \
+  -H 'content-type: application/json' \
+  -d '{"expected_revision":3,"source":{"kind":"local_file","relative_path":"source.json"},"cadence_seconds":15,"comparison":{"criterion":{"kind":"integer_at_most","value":100},"max_age_seconds":3600,"regular_summary":true}}'
+```
+
+`observe`/POST는 plan 전체 교체입니다. 비교 flag/API `comparison`을 생략하면 비교를 끄고 digest 관측만 유지합니다. 같은 명령으로 상한·자료 나이·요약 선호를 수정하며 기존 CAS와 linked-target/loopback mutation 경계를 그대로 사용합니다. 변경은 revision을 올리고 비교 기준을 재설정하므로 이전 revision의 B를 새 조건의 중요 변화로 재해석하지 않습니다. 일반 `work revise`로 자유 형식 조건을 바꾸어도 revision이 달라져 기준이 재설정됩니다. 수치 상한 변경은 `observe`의 `--at-most`로 별도 명시해야 합니다.
+
+실제 worker의 각 due를 기다리며 `120 → 120 → 110 → 90`을 기록하고, 값을 변경할 때 `as_of_ms`도 갱신하면 다음 결과를 조회합니다:
+
+| 값 | verdict | reason.code | 의미 |
+|---|---|---|---|
+| 첫 120 | `baseline` | `first_comparable_observation` | 최초 기준, 변화 아님 |
+| 다시 120 | `suppress` | `equivalent_value` | 동일값, timestamp/공백 차이는 중요도 아님 |
+| 110 | `suppress` | `same_condition_outcome` | 여전히 100 초과, 사용자 선택 결과 동일 |
+| 90 | `notify_candidate` | `condition_outcome_changed` | 상한 조건 미충족에서 충족으로 변경 |
+| 다시 90 | `suppress` | `equivalent_value` | 동일 결과를 새 중요 사건으로 만들지 않음 |
+
+충족에서 미충족으로 바뀌는 경우도 Notify 후보입니다. 응답의 `current_decision`, 최근 32개 `decisions`, `comparison_baseline`에서 이전/새 수치 요약과 조건 충족 여부, 조건 revision/정책, source 상대 경로, 관측 시각, evidence/snapshot ref, reason, 한계를 확인합니다. `regular_summary_eligible`는 성공적으로 비교 가능한 결과에 대한 별도 opt-in 사실이며 `verdict`를 바꾸지 않습니다. false인 무변화는 반복 보고 후보가 아닙니다. 조회에 아직 `current_decision: null`이면 현재 조건의 판정이 없는 것이지 무변화가 아닙니다.
+
+판정은 관측·다음 wake 의도와 같은 029 terminal fact에 저장됩니다. `decision_id`는 관측 work ID(위임·조건 revision·goal transition·due)에 결속된 안정적인 ID이며 중복 tick과 재시작으로 바뀌지 않습니다. 원래 event log에서 마지막 비교 가능 기준을 별도로 유지하므로 최근 32개 조회에서 빠져도 기준이 사라지지 않습니다. 성공적인 baseline/suppress/notify 후보만 기준을 갱신하며 unknown/blocked는 갱신하지 않습니다. 읽기 도중 조건 변경·중단·취소가 일어나면 새 관측/판정 terminal은 저장하지 않고 기존 029 cancellation fact를 `blocked` 결정으로 조회합니다(`basis.kind: cancellation_fact`, 원래 event ID 포함). 이것은 취소 이후의 관측이나 실행 성공이 아닙니다.
+
+오래된/미래/역순 시각, 같은 시각의 서로 다른 값, 불완전 스키마는 `unknown`입니다. 읽기 실패는 `unknown/observation_unavailable`, gate 거절과 구버전 취소는 `blocked/observation_blocked`로 보입니다. 첫 자료가 불완전했다면 다음 fresh/comparable 값은 변화 통지가 아닌 첫 `baseline`이 됩니다. 이미 있던 기준이 너무 오래됐거나 이력이 모순되면 `baseline_stale`/`baseline_unavailable`이며 B를 중요 변화로 확정하지 않습니다. source 누락으로 확인이 중단됐거나 오래된 기준을 새로 시작해야 한다면 자료를 고치고 최신 revision으로 `observe`를 다시 설정하세요. 구형 digest-only terminal은 `legacy_observation_uncompared` 근거의 unknown으로 읽으며 의미 기준으로 승격하지 않습니다. pause/resume 후 이전 goal 전이의 판정은 현재 판정으로 표시되지 않고 이력에만 남습니다. 관측 이력·판정 로그를 삭제하면 전체 연속성 복구를 보장하지 않습니다. 별도 evaluator/queue/session lifecycle, 비교·알림 렌더링용 provider 호출, 배송/수신 ACK, 자동 예약·구매·발송은 추가하지 않습니다.
+
+### Email 변경 알림과 전달 상태 (PRD 030 첫 구현 단위)
+
+현재 자동 알림 대상은 **사용자가 선택한 owner session `email:<수신 주소>` 하나**입니다. 기존 Email SMTP 설정(`channels.email.enabled`, `consentGranted`, `smtp`)을 마친 뒤 같은 config로 `runtime start`를 실행하세요. linked target은 조회·조건 변경 권한이며 자동 발송 대상 목록이 아닙니다. 다른 channel/CLI/API owner의 알림 후보는 `unsupported_target`으로 남고 다른 사용자·채널로 자동 전환하지 않습니다.
+
+```sh
+shacs-bot --config "$DATA/config.json" session create --workspace "$WS" --session email:me@example.com
+shacs-bot work create "watch my integer" --workspace "$WS" --session email:me@example.com \
+  --consent explicit-request --evidence-ref cli:user --instructions "notify when the integer condition changes"
+WORK='<new-work-id>'
+shacs-bot work observe "$WORK" --workspace "$WS" --session email:me@example.com \
+  --expected-revision 1 --source source.json --cadence-seconds 15 --at-most 100 --max-age-seconds 3600
+shacs-bot --config "$DATA/config.json" runtime start --workspace "$WS"
+# 다른 터미널에서 같은 경로로 조회
+shacs-bot work observations "$WORK" --workspace "$WS" --session email:me@example.com --data-dir "$DATA"
+```
+
+`source.json`에는 위의 typed JSON과 실제 `as_of_ms`를 사용합니다. 기본 설정에서 baseline/같은 값/선택 무관 변화/unknown/blocked는 침묵하고, 조건 충족 여부가 바뀐 후보만 이전·새 수치, 명시 기준, 이유, 두 evidence digest, 시각, 검증 한계와 tracking ID를 가진 제한된 메시지로 렌더링합니다. `--regular-summary true`일 때만 비교 가능한 매 관측을 별도 `regular_summary` 유형으로 요약합니다. 기존 `suppress` 판정을 change alert로 바꾸지 않으며 중요한 변화가 발생한 한 사건에서 change와 summary를 중복 발송하지 않습니다.
+
+`notifications`는 관측 성공 및 `current_decision`과 별개입니다. `intent.correlation_id`는 관측 사건·조건에 결속되고 durable inbound, session turn, outbound, Email worker의 delivery metadata로 이어집니다. `enqueue`는 `pending`, `failed`, `enqueued`, `suppressed`, `unsupported_target`이며 `consumption_started`와 `suppressed_stale`도 따로 표시합니다. `delivery`의 `pending`은 아직 전달 의도/처리 중이라는 뜻, `failed`는 관찰한 dispatch/SMTP 실패, `sent_hint`는 SMTP send 반환값일 뿐 원격 수신 ACK나 읽음 확인이 아닙니다. 실행 중단 또는 다른 process가 확정 송신 사실 없이 읽은 처리 중 상태는 `unknown`일 수 있고, 억제된 경우는 `not_requested`입니다.
+
+알림 enqueue 직전과 durable inbound 소비 직전에 동일 owner의 033 goal·동의·조건 revision·goal transition을 잠금 안에서 다시 확인합니다. 그 전에 pause/done/clear 또는 조건 변경이 완료되면 오래된 알림은 outbound와 assistant history를 만들지 않습니다. 합성 알림은 provider, 진행 중인 일반 턴의 입력 주입, `ask_user`, permission approval, workflow resume를 소비하지 않습니다. 소비 시작을 영속 기록한 뒤에는 같은 사건을 자동 재발행하지 않으므로 crash 중 전달 누락/unknown이 남을 수 있습니다. 재시도는 기존 transport의 `sendMaxRetries` 범위이고 새로운 알림 의도를 만들지 않습니다. 이미 outbound로 넘긴 메시지의 취소·회수와 exactly-once 송신은 보장하지 않습니다.
+
+`serve`의 worker도 관측·enqueue를 하지만 Email transport를 실행하지 않아 알림이 pending으로 남습니다. Email 전달에는 해당 `serve`를 정상 종료하고 같은 data/workspace의 `runtime start`를 사용합니다. 새 `entrusted.notification_fact` event를 모르는 이전 binary로의 저장 데이터 downgrade는 지원하지 않습니다. 이 알림 단위는 실제 로컬 SMTP 수신·550 거절·재시작까지 확인했으며 원격 mailbox, 모든 channel parity나 PRD030 전체 완료를 뜻하지 않습니다. 외부 행동 결정은 다음 별도 경계를 사용합니다.
+
+### 외부 행동 제안의 결정과 도구 권한
+
+현재 owner session의 활성 위임에 대해 어시스턴트가 예약·구매·발송을 제안할 때는 `ask_user`의 `external_action` 필드를 사용합니다. 예를 들어 사용자 메시지에서 해당 work ID와 검토할 초안을 지정하면 provider는 다음 형식으로 질문할 수 있습니다. 이 질문 자체는 예약·구매·발송 도구가 아니며 외부 실행을 하지 않습니다.
+
+```json
+{
+  "question": "준비한 문의 초안을 발송할까요?",
+  "external_action": {
+    "work_id": "work-<current-id>",
+    "category": "send",
+    "summary": "준비한 문의 초안 한 건 발송",
+    "reference": "draft:inquiry-1"
+  }
+}
+```
+
+`category`는 `reserve`, `purchase`, `send`만 받습니다. 요약은 240자 이내, work ID와 reference는 영문·숫자·`:`·`_`·`-`·`.`로 된 160 byte 이내 식별자여야 합니다. 원문 전체, URL, credential을 넣지 마세요. Runtime은 요약에 기존 redaction을 적용하고 provider의 임의 질문·선택지 대신 work ID·조건 revision·유형·요약·reference와 고유한 action ID를 표시합니다. 같은 provider 응답에 다른 도구가 함께 있으면 실행하지 않고 질문만 처리합니다.
+
+표시된 제안에 **원래 session/channel/chat의 같은 발신자**가 `/action accept <action-id>`를 정확히 보내면 해당 제안의 provider 대화만 한 번 재개합니다. `/action decline <action-id>`는 보류를 지우고 provider나 도구를 실행하지 않습니다. 응답하지 않거나 `yes`, `approve`, `1`, 다른 ID, `/work accept ...`를 보내도 행동 동의가 되지 않습니다. `/stop`으로도 보류를 취소할 수 있습니다. 일반 `ask_user`의 자유 응답과 `/work`의 지속 위임 동의는 외부 행동 결정과 별개입니다.
+
+수락 직전과 후속 tool permission 응답 직전에 저장된 work ID·동의 근거·현재 조건 revision·goal ID/전이를 session mutation lock 안에서 다시 확인합니다. 조건 수정, pause/resume/done/clear, goal binding 변경 또는 실제 프로세스 재시작 뒤에는 이전 제안이나 이미 수락한 후속 대기를 닫습니다. 새 제안을 받아 다시 결정해야 합니다. 따라서 별도 프로세스로 반복 실행하는 `ask` 명령 사이에서는 이전 제안을 수락할 수 없으며, 같은 실행 중인 `agent` REPL 또는 channel/API runtime의 같은 대화를 사용해야 합니다. 연결된 다른 대상의 조회 권한만으로 대신 결정할 수 없습니다.
+
+수락은 tool permission grant/cache를 만들지 않으며 성공을 뜻하지도 않습니다. 실제 후속 도구는 기존 030 hook·confirmation·permission·credential·sandbox 경계를 그대로 거칩니다. 별도 permission 질문이 나오면 그 도구의 `approve`/`deny` 등 기존 선택으로 결정하세요. 이미 설정된 허용/거절 정책도 그대로 유효합니다. 이 기능은 provider가 선언한 typed 제안의 결정 경계이며 자연어 문장의 모든 외부 행동을 자동 분류하거나 새 예약·구매 서비스, 모든 channel UI parity, 이미 실행된 부작용의 취소를 제공하지 않습니다.
+
 ## Spec 033 goal, improvement, replay
 
 Goal lifecycle은 session metadata owner를 사용하며 CLI와 local API가 같은 typed projection을 반환합니다:

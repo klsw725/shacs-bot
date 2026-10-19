@@ -112,6 +112,8 @@ cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- goal status --worksp
 curl http://127.0.0.1:8900/v1/sessions/cli%3Adirect/goal-snapshot
 ```
 
+Spec 036의 현재 self-hosted 범위는 명시적으로 맡긴 일의 조건·goal 수명주기, 사용자 소유 로컬 파일의 예약 관측, 명시적 정수 조건의 변화 판정, 선택된 owner Email session에 대한 근거 있는 통지와 외부 행동 전 사용자 판단입니다. 모든 사이트/채널 감지나 원격 수신 ACK, 정확히 한 번 발송을 보장하지 않습니다. 실제 `work create|observe|observations` 명령, API 설정, 통지와 `/action accept|decline` 경계는 [위임 작업 사용법](docs/USAGE.md#명시적으로-맡긴-작업)을 참고하세요. 네 PRD의 독립 PASS와 통합 범위는 [Spec 036 종료 증거](docs/specs/036-entrusted-work-continuity-and-change-notification/SPEC.md#종료-증거-2026-10-19)에 기록했습니다.
+
 사용자 소유 local artifact에 대한 CAS self-improvement는 `improve propose|inspect|apply|verify|candidate|rollback`으로 실행합니다. Target은 `--root` 아래 상대 경로만 허용하며 apply/rollback은 current hook, confirmation, process, sandbox, credential gate를 다시 확인합니다.
 
 Recorded-only trajectory와 release evidence는 다음 binary로 생성합니다:
