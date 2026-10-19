@@ -469,6 +469,31 @@ impl DurableWorkDispatcher {
             .is_some())
     }
 
+    pub(crate) fn record_observation_terminal(
+        &mut self,
+        item: &ReplayWorkItem,
+        observation: &super::ObservationRecord,
+    ) -> Result<DurableEventRecord, DurableDispatchError> {
+        let terminal_kind = match observation.result {
+            super::ObservationResult::Observed { .. } => WorkTerminalKind::Succeeded,
+            super::ObservationResult::Unavailable { .. } => WorkTerminalKind::Failed,
+            super::ObservationResult::Blocked { .. } => WorkTerminalKind::Blocked,
+        };
+        self.append_for_item(
+            item,
+            WORK_TERMINAL,
+            &shacs_session::durable_work::WorkTerminalCommit {
+                terminal: WorkTerminal {
+                    work_id: item.work_id.clone(),
+                    terminal_kind,
+                    outcome_ref: super::ENTRUSTED_OBSERVATION_OUTCOME.to_owned(),
+                    facts: Some(serde_json::to_value(observation)?),
+                },
+                cancel_if_requested: true,
+            },
+        )
+    }
+
     pub fn requeue_stale(
         &mut self,
         state: &DurableWorkReplayState,
@@ -548,6 +573,13 @@ impl DurableWorkDispatcher {
             );
         }
         message.session_key_override = Some(item.session_key.clone());
+        if item
+            .work_id
+            .starts_with(super::ENTRUSTED_NOTIFICATION_PREFIX)
+            && item.dedupe_hint.as_deref() == Some(item.work_id.as_str())
+        {
+            message = message.with_owner_accepted_notification(item.work_id.clone());
+        }
         message.metadata.insert(
             DURABLE_WORK_ID_METADATA.to_owned(),
             serde_json::Value::String(item.work_id.clone()),
