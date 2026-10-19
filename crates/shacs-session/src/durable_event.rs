@@ -33,6 +33,7 @@ const TOOL_RESULT_ARTIFACT_PREFIX: &str = ".nanobot/tool-results/";
 pub const SESSION_TURN_ACCEPTED: &str = "session.turn_accepted";
 pub const SESSION_TURN_COMPLETED: &str = "session.turn_completed";
 pub const SESSION_TURN_FAILED: &str = "session.turn_failed";
+pub const ENTRUSTED_NOTIFICATION_FACT: &str = "entrusted.notification_fact";
 pub const WORKFLOW_PLANNED: &str = "workflow.planned";
 pub const WORKFLOW_COMPLETED: &str = "workflow.completed";
 pub const WORKFLOW_FAILED: &str = "workflow.failed";
@@ -176,6 +177,7 @@ impl Default for DurableEventSchemaRegistry {
             SESSION_TURN_ACCEPTED,
             SESSION_TURN_COMPLETED,
             SESSION_TURN_FAILED,
+            ENTRUSTED_NOTIFICATION_FACT,
             WORKFLOW_PLANNED,
             WORKFLOW_COMPLETED,
             WORKFLOW_FAILED,
