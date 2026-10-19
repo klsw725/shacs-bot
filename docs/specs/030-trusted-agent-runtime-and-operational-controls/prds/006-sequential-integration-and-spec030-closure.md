@@ -24,11 +24,11 @@ PRD 001과 PRD 002는 PRD 000을 요구한다. PRD 003, PRD 004, PRD 005는 PRD 
 
 ## External gates
 
-1. Spec 035: trusted runtime, hook denial, process, sandbox, credential, resource diagnostics projection parity.
+1. 당시 Spec 035로 이관한 trusted runtime, hook denial, process, sandbox, credential, resource diagnostics projection parity. 035 문서는 현재 스펙 세트에서 제거됐으며 기존 구현 관측은 새 완료 판정이 아니다.
 2. Spec 032: app/skill install과 supervisor lifecycle의 trusted-code disclosure.
 3. Spec 031: config/profile/auth locator와 runtime layout persistence.
 
-External spec 전체의 `Complete` 상태는 요구하지 않는다. 각 external gate는 030 owner fact를 소비하는 adapter, focused test, artifact locator만 제공하면 된다. 031·032·035가 Open이어도 해당 030-specific evidence가 통과하면 030 closure에 사용할 수 있다.
+External spec 전체의 `Complete` 상태는 요구하지 않는다. 각 external gate는 030 owner fact를 소비하는 adapter, focused test, artifact locator만 제공하면 된다. 당시 031·032·035의 전체 status와 별개로 해당 030-specific evidence가 통과하면 030 closure에 사용할 수 있었다.
 
 ## Verification gates
 
