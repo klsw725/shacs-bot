@@ -90,7 +90,7 @@ pub struct Spec033GoalFact {
     pub budget: Spec033GoalBudgetFact,
     pub usage: Spec033GoalUsageSummary,
     pub user_interrupted: bool,
-    pub latest_transition: Option<Spec033GoalTransitionFact>,
+    pub latest_transition: Option<Box<Spec033GoalTransitionFact>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +113,8 @@ pub struct Spec033GoalBudgetFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec033GoalTransitionFact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_id: Option<String>,
     pub goal_id: String,
     pub prior_state: Spec033GoalStatus,
     pub current_state: Spec033GoalStatus,

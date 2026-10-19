@@ -172,7 +172,8 @@ fn snapshot_from_session(session: &Session) -> Spec033Snapshot {
 fn goal_owner(goal: PersistentGoal) -> Spec033GoalOwner {
     let remaining_turns = goal.turn_budget.saturating_sub(goal.turns_used);
     let latest_transition = goal.last_transition.as_ref().map(|transition| {
-        shacs_projection::Spec033GoalTransitionFact {
+        Box::new(shacs_projection::Spec033GoalTransitionFact {
+            transition_id: transition.transition_id.clone(),
             goal_id: transition.goal_id.clone(),
             prior_state: observed_state(transition.prior_state),
             current_state: observed_state(transition.current_state),
@@ -184,7 +185,7 @@ fn goal_owner(goal: PersistentGoal) -> Spec033GoalOwner {
             },
             user_interrupted: transition.user_interrupted,
             observed_at: transition.observed_at.clone(),
-        }
+        })
     });
     Spec033GoalOwner {
         availability: Spec033Availability::Available,

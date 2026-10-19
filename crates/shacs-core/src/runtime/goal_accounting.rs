@@ -96,6 +96,8 @@ pub struct GoalBudgetAccounting {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalTransitionFact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_id: Option<String>,
     pub goal_id: String,
     pub prior_state: GoalObservedState,
     pub current_state: GoalObservedState,
@@ -145,7 +147,14 @@ pub(super) fn transition_fact(
     stop_reason: GoalStopReason,
     observed_at: String,
 ) -> GoalTransitionFact {
+    let ordinal = goal
+        .transitions
+        .iter()
+        .filter(|fact| fact.goal_id == goal.id)
+        .count()
+        .saturating_add(1);
     GoalTransitionFact {
+        transition_id: Some(format!("goal-transition:{}:{ordinal}", goal.id)),
         goal_id: goal.id.clone(),
         prior_state,
         current_state: goal.status.into(),

@@ -1,8 +1,8 @@
 use shacs_projection::{
     Spec033AutomationFact, Spec033AutomationJobStatus, Spec033Availability, Spec033CapabilityOwner,
     Spec033DeliveryStatus, Spec033DiagnosticLink, Spec033DiagnosticUnavailableReason,
-    Spec033EvidenceSource, Spec033GoalStatus, Spec033HookConfirmationFact, Spec033Owner,
-    Spec033OwnerFact, Spec033Snapshot,
+    Spec033EvidenceSource, Spec033GoalStatus, Spec033GoalTransitionFact,
+    Spec033HookConfirmationFact, Spec033Owner, Spec033OwnerFact, Spec033Snapshot,
 };
 
 #[test]
@@ -117,4 +117,28 @@ fn owner_capabilities_are_typed_unavailable_without_evidence() {
         Spec033GoalStatus::Cleared,
     ];
     assert_eq!(statuses.len(), 5);
+}
+
+#[test]
+fn legacy_goal_transition_without_id_remains_readable() -> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let raw = serde_json::json!({
+        "goal_id": "goal-legacy",
+        "prior_state": "unavailable",
+        "current_state": "active",
+        "stop_reason": "goal_set",
+        "budget": {"turn_budget": 2, "turns_used": 0, "remaining_turns": 2},
+        "user_interrupted": false,
+        "observed_at": "t0"
+    });
+
+    // When
+    let transition: Spec033GoalTransitionFact = serde_json::from_value(raw)?;
+
+    // Then
+    assert!(transition.transition_id.is_none());
+    assert!(serde_json::to_value(transition)?
+        .get("transition_id")
+        .is_none());
+    Ok(())
 }

@@ -250,6 +250,7 @@ pub struct RuntimeDecisionRecord {
 
 #[derive(Debug)]
 pub enum GoalMetadataError {
+    Deserialize(serde_json::Error),
     Serialize(serde_json::Error),
     SnapshotDigest(serde_json::Error),
 }
@@ -257,6 +258,9 @@ pub enum GoalMetadataError {
 impl std::fmt::Display for GoalMetadataError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Deserialize(error) => {
+                write!(formatter, "goal metadata is malformed: {error}")
+            }
             Self::Serialize(error) => {
                 write!(formatter, "goal metadata could not serialize: {error}")
             }
@@ -982,6 +986,18 @@ pub fn persistent_goal_from_session(session: &Session) -> Option<PersistentGoal>
         .get(PERSISTENT_GOAL_METADATA_KEY)
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
+}
+
+pub(super) fn persistent_goal_result_from_session(
+    session: &Session,
+) -> Result<Option<PersistentGoal>, GoalMetadataError> {
+    session
+        .metadata
+        .get(PERSISTENT_GOAL_METADATA_KEY)
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(GoalMetadataError::Deserialize)
 }
 
 pub fn store_persistent_goal(
