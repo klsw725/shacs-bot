@@ -215,6 +215,14 @@ pub struct WorkTerminal {
     pub facts: Option<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkTerminalCommit {
+    #[serde(flatten)]
+    pub terminal: WorkTerminal,
+    #[serde(default)]
+    pub cancel_if_requested: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeControlRequested {
     pub requested_at_ms: u64,
@@ -306,7 +314,8 @@ pub(crate) fn normalize_durable_work_append(
     if event.kind != WORK_TERMINAL {
         return Ok(());
     }
-    let terminal = parse_payload::<WorkTerminal>(event)?;
+    let commit = parse_payload::<WorkTerminalCommit>(event)?;
+    let terminal = commit.terminal;
     let item =
         state
             .items
@@ -315,7 +324,7 @@ pub(crate) fn normalize_durable_work_append(
                 sequence: event.sequence,
                 work_id: terminal.work_id.clone(),
             })?;
-    if terminal.terminal_kind != WorkTerminalKind::Succeeded
+    if (terminal.terminal_kind != WorkTerminalKind::Succeeded && !commit.cancel_if_requested)
         || item.cancellation_requested_sequence.is_none()
         || item.state.is_terminal()
     {
@@ -326,7 +335,12 @@ pub(crate) fn normalize_durable_work_append(
         "durable_work",
         serde_json::to_value(WorkCancellation {
             work_id: terminal.work_id,
-            reason: "success_after_cancellation_request".to_owned(),
+            reason: if terminal.terminal_kind == WorkTerminalKind::Succeeded {
+                "success_after_cancellation_request"
+            } else {
+                "terminal_after_cancellation_request"
+            }
+            .to_owned(),
         })
         .map_err(|error| invalid_payload(event.sequence, error.to_string()))?,
     );
@@ -339,7 +353,8 @@ pub(crate) fn durable_work_append_requires_normalization(
     if event.kind != WORK_TERMINAL {
         return Ok(false);
     }
-    Ok(parse_payload::<WorkTerminal>(event)?.terminal_kind == WorkTerminalKind::Succeeded)
+    let commit = parse_payload::<WorkTerminalCommit>(event)?;
+    Ok(commit.cancel_if_requested || commit.terminal.terminal_kind == WorkTerminalKind::Succeeded)
 }
 
 fn apply_enqueued(
