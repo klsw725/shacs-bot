@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use super::coverage::{Spec031ExternalAuditRow, Spec031ReleaseCoverageEntry};
 
-pub const SPEC031_RELEASE_RUNNER_SCHEMA: &str = "spec031.release_runner.v2";
+pub const SPEC031_RELEASE_RUNNER_SCHEMA: &str = "spec031.release_runner.v3";
+pub(super) const SPEC031_RELEASE_RUNNER_SCHEMA_V2: &str = "spec031.release_runner.v2";
 const MAX_SAFE_ID_LEN: usize = 80;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

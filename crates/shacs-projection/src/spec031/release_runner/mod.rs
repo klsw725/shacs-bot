@@ -1,3 +1,4 @@
+mod archive_integrity;
 mod audit;
 mod command;
 mod command_process;
