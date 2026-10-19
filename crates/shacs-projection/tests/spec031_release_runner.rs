@@ -24,6 +24,35 @@ fn workspace_root() -> std::path::PathBuf {
         .expect("workspace root canonicalizes")
 }
 
+fn copy_spec035_archive(repo: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    for relative in [
+        "docs/archive/spec035/README.md",
+        "docs/archive/spec035/current/SHA256SUMS",
+        "docs/archive/spec035/current/SPEC.md",
+        "docs/archive/spec035/current/CLOSURE.md",
+        "docs/archive/spec035/current/prds/000-shared-projection-model-and-vocabulary.md",
+        "docs/archive/spec035/current/prds/001-surface-adapter-parity-cli-api-channel.md",
+        "docs/archive/spec035/current/prds/002-approval-progress-and-recovery-parity.md",
+        "docs/archive/spec035/current/prds/003-readiness-degraded-health-and-diagnostics.md",
+        "docs/archive/spec035/current/prds/004-context-extension-app-and-media-projection.md",
+        "docs/archive/spec035/current/prds/005-interactive-tui-repl-and-onboard-flows.md",
+        "docs/archive/spec035/current/prds/006-reconnect-backpressure-and-drop-accounting.md",
+        "docs/archive/spec035/current/prds/007-release-runner-and-spec035-closure.md",
+        "docs/archive/spec035/current/prds/008-transport-capability-and-snapshot-first-reconnect.md",
+        "docs/archive/spec035/current/prds/009-goal-and-read-only-tasks-projection.md",
+        "docs/specs/029-durable-runtime-recovery-and-data-migration/SPEC.md",
+        "docs/specs/030-trusted-agent-runtime-and-operational-controls/SPEC.md",
+        "docs/specs/032-app-maker-runtime-and-extension-lifecycle/SPEC.md",
+        "docs/specs/033-evaluation-automation-live-integration/SPEC.md",
+        "docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md",
+    ] {
+        let target = repo.join(relative);
+        fs::create_dir_all(target.parent().ok_or("archive parent")?)?;
+        fs::copy(workspace_root().join(relative), target)?;
+    }
+    Ok(())
+}
+
 fn command_from_spec(
     root: &std::path::Path,
     spec: Spec031ReleaseCommandSpec,
@@ -690,8 +719,13 @@ fn root_from(artifacts: &Spec031ReleaseRunArtifacts) -> std::path::PathBuf {
 fn spec031_current_runner_reports_external_blockers_before_dirty_masking(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = temp_path("dirty-blocked-repo");
-    fs::create_dir_all(&repo)?;
+    fs::create_dir_all(repo.join("crates"))?;
+    fs::write(
+        repo.join("crates/Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = []\n",
+    )?;
     run_git(&repo, &["init"])?;
+    copy_spec035_archive(&repo)?;
     fs::write(repo.join("dirty.txt"), "untracked\n")?;
     let evidence_root = temp_path("dirty-blocked-evidence");
 

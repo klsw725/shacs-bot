@@ -34,19 +34,14 @@ pub(super) fn validate_matrix_phase(
         return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
     }
     let mut seen = HashSet::new();
-    let mut expected_entries = super::coverage_matrix::coverage_entries(
+    let expected_entries = super::coverage_matrix::coverage_entries(
         &PathBuf::from(&artifacts.evidence_root),
         repo_root,
+        &artifacts.schema,
         Spec031CoverageStatus::Blocked,
         &artifacts.command_registry,
         &artifacts.external_audits,
     )?;
-    if !super::spec035_coverage::has_catalog(artifacts, repo_root)? {
-        if artifacts.fixture_registry != ["fixtures/success-fixture/Cargo.toml"] {
-            return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
-        }
-        expected_entries.retain(|entry| !entry.requirement_id.starts_with("spec035:"));
-    }
     let required_ids: HashSet<String> = expected_entries
         .iter()
         .map(|entry| entry.requirement_id.clone())
@@ -66,19 +61,19 @@ pub(super) fn validate_matrix_phase(
         let expected = expected_by_id
             .get(&entry.requirement_id)
             .ok_or(Spec031ReleaseArtifactError::UnknownCoverageRequirement)?;
-        if entry != expected {
+        if artifacts.schema != super::model::SPEC031_RELEASE_RUNNER_SCHEMA_V2 && entry != expected {
             return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
         }
     }
     if !required_ids.is_subset(&seen) {
         return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
     }
-    let deferred = super::spec035_catalog::postrun_ids();
-    if artifacts.coverage_matrix.iter().any(|entry| {
-        entry.requirement_id.starts_with("spec035:")
-            && entry.status == Spec031CoverageStatus::Blocked
-            && !(pending && deferred.contains(&entry.requirement_id))
-    }) {
+    if !pending
+        && artifacts
+            .coverage_matrix
+            .iter()
+            .any(|entry| entry.status == Spec031CoverageStatus::Blocked)
+    {
         return Err(Spec031ReleaseArtifactError::BlockedExternalEvidence);
     }
     Ok(())
@@ -106,8 +101,18 @@ fn validate_coverage_entry(
     {
         return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
     }
+    if entry.requirement_id == "spec031:archive:spec035"
+        && entry.status != Spec031CoverageStatus::Pass
+    {
+        return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
+    }
     validate_coverage_artifact(artifacts, entry)?;
-    validate_source_locator(&entry.source_locator, &entry.requirement_id, repo_root)?;
+    validate_source_locator(
+        artifacts,
+        &entry.source_locator,
+        &entry.requirement_id,
+        repo_root,
+    )?;
     validate_command_coverage(artifacts, entry)?;
     validate_external_coverage_status(artifacts, entry)?;
     validate_requirement_command_dependency(artifacts, entry)?;
@@ -116,6 +121,7 @@ fn validate_coverage_entry(
 }
 
 fn validate_source_locator(
+    artifacts: &Spec031ReleaseRunArtifacts,
     locator: &str,
     requirement_id: &str,
     root: &Path,
@@ -126,7 +132,8 @@ fn validate_source_locator(
     let line = line
         .parse::<usize>()
         .map_err(|_| Spec031ReleaseArtifactError::InvalidCoverageEvidence)?;
-    let text = std::fs::read_to_string(root.join(relative))
+    let source_path = legacy_source_path(artifacts, relative, root)?;
+    let text = std::fs::read_to_string(source_path)
         .map_err(|_| Spec031ReleaseArtifactError::InvalidCoverageEvidence)?;
     let Some(source_line) = text.lines().nth(line.saturating_sub(1)) else {
         return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
@@ -137,7 +144,40 @@ fn validate_source_locator(
     Ok(())
 }
 
+fn legacy_source_path(
+    artifacts: &Spec031ReleaseRunArtifacts,
+    relative: &str,
+    root: &Path,
+) -> Result<PathBuf, Spec031ReleaseArtifactError> {
+    const LEGACY_ROOT: &str =
+        "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity";
+    if artifacts.schema != super::model::SPEC031_RELEASE_RUNNER_SCHEMA_V2
+        || !relative.starts_with(LEGACY_ROOT)
+    {
+        return super::validate::require_safe_file(root, relative);
+    }
+    let binding: super::spec035_execution_model::ExecutionBinding = super::validate::read_json(
+        Path::new(&artifacts.evidence_root),
+        super::spec035_execution::BINDING,
+    )?;
+    let suffix = relative
+        .strip_prefix(LEGACY_ROOT)
+        .and_then(|path| path.strip_prefix('/'))
+        .ok_or(Spec031ReleaseArtifactError::InvalidCoverageEvidence)?;
+    let archived = if binding.source_sha256 == super::archive_integrity::G7_SOURCE_SHA256
+        && matches!(suffix, "SPEC.md" | "CLOSURE.md")
+    {
+        format!("docs/archive/spec035/g7/{suffix}")
+    } else {
+        format!("docs/archive/spec035/current/{suffix}")
+    };
+    super::validate::require_safe_file(root, &archived)
+}
+
 fn source_line_matches(line: &str, requirement_id: &str) -> bool {
+    if requirement_id == "spec031:archive:spec035" {
+        return line.contains("historical integrity checks");
+    }
     if requirement_id.starts_with("spec035:") {
         let number = requirement_id.rsplit([':', '-']).next().unwrap_or("");
         return line

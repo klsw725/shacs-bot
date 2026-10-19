@@ -2,9 +2,12 @@ use super::coverage::{
     artifact_hash, Spec031ArtifactMediaType, Spec031ExternalAuditRow, Spec031ExternalAuditStatus,
     Spec031ExternalOwnerId, Spec031TypedEvidenceClass,
 };
-use super::external_audit_facts::{external_owner_facts, ExternalOwnerFactDescriptor};
+use super::external_audit_facts::{
+    external_owner_facts, legacy_spec035_owner_fact, ExternalOwnerFactDescriptor,
+};
 use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseCommandStatus, Spec031ReleaseRunArtifacts,
+    SPEC031_RELEASE_RUNNER_SCHEMA,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -14,6 +17,14 @@ pub(super) fn validate_external_audits(
     repo_root: &Path,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     let root = PathBuf::from(&artifacts.evidence_root);
+    let required = if artifacts.schema == SPEC031_RELEASE_RUNNER_SCHEMA {
+        &required_external_owners()[..]
+    } else {
+        &required_external_owners_legacy()[..]
+    };
+    if artifacts.external_audits.len() != required.len() {
+        return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
+    }
     let mut owners = HashSet::new();
     for audit in &artifacts.external_audits {
         if !owners.insert(audit.owner) {
@@ -32,7 +43,7 @@ pub(super) fn validate_external_audits(
         validate_external_audit_content(&root, audit)?;
         validate_owner_facts(artifacts, audit, repo_root)?;
     }
-    for owner in required_external_owners() {
+    for &owner in required {
         if !owners.contains(&owner) {
             return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
         }
@@ -145,13 +156,23 @@ fn validate_owner_facts(
         if audit.implementation_artifacts != expected_fixture_fact_artifacts(audit.owner) {
             return Err(Spec031ReleaseArtifactError::BlockedAsPass);
         }
-    } else if audit.owner == Spec031ExternalOwnerId::Spec035 {
-        if audit.implementation_artifacts != [super::spec035_execution::MANIFEST]
-            || super::spec035_execution::preflight_bound(
-                repo_root,
-                Path::new(&artifacts.evidence_root),
-            )
-            .is_err()
+    } else if audit.owner == Spec031ExternalOwnerId::Spec035
+        && artifacts.schema == super::model::SPEC031_RELEASE_RUNNER_SCHEMA_V2
+    {
+        let binding: super::spec035_execution_model::ExecutionBinding = super::validate::read_json(
+            Path::new(&artifacts.evidence_root),
+            super::spec035_execution::BINDING,
+        )?;
+        if audit.implementation_artifacts != [super::spec035_execution::MANIFEST] {
+            return Err(Spec031ReleaseArtifactError::BlockedAsPass);
+        }
+        if binding.source_sha256 == super::archive_integrity::G7_SOURCE_SHA256 {
+            super::archive_integrity::validate_legacy_g7(repo_root)?;
+        } else if super::spec035_execution::preflight_bound(
+            repo_root,
+            Path::new(&artifacts.evidence_root),
+        )
+        .is_err()
         {
             return Err(Spec031ReleaseArtifactError::BlockedAsPass);
         }
@@ -159,6 +180,13 @@ fn validate_owner_facts(
         return Err(Spec031ReleaseArtifactError::BlockedAsPass);
     }
     for artifact in &audit.implementation_artifacts {
+        if artifacts.schema == super::model::SPEC031_RELEASE_RUNNER_SCHEMA_V2
+            && audit.owner == Spec031ExternalOwnerId::Spec035
+            && artifact == super::spec035_execution::MANIFEST
+            && super::archive_integrity::has_g7_binding(Path::new(&artifacts.evidence_root))
+        {
+            continue;
+        }
         if !fact_artifact_exists(repo_root, &artifacts.evidence_root, artifact) {
             return Err(Spec031ReleaseArtifactError::BlockedAsPass);
         }
@@ -197,6 +225,9 @@ fn fact_artifact_exists(root: &Path, evidence_root: &str, artifact: &str) -> boo
 fn expected_descriptor(
     owner: Spec031ExternalOwnerId,
 ) -> Result<&'static ExternalOwnerFactDescriptor, Spec031ReleaseArtifactError> {
+    if owner == Spec031ExternalOwnerId::Spec035 {
+        return Ok(legacy_spec035_owner_fact());
+    }
     external_owner_facts()
         .iter()
         .find(|descriptor| descriptor.owner == owner)
@@ -246,7 +277,17 @@ fn external_status_slug(status: Spec031ExternalAuditStatus) -> &'static str {
     }
 }
 
-fn required_external_owners() -> [Spec031ExternalOwnerId; 6] {
+fn required_external_owners() -> [Spec031ExternalOwnerId; 5] {
+    [
+        Spec031ExternalOwnerId::Spec029,
+        Spec031ExternalOwnerId::Spec030,
+        Spec031ExternalOwnerId::Spec032,
+        Spec031ExternalOwnerId::Spec033,
+        Spec031ExternalOwnerId::Spec034,
+    ]
+}
+
+fn required_external_owners_legacy() -> [Spec031ExternalOwnerId; 6] {
     [
         Spec031ExternalOwnerId::Spec029,
         Spec031ExternalOwnerId::Spec030,
