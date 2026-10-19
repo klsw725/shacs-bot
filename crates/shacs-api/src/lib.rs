@@ -50,6 +50,8 @@ mod spec035_reconnect;
 mod spec035_revised;
 mod spec035_tasks;
 mod spec035_transport;
+mod spec036_observation;
+mod spec036_work;
 pub use media_api::*;
 pub use spec030_api::TRUSTED_RUNTIME_PATH;
 pub use spec030_client::{
@@ -62,6 +64,7 @@ pub use spec035_revised::{
 };
 pub use spec035_tasks::{TASKS_ACTIONS_PATH, TASKS_PATH};
 pub use spec035_transport::{transport_hello_response, TRANSPORT_HELLO_PATH};
+pub use spec036_work::ENTRUSTED_WORK_SUFFIX;
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const MODELS_PATH: &str = "/v1/models";
@@ -1469,6 +1472,7 @@ fn is_local_mutation_request(method: ApiMethod, path: &str) -> bool {
     method == ApiMethod::Post
         && (path.starts_with("/v1/improvements/")
             || path == TASKS_ACTIONS_PATH
+            || spec036_work::is_entrusted_work_path(path)
             || (path.starts_with("/v1/sessions/") && path.contains("/goal/")))
 }
 
@@ -2040,6 +2044,7 @@ fn should_read_axum_body(
     method == ApiMethod::Post
         && (path == CHAT_COMPLETIONS_PATH
             || path.contains("/goal/")
+            || spec036_work::is_entrusted_work_path(path)
             || path == TASKS_ACTIONS_PATH
             || path == TRANSPORT_HELLO_PATH
             || path.starts_with("/v1/improvements/"))
