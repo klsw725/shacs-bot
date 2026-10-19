@@ -131,6 +131,7 @@ fn mid_turn_injection_callback(
         bus.drain_inbound_matching(max_injections, |message| {
             effective_session_key(message, unified_session_key.as_deref()) == session_key
                 && !is_command(&message.content)
+                && message.owner_accepted_notification().is_none()
         })
         .into_iter()
         .map(|message| injected_user_message(&context_builder, &message))
@@ -163,4 +164,24 @@ fn injected_user_message(builder: &ContextBuilder, message: &InboundMessage) -> 
         .into_iter()
         .find(|candidate| candidate.get("role").and_then(Value::as_str) == Some("user"))
         .unwrap_or_else(|| json!({"role": "user", "content": message.content}))
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn notification_waits_for_its_own_turn_instead_of_provider_injection() -> std::io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let bus = MessageBus::new();
+        bus.publish_inbound(InboundMessage::new("email", "system", "owner", "")
+            .with_owner_accepted_notification("notification:test".to_owned()));
+        let callback = mid_turn_injection_callback(bus.clone(), "email:owner".to_owned(), None, ContextBuilder::new(root.path()), 3, |_| false);
+
+        let injected = callback();
+
+        assert!(injected.is_empty());
+        assert_eq!(bus.inbound_size(), 1);
+        Ok(())
+    }
 }

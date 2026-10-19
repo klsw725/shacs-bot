@@ -36,6 +36,13 @@ pub struct InboundMessage {
     pub session_key_override: Option<String>,
     #[serde(skip)]
     owner_accepted_automation_result: Option<OwnerAcceptedAutomationResult>,
+    #[serde(skip)]
+    owner_accepted_notification: Option<Box<OwnerAcceptedNotification>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnerAcceptedNotification {
+    correlation_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +67,7 @@ impl InboundMessage {
             metadata: Map::new(),
             session_key_override: None,
             owner_accepted_automation_result: None,
+            owner_accepted_notification: None,
         }
     }
 
@@ -94,6 +102,18 @@ impl InboundMessage {
 
     pub fn owner_accepted_automation_result(&self) -> Option<&OwnerAcceptedAutomationResult> {
         self.owner_accepted_automation_result.as_ref()
+    }
+
+    pub fn with_owner_accepted_notification(mut self, correlation_id: String) -> Self {
+        self.owner_accepted_notification =
+            Some(Box::new(OwnerAcceptedNotification { correlation_id }));
+        self
+    }
+
+    pub fn owner_accepted_notification(&self) -> Option<&str> {
+        self.owner_accepted_notification
+            .as_ref()
+            .map(|origin| origin.correlation_id.as_str())
     }
 }
 
@@ -1730,6 +1750,7 @@ pub fn route_channel_command(request: ChannelCommandRequest) -> ChannelCommandAc
         metadata: request.metadata,
         session_key_override: request.session_key_override,
         owner_accepted_automation_result: None,
+        owner_accepted_notification: None,
     };
     ChannelCommandAction::Forward(inbound)
 }
