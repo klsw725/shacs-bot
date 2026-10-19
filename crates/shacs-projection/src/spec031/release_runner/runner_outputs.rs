@@ -5,7 +5,6 @@ use super::coverage_provenance::{requirement_provenance, REQUIRED_ARTIFACT_PROVE
 use super::external_audit_facts::external_owner_facts;
 use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseRunArtifacts, Spec031ReleaseRunnerConfig,
-    SPEC031_RELEASE_RUNNER_SCHEMA,
 };
 use super::writer::write_json;
 use crate::release_evidence::EvidenceWriter;
@@ -28,7 +27,7 @@ pub(super) fn push_cleanup(
         writer,
         &cleanup,
         &serde_json::json!({
-            "schema": SPEC031_RELEASE_RUNNER_SCHEMA,
+            "schema": artifacts.schema,
             "run_id": config.run_id.as_str(),
             "status": spec.status,
             "success": true,
@@ -80,7 +79,7 @@ pub(super) fn push_blocked_external_triage(
         writer,
         triage,
         &serde_json::json!({
-            "schema": SPEC031_RELEASE_RUNNER_SCHEMA,
+            "schema": artifacts.schema,
             "run_id": config.run_id.as_str(),
             "code": "blocked_external_evidence",
             "message": "required external read audits are not PASS",
@@ -92,49 +91,37 @@ pub(super) fn push_blocked_external_triage(
 }
 
 pub(super) fn write_evidence_index(
-    config: &Spec031ReleaseRunnerConfig,
     writer: &EvidenceWriter,
     artifacts: &mut Spec031ReleaseRunArtifacts,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     let path = "evidence-index.json";
-    let catalog = if artifacts
-        .manifest_files
-        .iter()
-        .any(|file| file == super::spec035_execution::BINDING)
-        || artifacts.fixture_registry == ["fixtures/success-fixture/Cargo.toml"]
-    {
-        super::spec035_catalog::catalog_at(&config.repo_root)?
-    } else {
-        super::spec035_catalog::catalog()
-    };
-    write_json(
-        writer,
-        path,
-        &serde_json::json!({
-            "schema": SPEC031_RELEASE_RUNNER_SCHEMA,
-            "run_id": config.run_id.as_str(),
-            "command_result_ids": artifacts.command_registry.iter().map(|record| record.id.as_str()).collect::<Vec<_>>(),
-            "external_audits": artifacts.external_audits.iter().map(indexed_audit).collect::<Vec<_>>(),
-            "fixtures": artifacts.fixture_registry,
-            "cleanup": artifacts.cleanup_registry,
-            "failure_triage": artifacts.failure_triage,
-            "reproducibility_observations": artifacts.reproducibility_observations,
-            "authoritative_sources": authoritative_sources(&catalog),
-            "spec035_catalog": catalog
-        }),
-    )?;
+    write_json(writer, path, &evidence_index(artifacts))?;
     if !artifacts.manifest_files.iter().any(|file| file == path) {
         artifacts.manifest_files.push(path.to_owned());
     }
     Ok(())
 }
 
-fn authoritative_sources(catalog: &[super::spec035_catalog::Requirement]) -> Vec<String> {
+pub(super) fn evidence_index(artifacts: &Spec031ReleaseRunArtifacts) -> serde_json::Value {
+    serde_json::json!({
+        "schema": artifacts.schema,
+        "run_id": artifacts.run_id.as_str(),
+        "command_result_ids": artifacts.command_registry.iter().map(|record| record.id.as_str()).collect::<Vec<_>>(),
+        "external_audits": artifacts.external_audits.iter().map(indexed_audit).collect::<Vec<_>>(),
+        "fixtures": artifacts.fixture_registry,
+        "cleanup": artifacts.cleanup_registry,
+        "failure_triage": artifacts.failure_triage,
+        "reproducibility_observations": artifacts.reproducibility_observations,
+        "authoritative_sources": authoritative_sources(),
+        "archive_integrity": super::archive_integrity::RECEIPT
+    })
+}
+
+fn authoritative_sources() -> Vec<String> {
     let mut sources: Vec<String> = requirement_provenance()
         .into_iter()
         .map(|row| row.source_locator)
         .collect();
-    sources.extend(catalog.iter().map(|row| row.source_locator.clone()));
     sources.extend(
         REQUIRED_ARTIFACT_PROVENANCE
             .iter()

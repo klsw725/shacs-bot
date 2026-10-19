@@ -12,6 +12,7 @@ fn spec031_blocked_external_triage_matches_blocked_audit_rows_before_commands(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = temp_path("blocked-triage-repo");
     fs::create_dir_all(repo.join("crates"))?;
+    copy_spec035_archive(&repo)?;
     fs::write(
         repo.join("crates/Cargo.toml"),
         "[workspace]\nresolver = \"2\"\nmembers = []\n",
@@ -30,7 +31,7 @@ fn spec031_blocked_external_triage_matches_blocked_audit_rows_before_commands(
 
     let artifacts: Spec031ReleaseRunArtifacts =
         serde_json::from_slice(&fs::read(evidence_root.join("manifest.json"))?)?;
-    assert!(artifacts.command_registry.is_empty());
+    assert!(!artifacts.command_registry.is_empty());
     let triage_path = evidence_root.join("triage/blocked-external-evidence.json");
     let triage: serde_json::Value = serde_json::from_slice(&fs::read(&triage_path)?)?;
     assert_eq!(
@@ -38,6 +39,36 @@ fn spec031_blocked_external_triage_matches_blocked_audit_rows_before_commands(
         blocked_audit_owner_set(&artifacts)
     );
 
+    Ok(())
+}
+
+fn copy_spec035_archive(repo: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for relative in [
+        "docs/archive/spec035/README.md",
+        "docs/archive/spec035/current/SHA256SUMS",
+        "docs/archive/spec035/current/SPEC.md",
+        "docs/archive/spec035/current/CLOSURE.md",
+        "docs/archive/spec035/current/prds/000-shared-projection-model-and-vocabulary.md",
+        "docs/archive/spec035/current/prds/001-surface-adapter-parity-cli-api-channel.md",
+        "docs/archive/spec035/current/prds/002-approval-progress-and-recovery-parity.md",
+        "docs/archive/spec035/current/prds/003-readiness-degraded-health-and-diagnostics.md",
+        "docs/archive/spec035/current/prds/004-context-extension-app-and-media-projection.md",
+        "docs/archive/spec035/current/prds/005-interactive-tui-repl-and-onboard-flows.md",
+        "docs/archive/spec035/current/prds/006-reconnect-backpressure-and-drop-accounting.md",
+        "docs/archive/spec035/current/prds/007-release-runner-and-spec035-closure.md",
+        "docs/archive/spec035/current/prds/008-transport-capability-and-snapshot-first-reconnect.md",
+        "docs/archive/spec035/current/prds/009-goal-and-read-only-tasks-projection.md",
+        "docs/specs/029-durable-runtime-recovery-and-data-migration/SPEC.md",
+        "docs/specs/030-trusted-agent-runtime-and-operational-controls/SPEC.md",
+        "docs/specs/032-app-maker-runtime-and-extension-lifecycle/SPEC.md",
+        "docs/specs/033-evaluation-automation-live-integration/SPEC.md",
+        "docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md",
+    ] {
+        let target = repo.join(relative);
+        fs::create_dir_all(target.parent().ok_or("archive parent")?)?;
+        fs::copy(source_root.join(relative), target)?;
+    }
     Ok(())
 }
 

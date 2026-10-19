@@ -9,7 +9,12 @@ pub fn write_spec031_release_artifacts(
 ) -> Result<(), Spec031ReleaseArtifactError> {
     let writer = EvidenceWriter::open_existing(evidence_root)
         .map_err(|_| Spec031ReleaseArtifactError::Io)?;
-    write_spec031_release_artifacts_with(&writer, artifacts)
+    write_spec031_release_artifacts_with(&writer, artifacts)?;
+    write_json(
+        &writer,
+        "evidence-index.json",
+        &super::runner_outputs::evidence_index(artifacts),
+    )
 }
 
 pub(super) fn write_json(
@@ -53,13 +58,18 @@ pub(super) fn write_spec031_release_artifacts_with(
 }
 
 pub(super) fn summary_status(artifacts: &Spec031ReleaseRunArtifacts) -> &'static str {
+    let legacy_spec035 = artifacts
+        .manifest_files
+        .iter()
+        .any(|file| file == super::spec035_execution::BINDING);
+    let expected_external_audits = if legacy_spec035 { 6 } else { 5 };
     if !artifacts.failure_triage.is_empty()
         || artifacts.command_registry.is_empty()
         || artifacts.command_registry.iter().any(|command| {
             command.status != super::model::Spec031ReleaseCommandStatus::Passed
                 || command.exit_code != Some(0)
         })
-        || artifacts.external_audits.len() != 6
+        || artifacts.external_audits.len() != expected_external_audits
         || artifacts
             .external_audits
             .iter()
@@ -74,14 +84,19 @@ pub(super) fn summary_status(artifacts: &Spec031ReleaseRunArtifacts) -> &'static
         .filter(|row| row.status == super::coverage::Spec031CoverageStatus::Blocked)
         .map(|row| row.requirement_id.clone())
         .collect();
-    if artifacts.fixture_registry == ["fixtures/current-worktree.json"] {
+    if legacy_spec035 && artifacts.fixture_registry == ["fixtures/current-worktree.json"] {
         if blocked == super::spec035_catalog::postrun_ids() {
             "pending-final-audit"
         } else {
             "BLOCKED"
         }
     } else if blocked.is_empty()
-        && artifacts.fixture_registry == ["fixtures/success-fixture/Cargo.toml"]
+        && matches!(
+            artifacts.fixture_registry.as_slice(),
+            [fixture]
+                if fixture == "fixtures/success-fixture/Cargo.toml"
+                    || fixture == "fixtures/current-worktree.json"
+        )
     {
         "PASS"
     } else {
