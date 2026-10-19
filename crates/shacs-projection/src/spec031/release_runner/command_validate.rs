@@ -19,7 +19,8 @@ pub(super) fn validate_command_registry(
     repo_root: &Path,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     let root = PathBuf::from(&artifacts.evidence_root);
-    let current_worktree = is_current_worktree(artifacts);
+    let current_worktree = is_current_worktree(artifacts)
+        && artifacts.schema == super::model::SPEC031_RELEASE_RUNNER_SCHEMA;
     let mut ids = HashSet::new();
     let mut paths = HashSet::new();
     for record in &artifacts.command_registry {
@@ -30,7 +31,9 @@ pub(super) fn validate_command_registry(
         require_unique(&mut paths, &record.stderr_path)?;
         validate_command_record(&root, record, current_worktree)?;
     }
-    validate_current_worktree_commands(artifacts, &ids, repo_root)?;
+    if artifacts.schema == super::model::SPEC031_RELEASE_RUNNER_SCHEMA {
+        validate_current_worktree_commands(artifacts, &ids, repo_root)?;
+    }
     Ok(())
 }
 

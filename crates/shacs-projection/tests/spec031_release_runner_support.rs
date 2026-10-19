@@ -108,6 +108,7 @@ fn remove_manifest_files(root: &std::path::Path) -> Result<(), Box<dyn std::erro
         "command-registry.json",
         "cleanup-registry.json",
         "summary.md",
+        "evidence-index.json",
     ] {
         let path = root.join(file);
         if path.exists() {
