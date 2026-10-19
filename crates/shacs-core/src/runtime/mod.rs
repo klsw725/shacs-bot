@@ -25,6 +25,24 @@ mod context_resolvers;
 mod context_safety;
 mod diagnostics;
 mod durable_dispatch;
+mod entrusted_comparison;
+mod entrusted_comparison_cancelled;
+mod entrusted_comparison_evaluate;
+mod entrusted_notification;
+mod entrusted_notification_delivery;
+mod entrusted_notification_dispatch;
+mod entrusted_notification_render;
+mod entrusted_notification_store;
+mod entrusted_observation;
+mod entrusted_observation_dispatch;
+mod entrusted_observation_source;
+mod entrusted_observation_store;
+mod entrusted_observation_surface;
+mod entrusted_work;
+mod entrusted_work_access;
+mod entrusted_work_conversation;
+mod entrusted_work_store;
+mod entrusted_work_surface;
 mod execution_contract;
 mod execution_snapshot;
 mod execution_snapshot_source;
@@ -200,6 +218,41 @@ pub use diagnostics::{
 pub use durable_dispatch::{
     inline_control_payload, runtime_control_payload, DurableDispatchError, DurableDispatchSummary,
     DurableStaleRecoverySummary, DurableWorkDispatcher, DurableWorkEnqueueInput,
+};
+pub use entrusted_comparison::{
+    IntegerObservationSummary, ObservationComparisonEvidence, ObservationComparisonLimit,
+    ObservationComparisonPolicy, ObservationComparisonReason, ObservationCriterion,
+    ObservationDecision, ObservationDecisionBasis, ObservationSummarySchema, ObservationVerdict,
+};
+pub use entrusted_notification::{
+    EntrustedNotificationDeliveryState, EntrustedNotificationEnqueueState,
+    EntrustedNotificationFact, EntrustedNotificationIntent, EntrustedNotificationKind,
+    EntrustedNotificationSnapshot, EntrustedNotificationStage, ENTRUSTED_NOTIFICATION_CORRELATION,
+    ENTRUSTED_NOTIFICATION_PREFIX,
+};
+pub use entrusted_notification_delivery::{
+    record_entrusted_notification_delivery, EntrustedNotificationTransportFact,
+};
+pub use entrusted_observation::{
+    ConfigureObservationRequest, EntrustedObservationPlan, EntrustedObservationSnapshot,
+    ObservationBlock, ObservationError, ObservationNextWake, ObservationRecord, ObservationResult,
+    ObservationSource, ObservationWake, ENTRUSTED_OBSERVATION_OUTCOME,
+    ENTRUSTED_OBSERVATION_WORK_KIND, MAX_OBSERVATION_BYTES,
+};
+pub use entrusted_observation_dispatch::{EntrustedObservationExecutor, ObservationRuntime};
+pub use entrusted_observation_source::BoundedObservationTool;
+pub use entrusted_observation_surface::{
+    configure_entrusted_observation, read_entrusted_observation,
+};
+pub use entrusted_work::{
+    EntrustedWork, EntrustedWorkConditions, EntrustedWorkConsentKind, EntrustedWorkConsentProof,
+    EntrustedWorkCreateRequest, EntrustedWorkError, EntrustedWorkLifecycleAction,
+    EntrustedWorkLifecycleRequest, EntrustedWorkMetadataError, EntrustedWorkReadRequest,
+    EntrustedWorkReviseRequest, EntrustedWorkRevision, EntrustedWorkSnapshot,
+    ENTRUSTED_WORK_METADATA_KEY,
+};
+pub use entrusted_work_surface::{
+    create_entrusted_work, read_entrusted_work, revise_entrusted_work, transition_entrusted_work,
 };
 pub use execution_contract::{
     ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope,

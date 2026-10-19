@@ -1,3 +1,6 @@
+use crate::runtime::entrusted_work_conversation::{
+    clear_pending_proposal, pending_proposal, proposal_from_runner_messages, store_pending_proposal,
+};
 use crate::runtime::permission_pattern::session_approval_reuse_pattern;
 use crate::runtime::tool_execution::permissioned_action_input_from_context;
 use crate::runtime::tool_execution::{
@@ -61,7 +64,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use shacs_command::{
     build_help_text, is_builtin_command, parse_loop_command_route, CommandKind, GoalCommandArgs,
-    HistoryCommandArgs, LoopCommand, PermissionCommandArgs,
+    HistoryCommandArgs, LoopCommand, PermissionCommandArgs, WorkCommandArgs,
 };
 use shacs_config::{
     AutoApprovalConfig, RawCredential, RememberedPermissionEffect, RememberedPermissionFileStore,
@@ -91,10 +94,16 @@ use shacs_utils::gitstore::{GitCliStore, GitStore};
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
+
+#[path = "agent_loop_action.rs"]
+mod action;
+#[path = "agent_loop_notification.rs"]
+mod notification;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkflowDurableFactState {
@@ -117,12 +126,29 @@ const INTERRUPTED_PLACEHOLDER: &str =
     "[Assistant reply unavailable because the previous turn was interrupted.]";
 const PENDING_TOOL_PLACEHOLDER: &str = "[Tool result unavailable — call was interrupted or lost]";
 const MAX_INJECTIONS_PER_TURN: usize = 3;
+const MAX_WORK_TEXT_CHARS: usize = 2_000;
+static COMMAND_TURN_NONCE: AtomicU64 = AtomicU64::new(0);
 const SYSTEM_BOOTSTRAP_CONTEXT_FILE_NAMES: [&str; 4] =
     ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
 
 type MessageDeliveryTarget = Arc<Mutex<Option<(String, String)>>>;
 pub type PermissionModeSetter =
     Arc<dyn Fn(PermissionMode) -> Result<PermissionModeSnapshot, String> + Send + Sync>;
+
+struct WorkTransitionCommand<'a> {
+    session_key: &'a str,
+    work_id: String,
+    action: crate::runtime::EntrustedWorkLifecycleAction,
+    observed_at: &'a str,
+}
+
+struct WorkProposalAcceptance<'a> {
+    message: &'a InboundMessage,
+    session_key: &'a str,
+    session: &'a Session,
+    proposal_id: &'a str,
+    timestamp: &'a str,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PendingPermissionWizard {
@@ -298,6 +324,7 @@ pub enum AgentLoopCommandResult {
     DreamLog,
     DreamRestore,
     Permission,
+    Work,
     Help,
     PluginCommand,
 }
@@ -734,6 +761,10 @@ impl<'a> AgentLoop<'a> {
         message: InboundMessage,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         let session_key = self.effective_session_key(&message);
+        if message.owner_accepted_notification().is_some() {
+            let _turn_guard = self.turn_lock.acquire(session_key.clone())?;
+            return self.process_entrusted_notification(&message, &session_key);
+        }
         let routed_command = parse_loop_command_route(&message.content);
 
         if let Some(route) = routed_command
@@ -782,6 +813,13 @@ impl<'a> AgentLoop<'a> {
             }
             Err(error) => return Err(error.into()),
         };
+        if let Some(LoopCommand::Work(args)) =
+            routed_command.as_ref().map(|route| route.command.clone())
+        {
+            let result = self.handle_work_command(args, &message, &session_key);
+            drop(turn_guard);
+            return result;
+        }
         self.process_message_with_turn_guard(message, session_key, routed_command, turn_guard)
     }
 
@@ -816,6 +854,16 @@ impl<'a> AgentLoop<'a> {
             return self.handle_loop_command(route.command, &message, session, true, None);
         }
 
+        let action_resume =
+            match action::check_reply(&mut session, &message, action::process_epoch())? {
+                action::Reply::Continue => None,
+                action::Reply::Resume(content) => Some(content),
+                action::Reply::Respond { content, reason } => {
+                    return self
+                        .publish_command_response(&message, session, &content, None, reason, true);
+                }
+            };
+
         if pending_permission_wizard(&session).is_some() {
             return self.handle_pending_permission_wizard(&message, session, &session_key);
         }
@@ -839,7 +887,11 @@ impl<'a> AgentLoop<'a> {
         }
 
         let mut session_summary = None;
-        if let Some(auto_compact) = self.auto_compact.as_mut() {
+        if let Some(auto_compact) = self
+            .auto_compact
+            .as_mut()
+            .filter(|_| action_resume.is_none())
+        {
             let prepared =
                 auto_compact.prepare_session(&mut self.sessions, session, &session_key)?;
             session = prepared.0;
@@ -1011,6 +1063,7 @@ impl<'a> AgentLoop<'a> {
                 PermissionApprovalReply::Deny => {
                     self.recent_retry_tokens.invalidate(&approval.denial_id);
                     session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                    action::cancel(&mut session);
                     return self.publish_command_response(
                         &message,
                         session,
@@ -1328,6 +1381,7 @@ impl<'a> AgentLoop<'a> {
                         .to_json(),
                     );
                     session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
+                    action::cancel(&mut session);
                     return self.publish_command_response(
                         &message,
                         session,
@@ -1349,7 +1403,11 @@ impl<'a> AgentLoop<'a> {
                 }
             }
         } else if let Some(tool_call_id) = pending_ask_id {
-            append_ask_user_resume(&mut session, &tool_call_id, &message.content);
+            append_ask_user_resume(
+                &mut session,
+                &tool_call_id,
+                action_resume.as_deref().unwrap_or(&message.content),
+            );
             let history = session.get_history_with_options(self.config.history_options);
             let mut messages = vec![json!({
                 "role": "system",
@@ -1483,7 +1541,9 @@ impl<'a> AgentLoop<'a> {
             cancellation_token: None,
             deadline: None,
         };
-        let provider_invocation: ProviderInvocation = media_turn.invoke(is_builtin_command);
+        let provider_invocation: ProviderInvocation = media_turn.invoke(|content| {
+            is_builtin_command(content) || crate::tools::ask_action::is_command(content)
+        });
         let provider_client = ProviderInvocationClient::new(self.client, &provider_invocation);
         let mut spec = AgentRunSpec::new(
             initial_messages.clone(),
@@ -1534,10 +1594,11 @@ impl<'a> AgentLoop<'a> {
             let _ = recover_lock(&checkpoint_manager_capture).save(&session);
         }));
 
-        let run_result = match self.runner.run(spec) {
+        let mut run_result = match self.runner.run(spec) {
             Ok(result) => result,
             Err(error) => {
                 store_current_execution_snapshot(&mut session, &run_snapshot);
+                action::cancel(&mut session);
                 session.add_message("assistant", provider_error_text(&error), Map::new());
                 clear_runtime_markers(&mut session);
                 let execution_ledger = recover_lock(&execution_ledger);
@@ -1568,6 +1629,18 @@ impl<'a> AgentLoop<'a> {
             }
         };
         append_new_runner_messages(&mut session, &initial_messages, &run_result.messages);
+        let new_runner_messages = run_result
+            .messages
+            .get(initial_messages.len()..)
+            .unwrap_or_default();
+        if let Some(proposal) =
+            proposal_from_runner_messages(new_runner_messages, &message, &session_key, now_iso())
+        {
+            let prompt = proposal.render_prompt();
+            store_pending_proposal(&mut session, &proposal);
+            run_result.final_content = Some(prompt);
+            run_result.stop_reason = "entrusted_work_proposed".to_owned();
+        }
         store_current_execution_snapshot(&mut session, &run_snapshot);
         self.recent_retry_tokens
             .extend(run_result.recent_auto_mode_retry_tokens.clone());
@@ -1581,6 +1654,7 @@ impl<'a> AgentLoop<'a> {
             &message,
             &session_key,
         );
+        self.finish_action_question(&mut session, &message, &mut run_result)?;
         let execution_ledger = recover_lock(&execution_ledger);
         let provenance =
             durable_event_provenance_from_snapshot(&turn_provenance, &execution_ledger);
@@ -2510,12 +2584,14 @@ impl<'a> AgentLoop<'a> {
                 )
             }
             LoopCommand::New => {
+                action::cancel(&mut session);
                 self.stopped = false;
                 let _ = self.task_registry.cancel(&session.key);
                 session.clear();
                 clear_runtime_markers(&mut session);
                 session.metadata.remove(SESSION_PERMISSION_APPROVALS_KEY);
                 session.metadata.remove(SESSION_REMEMBERED_PERMISSIONS_KEY);
+                clear_pending_proposal(&mut session);
                 remove_persistent_goal(&mut session);
                 self.publish_command_response(
                     message,
@@ -2537,7 +2613,16 @@ impl<'a> AgentLoop<'a> {
                     save_session,
                 )
             }
+            LoopCommand::Work(_) => self.publish_command_response(
+                message,
+                session,
+                "Entrusted work command routing failed closed.",
+                Some(AgentLoopCommandResult::Work),
+                "work_routing_error",
+                save_session,
+            ),
             LoopCommand::Stop => {
+                action::cancel(&mut session);
                 let synchronous_turn_cancelled = matches!(
                     stop_cancel,
                     Some(SessionTurnCancelOutcome::Active | SessionTurnCancelOutcome::Reserved)
@@ -2724,6 +2809,244 @@ impl<'a> AgentLoop<'a> {
                 save_session,
             ),
         }
+    }
+
+    fn handle_work_command(
+        &mut self,
+        args: WorkCommandArgs,
+        message: &InboundMessage,
+        session_key: &str,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        let session = self.sessions.get_or_create(session_key);
+        self.sessions.save(&session)?;
+        let timestamp = now_iso();
+        let outcome = match args {
+            WorkCommandArgs::Create(goal_text) => {
+                if !work_text_is_bounded(&goal_text) {
+                    Err("Work text must be between 1 and 2,000 characters.".to_owned())
+                } else {
+                    crate::runtime::create_entrusted_work(
+                        &self.config.workspace,
+                        crate::runtime::EntrustedWorkCreateRequest {
+                            owner_session_id: session_key.to_owned(),
+                            goal_text: goal_text.clone(),
+                            turn_budget: DEFAULT_GOAL_TURN_BUDGET,
+                            consent: crate::runtime::EntrustedWorkConsentProof {
+                                kind: crate::runtime::EntrustedWorkConsentKind::ExplicitRequest,
+                                evidence_ref: explicit_work_evidence(message, &session),
+                                recorded_at: timestamp.clone(),
+                            },
+                            conditions: crate::runtime::EntrustedWorkConditions {
+                                instructions: goal_text,
+                                budget: None,
+                                prior_decisions: Vec::new(),
+                                remaining_questions: Vec::new(),
+                            },
+                            linked_targets: Vec::new(),
+                            observed_at: timestamp.clone(),
+                        },
+                    )
+                    .map(|snapshot| format_entrusted_work_snapshot("Created", &snapshot))
+                    .map_err(|error| error.to_string())
+                }
+            }
+            WorkCommandArgs::Read(work_id) => crate::runtime::read_entrusted_work(
+                &self.config.workspace,
+                &crate::runtime::EntrustedWorkReadRequest {
+                    owner_session_id: session_key.to_owned(),
+                    requester_target: session_key.to_owned(),
+                    work_id,
+                },
+            )
+            .map(|snapshot| format_entrusted_work_snapshot("Work", &snapshot))
+            .map_err(|error| error.to_string()),
+            WorkCommandArgs::Edit {
+                work_id,
+                expected_revision,
+                instructions,
+            } => {
+                if !work_text_is_bounded(&instructions) {
+                    Err("Work instructions must be between 1 and 2,000 characters.".to_owned())
+                } else {
+                    crate::runtime::read_entrusted_work(
+                        &self.config.workspace,
+                        &crate::runtime::EntrustedWorkReadRequest {
+                            owner_session_id: session_key.to_owned(),
+                            requester_target: session_key.to_owned(),
+                            work_id: work_id.clone(),
+                        },
+                    )
+                    .and_then(|current| {
+                        let mut conditions =
+                            current.work.current_conditions().cloned().ok_or(
+                                crate::runtime::EntrustedWorkError::InvalidInput("revision"),
+                            )?;
+                        conditions.instructions = instructions;
+                        crate::runtime::revise_entrusted_work(
+                            &self.config.workspace,
+                            crate::runtime::EntrustedWorkReviseRequest {
+                                owner_session_id: session_key.to_owned(),
+                                requester_target: session_key.to_owned(),
+                                work_id,
+                                expected_revision,
+                                conditions,
+                                linked_targets: None,
+                                changed_at: timestamp.clone(),
+                            },
+                        )
+                    })
+                    .map(|snapshot| format_entrusted_work_snapshot("Updated", &snapshot))
+                    .map_err(|error| error.to_string())
+                }
+            }
+            WorkCommandArgs::Pause(work_id) => {
+                self.transition_work_command(WorkTransitionCommand {
+                    session_key,
+                    work_id,
+                    action: crate::runtime::EntrustedWorkLifecycleAction::Pause,
+                    observed_at: &timestamp,
+                })
+            }
+            WorkCommandArgs::Resume(work_id) => {
+                self.transition_work_command(WorkTransitionCommand {
+                    session_key,
+                    work_id,
+                    action: crate::runtime::EntrustedWorkLifecycleAction::Resume,
+                    observed_at: &timestamp,
+                })
+            }
+            WorkCommandArgs::Done(work_id) => self.transition_work_command(WorkTransitionCommand {
+                session_key,
+                work_id,
+                action: crate::runtime::EntrustedWorkLifecycleAction::Done,
+                observed_at: &timestamp,
+            }),
+            WorkCommandArgs::Clear(work_id) => {
+                self.transition_work_command(WorkTransitionCommand {
+                    session_key,
+                    work_id,
+                    action: crate::runtime::EntrustedWorkLifecycleAction::Clear,
+                    observed_at: &timestamp,
+                })
+            }
+            WorkCommandArgs::Accept(proposal_id) => {
+                self.accept_work_proposal(WorkProposalAcceptance {
+                    message,
+                    session_key,
+                    session: &session,
+                    proposal_id: &proposal_id,
+                    timestamp: &timestamp,
+                })
+            }
+            WorkCommandArgs::Decline(proposal_id) => match pending_proposal(&session) {
+                Some(proposal)
+                    if proposal.proposal_id == proposal_id
+                        && proposal.matches_request(message, session_key) =>
+                {
+                    let _mutation_guard = shacs_session::SessionMutationGuard::acquire(
+                        &self.config.workspace,
+                        session_key,
+                    )?;
+                    let mut updated = session.clone();
+                    clear_pending_proposal(&mut updated);
+                    self.sessions.save(&updated)?;
+                    Ok(format!("Declined entrusted work proposal `{proposal_id}`."))
+                }
+                Some(_) => Err("Proposal token or requester identity did not match.".to_owned()),
+                None => {
+                    Err("No pending entrusted work proposal exists in this session.".to_owned())
+                }
+            },
+            WorkCommandArgs::Invalid => Err(work_command_usage().to_owned()),
+        };
+        let _mutation_guard =
+            shacs_session::SessionMutationGuard::acquire(&self.config.workspace, session_key)?;
+        self.sessions.invalidate(session_key);
+        let session = self.sessions.get_or_create(session_key);
+        let (content, stop_reason) = match outcome {
+            Ok(content) => (content, "work"),
+            Err(error) => (
+                format!("Entrusted work unchanged: {error}"),
+                "work_rejected",
+            ),
+        };
+        self.publish_command_response(
+            message,
+            session,
+            &content,
+            Some(AgentLoopCommandResult::Work),
+            stop_reason,
+            true,
+        )
+    }
+
+    fn transition_work_command(
+        &self,
+        command: WorkTransitionCommand<'_>,
+    ) -> Result<String, String> {
+        crate::runtime::transition_entrusted_work(
+            &self.config.workspace,
+            crate::runtime::EntrustedWorkLifecycleRequest {
+                owner_session_id: command.session_key.to_owned(),
+                requester_target: command.session_key.to_owned(),
+                work_id: command.work_id,
+                action: command.action,
+                observed_at: command.observed_at.to_owned(),
+            },
+        )
+        .map(|snapshot| format_entrusted_work_snapshot("Updated", &snapshot))
+        .map_err(|error| error.to_string())
+    }
+
+    fn accept_work_proposal(
+        &self,
+        acceptance: WorkProposalAcceptance<'_>,
+    ) -> Result<String, String> {
+        let proposal = pending_proposal(acceptance.session).ok_or_else(|| {
+            "No pending entrusted work proposal exists in this session.".to_owned()
+        })?;
+        if proposal.proposal_id != acceptance.proposal_id
+            || !proposal.matches_request(acceptance.message, acceptance.session_key)
+        {
+            return Err("Proposal token or requester identity did not match.".to_owned());
+        }
+        let snapshot = crate::runtime::create_entrusted_work(
+            &self.config.workspace,
+            crate::runtime::EntrustedWorkCreateRequest {
+                owner_session_id: acceptance.session_key.to_owned(),
+                goal_text: proposal.draft.goal_text,
+                turn_budget: proposal.draft.turn_budget,
+                consent: crate::runtime::EntrustedWorkConsentProof {
+                    kind: crate::runtime::EntrustedWorkConsentKind::ConfirmedProposal,
+                    evidence_ref: proposal.evidence_ref,
+                    recorded_at: acceptance.timestamp.to_owned(),
+                },
+                conditions: crate::runtime::EntrustedWorkConditions {
+                    instructions: proposal.draft.instructions,
+                    budget: None,
+                    prior_decisions: Vec::new(),
+                    remaining_questions: Vec::new(),
+                },
+                linked_targets: Vec::new(),
+                observed_at: acceptance.timestamp.to_owned(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let _mutation_guard = shacs_session::SessionMutationGuard::acquire(
+            &self.config.workspace,
+            acceptance.session_key,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut manager =
+            SessionManager::new(&self.config.workspace).map_err(|error| error.to_string())?;
+        let mut updated = manager
+            .load_existing(acceptance.session_key)
+            .ok_or_else(|| "Entrusted work owner session disappeared.".to_owned())?;
+        clear_pending_proposal(&mut updated);
+        manager
+            .save_with_fsync(&updated)
+            .map_err(|error| error.to_string())?;
+        Ok(format_entrusted_work_snapshot("Accepted", &snapshot))
     }
 
     fn try_plugin_command(
@@ -3008,9 +3331,24 @@ impl<'a> AgentLoop<'a> {
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         let session_key = session.key.clone();
         if save_session {
+            let turn_id = if message
+                .metadata
+                .get("message_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+            {
+                turn_id_for_message(message, &session)
+            } else {
+                format!(
+                    "turn:{session_key}:command:{}:{}:{}",
+                    std::process::id(),
+                    now_iso(),
+                    COMMAND_TURN_NONCE.fetch_add(1, Ordering::Relaxed)
+                )
+            };
             self.append_durable_fact(
                 &session_key,
-                Some(turn_id_for_message(message, &session)),
+                Some(turn_id),
                 SESSION_TURN_COMPLETED,
                 json!({
                     "command": command.clone(),
@@ -3372,6 +3710,7 @@ pub struct AgentLoopRunSummary {
 
 #[derive(Debug)]
 pub enum AgentLoopError {
+    Observation(crate::runtime::ObservationError),
     Session(std::io::Error),
     DurableEvent(DurableEventError),
     DurableDispatch(crate::runtime::DurableDispatchError),
@@ -3387,6 +3726,7 @@ pub enum AgentLoopError {
 impl fmt::Display for AgentLoopError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Observation(error) => error.fmt(formatter),
             Self::Session(error) => write!(formatter, "session persistence failed: {error}"),
             Self::DurableEvent(error) => write!(formatter, "durable event append failed: {error}"),
             Self::DurableDispatch(error) => write!(formatter, "durable dispatch failed: {error}"),
@@ -3409,6 +3749,12 @@ impl fmt::Display for AgentLoopError {
 }
 
 impl Error for AgentLoopError {}
+
+impl From<crate::runtime::ObservationError> for AgentLoopError {
+    fn from(error: crate::runtime::ObservationError) -> Self {
+        Self::Observation(error)
+    }
+}
 
 impl From<std::io::Error> for AgentLoopError {
     fn from(error: std::io::Error) -> Self {
@@ -4349,6 +4695,45 @@ fn append_ask_user_resume(session: &mut Session, tool_call_id: &str, content: &s
             "timestamp": now_iso(),
         }),
     );
+}
+
+fn explicit_work_evidence(message: &InboundMessage, session: &Session) -> String {
+    message
+        .metadata
+        .get("message_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message_id| !message_id.is_empty())
+        .map(|message_id| format!("message:{message_id}"))
+        .unwrap_or_else(|| turn_id_for_message(message, session))
+}
+
+fn work_text_is_bounded(text: &str) -> bool {
+    let count = text.trim().chars().count();
+    count > 0 && count <= MAX_WORK_TEXT_CHARS
+}
+
+fn format_entrusted_work_snapshot(
+    prefix: &str,
+    snapshot: &crate::runtime::EntrustedWorkSnapshot,
+) -> String {
+    let instructions = snapshot
+        .work
+        .current_conditions()
+        .map(|conditions| conditions.instructions.as_str())
+        .unwrap_or("unavailable");
+    format!(
+        "{prefix} entrusted work `{}`: status={:?}, revision={}, goal_id={}, transition_id={}, instructions={instructions}",
+        snapshot.work.work_id,
+        snapshot.goal_status,
+        snapshot.work.current_revision,
+        snapshot.work.goal_id,
+        snapshot.latest_goal_transition_id
+    )
+}
+
+fn work_command_usage() -> &'static str {
+    "Usage: /work create <text>, /work read <work-id>, /work edit <work-id> <revision> <instructions>, /work pause|resume|done|clear <work-id>, or /work accept|decline <proposal-id>."
 }
 
 fn append_new_runner_messages(
@@ -5534,6 +5919,7 @@ fn truncate_history_line(value: &str, max_chars: usize) -> String {
 }
 
 fn materialize_recovery_markers(session: &mut Session) {
+    action::preserve_checkpoint_boundary(session);
     let had_checkpoint = session.metadata.contains_key(RUNTIME_CHECKPOINT_KEY);
     if let Some(checkpoint) = session.metadata.remove(RUNTIME_CHECKPOINT_KEY) {
         if workflow_checkpoint_is_resumable(&checkpoint) {

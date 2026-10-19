@@ -1,4 +1,5 @@
 mod ask;
+pub(crate) mod ask_action;
 mod base;
 mod cron;
 mod file_state;
@@ -7,6 +8,7 @@ mod image_generation;
 mod mcp;
 mod message;
 mod notebook;
+mod propose_entrusted_work;
 mod registry;
 mod sandbox;
 mod schema;
@@ -39,6 +41,10 @@ pub use mcp::{
 };
 pub use message::{MessageSender, MessageTool, OutboundMessage};
 pub use notebook::NotebookEditTool;
+pub(crate) use propose_entrusted_work::{
+    proposal_draft_from_tool_content, EntrustedWorkProposalDraft,
+};
+pub use propose_entrusted_work::{ProposeEntrustedWorkTool, PROPOSE_ENTRUSTED_WORK_TOOL_NAME};
 pub use registry::{PreparedToolCall, ToolRegistry};
 pub use sandbox::wrap_command;
 pub use schema::{
