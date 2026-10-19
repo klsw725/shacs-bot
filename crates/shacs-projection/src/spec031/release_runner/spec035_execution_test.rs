@@ -55,8 +55,9 @@ fn spec035_execution_admits_real_coverage_without_success_fixture_facts() {
         reason: "constructed test input, not semantic closure".to_owned(),
     };
 
-    let rows = super::spec035_coverage::coverage_rows(&output, &[audit], fixture.repo.path())
-        .expect("coverage");
+    let rows =
+        super::spec035_coverage::coverage_rows(&output, &[audit], fixture.repo.path(), false)
+            .expect("coverage");
 
     assert_eq!(rows.len(), 80);
     assert_eq!(

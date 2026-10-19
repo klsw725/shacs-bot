@@ -5,9 +5,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-#[ignore = "manual CLI QA with an explicitly supplied compiled runner and new evidence directory"]
-fn spec035_helper_surface_records_actual_preflight_outputs_on_constructed_input() {
-    let binary = PathBuf::from(std::env::var("SPEC035_RUNNER_BIN").expect("compiled runner"));
+#[ignore = "historical v2 CLI QA; requires the preserved phase-capable binary and a new evidence directory"]
+fn historical_v2_helper_surface_records_actual_preflight_outputs_on_constructed_input() {
+    let binary = PathBuf::from(
+        std::env::var("SPEC035_HISTORICAL_RUNNER_BIN").expect("historical compiled runner"),
+    );
     let output =
         PathBuf::from(std::env::var("SPEC035_HELPER_EVIDENCE").expect("owned evidence directory"));
     std::fs::create_dir(&output).expect("new evidence directory");

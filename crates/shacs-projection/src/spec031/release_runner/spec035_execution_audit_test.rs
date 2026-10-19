@@ -3,7 +3,7 @@ use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseCommandStatus,
     Spec031ReleaseGateKind, Spec031ReleaseRunArtifacts, Spec031ReleaseRunId,
     Spec031ReleaseRunnerConfig, Spec031ReleaseRunnerMode, Spec031ReleaseTestCounts,
-    SPEC031_RELEASE_RUNNER_SCHEMA,
+    SPEC031_RELEASE_RUNNER_SCHEMA_V2,
 };
 use super::spec035_execution::{admit, BINDING, MANIFEST};
 use super::spec035_execution_fixture::Fixture;
@@ -23,7 +23,7 @@ fn spec035_execution_production_audit_and_coverage_use_current_proof_not_fixture
     let writer = EvidenceWriter::open_new_run(&root).expect("owned output");
     super::writer::write_json(&writer, BINDING, &execution.binding).expect("immutable binding");
     let mut artifacts = Spec031ReleaseRunArtifacts {
-        schema: SPEC031_RELEASE_RUNNER_SCHEMA.to_owned(),
+        schema: SPEC031_RELEASE_RUNNER_SCHEMA_V2.to_owned(),
         run_id: Spec031ReleaseRunId::try_new("constructed-audit").expect("run id"),
         evidence_root: root.display().to_string(),
         fixture_registry: vec!["fixtures/current-worktree.json".to_owned()],
@@ -60,7 +60,7 @@ fn spec035_execution_production_audit_and_coverage_use_current_proof_not_fixture
         command_timeout: std::time::Duration::ZERO,
     };
 
-    super::audit::add_external_audits(&config, &writer, &mut artifacts, false, None)
+    super::audit::add_external_audits(&config, &writer, &mut artifacts, false)
         .expect("production audit assembly");
 
     let audit = artifacts
@@ -76,6 +76,7 @@ fn spec035_execution_production_audit_and_coverage_use_current_proof_not_fixture
         &root,
         &artifacts.external_audits,
         fixture.repo.path(),
+        false,
     )
     .expect("rows");
     assert_eq!(rows.len(), 80);
@@ -105,6 +106,7 @@ fn spec035_execution_production_audit_and_coverage_use_current_proof_not_fixture
         &root,
         &artifacts.external_audits,
         fixture.repo.path(),
+        false,
     )
     .expect("blocked rows");
     assert!(rows

@@ -3,6 +3,34 @@ use super::spec035_evidence_io::sha256;
 use serde_json::{json, Value};
 use std::path::Path;
 
+const HISTORICAL_G7_SOURCE_HASHES: [(&str, &str); 2] = [
+    (
+        "CLOSURE.md",
+        "a4eec6073d8e1e84448c112256c9091ad97bfc6922f824625b4f91348023174b",
+    ),
+    (
+        "SPEC.md",
+        "a850344cd16ee15b0423e6ed76d0628451009add9cbfd34406bb3131aac3e472",
+    ),
+];
+const CURRENT_SOURCE_HASHES: [(&str, &str); 2] = [
+    (
+        "CLOSURE.md",
+        "76035a39fced8770c7c1cc90f62a1483a66e3dcbc430180505c6e94e71003ecb",
+    ),
+    (
+        "SPEC.md",
+        "25c7aa4750510dc9c9c641ea6b8775caa0c9bd861dc180c7c59f8bf35555ec0c",
+    ),
+];
+
+fn assert_source_snapshot(repo: &Path, root: &str, expected: &[(&str, &str)]) {
+    for (file, hash) in expected {
+        let bytes = std::fs::read(repo.join(root).join(file)).expect("retained source snapshot");
+        assert_eq!(sha256(&bytes), *hash);
+    }
+}
+
 pub(super) fn acceptance() -> Value {
     json!({
         "schema":"spec035.config_user_baseline_acceptance.v1",
@@ -24,6 +52,22 @@ pub(super) fn acceptance() -> Value {
         },
         "limits":["constructed fixture, not a user acceptance receipt"]
     })
+}
+
+#[test]
+fn spec035_admission_preserves_historical_and_current_source_snapshots() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+    assert_source_snapshot(
+        &repo,
+        "docs/archive/spec035/g7",
+        &HISTORICAL_G7_SOURCE_HASHES,
+    );
+    assert_source_snapshot(
+        &repo,
+        "docs/archive/spec035/current",
+        &CURRENT_SOURCE_HASHES,
+    );
 }
 
 #[test]
@@ -176,23 +220,16 @@ fn spec035_admission_preserves_original_evidence_and_two_document_changes() {
     for file in compiled.entries {
         super::spec035_execution_io::read_bound(&repo, &file).expect("compiled evidence unchanged");
     }
-    for (file, hash) in [
-        (
-            "CLOSURE.md",
-            "a4eec6073d8e1e84448c112256c9091ad97bfc6922f824625b4f91348023174b",
-        ),
-        (
-            "SPEC.md",
-            "a850344cd16ee15b0423e6ed76d0628451009add9cbfd34406bb3131aac3e472",
-        ),
-    ] {
-        assert_eq!(
-            sha256(&read(&format!(
-                "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/{file}"
-            ))),
-            hash
-        );
-    }
+    assert_source_snapshot(
+        &repo,
+        "docs/archive/spec035/g7",
+        &HISTORICAL_G7_SOURCE_HASHES,
+    );
+    assert_source_snapshot(
+        &repo,
+        "docs/archive/spec035/current",
+        &CURRENT_SOURCE_HASHES,
+    );
     let acceptance = read(".omo/evidence/spec035/closure/config-user-baseline-acceptance.json");
     assert!(
         super::spec035_execution_io::decode::<super::spec035_execution_model::Receipt>(&acceptance)
