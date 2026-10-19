@@ -25,12 +25,13 @@
 
 ## 현재 numbered owner specs
 
-| Spec | Owner scope | Origin specs |
+| Spec | Owner scope | Origin / consumes |
 |---|---|---|
 | `032-app-maker-runtime-and-extension-lifecycle` | `Complete (Scoped)`: foreground AppSupervisor/process lifecycle, current-user authoring/apply/install, app-level activation provenance and blockers | 005, 017, 021, 025 |
 | `033-evaluation-automation-live-integration` | `Complete (Scoped)`: local goal/evaluator, durable automation routing, CAS self-improvement, recorded-only replay, domain projection input과 source-bound release evidence 구현; QA/goal/code/security/docs final PASS 및 final source-bound release execution PASS | 009, 012, 013, 014, 016, 018, 022 |
 | `034-generated-media-and-rich-file-context-expansion` | `Complete (Scoped)`: Codex image event, edit/mask/variation 계약, streaming/remote-output 정책, generated artifact, bounded video analyzer와 media-domain evidence; [remediation PASS](../../.omo/evidence/spec034/remediation/PASS.json)와 [Todo 14 QA baseline](../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)에서 22/22 검증. 최신 source-bound release 상태는 [local canonical final manifest](../../.omo/evidence/spec034/task-15-closure/final-committed/manifest.json)가 현재 committed source와 최종 5개 리뷰를 결합해 판정하며 이전 candidate receipt로 대체하지 않음 | 004, 019, 027 |
 | `035-ui-projection-diagnostics-and-release-evidence-parity` | `Open`: shared projection/TUI/REPL/wizard, owner 기반 Tasks CLI/API/TUI, capability 협상, snapshot-first reconnect, accounting 및 release evidence 검증 구현. Fixture 실제 재생성, 최신 workspace 3003 PASS / 0 FAIL / 8 ignored 및 fmt/clippy 통과, 해당 실행 cleanup 0, 한계 있는 사용자 설정 baseline 수용. Closure는 동일 source/run의 authentic assembly·runner·최종 독립 감사 전이므로 `BLOCKED`; 역사적 288개 provenance와 todo10 binding은 갱신하지 않음. [closure 기록](035-ui-projection-diagnostics-and-release-evidence-parity/CLOSURE.md) 참조 | 001, 011, 012, 013, 014, 016, 021, 023, 025, 026, 027 |
+| [`036-entrusted-work-continuity-and-change-notification`](036-entrusted-work-continuity-and-change-notification/SPEC.md) | `Complete (Scoped)`: 명시적 위임·조건 수정·goal-bound 관측·조건별 변화 통지와 사용자 결정의 로컬 Email 수직 흐름. 네 PRD 및 통합 Oracle PASS; 전체 출시 seal 아님 | 029, 030, 031, 033 |
 
 Spec035의 카탈로그는 Spec031 66행과 Spec035 80행을 구분한 총 146행이며 runner 원본은 보존됐다. G7 preflight는 74개 prerequisite와 FC5 의존 postrun 6행을 구분한다. G1/G6 보정, G2 owner 관측, G3 실제 container Ready/Degraded, G4 production REPL·wizard, G5 반복 reconnect의 최신 근거가 있지만 서로 다른 source/run을 하나의 실행으로 재표기하지 않는다. Canonical 45행/6 owner `BLOCKED` classification은 그대로 보존한 비실행 입력이다. 원래 F2 scoped confirmed와 후속 관측·workspace 통과는 전체 F1/F4 승인이나 `Complete` 전환이 아니다. 최신 행별 assembly mapping과 잔여 gate는 [Spec035 CLOSURE](035-ui-projection-diagnostics-and-release-evidence-parity/CLOSURE.md)를 따른다.
 
@@ -74,6 +75,7 @@ Spec035의 카탈로그는 Spec031 66행과 Spec035 80행을 구분한 총 146�
 33. `033-evaluation-automation-live-integration`
 34. `034-generated-media-and-rich-file-context-expansion`
 35. `035-ui-projection-diagnostics-and-release-evidence-parity`
+36. `036-entrusted-work-continuity-and-change-notification`
 
 ## 운영 원칙
 
