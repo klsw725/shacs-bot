@@ -48,7 +48,7 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 9. Goal review, QA review, code review, security review, docs review를 위한 reproducible review artifact.
 10. Hook veto, headless confirmation denial, missing hook evidence, process timeout/cleanup incomplete, sandbox fallback/failure, credential unavailable, snapshot missing/mismatch/source mutation, missing artifact redaction evidence, duplicate consumption, superseded consumption, recursion guard, delivery failure, replay mismatch edge regression.
 
-033은 하위 owner boundary를 소비하지만 대체하지 않는다. 009/012/013/014/016/018/022는 historical implementation baseline을, 029는 durable scheduling/recovery를, 030은 trusted runtime operational facts를, 031은 immutable execution snapshot을 제공한다. Shared UI adapter, surface parity smoke, release runner shell은 035가 소유한다. 033은 evaluation/automation domain state, goal accounting, coverage entry, review artifact와 edge-regression evidence를 생산한다.
+033은 하위 owner boundary를 소비하지만 대체하지 않는다. 009/012/013/014/016/018/022는 historical implementation baseline을, 029는 durable scheduling/recovery를, 030은 trusted runtime operational facts를, 031은 immutable execution snapshot을 제공한다. Shared UI adapter와 surface parity 구현은 존재하지만 당시 이를 맡았던 035 owner 문서는 현재 스펙 세트에서 제거되었다. 033은 evaluation/automation domain state, goal accounting, coverage entry, review artifact와 edge-regression evidence를 생산한다.
 
 ## invariants
 
@@ -116,12 +116,13 @@ Origin specs: 009, 012, 013, 014, 016, 018, 022
 | 013 user interfaces and session UX | CLI/session projection, local API session query, WebSocket/chat surface, web helper baseline | Goal, automation, evaluator, hook/confirmation, verify, rollback candidate projection inputs |
 | 014 observability diagnostics and inspection | Local diagnostics, projection-boundary redaction points, runtime marker projection, diagnostics bundle | Evaluation ledger, automation receipt, replay artifact, review evidence, MissingRedactionEvidence blocker |
 | 016 verification matrix and release gates | Verification family, release gates, blocker language, coverage matrix | 033 release coverage entries, reproducible review artifacts, edge regression gate |
-| 018 evaluation automation and self-improvement | PRD 000-014 Rust contract/runtime-helper/projection-helper/release-gate-helper closure | Supported AgentLoop/heartbeat/cron/owner-accepted terminal-subagent producer wiring plus CLI/local API domain projection input; unsupported app/channel/local-API background terminal producers remain unavailable/fail-closed; TUI/Tasks/cross-surface adapter parity and closure remain Spec035 |
+| 018 evaluation automation and self-improvement | PRD 000-014 Rust contract/runtime-helper/projection-helper/release-gate-helper closure | Supported AgentLoop/heartbeat/cron/owner-accepted terminal-subagent producer wiring plus CLI/local API domain projection input; unsupported app/channel/local-API background terminal producers remain unavailable/fail-closed; TUI/Tasks/cross-surface parity는 이 033 closure에 포함되지 않음 |
 | 022 auto approval permissions | Historical normalization/audit/replay helpers and closed implementation evidence | Compatibility input only. Central permission mode, durable approval correlation, replay authorization은 033 신규 보장이 아님 |
 | 029 durable runtime recovery | Durable queue/scheduler, owner lease/supervision, trace/recovery scoped baseline | Automation scheduling/recovery facts를 소비하고 별도 scheduler·lease·trace를 재구현하지 않음 |
 | 030 trusted agent runtime | Pre-tool veto, ephemeral confirmation/headless deny, adapter별 process control, credential/sandbox/resource/data disclosure | Live automation/self-improvement gate와 evidence, replay no-live-dispatch invariant |
 | 031 configuration and snapshots | Immutable config/context/provider/trusted-runtime execution snapshot과 provenance | Evaluator, automation, self-improvement, replay input과 diagnostics receipt |
-| 035 UI projection parity | Shared projection, TUI/REPL/onboard, reconnect/release baseline과 planned Tasks view | 033 goal/automation owner facts를 cross-surface adapter와 release evidence로 소비 |
+
+과거 035로 이관한 사용자 표면 parity 기록은 [비활성 보관 자료](../../archive/spec035/README.md)에 남기되 현재 active owner로 간주하지 않는다.
 
 ## Implementation PRDs
 

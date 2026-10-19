@@ -137,7 +137,7 @@ Snapshot은 중앙 permission/safety decision, durable approval, replay authoriz
 ## Open-owner handoff
 
 1. 030은 trusted runtime profile, sandbox adapter state, raw auth lifecycle, credential resolution/status, executable-resource eligibility와 data disclosure의 live truth다.
-2. 035는 config/profile/auth-source/snapshot fact를 CLI/TUI/API에 투영하고 unknown/unavailable을 안전으로 추론하지 않는다.
+2. CLI/TUI/API의 config/profile/auth-source/snapshot 투영은 031의 owner fact를 소비하고 unknown/unavailable을 안전으로 추론하지 않는다. 과거 035 owner 문서는 현재 스펙 세트에서 제거되었다.
 3. 032는 app/resource install과 lifecycle transition을 소유하며 031은 persistence와 snapshot ref만 소유한다.
 4. 033 evaluator/automation/replay는 031 snapshot을 input evidence로 소비하되 authorization으로 재사용하지 않는다.
 5. 034 rich media/context는 source identity, digest, budget/truncation provenance를 제공하고 031이 snapshot에 기록한다.
@@ -243,4 +243,4 @@ Parent Must Have 1-6은 `spec031-test-lifecycle`, 7-11은 `spec031-test-projecti
 
 현재 구현 결정은 JSON compatibility 유지이며 TOML 전환을 하지 않는다. `runtime config-migrate --dry-run|--apply|--recover`는 config transform을, 기존 `runtime migrate`는 029 stored-data family를 다룬다. Snapshot과 activation replay는 diagnostics 전용이고 permission grant, 현재 auth/config truth, 재실행 승인을 보장하지 않는다. Runtime directory ownership은 local mutation admission이지 sandbox/OS isolation이 아니다.
 
-외부 owner audit은 Specs 029/030/032/033/034/035 전체 완료 상태를 요구하지 않는다. 031이 소비하는 exact adapter test fact와 해당 Cargo command가 모두 존재하고 통과할 때만 PASS이며, unknown/missing fact는 계속 blocked다. 이 scoped closure는 Specs 032-035의 상태를 변경하지 않는다.
+현재 외부 owner audit은 Specs 029/030/032/033/034 전체 완료 상태를 요구하지 않는다. 031이 소비하는 exact adapter test fact와 해당 Cargo command가 모두 존재하고 통과할 때만 PASS이며, unknown/missing fact는 계속 blocked다. 삭제된 035 문서의 역사적 evidence와 closure 상태를 031의 현재 PASS로 재해석하지 않으며, 이 scoped closure는 Specs 032-034의 상태를 변경하지 않는다.

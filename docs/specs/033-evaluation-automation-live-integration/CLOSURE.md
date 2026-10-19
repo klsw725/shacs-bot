@@ -2,7 +2,7 @@
 
 Verdict: `COMPLETE (SCOPED) - final source-bound release execution PASS`
 
-Spec 033의 self-hosted/local owner 구현은 goal accounting, advisory evaluator consumption, durable automation outcome routing, CAS self-improvement, recorded-only replay, CLI/local API domain projection input과 source-manifest-bound release evidence를 제공한다. QA, goal, code, security, docs 최종 review와 final source-bound release execution을 모두 통과한 `Complete (Scoped)`다. 최종 manifest는 결정론적 locator에 생성되었으며, 향후 재실행에서 명령 실패 또는 manifest 미생성은 shipping을 차단한다. TUI/Tasks adapter parity와 그 release closure는 Spec 035 소유다.
+Spec 033의 self-hosted/local owner 구현은 goal accounting, advisory evaluator consumption, durable automation outcome routing, CAS self-improvement, recorded-only replay, CLI/local API domain projection input과 source-manifest-bound release evidence를 제공한다. QA, goal, code, security, docs 최종 review와 final source-bound release execution을 모두 통과한 `Complete (Scoped)`다. 최종 manifest는 결정론적 locator에 생성되었으며, 향후 재실행에서 명령 실패 또는 manifest 미생성은 shipping을 차단한다. TUI/Tasks adapter parity와 그 release closure는 당시 Spec 035 소유로 이관됐으나 해당 미완료 문서는 현재 스펙 세트에서 제거됐다. 이 이관 이력은 033의 완료 범위를 넓히지 않는다.
 
 ## Requirement mapping
 

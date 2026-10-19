@@ -7,7 +7,7 @@ Spec034의 현재 self-hosted/personal-use 범위는 구현, 정확한 22/22 요
 ## Scope boundary
 
 - Domain owner: Codex generated-media event, edit/mask/variation 계약, partial/final lifecycle, guarded remote output, local artifact persistence, bounded video analyzer, recorded-only replay와 media/analyzer owner facts.
-- Adapter consumer: Spec035는 이미 생산된 canonical media/analyzer fact를 CLI/TUI/API/WebSocket/channel에 read-only로 투영한다. Spec035의 transport negotiation, reconnect와 Tasks parity는 계속 Open이다.
+- Adapter consumer: 당시 Spec035로 이관한 adapter는 이미 생산된 canonical media/analyzer fact를 CLI/TUI/API/WebSocket/channel에 read-only로 투영한다. 035 미완료 owner 문서는 현재 스펙 세트에서 제거됐으며, transport negotiation, reconnect와 Tasks parity의 전체 완료를 주장하지 않는다.
 - Release boundary: [Remediation PASS](../../../.omo/evidence/spec034/remediation/PASS.json)는 failed candidate1의 blocker를 닫고 fresh QA와 새 source freeze를 요구했다. Todo 13은 `runner-mechanics-only`, `closure_eligible: false`다. [Todo 14 QA baseline](../../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)은 QA PASS지만 `closureClaimed: false`이고 surface receipt도 `final_release_evidence: false`다. 이후 source 변경은 새 frozen manifest와 변경 범위 재검증이 필요하다. Canonical final manifest가 현재 committed source digest, 최종 5개 PASS receipt, clean-tree runner evidence를 모두 결합하고 자체 verdict를 PASS로 기록한 경우에만 closure-eligible final seal이다.
 
 ## Must Have mapping
@@ -72,7 +72,7 @@ Canonical catalog와 sequential integration은 정확히 10개 Must Have와 12�
 - Cleanup v2 receipt는 exact retained isolation-root identity에 결합된 cleanup digest와 cleanup 이후 관측한 raw-evidence 삭제·bounded leak 사실만 기록한다. Atomic publication 승인은 cleanup 문서의 자기 선언이 아니라 final validation, approved marker, post-rename status가 순서대로 확정한다.
 - Cleanup은 root와 nested pathname의 device/inode/owner를 destructive `unlinkat` 직전에 재검증하고 감지된 identity 또는 event 불일치에서 publication을 차단한다. POSIX conditional unlink를 제공하지 않으므로 지속적으로 악의적인 same-UID process가 재검증과 syscall 사이에 pathname을 교체하는 경우 unrelated replacement의 원자적 보존과 isolation root의 보장된 회수는 보장하지 않는다. Post-unlink retained inode link-count/event 검사는 이 final syscall gap을 통과한 race를 계속 감지한다.
 - Public API poll 사이의 악의적인 same-UID Darwin double-fork/setsid reparent escape는 원자적으로 추적한다고 주장하지 않는다. Zero-instruction prevention과 universal sandbox/process containment도 보장하지 않는다.
-- Spec035의 상태는 계속 Open이다.
+- 당시 Spec035의 최종 closure는 Open이었다. 해당 문서의 제거를 완료 판정으로 재해석하지 않는다.
 
 ## Verification and mechanical seal
 
