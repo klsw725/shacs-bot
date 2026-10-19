@@ -177,6 +177,7 @@ pub(crate) fn production_tool_registry(
         }));
     }
     registry.register(AskUserTool::new());
+    registry.register(shacs_core::tools::ProposeEntrustedWorkTool::new());
     registry.register(SelfTool::with_modify_allowed(
         Arc::new(Mutex::new(SelfRuntimeState::new())),
         allow_side_effect_tools && bundle.config.tools.my.allow_set,
