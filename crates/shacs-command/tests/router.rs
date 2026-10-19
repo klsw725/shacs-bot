@@ -2,7 +2,7 @@ use shacs_command::{
     build_help_text, is_builtin_command, is_builtin_command_name, normalize_channel_command,
     parse_loop_command, parse_loop_command_route, CommandId, CommandKind, CommandRouter,
     GoalCommandArgs, HistoryCommandArgs, LoopCommand, PermissionCommandArgs, PluginCommandRouter,
-    PluginCommandSpec,
+    PluginCommandSpec, WorkCommandArgs,
 };
 use std::error::Error;
 
@@ -127,6 +127,30 @@ fn loop_command_parser_matches_builtin_router_semantics() {
         )))
     );
     assert_eq!(
+        parse_loop_command("/work create monitor release readiness"),
+        Some(LoopCommand::Work(WorkCommandArgs::Create(
+            "monitor release readiness".to_owned()
+        )))
+    );
+    assert_eq!(
+        parse_loop_command("/work edit work-123 2 notify only on verified changes"),
+        Some(LoopCommand::Work(WorkCommandArgs::Edit {
+            work_id: "work-123".to_owned(),
+            expected_revision: 2,
+            instructions: "notify only on verified changes".to_owned(),
+        }))
+    );
+    assert_eq!(
+        parse_loop_command("/work accept proposal-123"),
+        Some(LoopCommand::Work(WorkCommandArgs::Accept(
+            "proposal-123".to_owned()
+        )))
+    );
+    assert_eq!(
+        parse_loop_command("/work accept proposal-123 extra"),
+        Some(LoopCommand::Work(WorkCommandArgs::Invalid))
+    );
+    assert_eq!(
         parse_loop_command("/history 25"),
         Some(LoopCommand::History(HistoryCommandArgs::Count(25)))
     );
@@ -233,6 +257,7 @@ fn builtin_command_detection_and_help_cover_registered_commands() {
         "/status",
         "/permission",
         "/goal",
+        "/work",
         "/history",
         "/dream",
         "/dream-log",

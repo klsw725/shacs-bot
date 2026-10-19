@@ -10,6 +10,7 @@ pub enum CommandId {
     New,
     Permission,
     Goal,
+    Work,
     History,
     Dream,
     DreamLog,
@@ -26,6 +27,7 @@ impl CommandId {
             Self::New => "/new",
             Self::Permission => "/permission",
             Self::Goal => "/goal",
+            Self::Work => "/work",
             Self::History => "/history",
             Self::Dream => "/dream",
             Self::DreamLog => "/dream-log",
@@ -160,6 +162,7 @@ impl CommandRouter {
             CommandId::Status,
             CommandId::History,
             CommandId::Goal,
+            CommandId::Work,
             CommandId::Dream,
             CommandId::DreamLog,
             CommandId::DreamRestore,
@@ -170,6 +173,7 @@ impl CommandRouter {
         for command in [
             CommandId::History,
             CommandId::Goal,
+            CommandId::Work,
             CommandId::Permission,
             CommandId::DreamLog,
             CommandId::DreamRestore,
@@ -308,6 +312,7 @@ pub enum LoopCommand {
     Stop,
     Permission(PermissionCommandArgs),
     Goal(GoalCommandArgs),
+    Work(WorkCommandArgs),
     History(HistoryCommandArgs),
     Dream,
     DreamLog { sha: Option<String> },
@@ -347,6 +352,25 @@ pub enum GoalCommandArgs {
     Invalid,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCommandArgs {
+    Create(String),
+    Read(String),
+    Edit {
+        work_id: String,
+        expected_revision: u64,
+        instructions: String,
+    },
+    Pause(String),
+    Resume(String),
+    Done(String),
+    Clear(String),
+    Accept(String),
+    Decline(String),
+    Invalid,
+}
+
 pub fn parse_loop_command(content: &str) -> Option<LoopCommand> {
     parse_loop_command_route(content).map(|route| route.command)
 }
@@ -369,6 +393,7 @@ fn loop_command_from_parsed(parsed: ParsedCommand) -> Option<RoutedLoopCommand> 
         CommandId::New => Some(LoopCommand::New),
         CommandId::Permission => Some(LoopCommand::Permission(parse_permission_args(&parsed.args))),
         CommandId::Goal => Some(LoopCommand::Goal(parse_goal_args(&parsed.args))),
+        CommandId::Work => Some(LoopCommand::Work(parse_work_args(&parsed.args))),
         CommandId::History => Some(LoopCommand::History(parse_history_args(&parsed.args))),
         CommandId::Dream => Some(LoopCommand::Dream),
         CommandId::DreamLog => Some(LoopCommand::DreamLog {
@@ -409,6 +434,70 @@ fn parse_goal_args(args: &str) -> GoalCommandArgs {
     } else {
         GoalCommandArgs::Set(rest.to_owned())
     }
+}
+
+fn parse_work_args(args: &str) -> WorkCommandArgs {
+    let Some((action, rest)) = split_first_token(args) else {
+        return WorkCommandArgs::Invalid;
+    };
+    match action.to_ascii_lowercase().as_str() {
+        "create" => non_empty_arg(rest)
+            .map(WorkCommandArgs::Create)
+            .unwrap_or(WorkCommandArgs::Invalid),
+        "read" => single_arg(rest)
+            .map(WorkCommandArgs::Read)
+            .unwrap_or(WorkCommandArgs::Invalid),
+        "edit" => parse_work_edit_args(rest),
+        "pause" => single_arg(rest)
+            .map(WorkCommandArgs::Pause)
+            .unwrap_or(WorkCommandArgs::Invalid),
+        "resume" => single_arg(rest)
+            .map(WorkCommandArgs::Resume)
+            .unwrap_or(WorkCommandArgs::Invalid),
+        "done" => single_arg(rest)
+            .map(WorkCommandArgs::Done)
+            .unwrap_or(WorkCommandArgs::Invalid),
+        "clear" => single_arg(rest)
+            .map(WorkCommandArgs::Clear)
+            .unwrap_or(WorkCommandArgs::Invalid),
+        "accept" => single_arg(rest)
+            .map(WorkCommandArgs::Accept)
+            .unwrap_or(WorkCommandArgs::Invalid),
+        "decline" => single_arg(rest)
+            .map(WorkCommandArgs::Decline)
+            .unwrap_or(WorkCommandArgs::Invalid),
+        _ => WorkCommandArgs::Invalid,
+    }
+}
+
+fn parse_work_edit_args(args: &str) -> WorkCommandArgs {
+    let Some((work_id, rest)) = split_first_token(args) else {
+        return WorkCommandArgs::Invalid;
+    };
+    let Some((revision, instructions)) = split_first_token(rest) else {
+        return WorkCommandArgs::Invalid;
+    };
+    let Ok(expected_revision) = revision.parse::<u64>() else {
+        return WorkCommandArgs::Invalid;
+    };
+    if instructions.is_empty() {
+        WorkCommandArgs::Invalid
+    } else {
+        WorkCommandArgs::Edit {
+            work_id: work_id.to_owned(),
+            expected_revision,
+            instructions: instructions.to_owned(),
+        }
+    }
+}
+
+fn non_empty_arg(args: &str) -> Option<String> {
+    (!args.trim().is_empty()).then(|| args.trim().to_owned())
+}
+
+fn single_arg(args: &str) -> Option<String> {
+    let trimmed = args.trim();
+    (trimmed.split_whitespace().count() == 1).then(|| trimmed.to_owned())
 }
 
 fn parse_history_args(args: &str) -> HistoryCommandArgs {
@@ -531,6 +620,7 @@ pub fn build_help_text() -> String {
         "/permission inspect <id-or-prefix> — Show one remembered permission rule",
         "/permission revoke <id-or-prefix> — Revoke one remembered permission rule",
         "/goal [status|pause|resume|clear|done|blocked <reason>|<text>] — Manage the persistent goal",
+        "/work create|read|edit|pause|resume|done|clear|accept|decline — Manage explicitly entrusted work",
         "/history [n] — Show the last N conversation messages (default 10)",
         "/dream — Manually trigger Dream consolidation",
         "/dream-log — Show what the last Dream changed",
@@ -558,6 +648,7 @@ fn command_from_exact(raw: &str) -> Option<CommandId> {
         "/new" => Some(CommandId::New),
         "/permission" => Some(CommandId::Permission),
         "/goal" => Some(CommandId::Goal),
+        "/work" => Some(CommandId::Work),
         "/history" => Some(CommandId::History),
         "/dream" => Some(CommandId::Dream),
         "/dream-log" => Some(CommandId::DreamLog),
