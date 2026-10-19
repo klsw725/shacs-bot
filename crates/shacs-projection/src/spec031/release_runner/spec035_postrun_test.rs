@@ -1,5 +1,5 @@
 use super::spec035_execution_fixture::{file_ref, write_json};
-use super::spec035_postrun_fixture::{runner_fixture, supplement};
+use super::spec035_postrun_fixture::{g7_runner_fixture, runner_fixture, supplement};
 use serde_json::json;
 use std::path::Path;
 
@@ -39,6 +39,23 @@ fn spec035_postrun_seals_only_after_exit_and_read_audit_without_rewriting_origin
     assert!(artifacts
         .finalize_spec035(fixture.repo.path(), "postrun/finalization.json")
         .is_err());
+}
+
+#[test]
+fn persisted_g7_v2_artifact_keeps_old_locators_and_validates_archived_bytes() {
+    let (_fixture, artifacts) = g7_runner_fixture();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+
+    assert_eq!(artifacts.schema, "spec031.release_runner.v2");
+    assert!(artifacts.coverage_matrix.iter().any(|row| {
+        row.source_locator
+            == "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:83"
+    }));
+    super::validate::validate_spec031_release_artifacts_with_repo_root(&artifacts, workspace)
+        .expect("tracked G7 archive validates persisted v2 locators");
 }
 
 #[test]

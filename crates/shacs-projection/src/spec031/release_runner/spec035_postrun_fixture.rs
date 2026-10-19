@@ -28,6 +28,13 @@ pub(super) fn copy_runner_sources(repo: &Path, actual: &Path) {
     );
     for owner in super::external_audit_facts::external_owner_facts() {
         paths.push(owner.source_locator.to_owned());
+        paths.push(
+            owner
+                .source_status_locator
+                .rsplit_once(':')
+                .map_or(owner.source_status_locator, |(path, _)| path)
+                .to_owned(),
+        );
         if owner.slug != "spec035" {
             paths.extend(
                 owner
@@ -45,6 +52,16 @@ pub(super) fn copy_runner_sources(repo: &Path, actual: &Path) {
 }
 
 pub(super) fn runner_fixture() -> (Fixture, Spec031ReleaseRunArtifacts) {
+    runner_fixture_with_source(None)
+}
+
+pub(super) fn g7_runner_fixture() -> (Fixture, Spec031ReleaseRunArtifacts) {
+    runner_fixture_with_source(Some(super::archive_integrity::G7_SOURCE_SHA256))
+}
+
+fn runner_fixture_with_source(
+    source_sha256: Option<&str>,
+) -> (Fixture, Spec031ReleaseRunArtifacts) {
     let fixture = super::spec035_preflight_test::pending_fixture();
     let root = fixture
         .repo
@@ -56,7 +73,8 @@ pub(super) fn runner_fixture() -> (Fixture, Spec031ReleaseRunArtifacts) {
     for directory in ["commands", "fixtures", "cleanup", "postrun"] {
         writer.create_dir_all(directory).expect("directory");
     }
-    let preflight = super::spec035_execution::preflight(fixture.repo.path()).expect("preflight");
+    let mut preflight =
+        super::spec035_execution::preflight(fixture.repo.path()).expect("preflight");
     super::writer::write_json(
         &writer,
         super::spec035_execution::BINDING,
@@ -84,7 +102,7 @@ pub(super) fn runner_fixture() -> (Fixture, Spec031ReleaseRunArtifacts) {
             exit_code: Some(0), duration_ms: 1, stdout_path, stderr_path, tests, process_receipt: None }
     }).collect();
     let mut artifacts = Spec031ReleaseRunArtifacts {
-        schema: SPEC031_RELEASE_RUNNER_SCHEMA.to_owned(),
+        schema: SPEC031_RELEASE_RUNNER_SCHEMA_V2.to_owned(),
         run_id: config.run_id.clone(),
         evidence_root: root.display().to_string(),
         fixture_registry: vec!["fixtures/current-worktree.json".to_owned()],
@@ -100,9 +118,8 @@ pub(super) fn runner_fixture() -> (Fixture, Spec031ReleaseRunArtifacts) {
         failure_triage: vec![],
         reproducibility_observations: vec![],
     };
-    super::writer::write_json(&writer, "fixtures/current-worktree.json", &json!({"schema":SPEC031_RELEASE_RUNNER_SCHEMA,"run_id":config.run_id.as_str(),"resource_id":"current-worktree"})).expect("fixture");
-    super::audit::add_external_audits(&config, &writer, &mut artifacts, false, None)
-        .expect("audits");
+    super::writer::write_json(&writer, "fixtures/current-worktree.json", &json!({"schema":SPEC031_RELEASE_RUNNER_SCHEMA_V2,"run_id":config.run_id.as_str(),"resource_id":"current-worktree"})).expect("fixture");
+    super::audit::add_external_audits(&config, &writer, &mut artifacts, false).expect("audits");
     super::runner_outputs::push_cleanup(
         &config,
         &writer,
@@ -115,15 +132,33 @@ pub(super) fn runner_fixture() -> (Fixture, Spec031ReleaseRunArtifacts) {
         },
     )
     .expect("cleanup");
-    super::runner_outputs::write_evidence_index(&config, &writer, &mut artifacts).expect("index");
+    super::runner_outputs::write_evidence_index(&writer, &mut artifacts).expect("index");
     artifacts.coverage_matrix = super::coverage_matrix::coverage_entries(
         &root,
         &config.repo_root,
+        &artifacts.schema,
         super::coverage::Spec031CoverageStatus::Blocked,
         &artifacts.command_registry,
         &artifacts.external_audits,
     )
     .expect("coverage");
+    if let Some(source_sha256) = source_sha256 {
+        for row in &mut artifacts.coverage_matrix {
+            if row.requirement_id.starts_with("spec035:") {
+                row.source_locator = row.source_locator.replacen(
+                    super::spec035_catalog::SPEC_ROOT,
+                    super::spec035_catalog::LEGACY_SPEC_ROOT,
+                    1,
+                );
+            }
+        }
+        preflight.binding.source_sha256 = source_sha256.to_owned();
+        std::fs::write(
+            root.join(super::spec035_execution::BINDING),
+            serde_json::to_vec_pretty(&preflight.binding).expect("binding JSON"),
+        )
+        .expect("G7 binding");
+    }
     super::writer::write_spec031_release_artifacts_with(&writer, &artifacts).expect("originals");
     (fixture, artifacts)
 }
