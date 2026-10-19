@@ -56,6 +56,11 @@ pub fn handle_api_request(
                     handle_local_improvement(request, adapter)
                 }
                 _ if path.starts_with("/v1/sessions/") => {
+                    if crate::spec036_work::is_entrusted_work_path(path) {
+                        return crate::spec036_work::handle_entrusted_work_request(
+                            request, adapter,
+                        );
+                    }
                     if let Some(session_key) = spec033_snapshot_session_key(path) {
                         return spec033_snapshot_response(adapter, &session_key);
                     }
@@ -77,6 +82,9 @@ pub fn handle_api_request(
             handle_local_improvement(request, adapter)
         }
         (ApiMethod::Post, _) if path.starts_with("/v1/sessions/") => {
+            if crate::spec036_work::is_entrusted_work_path(path) {
+                return crate::spec036_work::handle_entrusted_work_request(request, adapter);
+            }
             handle_spec033_goal_action(request, adapter)
         }
         (_, HEALTH_PATH)
