@@ -1,4 +1,4 @@
-use super::coverage::{Spec031CoverageStatus, Spec031ExternalOwnerId};
+use super::coverage::Spec031CoverageStatus;
 use super::coverage_validate::validate_coverage_matrix;
 use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseRunArtifacts, Spec031ReleaseRunId,
@@ -23,11 +23,11 @@ fn fixture() -> (tempfile::TempDir, Spec031ReleaseRunArtifacts) {
 }
 
 #[test]
-fn spec035_catalog_rejects_omission_even_when_all_new_rows_are_removed() {
+fn spec031_archive_row_rejects_omission() {
     let (_root, mut artifacts) = fixture();
     artifacts
         .coverage_matrix
-        .retain(|row| !row.requirement_id.starts_with("spec035:"));
+        .retain(|row| row.requirement_id != "spec031:archive:spec035");
 
     assert_eq!(
         validate_coverage_matrix(&artifacts, &repo_root()),
@@ -36,26 +36,19 @@ fn spec035_catalog_rejects_omission_even_when_all_new_rows_are_removed() {
 }
 
 #[test]
-fn spec035_catalog_blocked_rows_prevent_success_from_legacy_audit() {
-    let (root, mut artifacts) = fixture();
-    let audit = artifacts
-        .external_audits
+fn spec031_archive_row_cannot_claim_pass_without_command_evidence() {
+    let (_root, mut artifacts) = fixture();
+    let row = artifacts
+        .coverage_matrix
         .iter_mut()
-        .find(|audit| audit.owner == Spec031ExternalOwnerId::Spec035)
-        .expect("Spec035 audit");
-    audit.implementation_artifacts = vec!["historical-v1-manifest.json".to_owned()];
-    artifacts.coverage_matrix = super::coverage_matrix::coverage_entries(
-        &root.path().join("run"),
-        &repo_root(),
-        Spec031CoverageStatus::Pass,
-        &artifacts.command_registry,
-        &artifacts.external_audits,
-    )
-    .expect("catalog rows");
+        .find(|row| row.requirement_id == "spec031:archive:spec035")
+        .expect("archive row");
+    row.status = Spec031CoverageStatus::Blocked;
+    row.command_result_id = None;
 
     assert_eq!(
         validate_coverage_matrix(&artifacts, &repo_root()),
-        Err(Spec031ReleaseArtifactError::BlockedExternalEvidence)
+        Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence)
     );
 }
 

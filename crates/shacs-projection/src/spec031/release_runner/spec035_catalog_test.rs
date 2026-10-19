@@ -1,12 +1,11 @@
-use super::coverage::Spec031CoverageStatus;
+use super::coverage::{Spec031CoverageRequirementKind, Spec031CoverageStatus};
 use super::coverage_matrix::coverage_entries;
 use super::model::Spec031ReleaseArtifactError;
 use super::spec035_evidence::validate_spec035_closure_evidence;
-use std::collections::HashSet;
 use std::fs;
 
 #[test]
-fn spec035_catalog_covers_authoritative_closure_and_parent_rows_without_relabeling_spec031() {
+fn spec031_catalog_keeps_sixty_six_rows_and_five_external_owners() {
     let root = tempfile::tempdir().expect("owned evidence root");
     fs::create_dir(root.path().join("triage")).expect("triage directory");
     fs::create_dir(root.path().join("external")).expect("audit directory");
@@ -15,7 +14,13 @@ fn spec035_catalog_covers_authoritative_closure_and_parent_rows_without_relabeli
         "{}",
     )
     .expect("blocked receipt");
-    for owner in ["029", "030", "032", "033", "034", "035"] {
+    fs::write(
+        root.path().join(super::archive_integrity::RECEIPT),
+        serde_json::to_vec_pretty(&super::archive_integrity::receipt())
+            .expect("archive receipt JSON"),
+    )
+    .expect("archive receipt");
+    for owner in ["029", "030", "032", "033", "034"] {
         fs::write(
             root.path()
                 .join(format!("external/spec{owner}-read-audit.md")),
@@ -27,38 +32,16 @@ fn spec035_catalog_covers_authoritative_closure_and_parent_rows_without_relabeli
     let rows = coverage_entries(
         root.path(),
         root.path(),
+        super::model::SPEC031_RELEASE_RUNNER_SCHEMA,
         Spec031CoverageStatus::Blocked,
         &[],
         &[],
     )
     .expect("coverage generated");
 
-    let spec035: Vec<_> = rows
+    assert!(rows
         .iter()
-        .filter(|row| row.requirement_id.starts_with("spec035:"))
-        .collect();
-    assert_eq!(spec035.len(), 80);
-    let ids: HashSet<_> = spec035
-        .iter()
-        .map(|row| row.requirement_id.as_str())
-        .collect();
-    for (prd, count) in [4, 4, 4, 4, 5, 4, 4, 8, 4, 4].into_iter().enumerate() {
-        let section = if prd == 7 { "FC" } else { "CE" };
-        for item in 1..=count {
-            assert!(ids.contains(format!("spec035:PRD{prd:03}-{section}-{item}").as_str()));
-        }
-    }
-    for (section, count) in [("must", 13), ("acceptance", 12), ("closure", 10)] {
-        for item in 1..=count {
-            assert!(ids.contains(format!("spec035:{section}:{item:02}").as_str()));
-        }
-    }
-    assert!(spec035
-        .iter()
-        .all(|row| row.status == Spec031CoverageStatus::Blocked));
-    assert!(spec035
-        .iter()
-        .all(|row| row.owner.starts_with("spec035:prd:")));
+        .all(|row| !row.requirement_id.starts_with("spec035:")));
     let original = rows
         .iter()
         .find(|row| row.requirement_id == "spec031:must:01")
@@ -68,12 +51,16 @@ fn spec035_catalog_covers_authoritative_closure_and_parent_rows_without_relabeli
         original.source_locator,
         "docs/specs/031-configuration-runtime-layout-and-execution-snapshots/SPEC.md:63"
     );
+    assert_eq!(rows.len(), 66);
     assert_eq!(
         rows.iter()
-            .filter(|row| row.requirement_id.starts_with("spec031:"))
+            .filter(|row| row.kind == Spec031CoverageRequirementKind::ExternalOwner)
             .count(),
-        66
+        5
     );
+    assert!(rows
+        .iter()
+        .any(|row| row.requirement_id == "spec031:archive:spec035"));
 }
 
 #[test]

@@ -3,37 +3,14 @@ use super::coverage::{
     Spec031ExternalAuditRow, Spec031ExternalAuditStatus, Spec031ExternalOwnerId,
     Spec031ReleaseCoverageEntry, Spec031TypedEvidenceClass,
 };
-use super::model::{Spec031ReleaseArtifactError, Spec031ReleaseRunArtifacts};
+use super::model::Spec031ReleaseArtifactError;
 use std::path::Path;
-
-pub(super) fn has_catalog(
-    artifacts: &Spec031ReleaseRunArtifacts,
-    repo: &Path,
-) -> Result<bool, Spec031ReleaseArtifactError> {
-    if !artifacts
-        .manifest_files
-        .iter()
-        .any(|file| file == "evidence-index.json")
-    {
-        return Ok(false);
-    }
-    #[derive(serde::Deserialize)]
-    struct Index {
-        spec035_catalog: Option<Vec<super::spec035_catalog::Requirement>>,
-    }
-    let index: Index =
-        super::validate::read_json(Path::new(&artifacts.evidence_root), "evidence-index.json")?;
-    match index.spec035_catalog {
-        None => Ok(false),
-        Some(catalog) if catalog == super::spec035_catalog::catalog_at(repo)? => Ok(true),
-        Some(_) => Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence),
-    }
-}
 
 pub(super) fn coverage_rows(
     root: &Path,
     audits: &[Spec031ExternalAuditRow],
     repo: &Path,
+    legacy: bool,
 ) -> Result<Vec<Spec031ReleaseCoverageEntry>, Spec031ReleaseArtifactError> {
     let fixture_pass = audits.iter().any(|audit| {
         audit.owner == Spec031ExternalOwnerId::Spec035
@@ -41,18 +18,21 @@ pub(super) fn coverage_rows(
             && audit.implementation_artifacts
                 == ["fixtures/success-fixture/external-owner-facts/spec035.json"]
     });
-    let execution = if audits.iter().any(|audit| {
-        audit.owner == Spec031ExternalOwnerId::Spec035
-            && audit.status == Spec031ExternalAuditStatus::Pass
-            && audit.implementation_artifacts == [super::spec035_execution::MANIFEST]
-    }) {
+    let execution = if !legacy
+        && audits.iter().any(|audit| {
+            audit.owner == Spec031ExternalOwnerId::Spec035
+                && audit.status == Spec031ExternalAuditStatus::Pass
+                && audit.implementation_artifacts == [super::spec035_execution::MANIFEST]
+        }) {
         super::spec035_execution::preflight_bound(repo, root).ok()
     } else {
         None
     };
     let artifact = "external/spec035-read-audit.md";
     let hash = artifact_hash(root, artifact)?;
-    let catalog = if execution.is_some()
+    let catalog = if legacy {
+        super::spec035_catalog::legacy_catalog()
+    } else if execution.is_some()
         || fixture_pass
         || repo.join(super::spec035_catalog::SPEC_ROOT).is_dir()
     {

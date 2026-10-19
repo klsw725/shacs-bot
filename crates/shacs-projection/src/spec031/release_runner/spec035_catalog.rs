@@ -1,7 +1,8 @@
 use super::coverage::Spec031CoverageRequirementKind;
 use serde::{Deserialize, Serialize};
 
-pub(super) const SPEC_ROOT: &str =
+pub(super) const SPEC_ROOT: &str = "docs/archive/spec035/current";
+pub(super) const LEGACY_SPEC_ROOT: &str =
     "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity";
 
 pub(super) struct PrdAuthority {
@@ -96,6 +97,14 @@ pub(super) struct Requirement {
 }
 
 pub(super) fn catalog() -> Vec<Requirement> {
+    catalog_with_root(SPEC_ROOT)
+}
+
+pub(super) fn legacy_catalog() -> Vec<Requirement> {
+    catalog_with_root(LEGACY_SPEC_ROOT)
+}
+
+fn catalog_with_root(spec_root: &str) -> Vec<Requirement> {
     let mut rows = Vec::with_capacity(80);
     for (prefix, kind, first_line, owners) in [
         (
@@ -125,7 +134,7 @@ pub(super) fn catalog() -> Vec<Requirement> {
             rows.push(Requirement {
                 id: format!("spec035:{prefix}:{:02}", offset + 1),
                 kind,
-                source_locator: format!("{SPEC_ROOT}/SPEC.md:{}", first_line + offset),
+                source_locator: format!("{spec_root}/SPEC.md:{}", first_line + offset),
                 owner: format!("spec035:prd:{prd:03}"),
                 closure_ids,
             });
@@ -137,7 +146,7 @@ pub(super) fn catalog() -> Vec<Requirement> {
                 id: format!("spec035:{id}"),
                 kind: Spec031CoverageRequirementKind::PrdTask,
                 source_locator: format!(
-                    "{SPEC_ROOT}/prds/{}:{}",
+                    "{spec_root}/prds/{}:{}",
                     authority.file,
                     authority.first_line + offset
                 ),
