@@ -5,6 +5,8 @@ mod automation_producer;
 mod automation_worker;
 mod discord_outbound;
 mod improvement_cli;
+mod notification_delivery;
+mod observation_worker;
 mod onboard_wizard;
 mod runtime_cleanup;
 pub mod spec030_cli;
@@ -17,6 +19,8 @@ mod spec033_cli;
 mod spec035_cli_media;
 mod spec035_revised;
 mod spec035_tasks_cli;
+mod spec036_observation_cli;
+mod spec036_work_cli;
 mod surface_approval_worker;
 mod tool_before_interaction;
 mod trajectory_cli;
@@ -270,6 +274,7 @@ pub enum CliCommand {
     Onboard(OnboardOptions),
     Status(StatusOptions),
     Goal(GoalOptions),
+    Work(spec036_work_cli::WorkOptions),
     Tasks(spec035_tasks_cli::TasksOptions),
     Improve(ImprovementOptions),
     Trajectory(trajectory_cli::TrajectoryOptions),
@@ -2835,6 +2840,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Onboard(options) => onboard(options).map(format_onboard_outcome),
         CliCommand::Status(options) => status(options).map(format_status_report),
         CliCommand::Goal(options) => spec033_cli::run(&options),
+        CliCommand::Work(options) => spec036_work_cli::run(options),
         CliCommand::Tasks(options) => spec035_tasks_cli::run(options),
         CliCommand::Improve(options) => improvement_cli::run(options),
         CliCommand::Trajectory(options) => trajectory_cli::run(options),
@@ -2913,6 +2919,7 @@ where
         "onboard" => parse_onboard(parser, global_config),
         "status" => parse_status(parser, global_config),
         "goal" => spec033_cli::parse(parser),
+        "work" => spec036_work_cli::parse(parser),
         "tasks" => spec035_tasks_cli::parse(parser, global_config),
         "improve" => improvement_cli::parse(parser, global_config),
         "trajectory" => trajectory_cli::parse(parser, global_config),
@@ -12872,7 +12879,7 @@ fn run_external_agent_processor(
             ));
         }
         progressed |= publish_due_external_typing_indicators(&mut typing_indicators, &runtime_bus);
-        progressed |= drain_runtime_outbound(&runtime_bus, &mut channels);
+        progressed |= drain_runtime_outbound(&runtime_bus, &mut channels, &durable_work.data_dir);
         let unavailable_sessions =
             external_active_sessions(&adapter.session_turn_lock, &turn_coordinator)
                 .into_iter()
@@ -12941,7 +12948,7 @@ fn run_external_agent_processor(
     let shutdown_deadline = Instant::now() + EXTERNAL_SHUTDOWN_DRAIN_TIMEOUT;
     while !turn_handles.is_empty() && Instant::now() < shutdown_deadline {
         enqueue_remaining_external_inbound(&runtime_bus, &mut durable_work)?;
-        drain_runtime_outbound(&runtime_bus, &mut channels);
+        drain_runtime_outbound(&runtime_bus, &mut channels, &durable_work.data_dir);
         join_finished_turns(&mut turn_handles);
         while let Ok(result) = turn_rx.try_recv() {
             handle_external_agent_turn_result(
@@ -12987,7 +12994,7 @@ fn run_external_agent_processor(
             false,
         )?;
     }
-    drain_runtime_outbound(&runtime_bus, &mut channels);
+    drain_runtime_outbound(&runtime_bus, &mut channels, &durable_work.data_dir);
     channels.stop_all().map_err(|error| {
         CliError::InvalidArguments(format!("external channel stop failed: {error}"))
     })?;
@@ -13639,14 +13646,23 @@ fn join_finished_turns(handles: &mut Vec<thread::JoinHandle<()>>) {
     *handles = pending;
 }
 
-fn drain_runtime_outbound(runtime_bus: &MessageBus, channels: &mut ChannelManager) -> bool {
+fn drain_runtime_outbound(
+    runtime_bus: &MessageBus,
+    channels: &mut ChannelManager,
+    data_dir: &Path,
+) -> bool {
     let mut drained = false;
     while let Some(message) = runtime_bus.try_consume_outbound() {
         drained = true;
         if !should_dispatch_runtime_outbound(&message) {
             continue;
         }
-        if let Err(error) = channels.dispatch_outbound(message) {
+        if let Err(error) = channels.dispatch_outbound(message.clone()) {
+            notification_delivery::record(
+                Some(data_dir),
+                &message,
+                shacs_core::runtime::EntrustedNotificationTransportFact::Failed,
+            );
             let statuses = channels
                 .status_report()
                 .into_iter()
@@ -14376,7 +14392,10 @@ fn link_channel_restart_work_refs(
     states: &mut BTreeMap<String, ChannelRestartStateInspect>,
     work: &shacs_session::durable_work::DurableWorkReplayState,
 ) {
-    for item in work.items.values().filter(|item| !item.state.is_terminal()) {
+    for item in work.items.values().filter(|item| {
+        !item.state.is_terminal()
+            && item.work_kind != shacs_core::runtime::ENTRUSTED_OBSERVATION_WORK_KIND
+    }) {
         let Some(channel) = durable_work_channel(item) else {
             continue;
         };
@@ -14712,6 +14731,7 @@ fn record_delivery_state(
         "writer_instance_ref": process_instance_ref(),
         "work_ref": message.metadata.get(DURABLE_WORK_ID_METADATA),
         "session_ref": message.metadata.get(DURABLE_SESSION_REF_METADATA),
+        "correlation_id": message.metadata.get(shacs_core::runtime::ENTRUSTED_NOTIFICATION_CORRELATION),
         "updated_at": now_millis(),
         "last_error": last_error,
     });
@@ -16493,7 +16513,25 @@ fn run_email_transport(
                 transport_context.send_attempts,
                 &stop,
                 Some(&metadata_path),
-                |message| send_email_message(smtp, message),
+                |message| {
+                    use shacs_core::runtime::EntrustedNotificationTransportFact as Fact;
+                    notification_delivery::record(
+                        transport_context.durable_data_dir.as_deref(),
+                        &message,
+                        Fact::Pending,
+                    );
+                    let result = send_email_message(smtp, message.clone());
+                    notification_delivery::record(
+                        transport_context.durable_data_dir.as_deref(),
+                        &message,
+                        if result.is_ok() {
+                            Fact::SentHint
+                        } else {
+                            Fact::Failed
+                        },
+                    );
+                    result
+                },
             );
         } else {
             discard_outbound(&outbound_rx, "email smtp is not configured");
@@ -17445,6 +17483,9 @@ pub fn help_text() -> String {
         "  goal      Manage and inspect the persistent goal for a session",
         "            Actions: inspect/status, set, pause, resume, clear, done, blocked",
         "            Flags: --workspace/-w, --session",
+        "  work      Create/read/revise/pause/resume/done/clear entrusted work; observe/observations",
+        "            Actions: create, read, revise, pause, resume, done, clear",
+        "            Flags: --workspace/-w, --session, --owner-session",
         "  tasks     Print the canonical owner-backed task projection as JSON",
         "            Flags: --workspace/-w, --data-dir, --session, --json",
         "            Actions: --owner, --action, --locator, --transport-hello",
@@ -21181,6 +21222,9 @@ impl AgentLoopChatCompletionAdapter {
         let mut outbound = Vec::new();
         while let Some(message) = outbound_bus.consume_outbound() {
             outbound.push(message);
+        }
+        if result.stop_reason.starts_with("entrusted_notification") {
+            return Ok((result, outbound));
         }
         if let Some(message) = loop_runtime
             .session_manager_mut()
