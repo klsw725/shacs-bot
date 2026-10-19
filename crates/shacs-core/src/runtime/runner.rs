@@ -476,7 +476,13 @@ impl AgentRunner {
                         )
                     })
                     .collect::<Vec<_>>();
-                if let Some(ask_index) = runtime_calls
+                let external_action_index = runtime_calls.iter().position(|call| {
+                    call.name == "ask_user" && call.arguments.get("external_action").is_some()
+                });
+                let is_external_action_question = external_action_index.is_some();
+                if let Some(index) = external_action_index {
+                    runtime_calls = vec![runtime_calls.remove(index)];
+                } else if let Some(ask_index) = runtime_calls
                     .iter()
                     .position(|call| call.name == "ask_user")
                 {
@@ -673,6 +679,9 @@ impl AgentRunner {
                         None,
                         None,
                     );
+                }
+                if is_external_action_question && report.interrupt.is_none() {
+                    fatal_outcome_content = Some("External action question rejected; no action was run. Request a new valid proposal.".to_owned());
                 }
                 if let Some(error) = fatal_outcome_content
                     .or_else(|| fatal_tool_error(&spec, &completed_tool_messages))

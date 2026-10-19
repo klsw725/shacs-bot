@@ -19,7 +19,7 @@ impl Tool for AskUserTool {
     }
 
     fn description(&self) -> &str {
-        "Pause and ask the user a question when their answer is required to continue. Use options for likely answers; the user's reply, typed or selected, is returned as the tool result. For non-blocking notifications or buttons, use the message tool instead."
+        "Pause and ask the user a question when their answer is required to continue. Use options for ordinary questions. For a proposed externally committing reservation, purchase, or send on entrusted work, include external_action; only its exact /action decision can resume it, and tool permission remains separate. For non-blocking notifications or buttons, use the message tool instead."
     }
 
     fn parameters(&self) -> Value {
@@ -35,6 +35,7 @@ impl Tool for AskUserTool {
                 ArraySchema::new(StringSchema::new("A possible answer label"))
                     .description("Optional choices. The user may still reply with free text."),
             )
+            .raw_property("external_action", super::ask_action::schema())
             .required(["question"])
             .to_json_schema()
     }
@@ -52,6 +53,13 @@ impl Tool for AskUserTool {
     }
 
     fn execute(&self, params: JsonMap) -> ToolResult {
+        if params.contains_key("external_action") {
+            return ToolResult::AskUserInterrupt {
+                question: "External action requires a current entrusted-work user decision."
+                    .to_owned(),
+                options: Vec::new(),
+            };
+        }
         let question = params
             .get("question")
             .and_then(Value::as_str)
@@ -184,7 +192,7 @@ fn tool_call_name(tool_call: &Value) -> &str {
         .unwrap_or_default()
 }
 
-fn tool_call_arguments(tool_call: &Value) -> Map<String, Value> {
+pub(crate) fn tool_call_arguments(tool_call: &Value) -> Map<String, Value> {
     let raw = tool_call
         .get("function")
         .and_then(Value::as_object)
