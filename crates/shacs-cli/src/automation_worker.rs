@@ -15,6 +15,13 @@ mod trajectory_recorder;
 pub(super) use trajectory_recorder::record_no_provider_trajectory;
 
 pub(super) trait AutomationOwnerAdapters {
+    fn process_observations(
+        &self,
+        _dispatcher: &mut DurableWorkDispatcher,
+        _data_dir: &Path,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn snapshot(&self, request: &ProviderRequest) -> Result<ExecutionSnapshot, String>;
     fn hooks(&self, request: &AutomationDispatchRequest) -> AutomationHookEvaluation;
     fn execute(
@@ -25,6 +32,21 @@ pub(super) trait AutomationOwnerAdapters {
 }
 
 impl AutomationOwnerAdapters for AgentLoopChatCompletionAdapter {
+    fn process_observations(
+        &self,
+        dispatcher: &mut DurableWorkDispatcher,
+        data_dir: &Path,
+    ) -> Result<(), String> {
+        let runtime = shacs_core::runtime::ObservationRuntime {
+            workspace: &self.workspace,
+            data_dir,
+            now_ms: now_millis(),
+        };
+        dispatcher
+            .process_entrusted_observations(&runtime, self)
+            .and_then(|()| dispatcher.enqueue_entrusted_notifications(&runtime))
+            .map_err(|error| error.to_string())
+    }
     fn snapshot(&self, request: &ProviderRequest) -> Result<ExecutionSnapshot, String> {
         self.execution_snapshot_source()
             .resolve(request, Vec::new(), None)
@@ -175,6 +197,7 @@ pub(super) fn process_due_automation(
     data_dir: &Path,
     adapters: &dyn AutomationOwnerAdapters,
 ) -> Result<(), String> {
+    adapters.process_observations(dispatcher, data_dir)?;
     super::automation_outcome::consume_verification_requests(dispatcher, data_dir)?;
     let (state, admission) = durable_work_state_for_owner(data_dir, dispatcher.lease_owner_ref())
         .map_err(|error| error.to_string())?;
