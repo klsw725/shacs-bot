@@ -1,0 +1,12 @@
+76035a39fced8770c7c1cc90f62a1483a66e3dcbc430180505c6e94e71003ecb  CLOSURE.md
+25c7aa4750510dc9c9c641ea6b8775caa0c9bd861dc180c7c59f8bf35555ec0c  SPEC.md
+4428e8a4a68b99d88b4845c305c77a520190389edd30014f5eccc13a68daaebd  prds/000-shared-projection-model-and-vocabulary.md
+e7b7a788a1a5b606332a2822d869d90ea89f31171211e14668f2ecac2f41097c  prds/001-surface-adapter-parity-cli-api-channel.md
+f02099df0fef1c58825ebd679e1e19bea9e5442f1478dc2ac949bd6984c7f071  prds/002-approval-progress-and-recovery-parity.md
+c0b202fa01df0b0ea50ee4a12f3159890930effa6f3f24e86c27ba84ca559daf  prds/003-readiness-degraded-health-and-diagnostics.md
+323c8acc10c16a5bdfa318f39fed71bd866c9b33d93cf9d66acaa7735744d5a1  prds/004-context-extension-app-and-media-projection.md
+8f85a874154eceb90cd6221656431d490726dcb8c9e2a3213409a551fa8b5a54  prds/005-interactive-tui-repl-and-onboard-flows.md
+d772f02f99381245b96ee14359fa39de9d7f0667d3738f732b11c55140492a5e  prds/006-reconnect-backpressure-and-drop-accounting.md
+760b43e4ea2f92a799814aab240690a446a154716e6f339f13322f01fa5bab15  prds/007-release-runner-and-spec035-closure.md
+b687e706db13f82c11a27c6ea3671eb6b92458bb623edd8caf7f8b11ee969460  prds/008-transport-capability-and-snapshot-first-reconnect.md
+c83fe741136453166908642013279246be2d02c9170e9e1d5b90b29c87502233  prds/009-goal-and-read-only-tasks-projection.md
