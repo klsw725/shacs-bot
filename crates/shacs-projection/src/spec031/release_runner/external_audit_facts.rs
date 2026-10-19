@@ -64,23 +64,20 @@ pub(super) fn external_owner_facts() -> &'static [ExternalOwnerFactDescriptor] {
             command_result_ids: &["spec031-owner-spec034"],
             blocked_reason: "Spec034 media analyzer adapter fact is absent or failed",
         },
-        ExternalOwnerFactDescriptor {
-            owner: Spec031ExternalOwnerId::Spec035,
-            slug: "spec035",
-            source_locator: "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md",
-            source_status_locator: "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:3",
-            fact_artifacts: &[
-                ".omo/evidence/spec035/prd000-009/manifest.json",
-                ".omo/evidence/spec035/prd000-009/artifact-hashes.sha256",
-                ".omo/evidence/spec035/prd000-009/command-registry.json",
-                ".omo/evidence/spec035/prd000-009/external-owner-audits.json",
-                ".omo/evidence/spec035/prd000-009/cleanup-registry.json",
-                ".omo/evidence/spec035/prd000-009/incident-registry.json",
-                ".omo/evidence/spec035/prd000-009/workspace-failure-triage.json",
-                ".omo/evidence/spec035/prd000-009/source-audits/correction-source-binding.json",
-            ],
-            command_result_ids: &["spec031-owner-spec035"],
-            blocked_reason: "Spec035 generated closure evidence is missing, stale, tampered, or blocked",
-        },
     ]
+}
+
+pub(super) fn legacy_spec035_owner_fact() -> &'static ExternalOwnerFactDescriptor {
+    static FACT: ExternalOwnerFactDescriptor = ExternalOwnerFactDescriptor {
+        owner: Spec031ExternalOwnerId::Spec035,
+        slug: "spec035",
+        source_locator:
+            "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md",
+        source_status_locator:
+            "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:3",
+        fact_artifacts: &[".omo/evidence/spec035/prd000-009/manifest.json"],
+        command_result_ids: &["spec031-owner-spec035"],
+        blocked_reason: "retained Spec035 execution evidence is missing, stale, or blocked",
+    };
+    &FACT
 }

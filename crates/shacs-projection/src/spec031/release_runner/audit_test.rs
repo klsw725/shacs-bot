@@ -47,7 +47,7 @@ fn external_audit_blocks_source_only_owner_test_with_broad_command_pass() {
         command_timeout: Duration::from_secs(1),
     };
 
-    add_external_audits(&config, &writer, &mut artifacts, false, None)
+    add_external_audits(&config, &writer, &mut artifacts, false)
         .expect("external audits are generated");
 
     let spec030 = artifacts
@@ -80,7 +80,7 @@ fn external_audit_passes_when_exact_owner_test_command_passes() {
     let mut artifacts = artifacts_with_command(&evidence, passed_command("spec031-owner-spec030"));
     let config = config(&artifacts, evidence, repo);
 
-    add_external_audits(&config, &writer, &mut artifacts, false, None)
+    add_external_audits(&config, &writer, &mut artifacts, false)
         .expect("external audits are generated");
 
     let spec030 = artifacts
@@ -90,6 +90,36 @@ fn external_audit_passes_when_exact_owner_test_command_passes() {
         .expect("spec030 audit exists");
     assert_eq!(spec030.status, Spec031ExternalAuditStatus::Pass);
     assert_eq!(spec030.command_result_ids, ["spec031-owner-spec030"]);
+}
+
+#[test]
+fn v3_rejects_a_sixth_external_owner_before_legacy_dispatch() {
+    let evidence = temp_path("sixth-owner");
+    let mut artifacts = artifacts_with_command(&evidence, passed_command("irrelevant"));
+    let row: super::super::coverage::Spec031ExternalAuditRow =
+        serde_json::from_value(serde_json::json!({
+            "owner": "spec029",
+            "status": "blocked",
+            "source_locator": "unused",
+            "source_status_locator": "unused:1",
+            "implementation_artifacts": [],
+            "command_result_ids": [],
+            "artifact": "external/unused-read-audit.md",
+            "artifact_hash": "fnv64:unused",
+            "artifact_media_type": "markdown",
+            "evidence_class": "external_audit_markdown",
+            "reason": "unused"
+        }))
+        .expect("audit row fixture");
+    artifacts.external_audits = vec![row; 6];
+
+    assert_eq!(
+        super::super::coverage_audit_validate::validate_external_audits(
+            &artifacts,
+            std::path::Path::new("unused")
+        ),
+        Err(super::super::model::Spec031ReleaseArtifactError::ArtifactMismatch)
+    );
 }
 
 fn artifacts_with_command(

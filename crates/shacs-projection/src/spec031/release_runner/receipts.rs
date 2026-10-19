@@ -1,9 +1,7 @@
 use super::coverage::{
     Spec031ExternalAuditRow, Spec031ExternalAuditStatus, Spec031ExternalOwnerId,
 };
-use super::model::{
-    Spec031ReleaseArtifactError, Spec031ReleaseRunArtifacts, SPEC031_RELEASE_RUNNER_SCHEMA,
-};
+use super::model::{Spec031ReleaseArtifactError, Spec031ReleaseRunArtifacts};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
@@ -15,9 +13,7 @@ pub(super) fn validate_triage_receipts(
     let mut codes = Vec::new();
     for path in &artifacts.failure_triage {
         let receipt: TriageReceipt = super::validate::read_json(root, path)?;
-        if receipt.schema != SPEC031_RELEASE_RUNNER_SCHEMA
-            || receipt.run_id != artifacts.run_id.as_str()
-        {
+        if receipt.schema != artifacts.schema || receipt.run_id != artifacts.run_id.as_str() {
             return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
         }
         if receipt.code.is_empty() || receipt.message.is_empty() {
@@ -100,7 +96,7 @@ pub(super) fn validate_cleanup_receipts(
     let mut cleaned_resources = HashSet::new();
     for receipt_path in &artifacts.cleanup_registry {
         let receipt: CleanupReceipt = super::validate::read_json(root, receipt_path)?;
-        if receipt.schema != SPEC031_RELEASE_RUNNER_SCHEMA
+        if receipt.schema != artifacts.schema
             || receipt.run_id != artifacts.run_id.as_str()
             || !receipt.success
             || !matches!(receipt.status.as_str(), "cleaned" | "verified")
