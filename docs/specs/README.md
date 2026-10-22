@@ -37,6 +37,7 @@
 | [`039-app-capability-disposition`](039-app-capability-disposition/SPEC.md) | `Planned (Decision only)`: app authoring/lifecycle의 사용자 자료와 호출 경로를 조사해 유지·축소·제거 판정. 변경 실행은 별도 | 021, 030, 032 |
 | [`040-video-analyzer-capability-disposition`](040-video-analyzer-capability-disposition/SPEC.md) | `Planned (Decision only)`: 선택적 video analyzer의 실제 사용·첨부·projection 영향을 조사해 유지·축소·제거 판정 | 027, 030, 031, 034 |
 | [`041-release-evidence-tooling-disposition`](041-release-evidence-tooling-disposition/SPEC.md) | `Planned (Decision only)`: Spec031 release runner의 소비자·증거/호환 계약을 조사해 유지·축소·제거 판정 | 016, 031, 033, 034 |
+| [`042-conversational-web-watch-and-trustworthy-silence`](042-conversational-web-watch-and-trustworthy-silence/SPEC.md) | `Planned`: 대화로 맡긴 웹페이지 한 곳의 관찰, 사용자와 함께 정한 조건의 변화와 확인 실패·회복·공백·결정 마감 알림. 036 완료 범위 재판정 없음 | 010, 029, 030, 031, 033, 036 |
 
 ## 읽는 순서 권장
 
@@ -84,6 +85,7 @@
 39. `039-app-capability-disposition`
 40. `040-video-analyzer-capability-disposition`
 41. `041-release-evidence-tooling-disposition`
+42. `042-conversational-web-watch-and-trustworthy-silence`
 
 ## 운영 원칙
 
