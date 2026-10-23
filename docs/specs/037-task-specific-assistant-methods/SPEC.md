@@ -69,6 +69,6 @@ PRD [000](prds/000-method-selection-and-user-override.md), [010](prds/010-reprod
 - 조건 4: 보고서에 계산이나 이미지를 넣는 복합 요청은 같은 목표 아래 부분마다 따로 판정한다. 한 부분의 성공이 다른 부분을 통과시키지 않는다. 답과 핵심 근거가 먼저 나오고, 코드·실행 기록·출처 상세는 `/method status`에서 본다(040).
 - 조건 5: macOS native와 공식 container 조건의 compiled REPL에서 일반·전문·방식 변경·미지원 입력을 실행해 관측했다(각 PRD의 `qa-*.txt`).
 
-fmt와 workspace clippy `-D warnings`가 통과했다. 마지막으로 바꾼 package(`shacs-core`)의 테스트는 1,583 passed / 1 failed / 3 ignored이며, 유일한 실패는 baseline부터 있던 Spec034 fixture 테스트다. 이 package 실행은 PRD040 14차 반영 코드에서 했다. 15차 반영(두 판정 함수와 단위 테스트) 뒤에는 대상 테스트(AgentLoop 124/124, 단위 59/59, CLI 2/2·2/2·4/4, command 3/3)를 다시 실행했다. 전체 workspace 테스트는 PRD040 8차 반영 코드의 3,304 passed / 1 failed / 13 ignored가 마지막이다. 그 뒤로는 저장소 작업 지침에 따라 사용자 승인을 기다린다.
+fmt와 workspace clippy `-D warnings`가 통과했다. 마지막으로 바꾼 package(`shacs-core`)의 테스트는 1,583 passed / 1 failed / 3 ignored이며, 유일한 실패는 baseline부터 있던 Spec034 fixture 테스트다. 이 package 실행은 PRD040 14차 반영 코드에서 했다. 15차 반영(두 판정 함수와 단위 테스트) 뒤에는 대상 테스트(AgentLoop 124/124, 단위 59/59, CLI 2/2·2/2·4/4, command 3/3)를 다시 실행했다. 커밋한 최종 코드에서 사용자 승인을 받아 전체 workspace 테스트를 다시 실행했다. suite 198개 기준 3,308 passed / 1 failed / 13 ignored이며, 유일한 실패는 같은 Spec034 fixture 테스트다(PRD040 종료 확인 참조).
 
 이미지 내용·모양 확인, 이미지 편집·마스크·변형, 전용 Python 서비스, 새 workflow engine, 방법 학습은 제공하지 않는다. 이미지·복합 요청에서는 확장 추론(thinking)을 요청하지 않는다. 실제 명령과 제한은 [사용 가이드](../../USAGE.md#복합-요청의-결과-확인)를 따른다.

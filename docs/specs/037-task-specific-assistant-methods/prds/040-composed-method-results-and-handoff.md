@@ -549,7 +549,11 @@ PRD 040은 앞선 독립 기능들의 사용자 결과를 한 요청으로 결�
 - 최종 검증:
   - 바꾼 package(`shacs-core`)의 테스트는 suite 124개 기준 **1,583 passed / 1 failed / 3 ignored**다(14차 반영 코드, `shacs-core-test.log`). 유일한 실패는 baseline부터 있던 Spec034 fixture 테스트 `mismatch_uses_isolated_tree`다.
   - 15차 반영(두 판정 함수와 단위 테스트) 뒤에는 대상 테스트를 다시 실행했다. 결과는 AgentLoop 124/124, 단위 59/59, CLI 2/2·2/2·4/4·3/3이다.
-  - 전체 workspace 실행은 8차 반영 코드의 **3,304 passed / 1 failed / 13 ignored**(`workspace-test-before-oracle9.log`)가 마지막이다. 그 뒤로는 저장소 작업 지침(`AGENTS.md`: 전체 workspace 테스트는 사용자 승인 뒤)에 따라 바꾼 package로 확인했다.
+  - 9차 반영부터는 저장소 작업 지침(`AGENTS.md`: 전체 workspace 테스트는 사용자 승인 뒤)에 따라 바꾼 package로 확인했다. 커밋한 최종 코드(`968697a`)에서 사용자 승인을 받아 전체 workspace를 다시 실행했다(`workspace-test.log`, `CARGO_INCREMENTAL=0 cargo test --manifest-path crates/Cargo.toml --locked --workspace --no-fail-fast -q`, 1,454초).
+    - suite 198개 기준 **3,308 passed / 1 failed / 13 ignored**다. 유일한 실패는 baseline부터 있던 Spec034 fixture 테스트 `mismatch_uses_isolated_tree`다.
+    - 8차 반영 코드의 전체 실행 3,304(`workspace-test-before-oracle9.log`) 대비 +4다. 9차 이후 순증 테스트 4개와 일치한다(AgentLoop +3: 9차 2개와 10차 1개, 단위 +1: 9차 +1, 10차 −1, 14차 +1).
+    - suite 수가 327개에서 198개로 준 것은 저장소 소유자 커밋 `c603fa3`이 통합 테스트를 crate마다 하나의 실행 파일로 합쳤기 때문이다.
+    - `CARGO_INCREMENTAL=0`은 incremental build cache가 디스크를 채우지 않게 하려는 것이며, 테스트 내용은 같다. 실행이 남긴 Spec034 toolchain 사본 4개는 끝난 뒤 지웠다.
   - fmt와 workspace clippy `-D warnings`가 통과했다.
   - 커밋하면서 Spec037 통합 테스트를 저장소의 `tests/it` 구조로 옮겼다. 저장소 지침이 통합 테스트 실행 파일을 늘리지 말라고 하기 때문이다.
     - shacs-core와 shacs-cli의 테스트는 각 crate의 `it` 모듈이 됐다. shacs-command의 `/method` 테스트는 `router` 테스트의 하위 모듈(`tests/router/method.rs`)이 됐다.
@@ -571,4 +575,3 @@ PRD 040은 앞선 독립 기능들의 사용자 결과를 한 요청으로 결�
   - 요청이 끝난 뒤의 다음 요청과 checkpoint 복구 뒤의 모델은 이전 도구 결과의 digest만 본다.
   - 다음은 원문을 담는다(문서에 적은 예외): `/method status`, 승인 화면, 제공된 도구의 plugin `tool:before` 정책 hook, 대화 기록과 checkpoint의 제공된 도구 호출(인자·ID·연속성 필드), 요청이 열린 동안의 보관 metadata와 method 기록. `session export --yes`는 경고 후 원본 metadata를 내보내는 명시적 진단 기능이다.
   - 이미 쓰인 durable event는 되돌리지 않는다. 처음에 계산 방식이던 요청이 나중에 복합 방식이 되면, 그 전 turn의 durable event에는 원래 호출 ID가 남을 수 있다.
-  - 전체 workspace 테스트는 8차 반영 코드가 마지막이며, 다시 실행하려면 사용자 승인이 필요하다.
