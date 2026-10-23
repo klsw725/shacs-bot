@@ -1,4 +1,5 @@
 use super::runner_spec034::*;
+use crate::runtime::quiet_tools::quiet_tool_calls;
 use crate::runtime::tool_execution::{
     effective_permission_rule_input, permission_decision_for_action,
     permissioned_action_input_from_context,
@@ -57,6 +58,8 @@ const MAX_TOOL_SEARCH_QUERY_CHARS: usize = 120;
 const BACKFILL_CONTENT: &str = "[Tool result unavailable — call was interrupted or lost]";
 const FATAL_SKIP_CONTENT: &str = "[Tool call skipped because a fatal tool error stopped the turn]";
 const CANCELLED_SKIP_CONTENT: &str = "[Tool call skipped because the turn was cancelled]";
+const INTERRUPT_SKIP_CONTENT: &str =
+    "[Tool call skipped because another tool call is waiting for approval]";
 const COMPACTABLE_TOOLS: [&str; 7] = [
     "read_file",
     "exec",
@@ -111,6 +114,20 @@ pub trait AgentHook: Send + Sync {
     ) -> Vec<RuntimeToolMessage> {
         self.before_execute_tools(context, calls);
         Vec::new()
+    }
+
+    /// `block_tool_calls` in an image or composed request: a hook that does
+    /// not take raw arguments (a diagnostic one) sees only `quiet_tool_calls`.
+    fn block_tool_calls_quietly(
+        &self,
+        context: &AgentHookContext,
+        calls: &[RuntimeToolCall],
+    ) -> Vec<RuntimeToolMessage> {
+        if self.receives_tool_arguments() {
+            self.block_tool_calls(context, calls)
+        } else {
+            self.block_tool_calls(context, &quiet_tool_calls(calls))
+        }
     }
 
     fn after_response(&self, _context: &AgentHookContext, _response: &LlmResponse) {}
@@ -191,6 +208,23 @@ impl AgentHook for CompositeHook {
         messages
     }
 
+    fn block_tool_calls_quietly(
+        &self,
+        context: &AgentHookContext,
+        calls: &[RuntimeToolCall],
+    ) -> Vec<RuntimeToolMessage> {
+        for hook in &self.hooks {
+            let blocked = catch_unwind(AssertUnwindSafe(|| {
+                hook.block_tool_calls_quietly(context, calls)
+            }))
+            .unwrap_or_default();
+            if !blocked.is_empty() {
+                return blocked;
+            }
+        }
+        Vec::new()
+    }
+
     fn after_response(&self, context: &AgentHookContext, response: &LlmResponse) {
         for hook in &self.hooks {
             invoke_hook_lifecycle(|| hook.after_response(context, response));
@@ -245,6 +279,10 @@ pub struct AgentRunSpec<'a> {
     pub deadline: Option<std::time::Instant>,
     pub execution_scope: Option<ExecutionScope>,
     pub execution_ledger: Option<Arc<Mutex<RuntimeExecutionLedger>>>,
+    /// The execution ledger keeps none of the model's words: tool calls go by
+    /// a digest of their ids, and a question the model asked by its digest
+    /// (an image or composed request asks for this).
+    pub quiet_ledger: bool,
     pub execution_snapshot_resolver: ExecutionSnapshotResolver,
     pub execution_snapshot_callback: ExecutionSnapshotCallback,
 }
@@ -289,6 +327,7 @@ impl<'a> AgentRunSpec<'a> {
             deadline: None,
             execution_scope: None,
             execution_ledger: None,
+            quiet_ledger: false,
             execution_snapshot_resolver: Arc::new(|request| {
                 crate::runtime::LiveExecutionSnapshotSource::default().resolve(
                     request,
@@ -371,6 +410,8 @@ pub(crate) struct AgentRunResult {
     pub stop_reason: String,
     pub error: Option<String>,
     pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_status: Option<u16>,
     pub interrupt: Option<RuntimeInterrupt>,
     pub tool_events: Vec<ToolEvent>,
     pub had_injections: bool,
@@ -574,6 +615,14 @@ impl AgentRunner {
                         },
                         normalized.artifact_ref.clone(),
                     );
+                    let event = tool_event_for_message(
+                        &normalized.message,
+                        executable_calls_by_id.get(&normalized.message.tool_call_id),
+                        current_catalog.as_ref(),
+                        None,
+                    );
+                    emit_events(&spec, std::slice::from_ref(&event));
+                    tool_events.push(event);
                     completed_tool_results.push(normalized.message.to_json());
                     completed_tool_messages.push(normalized.message.clone());
                     messages.push(normalized.message.to_json());
@@ -679,6 +728,12 @@ impl AgentRunner {
                         None,
                         None,
                     );
+                    if report.interrupt.is_some() {
+                        emit_events(
+                            &spec,
+                            &[skipped_tool_event(skipped_call, INTERRUPT_SKIP_CONTENT)],
+                        );
+                    }
                 }
                 if is_external_action_question && report.interrupt.is_none() {
                     fatal_outcome_content = Some("External action question rejected; no action was run. Request a new valid proposal.".to_owned());
@@ -713,6 +768,7 @@ impl AgentRunner {
                         stop_reason: "tool_error".to_owned(),
                         error: Some(error.clone()),
                         error_message: Some(error),
+                        error_status: None,
                         interrupt: None,
                         tool_events,
                         had_injections,
@@ -761,6 +817,7 @@ impl AgentRunner {
                         stop_reason: "ask_user".to_owned(),
                         error: None,
                         error_message: None,
+                        error_status: None,
                         interrupt: Some(interrupt),
                         tool_events,
                         had_injections,
@@ -806,6 +863,7 @@ impl AgentRunner {
                     stop_reason: "error".to_owned(),
                     error: Some(content),
                     error_message: Some(DEFAULT_ERROR_MESSAGE.to_owned()),
+                    error_status: response.error_status_code,
                     interrupt: None,
                     tool_events,
                     had_injections,
@@ -874,6 +932,7 @@ impl AgentRunner {
                         stop_reason: "completed".to_owned(),
                         error: None,
                         error_message: None,
+                        error_status: None,
                         interrupt: None,
                         tool_events,
                         had_injections,
@@ -903,6 +962,7 @@ impl AgentRunner {
                     stop_reason: "empty_final_response".to_owned(),
                     error: Some(content.clone()),
                     error_message: Some(content),
+                    error_status: None,
                     interrupt: None,
                     tool_events,
                     had_injections,
@@ -957,6 +1017,7 @@ impl AgentRunner {
                 stop_reason: "completed".to_owned(),
                 error: None,
                 error_message: None,
+                error_status: None,
                 interrupt: None,
                 tool_events,
                 had_injections,
@@ -995,6 +1056,7 @@ impl AgentRunner {
             stop_reason: "max_iterations".to_owned(),
             error: None,
             error_message: None,
+            error_status: None,
             interrupt: None,
             tool_events,
             had_injections,
@@ -1073,11 +1135,20 @@ fn provider_execution_identity(
 
 fn tool_execution_identity(spec: &AgentRunSpec<'_>, call_id: &str) -> Option<ExecutionIdentity> {
     let scope = execution_scope(spec)?;
-    let effect_id = format!("tool:{}:{call_id}", scope.turn_id);
+    let call = tool_call_key(spec, call_id);
+    let effect_id = format!("tool:{}:{call}", scope.turn_id);
     Some(
-        ExecutionIdentity::new(scope.clone(), effect_id, call_id.to_owned())
+        ExecutionIdentity::new(scope.clone(), effect_id, call)
             .with_causation_id(format!("provider:{}", scope.turn_id)),
     )
+}
+
+fn tool_call_key(spec: &AgentRunSpec<'_>, call_id: &str) -> String {
+    if spec.quiet_ledger {
+        super::quiet_tools::opaque_call_id(call_id)
+    } else {
+        call_id.to_owned()
+    }
 }
 
 fn cancelled_run_result(
@@ -1099,6 +1170,7 @@ fn cancelled_run_result(
         stop_reason: "cancelled".to_owned(),
         error: None,
         error_message: None,
+        error_status: None,
         interrupt: None,
         tool_events,
         had_injections,
@@ -2619,7 +2691,11 @@ fn begin_spawned_subagent_execution(spec: &AgentRunSpec<'_>, message: &RuntimeTo
         format!("spawn:{child_task_id}"),
         child_task_id.clone(),
     )
-    .with_causation_id(format!("tool:{}:{}", scope.turn_id, message.tool_call_id));
+    .with_causation_id(format!(
+        "tool:{}:{}",
+        scope.turn_id,
+        tool_call_key(spec, &message.tool_call_id)
+    ));
     begin_execution(spec, identity, ExecutionDomain::Subagent);
 }
 
@@ -2731,11 +2807,17 @@ fn record_tool_interrupt_outcome(spec: &AgentRunSpec<'_>, interrupt: &RuntimeInt
             (tool_call.clone(), ToolInterruptKind::PermissionApproval)
         }
     };
+    let detail = match interrupt {
+        RuntimeInterrupt::AskUser { question, .. } if spec.quiet_ledger => {
+            Some(super::quiet_tools::quiet_text(question))
+        }
+        _ => interrupt_observable_text(interrupt),
+    };
     record_tool_call_outcome(
         spec,
         &call,
         ToolOutcomeKind::Interrupted { interrupt: kind },
-        interrupt_observable_text(interrupt),
+        detail,
         None,
     );
 }
@@ -2768,9 +2850,21 @@ fn append_skipped_tool_results(
         };
         let skipped_json = skipped.to_json();
         record_tool_message_outcome(spec, &skipped, outcome.clone(), None);
+        emit_events(spec, &[skipped_tool_event(call, content)]);
         completed_messages.push(skipped);
         completed_results.push(skipped_json.clone());
         messages.push(skipped_json);
+    }
+}
+
+fn skipped_tool_event(call: &RuntimeToolCall, content: &str) -> ToolEvent {
+    ToolEvent {
+        name: call.name.clone(),
+        status: ToolStatus::Skipped,
+        detail: content.to_owned(),
+        call_id: Some(call.id.clone()),
+        arguments: Some(observable_tool_arguments(&call.name, &call.arguments)),
+        result: Some(Value::String(content.to_owned())),
     }
 }
 

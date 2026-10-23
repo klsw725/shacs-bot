@@ -102,6 +102,17 @@ const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 
 #[path = "agent_loop_action.rs"]
 mod action;
+#[path = "agent_loop_method.rs"]
+mod method;
+#[path = "agent_loop_method_finish.rs"]
+mod method_finish;
+#[path = "agent_loop_method_record.rs"]
+mod method_record;
+#[path = "agent_loop_method_workflow.rs"]
+mod method_workflow;
+#[cfg(test)]
+#[path = "agent_loop_method_workflow_tests.rs"]
+mod method_workflow_tests;
 #[path = "agent_loop_notification.rs"]
 mod notification;
 
@@ -778,6 +789,17 @@ impl<'a> AgentLoop<'a> {
             };
             return match self.turn_lock.acquire_priority(session_key.clone()) {
                 Ok(_turn_guard) => {
+                    let method_mutation_guard = if matches!(&route.command, LoopCommand::Stop) {
+                        Some(shacs_session::SessionMutationGuard::acquire(
+                            &self.config.workspace,
+                            &session_key,
+                        )?)
+                    } else {
+                        None
+                    };
+                    if method_mutation_guard.is_some() {
+                        self.sessions.invalidate(&session_key);
+                    }
                     let mut session = self.sessions.get_or_create(&session_key);
                     materialize_recovery_markers(&mut session);
                     self.handle_loop_command(
@@ -868,6 +890,11 @@ impl<'a> AgentLoop<'a> {
             return self.handle_pending_permission_wizard(&message, session, &session_key);
         }
 
+        if let Some(result) = self.prepare_method_request(&message, &mut session)? {
+            return Ok(result);
+        }
+        self.cancel_reported_workflow(&message, &mut session)?;
+
         if let Some(result) =
             self.try_resume_pending_workflow(&message, &mut session, &session_key)?
         {
@@ -899,13 +926,20 @@ impl<'a> AgentLoop<'a> {
         }
 
         let pending_recent_retry_approval = pending_recent_retry_approval(&session);
+        let method_observation = Arc::new(Mutex::new(
+            crate::runtime::task_method_observe::MethodObservation::with_media_roots(
+                self.config.media_roots.clone(),
+            ),
+        ));
         let pending_permission_approval = pending_permission_approval(&session);
         let pending_ask_id = pending_ask_user_id(&session.messages);
+        let method_tracked = method::user_turn(&message)
+            || (pending_ask_id.is_some() && method::request_in_progress(&session)?);
         let execution_ledger = Arc::new(Mutex::new(execution_ledger_for_turn(&message, &session)));
         let mut media_turn = super::turn!(self, &session_key, MAX_INJECTIONS_PER_TURN);
         let turn_provenance =
             durable_event_provenance(&self.context_builder, &recover_lock(&execution_ledger));
-        let (initial_messages, context_provider_handoff) = if let Some(approval) =
+        let (mut initial_messages, context_provider_handoff) = if let Some(approval) =
             pending_recent_retry_approval
         {
             if approval.status == PendingPermissionApprovalStatus::Executing {
@@ -995,6 +1029,18 @@ impl<'a> AgentLoop<'a> {
                     set_pending_recent_retry_approval(&mut session, &executing_approval);
                     self.sessions.save(&session)?;
                     let report = self.execute_approved_permission_payload(&token, approval_cache);
+                    if method_tracked {
+                        self.observe_method_approved(
+                            &method_observation,
+                            token.tool_call(),
+                            &report,
+                        );
+                        method_finish::finish(
+                            &mut session,
+                            &method_observation,
+                            crate::runtime::task_method::RequestState::InProgress,
+                        )?;
+                    }
                     session.record_permission_approval_receipt(
                         shacs_session::PermissionApprovalReceipt {
                             approval_request_id: approval.approval_request_id.clone(),
@@ -1004,15 +1050,21 @@ impl<'a> AgentLoop<'a> {
                             recorded_at_unix_ms: now_unix_ms(),
                         },
                     );
+                    let events =
+                        method::image::quiet_events(&session, self.tool_event_callback.clone())?;
+                    let held_from = session.messages.len();
                     let fatal_error = self.append_approved_tool_messages(
                         &message,
                         &session_key,
                         &mut session,
                         &execution_ledger,
                         report.messages,
+                        events,
                     );
+                    method::image::hold_results(&mut session, held_from)?;
                     session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
                     if let Some(error) = fatal_error {
+                        let error = method::image::quiet_failure(&session, error)?;
                         clear_runtime_markers(&mut session);
                         store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
                         session.add_message("assistant", error.clone(), Map::new());
@@ -1210,6 +1262,18 @@ impl<'a> AgentLoop<'a> {
                     }
                     let report =
                         self.execute_approved_permission_tool(&approval, approval_cache.clone());
+                    if method_tracked {
+                        self.observe_method_approved(
+                            &method_observation,
+                            &approval.tool_call,
+                            &report,
+                        );
+                        method_finish::finish(
+                            &mut session,
+                            &method_observation,
+                            crate::runtime::task_method::RequestState::InProgress,
+                        )?;
+                    }
                     let terminal_state = if approval_is_valid {
                         shacs_session::PermissionApprovalTerminalState::Consumed
                     } else if correlation.error
@@ -1221,13 +1285,18 @@ impl<'a> AgentLoop<'a> {
                     };
                     record_permission_approval_terminal(&mut session, &approval, terminal_state);
                     let executed_action = report.permissioned_actions.first().cloned();
+                    let events =
+                        method::image::quiet_events(&session, self.tool_event_callback.clone())?;
+                    let held_from = session.messages.len();
                     let fatal_error = self.append_approved_tool_messages(
                         &message,
                         &session_key,
                         &mut session,
                         &execution_ledger,
                         report.messages,
+                        events,
                     );
+                    method::image::hold_results(&mut session, held_from)?;
                     session.metadata.remove(PENDING_PERMISSION_APPROVAL_KEY);
                     if let (true, true, Some(action)) =
                         (session_scoped, approval_is_valid, executed_action)
@@ -1247,6 +1316,7 @@ impl<'a> AgentLoop<'a> {
                         );
                     }
                     if let Some(error) = fatal_error {
+                        let error = method::image::quiet_failure(&session, error)?;
                         clear_runtime_markers(&mut session);
                         store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
                         session.add_message("assistant", error.clone(), Map::new());
@@ -1371,6 +1441,13 @@ impl<'a> AgentLoop<'a> {
                             shacs_session::PermissionApprovalTerminalState::Denied
                         },
                     );
+                    if method_tracked {
+                        method_record::record_denied_call(
+                            &mut session,
+                            &approval.tool_call,
+                            "Permission denied by user.",
+                        )?;
+                    }
                     append_session_message(
                         &mut session,
                         RuntimeToolMessage {
@@ -1403,6 +1480,9 @@ impl<'a> AgentLoop<'a> {
                 }
             }
         } else if let Some(tool_call_id) = pending_ask_id {
+            if method::user_turn(&message) {
+                method_finish::record_decision(&mut session, &message.content)?;
+            }
             append_ask_user_resume(
                 &mut session,
                 &tool_call_id,
@@ -1432,10 +1512,12 @@ impl<'a> AgentLoop<'a> {
                 return Ok(result);
             }
             self.maybe_consolidate_session_by_tokens(&mut session)?;
-            if let Some(result) =
-                self.try_live_workflow_turn(&message, &mut session, &session_key)?
-            {
-                return Ok(result);
+            if !(method_tracked && method::image::skips_workflow(&session)?) {
+                if let Some(result) =
+                    self.try_live_workflow_turn(&message, &mut session, &session_key)?
+                {
+                    return Ok(result);
+                }
             }
             let history = session.get_history_with_options(self.config.history_options);
             let initial_messages = self.context_builder.build_messages(ContextBuildRequest {
@@ -1478,6 +1560,10 @@ impl<'a> AgentLoop<'a> {
                 .insert(PENDING_USER_TURN_KEY.to_owned(), Value::Bool(true));
             (initial_messages, Some(context_provider_handoff))
         };
+        if method_tracked {
+            method::project_context(&session, &mut initial_messages)?;
+            method::image::restore_results(&mut session, &mut initial_messages)?;
+        }
         let turn_id = turn_id_for_message(&message, &session);
         let session_context_digest =
             session_remembered_context_digest_for_input(&PermissionedActionInput {
@@ -1545,9 +1631,15 @@ impl<'a> AgentLoop<'a> {
             is_builtin_command(content) || crate::tools::ask_action::is_command(content)
         });
         let provider_client = ProviderInvocationClient::new(self.client, &provider_invocation);
+        let method_tools = if method_tracked {
+            method::image::method_tools(&session, self.tools)?
+        } else {
+            None
+        };
+        let offered_tools = method_tools.as_ref().unwrap_or(self.tools);
         let mut spec = AgentRunSpec::new(
             initial_messages.clone(),
-            self.tools,
+            offered_tools,
             &provider_client,
             self.config.model.clone(),
         );
@@ -1585,6 +1677,10 @@ impl<'a> AgentLoop<'a> {
         spec.tool_event_callback = self.tool_event_callback.clone();
         spec.provider_event_callback = self.provider_event_callback.clone();
         spec.agent_hook = self.agent_hook.clone();
+        if method_tracked {
+            method::image::hold_model_text(&session, &mut spec)?;
+            crate::runtime::task_method_observe::attach(&mut spec, method_observation.clone());
+        }
         spec.checkpoint_callback = Some(Arc::new(move |checkpoint| {
             let mut session = recover_lock(&checkpoint_capture);
             session
@@ -1593,15 +1689,34 @@ impl<'a> AgentLoop<'a> {
             store_runtime_execution(&mut session, &recover_lock(&checkpoint_execution_ledger));
             let _ = recover_lock(&checkpoint_manager_capture).save(&session);
         }));
+        if method_tracked {
+            method::image::quiet_checkpoints(&session, &mut spec)?;
+        }
 
         let mut run_result = match self.runner.run(spec) {
             Ok(result) => result,
             Err(error) => {
+                let quiet_error = method::image::quiet_provider_error(&session, &error)?;
+                let error_text = quiet_error
+                    .clone()
+                    .unwrap_or_else(|| provider_error_text(&error));
+                let method_footer = if method_tracked {
+                    method_finish::finish(
+                        &mut session,
+                        &method_observation,
+                        crate::runtime::task_method::RequestState::Failed,
+                    )?
+                } else {
+                    String::new()
+                };
                 store_current_execution_snapshot(&mut session, &run_snapshot);
                 action::cancel(&mut session);
-                session.add_message("assistant", provider_error_text(&error), Map::new());
+                session.add_message("assistant", error_text.clone(), Map::new());
                 clear_runtime_markers(&mut session);
-                let execution_ledger = recover_lock(&execution_ledger);
+                let mut execution_ledger = recover_lock(&execution_ledger);
+                if quiet_error.is_some() {
+                    method::image::quiet_provider_details(&mut execution_ledger, &turn_id);
+                }
                 store_runtime_execution(&mut session, &execution_ledger);
                 let provenance =
                     durable_event_provenance_from_snapshot(&turn_provenance, &execution_ledger);
@@ -1614,10 +1729,11 @@ impl<'a> AgentLoop<'a> {
                     Some(provenance),
                 )?;
                 self.sessions.save(&session)?;
-                let outbound_count = self.publish_error(&message, &session_key, &error);
+                let final_content = format!("{error_text}{method_footer}");
+                let outbound_count = self.publish_error(&message, &session_key, &final_content);
                 return Ok(AgentLoopTurnResult {
                     session_key,
-                    final_content: Some(provider_error_text(&error)),
+                    final_content: Some(final_content),
                     stop_reason: "error".to_owned(),
                     tools_used: Vec::new(),
                     outbound_count,
@@ -1628,13 +1744,38 @@ impl<'a> AgentLoop<'a> {
                 });
             }
         };
+        if method_tracked {
+            method::image::quiet_run_error(&session, &mut run_result)?;
+            let added = run_result.messages.get_mut(initial_messages.len()..);
+            let used = &mut run_result.tools_used;
+            method::image::withhold_run_text(
+                &session,
+                added.unwrap_or_default(),
+                used,
+                offered_tools,
+            )?;
+        }
+        let history_start = session.messages.len();
         append_new_runner_messages(&mut session, &initial_messages, &run_result.messages);
+        if method_tracked {
+            method::image::hold_results(&mut session, history_start)?;
+        }
         let new_runner_messages = run_result
             .messages
             .get(initial_messages.len()..)
             .unwrap_or_default();
-        if let Some(proposal) =
-            proposal_from_runner_messages(new_runner_messages, &message, &session_key, now_iso())
+        // An image or composed request cannot propose entrusted work.
+        if let Some(proposal) = method_tools
+            .is_none()
+            .then(|| {
+                proposal_from_runner_messages(
+                    new_runner_messages,
+                    &message,
+                    &session_key,
+                    now_iso(),
+                )
+            })
+            .flatten()
         {
             let prompt = proposal.render_prompt();
             store_pending_proposal(&mut session, &proposal);
@@ -1655,6 +1796,16 @@ impl<'a> AgentLoop<'a> {
             &session_key,
         );
         self.finish_action_question(&mut session, &message, &mut run_result)?;
+        let method_footer = if method_tracked {
+            method_finish::finish_run(
+                &mut session,
+                &method_observation,
+                &mut run_result,
+                history_start,
+            )?
+        } else {
+            String::new()
+        };
         let execution_ledger = recover_lock(&execution_ledger);
         let provenance =
             durable_event_provenance_from_snapshot(&turn_provenance, &execution_ledger);
@@ -1689,6 +1840,7 @@ impl<'a> AgentLoop<'a> {
         }
         self.sessions.save(&session)?;
 
+        method_finish::append_footer(&mut run_result, &method_footer);
         let (outbound_count, ask_user_options) =
             self.publish_run_outbound(&message, &session_key, &run_result)?;
         Ok(AgentLoopTurnResult {
@@ -2076,11 +2228,20 @@ impl<'a> AgentLoop<'a> {
                     Some(workflow_provenance),
                 )?;
             }
-            let content = format!(
+            let mut content = format!(
                 "Workflow completed from saved checkpoint: {}",
                 pending.plan.workflow_id
             );
             session.add_message("assistant", content.clone(), Map::new());
+            if method_workflow::tracks(message, session, &pending.plan)? {
+                content.push_str(&method_workflow::finish(
+                    session,
+                    &Arc::new(Mutex::new(
+                        crate::runtime::task_method_observe::MethodObservation::default(),
+                    )),
+                    WorkflowRunState::Completed,
+                )?);
+            }
             clear_runtime_markers(session);
             self.sessions.save(session)?;
             self.bus.publish_outbound(outbound_for(
@@ -2123,6 +2284,19 @@ impl<'a> AgentLoop<'a> {
         content: &str,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         session.add_message("assistant", content, Map::new());
+        let method_footer = if method_workflow::tracks(message, session, plan)? {
+            method_workflow::finish(
+                session,
+                &Arc::new(Mutex::new(
+                    crate::runtime::task_method_observe::MethodObservation::default(),
+                )),
+                WorkflowRunState::Failed,
+            )?
+        } else {
+            String::new()
+        };
+        let rendered = format!("{content}{method_footer}");
+        let content = rendered.as_str();
         clear_runtime_markers(session);
         session.metadata.insert(
             RUNTIME_CHECKPOINT_KEY.to_owned(),
@@ -2221,6 +2395,10 @@ impl<'a> AgentLoop<'a> {
                     );
                 }
                 plan.origin_session_id = session_key.to_owned();
+                if method::user_turn(message) {
+                    method_workflow::bind(session, &mut plan)?;
+                }
+                let method_tracked = method_workflow::tracks(message, session, &plan)?;
                 if pending_workflow(session).is_none() {
                     append_user_turn(session, message);
                 }
@@ -2281,8 +2459,16 @@ impl<'a> AgentLoop<'a> {
                         );
                         let _ = recover_lock(&checkpoint_manager_capture).save(&session);
                     };
-                let execution_config =
+                let mut execution_config =
                     self.workflow_subagent_execution_config(&plan, session, session_key);
+                let method_observation = Arc::new(Mutex::new(
+                    crate::runtime::task_method_observe::MethodObservation::with_media_roots(
+                        self.config.media_roots.clone(),
+                    ),
+                ));
+                if method_tracked {
+                    execution_config.method_observation = Some(method_observation.clone());
+                }
                 let outcome = match run_live_runtime_workflow_with_checkpoint_callback(
                     RuntimeWorkflowLiveOptions {
                         input: RuntimeWorkflowLiveInput {
@@ -2302,8 +2488,15 @@ impl<'a> AgentLoop<'a> {
                 ) {
                     Ok(outcome) => outcome,
                     Err(error) => {
-                        let final_content = format!("Workflow failed: {error}");
+                        let mut final_content = format!("Workflow failed: {error}");
                         session.add_message("assistant", final_content.clone(), Map::new());
+                        if method_tracked {
+                            final_content.push_str(&method_workflow::finish(
+                                session,
+                                &method_observation,
+                                WorkflowRunState::Failed,
+                            )?);
+                        }
                         clear_runtime_markers(session);
                         self.append_durable_fact(
                             session_key,
@@ -2402,8 +2595,15 @@ impl<'a> AgentLoop<'a> {
                     &outcome.verification_gate,
                     &outcome.synthesis_outcome.evidence_refs,
                 );
-                let final_content = format_workflow_turn_content(&outcome);
+                let mut final_content = format_workflow_turn_content(&outcome);
                 session.add_message("assistant", final_content.clone(), Map::new());
+                if method_tracked {
+                    final_content.push_str(&method_workflow::finish(
+                        session,
+                        &method_observation,
+                        outcome.run.state,
+                    )?);
+                }
                 clear_runtime_markers(session);
                 session.metadata.insert(
                     RUNTIME_CHECKPOINT_KEY.to_owned(),
@@ -2563,6 +2763,7 @@ impl<'a> AgentLoop<'a> {
         stop_cancel: Option<SessionTurnCancelOutcome>,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         match command {
+            LoopCommand::Method(args) => self.handle_method_command(args, message, session),
             LoopCommand::Status => {
                 let content = if self.stopped {
                     "Status: stopped".to_owned()
@@ -2584,6 +2785,7 @@ impl<'a> AgentLoop<'a> {
                 )
             }
             LoopCommand::New => {
+                method::close_request(&mut session, false)?;
                 action::cancel(&mut session);
                 self.stopped = false;
                 let _ = self.task_registry.cancel(&session.key);
@@ -2623,6 +2825,9 @@ impl<'a> AgentLoop<'a> {
             ),
             LoopCommand::Stop => {
                 action::cancel(&mut session);
+                if save_session {
+                    method::close_request(&mut session, true)?;
+                }
                 let synchronous_turn_cancelled = matches!(
                     stop_cancel,
                     Some(SessionTurnCancelOutcome::Active | SessionTurnCancelOutcome::Reserved)
@@ -3323,12 +3528,19 @@ impl<'a> AgentLoop<'a> {
     fn publish_command_response(
         &mut self,
         message: &InboundMessage,
-        session: Session,
+        mut session: Session,
         content: &str,
         command: Option<AgentLoopCommandResult>,
         stop_reason: &str,
         save_session: bool,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        let method_footer = if save_session && method::user_turn(message) {
+            method_finish::command_footer(&mut session, stop_reason)?
+        } else {
+            String::new()
+        };
+        let rendered_content = format!("{content}{method_footer}");
+        let content = rendered_content.as_str();
         let session_key = session.key.clone();
         if save_session {
             let turn_id = if message
@@ -3462,16 +3674,11 @@ impl<'a> AgentLoop<'a> {
         Ok((count, ask_options))
     }
 
-    fn publish_error(
-        &self,
-        message: &InboundMessage,
-        session_key: &str,
-        error: &ProviderError,
-    ) -> usize {
+    fn publish_error(&self, message: &InboundMessage, session_key: &str, content: &str) -> usize {
         self.bus.publish_outbound(outbound_for(
             message,
             session_key,
-            provider_error_text(error),
+            content.to_owned(),
             Vec::new(),
             "error",
         ));
@@ -3656,6 +3863,7 @@ impl<'a> AgentLoop<'a> {
         session: &mut Session,
         execution_ledger: &Arc<Mutex<RuntimeExecutionLedger>>,
         messages: Vec<RuntimeToolMessage>,
+        tool_event_callback: Option<ToolEventCallback>,
     ) -> Option<String> {
         let mut spec = AgentRunSpec::new(
             Vec::new(),
@@ -3672,7 +3880,8 @@ impl<'a> AgentLoop<'a> {
             turn_id_for_message(message, session),
         ));
         spec.execution_ledger = Some(execution_ledger.clone());
-        spec.tool_event_callback = self.tool_event_callback.clone();
+        spec.quiet_ledger = method::image::quiet_ledger(session);
+        spec.tool_event_callback = tool_event_callback;
         let calls = messages
             .iter()
             .map(|message| {

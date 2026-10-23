@@ -111,6 +111,7 @@ fn materialize_run_result(
         stop_reason: result.stop_reason,
         error: result.error,
         error_message: result.error_message,
+        error_status: result.error_status,
         interrupt: result.interrupt,
         tool_events: result.tool_events,
         had_injections: result.had_injections,

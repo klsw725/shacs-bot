@@ -13,6 +13,8 @@ pub struct AgentRunResult {
     pub stop_reason: String,
     pub error: Option<String>,
     pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_status: Option<u16>,
     pub interrupt: Option<RuntimeInterrupt>,
     pub tool_events: Vec<ToolEvent>,
     pub had_injections: bool,

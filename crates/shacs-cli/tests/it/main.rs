@@ -32,3 +32,9 @@ pub mod spec035_tasks_app_path;
 pub mod spec035_tasks_cli;
 #[path = "spec035_tasks_fail_closed.rs"]
 pub mod spec035_tasks_fail_closed;
+#[path = "spec037_image_repl.rs"]
+pub mod spec037_image_repl;
+#[path = "spec037_image_verbose.rs"]
+pub mod spec037_image_verbose;
+#[path = "spec037_method_repl.rs"]
+pub mod spec037_method_repl;

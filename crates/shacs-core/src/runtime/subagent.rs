@@ -373,6 +373,8 @@ impl Default for SubagentRuntimeConfig {
 
 #[derive(Debug, Clone)]
 pub struct SubagentExecutionConfig {
+    pub method_observation:
+        Option<Arc<Mutex<crate::runtime::task_method_observe::MethodObservation>>>,
     pub workspace: PathBuf,
     pub model: String,
     pub settings: GenerationSettings,
@@ -402,6 +404,7 @@ pub struct SubagentExecutionConfig {
 impl SubagentExecutionConfig {
     pub fn new(workspace: impl Into<PathBuf>, model: impl Into<String>) -> Self {
         Self {
+            method_observation: None,
             workspace: workspace.into(),
             model: model.into(),
             settings: GenerationSettings::default(),
@@ -935,8 +938,16 @@ impl SubagentRuntime {
                 },
             );
         }));
+        if let Some(observation) = &config.method_observation {
+            crate::runtime::task_method_observe::attach(&mut spec, observation.clone());
+        }
         match AgentRunner::new().run(spec) {
-            Ok(result) => self.child_result_from_agent_run(envelope, result),
+            Ok(result) => {
+                if let Some(observation) = &config.method_observation {
+                    crate::runtime::task_method_observe::record_artifacts(observation, &result);
+                }
+                self.child_result_from_agent_run(envelope, result)
+            }
             Err(error) => {
                 let mut result = ChildResultEnvelope::from_spawn(
                     envelope,
