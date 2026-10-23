@@ -530,10 +530,231 @@ Command router는 priority, exact, prefix 경계를 분리합니다. `/status`, 
 - `--session <id>` / `-s <id>`: 기본값은 `cli:direct`입니다. `:`가 없는 값은 `cli:<id>`로 저장됩니다.
 - `--temperature <number>`
 - `--max-tokens <positive integer>`
-- `--allow-side-effects`: 이 로컬 CLI turn에서 write/edit/exec tool을 명시적으로 허용합니다.
+- `--no-side-effects`: 이 로컬 CLI turn에서 write/edit/exec/message/image tool과 plugin tool을 등록하지 않습니다. `ask`/`agent`/`run`은 기본으로 이 tool들을 등록하며, 등록된 tool의 실행 승인은 계속 permission mode가 결정합니다.
+- `--allow-side-effects`: 기본 동작과 같으며 호환을 위해 받습니다. `run --allow-remote`는 side-effect tool을 기본으로 끄므로 이 flag를 명시해야 등록됩니다. `serve`의 `--allow-api-side-effects`와 channel `runtime start`는 기존처럼 opt-in입니다.
 - `--markdown` / `--no-markdown`: nanobot CLI 호환을 위해 받지만, 현재 Rust binary는 plain stdout text를 출력합니다.
 
 Message가 `-`로 시작하는 `agent` direct message는 `--message`/`-m`로 전달하세요. `agent hello` 같은 positional direct message는 REPL 경로와 구분하기 위해 거절됩니다.
+
+## 요청별 수행 방식과 `/method`
+
+`agent` REPL과 같은 `AgentLoop`를 사용하는 대화 표면에서 사용자 요청마다 수행 방식을 선택합니다. 한국어·영어의 명확한 요청 표현을 보수적으로 분류하며, 분류 자체는 provider·도구·credential command를 호출하지 않습니다. 모호하면 `general`입니다. 일반 자동 선택은 기존 답변 형식을 유지하고, 전문 방식이나 사용자 지정 방식에는 런타임이 선택 이유·가용성·예정 확인 항목을 footer로 덧붙입니다. Footer는 conversation history에 저장하지 않습니다.
+
+| 별칭 | Canonical ID | 필요한 실제 등록 도구 | 예정 확인 항목 |
+|---|---|---|---|
+| `general` | `general` | 없음 | 없음 |
+| `calculation` | `reproducible_calculation` | `exec` | 입력, 단위, 가정, 독립 확인 |
+| `report` | `source_grounded_report` | `read_file` | 실제 읽은 출처, 주장–출처 연결, 미확인 주장 |
+| `image` | `image_generation_review` | `image_generate` | 생성 artifact, 명시한 요구 조건, 사용자 수정 |
+| (자동 선택만) | `composed` | 각 부분의 도구(하나 이상) | 각 부분의 확인 항목(부분 이름이 붙음) |
+
+**방식 선택 자체는 전문 검증을 하지 않습니다.** 선택 직후 모든 확인 항목은 `not verified`이며, 각 방식의 판정은 아래 계산·보고서·이미지·복합 절의 실제 실행 기록으로만 바뀝니다. Tool 성공이나 사용자 승인만으로 계산·출처·이미지 품질의 검증 성공을 주장하지 않습니다. 이미지 도구가 등록되어도 credential과 provider 지원 여부는 실제 호출 시 확인하므로 `requires_runtime_check`입니다. 보고서는 로컬 `read_file`만 있어도 선택할 수 있고, `web_search`/`web_fetch`가 없으면 `web research unavailable`을 표시합니다. Skill의 요구사항 문자열이나 ready workflow recipe는 도구 가용성의 증거로 사용하지 않습니다.
+
+```text
+/method
+/method status
+/method list
+/method use general
+/method use calculation
+/method use report
+/method use image
+/method auto
+/method history
+/method accept
+/method revise
+```
+
+`use`는 표의 canonical ID도 받습니다. 명령 자체는 provider turn을 시작하지 않으며 non-priority builtin입니다. 실행 중인 provider를 끼어들어 바꾸는 명령이 아니라 기존 turn 직렬화 경계를 따릅니다.
+
+- **활성 요청이 없을 때:** `use`는 다음 사용자 요청 **한 번만** 적용합니다. 다음 요청이 차단되어도 이 지정은 소비됩니다. `/method auto`로 아직 소비하지 않은 지정을 지울 수 있습니다.
+- **질문·승인·workflow checkpoint 대기, 변경 후 이어가기 대기, 도구 부족으로 차단된 요청이 있을 때:** `use`는 같은 요청에 새 selection revision을 만듭니다. 같은 방식은 상태를 건드리지 않는 no-op입니다. `auto`는 원래 목표를 자동으로 다시 선택하는 새 revision입니다. 원문이 이미 conversation compaction으로 제거됐다면 기록된 원래 자동 분류를 사용합니다.
+- **변경 후:** 다음 일반 메시지는 같은 요청 ID를 이어가며 재분류하지 않습니다. 목표 preview, 관측한 산출물, 답한 질문과 답변, 남은 질문, 외부 효과 기록을 유지합니다. 이전 질문에는 취소 tool result를 추가하고, 보류 승인·retry token·Spec036 행동 결정과 보류 workflow는 취소합니다. 이전 validation claim은 `superseded_not_inherited`이며 새 revision에는 승계하지 않습니다. 다만 새 방식에도 남는 계산·보고서·이미지 부분은 이미 기록된 실행·읽은 자료·저장된 이미지를 새 revision에서 다시 판정합니다(아래 "복합 요청의 결과 확인").
+- **승인 정책:** 변경 전의 보류 승인은 새 행동에 재사용하지 않습니다. Session/project remembered permission rule 자체는 삭제하지 않으며, 새 행동은 현재 정상 permission gate를 통과합니다. 따라서 유지된 정책에 따라 승인되거나 다시 승인을 요구할 수 있습니다.
+- **완료 후:** 다음 일반 메시지는 새 요청입니다. 차단된 요청도 방식 변경 없이 새 일반 메시지를 보내면 abandoned로 닫고 새 요청을 시작합니다. 차단된 목표를 이어가려면 먼저 `/method use general` 같은 변경 명령을 쓰세요.
+- **`/stop`과 `/new`:** 방식 변경이 아니므로 위의 변경 처리(질문·승인·workflow 취소)를 하지 않습니다. `/stop`은 보류 중인 질문·승인·workflow가 있으면 요청을 그대로 두어 이어서 답하거나 승인할 수 있게 하고, 보류 항목 없이 이어가기 대기이거나 차단된 요청만 cancelled로 닫습니다. 실행 중인 turn에 보낸 `/stop`은 그 turn이 취소로 끝나면 요청을 cancelled로 닫습니다. `/new`는 새 session을 시작하면서 활성 요청을 cancelled로 닫습니다.
+
+필요한 도구가 없으면 provider/workflow 실행 전에 차단합니다. 둘 이상의 전문 방식을 함께 요청하면 복합 방식(`composed`)으로 처리하며, 모든 부분을 쓸 수 없을 때만 차단합니다(아래 "복합 요청의 결과 확인"). 조용히 일반 방식으로 fallback하지 않습니다.
+
+로컬 `ask`/`agent`/`run`은 side-effect tool을 기본으로 등록하므로 `tools.exec.enable`(기본값 `true`)이 켜져 있으면 계산 방식을 쓸 수 있습니다. `--no-side-effects`로 실행했거나 `run --allow-remote`를 `--allow-side-effects` 없이 실행했으면 `exec`가 등록되지 않아 계산 요청이 차단됩니다. 이미지에는 `tools.imageGeneration.enable`과 지원되는 image provider 설정도 필요합니다. 설정을 바꿔 재시작한 뒤 기존 차단 요청은 `/method auto`로 다시 평가할 수 있습니다. 단순히 같은 `use`를 반복하면 no-op입니다. 대신 `/method use general` 후 `continue`처럼 이어갈 수도 있습니다.
+
+이미 실행한 파일 쓰기·외부 전송 등을 자동으로 되돌리거나 재실행하지 않습니다. `/method status`와 재시작 후 `/method history`에서도 관측한 외부 효과를 `not reverted`로 표시합니다. 기록에는 tool 이름·결과·canonical argument SHA-256·revision·turn·시각만 남기며 raw argument/result는 method metadata에 저장하지 않습니다. 단, 계산 방식 요청의 `exec` 실행은 재현과 확인을 위해 아래 계산 절의 범위로 명령과 출력 일부를 저장합니다. 이는 실제 원격 효과를 독립적으로 검증했다는 뜻은 아닙니다.
+
+### 계산 방식의 결과 확인
+
+계산 방식(`reproducible_calculation`)은 답을 실제로 실행한 코드와 별도 확인으로 판정합니다.
+
+- **실행 기록:** 모델은 `exec`로 계산 코드(예: `python3 -c ...`)를 실행합니다. 각 실행은 결과 한 줄 `SHACS_CALC {json}`을 출력합니다.
+  - 주 계산은 `role: "primary"`와 함께 `answer`, `unit`, `inputs`, `assumptions`를 출력합니다.
+  - 확인 계산은 다른 코드·방법으로 `role: "check"`와 `answer`, `unit`, `method`를 출력합니다.
+  - `answer`는 수여야 합니다(예: `6`, `6.0`, `-1.5e3`, `6,000`, `1/3`). `unit`은 공백과 대괄호가 없는 24자 이하의 한 낱말입니다(예: `m^2`, `km/h`, 빈 값). 그렇지 않은 결과 줄은 "result line problem"으로 기록하고 결과로 쓰지 않습니다. runtime이 확인된 값과 단위를 직접 화면에 적기 때문입니다.
+  - 기록하는 글(입력, 가정, 방법 설명, 오류, 위치 등)의 줄바꿈과 제어 문자는 공백으로 바꿔 한 줄로 저장합니다. 실행 코드와 출력만 줄을 그대로 남깁니다.
+- **판정은 runtime이 합니다.** 모델이 "검증됐다"고 말해도 판정에는 영향이 없습니다.
+  - `verified`: 마지막 주 계산 뒤에 성공한 다른 코드의 확인 계산이 같은 값과 단위를 냈을 때만입니다.
+  - `conflict`: 확인 계산의 값이나 단위가 다를 때입니다. 예를 들어 단위를 잘못 바꿔 600과 6이 나온 경우입니다.
+  - `not verified`: 확인 계산이 없거나, 실패했거나, 주 계산과 같은 코드일 때입니다.
+  - `failed`: 주 계산이 0이 아닌 종료 코드로 끝났거나 오류가 났을 때입니다.
+  - `unavailable`: 실행이 permission·process gate에 막혔거나, Python 또는 필요한 package가 없을 때입니다.
+  - `not recorded`: 결과 줄이 없을 때입니다.
+  - `not run`: 실행이 아예 없을 때입니다.
+  - 종료 코드 0만으로는 `verified`가 되지 않습니다.
+  - 독립성은 확인 계산의 코드가 주 계산과 다르다는 것까지만 기계적으로 확인합니다. 실제로 다른 방법인지는 `/method status`의 코드와 `method` 설명으로 직접 확인해야 합니다.
+- **재실행:** 오류를 고쳐 주 계산을 다시 실행하면 그 이전의 확인은 `superseded`로 표시되고 판정에 쓰이지 않습니다.
+  - 마지막 주 계산 뒤의 실행이 하나라도 실패하거나 취소되면 이미 `verified`였던 판정도 거둬들입니다. 거부·Python 없음·package 없음이면 `unavailable`, 그 밖의 실패면 `not verified`가 됩니다. 실행 전에 취소된 실행(다른 호출의 승인 대기로 건너뛴 실행, 방식 변경으로 취소된 보류 실행)도 `not verified`이며 이유는 "a run after the latest primary result was cancelled"입니다. 그 뒤 확인 계산만 다시 성공해도 판정은 돌아오지 않습니다.
+  - 마지막 주 계산 뒤에 결과 줄이 없거나 잘못된 실행이 있어도 판정을 거둬들여 `not verified`가 됩니다.
+  - 주 계산과 확인 계산을 모두 다시 성공시켜야 다시 `verified`가 됩니다.
+  - 다른 hook이 `exec`를 막은 경우와 사용자가 `exec` 승인을 거절한 경우도 거부된 실행으로 기록합니다. 실패하거나 거부된 실행의 출력에 결과 줄이 섞여 있어도 결과로 쓰지 않습니다.
+  - 방식을 바꾸면 이전 revision의 계산 판정은 `superseded_not_inherited`가 됩니다. 새 방식에도 계산 부분이 남으면(예: 복합 요청에서 계산만 남김) 기록된 실행을 새 revision에서 다시 판정합니다. 방식 변경으로 취소된 보류 실행도 그 기록에 취소로 남습니다.
+  - 각 실행은 요청 안의 순번(`#1`, `#2` …)으로 구분하므로 tool call ID가 겹쳐도 판정에 쓰인 실행을 정확히 가리킵니다.
+- **결과 표시:** 답 다음에 판정과 핵심 근거를 보여 줍니다. 근거는 확인된 답 또는 확인되지 않은 주 계산 결과, 입력, 가정, 실행 상태입니다. `/method status`에서는 각 실행의 명령·출력·종료 상태·결과 줄을 볼 수 있습니다.
+- **`/method accept`:** 현재 또는 마지막 요청의 결과를 사용자가 받아들였다는 사실을 따로 기록합니다. 판정은 바꾸지 않습니다. 사용자 아닌 turn에서는 거절합니다.
+- **저장 범위:** 계산 실행 기록은 redaction 후 명령 2,048자, 출력 1,024자까지 저장합니다.
+  - 활성 요청에는 최근 16개를 보관합니다.
+  - 요청이 끝나면 판정에 쓰인 실행과 최근 4개만 남기고, 생략한 수를 표시합니다.
+- **실행 환경:** 실제 실행은 기존 permission 승인과 Spec030 process gate를 그대로 거칩니다.
+  - 공식 container처럼 containment가 확인된 환경에서는 승인 뒤 실행됩니다.
+  - 이를 확인할 수 없는 native host에서는 승인 뒤에도 gate가 실행을 막을 수 있습니다. 그때 계산은 `unavailable`로 표시되며 결과를 합성하지 않습니다.
+
+### 보고서 방식의 출처 확인
+
+보고서 방식(`source_grounded_report`)은 결론이 이 요청에서 실제로 읽은 자료에 연결되는지 확인합니다. 결론이 참인지 보증하지는 않습니다.
+
+- **읽은 자료 기록:** `read_file`과 `web_fetch`의 읽기 결과를 같은 요청에 기록합니다. 기록하는 항목은 위치, 읽은 시각, 내용 digest, 실패 사유입니다.
+  - 작업 폴더 안의 파일은 읽을 때의 파일 digest도 남깁니다. 그래서 나중에 파일이 바뀌었는지 다시 확인할 수 있습니다.
+  - 다시 확인할 때 읽을 때 쓴 경로가 더 이상 같은 실제 파일을 가리키지 않으면(예: symlink가 다른 파일을 가리키게 바뀜) 따라가 읽지 않고 "바뀐 파일"로 봅니다.
+  - hook에 막히거나, 사용자가 거부했거나, 실행 전에 거절·취소된 읽기도 실패한 자료로 남깁니다. hook이 어떤 문구로 막았는지와 관계없이 실패로 기록합니다.
+  - 준비 단계에서 거절되거나 실행 전에 취소된 읽기도 요청한 경로·URL로 기록합니다. 인자를 알 수 없을 때만 `<read call rejected/skipped before it ran>`으로 남깁니다.
+  - `web_fetch`가 URL 검사 실패, 네트워크 오류, HTTP 오류처럼 `{"error": ...}` 결과를 돌려주면 읽기 실패입니다. 그 사유는 "Sources that could not be read"에 표시합니다.
+- **인용 형식:** 모델은 결론 줄 끝에 `[source: <읽은 경로나 URL>]`을 붙입니다.
+  - 인용은 읽을 때 쓴 경로·URL과 정확히 같아야 연결됩니다. 앞의 `./`, 따옴표, 끝의 `/`만 무시합니다.
+  - 작업 폴더 파일은 같은 파일을 가리키는 작업 폴더 기준 상대 경로나 실제 절대 경로로 인용해도 됩니다. 파일 이름만 같은 다른 경로(예: `notes.md`를 읽고 `imaginary/notes.md`나 `docs/notes.md`로 인용)는 "never read"입니다.
+  - 긴 경로·URL은 화면과 기록에서 256자로 줄이지만, 연결 여부는 줄이기 전 전체 값으로 비교합니다.
+  - 여러 자료는 `[source: a; b]`로 씁니다. 구분자는 `;`뿐이며, 경로나 URL 안의 쉼표는 그대로 위치의 일부입니다.
+  - 해결되지 않은 점은 `[unresolved: ...]`, 서로 다른 자료는 `[conflict: a; b]`로 표시합니다.
+  - 답변 본문과 `write_file`로 쓴 보고서 파일 내용을 모두 검사합니다. `edit_file`로 고친 파일은 고친 뒤 디스크의 내용을 다시 읽어 검사합니다.
+- **판정:**
+  - `source-linked`: 모든 인용이 이 보고서를 위해 읽은 자료에 연결되고, 인용 표시 없는 문장 줄이 하나도 없을 때만입니다.
+  - `citation problems`: 인용 중 하나라도 다음 중 하나일 때입니다. 읽지 않은 자료, 읽기 실패, 읽은 뒤 바뀐 파일, 이전 판에서 가져와 다시 확인하지 못한 웹 자료.
+  - `partly cited`: 인용은 모두 연결됐지만 표시가 없는 문장 줄이 있을 때입니다. 이때 "claim-source linkage" 확인은 `not verified`로 남습니다.
+  - 그 밖의 상태: `no citations`(인용 없음), `no sources read`(읽은 자료 없음), `unavailable`(보고서 글이 있고 모든 읽기가 실패), `not written`(보고서 글 없음). 글이 없으면 읽기 결과와 관계없이 먼저 `not written`입니다.
+  - 표시만 있고 문장이 없는 줄(예: `[source: notes.md]`만 있는 줄)은 결론이 아닙니다. 빈 표시(`[source: ]`)만 있는 문장은 표시가 없는 줄로 셉니다.
+  - 표시 없는 문장 줄은 "not source-checked"로 수와 처음 5개를 보여 주고, `/method status`에서 전체(최대 32개)를 보여 줍니다. 짧은 문장과 한국어 문장도 모두 셉니다. 세지 않는 줄은 제목(`#`), `:`로 끝나는 머리말, 구분선·표 구분 줄·코드 펜스 같은 서식 줄, 파일 저장 안내 `Saved: <파일>` 한 줄뿐입니다. 이런 줄은 출처 표시가 있어도 보고서 내용으로 세지 않습니다(그것만 있으면 `not written`). 다만 그 인용은 검사하므로 읽지 않은 자료를 가리키면 `citation problems`가 됩니다.
+  - 검사 한도를 넘은 부분(출력당 결론 32개·판정당 64개를 넘는 결론, 결론당 32개를 넘는 인용, 출력당 65,536자를 넘는 본문, 판당 32개를 넘어 밀려난 출력)은 "Parts beyond the checking limits (not checked)"로 세며, 이 경우에도 `source-linked`가 아닙니다.
+  - 검사 대상 답변은 모델이 정상으로 끝낸 최종 답변뿐입니다. 도구 오류로 멈춘 turn, 취소, 반복 한도 도달, 빈 응답, 질문·승인 대기에서 runtime이 만든 안내문은 보고서 본문으로 보지 않습니다.
+  - 보고서를 파일로 저장할 때 답변도 검사 대상입니다. 답변을 "Saved: report.md"처럼 짧게 쓰지 않으면 그 문장도 표시 없는 줄로 셉니다.
+  - 024 workflow로 실행된 보고서 요청에서는 child가 읽은 자료와 파일로 쓴 보고서를 검사합니다. workflow 진행 요약(완료 상태·child 요약)은 보고서 본문으로 보지 않으므로, 파일로 쓴 보고서가 없으면 `not written`으로 남습니다.
+  - 자료끼리 내용이 맞지 않는지는 runtime이 판단하지 않습니다. 모델이 `[conflict: ...]`로 표시한 충돌만 보여 주고, 연결된 결론도 사실이라고 보증하지 않습니다.
+- **결과 표시:** 답 다음에 판정, 읽은 자료, 연결되지 않은 결론과 그 이유, 충돌·미해결 수를 보여 줍니다. "Sources read"와 "Sources that could not be read"에는 이번 판정에 쓰는 자료(현재 selection revision에서 읽었거나 이전 판에서 가져온 자료)만 나옵니다. 방식 변경 전에 읽은 자료는 `/method status`에 `revision N; superseded_not_inherited`로 표시하고 판정에는 쓰지 않습니다. `/method status`는 자료별 기록과 결론별 인용 상태를 보여 줍니다. `/method status`, `/method history`, `/method accept`와 다음 turn의 모델 문맥은 판정을 보여 주거나 기록하기 전에 작업 폴더 파일이 읽은 뒤 바뀌었는지 다시 확인합니다.
+- **`/method revise`:** 다음 메시지를 마지막으로 끝난 보고서 또는 이미지 요청의 새 판으로 만듭니다(이미지는 아래 절 참조). 보고서라면 이전 판에서 읽은 자료는 가져오지만 그대로 믿지 않습니다. 가져오는 자료는 이전 판의 마지막 판정에 쓰인 자료(그 판에서 읽었거나 이미 이월된 자료)뿐입니다.
+  - 작업 폴더 파일은 바뀌지 않았을 때만 "이전 판에서 읽음, 그 뒤 변경 없음"으로 연결합니다.
+  - 바뀐 파일과 웹 자료는 다시 읽어야 연결됩니다.
+  - 새 판에서 새로 생기거나 바뀐 결론의 수와 처음 5개, 그리고 각 결론의 연결 여부를 표시합니다. 출처 표시 없는 문장 줄도 결론으로 비교하며 "no source marker"로 표시합니다.
+  - 이전 판에는 있었지만 새 판에서 빠지거나 문구가 바뀐 결론(출처 표시 없는 줄 포함)도 "removed or reworded"로 수와 처음 5개를 표시합니다. 전체 목록은 `/method status`에서 봅니다. 새 판의 글이 아직 없으면 세지 않습니다.
+  - 모델에게는 새 판 번호, 이전 요청 ID, 원래 요청을 함께 알려 줍니다.
+  - 수정판 비교는 저장된 결론 문장(redaction 후 앞 256자)으로 합니다. 그 뒤만 바뀐 긴 결론은 바뀐 것으로 잡히지 않을 수 있습니다.
+  - 진행 중인 요청이 있거나 사용자 아닌 turn이면 거절합니다.
+- **저장 범위:**
+  - 자료는 요청당 최근 32개를 보관합니다.
+  - 결론은 출력당 32개, 판정당 64개까지 보관합니다.
+  - 위치·결론 문장은 redaction 후 256자까지 저장합니다. redaction은 저장 한도에 1,024자를 더한 앞부분에만 적용합니다(긴 본문에서 느려지지 않게 하려는 것이며, 그보다 긴 secret은 가정하지 않습니다).
+  - 보고서 본문 원문은 저장하지 않고 digest와 해석한 결론만 남깁니다. 검사 대상 본문은 출력당 앞 65,536자입니다.
+
+### 이미지 방식의 결과 확인
+
+이미지 방식(`image_generation_review`)은 `image_generate`로 실제 저장된 이미지 파일과, 요청에 적힌 조건 중 잴 수 있는 것을 따로 보여 줍니다. 그림의 내용이나 보기 좋은지는 자동으로 판단하지 않습니다.
+
+- **필요한 설정:** `image_generate`가 등록돼야 합니다. side-effect 도구가 켜져 있고, `tools.imageGeneration.enable`과 이미지 생성을 지원하는 provider(`openai`, `openrouter`, `openai_codex`)가 설정돼야 합니다.
+  - 등록되지 않았으면 provider를 부르기 전에 요청을 막고 다음 단계를 안내합니다.
+  - 자격 증명과 provider 지원 여부는 호출할 때 확인합니다.
+- **호출 기록:** 각 `image_generate` 호출의 옵션(size, format, count, quality, background), 프롬프트(redaction 후 256자), 결과를 같은 요청에 기록합니다.
+  - 생성으로 인정하려면 도구가 보고한 파일이 media root 안에 실제로 있고 sha256이 일치해야 합니다. 그 파일의 머리 부분에서 형식(PNG·JPEG·WebP)과 픽셀 크기를 직접 잽니다.
+  - 파일을 찾지 못하거나 digest가 다르면 `save not confirmed`입니다. 이미지가 생성됐다고 표시하지 않습니다. 한 호출이 8장을 넘게 보고하면 나머지를 확인할 수 없으므로 역시 `save not confirmed`입니다.
+  - 판정은 가장 최근 호출이 정합니다. 같은 판에서 이미지가 저장된 뒤 다시 부른 호출이 실패·거부·저장 불확실이면, 앞의 이미지는 현재 결과가 아니며 "Earlier saved image in this request (not the current result)"로만 보여 줍니다. 다시 저장에 성공하면 그 이미지가 결과입니다.
+  - 자격 증명이나 provider가 없으면 `unavailable`, provider가 지원하지 않는 요청은 `unsupported`, provider 오류와 저장 실패는 `failed`, 사용자 거부·취소·hook 차단은 `not generated`입니다.
+- **요구 조건 확인:** 요청 문장에 적힌 크기(`1024x1024`), 형식(`png`, `jpeg`/`jpg`, `webp`), 장수(`2 images`, `2장`)를 저장된 파일과 비교합니다. 결과는 `met`, `not met`, `not checked`입니다.
+  - 하나라도 `not met`이면 "stated requirements" 확인은 `failed`입니다.
+  - 모두 맞아도 내용과 모양은 확인하지 않았으므로 `not verified`로 남습니다. 결과에는 항상 "content and look — not checked automatically; please review the image"를 붙입니다.
+- **결과 표시:** 이미지 방식의 답은 모델 답변이 아니라 runtime이 확인한 내용입니다. 모델 답변은 이미지가 없는데 있다고 하거나, 확인하지 않은 내용(예: "파란 고양이")을 맞다고 할 수 있기 때문입니다. 성공·실패·호출 없음 모두 같습니다.
+  - 저장이 확인되면 "Image saved and checked on disk (see below)."로 시작합니다. 요구 조건 중 `not met`이 있으면 "Image saved, but not every stated requirement is met (see below)."입니다. 이어서 내용과 모양은 직접 확인해 달라고 알립니다.
+  - `image_generate`를 불렀지만 저장된 새 이미지가 없으면 "No new image was saved for this request (image: …)"입니다. 한 번도 부르지 않았으면 "No image was generated for this request (image: not generated)"이고, 다시 요청하거나 `/method use general`로 일반 답을 받는 방법을 안내합니다.
+  - provider 오류나 반복 한도 등으로 turn이 정상 답 없이 끝났으면 "The turn ended early (…)"를 덧붙입니다.
+  - 그 아래에 판정, 저장된 이미지의 참조, 형식·크기·바이트 수·digest 앞부분·provider/model, 요구 조건 확인 결과를 보여 줍니다.
+  - 이미지 방식 요청에서 모델이 쓸 수 있는 도구는 `image_generate` 하나입니다. 질문(`ask_user`), 메시지 보내기(`message`), 하위 작업(`spawn`), 맡김 작업 제안 같은 다른 도구는 모델에게 보이지 않고, 불러도 실행되지 않습니다. 그런 호출의 인자는 대화 기록에 남기지 않고 진행 출력(tool 이벤트)으로도 내보내지 않습니다. 호출의 도구 이름도 모델이 쓴 글이므로(없는 도구 이름일 수도 있음), 대화 기록·복구용 checkpoint·runtime hook에는 `unoffered_tool`로 바꿔 남깁니다. 그래서 모델의 문장이 질문이나 메시지 모양으로 사용자에게 가지 않습니다.
+  - 승인 요청 화면은 runtime이 만든 그대로 보여 줍니다(도구 이름·인자·위험도).
+  - 모델 답변은 진단용으로 session metadata의 `withheld_reply`(redaction 후 512자)에만 남깁니다. `/method status`를 포함해 어떤 화면에도 보여 주지 않습니다.
+  - 같은 이유로 이미지 방식 요청에서는 모델의 문장을 진행 출력으로 내보내지 않습니다. text·reasoning delta와 도구 호출 입력(delta·완성본) 모두 해당하며(WebSocket `sendProgress` 포함), 도구 호출 시작·종료와 미디어 이벤트만 보냅니다. provider가 스트리밍으로 알리는 도구 호출 시작은 모델이 쓸 수 있는 도구일 때만 보내고, 호출 ID는 digest(`call-…`)로 바꿉니다. runtime hook(`--verbose` 로그, observability hook, plugin hook)에도 모델 문장과 reasoning, 쓸 수 없는 도구 호출의 인자를 넘기지 않습니다. `image_generate`의 프롬프트도 tool 이벤트와 진단용 hook에는 길이·digest로만 넘기고, 도구 결과도 진행 이벤트·hook 문맥·대화 기록·checkpoint에는 길이·digest로만 남깁니다(아래 "복합 요청의 결과 확인"의 도구 인자·결과 규칙과 같음). 그래서 `run --verbose`의 "LLM response preview"는 이미지 요청에서 `<empty>`입니다. 대화 기록에도 이번 turn에 모델이 쓴 문장을 남기지 않습니다. 도구 호출과 함께 온 문장과 reasoning은 지우고 호출만 남기며, 마지막 답 자리에는 사용자에게 보인 runtime 답을 저장합니다. 실행 도중 저장하는 복구용 checkpoint에도 모델 문장·reasoning·thinking을 넣지 않으므로, 실행 중 프로세스가 멈춘 뒤 복구해도 기록에 되살아나지 않습니다. 그래서 승인을 기다리는 동안에도, 다음 turn의 모델 문맥에도 확인되지 않은 문구가 남지 않습니다. 이미지·복합 요청에서는 provider에 thinking(확장 추론)을 요청하지 않습니다. 설정한 reasoning effort를 이 요청들에는 보내지 않고, 앞선 대화의 thinking block도 보내지 않습니다. thinking block은 모델의 말인 데다, 승인 뒤 도구 호출을 이어갈 때 provider가 요구하는 모양 그대로(순서·redacted block 포함) 되돌려 줄 방법이 없기 때문입니다. 그래도 provider가 보낸 thinking block은 대화 기록(SDK 실행 결과의 `messages` 포함)에 남기지 않고 버립니다.
+  - 이미지 방식 요청은 길거나 "review" 같은 말이 들어 있어도 자동 workflow로 보내지 않습니다. 메시지 metadata로 workflow를 요청해도 같습니다. workflow 하위 작업은 `image_generate`를 쓸 수 없고, workflow 답은 하위 작업이 쓴 문장을 그대로 담기 때문입니다. 대신 위와 같은 일반 실행과 확인을 거칩니다.
+  - 같은 이유로, 이미지 요청의 사용자 turn에 이전부터 대기 중인 workflow가 있으면 이어서 실행하지 않고 취소로 기록합니다(durable 기록의 이유 `image_request`).
+  - 참조는 data directory 또는 media root 기준 상대 경로이며 절대 경로를 보여 주지 않습니다.
+  - `/method status`는 호출별 옵션, 프롬프트, 전체 digest, 저장 확인 여부, 오류를 보여 줍니다.
+- **`/method revise`:** 마지막으로 끝난 보고서 또는 이미지 요청을 다음 메시지의 새 판으로 만듭니다. 이미지라면 원래 요청과 이전 판에 마지막으로 저장된 이미지 참조를 가져와 함께 표시합니다.
+  - 명령 자체는 아무것도 만들지 않습니다. 다음 turn이 새 이미지를 요청하고, 저장이 확인된 이미지만 결과가 됩니다. 이전 요청에 저장된 이미지가 없으면 "has no saved image to link"로 알립니다.
+  - 새 판은 수정된 요청으로 **새로 생성한** 이미지입니다. 이미지 편집·마스크·변형(edit, mask, variation)은 지원하지 않으므로, 이전 이미지를 고쳤다고 표시하지 않습니다.
+  - 요구 조건은 원래 요청의 조건에 새 메시지의 조건을 덮어써서 다시 확인합니다. 이전 판의 확인 결과는 물려받지 않습니다.
+- **저장 범위:**
+  - 호출은 요청당 최근 16개, 호출당 이미지 8개, 이전 판 이미지 참조 8개를 보관합니다.
+  - 마지막으로 저장이 확인된 이미지의 참조는 호출 기록이 한도로 밀려나도 따로 보관해 수정판 계보에 씁니다.
+  - 이미지 파일은 media root에 남습니다. session metadata에는 호출별 옵션, redaction한 프롬프트(256자), 상태·오류, 호출 ID와 시각, 저장된 이미지의 참조·artifact ID·digest·잰 값·provider/model, 그리고 보류한 모델의 마지막 답변(512자, 화면에 보이지 않음)을 저장합니다. 이미지 바이트와 provider 원본 응답은 저장하지 않습니다.
+  - 크기를 재려고 읽는 파일은 64 MiB 이하만 다룹니다.
+
+### 복합 요청의 결과 확인
+
+한 요청에 계산·보고서·이미지 중 둘 이상이 함께 들어 있으면 복합 방식(`composed`)으로 처리합니다. 예를 들어 "출처를 연결한 보고서를 쓰고 넓이도 계산해 줘", "자료로 보고서를 쓰고 그래프 이미지를 만들어 줘" 같은 요청입니다.
+
+- **부분별 확인:** 각 부분(계산·보고서·이미지)은 앞 절들의 규칙대로 따로 기록하고 판정합니다. 한 부분의 성공이 다른 부분의 실패나 미검증을 통과시키지 않습니다.
+  - 요약에는 먼저 "Parts (each checked on its own): calculation — verified; report — citation problems"처럼 부분별 상태를 한 줄로 보여 주고, 이어서 부분별 요약을 보여 줍니다.
+  - 확인 항목 이름 앞에는 부분 이름이 붙습니다(예: `calculation: independent check`, `report: claim-source linkage`).
+  - 방식 표시는 `composed [calculation + report]`처럼 부분을 함께 보여 줍니다.
+- **답 표시:** 모델 답변은 runtime이 줄마다 확인할 수 있을 때만 보여 줍니다.
+  - 보고서 부분이 있으면 모델이 쓴 보고서를 보여 주되, 확인되지 않은 줄 끝마다 runtime의 표시를 붙입니다. 출처 표시가 없는 줄은 `[runtime: no source marker, not checked]`, 연결되지 않은 인용이 있는 줄은 `[runtime: not backed: <인용> — <이유>]`입니다.
+  - `[runtime: …]` 표시는 runtime만 붙입니다. 모델이 직접 쓴 `[runtime: …]`는 지우고, 그 줄도 확인 대상에서는 일반 문장으로 봅니다.
+  - 확인되지 않은 부분(계산이 `verified`가 아님, 보고서가 `source-linked`가 아님, 이미지가 `generated`가 아님)이 하나라도 있으면 답 맨 앞에 "Not every part of this request is confirmed (…)"를 붙입니다.
+  - 이미지 부분이 있는 복합 요청은 더 엄격합니다. 이 요청에서 읽은 파일의 문장을 그대로 옮긴 줄(인용)만 보여 줍니다. 그림의 내용은 아무도 확인하지 않으므로, 모델이 그림에 대해 쓴 문장이 확인된 것처럼 보이지 않게 하려는 것입니다. 특정 낱말로 그림 이야기를 가려내는 방식은 다른 말로 쓰면 빠져나가므로 쓰지 않습니다.
+    - 인용인지는 그 줄이 `[source: …]`로 가리킨 파일을 다시 읽어 확인합니다. 읽을 때와 같은 내용(digest)이어야 하고, 줄의 문장이 그 파일의 **문장 전체나 줄 전체**와 글자 그대로 같아야 합니다(대소문자 포함). 공백의 수, 앞의 목록 기호(`-`, `1.`), 앞뒤 따옴표, 끝의 `,` `;` `:`, 문장 끝의 마침표만 달라도 됩니다. `?`나 `!`는 빠지면 안 됩니다.
+    - 문장의 일부만 옮긴 줄은 인용이 아닙니다. 예를 들어 파일의 "The artwork is blue in the photo, not in the image."에서 "The artwork is blue"만 옮기거나, "Revenue grew 100%."에서 "Revenue grew 10"만 옮긴 줄은 감춥니다. 일부만 옮기면 뜻을 바꾸는 말(부정, 단서, 숫자의 나머지 자리, 부호)이 빠질 수 있기 때문입니다.
+    - 문장의 끝은 `.` `?` `!` 뒤의 공백, 줄의 끝은 빈 줄·목록·제목·인용·표의 경계로 판단합니다. 한 문단을 여러 줄로 나눠 쓴 파일에서 줄 끝은 문장의 끝이 아닙니다.
+    - "U.S." 같은 약어의 마침표는 뒤에 소문자로 시작하는 낱말이 오면 문장의 끝도 시작도 아닙니다. 그래서 "U.S. revenue fell."에서 "U.S."만 옮기거나 "revenue fell."만 옮긴 줄은 감춥니다. 다만 약어 뒤가 대문자로 시작하면 약어에서 문장이 끝난 것으로 보므로, 그 경우 약어 앞뒤로 나뉜 인용이 통과할 수 있습니다.
+    - 8 MiB를 넘는 파일과 웹 자료는 인용으로 확인하지 않습니다.
+    - 요청이 시작된 뒤 바뀐 파일(예: 모델이 이 요청에서 쓴 파일)은 인용으로 치지 않습니다. 모델이 직접 쓴 문장을 파일에 옮겨 놓고 인용하는 일을 막으려는 것입니다. 다만 수정 시각으로 판단하므로, 이전 요청에서 만든 파일이나 수정 시각을 되돌린 파일은 가려내지 못합니다.
+    - 보여 주는 줄은 인용 문장과 그 자료의 번호만 남깁니다(예: "Revenue grew 10%. [source #1]"). 자료의 경로·주소는 모델이 고른 글이라 답에 적지 않으며, 번호와 이름의 짝은 `/method status`의 "Report sources"에서 봅니다. 같은 줄의 다른 표시(`[unresolved: …]` 등)에 모델이 쓴 말도 지웁니다.
+    - 나머지 줄은 모두 "[runtime: line withheld — not a word-for-word quote of a file read in this request]"로 바꾸고(이어지는 줄은 하나로 묶음), 답 앞에 그 사실을 알립니다. 제목·안내 줄, 출처 표시 없는 줄, 연결됐지만 인용이 아닌 줄, 표시만 있는 줄(예: `[unresolved: …]`만 있는 줄), 저장 한도(256자)에 걸리는 긴 줄, 저장할 때 가려지는 비밀값이 든 줄이 여기에 들어갑니다. 글자가 없는 구분선(`---`)과 빈 줄만 그대로 둡니다.
+    - 요약과 `/method status`에도 그런 줄의 문장은 옮기지 않고 수만 보이거나 "(withheld)"로 표시합니다.
+    - 인용은 파일에 그렇게 적혀 있다는 뜻일 뿐, 그 내용이 맞다는 보증은 아닙니다(보고서 방식과 같음).
+    - 요약에도 모델이 고른 이름과 도구 결과에서 나온 글을 적지 않습니다. 자료는 "Sources read: source #1 (names in /method status)", 읽기 실패는 "Sources that could not be read: source #2 (names and errors in /method status)", 이미지 호출의 오류(정책 hook의 거부 사유 등)는 "image_generate did not save an image (blocked before it ran); the error is in /method status", 계산 실행은 "Execution: primary #1 exit 0; check #2 exit 0"처럼 번호로 적습니다(호출 ID도 모델이 정할 수 있기 때문). 방식 표시(`/method history` 등)의 "Observed written file"도 경로 대신 길이·digest로 적습니다. 원문은 `/method status`의 상세에서 봅니다.
+  - 보고서의 `[image]` 줄은 이미지가 들어갈 자리입니다. 그 줄에 모델이 쓴 문장은 버리고 runtime의 줄로 바꿉니다. 저장됐으면 "[Image: <참조> — saved and checked on disk; content and look not checked]", 아니면 "[Image: none — the image part is <상태>]"입니다. 그림의 내용은 아무도 확인하지 않으므로, 이 줄은 보고서 확인 대상에서도 빠집니다.
+  - 보고서 부분이 없으면(예: 계산 + 이미지) 줄마다 확인할 방법이 없습니다. 이미지 방식처럼 모델 답변 대신 "Parts (each checked on its own): …"와 이미지 결과를 보여 주고, 계산 값은 요약의 "Verified answer"로 확인합니다. 원래 답변은 진단용 `withheld_reply`에만 남깁니다.
+  - turn이 정상 답 없이 끝났으면 "The turn ended early (…), so its reply was not checked."를 붙이고, 출처를 단 줄도 모두 not checked로 표시합니다.
+  - 도구 호출과 함께 온 문장과 reasoning은 대화 기록에서 지웁니다(이미지 방식과 같음). 마지막 답 자리에는 사용자에게 보인 답(runtime 표시가 붙은 보고서)을 저장합니다.
+  - 복합 요청의 모델 문장은 진행 출력으로 내보내지 않고(text·reasoning delta와 도구 호출 입력), 판정이 끝난 답만 보냅니다. runtime hook(`--verbose` 로그, observability hook, plugin hook)과 복구용 checkpoint에도 모델 문장을 넘기지 않습니다(이미지 방식과 같음). runtime 표시 없이 모델 문장이 보이는 곳을 남기지 않으려는 것입니다.
+  - 도구 호출의 인자도 모델이 쓴 말입니다(이미지 프롬프트, 파일 내용, 명령, 검색어, 경로, 호출 ID). 그래서 진행 이벤트(tool 이벤트)와 진단용 hook(`--verbose` 로그, observability hook, plugin의 `llm:after`)에는 인자 대신 그 길이·digest만 넘기고(예: `{"arguments":"<withheld: 52 chars, sha256:…>"}`), 호출 ID도 digest(`call-…`)로 바꿉니다. 같은 호출의 시작과 끝은 같은 digest라 서로 맞출 수 있습니다. provider가 응답이나 호출에 붙이는 고유 필드(호출의 `extra_content`·`provider_specific_fields`, 응답의 `error_type`·`error_code` 같은 오류 문자열)도 hook에 넘기지 않습니다. hook이 받는 응답에는 호출의 이름·digest와 종료 이유, 사용량, 상태 코드 같은 값만 있습니다. 종료 이유는 runtime이 아는 값(`stop`, `tool_calls`, `length`, `content_filter`, `error`)이 아니면 `other`로, 사용량은 알려진 token 수 항목만 넘깁니다. provider의 스트리밍 종료 이벤트도 같고, 이미지 생성 진행 이벤트는 provider가 정한 후보 ID 대신 그 digest로 보냅니다. 실행 기록(session metadata `runtime_execution`)도 도구 호출을 원래 호출 ID 대신 그 SHA-256 digest로 부르고, 모델이 한 질문은 digest로만 둡니다. 방식 변경으로 계산·일반 방식을 거쳐도 그 요청이 끝날 때까지 같고, 다시 이미지·복합 방식이 되면 남아 있던 기록도 이렇게 바꿉니다. 이미지 방식도 같습니다. 이 때문에 이런 요청에서는 skill 파일을 읽어도 skill 사용 알림이 나오지 않습니다.
+  - 도구의 결과에도 모델의 말이 실릴 수 있습니다(명령이 출력한 글, 모델이 쓴 파일을 읽은 내용). 그래서 진행 이벤트, 진단용 hook의 문맥, 저장되는 대화 기록, 복구용 checkpoint에는 도구 결과 대신 길이·digest만 남깁니다(예: `<withheld: 1024 chars, sha256:…>`, 오류였으면 앞에 `Error: `). 이미지 방식도 같습니다.
+  - 모델은 같은 요청 안에서는 도구 결과를 그대로 봅니다. 승인을 기다렸다가 이어 실행할 때 필요하기 때문입니다. 이를 위해 요청이 열려 있는 동안만 원래 결과를 session metadata(`task_method_held_results_v1`)에 두고 다음 실행 때 모델 문맥에 되돌립니다. 방식 변경으로 같은 요청이 계산·보고서 같은 다른 방식이 된 뒤에도 원래 결과를 모델에게 되돌립니다. 다만 그 실행의 runtime hook에는 이미지·복합 단계에서 저장된 호출(호출 ID, 인자, 결과)을 이미지·복합 요청에서처럼 길이·digest로만 넘기고, 새 방식에서 생긴 호출은 그 방식의 규칙대로 둡니다. 요청이 어떻게 끝나든(답, 실패, provider 오류, 승인 거부, `/stop`, `/new`, 새 요청 시작) 지웁니다. 화면에는 나오지 않지만 `session export --yes`(경고 후 원본 metadata를 내보내는 진단 기능)에는 그때 남아 있는 내용이 포함됩니다.
+  - 그래서 요청이 끝난 뒤의 다음 요청에서 모델은 이전 도구 결과의 digest만 봅니다. 필요하면 다시 읽어야 합니다. 실행 중 프로세스가 멈춘 뒤 checkpoint로 복구한 경우에도 모델은 그 결과의 digest만 봅니다.
+  - 승인 뒤 실행한 도구의 결과가 turn을 멈추는 오류이면(예: 작업 폴더 밖 경로) 답은 "The approved tool call stopped this turn; its output is withheld (Error: <withheld: …>)."입니다. 원래 결과는 보여 주지 않습니다.
+  - provider API 오류의 글에도 모델의 말이 실릴 수 있습니다(예: 모델이 지어낸 도구 이름을 그대로 인용한 오류). 그래서 이미지·복합 요청이 provider API 오류로 끝나면 답은 "Sorry, I encountered an error calling the AI model: provider API error (HTTP 400); its message is withheld (<withheld: …>)."처럼 상태 코드와 오류 글의 길이·digest만 보여 줍니다. provider가 오류를 응답으로 알린 경우(HTTP 오류 응답, 스트림의 오류 frame, 재시도가 다 끝난 뒤의 오류)도 같습니다. 대화 기록, SDK 실행 결과, 실행 기록(`runtime_execution`)의 오류 상세도 같습니다. provider·model을 찾지 못함, 인증 필요 같은 설정 오류는 설정 값만 담으므로 그대로 보입니다.
+  - 호출을 실행하는 도구, 권한 판정과 승인 화면, plugin의 `tool:before` 정책 hook, method 기록은 인자를 그대로 받습니다. 정책이 실제 인자를 보고 막을 수 있어야 하고, 사용자는 승인 전에 무엇을 실행하는지 봐야 하기 때문입니다. 대화 기록에도 provider가 대화를 이어가는 데 필요한 도구 호출(인자 포함)은 남습니다.
+  - `/method status`는 확인 근거를 직접 살펴보는 곳이라 모델이 쓴 실행 기록을 그대로 보여 줍니다. 이미지 호출의 프롬프트, 계산 실행의 코드·출력·입력·가정이 여기에 해당합니다. 모두 "prompt", "code", "output"처럼 이름이 붙어 있으며, 그림에 대해 확인된 내용이 아닙니다. 이미지 부분이 있는 복합 요청의 답과 요약에는 계산의 입력·가정을 적지 않고 "Inputs and assumptions: recorded, shown in /method status"만 적습니다. 실행 출력에서 읽은 package 이름도 요약에는 적지 않고 "a required Python package is not installed (see /method status)"로 적습니다.
+  - 복합 요청에서 모델은 질문(`ask_user`), 메시지 보내기(`message`), 하위 작업(`spawn`), 맡김 작업 제안 도구를 쓸 수 없습니다. 이 도구들은 확인을 거치지 않은 모델 문장을 답 밖으로 보내기 때문입니다. 다른 도구(자료 읽기, 계산 실행, 이미지 생성 등)는 그대로 쓸 수 있습니다.
+  - 쓸 수 없는 도구(위 도구들이나 아예 없는 이름)를 부른 호출은 실행되지 않습니다. 그 호출의 진행 이벤트와 provider의 스트리밍 호출 시작 이벤트는 내보내지 않습니다. 도구 이름도 모델이 쓴 글이므로, runtime hook(정책 hook 포함)·대화 기록·복구용 checkpoint·SDK 실행 결과의 사용한 도구 목록(`tools_used`)에는 인자 없이 `unoffered_tool`이라는 이름으로만 남깁니다. 호출 ID는 대화 기록에 그대로 두어 호출과 결과의 짝을 유지합니다. 방식 변경으로 요청이 다시 이미지·복합 방식이 될 때 앞서 저장된 기록의 없는 도구 이름도 같이 바꿉니다.
+  - 복합 요청은 길거나 "review" 같은 말이 있어도 자동·metadata workflow로 보내지 않습니다. 사용자 turn에 대기 중인 workflow가 있으면 이어 실행하지 않고 취소로 기록합니다(이유 `composed_request`). 이미지 방식과 같은 이유입니다.
+- **보고서에서 계산 결과:** 보고서의 `[calculation]` 줄은 계산 결과가 들어갈 자리입니다(`[image]`와 같음). 그 줄에 모델이 쓴 문장은 버리고 runtime의 줄로 바꿉니다.
+  - 계산이 `verified`이면 "[Calculation: 6 m^2 — verified by a separate check run]"처럼 확인된 값과 단위를 runtime이 직접 적습니다. 아니면 "[Calculation: none — the calculation part is <상태>]"(예: `in conflict`, `unavailable`), 계산 부분이 없으면 "[Calculation: none — this request has no calculation part]"입니다.
+  - 모델이 그 줄에 다른 값이나 부정하는 문장을 써도("600 m^2", "6이 아니다") 사용자에게는 보이지 않습니다. 문장을 읽어 값이 맞는지 판단하는 방식은 표현이 다양해 빠져나갈 수 있으므로 쓰지 않습니다.
+  - 이 줄은 보고서 확인 대상에서 빠집니다. 다만 파일로 쓴 보고서 안의 `[calculation]` 줄은 runtime이 바꿔 쓸 수 없으므로 확인하지 않은 인용으로 남습니다("not checked; only the runtime's [calculation] line in the answer shows the checked result"). 그래서 그 보고서는 `citation problems`가 됩니다.
+- **일부 부분을 쓸 수 없을 때:** 필요한 도구가 없는 부분은 `unavailable`로 표시하고 나머지 부분만 진행합니다. 방식 표시 줄에 "unavailable parts: image"처럼 적습니다.
+  - unavailable 부분의 확인 항목은 `not verified`이며, 근거에 "unavailable: <도구> is not registered"를 남깁니다.
+  - 모든 부분을 쓸 수 없으면 provider를 부르기 전에 요청을 막습니다.
+- **방식 변경과 부분 취소:** 진행 중 `/method use report`처럼 한 부분만 남기면, 보류 중인 승인·질문(예: 이미지 생성 승인)을 취소하고 같은 목표로 이어갑니다.
+  - 방식 변경으로 요청이 이미지 방식이나 복합 방식이 되면(예: `/method use calculation`으로 계산만 남겼다가 `/method auto`로 다시 이미지를 포함), 그 요청에서 앞서 저장된 기록도 같은 규칙으로 정리합니다. 모델의 문장은 지우고, 도구 결과는 digest만 남깁니다. 원래 결과는 앞서 말한 보관 metadata로 옮겨 모델에게만 되돌리며, 같은 호출 ID의 결과가 여럿이어도 각각 제자리로 돌아갑니다.
+  - 요청의 기록이 어디서 시작하는지는 요청의 첫 메시지(목표 문장)로 찾고, 없으면 요청이 시작된 시각으로 찾습니다. 둘 다 찾지 못하면 기록을 정리할 수 없으므로 이미지·복합 방식으로의 변경을 거절하고("Method not changed: …") 새 요청을 시작하라고 안내합니다.
+  - 이미지 부분이 있는 요청(이미지 방식, 이미지를 포함한 복합 방식)에서는 방식 변경 응답, `/method status`, `/method history`의 "Remaining question"과 "User decision"에 모델이 했던 질문을 적지 않고 "(the model's question is withheld)"로 적습니다. 사용자의 답은 그대로 보입니다.
+  - 보고서 부분이 남으면 이미 읽은 자료를 "read before the method change"로 가져와 다시 확인합니다. 작업 폴더 파일이 바뀌지 않았을 때만 연결됩니다.
+  - 새 방식에도 남는 부분은 이미 만든 결과를 유지합니다. 계산 부분이 남으면 앞서 기록된 실행을, 이미지 부분이 남으면 앞서 저장된 이미지를 새 판에서 다시 판정합니다. `/method status`의 계산 실행에는 "kept across the method change and judged again"이 붙습니다.
+  - 방식 변경으로 취소한 보류 승인의 호출은 남는 부분의 기록에 취소로 남깁니다. 계산 실행이었다면 마지막 주 계산 뒤의 취소된 실행이므로, 주 계산과 확인 계산을 다시 실행해야 `verified`가 됩니다. 이미지 생성이었다면 앞서 저장된 이미지는 더 이상 현재 결과가 아니고 "Earlier saved image in this request (not the current result)"로만 보입니다.
+  - 빠지거나 새로 더해진 부분은 처음부터 다시 판정합니다. 보고서 부분이 한 번 빠지면 이월 자료도 버리므로, 나중에 다시 더해져도 그 전 자료는 되살아나지 않습니다. 보고서 부분이 남을 때 이월하는 자료는 방금 떠나는 판에서 쓰던 자료(그 판에서 읽었거나 이미 이월된 자료)뿐입니다. 이전 판의 확인 항목은 물려받지 않습니다(`superseded_not_inherited`).
+  - 사용자가 한 부분의 도구 실행(예: 이미지 생성)을 거부하면 그 부분의 기록에 거부로 남습니다. 예를 들어 저장된 이미지 뒤의 새 생성을 거부하면 그 이미지는 더 이상 현재 결과가 아닙니다.
+- **수용과 수정:** `/method accept`는 요청 전체에 한 번 기록하며 판정은 바꾸지 않습니다. 기록에는 부분별 상태 전체(예: "report — source-linked; image — unavailable")를 남깁니다. `/method revise`는 보고서 단독·이미지 단독 요청만 대상으로 합니다.
+
+저장 범위는 session metadata `task_method_requests_v1`의 활성 요청 1개와 최근 종료 요청 32개입니다. Preview 문자열은 redaction 후 512자, provider projection은 8,192자로 제한합니다. 한 요청의 과거 revision은 최대 128개이며 한도에 도달하면 변경을 거절하고 기존 기록을 유지합니다. 관측 효과·산출물·결정·남은 질문은 각각 128개로 제한하며, 오래된 효과가 생략된 경우 그 수를 표시합니다. Conversation history의 보존·compaction 정책은 별개입니다. Synthetic/system/automation turn은 새 method request나 one-shot 소비를 만들지 않으며(사용자 channel로 들어오지만 `automation_route` 표시가 있는 자동화 알림·검증 메시지도 포함), method 가용성으로 차단하지 않습니다. 이런 turn에서 온 `/method use`와 `/method auto`는 상태를 바꾸지 않고 거절합니다. 사용자 요청이 시작한 workflow를 이런 turn이 재개해 끝내면 연결된 요청도 그 workflow 결과(완료·실패·취소)로 닫습니다. 이런 turn이 진행 중 요청의 보류 질문에 대한 응답으로 처리되어 실행을 이어가면 그 결과와 관측 효과도 같은 요청에 기록합니다. 다만 그 내용을 사용자 결정으로 기록하지는 않습니다.
 
 ## Tasks 조회와 owner 변경 요청
 
@@ -772,7 +993,7 @@ shacs-bot run --workspace /tmp/ws
 shacs-bot run --websocket-host 127.0.0.1 --websocket-port 8765 --workspace /tmp/ws
 ```
 
-`run`은 `websocket` channel이 enabled이면 WebSocket channel server를 시작합니다. 들어오는 JSON text 또는 binary WebSocket frame은 channel contract를 통해 normalize되고, 로컬 `AgentLoop`에서 처리된 뒤 WebSocket channel adapter와 `ChannelManager` dispatch 정책을 거쳐 WebSocket server event로 반환됩니다. Provider text delta는 너무 잘게 나가지 않도록 coalesce되어 `delta` event로 전달되고, turn 종료 시 `stream_end` event가 뒤따릅니다. 최종 assistant answer는 backward compatibility를 위해 기존 `message` event로도 유지됩니다. WebSocket server는 adapter event를 bounded queue로 socket writer에 넘기므로 느린 client에는 backpressure가 적용되고, client disconnect 시 해당 connection의 event delivery를 중단합니다. WebSocket config는 `channels.websocket`의 `enabled`, `host`, `port`, `path`에서 읽습니다. Command-line `--websocket-host`와 `--websocket-port`는 한 번의 실행에서 host/port를 override합니다. Non-loopback WebSocket bind에는 `--allow-remote`가 필요합니다. `run --verbose`와 `web --verbose`는 input/response/tool/usage preview만 stderr에 찍고 raw prompt나 full payload는 출력하지 않습니다.
+`run`은 `websocket` channel이 enabled이면 WebSocket channel server를 시작합니다. 들어오는 JSON text 또는 binary WebSocket frame은 channel contract를 통해 normalize되고, 로컬 `AgentLoop`에서 처리된 뒤 WebSocket channel adapter와 `ChannelManager` dispatch 정책을 거쳐 WebSocket server event로 반환됩니다. Provider text delta는 너무 잘게 나가지 않도록 coalesce되어 `delta` event로 전달되고, turn 종료 시 `stream_end` event가 뒤따릅니다. 최종 assistant answer는 backward compatibility를 위해 기존 `message` event로도 유지됩니다. WebSocket server는 adapter event를 bounded queue로 socket writer에 넘기므로 느린 client에는 backpressure가 적용되고, client disconnect 시 해당 connection의 event delivery를 중단합니다. WebSocket config는 `channels.websocket`의 `enabled`, `host`, `port`, `path`에서 읽습니다. Command-line `--websocket-host`와 `--websocket-port`는 한 번의 실행에서 host/port를 override합니다. Non-loopback WebSocket bind에는 `--allow-remote`가 필요합니다. `run`은 기본으로 side-effect tool을 등록하므로 allowlist에 등록한 channel sender의 turn에서도 write/edit/exec 등 tool이 permission 승인 절차를 거쳐 실행될 수 있습니다. 끄려면 `--no-side-effects`를 쓰세요. `--allow-remote` 실행은 `--allow-side-effects`를 명시해야 켜집니다. `run --verbose`와 `web --verbose`는 input/response/tool/usage preview만 stderr에 찍고 raw prompt나 full payload는 출력하지 않습니다.
 
 `onboard`는 built-in channel별 기본 config stub을 `channels.<name>`에 생성하고, 기존 channel config가 있으면 사용자 값과 secret/env placeholder를 덮어쓰지 않은 채 누락된 기본 key만 병합합니다. `run`은 plugin config에 충분한 인증 정보와 현재 구현된 transport에 필요한 설정이 있으면 선택된 외부 channel transport도 시작합니다. 인증 정보가 없으면 전체 runtime을 실패시키지 않고 `skipped-missing-credentials`로 보고하므로, WebSocket부터 켜고 외부 channel을 점진적으로 추가할 수 있습니다. Slack은 Socket Mode worker를 사용하므로 `appToken`/`app_token`과 `botToken`/`bot_token`/`token`이 모두 필요합니다. Discord는 Gateway worker를 사용하므로 `allowChannels: []`가 원본처럼 봇이 볼 수 있는 모든 채널을 의미합니다. `allowChannels: ["*"]`도 모든 채널 허용으로 처리합니다.
 
