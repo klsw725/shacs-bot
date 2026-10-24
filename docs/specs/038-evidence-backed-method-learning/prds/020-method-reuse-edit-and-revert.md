@@ -1,6 +1,6 @@
 # PRD 020. 확인 방법의 재사용·수정·철회
 
-Status: Planned
+Status: Complete (Scoped)
 
 Depends on: [PRD 000](000-method-candidate-and-evidence.md), [PRD 010](010-method-review-and-promotion.md) 완료. 뒤 번호 PRD에는 의존하지 않는다.
 
@@ -41,3 +41,76 @@ Depends on: [PRD 000](000-method-candidate-and-evidence.md), [PRD 010](010-metho
 - 이전 방법 버전 복원과 이미 일어난 tool side effect는 다른 의미임을 보여주는 사용자-visible 상태.
 
 PRD 020은 앞선 후보·확인 결과만 소비해 **다음 작업에서의 재사용과 사용자 철회**로 닫힌다. 뒤 번호의 기능이나 모든 외부 부작용 rollback을 요구하지 않는다.
+
+## 구현 메모 및 검증 근거 (2026-10-24)
+
+아래는 구현·실행 기록이다. 완료 판정은 종료 확인 절에 따로 기록한다.
+
+- **표면:** `shacs-command` `learn.rs`에 하위 명령을 더했다. 모든 하위 명령은 PRD 000·010과 같은 사용자 turn 판정을 거친다. 사용법은 [USAGE](../../../USAGE.md#확인한-방법의-사용수정되돌리기)에 적었다.
+  - `/learn edit <id> v<N> purpose|applies <text>`, `… premise|step <k> <text>`, `… remove premise|step <k>`. 글은 입력한 그대로 넘긴다.
+  - `/learn deactivate <id> v<N>`, `/learn restore <id> v<N>`, `/learn show <id> v<N>`.
+- **버전과 결정(`learned_method`, `learned_method_edit`, `learned_method_history`):** 고치기는 현재 버전을 복사해 한 부분만 바꾼 새 버전을 만든다. 새 버전은 현재 버전이 되고 후보로 시작한다.
+  - 새 버전의 출처는 `user_edit`(`edited_from`)이다. 원래 session·근거 창·작업 신원·근거 기록·제외 항목은 고치기 전 버전과 같다. 사용자가 쓴 글은 `edited_in`(그 글을 쓴 버전)을 달고 근거를 인용하지 않으며, 단계는 `user_edited`다.
+  - 결정 종류에 `edited`·`deactivated`·`restored`를 더했다. 상태는 PRD 010처럼 현재 버전의 결정을 다시 계산해 정한다. `deactivated`는 확인된 버전을 `inactive`로 만든다. `edited`와 `restored`는 상태를 바꾸지 않는다.
+  - 되돌리기는 확인된 적이 있고 거절되지 않은 버전만 가능하며, 그 버전의 상태는 그 버전의 결정대로다.
+  - 저장 검증은 버전과 결정을 처음부터 다시 따라간다(`history_holds`). v1은 생성이어야 한다. 이후 버전은 그때의 현재 버전을 고친 것이어야 하고 근거가 같아야 한다. 되돌리기·사용 멈추기는 그때 허락된 버전에만, 그 밖의 결정은 그때의 현재 버전에만 있어야 한다. 끝의 현재 버전도 저장된 값과 같아야 한다. 사용자 글의 `edited_in`은 그 버전 이하의 2 이상이어야 하고, 사용자 글은 재대조 때 요청 복사·인용 검사에서 빠진다.
+  - 고치기·사용 멈추기는 `v<N>`이 현재 버전이어야 한다. 저장소 lock 안에서 지금 저장된 방법과 비교하므로 동시에 온 두 수정 중 하나만 저장된다. 버전은 64개, 결정은 64개까지다. 실행 노트("Step N comes from a run that failed …")는 단계를 바꾸거나 빼면 따라 고친다.
+  - 다른 작업으로 확인할 때 `user_edited` 단계는 `user_stated`처럼 그 문장이 든 사용자 피드백·절차 메시지로만 다시 한 것으로 본다.
+- **다음 요청에서의 사용(`agent_loop_learn_use`, `learned_method_use`, `learned_method_match`):** 사용자 turn의 새 요청이 실행되기 전에 쓸 방법을 고른다(`choose_learned_method`). 일반 loop로 가는 요청이든, 새 Spec 024 workflow로 가는 요청이든(자동 선택·metadata 모두) 같다. 확인된 방법이 없으면 model을 부르지 않는다. 새 요청은 이전 요청이 남긴 선택 없이 시작한다(`reset`).
+  - 저장소를 읽고 session과 재대조한 뒤, `/learn match`와 같은 도구 없는 호출 한 번으로 적합성·맞지 않는 전제·요청이 결과의 모양을 정했는지·모양을 정하는 단계를 묻는다.
+  - 맞는 첫 방법의 현재 버전을 안내 글로 만들어 session metadata(`learned_method_turn`)에 둔다. 안내 글에는 목적·적용 작업·전제·단계별 근거 표시·untrusted 영향 경고, 권한이 아니라는 지시, 결과의 모양은 요청을 따르라는 지시가 들어간다. 요청이 모양을 정했으면 모양을 정하는 단계를 뺀다.
+  - 이 요청의 모든 실행(승인·질문 뒤 이어지는 실행 포함)은 그 안내를 system prompt 끝에 덧붙인다. workflow는 안내를 `SubagentExecutionConfig.learned_method_guidance`로 넘겨 각 child·verifier의 system prompt 끝에 붙인다. 그래서 요청 중에 방법이 바뀌어도 이미 시작한 요청은 처음 고른 버전을 쓴다. workflow가 범위를 묻거나 막혀 시작하지 않으면 고르지 않는다.
+  - 요청이 끝나는 모든 경로는 한 곳(`conclude`)에서 마무리한다. 일반 답, provider 오류, workflow 완료·실패·checkpoint 완료·재시작 복구 차단, 승인한 도구의 실패(`tool_error`, 저장된 답의 위치를 넘김)가 모두 여기를 거친다.
+  - 명령 답은 이유 문자열로 정하지 않고 상태로 정한다. 실행이 사용자를 기다리며 멈추면(승인·질문·행동 결정·workflow) 선택에 `waited`를 표시한다. 그 뒤 명령 답을 보낸 시점에 기다리는 것(pending approval, recent-retry approval, `ask_user`, workflow, 행동 결정)이 하나도 없으면 그 명령 답으로 요청이 끝난 것으로 본다. 예: 승인 거절, 프로젝트 권한 저장 실패, `/stop`으로 취소된 행동 결정.
+  - 기다리는 것이 남아 있으면(다른 거절 기록의 재시도 답 등) 끝내지 않는다. `waited`가 없는 선택(실행 중이거나 비정상 종료로 남은 것)은 명령 답이 끝내지 않는다. `/new`는 선택을 버린다(`reset`).
+  - 사용자가 받는 답에 표시 문장을 붙이고, 대화 기록의 그 답(같은 글의 assistant 메시지)도 같게 고친다. 기록에 없던 답(명령 답, 바뀐 `final_content` 등)은 새 assistant 메시지로 남긴다. 저장된 답을 고치는 것은 호출부가 그 위치를 넘길 때(일반 답의 같은 글 assistant 메시지, provider 오류, workflow, 승인한 도구의 실패)뿐이다. 쓴 방법이면 그 메시지에 `learned_method`(ID·버전·revision·버전 sha256·당시 상태·끝난 이유 `ended`)를 남기고 metadata를 지운다.
+  - 승인·질문·workflow 대기 중에는 마무리하지 않는다. Spec 037 method의 답 검사가 이 표시를 보지 않도록 그 뒤에 붙인다.
+  - 고른 방법의 근거나 그 방법을 확인한 다른 작업의 근거를 다시 대조하지 못했으면 표시 문장에 그 사실을 붙인다.
+  - 저장소 오류·재대조 불일치·판단 호출 실패면 어떤 방법도 쓰지 않고 이유를 표시한다.
+- **권한:** 방법 사용은 permission rule·grant를 만들지 않고 도구 목록도 바꾸지 않는다. 안내는 system prompt의 글일 뿐이다.
+- **PRD 010에 생긴 변경:** `/learn match`의 판단 호출에 단계 글을 보내고 결과의 모양에 대한 판단을 받는다. 맞는 방법에 빠질 단계를 표시하고, 사용을 멈춘 방법과 어긋남으로 멈춘 방법의 이유를 구분한다. 거절된 버전의 검토 요청에는 고치기·되돌리기를 안내한다.
+- **테스트(최소):** `shacs-command` router 테스트에 새 하위 명령을 더했다. `shacs-core` `tests/it` `spec038_learned_methods`에 12개를 더했다(전체 43개).
+  - `reuse`: 맞는 요청에는 버전·전제·출처가 답에 표시되고 안내가 system prompt에 들어간다. 전제가 맞지 않는 요청에는 쓰지 않고 이유를 표시한다. 모양을 정한 요청에서는 모양 단계를 뺀다. 답 기록에 버전이 남는다. `/new`로 근거가 지워진 뒤에는 다시 대조하지 못했다고 표시한다. 저장 파일을 고쳐 형식이 어긋나면 쓰지 않는다. 승인을 기다리는 사이 방법을 고쳐도, 승인 뒤 이어진 실행은 처음 고른 v1 안내를 쓰고 v1로 기록된다.
+  - `endings`: 승인 거절과 provider 오류로 끝난 요청도 답에 표시되고, 그 답이 끝난 이유와 함께 기록된다. 프로젝트 권한 저장 실패로 끝난 요청도 같다(model의 tool-call 메시지 글이 실패 답과 같아도 기록은 새 답에 붙는다). 승인한 도구가 실패해 끝난 요청은 대화 기록에 답이 하나만 남는다.
+  - `waiting`: `/stop`이 기다리던 행동 결정을 취소하면 그 답에 표시·기록(`stop_requested`)이 남는다. 질문을 기다리는 동안 다른 거절 기록의 재시도 답은 요청을 끝내지 않고, 질문에 답한 뒤의 답에 표시·기록이 남는다(이어진 실행에도 안내가 들어간다). `/new`는 기다리던 선택을 버린다.
+  - `workflow`: metadata로 들어온 새 workflow 요청에서 판단 호출 뒤 child와 verifier의 system prompt에 안내가 들어간다. workflow 답에 표시 문장이 붙고, 그 답에 `ended: workflow_completed` 기록이 남는다.
+  - `lifecycle`: 고치기(새 후보, 확인 전 미사용)와 낡은 버전으로 고치기 거절을 확인한다. 이어서 v2 확인·사용, v2 거절 뒤 미사용, v1 되돌리기, 거절 버전 되돌리기 거절, 재시작 뒤 v1 사용, 사용 멈추기 뒤 미사용, 이전 버전 보기를 확인한다. 답 기록은 각자 쓴 버전을 유지한다. 두 thread가 같은 버전을 동시에 고치면 하나만 저장된다. 사용자가 쓴 단계는 다른 작업의 실행 인용으로는 다시 한 것이 아니고, 그 문장이 든 사용자 피드백으로만 다시 한 것이 되어 새 버전을 확인한다.
+  - 기존 테스트: `review`는 확인된 방법을 쓰는 요청의 `write_file`도 승인을 묻고 실행되지 않음을 확인한다(안내가 system prompt에 들어간 상태에서). `edits`에 사용자 수정 표시와 되돌리기 결정을 꾸민 저장 파일의 거절을 더했다. `conflicts`의 확인 뒤 요청에 판단 호출을 더했다.
+- **실제 CLI QA:** 격리된 config·workspace와 fake provider로 compiled `agent` REPL을 tmux에서 실행했다(`.omo/evidence/spec038/prd020/qa1/`).
+  - 제안 조회·확인·다음 요청 사용, 전제가 다른 요청, 모양을 정한 요청을 확인했다.
+  - 승인을 묻는 `write_file`과 그 거절, 고치기와 낡은 버전으로 고치기, v2 확인·사용·거절, v1 되돌리기를 확인했다.
+  - 새 process에서 v1 사용, 사용 멈추기와 그 뒤 미사용, 거절 버전 되돌리기 거절, 이전 버전 보기, 답 기록의 버전 결속을 확인했다.
+  - 2차(`qa2/`, 1차 gate 지적 수정 뒤): 승인 거절로 끝난 요청의 답에 표시 문장과 기록(`permission_denied_by_user`)이 남았다. 자동 선택된 workflow 요청에서도 판단 호출 뒤 child·verifier가 실행되고, workflow 답에 표시 문장과 기록(`workflow_completed`)이 남았다.
+  - 3차(`qa3/`, 3차 gate 지적 수정 뒤): 승인을 기다리는 요청에서 `/new`를 보내면 표시 없이 선택이 버려졌다. 새 대화에서 같은 요청을 거절하면 표시·기록과 '다시 대조하지 못함' 표시가 붙었다. 뒤이은 `/learn list`에는 표시가 없었다.
+  - 이 evidence가 없는 checkout에서는 실행 증명으로 보지 않는다.
+- **독립 검토:** 1차 gate는 BLOCKED였고 지적은 두 가지였다.
+  1. workflow로 가는 요청은 방법을 고르거나 쓰지 않았다.
+  2. 승인 거절·provider 오류·바뀐 `final_content`로 끝난 요청은 표시 문장이나 기록이 없거나 다른 메시지에 붙었다.
+  - 1은 새 workflow에서도 고르고 안내를 child·verifier에 넘기도록, 2는 끝나는 모든 경로를 `conclude` 한 곳으로 모으도록 고쳤다. 두 경우 모두 고치기 전 코드에서 실패하는 테스트(`workflow`, `endings`)를 더했다(`gate1-fixes/`). 비차단 지적에 따라 다시 대조하지 못한 근거를 표시하고 QA 1차 요약의 문구를 바로잡았다.
+  - 2차 gate는 BLOCKED였다. 프로젝트 권한 저장 실패로 끝나는 명령 답이 끝나는 이유 목록에 빠져 있었다. 이를 더했다. 비차단 지적이던 승인한 도구 실패 답의 중복 저장도 고쳤다. 두 테스트가 고치기 전 코드에서 실패함을 확인했다(`gate2-fixes/`).
+  - 3차 gate는 BLOCKED였다. 지적은 네 가지였다. (1) `/stop`으로 취소된 행동 결정이 기록되지 않았다. (2) 다른 일의 끝을 알리는 명령 답이 질문을 기다리는 요청을 끝냈다. (3) `/new` 뒤에도 선택이 남았다. (4) 같은 글이면 tool-call 메시지에 기록이 붙을 수 있었다.
+    - 이유 목록 대신 위의 상태 규칙(`waited`와 기다리는 것의 유무)으로 바꿨다. `/new`에서 선택을 버리고, 저장된 답 재사용은 호출부가 위치를 넘길 때만 하게 했다.
+    - 네 테스트가 고치기 전 코드에서 실패함을 확인했다(`gate3-fixes/`).
+  - 4차 gate는 PASS였다(아래 종료 확인).
+- **남은 제한:**
+  - 적합성·전제·결과의 모양에 대한 판단은 model의 판단이다. 안내를 실제로 따르는지는 실행 model에 달려 있다. runtime은 안내를 붙이고 사용 사실을 표시하며, 단계가 지켜졌는지는 확인하지 않는다.
+  - 한 요청에 방법 하나만 쓴다. 확인된 방법이 있으면 일반 요청마다 저장소 읽기·재대조와 판단 호출 한 번이 더 든다.
+  - 저장 파일은 인증된 기록이 아니다(PRD 010 남은 제한). 사용자 수정과 버전 기록도 같다.
+
+## 종료 확인 (2026-10-24)
+
+- 범위: 다음을 포함한다.
+  - 확인된 방법의 다음 요청 사용: 일반 loop와 새 Spec 024 workflow, 적합·전제 판단, 결과 모양을 정한 요청에서 모양 단계 빼기, 답의 표시와 버전 기록, 승인·질문 뒤 이어지는 실행의 버전 결속.
+  - 사용자 고치기(새 후보 버전), 사용 멈추기, 이전 확인 버전 되돌리기, 이전 버전 보기, 버전 CAS와 동시 수정 거절, 버전·결정 흐름의 저장 검증.
+  - 요청이 끝나는 모든 경로의 마무리.
+  - 저장 파일의 인증, 실행 model이 안내를 지켰는지의 확인, 외부 부작용 되돌리기는 포함하지 않는다(남은 제한).
+- 최종 검증(변경한 package, `--no-fail-fast`, 기록은 `.omo/evidence/spec038/prd020/closure/`):
+  - `shacs-core`: 1,632 passed, 1 failed, 3 ignored. 유일한 실패는 PRD 000·010 종료 때와 같은 baseline 실패다(`runtime::generated_media_release::runner::fixture::tests::mismatch_uses_isolated_tree`, Spec034 로컬 evidence 파일 누락).
+  - `shacs-cli`: 474 passed, 3 ignored. `shacs-command`: 17 passed.
+  - `cargo fmt --all -- --check`와 workspace clippy `-D warnings`도 통과했다.
+  - 전체 workspace 실행은 사용자 승인을 받아 Spec 038 마무리 때 한다.
+- 실제 표면: 격리된 config·workspace와 fake provider로 compiled `agent` REPL QA를 세 번 했다(`qa1/`–`qa3/`). 제안 조회·확인·다음 요청 사용·철회를 한 흐름으로 확인했다.
+- Oracle 독립 검증: **PASS** (4차).
+  - 1–3차는 BLOCKED였다. 지적과 보정은 위 독립 검토 항목에 있고, 각 차수의 회귀 테스트가 그 전 코드에서 실패함을 확인했다(`gate1-fixes/`–`gate3-fixes/`).
+  - 4차는 3차 지적 네 가지가 해결됐음을 확인했다. 수용 조건 1–4도 코드·테스트·QA 기록과 맞춰 봤고, 대상 테스트와 fmt·clippy를 다시 실행했다. 차단 결함은 없었다.
+- 남은 제한은 위 구현 메모의 남은 제한 항목과 같다.

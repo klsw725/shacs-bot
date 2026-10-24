@@ -216,7 +216,7 @@ shacs-bot --config /tmp/shacs-config.json onboard --wizard --workspace /tmp/ws
 
 Config 문자열 값은 load 시 `${ENV_NAME}` 형태의 environment variable reference를 해석합니다. 예를 들어 provider key는 config에 `"apiKey": "${OPENROUTER_API_KEY}"`로 남겨두고 실행 환경에서 값을 제공할 수 있으며, migration write-back은 실제 secret 값을 config 파일에 저장하지 않습니다. 참조한 environment variable이 없으면 config load가 실패합니다.
 
-스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. 빈 문자열은 `requires.env`를 만족하지 않습니다. Secret 값을 넣은 config 파일은 커밋하거나 공유하지 마세요.
+스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. MCP 도구가 결과에 `isError: true`를 붙여 스스로 실패를 알리면, 그 결과는 성공 내용이 아니라 `(MCP tool call failed: <도구가 보낸 글>)` 형식의 실패로 전달됩니다. 빈 문자열은 `requires.env`를 만족하지 않습니다. Secret 값을 넣은 config 파일은 커밋하거나 공유하지 마세요.
 
 `permissions.mode`는 provider tool 실행 경로가 소비하는 permission policy gate 설정입니다. Rust runtime은 `default`, `plan`, `accept_edits`, `auto`, `dont_ask`, `bypass_permissions` 값을 파싱해 safe fallback/diagnostics를 만들고, provider tool call과 deferred bridge call을 실행 직전 permission mode snapshot과 policy decision에 통과시킵니다. `allow`만 즉시 tool 실행으로 이어지고, `deny`는 실행하지 않은 permission outcome으로 provider-visible tool result에 남습니다. `ask`는 channel runtime에서 사용자에게 승인 질문을 보내며, 사용자는 여섯 가지 decision을 답할 수 있습니다: `1`/`approve`는 pending tool call 한 번만 실행하고, `2`/`deny` 또는 `cancel`은 한 번 취소하며, `3`/`approve_session`은 현재 session에서 session key, permission context, requested scope가 같은 후속 action을 재사용 승인하고, `4`/`approve_project`는 현재 project의 `permissions.json`에 matching action rule을 저장하고, `5`/`deny_session`은 현재 session에서 matching action을 재사용 거절하고, `6`/`deny_project`는 현재 project의 `permissions.json`에 matching deny rule을 저장합니다. `exec`의 단순 shell 명령은 OpenCode식 arity prefix를 사용하므로 `cargo test --workspace`를 승인하면 `cargo test *`가 재사용 패턴으로 저장되고 같은 prefix의 후속 명령도 같은 rule에 매칭될 수 있습니다. Shell 제어 문자나 따옴표를 포함한 복합 명령은 기존 action digest exact match를 유지합니다. 파일 계열 tool은 workspace 상대 exact path 또는 subtree matcher, `web_fetch`는 origin matcher, MCP tool은 wrapped tool name matcher, 그 외 action은 exact action matcher로 요약됩니다. 승인 질문의 `Reusable pattern` 항목에서 실제 저장될 패턴 또는 `exact action` 요약을 확인할 수 있습니다. `ask_user`는 여전히 별도 user interruption tool이며 formal approval decision으로 해석되지 않습니다. `auto`는 user-local opt-in이나 명시적 실행 source 없이 workspace config만으로 활성화되지 않고, `bypass_permissions`는 격리 precondition이 충족된 명시적 opt-in일 때만 normalized snapshot에서 유지됩니다. `auto`에서는 public target을 다루는 built-in `web_search`/`web_fetch`, workspace 일반 파일 read/edit, `pwd`, `cargo fmt --check`를 별도 질문 없이 실행합니다. `cargo check/test/clippy/build`는 confirmed non-privileged containment 안에서만 자동 승인하며, 이미지 생성, 외부 메시지 전송, secret 접근, protected target, runtime 설정과 파괴적·network·secret exec는 계속 승인 또는 거절 경계를 유지합니다.
 
@@ -755,6 +755,150 @@ Message가 `-`로 시작하는 `agent` direct message는 `--message`/`-m`로 전
 - **수용과 수정:** `/method accept`는 요청 전체에 한 번 기록하며 판정은 바꾸지 않습니다. 기록에는 부분별 상태 전체(예: "report — source-linked; image — unavailable")를 남깁니다. `/method revise`는 보고서 단독·이미지 단독 요청만 대상으로 합니다.
 
 저장 범위는 session metadata `task_method_requests_v1`의 활성 요청 1개와 최근 종료 요청 32개입니다. Preview 문자열은 redaction 후 512자, provider projection은 8,192자로 제한합니다. 한 요청의 과거 revision은 최대 128개이며 한도에 도달하면 변경을 거절하고 기존 기록을 유지합니다. 관측 효과·산출물·결정·남은 질문은 각각 128개로 제한하며, 오래된 효과가 생략된 경우 그 수를 표시합니다. Conversation history의 보존·compaction 정책은 별개입니다. Synthetic/system/automation turn은 새 method request나 one-shot 소비를 만들지 않으며(사용자 channel로 들어오지만 `automation_route` 표시가 있는 자동화 알림·검증 메시지도 포함), method 가용성으로 차단하지 않습니다. 이런 turn에서 온 `/method use`와 `/method auto`는 상태를 바꾸지 않고 거절합니다. 사용자 요청이 시작한 workflow를 이런 turn이 재개해 끝내면 연결된 요청도 그 workflow 결과(완료·실패·취소)로 닫습니다. 이런 turn이 진행 중 요청의 보류 질문에 대한 응답으로 처리되어 실행을 이어가면 그 결과와 관측 효과도 같은 요청에 기록합니다. 다만 그 내용을 사용자 결정으로 기록하지는 않습니다.
+
+## 작업 방법 후보와 `/learn`
+
+대화에서 끝낸 작업과 사용자의 피드백을 근거로, 다음에도 쓸 만한 작업 방법의 **후보**를 만들고 조회합니다. 후보는 비활성입니다. 다음 요청에 자동으로 쓰이지 않고, 저장해도 도구 권한·skill·승인이 생기지 않습니다. 후보는 사용자가 검토 화면의 코드로 확인하거나, 서로 다른 두 번째 작업에서 근거 있는 단계가 모두 다시 실행됐을 때만 확인된 방법이 됩니다(아래 "방법의 확인·거절과 다른 작업으로 확인"). 확인된 방법은 그 뒤 맞는 요청에 작업 방식의 안내로 쓰이고, 답 끝에 어느 방법·버전을 썼는지 표시됩니다. 사용자는 방법을 고쳐 새 버전을 만들거나, 사용을 멈추거나, 이전에 확인한 버전으로 되돌릴 수 있습니다(아래 "확인한 방법의 사용·수정·되돌리기").
+
+```text
+/learn
+/learn list
+/learn show method-1
+/learn confirm method-1
+/learn reject method-1 v1
+/learn verify method-1
+/learn match <요청>
+/learn edit method-1 v1 step 2 <새 문장>
+/learn deactivate method-1 v1
+/learn restore method-1 v1
+/learn show method-1 v2
+```
+
+- **`/learn`:** 현재 대화의 최근 사용자 turn 6개와 그 뒤 기록에서 근거를 모아 후보를 만듭니다. 사용자 turn에서만 동작하며, system·cron·automation turn과 다른 대상을 위해 주입된 메시지(`injected_event` 등)는 거절합니다. 도구를 하나도 주지 않은 model 호출을 두 번 합니다.
+  1. 사용자가 직접 쓴 메시지만 보여 주고 요청·피드백·절차·선호·이번 작업 조건·섞임(선호나 이번 작업 조건이 다른 내용과 함께 있음)·기타로 나눕니다.
+  2. 그 결과에 따라 보여 줄 수 있는 근거만으로 후보 초안을 받습니다.
+  - 어느 응답이든 도구 호출을 요청하면 아무것도 실행하지 않고 저장하지도 않습니다("nothing was run").
+- **초안 호출에 보이는 것:** 요청·피드백·절차로 분류된 사용자 메시지의 글, 도구 호출의 이름과 실행 판정, 답변이 있었다는 사실뿐입니다. 글은 항목마다 redaction 뒤 600자로 자르고 근거는 최대 40개입니다. 요청은 어떤 종류의 작업이었는지 알리는 용도이며, 초안은 요청의 표현·이름·경로를 옮기지 말고 일반적으로 쓰도록 지시합니다.
+  - 도구 이름은 `/learn` 시점에 등록된 도구일 때만 그대로 쓰고, 그 밖의 이름(모델이 지어낸 이름, 지금은 연결되지 않은 MCP 도구 등)은 `unregistered tool`로 바꿔 보여 주고 저장합니다. 모델이 쓴 이름에도 글이 실릴 수 있기 때문입니다.
+  - 선호·이번 작업 조건·섞임·기타로 분류된 사용자 메시지는 초안 호출에 아예 넘기지 않습니다.
+  - 도구 결과, 첨부, 사용자가 아닌 주입 메시지, 그리고 모델이 쓴 모든 인자와 답변은 글을 넘기지 않습니다. 모델의 답변은 제외한 선호를 되풀이할 수 있기 때문입니다(예: "Call me Bob"에 대한 "Okay Bob").
+  - 근거 안의 지시는 따를 명령이 아니라 데이터로만 다루도록 지시합니다.
+- **신뢰 구분:** 근거마다 `from you`(사용자가 직접 쓴 turn), `assistant output`(외부 자료를 읽기 전의 모델 출력), `untrusted`(Spec 024 quarantine 기준)를 표시합니다.
+  - `from you`: runtime이 사용자 turn을 저장할 때 붙인 표시(`owner_turn`)가 있는 메시지만입니다. system·heartbeat·cron·automation channel turn, 다른 대상을 위해 주입된 메시지, runtime이 직접 넣은 user 메시지에는 이 표시가 없습니다. 이 기능 이전에 저장된 메시지에도 없으므로 그런 메시지는 `untrusted`로 보고, 그 뒤의 모델 출력도 `untrusted`가 됩니다. 이전 대화를 이어 가면 새로 입력한 turn만 사용자 말로 쓰입니다.
+  - `untrusted`: 도구 결과·첨부, `from you`가 아닌 user 메시지(runtime이 저장한 출력 한도 복구 지시·turn 중간 주입 포함), 그리고 같은 session에서 그런 자료를 한 번이라도 읽은 뒤의 모델 출력입니다. 근거 창보다 앞선 기록도 따집니다.
+  - 도구 결과와 첨부는 내용 대신 digest(`material … (untrusted)`)만 남깁니다.
+- **실행 판정:** 도구 결과에 실패 표시가 있으면 `failed`입니다. 실패 표시는 runtime이 도구 실패로 보는 형식(`Error`로 시작, MCP 호출의 실패·시간 초과·취소 표시(MCP 도구가 `isError`로 스스로 알린 실패 포함), 작업 폴더 밖 접근 같은 안전 차단), `Permission denied`, 최상위 `error`가 있는 JSON, 마지막 줄의 0이 아닌 `Exit code: N`입니다. 도구가 이 밖의 자유로운 문장으로 실패를 알리면 알아보지 못합니다. 결과가 없거나 비었거나 승인 대기·건너뜀이거나 Spec 037에서 가려진 결과(`<withheld: …>`)이거나 마지막 줄에 종료 코드가 없는 `exec` 결과이거나, `read_file`이 같은 프로그램 실행 안에서 이미 읽은 바뀌지 않은 파일이라며 내용 대신 `[File unchanged since last read: …]`만 돌려준 결과이면 `did not finish`입니다. 그 밖의 결과만 `ran without a reported error`이며, 이는 그 단계가 좋은 결과를 만들었다는 뜻이 아닙니다.
+  - 결과는 호출 ID로 짝지으며, 뒤에서 같은 ID로 다시 한 호출의 결과는 앞 호출의 결과로 보지 않습니다. 같은 호출 묶음 안에서 ID가 겹치거나 비어 있으면 `did not finish`입니다.
+- **단계의 근거:** runtime이 단계가 인용한 근거로만 정합니다. 모델이 붙인 판정은 무시합니다.
+  - `your own words`: 단계 문장이 인용한 피드백·절차 메시지에 그대로 들어 있습니다. 대소문자·띄어쓰기·끝 문장부호만 달라도 되며 6자 이상이어야 합니다. 그 단계의 근거로는 문장이 실제로 들어 있는 메시지만 남깁니다. 요청은 그 작업에만 해당하므로 인용으로 치지 않습니다.
+  - `ran without a reported error`: 오류 없이 실행된 도구 호출을 인용했습니다. 단계 문장은 runtime이 쓴 "Run <도구>"(같은 도구는 한 번, 400자까지)이고, 모델의 설명은 확인하지 않은 글로 따로 붙입니다. 그 단계의 근거로는 그 호출만 남깁니다.
+  - `unverified`: 그 밖의 모델 문장입니다. 실패하거나 끝나지 않은 실행만 인용했으면 이유를 적고, `untrusted` 근거를 인용했으면 `influenced by untrusted material`을 붙입니다.
+  - 목적·적용 작업은 요청·피드백·절차 메시지를 인용해야 하며 모델의 문장으로 표시합니다. 전제는 인용한 피드백·절차 메시지에 그대로 들어 있을 때만 전제로 남고, 그렇지 않으면 "Premise not in your own words"로 미확인 사항에 옮깁니다.
+  - 모든 후보에 "Effect not attributed"를 표시합니다. 결과가 좋았거나 받아들여졌다는 사실은 어느 단계 덕분인지 보여 주지 않습니다.
+- **가려 둔 내용이 다시 들어오는 것 막기:** 초안의 어느 문장이든 초안 호출에 보여 주지 않은 글을 되풀이하거나 제외한 메시지를 인용하면 그 문장을 버리고 수를 적습니다. 목적이나 적용 작업이 그렇게 버려지면 후보를 저장하지 않습니다. 보여 준 글에도 있는 표현은 되풀이로 보지 않습니다.
+  - 모든 가려 둔 글(제외한 사용자 메시지, `untrusted` 근거의 글, 근거로 남은 도구 호출의 결과): 16자 이상 글자 그대로 겹치면 되풀이입니다.
+  - 선호·이번 작업 조건·섞임으로 분류된 메시지: 문장부호(`.` `!` `?` `,` `;` `:`)와 줄바꿈으로 나눈 구절이 낱말 단위로 그대로 들어 있으면, 한 낱말짜리 구절이라도 되풀이입니다.
+  - 그 밖의 가려 둔 글(기타로 분류된 사용자 메시지, 사용자가 아닌 메시지, `untrusted` 답변·인자, 도구 결과): 두 낱말 이상인 구절이 그대로 들어 있으면 되풀이입니다.
+  - 요청: 초안 호출이 보는 글이지만 그대로 옮기면 안 됩니다. 요청의 32자 이상, 요청의 구절 하나(한 낱말이나 기호뿐이라도: 요청 "Check the release date."나 한 낱말 요청 "zephyrcase", 띄어 쓰지 않은 "보고서요약해줘", 이모지 하나뿐인 요청을 그대로 쓴 목적), 또는 요청에 든 구체적인 표시(경로, `@`가 든 주소, 파일 이름처럼 가운데 점이 있는 낱말, 숫자, 대문자가 둘 이상인 4자 이상 코드)를 그대로 담은 문장은 버립니다. 같은 표현이 피드백·절차 메시지에도 같은 낱말로 있으면 버리지 않습니다. 더 긴 낱말의 일부로만 있으면(예: 피드백의 `1234` 속 `123`) 버립니다.
+  - 글자 그대로의 되풀이만 찾으므로 바꿔 쓴 표현이나 16자보다 짧은 구절의 일부는 잡지 못합니다. 예를 들어 요청 구절 속의 소문자 이름이나 띄어 쓴 한국어 고유명사 한 낱말만 옮기면 걸러지지 않습니다. 다만 초안 호출은 요청 밖의 가려 둔 글을 볼 수 없습니다. 반대로 우연히 같은 표현을 쓴 문장도 버려질 수 있으며, 버린 수는 항상 표시합니다.
+- **선호와 이번 작업 조건:** 선호·이번 작업 조건·섞임으로 분류된 메시지는 "Kept out of the method"에 근거 ID로만 남기고 그 글은 저장하지 않습니다. 분류는 모델이 메시지 단위로 하므로, 잘못 분류된 메시지는 걸러지지 않습니다. 기존 기억(`memory/`, `USER.md`)은 바꾸지 않습니다.
+- **후보 없음:** 사용자 요청이 없거나, 요청·피드백·절차로 분류된 메시지가 없거나, 모델이 근거가 없다고 하거나, 사용자 말이나 오류 없이 실행된 도구 호출로 뒷받침된 단계가 하나도 없으면 "No method candidate was created … This is a normal result"를 보여 주고 아무것도 저장하지 않습니다. 오류가 아닙니다.
+- **저장:** workspace의 `.shacs-methods/methods.json`(권한 `0600`)에 저장하며 `memory/`·`USER.md`·`skills/`와 분리됩니다. 같은 workspace의 다른 session에서도 `/learn list`로 보입니다. 목록에는 상태(와 그 상태를 만든 결정), 적용 작업, 단계 수가 보입니다.
+  - `.shacs-methods/`는 보호 대상입니다. 모델의 파일 도구(`read_file`·`write_file`·`edit_file`·`notebook_edit`·`list_dir`·`glob`·`grep`)는 권한 모드와 관계없이 그 안을 읽거나 바꾸지 못합니다.
+    - 경로에 `.shacs-methods`가 들어 있으면 권한 단계에서 거절됩니다(`auto`에서는 묻지만 승인해도 실행되지 않습니다).
+    - 다른 이름으로 가리켜도 도구가 실제 경로를 확인해 거절합니다. 그 폴더로 가는 symlink와 저장 파일의 hard link(Unix 계열)가 여기에 해당합니다.
+    - 폴더를 훑는 `list_dir`·`glob`·`grep`은 경로를 주지 않아도(`grep`의 기본값 `.` 포함) `.shacs-methods` 폴더를 건너뜁니다. `grep`은 저장 파일의 hard link도 읽지 않습니다. `list_dir`·`glob`에는 hard link의 이름만 보일 수 있습니다.
+    - 셸 명령(`exec`), Python, 파일을 첨부해 보내는 `message` 같은 다른 도구는 이 경로를 따로 막지 않고 기존 승인 경계를 따릅니다. 승인하면 저장 파일을 읽거나 바꿀 수 있습니다.
+  - 후보 ID, 버전, 작성 시각, 목적·적용 작업·전제와 인용, 단계, 미확인 사항, 제외 항목, 근거별 종류·신뢰 구분·출처·원래 메시지의 시각·digest를 남깁니다. 출처는 `session://<session key digest 12자리>/<당시 메시지 번호>`이고, session key 자체는 저장하지 않고 digest만 둡니다.
+  - 저장하는 모든 글은 redaction을 거칩니다. 비밀값처럼 보이는 `키: 값`·`키=값`(예: `secrets: weekly`의 `weekly`)도 `[REDACTED]`로 바뀌므로, 그런 표현이 든 사용자 문장은 `your own words` 단계에도 바뀐 모양으로 남습니다.
+  - 메시지 자체(요청·피드백·도구 결과·답변)는 저장하지 않고 digest와 출처만 둡니다. 저장되는 글은 모델이 쓴 목적·적용 작업·전제·단계 문장과 runtime의 표시이며, 위의 검사가 요청이나 가려 둔 글을 옮긴 문장을 버리지만 그 검사가 놓치는 짧은 표현은 남을 수 있습니다.
+  - 보여 줄 때마다(`/learn`, `list`, `show`) 저장된 모든 후보를 원래 session의 지금 기록과 다시 대조합니다(session마다 한 번만 읽습니다). 같은 시각·같은 digest의 메시지가 아직 있으면 다음을 다시 확인하고, 하나라도 어긋나면 `/learn` 밖에서 고친 것으로 보고 "store is invalid (a method does not match the messages it cites)" 오류를 보여 주며 파일은 그대로 둡니다.
+    - 저장된 신뢰 구분·실행 판정·결과 digest·도구 이름이 그 메시지에서 다시 계산한 값과 같은지. 사용자 메시지의 신뢰 구분은 정확히 같아야 하고, 모델·도구 기록은 저장된 쪽이 더 신뢰되지만 않으면 됩니다.
+    - 전제와 `your own words` 단계 문장이 인용한 각 메시지(생성 때 보인 redaction·길이 제한 형태)에 그대로 들어 있는지.
+    - 모델이 쓴 목적·적용 작업·전제·단계·설명·미확인 사항이 남아 있는 요청이나 제외한 사용자 메시지를 옮기지 않았고, 제외한 메시지를 인용하지 않았는지(생성 때와 같은 검사).
+  - 메시지가 아직 있지만 저장했을 때와 다른 위치에 있으면(기록 정리로 앞부분이 잘린 경우 등) 내용은 다시 확인하되 그 근거에 "saved position not rechecked: the session changed since"를 붙입니다. 저장할 때 끝나지 않았거나 실패한 도구 호출에 그 뒤 결과가 붙었으면(승인이나 답이 늦게 온 경우) 오류로 보지 않고 "its result changed after saving, not rechecked"를 붙입니다. 이런 호출은 처음부터 어떤 단계도 뒷받침하지 않습니다.
+  - 메시지가 더 이상 없으면 그 근거에 "no longer in that session"을 붙이고, 끝 줄에는 "some source messages changed or were cleared since"를 붙입니다. 그 근거에 기댄 단계는 "your own words when saved"·"ran without a reported error when saved"와 "not rechecked: its source is no longer in that session"으로, 목적·적용 작업·전제는 인용 뒤에 같은 표시를 붙여 보여 줍니다. `/learn list`에는 "some sources changed or cleared since, not rechecked"를 붙입니다. session이 지워졌으면 "(that session no longer exists)"입니다. "(this conversation)"은 후보를 만든 session에서 근거가 모두 저장한 위치에 남아 있을 때만 붙습니다. `/new`나 기록 정리 뒤에는 붙지 않습니다.
+  - session 목록을 읽지 못하거나, 읽을 수 없거나 일반 파일이 아닌(링크·디렉터리) session 항목이 있는데 후보의 원래 session을 찾지 못하면 삭제된 것으로 보지 않고 "learned methods could not be checked against their sessions (…)" 오류를 보여 줍니다. 읽을 수 없는 파일 이름을 함께 보여 줍니다.
+  - 이 대조가 잡는 것은 저장 파일에서 남아 있는 근거로 다시 계산·검사할 수 있는 부분을 고친 경우입니다. 근거 메시지가 사라진 뒤 고친 부분, 근거 기록 자체를 지운 편집(예: 제외한 선호의 기록과 "Kept out" 항목을 함께 지운 경우), 저장하지 않은 근거(인용하지 않은 답변·도구 결과)나 도구 결과·답변의 글을 옮겨 넣은 문장, 어떤 근거에도 없는 글로 바꾼 모델 문장(계속 "the model's wording"·"unverified"로 표시됨), 모델의 분류(`classified_as`)는 다시 확인하지 못합니다(분류를 바꾸면, 예를 들어 요청을 피드백으로 바꾸면 그 메시지에는 요청을 옮긴 문장 검사가 다시 적용되지 않습니다). 저장 파일과 session 파일은 모두 workspace의 일반 파일이므로 둘을 함께 맞춰 고치면 구별하지 못합니다.
+  - 근거 창 밖으로 빠진 근거 수(앞선 turn과 40개 한도 초과분)를 표시합니다.
+  - 최대 200개입니다. 저장하기 전과 읽을 때 모두 개수, 파일 크기(16 MiB), 버전·단계·전제·인용·목록 수, 글과 ref의 길이, 버전 번호와 근거 ID의 중복을 확인합니다. 저장 전에 한도를 넘으면 저장하지 않습니다. 그 한도를 넘거나, 파일이 손상됐거나 모르는 형식이거나 경로가 symlink이면 바꾸지 않고 오류를 보여 줍니다.
+  - 읽을 때 표시와 근거가 맞는지도 확인합니다. 인용한 근거가 모두 있어야 하고, 원래 session과 근거의 digest는 `sha256:<소문자 16진수 64자리>`, 근거 ID는 `e<번호>`, 출처는 `session://<원래 session digest 12자리>/<번호>`(도구 호출은 뒤에 `#call-<12자리>`) 형식이어야 하며, 도구 이름·실행 판정은 도구 호출에만, 분류는 사용자 메시지에만 있어야 하고, 저장된 글(목적·단계·미확인 사항·도구 이름·시각 등)을 redaction해도 바뀌지 않아야 하며(손으로 넣은 비밀값은 거절), 도구 호출·답변은 `from you`일 수 없고 사용자 메시지는 `assistant output`일 수 없으며, 선호·이번 작업 조건·섞임으로 분류된 메시지마다 "Kept out" 항목이 있어야 합니다. `your own words` 단계와 전제는 `from you`인 피드백·절차 메시지를, 목적·적용 작업은 `from you`인 요청·피드백·절차 메시지를, `ran without a reported error` 단계는 오류 없이 실행된 도구 호출을 인용해야 하며, 그 단계 문장은 runtime이 쓰는 "Run <도구>"와 같아야 합니다. 파일을 고쳐 표시만 바꾸면(예: 사용자 말 단계를 실행 단계로) 저장소가 잘못됐다는 오류("malformed method record")를 보여 주고 파일은 그대로 둡니다.
+
+### 방법의 확인·거절과 다른 작업으로 확인
+
+```text
+/learn confirm method-1
+/learn confirm method-1 v1 3f2a9c1b
+/learn reject method-1 v1
+/learn verify method-1
+/learn match Summarize the meeting notes in minutes.md
+```
+
+모든 명령은 사용자 turn에서만 동작합니다(위 `/learn`과 같은 기준).
+
+- **상태:** `candidate`(후보: 기본으로 쓰지 않음), `confirmed`(확인됨: 맞는 작업에 기본 방법으로 제안할 수 있음), `rejected`(거절: 다시 제안하지 않음), `inactive`(확인됐지만 그 뒤 사용자의 피드백과 어긋났거나 사용자가 사용을 멈춤)입니다. 상태는 현재 버전에 대한 결정 기록으로 정해지고, 목록과 `show`에 그 상태를 만든 결정과 시각이 함께 보입니다. 어떤 상태도 도구 권한·skill·승인을 만들지 않습니다. 확인한 뒤에도 명령 실행·Python·plugin·외부 발송은 그때의 승인 경계를 그대로 거칩니다.
+- **사용자 확인:** `/learn confirm <id>`는 현재 버전의 전체 내용(근거별 출처와 신뢰 구분, 지금까지의 결정 포함), 확인의 뜻("이 버전을 맞는 작업에 기본 방법으로 제안할 수 있다"), 권한이 생기지 않는다는 안내, 확인 코드를 보여 줍니다. 신뢰하지 않는 자료가 단계에 영향을 줬으면 그 점을 따로 알립니다.
+  - 이미 확인된 방법이면 검토 화면 대신 그 사실과 사용을 멈추는 방법(`/learn deactivate`), 거두는 방법(`/learn reject`)을 알려 줍니다.
+  - `/learn confirm <id> v<N> <코드>`로 그 화면에서 본 버전만 확인합니다. 코드는 방법이 바뀔 때마다(다른 작업의 확인이 기록될 때도) 달라지므로, 본 뒤에 바뀐 방법은 확인되지 않고 다시 검토하라고 안내합니다.
+  - 작업 결과를 받아들이는 말("좋아요")이나 결과를 고른 사실은 확인으로 치지 않습니다.
+- **거절:** `/learn reject <id> v<N>`. 거절한 방법은 다시 확인되거나 제안되지 않습니다. 확인한 방법을 거두려면 거절합니다.
+- **다른 작업으로 확인(`/learn verify <id>`):** 지금 대화의 작업(최근 사용자 turn 6개와 그 뒤 기록)을 그 방법과 대조합니다. 도구를 주지 않은 model 호출을 두 번 합니다(사용자 메시지 분류와 대조). 대조 호출에는 방법의 목적·적용 작업·전제·근거 있는 단계와, 후보 초안 호출과 같은 범위의 근거(요청·피드백·절차의 글, 도구 이름과 실행 판정, 답변이 있었다는 사실)만 보냅니다.
+  - 모델은 이 작업이 그 방법의 작업 종류인지, 맞지 않는 전제가 있는지, 어느 근거가 어느 단계를 다시 했는지, 어느 피드백이 어느 단계와 어긋나는지 답합니다. 작업 종류와 전제가 맞는지는 모델의 판단입니다.
+  - 무엇을 세는지는 runtime이 정합니다. `your own words` 단계는 그 단계 문장이 그대로 든 이 작업의 피드백·절차 메시지로만, `ran without a reported error` 단계는 그 단계의 도구가 이 작업에서 모두 오류 없이 실행된 호출로만 다시 한 것으로 봅니다. 없는 근거 ID, 실패하거나 끝나지 않은 실행, 요청 메시지, 결과를 받아들이는 말은 세지 않습니다.
+  - **새 작업:** 이 작업의 요청 글, 사용자가 쓴 메시지(글과 시각, 모델이 어떻게 분류했든), 도구 결과의 digest가 그 방법의 원래 작업이나 이미 기록된 다른 작업 어느 것과도 겹치지 않아야 합니다. 원래 작업의 것은 후보를 만들 때 근거 창 전체(인용하지 않은 메시지와 도구 결과 포함)에서 계산해 저장합니다. 신뢰하지 않는 자료가 단계에 영향을 준 방법은, 같은 출처(같은 인자로 부른 호출)를 다시 읽은 작업도 새 작업으로 보지 않습니다. 근거 있는 단계를 모두 다시 한 새 작업이 기록되면, 서로 다른 두 작업(원래 작업과 이 작업)에서 확인된 것으로 보고 `confirmed`가 됩니다. 그 전에 어긋나는 피드백이 기록됐으면 이렇게 확인되지 않습니다(사용자가 직접 확인할 수는 있습니다).
+  - **다시 한 작업(재시도·재요청·같은 자료):** 새 작업이 아니면 확인 근거로 세지 않고, 이 작업이 다시 한 단계만 "rerun … kept as stability evidence only"로 남깁니다(다시 하지 않은 단계도 표시). 이미 기록된 같은 메시지·실행만 보여 주면 아무것도 저장하지 않습니다.
+  - **어긋남:** 이 작업(원래 작업 포함)에서 사용자의 피드백·절차가 단계와 어긋난다고 판단되면 기록합니다. 모델이 이 작업은 그 방법의 작업 종류가 아니라거나 맞지 않는 전제가 있다고 답해도 기록합니다. `confirmed`였으면 `inactive`가 되어 사용자가 다시 확인할 때까지 제안되지 않고, 후보였으면 이후 다른 작업으로는 확인되지 않습니다. 같은 피드백은 한 번만 기록합니다.
+  - 결정마다 버전, 시각, 그 작업의 session digest, 단계별 근거와 그 근거의 기록(digest·출처만)을 남깁니다. 볼 때마다 그 session의 지금 기록과 방법의 근거처럼 다시 대조하고, 확인을 만든 작업의 근거가 지워졌으면 상태 옆에 "(the task it was redone in is no longer in its session, not rechecked)"를 붙입니다.
+- **맞는 방법 보기(`/learn match <요청>`):** 확인된 방법만 도구 없는 model 호출 한 번으로 그 요청에 맞는지(작업 종류와 전제)를 판단해 "Offered as the default"로 보여 줍니다. 요청이 결과의 모양을 정했다고 판단되면, 결과의 모양을 정하는 단계는 "left out"으로 표시합니다(아래 사용과 같은 기준). 후보·거절·사용 중지 방법은 model에 보내지 않고, 제안하지 않는 이유와 함께 나열합니다. 확인된 방법이 없으면 model을 부르지 않습니다. 아무것도 실행하지 않습니다.
+- **결정 수:** 방법마다 결정은 64개, 버전은 64개까지 남습니다. 결정이 다 차면 확인·거절·다른 작업 기록·고치기·사용 멈추기·되돌리기를 하지 않고, 버전이 다 차면 고치기를 하지 않으며, 그렇다고 알려 줍니다.
+- **저장 검사:** 읽을 때마다 결정의 형식, 다른 작업 기록마다 그 앞의 기록에 비춰 새 작업·다시 한 작업·어긋남의 조건에 맞는지, 저장된 상태가 결정으로 다시 계산한 상태와 같은지 확인하고, 어긋나면 "malformed method record"로 거절하며 파일은 그대로 둡니다.
+- **한계:**
+  - 같은 작업인지는 요청 글·사용자 메시지·도구 결과의 digest로만 봅니다. 표현을 바꿔 다시 요청하고 자료도 달라졌으면 새 작업으로 셀 수 있습니다. 반대로 근거 창에 앞 작업의 요청이 남아 있으면, 같은 대화의 다른 요청도 다시 한 작업으로 봅니다.
+  - 같은 프로그램 실행 안에서 이미 읽은 바뀌지 않은 파일을 다시 읽으면 `read_file`이 내용 대신 바뀌지 않았다는 안내만 돌려주는데, 이런 읽기는 끝나지 않은 실행이라 단계를 다시 한 것으로 세지 않습니다.
+  - 작업 종류·전제가 맞는지, 어긋나는 피드백이 있는지는 모델의 판단입니다. 모델이 어긋남을 놓치면 기록되지 않습니다.
+  - 저장 파일은 인증된 기록이 아닙니다. 읽을 때 결정의 형식과 앞뒤 조건만 검사하므로, 저장 파일만 고쳐도(예: 셸 명령을 승인해 `confirmed` 결정과 상태를 넣으면) 사용자 확인으로 보이게 만들 수 있습니다. 확인 코드는 사용자가 확인 화면을 봤다는 표시일 뿐 비밀번호나 서명이 아니고, 사용자 확인은 session 기록과 대조하지 않습니다. 다른 작업의 확인도 근거가 그 session에 남아 있을 때만 다시 대조하므로, 근거가 없는 session을 가리키게 꾸민 기록은 "not rechecked" 표시로만 드러납니다. 위의 보호는 모델의 파일 도구가 저장 파일을 바꾸는 것을 막을 뿐입니다.
+
+### 확인한 방법의 사용·수정·되돌리기
+
+```text
+/learn edit method-1 v1 purpose <새 목적>
+/learn edit method-1 v1 applies <새 적용 작업>
+/learn edit method-1 v1 premise 2 <새 전제>
+/learn edit method-1 v1 step 3 <새 단계>
+/learn edit method-1 v1 remove step 3
+/learn deactivate method-1 v1
+/learn restore method-1 v1
+/learn show method-1 v1
+```
+
+- **다음 요청에서의 사용:** 사용자가 보낸 일반 요청마다(명령·승인 답·system·cron·automation turn은 아님), 확인된 방법이 하나라도 있으면 그 요청을 실행하기 전에 다음을 합니다. 확인된 방법이 없으면 아무것도 하지 않고 model도 부르지 않습니다.
+  1. 저장된 방법을 읽고 원래 session과 다시 대조합니다(`/learn list`와 같은 검사). 저장소가 잘못됐거나 대조가 어긋나면 어떤 방법도 쓰지 않고, 답 끝에 "No learned method was used: …"와 이유를 붙입니다.
+  2. 도구 없는 model 호출 한 번으로 확인된 방법들이 그 요청에 맞는지(작업 종류, 맞지 않는 전제), 요청이 결과의 모양을 정했는지, 어느 단계가 결과의 모양(필드, 순서, 구성, 파일 형식)을 정하는지 묻습니다. `/learn match`와 같은 호출입니다.
+  3. 맞는 방법이 있으면 그중 첫 번째 하나만 씁니다. 현재 버전의 목적·적용 작업·전제·단계를 단계별 근거 표시(사용자 말, 실행, 사용자 수정, 확인되지 않은 모델 문장, 신뢰하지 않는 자료의 영향)와 함께 그 요청의 system prompt에 덧붙입니다. "작업 방식의 안내일 뿐 권한이 아니며, 결과의 모양은 요청을 따른다"는 지시도 함께 붙습니다.
+  4. 답 끝에 "Method used: <id> v<N> — <상태> — as a guide only; it grants no permission."과 적용 작업, model이 성립한다고 본 전제, 근거가 나온 session을 붙입니다. 근거가 지워지거나 바뀌어 다시 대조하지 못한 방법이면 "Some sources it rests on changed or were cleared since, so they were not rechecked"도 붙입니다. 맞는 방법이 없으면 "No learned method was used for this request:"와 방법별 이유(전제가 맞지 않음, 작업 종류가 다름 등)를 붙이고 일반 경로로 진행합니다.
+  - Spec 024 workflow로 실행되는 요청(자동 선택이나 metadata로 들어온 workflow)도 새 workflow를 시작할 때 같은 방식으로 고르고, 안내를 workflow의 각 하위 실행(child·verifier)의 system prompt에 붙입니다. workflow가 범위를 묻거나 정책으로 막혀 시작하지 않으면 방법을 고르지 않습니다. 재시작 뒤 이어지는 workflow는 처음 고른 것을 그대로 씁니다.
+- **버전 결속:** 요청이 시작할 때 고른 버전과 안내 문장을 그 session에 두었다가, 승인이나 질문의 답으로 실행이 이어질 때도 같은 버전을 씁니다. 그사이 방법을 고치거나 거절해도 이미 시작한 요청은 바뀌지 않습니다.
+  - 요청이 끝나면 사용자가 받는 답 끝에 위 표시 문장을 붙입니다. 끝나는 경우는 답, provider 오류, workflow 완료·실패, 그리고 기다리던 요청이 더 기다릴 것이 없어지는 명령 답입니다. 명령 답의 예는 승인 거절, 프로젝트 권한 저장 실패, 승인한 도구의 실패, `/stop`으로 취소한 행동 결정입니다. 대화 기록에도 그 답을 표시 문장과 함께 남기고, 기록에 없던 답(예: "Tool execution cancelled.")이면 새 답으로 남깁니다.
+  - 요청이 아직 승인·답·행동 결정을 기다리는 동안 다른 명령(예: `/learn`, 다른 거절 기록의 재시도)에 답해도 그 요청은 끝나지 않습니다. `/new`는 대화와 함께 기다리던 요청의 선택도 버리며, 그 요청에는 표시하지 않습니다.
+  - 쓴 방법이면 그 답에 방법의 ID·버전·revision·버전 내용의 sha256·당시 상태와 요청이 끝난 이유(`ended`, 예: `completed`, `permission_denied_by_user`, `provider_error`, `workflow_completed`)를 남깁니다. 방법을 나중에 바꿔도 이 기록은 그대로입니다.
+  - 승인·질문·workflow를 기다리는 동안에는 표시하지 않고, 이어진 실행이 끝날 때 표시합니다.
+- **결과의 모양:** 방법은 일하는 방식만 바꿉니다. model이 요청이 결과의 모양을 정했다고 판단하면, 결과의 모양을 정한다고 본 단계는 안내에서 빼고 답 끝에 "Left out: step N (your request says how the result should look)."를 붙입니다. 요청이 모양을 정하지 않았으면 방법의 모양을 기본으로 안내합니다. 어느 단계가 모양을 정하는지, 요청이 모양을 정했는지는 model의 판단입니다.
+- **권한:** 방법 사용은 어떤 도구도 허락하지 않습니다. 안내를 받은 요청에서도 명령 실행·파일 쓰기·Python·plugin·외부 발송은 그때의 승인 경계를 그대로 거칩니다(예: 확인된 방법을 쓰는 요청의 `write_file`도 승인을 묻고, 승인 전에는 실행되지 않습니다).
+- **고치기(`/learn edit <id> v<N> …`):** 현재 버전을 고친 새 버전을 만듭니다. `purpose`·`applies`는 바꾸고, `premise <k>`·`step <k>`는 k번째를 바꾸거나(마지막 번호+1이면 더하기), `remove premise|step <k>`는 뺍니다. 단계는 하나 이상 남아야 합니다.
+  - 새 글은 redaction 뒤 400자까지이며, 사용자 수정("your edit in v<N>")으로 표시됩니다. 사용자 수정은 근거를 인용하지 않습니다. 근거 기록(digest·출처)은 고치기 전 버전의 것을 그대로 둡니다.
+  - 새 버전은 현재 버전이 되고 후보로 시작합니다. 확인하기 전에는 쓰이지 않습니다. 응답에 새 버전의 검토 화면과 확인 코드가 바로 나옵니다.
+  - `v<N>`이 현재 버전이 아니면(그사이 다른 수정이 있었으면) "is at v<M>, not v<N>"로 거절하고 아무것도 바꾸지 않습니다. 두 수정이 동시에 와도 저장소 lock 안에서 차례로 확인하므로 하나만 저장됩니다.
+  - 다른 작업으로 확인(`/learn verify`)할 때, 사용자 수정 단계는 그 단계 문장이 그대로 든 그 작업의 피드백·절차 메시지가 있어야 다시 한 것으로 봅니다.
+- **사용 멈추기(`/learn deactivate <id> v<N>`):** 확인된 현재 버전을 `inactive`로 바꿉니다. 다시 확인할 때까지 쓰이지 않습니다. 거절과 달리 다시 확인할 수 있습니다.
+- **되돌리기(`/learn restore <id> v<N>`):** 확인된 적이 있고 거절되지 않은 이전 버전을 다시 현재 버전으로 만듭니다. 그 버전의 상태는 그 버전의 결정대로입니다(확인된 채였으면 `confirmed`, 사용을 멈췄거나 어긋남이 기록됐으면 `inactive`). 거절한 버전은 되돌릴 수 없습니다. 되돌리기는 앞으로의 요청이 쓸 버전만 바꿉니다. 이미 답한 요청은 쓴 버전 그대로 남고, 그 요청이 한 일(쓴 파일, 보낸 메시지)은 되돌리지 않습니다.
+- **버전 보기(`/learn show <id> v<N>`):** 이전 버전도 내용과 그 버전의 상태를 보여 주고, 현재 버전이 아니면 "not the current version"을 붙입니다. 결정 목록에는 고치기("edited by you"), 사용 멈추기("put out of use by you"), 되돌리기("made current again by you")도 보입니다.
+- **저장 검사:** 읽을 때마다 버전과 결정이 한 흐름인지 확인합니다. v1은 생성된 것이고, 이후 버전은 그때의 현재 버전을 고친 것이어야 하며 근거 기록이 같아야 합니다. 되돌리기는 그때 확인된 적이 있고 거절되지 않은 버전만 가리켜야 하고, 사용 멈추기는 그때 확인된 버전에만 있어야 합니다. 다른 결정은 그때의 현재 버전에 대한 것이어야 하고, 저장된 현재 버전과 상태는 이 흐름의 끝과 같아야 합니다. 어긋나면 "malformed method record"로 거절하며, 그동안 어떤 방법도 쓰지 않습니다.
+- **한계:**
+  - 맞는지, 전제가 성립하는지, 결과의 모양을 누가 정했는지는 model의 판단입니다. 안내를 따를지도 실행하는 model에 달려 있으며, runtime은 안내를 붙이고 그 사실을 표시할 뿐 단계가 실제로 지켜졌는지 확인하지 않습니다.
+  - 한 요청에 방법 하나만 씁니다. 맞는 방법이 더 있으면 "Also fitting, not used"로만 알립니다.
+  - 확인된 방법이 있으면 일반 요청마다 저장소를 읽어 대조하고 model 호출이 한 번 더 듭니다.
+  - 실패 피드백은 기존 방법을 자동으로 고치지 않습니다. 새 후보(`/learn`)나 사용자 수정의 근거가 될 뿐이고, `/learn verify`가 어긋남을 기록하면 확인된 방법은 사용을 멈춥니다.
+  - 저장 파일이 인증된 기록이 아니라는 위 한계는 버전과 결정에도 같습니다.
 
 ## Tasks 조회와 owner 변경 요청
 

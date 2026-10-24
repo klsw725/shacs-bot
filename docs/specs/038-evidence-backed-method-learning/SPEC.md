@@ -1,6 +1,6 @@
 # 038. 근거 있는 작업 방법 학습과 재사용 아키텍처 명세
 
-Status: Planned
+Status: Implemented, closure blocked (전체 workspace 테스트 사용자 승인 전)
 
 Consumes: 005 skill discovery, 018 evaluation helpers, 024 workflow recipes and quarantine classification, 030 trusted resources, 033 recorded trajectory and improvement evidence
 
@@ -58,3 +58,22 @@ Consumes: 005 skill discovery, 018 evaluation helpers, 024 workflow recipes and 
 | [020 재사용·수정·철회](prds/020-method-reuse-edit-and-revert.md) | 다음 작업의 버전 결속 사용, 수정·비활성·이전 버전 복원 | 000, 010 | 제안→확인→사용→철회의 실제 표면 |
 
 소유 범위 1·수용 조건 1은 000, 범위 2와 조건 2의 승격/적합성 판단은 010, 범위 3–4의 실제 재사용·수정과 조건 2의 사용 및 조건 3–5는 020이 소유한다. 020의 전체 사용자 흐름은 앞선 각 PRD의 독립 종료를 소급 변경하지 않는다.
+
+## 종료 증거 (2026-10-24)
+
+PRD [000](prds/000-method-candidate-and-evidence.md), [010](prds/010-method-review-and-promotion.md), [020](prds/020-method-reuse-edit-and-revert.md)이 각각 독립 Oracle **PASS**를 받았다(000은 10차, 010은 2차, 020은 4차). 그 뒤의 스펙 차원 Oracle 검토도 수용 조건 1–5와 반드시 지킬 것 전체를 **PASS**로 판정했다. 남은 종료 절차는 사용자 승인을 받은 전체 workspace 테스트뿐이다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 release seal이 아니다.
+
+- 조건 1: `/learn`은 도구 없는 model 호출 두 번으로 비활성 후보 하나를 만든다. 후보는 사용자 말·실행·답변의 근거와 신뢰 구분을 가진다. 선호·이번 작업 조건은 따로 두고, 효과는 미확인으로 표시하며, 근거 안의 지시는 실행되지 않는다. 재사용할 근거가 없으면 후보 없이 끝난다(000).
+- 조건 2: 사용자 확인(검토 화면과 코드)이나 서로 다른 두 번째 작업에서 근거 있는 단계를 모두 다시 한 경우에만 확인된 방법이 된다. 같은 요청·자료·메시지의 반복, 신뢰하지 않는 같은 출처, 결과 수락은 세지 않는다(010).
+  - 확인된 방법은 맞는 요청에 버전·전제·출처와 함께 쓰인다. 전제가 맞지 않으면 쓰지 않고 이유를 보인다. 요청이 결과의 모양을 정하면 방법의 모양 단계를 뺀다(020).
+- 조건 3: 고치기(새 후보 버전), 거절, 사용 멈추기, 이전 확인 버전 되돌리기가 재시작 뒤에도 유지되고, 그 뒤 요청은 마지막 사용자 선택만 따른다(020).
+- 조건 4: 낡은 버전으로 고치기와 동시에 온 두 수정 중 늦은 것, 형식이 어긋난 저장 파일, 실패한 실행·없는 근거를 인용한 확인은 기존 확인 방법을 덮지 않고 이유를 보이며 실패한다(010, 020). 저장 파일이 인증된 기록이 아니라는 한계는 각 PRD의 남은 제한에 있다.
+- 조건 5: 격리된 config·workspace와 fake provider로 compiled `agent` REPL에서 제안 조회·확인·다음 요청 사용·고치기·되돌리기·사용 멈추기·철회를 한 흐름으로 관측했다(`.omo/evidence/spec038/`의 PRD별 `qa*/`).
+
+fmt와 workspace clippy `-D warnings`가 통과했다. 마지막으로 바꾼 package의 테스트는 다음과 같다.
+
+- `shacs-core`: 1,632 passed / 1 failed / 3 ignored. 유일한 실패는 baseline부터 있던 Spec034 fixture 테스트(`mismatch_uses_isolated_tree`)다.
+- `shacs-cli`: 474 passed / 3 ignored. `shacs-command`: 17 passed.
+- 전체 workspace 테스트는 아직 실행하지 않았다. 프로젝트 규칙에 따라 사용자 승인을 받아 실행하고, 그 결과로 상태를 `Complete (Scoped)`로 바꾼다.
+
+다른 사용자·workspace와의 방법 공유, 원격 배포, 036의 선제 감시, 037의 전문 하네스는 제공하지 않는다. 실제 명령과 제한은 [사용 가이드](../../USAGE.md#작업-방법-후보와-learn)를 따른다.
