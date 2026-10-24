@@ -164,7 +164,7 @@ Status: Complete (Decision)
 
 ### 후속 구현 범위
 
-- 별도 구현 스펙이 위 계약 전체를 소유한다. 자료 이전은 없다. 안내·readiness·Tasks·agent 실행 기록·release runner·문서를 한 변경 단위로 바꾸고 `shacs-app` crate와 앱 전용 코드를 지운다. 이 구현은 다른 신규 기능이나 040·041의 판정을 기다리지 않는다.
+- 별도 구현 스펙 [043](../../043-app-capability-retirement/SPEC.md)이 위 계약 전체를 소유한다. 자료 이전은 없다. 안내·readiness·Tasks·agent 실행 기록·release runner·문서를 한 변경 단위로 바꾸고 `shacs-app` crate와 앱 전용 코드를 지운다. 이 구현은 다른 신규 기능이나 040·041의 판정을 기다리지 않는다.
 - 구현 전까지 현재 명령은 그대로 동작한다. 이번 작업에서 [사용 가이드의 앱 절](../../../USAGE.md#앱)에 판정과 확인된 한계를 적었다.
 
 ### 남은 위험과 한계

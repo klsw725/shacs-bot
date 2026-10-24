@@ -38,6 +38,7 @@
 | [`040-video-analyzer-capability-disposition`](040-video-analyzer-capability-disposition/SPEC.md) | `Planned (Decision only)`: 선택적 video analyzer의 실제 사용·첨부·projection 영향을 조사해 유지·축소·제거 판정 | 027, 030, 031, 034 |
 | [`041-release-evidence-tooling-disposition`](041-release-evidence-tooling-disposition/SPEC.md) | `Planned (Decision only)`: Spec031 release runner의 소비자·증거/호환 계약을 조사해 유지·축소·제거 판정 | 016, 031, 033, 034 |
 | [`042-conversational-web-watch-and-trustworthy-silence`](042-conversational-web-watch-and-trustworthy-silence/SPEC.md) | `Planned`: 대화로 맡긴 웹페이지 한 곳의 관찰, 사용자와 함께 정한 조건의 변화와 확인 실패·회복·공백·결정 마감 알림. 036 완료 범위 재판정 없음 | 010, 029, 030, 031, 033, 036 |
+| [`043-app-capability-retirement`](043-app-capability-retirement/SPEC.md) | `Planned`: 039 판정대로 `apps`를 읽기 전용 퇴역 안내로 바꾸고 readiness·Tasks·agent 실행 기록에서 앱 의존을 빼며 `shacs-app`과 앱 전용 코드·테스트를 지운다. 남은 앱 자료는 지우거나 고쳐 쓰지 않음 | 030, 031, 039 |
 
 ## 읽는 순서 권장
 
@@ -86,6 +87,7 @@
 40. `040-video-analyzer-capability-disposition`
 41. `041-release-evidence-tooling-disposition`
 42. `042-conversational-web-watch-and-trustworthy-silence`
+43. `043-app-capability-retirement`
 
 ## 운영 원칙
 
