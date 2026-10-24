@@ -6,6 +6,11 @@ use shacs_command::{
 };
 use std::error::Error;
 
+#[path = "router/learn.rs"]
+mod learn;
+#[path = "router/method.rs"]
+mod method;
+
 #[test]
 fn builtin_router_distinguishes_priority_exact_and_prefix_commands() -> Result<(), Box<dyn Error>> {
     let router = CommandRouter::builtin();

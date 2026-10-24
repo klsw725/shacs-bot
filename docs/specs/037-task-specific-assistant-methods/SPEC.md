@@ -1,6 +1,6 @@
 # 037. 작업별 수행 방식의 선택과 결과 확인 아키텍처 명세
 
-Status: Planned
+Status: Complete (Scoped)
 
 Consumes: 004 tool runtime, 005 skills, 024 workflow/harness execution, 030 trusted execution, 034 generated media
 
@@ -58,3 +58,17 @@ Consumes: 004 tool runtime, 005 skills, 024 workflow/harness execution, 030 trus
 | [040 복합 결과 인계](prds/040-composed-method-results-and-handoff.md) | 한 목표의 다중 산출물·독립 검증·답 우선 표면 | 000, 010, 020, 030 | 보고서+계산 및 지원 시 보고서+이미지 실제 표면 |
 
 소유 범위 1과 수용 조건 1의 선택·변경은 000, 범위 3의 계산은 010·보고서는 020·이미지는 030이 각각 단독 소유한다. 범위 2·4의 복합 결과와 수용 조건 4–5의 통합 표면은 040이 소유한다. 조건 2는 010, 조건 3은 020/030이 각 분야별로 닫는다. 037 최종 판정에는 다섯 PRD의 종료 증거와 040의 실제 사용자 결과를 함께 확인하되 별도 뒤 번호 PRD는 요구하지 않는다.
+
+## 종료 증거 (2026-10-23)
+
+PRD [000](prds/000-method-selection-and-user-override.md), [010](prds/010-reproducible-calculation-evidence.md), [020](prds/020-source-grounded-report-output.md), [030](prds/030-image-result-review-and-revision.md), [040](prds/040-composed-method-results-and-handoff.md)이 각각 독립 Oracle **PASS**를 받았다(000은 3차, 010은 7차, 020은 7차, 030은 9차, 040은 16차). 마지막 Oracle 검토는 이 스펙의 수용 조건 1–5와 반드시 지킬 것 전체도 **PASS**로 판정했다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 release seal이 아니다.
+
+- 조건 1: 같은 session에서 일반 요청은 일반 방식으로 처리한다. 계산·보고서·이미지 요청은 방식, 선택 이유, 가용 상태, 확인 항목을 보인다. 시작 전 지정과 진행 중 변경 뒤에도 목표·사용자 결정·확인된 근거를 잇고, 이전 판의 검증을 승계하지 않는다(000, 040).
+- 조건 2: 계산은 실행한 코드의 입력·단위·가정·결과를 기록하고, 다른 코드로 한 독립 확인으로 판정한다. 단위를 바꾸거나 반례를 넣으면 `conflict`나 미확인으로 남는다(010).
+- 조건 3: 보고서는 이 요청에서 실제로 읽은 자료에 결론을 연결하고 없는 출처를 만들지 않는다(020). 이미지는 저장이 확인된 artifact만 결과로 보이고 형식·크기·장수 요구를 확인한다. 미설정·미지원·실패는 그 이유를 보이고, 내용과 모양은 미확인으로 남긴다(030).
+- 조건 4: 보고서에 계산이나 이미지를 넣는 복합 요청은 같은 목표 아래 부분마다 따로 판정한다. 한 부분의 성공이 다른 부분을 통과시키지 않는다. 답과 핵심 근거가 먼저 나오고, 코드·실행 기록·출처 상세는 `/method status`에서 본다(040).
+- 조건 5: macOS native와 공식 container 조건의 compiled REPL에서 일반·전문·방식 변경·미지원 입력을 실행해 관측했다(각 PRD의 `qa-*.txt`).
+
+fmt와 workspace clippy `-D warnings`가 통과했다. 마지막으로 바꾼 package(`shacs-core`)의 테스트는 1,583 passed / 1 failed / 3 ignored이며, 유일한 실패는 baseline부터 있던 Spec034 fixture 테스트다. 이 package 실행은 PRD040 14차 반영 코드에서 했다. 15차 반영(두 판정 함수와 단위 테스트) 뒤에는 대상 테스트(AgentLoop 124/124, 단위 59/59, CLI 2/2·2/2·4/4, command 3/3)를 다시 실행했다. 커밋한 최종 코드에서 사용자 승인을 받아 전체 workspace 테스트를 다시 실행했다. suite 198개 기준 3,308 passed / 1 failed / 13 ignored이며, 유일한 실패는 같은 Spec034 fixture 테스트다(PRD040 종료 확인 참조).
+
+이미지 내용·모양 확인, 이미지 편집·마스크·변형, 전용 Python 서비스, 새 workflow engine, 방법 학습은 제공하지 않는다. 이미지·복합 요청에서는 확장 추론(thinking)을 요청하지 않는다. 실제 명령과 제한은 [사용 가이드](../../USAGE.md#복합-요청의-결과-확인)를 따른다.

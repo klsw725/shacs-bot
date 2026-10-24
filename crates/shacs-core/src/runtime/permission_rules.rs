@@ -107,6 +107,8 @@ impl ProcExecSummary {
 #[serde(rename_all = "snake_case")]
 pub enum ProtectedTargetClass {
     GitState,
+    /// The learned-method store (Spec038): only `/learn` commands change it.
+    LearnedMethods,
     AuthStore,
     RuntimeConfig,
     AppRegistry,
@@ -384,6 +386,9 @@ fn classify_target_value(
     let path_parts = normalized.split('/').collect::<Vec<_>>();
     if normalized == ".git" || normalized.starts_with(".git/") || path_parts.contains(&".git") {
         return Some(ProtectedTargetClass::GitState);
+    }
+    if path_parts.contains(&".shacs-methods") {
+        return Some(ProtectedTargetClass::LearnedMethods);
     }
     if normalized.contains(".shacs-bot/auth.json")
         || normalized.contains("auth.json")

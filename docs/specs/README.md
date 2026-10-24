@@ -32,11 +32,12 @@
 | `033-evaluation-automation-live-integration` | `Complete (Scoped)`: local goal/evaluator, durable automation routing, CAS self-improvement, recorded-only replay, domain projection input과 source-bound release evidence 구현; QA/goal/code/security/docs final PASS 및 final source-bound release execution PASS | 009, 012, 013, 014, 016, 018, 022 |
 | `034-generated-media-and-rich-file-context-expansion` | `Complete (Scoped)`: Codex image event, edit/mask/variation 계약, streaming/remote-output 정책, generated artifact, bounded video analyzer와 media-domain evidence; [remediation PASS](../../.omo/evidence/spec034/remediation/PASS.json)와 [Todo 14 QA baseline](../../.omo/evidence/spec034/task-14-final-qa-candidate2/PASS.json)에서 22/22 검증. 최신 source-bound release 상태는 [local canonical final manifest](../../.omo/evidence/spec034/task-15-closure/final-committed/manifest.json)가 현재 committed source와 최종 5개 리뷰를 결합해 판정하며 이전 candidate receipt로 대체하지 않음 | 004, 019, 027 |
 | [`036-entrusted-work-continuity-and-change-notification`](036-entrusted-work-continuity-and-change-notification/SPEC.md) | `Complete (Scoped)`: 명시적 위임·조건 수정·goal-bound 관측·조건별 변화 통지와 사용자 결정의 로컬 Email 수직 흐름. 네 PRD 및 통합 Oracle PASS; 전체 출시 seal 아님 | 029, 030, 031, 033 |
-| [`037-task-specific-assistant-methods`](037-task-specific-assistant-methods/SPEC.md) | `Planned`: 한 요청에서 수행 방식 선택·사용자 변경과 계산·보고서·이미지의 결과 확인. 024 실행 엔진 재소유 없음 | 004, 005, 024, 030, 034 |
-| [`038-evidence-backed-method-learning`](038-evidence-backed-method-learning/SPEC.md) | `Planned`: 작업 결과·피드백에서 방법 후보를 만들고 확인·재사용·수정·철회. 036/037 완료와 독립 | 005, 018, 024, 030, 033 |
+| [`037-task-specific-assistant-methods`](037-task-specific-assistant-methods/SPEC.md) | `Complete (Scoped)`: 한 요청의 수행 방식 선택·사용자 변경, 계산·보고서·이미지의 결과 확인, 복합 요청의 부분별 판정과 답 우선 표면. 다섯 PRD 및 통합 Oracle PASS([종료 증거](037-task-specific-assistant-methods/SPEC.md#종료-증거-2026-10-23)); 전체 출시 seal 아님. 024 실행 엔진 재소유 없음 | 004, 005, 024, 030, 034 |
+| [`038-evidence-backed-method-learning`](038-evidence-backed-method-learning/SPEC.md) | `Complete (Scoped)`: 한 대화의 근거에서 비활성 방법 후보를 만들고, 사용자 확인이나 서로 다른 두 번째 작업으로 확인하며, 맞는 요청에 버전과 함께 재사용하고 수정·사용 중지·이전 버전 복원을 한다. 세 PRD 및 스펙 차원 Oracle PASS([종료 증거](038-evidence-backed-method-learning/SPEC.md#종료-증거-2026-10-24)); 전체 출시 seal 아님. 저장 파일은 인증된 기록이 아님 | 005, 018, 024, 030, 033 |
 | [`039-app-capability-disposition`](039-app-capability-disposition/SPEC.md) | `Planned (Decision only)`: app authoring/lifecycle의 사용자 자료와 호출 경로를 조사해 유지·축소·제거 판정. 변경 실행은 별도 | 021, 030, 032 |
 | [`040-video-analyzer-capability-disposition`](040-video-analyzer-capability-disposition/SPEC.md) | `Planned (Decision only)`: 선택적 video analyzer의 실제 사용·첨부·projection 영향을 조사해 유지·축소·제거 판정 | 027, 030, 031, 034 |
 | [`041-release-evidence-tooling-disposition`](041-release-evidence-tooling-disposition/SPEC.md) | `Planned (Decision only)`: Spec031 release runner의 소비자·증거/호환 계약을 조사해 유지·축소·제거 판정 | 016, 031, 033, 034 |
+| [`042-conversational-web-watch-and-trustworthy-silence`](042-conversational-web-watch-and-trustworthy-silence/SPEC.md) | `Planned`: 대화로 맡긴 웹페이지 한 곳의 관찰, 사용자와 함께 정한 조건의 변화와 확인 실패·회복·공백·결정 마감 알림. 036 완료 범위 재판정 없음 | 010, 029, 030, 031, 033, 036 |
 
 ## 읽는 순서 권장
 
@@ -84,6 +85,7 @@
 39. `039-app-capability-disposition`
 40. `040-video-analyzer-capability-disposition`
 41. `041-release-evidence-tooling-disposition`
+42. `042-conversational-web-watch-and-trustworthy-silence`
 
 ## 운영 원칙
 

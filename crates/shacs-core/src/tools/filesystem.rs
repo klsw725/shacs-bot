@@ -79,6 +79,7 @@ pub fn resolve_path(path: &str, context: &PathContext) -> Result<PathBuf, String
             ));
         }
     }
+    refuse_learned_methods(path, &resolved, context)?;
     Ok(resolved)
 }
 
@@ -119,7 +120,52 @@ pub(crate) fn resolve_creatable_path(path: &str, context: &PathContext) -> Resul
             ));
         }
     }
+    refuse_learned_methods(path, &canonical_target, context)?;
     Ok(canonical_target)
+}
+
+/// The learned-method store (Spec038): only `/learn` commands read or change
+/// it, so file tools neither open it under any name nor walk into it.
+const LEARNED_METHODS_DIR: &str = ".shacs-methods";
+
+/// Refuses `resolved`, a canonical path (symlinks already followed), when it
+/// is in the learned-method store or is a hard link to a file there.
+fn refuse_learned_methods(
+    path: &str,
+    resolved: &Path,
+    context: &PathContext,
+) -> Result<(), String> {
+    let inside = resolved
+        .components()
+        .any(|component| component.as_os_str() == LEARNED_METHODS_DIR);
+    if inside || hard_links_into_store(resolved, context) {
+        return Err(format!(
+            "Path {path} leads into the learned-method store, which only /learn commands read or change"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn hard_links_into_store(file: &Path, context: &PathContext) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(metadata), Some(workspace)) = (fs::metadata(file), &context.workspace) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.nlink() < 2 {
+        return false;
+    }
+    fs::read_dir(workspace.join(LEARNED_METHODS_DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .any(|stored| stored.dev() == metadata.dev() && stored.ino() == metadata.ino())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn hard_links_into_store(_: &Path, _: &PathContext) -> bool {
+    false
 }
 
 pub(crate) fn raw_candidate_path(path: &str, context: &PathContext) -> PathBuf {
@@ -801,7 +847,7 @@ impl ListDirTool {
 }
 
 pub(crate) fn ignored_name(name: &str) -> bool {
-    ListDirTool::IGNORE_DIRS.contains(&name)
+    ListDirTool::IGNORE_DIRS.contains(&name) || name == LEARNED_METHODS_DIR
 }
 
 pub(crate) fn sorted_read_dir(path: &Path) -> Result<Vec<fs::DirEntry>, String> {

@@ -218,6 +218,25 @@ fn parse_sensitive_key_value(value: &str, start: usize) -> Option<SensitiveKeyVa
     } else {
         find_unquoted_value_end(value, index)
     };
+    // A value that is already exactly the marker stays as it is, so that
+    // redacting twice changes nothing.
+    if value[value_start..].starts_with(REDACTED) {
+        let marker_end = value_start + REDACTED.len();
+        let ends_there =
+            value[marker_end..]
+                .chars()
+                .next()
+                .map_or(true, |next| match value_quote {
+                    Some(quote) => next == quote,
+                    None => next.is_whitespace() || matches!(next, ',' | '}' | ']'),
+                });
+        if ends_there {
+            return Some(SensitiveKeyValueMatch {
+                value_start,
+                value_end: marker_end,
+            });
+        }
+    }
     (value_end > value_start).then_some(SensitiveKeyValueMatch {
         value_start,
         value_end,
@@ -391,6 +410,25 @@ mod tests {
         assert_eq!(
             redacted["nested"]["message"],
             format!("provider failed with {REDACTED} in body")
+        );
+    }
+
+    #[test]
+    fn redacting_twice_changes_nothing() {
+        for text in [
+            "Rotate the secrets: weekly, then confirm the deploy",
+            "SMTP_PASSWORD=hunter2 ok=true",
+            "Keep the token: out of logs",
+            "{\"api_key\": \"sk-secret\", \"password\": hunter2}",
+            "Authorization: Bearer abc.def",
+            "token: [RED [truncated]",
+        ] {
+            let once = redact_string(text);
+            assert_eq!(redact_string(&once), once, "{text}");
+        }
+        assert_eq!(
+            redact_string("Rotate the secrets: weekly"),
+            format!("Rotate the secrets: {REDACTED}")
         );
     }
 

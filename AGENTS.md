@@ -6,6 +6,7 @@
 ## 응답 언어
 
 - 사용자에게는 항상 한국어로 답변할 것. 코드, 커밋 메시지, 식별자, 설정 키 이름은 기존 프로젝트 관례를 따른다.
+- 사용자에게 하는 설명과 보고는 비개발자에게 설명하듯 쉽게 쓸 것. 개발 용어는 피하거나 쉬운 말로 풀어 쓰고, 필요하면 일상적인 비유를 든다. 스펙·PRD·코드처럼 저장소에 남기는 문서의 문체에는 적용하지 않는다.
 
 ## 제품 관점
 
@@ -16,7 +17,7 @@
 ## 툴링
 
 - **Rust는 `cargo`로만 다룬다**. 빌드/실행/테스트/체크를 다른 언어용 도구로 우회하지 말 것. 빠른 검증은 `cargo check`, 빌드는 `cargo build`, 배포용 빌드는 `cargo build --release`, 테스트는 `cargo test`를 기본으로 본다.
-- **빌드 전에는 기존 빌드 데이터를 정리한다**. 빌드 산출물이 과도하게 누적되지 않도록 `cargo clean --manifest-path crates/Cargo.toml`을 먼저 실행한 뒤 `cargo build --manifest-path crates/Cargo.toml`을 실행한다.
+- **빌드 전에는 기존 빌드 데이터를 정리한다**. 빌드 산출물이 과도하게 누적되지 않도록 `cargo clean --manifest-path crates/Cargo.toml`을 먼저 실행한 뒤 `cargo build --manifest-path crates/Cargo.toml`을 실행한다. `cargo check`/`clippy`/`test` 앞에서는 `cargo clean`을 실행하지 않는다. 매번 처음부터 다시 컴파일하게 된다.
 - **포맷/린트는 Cargo 하위 명령 기준**. 포맷은 `cargo fmt`, 린트는 `cargo clippy`를 사용한다. 검증 단계에서는 가능하면 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`까지 확인할 것.
 - **Rust toolchain component를 전제로 생각하지 말 것**. `rustfmt`, `clippy`가 없다면 `rustup component add rustfmt clippy`가 먼저다.
 - **레포 루트 추측 실행 금지**. Rust workspace는 `crates/Cargo.toml`이므로 저장소 루트에서 `cargo --manifest-path crates/Cargo.toml ...` 형태로 명시 실행하라.
@@ -44,9 +45,22 @@
 
 ## 검증 기준
 
-- **Rust 변경의 기본 검증 순서**는 `cargo fmt --manifest-path crates/Cargo.toml --all -- --check` → `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings` → `cargo test --manifest-path crates/Cargo.toml --workspace`다.
+- **Rust 변경의 마무리 검증 순서**는 `cargo fmt --manifest-path crates/Cargo.toml --all -- --check` → `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings` → `cargo test --manifest-path crates/Cargo.toml -p <변경한 package> -q`다. 수정할 때마다 돌리지 말고 작업 끝에 실행하며, 변경한 package가 여러 개면 `-p`를 반복한다.
+- **전체 테스트(`cargo test --manifest-path crates/Cargo.toml --workspace -q`)는 사용자 승인 없이 돌리지 않는다**. 다른 crate가 쓰는 공개 동작을 바꿨으면 실제 사용처를 찾아 그 package의 관련 테스트만 돌린다. 영향 범위를 좁히기 어렵거나 Rust 코드 변경을 커밋하기 전이면 전체 테스트를 돌릴지 먼저 묻는다. `clippy --workspace --all-targets`는 다른 crate의 타입 오류는 잡지만 동작이 바뀐 것은 잡지 못한다.
 - **검증 범위를 명시**. 전체 workspace면 `--workspace`, 특정 crate면 `-p <package>`를 붙여 어느 crate를 검증하는지 분명히 하라.
 - **사용자가 요청하지 않은 언어/서브프로젝트까지 한꺼번에 건드리지 말 것**. Rust를 건드렸다고 해서 다른 툴체인까지 리팩토링하지 않는다.
+
+## 테스트 간소화
+
+- **작업 중 반복 확인은 변경한 package의 `cargo check`와 관련 테스트만**. 컴파일 확인은 `cargo check --manifest-path crates/Cargo.toml -p <package>`로 충분하다. 테스트는 `--lib`(단위 테스트), `--test it`(합쳐진 통합 테스트) 또는 `--test <파일명>`(따로 남은 통합 테스트 파일)으로 대상을 좁히고 이름 필터를 붙인다. 예: `cargo test --manifest-path crates/Cargo.toml -p <package> --test it -q <모듈 이름>::`. 이름 필터만 쓰면 그 package의 테스트 실행 파일이 전부 빌드·실행된다.
+- **`cargo test`에는 항상 `-q`를 붙인다**. 통과한 테스트를 한 줄씩 출력하지 않아 결과가 짧아진다.
+- **검증 대상(코드·설정·fixture)이 바뀌지 않았으면 테스트를 다시 돌리지 않는다**. 통과를 재확인하려고 재실행하지 말 것. 고친 뒤에는 실패했던 테스트와 영향받는 테스트만 다시 돌린다.
+- **자신의 변경과 무관한 기존 실패는 쫓지 말 것**. 고치지 말고 실패한 테스트 이름만 보고한다.
+- **문서(`.md`)만 바꿨으면 Cargo 검증을 생략한다**.
+- **새 테스트는 바뀐 동작에만, 최소 개수로**. 버그 수정은 재현 테스트 1개, 새 기능은 핵심 성공 경로와 꼭 필요한 실패 경로 정도면 충분하다. 입력 조합을 전부 나열하지 말고, 기존 테스트에 assert를 추가해 확인할 수 있으면 새 테스트를 만들지 않는다.
+- **가치 없는 테스트 금지**. 단순 getter/생성자, 속성 없는 단순 derive(serde 왕복 등), 타입 시스템이 이미 보장하는 것, 기존 테스트와 같은 경로를 다시 확인하는 테스트는 쓰지 않는다. 저장·공개 직렬화 형식(`rename`, `default` 등)을 지키는 테스트는 예외다.
+- **통합 테스트 실행 파일을 새로 늘리지 말 것**. `tests/` 바로 아래 `.rs` 파일은 하나하나가 별도 실행 파일로 컴파일·링크되어 전체 테스트가 느려진다. 새 통합 테스트는 `tests/it/` 아래에 두고 `tests/it/main.rs`에 모듈로 등록한다. `tests/it/`이 없는 crate는 기존 테스트 파일에 추가한다.
+- **`tests/` 바로 아래에 남은 통합 테스트 파일을 이유 확인 없이 `tests/it/`으로 옮기지 말 것**. 출시 점검 도구(release runner)·다른 코드·예제·문서가 이름이나 경로로 직접 부르거나, 환경 변수 변경·자기 재실행처럼 별도 프로세스가 필요해서 남긴 파일이다.
 
 ## 코딩 행동 지침
 
@@ -93,7 +107,7 @@
 작업을 검증 가능한 목표로 변환하라:
 - "유효성 검증 추가" → "잘못된 입력에 대한 테스트를 작성하고 통과시키기"
 - "버그 수정" → "버그를 재현하는 테스트를 작성하고 통과시키기"
-- "X 리팩토링" → "리팩토링 전후 테스트가 모두 통과하는지 확인하기"
+- "X 리팩토링" → "리팩토링 전후 관련 테스트가 통과하는지 확인하기"
 
 ## 작업 기록
 

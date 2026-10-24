@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod learn;
+mod method;
+pub use learn::{LearnCommandArgs, MethodPart};
+pub use method::{MethodCommandArgs, MethodName};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandId {
@@ -11,6 +16,8 @@ pub enum CommandId {
     Permission,
     Goal,
     Work,
+    Method,
+    Learn,
     History,
     Dream,
     DreamLog,
@@ -28,6 +35,8 @@ impl CommandId {
             Self::Permission => "/permission",
             Self::Goal => "/goal",
             Self::Work => "/work",
+            Self::Method => "/method",
+            Self::Learn => "/learn",
             Self::History => "/history",
             Self::Dream => "/dream",
             Self::DreamLog => "/dream-log",
@@ -163,6 +172,8 @@ impl CommandRouter {
             CommandId::History,
             CommandId::Goal,
             CommandId::Work,
+            CommandId::Method,
+            CommandId::Learn,
             CommandId::Dream,
             CommandId::DreamLog,
             CommandId::DreamRestore,
@@ -174,6 +185,8 @@ impl CommandRouter {
             CommandId::History,
             CommandId::Goal,
             CommandId::Work,
+            CommandId::Method,
+            CommandId::Learn,
             CommandId::Permission,
             CommandId::DreamLog,
             CommandId::DreamRestore,
@@ -313,6 +326,8 @@ pub enum LoopCommand {
     Permission(PermissionCommandArgs),
     Goal(GoalCommandArgs),
     Work(WorkCommandArgs),
+    Method(MethodCommandArgs),
+    Learn(LearnCommandArgs),
     History(HistoryCommandArgs),
     Dream,
     DreamLog { sha: Option<String> },
@@ -394,6 +409,8 @@ fn loop_command_from_parsed(parsed: ParsedCommand) -> Option<RoutedLoopCommand> 
         CommandId::Permission => Some(LoopCommand::Permission(parse_permission_args(&parsed.args))),
         CommandId::Goal => Some(LoopCommand::Goal(parse_goal_args(&parsed.args))),
         CommandId::Work => Some(LoopCommand::Work(parse_work_args(&parsed.args))),
+        CommandId::Method => Some(LoopCommand::Method(method::parse_method_args(&parsed.args))),
+        CommandId::Learn => Some(LoopCommand::Learn(learn::parse_learn_args(&parsed.args))),
         CommandId::History => Some(LoopCommand::History(parse_history_args(&parsed.args))),
         CommandId::Dream => Some(LoopCommand::Dream),
         CommandId::DreamLog => Some(LoopCommand::DreamLog {
@@ -621,6 +638,8 @@ pub fn build_help_text() -> String {
         "/permission revoke <id-or-prefix> — Revoke one remembered permission rule",
         "/goal [status|pause|resume|clear|done|blocked <reason>|<text>] — Manage the persistent goal",
         "/work create|read|edit|pause|resume|done|clear|accept|decline — Manage explicitly entrusted work",
+        "/method [status|list|use <general|calculation|report|image>|auto|history|accept|revise] — Select the active request method or a one-shot method for the next request; accept records your acceptance of the latest result; revise makes your next message a new version of the latest report or image",
+        "/learn [list|show <id> [v<N>]|confirm <id>|reject <id> v<N>|verify <id>|match <request>|edit <id> v<N> <part> <text>|deactivate <id> v<N>|restore <id> v<N>] — Propose a reusable method candidate from this conversation's evidence, list or show saved methods, confirm or reject one, check one against a later task, see which confirmed methods fit a request, edit one into a new version, put one out of use, or make an earlier confirmed version current again; a method is never used by default without your confirmation and confirming grants no permission",
         "/history [n] — Show the last N conversation messages (default 10)",
         "/dream — Manually trigger Dream consolidation",
         "/dream-log — Show what the last Dream changed",
@@ -649,6 +668,8 @@ fn command_from_exact(raw: &str) -> Option<CommandId> {
         "/permission" => Some(CommandId::Permission),
         "/goal" => Some(CommandId::Goal),
         "/work" => Some(CommandId::Work),
+        "/method" => Some(CommandId::Method),
+        "/learn" => Some(CommandId::Learn),
         "/history" => Some(CommandId::History),
         "/dream" => Some(CommandId::Dream),
         "/dream-log" => Some(CommandId::DreamLog),

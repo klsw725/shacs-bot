@@ -87,6 +87,11 @@ pub(super) fn check_reply(
     }
 }
 
+/// Whether an action decision of the user is still awaited.
+pub(super) fn waiting(session: &Session) -> bool {
+    session.metadata.contains_key(KEY) || pending_call(&session.messages).is_some()
+}
+
 pub(super) fn cancel(session: &mut Session) {
     if !session.metadata.contains_key(KEY) && pending_call(&session.messages).is_none() {
         return;

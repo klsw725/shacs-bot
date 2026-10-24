@@ -373,6 +373,8 @@ impl Default for SubagentRuntimeConfig {
 
 #[derive(Debug, Clone)]
 pub struct SubagentExecutionConfig {
+    pub method_observation:
+        Option<Arc<Mutex<crate::runtime::task_method_observe::MethodObservation>>>,
     pub workspace: PathBuf,
     pub model: String,
     pub settings: GenerationSettings,
@@ -397,11 +399,15 @@ pub struct SubagentExecutionConfig {
     pub permission_session_remembered_rules: Vec<SessionRememberedPermissionRule>,
     pub project_permission_store: Option<crate::runtime::ProjectPermissionStoreConfig>,
     pub provider_runtime_override: Option<RawCredential>,
+    /// The confirmed learned method (Spec038) the parent request uses, added
+    /// to each child's system prompt.
+    pub learned_method_guidance: Option<String>,
 }
 
 impl SubagentExecutionConfig {
     pub fn new(workspace: impl Into<PathBuf>, model: impl Into<String>) -> Self {
         Self {
+            method_observation: None,
             workspace: workspace.into(),
             model: model.into(),
             settings: GenerationSettings::default(),
@@ -426,6 +432,7 @@ impl SubagentExecutionConfig {
             permission_session_remembered_rules: Vec::new(),
             project_permission_store: None,
             provider_runtime_override: None,
+            learned_method_guidance: None,
         }
     }
 }
@@ -871,9 +878,16 @@ impl SubagentRuntime {
         cancellation_token: CancellationToken,
     ) -> ChildResultEnvelope {
         let registry = build_subagent_tool_registry(config);
-        let system_prompt = ContextBuilder::new(&config.workspace)
-            .with_configured_env(config.exec_env.clone())
-            .build_subagent_prompt();
+        let system_prompt = format!(
+            "{}{}",
+            ContextBuilder::new(&config.workspace)
+                .with_configured_env(config.exec_env.clone())
+                .build_subagent_prompt(),
+            config
+                .learned_method_guidance
+                .as_deref()
+                .unwrap_or_default()
+        );
         let messages = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "user", "content": envelope.task_goal}),
@@ -935,8 +949,16 @@ impl SubagentRuntime {
                 },
             );
         }));
+        if let Some(observation) = &config.method_observation {
+            crate::runtime::task_method_observe::attach(&mut spec, observation.clone());
+        }
         match AgentRunner::new().run(spec) {
-            Ok(result) => self.child_result_from_agent_run(envelope, result),
+            Ok(result) => {
+                if let Some(observation) = &config.method_observation {
+                    crate::runtime::task_method_observe::record_artifacts(observation, &result);
+                }
+                self.child_result_from_agent_run(envelope, result)
+            }
             Err(error) => {
                 let mut result = ChildResultEnvelope::from_spawn(
                     envelope,

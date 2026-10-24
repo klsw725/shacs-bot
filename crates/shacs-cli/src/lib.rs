@@ -17540,7 +17540,8 @@ pub fn help_text() -> String {
         "      --bundle <path>   Local .shacsapp bundle for apps install",
         "      --app-id <id>     Select an app for apps commands",
         "  -y, --yes            Confirm irreversible session delete",
-        "      --allow-side-effects  Enable write/edit/exec tools in CLI turns",
+        "      --no-side-effects     Disable write/edit/exec/message/image tools for ask/agent/run",
+        "      --allow-side-effects  Side-effect tools are on by default; required for run --allow-remote",
         "      --token-stdin     Read provider token from stdin for import-token/import-key commands",
         "      --token-env <var> Read provider token from an environment variable",
         "      --account-id <id> Store optional ChatGPT account id for Codex",
@@ -19545,6 +19546,7 @@ fn parse_ask(
 ) -> Result<CliCommand, CliError> {
     let mut options = AskOptions {
         config_path: global_config,
+        allow_side_effects: true,
         ..AskOptions::default()
     };
     let mut message_parts = Vec::new();
@@ -19560,6 +19562,7 @@ fn parse_ask(
             "--temperature" => options.temperature = Some(take_temperature(&mut parser, &arg)?),
             "--max-tokens" => options.max_tokens = Some(take_max_tokens(&mut parser, &arg)?),
             "--allow-side-effects" => options.allow_side_effects = true,
+            "--no-side-effects" => options.allow_side_effects = false,
             "--markdown" => options.markdown = true,
             "--no-markdown" => options.markdown = false,
             "--help" | "-h" => return Ok(CliCommand::Help),
@@ -19616,6 +19619,7 @@ fn parse_run(
         config_path: global_config,
         ..RunOptions::default()
     };
+    let mut side_effects = None;
     while let Some(arg) = parser.next() {
         match arg.as_str() {
             "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
@@ -19627,9 +19631,8 @@ fn parse_run(
             "--timeout" | "-t" => options.timeout = Some(take_timeout(&mut parser, &arg)?),
             "--verbose" | "-v" => options.verbose = true,
             "--allow-remote" => options.allow_remote = true,
-            "--allow-side-effects" | "--allow-api-side-effects" => {
-                options.allow_side_effects = true
-            }
+            "--allow-side-effects" | "--allow-api-side-effects" => side_effects = Some(true),
+            "--no-side-effects" => side_effects = Some(false),
             "--help" | "-h" => return Ok(CliCommand::Help),
             other => {
                 return Err(CliError::InvalidArguments(format!(
@@ -19638,6 +19641,7 @@ fn parse_run(
             }
         }
     }
+    options.allow_side_effects = side_effects.unwrap_or(!options.allow_remote);
     Ok(CliCommand::Run(options))
 }
 
@@ -28321,6 +28325,60 @@ mod tests {
         assert_eq!(options.max_tokens, Some(200));
         assert!(options.allow_side_effects);
         assert!(!options.markdown);
+        Ok(())
+    }
+
+    #[test]
+    fn local_cli_turns_enable_side_effect_tools_without_a_flag() -> Result<(), Box<dyn Error>> {
+        let CliCommand::Ask(ask) = parse_cli_args(["ask", "hello"])? else {
+            return Err("expected ask command".into());
+        };
+        let CliCommand::AgentRepl(repl) = parse_cli_args(["agent"])? else {
+            return Err("expected agent repl command".into());
+        };
+        let CliCommand::Run(run) = parse_cli_args(["run"])? else {
+            return Err("expected run command".into());
+        };
+        assert!(ask.allow_side_effects);
+        assert!(repl.allow_side_effects);
+        assert!(run.allow_side_effects);
+        Ok(())
+    }
+
+    #[test]
+    fn no_side_effects_flag_disables_side_effect_tools() -> Result<(), Box<dyn Error>> {
+        let CliCommand::Ask(ask) = parse_cli_args(["ask", "hello", "--no-side-effects"])? else {
+            return Err("expected ask command".into());
+        };
+        let CliCommand::AgentRepl(repl) = parse_cli_args(["agent", "--no-side-effects"])? else {
+            return Err("expected agent repl command".into());
+        };
+        let CliCommand::Run(run) = parse_cli_args(["run", "--no-side-effects"])? else {
+            return Err("expected run command".into());
+        };
+        assert!(!ask.allow_side_effects);
+        assert!(!repl.allow_side_effects);
+        assert!(!run.allow_side_effects);
+        Ok(())
+    }
+
+    #[test]
+    fn remote_and_daemon_surfaces_keep_side_effect_tools_opt_in() -> Result<(), Box<dyn Error>> {
+        let CliCommand::Run(remote) = parse_cli_args(["run", "--allow-remote"])? else {
+            return Err("expected run command".into());
+        };
+        let CliCommand::Run(opted_in) =
+            parse_cli_args(["run", "--allow-remote", "--allow-side-effects"])?
+        else {
+            return Err("expected run command".into());
+        };
+        let CliCommand::Serve(serve) = parse_cli_args(["serve"])? else {
+            return Err("expected serve command".into());
+        };
+        assert!(!remote.allow_side_effects);
+        assert!(opted_in.allow_side_effects);
+        assert!(!serve.allow_api_side_effects);
+        assert!(!RunOptions::default().allow_side_effects);
         Ok(())
     }
 

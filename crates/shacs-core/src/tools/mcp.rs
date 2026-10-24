@@ -517,7 +517,7 @@ impl StdioMcpConnection {
         timeout_seconds: u64,
     ) -> McpCallOutcome {
         match self.request(method, params, timeout_seconds) {
-            Ok(result) => McpCallOutcome::Success(parts_from_mcp_result(method, &result)),
+            Ok(result) => result_outcome(method, &result),
             Err(error) => McpCallOutcome::Error(McpErrorKind::Other { type_name: error }),
         }
     }
@@ -1256,6 +1256,19 @@ fn optional_string(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_owned)
 }
 
+/// A tool reports its own failure in a successful JSON-RPC result, marked
+/// with `isError`.
+fn result_outcome(method: &str, result: &Value) -> McpCallOutcome {
+    let parts = parts_from_mcp_result(method, result);
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        McpCallOutcome::Error(McpErrorKind::Other {
+            type_name: join_parts(parts),
+        })
+    } else {
+        McpCallOutcome::Success(parts)
+    }
+}
+
 fn parts_from_mcp_result(method: &str, result: &Value) -> Vec<String> {
     match method {
         "resources/read" => result
@@ -1516,6 +1529,12 @@ mod tests {
         assert_eq!(
             parts_from_mcp_result("resources/read", &json!({"contents": [{"blob": "abcd"}]})),
             vec!["[Binary resource: 4 bytes]".to_owned()]
+        );
+        let failed =
+            json!({"isError": true, "content": [{"type": "text", "text": "Invalid date"}]});
+        assert_eq!(
+            format_tool_outcome(result_outcome("tools/call", &failed), 5),
+            "(MCP tool call failed: Invalid date)"
         );
     }
 
