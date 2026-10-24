@@ -9,6 +9,7 @@ use std::process::Command;
 pub(super) mod control;
 use control::controlled_temp_root;
 use control::ControlLease;
+use control::ToolRoot;
 mod cache_key;
 use cache_key::rust_tool_candidates;
 pub(super) use cache_key::tool_cache_key;
@@ -40,7 +41,7 @@ pub struct ResolvedTool {
     seal: PathChainSeal,
     runtime_seals: Vec<PathChainSeal>,
     runtime_inventory: Vec<PathBuf>,
-    _root: Option<tempfile::TempDir>,
+    _root: Option<ToolRoot>,
     _control: Option<ControlLease>,
 }
 
@@ -59,7 +60,7 @@ pub struct ResolvedToolchain {
     linker_receipts: linker::LinkerReceipts,
     linker_path: PathBuf,
     linker_seals: Vec<PathChainSeal>,
-    _root: Option<tempfile::TempDir>,
+    _root: Option<ToolRoot>,
     _control: Option<ControlLease>,
 }
 

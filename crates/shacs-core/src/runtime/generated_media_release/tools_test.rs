@@ -17,6 +17,9 @@ fn release_temp_directories_are_identifiable() -> Result<(), Box<dyn std::error:
         Some("cargo-home")
     );
     assert_eq!(toolchain.target.file_name().and_then(|name| name.to_str()), Some("target"));
+    let root = root.to_path_buf();
+    drop(toolchain);
+    assert!(!root.exists(), "controlled root survived drop: {}", root.display());
     Ok(())
 }
 

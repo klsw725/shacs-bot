@@ -91,9 +91,46 @@ pub(in crate::runtime::generated_media_release) fn acquire_control(
     Err(Spec034ReleaseArtifactError::InvalidConfig)
 }
 
+pub(in crate::runtime::generated_media_release) struct ToolRoot(tempfile::TempDir);
+
+impl ToolRoot {
+    pub(in crate::runtime::generated_media_release) fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+impl Drop for ToolRoot {
+    fn drop(&mut self) {
+        // The read-only tool closure makes TempDir's own removal fail silently.
+        restore_owner_write(self.0.path());
+    }
+}
+
+#[cfg(unix)]
+fn restore_owner_write(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o700);
+    let _ = std::fs::set_permissions(path, permissions);
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            restore_owner_write(&entry.path());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_owner_write(_path: &std::path::Path) {}
+
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 pub(super) fn controlled_temp_root(
-) -> Result<(ControlLease, tempfile::TempDir), Spec034ReleaseArtifactError> {
+) -> Result<(ControlLease, ToolRoot), Spec034ReleaseArtifactError> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -108,12 +145,12 @@ pub(super) fn controlled_temp_root(
         .map_err(Spec034ReleaseArtifactError::Io)?;
     Ok((
         control,
-        root,
+        ToolRoot(root),
     ))
 }
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 pub(super) fn controlled_temp_root(
-) -> Result<(ControlLease, tempfile::TempDir), Spec034ReleaseArtifactError> {
+) -> Result<(ControlLease, ToolRoot), Spec034ReleaseArtifactError> {
     Err(Spec034ReleaseArtifactError::InvalidConfig)
 }
