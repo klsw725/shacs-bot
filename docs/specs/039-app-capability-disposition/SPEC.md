@@ -1,6 +1,6 @@
 # 039. 개인용 앱 기능의 유지·축소·제거 판정 명세
 
-Status: Planned (Decision only)
+Status: Complete (Decision)
 
 Consumes: 021 app authoring baseline, 030 trusted resource boundary, 032 app lifecycle, current CLI/Tasks/readiness surfaces
 
@@ -47,3 +47,14 @@ Consumes: 021 app authoring baseline, 030 trusted resource boundary, 032 app lif
 | [000 앱 사용·호환성 판정](prds/000-app-usage-compatibility-and-disposition.md) | 조사 계약 1–4, 판정 수용 조건 1–3의 실제 근거와 유지/축소/제거 결정문 | 없음 |
 
 PRD 000은 조사만 끝내거나 판정만 추측해서는 완료할 수 없다. 이 한 PRD의 근거와 결론이 갖춰지면 039는 `Complete (Decision)`으로 닫을 수 있으나, 이는 앱 코드·사용자 자료의 변경 완료가 아니다.
+
+## 판정 결과 (2026-10-24)
+
+결론은 **제거**다. 앱 authoring과 lifecycle 전체를 제품 표면에서 빼되 사용자 자료는 그대로 둔다. 근거·호환 계약·회귀 테스트·후속 범위는 [PRD 000의 판정](prds/000-app-usage-compatibility-and-disposition.md#판정-2026-10-24-제거)에 있다.
+
+- 앱은 대화·위임 작업·알림·agent tool/skill/context와 연결되지 않는다. 이 기기의 실제 자료에는 설치가 없고 고치지 않은 초안 하나만 있다. 외부 사용은 미확인이다.
+- 격리 실제 표면에서 Ctrl+C 한 번이 고아 process와 사실과 다른 `running`을 남겼다. `recover` 뒤에는 제품 명령으로 벗어날 수 없는 `recovery_needed`가 전체 readiness를 `blocked`로 고정하고 uninstall도 막았다.
+- 같은 작업에는 사용자 skill, 셸 실행, 025 plugin tool, 036 위임 작업이 더 적은 부담으로 있다.
+- 구현은 별도 작업이다. 그 작업은 남은 앱 자료를 지우거나 고쳐 쓰지 않고, `apps` 명령을 읽기 전용 퇴역 안내로 바꾸며, readiness·Tasks·agent 실행 기록에서 앱 의존을 뺀다. 그때까지 현재 명령은 그대로 동작한다.
+
+이 판정은 021·032의 과거 완료 판정을 다시 열지 않고 다른 판정 스펙의 실행을 기다리지 않는다.

@@ -41,3 +41,5 @@ CLI/API goal lifecycle과 session 저장 테스트(`crates/shacs-cli/tests/spec0
 이 첫 흐름의 독립 계약은 [`036`](specs/036-entrusted-work-continuity-and-change-notification/SPEC.md)에, 단일 요청의 작업별 선택·검증은 [`037`](specs/037-task-specific-assistant-methods/SPEC.md)에, 배운 방법의 검토·재사용은 [`038`](specs/038-evidence-backed-method-learning/SPEC.md)에 정의한다. 셋은 각각의 수용 조건으로 종료되며 다른 신규 스펙의 완료를 전제로 삼지 않는다. 첫 흐름을 대화형 위임·웹페이지 관찰과 확인 실패·결정 마감 알림으로 넓히는 계약은 [`042`](specs/042-conversational-web-watch-and-trustworthy-silence/SPEC.md)에 정의한다.
 
 후순위 기능의 실제 축소 여부는 미리 정하지 않는다. 앱 흐름은 [`039`](specs/039-app-capability-disposition/SPEC.md), 비디오 분석은 [`040`](specs/040-video-analyzer-capability-disposition/SPEC.md), Spec031 release tooling은 [`041`](specs/041-release-evidence-tooling-disposition/SPEC.md)에서 각각 사용자 경로·저장 자료·대체 검증을 조사해 유지/축소/제거를 판정한다. 이 결정 스펙들의 완료는 코드 삭제를 뜻하지 않는다.
+
+앱 흐름은 039에서 **제거**로 판정했다([판정 결과](specs/039-app-capability-disposition/SPEC.md#판정-결과-2026-10-24)). 위 표의 호환 보존 원칙대로 남은 앱 자료는 지우지 않고 `apps` 명령은 읽기 전용 퇴역 안내로 바꾸며, 이 구현은 별도 작업이다.

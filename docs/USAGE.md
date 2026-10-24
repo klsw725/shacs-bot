@@ -442,6 +442,8 @@ shacs-bot skills recipes --all --workspace /tmp/ws
 
 현재 Rust CLI의 app 표면은 local `.shacsapp` authoring proposal/apply와 foreground process lifecycle을 제공합니다. `apps init`은 설치 전 draft만 생성하며 install, enable, start를 수행하지 않습니다. Bundle은 config data dir의 `apps/<app-id>.shacsapp/` 경로에 있어야 하며, manifest의 `id`와 directory 이름은 일치해야 합니다.
 
+[Spec 039](specs/039-app-capability-disposition/SPEC.md#판정-결과-2026-10-24)에서 이 앱 기능을 제거하기로 판정했습니다. 제거 구현 전까지 아래 명령은 그대로 동작합니다. 구현 뒤에도 남은 앱 자료(registry, bundle, journal, draft, receipt)는 지우지 않으며 `apps`는 남은 자료 위치를 알려주는 읽기 전용 안내로 바뀝니다. 절차·지식을 어시스턴트에 주려면 `<data dir>/skills/<name>/SKILL.md`에 사용자 skill을 두세요.
+
 ```sh
 shacs-bot apps init demo.app --workspace /tmp/ws
 shacs-bot apps propose <candidate-dir> --intent "create demo app" --workspace /tmp/ws
@@ -460,11 +462,13 @@ shacs-bot apps uninstall demo.app --workspace /tmp/ws
 
 `apps init <app-id>`은 config data dir 아래 `authoring/apps/draft-<app-id>/`에 `draft.json`, `scaffold-plan.json`, `candidates/manifest.json`, `candidates/README.md`를 만듭니다. 이 명령은 app registry를 변경하지 않고, MCP/process/package/network 실행, secret read, grant 생성, active skill 주입을 하지 않습니다. 같은 내용의 draft가 이미 있으면 idempotent하게 기존 draft summary를 보여주며, 다른 내용이면 덮어쓰지 않고 conflict로 멈춥니다.
 
-`apps propose`는 candidate를 정적으로 검증하고 revision/intent digest와 risk summary를 기록합니다. `apps apply`는 proposal revision과 installed digest를 다시 확인하고 checkpoint, verify, install/update handoff를 기록합니다. 두 명령 모두 permission/credential grant, executable activation, process start를 만들지 않습니다. Existing app update에는 `--update`를 사용합니다.
+`apps propose`는 candidate를 정적으로 검증하고 revision/intent digest와 risk summary를 기록합니다. `apps apply`는 proposal revision과 installed digest를 다시 확인하고 checkpoint, verify, install/update handoff를 기록합니다. 두 명령 모두 permission/credential grant, executable activation, process start를 만들지 않습니다. `apps apply`는 앞서 확인한 proposal id를 받지 않고, 실행 시점의 candidate를 다시 검증해 적용합니다. Existing app update에는 `--update`를 사용합니다. 이때는 draft 폴더가 아니라 `candidates/` 폴더를 넘겨야 합니다. 갱신 뒤 registry 상태가 `installed`로 돌아가므로 다시 `apps enable`해야 start됩니다.
 
 `apps install`은 manifest와 선언 resource/skill/entry file의 digest와 summary만 registry에 저장합니다. Required secret을 선언해도 install/enable 단계에서 값을 읽거나 grant를 만들지 않으며, start admission에서 source 상태를 확인합니다.
 
-`apps start`는 enabled registry state, current bundle digest, trusted workspace, required credential source status, persisted activation status를 확인한 뒤 manifest `runtime.command`를 controlled child로 foreground 실행합니다. `apps stop`과 `apps restart`는 같은 AppSupervisor journal에 durable request를 남기고 foreground owner가 graceful cleanup 후 completed receipt를 기록합니다. Restart는 외부 daemon/reexec가 아니라 같은 foreground owner의 새 generation입니다. `apps recover`는 live-dispatch 없이 lifecycle evidence를 `stopped` 또는 `recovery-needed`로 조정합니다. `apps disable`/`uninstall`은 process가 stopped/recovered 상태일 때만 허용하며 historical receipts를 삭제하지 않습니다.
+`apps start`는 enabled registry state, current bundle digest, trusted workspace, required credential source status, persisted activation status를 확인한 뒤 manifest `runtime.command`를 controlled child로 foreground 실행합니다. `apps stop`과 `apps restart`는 같은 AppSupervisor journal에 durable request를 남기고 foreground owner가 graceful cleanup 후 completed receipt를 기록합니다. Restart는 외부 daemon/reexec가 아니라 같은 foreground owner의 새 generation입니다. 중단은 다른 터미널에서 `apps stop`으로 하세요. Unix(macOS·Linux)에서 foreground owner를 Ctrl+C로 끝내면 앱 process는 별도 process group이라 계속 실행되고 journal은 `running`으로 남습니다.
+
+`apps recover`는 live-dispatch 없이, process를 확인하거나 정리하지 않고 lifecycle evidence를 항상 `RecoveryNeeded`(journal 값 `recovery_needed`)로 기록합니다. 현재 CLI·Tasks·API·TUI에는 이 상태를 `Stopped`로 되돌리는 경로가 없습니다. 그 뒤에는 `start`, `disable`, `uninstall`, `apply --update`가 모두 거부되고 readiness가 `blocked`로 남으므로, 정상 중단된 앱에는 실행하지 마세요. `apps disable`/`uninstall`은 lifecycle 기록이 없거나 `Stopped`·`Failed`일 때만 허용합니다. `apps uninstall`은 registry 항목과 설치된 bundle 폴더 전체(직접 넣은 파일 포함)를 지우고, draft와 journal·authoring receipt 같은 historical receipts는 삭제하지 않습니다.
 
 ## 일회성 CLI 에이전트
 
