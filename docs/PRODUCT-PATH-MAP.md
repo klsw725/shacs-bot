@@ -43,3 +43,5 @@ CLI/API goal lifecycle과 session 저장 테스트(`crates/shacs-cli/tests/spec0
 후순위 기능의 실제 축소 여부는 미리 정하지 않는다. 앱 흐름은 [`039`](specs/039-app-capability-disposition/SPEC.md), 비디오 분석은 [`040`](specs/040-video-analyzer-capability-disposition/SPEC.md), Spec031 release tooling은 [`041`](specs/041-release-evidence-tooling-disposition/SPEC.md)에서 각각 사용자 경로·저장 자료·대체 검증을 조사해 유지/축소/제거를 판정한다. 이 결정 스펙들의 완료는 코드 삭제를 뜻하지 않는다.
 
 앱 흐름은 039에서 **제거**로 판정했다([판정 결과](specs/039-app-capability-disposition/SPEC.md#판정-결과-2026-10-24)). 위 표의 호환 보존 원칙대로 남은 앱 자료는 지우지 않고 `apps` 명령은 읽기 전용 퇴역 안내로 바꾸며, 이 구현은 [`043`](specs/043-app-capability-retirement/SPEC.md)이 소유한다.
+
+비디오 분석은 040에서 **제거**로 판정했다([판정 결과](specs/040-video-analyzer-capability-disposition/SPEC.md#판정-결과-2026-10-24)). 위 표의 호환 보존 원칙대로 저장된 영상 첨부와 남은 분석 기록은 지우지 않고 영상 첨부는 계속 unsupported note로 모델에 알리며, analyzer와 분석 기록 표면을 빼는 구현은 별도 작업이다.

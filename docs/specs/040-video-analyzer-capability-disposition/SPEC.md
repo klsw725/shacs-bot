@@ -1,6 +1,6 @@
 # 040. 비디오 분석 기능의 유지·축소·제거 판정 명세
 
-Status: Planned (Decision only)
+Status: Complete (Decision)
 
 Consumes: 027 stored attachment intake, 030 trusted execution, 031 snapshot provenance, 034 video analyzer/domain evidence
 
@@ -47,3 +47,14 @@ Consumes: 027 stored attachment intake, 030 trusted execution, 031 snapshot prov
 | [000 비디오 사용·호환성 판정](prds/000-video-runtime-value-and-compatibility-decision.md) | 조사 계약 1–4, 판정 수용 조건 1–3의 기본/주입 실행·영향 근거와 유지/축소/제거 결정문 | 없음 |
 
 PRD 000은 기본 미설정만으로 제거를 정하지 않고 실제 표면과 보존 자료를 조사해 한 결론으로 닫는다. 040의 `Complete (Decision)`은 analyzer 변경 완료를 뜻하지 않는다.
+
+## 판정 결과 (2026-10-24)
+
+결론은 **제거**다. video analyzer capability와 그 분석 기록 표면을 제품에서 빼되, 영상 첨부의 저장과 `unsupported` note는 남기고 사용자 자료는 그대로 둔다. 근거·호환 계약·회귀 테스트·후속 범위는 [PRD 000의 판정](prds/000-video-runtime-value-and-compatibility-decision.md#판정-2026-10-24-제거)에 있다.
+
+- production에 analyzer를 넣는 생성자·설정·명령·plugin 경로가 없고 주입은 코드를 고쳐 다시 빌드해야만 된다. 실제 사용은 미확인이다(이 스펙은 실제 사용자 자료를 검사하지 않는다).
+- 실제 binary에서 직접 만든 5초 영상은 모델 입력에 `video analyzer is not configured` note 한 줄로만 들어갔고 화면 글자와 음성 내용은 전달되지 않았다. 저장소 밖 harness로 가짜 analyzer를 붙이면 성공한 분석도 표면에는 unavailable로 보였고, 마감·취소는 대기 시간을 줄이지 못했으며, 기록 저장 실패는 성공한 분석을 버렸다.
+- 제품이 쓰지 않는 분석 기록 파일 하나가 손상되면 `runtime inspect`와 진단 묶음이 실패하고 외부 채널 답장이 전달되지 않았다.
+- 구현은 별도 작업이 소유한다. 그 작업은 저장된 첨부와 남은 기록을 지우거나 고쳐 쓰지 않고, 남은 기록을 읽지 않으며 표면을 지금 기록이 없을 때와 같은 결과로 고정하고, 공개 주입 API와 release runner 결합을 같은 변경에서 정리한다. 그때까지 현재 동작은 그대로다.
+
+이 판정은 [034](../034-generated-media-and-rich-file-context-expansion/SPEC.md)의 과거 완료 판정을 다시 열지 않고 다른 판정 스펙의 실행을 기다리지 않는다.
