@@ -38,3 +38,5 @@ pub mod spec037_image_repl;
 pub mod spec037_image_verbose;
 #[path = "spec037_method_repl.rs"]
 pub mod spec037_method_repl;
+#[path = "spec038_learn_repl.rs"]
+pub mod spec038_learn_repl;

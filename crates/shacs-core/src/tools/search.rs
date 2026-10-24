@@ -1,5 +1,6 @@
 use crate::tools::filesystem::{
-    entry_is_symlink, ignored_name, resolve_path, sorted_read_dir, PathContext,
+    entry_is_symlink, hard_links_into_store, ignored_name, resolve_path, sorted_read_dir,
+    PathContext,
 };
 use crate::tools::SchemaFragment;
 use crate::tools::{
@@ -319,7 +320,8 @@ impl GrepTool {
                     continue;
                 }
             }
-            if !matches_type(name, type_filter) {
+            if !matches_type(name, type_filter) || hard_links_into_store(&file_path, &self.context)
+            {
                 continue;
             }
             let metadata = file_path.metadata().map_err(|error| error.to_string())?;

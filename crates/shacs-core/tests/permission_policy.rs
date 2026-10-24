@@ -689,41 +689,50 @@ fn remembered_permission_precedence_plan_and_bypass_explicit_baselines_remain_ha
 
 #[test]
 fn auto_mode_asks_before_protected_target_action() -> Result<(), Box<dyn Error>> {
-    let action = action(
-        PermissionMode::Auto,
-        "write_file",
-        vec![SafetyCapability::FsWrite],
-        vec![target(json!(".git/config"))],
-    );
-    let rules = evaluate_static_rules(
-        &action,
-        &PermissionRuleInput {
-            containment: safe_containment(),
-            protected_targets: Vec::new(),
-            proc_exec_summary: None,
-        },
-    );
-    let mut input = policy_input(action, rules.clone());
-    input.evaluator = Some(evaluator(
-        AutoEvaluatorVerdictKind::AllowCandidate,
-        EvaluatorConfidence::High,
-    ));
-    let decision = decide_permission(input);
+    for (path, class) in [
+        (".git/config", ProtectedTargetClass::GitState),
+        (
+            ".shacs-methods/methods.json",
+            ProtectedTargetClass::LearnedMethods,
+        ),
+        (
+            "/home/me/workspace/.shacs-methods/.lock",
+            ProtectedTargetClass::LearnedMethods,
+        ),
+    ] {
+        let action = action(
+            PermissionMode::Auto,
+            "write_file",
+            vec![SafetyCapability::FsWrite],
+            vec![target(json!(path))],
+        );
+        let rules = evaluate_static_rules(
+            &action,
+            &PermissionRuleInput {
+                containment: safe_containment(),
+                protected_targets: Vec::new(),
+                proc_exec_summary: None,
+            },
+        );
+        let mut input = policy_input(action, rules.clone());
+        input.evaluator = Some(evaluator(
+            AutoEvaluatorVerdictKind::AllowCandidate,
+            EvaluatorConfidence::High,
+        ));
+        let decision = decide_permission(input);
 
-    if rules.kind != StaticRuleDecisionKind::Deny
-        || rules.reason != StaticRuleReason::ProtectedTarget
-        || !rules
-            .diagnostics
-            .protected_targets
-            .contains(&ProtectedTargetClass::GitState)
-        || decision.kind != PermissionPolicyDecisionKind::Ask
-        || decision.reason != PermissionPolicyReason::ProtectedTarget
-        || decision.can_handoff_to_tool_runtime
-    {
-        return Err(format!(
-            "protected target did not ask before auto policy: {rules:?} {decision:?}"
-        )
-        .into());
+        if rules.kind != StaticRuleDecisionKind::Deny
+            || rules.reason != StaticRuleReason::ProtectedTarget
+            || !rules.diagnostics.protected_targets.contains(&class)
+            || decision.kind != PermissionPolicyDecisionKind::Ask
+            || decision.reason != PermissionPolicyReason::ProtectedTarget
+            || decision.can_handoff_to_tool_runtime
+        {
+            return Err(format!(
+                "protected target {path} did not ask before auto policy: {rules:?} {decision:?}"
+            )
+            .into());
+        }
     }
     Ok(())
 }

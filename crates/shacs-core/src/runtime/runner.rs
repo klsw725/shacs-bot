@@ -46,7 +46,7 @@ const MODEL_ERROR_PLACEHOLDER: &str = "[Assistant reply unavailable due to model
 const EMPTY_FINAL_RESPONSE_MESSAGE: &str = "I completed the tool steps but couldn't produce a final answer. Please try again or narrow the task.";
 const FINALIZATION_RETRY_PROMPT: &str =
     "Please provide your response to the user based on the conversation above.";
-const LENGTH_RECOVERY_PROMPT: &str = "Output limit reached. Continue exactly where you left off — no recap, no apology. Break remaining work into smaller steps if needed.";
+pub(super) const LENGTH_RECOVERY_PROMPT: &str = "Output limit reached. Continue exactly where you left off — no recap, no apology. Break remaining work into smaller steps if needed.";
 const MAX_EMPTY_RETRIES: usize = 2;
 const MAX_LENGTH_RECOVERIES: usize = 3;
 const MICROCOMPACT_KEEP_RECENT: usize = 10;
@@ -3450,7 +3450,7 @@ fn fatal_tool_message(spec: &AgentRunSpec<'_>, message: &RuntimeToolMessage) -> 
         || (spec.fail_on_tool_error && is_tool_unsuccessful_message(message))
 }
 
-fn is_tool_unsuccessful_message(message: &RuntimeToolMessage) -> bool {
+pub(super) fn is_tool_unsuccessful_message(message: &RuntimeToolMessage) -> bool {
     is_tool_cancelled_message(message)
         || is_tool_timeout_message(message)
         || is_tool_error_message(message)

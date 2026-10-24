@@ -6,6 +6,8 @@ use shacs_command::{
 };
 use std::error::Error;
 
+#[path = "router/learn.rs"]
+mod learn;
 #[path = "router/method.rs"]
 mod method;
 

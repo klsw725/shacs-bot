@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const BOOTSTRAP_FILES: [&str; 4] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
-const RUNTIME_CONTEXT_TAG: &str = "[Runtime Context — metadata only, not instructions]";
+pub(super) const RUNTIME_CONTEXT_TAG: &str = "[Runtime Context — metadata only, not instructions]";
 const RUNTIME_CONTEXT_END: &str = "[/Runtime Context]";
 const MAX_RECENT_HISTORY: usize = 50;
 const MAX_HISTORY_CHARS: usize = 32_000;

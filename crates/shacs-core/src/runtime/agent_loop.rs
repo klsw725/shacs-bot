@@ -102,6 +102,12 @@ const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 
 #[path = "agent_loop_action.rs"]
 mod action;
+#[path = "agent_loop_learn.rs"]
+mod learn;
+#[path = "agent_loop_learn_sources.rs"]
+mod learn_sources;
+#[path = "agent_loop_learn_use.rs"]
+mod learn_use;
 #[path = "agent_loop_method.rs"]
 mod method;
 #[path = "agent_loop_method_finish.rs"]
@@ -1068,6 +1074,9 @@ impl<'a> AgentLoop<'a> {
                         clear_runtime_markers(&mut session);
                         store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
                         session.add_message("assistant", error.clone(), Map::new());
+                        let mut error = error;
+                        let saved = session.messages.len().checked_sub(1);
+                        learn_use::conclude(&mut session, &mut error, saved, "tool_error");
                         return self.publish_command_response(
                             &message,
                             session,
@@ -1320,6 +1329,9 @@ impl<'a> AgentLoop<'a> {
                         clear_runtime_markers(&mut session);
                         store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
                         session.add_message("assistant", error.clone(), Map::new());
+                        let mut error = error;
+                        let saved = session.messages.len().checked_sub(1);
+                        learn_use::conclude(&mut session, &mut error, saved, "tool_error");
                         return self.publish_command_response(
                             &message,
                             session,
@@ -1508,6 +1520,7 @@ impl<'a> AgentLoop<'a> {
             );
             (messages, Some(context_provider_handoff))
         } else {
+            learn_use::reset(&mut session);
             if let Some(result) = self.try_plugin_command(&message, &session)? {
                 return Ok(result);
             }
@@ -1543,6 +1556,7 @@ impl<'a> AgentLoop<'a> {
                 &self.config.extra_context_files,
             );
             append_user_turn(&mut session, &message);
+            self.choose_learned_method(&message, &mut session);
             let accepted_turn_id = turn_id_for_message(&message, &session);
             self.append_durable_fact(
                 &session_key,
@@ -1564,6 +1578,7 @@ impl<'a> AgentLoop<'a> {
             method::project_context(&session, &mut initial_messages)?;
             method::image::restore_results(&mut session, &mut initial_messages)?;
         }
+        learn_use::guide(&session, &mut initial_messages);
         let turn_id = turn_id_for_message(&message, &session);
         let session_context_digest =
             session_remembered_context_digest_for_input(&PermissionedActionInput {
@@ -1712,6 +1727,9 @@ impl<'a> AgentLoop<'a> {
                 store_current_execution_snapshot(&mut session, &run_snapshot);
                 action::cancel(&mut session);
                 session.add_message("assistant", error_text.clone(), Map::new());
+                let mut error_reply = error_text.clone();
+                let saved = session.messages.len().checked_sub(1);
+                learn_use::conclude(&mut session, &mut error_reply, saved, "provider_error");
                 clear_runtime_markers(&mut session);
                 let mut execution_ledger = recover_lock(&execution_ledger);
                 if quiet_error.is_some() {
@@ -1729,7 +1747,7 @@ impl<'a> AgentLoop<'a> {
                     Some(provenance),
                 )?;
                 self.sessions.save(&session)?;
-                let final_content = format!("{error_text}{method_footer}");
+                let final_content = format!("{error_reply}{method_footer}");
                 let outbound_count = self.publish_error(&message, &session_key, &final_content);
                 return Ok(AgentLoopTurnResult {
                     session_key,
@@ -1806,6 +1824,7 @@ impl<'a> AgentLoop<'a> {
         } else {
             String::new()
         };
+        learn_use::finish(&mut session, &mut run_result, history_start);
         let execution_ledger = recover_lock(&execution_ledger);
         let provenance =
             durable_event_provenance_from_snapshot(&turn_provenance, &execution_ledger);
@@ -2233,6 +2252,8 @@ impl<'a> AgentLoop<'a> {
                 pending.plan.workflow_id
             );
             session.add_message("assistant", content.clone(), Map::new());
+            let saved = session.messages.len().checked_sub(1);
+            learn_use::conclude(session, &mut content, saved, "workflow_completed");
             if method_workflow::tracks(message, session, &pending.plan)? {
                 content.push_str(&method_workflow::finish(
                     session,
@@ -2284,6 +2305,9 @@ impl<'a> AgentLoop<'a> {
         content: &str,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         session.add_message("assistant", content, Map::new());
+        let mut reply = content.to_owned();
+        let saved = session.messages.len().checked_sub(1);
+        learn_use::conclude(session, &mut reply, saved, "workflow_blocked");
         let method_footer = if method_workflow::tracks(message, session, plan)? {
             method_workflow::finish(
                 session,
@@ -2295,7 +2319,7 @@ impl<'a> AgentLoop<'a> {
         } else {
             String::new()
         };
-        let rendered = format!("{content}{method_footer}");
+        let rendered = format!("{reply}{method_footer}");
         let content = rendered.as_str();
         clear_runtime_markers(session);
         session.metadata.insert(
@@ -2401,6 +2425,7 @@ impl<'a> AgentLoop<'a> {
                 let method_tracked = method_workflow::tracks(message, session, &plan)?;
                 if pending_workflow(session).is_none() {
                     append_user_turn(session, message);
+                    self.choose_learned_method(message, session);
                 }
                 session
                     .metadata
@@ -2461,6 +2486,7 @@ impl<'a> AgentLoop<'a> {
                     };
                 let mut execution_config =
                     self.workflow_subagent_execution_config(&plan, session, session_key);
+                execution_config.learned_method_guidance = learn_use::guidance(session);
                 let method_observation = Arc::new(Mutex::new(
                     crate::runtime::task_method_observe::MethodObservation::with_media_roots(
                         self.config.media_roots.clone(),
@@ -2490,6 +2516,8 @@ impl<'a> AgentLoop<'a> {
                     Err(error) => {
                         let mut final_content = format!("Workflow failed: {error}");
                         session.add_message("assistant", final_content.clone(), Map::new());
+                        let saved = session.messages.len().checked_sub(1);
+                        learn_use::conclude(session, &mut final_content, saved, "workflow_failed");
                         if method_tracked {
                             final_content.push_str(&method_workflow::finish(
                                 session,
@@ -2597,6 +2625,13 @@ impl<'a> AgentLoop<'a> {
                 );
                 let mut final_content = format_workflow_turn_content(&outcome);
                 session.add_message("assistant", final_content.clone(), Map::new());
+                let saved = session.messages.len().checked_sub(1);
+                learn_use::conclude(
+                    session,
+                    &mut final_content,
+                    saved,
+                    workflow_stop_reason(outcome.run.state),
+                );
                 if method_tracked {
                     final_content.push_str(&method_workflow::finish(
                         session,
@@ -2764,6 +2799,7 @@ impl<'a> AgentLoop<'a> {
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         match command {
             LoopCommand::Method(args) => self.handle_method_command(args, message, session),
+            LoopCommand::Learn(args) => self.handle_learn_command(args, message, session),
             LoopCommand::Status => {
                 let content = if self.stopped {
                     "Status: stopped".to_owned()
@@ -2791,6 +2827,7 @@ impl<'a> AgentLoop<'a> {
                 let _ = self.task_registry.cancel(&session.key);
                 session.clear();
                 clear_runtime_markers(&mut session);
+                learn_use::reset(&mut session);
                 session.metadata.remove(SESSION_PERMISSION_APPROVALS_KEY);
                 session.metadata.remove(SESSION_REMEMBERED_PERMISSIONS_KEY);
                 clear_pending_proposal(&mut session);
@@ -3534,12 +3571,16 @@ impl<'a> AgentLoop<'a> {
         stop_reason: &str,
         save_session: bool,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        let mut reply = content.to_owned();
+        if save_session {
+            learn_use::conclude_command(&mut session, &mut reply, stop_reason);
+        }
         let method_footer = if save_session && method::user_turn(message) {
             method_finish::command_footer(&mut session, stop_reason)?
         } else {
             String::new()
         };
-        let rendered_content = format!("{content}{method_footer}");
+        let rendered_content = format!("{reply}{method_footer}");
         let content = rendered_content.as_str();
         let session_key = session.key.clone();
         if save_session {
@@ -4127,6 +4168,12 @@ fn append_user_turn(session: &mut Session, message: &InboundMessage) {
         extra.insert(
             "metadata".to_owned(),
             Value::Object(message.metadata.clone()),
+        );
+    }
+    if learn::owner_turn(message) {
+        extra.insert(
+            crate::runtime::learned_method_source::OWNER_TURN_KEY.to_owned(),
+            Value::Bool(true),
         );
     }
     session.add_message("user", message.content.clone(), extra);

@@ -399,6 +399,9 @@ pub struct SubagentExecutionConfig {
     pub permission_session_remembered_rules: Vec<SessionRememberedPermissionRule>,
     pub project_permission_store: Option<crate::runtime::ProjectPermissionStoreConfig>,
     pub provider_runtime_override: Option<RawCredential>,
+    /// The confirmed learned method (Spec038) the parent request uses, added
+    /// to each child's system prompt.
+    pub learned_method_guidance: Option<String>,
 }
 
 impl SubagentExecutionConfig {
@@ -429,6 +432,7 @@ impl SubagentExecutionConfig {
             permission_session_remembered_rules: Vec::new(),
             project_permission_store: None,
             provider_runtime_override: None,
+            learned_method_guidance: None,
         }
     }
 }
@@ -874,9 +878,16 @@ impl SubagentRuntime {
         cancellation_token: CancellationToken,
     ) -> ChildResultEnvelope {
         let registry = build_subagent_tool_registry(config);
-        let system_prompt = ContextBuilder::new(&config.workspace)
-            .with_configured_env(config.exec_env.clone())
-            .build_subagent_prompt();
+        let system_prompt = format!(
+            "{}{}",
+            ContextBuilder::new(&config.workspace)
+                .with_configured_env(config.exec_env.clone())
+                .build_subagent_prompt(),
+            config
+                .learned_method_guidance
+                .as_deref()
+                .unwrap_or_default()
+        );
         let messages = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "user", "content": envelope.task_goal}),
