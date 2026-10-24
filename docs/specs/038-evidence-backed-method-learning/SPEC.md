@@ -1,6 +1,6 @@
 # 038. 근거 있는 작업 방법 학습과 재사용 아키텍처 명세
 
-Status: Implemented, closure blocked (전체 workspace 테스트 사용자 승인 전)
+Status: Complete (Scoped)
 
 Consumes: 005 skill discovery, 018 evaluation helpers, 024 workflow recipes and quarantine classification, 030 trusted resources, 033 recorded trajectory and improvement evidence
 
@@ -61,7 +61,7 @@ Consumes: 005 skill discovery, 018 evaluation helpers, 024 workflow recipes and 
 
 ## 종료 증거 (2026-10-24)
 
-PRD [000](prds/000-method-candidate-and-evidence.md), [010](prds/010-method-review-and-promotion.md), [020](prds/020-method-reuse-edit-and-revert.md)이 각각 독립 Oracle **PASS**를 받았다(000은 10차, 010은 2차, 020은 4차). 그 뒤의 스펙 차원 Oracle 검토도 수용 조건 1–5와 반드시 지킬 것 전체를 **PASS**로 판정했다. 남은 종료 절차는 사용자 승인을 받은 전체 workspace 테스트뿐이다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 release seal이 아니다.
+PRD [000](prds/000-method-candidate-and-evidence.md), [010](prds/010-method-review-and-promotion.md), [020](prds/020-method-reuse-edit-and-revert.md)이 각각 독립 Oracle **PASS**를 받았다(000은 10차, 010은 2차, 020은 4차). 그 뒤의 스펙 차원 Oracle 검토도 수용 조건 1–5와 반드시 지킬 것 전체를 **PASS**로 판정했다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 release seal이 아니다.
 
 - 조건 1: `/learn`은 도구 없는 model 호출 두 번으로 비활성 후보 하나를 만든다. 후보는 사용자 말·실행·답변의 근거와 신뢰 구분을 가진다. 선호·이번 작업 조건은 따로 두고, 효과는 미확인으로 표시하며, 근거 안의 지시는 실행되지 않는다. 재사용할 근거가 없으면 후보 없이 끝난다(000).
 - 조건 2: 사용자 확인(검토 화면과 코드)이나 서로 다른 두 번째 작업에서 근거 있는 단계를 모두 다시 한 경우에만 확인된 방법이 된다. 같은 요청·자료·메시지의 반복, 신뢰하지 않는 같은 출처, 결과 수락은 세지 않는다(010).
@@ -74,6 +74,6 @@ fmt와 workspace clippy `-D warnings`가 통과했다. 마지막으로 바꾼 pa
 
 - `shacs-core`: 1,632 passed / 1 failed / 3 ignored. 유일한 실패는 baseline부터 있던 Spec034 fixture 테스트(`mismatch_uses_isolated_tree`)다.
 - `shacs-cli`: 474 passed / 3 ignored. `shacs-command`: 17 passed.
-- 전체 workspace 테스트는 아직 실행하지 않았다. 프로젝트 규칙에 따라 사용자 승인을 받아 실행하고, 그 결과로 상태를 `Complete (Scoped)`로 바꾼다.
+- 커밋한 최종 코드(`f57ab4d`)에서 사용자 승인을 받아 전체 workspace 테스트를 실행했다. suite 206개 기준 3,363 passed / 1 failed / 13 ignored이며, 유일한 실패는 같은 Spec034 fixture 테스트다.
 
 다른 사용자·workspace와의 방법 공유, 원격 배포, 036의 선제 감시, 037의 전문 하네스는 제공하지 않는다. 실제 명령과 제한은 [사용 가이드](../../USAGE.md#작업-방법-후보와-learn)를 따른다.

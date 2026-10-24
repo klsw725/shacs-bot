@@ -108,7 +108,7 @@ PRD 020은 앞선 후보·확인 결과만 소비해 **다음 작업에서의 �
   - `shacs-core`: 1,632 passed, 1 failed, 3 ignored. 유일한 실패는 PRD 000·010 종료 때와 같은 baseline 실패다(`runtime::generated_media_release::runner::fixture::tests::mismatch_uses_isolated_tree`, Spec034 로컬 evidence 파일 누락).
   - `shacs-cli`: 474 passed, 3 ignored. `shacs-command`: 17 passed.
   - `cargo fmt --all -- --check`와 workspace clippy `-D warnings`도 통과했다.
-  - 전체 workspace 실행은 사용자 승인을 받아 Spec 038 마무리 때 한다.
+  - 전체 workspace 실행은 Spec 038 마무리 때 사용자 승인을 받아 했다([SPEC 종료 증거](../SPEC.md#종료-증거-2026-10-24)).
 - 실제 표면: 격리된 config·workspace와 fake provider로 compiled `agent` REPL QA를 세 번 했다(`qa1/`–`qa3/`). 제안 조회·확인·다음 요청 사용·철회를 한 흐름으로 확인했다.
 - Oracle 독립 검증: **PASS** (4차).
   - 1–3차는 BLOCKED였다. 지적과 보정은 위 독립 검토 항목에 있고, 각 차수의 회귀 테스트가 그 전 코드에서 실패함을 확인했다(`gate1-fixes/`–`gate3-fixes/`).

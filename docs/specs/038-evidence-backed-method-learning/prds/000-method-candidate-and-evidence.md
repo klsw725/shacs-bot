@@ -157,7 +157,7 @@ PRD 000은 **검토 가능한 비활성 방법 후보**라는 자체 결과로 �
   - `shacs-cli` 474 passed / 3 ignored, `shacs-command` 17, `shacs-api` 121, `shacs-redaction` 13 passed.
   - `shacs-redaction`을 쓰는 `shacs-session` 105, `shacs-config` 85, `shacs-utils` 82, `shacs-projection` 359 passed / 7 ignored, `shacs-eval` 73, `shacs-app` 35 passed.
   - `cargo fmt --all -- --check`와 workspace clippy `-D warnings`도 통과했다.
-  - 전체 workspace 실행은 사용자 승인을 받아 Spec 038 마무리 때 한다.
+  - 전체 workspace 실행은 Spec 038 마무리 때 사용자 승인을 받아 했다([SPEC 종료 증거](../SPEC.md#종료-증거-2026-10-24)).
 - 실제 표면: 격리된 config·workspace와 fake provider로 compiled `agent` REPL QA를 열 번 했다(`qa1/`–`qa10/`). 200개 후보 재대조 비용은 `qa8/PERFORMANCE.md`에 있다.
 - Oracle 독립 검증: **PASS** (10차).
   - 1–9차는 BLOCKED였다. 지적과 보정은 위 구현 메모의 1–9차 항목에 있고, 각 차수의 회귀 테스트는 그 전 후보 코드에서 실패함을 확인했다(`gate*-fixes/`).
