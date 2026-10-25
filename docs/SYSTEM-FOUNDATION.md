@@ -480,11 +480,11 @@ Shacs는 사용자가 직접 설치·운영하는 trusted local agent runtime을
 39. `docs/specs/039-app-capability-disposition/SPEC.md` (Complete (Decision): 제거)
 40. `docs/specs/040-video-analyzer-capability-disposition/SPEC.md` (Complete (Decision): 제거)
 41. `docs/specs/041-release-evidence-tooling-disposition/SPEC.md` (Complete (Decision): 범위 축소)
-42. `docs/specs/042-conversational-web-watch-and-trustworthy-silence/SPEC.md` (Planned)
+42. `docs/specs/042-conversational-web-watch-and-trustworthy-silence/SPEC.md` (Planned; PRD 000 Complete (Scoped))
 43. `docs/specs/043-app-capability-retirement/SPEC.md` (Complete (Scoped))
 44. `docs/specs/044-video-analyzer-retirement/SPEC.md` (Complete (Scoped))
 
-`001`부터 `027`은 2026-07-20 기준 실제 구현 범위로 완료 처리되었다. 각 문서에서 분리된 후속 owner 중 완료된 범위는 `028`부터 `034`가 기록한다. 미완료였던 `035` 문서는 현재 스펙 세트에서 제거했으며, 구현 상태와 완료 판정을 변경한 것은 아니다. `036`·`037`·`038`은 새 제품 방향의 독립적인 scoped 구현을 완료했다. 이들은 이전 `035`의 구현·QA·closure를 계승하지 않는다. `039`부터 `041`은 기존 기능을 삭제한다고 가정하지 않는 독립 판정 계약이며, `039`·`040`이 제거로 판정한 앱 기능과 video analyzer는 각각 `043`·`044`가 퇴역시켰다. `041`은 Spec031 release runner의 현재 경로를 남기고 v2 판독 장치만 지우는 범위 축소로 판정했으며 그 구현은 별도다. `042`는 `036`의 완료 범위를 다시 열지 않고 첫 경험을 대화형 위임·웹페이지 관찰과 확인 실패·결정 마감 알림으로 넓히는 Planned 계약이다. 명시적 비목표와 미결정 아이디어는 자동으로 backlog에 포함하지 않는다.
+`001`부터 `027`은 2026-07-20 기준 실제 구현 범위로 완료 처리되었다. 각 문서에서 분리된 후속 owner 중 완료된 범위는 `028`부터 `034`가 기록한다. 미완료였던 `035` 문서는 현재 스펙 세트에서 제거했으며, 구현 상태와 완료 판정을 변경한 것은 아니다. `036`·`037`·`038`은 새 제품 방향의 독립적인 scoped 구현을 완료했다. 이들은 이전 `035`의 구현·QA·closure를 계승하지 않는다. `039`부터 `041`은 기존 기능을 삭제한다고 가정하지 않는 독립 판정 계약이며, `039`·`040`이 제거로 판정한 앱 기능과 video analyzer는 각각 `043`·`044`가 퇴역시켰다. `041`은 Spec031 release runner의 현재 경로를 남기고 v2 판독 장치만 지우는 범위 축소로 판정했으며 그 구현은 별도다. `042`는 `036`의 완료 범위를 다시 열지 않고 첫 경험을 대화형 위임·웹페이지 관찰과 확인 실패·결정 마감 알림으로 넓히는 Planned 계약이며, 그중 PRD 000(웹페이지 관찰과 조건 판정)은 scoped 구현을 완료했다. 명시적 비목표와 미결정 아이디어는 자동으로 backlog에 포함하지 않는다.
 
 [`../intent.md`](../intent.md)는 제품 경험의 방향을 정하고, 위 architecture spec 세트는 각 설계 계약과 완료 기준을 정의한다. 어느 쪽도 다른 문서의 구현 사실이나 완료 판정을 자동으로 바꾸지 않는다.
 

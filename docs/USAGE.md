@@ -146,6 +146,49 @@ shacs-bot work observations "$WORK" --workspace "$WS" --session email:me@example
 
 수락은 tool permission grant/cache를 만들지 않으며 성공을 뜻하지도 않습니다. 실제 후속 도구는 기존 030 hook·confirmation·permission·credential·sandbox 경계를 그대로 거칩니다. 별도 permission 질문이 나오면 그 도구의 `approve`/`deny` 등 기존 선택으로 결정하세요. 이미 설정된 허용/거절 정책도 그대로 유효합니다. 이 기능은 provider가 선언한 typed 제안의 결정 경계이며 자연어 문장의 모든 외부 행동을 자동 분류하거나 새 예약·구매 서비스, 모든 channel UI parity, 이미 실행된 부작용의 취소를 제공하지 않습니다.
 
+### 웹페이지 한 곳의 값 관찰 (Spec 042 PRD 000)
+
+활성 위임 하나에 **공개 웹페이지 한 곳의 값 하나**를 맡길 수 있습니다. 어시스턴트가 페이지를 직접 읽어 볼 값 후보를 보여주고, 사용자가 확인한 위치와 조건으로 주기적으로 다시 읽어 판정합니다. 이 단계는 알림을 보내지 않으며 CLI/API로 판정과 상태를 조회합니다. 로컬 파일 관측(`observe`)을 설정한 위임에는 웹페이지를 설정할 수 없고, 그 반대도 마찬가지입니다.
+
+```sh
+shacs-bot --config "$DATA/config.json" session create --workspace "$WS" --session cli:direct
+shacs-bot work create "watch the price" --workspace "$WS" --session cli:direct \
+  --consent explicit-request --evidence-ref cli:user --instructions "tell me when it is 11000 or cheaper"
+WORK='<work-id-from-create>'
+URL='https://shop.example.com/item/42?ref=mail'
+shacs-bot work web-preview "$WORK" --workspace "$WS" --session cli:direct --url "$URL" --label "판매가"
+shacs-bot work web-watch "$WORK" --workspace "$WS" --session cli:direct --url "$URL" \
+  --candidate '<token-from-preview>' --at-most 11000 --cadence-seconds 3600 --expected-revision 1
+shacs-bot work web-status "$WORK" --workspace "$WS" --session cli:direct --data-dir "$DATA"
+shacs-bot --config "$DATA/config.json" serve --workspace "$WS" --port 8900 --allow-api-side-effects
+```
+
+- **미리보기:** `web-preview`는 페이지를 한 번 읽고 `--label` 뒤 80자 안의 첫 숫자를 후보로 보여줍니다. `--phrase`만 주면 그 문구가 지금 있는 자리를 후보로 보여줍니다. 아직 없는 문구(예: `재입고`)를 기다리려면 `--phrase "재입고" --label "재고:" --until "배송:"`처럼 영역의 시작 문구와 끝 문구를 함께 줍니다. 그러면 두 문구 사이 영역(최대 120자)마다 영역 내용과 지금 문구가 있는지(`present`)를 후보로 보여줍니다. 소수점이 쉼표인 페이지는 `--decimal-comma`를 붙입니다. 후보마다 페이지의 표시(`shown_text`), 읽은 값, 앞뒤 고정 문구·몇 번째 일치인지, 숫자 형식(소수점·천 단위 문자·통화나 단위)이 나옵니다. 미리보기는 아무것도 저장하지 않습니다. 볼 값을 찾지 못하면 후보가 빈 목록입니다.
+- **확인:** `web-watch`는 고른 후보의 `token`과 조건 하나(`--at-most`, `--at-least`, `--text-present`, `--text-absent`)로 페이지를 **다시 읽습니다.** 미리보기 때와 같은 값일 때만 그 결과를 첫 기준으로 저장하고, 값이 바뀌었으면 아무것도 저장하지 않고 다시 미리보기를 요구합니다. 확인은 위임의 revision을 하나 올리는 CAS 설정입니다. 주소·위치·조건·주기를 바꾸려면 새 미리보기와 확인을 거치며 기준도 새로 잡힙니다. 확인 주기는 600~86,400초입니다.
+- **API:** `POST /v1/sessions/<session>/entrusted-work/<work>/web-watch/preview` (`{"url": ..., "label": ...}`, `"phrase"`, 또는 `"phrase"`·`"label"`·`"until"`), `POST .../web-watch` (`{"expected_revision", "url", "candidate", "condition": {"kind": "at_most", "value": "11000"}, "cadence_seconds"}`), `GET .../web-watch`. POST는 기존 loopback mutation opt-in이 필요합니다.
+
+**읽는 규칙(`normalized_static_text_v1`):** 주석과 `script`·`style` 요소를 빼고, 문단·표 칸 같은 블록 태그는 공백 하나로, 나머지 태그는 지운 뒤(HTML처럼 왼쪽부터 읽으므로 따옴표로 감싼 속성값 안의 `>`, `<!--`, `</script>`는 태그를 끝내거나 주석·스크립트를 열지 않고, 속성값은 본문이 되지 않습니다) `;`로 끝나는 HTML 문자 참조(`&euro;`, `&#8361;` 등)를 풀고 Unicode NFC로 맞추며 연속 공백을 공백 하나로 줄입니다. 대소문자는 그대로입니다. 숫자는 ASCII 숫자로 된 부호 없는 수만 읽고, 확인한 소수점·천 단위 문자와 숫자에 바로 붙은 통화·단위(`₩12,900`, `12,900원`)가 같아야 합니다. `-5`, `+5`, `−3`, `.5`처럼 부호나 앞 소수점이 붙은 수는 후보로 보여주지 않습니다. 이때 그 뒤의 다른 숫자를 대신 보여주지도 않습니다. `₩10,000~12,000`, `₩10,000 ~ ₩12,000`, `10,000 원 ~ 12,000 원`, `10,000 ~ -12,000`, `$10 to $12`처럼 범위로 적힌 값이나 바로 다음 단어에 이어지는 숫자도 한 값으로 보여주지 않습니다. 앞뒤 고정 문구 사이 영역이 확인 때와 같은 개수만큼 있어야 하고, 그 영역에서 숫자 하나만 읽습니다. 문구 조건은 그 영역에 확인한 문구가 그대로 있는지만 봅니다. 뒤 고정 문구는 앞 공백 없이 다음 단어만 담습니다. 그래서 값이나 문구만 지워져도 영역은 그대로 찾고, 숫자는 `format_mismatch`, 문구는 `present=false`로 읽습니다. 문자 집합은 응답 형식(`text/html`, `application/xhtml+xml` 등)과 관계없이 HTTP 응답의 `charset`만 따릅니다. charset이 없거나 모르는 이름이면 UTF-8로 읽습니다. 응답은 1 MiB까지만 읽으며 잘린 사실을 기록합니다.
+
+serve 또는 channel `runtime start`의 기존 worker가 029 queue에 `web_watch.observation` work를 등록해 due마다 읽습니다. 주기 확인은 provider·agent turn·일반 도구를 쓰지 않고 위 규칙으로만 읽습니다. 판정은 036과 같습니다. 같은 값과 조건 결과가 같은 변화는 `suppress`, 조건 충족 여부가 바뀐 경우만 `notify_candidate`입니다. 페이지 문구 diff나 페이지에 적힌 지시는 판정에 쓰지 않습니다. resume이나 일반 `work revise` 뒤 첫 성공 확인은 새 기준(`baseline`/`lineage_reset`)입니다.
+
+| 결과 | 분류 | 의미 |
+|---|---|---|
+| 연결 실패·시간 초과(redirect를 포함한 한 번의 확인 전체 20초) | `network_error` | 응답을 받지 못함 |
+| 실행 중 사설 주소로 가는 redirect | `guard_blocked` | 요청하지 않음 |
+| 404 등 실패 응답, redirect 5회 초과, http/https 이외 주소로의 redirect | `http_error` | 응답 상태만 기록 |
+| 429 | `rate_limited` | `Retry-After`를 지킴 |
+| 앞뒤 고정 문구를 찾지 못함 | `static_content_unavailable` | 로그인·JavaScript 때문이라고 단정하지 않음 |
+| 일치 개수가 달라짐, 영역에 숫자 여러 개(범위 표기 등), 값 뒤로 범위가 이어지거나 같은 단위의 다른 값이 붙음(취소선 옛 가격 등) | `ambiguous_value` | 다른 자리를 대신 고르지 않음 |
+| 숫자가 없음, 통화·단위·구분 문자가 다름 | `format_mismatch` | 값을 추측하지 않음 |
+
+실패는 모두 `unknown`이며 기준을 바꾸지 않고, 다음 확인을 멈추지 않습니다. 429와 503에는 `Retry-After`(초 또는 HTTP 날짜, 최대 7일)와 연속 횟수에 따른 대기(주기×2ⁿ, 최대 하루)를 주기보다 우선합니다. 한 번의 확인은 redirect 경로 하나만 따라가며 바로 다시 요청하지 않습니다. 첫 요청을 포함한 매 요청 직전에 주소를 다시 검사합니다. 성공한 확인 뒤 첫 실패에서 실패 구간이 시작되고 성공한 추출만 구간을 닫습니다. 어시스턴트가 꺼져 예정 확인이 주기 이상 밀리면 실패가 아니라 `runtime_gap`으로 기록하고 다시 켜지면 밀린 확인을 한 번 바로 실행합니다. 공백은 실패 구간을 닫거나 나누지 않습니다. pause/done/clear 뒤의 예약 확인은 관측 없이 취소되고 열린 구간은 알림 없이 닫힌 것으로 표시됩니다. `web-status`·`GET`은 계획, 첫 기준, 마지막 성공 확인 시각, 현재 판정, 열린 실패 구간(시작 시각·횟수·분류), 기록된 공백, 다음 확인, 최근 32개 기록을 보여줍니다.
+
+**저장하는 것과 하지 않는 것:** 확인한 전체 URL은 위임 owner session 파일에 계획으로만 저장합니다. `session export`(JSON·JSONL)도 다른 출력처럼 이 계획 주소를 query와 fragment를 뺀 주소와 전체 URL의 SHA-256으로 바꿔 내보냅니다. 대화 메시지는 export에 원문 그대로 들어갑니다. 관측 기록, 판정, `web-status`·API 응답과 hook에 넘기는 값은 URL의 query(`?…`)와 fragment(`#…`)를 뺀 주소와 전체 URL의 SHA-256만 담습니다. 응답 본문과 주변 문구는 저장하지 않고, 정규화한 텍스트의 SHA-256, HTTP 상태, 최종 주소, 잘림 여부, 읽은 값만 남깁니다. 앞뒤 고정 문구는 확인한 추출 기준이라서 저장됩니다.
+
+**지원하지 않는 것:** JavaScript 실행, 로그인·cookie·인증 header·credential이 필요한 페이지, URL의 사용자 이름·비밀번호, http/https 이외 scheme, 접근 차단이나 이용 제한의 우회, 여러 값·여러 페이지입니다. 내부·사설 주소는 `tools.ssrfWhitelist`와 관계없이 설정 단계와 실행 중 모두 거절합니다. 프록시 환경 변수(`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`)는 쓰지 않고 페이지에 직접 연결합니다. 그래서 프록시를 거쳐야만 밖으로 나갈 수 있는 환경에서는 `network_error`가 됩니다. 주소 확인과 실제 연결 사이에 DNS 응답이 바뀌는 경우까지 막지는 않습니다. 위임 확인은 이 읽기 하나의 근거일 뿐 `web_fetch` 같은 도구 권한이 아니며 예약·구매·발송 승인이 아닙니다. 읽기 전에는 031 실행 snapshot과 030 `tool:before` hook(`web_watch_fetch`, 인자는 query를 뺀 주소)을 거치며 hook이 거절하면 `blocked`로 기록하고 다음 주기에 다시 확인합니다.
+
+종료 시험은 `--features spec042-test-profile`로 따로 빌드한 binary에서만 `SHACS_SPEC042_ALLOW_LOOPBACK=1`(127.0.0.1/32 허용)과 `SHACS_SPEC042_CLOCK_FILE`(시험용 시계)을 읽습니다. 일반 빌드와 Docker 빌드는 이 변수를 무시합니다.
+
 ## Spec 033 goal, improvement, replay
 
 Goal lifecycle은 session metadata owner를 사용하며 CLI와 local API가 같은 typed projection을 반환합니다:
