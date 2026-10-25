@@ -24,7 +24,7 @@ pub(super) fn coverage_entries(
     push_command_rows(root, &mut entries, commands)?;
     push_artifact_rows(root, &mut entries, commands)?;
     push_external_rows(root, &mut entries, external_status, audits)?;
-    if schema == super::model::SPEC031_RELEASE_RUNNER_SCHEMA {
+    if super::model::is_current_layout(schema) {
         push_archived_source_row(root, &mut entries, commands)?;
     } else if schema == super::model::SPEC031_RELEASE_RUNNER_SCHEMA_V2 {
         entries.push(legacy_spec035_external_row(root, audits)?);

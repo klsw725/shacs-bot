@@ -1,14 +1,9 @@
 use super::super::{AudioContextAnalyzer, StoredAttachmentNote};
-use super::attachment_dispatch::{routed_stored_attachment, StoredAttachmentAnalyzers};
-use crate::runtime::video_analyzer_runtime::{AnalyzerInvocation, SupervisedVideoAnalyzer};
-use crate::runtime::video_analyzer_spec035::VideoAnalyzerSpec035Publisher;
-#[cfg(test)]
-use crate::runtime::{CancellationToken, VideoContextAnalyzer};
+use super::attachment_dispatch::routed_stored_attachment;
 use serde_json::Value;
 use shacs_utils::attachments::AttachmentHandoffStatus;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MediaRootRouting {
@@ -23,81 +18,14 @@ pub(crate) fn route_stored_attachment_with_native_image_support(
     media_roots: &[PathBuf],
     native_image_input_supported: bool,
 ) -> MediaRootRouting {
-    route_stored_attachment_with_audio_analyzer(
-        path,
-        media_roots,
-        native_image_input_supported,
-        None,
-    )
+    route_stored_attachment(path, media_roots, native_image_input_supported, None)
 }
 
-#[cfg(test)]
-pub(crate) fn route_stored_attachment_with_audio_analyzer(
+pub(crate) fn route_stored_attachment(
     path: &Path,
     media_roots: &[PathBuf],
     native_image_input_supported: bool,
     audio_analyzer: Option<&dyn AudioContextAnalyzer>,
-) -> MediaRootRouting {
-    route_stored_attachment_with_analyzers(
-        path,
-        media_roots,
-        native_image_input_supported,
-        audio_analyzer,
-        None,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn route_stored_attachment_with_analyzers(
-    path: &Path,
-    media_roots: &[PathBuf],
-    native_image_input_supported: bool,
-    audio_analyzer: Option<&dyn AudioContextAnalyzer>,
-    video_analyzer: Option<&dyn VideoContextAnalyzer>,
-) -> MediaRootRouting {
-    let invocation = AnalyzerInvocation::new(
-        std::env::temp_dir().join("shacs-video-analyzer-staging"),
-        CancellationToken::new(),
-    );
-    route_stored_attachment(
-        path,
-        media_roots,
-        native_image_input_supported,
-        audio_analyzer,
-        video_analyzer.map(super::video_route::VideoAnalyzer::direct),
-        &invocation,
-        None,
-    )
-}
-
-pub(crate) fn route_stored_attachment_with_analyzer_invocation(
-    path: &Path,
-    media_roots: &[PathBuf],
-    native_image_input_supported: bool,
-    audio_analyzer: Option<&dyn AudioContextAnalyzer>,
-    video_analyzer: Option<Arc<SupervisedVideoAnalyzer>>,
-    analyzer_invocation: &AnalyzerInvocation,
-    video_projection_publisher: Option<&VideoAnalyzerSpec035Publisher>,
-) -> MediaRootRouting {
-    route_stored_attachment(
-        path,
-        media_roots,
-        native_image_input_supported,
-        audio_analyzer,
-        video_analyzer.map(super::video_route::VideoAnalyzer::supervised),
-        analyzer_invocation,
-        video_projection_publisher,
-    )
-}
-
-fn route_stored_attachment(
-    path: &Path,
-    media_roots: &[PathBuf],
-    native_image_input_supported: bool,
-    audio_analyzer: Option<&dyn AudioContextAnalyzer>,
-    video_analyzer: Option<super::video_route::VideoAnalyzer<'_>>,
-    analyzer_invocation: &AnalyzerInvocation,
-    video_projection_publisher: Option<&VideoAnalyzerSpec035Publisher>,
 ) -> MediaRootRouting {
     if let Some(routing) = route_original_symlink_leaf(path, media_roots) {
         return routing;
@@ -127,12 +55,7 @@ fn route_stored_attachment(
             &channel,
             attachment_path,
             native_image_input_supported,
-            StoredAttachmentAnalyzers {
-                audio: audio_analyzer,
-                video: video_analyzer,
-                invocation: analyzer_invocation,
-                publisher: video_projection_publisher,
-            },
+            audio_analyzer,
         );
     }
     MediaRootRouting::OutsideMediaRoots

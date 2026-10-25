@@ -18,6 +18,7 @@ pub enum Spec034SchemaError {
     MissingRequirement,
     DuplicateRequirement,
     UnknownRequirement,
+    RetiredRequirement,
     IncorrectPrimaryPrd,
     InvalidEvidence,
     DirtyWorktree,
@@ -164,6 +165,9 @@ fn validate_requirements(rows: &[Spec034RequirementCoverage]) -> Result<(), Spec
             .iter()
             .find(|requirement| requirement.id == row.requirement_id)
             .ok_or(Spec034SchemaError::UnknownRequirement)?;
+        if spec034_requirement_is_retired(expected.id) {
+            return Err(Spec034SchemaError::RetiredRequirement);
+        }
         if !seen.insert(row.requirement_id.as_str()) {
             return Err(Spec034SchemaError::DuplicateRequirement);
         }
@@ -172,7 +176,7 @@ fn validate_requirements(rows: &[Spec034RequirementCoverage]) -> Result<(), Spec
         }
         validate_evidence_list(&row.evidence)?;
     }
-    if seen.len() != SPEC034_REQUIREMENTS.len() {
+    if seen.len() != spec034_current_requirements().count() {
         return Err(Spec034SchemaError::MissingRequirement);
     }
     Ok(())
@@ -193,6 +197,9 @@ fn validate_blockers(blockers: &[Spec034BlockerRecord]) -> Result<(), Spec034Sch
                 .any(|requirement| requirement.id == requirement_id)
             {
                 return Err(Spec034SchemaError::UnknownRequirement);
+            }
+            if spec034_requirement_is_retired(requirement_id) {
+                return Err(Spec034SchemaError::RetiredRequirement);
             }
         }
         validate_evidence_list(&blocker.evidence)?;

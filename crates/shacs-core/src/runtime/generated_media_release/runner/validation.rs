@@ -178,7 +178,7 @@ fn validate_snapshot_structure(
         || manifest.schema != RELEASE_SCHEMA
         || manifest.repo_root != "."
         || manifest.head_oid != manifest.source.head_oid
-        || manifest.requirement_count != 22
+        || manifest.requirement_count != catalog::current_requirement_count()
         || manifest.blocker_count != 8
         || !manifest.runner_passed
         || !manifest.runner_only

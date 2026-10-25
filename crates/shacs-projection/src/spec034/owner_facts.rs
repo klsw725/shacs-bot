@@ -1,7 +1,7 @@
 use super::Spec034EvidenceRef;
 use serde::{Deserialize, Serialize};
 
-pub const SPEC034_OWNER_FACTS_SCHEMA: &str = "spec034.owner_facts.v1";
+pub const SPEC034_OWNER_FACTS_SCHEMA: &str = "spec034.owner_facts.v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,23 +25,17 @@ pub enum Spec034OwnerFactKind {
     NetworkGuard,
     CredentialStatus,
     SandboxScope,
-    TrustedAnalyzerSource,
     RawContentDisclosure,
-    ExecutionSnapshot,
-    ProjectionParity,
 }
 
 impl Spec034OwnerFactKind {
-    pub const fn required() -> [Self; 8] {
+    pub const fn required() -> [Self; 5] {
         [
             Self::CurrentOsAuthority,
             Self::NetworkGuard,
             Self::CredentialStatus,
             Self::SandboxScope,
-            Self::TrustedAnalyzerSource,
             Self::RawContentDisclosure,
-            Self::ExecutionSnapshot,
-            Self::ProjectionParity,
         ]
     }
 }

@@ -19,10 +19,9 @@ pub fn handle_api_request(
         (ApiMethod::Get, MODELS_PATH) => {
             json_response(200, crate::models_response_with_owned_by(&adapter.models()))
         }
-        (ApiMethod::Get, MEDIA_DIAGNOSTICS_PATH) => match adapter.media_projection() {
-            Some(projection) => json_response(200, json!(projection)),
-            None => error_response(ApiError::not_found("media projection is unavailable")),
-        },
+        (ApiMethod::Get, MEDIA_DIAGNOSTICS_PATH) => {
+            error_response(ApiError::not_found("media projection is unavailable"))
+        }
         (ApiMethod::Get, TASKS_PATH) => crate::spec035_tasks::tasks_response(&request, adapter),
         (ApiMethod::Get, SESSIONS_PATH) => handle_session_query_request(path, adapter),
         (ApiMethod::Get, CHAT_COMPLETIONS_PATH) => error_response(ApiError::method_not_allowed(

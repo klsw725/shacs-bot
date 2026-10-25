@@ -26,7 +26,10 @@ pub(super) fn copy_runner_sources(repo: &Path, actual: &Path) {
                     .to_owned()
             }),
     );
-    for owner in super::external_audit_facts::external_owner_facts() {
+    paths.push(super::external_audit_facts::RETIRED_SPEC034_ARCHIVE.to_owned());
+    for owner in
+        super::external_audit_facts::external_owner_facts_for(SPEC031_RELEASE_RUNNER_SCHEMA_V2)
+    {
         paths.push(owner.source_locator.to_owned());
         paths.push(
             owner
@@ -88,7 +91,7 @@ fn runner_fixture_with_source(
         mode: Spec031ReleaseRunnerMode::CurrentWorktree,
         command_timeout: std::time::Duration::ZERO,
     };
-    let commands = super::current_commands::required_worktree_commands(&config).into_iter().map(|spec| {
+    let commands = super::current_commands::required_worktree_commands_for(&config, SPEC031_RELEASE_RUNNER_SCHEMA_V2).into_iter().map(|spec| {
         let stdout_path = format!("commands/{}.stdout", spec.id);
         let stderr_path = format!("commands/{}.stderr", spec.id);
         let tests = if spec.argv.get(1).is_some_and(|arg| arg == "test") { Some(Spec031ReleaseTestCounts { tests_run: 1, tests_failed: 0 }) } else { None };

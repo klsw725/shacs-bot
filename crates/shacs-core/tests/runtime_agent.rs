@@ -12,7 +12,6 @@ use shacs_core::runtime::{
     RuntimeExecutionLedger, Session, SessionHistoryOptions, SessionManager, SkillsLoader,
     StreamDeltaCoalescer, SubagentManager, TokenConsolidationConfig, ToolExecutionContext,
     ToolFailureClass, ToolOutcomeKind, ToolSearchConfig, ToolSearchMode, ToolStatus,
-    VideoContextAnalysis, VideoContextAnalyzer, VideoContextRequest, VideoMetadata,
 };
 use shacs_core::tools::{
     AskUserTool, JsonMap, SchemaFragment, SpawnRequest, SpawnTool, StringSchema, Tool,
@@ -395,7 +394,6 @@ fn runtime_context_builds_system_runtime_and_media_messages() -> Result<(), Box<
         chat_id: Some("direct"),
         current_role: "user",
         session_summary: Some("summary"),
-        analyzer_invocation: None,
     });
     if messages[0]["role"] != "system"
         || !messages[0]["content"]
@@ -465,7 +463,6 @@ fn runtime_context_routes_media_root_stored_attachments_and_keeps_workspace_imag
         chat_id: Some("direct"),
         current_role: "user",
         session_summary: None,
-        analyzer_invocation: None,
     });
 
     let blocks = messages[1]["content"]
@@ -532,44 +529,6 @@ impl AudioContextAnalyzer for RuntimeAudioAnalyzer {
     }
 }
 
-#[derive(Debug)]
-struct RuntimeVideoAnalyzer;
-
-impl VideoContextAnalyzer for RuntimeVideoAnalyzer {
-    fn analyze(
-        &self,
-        _invocation: &shacs_core::runtime::AnalyzerInvocation,
-        request: VideoContextRequest,
-    ) -> Result<VideoContextAnalysis, shacs_core::runtime::VideoContextError> {
-        if request.detected_mime != "video/mp4" {
-            return Err(shacs_core::runtime::VideoContextError::Unsupported(
-                "unsupported test video mime".to_owned(),
-            ));
-        }
-        Ok(VideoContextAnalysis {
-            metadata: Some(VideoMetadata {
-                duration_seconds: request.duration_seconds,
-                container: Some("mp4".to_owned()),
-                video_codec: Some("h264".to_owned()),
-                audio_codec: None,
-                width: Some(640),
-                height: Some(360),
-                audio_track_available: false,
-                subtitle_tracks: Vec::new(),
-            }),
-            subtitles: None,
-            scene_summary: Some("runtime video scene".to_owned()),
-            keyframe_summary: None,
-            extracted_audio_path: None,
-            extracted_audio_mime: None,
-            extracted_audio_byte_length: None,
-            extracted_audio_duration_seconds: None,
-            component_failures: Vec::new(),
-            truncated: false,
-        })
-    }
-}
-
 #[test]
 fn runtime_context_routes_stored_audio_with_injected_analyzer() -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
@@ -613,50 +572,7 @@ fn runtime_context_routes_stored_audio_with_injected_analyzer() -> Result<(), Bo
 }
 
 #[test]
-fn runtime_context_routes_stored_video_with_injected_analyzer() -> Result<(), Box<dyn Error>> {
-    let workspace = tempfile::tempdir()?;
-    let media_root = tempfile::tempdir()?;
-    let attachments = media_root.path().join("attachments/cli");
-    std::fs::create_dir_all(&attachments)?;
-    let stored_video = attachments.join("att-clip.mp4");
-    std::fs::write(&stored_video, mp4_video_bytes_for_runtime(6))?;
-    let context = ContextBuilder::new(workspace.path())
-        .with_media_roots([media_root.path().to_path_buf()])
-        .with_video_analyzer(Arc::new(RuntimeVideoAnalyzer));
-    let media = vec![stored_video.to_string_lossy().to_string()];
-    let messages = context.build_messages(ContextBuildRequest {
-        current_message: "current",
-        media: &media,
-        channel: Some("cli"),
-        chat_id: Some("direct"),
-        ..ContextBuildRequest::new("current")
-    });
-    let blocks = messages[1]["content"]
-        .as_array()
-        .ok_or("missing routed content blocks")?;
-    if blocks.len() != 4
-        || !blocks[1]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("[attachment:included_text]")
-        || !blocks[2]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("[Video metadata]")
-        || !blocks[2]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("[Video scene summary]\nruntime video scene")
-        || blocks[3]["text"] != "current"
-    {
-        return Err(format!("video analyzer routing drifted: {messages:?}").into());
-    }
-    Ok(())
-}
-
-#[test]
-fn runtime_context_routes_stored_video_missing_analyzer_as_unsupported(
-) -> Result<(), Box<dyn Error>> {
+fn runtime_context_routes_stored_video_as_unsupported_note() -> Result<(), Box<dyn Error>> {
     let workspace = tempfile::tempdir()?;
     let media_root = tempfile::tempdir()?;
     let attachments = media_root.path().join("attachments/cli");
@@ -684,14 +600,14 @@ fn runtime_context_routes_stored_video_missing_analyzer_as_unsupported(
         || !blocks[1]["text"]
             .as_str()
             .unwrap_or_default()
-            .contains("video analyzer is not configured")
+            .ends_with("reason=video content analysis is not supported")
         || blocks[1]["text"]
             .as_str()
             .unwrap_or_default()
             .contains("deferred")
         || blocks[2]["text"] != "current"
     {
-        return Err(format!("missing video analyzer routing drifted: {messages:?}").into());
+        return Err(format!("stored video routing drifted: {messages:?}").into());
     }
     Ok(())
 }

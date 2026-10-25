@@ -2,9 +2,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use shacs_providers::{TranscriptionClient, TranscriptionRequest};
 use shacs_redaction::redact_string;
-use shacs_utils::attachments::{
-    detect_attachment_mime, AttachmentContentFamily, AttachmentHandoffStatus, MimeDetectionMetadata,
-};
+use shacs_utils::attachments::{AttachmentHandoffStatus, MimeDetectionMetadata};
 use shacs_utils::document::{extract_text, MAX_TEXT_LENGTH};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -244,261 +242,6 @@ fn audio_analysis_blocks(
     ]
 }
 
-fn video_metadata_section(metadata: &VideoMetadata, max_chars: usize) -> ExtractedText {
-    let mut lines = Vec::new();
-    if let Some(duration) = metadata.duration_seconds {
-        lines.push(format!("duration_seconds={duration}"));
-    }
-    if let Some(container) = metadata
-        .container
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(format!(
-            "container={}",
-            safe_video_output_fragment(container, "unavailable")
-        ));
-    }
-    if let Some(codec) = metadata
-        .video_codec
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(format!(
-            "video_codec={}",
-            safe_video_output_fragment(codec, "unavailable")
-        ));
-    }
-    if let Some(codec) = metadata
-        .audio_codec
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(format!(
-            "audio_codec={}",
-            safe_video_output_fragment(codec, "unavailable")
-        ));
-    }
-    if let (Some(width), Some(height)) = (metadata.width, metadata.height) {
-        lines.push(format!("resolution={width}x{height}"));
-    }
-    lines.push(format!(
-        "audio_track_available={}",
-        metadata.audio_track_available
-    ));
-    if metadata.subtitle_tracks.is_empty() {
-        lines.push("subtitle_tracks=none".to_owned());
-    } else {
-        lines.push(format!(
-            "subtitle_tracks={}",
-            metadata
-                .subtitle_tracks
-                .iter()
-                .map(|track| safe_video_output_fragment(track, "unavailable"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    truncate_chars(&lines.join("\n"), max_chars)
-}
-
-fn video_audio_component_section(
-    analysis: &VideoContextAnalysis,
-    audio_analyzer: Option<&dyn AudioContextAnalyzer>,
-    source_video_path: &Path,
-) -> Option<ExtractedText> {
-    let Some(audio_path) = analysis.extracted_audio_path.as_ref() else {
-        let reason = if analysis
-            .metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.audio_track_available)
-        {
-            "audio track extraction is not available"
-        } else {
-            "audio track unavailable"
-        };
-        return Some(ExtractedText {
-            text: format!("[Video audio status]\nunavailable: {reason}"),
-            truncated: false,
-            original_chars: reason.len(),
-        });
-    };
-    let Some(analyzer) = audio_analyzer else {
-        return Some(ExtractedText {
-            text: "[Video audio status]\nunsupported: audio analyzer is not configured".to_owned(),
-            truncated: false,
-            original_chars: 0,
-        });
-    };
-    let request = match validated_extracted_audio_request(audio_path, source_video_path) {
-        Ok(request) => request,
-        Err(status) => return Some(status),
-    };
-    let policy = request.policy;
-    match analyzer.analyze(request) {
-        Ok(audio) => Some(video_audio_analysis_section(audio, policy)),
-        Err(AudioContextError::Unsupported(reason)) => Some(ExtractedText {
-            text: format!(
-                "[Video audio status]\nunsupported: {}",
-                safe_audio_error_reason(&reason, "audio format is not supported")
-            ),
-            truncated: false,
-            original_chars: reason.chars().count(),
-        }),
-        Err(AudioContextError::Failed(reason)) => Some(ExtractedText {
-            text: format!(
-                "[Video audio status]\nfailed: {}",
-                safe_audio_error_reason(&reason, "audio analyzer failed")
-            ),
-            truncated: false,
-            original_chars: reason.chars().count(),
-        }),
-    }
-}
-
-fn validated_extracted_audio_request(
-    audio_path: &Path,
-    source_video_path: &Path,
-) -> Result<AudioContextRequest, ExtractedText> {
-    let policy = AudioAnalysisPolicy::default();
-    let metadata = fs::symlink_metadata(audio_path)
-        .map_err(|_| video_audio_status("failed", "extracted audio file could not be read"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(video_audio_status(
-            "unsupported",
-            "extracted audio path is not an allowed file",
-        ));
-    }
-    let canonical_audio = fs::canonicalize(audio_path)
-        .map_err(|_| video_audio_status("failed", "extracted audio file could not be read"))?;
-    let source_parent = source_video_path
-        .parent()
-        .and_then(|parent| fs::canonicalize(parent).ok())
-        .ok_or_else(|| video_audio_status("failed", "source video directory could not be read"))?;
-    if !canonical_audio.starts_with(source_parent) {
-        return Err(video_audio_status(
-            "unsupported",
-            "extracted audio path is outside attachment directory",
-        ));
-    }
-    let bytes = fs::read(&canonical_audio)
-        .map_err(|_| video_audio_status("failed", "extracted audio file could not be read"))?;
-    let mime = detect_attachment_mime(&bytes, None, None);
-    if mime.content_family != AttachmentContentFamily::Audio {
-        return Err(video_audio_status(
-            "unsupported",
-            "extracted audio is not an audio file",
-        ));
-    }
-    let duration_seconds = sniff_audio_duration_seconds(&bytes, mime.detected_mime.as_deref());
-    if let Some(duration_seconds) = duration_seconds {
-        if duration_seconds > policy.max_duration_seconds {
-            return Err(video_audio_status(
-                "unsupported",
-                "extracted audio duration exceeds configured limit",
-            ));
-        }
-    } else if !policy.allow_unknown_duration {
-        return Err(video_audio_status(
-            "unsupported",
-            "extracted audio duration could not be determined",
-        ));
-    }
-    Ok(AudioContextRequest {
-        file_path: canonical_audio,
-        detected_mime: mime.detected_mime.unwrap_or_else(|| "unknown".to_owned()),
-        byte_length: bytes.len() as u64,
-        duration_seconds,
-        policy,
-    })
-}
-
-fn video_audio_status(status: &str, reason: &str) -> ExtractedText {
-    ExtractedText {
-        text: format!("[Video audio status]\n{status}: {reason}"),
-        truncated: false,
-        original_chars: reason.chars().count(),
-    }
-}
-
-fn video_audio_analysis_section(
-    audio: AudioContextAnalysis,
-    policy: AudioAnalysisPolicy,
-) -> ExtractedText {
-    let transcript = audio
-        .transcript
-        .map(|text| truncate_chars(&text, policy.max_transcript_chars));
-    let summary = audio
-        .summary
-        .map(|text| truncate_chars(&text, policy.max_summary_chars));
-    let mut body = String::from("[Video audio transcript/summary]\n");
-    let mut truncated = audio.truncated;
-    let mut original_chars = 0usize;
-    if let Some(summary) = summary {
-        truncated |= summary.truncated;
-        original_chars = original_chars.saturating_add(summary.original_chars);
-        body.push_str("summary:\n");
-        body.push_str(&redact_string(&summary.text));
-        body.push('\n');
-        if summary.truncated {
-            let omitted = summary
-                .original_chars
-                .saturating_sub(policy.max_summary_chars);
-            body.push_str(&format!("summary_truncated omitted_chars={omitted}\n"));
-        }
-    }
-    if let Some(transcript) = transcript {
-        truncated |= transcript.truncated;
-        original_chars = original_chars.saturating_add(transcript.original_chars);
-        body.push_str("transcript:\n");
-        body.push_str(&redact_string(&transcript.text));
-        if transcript.truncated {
-            let omitted = transcript
-                .original_chars
-                .saturating_sub(policy.max_transcript_chars);
-            body.push_str(&format!("\ntranscript_truncated omitted_chars={omitted}"));
-        }
-    }
-    ExtractedText {
-        text: body.trim_end().to_owned(),
-        truncated,
-        original_chars,
-    }
-}
-
-fn append_video_summary(
-    body: &mut String,
-    header: &str,
-    summary: &str,
-    policy: VideoAnalysisPolicy,
-    truncated: &mut bool,
-) {
-    let summary = truncate_chars(summary, policy.max_summary_chars);
-    *truncated |= summary.truncated;
-    if summary.truncated {
-        let omitted = summary
-            .original_chars
-            .saturating_sub(policy.max_summary_chars);
-        body.push_str(&format!(
-            "[Video truncation]\nsummary truncated to {} chars; omitted_chars={omitted}\n\n",
-            policy.max_summary_chars
-        ));
-    }
-    body.push_str(header);
-    body.push('\n');
-    body.push_str(&redact_string(&summary.text));
-    body.push_str("\n\n");
-}
-
-fn body_has_video_payload(body: &str) -> bool {
-    body.contains("[Video metadata]")
-        || body.contains("[Video subtitles]")
-        || body.contains("[Video audio")
-        || body.contains("[Video scene summary]")
-        || body.contains("[Video keyframe summary]")
-        || body.contains("[Video component status]")
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExtractedText {
     text: String,
@@ -609,39 +352,10 @@ fn safe_audio_error_reason(reason: &str, fallback: &str) -> String {
     }
 }
 
-fn safe_video_error_reason(reason: &str, fallback: &str) -> String {
-    safe_audio_error_reason(reason, fallback)
-}
-
-fn safe_video_output_fragment(value: &str, fallback: &str) -> String {
-    let redacted = redact_string(value);
-    let lowered = redacted.to_ascii_lowercase();
-    if redacted.contains('/')
-        || redacted.contains('\\')
-        || redacted.contains("://")
-        || lowered.starts_with("file:")
-        || lowered.starts_with("data:")
-        || lowered.starts_with("~/")
-        || lowered.starts_with("./")
-        || lowered.starts_with("../")
-    {
-        fallback.to_owned()
-    } else {
-        redacted
-    }
-}
-
 fn sniff_audio_duration_seconds(bytes: &[u8], mime: Option<&str>) -> Option<u64> {
     match mime {
         Some("audio/wav") => sniff_wav_duration_seconds(bytes),
         Some("audio/mp4") => sniff_mp4_duration_seconds(bytes),
-        _ => None,
-    }
-}
-
-fn sniff_video_duration_seconds(bytes: &[u8], mime: Option<&str>) -> Option<u64> {
-    match mime {
-        Some("video/mp4") | Some("video/quicktime") => sniff_mp4_duration_seconds(bytes),
         _ => None,
     }
 }
@@ -788,42 +502,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct FakeVideoAnalyzer {
-        result: Result<VideoContextAnalysis, VideoContextError>,
-    }
-
-    impl VideoContextAnalyzer for FakeVideoAnalyzer {
-        fn analyze(
-            &self,
-            _invocation: &AnalyzerInvocation,
-            request: VideoContextRequest,
-        ) -> Result<VideoContextAnalysis, VideoContextError> {
-            assert_eq!(request.detected_mime, "video/mp4");
-            assert_eq!(request.policy, VideoAnalysisPolicy::default());
-            self.result.clone()
-        }
-    }
-
-    #[derive(Debug)]
-    struct VideoAudioAnalyzer;
-
-    impl AudioContextAnalyzer for VideoAudioAnalyzer {
-        fn analyze(
-            &self,
-            request: AudioContextRequest,
-        ) -> Result<AudioContextAnalysis, AudioContextError> {
-            assert_eq!(request.detected_mime, "audio/mp4");
-            assert_eq!(request.duration_seconds, Some(7));
-            Ok(AudioContextAnalysis {
-                transcript: Some("audio track transcript".to_owned()),
-                summary: None,
-                language: None,
-                truncated: false,
-            })
-        }
-    }
-
     #[test]
     fn routes_media_root_stored_image_text_binary_and_deferred_content(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -927,348 +605,38 @@ mod tests {
     }
 
     #[test]
-    fn routes_video_missing_analyzer_as_unsupported() -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
-        let media_root = root.path().join("media");
-        let attachments = media_root.join("attachments/cli");
-        fs::create_dir_all(&attachments)?;
-        let video = attachments.join("clip.mp4");
-        fs::write(&video, mp4_video_bytes(3))?;
-
-        match route_stored_attachment_with_analyzers(&video, &[media_root], true, None, None) {
-            MediaRootRouting::Routed(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                let note = blocks[0]["text"].as_str().unwrap_or_default();
-                assert!(note.contains("[attachment:unsupported]"));
-                assert!(note.contains("video analyzer is not configured"));
-                assert!(!note.contains("deferred"));
-            }
-            other => panic!("unexpected video missing-analyzer routing: {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn routes_video_analysis_and_reuses_audio_analyzer() -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
-        let media_root = root.path().join("media");
-        let attachments = media_root.join("attachments/cli");
-        fs::create_dir_all(&attachments)?;
-        let video = attachments.join("clip.mp4");
-        fs::write(&video, mp4_video_bytes(5))?;
-        let audio_track = attachments.join("clip-audio.m4a");
-        fs::write(&audio_track, mp4_audio_bytes(7))?;
-        let video_analyzer = FakeVideoAnalyzer {
-            result: Ok(VideoContextAnalysis {
-                metadata: Some(VideoMetadata {
-                    duration_seconds: Some(5),
-                    container: Some("mp4".to_owned()),
-                    video_codec: Some("h264".to_owned()),
-                    audio_codec: Some("aac".to_owned()),
-                    width: Some(1920),
-                    height: Some(1080),
-                    audio_track_available: true,
-                    subtitle_tracks: vec!["en".to_owned()],
-                }),
-                subtitles: Some("hello subtitle".to_owned()),
-                scene_summary: Some("a person waves".to_owned()),
-                keyframe_summary: Some("keyframe shows a room".to_owned()),
-                extracted_audio_path: Some(audio_track),
-                extracted_audio_mime: Some("audio/mp4".to_owned()),
-                extracted_audio_byte_length: None,
-                extracted_audio_duration_seconds: Some(7),
-                component_failures: Vec::new(),
-                truncated: false,
-            }),
-        };
-
-        match route_stored_attachment_with_analyzers(
-            &video,
-            &[media_root],
-            true,
-            Some(&VideoAudioAnalyzer),
-            Some(&video_analyzer),
-        ) {
-            MediaRootRouting::Routed(blocks) => {
-                assert_eq!(blocks.len(), 2);
-                assert!(blocks[0]["text"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("[attachment:included_text]"));
-                let body = blocks[1]["text"].as_str().unwrap_or_default();
-                assert!(body.contains("[Attachment content warning]"));
-                assert!(body.contains("[Video metadata]"));
-                assert!(body.contains("resolution=1920x1080"));
-                assert!(body.contains("[Video subtitles]\nhello subtitle"));
-                assert!(body.contains("[Video audio transcript/summary]"));
-                assert!(body.contains("audio track transcript"));
-                assert!(body.contains("[Video scene summary]\na person waves"));
-                assert!(body.contains("[Video keyframe summary]\nkeyframe shows a room"));
-                assert!(!body.contains(video.to_string_lossy().as_ref()));
-            }
-            other => panic!("unexpected video success routing: {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_spoofed_video_extracted_audio_before_audio_analyzer(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
-        let media_root = root.path().join("media");
-        let attachments = media_root.join("attachments/cli");
-        fs::create_dir_all(&attachments)?;
-        let video = attachments.join("clip.mp4");
-        fs::write(&video, mp4_video_bytes(5))?;
-        let spoofed_audio = attachments.join("clip-audio.m4a");
-        fs::write(&spoofed_audio, b"not really audio")?;
-        let video_analyzer = FakeVideoAnalyzer {
-            result: Ok(VideoContextAnalysis {
-                metadata: Some(VideoMetadata {
-                    duration_seconds: Some(5),
-                    container: Some("mp4".to_owned()),
-                    video_codec: Some("h264".to_owned()),
-                    audio_codec: Some("aac".to_owned()),
-                    width: None,
-                    height: None,
-                    audio_track_available: true,
-                    subtitle_tracks: Vec::new(),
-                }),
-                subtitles: None,
-                scene_summary: None,
-                keyframe_summary: None,
-                extracted_audio_path: Some(spoofed_audio.clone()),
-                extracted_audio_mime: Some("audio/mp4".to_owned()),
-                extracted_audio_byte_length: Some(7),
-                extracted_audio_duration_seconds: Some(7),
-                component_failures: Vec::new(),
-                truncated: false,
-            }),
-        };
-
-        match route_stored_attachment_with_analyzers(
-            &video,
-            &[media_root],
-            true,
-            Some(&PanickingAudioAnalyzer),
-            Some(&video_analyzer),
-        ) {
-            MediaRootRouting::Routed(blocks) => {
-                assert_eq!(blocks.len(), 2);
-                let body = blocks[1]["text"].as_str().unwrap_or_default();
-                assert!(body.contains(
-                    "[Video audio status]\nunsupported: extracted audio is not an audio file"
-                ));
-                assert!(!body.contains(spoofed_audio.to_string_lossy().as_ref()));
-            }
-            other => panic!("unexpected spoofed audio routing: {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn preserves_video_component_failures_with_metadata() -> Result<(), Box<dyn std::error::Error>>
+    fn routes_every_stored_video_as_one_unsupported_note() -> Result<(), Box<dyn std::error::Error>>
     {
         let root = tempfile::tempdir()?;
         let media_root = root.path().join("media");
         let attachments = media_root.join("attachments/cli");
         fs::create_dir_all(&attachments)?;
-        let video = attachments.join("clip.mp4");
-        fs::write(&video, mp4_video_bytes(4))?;
-        let video_analyzer = FakeVideoAnalyzer {
-            result: Ok(VideoContextAnalysis {
-                metadata: Some(VideoMetadata {
-                    duration_seconds: Some(4),
-                    container: Some("mp4".to_owned()),
-                    video_codec: None,
-                    audio_codec: None,
-                    width: None,
-                    height: None,
-                    audio_track_available: false,
-                    subtitle_tracks: Vec::new(),
-                }),
-                subtitles: None,
-                scene_summary: None,
-                keyframe_summary: None,
-                extracted_audio_path: None,
-                extracted_audio_mime: None,
-                extracted_audio_byte_length: None,
-                extracted_audio_duration_seconds: None,
-                component_failures: vec![VideoComponentFailure {
-                    component: "keyframe".to_owned(),
-                    reason: "unsupported codec".to_owned(),
-                }],
-                truncated: false,
-            }),
-        };
+        let short = attachments.join("clip.mp4");
+        fs::write(&short, mp4_video_bytes(3))?;
+        let long = attachments.join("long.mp4");
+        fs::write(&long, mp4_video_bytes(16 * 60))?;
+        let webm = attachments.join("clip.webm");
+        fs::write(
+            &webm,
+            [0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01],
+        )?;
 
-        match route_stored_attachment_with_analyzers(
-            &video,
-            &[media_root],
-            true,
-            None,
-            Some(&video_analyzer),
-        ) {
-            MediaRootRouting::Routed(blocks) => {
-                assert_eq!(blocks.len(), 2);
-                let body = blocks[1]["text"].as_str().unwrap_or_default();
-                assert!(body.contains("[Video metadata]"));
-                assert!(
-                    body.contains("[Video component status]\nkeyframe: failed: unsupported codec")
-                );
-                assert!(body.contains("[Video audio status]\nunavailable: audio track unavailable"));
+        for video in [short, long, webm] {
+            match route_stored_attachment_with_native_image_support(
+                &video,
+                std::slice::from_ref(&media_root),
+                true,
+            ) {
+                MediaRootRouting::Routed(blocks) => {
+                    assert_eq!(blocks.len(), 1);
+                    let note = blocks[0]["text"].as_str().unwrap_or_default();
+                    assert!(note.starts_with("[attachment:unsupported]"));
+                    assert!(note.contains("mime=video/"));
+                    assert!(note.contains("sha256_prefix="));
+                    assert!(note.ends_with("reason=video content analysis is not supported"));
+                }
+                other => panic!("unexpected video routing: {other:?}"),
             }
-            other => panic!("unexpected component failure routing: {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn scrubs_video_metadata_and_component_failure_paths() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let root = tempfile::tempdir()?;
-        let media_root = root.path().join("media");
-        let attachments = media_root.join("attachments/cli");
-        fs::create_dir_all(&attachments)?;
-        let video = attachments.join("clip.mp4");
-        fs::write(&video, mp4_video_bytes(4))?;
-        let video_analyzer = FakeVideoAnalyzer {
-            result: Ok(VideoContextAnalysis {
-                metadata: Some(VideoMetadata {
-                    duration_seconds: Some(4),
-                    container: Some("/tmp/private.mp4".to_owned()),
-                    video_codec: Some("https://signed.example/video?token=secret".to_owned()),
-                    audio_codec: Some("file:///tmp/audio.m4a".to_owned()),
-                    width: None,
-                    height: None,
-                    audio_track_available: false,
-                    subtitle_tracks: vec!["../captions.srt".to_owned(), "en".to_owned()],
-                }),
-                subtitles: None,
-                scene_summary: None,
-                keyframe_summary: None,
-                extracted_audio_path: None,
-                extracted_audio_mime: None,
-                extracted_audio_byte_length: None,
-                extracted_audio_duration_seconds: None,
-                component_failures: vec![VideoComponentFailure {
-                    component: "/tmp/keyframe.jpg".to_owned(),
-                    reason: "https://signed.example/video?token=secret failed at /tmp/frame.jpg"
-                        .to_owned(),
-                }],
-                truncated: false,
-            }),
-        };
-
-        match route_stored_attachment_with_analyzers(
-            &video,
-            &[media_root],
-            true,
-            None,
-            Some(&video_analyzer),
-        ) {
-            MediaRootRouting::Routed(blocks) => {
-                assert_eq!(blocks.len(), 2);
-                let body = blocks[1]["text"].as_str().unwrap_or_default();
-                assert!(body.contains("container=unavailable"));
-                assert!(body.contains("video_codec=unavailable"));
-                assert!(body.contains("audio_codec=unavailable"));
-                assert!(body.contains("subtitle_tracks=unavailable, en"));
-                assert!(body.contains(
-                    "[Video component status]\ncomponent: failed: component failure details unavailable"
-                ));
-                assert!(!body.contains("/tmp"));
-                assert!(!body.contains("https://"));
-                assert!(!body.contains("file://"));
-                assert!(!body.contains("token=secret"));
-            }
-            other => panic!("unexpected scrubbed metadata routing: {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn bounds_truncated_video_text_components() -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
-        let media_root = root.path().join("media");
-        let attachments = media_root.join("attachments/cli");
-        fs::create_dir_all(&attachments)?;
-        let video = attachments.join("clip.mp4");
-        fs::write(&video, mp4_video_bytes(4))?;
-        let video_analyzer = FakeVideoAnalyzer {
-            result: Ok(VideoContextAnalysis {
-                metadata: None,
-                subtitles: Some("s".repeat(MAX_VIDEO_SUBTITLE_CHARS + 1)),
-                scene_summary: Some("v".repeat(MAX_VIDEO_SUMMARY_CHARS + 1)),
-                keyframe_summary: None,
-                extracted_audio_path: None,
-                extracted_audio_mime: None,
-                extracted_audio_byte_length: None,
-                extracted_audio_duration_seconds: None,
-                component_failures: Vec::new(),
-                truncated: false,
-            }),
-        };
-
-        match route_stored_attachment_with_analyzers(
-            &video,
-            &[media_root],
-            true,
-            None,
-            Some(&video_analyzer),
-        ) {
-            MediaRootRouting::Routed(blocks) => {
-                assert!(blocks[0]["text"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("[attachment:truncated]"));
-                let body = blocks[1]["text"].as_str().unwrap_or_default();
-                assert!(body.contains("subtitles truncated to 8000 chars; omitted_chars=1"));
-                assert!(body.contains("summary truncated to 4000 chars; omitted_chars=1"));
-                assert!(!body.contains(&"s".repeat(MAX_VIDEO_SUBTITLE_CHARS + 1)));
-                assert!(!body.contains(&"v".repeat(MAX_VIDEO_SUMMARY_CHARS + 1)));
-            }
-            other => panic!("unexpected truncated video routing: {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[derive(Debug)]
-    struct PanickingVideoAnalyzer;
-
-    impl VideoContextAnalyzer for PanickingVideoAnalyzer {
-        fn analyze(
-            &self,
-            _invocation: &AnalyzerInvocation,
-            _request: VideoContextRequest,
-        ) -> Result<VideoContextAnalysis, VideoContextError> {
-            panic!("video analyzer must not run after duration cap failure")
-        }
-    }
-
-    #[test]
-    fn blocks_video_over_duration_cap_before_analyzer() -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
-        let media_root = root.path().join("media");
-        let attachments = media_root.join("attachments/cli");
-        fs::create_dir_all(&attachments)?;
-        let video = attachments.join("long.mp4");
-        fs::write(&video, mp4_video_bytes(MAX_VIDEO_DURATION_SECONDS + 1))?;
-
-        match route_stored_attachment_with_analyzers(
-            &video,
-            &[media_root],
-            true,
-            None,
-            Some(&PanickingVideoAnalyzer),
-        ) {
-            MediaRootRouting::Routed(blocks) => {
-                let note = blocks[0]["text"].as_str().unwrap_or_default();
-                assert!(note.contains("[attachment:unsupported]"));
-                assert!(note.contains("video duration exceeds configured limit"));
-                assert!(note.contains("limit_seconds=900"));
-            }
-            other => panic!("unexpected video duration cap routing: {other:?}"),
         }
         Ok(())
     }
@@ -1290,7 +658,7 @@ mod tests {
             }),
         };
 
-        match route_stored_attachment_with_audio_analyzer(
+        match route_stored_attachment(
             &audio,
             std::slice::from_ref(&media_root),
             true,
@@ -1329,7 +697,7 @@ mod tests {
                 truncated: false,
             }),
         };
-        match route_stored_attachment_with_audio_analyzer(
+        match route_stored_attachment(
             &audio,
             std::slice::from_ref(&media_root),
             true,
@@ -1364,12 +732,7 @@ mod tests {
                 "provider token sk-secret failed".to_owned(),
             )),
         };
-        match route_stored_attachment_with_audio_analyzer(
-            &audio,
-            &[media_root],
-            true,
-            Some(&failed),
-        ) {
+        match route_stored_attachment(&audio, &[media_root], true, Some(&failed)) {
             MediaRootRouting::Routed(blocks) => {
                 let note = blocks[0]["text"].as_str().unwrap_or_default();
                 assert!(note.contains("[attachment:extraction_failed]"));
@@ -1402,12 +765,7 @@ mod tests {
         let audio = attachments.join("long.wav");
         fs::write(&audio, wav_bytes(8_000, MAX_AUDIO_DURATION_SECONDS + 1))?;
 
-        match route_stored_attachment_with_audio_analyzer(
-            &audio,
-            &[media_root],
-            true,
-            Some(&PanickingAudioAnalyzer),
-        ) {
+        match route_stored_attachment(&audio, &[media_root], true, Some(&PanickingAudioAnalyzer)) {
             MediaRootRouting::Routed(blocks) => {
                 assert_eq!(blocks.len(), 1);
                 let note = blocks[0]["text"].as_str().unwrap_or_default();
@@ -1429,12 +787,7 @@ mod tests {
         let audio = attachments.join("long.m4a");
         fs::write(&audio, mp4_audio_bytes(MAX_AUDIO_DURATION_SECONDS + 1))?;
 
-        match route_stored_attachment_with_audio_analyzer(
-            &audio,
-            &[media_root],
-            true,
-            Some(&PanickingAudioAnalyzer),
-        ) {
+        match route_stored_attachment(&audio, &[media_root], true, Some(&PanickingAudioAnalyzer)) {
             MediaRootRouting::Routed(blocks) => {
                 assert_eq!(blocks.len(), 1);
                 let note = blocks[0]["text"].as_str().unwrap_or_default();
@@ -1681,4 +1034,4 @@ mod tests {
 }
 // allow: SIZE_OK — preexisting file-context facade; Spec034 analyzer routing lives in bounded child modules
 mod spec034_context;
-pub use spec034_context::*;
+pub(crate) use spec034_context::*;

@@ -53,10 +53,6 @@ impl RuntimeProjectionSource for SessionRuntimeSource {
             Some(self.workspace.clone()),
         )
         .data_dir;
-        let media_projection = shacs_core::runtime::Spec035MediaProjectionStore::new(&data_dir)
-            .read()
-            .ok()
-            .flatten();
         let now_ms = now_ms();
         let Some(manager) =
             SessionManager::open_existing(&self.workspace).map_err(TuiSourceError::Store)?
@@ -92,10 +88,7 @@ impl RuntimeProjectionSource for SessionRuntimeSource {
                     pending_approval: raw
                         .as_ref()
                         .and_then(|payload| pending_approval(payload, &data_dir, now_ms)),
-                    media: media_projection
-                        .as_ref()
-                        .map(MediaProjectionView::from_projection)
-                        .unwrap_or_else(MediaProjectionView::unavailable),
+                    media: MediaProjectionView::unavailable(),
                     tasks: build_spec035_tasks_projection(&self.workspace, &data_dir, &detail.key)
                         .ok(),
                 })

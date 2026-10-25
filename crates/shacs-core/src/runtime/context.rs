@@ -26,7 +26,7 @@ pub struct ContextBuilder {
     extra_skill_roots: Vec<PathBuf>,
     media_roots: Vec<PathBuf>,
     native_image_input_supported: bool,
-    media: video::MediaContext,
+    media: media::MediaContext,
     configured_env: BTreeMap<String, String>,
 }
 
@@ -39,7 +39,6 @@ pub struct ContextBuildRequest<'a> {
     pub chat_id: Option<&'a str>,
     pub current_role: &'a str,
     pub session_summary: Option<&'a str>,
-    pub analyzer_invocation: Option<super::AnalyzerInvocation>,
 }
 
 impl<'a> ContextBuildRequest<'a> {
@@ -52,7 +51,6 @@ impl<'a> ContextBuildRequest<'a> {
             chat_id: None,
             current_role: "user",
             session_summary: None,
-            analyzer_invocation: None,
         }
     }
 }
@@ -60,7 +58,7 @@ impl<'a> ContextBuildRequest<'a> {
 impl ContextBuilder {
     pub fn new(workspace: impl AsRef<Path>) -> Self {
         Self {
-            media: video::MediaContext::new(workspace.as_ref()),
+            media: media::MediaContext::default(),
             workspace: workspace.as_ref().to_path_buf(),
             timezone: None,
             disabled_skills: Vec::new(),
@@ -513,7 +511,7 @@ impl ContextBuilder {
     }
 }
 // allow: SIZE_OK — preexisting context facade; Spec034 video state and routing live in a focused child module
-mod video;
+mod media;
 
 #[derive(Debug, Clone)]
 struct SkillDocument {

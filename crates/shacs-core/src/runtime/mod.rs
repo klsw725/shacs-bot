@@ -329,9 +329,7 @@ pub use execution_snapshot::{
 pub use execution_snapshot_source::LiveExecutionSnapshotSource;
 pub use file_context::{
     AudioAnalysisPolicy, AudioContextAnalysis, AudioContextAnalyzer, AudioContextError,
-    AudioContextRequest, TranscriptionAudioAnalyzer, VideoAnalysisPolicy, VideoComponentFailure,
-    VideoContextAnalysis, VideoContextAnalyzer, VideoContextError, VideoContextRequest,
-    VideoMetadata,
+    AudioContextRequest, TranscriptionAudioAnalyzer,
 };
 pub use goal::{
     apply_completion_verdict, build_goal_completion_evaluation_request, clear_goal,

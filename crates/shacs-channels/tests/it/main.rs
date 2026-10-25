@@ -12,8 +12,6 @@ pub mod common;
 pub mod spec031_channel_projection;
 #[path = "spec035_capability_channel.rs"]
 pub mod spec035_capability_channel;
-#[path = "spec035_media_projection.rs"]
-pub mod spec035_media_projection;
 #[path = "spec035_production_channel.rs"]
 pub mod spec035_production_channel;
 #[path = "spec035_revised_adapter.rs"]

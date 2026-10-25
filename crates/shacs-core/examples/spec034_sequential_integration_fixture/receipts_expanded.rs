@@ -4,7 +4,7 @@ use shacs_core::generated_media::{
     GeneratedMediaKind, GeneratedProvenanceKind, ProjectionDisclosure, RetentionPolicy,
 };
 
-pub use super::receipts_acceptance::{ac002, ac004, ac005, ac007, ac008, ac010};
+pub use super::receipts_acceptance::{ac002, ac004, ac005, ac010};
 
 pub fn mh002(input: &ReceiptInputs<'_>) -> Vec<SubObservation> {
     sub_observations([
@@ -75,65 +75,6 @@ pub fn mh006(input: &ReceiptInputs<'_>) -> Vec<SubObservation> {
             "disclosure",
             artifact.retention == RetentionPolicy::UserManaged
                 && artifact.disclosure == ProjectionDisclosure::RawContentPossibleElsewhere,
-        ),
-    ])
-}
-
-pub fn mh008(input: &ReceiptInputs<'_>) -> Vec<SubObservation> {
-    let states = [
-        "included",
-        "unsupported",
-        "extraction_failed",
-        "analyzer_missing",
-        "truncated",
-    ]
-    .iter()
-    .all(|state| input.analyzer.states.contains(state));
-    sub_observations([
-        ("states", states),
-        (
-            "stored_provenance",
-            input.analyzer.runtime.stored_provenance,
-        ),
-        (
-            "generated_provenance",
-            input.analyzer.runtime.generated_provenance,
-        ),
-        ("minimum_fields", input.analyzer.runtime.minimum_fields),
-    ])
-}
-
-pub fn mh009(input: &ReceiptInputs<'_>) -> Vec<SubObservation> {
-    let owner = input
-        .analyzer
-        .included
-        .as_ref()
-        .map(|included| &included.owner_facts);
-    sub_observations([
-        ("runtime_injection", input.analyzer.runtime.injected),
-        (
-            "source",
-            owner.and_then(|facts| facts.source.as_ref()).is_some()
-                && input.analyzer.trusted_source_disclosed,
-        ),
-        (
-            "sandbox",
-            owner.and_then(|facts| facts.sandbox.as_ref()).is_some()
-                && input.analyzer.sandbox_not_universal,
-        ),
-        (
-            "credential",
-            owner.and_then(|facts| facts.credential.as_ref()).is_some()
-                && input.analyzer.credential_not_exposed,
-        ),
-        (
-            "disclosure",
-            owner.and_then(|facts| facts.disclosure.as_ref()).is_some()
-                && input.analyzer.typed_disclosure_recorded,
-        ),
-        (
-            "snapshot",
-            owner.and_then(|facts| facts.snapshot.as_ref()).is_some(),
         ),
     ])
 }

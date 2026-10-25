@@ -2,7 +2,6 @@ use super::artifacts::{collect_digests, write_json};
 use super::catalog;
 use super::model::*;
 use super::source;
-use shacs_projection::SPEC034_REQUIREMENTS;
 use std::path::Path;
 
 mod command_validation;
@@ -155,7 +154,7 @@ fn run_with_publication_hooks_and_linker_image(
         source,
         fixture_digests,
         artifact_digests: collect_digests(staging.path())?,
-        requirement_count: SPEC034_REQUIREMENTS.len(),
+        requirement_count: catalog::current_requirement_count(),
         blocker_count: catalog::BLOCKERS.len(),
         runner_passed: true,
         runner_only: true,

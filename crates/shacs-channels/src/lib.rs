@@ -14,9 +14,8 @@ pub use spec031::{
     ChannelDeliveryObservation, ChannelSpec031ProjectionInput, ChannelSpec031ProjectionKind,
 };
 pub use spec035::{
-    negotiate_spec035_channel_hello, project_spec035_media_for_channel,
-    project_spec035_revised_channel_event, project_spec035_revised_json_for_channel,
-    spec035_channel_worker_hello, ChannelSpec035MediaDelivery, ChannelSpec035MediaProjection,
+    negotiate_spec035_channel_hello, project_spec035_revised_channel_event,
+    project_spec035_revised_json_for_channel, spec035_channel_worker_hello,
     ChannelSpec035MutationError,
 };
 

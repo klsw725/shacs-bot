@@ -1,11 +1,12 @@
 use shacs_projection::{
-    parse_spec034_owner_facts, parse_spec034_release_evidence, Spec034BlockerDisposition,
-    Spec034BlockerKind, Spec034BlockerRecord, Spec034CargoCommandEvidence, Spec034EvidenceRef,
-    Spec034OwnerFactKind, Spec034OwnerFactRecord, Spec034OwnerFacts, Spec034PrimaryPrd,
-    Spec034ReleaseEvidence, Spec034RequirementCoverage, Spec034ReviewEvidence, Spec034ReviewKind,
-    Spec034ReviewRecord, Spec034ReviewVerdict, Spec034SchemaError, Spec034SourceEvidence,
-    Spec034UnavailableReason, SPEC034_OWNER_FACTS_SCHEMA, SPEC034_RELEASE_SCHEMA,
-    SPEC034_REQUIREMENTS, SPEC034_REVIEW_SCHEMA,
+    parse_spec034_owner_facts, parse_spec034_release_evidence, spec034_current_requirements,
+    Spec034BlockerDisposition, Spec034BlockerKind, Spec034BlockerRecord,
+    Spec034CargoCommandEvidence, Spec034EvidenceRef, Spec034OwnerFactKind, Spec034OwnerFactRecord,
+    Spec034OwnerFacts, Spec034PrimaryPrd, Spec034ReleaseEvidence, Spec034RequirementCoverage,
+    Spec034ReviewEvidence, Spec034ReviewKind, Spec034ReviewRecord, Spec034ReviewVerdict,
+    Spec034SchemaError, Spec034SourceEvidence, Spec034UnavailableReason,
+    SPEC034_OWNER_FACTS_SCHEMA, SPEC034_RELEASE_SCHEMA, SPEC034_REQUIREMENTS,
+    SPEC034_RETIRED_REQUIREMENTS, SPEC034_REVIEW_SCHEMA,
 };
 
 #[test]
@@ -55,23 +56,45 @@ fn requirement_catalog_contains_exact_parent_ids_and_prd_mappings() {
             Spec034PrimaryPrd::Prd003,
         ]
     );
+    assert_eq!(
+        SPEC034_RETIRED_REQUIREMENTS,
+        [
+            "034-MH007",
+            "034-MH008",
+            "034-MH009",
+            "034-MH010",
+            "034-AC007",
+            "034-AC008",
+            "034-AC009",
+            "034-AC011",
+            "034-AC012",
+        ]
+    );
+    assert_eq!(spec034_current_requirements().count(), 13);
 }
 
 #[test]
-fn release_parser_rejects_missing_duplicate_and_unknown_requirement_ids() {
+fn release_parser_rejects_missing_duplicate_unknown_and_retired_requirement_ids() {
     // Given
     let release = valid_release();
     let mut missing = release.clone();
     missing.requirements.pop();
     let mut duplicate = release.clone();
     duplicate.requirements[1] = duplicate.requirements[0].clone();
-    let mut unknown = release;
+    let mut unknown = release.clone();
     unknown.requirements[0].requirement_id = "034-MH999".to_owned();
+    let mut retired = release;
+    retired.requirements.push(Spec034RequirementCoverage {
+        requirement_id: "034-MH009".to_owned(),
+        primary_prd: Spec034PrimaryPrd::Prd003,
+        evidence: vec![evidence()],
+    });
 
     // When
     let missing_result = parse_release(&missing);
     let duplicate_result = parse_release(&duplicate);
     let unknown_result = parse_release(&unknown);
+    let retired_result = parse_release(&retired);
 
     // Then
     assert_eq!(missing_result, Err(Spec034SchemaError::MissingRequirement));
@@ -80,6 +103,7 @@ fn release_parser_rejects_missing_duplicate_and_unknown_requirement_ids() {
         Err(Spec034SchemaError::DuplicateRequirement)
     );
     assert_eq!(unknown_result, Err(Spec034SchemaError::UnknownRequirement));
+    assert_eq!(retired_result, Err(Spec034SchemaError::RetiredRequirement));
 }
 
 #[test]
@@ -191,8 +215,7 @@ fn valid_release() -> Spec034ReleaseEvidence {
         },
         owner_facts: valid_owner_facts(),
         review_evidence: valid_reviews(),
-        requirements: SPEC034_REQUIREMENTS
-            .iter()
+        requirements: spec034_current_requirements()
             .map(|requirement| Spec034RequirementCoverage {
                 requirement_id: requirement.id.to_owned(),
                 primary_prd: requirement.primary_prd,

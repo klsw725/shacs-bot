@@ -131,7 +131,7 @@ fn current_artifacts(label: &str) -> (PathBuf, PathBuf, Spec031ReleaseRunArtifac
         mode: Spec031ReleaseRunnerMode::CurrentWorktree,
         command_timeout: Duration::ZERO,
     };
-    let specs = required_worktree_commands(&config);
+    let specs = required_worktree_commands_for(&config, SPEC031_RELEASE_RUNNER_SCHEMA);
     let records = specs
         .iter()
         .map(|spec| record_with_transcript(&root, spec))

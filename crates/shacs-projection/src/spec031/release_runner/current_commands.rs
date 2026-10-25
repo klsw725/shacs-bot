@@ -1,8 +1,18 @@
 use super::external_owner_commands::exact_owner_commands;
-use super::model::{Spec031ReleaseCommandSpec, Spec031ReleaseGateKind, Spec031ReleaseRunnerConfig};
+use super::model::{
+    Spec031ReleaseCommandSpec, Spec031ReleaseGateKind, Spec031ReleaseRunnerConfig,
+    SPEC031_RELEASE_RUNNER_SCHEMA,
+};
 
 pub fn required_worktree_commands(
     config: &Spec031ReleaseRunnerConfig,
+) -> Vec<Spec031ReleaseCommandSpec> {
+    required_worktree_commands_for(config, SPEC031_RELEASE_RUNNER_SCHEMA)
+}
+
+pub(super) fn required_worktree_commands_for(
+    config: &Spec031ReleaseRunnerConfig,
+    schema: &str,
 ) -> Vec<Spec031ReleaseCommandSpec> {
     let mut commands = vec![
         Spec031ReleaseCommandSpec {
@@ -162,7 +172,7 @@ pub fn required_worktree_commands(
             timeout: config.command_timeout,
         },
     ];
-    commands.extend(exact_owner_commands(config));
+    commands.extend(exact_owner_commands(config, schema));
     commands
 }
 

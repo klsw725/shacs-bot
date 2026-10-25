@@ -3,7 +3,7 @@ use shacs_projection::{Spec034OwnerFactKind, Spec034PrimaryPrd, Spec034ReviewKin
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub const RELEASE_SCHEMA: &str = "spec034.release_runner.v2";
+pub const RELEASE_SCHEMA: &str = "spec034.release_runner.v3";
 pub const PUBLICATION_STATUS_SCHEMA: &str = "spec034.publication_status.v1";
 
 #[path = "command_model.rs"]
@@ -109,10 +109,19 @@ pub struct BlockerRow {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RetiredRequirementRow {
+    pub requirement_id: String,
+    pub primary_prd: Spec034PrimaryPrd,
+    pub retired_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoverageDocument {
     pub schema: String,
     pub run_id: String,
     pub requirements: Vec<RequirementRow>,
+    pub retired_requirements: Vec<RetiredRequirementRow>,
     pub blockers: Vec<BlockerRow>,
 }
 

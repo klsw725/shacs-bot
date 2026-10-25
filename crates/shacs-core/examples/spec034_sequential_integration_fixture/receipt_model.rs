@@ -1,6 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
-use shacs_projection::{Spec034PrimaryPrd, SPEC034_REQUIREMENTS};
+use shacs_projection::{spec034_current_requirements, Spec034PrimaryPrd};
 use std::error::Error;
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,10 +58,11 @@ impl ObservedReceipt {
 pub fn validate_catalog_after_observation(
     receipts: &[ObservedReceipt],
 ) -> Result<usize, Box<dyn Error>> {
-    if receipts.len() != SPEC034_REQUIREMENTS.len() {
+    let canonical = spec034_current_requirements().collect::<Vec<_>>();
+    if receipts.len() != canonical.len() {
         return Err("observed receipt count differs from canonical catalog".into());
     }
-    for (receipt, canonical) in receipts.iter().zip(SPEC034_REQUIREMENTS) {
+    for (receipt, canonical) in receipts.iter().zip(canonical) {
         if receipt.requirement_id != canonical.id || receipt.primary_prd != canonical.primary_prd {
             return Err(format!("receipt catalog mismatch: {}", receipt.name).into());
         }

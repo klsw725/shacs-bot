@@ -1,18 +1,9 @@
 mod attachment_dispatch;
 mod attachment_routing;
-mod video_blocks;
-mod video_route;
-mod video_types;
 
-pub(crate) use attachment_routing::{
-    route_stored_attachment_with_analyzer_invocation, MediaRootRouting,
-};
 #[cfg(test)]
-pub(crate) use attachment_routing::{
-    route_stored_attachment_with_analyzers, route_stored_attachment_with_audio_analyzer,
-    route_stored_attachment_with_native_image_support,
-};
-pub use video_types::*;
+pub(crate) use attachment_routing::route_stored_attachment_with_native_image_support;
+pub(crate) use attachment_routing::{route_stored_attachment, MediaRootRouting};
 
 pub(super) fn handoff_status_name(
     status: shacs_utils::attachments::AttachmentHandoffStatus,

@@ -3,11 +3,12 @@ use super::coverage::{
     Spec031ExternalOwnerId, Spec031TypedEvidenceClass,
 };
 use super::external_audit_facts::{
-    external_owner_facts, legacy_spec035_owner_fact, ExternalOwnerFactDescriptor,
+    external_owner_facts_for, legacy_spec035_owner_fact, owner_fact_exists,
+    ExternalOwnerFactDescriptor,
 };
 use super::model::{
-    Spec031ReleaseArtifactError, Spec031ReleaseCommandStatus, Spec031ReleaseRunArtifacts,
-    SPEC031_RELEASE_RUNNER_SCHEMA,
+    is_current_layout, Spec031ReleaseArtifactError, Spec031ReleaseCommandStatus,
+    Spec031ReleaseRunArtifacts,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ pub(super) fn validate_external_audits(
     repo_root: &Path,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     let root = PathBuf::from(&artifacts.evidence_root);
-    let required = if artifacts.schema == SPEC031_RELEASE_RUNNER_SCHEMA {
+    let required = if is_current_layout(&artifacts.schema) {
         &required_external_owners()[..]
     } else {
         &required_external_owners_legacy()[..]
@@ -36,7 +37,7 @@ pub(super) fn validate_external_audits(
         {
             return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
         }
-        validate_external_audit_shape(audit)?;
+        validate_external_audit_shape(audit, &artifacts.schema)?;
         if artifact_hash(&root, &audit.artifact)? != audit.artifact_hash {
             return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
         }
@@ -53,6 +54,7 @@ pub(super) fn validate_external_audits(
 
 fn validate_external_audit_shape(
     audit: &Spec031ExternalAuditRow,
+    schema: &str,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     if audit.artifact_media_type != Spec031ArtifactMediaType::Markdown
         || audit.evidence_class != Spec031TypedEvidenceClass::ExternalAuditMarkdown
@@ -61,15 +63,15 @@ fn validate_external_audit_shape(
     {
         return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
     }
-    if audit.source_locator != expected_source_locator(audit.owner)
-        || audit.source_status_locator != expected_status_locator(audit.owner)
+    if audit.source_locator != expected_source_locator(audit.owner, schema)
+        || audit.source_status_locator != expected_status_locator(audit.owner, schema)
     {
         return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
     }
     if audit.status == Spec031ExternalAuditStatus::Pass && audit.command_result_ids.is_empty() {
         return Err(Spec031ReleaseArtifactError::InvalidCoverageEvidence);
     }
-    let expected = expected_descriptor(audit.owner)?;
+    let expected = expected_descriptor(audit.owner, schema)?;
     if audit.status == Spec031ExternalAuditStatus::Blocked && !audit.command_result_ids.is_empty() {
         return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
     }
@@ -176,7 +178,9 @@ fn validate_owner_facts(
         {
             return Err(Spec031ReleaseArtifactError::BlockedAsPass);
         }
-    } else if audit.implementation_artifacts != expected_fact_artifacts(audit.owner)? {
+    } else if audit.implementation_artifacts
+        != expected_fact_artifacts(audit.owner, &artifacts.schema)?
+    {
         return Err(Spec031ReleaseArtifactError::BlockedAsPass);
     }
     for artifact in &audit.implementation_artifacts {
@@ -187,7 +191,12 @@ fn validate_owner_facts(
         {
             continue;
         }
-        if !fact_artifact_exists(repo_root, &artifacts.evidence_root, artifact) {
+        if !owner_fact_exists(
+            repo_root,
+            Path::new(&artifacts.evidence_root),
+            &artifacts.schema,
+            artifact,
+        ) {
             return Err(Spec031ReleaseArtifactError::BlockedAsPass);
         }
     }
@@ -206,38 +215,24 @@ fn validate_owner_facts(
     Ok(())
 }
 
-fn fact_artifact_exists(root: &Path, evidence_root: &str, artifact: &str) -> bool {
-    let (path, token) = match artifact.split_once('#') {
-        Some(parts) => parts,
-        None => (artifact, ""),
-    };
-    let full_path = if path.starts_with("fixtures/") {
-        Path::new(evidence_root).join(path)
-    } else {
-        root.join(path)
-    };
-    let Ok(text) = std::fs::read_to_string(full_path) else {
-        return false;
-    };
-    token.is_empty() || text.contains(token)
-}
-
 fn expected_descriptor(
     owner: Spec031ExternalOwnerId,
+    schema: &str,
 ) -> Result<&'static ExternalOwnerFactDescriptor, Spec031ReleaseArtifactError> {
     if owner == Spec031ExternalOwnerId::Spec035 {
         return Ok(legacy_spec035_owner_fact());
     }
-    external_owner_facts()
-        .iter()
+    external_owner_facts_for(schema)
+        .into_iter()
         .find(|descriptor| descriptor.owner == owner)
         .ok_or(Spec031ReleaseArtifactError::InvalidCoverageEvidence)
 }
 
 fn expected_fact_artifacts(
     owner: Spec031ExternalOwnerId,
+    schema: &str,
 ) -> Result<Vec<String>, Spec031ReleaseArtifactError> {
-    Ok(expected_descriptor(owner)?
+    Ok(expected_descriptor(owner, schema)?
         .fact_artifacts
         .iter()
         .map(|artifact| (*artifact).to_owned())
@@ -251,12 +246,12 @@ fn expected_fixture_fact_artifacts(owner: Spec031ExternalOwnerId) -> Vec<String>
     )]
 }
 
-fn expected_source_locator(owner: Spec031ExternalOwnerId) -> &'static str {
-    expected_descriptor(owner).map_or("", |descriptor| descriptor.source_locator)
+fn expected_source_locator(owner: Spec031ExternalOwnerId, schema: &str) -> &'static str {
+    expected_descriptor(owner, schema).map_or("", |descriptor| descriptor.source_locator)
 }
 
-fn expected_status_locator(owner: Spec031ExternalOwnerId) -> &'static str {
-    expected_descriptor(owner).map_or("", |descriptor| descriptor.source_status_locator)
+fn expected_status_locator(owner: Spec031ExternalOwnerId, schema: &str) -> &'static str {
+    expected_descriptor(owner, schema).map_or("", |descriptor| descriptor.source_status_locator)
 }
 
 fn owner_slug(owner: Spec031ExternalOwnerId) -> &'static str {

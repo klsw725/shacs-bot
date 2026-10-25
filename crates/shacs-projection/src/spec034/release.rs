@@ -1,7 +1,7 @@
 use super::{Spec034EvidenceRef, Spec034OwnerFacts, Spec034PrimaryPrd, Spec034ReviewEvidence};
 use serde::{Deserialize, Serialize};
 
-pub const SPEC034_RELEASE_SCHEMA: &str = "spec034.release_evidence.v1";
+pub const SPEC034_RELEASE_SCHEMA: &str = "spec034.release_evidence.v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

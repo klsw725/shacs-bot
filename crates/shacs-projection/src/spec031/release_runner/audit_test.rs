@@ -1,4 +1,5 @@
 use super::super::coverage::Spec031ExternalOwnerId;
+use super::super::external_audit_facts::external_owner_facts;
 use super::super::model::{
     Spec031ReleaseCommandRecord, Spec031ReleaseCommandStatus, Spec031ReleaseGateKind,
     Spec031ReleaseRunArtifacts, Spec031ReleaseRunId, Spec031ReleaseRunnerConfig,

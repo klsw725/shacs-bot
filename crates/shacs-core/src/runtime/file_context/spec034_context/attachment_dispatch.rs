@@ -4,9 +4,6 @@ use super::super::{
     MAX_STORED_ATTACHMENT_BYTES, MAX_TEXT_LENGTH,
 };
 use super::attachment_routing::MediaRootRouting;
-use super::video_route::{route_video_attachment, VideoAnalyzer, VideoRoutingAnalyzers};
-use crate::runtime::video_analyzer_runtime::AnalyzerInvocation;
-use crate::runtime::video_analyzer_spec035::VideoAnalyzerSpec035Publisher;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::json;
 use shacs_utils::attachments::{
@@ -15,19 +12,14 @@ use shacs_utils::attachments::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(super) struct StoredAttachmentAnalyzers<'a> {
-    pub(super) audio: Option<&'a dyn AudioContextAnalyzer>,
-    pub(super) video: Option<VideoAnalyzer<'a>>,
-    pub(super) invocation: &'a AnalyzerInvocation,
-    pub(super) publisher: Option<&'a VideoAnalyzerSpec035Publisher>,
-}
+const VIDEO_UNSUPPORTED_REASON: &str = "video content analysis is not supported";
 
 pub(super) fn routed_stored_attachment(
     path: &Path,
     channel: &str,
     attachment_path: PathBuf,
     native_image_input_supported: bool,
-    analyzers: StoredAttachmentAnalyzers<'_>,
+    audio_analyzer: Option<&dyn AudioContextAnalyzer>,
 ) -> MediaRootRouting {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -101,21 +93,12 @@ pub(super) fn routed_stored_attachment(
             &mime,
             metadata.len(),
             base_note.clone(),
-            analyzers.audio,
+            audio_analyzer,
         ),
-        AttachmentContentFamily::Video => route_video_attachment(
-            path,
-            &bytes,
-            &mime,
-            metadata.len(),
-            base_note.clone(),
-            VideoRoutingAnalyzers {
-                audio: analyzers.audio,
-                video: analyzers.video,
-                invocation: analyzers.invocation,
-                publisher: analyzers.publisher,
-            },
-        ),
+        AttachmentContentFamily::Video => vec![note_block(
+            AttachmentHandoffStatus::Unsupported,
+            base_note.with_reason(VIDEO_UNSUPPORTED_REASON),
+        )],
         AttachmentContentFamily::UnsupportedBinary | AttachmentContentFamily::Unknown => {
             vec![note_block(
                 AttachmentHandoffStatus::Unsupported,

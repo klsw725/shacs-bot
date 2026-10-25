@@ -8,8 +8,8 @@ use crate::{
 use serde_json::{json, Value};
 use shacs_channels::WebSocketServerEvent;
 use shacs_projection::{
-    project_spec035_revised_owner_facts, Spec031ConstructionError, Spec035MediaProjection,
-    Spec035OwnerSurface, Spec035RevisedOwnerFacts, Spec035RevisedProjection,
+    project_spec035_revised_owner_facts, Spec031ConstructionError, Spec035OwnerSurface,
+    Spec035RevisedOwnerFacts, Spec035RevisedProjection,
 };
 use shacs_providers::{LlmResponse, ProviderEvent};
 use std::path::PathBuf;
@@ -124,14 +124,6 @@ pub trait ChatCompletionAdapter {
 
     fn readiness_projection(&self) -> Option<Value> {
         None
-    }
-
-    fn media_projection(&self) -> Option<Spec035MediaProjection> {
-        let data_dir = self.runtime_data_dir()?;
-        shacs_core::runtime::Spec035MediaProjectionStore::new(data_dir)
-            .read()
-            .ok()
-            .flatten()
     }
 
     fn trusted_runtime_projection(&self) -> Spec030RuntimeProjection {

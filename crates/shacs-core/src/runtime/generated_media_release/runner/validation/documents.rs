@@ -29,9 +29,9 @@ pub(super) fn validate(
     ];
     if run_ids.iter().any(|run_id| *run_id != &manifest.run_id)
         || results.schema != "spec034.results.v2"
-        || coverage.schema != "spec034.coverage.v1"
+        || coverage.schema != "spec034.coverage.v2"
         || reviews.schema != "spec034.runner_reviews.v1"
-        || owners.schema != "spec034.runner_owner_audits.v1"
+        || owners.schema != "spec034.runner_owner_audits.v2"
         || cleanup.schema != "spec034.cleanup.v2"
         || observations.schema != "spec034.observations.v1"
         || triage.schema != "spec034.triage.v1"
@@ -84,7 +84,10 @@ fn validate_coverage(
 ) -> Result<(), Spec034ReleaseArtifactError> {
     let requirements = catalog::requirements(&command_ref(commands, "sequential-integration")?);
     let blockers = catalog::blockers(&command_ref(commands, "schema-contract")?);
-    if coverage.requirements != requirements || coverage.blockers != blockers {
+    if coverage.requirements != requirements
+        || coverage.retired_requirements != catalog::retired_requirements()
+        || coverage.blockers != blockers
+    {
         return Err(Spec034ReleaseArtifactError::InvalidEvidence);
     }
     Ok(())

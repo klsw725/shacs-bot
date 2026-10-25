@@ -4,7 +4,7 @@ use super::coverage_audit_validate::validate_external_audits;
 use super::coverage_validate::validate_coverage_matrix;
 use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseRunArtifacts,
-    SPEC031_RELEASE_RUNNER_SCHEMA, SPEC031_RELEASE_RUNNER_SCHEMA_V2,
+    SPEC031_RELEASE_RUNNER_SCHEMA_V2,
 };
 use super::receipts::{
     validate_cleanup_receipts, validate_reproducibility_observations, validate_triage_receipts,
@@ -84,15 +84,16 @@ fn validate_phase(
         .manifest_files
         .iter()
         .any(|file| file == super::spec035_execution::BINDING);
-    match artifacts.schema.as_str() {
-        SPEC031_RELEASE_RUNNER_SCHEMA if !has_legacy_binding => {}
-        SPEC031_RELEASE_RUNNER_SCHEMA_V2 if has_legacy_binding => {}
-        SPEC031_RELEASE_RUNNER_SCHEMA | SPEC031_RELEASE_RUNNER_SCHEMA_V2 => {
-            return Err(Spec031ReleaseArtifactError::UnsupportedSchema);
-        }
-        _ => return Err(Spec031ReleaseArtifactError::UnsupportedSchema),
+    let current_layout = super::model::is_current_layout(&artifacts.schema);
+    let supported = if current_layout {
+        !has_legacy_binding
+    } else {
+        artifacts.schema == SPEC031_RELEASE_RUNNER_SCHEMA_V2 && has_legacy_binding
+    };
+    if !supported {
+        return Err(Spec031ReleaseArtifactError::UnsupportedSchema);
     }
-    if artifacts.schema == SPEC031_RELEASE_RUNNER_SCHEMA {
+    if current_layout {
         if !artifacts
             .manifest_files
             .iter()
@@ -171,7 +172,7 @@ fn validate_evidence_root(
     if observations != artifacts.reproducibility_observations {
         return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
     }
-    if artifacts.schema == SPEC031_RELEASE_RUNNER_SCHEMA {
+    if super::model::is_current_layout(&artifacts.schema) {
         let commands: Vec<Spec031ReleaseCommandRecord> = read_json(&root, "command-registry.json")?;
         if commands != artifacts.command_registry {
             return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
@@ -185,13 +186,13 @@ fn validate_evidence_root(
             return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
         }
     }
-    if artifacts.schema == SPEC031_RELEASE_RUNNER_SCHEMA {
+    if super::model::is_current_layout(&artifacts.schema) {
         let index: serde_json::Value = read_json(&root, "evidence-index.json")?;
         if index != super::runner_outputs::evidence_index(artifacts) {
             return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
         }
     }
-    if artifacts.schema == SPEC031_RELEASE_RUNNER_SCHEMA {
+    if super::model::is_current_layout(&artifacts.schema) {
         validate_summary(&root, artifacts)?;
     }
     for entry in &artifacts.fixture_registry {

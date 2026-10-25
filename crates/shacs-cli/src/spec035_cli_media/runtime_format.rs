@@ -112,28 +112,7 @@ pub(crate) fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
             artifact.artifact_id, artifact.mime_type, artifact.byte_len, artifact.redacted
         ));
     }
-    if report.media_projections.is_empty() {
-        lines.push(
-            "Spec035 media projections: unavailable (canonical records unavailable)".to_owned(),
-        );
-    } else {
-        lines.push(format!(
-            "Spec035 media projections: {}",
-            report.media_projections.len()
-        ));
-        for projection in &report.media_projections {
-            match super::present_media_projection(projection) {
-                Ok(presentation) => {
-                    lines.push(presentation.human);
-                    lines.push(format!("Spec035 media JSON: {}", presentation.machine_json));
-                }
-                Err(error) => lines.push(format!(
-                    "Spec035 media: state=unavailable reason=unavailable detail={}",
-                    redact_string(&error.to_string())
-                )),
-            }
-        }
-    }
+    lines.push("Spec035 media projections: unavailable (canonical records unavailable)".to_owned());
     lines.push(format!(
         "Spec035 revised projection: {}",
         serde_json::json!(report.spec035_revised)

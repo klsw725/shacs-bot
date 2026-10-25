@@ -12,7 +12,9 @@ use super::coverage::{
     artifact_hash, Spec031ArtifactMediaType, Spec031ExternalAuditRow, Spec031ExternalAuditStatus,
     Spec031TypedEvidenceClass,
 };
-use super::external_audit_facts::{external_owner_facts, ExternalOwnerFactDescriptor};
+use super::external_audit_facts::{
+    external_owner_facts_for, owner_fact_exists, ExternalOwnerFactDescriptor,
+};
 use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseCommandStatus, Spec031ReleaseRunArtifacts,
     Spec031ReleaseRunnerConfig,
@@ -34,7 +36,7 @@ pub(super) fn add_external_audits(
         .manifest_files
         .iter()
         .any(|file| file == super::spec035_execution::BINDING);
-    let mut specs: Vec<_> = external_owner_facts().iter().collect();
+    let mut specs = external_owner_facts_for(&artifacts.schema);
     if legacy_spec035 {
         specs.push(super::external_audit_facts::legacy_spec035_owner_fact());
     }
@@ -157,9 +159,14 @@ fn audit_passes(
         super::spec035_execution::preflight_bound(&config.repo_root, &config.evidence_root)?;
     }
     if implementation_artifacts.is_empty()
-        || !implementation_artifacts
-            .iter()
-            .all(|artifact| fact_artifact_exists(config, artifact))
+        || !implementation_artifacts.iter().all(|artifact| {
+            owner_fact_exists(
+                &config.repo_root,
+                &config.evidence_root,
+                &artifacts.schema,
+                artifact,
+            )
+        })
     {
         return Err(Spec031ReleaseArtifactError::MissingRequiredArtifact);
     }
@@ -172,22 +179,6 @@ fn audit_passes(
         return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
     }
     Ok(())
-}
-
-fn fact_artifact_exists(config: &Spec031ReleaseRunnerConfig, artifact: &str) -> bool {
-    let (path, token) = match artifact.split_once('#') {
-        Some(parts) => parts,
-        None => (artifact, ""),
-    };
-    let full_path = if path.starts_with("fixtures/") {
-        config.evidence_root.join(path)
-    } else {
-        config.repo_root.join(path)
-    };
-    let Ok(text) = fs::read_to_string(full_path) else {
-        return false;
-    };
-    token.is_empty() || text.contains(token)
 }
 
 fn render_audit(

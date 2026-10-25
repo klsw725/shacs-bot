@@ -1,4 +1,6 @@
 use super::coverage::Spec031ExternalOwnerId;
+use sha2::{Digest, Sha256};
+use std::path::Path;
 
 pub(super) struct ExternalOwnerFactDescriptor {
     pub(super) owner: Spec031ExternalOwnerId,
@@ -60,11 +62,78 @@ pub(super) fn external_owner_facts() -> &'static [ExternalOwnerFactDescriptor] {
             slug: "spec034",
             source_locator: "docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md",
             source_status_locator: "docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md:3",
-            fact_artifacts: &["crates/shacs-core/tests/runtime_agent.rs#runtime_context_routes_stored_video_with_injected_analyzer"],
+            fact_artifacts: &["crates/shacs-core/tests/spec034_persistence_operations.rs#final_edit_and_variation_candidates_publish_one_complete_record_each"],
             command_result_ids: &["spec031-owner-spec034"],
-            blocked_reason: "Spec034 media analyzer adapter fact is absent or failed",
+            blocked_reason: "Spec034 generated media persistence fact is absent or failed",
         },
     ]
+}
+
+const RETIRED_SPEC034_FACT_ARTIFACT: &str =
+    "crates/shacs-core/tests/runtime_agent.rs#runtime_context_routes_stored_video_with_injected_analyzer";
+pub(super) const RETIRED_SPEC034_ARCHIVE: &str =
+    "docs/archive/spec034-video-analyzer/runtime_agent_video_injection_test.rs";
+const RETIRED_SPEC034_ARCHIVE_SHA256: &str =
+    "df818f687d26dbc22881e136b6b0ea87dedcea3143943ab2f54f97d3fdcae512";
+
+fn retired_spec034_owner_fact() -> &'static ExternalOwnerFactDescriptor {
+    static FACT: ExternalOwnerFactDescriptor = ExternalOwnerFactDescriptor {
+        owner: Spec031ExternalOwnerId::Spec034,
+        slug: "spec034",
+        source_locator: "docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md",
+        source_status_locator:
+            "docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md:3",
+        fact_artifacts: &[RETIRED_SPEC034_FACT_ARTIFACT],
+        command_result_ids: &["spec031-owner-spec034"],
+        blocked_reason: "Spec034 media analyzer adapter fact is absent or failed",
+    };
+    &FACT
+}
+
+pub(super) fn external_owner_facts_for(schema: &str) -> Vec<&'static ExternalOwnerFactDescriptor> {
+    external_owner_facts()
+        .iter()
+        .map(|fact| {
+            if fact.owner == Spec031ExternalOwnerId::Spec034
+                && super::model::uses_retired_spec034_fact(schema)
+            {
+                retired_spec034_owner_fact()
+            } else {
+                fact
+            }
+        })
+        .collect()
+}
+
+pub(super) fn owner_fact_exists(
+    repo_root: &Path,
+    evidence_root: &Path,
+    schema: &str,
+    artifact: &str,
+) -> bool {
+    if artifact == RETIRED_SPEC034_FACT_ARTIFACT && super::model::uses_retired_spec034_fact(schema)
+    {
+        return retired_spec034_archive_has_test(repo_root);
+    }
+    let (path, token) = artifact.split_once('#').unwrap_or((artifact, ""));
+    let full_path = if path.starts_with("fixtures/") {
+        evidence_root.join(path)
+    } else {
+        repo_root.join(path)
+    };
+    std::fs::read_to_string(full_path).is_ok_and(|text| token.is_empty() || text.contains(token))
+}
+
+fn retired_spec034_archive_has_test(repo_root: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(repo_root.join(RETIRED_SPEC034_ARCHIVE)) else {
+        return false;
+    };
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let test_name = RETIRED_SPEC034_FACT_ARTIFACT
+        .split_once('#')
+        .map_or("", |(_, name)| name);
+    digest == RETIRED_SPEC034_ARCHIVE_SHA256
+        && String::from_utf8(bytes).is_ok_and(|text| text.contains(test_name))
 }
 
 pub(super) fn legacy_spec035_owner_fact() -> &'static ExternalOwnerFactDescriptor {

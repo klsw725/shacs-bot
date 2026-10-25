@@ -75,43 +75,6 @@ pub fn ac005(input: &ReceiptInputs<'_>) -> Vec<SubObservation> {
     ])
 }
 
-pub fn ac007(input: &ReceiptInputs<'_>) -> Vec<SubObservation> {
-    sub_observations([
-        state_parity(input, "included"),
-        state_parity(input, "unsupported"),
-        state_parity(input, "extraction_failed"),
-        state_parity(input, "analyzer_missing"),
-        state_parity(input, "truncated"),
-        state_parity(input, "unavailable"),
-    ])
-}
-
-pub fn ac008(input: &ReceiptInputs<'_>) -> Vec<SubObservation> {
-    sub_observations([
-        ("injected", input.analyzer.runtime.injected),
-        ("missing", input.analyzer.missing_explicit),
-        (
-            "codec",
-            input.analyzer.codec_unsupported && input.analyzer.codec_reason_recorded,
-        ),
-        (
-            "duration",
-            input.analyzer.duration_capped && input.analyzer.duration_reason_recorded,
-        ),
-    ])
-}
-
 pub fn ac010(input: &ReceiptInputs<'_>) -> Vec<SubObservation> {
     input.documentation_policy.sub_observations.clone()
-}
-
-fn state_parity(input: &ReceiptInputs<'_>, name: &'static str) -> (&'static str, bool) {
-    (
-        name,
-        input
-            .surfaces
-            .states
-            .get(name)
-            .is_some_and(|state| state.all_empty()),
-    )
 }

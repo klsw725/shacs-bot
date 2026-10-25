@@ -1541,7 +1541,6 @@ impl<'a> AgentLoop<'a> {
                 chat_id: Some(&message.chat_id),
                 current_role: "user",
                 session_summary: session_summary.as_deref(),
-                analyzer_invocation: Some(media_turn.analyzer()),
             });
             let context_provider_handoff = build_live_context_provider_handoff(
                 &self.config.workspace,

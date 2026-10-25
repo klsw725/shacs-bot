@@ -36,9 +36,10 @@ pub fn coverage(
     commands: &[CommandEvidence],
 ) -> Result<CoverageDocument, Spec034ReleaseArtifactError> {
     Ok(CoverageDocument {
-        schema: "spec034.coverage.v1".to_owned(),
+        schema: "spec034.coverage.v2".to_owned(),
         run_id: config.run_id.clone(),
         requirements: catalog::requirements(&command_ref(commands, "sequential-integration")?),
+        retired_requirements: catalog::retired_requirements(),
         blockers: catalog::blockers(&command_ref(commands, "schema-contract")?),
     })
 }
@@ -68,7 +69,7 @@ pub fn write_documents(
         root,
         "owner-audits.json",
         &OwnerAuditDocument {
-            schema: "spec034.runner_owner_audits.v1".to_owned(),
+            schema: "spec034.runner_owner_audits.v2".to_owned(),
             run_id: config.run_id.clone(),
             audits: catalog::owner_audits(&integration),
         },

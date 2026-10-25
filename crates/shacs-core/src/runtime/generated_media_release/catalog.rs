@@ -1,5 +1,8 @@
 use super::model::*;
-use shacs_projection::{Spec034OwnerFactKind, Spec034ReviewKind, SPEC034_REQUIREMENTS};
+use shacs_projection::{
+    spec034_current_requirements, spec034_requirement_is_retired, Spec034OwnerFactKind,
+    Spec034ReviewKind, SPEC034_REQUIREMENTS, SPEC034_RETIRED_BY,
+};
 
 pub const FIXTURES: [&str; 2] = [
     ".omo/evidence/spec034/task-12-integration.json",
@@ -36,8 +39,7 @@ pub fn non_guarantees() -> Vec<String> {
 }
 
 pub fn requirements(evidence: &DigestRow) -> Vec<RequirementRow> {
-    SPEC034_REQUIREMENTS
-        .iter()
+    spec034_current_requirements()
         .map(|spec| RequirementRow {
             requirement_id: spec.id.to_owned(),
             primary_prd: spec.primary_prd,
@@ -45,6 +47,22 @@ pub fn requirements(evidence: &DigestRow) -> Vec<RequirementRow> {
             evidence: evidence.clone(),
         })
         .collect()
+}
+
+pub fn retired_requirements() -> Vec<RetiredRequirementRow> {
+    SPEC034_REQUIREMENTS
+        .iter()
+        .filter(|spec| spec034_requirement_is_retired(spec.id))
+        .map(|spec| RetiredRequirementRow {
+            requirement_id: spec.id.to_owned(),
+            primary_prd: spec.primary_prd,
+            retired_by: SPEC034_RETIRED_BY.to_owned(),
+        })
+        .collect()
+}
+
+pub fn current_requirement_count() -> usize {
+    spec034_current_requirements().count()
 }
 
 pub fn blockers(evidence: &DigestRow) -> Vec<BlockerRow> {

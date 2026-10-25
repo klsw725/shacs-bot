@@ -29,7 +29,7 @@ fn runner_publishes_runner_only_source_bound_evidence() -> Result<(), Box<dyn Er
     // Then
     assert_eq!(support::baseline_generation_count(), 1);
     assert_eq!(manifest.run_id, "spec034-success-fixture");
-    assert_eq!(manifest.requirement_count, 22);
+    assert_eq!(manifest.requirement_count, 13);
     assert_eq!(manifest.blocker_count, 8);
     assert!(manifest.runner_passed);
     assert!(manifest.runner_only);

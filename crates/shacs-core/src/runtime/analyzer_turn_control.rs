@@ -1,6 +1,6 @@
 use super::{
-    AgentRunSpec, AnalyzerInvocation, CancellationToken, ContextBuildRequest, ContextBuilder,
-    InboundMessage, MessageBus, ToolExecutionContext,
+    AgentRunSpec, CancellationToken, ContextBuildRequest, ContextBuilder, InboundMessage,
+    MessageBus, ToolExecutionContext,
 };
 use serde_json::{json, Value};
 use shacs_config::RawCredential;
@@ -11,7 +11,6 @@ use std::time::Instant;
 pub(crate) struct MediaTurnControl {
     cancellation: Option<CancellationToken>,
     deadline: Option<Instant>,
-    analyzer: AnalyzerInvocation,
     runtime_override: Option<RawCredential>,
     bus: MessageBus,
     session_key: String,
@@ -34,14 +33,9 @@ pub(crate) struct MediaTurnInput<'a> {
 
 impl MediaTurnControl {
     pub(crate) fn new(input: MediaTurnInput<'_>) -> Self {
-        let analyzer = input.context_builder.analyzer_invocation(
-            input.cancellation.clone().unwrap_or_default(),
-            input.deadline,
-        );
         Self {
             cancellation: input.cancellation,
             deadline: input.deadline,
-            analyzer,
             runtime_override: input.runtime_override,
             bus: input.bus,
             session_key: input.session_key,
@@ -50,10 +44,6 @@ impl MediaTurnControl {
             max_injections: input.max_injections,
             is_command: None,
         }
-    }
-
-    pub(crate) fn analyzer(&self) -> AnalyzerInvocation {
-        self.analyzer.clone()
     }
 
     pub(crate) fn invoke(&mut self, is_command: fn(&str) -> bool) -> ProviderInvocation {
@@ -159,7 +149,6 @@ fn injected_user_message(builder: &ContextBuilder, message: &InboundMessage) -> 
             chat_id: Some(&message.chat_id),
             current_role: "user",
             session_summary: None,
-            analyzer_invocation: None,
         })
         .into_iter()
         .find(|candidate| candidate.get("role").and_then(Value::as_str) == Some("user"))

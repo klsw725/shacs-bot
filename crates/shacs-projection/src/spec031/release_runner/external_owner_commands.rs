@@ -1,9 +1,24 @@
 use super::current_commands::focused_test;
-use super::model::{Spec031ReleaseCommandSpec, Spec031ReleaseGateKind, Spec031ReleaseRunnerConfig};
+use super::model::{
+    uses_retired_spec034_fact, Spec031ReleaseCommandSpec, Spec031ReleaseGateKind,
+    Spec031ReleaseRunnerConfig,
+};
 
 pub(super) fn exact_owner_commands(
     config: &Spec031ReleaseRunnerConfig,
+    schema: &str,
 ) -> [Spec031ReleaseCommandSpec; 7] {
+    let (spec034_target, spec034_test) = if uses_retired_spec034_fact(schema) {
+        (
+            "runtime_agent",
+            "runtime_context_routes_stored_video_with_injected_analyzer",
+        )
+    } else {
+        (
+            "spec034_persistence_operations",
+            "final_edit_and_variation_candidates_publish_one_complete_record_each",
+        )
+    };
     [
         exact_owner_test(
             config,
@@ -44,8 +59,8 @@ pub(super) fn exact_owner_commands(
             config,
             "spec031-owner-spec034",
             "shacs-core",
-            "runtime_agent",
-            "runtime_context_routes_stored_video_with_injected_analyzer",
+            spec034_target,
+            spec034_test,
         ),
         exact_owner_test(
             config,

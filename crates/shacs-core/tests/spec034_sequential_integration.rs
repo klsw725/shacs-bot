@@ -1,7 +1,7 @@
 #[path = "../examples/spec034_sequential_integration_fixture/scenario.rs"]
 mod scenario;
 
-use shacs_projection::SPEC034_REQUIREMENTS;
+use shacs_projection::{spec034_current_requirements, SPEC034_RETIRED_REQUIREMENTS};
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::path::Path;
@@ -31,26 +31,6 @@ const EXPANDED_RECEIPTS: &[(&str, &[&str])] = &[
             "options",
             "lifecycle",
             "disclosure",
-        ],
-    ),
-    (
-        "034-MH008",
-        &[
-            "states",
-            "stored_provenance",
-            "generated_provenance",
-            "minimum_fields",
-        ],
-    ),
-    (
-        "034-MH009",
-        &[
-            "runtime_injection",
-            "source",
-            "sandbox",
-            "credential",
-            "disclosure",
-            "snapshot",
         ],
     ),
     (
@@ -86,18 +66,6 @@ const EXPANDED_RECEIPTS: &[(&str, &[&str])] = &[
             "disclosure",
         ],
     ),
-    (
-        "034-AC007",
-        &[
-            "included",
-            "unsupported",
-            "extraction_failed",
-            "analyzer_missing",
-            "truncated",
-            "unavailable",
-        ],
-    ),
-    ("034-AC008", &["injected", "missing", "codec", "duration"]),
     (
         "034-AC010",
         &[
@@ -148,16 +116,19 @@ fn sequential_receipts_link_every_requirement_to_observed_production_behavior(
         .iter()
         .map(|receipt| receipt.requirement_id)
         .collect::<Vec<_>>();
-    let canonical_ids = SPEC034_REQUIREMENTS
-        .iter()
+    let canonical_ids = spec034_current_requirements()
         .map(|requirement| requirement.id)
         .collect::<Vec<_>>();
 
     // Then
-    assert_eq!(report.receipts.len(), 22);
+    assert_eq!(report.receipts.len(), 13);
     assert!(report.is_complete());
     assert_eq!(receipt_ids, canonical_ids);
-    assert_eq!(receipt_ids.iter().collect::<BTreeSet<_>>().len(), 22);
+    assert_eq!(receipt_ids.iter().collect::<BTreeSet<_>>().len(), 13);
+    assert_eq!(report.retired_requirements, SPEC034_RETIRED_REQUIREMENTS);
+    assert!(receipt_ids
+        .iter()
+        .all(|id| !SPEC034_RETIRED_REQUIREMENTS.contains(id)));
     assert!(report
         .receipts
         .iter()
@@ -169,21 +140,19 @@ fn sequential_receipts_link_every_requirement_to_observed_production_behavior(
         report.lifecycle_states,
         ["started", "partial", "final", "failed", "cancelled"]
     );
-    assert!(report.analyzer.codec_unsupported);
-    assert!(report.analyzer.duration_capped);
     assert!(report.edit.replacement_revalidated);
     assert!(report.crash.before_rename_hidden_and_clean);
     assert!(report.crash.after_rename_recovered);
-    assert_eq!(report.replay.probe_counts, [1, 1, 1, 1]);
-    assert_eq!(report.replay.replay_counts, [0, 0, 0, 0]);
-    assert!(report.surfaces.semantic_parity);
-    assert!(!report.surfaces.http_websocket_raw_equal);
-    assert!(report.surfaces.cli_diff.is_empty());
-    assert!(report.surfaces.http_diff.is_empty());
-    assert!(report.surfaces.websocket_diff.is_empty());
-    assert!(report.surfaces.channel_diff.is_empty());
-    assert!(report.surfaces.tui_diff.is_empty());
-    assert!(!report.secret_scan.inputs.is_empty());
+    assert_eq!(
+        report
+            .secret_scan
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>(),
+        ["artifact", "edit", "remote"]
+    );
+    assert_eq!(report.secret_scan.forbidden_classes.len(), 8);
     assert!(report.secret_scan.matches.is_empty());
     assert!(report.adversarial.all_observed());
     for (requirement_id, expected_names) in EXPANDED_RECEIPTS {
@@ -204,29 +173,6 @@ fn sequential_receipts_link_every_requirement_to_observed_production_behavior(
             .iter()
             .all(|observation| observation["observed"] == true));
     }
-    assert_eq!(
-        report
-            .surfaces
-            .states
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>(),
-        [
-            "included",
-            "unsupported",
-            "extraction_failed",
-            "analyzer_missing",
-            "truncated",
-            "unavailable",
-        ]
-        .into_iter()
-        .collect()
-    );
-    assert!(report
-        .surfaces
-        .states
-        .values()
-        .all(|state| state.all_empty()));
     assert!(report.cleanup);
     Ok(())
 }

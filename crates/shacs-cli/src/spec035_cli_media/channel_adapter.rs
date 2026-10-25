@@ -1,19 +1,4 @@
 use super::super::*;
-use shacs_channels::project_spec035_media_for_channel;
-
-impl ExternalTransportRuntimeContext {
-    pub(crate) fn media_projection(
-        &self,
-    ) -> Result<Option<shacs_channels::ChannelSpec035MediaProjection>, ChannelError> {
-        let Some(data_dir) = self.durable_data_dir.as_ref() else {
-            return Ok(None);
-        };
-        shacs_core::runtime::Spec035MediaProjectionStore::new(data_dir)
-            .read()
-            .map(|projection| projection.map(project_spec035_media_for_channel))
-            .map_err(|_| ChannelError::Delivery("media projection is invalid".to_owned()))
-    }
-}
 
 impl ChannelAdapter for ExternalTransportChannelAdapter {
     fn name(&self) -> &str {
@@ -55,19 +40,7 @@ impl ChannelAdapter for ExternalTransportChannelAdapter {
         Ok(())
     }
 
-    fn send(&self, mut message: OutboundMessage) -> Result<(), ChannelError> {
-        if let Some(media) = self.transport_context.media_projection()? {
-            message.metadata.insert(
-                "media_capability".to_owned(),
-                serde_json::to_value(media.media_capability())
-                    .map_err(|error| ChannelError::Delivery(error.to_string()))?,
-            );
-            message.metadata.insert(
-                "media_delivery_status".to_owned(),
-                serde_json::to_value(media.delivery_status())
-                    .map_err(|error| ChannelError::Delivery(error.to_string()))?,
-            );
-        }
+    fn send(&self, message: OutboundMessage) -> Result<(), ChannelError> {
         self.outbound_tx
             .as_ref()
             .ok_or_else(|| {

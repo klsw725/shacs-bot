@@ -47,16 +47,6 @@ pub(crate) fn runtime_inspect_with_owner(
     providers.sort_by(|left, right| left.name.cmp(&right.name));
     let generated_media =
         inspect_generated_media(&bundle.context.media_dir(Some("image-generation")))?;
-    let media_projections =
-        shacs_core::runtime::Spec035MediaProjectionStore::new(&bundle.context.data_dir)
-            .read()
-            .map_err(|_| {
-                CliError::Runtime(
-                    "Spec035 media projection unavailable: invalid canonical record".to_owned(),
-                )
-            })?
-            .into_iter()
-            .collect();
     let capabilities = runtime_capabilities(&bundle);
     let sessions = inspect_runtime_sessions(&workspace)?;
     let marker_path = runtime_update_marker_path(&bundle.context.data_dir);
@@ -111,7 +101,6 @@ pub(crate) fn runtime_inspect_with_owner(
         provider: bundle.config.agents.defaults.provider,
         providers,
         generated_media,
-        media_projections,
         spec035_revised,
         capabilities,
         sessions,

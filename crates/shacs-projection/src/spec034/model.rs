@@ -51,3 +51,27 @@ pub const SPEC034_REQUIREMENTS: [Spec034RequirementSpec; 22] = [
     requirement("034-AC011", Spec034PrimaryPrd::Prd003),
     requirement("034-AC012", Spec034PrimaryPrd::Prd003),
 ];
+
+pub const SPEC034_RETIRED_BY: &str = "040";
+
+pub const SPEC034_RETIRED_REQUIREMENTS: [&str; 9] = [
+    "034-MH007",
+    "034-MH008",
+    "034-MH009",
+    "034-MH010",
+    "034-AC007",
+    "034-AC008",
+    "034-AC009",
+    "034-AC011",
+    "034-AC012",
+];
+
+pub fn spec034_requirement_is_retired(id: &str) -> bool {
+    SPEC034_RETIRED_REQUIREMENTS.contains(&id)
+}
+
+pub fn spec034_current_requirements() -> impl Iterator<Item = &'static Spec034RequirementSpec> {
+    SPEC034_REQUIREMENTS
+        .iter()
+        .filter(|requirement| !spec034_requirement_is_retired(requirement.id))
+}

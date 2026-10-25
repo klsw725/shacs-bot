@@ -1158,7 +1158,6 @@ pub struct RuntimeInspectReport {
     pub provider: String,
     pub providers: Vec<ProviderStatus>,
     pub generated_media: Vec<GeneratedMediaArtifactInspect>,
-    pub media_projections: Vec<shacs_projection::Spec035MediaProjection>,
     pub spec035_revised: shacs_projection::Spec035RevisedProjection,
     pub capabilities: Vec<RuntimeCapabilityReport>,
     pub sessions: RuntimeSessionInspect,
@@ -4466,7 +4465,7 @@ fn diagnostics_snapshot_from_runtime_inspect(report: &RuntimeInspectReport) -> D
                 "digest": &report.containment.digest,
             },
             "generated_media": generated_media,
-            "spec035_media_projections": json!(&report.media_projections),
+            "spec035_media_projections": json!([]),
             "spec033": spec033,
             "sessions": {
                 "count": report.sessions.count,
@@ -26507,7 +26506,6 @@ mod tests {
                     chat_id: Some("default"),
                     current_role: "user",
                     session_summary: None,
-                    analyzer_invocation: None,
                 });
         let request_json = serde_json::to_string(&messages)?;
 

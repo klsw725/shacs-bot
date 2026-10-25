@@ -50,12 +50,6 @@ pub mod spec031_release_runner_triage;
 pub mod spec033_snapshot;
 #[path = "spec035_capability_matrix.rs"]
 pub mod spec035_capability_matrix;
-#[path = "spec035_media_invariants.rs"]
-pub mod spec035_media_invariants;
-#[path = "spec035_media_model.rs"]
-pub mod spec035_media_model;
-#[path = "spec035_media_model/support.rs"]
-pub mod spec035_media_model_support;
 #[path = "spec035_reconnect_accounting.rs"]
 pub mod spec035_reconnect_accounting;
 #[path = "spec035_revised_characterization.rs"]
