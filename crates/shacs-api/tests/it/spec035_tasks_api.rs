@@ -1,12 +1,12 @@
 use axum::body::{to_bytes, Body};
 use shacs_api::{api_router, api_router_with_local_mutations, ChatCompletionAdapter};
 use shacs_projection::{
-    Spec033GoalStatus, Spec035TaskActionStatus, Spec035TaskDetail, Spec035TaskOwnerKind,
+    Spec033GoalStatus, Spec035TaskCount, Spec035TaskDetail, Spec035TaskOwnerKind,
     Spec035TasksProjection,
 };
 use shacs_providers::LlmResponse;
 use shacs_session::{Session, SessionManager};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -144,70 +144,111 @@ async fn unsupported_tasks_action_is_rejected_before_owner_access(
     Ok(())
 }
 
+fn copy_dir(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let path = target.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &path)?;
+        } else {
+            std::fs::copy(entry.path(), path)?;
+        }
+    }
+    Ok(())
+}
+
+fn tree(
+    root: &Path,
+    path: &Path,
+    entries: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
+) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(path)?.is_dir() {
+        entries.push((path.strip_prefix(root).unwrap_or(path).to_path_buf(), None));
+        for entry in std::fs::read_dir(path)? {
+            tree(root, &entry?.path(), entries)?;
+        }
+    } else {
+        entries.push((
+            path.strip_prefix(root).unwrap_or(path).to_path_buf(),
+            Some(std::fs::read(path)?),
+        ));
+    }
+    Ok(())
+}
+
+fn data_tree(data_dir: &Path) -> std::io::Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
+    let mut entries = Vec::new();
+    tree(data_dir, data_dir, &mut entries)?;
+    entries.sort();
+    Ok(entries)
+}
+
 #[tokio::test]
-async fn app_stop_action_stays_requested_until_owner_terminal_receipt(
+async fn leftover_app_data_leaves_tasks_unchanged_and_app_actions_unsupported(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Given
-    let root = tempfile::tempdir()?;
-    let workspace = root.path().join("workspace");
-    let data_dir = root.path().join("data");
-    let mut manager = SessionManager::new(&workspace)?;
-    manager.save(&Session::new("cli:direct"))?;
-    let app_id = shacs_core::app::AppId::parse("fixture-app")?;
-    let registry = shacs_core::app::AppRegistry {
-        entries: std::collections::BTreeMap::from([(
-            app_id.clone(),
-            shacs_core::app::AppRegistryEntry {
-                app_id: app_id.clone(),
-                version: "1".to_owned(),
-                digest: "sha256:fixture".to_owned(),
-                bundle_path: data_dir.join("apps/fixture-app.shacsapp"),
-                lifecycle_state: shacs_core::app::AppLifecycleState::Enabled,
-                permission_requests: Vec::new(),
-                secret_requests: Vec::new(),
-                resource_summaries: Vec::new(),
-                grant_reference: None,
-                unavailable_reasons: Vec::new(),
-                process_snapshots: Vec::new(),
-                installed_at_unix_ms: 1,
-            },
-        )]),
-    };
-    shacs_core::app::AppRegistryStore::new(&data_dir).save(&registry)?;
-    let journal = shacs_core::app_lifecycle::AppSupervisorJournal::new(data_dir.join("apps"));
-    let started = journal.request(
-        &app_id,
-        shacs_core::app_lifecycle::AppLifecycleAction::Start,
+    let empty = tempfile::tempdir()?;
+    let leftover = tempfile::tempdir()?;
+    let data_dir = leftover.path().join("data");
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../shacs-core/tests/fixtures/spec043_leftover_apps"),
+        &data_dir,
     )?;
-    journal.complete(
-        &started,
-        shacs_core::app_lifecycle::AppProcessState::Running,
-        "sha256:fixture",
-        "runtime:fixture",
-        Vec::new(),
-    )?;
-    let adapter = Arc::new(WorkspaceAdapter::new(workspace, data_dir));
+    let before = data_tree(&data_dir)?;
+    let adapter = Arc::new(WorkspaceAdapter::new(
+        leftover.path().join("workspace"),
+        data_dir.clone(),
+    ));
 
     // When
-    let (status, bytes) = request(
-        api_router_with_local_mutations(adapter),
-        "POST",
-        "/v1/tasks/actions",
-        r#"{"owner":"app","action":"stop","locator":"fixture-app","session_id":"cli:direct","transport_hello":{"client_id":"client:tasks-api","schema_versions":[1],"mutation_capabilities":["task_stop"]}}"#,
+    let (_, without) = request(
+        api_router(Arc::new(WorkspaceAdapter::new(
+            empty.path().join("workspace"),
+            empty.path().join("data"),
+        ))),
+        "GET",
+        "/v1/tasks?session_id=cli%3Adirect",
+        "",
     )
     .await?;
+    let (status, with) = request(
+        api_router(adapter.clone()),
+        "GET",
+        "/v1/tasks?session_id=cli%3Adirect",
+        "",
+    )
+    .await?;
+    let mut rejections = Vec::new();
+    for (action, locator) in [("stop", "demo.clock"), ("recover", "demo.recover")] {
+        rejections.push(
+            request(
+                api_router_with_local_mutations(adapter.clone()),
+                "POST",
+                "/v1/tasks/actions",
+                &format!(
+                    r#"{{"owner":"app","action":"{action}","locator":"{locator}","session_id":"cli:direct","transport_hello":{{"client_id":"client:tasks-api","schema_versions":[1],"mutation_capabilities":["task_stop","task_recover"]}}}}"#
+                ),
+            )
+            .await?,
+        );
+    }
 
     // Then
     assert_eq!(status, axum::http::StatusCode::OK);
-    let projection = Spec035TasksProjection::parse_json(std::str::from_utf8(&bytes)?)?;
-    let app = projection
+    assert_eq!(with, without);
+    let projection = Spec035TasksProjection::parse_json(std::str::from_utf8(&with)?)?;
+    assert_eq!(projection.coverage().app, Spec035TaskCount::Unavailable);
+    assert!(projection
         .rows()
         .iter()
-        .find(|row| row.owner().kind() == Spec035TaskOwnerKind::App)
-        .ok_or("app row")?;
-    assert_eq!(
-        app.action().map(|action| action.status),
-        Some(Spec035TaskActionStatus::Requested)
-    );
+        .all(|row| row.owner().kind() != Spec035TaskOwnerKind::App));
+    for (status, body) in rejections {
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8(body)?.contains("unsupported tasks owner/action pair"));
+    }
+    assert_eq!(adapter.owner_accesses.load(Ordering::SeqCst), 1);
+    assert_eq!(data_tree(&data_dir)?, before);
     Ok(())
 }

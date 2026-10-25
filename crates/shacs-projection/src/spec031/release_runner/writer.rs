@@ -62,7 +62,9 @@ pub(super) fn summary_status(artifacts: &Spec031ReleaseRunArtifacts) -> &'static
         .manifest_files
         .iter()
         .any(|file| file == super::spec035_execution::BINDING);
-    let expected_external_audits = if legacy_spec035 { 6 } else { 5 };
+    let expected_external_audits =
+        super::external_audit_facts::external_owner_facts_for(&artifacts.schema).len()
+            + usize::from(legacy_spec035);
     if !artifacts.failure_triage.is_empty()
         || artifacts.command_registry.is_empty()
         || artifacts.command_registry.iter().any(|command| {

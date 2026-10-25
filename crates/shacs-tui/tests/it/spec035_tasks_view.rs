@@ -19,8 +19,7 @@ fn mixed_owner_projection_renders_canonical_tasks_fields() -> Result<(), TestErr
     let rendered = tasks_projection_lines(&projection).join("\n");
 
     // Then
-    assert!(rendered
-        .contains("tasks coverage: goal=1 child=1 workflow=1 automation=1 app=1 recovery=1"));
+    assert!(rendered.contains("tasks coverage: goal=1 child=1 workflow=1 automation=1 recovery=1"));
     assert!(rendered
         .contains("task: owner=goal locator=goal-1 observed=10 freshness=current state=blocked"));
     assert!(rendered

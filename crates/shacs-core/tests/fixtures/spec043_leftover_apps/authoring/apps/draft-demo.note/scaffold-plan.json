@@ -1,0 +1,25 @@
+{
+  "appId": "demo.note",
+  "draftId": "draft-demo.note",
+  "files": [
+    {
+      "path": "candidates/manifest.json",
+      "kind": "manifest-candidate",
+      "digest": "sha256:ddc5a1e04bf731aa2b865f8b4c2d898709d6f351bb0cc28b345910a67742de53",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    },
+    {
+      "path": "candidates/README.md",
+      "kind": "readme-candidate",
+      "digest": "sha256:6dc9392ba8babdb041bdee030256575260ceeb52cbf19a6dc6bff7c6088255bc",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    }
+  ],
+  "ownerBoundary": "authoring draft only; install, enable, start, grants, secrets, tools, services, and active skills are separate owner boundaries",
+  "riskLabel": "no-run-static-scaffold",
+  "installBlockers": [
+    "manual review and explicit install handoff are required"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "demo.draft",
+  "version": "0.1.0",
+  "entry": "README.md",
+  "name": "demo.draft",
+  "skills": [],
+  "resources": [],
+  "permissions": [],
+  "secrets": []
+}

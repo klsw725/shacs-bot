@@ -1,5 +1,6 @@
 // allow: SIZE_OK — preexisting CLI composition root; Spec034 retains five typed module/field/diagnostics fixture hooks
 mod agent_repl;
+mod apps_retirement;
 mod automation_outcome;
 mod automation_producer;
 mod automation_worker;
@@ -11,8 +12,6 @@ mod onboard_wizard;
 mod runtime_cleanup;
 pub mod spec030_cli;
 mod spec030_startup_facts;
-#[cfg(not(test))]
-mod spec031_activation_provider;
 mod spec031_cli;
 mod spec031_management;
 mod spec033_cli;
@@ -45,9 +44,6 @@ use shacs_api::{
     ChatCompletionAdapter, ChatCompletionInvocation, ChatCompletionRequest,
     Spec035TasksStreamEvent,
 };
-use shacs_app::app_authoring_flow::{
-    ApplyError, AuthoringFlowStore, AuthoringProposal, InstallHandoff, VerificationOutcome,
-};
 use shacs_channels::{
     builtin_channel_default_configs, builtin_live_worker_descriptors, normalize_websocket_frame,
     normalize_whatsapp_bridge_message, runtime_workflow_projection_outbound,
@@ -68,17 +64,6 @@ use shacs_config::{
     PermissionModeSource, ProcessEnv, ProviderAuth, ProviderConfig, RawCredential,
     RememberedPermissionFileStore, WorkspacePermissionId,
 };
-use shacs_core::app::{AppError, AppId, AppLifecycleState, AppRegistryEntry, AppRegistryStore};
-use shacs_core::app_authoring::{
-    AppAuthoringError, AppAuthoringInitOutcome, AppAuthoringInitReport, AppAuthoringStore,
-};
-use shacs_core::app_lifecycle::{
-    AppLifecycleAction, AppLifecycleBlocker, AppLifecycleError, AppLifecycleReceipt,
-    AppSupervisorJournal,
-};
-use shacs_core::controlled_child::{
-    run_generic_argv, ControlledChildAbort, ControlledChildCommand, ControlledChildOutcome,
-};
 use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
     build_core_diagnostics_aggregate, build_permission_diagnostics_summary,
@@ -88,35 +73,31 @@ use shacs_core::runtime::{
     parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
     request_runtime_control, resolve_context_reference,
     runtime_stop_request_marker_path as core_runtime_stop_request_marker_path,
-    serialize_spec035_tasks_projection, ActionNormalizationState, ActivationStatus,
-    ActivationStore, AgentHook, AgentHookContext, AgentLoop, AgentLoopCommandResult,
-    AgentLoopConfig, AgentLoopTurnResult, AppProcessDriver, AppProcessRunOutcome, AppStartFacts,
-    AppSupervisor, AppSupervisorTerminal, CompositeHook, ConfigMigrationState, ConfigSnapshotRef,
+    serialize_spec035_tasks_projection, ActionNormalizationState, AgentHook, AgentHookContext,
+    AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
     ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, ContextBudgetInput,
     ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
     ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
     ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput,
     CredentialResolvingImageGenerationClient, CredentialResolvingProviderClient, DiscoveredPlugin,
-    DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, ExecutionSnapshot,
-    ExecutionSnapshotInput, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
-    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage,
-    InheritedPermissionContext, McpLifecycle, MessageBus, PermissionCeilingSnapshot,
-    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
-    PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError, PluginHookCatalog,
-    PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
+    DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, HeartbeatError,
+    HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor,
+    HeartbeatWorker, InboundMessage, InheritedPermissionContext, McpLifecycle, MessageBus,
+    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
+    PermissionedAction, PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError,
+    PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
     PluginProcessPermissionContext, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
     PluginSurfaceProjection, ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
     ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
     ProcessGateTerminalPrecondition, ProcessIdentity, ProcessPluginHookCommandExecutor,
-    ProcessRedactedCommand, ProfileSelectionSnapshot, ProjectPermissionStoreConfig,
-    ProviderClientResolutionRequest, ProviderCredentialClientConfig, ProviderCredentialRuntime,
-    ProviderInputSnapshot, ProviderNotificationEvaluator, ReplayContract, RuntimeBoundaryOrigin,
-    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, SafetyCapability, Session,
-    SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome, SessionTurnLock,
-    SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
+    ProcessRedactedCommand, ProjectPermissionStoreConfig, ProviderClientResolutionRequest,
+    ProviderCredentialClientConfig, ProviderCredentialRuntime, ProviderNotificationEvaluator,
+    RuntimeBoundaryOrigin, RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall,
+    SafetyCapability, Session, SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome,
+    SessionTurnLock, SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
     SubagentExecutionConfig, SubagentRuntime, SurfaceActionOutcomeKind, SurfaceActionRequestKind,
-    SurfaceApprovalRequest, TokenBudgetSnapshot, ToolEvent, ToolSearchConfig, ToolSearchMode,
-    ToolStatus, WorkspaceTrustRef, HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
+    SurfaceApprovalRequest, ToolEvent, ToolSearchConfig, ToolSearchMode, ToolStatus,
+    HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
 };
 use shacs_core::tools::{
     AskUserTool, CronTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
@@ -264,7 +245,6 @@ type ExternalTransportRunner = Arc<
         ) + Send
         + Sync,
 >;
-type AppActivationLink = (String, String);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CliCommand {
@@ -292,7 +272,7 @@ pub enum CliCommand {
     RuntimeRestart(RuntimeStopOptions),
     Session(SessionCommand),
     Skills(SkillsCommand),
-    Apps(AppsCommand),
+    AppsRetired(apps_retirement::AppsRetiredOptions),
     Plugins(PluginsCommand),
     Hooks(HooksCommand),
     Channels(ChannelsCommand),
@@ -445,23 +425,6 @@ pub enum SkillsCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppsCommand {
-    Init(AppsInitOptions),
-    Install(AppsInstallOptions),
-    List(AppsListOptions),
-    Inspect(AppsInspectOptions),
-    Enable(AppsIdOptions),
-    Disable(AppsIdOptions),
-    Uninstall(AppsIdOptions),
-    Start(AppsIdOptions),
-    Stop(AppsIdOptions),
-    Restart(AppsIdOptions),
-    Recover(AppsIdOptions),
-    Propose(AppsAuthoringFlowOptions),
-    Apply(AppsAuthoringFlowOptions),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginsCommand {
     List(PluginsListOptions),
     Inspect(PluginsInspectOptions),
@@ -549,49 +512,6 @@ pub struct PermissionsIdOptions {
     pub config_path: Option<PathBuf>,
     pub workspace_override: Option<PathBuf>,
     pub rule_id_prefix: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AppsInitOptions {
-    pub config_path: Option<PathBuf>,
-    pub workspace_override: Option<PathBuf>,
-    pub app_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AppsInstallOptions {
-    pub config_path: Option<PathBuf>,
-    pub workspace_override: Option<PathBuf>,
-    pub bundle_path: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AppsListOptions {
-    pub config_path: Option<PathBuf>,
-    pub workspace_override: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AppsInspectOptions {
-    pub config_path: Option<PathBuf>,
-    pub workspace_override: Option<PathBuf>,
-    pub app_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AppsIdOptions {
-    pub config_path: Option<PathBuf>,
-    pub workspace_override: Option<PathBuf>,
-    pub app_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AppsAuthoringFlowOptions {
-    pub config_path: Option<PathBuf>,
-    pub workspace_override: Option<PathBuf>,
-    pub candidate_path: PathBuf,
-    pub intent: String,
-    pub update: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1985,15 +1905,12 @@ pub struct SessionDeleteReport {
 
 #[derive(Debug)]
 pub enum CliError {
-    App(AppError),
-    AppAuthoring(AppAuthoringError),
-    AppLifecycle(AppLifecycleError),
-    AppApply(ApplyError),
     Api(ApiError),
     Config(ConfigError),
     Io(std::io::Error),
     InvalidArguments(String),
     Provider(ProviderError),
+    Retired(String),
     Runtime(String),
     TransportRejected(shacs_projection::Spec035TransportMutationRejection),
     Unsupported(String),
@@ -2002,15 +1919,12 @@ pub enum CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::App(error) => write!(formatter, "{error}"),
-            Self::AppAuthoring(error) => write!(formatter, "{error}"),
-            Self::AppLifecycle(error) => write!(formatter, "{error}"),
-            Self::AppApply(error) => write!(formatter, "{error}"),
             Self::Api(error) => write!(formatter, "{error}"),
             Self::Config(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "CLI I/O failed: {error}"),
             Self::InvalidArguments(error) => write!(formatter, "invalid CLI arguments: {error}"),
             Self::Provider(error) => write!(formatter, "{error}"),
+            Self::Retired(notice) => formatter.write_str(notice),
             Self::Runtime(error) => write!(formatter, "runtime error: {error}"),
             Self::TransportRejected(rejection) => {
                 formatter.write_str(&render_spec035_transport_rejection(rejection))
@@ -2021,30 +1935,6 @@ impl fmt::Display for CliError {
 }
 
 impl std::error::Error for CliError {}
-
-impl From<AppError> for CliError {
-    fn from(error: AppError) -> Self {
-        Self::App(error)
-    }
-}
-
-impl From<AppAuthoringError> for CliError {
-    fn from(error: AppAuthoringError) -> Self {
-        Self::AppAuthoring(error)
-    }
-}
-
-impl From<AppLifecycleError> for CliError {
-    fn from(error: AppLifecycleError) -> Self {
-        Self::AppLifecycle(error)
-    }
-}
-
-impl From<ApplyError> for CliError {
-    fn from(error: ApplyError) -> Self {
-        Self::AppApply(error)
-    }
-}
 
 impl From<ConfigError> for CliError {
     fn from(error: ConfigError) -> Self {
@@ -2868,7 +2758,9 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::RuntimeRestart(options) => runtime_restart(options).map(format_runtime_restart),
         CliCommand::Session(command) => run_session_command(command),
         CliCommand::Skills(command) => run_skills_command(command),
-        CliCommand::Apps(command) => run_apps_command(command),
+        CliCommand::AppsRetired(options) => {
+            Err(CliError::Retired(apps_retirement::notice(&options)))
+        }
         CliCommand::Plugins(command) => run_plugins_command(command),
         CliCommand::Hooks(command) => run_hooks_command(command),
         CliCommand::Channels(command) => run_channels_command(command),
@@ -2925,7 +2817,7 @@ where
         "runtime" => parse_runtime(parser, global_config),
         "session" | "sessions" => parse_session(parser, global_config),
         "skills" | "skill" => parse_skills(parser, global_config),
-        "apps" | "app" => parse_apps(parser, global_config),
+        "apps" | "app" => Ok(apps_retirement::parse(parser, global_config)),
         "plugins" | "plugin" => parse_plugins(parser, global_config),
         "hooks" | "hook" => parse_hooks(parser, global_config),
         "channels" | "channel" => parse_channels(parser, global_config),
@@ -6982,28 +6874,6 @@ fn run_skills_command(command: SkillsCommand) -> Result<String, CliError> {
     }
 }
 
-fn run_apps_command(command: AppsCommand) -> Result<String, CliError> {
-    match command {
-        AppsCommand::Init(options) => apps_init(options).map(format_apps_init),
-        AppsCommand::Install(options) => apps_install(options).map(format_apps_entry_report),
-        AppsCommand::List(options) => apps_list(options).map(format_apps_list),
-        AppsCommand::Inspect(options) => apps_inspect(options).map(format_apps_inspect),
-        AppsCommand::Enable(options) => apps_enable(options).map(format_apps_entry_report),
-        AppsCommand::Disable(options) => apps_disable(options).map(format_apps_entry_report),
-        AppsCommand::Uninstall(options) => apps_uninstall(options).map(format_apps_uninstall),
-        AppsCommand::Start(options) => apps_start(options).map(format_apps_lifecycle),
-        AppsCommand::Stop(options) => {
-            apps_request(options, AppLifecycleAction::Stop).map(format_apps_lifecycle)
-        }
-        AppsCommand::Restart(options) => {
-            apps_request(options, AppLifecycleAction::Restart).map(format_apps_lifecycle)
-        }
-        AppsCommand::Recover(options) => apps_recover(options).map(format_apps_lifecycle),
-        AppsCommand::Propose(options) => apps_propose(options).map(format_apps_proposal),
-        AppsCommand::Apply(options) => apps_apply(options).map(format_apps_apply),
-    }
-}
-
 fn run_plugins_command(command: PluginsCommand) -> Result<String, CliError> {
     match command {
         PluginsCommand::List(options) => plugins_list(options).map(format_plugins_list),
@@ -7280,799 +7150,6 @@ pub fn channels_list(options: ChannelsListOptions) -> Result<ChannelsReport, Cli
 
 pub fn channels_status(options: ChannelsStatusOptions) -> Result<ChannelsReport, CliError> {
     load_channels_report(options.config_path, options.workspace_override)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppsEntryReport {
-    pub config_path: PathBuf,
-    pub workspace: PathBuf,
-    pub registry_path: PathBuf,
-    pub entry: AppRegistryEntry,
-    pub lifecycle_receipt: Option<AppLifecycleReceipt>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppsListReport {
-    pub config_path: PathBuf,
-    pub workspace: PathBuf,
-    pub registry_path: PathBuf,
-    pub entries: Vec<AppRegistryEntry>,
-    pub lifecycle_receipts: Vec<AppLifecycleReceipt>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppsUninstallReport {
-    pub config_path: PathBuf,
-    pub workspace: PathBuf,
-    pub registry_path: PathBuf,
-    pub app_id: String,
-    pub removed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppsInitReport {
-    pub config_path: PathBuf,
-    pub workspace: PathBuf,
-    pub data_dir: PathBuf,
-    pub authoring: AppAuthoringInitReport,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppsLifecycleReport {
-    pub app_id: AppId,
-    pub receipt: AppLifecycleReceipt,
-    pub dispatch_count: usize,
-    pub restart_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppsProposalReport {
-    pub proposal: AuthoringProposal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppsApplyReport {
-    pub handoff: InstallHandoff,
-}
-
-pub fn apps_init(options: AppsInitOptions) -> Result<AppsInitReport, CliError> {
-    let config_path = options.config_path.unwrap_or_else(default_config_path);
-    let bundle = load_config_with_env(
-        LoadOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override: options.workspace_override,
-            resolve_env: false,
-            write_back_migrations: false,
-        },
-        &ProcessEnv,
-    )?;
-    let data_dir = bundle.context.data_dir.clone();
-    let authoring = AppAuthoringStore::new(&data_dir).init_app(options.app_id)?;
-    Ok(AppsInitReport {
-        config_path,
-        workspace: bundle.context.workspace,
-        data_dir,
-        authoring,
-    })
-}
-
-pub fn apps_install(options: AppsInstallOptions) -> Result<AppsEntryReport, CliError> {
-    let (config_path, workspace, store) =
-        apps_store(options.config_path, options.workspace_override)?;
-    let entry = store.install_local_bundle(options.bundle_path)?;
-    Ok(AppsEntryReport {
-        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &entry.app_id)?,
-        config_path,
-        workspace,
-        registry_path: store.registry_path(),
-        entry,
-    })
-}
-
-pub fn apps_list(options: AppsListOptions) -> Result<AppsListReport, CliError> {
-    let (config_path, workspace, store) =
-        apps_store(options.config_path, options.workspace_override)?;
-    let entries = store.list()?;
-    let lifecycle_receipts = entries
-        .iter()
-        .map(|entry| spec031_cli::app::read_receipt(&store, &entry.app_id))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    Ok(AppsListReport {
-        config_path,
-        workspace,
-        registry_path: store.registry_path(),
-        entries,
-        lifecycle_receipts,
-    })
-}
-
-pub fn apps_inspect(options: AppsInspectOptions) -> Result<AppsEntryReport, CliError> {
-    let app_id = AppId::parse(options.app_id)?;
-    let (config_path, workspace, store) =
-        apps_store(options.config_path, options.workspace_override)?;
-    let entry = store
-        .inspect(&app_id)?
-        .ok_or_else(|| AppError::UnknownApp(app_id.clone()))?;
-    Ok(AppsEntryReport {
-        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &app_id)?,
-        config_path,
-        workspace,
-        registry_path: store.registry_path(),
-        entry,
-    })
-}
-
-pub fn apps_enable(options: AppsIdOptions) -> Result<AppsEntryReport, CliError> {
-    let app_id = AppId::parse(options.app_id)?;
-    let (config_path, workspace, store) =
-        apps_store(options.config_path, options.workspace_override)?;
-    let entry = store.enable(&app_id)?;
-    Ok(AppsEntryReport {
-        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &app_id)?,
-        config_path,
-        workspace,
-        registry_path: store.registry_path(),
-        entry,
-    })
-}
-
-pub fn apps_disable(options: AppsIdOptions) -> Result<AppsEntryReport, CliError> {
-    let app_id = AppId::parse(options.app_id)?;
-    let (config_path, workspace, store) =
-        apps_store(options.config_path, options.workspace_override)?;
-    let entry =
-        with_inactive_app_lifecycle(&config_path, &workspace, &store, &app_id, "disable", || {
-            store.disable(&app_id).map_err(Into::into)
-        })?;
-    Ok(AppsEntryReport {
-        lifecycle_receipt: spec031_cli::app::read_receipt(&store, &app_id)?,
-        config_path,
-        workspace,
-        registry_path: store.registry_path(),
-        entry,
-    })
-}
-
-pub fn apps_uninstall(options: AppsIdOptions) -> Result<AppsUninstallReport, CliError> {
-    let app_id = AppId::parse(options.app_id.clone())?;
-    let (config_path, workspace, store) =
-        apps_store(options.config_path, options.workspace_override)?;
-    let removed = with_inactive_app_lifecycle(
-        &config_path,
-        &workspace,
-        &store,
-        &app_id,
-        "uninstall",
-        || {
-            store
-                .uninstall_local_app(&app_id)
-                .map(|entry| entry.is_some())
-                .map_err(Into::into)
-        },
-    )?;
-    Ok(AppsUninstallReport {
-        config_path,
-        workspace,
-        registry_path: store.registry_path(),
-        app_id: options.app_id,
-        removed,
-    })
-}
-
-pub fn apps_start(options: AppsIdOptions) -> Result<AppsLifecycleReport, CliError> {
-    let app_id = AppId::parse(options.app_id)?;
-    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
-    let store = AppRegistryStore::new(&bundle.context.data_dir);
-    let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
-    let supervisor_root = bundle.context.runtime_subdir("apps");
-    let supervisor = AppSupervisor::new(&journal);
-    let mut start_request = journal.request(&app_id, AppLifecycleAction::Start)?;
-    let admission = (|| -> Result<_, CliError> {
-        let entry = store
-            .inspect(&app_id)?
-            .ok_or_else(|| AppError::UnknownApp(app_id.clone()))?;
-        let validated = shacs_core::app::AppManifest::load_from_bundle(
-            &shacs_core::app::AppBundlePath::new(&entry.bundle_path),
-        )?;
-        let runtime = validated.manifest.runtime.clone().ok_or_else(|| {
-            CliError::InvalidArguments(format!("app `{app_id}` has no runtime command declaration"))
-        })?;
-        let credential_statuses = entry
-            .secret_requests
-            .iter()
-            .map(|request| {
-                let status = if std::env::var_os(&request.key).is_some() {
-                    "resolved"
-                } else {
-                    "missing"
-                };
-                format!("{}:{status}:environment", request.key)
-            })
-            .collect::<Vec<_>>();
-        let missing_credentials = entry
-            .secret_requests
-            .iter()
-            .filter(|request| request.required && std::env::var_os(&request.key).is_none())
-            .map(|request| request.key.clone())
-            .collect::<Vec<_>>();
-        let process_environment = entry
-            .secret_requests
-            .iter()
-            .filter_map(|request| {
-                std::env::var_os(&request.key).map(|value| (request.key.clone().into(), value))
-            })
-            .collect::<Vec<_>>();
-        let workspace_trusted = bundle
-            .config
-            .plugins
-            .trusts_workspace(&bundle.context.workspace);
-        let trusted_projection =
-            shacs_core::runtime::trusted_runtime::build_trusted_runtime_projection(
-                spec030_fact_store_for_bundle(&bundle)
-                    .snapshot()
-                    .into_input(),
-            )
-            .map_err(|error| CliError::Runtime(error.to_string()))?;
-        let (activation_blockers, activation_links) =
-            app_activation_blockers(&bundle, &entry, trusted_projection.resources())?;
-        let activation_refs = activation_links
-            .iter()
-            .map(|(_, activation_ref)| activation_ref.clone())
-            .collect::<Vec<_>>();
-        Ok((
-            entry,
-            validated,
-            runtime,
-            credential_statuses,
-            missing_credentials,
-            process_environment,
-            workspace_trusted,
-            trusted_projection,
-            activation_blockers,
-            activation_links,
-            activation_refs,
-        ))
-    })();
-    let (
-        entry,
-        validated,
-        runtime,
-        credential_statuses,
-        missing_credentials,
-        process_environment,
-        workspace_trusted,
-        trusted_projection,
-        activation_blockers,
-        activation_links,
-        activation_refs,
-    ) = match admission {
-        Ok(values) => values,
-        Err(error) => {
-            let _ = journal.block(&start_request, vec![AppLifecycleBlocker::RecoveryRequired]);
-            return Err(error);
-        }
-    };
-    let mut restart_count = 0;
-    loop {
-        let execution_snapshot_ref = match persist_app_execution_snapshot(
-            &bundle,
-            &app_id,
-            &validated.digest,
-            start_request.generation,
-            &start_request.request_id,
-            &trusted_projection,
-            &activation_links,
-        ) {
-            Ok(snapshot_ref) => snapshot_ref,
-            Err(error) => {
-                let _ = journal.block(&start_request, vec![AppLifecycleBlocker::RecoveryRequired]);
-                return Err(error);
-            }
-        };
-        let mut driver = CliAppProcessDriver::new(
-            runtime.command.clone(),
-            entry.bundle_path.clone(),
-            runtime.timeout_seconds,
-            supervisor_root.clone(),
-            app_id.clone(),
-            process_environment.clone(),
-        );
-        let result = supervisor
-            .start_reserved(
-                start_request,
-                AppStartFacts {
-                    app_id: app_id.clone(),
-                    lifecycle: entry.lifecycle_state.clone(),
-                    expected_manifest_digest: entry.digest.clone(),
-                    current_manifest_digest: validated.digest.clone(),
-                    trusted_runtime_ref: workspace_trusted.then(|| {
-                        format!(
-                            "trusted-runtime:spec030:{}",
-                            trusted_projection.schema_version()
-                        )
-                    }),
-                    workspace_trusted,
-                    credential_source_statuses: credential_statuses.clone(),
-                    missing_credentials: missing_credentials.clone(),
-                    activation_blockers: activation_blockers.clone(),
-                    process_authorized: matches!(
-                        trusted_projection
-                            .process_adapters()
-                            .iter()
-                            .find(|adapter| {
-                                adapter.adapter == shacs_projection::ProcessAdapterKind::GenericExec
-                            }),
-                        Some(adapter)
-                            if adapter.control_scope
-                                == shacs_projection::ProcessControlScope::ControlledChild
-                                && adapter.capabilities.timeout
-                                && adapter.capabilities.abort
-                                && adapter.capabilities.cwd
-                                && adapter.capabilities.env
-                                && adapter.capabilities.bounded_output
-                    ),
-                    activation_refs: activation_refs.clone(),
-                    execution_snapshot_ref,
-                },
-                &mut driver,
-            )
-            .map_err(|error| CliError::Runtime(error.to_string()))?;
-        if result.restart_requested {
-            restart_count += 1;
-            start_request = journal.request(&app_id, AppLifecycleAction::Start)?;
-            continue;
-        }
-        return Ok(AppsLifecycleReport {
-            app_id,
-            receipt: result.terminal,
-            dispatch_count: result.dispatch_count,
-            restart_count,
-        });
-    }
-}
-
-fn app_activation_blockers(
-    bundle: &ConfigBundle,
-    entry: &AppRegistryEntry,
-    resources: &[shacs_projection::ResourceCandidateProjection],
-) -> Result<(Vec<AppLifecycleBlocker>, Vec<AppActivationLink>), CliError> {
-    let owner = WorkspaceTrustRef::new(bundle.context.workspace_permission_id()?.as_str());
-    let store = ActivationStore::new(
-        bundle
-            .context
-            .runtime_subdir("snapshots")
-            .join("activation-records.json"),
-    );
-    let mut blockers = Vec::new();
-    let mut activation_links = Vec::new();
-    for resource in entry
-        .resource_summaries
-        .iter()
-        .filter(|resource| resource.kind == "skill")
-    {
-        let canonical = entry.bundle_path.join(&resource.path).canonicalize()?;
-        let source_identity = format!("source:app:{}", canonical.to_string_lossy());
-        let resource_ref = resources
-            .iter()
-            .find(|candidate| {
-                Path::new(&candidate.canonical_path)
-                    .canonicalize()
-                    .is_ok_and(|path| path == canonical)
-            })
-            .map(|candidate| candidate.resource_ref.clone())
-            .unwrap_or_else(|| format!("skill:{}", resource.path));
-        match store
-            .find_current(&resource_ref, &owner, &source_identity)
-            .map_err(|error| CliError::Runtime(error.to_string()))?
-        {
-            None => blockers.push(AppLifecycleBlocker::ActivationMissing { resource_ref }),
-            Some(record) => match record.status() {
-                ActivationStatus::Active => {
-                    activation_links.push((
-                        record.resource_ref().to_owned(),
-                        record.activation_ref().to_owned(),
-                    ));
-                    if record.content_digest() != resource.sha256
-                        || record.dependency_manifest_digest() != entry.digest
-                    {
-                        blockers.push(AppLifecycleBlocker::ActivationStale {
-                            activation_ref: record.activation_ref().to_owned(),
-                        });
-                    }
-                }
-                ActivationStatus::Stale => blockers.push(AppLifecycleBlocker::ActivationStale {
-                    activation_ref: record.activation_ref().to_owned(),
-                }),
-                ActivationStatus::Disabled => {
-                    blockers.push(AppLifecycleBlocker::ActivationDisabled {
-                        activation_ref: record.activation_ref().to_owned(),
-                    })
-                }
-                ActivationStatus::Revoked => {
-                    blockers.push(AppLifecycleBlocker::ActivationRevoked {
-                        activation_ref: record.activation_ref().to_owned(),
-                    })
-                }
-                ActivationStatus::Removed => {
-                    blockers.push(AppLifecycleBlocker::ActivationRemoved {
-                        activation_ref: record.activation_ref().to_owned(),
-                    })
-                }
-            },
-        }
-    }
-    Ok((blockers, activation_links))
-}
-
-fn persist_app_execution_snapshot(
-    bundle: &ConfigBundle,
-    app_id: &AppId,
-    digest: &str,
-    generation: u64,
-    request_id: &str,
-    projection: &shacs_projection::Spec030RuntimeProjection,
-    activation_links: &[AppActivationLink],
-) -> Result<Option<String>, CliError> {
-    let refs = shacs_core::runtime::trusted_runtime_fact_refs(projection)
-        .map_err(|error| CliError::Runtime(error.to_string()))?;
-    let mut resources = refs.resources;
-    for resource in &mut resources {
-        resource.activation_ref = activation_links
-            .iter()
-            .find(|(resource_ref, _)| resource_ref == &resource.identity)
-            .map(|(_, activation_ref)| activation_ref.clone());
-    }
-    let snapshot_id = format!(
-        "app-{app_id}-g{generation}-{}-{}",
-        &digest[..digest.len().min(12)],
-        request_id.rsplit('-').next().unwrap_or("request")
-    );
-    let snapshot = ExecutionSnapshot::create(ExecutionSnapshotInput {
-        snapshot_id: snapshot_id.clone(),
-        created_at_unix_ms: u64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-        )
-        .unwrap_or(u64::MAX),
-        config: ConfigSnapshotRef {
-            source_ref: "config:app-start".to_owned(),
-            schema_version: 1,
-            migration_state: ConfigMigrationState::Current,
-        },
-        profiles: ProfileSelectionSnapshot {
-            provider: None,
-            trusted_runtime: Some("spec030".to_owned()),
-            context: Some("app-start".to_owned()),
-        },
-        trusted_runtime: refs.trusted_runtime,
-        sandbox: refs.sandbox,
-        credential: refs.credential,
-        context_sources: Vec::new(),
-        selected_tools: Vec::new(),
-        selected_resources: resources,
-        provider: ProviderInputSnapshot {
-            provider: "app-runtime".to_owned(),
-            model: "not-applicable".to_owned(),
-            shaping_version: "spec032-v1".to_owned(),
-            messages_digest: digest.to_owned(),
-            tools_digest: digest.to_owned(),
-        },
-        token_budget: TokenBudgetSnapshot {
-            tokenizer: "not-applicable".to_owned(),
-            estimator_uncertainty_percent: 0,
-            budget_tokens: 0,
-            reserved_tokens: 0,
-            used_context_tokens: 0,
-            estimated_input_tokens: 0,
-        },
-        disclosure: refs.disclosure,
-        replay: ReplayContract::diagnostic_only(),
-    })
-    .map_err(|error| CliError::Runtime(error.to_string()))?;
-    let path = bundle
-        .context
-        .runtime_subdir("snapshots")
-        .join("app-lifecycle")
-        .join(format!("{snapshot_id}.json"));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let bytes = serde_json::to_vec_pretty(&snapshot)
-        .map_err(|error| CliError::Runtime(error.to_string()))?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
-    }
-    Ok(Some(format!("snapshot:app:{snapshot_id}")))
-}
-
-pub fn apps_request(
-    options: AppsIdOptions,
-    action: AppLifecycleAction,
-) -> Result<AppsLifecycleReport, CliError> {
-    let app_id = AppId::parse(options.app_id)?;
-    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
-    let store = AppRegistryStore::new(&bundle.context.data_dir);
-    if store.inspect(&app_id)?.is_none() {
-        return Err(AppError::UnknownApp(app_id).into());
-    }
-    let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
-    let receipt = journal.request(&app_id, action)?;
-    Ok(AppsLifecycleReport {
-        app_id,
-        receipt,
-        dispatch_count: 0,
-        restart_count: 0,
-    })
-}
-
-pub fn apps_recover(options: AppsIdOptions) -> Result<AppsLifecycleReport, CliError> {
-    let app_id = AppId::parse(options.app_id)?;
-    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
-    if AppRegistryStore::new(&bundle.context.data_dir)
-        .inspect(&app_id)?
-        .is_none()
-    {
-        return Err(AppError::UnknownApp(app_id).into());
-    }
-    let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
-    let receipt = AppSupervisor::new(&journal)
-        .recover(&app_id, false)
-        .map_err(|error| CliError::Runtime(error.to_string()))?;
-    Ok(AppsLifecycleReport {
-        app_id,
-        receipt,
-        dispatch_count: 0,
-        restart_count: 0,
-    })
-}
-
-fn with_inactive_app_lifecycle<T>(
-    config_path: &Path,
-    workspace: &Path,
-    store: &AppRegistryStore,
-    app_id: &AppId,
-    action: &str,
-    mutation: impl FnOnce() -> Result<T, CliError>,
-) -> Result<T, CliError> {
-    let bundle = apps_config_bundle(
-        Some(config_path.to_path_buf()),
-        Some(workspace.to_path_buf()),
-    )?;
-    let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
-    journal.with_locked_snapshot(app_id, |snapshot| {
-        match snapshot {
-            Some(snapshot)
-                if matches!(
-                    snapshot.state,
-                    shacs_core::app_lifecycle::AppProcessState::Starting
-                        | shacs_core::app_lifecycle::AppProcessState::Running
-                        | shacs_core::app_lifecycle::AppProcessState::Stopping
-                        | shacs_core::app_lifecycle::AppProcessState::RecoveryNeeded
-                ) =>
-            {
-                return Err(CliError::InvalidArguments(format!(
-                    "apps {action} requires the app process to be stopped or recovered first"
-                )))
-            }
-            Some(_) | None => {}
-        }
-        if store.inspect(app_id)?.is_none() {
-            return Err(AppError::UnknownApp(app_id.clone()).into());
-        }
-        mutation()
-    })
-}
-
-pub fn apps_propose(options: AppsAuthoringFlowOptions) -> Result<AppsProposalReport, CliError> {
-    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
-    let store = AuthoringFlowStore::new(bundle.context.data_dir);
-    let proposal = if options.update {
-        store.propose_update(&options.candidate_path, &options.intent)?
-    } else {
-        store.propose_new(&options.candidate_path, &options.intent)?
-    };
-    Ok(AppsProposalReport { proposal })
-}
-
-pub fn apps_apply(options: AppsAuthoringFlowOptions) -> Result<AppsApplyReport, CliError> {
-    let bundle = apps_config_bundle(options.config_path, options.workspace_override)?;
-    let data_dir = bundle.context.data_dir.clone();
-    let store = AuthoringFlowStore::new(&data_dir);
-    let proposal = if options.update {
-        store.propose_update(&options.candidate_path, &options.intent)?
-    } else {
-        store.propose_new(&options.candidate_path, &options.intent)?
-    };
-    let run_apply = || -> Result<InstallHandoff, CliError> {
-        let checkpoint = store.checkpoint(&proposal)?;
-        let pending = store.apply(&checkpoint)?;
-        Ok(store.verify(pending, VerificationOutcome::Passed)?)
-    };
-    let handoff = if options.update {
-        let registry = AppRegistryStore::new(&data_dir);
-        let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
-        journal.with_locked_snapshot(&proposal.app_id, |snapshot| {
-            if snapshot.is_some_and(|snapshot| {
-                !matches!(
-                    snapshot.state,
-                    shacs_core::app_lifecycle::AppProcessState::Installed
-                        | shacs_core::app_lifecycle::AppProcessState::Stopped
-                        | shacs_core::app_lifecycle::AppProcessState::Failed
-                )
-            }) {
-                return Err(CliError::InvalidArguments(
-                    "apps apply --update requires a stopped app process".to_owned(),
-                ));
-            }
-            if registry.inspect(&proposal.app_id)?.is_none() {
-                return Err(AppError::UnknownApp(proposal.app_id.clone()).into());
-            }
-            run_apply()
-        })?
-    } else {
-        run_apply()?
-    };
-    Ok(AppsApplyReport { handoff })
-}
-
-struct CliAppProcessDriver {
-    command: Vec<String>,
-    cwd: PathBuf,
-    timeout_seconds: u64,
-    supervisor_root: PathBuf,
-    app_id: AppId,
-    process_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
-}
-
-impl CliAppProcessDriver {
-    fn new(
-        command: Vec<String>,
-        cwd: PathBuf,
-        timeout_seconds: u64,
-        supervisor_root: PathBuf,
-        app_id: AppId,
-        process_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
-    ) -> Self {
-        Self {
-            command,
-            cwd,
-            timeout_seconds,
-            supervisor_root,
-            app_id,
-            process_environment,
-        }
-    }
-}
-
-impl AppProcessDriver for CliAppProcessDriver {
-    fn run(&mut self) -> AppProcessRunOutcome {
-        let abort = ControlledChildAbort::new();
-        let watcher_abort = abort.clone();
-        let app_id = self.app_id.clone();
-        let runtime_root = self.supervisor_root.clone();
-        let watcher = thread::spawn(move || {
-            let journal = AppSupervisorJournal::new(runtime_root);
-            loop {
-                if watcher_abort.is_aborted() {
-                    return AppSupervisorTerminal::Stopped;
-                }
-                if journal
-                    .pending_request(&app_id, AppLifecycleAction::Restart)
-                    .ok()
-                    .flatten()
-                    .is_some()
-                {
-                    watcher_abort.abort();
-                    return AppSupervisorTerminal::RestartRequested;
-                }
-                if journal
-                    .pending_request(&app_id, AppLifecycleAction::Stop)
-                    .ok()
-                    .flatten()
-                    .is_some()
-                {
-                    watcher_abort.abort();
-                    return AppSupervisorTerminal::Stopped;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-        });
-        let command = ControlledChildCommand::new(
-            self.command.clone(),
-            &self.cwd,
-            Duration::from_secs(self.timeout_seconds),
-        );
-        let mut command = command;
-        command.inherit_env = false;
-        if let Some(path) = std::env::var_os("PATH") {
-            command.env.insert("PATH".into(), path);
-        }
-        command.env.extend(self.process_environment.clone());
-        let outcome = run_generic_argv(&command, &abort);
-        if !abort.is_aborted() {
-            abort.abort();
-        }
-        let requested = watcher
-            .join()
-            .unwrap_or(AppSupervisorTerminal::RecoveryNeeded);
-        let terminal = match &outcome {
-            Ok(receipt) => match receipt.outcome {
-                ControlledChildOutcome::Succeeded { .. } => AppSupervisorTerminal::Stopped,
-                ControlledChildOutcome::Aborted => requested,
-                ControlledChildOutcome::TimedOut => AppSupervisorTerminal::RecoveryNeeded,
-                ControlledChildOutcome::Failed { .. } | ControlledChildOutcome::InvalidCwd => {
-                    AppSupervisorTerminal::Failed
-                }
-            },
-            Err(_) => AppSupervisorTerminal::RecoveryNeeded,
-        };
-        let evidence = outcome.map_or_else(
-            |_| shacs_core::app_lifecycle::AppProcessOutcomeEvidence {
-                outcome: "controlled_child_error".to_owned(),
-                duration_ms: 0,
-                cleanup_attempted: false,
-                descendant_cleanup_supported: cfg!(unix),
-            },
-            |receipt| shacs_core::app_lifecycle::AppProcessOutcomeEvidence {
-                outcome: format!("{:?}", receipt.outcome),
-                duration_ms: receipt.duration_ms,
-                cleanup_attempted: receipt.cleanup_attempted,
-                descendant_cleanup_supported: matches!(
-                    receipt.descendant_cleanup,
-                    shacs_core::controlled_child::DescendantCleanupCapability::Supported
-                ),
-            },
-        );
-        AppProcessRunOutcome { terminal, evidence }
-    }
-}
-
-fn apps_store(
-    config_path: Option<PathBuf>,
-    workspace_override: Option<PathBuf>,
-) -> Result<(PathBuf, PathBuf, AppRegistryStore), CliError> {
-    let config_path = config_path.unwrap_or_else(default_config_path);
-    let bundle = load_config_with_env(
-        LoadOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override,
-            resolve_env: false,
-            write_back_migrations: false,
-        },
-        &ProcessEnv,
-    )?;
-    Ok((
-        config_path,
-        bundle.context.workspace,
-        AppRegistryStore::new(bundle.context.data_dir),
-    ))
-}
-
-fn apps_config_bundle(
-    config_path: Option<PathBuf>,
-    workspace_override: Option<PathBuf>,
-) -> Result<ConfigBundle, CliError> {
-    load_config_with_env(
-        LoadOptions {
-            config_path: Some(config_path.unwrap_or_else(default_config_path)),
-            workspace_override,
-            resolve_env: false,
-            write_back_migrations: false,
-        },
-        &ProcessEnv,
-    )
-    .map_err(Into::into)
 }
 
 pub fn plugins_list(options: PluginsListOptions) -> Result<PluginProjectionReport, CliError> {
@@ -9536,210 +8613,6 @@ fn workflow_recipe_projection_item(recipe: &SkillBackedWorkflowRecipe) -> Value 
     })
 }
 
-pub fn format_apps_list(report: AppsListReport) -> String {
-    let mut lines = vec![
-        "Apps".to_owned(),
-        format!("Config: {}", diagnostics_path_ref(&report.config_path)),
-        format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
-        format!("Registry: {}", diagnostics_path_ref(&report.registry_path)),
-    ];
-    if report.entries.is_empty() {
-        lines.push("No apps installed.".to_owned());
-        spec031_cli::push(
-            &mut lines,
-            &[spec031_cli::Projection::App { total_count: 0 }],
-        );
-        return lines.join("\n");
-    }
-    for entry in report.entries {
-        lines.push(format!(
-            "- {} {} [{}] {}",
-            entry.app_id,
-            entry.version,
-            app_lifecycle_label(&entry.lifecycle_state),
-            entry.digest
-        ));
-        lines.extend(spec031_cli::app::lines(
-            &entry,
-            report
-                .lifecycle_receipts
-                .iter()
-                .find(|receipt| receipt.app_id == entry.app_id),
-        ));
-    }
-    lines.join("\n")
-}
-
-pub fn format_apps_init(report: AppsInitReport) -> String {
-    let outcome = match &report.authoring.outcome {
-        AppAuthoringInitOutcome::Created => "created",
-        AppAuthoringInitOutcome::AlreadyExistsSameContent => "already-exists-same-content",
-    };
-    let file_list = report
-        .authoring
-        .generated_files
-        .iter()
-        .map(|file| file.path.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    [
-        format!("App authoring draft: {}", report.authoring.app_id),
-        format!("Outcome: {outcome}"),
-        format!("Draft id: {}", report.authoring.draft_id),
-        format!(
-            "Draft path: {}",
-            display_path_escaped(&report.authoring.draft_path)
-        ),
-        format!(
-            "Manifest candidate: {}",
-            display_path_escaped(&report.authoring.manifest_candidate_path)
-        ),
-        format!(
-            "README candidate: {}",
-            display_path_escaped(&report.authoring.readme_candidate_path)
-        ),
-        format!(
-            "Scaffold plan: {}",
-            display_path_escaped(&report.authoring.scaffold_plan_path)
-        ),
-        format!(
-            "Draft metadata: {}",
-            display_path_escaped(&report.authoring.draft_metadata_path)
-        ),
-        format!("Config: {}", display_path_escaped(&report.config_path)),
-        format!("Workspace: {}", display_path_escaped(&report.workspace)),
-        format!("Data dir: {}", display_path_escaped(&report.data_dir)),
-        format!(
-            "Revision digest: {}",
-            report.authoring.current_revision_digest
-        ),
-        format!("Generated files: {file_list}"),
-        format!("Validation: {}", report.authoring.validation_status),
-        format!("Next action: {}", report.authoring.next_action),
-    ]
-    .join("\n")
-}
-
-pub fn format_apps_inspect(report: AppsEntryReport) -> String {
-    format_apps_entry("App", report)
-}
-
-pub fn format_apps_entry_report(report: AppsEntryReport) -> String {
-    format_apps_entry("App", report)
-}
-
-fn format_apps_entry(title: &str, report: AppsEntryReport) -> String {
-    let entry = report.entry;
-    let mut lines = vec![
-        format!("{title}: {}", entry.app_id),
-        format!("Version: {}", entry.version),
-        format!(
-            "Registry state: {}",
-            app_lifecycle_label(&entry.lifecycle_state)
-        ),
-        format!("Digest: {}", entry.digest),
-        format!("Bundle: {}", diagnostics_path_ref(&entry.bundle_path)),
-        format!("Config: {}", diagnostics_path_ref(&report.config_path)),
-        format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
-        format!("Registry: {}", diagnostics_path_ref(&report.registry_path)),
-        format!("Permission requests: {}", entry.permission_requests.len()),
-        format!("Secret requests: {}", entry.secret_requests.len()),
-        format!("Process snapshots: {}", entry.process_snapshots.len()),
-    ];
-    if let Some(grant_reference) = entry.grant_reference.as_deref() {
-        lines.push(format!("Grant reference: {grant_reference}"));
-    }
-    if !entry.unavailable_reasons.is_empty() {
-        lines.push(format!(
-            "Unavailable: {}",
-            entry.unavailable_reasons.join("; ")
-        ));
-    }
-    lines.extend(spec031_cli::app::lines(
-        &entry,
-        report.lifecycle_receipt.as_ref(),
-    ));
-    lines.join("\n")
-}
-
-pub fn format_apps_uninstall(report: AppsUninstallReport) -> String {
-    [
-        format!("App: {}", report.app_id),
-        format!("Removed: {}", yes_no_label(report.removed)),
-        format!("Config: {}", display_path(&report.config_path)),
-        format!("Workspace: {}", diagnostics_path_ref(&report.workspace)),
-        format!("Registry: {}", display_path(&report.registry_path)),
-    ]
-    .join("\n")
-}
-
-pub fn format_apps_lifecycle(report: AppsLifecycleReport) -> String {
-    let blockers = report
-        .receipt
-        .blockers
-        .iter()
-        .map(|blocker| match blocker {
-            AppLifecycleBlocker::CredentialMissing { name } => {
-                format!("credential_missing:{name}")
-            }
-            other => format!("{other:?}").to_ascii_lowercase(),
-        })
-        .collect::<Vec<_>>();
-    let process_outcome = report
-        .receipt
-        .process_outcome
-        .as_ref()
-        .map_or_else(|| "none".to_owned(), |evidence| evidence.outcome.clone());
-    [
-        format!("App: {}", report.app_id),
-        format!("Action: {:?}", report.receipt.action),
-        format!("State: {:?}", report.receipt.current_state),
-        format!("Completed: {}", yes_no_label(report.receipt.completed)),
-        format!("Receipt: {}", report.receipt.receipt_id),
-        format!("Process dispatches: {}", report.dispatch_count),
-        format!("Restarts: {}", report.restart_count),
-        format!("Process outcome: {process_outcome}"),
-        format!("Blockers: {}", blockers.join(", ")),
-    ]
-    .join("\n")
-}
-
-pub fn format_apps_proposal(report: AppsProposalReport) -> String {
-    [
-        format!("App proposal: {}", report.proposal.app_id),
-        format!("Proposal: {}", report.proposal.proposal_id),
-        format!("Kind: {:?}", report.proposal.kind),
-        format!("Revision: {}", report.proposal.revision_digest),
-        format!("Validation: {}", report.proposal.validation_summary),
-        format!("Risk: {}", report.proposal.risk_summary),
-        "Applied: no".to_owned(),
-        "Runtime authorization created: no".to_owned(),
-    ]
-    .join("\n")
-}
-
-pub fn format_apps_apply(report: AppsApplyReport) -> String {
-    [
-        format!("App apply: {}", report.handoff.app_id),
-        format!("Checkpoint: {}", report.handoff.checkpoint_id),
-        format!("Version: {}", report.handoff.version),
-        format!("Digest: {}", report.handoff.digest),
-        format!(
-            "Runtime authorization created: {}",
-            yes_no_label(report.handoff.runtime_authorization_created)
-        ),
-        format!(
-            "Executable activation created: {}",
-            yes_no_label(report.handoff.executable_activation_created)
-        ),
-        format!(
-            "Process started: {}",
-            yes_no_label(report.handoff.process_started)
-        ),
-    ]
-    .join("\n")
-}
-
 pub fn format_plugins_list(report: PluginProjectionReport) -> String {
     let plugin_count = report.plugins.len();
     let blocked_count = report
@@ -10088,16 +8961,6 @@ fn spec031_extension_count(
         .iter()
         .filter(|extension| extension.readiness == readiness)
         .count()
-}
-
-fn app_lifecycle_label(state: &AppLifecycleState) -> &'static str {
-    match state {
-        AppLifecycleState::Installed => "installed",
-        AppLifecycleState::Enabled => "enabled",
-        AppLifecycleState::Disabled => "disabled",
-        AppLifecycleState::Unavailable => "unavailable",
-        AppLifecycleState::Uninstalling => "uninstalling",
-    }
 }
 
 pub fn format_channels_list(report: ChannelsReport) -> String {
@@ -17497,7 +16360,6 @@ pub fn help_text() -> String {
         "  runtime   Start, stop, restart, inspect trusted-runtime, migrate config/data, and inspect snapshot/activation diagnostics",
         "  session   Manage local session files",
         "  skills    List skills, inspect entries, and discover workflow recipes",
-        "  apps      Propose/apply app drafts and manage local app lifecycle start, stop, restart, and recover",
         "  plugins   List, inspect, doctor, enable, or disable plugin state and surfaces",
         "  hooks     List and inspect plugin hook metadata",
         "  permissions List, inspect, or revoke remembered permission rules",
@@ -17514,7 +16376,7 @@ pub fn help_text() -> String {
         "",
         "Options:",
         "  -c, --config <path>   Use an explicit config file",
-        "  -w, --workspace <path> Override workspace for runtime, projection, app, context, channel, ask/agent/serve commands",
+        "  -w, --workspace <path> Override workspace for runtime, projection, context, channel, ask/agent/serve commands",
         "  -m, --message <text> Direct message for agent",
         "      --bind <addr>     Serve API on host:port",
         "      --host <ip>       Override API host for serve",
@@ -17536,8 +16398,6 @@ pub fn help_text() -> String {
         "      --keep-messages <n> Retain this many messages during session compact",
         "      --target-version <v> Record runtime update target version",
         "      --all             Include inactive skill diagnostics in skills list",
-        "      --bundle <path>   Local .shacsapp bundle for apps install",
-        "      --app-id <id>     Select an app for apps commands",
         "  -y, --yes            Confirm irreversible session delete",
         "      --no-side-effects     Disable write/edit/exec/message/image tools for ask/agent/run",
         "      --allow-side-effects  Side-effect tools are on by default; required for run --allow-remote",
@@ -18167,273 +17027,6 @@ fn parse_skills_recipes(
         }
     }
     Ok(CliCommand::Skills(SkillsCommand::Recipes(options)))
-}
-
-fn parse_apps(
-    mut parser: ArgParser,
-    global_config: Option<PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let Some(action) = parser.next() else {
-        return Err(CliError::InvalidArguments(
-            "apps requires `init`, `propose`, `apply`, `install`, `list`, `inspect`, `enable`, `disable`, `start`, `stop`, `restart`, `recover`, or `uninstall`"
-                .to_owned(),
-        ));
-    };
-    match action.as_str() {
-        "init" | "new" => parse_apps_init(parser, global_config),
-        "install" => parse_apps_install(parser, global_config),
-        "list" | "ls" => parse_apps_list(parser, global_config),
-        "inspect" | "show" => parse_apps_inspect(parser, global_config),
-        "enable" => parse_apps_id_action(parser, global_config, "enable"),
-        "disable" => parse_apps_id_action(parser, global_config, "disable"),
-        "start" => parse_apps_id_action(parser, global_config, "start"),
-        "stop" => parse_apps_id_action(parser, global_config, "stop"),
-        "restart" => parse_apps_id_action(parser, global_config, "restart"),
-        "recover" => parse_apps_id_action(parser, global_config, "recover"),
-        "propose" => parse_apps_authoring_flow(parser, global_config, false),
-        "apply" => parse_apps_authoring_flow(parser, global_config, true),
-        "uninstall" | "remove" => parse_apps_id_action(parser, global_config, "uninstall"),
-        "--help" | "-h" => Ok(CliCommand::Help),
-        other => Err(CliError::InvalidArguments(format!(
-            "unknown apps subcommand `{other}`"
-        ))),
-    }
-}
-
-fn parse_apps_authoring_flow(
-    mut parser: ArgParser,
-    global_config: Option<PathBuf>,
-    apply: bool,
-) -> Result<CliCommand, CliError> {
-    let action = if apply { "apply" } else { "propose" };
-    let mut options = AppsAuthoringFlowOptions {
-        config_path: global_config,
-        workspace_override: None,
-        candidate_path: PathBuf::new(),
-        intent: String::new(),
-        update: false,
-    };
-    while let Some(arg) = parser.next() {
-        match arg.as_str() {
-            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
-            "--workspace" | "-w" => {
-                options.workspace_override = Some(take_path(&mut parser, &arg)?)
-            }
-            "--candidate" => options.candidate_path = take_path(&mut parser, &arg)?,
-            "--intent" => options.intent = take_value(&mut parser, &arg)?,
-            "--update" => options.update = true,
-            "--help" | "-h" => return Ok(CliCommand::Help),
-            other if other.starts_with('-') => {
-                return Err(CliError::InvalidArguments(format!(
-                    "unknown apps {action} argument `{other}`"
-                )))
-            }
-            other if options.candidate_path.as_os_str().is_empty() => {
-                options.candidate_path = PathBuf::from(other)
-            }
-            other => {
-                return Err(CliError::InvalidArguments(format!(
-                    "apps {action} accepts exactly one candidate path; unexpected `{other}`"
-                )))
-            }
-        }
-    }
-    if options.candidate_path.as_os_str().is_empty() {
-        return Err(CliError::InvalidArguments(format!(
-            "apps {action} requires a candidate path"
-        )));
-    }
-    if options.intent.trim().is_empty() {
-        return Err(CliError::InvalidArguments(format!(
-            "apps {action} requires --intent"
-        )));
-    }
-    Ok(CliCommand::Apps(if apply {
-        AppsCommand::Apply(options)
-    } else {
-        AppsCommand::Propose(options)
-    }))
-}
-
-fn parse_apps_init(
-    mut parser: ArgParser,
-    global_config: Option<PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let mut options = AppsInitOptions {
-        config_path: global_config,
-        workspace_override: None,
-        app_id: String::new(),
-    };
-    while let Some(arg) = parser.next() {
-        match arg.as_str() {
-            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
-            "--workspace" | "-w" => {
-                options.workspace_override = Some(take_path(&mut parser, &arg)?)
-            }
-            "--app-id" | "--id" => options.app_id = take_value(&mut parser, &arg)?,
-            "--help" | "-h" => return Ok(CliCommand::Help),
-            other if other.starts_with('-') => {
-                return Err(CliError::InvalidArguments(format!(
-                    "unknown apps init argument `{other}`"
-                )))
-            }
-            other => {
-                if !options.app_id.is_empty() {
-                    return Err(CliError::InvalidArguments(
-                        "apps init accepts exactly one app id".to_owned(),
-                    ));
-                }
-                options.app_id = other.to_owned();
-            }
-        }
-    }
-    if options.app_id.trim().is_empty() {
-        return Err(CliError::InvalidArguments(
-            "apps init requires an app id".to_owned(),
-        ));
-    }
-    Ok(CliCommand::Apps(AppsCommand::Init(options)))
-}
-
-fn parse_apps_install(
-    mut parser: ArgParser,
-    global_config: Option<PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let mut options = AppsInstallOptions {
-        config_path: global_config,
-        workspace_override: None,
-        bundle_path: PathBuf::new(),
-    };
-    while let Some(arg) = parser.next() {
-        match arg.as_str() {
-            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
-            "--workspace" | "-w" => {
-                options.workspace_override = Some(take_path(&mut parser, &arg)?)
-            }
-            "--bundle" => options.bundle_path = take_path(&mut parser, &arg)?,
-            "--help" | "-h" => return Ok(CliCommand::Help),
-            other if other.starts_with('-') => {
-                return Err(CliError::InvalidArguments(format!(
-                    "unknown apps install argument `{other}`"
-                )))
-            }
-            other => {
-                if options.bundle_path.as_os_str().is_empty() {
-                    options.bundle_path = PathBuf::from(other);
-                } else {
-                    return Err(CliError::InvalidArguments(
-                        "apps install accepts exactly one bundle path".to_owned(),
-                    ));
-                }
-            }
-        }
-    }
-    if options.bundle_path.as_os_str().is_empty() {
-        return Err(CliError::InvalidArguments(
-            "apps install requires a bundle path".to_owned(),
-        ));
-    }
-    Ok(CliCommand::Apps(AppsCommand::Install(options)))
-}
-
-fn parse_apps_list(
-    mut parser: ArgParser,
-    global_config: Option<PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let mut options = AppsListOptions {
-        config_path: global_config,
-        workspace_override: None,
-    };
-    while let Some(arg) = parser.next() {
-        match arg.as_str() {
-            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
-            "--workspace" | "-w" => {
-                options.workspace_override = Some(take_path(&mut parser, &arg)?)
-            }
-            "--help" | "-h" => return Ok(CliCommand::Help),
-            other => {
-                return Err(CliError::InvalidArguments(format!(
-                    "unknown apps list argument `{other}`"
-                )))
-            }
-        }
-    }
-    Ok(CliCommand::Apps(AppsCommand::List(options)))
-}
-
-fn parse_apps_inspect(
-    parser: ArgParser,
-    global_config: Option<PathBuf>,
-) -> Result<CliCommand, CliError> {
-    match parse_apps_id_options(parser, global_config, "inspect")? {
-        Some(options) => Ok(CliCommand::Apps(AppsCommand::Inspect(options))),
-        None => Ok(CliCommand::Help),
-    }
-}
-
-fn parse_apps_id_action(
-    parser: ArgParser,
-    global_config: Option<PathBuf>,
-    action: &str,
-) -> Result<CliCommand, CliError> {
-    let Some(options) = parse_apps_id_options(parser, global_config, action)? else {
-        return Ok(CliCommand::Help);
-    };
-    let options = AppsIdOptions {
-        config_path: options.config_path,
-        workspace_override: options.workspace_override,
-        app_id: options.app_id,
-    };
-    match action {
-        "enable" => Ok(CliCommand::Apps(AppsCommand::Enable(options))),
-        "disable" => Ok(CliCommand::Apps(AppsCommand::Disable(options))),
-        "start" => Ok(CliCommand::Apps(AppsCommand::Start(options))),
-        "stop" => Ok(CliCommand::Apps(AppsCommand::Stop(options))),
-        "restart" => Ok(CliCommand::Apps(AppsCommand::Restart(options))),
-        "recover" => Ok(CliCommand::Apps(AppsCommand::Recover(options))),
-        _ => Ok(CliCommand::Apps(AppsCommand::Uninstall(options))),
-    }
-}
-
-fn parse_apps_id_options(
-    mut parser: ArgParser,
-    global_config: Option<PathBuf>,
-    action: &str,
-) -> Result<Option<AppsInspectOptions>, CliError> {
-    let mut options = AppsInspectOptions {
-        config_path: global_config,
-        workspace_override: None,
-        app_id: String::new(),
-    };
-    while let Some(arg) = parser.next() {
-        match arg.as_str() {
-            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
-            "--workspace" | "-w" => {
-                options.workspace_override = Some(take_path(&mut parser, &arg)?)
-            }
-            "--app-id" | "--id" => options.app_id = take_value(&mut parser, &arg)?,
-            "--help" | "-h" => return Ok(None),
-            other if other.starts_with('-') => {
-                return Err(CliError::InvalidArguments(format!(
-                    "unknown apps {action} argument `{other}`"
-                )))
-            }
-            other => {
-                if !options.app_id.is_empty() {
-                    return Err(CliError::InvalidArguments(format!(
-                        "apps {action} accepts exactly one app id"
-                    )));
-                }
-                options.app_id = other.to_owned();
-            }
-        }
-    }
-    if options.app_id.trim().is_empty() {
-        return Err(CliError::InvalidArguments(format!(
-            "apps {action} requires an app id"
-        )));
-    }
-    Ok(Some(options))
 }
 
 fn parse_plugins(
@@ -20210,12 +18803,6 @@ impl AgentLoopChatCompletionAdapter {
             source = source.with_spec030_provider(Arc::new(move || {
                 shacs_projection::Spec030ProjectionProvider::projection(&provider)
             }));
-            source = source.with_activation_provider(
-                spec031_activation_provider::production_activation_provider(
-                    self.config_path.clone(),
-                    self.workspace.clone(),
-                ),
-            );
         }
         source
     }
@@ -23450,13 +22037,6 @@ pub(crate) fn display_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn display_path_escaped(path: &Path) -> String {
-    path.to_string_lossy()
-        .chars()
-        .flat_map(char::escape_default)
-        .collect()
-}
-
 fn exists_label(exists: bool) -> &'static str {
     if exists {
         "exists"
@@ -24106,482 +22686,6 @@ mod tests {
         };
         assert_eq!(options.host.as_deref(), Some("127.0.0.1"));
         assert_eq!(options.port, Some(8901));
-        Ok(())
-    }
-
-    #[test]
-    fn parser_handles_apps_command_surface() -> Result<(), Box<dyn Error>> {
-        let parsed = parse_cli_args([
-            "apps",
-            "install",
-            "--bundle",
-            "/tmp/demo.shacsapp",
-            "--workspace",
-            "/tmp/workspace",
-            "--config",
-            "/tmp/config.json",
-        ])?;
-        let CliCommand::Apps(AppsCommand::Install(options)) = parsed else {
-            return Err("expected apps install command".into());
-        };
-        assert_eq!(options.bundle_path, PathBuf::from("/tmp/demo.shacsapp"));
-        assert_eq!(
-            options.workspace_override,
-            Some(PathBuf::from("/tmp/workspace"))
-        );
-        assert_eq!(options.config_path, Some(PathBuf::from("/tmp/config.json")));
-
-        let parsed = parse_cli_args([
-            "apps",
-            "init",
-            "demo.app",
-            "--workspace",
-            "/tmp/workspace",
-            "--config",
-            "/tmp/config.json",
-        ])?;
-        let CliCommand::Apps(AppsCommand::Init(options)) = parsed else {
-            return Err("expected apps init command".into());
-        };
-        assert_eq!(options.app_id, "demo.app");
-        assert_eq!(
-            options.workspace_override,
-            Some(PathBuf::from("/tmp/workspace"))
-        );
-        assert_eq!(options.config_path, Some(PathBuf::from("/tmp/config.json")));
-
-        let parsed = parse_cli_args(["apps", "new", "--app-id", "demo_app"])?;
-        let CliCommand::Apps(AppsCommand::Init(options)) = parsed else {
-            return Err("expected apps new command".into());
-        };
-        assert_eq!(options.app_id, "demo_app");
-
-        let parsed = parse_cli_args(["apps", "init", "--help"])?;
-        assert!(matches!(parsed, CliCommand::Help));
-
-        let parsed = parse_cli_args(["apps", "list", "-w", "/tmp/workspace"])?;
-        let CliCommand::Apps(AppsCommand::List(options)) = parsed else {
-            return Err("expected apps list command".into());
-        };
-        assert_eq!(
-            options.workspace_override,
-            Some(PathBuf::from("/tmp/workspace"))
-        );
-
-        let parsed = parse_cli_args(["apps", "inspect", "demo.app"])?;
-        let CliCommand::Apps(AppsCommand::Inspect(options)) = parsed else {
-            return Err("expected apps inspect command".into());
-        };
-        assert_eq!(options.app_id, "demo.app");
-
-        let parsed = parse_cli_args(["apps", "inspect", "--help"])?;
-        assert!(matches!(parsed, CliCommand::Help));
-
-        let parsed = parse_cli_args(["apps", "show", "--app-id", "demo.app"])?;
-        let CliCommand::Apps(AppsCommand::Inspect(options)) = parsed else {
-            return Err("expected apps show command".into());
-        };
-        assert_eq!(options.app_id, "demo.app");
-
-        let parsed = parse_cli_args(["apps", "enable", "demo.app"])?;
-        let CliCommand::Apps(AppsCommand::Enable(options)) = parsed else {
-            return Err("expected apps enable command".into());
-        };
-        assert_eq!(options.app_id, "demo.app");
-
-        let parsed = parse_cli_args(["apps", "enable", "--help"])?;
-        assert!(matches!(parsed, CliCommand::Help));
-
-        let parsed = parse_cli_args(["apps", "disable", "demo.app"])?;
-        let CliCommand::Apps(AppsCommand::Disable(options)) = parsed else {
-            return Err("expected apps disable command".into());
-        };
-        assert_eq!(options.app_id, "demo.app");
-
-        let parsed = parse_cli_args(["apps", "disable", "--help"])?;
-        assert!(matches!(parsed, CliCommand::Help));
-
-        for (action, expected) in [
-            ("start", "start"),
-            ("stop", "stop"),
-            ("restart", "restart"),
-            ("recover", "recover"),
-        ] {
-            let parsed = parse_cli_args(["apps", action, "demo.app"])?;
-            let matches_action = match parsed {
-                CliCommand::Apps(AppsCommand::Start(options)) => {
-                    expected == "start" && options.app_id == "demo.app"
-                }
-                CliCommand::Apps(AppsCommand::Stop(options)) => {
-                    expected == "stop" && options.app_id == "demo.app"
-                }
-                CliCommand::Apps(AppsCommand::Restart(options)) => {
-                    expected == "restart" && options.app_id == "demo.app"
-                }
-                CliCommand::Apps(AppsCommand::Recover(options)) => {
-                    expected == "recover" && options.app_id == "demo.app"
-                }
-                _ => false,
-            };
-            assert!(matches_action, "expected apps {action} command");
-        }
-
-        let proposed = parse_cli_args([
-            "apps",
-            "propose",
-            "/tmp/candidate",
-            "--intent",
-            "create app",
-        ])?;
-        let CliCommand::Apps(AppsCommand::Propose(options)) = proposed else {
-            return Err("expected apps propose command".into());
-        };
-        assert_eq!(options.candidate_path, PathBuf::from("/tmp/candidate"));
-        assert_eq!(options.intent, "create app");
-
-        let applied = parse_cli_args([
-            "apps",
-            "apply",
-            "--candidate",
-            "/tmp/candidate",
-            "--intent",
-            "update app",
-            "--update",
-        ])?;
-        let CliCommand::Apps(AppsCommand::Apply(options)) = applied else {
-            return Err("expected apps apply command".into());
-        };
-        assert!(options.update);
-
-        let parsed = parse_cli_args(["apps", "uninstall", "demo.app"])?;
-        let CliCommand::Apps(AppsCommand::Uninstall(options)) = parsed else {
-            return Err("expected apps uninstall command".into());
-        };
-        assert_eq!(options.app_id, "demo.app");
-
-        let parsed = parse_cli_args(["apps", "uninstall", "--help"])?;
-        assert!(matches!(parsed, CliCommand::Help));
-        Ok(())
-    }
-
-    #[test]
-    fn apps_commands_use_configured_workspace() -> Result<(), Box<dyn Error>> {
-        let root = tempfile::tempdir()?;
-        let config_path = root.path().join("config.json");
-        let configured_workspace = root.path().join("configured-workspace");
-        let overridden_workspace = root.path().join("overridden-workspace");
-        let mut config = Config::default();
-        config.agents.defaults.workspace = configured_workspace.to_string_lossy().to_string();
-        save_config_to_path(&config, &config_path)?;
-
-        let report = apps_list(AppsListOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override: None,
-        })?;
-        assert_eq!(report.workspace, configured_workspace);
-
-        let overridden = apps_list(AppsListOptions {
-            config_path: Some(config_path),
-            workspace_override: Some(overridden_workspace.clone()),
-        })?;
-        assert_eq!(overridden.workspace, overridden_workspace);
-        Ok(())
-    }
-
-    #[test]
-    fn apps_init_creates_authoring_draft_without_registry_mutation() -> Result<(), Box<dyn Error>> {
-        let root = tempfile::tempdir()?;
-        let config_path = root.path().join("config.json");
-        let workspace = root.path().join("workspace");
-        fs::create_dir_all(&workspace)?;
-        let mut config = Config::default();
-        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
-        save_config_to_path(&config, &config_path)?;
-        let report = apps_init(AppsInitOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override: None,
-            app_id: "demo.app".to_owned(),
-        })?;
-
-        assert_eq!(report.config_path, config_path);
-        assert_eq!(report.workspace, workspace);
-        assert_eq!(report.authoring.app_id, AppId::parse("demo.app")?);
-        assert_eq!(report.authoring.draft_id.as_str(), "draft-demo.app");
-        assert!(report.authoring.draft_metadata_path.exists());
-        assert!(report.authoring.scaffold_plan_path.exists());
-        assert!(report.authoring.manifest_candidate_path.exists());
-        assert!(report.authoring.readme_candidate_path.exists());
-        assert!(!root.path().join("apps/registry.json").exists());
-        assert!(!root.path().join("apps/demo.app.shacsapp").exists());
-        assert!(!root.path().join("runtime").exists());
-
-        let output = format_apps_init(report);
-        assert!(output.contains("App authoring draft: demo.app"));
-        assert!(output.contains("Outcome: created"));
-        assert!(output.contains("Validation: static scaffold created"));
-        assert!(output.contains("Next action: review candidates"));
-        assert!(!output.contains("State: installed"));
-        assert!(!output.contains("State: enabled"));
-        assert!(!output.contains("running"));
-        Ok(())
-    }
-
-    #[test]
-    fn apps_init_escapes_control_chars_in_report_paths() -> Result<(), Box<dyn Error>> {
-        let root = tempfile::tempdir()?;
-        let data_dir = root.path().join("line\nbreak");
-        let config_path = data_dir.join("config.json");
-        let workspace = data_dir.join("workspace");
-        fs::create_dir_all(&workspace)?;
-        save_config_to_path(&Config::default(), &config_path)?;
-
-        let report = apps_init(AppsInitOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override: Some(workspace),
-            app_id: "demo.app".to_owned(),
-        })?;
-        let output = format_apps_init(report.clone());
-        assert!(output.contains("line\\nbreak"));
-        assert!(!output.contains("line\nbreak"));
-
-        fs::write(&report.authoring.readme_candidate_path, "changed")?;
-        let error = apps_init(AppsInitOptions {
-            config_path: Some(config_path),
-            workspace_override: None,
-            app_id: "demo.app".to_owned(),
-        })
-        .err()
-        .ok_or("expected escaped path conflict")?
-        .to_string();
-        assert!(error.contains("line\\nbreak"));
-        assert!(!error.contains("line\nbreak"));
-        Ok(())
-    }
-
-    #[test]
-    fn apps_init_is_idempotent_and_conflicts_on_modified_candidates() -> Result<(), Box<dyn Error>>
-    {
-        let root = tempfile::tempdir()?;
-        let config_path = root.path().join("config.json");
-        save_config_to_path(&Config::default(), &config_path)?;
-
-        let first = apps_init(AppsInitOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override: None,
-            app_id: "demo.app".to_owned(),
-        })?;
-        let second = apps_init(AppsInitOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override: None,
-            app_id: "demo.app".to_owned(),
-        })?;
-        assert_eq!(
-            second.authoring.outcome,
-            AppAuthoringInitOutcome::AlreadyExistsSameContent
-        );
-        assert_eq!(first.authoring.draft_path, second.authoring.draft_path);
-
-        fs::write(&first.authoring.readme_candidate_path, "changed")?;
-        let error = apps_init(AppsInitOptions {
-            config_path: Some(config_path),
-            workspace_override: None,
-            app_id: "demo.app".to_owned(),
-        })
-        .err()
-        .ok_or("expected apps init conflict")?;
-        assert!(matches!(
-            error,
-            CliError::AppAuthoring(AppAuthoringError::Conflict(_))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn apps_init_blocks_installed_app_without_registry_mutation() -> Result<(), Box<dyn Error>> {
-        let root = tempfile::tempdir()?;
-        let config_path = root.path().join("config.json");
-        let bundle = root.path().join("apps/demo.app.shacsapp");
-        save_config_to_path(&Config::default(), &config_path)?;
-        fs::create_dir_all(&bundle)?;
-        fs::write(bundle.join("entry.md"), "# entry")?;
-        fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec_pretty(&json!({
-                "id": "demo.app",
-                "version": "1.0.0",
-                "entry": "entry.md"
-            }))?,
-        )?;
-        let install = apps_install(AppsInstallOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override: None,
-            bundle_path: bundle,
-        })?;
-        let before = fs::read(&install.registry_path)?;
-
-        let error = apps_init(AppsInitOptions {
-            config_path: Some(config_path),
-            workspace_override: None,
-            app_id: "demo.app".to_owned(),
-        })
-        .err()
-        .ok_or("expected installed app blocker")?;
-        assert!(matches!(
-            error,
-            CliError::AppAuthoring(AppAuthoringError::InstalledApp(app_id)) if app_id == AppId::parse("demo.app")?
-        ));
-        assert_eq!(fs::read(&install.registry_path)?, before);
-        assert!(!root.path().join("authoring/apps/draft-demo.app").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn apps_init_rejects_invalid_app_ids_without_raw_control_output() -> Result<(), Box<dyn Error>>
-    {
-        let root = tempfile::tempdir()?;
-        let config_path = root.path().join("config.json");
-        save_config_to_path(&Config::default(), &config_path)?;
-        let error = apps_init(AppsInitOptions {
-            config_path: Some(config_path),
-            workspace_override: None,
-            app_id: "bad\napp".to_owned(),
-        })
-        .err()
-        .ok_or("expected invalid app id")?
-        .to_string();
-        assert!(error.contains("bad\\napp"));
-        assert!(!error.contains("bad\napp"));
-        Ok(())
-    }
-
-    #[test]
-    fn apps_install_rejects_bundle_outside_resolved_data_dir() -> Result<(), Box<dyn Error>> {
-        let root = tempfile::tempdir()?;
-        let config_path = root.path().join("config.json");
-        let workspace = root.path().join("workspace");
-        let outside = root.path().join("outside");
-        let bundle = outside.join("demo.app.shacsapp");
-
-        fs::create_dir_all(&workspace)?;
-        let mut config = Config::default();
-        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
-        save_config_to_path(&config, &config_path)?;
-
-        fs::create_dir_all(&bundle)?;
-        fs::write(bundle.join("entry.md"), "# entry")?;
-        fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec_pretty(&json!({
-                "id": "demo.app",
-                "version": "1.0.0",
-                "entry": "entry.md"
-            }))?,
-        )?;
-
-        let error = apps_install(AppsInstallOptions {
-            config_path: Some(config_path),
-            workspace_override: None,
-            bundle_path: bundle,
-        })
-        .err()
-        .ok_or("expected invalid bundle location")?;
-
-        assert!(matches!(
-            error,
-            CliError::App(AppError::InvalidBundleLocation { .. })
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn apps_install_accepts_relative_bundle_path_inside_data_dir() -> Result<(), Box<dyn Error>> {
-        let root = tempfile::Builder::new()
-            .prefix("shacs-cli-apps-")
-            .tempdir()?;
-        let config_path = root.path().join("config.json");
-        let workspace = root.path().join("workspace");
-        let bundle = root.path().join("apps/demo.app.shacsapp");
-
-        fs::create_dir_all(&workspace)?;
-        fs::create_dir_all(&bundle)?;
-        let mut config = Config::default();
-        let canonical_workspace = workspace.canonicalize()?;
-        config.agents.defaults.workspace = canonical_workspace.to_string_lossy().to_string();
-        save_config_to_path(&config, &config_path)?;
-
-        fs::write(bundle.join("entry.md"), "# entry")?;
-        fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec_pretty(&json!({
-                "id": "demo.app",
-                "version": "1.0.0",
-                "entry": "entry.md"
-            }))?,
-        )?;
-
-        let report = apps_install(AppsInstallOptions {
-            config_path: Some(config_path),
-            workspace_override: None,
-            bundle_path: bundle.clone(),
-        })?;
-
-        assert_eq!(report.entry.app_id, AppId::parse("demo.app")?);
-        assert_eq!(report.entry.bundle_path, bundle.canonicalize()?);
-        Ok(())
-    }
-
-    #[test]
-    fn apps_uninstall_rejects_poisoned_registry_bundle_path() -> Result<(), Box<dyn Error>> {
-        let root = tempfile::tempdir()?;
-        let config_path = root.path().join("config.json");
-        let workspace = root.path().join("workspace");
-        let bundle = root.path().join("apps/demo.app.shacsapp");
-        let outside = root.path().join("outside-delete-target");
-
-        let mut config = Config::default();
-        config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
-        save_config_to_path(&config, &config_path)?;
-
-        fs::create_dir_all(&bundle)?;
-        fs::write(bundle.join("entry.md"), "# entry")?;
-        fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec_pretty(&json!({
-                "id": "demo.app",
-                "version": "1.0.0",
-                "entry": "entry.md"
-            }))?,
-        )?;
-        fs::create_dir_all(&outside)?;
-        fs::write(outside.join("keep.txt"), "keep")?;
-
-        let install = apps_install(AppsInstallOptions {
-            config_path: Some(config_path.clone()),
-            workspace_override: None,
-            bundle_path: bundle.clone(),
-        })?;
-        let mut registry: serde_json::Value =
-            serde_json::from_slice(&fs::read(install.registry_path)?)?;
-        registry["entries"]["demo.app"]["bundlePath"] = json!(outside);
-        fs::write(
-            root.path().join("apps/registry.json"),
-            serde_json::to_vec_pretty(&registry)?,
-        )?;
-
-        let error = apps_uninstall(AppsIdOptions {
-            config_path: Some(config_path),
-            workspace_override: None,
-            app_id: "demo.app".to_owned(),
-        })
-        .err()
-        .ok_or("expected poisoned bundle path rejection")?;
-
-        assert!(matches!(
-            error,
-            CliError::App(AppError::InvalidBundleLocation { .. })
-        ));
-        assert!(outside.join("keep.txt").exists());
-        assert!(bundle.exists());
         Ok(())
     }
 
@@ -34826,7 +32930,9 @@ mod tests {
         assert!(help.contains("agent     Start an interactive REPL"));
         assert!(help.contains("provider  Manage provider auth"));
         assert!(help.contains("generic import-key"));
-        assert!(help.contains("apps      Propose/apply app drafts"));
+        assert!(!help
+            .lines()
+            .any(|line| line.trim_start().starts_with("apps ")));
         assert!(help.contains("channels  List channel"));
         assert!(!help.contains("channels  Reserved"));
         assert!(help.contains("-m, --message"));

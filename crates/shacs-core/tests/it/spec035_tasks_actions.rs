@@ -1,5 +1,3 @@
-use shacs_core::app::{AppError, AppId};
-use shacs_core::app_lifecycle::{AppLifecycleAction, AppLifecycleReceipt, AppProcessState};
 use shacs_core::runtime::{
     accept_spec035_surface_action_outcome, assemble_spec035_tasks, Spec035RecoveryOwnerFact,
     Spec035TasksOwnerSnapshots, Spec035TasksOwnerSource, SurfaceActionOutcome,
@@ -17,21 +15,13 @@ use shacs_session::durable_replay::{
 type FixtureError = Box<dyn std::error::Error>;
 
 #[test]
-fn current_goal_and_app_rows_advertise_owner_supported_actions() -> Result<(), FixtureError> {
+fn current_goal_row_advertises_owner_supported_action() -> Result<(), FixtureError> {
     // Given
     let mut snapshots = unavailable_snapshots();
     snapshots.goal = source(
         1,
         Spec031Freshness::Current,
         vec![located("goal-1", goal(Spec033GoalStatus::Active))],
-    );
-    snapshots.app = source(
-        2,
-        Spec031Freshness::Current,
-        vec![located(
-            "formatter",
-            app(AppLifecycleAction::Start, AppProcessState::Running, true)?,
-        )],
     );
 
     // When
@@ -44,16 +34,8 @@ fn current_goal_and_app_rows_advertise_owner_supported_actions() -> Result<(), F
         .find(|row| row.owner().kind() == Spec035TaskOwnerKind::Goal)
         .and_then(|row| row.action())
         .ok_or("goal action")?;
-    let app = projection
-        .rows()
-        .iter()
-        .find(|row| row.owner().kind() == Spec035TaskOwnerKind::App)
-        .and_then(|row| row.action())
-        .ok_or("app action")?;
     assert_eq!(goal.kind, Spec035TaskActionKind::Pause);
     assert_eq!(goal.status, Spec035TaskActionStatus::Available);
-    assert_eq!(app.kind, Spec035TaskActionKind::Stop);
-    assert_eq!(app.status, Spec035TaskActionStatus::Available);
     Ok(())
 }
 
@@ -104,31 +86,6 @@ fn goal(status: Spec033GoalStatus) -> Spec033GoalFact {
         user_interrupted: false,
         latest_transition: None,
     }
-}
-
-fn app(
-    action: AppLifecycleAction,
-    state: AppProcessState,
-    completed: bool,
-) -> Result<AppLifecycleReceipt, AppError> {
-    Ok(AppLifecycleReceipt {
-        receipt_id: "receipt:formatter".to_owned(),
-        request_id: "request:formatter".to_owned(),
-        app_id: AppId::parse("formatter")?,
-        action,
-        previous_state: AppProcessState::Running,
-        current_state: state,
-        generation: 1,
-        completed,
-        manifest_digest: String::new(),
-        trusted_runtime_ref: String::new(),
-        credential_source_statuses: Vec::new(),
-        blockers: Vec::new(),
-        activation_refs: Vec::new(),
-        execution_snapshot_ref: None,
-        process_outcome: None,
-        occurred_at_unix_ms: 30,
-    })
 }
 
 fn recovery(status: DurableRecoveryStatus) -> DurableReplayAdmission {

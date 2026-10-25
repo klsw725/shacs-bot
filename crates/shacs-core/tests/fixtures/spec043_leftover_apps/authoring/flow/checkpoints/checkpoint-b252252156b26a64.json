@@ -1,0 +1,20 @@
+{
+  "checkpointId": "checkpoint-b252252156b26a64",
+  "proposal": {
+    "proposalId": "proposal-63bad4d2825b942b",
+    "appId": "demo.note",
+    "kind": "install",
+    "userIntent": {
+      "digest": "sha256:62261d5813ef3ef0143ae99df66a951ba4437458e967be71529133d0f4e3ee28",
+      "redacted": true
+    },
+    "revisionDigest": "sha256:cb1a51f6a88f65e8be1f4571f901ecb0c3102d4294e4108a694b8214a683fb87",
+    "candidateDigest": "663b1d8c0e8a86942f690b553c4dde31228a2b8110f0af9429cafff54666b209",
+    "installedDigest": null,
+    "installedTreeDigest": null,
+    "validationSummary": "static manifest and local resource validation passed",
+    "riskSummary": "authoring mutation only; no runtime authorization or activation",
+    "diff": []
+  },
+  "originalRegistryEntry": null
+}

@@ -5,9 +5,6 @@ use shacs_cli::AgentLoopChatCompletionAdapter;
 use shacs_config::{
     Config, ConfigBundle, ConfigContext, ProviderConfig, TrustedResourceConfig, TrustedResourceKind,
 };
-use shacs_core::app::{
-    AppId, AppLifecycleState, AppRegistry, AppRegistryEntry, AppRegistryStore, AppResourceSummary,
-};
 use shacs_core::runtime::{
     ActivationReason, ActivationRecord, ActivationRecordInput, ActivationSource, ActivationStatus,
     ActivationStore, ExecutionSnapshot, WorkspaceTrustRef,
@@ -17,68 +14,26 @@ use shacs_session::SessionManager;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::thread;
 
 type ProviderServer = thread::JoinHandle<Result<(), String>>;
 
-pub struct Scenario {
-    status: Option<ActivationStatus>,
-    record_manifest_digest: &'static str,
-}
-
-impl Scenario {
-    pub const fn active() -> Self {
-        Self {
-            status: Some(ActivationStatus::Active),
-            record_manifest_digest: "sha256:app-manifest-a",
-        }
-    }
-    pub const fn missing() -> Self {
-        Self {
-            status: None,
-            record_manifest_digest: "sha256:app-manifest-a",
-        }
-    }
-    pub const fn status(status: ActivationStatus) -> Self {
-        Self {
-            status: Some(status),
-            record_manifest_digest: "sha256:app-manifest-a",
-        }
-    }
-    pub const fn digest_mismatch() -> Self {
-        Self {
-            status: Some(ActivationStatus::Active),
-            record_manifest_digest: "sha256:app-manifest-b",
-        }
-    }
-}
-
-pub fn run(scenario: Scenario) -> Result<ExecutionSnapshot, Box<dyn Error>> {
+pub fn run() -> Result<ExecutionSnapshot, Box<dyn Error>> {
     let root = tempfile::tempdir()?;
-    let workspace = root.path().join("workspace");
-    let app_root = root.path().join("apps/formatter.shacsapp");
+    let data_dir = root.path().canonicalize()?;
+    let workspace = data_dir.join("workspace");
     std::fs::create_dir_all(&workspace)?;
-    std::fs::create_dir_all(&app_root)?;
-    let resource_path = app_root.join("formatter.py");
-    std::fs::write(&resource_path, b"print('formatter')")?;
-    let canonical_resource = std::fs::canonicalize(&resource_path)?;
+    crate::spec043_leftover_apps::copy_into(&data_dir)?;
+    let (bundle, app_digest) = registry_in_place(&data_dir, "demo.clock")?;
+    let canonical_resource = bundle.join("README.md").canonicalize()?;
     let content_digest = format!("{:x}", Sha256::digest(std::fs::read(&canonical_resource)?));
-    let app_digest = "sha256:app-manifest-a";
-    seed_app(root.path(), &app_root, app_digest)?;
     let context = ConfigContext {
-        config_path: root.path().join("config.json"),
-        data_dir: root.path().to_path_buf(),
+        config_path: data_dir.join("config.json"),
+        data_dir: data_dir.clone(),
         workspace: workspace.clone(),
     };
-    if let Some(status) = scenario.status {
-        seed_activation(
-            &context,
-            &canonical_resource,
-            &content_digest,
-            scenario.record_manifest_digest,
-            status,
-        )?;
-    }
+    seed_activation(&context, &canonical_resource, &content_digest, &app_digest)?;
     let (api_base, server) = serve_chat_response()?;
     let config = config(&canonical_resource, &api_base);
     std::fs::write(&context.config_path, serde_json::to_vec(&config)?)?;
@@ -95,45 +50,30 @@ pub fn run(scenario: Scenario) -> Result<ExecutionSnapshot, Box<dyn Error>> {
     persisted_snapshot(&workspace)
 }
 
-fn seed_app(
-    data_dir: &std::path::Path,
-    app_root: &std::path::Path,
-    digest: &str,
-) -> Result<(), Box<dyn Error>> {
-    let app_id = AppId::parse("formatter")?;
-    let mut registry = AppRegistry::default();
-    registry.entries.insert(
-        app_id.clone(),
-        AppRegistryEntry {
-            app_id,
-            version: "1.0.0".to_owned(),
-            digest: digest.to_owned(),
-            bundle_path: app_root.to_path_buf(),
-            lifecycle_state: AppLifecycleState::Enabled,
-            permission_requests: Vec::new(),
-            secret_requests: Vec::new(),
-            resource_summaries: vec![AppResourceSummary {
-                kind: "entry".to_owned(),
-                path: "formatter.py".to_owned(),
-                size_bytes: 18,
-                sha256: String::new(),
-            }],
-            grant_reference: None,
-            unavailable_reasons: Vec::new(),
-            process_snapshots: Vec::new(),
-            installed_at_unix_ms: 31_100,
-        },
-    );
-    AppRegistryStore::new(data_dir).save(&registry)?;
-    Ok(())
+/// Rewrites the copied registry's bundle paths to this data dir, as if the
+/// leftover data had never moved, and returns the app's bundle and digest.
+fn registry_in_place(data_dir: &Path, app_id: &str) -> Result<(PathBuf, String), Box<dyn Error>> {
+    let registry_path = data_dir.join("apps/registry.json");
+    let text = std::fs::read_to_string(&registry_path)?;
+    let entry = &serde_json::from_str::<serde_json::Value>(&text)?["entries"][app_id];
+    let suffix = format!("/apps/{app_id}.shacsapp");
+    let original = entry["bundlePath"]
+        .as_str()
+        .and_then(|path| path.strip_suffix(&suffix))
+        .ok_or("fixture bundle path")?;
+    let digest = entry["digest"].as_str().ok_or("fixture digest")?.to_owned();
+    std::fs::write(
+        &registry_path,
+        text.replace(original, &data_dir.to_string_lossy()),
+    )?;
+    Ok((data_dir.join(format!("apps/{app_id}.shacsapp")), digest))
 }
 
 fn seed_activation(
     context: &ConfigContext,
-    source: &std::path::Path,
+    source: &Path,
     content_digest: &str,
     manifest_digest: &str,
-    status: ActivationStatus,
 ) -> Result<(), Box<dyn Error>> {
     let owner = WorkspaceTrustRef::new(context.workspace_permission_id()?.as_str());
     ActivationStore::new(
@@ -149,14 +89,8 @@ fn seed_activation(
         source_identity: format!("source:app:{}", source.to_string_lossy()),
         content_digest: content_digest.to_owned(),
         dependency_manifest_digest: manifest_digest.to_owned(),
-        status,
-        reason: match status {
-            ActivationStatus::Active => ActivationReason::Activated,
-            ActivationStatus::Disabled => ActivationReason::UserDisabled,
-            ActivationStatus::Revoked => ActivationReason::UserRevoked,
-            ActivationStatus::Stale => ActivationReason::ContentDigestMismatch,
-            ActivationStatus::Removed => ActivationReason::SourceRemoved,
-        },
+        status: ActivationStatus::Active,
+        reason: ActivationReason::Activated,
         recorded_at_unix_ms: 31_100,
     }))?;
     Ok(())

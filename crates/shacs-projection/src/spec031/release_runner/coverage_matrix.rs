@@ -23,7 +23,7 @@ pub(super) fn coverage_entries(
     push_requirement_rows(root, &mut entries, commands, audits)?;
     push_command_rows(root, &mut entries, commands)?;
     push_artifact_rows(root, &mut entries, commands)?;
-    push_external_rows(root, &mut entries, external_status, audits)?;
+    push_external_rows(root, &mut entries, schema, external_status, audits)?;
     if super::model::is_current_layout(schema) {
         push_archived_source_row(root, &mut entries, commands)?;
     } else if schema == super::model::SPEC031_RELEASE_RUNNER_SCHEMA_V2 {
@@ -122,10 +122,12 @@ fn push_artifact_rows(
 fn push_external_rows(
     root: &Path,
     entries: &mut Vec<Spec031ReleaseCoverageEntry>,
+    schema: &str,
     external_status: Spec031CoverageStatus,
     audits: &[Spec031ExternalAuditRow],
 ) -> Result<(), Spec031ReleaseArtifactError> {
-    for name in ["spec029", "spec030", "spec032", "spec033", "spec034"] {
+    for descriptor in super::external_audit_facts::external_owner_facts_for(schema) {
+        let name = descriptor.slug;
         let audit = audits.iter().find(|audit| owner_slug(audit.owner) == name);
         let artifact = audit
             .map(|audit| audit.artifact.clone())

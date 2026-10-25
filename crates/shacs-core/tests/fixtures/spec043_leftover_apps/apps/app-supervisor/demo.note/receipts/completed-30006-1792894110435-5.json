@@ -1,0 +1,23 @@
+{
+  "receiptId": "completed-30006-1792894110435-5",
+  "requestId": "request-30006-1792894110417-3",
+  "appId": "demo.note",
+  "action": "stop",
+  "previousState": "stopping",
+  "currentState": "stopped",
+  "generation": 1,
+  "completed": true,
+  "manifestDigest": "663b1d8c0e8a86942f690b553c4dde31228a2b8110f0af9429cafff54666b209",
+  "trustedRuntimeRef": "trusted-runtime:spec030:1",
+  "credentialSourceStatuses": [],
+  "blockers": [],
+  "activationRefs": [],
+  "executionSnapshotRef": "snapshot:app:app-demo.note-g1-663b1d8c0e8a-0",
+  "processOutcome": {
+    "outcome": "Succeeded { code: Some(0) }",
+    "durationMs": 15,
+    "cleanupAttempted": false,
+    "descendantCleanupSupported": true
+  },
+  "occurredAtUnixMs": 1792894110435
+}

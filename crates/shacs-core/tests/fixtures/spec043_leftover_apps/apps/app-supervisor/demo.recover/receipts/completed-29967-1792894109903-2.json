@@ -1,0 +1,17 @@
+{
+  "receiptId": "completed-29967-1792894109903-2",
+  "requestId": "request-29967-1792894109858-0",
+  "appId": "demo.recover",
+  "action": "start",
+  "previousState": "starting",
+  "currentState": "running",
+  "generation": 1,
+  "completed": true,
+  "manifestDigest": "fe053b08a4d4004e51d497f0e5588d0f7e027061df8c76cb71da3f489c68f981",
+  "trustedRuntimeRef": "trusted-runtime:spec030:1",
+  "credentialSourceStatuses": [],
+  "blockers": [],
+  "activationRefs": [],
+  "executionSnapshotRef": "snapshot:app:app-demo.recover-g1-fe053b08a4d4-0",
+  "occurredAtUnixMs": 1792894109903
+}

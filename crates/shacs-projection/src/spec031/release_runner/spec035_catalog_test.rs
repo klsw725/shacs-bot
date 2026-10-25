@@ -5,7 +5,7 @@ use super::spec035_evidence::validate_spec035_closure_evidence;
 use std::fs;
 
 #[test]
-fn spec031_catalog_keeps_sixty_six_rows_and_five_external_owners() {
+fn spec031_catalog_keeps_sixty_five_rows_and_four_external_owners() {
     let root = tempfile::tempdir().expect("owned evidence root");
     fs::create_dir(root.path().join("triage")).expect("triage directory");
     fs::create_dir(root.path().join("external")).expect("audit directory");
@@ -20,7 +20,7 @@ fn spec031_catalog_keeps_sixty_six_rows_and_five_external_owners() {
             .expect("archive receipt JSON"),
     )
     .expect("archive receipt");
-    for owner in ["029", "030", "032", "033", "034"] {
+    for owner in ["029", "030", "033", "034"] {
         fs::write(
             root.path()
                 .join(format!("external/spec{owner}-read-audit.md")),
@@ -51,12 +51,12 @@ fn spec031_catalog_keeps_sixty_six_rows_and_five_external_owners() {
         original.source_locator,
         "docs/specs/031-configuration-runtime-layout-and-execution-snapshots/SPEC.md:63"
     );
-    assert_eq!(rows.len(), 66);
+    assert_eq!(rows.len(), 65);
     assert_eq!(
         rows.iter()
             .filter(|row| row.kind == Spec031CoverageRequirementKind::ExternalOwner)
             .count(),
-        5
+        4
     );
     assert!(rows
         .iter()

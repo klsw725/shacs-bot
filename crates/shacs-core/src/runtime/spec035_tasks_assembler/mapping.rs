@@ -5,12 +5,10 @@ use super::{
     Spec035TasksAssemblerErrorKind,
 };
 use crate::runtime::SurfaceActionOutcomeKind;
-use shacs_app::app_lifecycle::{AppLifecycleAction, AppLifecycleReceipt, AppProcessState};
 use shacs_projection::{
-    Spec031Count, Spec031Freshness, Spec031ObservedAtUnixMs, Spec035AppProcessState,
-    Spec035RecoveryStatus, Spec035TaskAction, Spec035TaskActionKind, Spec035TaskActionStatus,
-    Spec035TaskDetail, Spec035TaskOwner, Spec035TaskRow, Spec035TaskRowInput, Spec035TaskState,
-    Spec035WorkflowPhase,
+    Spec031Count, Spec031Freshness, Spec031ObservedAtUnixMs, Spec035RecoveryStatus,
+    Spec035TaskAction, Spec035TaskActionKind, Spec035TaskActionStatus, Spec035TaskDetail,
+    Spec035TaskOwner, Spec035TaskRow, Spec035TaskRowInput, Spec035TaskState, Spec035WorkflowPhase,
 };
 use shacs_session::durable_replay::{DurableRecoveryStatus, DurableReplayAdmission};
 use shacs_workflow::{WorkflowProjection, WorkflowRunState};
@@ -38,30 +36,6 @@ pub(super) fn workflow_row(
                 active_children,
             },
             action: None,
-        },
-    )
-}
-
-pub(super) fn app_row(
-    located: Spec035LocatedOwnerFact<AppLifecycleReceipt>,
-    observed_at: Spec031ObservedAtUnixMs,
-    freshness: Spec031Freshness,
-) -> Result<Spec035TaskRow, Spec035TasksAssemblerError> {
-    if located.fact.current_state == AppProcessState::Stopped && !located.fact.completed {
-        return invalid_owner_fact();
-    }
-    let (state, process_state) = app_state(&located.fact);
-    let action = app_action(&located.fact, state);
-    row(
-        located.locator,
-        Observation {
-            observed_at,
-            freshness,
-        },
-        MappedRow {
-            state,
-            detail: Spec035TaskDetail::App { process_state },
-            action,
         },
     )
 }
@@ -159,62 +133,6 @@ const fn workflow_state(state: WorkflowRunState) -> Spec035TaskState {
         WorkflowRunState::Failed => Spec035TaskState::Failed,
         WorkflowRunState::Cancelled => Spec035TaskState::Cancelled,
     }
-}
-
-fn app_state(receipt: &AppLifecycleReceipt) -> (Spec035TaskState, Spec035AppProcessState) {
-    let process = match receipt.current_state {
-        AppProcessState::Installed | AppProcessState::Stopped => Spec035AppProcessState::Stopped,
-        AppProcessState::Starting => Spec035AppProcessState::Starting,
-        AppProcessState::Running => Spec035AppProcessState::Running,
-        AppProcessState::Stopping => Spec035AppProcessState::Stopping,
-        AppProcessState::Failed => Spec035AppProcessState::Failed,
-        AppProcessState::RecoveryNeeded => Spec035AppProcessState::RecoveryNeeded,
-    };
-    let state = match receipt.current_state {
-        AppProcessState::Installed => Spec035TaskState::Pending,
-        AppProcessState::Starting | AppProcessState::Running => Spec035TaskState::Running,
-        AppProcessState::Stopping => Spec035TaskState::Requested,
-        AppProcessState::Stopped
-            if receipt.action == AppLifecycleAction::Recover && receipt.completed =>
-        {
-            Spec035TaskState::Recovered
-        }
-        AppProcessState::Stopped => Spec035TaskState::Done,
-        AppProcessState::Failed => Spec035TaskState::Failed,
-        AppProcessState::RecoveryNeeded => Spec035TaskState::Blocked,
-    };
-    (state, process)
-}
-
-fn app_action(receipt: &AppLifecycleReceipt, state: Spec035TaskState) -> Option<Spec035TaskAction> {
-    let (kind, status) = match (receipt.completed, receipt.action, receipt.current_state) {
-        (false, AppLifecycleAction::Stop, _) => (
-            Spec035TaskActionKind::Stop,
-            Spec035TaskActionStatus::Requested,
-        ),
-        (false, AppLifecycleAction::Recover, _) => (
-            Spec035TaskActionKind::Recover,
-            Spec035TaskActionStatus::Requested,
-        ),
-        (_, _, AppProcessState::Running) => (
-            Spec035TaskActionKind::Stop,
-            Spec035TaskActionStatus::Available,
-        ),
-        (_, _, AppProcessState::RecoveryNeeded) => (
-            Spec035TaskActionKind::Recover,
-            Spec035TaskActionStatus::Available,
-        ),
-        (true, AppLifecycleAction::Stop, _) if state == Spec035TaskState::Done => (
-            Spec035TaskActionKind::Stop,
-            Spec035TaskActionStatus::Completed,
-        ),
-        (true, AppLifecycleAction::Recover, _) if state == Spec035TaskState::Recovered => (
-            Spec035TaskActionKind::Recover,
-            Spec035TaskActionStatus::Completed,
-        ),
-        _ => return None,
-    };
-    Some(Spec035TaskAction { kind, status })
 }
 
 fn recovery_state(

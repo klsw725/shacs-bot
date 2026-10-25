@@ -1,9 +1,8 @@
 mod mapping;
 
 use self::mapping::execution::{automation_row, child_row, goal_row};
-use self::mapping::{app_row, recovery_row, workflow_row};
+use self::mapping::{recovery_row, workflow_row};
 use super::SurfaceActionOutcome;
-use shacs_app::app_lifecycle::AppLifecycleReceipt;
 use shacs_projection::{
     Spec031Freshness, Spec031ObservedAtUnixMs, Spec033AutomationFact, Spec033GoalFact,
     Spec035TaskCount, Spec035TaskRow, Spec035TasksCoverage, Spec035TasksProjection,
@@ -47,7 +46,6 @@ pub struct Spec035TasksOwnerSnapshots {
     pub child: Spec035TasksOwnerSource<ReplayChildTask>,
     pub workflow: Spec035TasksOwnerSource<WorkflowProjection>,
     pub automation: Spec035TasksOwnerSource<Spec033AutomationFact>,
-    pub app: Spec035TasksOwnerSource<AppLifecycleReceipt>,
     pub recovery: Spec035TasksOwnerSource<Spec035RecoveryOwnerFact>,
 }
 
@@ -58,7 +56,6 @@ impl Spec035TasksOwnerSnapshots {
             child: Spec035TasksOwnerSource::Unavailable { freshness },
             workflow: Spec035TasksOwnerSource::Unavailable { freshness },
             automation: Spec035TasksOwnerSource::Unavailable { freshness },
-            app: Spec035TasksOwnerSource::Unavailable { freshness },
             recovery: Spec035TasksOwnerSource::Unavailable { freshness },
         }
     }
@@ -110,7 +107,6 @@ pub fn assemble_spec035_tasks(
         source_len(&snapshots.child)?,
         source_len(&snapshots.workflow)?,
         source_len(&snapshots.automation)?,
-        source_len(&snapshots.app)?,
         source_len(&snapshots.recovery)?,
     ];
     let total = lengths.into_iter().try_fold(0_usize, |total, length| {
@@ -129,7 +125,8 @@ pub fn assemble_spec035_tasks(
         child: source_count(&snapshots.child)?,
         workflow: source_count(&snapshots.workflow)?,
         automation: source_count(&snapshots.automation)?,
-        app: source_count(&snapshots.app)?,
+        // The app owner was retired by Spec 043; schema version 1 keeps the key.
+        app: Spec035TaskCount::Unavailable,
         recovery: source_count(&snapshots.recovery)?,
     };
     let mut rows = Vec::with_capacity(total);
@@ -137,7 +134,6 @@ pub fn assemble_spec035_tasks(
     append_rows(&mut rows, snapshots.child, child_row)?;
     append_rows(&mut rows, snapshots.workflow, workflow_row)?;
     append_rows(&mut rows, snapshots.automation, automation_row)?;
-    append_rows(&mut rows, snapshots.app, app_row)?;
     append_rows(&mut rows, snapshots.recovery, recovery_row)?;
     Spec035TasksProjection::try_new(rows, coverage).map_err(Into::into)
 }

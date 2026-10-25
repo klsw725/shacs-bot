@@ -2,7 +2,6 @@
 mod support;
 
 use serde_json::json;
-use shacs_core::app_lifecycle::{AppLifecycleAction, AppProcessState};
 use shacs_core::runtime::{
     assemble_spec035_tasks, Spec035RecoveryOwnerFact, Spec035TasksAssemblerErrorKind,
     Spec035TasksOwnerSource,
@@ -17,7 +16,7 @@ use shacs_workflow::WorkflowRunState;
 use support::*;
 
 #[test]
-fn spec035_tasks_assembler_emits_six_owner_kinds_together() -> Result<(), FixtureError> {
+fn spec035_tasks_assembler_emits_current_owner_kinds_together() -> Result<(), FixtureError> {
     // Given
     let mut snapshots = unavailable_snapshots();
     snapshots.goal = source(
@@ -52,14 +51,6 @@ fn spec035_tasks_assembler_emits_six_owner_kinds_together() -> Result<(), Fixtur
             automation(Spec033AutomationJobStatus::Pending),
         )],
     );
-    snapshots.app = source(
-        14,
-        Spec031Freshness::Current,
-        vec![located(
-            "owner:app:formatter",
-            app(AppLifecycleAction::Stop, AppProcessState::Stopping, false)?,
-        )],
-    );
     snapshots.recovery = source(
         15,
         Spec031Freshness::Current,
@@ -76,19 +67,25 @@ fn spec035_tasks_assembler_emits_six_owner_kinds_together() -> Result<(), Fixtur
     let projection = assemble_spec035_tasks(snapshots)?;
 
     // Then
-    assert_eq!(projection.rows().len(), 6);
     assert_eq!(
         projection
             .rows()
             .iter()
             .map(|row| row.owner().kind())
             .collect::<Vec<_>>(),
-        Spec035TaskOwnerKind::ALL
+        [
+            Spec035TaskOwnerKind::Goal,
+            Spec035TaskOwnerKind::Child,
+            Spec035TaskOwnerKind::Workflow,
+            Spec035TaskOwnerKind::Automation,
+            Spec035TaskOwnerKind::Recovery,
+        ]
     );
+    assert_eq!(projection.coverage().app, Spec035TaskCount::Unavailable);
     assert_eq!(projection.rows()[2].freshness(), Spec031Freshness::Stale);
-    assert_eq!(projection.rows()[5].state(), Spec035TaskState::Recovered);
+    assert_eq!(projection.rows()[4].state(), Spec035TaskState::Recovered);
     assert_eq!(
-        projection.rows()[5].action().map(|action| action.status),
+        projection.rows()[4].action().map(|action| action.status),
         Some(Spec035TaskActionStatus::Completed)
     );
     if let Some(path) = std::env::var_os("SPEC035_TASKS_ASSEMBLY_ARTIFACT") {
@@ -217,12 +214,15 @@ fn spec035_tasks_assembler_fails_closed_for_unknown_rows_and_omits_sensitive_own
         assemble_spec035_tasks(snapshots)
     };
     let mut snapshots = unavailable_snapshots();
-    snapshots.app = source(
+    snapshots.recovery = source(
         1,
         Spec031Freshness::Current,
         vec![located(
-            "owner:app:formatter",
-            app(AppLifecycleAction::Stop, AppProcessState::Stopped, true)?,
+            "owner:recovery:runtime",
+            Spec035RecoveryOwnerFact::Recovered {
+                admission: recovery(DurableRecoveryStatus::Healthy),
+                outcome: recovered_outcome(),
+            },
         )],
     );
 
@@ -238,13 +238,6 @@ fn spec035_tasks_assembler_fails_closed_for_unknown_rows_and_omits_sensitive_own
         stale_terminal.expect_err("stale terminal evidence").kind(),
         Spec035TasksAssemblerErrorKind::Projection
     );
-    for sentinel in [
-        "secret-token-must-not-leak",
-        "/Users/private/process",
-        "API_TOKEN=secret",
-        "raw owner detail must not leak",
-    ] {
-        assert!(!encoded.contains(sentinel));
-    }
+    assert!(!encoded.contains("raw owner detail must not leak"));
     Ok(())
 }

@@ -3,7 +3,6 @@ use shacs_projection::{
     Spec031Severity, Spec031SourceOwner,
 };
 
-pub(crate) mod app;
 mod build;
 pub(crate) mod child;
 #[cfg(test)]

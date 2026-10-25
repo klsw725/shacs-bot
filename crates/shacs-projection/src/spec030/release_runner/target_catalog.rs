@@ -66,7 +66,6 @@ const TARGETS: &[Spec030IntegrationTarget] = &[
     target("target-tui-credentials", "shacs-tui", "spec030_credential_resolution_surfaces", &["003"]),
     target("target-session-diagnostics", "shacs-session", "spec030_session_diagnostics", &["005"]),
     target("target-skills-registry", "shacs-skills", "spec030_skill_registry_baseline", &["005"]),
-    target("target-app-registry", "shacs-app", "spec030_app_registry_baseline", &["005"]),
 ];
 
 pub const fn spec030_integration_targets() -> &'static [Spec030IntegrationTarget] {

@@ -1,0 +1,14 @@
+{
+  "receiptId": "requested-30016-1792894110509-1",
+  "requestId": "request-30016-1792894110509-0",
+  "appId": "nope.app",
+  "action": "start",
+  "previousState": "installed",
+  "currentState": "starting",
+  "generation": 1,
+  "completed": false,
+  "credentialSourceStatuses": [],
+  "blockers": [],
+  "activationRefs": [],
+  "occurredAtUnixMs": 1792894110509
+}

@@ -1,0 +1,17 @@
+{
+  "id": "demo.note",
+  "version": "0.1.0",
+  "entry": "README.md",
+  "name": "demo.note",
+  "skills": [],
+  "resources": [],
+  "permissions": [],
+  "secrets": [],
+  "runtime": {
+    "command": [
+      "/bin/echo",
+      "note-ran"
+    ],
+    "timeoutSeconds": 600
+  }
+}

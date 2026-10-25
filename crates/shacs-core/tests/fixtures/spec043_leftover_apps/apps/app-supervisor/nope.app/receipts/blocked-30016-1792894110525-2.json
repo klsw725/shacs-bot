@@ -1,0 +1,18 @@
+{
+  "receiptId": "blocked-30016-1792894110525-2",
+  "requestId": "request-30016-1792894110509-0",
+  "appId": "nope.app",
+  "action": "start",
+  "previousState": "starting",
+  "currentState": "failed",
+  "generation": 1,
+  "completed": true,
+  "credentialSourceStatuses": [],
+  "blockers": [
+    {
+      "kind": "recovery_required"
+    }
+  ],
+  "activationRefs": [],
+  "occurredAtUnixMs": 1792894110525
+}

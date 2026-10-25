@@ -1,7 +1,5 @@
 use crate::{runtime_inspect, RuntimeInspectOptions};
 use serde_json::json;
-use shacs_app::app::{AppId, AppRegistry, AppRegistryStore};
-use shacs_app::app_lifecycle::{AppLifecycleAction, AppProcessState, AppSupervisorJournal};
 use shacs_config::{save_config_to_path, Config};
 use shacs_projection::{
     Spec031Availability, Spec031ReadinessComponentKind, Spec031ReadinessRequirement,
@@ -17,7 +15,6 @@ fn fixture() -> Result<tempfile::TempDir, Box<dyn Error>> {
     let mut config = Config::default();
     config.agents.defaults.workspace = root.path().join("workspace").to_string_lossy().into_owned();
     save_config_to_path(&config, &root.path().join("config.json"))?;
-    AppRegistryStore::new(root.path()).save(&AppRegistry::default())?;
     Ok(root)
 }
 
@@ -50,47 +47,10 @@ fn plugin(root: &Path, manifest: serde_json::Value) -> TestResult {
     Ok(())
 }
 
-fn app(root: &Path, state: Option<AppProcessState>) -> TestResult {
-    let store = AppRegistryStore::new(root);
-    let registry = serde_json::from_value(json!({"entries": {"controlled": {
-        "appId": "controlled", "version": "1", "digest": "controlled-descriptor",
-        "bundlePath": root.join("apps/controlled.app"), "lifecycleState": "enabled"
-    }}}))?;
-    store.save(&registry)?;
-    if let Some(state) = state {
-        let journal = AppSupervisorJournal::new(root.join("apps"));
-        let requested = journal.request(&AppId::parse("controlled")?, AppLifecycleAction::Start)?;
-        if state != AppProcessState::Starting {
-            journal.complete(
-                &requested,
-                state,
-                "controlled-descriptor",
-                "controlled-owner-fixture",
-                vec![],
-            )?;
-        }
-    }
-    Ok(())
-}
-
 #[test]
-fn ready_when_authoritative_owner_collections_are_empty() -> TestResult {
+fn ready_when_plugin_collections_are_empty_and_no_app_registry_exists() -> TestResult {
     let root = fixture()?;
     assert_state(root.path(), Spec031Availability::Ready)
-}
-
-#[test]
-fn unavailable_when_app_registry_evidence_is_absent() -> TestResult {
-    let root = fixture()?;
-    fs::remove_file(root.path().join("apps/registry.json"))?;
-    assert_state(root.path(), Spec031Availability::Unavailable)
-}
-
-#[test]
-fn unavailable_when_app_registry_lookup_fails() -> TestResult {
-    let root = fixture()?;
-    fs::write(root.path().join("apps/registry.json"), "{corrupt")?;
-    assert_state(root.path(), Spec031Availability::Unavailable)
 }
 
 #[test]
@@ -139,46 +99,6 @@ fn unavailable_when_configured_plugin_is_not_discovered() -> TestResult {
     plugin(
         root.path(),
         json!({"schemaVersion": 1, "name": "different", "version": "1"}),
-    )?;
-    assert_state(root.path(), Spec031Availability::Unavailable)
-}
-
-#[test]
-fn ready_when_enabled_app_owner_reports_running() -> TestResult {
-    let root = fixture()?;
-    app(root.path(), Some(AppProcessState::Running))?;
-    assert_state(root.path(), Spec031Availability::Ready)
-}
-
-#[test]
-fn degraded_when_enabled_app_owner_reports_starting() -> TestResult {
-    let root = fixture()?;
-    app(root.path(), Some(AppProcessState::Starting))?;
-    assert_state(root.path(), Spec031Availability::Degraded)
-}
-
-#[test]
-fn blocked_when_enabled_app_owner_reports_failed() -> TestResult {
-    let root = fixture()?;
-    app(root.path(), Some(AppProcessState::Failed))?;
-    assert_state(root.path(), Spec031Availability::Blocked)
-}
-
-#[test]
-fn unavailable_when_enabled_app_has_no_lifecycle_evidence() -> TestResult {
-    let root = fixture()?;
-    app(root.path(), None)?;
-    assert_state(root.path(), Spec031Availability::Unavailable)
-}
-
-#[test]
-fn unavailable_when_app_lifecycle_lookup_fails() -> TestResult {
-    let root = fixture()?;
-    app(root.path(), Some(AppProcessState::Running))?;
-    fs::write(
-        root.path()
-            .join("apps/app-supervisor/controlled/receipts/corrupt.json"),
-        "{",
     )?;
     assert_state(root.path(), Spec031Availability::Unavailable)
 }

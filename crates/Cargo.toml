@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "shacs-api",
-    "shacs-app",
     "shacs-bus",
     "shacs-channels",
     "shacs-cli",

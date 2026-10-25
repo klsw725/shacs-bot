@@ -1,5 +1,3 @@
-use shacs_app::app::{AppLifecycleState, AppRegistryEntry, AppRegistryStore};
-use shacs_app::app_lifecycle::{AppProcessState, AppSupervisorJournal};
 use shacs_config::{ConfigBundle, ProcessEnv};
 use shacs_core::runtime::{
     build_plugin_runtime_snapshot, build_plugin_surface_projection, discover_plugins,
@@ -12,31 +10,27 @@ use shacs_projection::{
 use std::{fs, io};
 
 pub(crate) fn observe(bundle: &ConfigBundle) -> Result<Spec031ReadinessObservation, String> {
-    let states = [plugins(bundle), apps(bundle)];
-    let (state, code, summary) = if states.contains(&Spec031Availability::Blocked) {
-        (
+    let (state, code, summary) = match plugins(bundle) {
+        Spec031Availability::Blocked => (
             Spec031Availability::Blocked,
             Spec031ReasonCode::Blocked,
-            "plugin or app owner reports a blocked target",
-        )
-    } else if states.contains(&Spec031Availability::Unavailable) {
-        (
+            "plugin owner reports a blocked target",
+        ),
+        Spec031Availability::Unavailable => (
             Spec031Availability::Unavailable,
             Spec031ReasonCode::MissingExternalOwnerEvidence,
-            "plugin or app owner lookup failed or required evidence is absent",
-        )
-    } else if states.contains(&Spec031Availability::Degraded) {
-        (
+            "plugin owner lookup failed or required evidence is absent",
+        ),
+        Spec031Availability::Degraded => (
             Spec031Availability::Degraded,
             Spec031ReasonCode::Degraded,
-            "plugin or app owner reports a lifecycle or runtime limitation",
-        )
-    } else {
-        (
+            "plugin owner reports a runtime limitation",
+        ),
+        Spec031Availability::Ready | Spec031Availability::Unknown => (
             Spec031Availability::Ready,
             Spec031ReasonCode::Included,
-            "plugin and app owner checks succeeded including empty collections",
-        )
+            "plugin owner checks succeeded including empty collections",
+        ),
     };
     super::readiness_observation::observation(
         Spec031ReadinessComponentKind::PluginApp,
@@ -95,73 +89,5 @@ fn plugins(bundle: &ConfigBundle) -> Spec031Availability {
         Spec031Availability::Degraded
     } else {
         Spec031Availability::Ready
-    }
-}
-
-fn apps(bundle: &ConfigBundle) -> Spec031Availability {
-    let store = AppRegistryStore::new(&bundle.context.data_dir);
-    let Ok(Some(registry)) = store.load_existing() else {
-        return Spec031Availability::Unavailable;
-    };
-    let journal = AppSupervisorJournal::new(bundle.context.runtime_subdir("apps"));
-    let states: Vec<_> = registry
-        .entries
-        .values()
-        .map(|entry| app(entry, &journal))
-        .collect();
-    if states.contains(&Spec031Availability::Blocked) {
-        Spec031Availability::Blocked
-    } else if states.contains(&Spec031Availability::Unavailable) {
-        Spec031Availability::Unavailable
-    } else if states.contains(&Spec031Availability::Degraded) {
-        Spec031Availability::Degraded
-    } else {
-        Spec031Availability::Ready
-    }
-}
-
-fn app(entry: &AppRegistryEntry, journal: &AppSupervisorJournal) -> Spec031Availability {
-    let enabled = match entry.lifecycle_state {
-        AppLifecycleState::Unavailable => return Spec031Availability::Blocked,
-        AppLifecycleState::Uninstalling => return Spec031Availability::Degraded,
-        AppLifecycleState::Enabled => true,
-        AppLifecycleState::Installed | AppLifecycleState::Disabled => false,
-    };
-    if !entry.unavailable_reasons.is_empty() {
-        return Spec031Availability::Blocked;
-    }
-    let Ok(replay) = journal.replay(&entry.app_id) else {
-        return Spec031Availability::Unavailable;
-    };
-    let Some(receipt) = replay.receipts.last() else {
-        return if enabled {
-            Spec031Availability::Unavailable
-        } else {
-            Spec031Availability::Ready
-        };
-    };
-    if receipt.app_id != entry.app_id {
-        return Spec031Availability::Unavailable;
-    }
-    if !receipt.blockers.is_empty() {
-        return Spec031Availability::Blocked;
-    }
-    match receipt.current_state {
-        AppProcessState::Failed | AppProcessState::RecoveryNeeded => Spec031Availability::Blocked,
-        AppProcessState::Starting | AppProcessState::Stopping => Spec031Availability::Degraded,
-        AppProcessState::Running => {
-            if receipt.completed && receipt.manifest_digest == entry.digest && enabled {
-                Spec031Availability::Ready
-            } else {
-                Spec031Availability::Unavailable
-            }
-        }
-        AppProcessState::Installed | AppProcessState::Stopped => {
-            if enabled {
-                Spec031Availability::Degraded
-            } else {
-                Spec031Availability::Ready
-            }
-        }
     }
 }

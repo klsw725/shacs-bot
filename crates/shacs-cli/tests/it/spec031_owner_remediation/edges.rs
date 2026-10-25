@@ -1,93 +1,10 @@
 use super::{config, invoke, TestResult};
-use shacs_core::app::{AppId, AppLifecycleState, AppRegistry, AppRegistryEntry, AppRegistryStore};
-use shacs_core::app_lifecycle::{
-    AppLifecycleAction, AppLifecycleBlocker, AppProcessState, AppSupervisorJournal,
-};
 use shacs_core::runtime::{
     ChildResultEnvelope, ChildResultStatus, ExecutionDomain, ExecutionIdentity, ExecutionOutcome,
     ExecutionOutcomeFact, ExecutionScope, PendingExecution, RuntimeExecutionLedger, SpawnEnvelope,
     SubagentRuntime, ToolFailureClass, ToolOutcomeKind,
 };
 use shacs_session::{Session, SessionManager};
-
-#[test]
-fn app_registry_intent_pending_and_terminal_receipts_remain_distinct() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let config = config(root.path())?;
-    let app_id = AppId::parse("g16.app")?;
-    let entry = AppRegistryEntry {
-        app_id: app_id.clone(),
-        version: "1".to_owned(),
-        digest: "sha256:fixture".to_owned(),
-        bundle_path: root.path().join("HOST_PATH_SENTINEL"),
-        lifecycle_state: AppLifecycleState::Enabled,
-        permission_requests: Vec::new(),
-        secret_requests: Vec::new(),
-        resource_summaries: Vec::new(),
-        grant_reference: None,
-        unavailable_reasons: Vec::new(),
-        process_snapshots: Vec::new(),
-        installed_at_unix_ms: 1,
-    };
-    AppRegistryStore::new(root.path()).save(&AppRegistry {
-        entries: [(app_id.clone(), entry)].into(),
-    })?;
-    let journal = AppSupervisorJournal::new(root.path().join("apps"));
-    let requested = journal.request(&app_id, AppLifecycleAction::Start)?;
-
-    let output = invoke(&config, &["apps", "inspect", "g16.app"])?;
-
-    assert!(output.contains("state=unknown"), "{output}");
-    assert!(output.contains("reason=requested"), "{output}");
-    assert!(output.contains("completed=false"), "{output}");
-    assert!(!output.contains("state=ready"), "{output}");
-    assert!(!output.contains("HOST_PATH_SENTINEL"), "{output}");
-    assert_eq!(journal.replay(&app_id)?.receipts, vec![requested]);
-    root.close()?;
-    Ok(())
-}
-
-#[test]
-fn app_blocker_paths_are_opaque_while_safe_owner_refs_survive() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let config = config(root.path())?;
-    let bundle = root.path().join("apps/g16.app.shacsapp");
-    std::fs::create_dir_all(&bundle)?;
-    std::fs::write(bundle.join("README.md"), "fixture")?;
-    std::fs::write(
-        bundle.join("manifest.json"),
-        br#"{"id":"g16.app","version":"1","entry":"README.md"}"#,
-    )?;
-    invoke(
-        &config,
-        &["apps", "install", bundle.to_str().ok_or("bundle")?],
-    )?;
-    let journal = AppSupervisorJournal::new(root.path().join("apps"));
-    let app_id = AppId::parse("g16.app")?;
-    let mut request = journal.request(&app_id, AppLifecycleAction::Start)?;
-    journal.attach_start_evidence(
-        &mut request,
-        vec!["activation:safe:opaque".to_owned()],
-        Some("snapshot:safe:opaque".to_owned()),
-    );
-    let receipt = journal.block(
-        &request,
-        vec![AppLifecycleBlocker::ActivationMissing {
-            resource_ref: "/HOST_PATH_SENTINEL/secret".to_owned(),
-        }],
-    )?;
-
-    let output = invoke(&config, &["apps", "inspect", "g16.app"])?;
-
-    assert!(!output.contains("HOST_PATH_SENTINEL"), "{output}");
-    assert!(output.contains("activation_missing:ref:"), "{output}");
-    assert!(output.contains("activation:safe:opaque"), "{output}");
-    assert!(output.contains("snapshot:safe:opaque"), "{output}");
-    assert!(output.contains(&receipt.receipt_id), "{output}");
-    assert_eq!(receipt.current_state, AppProcessState::Failed);
-    root.close()?;
-    Ok(())
-}
 
 #[test]
 fn session_tools_keep_failed_ignored_and_pending_owner_facts_separate() -> TestResult {

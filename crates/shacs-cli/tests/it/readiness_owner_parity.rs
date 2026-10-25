@@ -1,6 +1,7 @@
 mod readiness_owner_support;
 mod readiness_runtime_support;
 
+use crate::spec043_leftover_apps::{copy_into, tree, PRESERVED};
 use readiness_owner_support::{Fixture, TestResult};
 use serde_json::Value;
 use std::fs;
@@ -57,13 +58,25 @@ fn owner_readiness_changes_reach_real_cli_api_and_preserved_bundles() -> TestRes
         "{corrupt",
     )?;
     assert_plugin_state(&fixture.capture("active-blocked")?, "blocked");
+    Ok(())
+}
 
-    write_plugin(&fixture.root, false)?;
-    fs::remove_file(fixture.root.join("apps/registry.json"))?;
-    assert_plugin_state(&fixture.capture("missing-unavailable")?, "unavailable");
+#[test]
+fn leftover_app_data_does_not_change_cli_or_api_readiness() -> TestResult {
+    // Given
+    let mut fixture = Fixture::new()?;
+    fixture.start()?;
+    let without = fixture.capture("without-leftover-apps")?;
+    copy_into(&fixture.root)?;
+    let preserved = tree(&fixture.root, &PRESERVED)?;
 
-    fs::write(fixture.root.join("apps/registry.json"), "{corrupt")?;
-    assert_plugin_state(&fixture.capture("failed-unavailable")?, "unavailable");
+    // When
+    let with = fixture.capture("with-leftover-apps")?;
+
+    // Then
+    assert_plugin_state(&without, "ready");
+    assert_eq!(with, without);
+    assert_eq!(tree(&fixture.root, &PRESERVED)?, preserved);
     Ok(())
 }
 

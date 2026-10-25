@@ -1,0 +1,24 @@
+{
+  "draftId": "draft-demo.draft",
+  "appId": "demo.draft",
+  "state": "scaffold-generated",
+  "sourceCommand": "apps init demo.draft",
+  "currentRevisionDigest": "sha256:eef72cf1dd1744ab0961e3175bd1e794ce14497ed7f8270768784c3f158a4672",
+  "generatedFiles": [
+    {
+      "path": "candidates/manifest.json",
+      "kind": "manifest-candidate",
+      "digest": "sha256:f42678241c5ec94cf0561f016bc2c927897b5d11f74343c0a8cb766412e239fd",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    },
+    {
+      "path": "candidates/README.md",
+      "kind": "readme-candidate",
+      "digest": "sha256:3a7df80768c5dc584a5572a5e5b0906e6283e9f7cfc624f40ab74e1a9cd000aa",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    }
+  ],
+  "warningSummary": []
+}

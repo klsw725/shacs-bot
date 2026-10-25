@@ -1,0 +1,18 @@
+{
+  "id": "demo.clock",
+  "version": "0.1.0",
+  "entry": "README.md",
+  "name": "demo.clock",
+  "skills": [],
+  "resources": [],
+  "permissions": [],
+  "secrets": [],
+  "runtime": {
+    "command": [
+      "/bin/sh",
+      "-c",
+      "sleep 300; : spec043-fixture-clock"
+    ],
+    "timeoutSeconds": 600
+  }
+}

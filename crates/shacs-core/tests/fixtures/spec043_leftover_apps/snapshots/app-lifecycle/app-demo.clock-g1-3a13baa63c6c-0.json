@@ -1,0 +1,487 @@
+{
+  "schema_id": "shacs.execution-diagnostic.v1",
+  "snapshot_id": "app-demo.clock-g1-3a13baa63c6c-0",
+  "created_at_unix_ms": 1792894108798,
+  "config": {
+    "source_ref": "config:app-start",
+    "schema_version": 1,
+    "migration_state": "current"
+  },
+  "profiles": {
+    "provider": null,
+    "trusted_runtime": "spec030",
+    "context": "app-start"
+  },
+  "trusted_runtime": {
+    "schema_version": 1,
+    "profile_ref": "sha256:bcc6267c77c2f62142673ba658dd6480313f60f461df4132dbbcb43c9593cef1",
+    "projection_digest": "sha256:13365a81b07d1003f4b7960739f0e57e5281ebbf62ede9c52708ed0eba45b247"
+  },
+  "sandbox": [
+    {
+      "adapter": "bash",
+      "mode": "unknown",
+      "fallback": "unknown"
+    },
+    {
+      "adapter": "genericExec",
+      "mode": "unknown",
+      "fallback": "unknown"
+    },
+    {
+      "adapter": "credentialCommand",
+      "mode": "unknown",
+      "fallback": "unknown"
+    },
+    {
+      "adapter": "packageOperation",
+      "mode": "unknown",
+      "fallback": "unknown"
+    },
+    {
+      "adapter": "pythonKernel",
+      "mode": "unknown",
+      "fallback": "unknown"
+    },
+    {
+      "adapter": "daemonWorker",
+      "mode": "unknown",
+      "fallback": "unknown"
+    },
+    {
+      "adapter": "mcp",
+      "mode": "unknown",
+      "fallback": "unknown"
+    }
+  ],
+  "credential": {
+    "source_kind": null,
+    "status": "unavailable",
+    "fingerprint_status": "unavailable"
+  },
+  "context_sources": [],
+  "selected_tools": [],
+  "selected_resources": [
+    {
+      "identity": "context:/private/var/folders/zr/3g_bnyrs53xb7y9sb1nh35sw0000gn/T/opencode/spec043-final/fixture-src/ws/AGENTS.md",
+      "content_digest": "4d00f4f59c13d80026b681ff4eac16f360e5039537625e6a1c4a57dc72171385",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:airtable",
+      "content_digest": "f7dbdb800f42e1d7fae3744b9fce70f7cadc4092fa70f7715b838d88b0226cba",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:apple-notes",
+      "content_digest": "803729ee2f171812469c170180d87bbb1ac1d6a8bff78801acec41b44600aabd",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:apple-reminders",
+      "content_digest": "7b79cdc5a39396ffa9b751e0f27c2ae583e51d9054c0684ef00695329c4b99b4",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:architecture-diagram",
+      "content_digest": "bee13f06401972854ed1fb0991bac200bdf23e1dfa1adcdb110ef6a0c19252d7",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:arxiv",
+      "content_digest": "a41513e70422180ad67c3aa3c835cfc915212c07480f96aef4ba562a4d63945f",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:ascii-art",
+      "content_digest": "c41dd584d87ddbe39470f607bad2756a2a74f4c8aab5f032a0db68424758fc24",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:ascii-video",
+      "content_digest": "ce83b664f7f479e5ff15d234ea31cd2cf98fb9d0dc8171d09a3e330868f07f06",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:audiocraft-audio-generation",
+      "content_digest": "1888c3581dc5fb6e39f7d45388bcdfb8d980739c4599fb832b61b39c8894c0c8",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:baoyu-article-illustrator",
+      "content_digest": "8249de9938ab4616a48200604ce3f9cfaedd40700e6076f13a62562f1389dbf6",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:baoyu-comic",
+      "content_digest": "bc0c99adf43a691714d40d44f8395266a30e0213894ad05b6d6cd92b0cc20a73",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:baoyu-infographic",
+      "content_digest": "49aa31ad0d41b948c9f3ad29bb55b56b834a4596262843dd6cb142f9cbab5a93",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:blogwatcher",
+      "content_digest": "5818a1c126dc9c0ce201f92b253609460f8de8a607313129ed62a3299f5759b6",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:claude-design",
+      "content_digest": "ead30f27aab3d18e981171d0e5d37cbc9931be3ffe1afb23aca74064a0156964",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:clawhub",
+      "content_digest": "5796f0d345a581ff7e0d9e3b138ecfd96b5aa40549d7ea29ad753262370e777e",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:codebase-inspection",
+      "content_digest": "a5f9eb387fd616f4c0b5c693789cbcf138e92941babf63c9d51e4c6c90319284",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:comfyui",
+      "content_digest": "ad7beed9b268866d3e702ee7dec58ab5c9a1b241919d24b21e3a0b9883018812",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:cron",
+      "content_digest": "b4b5f4ef6b197ecd09d32effb5138d3124b59795420b0bcb15117474a9b7e47e",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:design-md",
+      "content_digest": "31156ba4ab91c770044e45763dab46012d571cba081c94a66337a3ec71a21e56",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:dogfood",
+      "content_digest": "e6ff945cb0bc8de4e35ad004411abcf647f1cfa1fb6d5606706352ac277530ab",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:dspy",
+      "content_digest": "ba51617cc9796b08922d0766f5e193bcd5c4b3cea841b270dbf3d8dab832882d",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:evaluating-llms-harness",
+      "content_digest": "1c7895a2cebf01de0791c963b681d7deb8c464a47c6343eadeeab50c41f762fa",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:excalidraw",
+      "content_digest": "9d2c8d3dc237fae2a4624608bbe469a0633f252f42fdafce33669ea2f223839a",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:gif-search",
+      "content_digest": "a73285b5eb16feba3dc2c57b40c476ef8f6ef438b473af27601714f82c8d1e20",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:github",
+      "content_digest": "bd1c4b4acec5fa7af31c2e26d1d26e5854fd74e53071c9d782edfc011cdcc145",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:github-auth",
+      "content_digest": "7ebe18430fa7497c9f9a615b97cadc043057b194b600992ae0cc9edd4bc5418a",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:github-code-review",
+      "content_digest": "ee78b62c0753154da77a6c63785f4f3dc614894b80c8331d750f288ba1d021e5",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:github-issues",
+      "content_digest": "bb73f4ac59ea1ae6c26a39a9e4e268515773eebf572415395b74498650abb8bf",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:github-pr-workflow",
+      "content_digest": "a54a12f6bc0a6b8ab0d63c84400705c14979b77a8405203ac12c9efb5720a5e9",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:github-repo-management",
+      "content_digest": "9b397ce17721f01346fe2cb518969f09f0cd15a9c7578da0cb51f29e30734fc6",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:google-workspace",
+      "content_digest": "882afa4cc212640ec4739e39b0e786a56586028c862a920b24a51e2a56e86ee2",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:heartmula",
+      "content_digest": "3243ce58cada5cf1425c39e3d6080a62bdb9a2f288594e0ffdbd3d368c02ae7a",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:himalaya",
+      "content_digest": "b88562bab4c4dbde9616c0de92c36a47663a6359d17bd6bd735076109a7313e6",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:huggingface-hub",
+      "content_digest": "60200237e3ce70aa191a476bd4ba16a238c12e61b1843c4fa95461b677a383cb",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:humanizer",
+      "content_digest": "b7165a88cf41526923ac416aa78d0ff66b7c73719971b86dbd34168e67ace2f8",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:ideation",
+      "content_digest": "63d9b89e3071641d9f9e3a28f2fa84fe5262c96651124791a8dc6aa8eef217dc",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:imessage",
+      "content_digest": "5df051d1d42789a4fc288445933cc2624d0798813d7a44319ae702527f7f107d",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:jupyter-live-kernel",
+      "content_digest": "98bf66fb04599616abd5aeb0cc8fb9cbbf3345d3ec7c0a6642b82daece916906",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:linear",
+      "content_digest": "85b8883fd2cb6e8d23cccb9a18da8566d82823bda4630f195029086630281a01",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:llama-cpp",
+      "content_digest": "7343e8b70a357ac31050c4a57fdec91153e5a560bf6513a7f332af4ef9c9076f",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:llm-wiki",
+      "content_digest": "873b3a61ef5adcc47913ba4ef6f6217bf500b2b9cc45aa64e5eac7ec6aac9e51",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:manim-video",
+      "content_digest": "5a93d95d1c51ae3a69bc02ada435a902994b691752771060e8b4d31bc43a3e6a",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:maps",
+      "content_digest": "82ae3722f73856afffecf1c6fcc787a3c8383de54228304c9d4af2ed9c383017",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:memory",
+      "content_digest": "2421337ad51143e84c54c44a7b10a4ef6c6552f51c8e210c677430793d40705c",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:minecraft-modpack-server",
+      "content_digest": "761095d8e826af55c0145052f7e933206c3241bdef5da10ea6617510b4f536b0",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:my",
+      "content_digest": "67f93aea6c1fc444dfa68fe0d3c22ee5c93ef50d6682cbe79e8e8ce7f2e1682e",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:nano-pdf",
+      "content_digest": "198bd3aba50fe9059bd983f9563473272876754d0095edbd24f52b06b9399b51",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:node-inspect-debugger",
+      "content_digest": "2e985f3c320c64172bb83db9f475e24b385d96af0c534c9ada23de0c2e44e1c5",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:notion",
+      "content_digest": "327ca60f7874c9b2320ccfc4cb2337c64b0df66607ba930c12264bdc5f1e6b67",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:obliteratus",
+      "content_digest": "83325d5dfa9786a1ac5b9a268ac0eed744ec57455762b4d48f94ab091073be71",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:obsidian",
+      "content_digest": "29e8fe1a664776af9a8769aa22c8f7f078f7dd31bd403f7f4b25402e4d9e1917",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:ocr-and-documents",
+      "content_digest": "0d18dc9317b49fc97eae8c4151cedf897544a6bbd55772c90af217499c67607d",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:openhue",
+      "content_digest": "df6dce94a4b7618037ad3f41d140eb282ba6e3a4ad61623cd4eb624adebd0a66",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:p5js",
+      "content_digest": "1ef0b46880129c61cd75a38f0217289cd6af8df0cfa5d7198c900dedf6bdbc83",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:pixel-art",
+      "content_digest": "43c0d68210e5cc55ade9770da8f4b06b08d235dec67afd2e3261dd7419a494e4",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:plan",
+      "content_digest": "0ef6ca05c61c1c26a0fcb1955e0883966c40036234c523665a96e0ee8aa7829e",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:polymarket",
+      "content_digest": "71d99090327becbc8c78af858010c15d2f9552849a0315ac312f86e516daa211",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:popular-web-designs",
+      "content_digest": "0b3b0a313d3740efbd8f184ed965cc8a703d5a7e7f557933d57d59e94f0ac27a",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:pretext",
+      "content_digest": "050b44c275c42802ab8c1ed3b1d5b0103da25e6cfaac06c6afad0a200cd52a4e",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:python-debugpy",
+      "content_digest": "07211a93a28eed48a138b15eb7b7432cdbb5d2e771a7e3633d59102467285164",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:requesting-code-review",
+      "content_digest": "085f402ec7812fd2e4bd320092eaa32ba0b5e08a06a587aeb517905669de96d0",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:research-paper-writing",
+      "content_digest": "deebac711f78beb07eaa46f7b213fb0ee4b62f1136283aa2af27d505befac795",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:segment-anything-model",
+      "content_digest": "cc487d890e9cb2d1099bcb1a41e0573e9c626690a5a6936907fe216c0020e70f",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:serving-llms-vllm",
+      "content_digest": "203d7c18adc2a69db5ce84092217e2a9ef40d62200e8b2ae883a06ae3a219e16",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:sketch",
+      "content_digest": "b3366d69314dcbebdd275cc13a4f0dff5d9c8db68cab018c63e5fb8eb042642f",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:skill-creator",
+      "content_digest": "222faa1a1395a3c81b682b1e89da660143c4df800d4cb1f3d6090c7fb0e08e11",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:songwriting-and-ai-music",
+      "content_digest": "2d258d4eddda14c60eb177633a1c99c34fa208719b224824a099283b4ecb80ec",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:spike",
+      "content_digest": "fe50e69493159a6b46d947f04636620aae4d9014390bbb3538d83745a7612da4",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:subagent-driven-development",
+      "content_digest": "1484047901fdd1c5c86cbd24f2d2fe69cf5132528d394c254ea8ddffdc25a4ee",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:summarize",
+      "content_digest": "6ca3a3a9b7197bd1be00efd1b1e926b6dc9d22a33ebc8ce0ba157812a29d6c19",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:systematic-debugging",
+      "content_digest": "b821bcfed840aa58ba8fec377f2ededb27c78815bcafb88ac4bd4dfbb1d5ff1f",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:test-driven-development",
+      "content_digest": "22676808783a7a6ccdfc7362f32da741c6c09eb8c382d7a605dbf079ceaa5356",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:tmux",
+      "content_digest": "f9708f46d0993c0236d7f782fa6ea7c3a18c5d80bf59b765864d3fd541bdc400",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:weather",
+      "content_digest": "4de36473bf5292991d39b1289d0910b699e9553b6be75ec85b80ed0089706cb2",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:weights-and-biases",
+      "content_digest": "45182d8ef27d9b65554a386d53f7d9a16d3b62ec2df0f634910d58e1a2f2a5e4",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:writing-plans",
+      "content_digest": "5eb2b206ca47f40b1b11bae84d53f9b169cbc927845f8088785338ce753089a5",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:xurl",
+      "content_digest": "e519fe56e0fe3101f881cb5dd7a79b5ee45d7e701470897da66d62344636b94f",
+      "activation_ref": null
+    },
+    {
+      "identity": "skill:youtube-content",
+      "content_digest": "13d874ef34b5be8ed8c4c1d29cc7007ea4e6f4316baa86d2ce011315721b52e4",
+      "activation_ref": null
+    }
+  ],
+  "provider": {
+    "provider": "app-runtime",
+    "model": "not-applicable",
+    "shaping_version": "spec032-v1",
+    "messages_digest": "3a13baa63c6c01cd1c1104ef40e40d9fffe91e5c4180c7d916bdca023b697335",
+    "tools_digest": "3a13baa63c6c01cd1c1104ef40e40d9fffe91e5c4180c7d916bdca023b697335"
+  },
+  "token_budget": {
+    "tokenizer": "not-applicable",
+    "estimator_uncertainty_percent": 0,
+    "budget_tokens": 0,
+    "reserved_tokens": 0,
+    "used_context_tokens": 0,
+    "estimated_input_tokens": 0
+  },
+  "disclosure": {
+    "raw_content_possible": true,
+    "surfaces": [
+      "session",
+      "log",
+      "toolOutput",
+      "extensionData"
+    ]
+  },
+  "replay": {
+    "diagnostic_only": true,
+    "live_execution_authorized": false,
+    "replay_authorized": false,
+    "current_source_truth": false
+  },
+  "provenance_digest": "sha256:d9e406adf846cd47a1519bdb8d7cd690ccca71601a38194019a35e2892fcd201"
+}

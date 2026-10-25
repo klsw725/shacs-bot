@@ -1,0 +1,14 @@
+{
+  "receiptId": "requested-30006-1792894110417-4",
+  "requestId": "request-30006-1792894110417-3",
+  "appId": "demo.note",
+  "action": "stop",
+  "previousState": "running",
+  "currentState": "stopping",
+  "generation": 1,
+  "completed": false,
+  "credentialSourceStatuses": [],
+  "blockers": [],
+  "activationRefs": [],
+  "occurredAtUnixMs": 1792894110417
+}

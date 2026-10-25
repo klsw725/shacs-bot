@@ -1,0 +1,16 @@
+{
+  "proposalId": "proposal-6dea69162e389f96",
+  "appId": "demo.clock",
+  "kind": "install",
+  "userIntent": {
+    "digest": "sha256:a609a5595472e474fc4a073fb9ac4163caab3fba7bcfb1e11760ff003752b184",
+    "redacted": true
+  },
+  "revisionDigest": "sha256:bce653343fa6c6249009559910c4ce585d1aad71460ca65ae014cec8efb6827b",
+  "candidateDigest": "3a13baa63c6c01cd1c1104ef40e40d9fffe91e5c4180c7d916bdca023b697335",
+  "installedDigest": null,
+  "installedTreeDigest": null,
+  "validationSummary": "static manifest and local resource validation passed",
+  "riskSummary": "authoring mutation only; no runtime authorization or activation",
+  "diff": []
+}

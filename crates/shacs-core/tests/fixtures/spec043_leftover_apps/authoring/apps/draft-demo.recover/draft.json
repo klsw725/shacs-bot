@@ -1,0 +1,24 @@
+{
+  "draftId": "draft-demo.recover",
+  "appId": "demo.recover",
+  "state": "scaffold-generated",
+  "sourceCommand": "apps init demo.recover",
+  "currentRevisionDigest": "sha256:5e11adb8e2f32cd122d66b5721f66166532295c8e42588169401d4dabd36dbb3",
+  "generatedFiles": [
+    {
+      "path": "candidates/manifest.json",
+      "kind": "manifest-candidate",
+      "digest": "sha256:6694c7761c5a54dc0c686a72192e0e80c4dc67cd2bef0b80c8695ff715ec3b60",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    },
+    {
+      "path": "candidates/README.md",
+      "kind": "readme-candidate",
+      "digest": "sha256:00467e079a498369176e3ad8b862ddc76528dee61bb4fbb827c9eae01667c1bf",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    }
+  ],
+  "warningSummary": []
+}

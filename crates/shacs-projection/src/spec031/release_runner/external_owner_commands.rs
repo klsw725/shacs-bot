@@ -1,13 +1,13 @@
 use super::current_commands::focused_test;
 use super::model::{
-    uses_retired_spec034_fact, Spec031ReleaseCommandSpec, Spec031ReleaseGateKind,
-    Spec031ReleaseRunnerConfig,
+    includes_retired_spec032_owner, uses_retired_spec034_fact, Spec031ReleaseCommandSpec,
+    Spec031ReleaseGateKind, Spec031ReleaseRunnerConfig,
 };
 
 pub(super) fn exact_owner_commands(
     config: &Spec031ReleaseRunnerConfig,
     schema: &str,
-) -> [Spec031ReleaseCommandSpec; 7] {
+) -> Vec<Spec031ReleaseCommandSpec> {
     let (spec034_target, spec034_test) = if uses_retired_spec034_fact(schema) {
         (
             "runtime_agent",
@@ -19,7 +19,7 @@ pub(super) fn exact_owner_commands(
             "final_edit_and_variation_candidates_publish_one_complete_record_each",
         )
     };
-    [
+    let mut commands = vec![
         exact_owner_test(
             config,
             "spec031-owner-spec029-dispatch",
@@ -43,13 +43,6 @@ pub(super) fn exact_owner_commands(
         ),
         exact_owner_test(
             config,
-            "spec031-owner-spec032",
-            "shacs-app",
-            "app_environment",
-            "enable_disable_lifecycle_projection_does_not_create_process_truth",
-        ),
-        exact_owner_test(
-            config,
             "spec031-owner-spec033",
             "shacs-core",
             "runtime_loop",
@@ -69,7 +62,20 @@ pub(super) fn exact_owner_commands(
             "spec031_cli_projection",
             "spec031_readiness_parity_uses_runtime_inspect_owner_source_for_api_cli_and_bundle",
         ),
-    ]
+    ];
+    if includes_retired_spec032_owner(schema) {
+        commands.insert(
+            3,
+            exact_owner_test(
+                config,
+                "spec031-owner-spec032",
+                "shacs-app",
+                "app_environment",
+                "enable_disable_lifecycle_projection_does_not_create_process_truth",
+            ),
+        );
+    }
+    commands
 }
 
 fn exact_owner_test(

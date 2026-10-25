@@ -158,7 +158,7 @@ fn component_remediation(
                 "fix channel worker configuration or restart the local runtime later"
             }
             super::Spec031ReadinessComponentKind::PluginApp => {
-                "inspect plugin or app owner diagnostics before enabling dependent features"
+                "inspect plugin owner diagnostics before enabling dependent features"
             }
             super::Spec031ReadinessComponentKind::Queue => {
                 "clear or recover blocked durable work before admitting more runtime work"
@@ -187,7 +187,7 @@ fn component_remediation(
                 "start runtime or inspect channel worker evidence later"
             }
             super::Spec031ReadinessComponentKind::PluginApp => {
-                "collect plugin or app owner evidence later"
+                "collect plugin owner evidence later"
             }
             super::Spec031ReadinessComponentKind::Queue => {
                 "collect queue depth and admission evidence later"

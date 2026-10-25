@@ -1,0 +1,14 @@
+{
+  "receiptId": "requested-29919-1792894108753-1",
+  "requestId": "request-29919-1792894108753-0",
+  "appId": "demo.clock",
+  "action": "start",
+  "previousState": "installed",
+  "currentState": "starting",
+  "generation": 1,
+  "completed": false,
+  "credentialSourceStatuses": [],
+  "blockers": [],
+  "activationRefs": [],
+  "occurredAtUnixMs": 1792894108753
+}

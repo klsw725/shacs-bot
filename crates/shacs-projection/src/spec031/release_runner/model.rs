@@ -5,17 +5,26 @@ use std::time::Duration;
 
 use super::coverage::{Spec031ExternalAuditRow, Spec031ReleaseCoverageEntry};
 
-pub const SPEC031_RELEASE_RUNNER_SCHEMA: &str = "spec031.release_runner.v4";
+pub const SPEC031_RELEASE_RUNNER_SCHEMA: &str = "spec031.release_runner.v5";
+pub(super) const SPEC031_RELEASE_RUNNER_SCHEMA_V4: &str = "spec031.release_runner.v4";
 pub(super) const SPEC031_RELEASE_RUNNER_SCHEMA_V3: &str = "spec031.release_runner.v3";
 pub(super) const SPEC031_RELEASE_RUNNER_SCHEMA_V2: &str = "spec031.release_runner.v2";
 const MAX_SAFE_ID_LEN: usize = 80;
 
 pub(super) fn is_current_layout(schema: &str) -> bool {
-    schema == SPEC031_RELEASE_RUNNER_SCHEMA || schema == SPEC031_RELEASE_RUNNER_SCHEMA_V3
+    schema == SPEC031_RELEASE_RUNNER_SCHEMA
+        || schema == SPEC031_RELEASE_RUNNER_SCHEMA_V4
+        || schema == SPEC031_RELEASE_RUNNER_SCHEMA_V3
 }
 
 pub(super) fn uses_retired_spec034_fact(schema: &str) -> bool {
     schema == SPEC031_RELEASE_RUNNER_SCHEMA_V3 || schema == SPEC031_RELEASE_RUNNER_SCHEMA_V2
+}
+
+pub(super) fn includes_retired_spec032_owner(schema: &str) -> bool {
+    schema == SPEC031_RELEASE_RUNNER_SCHEMA_V4
+        || schema == SPEC031_RELEASE_RUNNER_SCHEMA_V3
+        || schema == SPEC031_RELEASE_RUNNER_SCHEMA_V2
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

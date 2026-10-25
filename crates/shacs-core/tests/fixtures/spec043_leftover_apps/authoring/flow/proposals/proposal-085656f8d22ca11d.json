@@ -1,0 +1,16 @@
+{
+  "proposalId": "proposal-085656f8d22ca11d",
+  "appId": "demo.recover",
+  "kind": "install",
+  "userIntent": {
+    "digest": "sha256:aac8a2f6968e60f85a850a03bda667bd72fd9448c26777edd01ae802242735eb",
+    "redacted": true
+  },
+  "revisionDigest": "sha256:5e9d8c87faaef302ab62d9f71cbd4089ce93eddee9fa30d13a528fd2e894cb4a",
+  "candidateDigest": "fe053b08a4d4004e51d497f0e5588d0f7e027061df8c76cb71da3f489c68f981",
+  "installedDigest": null,
+  "installedTreeDigest": null,
+  "validationSummary": "static manifest and local resource validation passed",
+  "riskSummary": "authoring mutation only; no runtime authorization or activation",
+  "diff": []
+}

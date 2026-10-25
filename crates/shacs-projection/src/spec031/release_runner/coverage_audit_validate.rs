@@ -18,11 +18,13 @@ pub(super) fn validate_external_audits(
     repo_root: &Path,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     let root = PathBuf::from(&artifacts.evidence_root);
-    let required = if is_current_layout(&artifacts.schema) {
-        &required_external_owners()[..]
-    } else {
-        &required_external_owners_legacy()[..]
-    };
+    let mut required: Vec<_> = external_owner_facts_for(&artifacts.schema)
+        .into_iter()
+        .map(|descriptor| descriptor.owner)
+        .collect();
+    if !is_current_layout(&artifacts.schema) {
+        required.push(Spec031ExternalOwnerId::Spec035);
+    }
     if artifacts.external_audits.len() != required.len() {
         return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
     }
@@ -44,7 +46,7 @@ pub(super) fn validate_external_audits(
         validate_external_audit_content(&root, audit)?;
         validate_owner_facts(artifacts, audit, repo_root)?;
     }
-    for &owner in required {
+    for owner in required {
         if !owners.contains(&owner) {
             return Err(Spec031ReleaseArtifactError::UnmappedCoverageRequirement);
         }
@@ -270,25 +272,4 @@ fn external_status_slug(status: Spec031ExternalAuditStatus) -> &'static str {
         Spec031ExternalAuditStatus::Pass => "pass",
         Spec031ExternalAuditStatus::Blocked => "blocked",
     }
-}
-
-fn required_external_owners() -> [Spec031ExternalOwnerId; 5] {
-    [
-        Spec031ExternalOwnerId::Spec029,
-        Spec031ExternalOwnerId::Spec030,
-        Spec031ExternalOwnerId::Spec032,
-        Spec031ExternalOwnerId::Spec033,
-        Spec031ExternalOwnerId::Spec034,
-    ]
-}
-
-fn required_external_owners_legacy() -> [Spec031ExternalOwnerId; 6] {
-    [
-        Spec031ExternalOwnerId::Spec029,
-        Spec031ExternalOwnerId::Spec030,
-        Spec031ExternalOwnerId::Spec032,
-        Spec031ExternalOwnerId::Spec033,
-        Spec031ExternalOwnerId::Spec034,
-        Spec031ExternalOwnerId::Spec035,
-    ]
 }

@@ -1,0 +1,14 @@
+{
+  "receiptId": "requested-29967-1792894109980-4",
+  "requestId": "request-29967-1792894109980-3",
+  "appId": "demo.recover",
+  "action": "stop",
+  "previousState": "running",
+  "currentState": "stopping",
+  "generation": 1,
+  "completed": false,
+  "credentialSourceStatuses": [],
+  "blockers": [],
+  "activationRefs": [],
+  "occurredAtUnixMs": 1792894109980
+}

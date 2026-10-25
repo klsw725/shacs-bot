@@ -1,7 +1,5 @@
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use shacs_core::app::AppId;
-use shacs_core::app_lifecycle::AppSupervisorJournal;
 use shacs_core::runtime::{
     ChildResultEnvelope, ChildResultStatus, ExecutionDomain, ExecutionIdentity, ExecutionOutcome,
     ExecutionOutcomeFact, ExecutionScope, PendingExecution, RuntimeExecutionLedger, SpawnEnvelope,
@@ -35,74 +33,6 @@ fn config(root: &Path) -> Result<std::path::PathBuf, Box<dyn Error>> {
         }))?,
     )?;
     Ok(path)
-}
-
-#[test]
-fn app_inspect_and_list_preserve_failed_owner_receipt_without_launch() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let config = config(root.path())?;
-    let bundle = root.path().join("apps/g16.app.shacsapp");
-    fs::create_dir_all(&bundle)?;
-    fs::write(bundle.join("README.md"), "controlled local app")?;
-    fs::write(
-        bundle.join("SKILL.md"),
-        "---\nname: fixture\ndescription: local\n---\ncontrolled",
-    )?;
-    let sentinel = root.path().join("MUST_NOT_LAUNCH");
-    fs::write(
-        bundle.join("manifest.json"),
-        serde_json::to_vec(&json!({
-            "id":"g16.app", "version":"0.1.0", "entry":"README.md", "skills":["SKILL.md"],
-            "secrets":[{"key":"G16_REMEDIATION_MISSING_TOKEN","required":true}],
-            "runtime":{"command":["/bin/sh","-c",format!("touch '{}'",sentinel.display())],"timeoutSeconds":2}
-        }))?,
-    )?;
-    invoke(
-        &config,
-        &["apps", "install", bundle.to_str().ok_or("bundle path")?],
-    )?;
-    invoke(&config, &["apps", "enable", "g16.app"])?;
-    let start = invoke(&config, &["apps", "start", "g16.app"])?;
-    assert!(start.contains("Process dispatches: 0"));
-    let journal = AppSupervisorJournal::new(root.path().join("apps"));
-    let app_id = AppId::parse("g16.app")?;
-    let receipts = journal.replay(&app_id)?.receipts;
-    let receipt = receipts.last().ok_or("terminal receipt")?;
-    println!("owner={}", serde_json::to_string(receipt)?);
-    let registry = root.path().join("apps/registry.json");
-    let registry_before = fs::read(&registry)?;
-    let config_before = fs::read(&config)?;
-
-    let outputs = [
-        invoke(&config, &["apps", "inspect", "g16.app"])?,
-        invoke(&config, &["apps", "list"])?,
-    ];
-
-    for output in outputs {
-        let line = output
-            .lines()
-            .find(|line| line.starts_with("Spec031 app:"))
-            .ok_or("app row")?;
-        assert!(line.contains("state=blocked"), "{line}");
-        assert!(line.contains("freshness=current"), "{line}");
-        assert!(
-            output.contains("credential_missing:G16_REMEDIATION_MISSING_TOKEN"),
-            "{output}"
-        );
-        assert!(output.contains("activation_missing"), "{output}");
-        assert!(output.contains(&receipt.receipt_id), "{output}");
-        assert!(
-            !output.contains(root.path().to_str().ok_or("root")?),
-            "{output}"
-        );
-        assert!(output.contains("path:"), "{output}");
-    }
-    assert_eq!(journal.replay(&app_id)?.receipts, receipts);
-    assert_eq!(fs::read(registry)?, registry_before);
-    assert_eq!(fs::read(config)?, config_before);
-    assert!(!sentinel.exists());
-    root.close()?;
-    Ok(())
 }
 
 #[test]

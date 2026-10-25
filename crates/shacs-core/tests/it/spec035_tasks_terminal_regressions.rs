@@ -1,8 +1,6 @@
-use shacs_core::app::AppId;
-use shacs_core::app_lifecycle::{AppLifecycleAction, AppLifecycleReceipt, AppProcessState};
 use shacs_core::runtime::{
-    assemble_spec035_tasks, Spec035LocatedOwnerFact, Spec035TasksAssemblerErrorKind,
-    Spec035TasksOwnerSnapshots, Spec035TasksOwnerSource,
+    assemble_spec035_tasks, Spec035LocatedOwnerFact, Spec035TasksOwnerSnapshots,
+    Spec035TasksOwnerSource,
 };
 use shacs_projection::{
     Spec031Freshness, Spec031ObservedAtUnixMs, Spec035TaskActionStatus, Spec035TaskState,
@@ -43,27 +41,6 @@ fn cancelled_child() -> ReplayChildTask {
     }
 }
 
-fn incomplete_stopped_app() -> Result<AppLifecycleReceipt, Box<dyn std::error::Error>> {
-    Ok(AppLifecycleReceipt {
-        receipt_id: "receipt:stopped-incomplete".to_owned(),
-        request_id: "request:stopped-incomplete".to_owned(),
-        app_id: AppId::parse("formatter")?,
-        action: AppLifecycleAction::Stop,
-        previous_state: AppProcessState::Running,
-        current_state: AppProcessState::Stopped,
-        generation: 1,
-        completed: false,
-        manifest_digest: String::new(),
-        trusted_runtime_ref: String::new(),
-        credential_source_statuses: Vec::new(),
-        blockers: Vec::new(),
-        activation_refs: Vec::new(),
-        execution_snapshot_ref: None,
-        process_outcome: None,
-        occurred_at_unix_ms: 35,
-    })
-}
-
 #[test]
 fn cancelled_child_with_stop_request_reports_completed_action(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -79,23 +56,6 @@ fn cancelled_child_with_stop_request_reports_completed_action(
     assert_eq!(
         projection.rows()[0].action().map(|action| action.status),
         Some(Spec035TaskActionStatus::Completed)
-    );
-    Ok(())
-}
-
-#[test]
-fn stopped_app_with_incomplete_receipt_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
-    // Given
-    let mut snapshots = Spec035TasksOwnerSnapshots::all_unavailable(Spec031Freshness::Unavailable);
-    snapshots.app = source("owner:app:formatter", incomplete_stopped_app()?);
-
-    // When
-    let result = assemble_spec035_tasks(snapshots);
-
-    // Then
-    assert_eq!(
-        result.expect_err("incomplete stopped receipt").kind(),
-        Spec035TasksAssemblerErrorKind::InvalidOwnerFact
     );
     Ok(())
 }

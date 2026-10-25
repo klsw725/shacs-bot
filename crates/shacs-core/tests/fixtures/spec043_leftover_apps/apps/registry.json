@@ -1,0 +1,64 @@
+{
+  "entries": {
+    "demo.clock": {
+      "appId": "demo.clock",
+      "version": "0.1.0",
+      "digest": "3a13baa63c6c01cd1c1104ef40e40d9fffe91e5c4180c7d916bdca023b697335",
+      "bundlePath": "/private/var/folders/zr/3g_bnyrs53xb7y9sb1nh35sw0000gn/T/opencode/spec043-final/fixture-src/data/apps/demo.clock.shacsapp",
+      "lifecycleState": "enabled",
+      "permissionRequests": [],
+      "secretRequests": [],
+      "resourceSummaries": [
+        {
+          "kind": "entry",
+          "path": "README.md",
+          "sizeBytes": 324,
+          "sha256": "9cf4d46e0f5a304fed456cba806be162a497b3be54b79cb5c322e7fb59eb053b"
+        }
+      ],
+      "unavailableReasons": [],
+      "processSnapshots": [],
+      "installedAtUnixMs": 0
+    },
+    "demo.note": {
+      "appId": "demo.note",
+      "version": "0.1.0",
+      "digest": "663b1d8c0e8a86942f690b553c4dde31228a2b8110f0af9429cafff54666b209",
+      "bundlePath": "/private/var/folders/zr/3g_bnyrs53xb7y9sb1nh35sw0000gn/T/opencode/spec043-final/fixture-src/data/apps/demo.note.shacsapp",
+      "lifecycleState": "enabled",
+      "permissionRequests": [],
+      "secretRequests": [],
+      "resourceSummaries": [
+        {
+          "kind": "entry",
+          "path": "README.md",
+          "sizeBytes": 322,
+          "sha256": "6dc9392ba8babdb041bdee030256575260ceeb52cbf19a6dc6bff7c6088255bc"
+        }
+      ],
+      "unavailableReasons": [],
+      "processSnapshots": [],
+      "installedAtUnixMs": 0
+    },
+    "demo.recover": {
+      "appId": "demo.recover",
+      "version": "0.1.0",
+      "digest": "fe053b08a4d4004e51d497f0e5588d0f7e027061df8c76cb71da3f489c68f981",
+      "bundlePath": "/private/var/folders/zr/3g_bnyrs53xb7y9sb1nh35sw0000gn/T/opencode/spec043-final/fixture-src/data/apps/demo.recover.shacsapp",
+      "lifecycleState": "enabled",
+      "permissionRequests": [],
+      "secretRequests": [],
+      "resourceSummaries": [
+        {
+          "kind": "entry",
+          "path": "README.md",
+          "sizeBytes": 328,
+          "sha256": "00467e079a498369176e3ad8b862ddc76528dee61bb4fbb827c9eae01667c1bf"
+        }
+      ],
+      "unavailableReasons": [],
+      "processSnapshots": [],
+      "installedAtUnixMs": 0
+    }
+  }
+}

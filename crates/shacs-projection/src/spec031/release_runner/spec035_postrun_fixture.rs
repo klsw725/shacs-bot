@@ -27,6 +27,7 @@ pub(super) fn copy_runner_sources(repo: &Path, actual: &Path) {
             }),
     );
     paths.push(super::external_audit_facts::RETIRED_SPEC034_ARCHIVE.to_owned());
+    paths.push(super::external_audit_facts::RETIRED_SPEC032_ARCHIVE.to_owned());
     for owner in
         super::external_audit_facts::external_owner_facts_for(SPEC031_RELEASE_RUNNER_SCHEMA_V2)
     {
@@ -38,7 +39,7 @@ pub(super) fn copy_runner_sources(repo: &Path, actual: &Path) {
                 .map_or(owner.source_status_locator, |(path, _)| path)
                 .to_owned(),
         );
-        if owner.slug != "spec035" {
+        if owner.slug != "spec035" && owner.slug != "spec032" {
             paths.extend(
                 owner
                     .fact_artifacts

@@ -35,9 +35,9 @@ fn rejects_v3_artifact_when_legacy_binding_is_present() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn v3_index_is_sixty_six_rows_five_owners_and_no_spec035_catalog(
+fn current_index_is_sixty_five_rows_four_owners_and_no_spec035_catalog(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (_evidence, artifacts) = current_artifacts("v3-index-shape")?;
+    let (_evidence, artifacts) = current_artifacts("current-index-shape")?;
     let index: serde_json::Value = serde_json::from_slice(&fs::read(
         std::path::Path::new(&artifacts.evidence_root).join("evidence-index.json"),
     )?)?;
@@ -45,12 +45,12 @@ fn v3_index_is_sixty_six_rows_five_owners_and_no_spec035_catalog(
         std::path::Path::new(&artifacts.evidence_root).join("archive-integrity.json"),
     )?)?;
 
-    assert_eq!(artifacts.coverage_matrix.len(), 66);
-    assert_eq!(artifacts.external_audits.len(), 5);
+    assert_eq!(artifacts.coverage_matrix.len(), 65);
+    assert_eq!(artifacts.external_audits.len(), 4);
     assert!(index.get("spec035_catalog").is_none());
     assert_eq!(
         index["external_audits"].as_array().ok_or("owners")?.len(),
-        5
+        4
     );
     assert_eq!(
         receipt["files"].as_array().ok_or("archive files")?.len(),

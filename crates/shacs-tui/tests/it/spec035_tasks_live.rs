@@ -133,6 +133,72 @@ fn production_tui_action_result_view_rejects_unsupported_capability(
     Ok(())
 }
 
+#[test]
+fn once_tasks_render_ignores_leftover_app_data() -> Result<(), Box<dyn std::error::Error>> {
+    // Given
+    let empty = tempfile::tempdir()?;
+    let leftover = tempfile::tempdir()?;
+    for root in [empty.path(), leftover.path()] {
+        SessionManager::new(root.join("workspace"))?.save(&Session::new("cli:direct"))?;
+        fs::create_dir_all(root.join("home"))?;
+    }
+    copy_dir(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../shacs-core/tests/fixtures/spec043_leftover_apps"),
+        &leftover.path().join("data"),
+    )?;
+    let before = directory_bytes(&leftover.path().join("data"))?;
+
+    // When
+    let without = render_once(empty.path())?;
+    let with = render_once(leftover.path())?;
+
+    // Then
+    assert_eq!(with, without);
+    assert!(with
+        .lines()
+        .any(|line| line.starts_with("tasks coverage: ") && !line.contains("app=")));
+    assert!(!with.contains("owner=app"));
+    assert_eq!(directory_bytes(&leftover.path().join("data"))?, before);
+    Ok(())
+}
+
+fn render_once(root: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_shacs-tui"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.join("home"))
+        .arg("--config")
+        .arg(root.join("data/config.json"))
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .args(["--session", "cli:direct", "--once"])
+        .output()?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+    }
+    Ok(String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|line| !line.starts_with("updated: "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace(&root.to_string_lossy().into_owned(), "<root>"))
+}
+
+fn copy_dir(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let path = target.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &path)?;
+        } else {
+            fs::copy(entry.path(), path)?;
+        }
+    }
+    Ok(())
+}
+
 fn directory_bytes(root: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, std::io::Error> {
     let mut files = Vec::new();
     if !root.exists() {

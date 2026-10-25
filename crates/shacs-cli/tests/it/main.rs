@@ -26,8 +26,6 @@ pub mod spec033_trajectory_cli;
 pub mod spec035_accounting_parity;
 #[path = "spec035_revised_adapter.rs"]
 pub mod spec035_revised_adapter;
-#[path = "spec035_tasks_app_path.rs"]
-pub mod spec035_tasks_app_path;
 #[path = "spec035_tasks_cli.rs"]
 pub mod spec035_tasks_cli;
 #[path = "spec035_tasks_fail_closed.rs"]
@@ -40,3 +38,5 @@ pub mod spec037_image_verbose;
 pub mod spec037_method_repl;
 #[path = "spec038_learn_repl.rs"]
 pub mod spec038_learn_repl;
+#[path = "spec043_leftover_apps.rs"]
+pub mod spec043_leftover_apps;

@@ -107,10 +107,10 @@ pub(in crate::runtime::spec033_release::release_runner) const fn required() -> [
         ),
         edge(
             "AbortCleanupIncomplete",
-            "crates/shacs-core/src/runtime/app_supervisor.rs",
+            "crates/shacs-core/src/runtime/automation_gates.rs",
             "shacs-core",
-            "spec032_app_supervisor",
-            "uncertain_cleanup_remains_recovery_needed",
+            "spec033_automation_dispatch",
+            "incomplete_process_cleanup_is_never_reported_as_success",
         ),
         edge(
             "SnapshotMissing",

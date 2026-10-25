@@ -2,8 +2,6 @@ use super::{
     assemble_spec035_tasks, build_spec033_snapshot_from, Spec035LocatedOwnerFact,
     Spec035RecoveryOwnerFact, Spec035TasksOwnerSnapshots, Spec035TasksOwnerSource,
 };
-use shacs_app::app::AppRegistryStore;
-use shacs_app::app_lifecycle::AppSupervisorJournal;
 use shacs_projection::{Spec031Freshness, Spec031ObservedAtUnixMs, Spec035TasksProjection};
 use shacs_session::durable_replay::evaluate_durable_recovery;
 use shacs_session::SessionManager;
@@ -51,7 +49,6 @@ pub fn build_spec035_tasks_projection(
     }
     populate_session_owners(&mut snapshots, workspace, session_id)?;
     populate_durable_owners(&mut snapshots, data_dir, session_id);
-    populate_app_owners(&mut snapshots, data_dir)?;
     assemble_spec035_tasks(snapshots).map_err(Into::into)
 }
 
@@ -138,44 +135,6 @@ fn populate_durable_owners(
             fact: Spec035RecoveryOwnerFact::Admission(admission),
         }],
     );
-}
-
-fn populate_app_owners(
-    snapshots: &mut Spec035TasksOwnerSnapshots,
-    data_dir: &Path,
-) -> Result<(), Spec035TasksSourceError> {
-    let store = AppRegistryStore::new(data_dir);
-    if !store.registry_path().exists() {
-        return Ok(());
-    }
-    let journal = AppSupervisorJournal::new(store.apps_dir());
-    let mut facts = Vec::new();
-    for app in store
-        .list()
-        .map_err(|error| Spec035TasksSourceError::Owner(error.to_string()))?
-    {
-        if let Some(fact) = journal
-            .replay(&app.app_id)
-            .map_err(|error| Spec035TasksSourceError::Owner(error.to_string()))?
-            .receipts
-            .into_iter()
-            .last()
-        {
-            facts.push(Spec035LocatedOwnerFact {
-                locator: app.app_id.as_str().to_owned(),
-                fact,
-            });
-        }
-    }
-    let observed_at = Spec031ObservedAtUnixMs::new(
-        facts
-            .iter()
-            .map(|located| u64::try_from(located.fact.occurred_at_unix_ms).unwrap_or(u64::MAX))
-            .max()
-            .unwrap_or_default(),
-    );
-    snapshots.app = available(observed_at, facts);
-    Ok(())
 }
 
 pub fn serialize_spec035_tasks_projection(

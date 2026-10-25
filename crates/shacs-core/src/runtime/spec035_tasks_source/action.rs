@@ -1,5 +1,4 @@
 use super::super::{Spec035TasksAssemblerError, SurfaceActionOutcome, SurfaceActionOutcomeKind};
-use shacs_app::app::AppId;
 use shacs_projection::{
     Spec035TaskActionKind, Spec035TaskActionStatus, Spec035TaskOwner, Spec035TaskOwnerKind,
     Spec035TasksProjection, Spec035TransportCapability,
@@ -10,8 +9,6 @@ use std::fmt::{Display, Formatter};
 pub enum Spec035TasksSemanticAction {
     GoalPause { locator: String },
     GoalResume { locator: String },
-    AppStop { app_id: AppId },
-    AppRecover { app_id: AppId },
     RuntimeRecover,
 }
 
@@ -23,9 +20,8 @@ impl Spec035TasksSemanticAction {
     ) -> Result<Self, Spec035TasksSourceError> {
         let owner_kind = match owner {
             "goal" => Spec035TaskOwnerKind::Goal,
-            "app" => Spec035TaskOwnerKind::App,
             "recovery" => Spec035TaskOwnerKind::Recovery,
-            "child" | "workflow" | "automation" => {
+            "child" | "workflow" | "automation" | "app" => {
                 return Err(Spec035TasksSourceError::UnsupportedAction)
             }
             _ => return Err(Spec035TasksSourceError::InvalidActionRequest),
@@ -38,14 +34,6 @@ impl Spec035TasksSemanticAction {
             }),
             (Spec035TaskOwnerKind::Goal, "resume") => Ok(Self::GoalResume {
                 locator: locator.to_owned(),
-            }),
-            (Spec035TaskOwnerKind::App, "stop") => Ok(Self::AppStop {
-                app_id: AppId::parse(locator.to_owned())
-                    .map_err(|_| Spec035TasksSourceError::InvalidActionRequest)?,
-            }),
-            (Spec035TaskOwnerKind::App, "recover") => Ok(Self::AppRecover {
-                app_id: AppId::parse(locator.to_owned())
-                    .map_err(|_| Spec035TasksSourceError::InvalidActionRequest)?,
             }),
             (Spec035TaskOwnerKind::Recovery, "recover") if locator == "runtime:recovery" => {
                 Ok(Self::RuntimeRecover)
@@ -64,7 +52,6 @@ impl Spec035TasksSemanticAction {
     pub const fn owner_kind(&self) -> Spec035TaskOwnerKind {
         match self {
             Self::GoalPause { .. } | Self::GoalResume { .. } => Spec035TaskOwnerKind::Goal,
-            Self::AppStop { .. } | Self::AppRecover { .. } => Spec035TaskOwnerKind::App,
             Self::RuntimeRecover => Spec035TaskOwnerKind::Recovery,
         }
     }
@@ -72,7 +59,6 @@ impl Spec035TasksSemanticAction {
     pub fn locator(&self) -> &str {
         match self {
             Self::GoalPause { locator } | Self::GoalResume { locator } => locator,
-            Self::AppStop { app_id } | Self::AppRecover { app_id } => app_id.as_str(),
             Self::RuntimeRecover => "runtime:recovery",
         }
     }
@@ -81,8 +67,7 @@ impl Spec035TasksSemanticAction {
         match self {
             Self::GoalPause { .. } => Spec035TaskActionKind::Pause,
             Self::GoalResume { .. } => Spec035TaskActionKind::Resume,
-            Self::AppStop { .. } => Spec035TaskActionKind::Stop,
-            Self::AppRecover { .. } | Self::RuntimeRecover => Spec035TaskActionKind::Recover,
+            Self::RuntimeRecover => Spec035TaskActionKind::Recover,
         }
     }
 
@@ -90,10 +75,7 @@ impl Spec035TasksSemanticAction {
         match self {
             Self::GoalPause { .. } => Spec035TransportCapability::TaskPause,
             Self::GoalResume { .. } => Spec035TransportCapability::TaskResume,
-            Self::AppStop { .. } => Spec035TransportCapability::TaskStop,
-            Self::AppRecover { .. } | Self::RuntimeRecover => {
-                Spec035TransportCapability::TaskRecover
-            }
+            Self::RuntimeRecover => Spec035TransportCapability::TaskRecover,
         }
     }
 }

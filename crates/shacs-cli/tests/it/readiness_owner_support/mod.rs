@@ -1,5 +1,4 @@
 use serde_json::Value;
-use shacs_app::app::{AppRegistry, AppRegistryStore};
 use shacs_config::{save_config_to_path, Config};
 use std::error::Error;
 use std::fs;
@@ -49,7 +48,6 @@ impl Fixture {
         fixture.config.api.host = "127.0.0.1".to_owned();
         fixture.config.api.port = fixture.port;
         fixture.save_config()?;
-        AppRegistryStore::new(&fixture.root).save(&AppRegistry::default())?;
         fixture.record(
             "isolation.json",
             &serde_json::to_vec_pretty(&serde_json::json!({

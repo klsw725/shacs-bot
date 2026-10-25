@@ -1,0 +1,9 @@
+{
+  "checkpointId": "checkpoint-c312e66274c09f1b",
+  "appId": "demo.clock",
+  "version": "0.1.0",
+  "digest": "3a13baa63c6c01cd1c1104ef40e40d9fffe91e5c4180c7d916bdca023b697335",
+  "runtimeAuthorizationCreated": false,
+  "executableActivationCreated": false,
+  "processStarted": false
+}

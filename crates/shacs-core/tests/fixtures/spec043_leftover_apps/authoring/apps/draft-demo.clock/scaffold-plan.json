@@ -1,0 +1,25 @@
+{
+  "appId": "demo.clock",
+  "draftId": "draft-demo.clock",
+  "files": [
+    {
+      "path": "candidates/manifest.json",
+      "kind": "manifest-candidate",
+      "digest": "sha256:4699a620c326cae0b736d983b2e265360e11faea848025ed9fdd5a24ebf94d71",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    },
+    {
+      "path": "candidates/README.md",
+      "kind": "readme-candidate",
+      "digest": "sha256:9cf4d46e0f5a304fed456cba806be162a497b3be54b79cb5c322e7fb59eb053b",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    }
+  ],
+  "ownerBoundary": "authoring draft only; install, enable, start, grants, secrets, tools, services, and active skills are separate owner boundaries",
+  "riskLabel": "no-run-static-scaffold",
+  "installBlockers": [
+    "manual review and explicit install handoff are required"
+  ]
+}

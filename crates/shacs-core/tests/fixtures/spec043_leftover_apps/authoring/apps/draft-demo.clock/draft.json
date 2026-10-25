@@ -1,0 +1,24 @@
+{
+  "draftId": "draft-demo.clock",
+  "appId": "demo.clock",
+  "state": "scaffold-generated",
+  "sourceCommand": "apps init demo.clock",
+  "currentRevisionDigest": "sha256:6305c67973dd6332e7b5995494c57a6043978f9beff0d598c9117fdeb165e19e",
+  "generatedFiles": [
+    {
+      "path": "candidates/manifest.json",
+      "kind": "manifest-candidate",
+      "digest": "sha256:4699a620c326cae0b736d983b2e265360e11faea848025ed9fdd5a24ebf94d71",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    },
+    {
+      "path": "candidates/README.md",
+      "kind": "readme-candidate",
+      "digest": "sha256:9cf4d46e0f5a304fed456cba806be162a497b3be54b79cb5c322e7fb59eb053b",
+      "redactionStatus": "redacted",
+      "overwritePolicy": "create-new"
+    }
+  ],
+  "warningSummary": []
+}

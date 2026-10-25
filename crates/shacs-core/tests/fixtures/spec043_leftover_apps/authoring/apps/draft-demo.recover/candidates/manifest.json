@@ -1,0 +1,17 @@
+{
+  "id": "demo.recover",
+  "version": "0.1.0",
+  "entry": "README.md",
+  "name": "demo.recover",
+  "skills": [],
+  "resources": [],
+  "permissions": [],
+  "secrets": [],
+  "runtime": {
+    "command": [
+      "/bin/echo",
+      "recover-ran"
+    ],
+    "timeoutSeconds": 600
+  }
+}

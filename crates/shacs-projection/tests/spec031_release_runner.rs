@@ -493,8 +493,8 @@ fn spec031_external_audit_rejects_blocked_as_pass_and_missing_artifact() {
     let audit = artifacts
         .external_audits
         .iter_mut()
-        .find(|row| row.owner == Spec031ExternalOwnerId::Spec032)
-        .expect("spec032 audit row exists");
+        .find(|row| row.owner == Spec031ExternalOwnerId::Spec033)
+        .expect("spec033 audit row exists");
     audit.status = Spec031ExternalAuditStatus::Pass;
     audit.reason = "closure evidence absent".to_owned();
     write_artifacts(&root_from(&artifacts), &artifacts).expect("mutated artifact writes");

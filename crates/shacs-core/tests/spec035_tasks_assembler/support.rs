@@ -1,9 +1,6 @@
-use shacs_core::app::{AppError, AppId};
-use shacs_core::app_lifecycle::{AppLifecycleAction, AppLifecycleReceipt, AppProcessState};
 use shacs_core::runtime::{
-    assemble_spec035_tasks, Spec035LocatedOwnerFact, Spec035TasksAssemblerErrorKind,
-    Spec035TasksOwnerSnapshots, Spec035TasksOwnerSource, SurfaceActionOutcome,
-    SurfaceActionOutcomeKind,
+    assemble_spec035_tasks, Spec035LocatedOwnerFact, Spec035TasksOwnerSnapshots,
+    Spec035TasksOwnerSource, SurfaceActionOutcome, SurfaceActionOutcomeKind,
 };
 use shacs_projection::{
     Spec031Freshness, Spec031ObservedAtUnixMs, Spec033AutomationFact, Spec033AutomationJobStatus,
@@ -129,31 +126,6 @@ pub fn workflow(state: WorkflowRunState) -> WorkflowProjection {
     }
 }
 
-pub fn app(
-    action: AppLifecycleAction,
-    state: AppProcessState,
-    completed: bool,
-) -> Result<AppLifecycleReceipt, AppError> {
-    Ok(AppLifecycleReceipt {
-        receipt_id: "receipt:formatter".to_owned(),
-        request_id: "request:formatter".to_owned(),
-        app_id: AppId::parse("formatter")?,
-        action,
-        previous_state: AppProcessState::Running,
-        current_state: state,
-        generation: 1,
-        completed,
-        manifest_digest: "secret-token-must-not-leak".to_owned(),
-        trusted_runtime_ref: "/Users/private/process".to_owned(),
-        credential_source_statuses: vec!["API_TOKEN=secret".to_owned()],
-        blockers: Vec::new(),
-        activation_refs: Vec::new(),
-        execution_snapshot_ref: None,
-        process_outcome: None,
-        occurred_at_unix_ms: 30,
-    })
-}
-
 pub fn recovery(status: DurableRecoveryStatus) -> DurableReplayAdmission {
     DurableReplayAdmission {
         status,
@@ -198,17 +170,6 @@ pub fn write_task4_artifact(
     let cancelled_stop_completed = cancelled_projection.rows()[0]
         .action()
         .is_some_and(|action| action.status == Spec035TaskActionStatus::Completed);
-    let mut invalid_app_snapshots = unavailable_snapshots();
-    invalid_app_snapshots.app = source(
-        35,
-        Spec031Freshness::Current,
-        vec![located(
-            "owner:app:stopped-incomplete",
-            app(AppLifecycleAction::Stop, AppProcessState::Stopped, false)?,
-        )],
-    );
-    let invalid_stopped_incomplete_rejected = assemble_spec035_tasks(invalid_app_snapshots)
-        .is_err_and(|error| error.kind() == Spec035TasksAssemblerErrorKind::InvalidOwnerFact);
     fs::write(
         path,
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -217,8 +178,7 @@ pub fn write_task4_artifact(
             "missing_owner_projection": missing,
             "terminal_probe": {
                 "cancelled_projection": cancelled_projection,
-                "cancelled_stop_completed": cancelled_stop_completed,
-                "invalid_stopped_incomplete_rejected": invalid_stopped_incomplete_rejected
+                "cancelled_stop_completed": cancelled_stop_completed
             },
             "owner_reads_are_atomic": false
         }))?,

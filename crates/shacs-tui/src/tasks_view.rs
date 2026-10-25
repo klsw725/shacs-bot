@@ -8,12 +8,11 @@ use shacs_projection::{
 pub fn tasks_projection_lines(projection: &Spec035TasksProjection) -> Vec<String> {
     let coverage = projection.coverage();
     let mut lines = vec![format!(
-        "tasks coverage: goal={} child={} workflow={} automation={} app={} recovery={}",
+        "tasks coverage: goal={} child={} workflow={} automation={} recovery={}",
         count_label(coverage.goal),
         count_label(coverage.child),
         count_label(coverage.workflow),
         count_label(coverage.automation),
-        count_label(coverage.app),
         count_label(coverage.recovery),
     )];
     if projection.rows().is_empty() {

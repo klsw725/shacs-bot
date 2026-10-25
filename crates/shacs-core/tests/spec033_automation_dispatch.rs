@@ -470,6 +470,91 @@ fn due_automation_is_normalized_consumed_and_persisted_by_durable_dispatcher(
     Ok(())
 }
 
+struct CleanupFailedExecutor;
+
+impl AutomationExecutor for CleanupFailedExecutor {
+    fn execute(
+        &mut self,
+        _request: AutomationDispatchRequest,
+        _control: AutomationExecutionControl,
+    ) -> AutomationExecutionReceipt {
+        AutomationExecutionReceipt {
+            job_result: AutomationJobResult::Succeeded {
+                result_ref: "result:before-cleanup".to_owned(),
+            },
+            terminal_fact: AutomationExecutionTerminalFact::Completed,
+            delivery_result: AutomationDeliveryResult::NotRequested,
+            process_receipt: None,
+            process_cleanup: AutomationProcessCleanupFact::Failed {
+                reason_ref: "cleanup:descendants-remain".to_owned(),
+            },
+            task_outcome: None,
+        }
+    }
+}
+
+#[test]
+fn incomplete_process_cleanup_is_never_reported_as_success() -> Result<(), Box<dyn Error>> {
+    // Given
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let checkpoint_root = root.path().join("checkpoints");
+    let payload_root = root.path().join("payloads");
+    let mut dispatcher = DurableWorkDispatcher::open(
+        &event_root,
+        &payload_root,
+        MessageBus::new(),
+        "owner-1",
+        100,
+    )?;
+    let queued_snapshot = snapshot(SandboxMode::Active, SandboxFallback::NotApplicable);
+    dispatcher.enqueue_automation(AutomationWorkEnqueueInput {
+        work_id: "cleanup-work".to_owned(),
+        envelope: AutomationWorkEnvelope {
+            event: source_event(AutomationExecutionMode::NoAgentCheck),
+            schedule: AutomationScheduleKind::OneShot,
+            existing_runs: Vec::new(),
+            enqueue_provenance_snapshot: Some(queued_snapshot.clone()),
+            expected_current_facts_digest: queued_snapshot.semantic_compatibility_digest()?,
+            hook_evidence: None,
+            requirements: requirements(),
+            instruction: Some("check runtime health".to_owned()),
+            outcome_policy: AutomationOutcomePolicy::Notify,
+        },
+        next_wake_at_ms: Some(100),
+    })?;
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let state = replay.state.ok_or("missing queued automation")?;
+    let admission = evaluate_durable_work_recovery(&state.work, &payload_root, 100);
+    let mut resolver = FreshGateResolver {
+        snapshot: refreshed_snapshot(queued_snapshot),
+        calls: 0,
+    };
+
+    // When
+    dispatcher.dispatch_due_automation(
+        &state.work,
+        &admission,
+        100,
+        &mut resolver,
+        &mut CleanupFailedExecutor,
+    )?;
+
+    // Then
+    let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    let terminal = replay.state.ok_or("missing terminal automation")?;
+    let work = &terminal.work.items["cleanup-work"];
+    assert_eq!(work.terminal_kind, Some(WorkTerminalKind::Failed));
+    let facts = work.terminal_facts.as_ref().ok_or("missing facts")?;
+    assert_eq!(facts["job_result"]["kind"], "failed");
+    assert_eq!(
+        facts["job_result"]["reason_ref"],
+        "cleanup:descendants-remain"
+    );
+    assert_ne!(facts["lifecycle"]["run"]["state"], "succeeded");
+    Ok(())
+}
+
 fn refreshed_snapshot(
     snapshot: shacs_core::runtime::ExecutionSnapshot,
 ) -> shacs_core::runtime::ExecutionSnapshot {

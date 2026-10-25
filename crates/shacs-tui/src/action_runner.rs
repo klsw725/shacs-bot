@@ -1,9 +1,7 @@
 use shacs_config::{config_context, default_config_path};
-use shacs_core::app::AppRegistryStore;
-use shacs_core::app_lifecycle::AppSupervisorJournal;
 use shacs_core::runtime::{
     apply_goal_surface_action, build_spec035_tasks_projection, recover_runtime_surface,
-    request_runtime_control, request_surface_approval, validate_spec035_task_action, AppSupervisor,
+    request_runtime_control, request_surface_approval, validate_spec035_task_action,
     GoalSurfaceAction, Spec035TasksSemanticAction, SurfaceAction, SurfaceActionOutcome,
     SurfaceActionOutcomeKind, SurfaceActionRequestKind,
 };
@@ -149,27 +147,6 @@ fn dispatch_tasks_action(
             |error| tasks_unavailable(error.to_string()),
             |_| tasks_completed("goal resume completed"),
         ),
-        Spec035TasksSemanticAction::AppStop { app_id } => {
-            AppSupervisorJournal::new(AppRegistryStore::new(data_dir).apps_dir())
-                .request(&app_id, shacs_core::app_lifecycle::AppLifecycleAction::Stop)
-                .map_or_else(
-                    |error| tasks_unavailable(error.to_string()),
-                    |_| SurfaceActionOutcome {
-                        kind: SurfaceActionOutcomeKind::Requested,
-                        changed: true,
-                        detail: "app stop requested".to_owned(),
-                    },
-                )
-        }
-        Spec035TasksSemanticAction::AppRecover { app_id } => {
-            let journal = AppSupervisorJournal::new(AppRegistryStore::new(data_dir).apps_dir());
-            AppSupervisor::new(&journal)
-                .recover(&app_id, false)
-                .map_or_else(
-                    |error| tasks_unavailable(error.to_string()),
-                    |_| tasks_completed("app recovery completed"),
-                )
-        }
         Spec035TasksSemanticAction::RuntimeRecover => {
             recover_runtime_surface(data_dir, now_ms()).unwrap_or_else(unavailable_outcome)
         }

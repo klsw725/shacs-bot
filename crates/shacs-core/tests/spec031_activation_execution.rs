@@ -1,10 +1,9 @@
 use serde_json::json;
-use shacs_app::app::AppLifecycleState;
 use shacs_core::runtime::{
-    admit_activation_for_execution, ActivationCurrentIdentity, ActivationLiveFacts,
-    ActivationReason, ActivationRecord, ActivationRecordInput, ActivationReplay, ActivationSource,
-    ActivationStatus, ExecutionSnapshot, ExecutionSnapshotInput, ResourceIdentitySnapshot,
-    WorkspaceTrustRef,
+    admit_activation_for_execution, ActivationAdmissionError, ActivationCurrentIdentity,
+    ActivationLiveFacts, ActivationReason, ActivationRecord, ActivationRecordInput,
+    ActivationReplay, ActivationSource, ActivationStatus, ExecutionSnapshot,
+    ExecutionSnapshotInput, ResourceIdentitySnapshot, WorkspaceTrustRef,
 };
 use shacs_projection::{
     ResourceActivation, ResourceCandidateProjection, ResourceCollisionStatus, ResourceKind,
@@ -48,7 +47,7 @@ fn eligible_resource(content_digest: &str) -> ResourceCandidateProjection {
 }
 
 #[test]
-fn new_execution_rechecks_current_spec030_and_spec032_facts() {
+fn new_execution_rechecks_current_spec030_facts() {
     // Given
     let activation = activation();
     let eligible = eligible_resource("sha256:content-a");
@@ -62,38 +61,41 @@ fn new_execution_rechecks_current_spec030_and_spec032_facts() {
                 WorkspaceTrustRef::new("workspace:sha256:owner-a"),
                 "source:project:.shacs/skills/formatter",
                 "sha256:deps-a",
-                AppLifecycleState::Enabled,
             ),
         )
     )
     .is_ok());
     let stale = eligible_resource("sha256:content-b");
-    assert!(admit_activation_for_execution(
-        &activation,
-        &ActivationLiveFacts::new(
-            &stale,
-            ActivationCurrentIdentity::new(
-                WorkspaceTrustRef::new("workspace:sha256:owner-a"),
-                "source:project:.shacs/skills/formatter",
-                "sha256:deps-a",
-                AppLifecycleState::Enabled,
-            ),
-        )
-    )
-    .is_err());
-    assert!(admit_activation_for_execution(
-        &activation,
-        &ActivationLiveFacts::new(
-            &eligible,
-            ActivationCurrentIdentity::new(
-                WorkspaceTrustRef::new("workspace:sha256:owner-a"),
-                "source:project:.shacs/skills/formatter",
-                "sha256:deps-a",
-                AppLifecycleState::Disabled,
-            ),
-        )
-    )
-    .is_err());
+    assert_eq!(
+        admit_activation_for_execution(
+            &activation,
+            &ActivationLiveFacts::new(
+                &stale,
+                ActivationCurrentIdentity::new(
+                    WorkspaceTrustRef::new("workspace:sha256:owner-a"),
+                    "source:project:.shacs/skills/formatter",
+                    "sha256:deps-a",
+                ),
+            )
+        ),
+        Err(ActivationAdmissionError::ContentDigest)
+    );
+    let mut inactive = eligible_resource("sha256:content-a");
+    inactive.activation = ResourceActivation::Inactive;
+    assert_eq!(
+        admit_activation_for_execution(
+            &activation,
+            &ActivationLiveFacts::new(
+                &inactive,
+                ActivationCurrentIdentity::new(
+                    WorkspaceTrustRef::new("workspace:sha256:owner-a"),
+                    "source:project:.shacs/skills/formatter",
+                    "sha256:deps-a",
+                ),
+            )
+        ),
+        Err(ActivationAdmissionError::Spec030Eligibility)
+    );
 }
 
 #[test]
@@ -111,7 +113,6 @@ fn new_execution_rejects_workspace_and_source_identity_mismatch() {
                 WorkspaceTrustRef::new("workspace:sha256:owner-b"),
                 "source:project:.shacs/skills/formatter",
                 "sha256:deps-a",
-                AppLifecycleState::Enabled,
             ),
         ),
     );
@@ -123,14 +124,13 @@ fn new_execution_rejects_workspace_and_source_identity_mismatch() {
                 WorkspaceTrustRef::new("workspace:sha256:owner-a"),
                 "source:package:formatter",
                 "sha256:deps-a",
-                AppLifecycleState::Enabled,
             ),
         ),
     );
 
     // Then
-    assert!(owner.is_err());
-    assert!(source.is_err());
+    assert_eq!(owner, Err(ActivationAdmissionError::WorkspaceIdentity));
+    assert_eq!(source, Err(ActivationAdmissionError::SourceIdentity));
 }
 
 #[test]

@@ -1,5 +1,4 @@
 use serde_json::json;
-use shacs_app::app::AppLifecycleState;
 use shacs_core::runtime::trusted_runtime::{
     LocalSpec030ProjectionProvider, Spec030FactStore, WorkspaceTrustObservation,
 };
@@ -49,7 +48,6 @@ fn agent_loop_snapshot_attaches_only_current_admitted_activation_ref() -> Result
         WorkspaceTrustRef::new("workspace:sha256:owner-a"),
         "source:project:.shacs/skills/formatter",
         "sha256:deps-a",
-        AppLifecycleState::Enabled,
     )));
     let source = LiveExecutionSnapshotSource::default()
         .with_spec030_provider(Arc::new(move || provider.projection()))
@@ -87,7 +85,6 @@ fn agent_loop_snapshot_attaches_only_current_admitted_activation_ref() -> Result
         WorkspaceTrustRef::new("workspace:sha256:owner-b"),
         "source:project:.shacs/skills/formatter",
         "sha256:deps-a",
-        AppLifecycleState::Enabled,
     );
     runtime.process_message(InboundMessage::new("cli", "direct", "user", "second"))?;
 

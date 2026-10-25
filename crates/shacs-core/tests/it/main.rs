@@ -84,8 +84,6 @@ pub mod spec034_persistence_remote;
 pub mod spec034_remote_output;
 #[path = "spec035_tasks_actions.rs"]
 pub mod spec035_tasks_actions;
-#[path = "spec035_tasks_app_path.rs"]
-pub mod spec035_tasks_app_path;
 #[path = "spec035_tasks_determinism.rs"]
 pub mod spec035_tasks_determinism;
 #[path = "spec035_tasks_source.rs"]

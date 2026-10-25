@@ -1,7 +1,6 @@
 use super::{
     ActivationReason, ActivationRecord, ActivationStatus, ExecutionSnapshot, WorkspaceTrustRef,
 };
-use shacs_app::app::AppLifecycleState;
 use shacs_projection::{ResourceActivation, ResourceCandidateProjection, ResourceLoadStatus};
 use std::fmt;
 
@@ -24,7 +23,6 @@ pub struct ActivationCurrentIdentity {
     workspace_trust_ref: WorkspaceTrustRef,
     source_identity: String,
     dependency_manifest_digest: String,
-    lifecycle: AppLifecycleState,
 }
 
 impl ActivationCurrentIdentity {
@@ -32,13 +30,11 @@ impl ActivationCurrentIdentity {
         workspace_trust_ref: WorkspaceTrustRef,
         source_identity: impl Into<String>,
         dependency_manifest_digest: impl Into<String>,
-        lifecycle: AppLifecycleState,
     ) -> Self {
         Self {
             workspace_trust_ref,
             source_identity: source_identity.into(),
             dependency_manifest_digest: dependency_manifest_digest.into(),
-            lifecycle,
         }
     }
 }
@@ -69,7 +65,6 @@ impl ActivationSnapshotCandidate {
 pub enum ActivationAdmissionError {
     PersistedState,
     Spec030Eligibility,
-    Spec032Lifecycle,
     WorkspaceIdentity,
     SourceIdentity,
     ContentDigest,
@@ -95,15 +90,6 @@ pub fn admit_activation_for_execution(
         || facts.resource.load_status != ResourceLoadStatus::Loaded
     {
         return Err(ActivationAdmissionError::Spec030Eligibility);
-    }
-    match facts.identity.lifecycle {
-        AppLifecycleState::Enabled => {}
-        AppLifecycleState::Installed
-        | AppLifecycleState::Disabled
-        | AppLifecycleState::Unavailable
-        | AppLifecycleState::Uninstalling => {
-            return Err(ActivationAdmissionError::Spec032Lifecycle)
-        }
     }
     if &facts.identity.workspace_trust_ref != record.workspace_trust_ref() {
         return Err(ActivationAdmissionError::WorkspaceIdentity);
@@ -175,7 +161,6 @@ pub const fn digest_reason(error: ActivationAdmissionError) -> Option<Activation
         }
         ActivationAdmissionError::PersistedState
         | ActivationAdmissionError::Spec030Eligibility
-        | ActivationAdmissionError::Spec032Lifecycle
         | ActivationAdmissionError::WorkspaceIdentity
         | ActivationAdmissionError::SourceIdentity => None,
     }

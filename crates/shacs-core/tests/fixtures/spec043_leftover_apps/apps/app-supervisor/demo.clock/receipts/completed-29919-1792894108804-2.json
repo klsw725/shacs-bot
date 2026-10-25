@@ -1,0 +1,17 @@
+{
+  "receiptId": "completed-29919-1792894108804-2",
+  "requestId": "request-29919-1792894108753-0",
+  "appId": "demo.clock",
+  "action": "start",
+  "previousState": "starting",
+  "currentState": "running",
+  "generation": 1,
+  "completed": true,
+  "manifestDigest": "3a13baa63c6c01cd1c1104ef40e40d9fffe91e5c4180c7d916bdca023b697335",
+  "trustedRuntimeRef": "trusted-runtime:spec030:1",
+  "credentialSourceStatuses": [],
+  "blockers": [],
+  "activationRefs": [],
+  "executionSnapshotRef": "snapshot:app:app-demo.clock-g1-3a13baa63c6c-0",
+  "occurredAtUnixMs": 1792894108804
+}
