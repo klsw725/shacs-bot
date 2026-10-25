@@ -494,6 +494,31 @@ impl DurableWorkDispatcher {
         )
     }
 
+    pub(crate) fn record_web_watch_terminal(
+        &mut self,
+        item: &ReplayWorkItem,
+        record: &super::WebObservationRecord,
+    ) -> Result<DurableEventRecord, DurableDispatchError> {
+        let terminal_kind = match record.result {
+            super::WebCheckResult::Observed { .. } => WorkTerminalKind::Succeeded,
+            super::WebCheckResult::Failed { .. } => WorkTerminalKind::Failed,
+            super::WebCheckResult::Blocked { .. } => WorkTerminalKind::Blocked,
+        };
+        self.append_for_item(
+            item,
+            WORK_TERMINAL,
+            &shacs_session::durable_work::WorkTerminalCommit {
+                terminal: WorkTerminal {
+                    work_id: item.work_id.clone(),
+                    terminal_kind,
+                    outcome_ref: super::WEB_WATCH_OUTCOME.to_owned(),
+                    facts: Some(serde_json::to_value(record)?),
+                },
+                cancel_if_requested: true,
+            },
+        )
+    }
+
     pub fn requeue_stale(
         &mut self,
         state: &DurableWorkReplayState,

@@ -153,6 +153,18 @@ mod trusted_javascript_tool_before;
 pub mod trusted_resources;
 pub mod trusted_runtime;
 mod trusted_tool_before_registry;
+mod web_watch;
+mod web_watch_decision;
+mod web_watch_dispatch;
+mod web_watch_extract;
+mod web_watch_fetch;
+mod web_watch_gate;
+mod web_watch_number;
+mod web_watch_read;
+mod web_watch_record;
+mod web_watch_store;
+mod web_watch_surface;
+mod web_watch_text;
 mod workflow;
 
 pub use activation_execution::{
@@ -533,6 +545,7 @@ pub use shacs_projection::{
     ToolSearchReleaseEvidenceChecklist,
 };
 pub use shacs_providers::{GenerationSettings, ProviderClient, ProviderRetryMode};
+pub use shacs_security::NetworkGuard;
 pub use shacs_session::{
     find_legal_message_start, Session, SessionHistoryOptions, SessionManager, SessionSummary,
     FILE_MAX_MESSAGES,
@@ -608,6 +621,22 @@ pub use trajectory_store::{
 };
 pub use trusted_javascript_tool_before::register_trusted_javascript_tool_before_handlers;
 pub use trusted_tool_before_registry::TrustedToolBeforeRegistry;
+pub use web_watch::{
+    WebCheckFailure, WebCondition, WebEvidence, WebExtraction, WebObservedValue, WebResponseFacts,
+    WebValueKind, WebWatchError, WebWatchWake, WEB_TEXT_VERSION, WEB_WATCH_MAX_CADENCE_SECONDS,
+    WEB_WATCH_METADATA_KEY, WEB_WATCH_MIN_CADENCE_SECONDS, WEB_WATCH_OUTCOME, WEB_WATCH_WORK_KIND,
+};
+use web_watch::{WebWatchEntry, WebWatchPlan};
+pub use web_watch_dispatch::{WebWatchExecutor, WebWatchRuntime};
+pub use web_watch_fetch::WebFetchLimits;
+pub use web_watch_read::{mask_web_watch_urls, read_web_watch};
+pub use web_watch_record::{
+    ConfirmWebWatchRequest, WebCandidate, WebCheckResult, WebDecision, WebDecisionReason,
+    WebFailureInterval, WebIntervalCloseReason, WebIntervalClosure, WebObservationRecord,
+    WebPreview, WebPreviewRequest, WebPreviewTarget, WebRuntimeGap, WebTextArea,
+    WebWatchConfigured, WebWatchPlanView, WebWatchSnapshot,
+};
+pub use web_watch_surface::{confirm_web_watch, preview_web_watch};
 pub use workflow::{
     cancel_runtime_workflow, read_only_child_tool_names, run_live_runtime_workflow,
     run_live_runtime_workflow_with_checkpoint_callback, run_live_runtime_workflow_with_options,

@@ -87,6 +87,19 @@ pub trait ChatCompletionAdapter {
         None
     }
 
+    /// Guard for 042 web watch reads: public addresses only unless a test build overrides it.
+    fn web_watch_network_guard(&self) -> shacs_core::runtime::NetworkGuard {
+        shacs_core::runtime::NetworkGuard::default()
+    }
+
+    fn now_ms(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+            })
+    }
+
     fn stream_spec035_tasks_events(
         &self,
         _session_id: &str,

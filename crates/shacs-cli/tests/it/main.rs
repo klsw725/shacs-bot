@@ -38,5 +38,7 @@ pub mod spec037_image_verbose;
 pub mod spec037_method_repl;
 #[path = "spec038_learn_repl.rs"]
 pub mod spec038_learn_repl;
+#[path = "spec042_web_watch_cli.rs"]
+pub mod spec042_web_watch_cli;
 #[path = "spec043_leftover_apps.rs"]
 pub mod spec043_leftover_apps;

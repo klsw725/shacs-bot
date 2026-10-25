@@ -52,6 +52,7 @@ mod spec035_tasks;
 mod spec035_transport;
 mod spec036_observation;
 mod spec036_work;
+mod spec042_web_watch;
 pub use media_api::*;
 pub use spec030_api::TRUSTED_RUNTIME_PATH;
 pub use spec030_client::{

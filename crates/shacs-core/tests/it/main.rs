@@ -94,5 +94,7 @@ pub mod spec035_tasks_terminal_regressions;
 pub mod spec037_method_selection;
 #[path = "spec038_learned_methods.rs"]
 pub mod spec038_learned_methods;
+#[path = "spec042_web_watch.rs"]
+pub mod spec042_web_watch;
 #[path = "token_estimator_consistency.rs"]
 pub mod token_estimator_consistency;

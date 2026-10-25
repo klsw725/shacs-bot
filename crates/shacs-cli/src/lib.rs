@@ -20,9 +20,11 @@ mod spec035_revised;
 mod spec035_tasks_cli;
 mod spec036_observation_cli;
 mod spec036_work_cli;
+mod spec042_web_watch_cli;
 mod surface_approval_worker;
 mod tool_before_interaction;
 mod trajectory_cli;
+mod web_watch_profile;
 pub use runtime_cleanup::{RemovedRuntimePath, RemovedRuntimePathKind, RuntimeCleanupReceipt};
 use spec035_cli_media::wiring::*;
 pub use spec035_revised::{
@@ -9360,9 +9362,10 @@ pub fn session_export(options: SessionExportOptions) -> Result<SessionExportRepo
         )));
     }
     let manager = SessionManager::new(&workspace)?;
-    let session = manager.load_existing(&options.session).ok_or_else(|| {
+    let mut session = manager.load_existing(&options.session).ok_or_else(|| {
         CliError::InvalidArguments(format!("session `{}` was not found", options.session))
     })?;
+    shacs_core::runtime::mask_web_watch_urls(&mut session.metadata);
     let content = match options.format {
         SessionExportFormat::Json => serde_json::to_string_pretty(&json!({
             "key": session.key,
@@ -10467,6 +10470,10 @@ fn percent_decode(value: &str) -> Option<String> {
 }
 
 pub(crate) fn now_millis() -> u64 {
+    #[cfg(feature = "spec042-test-profile")]
+    if let Some(now_ms) = web_watch_profile::test_clock_ms() {
+        return now_ms;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
@@ -13257,6 +13264,7 @@ fn link_channel_restart_work_refs(
     for item in work.items.values().filter(|item| {
         !item.state.is_terminal()
             && item.work_kind != shacs_core::runtime::ENTRUSTED_OBSERVATION_WORK_KIND
+            && item.work_kind != shacs_core::runtime::WEB_WATCH_WORK_KIND
     }) {
         let Some(channel) = durable_work_channel(item) else {
             continue;
@@ -16347,6 +16355,7 @@ pub fn help_text() -> String {
         "            Flags: --workspace/-w, --session",
         "  work      Create/read/revise/pause/resume/done/clear entrusted work; observe/observations",
         "            Actions: create, read, revise, pause, resume, done, clear",
+        "            Web page watch: web-preview, web-watch, web-status",
         "            Flags: --workspace/-w, --session, --owner-session",
         "  tasks     Print the canonical owner-backed task projection as JSON",
         "            Flags: --workspace/-w, --data-dir, --session, --json",
@@ -20397,6 +20406,14 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
 
     fn runtime_data_dir(&self) -> Option<PathBuf> {
         self.config_path.parent().map(Path::to_path_buf)
+    }
+
+    fn web_watch_network_guard(&self) -> shacs_core::runtime::NetworkGuard {
+        web_watch_profile::web_watch_guard()
+    }
+
+    fn now_ms(&self) -> u64 {
+        now_millis()
     }
 
     fn local_improvement(

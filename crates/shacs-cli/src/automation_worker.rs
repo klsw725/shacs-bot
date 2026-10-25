@@ -37,14 +37,24 @@ impl AutomationOwnerAdapters for AgentLoopChatCompletionAdapter {
         dispatcher: &mut DurableWorkDispatcher,
         data_dir: &Path,
     ) -> Result<(), String> {
+        let now_ms = now_millis();
         let runtime = shacs_core::runtime::ObservationRuntime {
             workspace: &self.workspace,
             data_dir,
-            now_ms: now_millis(),
+            now_ms,
+        };
+        let guard = super::web_watch_profile::web_watch_guard();
+        let web = shacs_core::runtime::WebWatchRuntime {
+            workspace: &self.workspace,
+            data_dir,
+            now_ms,
+            guard: &guard,
+            limits: shacs_core::runtime::WebFetchLimits::PRODUCTION,
         };
         dispatcher
             .process_entrusted_observations(&runtime, self)
             .and_then(|()| dispatcher.enqueue_entrusted_notifications(&runtime))
+            .and_then(|()| dispatcher.process_web_watches(&web, self))
             .map_err(|error| error.to_string())
     }
     fn snapshot(&self, request: &ProviderRequest) -> Result<ExecutionSnapshot, String> {

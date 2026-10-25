@@ -36,6 +36,7 @@ fs2 = "0.4"
 
 [features]
 spec031-test-fixture = []
+spec042-test-profile = []
 
 [dev-dependencies]
 axum = { version = "=0.8.4", default-features = false }

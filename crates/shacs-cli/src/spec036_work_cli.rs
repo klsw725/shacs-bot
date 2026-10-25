@@ -11,6 +11,7 @@ pub struct WorkOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkAction {
     Observation(super::spec036_observation_cli::ObservationAction),
+    WebWatch(super::spec042_web_watch_cli::WebWatchAction),
     Create(CreateOptions),
     Read {
         work_id: String,
@@ -46,6 +47,7 @@ pub(super) fn run(options: WorkOptions) -> Result<String, CliError> {
         WorkAction::Observation(action) => {
             return super::spec036_observation_cli::run(options, action)
         }
+        WorkAction::WebWatch(action) => return super::spec042_web_watch_cli::run(options, action),
         WorkAction::Create(create) => shacs_core::runtime::create_entrusted_work(
             &options.workspace,
             shacs_core::runtime::EntrustedWorkCreateRequest {
@@ -102,6 +104,12 @@ pub(super) fn run(options: WorkOptions) -> Result<String, CliError> {
 pub(super) fn parse(mut parser: ArgParser) -> Result<CliCommand, CliError> {
     if matches!(parser.peek(), Some("observe" | "observations")) {
         return super::spec036_observation_cli::parse(parser);
+    }
+    if matches!(
+        parser.peek(),
+        Some("web-preview" | "web-watch" | "web-status")
+    ) {
+        return super::spec042_web_watch_cli::parse(parser);
     }
     if matches!(parser.peek(), Some("--help" | "-h")) {
         return Ok(CliCommand::Help);
@@ -280,8 +288,5 @@ fn take_required(parser: &mut ArgParser, message: &str) -> Result<String, CliErr
 }
 
 fn current_timestamp() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().to_string())
-        .unwrap_or_default()
+    now_millis().to_string()
 }

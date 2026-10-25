@@ -180,8 +180,13 @@ pub fn parse_http_url(url: &str) -> Result<ParsedUrl, String> {
 }
 
 pub fn resolve_redirect_url(base: &str, location: &str) -> Result<String, String> {
-    if location.starts_with("http://") || location.starts_with("https://") {
-        return Ok(location.to_owned());
+    if let Some(scheme) = uri_scheme(location) {
+        let rest = &location[scheme.len() + 1..];
+        let http = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+        if !http || !rest.starts_with("//") {
+            return Err(format!("Only http/https allowed, got '{scheme}'"));
+        }
+        return Ok(format!("{}:{rest}", scheme.to_ascii_lowercase()));
     }
     let parsed = parse_http_url(base)?;
     if location.starts_with("//") {
@@ -192,6 +197,14 @@ pub fn resolve_redirect_url(base: &str, location: &str) -> Result<String, String
             "{}://{}{}",
             parsed.scheme, parsed.authority, location
         ));
+    }
+    let base = &base[..base.find('#').unwrap_or(base.len())];
+    if location.starts_with('#') {
+        return Ok(format!("{base}{location}"));
+    }
+    let base = &base[..base.find('?').unwrap_or(base.len())];
+    if location.starts_with('?') {
+        return Ok(format!("{base}{location}"));
     }
     let base_path = base
         .split_once("://")
@@ -209,6 +222,19 @@ pub fn resolve_redirect_url(base: &str, location: &str) -> Result<String, String
         "{}://{}{}/{}",
         parsed.scheme, parsed.authority, prefix, location
     ))
+}
+
+/// The scheme of an absolute URI reference: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"`.
+fn uri_scheme(reference: &str) -> Option<&str> {
+    let (scheme, _) = reference.split_once(':')?;
+    let mut characters = scheme.chars();
+    let valid = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        });
+    valid.then_some(scheme)
 }
 
 fn hostname_from_authority(authority: &str) -> Result<String, String> {
@@ -345,6 +371,45 @@ mod tests {
             resolve_redirect_url("https://example.com/a/b", "../c").expect("relative redirect"),
             "https://example.com/a/../c"
         );
+        let resolved = [
+            (
+                "https://example.com/a/b?x=1#f",
+                "?page=2",
+                "https://example.com/a/b?page=2",
+            ),
+            (
+                "https://example.com/a/b?x=1#f",
+                "#top",
+                "https://example.com/a/b?x=1#top",
+            ),
+            (
+                "https://example.com/a/b?next=/c/d",
+                "e",
+                "https://example.com/a/e",
+            ),
+            (
+                "https://example.com/a",
+                "HTTP://other.example/x",
+                "http://other.example/x",
+            ),
+        ];
+        for (base, location, expected) in resolved {
+            assert_eq!(
+                resolve_redirect_url(base, location).as_deref(),
+                Ok(expected),
+                "{location}"
+            );
+        }
+        for location in [
+            "ftp://203.0.113.10/x",
+            "javascript:alert(1)",
+            "http:relative",
+        ] {
+            assert!(
+                resolve_redirect_url("https://example.com/a", location).is_err(),
+                "{location}"
+            );
+        }
         assert!(validate_resolved_url("http://127.0.0.1/private").is_err());
         assert!(contains_internal_url("curl http://169.254.169.254/latest"));
         assert!(contains_internal_url("curl HTTP://169.254.169.254/latest"));

@@ -90,6 +90,28 @@ fn redirect_target_is_revalidated_before_second_request() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn a_redirect_to_another_scheme_is_an_invalid_url() -> Result<(), Box<dyn Error>> {
+    // Given
+    let fixture = RawResponseFixture::start(
+        b"HTTP/1.1 302 Found\r\nLocation: ftp://203.0.113.10/image.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_vec(),
+    )?;
+    let guard = NetworkGuard::with_ssrf_whitelist(["127.0.0.1/32"]);
+    let transport = UreqGuardedRemoteTransport::new(guard.clone(), Duration::from_secs(1));
+    let context =
+        RemoteOutputEvaluationContext::new(Some(&guard), &transport, SystemTime::UNIX_EPOCH);
+
+    // When
+    let decision =
+        RemoteOutputPolicy::download(1024, 3).evaluate(candidate(&fixture.url()), context);
+    fixture.finish()?;
+
+    // Then
+    assert_eq!(rejected_reason(decision), RemoteRejectionReason::InvalidUrl);
+    Ok(())
+}
+
+#[test]
 fn concrete_transport_reports_actual_connected_peer() -> Result<(), Box<dyn Error>> {
     // Given
     let fixture = LoopbackFixture::start(png())?;

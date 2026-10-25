@@ -28,6 +28,15 @@ pub fn configure_entrusted_observation(
     if goal.status != PersistentGoalStatus::Active {
         return Err(ObservationError::Blocked(ObservationBlock::GoalInactive));
     }
+    if super::web_watch_store::web_watches(&session)
+        .map_err(EntrustedWorkError::Metadata)?
+        .iter()
+        .any(|entry| entry.work_id == request.work.work_id)
+    {
+        return Err(ObservationError::InvalidInput(
+            "work already watches a web page",
+        ));
+    }
     let work = &mut works[index];
     if work.current_revision != request.expected_revision {
         return Err(EntrustedWorkError::RevisionConflict {

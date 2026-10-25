@@ -78,6 +78,9 @@ pub(crate) fn handle_entrusted_work_request(
     request: ApiHttpRequest,
     adapter: &(impl ChatCompletionAdapter + ?Sized),
 ) -> ApiHttpResponse {
+    if let Some(response) = super::spec042_web_watch::handle(&request, adapter) {
+        return response;
+    }
     if let Some(response) = super::spec036_observation::handle(&request, adapter) {
         return response;
     }
