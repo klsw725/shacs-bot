@@ -6,6 +6,8 @@ Implemented scope: 현재 구현은 local `.shacsapp` manifest validation, app r
 
 Open work moved to: [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md)
 
+> **퇴역 안내 (2026-10-25):** 앱 기능은 [039](../039-app-capability-disposition/SPEC.md)의 판정에 따라 [043](../043-app-capability-retirement/SPEC.md)에서 퇴역했다. `shacs-app` crate와 app registry·lifecycle 코드는 지웠고, `shacs-bot apps`는 남은 앱 자료의 위치만 보여주는 읽기 전용 안내다. 남은 registry·bundle·journal·ledger는 지우거나 고쳐 쓰지 않는다. 이 문서의 구현 범위와 근거 파일은 017 종료 당시의 역사 기록이며, 017의 완료 판정은 바꾸지 않는다.
+
 Not carried forward: remote marketplace, Rust dynamic plugin ABI, arbitrary in-process third-party code loading, SaaS/admin/fleet workflow, OS-specific visual UI design은 이 app environment baseline에 포함하지 않는다.
 
 ## 문서 목적

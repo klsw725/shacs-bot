@@ -21,7 +21,7 @@
 
 `shacs-bot`은 **사용자 본인이 직접 설치하고 운영하는 개인용 어시스턴트**를 지향하는 Rust 프로젝트다.
 
-사용자가 맡긴 일과 이전 결정을 이어받고, 의미 있는 변화가 생기면 근거 있는 도움을 먼저 가져오는 경험이 중심이다. 로컬 작업 수행, 지속 세션, 도구 사용, 오케스트레이션과 AI app 실행 환경은 이를 뒷받침하는 수단이다. 기존의 개인형 AI Operating System/userland 비유는 시스템 설계 배경이지, AI app 운영 환경으로의 수렴을 제품의 최종 목표로 고정하지 않는다.
+사용자가 맡긴 일과 이전 결정을 이어받고, 의미 있는 변화가 생기면 근거 있는 도움을 먼저 가져오는 경험이 중심이다. 로컬 작업 수행, 지속 세션, 도구 사용, 오케스트레이션은 이를 뒷받침하는 수단이다. 설치형 AI app 실행 환경은 [043](specs/043-app-capability-retirement/SPEC.md)에서 퇴역했다. 기존의 개인형 AI Operating System/userland 비유는 시스템 설계 배경이지 제품의 최종 목표가 아니다.
 
 ---
 
@@ -37,7 +37,7 @@
 
 `shacs-bot`은 현재 구현체, CLI, runtime process 이름이다. 현재 사용자 데이터 루트도 구현체 이름에 맞춰 `.shacs-bot/`을 사용한다.
 
-따라서 기본 사용자 데이터 루트는 `~/.shacs-bot/`이고, 설치 가능한 AI app bundle은 config data dir의 `apps/<app-id>.shacsapp/` 아래에 놓는다. 기본 config 기준으로는 `~/.shacs-bot/apps/<app-id>.shacsapp/`이다. `.shacsapp`은 독립 최상위 workspace 이름이 아니라 data dir의 `apps/` 아래에서 의미를 갖는 app bundle 디렉터리 확장자다.
+따라서 기본 사용자 데이터 루트는 `~/.shacs-bot/`이다. 설치형 AI app bundle(`apps/<app-id>.shacsapp/`)은 앱 기능과 함께 [043](specs/043-app-capability-retirement/SPEC.md)에서 퇴역했다. 이전 버전이 만든 bundle과 앱 자료는 config data dir의 `apps/` 아래에 남을 수 있고, 제품은 지우거나 고쳐 쓰지 않으며 `shacs-bot apps`의 읽기 전용 퇴역 안내에서만 그 위치를 보여준다.
 
 ### 지향점
 
@@ -82,7 +82,7 @@
 `shacs-bot`은 이 참고점들을 그대로 복제하지 않는다. 대신 다음처럼 조합한다.
 
 - **코어는 `nanobot + opencode` 성격으로 가져간다.**
-- **주변 서비스와 app bundle 경계는 `claude-code`, `OpenHarness`, `openclaw`에서 아이디어만 가져온다.**
+- **주변 서비스 경계는 `claude-code`, `OpenHarness`, `openclaw`에서 아이디어만 가져온다.** app bundle 경계는 앱 기능과 함께 [043](specs/043-app-capability-retirement/SPEC.md)에서 퇴역했다.
 - **검증 가능한 위임 경험은 `oh-my-opencode`에서 방향만 가져오되, 최종 상태와 dispatch ordering은 이 프로젝트의 오케스트레이터 계약으로 재해석한다.**
 - **사용자 맥락과 작업 방법의 학습은 분리하고, 확인되지 않은 경험을 곧바로 기본 절차로 승격하지 않는다.**
 - **최종 상태 변경 권한은 메인 오케스트레이터에 남긴다.**
@@ -238,9 +238,10 @@ MainOrchestrator
 ```text
 ~/.shacs-bot/skills/<skill-name>/SKILL.md
 <workspace>/.shacs-bot/skills/<skill-name>/SKILL.md
-<data-dir>/apps/<app-id>.shacsapp/skills/<skill-name>/SKILL.md
 bundled-skills/<skill-name>/SKILL.md
 ```
+
+앱 bundle 안의 skill 위치(`<data-dir>/apps/<app-id>.shacsapp/skills/`)는 앱 기능과 함께 [043](specs/043-app-capability-retirement/SPEC.md)에서 퇴역했다. 그 위치의 skill은 이전에도 skill 목록에 나오지 않았으며, 같은 `SKILL.md`를 `~/.shacs-bot/skills/<skill-name>/`에 두면 사용자 skill로 발견된다.
 
 ### Resource 로딩 우선순위
 
@@ -474,14 +475,16 @@ Shacs는 사용자가 직접 설치·운영하는 trusted local agent runtime을
 33. `docs/specs/033-evaluation-automation-live-integration/SPEC.md`
 34. `docs/specs/034-generated-media-and-rich-file-context-expansion/SPEC.md`
 36. `docs/specs/036-entrusted-work-continuity-and-change-notification/SPEC.md` (Complete (Scoped))
-37. `docs/specs/037-task-specific-assistant-methods/SPEC.md` (Planned)
-38. `docs/specs/038-evidence-backed-method-learning/SPEC.md` (Planned)
-39. `docs/specs/039-app-capability-disposition/SPEC.md` (Planned, decision only)
-40. `docs/specs/040-video-analyzer-capability-disposition/SPEC.md` (Planned, decision only)
+37. `docs/specs/037-task-specific-assistant-methods/SPEC.md` (Complete (Scoped))
+38. `docs/specs/038-evidence-backed-method-learning/SPEC.md` (Complete (Scoped))
+39. `docs/specs/039-app-capability-disposition/SPEC.md` (Complete (Decision): 제거)
+40. `docs/specs/040-video-analyzer-capability-disposition/SPEC.md` (Complete (Decision): 제거)
 41. `docs/specs/041-release-evidence-tooling-disposition/SPEC.md` (Planned, decision only)
 42. `docs/specs/042-conversational-web-watch-and-trustworthy-silence/SPEC.md` (Planned)
+43. `docs/specs/043-app-capability-retirement/SPEC.md` (Complete (Scoped))
+44. `docs/specs/044-video-analyzer-retirement/SPEC.md` (Complete (Scoped))
 
-`001`부터 `027`은 2026-07-20 기준 실제 구현 범위로 완료 처리되었다. 각 문서에서 분리된 후속 owner 중 완료된 범위는 `028`부터 `034`가 기록한다. 미완료였던 `035` 문서는 현재 스펙 세트에서 제거했으며, 구현 상태와 완료 판정을 변경한 것은 아니다. `036`은 새 제품 방향의 독립적인 scoped 구현을 완료했고 `037`·`038`은 Planned 계약이다. 이들은 이전 `035`의 구현·QA·closure를 계승하지 않는다. `039`부터 `041`은 기존 기능을 삭제한다고 가정하지 않는 독립 판정 계약이다. `042`는 `036`의 완료 범위를 다시 열지 않고 첫 경험을 대화형 위임·웹페이지 관찰과 확인 실패·결정 마감 알림으로 넓히는 Planned 계약이다. 명시적 비목표와 미결정 아이디어는 자동으로 backlog에 포함하지 않는다.
+`001`부터 `027`은 2026-07-20 기준 실제 구현 범위로 완료 처리되었다. 각 문서에서 분리된 후속 owner 중 완료된 범위는 `028`부터 `034`가 기록한다. 미완료였던 `035` 문서는 현재 스펙 세트에서 제거했으며, 구현 상태와 완료 판정을 변경한 것은 아니다. `036`·`037`·`038`은 새 제품 방향의 독립적인 scoped 구현을 완료했다. 이들은 이전 `035`의 구현·QA·closure를 계승하지 않는다. `039`부터 `041`은 기존 기능을 삭제한다고 가정하지 않는 독립 판정 계약이며, `039`·`040`이 제거로 판정한 앱 기능과 video analyzer는 각각 `043`·`044`가 퇴역시켰다. `042`는 `036`의 완료 범위를 다시 열지 않고 첫 경험을 대화형 위임·웹페이지 관찰과 확인 실패·결정 마감 알림으로 넓히는 Planned 계약이다. 명시적 비목표와 미결정 아이디어는 자동으로 backlog에 포함하지 않는다.
 
 [`../intent.md`](../intent.md)는 제품 경험의 방향을 정하고, 위 architecture spec 세트는 각 설계 계약과 완료 기준을 정의한다. 어느 쪽도 다른 문서의 구현 사실이나 완료 판정을 자동으로 바꾸지 않는다.
 

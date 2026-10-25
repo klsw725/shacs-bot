@@ -5,6 +5,8 @@ Implemented scope: The safe `apps init` authoring draft baseline from PRD 000 is
 Open work moved to: [032 App Maker runtime and extension lifecycle](../032-app-maker-runtime-and-extension-lifecycle/SPEC.md).
 Not carried forward: Remote marketplace, organization-admin authoring approval, fleet rollout, visual widget design, and secret vault backend are outside this follow-up scope.
 
+> **퇴역 안내 (2026-10-25):** 앱 authoring은 [039](../039-app-capability-disposition/SPEC.md)의 판정에 따라 [043](../043-app-capability-retirement/SPEC.md)에서 퇴역했다. `apps init`은 더 이상 초안을 만들지 않고 읽기 전용 퇴역 안내를 내며, 남은 `authoring/apps/draft-<app-id>/` 초안은 지우거나 고쳐 쓰지 않는다. 이 문서의 구현 범위와 근거 파일은 021 종료 당시의 역사 기록이며, 021의 완료 판정은 바꾸지 않는다.
+
 ## 문서 목적
 이 문서는 `docs/SYSTEM-FOUNDATION.md`와 numbered spec set 전체를 바탕으로 `shacs-bot`의 App Maker 경계를 정의한다.
 목표는 다음과 같다.

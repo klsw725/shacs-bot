@@ -32,7 +32,7 @@ Executable-resource activation record를 schema-versioned로 persist/migrate하�
 1. Migration preserves activation identity/status/reason and detects digest mismatch.
 2. Snapshot consumes exact activation ref as diagnostic provenance only.
 3. Replay performs no current resource discovery, dependency preparation, credential resolution, or entrypoint execution.
-4. New execution rechecks current 030 eligibility and 032 lifecycle facts.
+4. New execution rechecks current 030 eligibility and 032 lifecycle facts. (Retirement note: after [043](../../043-app-capability-retirement/SPEC.md) retired the app capability, admission no longer takes a 032 lifecycle input; it rechecks status, 030 eligibility, workspace, source, content and dependency digests. This criterion is the record of the 031 closure.)
 
 ## Closure Evidence
 

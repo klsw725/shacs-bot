@@ -4,6 +4,8 @@ Status: Complete (Scoped)
 
 Origin specs: 005, 017, 021, 025
 
+> **퇴역 안내 (2026-10-25):** 앱 authoring과 lifecycle은 [039](../039-app-capability-disposition/SPEC.md)의 판정에 따라 [043](../043-app-capability-retirement/SPEC.md)에서 퇴역했다. AppSupervisor, `apps` 하위 명령, 앱 extension provenance, readiness·Tasks·agent 실행 기록의 앱 입력을 지웠고 `shacs-bot apps`는 읽기 전용 퇴역 안내다. 남은 앱 자료는 지우거나 고쳐 쓰지 않는다. Spec031 release runner의 새 run(v5)은 032 owner fact를 요구하지 않으며, 이전 run의 032 fact는 보관 사본으로만 판독한다. 이 문서와 PRD·[CLOSURE](CLOSURE.md)의 구현 설명은 032 종료 당시의 역사 기록이며, 032의 완료 판정은 바꾸지 않는다.
+
 ## 목적
 
 이 문서는 기존 specs 005, 017, 021, 025가 implemented scope로 닫힌 뒤 남는 app product work의 owner boundary를 연다.

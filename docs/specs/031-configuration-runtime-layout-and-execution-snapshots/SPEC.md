@@ -112,7 +112,7 @@ Origin specs: 008, 009, 010, 015, 026
 11. Extra context config live wiring test가 config-provided context files를 live provider handoff에 포함하고, default discovery와 중복을 피한다.
 12. Diagnostics/replay test가 과거 snapshot을 live source 재조회 없이 해석하되 current live truth나 재실행 authorization으로 사용하지 않는다.
 13. 사용자 문서가 JSON compatibility, migration 필요 여부, profile/auth source 사용법, raw auth store disclosure, 비범위를 정확히 말한다.
-14. Resource activation persistence test가 active/stale/disabled/revoked/removed state, digest mismatch, migration, inspect/disable/revoke mutation을 검증한다. Snapshot은 정확한 activation ref를 diagnostic state로 소비하고, 새 실행은 current 030 eligibility와 032 lifecycle state를 다시 확인한다.
+14. Resource activation persistence test가 active/stale/disabled/revoked/removed state, digest mismatch, migration, inspect/disable/revoke mutation을 검증한다. Snapshot은 정확한 activation ref를 diagnostic state로 소비하고, 새 실행은 current 030 eligibility와 032 lifecycle state를 다시 확인한다. (퇴역 안내: 앱 기능이 [043](../043-app-capability-retirement/SPEC.md)에서 퇴역해 activation 판정은 032 lifecycle을 입력으로 받지 않는다. 새 실행은 상태·030 eligibility·workspace·source·content·dependency 대조만 다시 하며, production agent는 앱 소속 activation 조회를 설치하지 않는다. 031 종료 당시의 이 문장은 역사 기록이다.)
 
 ## Execution snapshot 의미
 
@@ -217,7 +217,7 @@ Dependency rules:
 
 1. PRD 000은 raw auth lifecycle을 재소유하지 않고 declaration/migration만 소유한다.
 2. PRD 002 snapshot은 authorization cache나 current live source truth가 아니다.
-3. PRD 004는 030 eligibility와 032 lifecycle을 소비하고 activation domain semantics를 재정의하지 않는다.
+3. PRD 004는 030 eligibility와 032 lifecycle을 소비하고 activation domain semantics를 재정의하지 않는다. (퇴역 안내: [043](../043-app-capability-retirement/SPEC.md) 이후 032 lifecycle 입력은 소비하지 않는다.)
 4. PRD 005는 external spec closure가 아니라 exact owner facts, compatibility evidence, local artifacts만 검사한다.
 
 ## Closure Evidence
@@ -235,7 +235,7 @@ Dependency rules:
 9. Diagnostics와 replay가 raw credential 노출 없이 과거 snapshot evidence를 해석하고, current live source truth나 재실행 authorization으로 사용하지 않는 테스트.
 10. README, usage, specs index 중 사용자에게 노출되는 문서가 migration, JSON compatibility, profiles, auth sources, 비범위를 정확히 반영한다.
 11. 닫는 문서에는 구현 파일, 테스트 이름, migration compatibility 판단, snapshot immutability evidence, TOML 결정 여부가 함께 기록되어야 한다.
-12. Executable resource activation schema, migration, mutation admission, inspect/disable/revoke, snapshot provenance evidence가 032 lifecycle 및 030 activation-eligibility/trusted-runtime evidence와 연결되고 permission provenance를 만들지 않아야 한다.
+12. Executable resource activation schema, migration, mutation admission, inspect/disable/revoke, snapshot provenance evidence가 032 lifecycle 및 030 activation-eligibility/trusted-runtime evidence와 연결되고 permission provenance를 만들지 않아야 한다. (퇴역 안내: [043](../043-app-capability-retirement/SPEC.md) 이후 032 lifecycle과의 연결은 없다. record 형식과 030 evidence 연결은 그대로다.)
 
 ## Scoped Closure Record
 
@@ -243,4 +243,4 @@ Parent Must Have 1-6은 `spec031-test-lifecycle`, 7-11은 `spec031-test-projecti
 
 현재 구현 결정은 JSON compatibility 유지이며 TOML 전환을 하지 않는다. `runtime config-migrate --dry-run|--apply|--recover`는 config transform을, 기존 `runtime migrate`는 029 stored-data family를 다룬다. Snapshot과 activation replay는 diagnostics 전용이고 permission grant, 현재 auth/config truth, 재실행 승인을 보장하지 않는다. Runtime directory ownership은 local mutation admission이지 sandbox/OS isolation이 아니다.
 
-현재 외부 owner audit은 Specs 029/030/032/033/034 전체 완료 상태를 요구하지 않는다. 031이 소비하는 exact adapter test fact와 해당 Cargo command가 모두 존재하고 통과할 때만 PASS이며, unknown/missing fact는 계속 blocked다. 삭제된 035 문서의 역사적 evidence와 closure 상태를 031의 현재 PASS로 재해석하지 않으며, 이 scoped closure는 Specs 032-034의 상태를 변경하지 않는다.
+현재 외부 owner audit은 Specs 029/030/032/033/034 전체 완료 상태를 요구하지 않는다. 031이 소비하는 exact adapter test fact와 해당 Cargo command가 모두 존재하고 통과할 때만 PASS이며, unknown/missing fact는 계속 blocked다. 삭제된 035 문서의 역사적 evidence와 closure 상태를 031의 현재 PASS로 재해석하지 않으며, 이 scoped closure는 Specs 032-034의 상태를 변경하지 않는다. (퇴역 안내: 앱 기능이 [043](../043-app-capability-retirement/SPEC.md)에서 퇴역해 새 run(`spec031.release_runner.v5`)의 외부 owner는 Specs 029/030/033/034이고 coverage는 65행이다. 032 fact와 `spec031-owner-spec032` 명령은 v4·v3·v2 결과를 기록된 구성 그대로 판독할 때만 쓰며, 지워진 앱 테스트는 [보관 사본](../../archive/spec043-app-environment/README.md)으로만 확인하고 다시 실행하지 않는다.)

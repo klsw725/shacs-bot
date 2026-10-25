@@ -251,7 +251,7 @@ shacs-bot runtime diagnostics --bundle /tmp/shacs-diagnostics.zip --workspace /t
 
 `runtime inspect`는 선택된 config, workspace, data directory, provider/model, provider 설정 여부, binary version, data schema compatibility classification, stored-data migration plan 요약, ownership status, stop request marker, update marker, runtime capability 요약, durable diagnostics evidence 요약, channel restart hint projection, containment contained/backend/snapshot digest, session 개수와 최신 session metadata, workflow recipe discovery count를 보고합니다. Durable diagnostics evidence는 redacted trace/log 보조 자료이며 event truth, replay 입력, writable admission 기준이 아닙니다. Channel restart projection은 cursor ref, pending inbound/outbound safe ref count, delivery status count만 표시하며 raw content나 session truth를 출력하지 않습니다. `runtime diagnostics` bundle에는 containment summary/digest와 durable diagnostics evidence가 redacted diagnostics field로 포함됩니다. 같은 readiness projection은 local API의 `GET /v1/readiness`와 `GET /v1/diagnostics`에서도 확인할 수 있습니다. Native host에서 Docker/Compose 같은 인식 가능한 containment evidence가 없으면 containment는 unknown으로 보고되며, sandboxed라고 주장하지 않습니다. `bwrap`는 공식 image/package에 포함되어 자동 설정된 경우가 아니라면 optional hardening입니다. `auth.json` token 값이나 raw session message는 노출하지 않으며, 장기 실행 cron/heartbeat worker를 시작하거나 실행 중인 것처럼 표시하지 않습니다.
 
-Plugin/app readiness는 항상 필수입니다. 실제 plugin 디렉터리의 discovery와 저장된 app registry 조회가 성공해 둘 다 비어 있으면 `ready`입니다. Owner 경로/registry 누락, 조회 실패, configured plugin의 manifest 누락이나 enabled app의 lifecycle 근거 누락은 빈 성공이 아니라 `unavailable`입니다. Plugin gate 차단과 app 실패/복구 필요 상태는 `blocked`, plugin runtime descriptor 진단과 app 시작/종료 전이는 `degraded`로 표시합니다. App의 `running`은 기존 supervisor journal이 보고한 lifecycle 상태이며 독립적인 process 생존·외부 서비스 health probe가 아닙니다. Runtime owner가 active라는 사실만으로 plugin/app을 정상으로 간주하지 않으며, 조회가 plugin/app을 실행하거나 자격 증명을 만들어 주지는 않습니다.
+Readiness의 `plugin_app` 구성 요소는 항상 필수입니다. 앱 기능이 [Spec 043](specs/043-app-capability-retirement/SPEC.md)에서 퇴역한 뒤로 이 구성 요소는 plugin 상태만 반영하며, 이름은 readiness 형식을 지키려고 그대로 둡니다. 실제 plugin 디렉터리의 discovery가 성공하고 비어 있으면 `ready`입니다. Plugin 디렉터리(data directory의 `plugins/`와 workspace의 `.shacs-bot/plugins/`)가 둘 다 없거나 조회에 실패하거나 configured plugin의 manifest가 없으면 빈 성공이 아니라 `unavailable`입니다. Plugin gate 차단은 `blocked`, plugin runtime descriptor 진단은 `degraded`로 표시합니다. 남은 앱 자료(registry, journal)는 읽지 않으므로 이 결과와 전체 readiness에 영향을 주지 않습니다. Runtime owner가 active라는 사실만으로 plugin을 정상으로 간주하지 않으며, 조회가 plugin을 실행하거나 자격 증명을 만들어 주지는 않습니다.
 
 Readiness의 필수 `runtime_controls`와 `resource_disclosure`는 실제 Spec030 owner 관측을 사용하며, JSON의 `trusted_runtime`에 같은 profile·adapter·sandbox·resource·disclosure 상세를 포함합니다. CLI는 config의 API 주소로 실행 중인 owner를 조회하고 API는 자신의 local provider를 직접 읽습니다. Owner가 없으면 `unavailable`, 실행 관측 전 sandbox는 `unknown`이며, optional sandbox disabled/native fallback은 `degraded`, execution denied는 `blocked`입니다. 별도의 필수 containment 조건은 그대로 유지됩니다. Disclosure가 `ready`여도 `rawContentPossible`과 trace destination은 숨기지 않으며 완전한 redaction을 뜻하지 않습니다.
 
@@ -440,35 +440,29 @@ shacs-bot skills recipes --all --workspace /tmp/ws
 
 ## 앱
 
-현재 Rust CLI의 app 표면은 local `.shacsapp` authoring proposal/apply와 foreground process lifecycle을 제공합니다. `apps init`은 설치 전 draft만 생성하며 install, enable, start를 수행하지 않습니다. Bundle은 config data dir의 `apps/<app-id>.shacsapp/` 경로에 있어야 하며, manifest의 `id`와 directory 이름은 일치해야 합니다.
-
-[Spec 039](specs/039-app-capability-disposition/SPEC.md#판정-결과-2026-10-24)에서 이 앱 기능을 제거하기로 판정했습니다. 제거 구현 전까지 아래 명령은 그대로 동작합니다. 구현 뒤에도 남은 앱 자료(registry, bundle, journal, draft, receipt)는 지우지 않으며 `apps`는 남은 자료 위치를 알려주는 읽기 전용 안내로 바뀝니다. 절차·지식을 어시스턴트에 주려면 `<data dir>/skills/<name>/SKILL.md`에 사용자 skill을 두세요.
+앱 기능(`.shacsapp` authoring과 lifecycle)은 [Spec 039](specs/039-app-capability-disposition/SPEC.md#판정-결과-2026-10-24)의 판정에 따라 [Spec 043](specs/043-app-capability-retirement/SPEC.md)에서 퇴역했습니다. `shacs-bot apps …`와 별칭 `app`은 하위 명령(`init`, `propose`, `apply`, `install`, `list`, `inspect`, `enable`, `disable`, `start`, `stop`, `restart`, `recover`, `uninstall`)이나 인자와 관계없이 같은 퇴역 안내를 출력하고 종료 코드 1로 끝납니다. 이 안내는 아무것도 실행·설치·중단·삭제하지 않으며 파일·폴더·lock을 만들지 않습니다. 이전처럼 `apps`를 부르던 개인 스크립트는 이 종료 코드로 실패합니다.
 
 ```sh
-shacs-bot apps init demo.app --workspace /tmp/ws
-shacs-bot apps propose <candidate-dir> --intent "create demo app" --workspace /tmp/ws
-shacs-bot apps apply <candidate-dir> --intent "create demo app" --workspace /tmp/ws
-shacs-bot apps install ~/.shacs-bot/apps/demo.app.shacsapp --workspace /tmp/ws
-shacs-bot apps list --workspace /tmp/ws
-shacs-bot apps inspect demo.app --workspace /tmp/ws
-shacs-bot apps enable demo.app --workspace /tmp/ws
-shacs-bot apps start demo.app --workspace /tmp/ws
-shacs-bot apps stop demo.app --workspace /tmp/ws
-shacs-bot apps restart demo.app --workspace /tmp/ws
-shacs-bot apps recover demo.app --workspace /tmp/ws
-shacs-bot apps disable demo.app --workspace /tmp/ws
-shacs-bot apps uninstall demo.app --workspace /tmp/ws
+shacs-bot --config ~/.shacs-bot/config.json apps
 ```
 
-`apps init <app-id>`은 config data dir 아래 `authoring/apps/draft-<app-id>/`에 `draft.json`, `scaffold-plan.json`, `candidates/manifest.json`, `candidates/README.md`를 만듭니다. 이 명령은 app registry를 변경하지 않고, MCP/process/package/network 실행, secret read, grant 생성, active skill 주입을 하지 않습니다. 같은 내용의 draft가 이미 있으면 idempotent하게 기존 draft summary를 보여주며, 다른 내용이면 덮어쓰지 않고 conflict로 멈춥니다.
+안내는 `--config`(없으면 기본 config)가 있는 폴더, 즉 data dir 안의 정해진 위치만 읽어 남은 앱 자료를 보여줍니다. config 파일이 없거나 읽을 수 없어도 같은 폴더를 읽기만 합니다.
 
-`apps propose`는 candidate를 정적으로 검증하고 revision/intent digest와 risk summary를 기록합니다. `apps apply`는 proposal revision과 installed digest를 다시 확인하고 checkpoint, verify, install/update handoff를 기록합니다. 두 명령 모두 permission/credential grant, executable activation, process start를 만들지 않습니다. `apps apply`는 앞서 확인한 proposal id를 받지 않고, 실행 시점의 candidate를 다시 검증해 적용합니다. Existing app update에는 `--update`를 사용합니다. 이때는 draft 폴더가 아니라 `candidates/` 폴더를 넘겨야 합니다. 갱신 뒤 registry 상태가 `installed`로 돌아가므로 다시 `apps enable`해야 start됩니다.
+| 위치 (`<data dir>` 기준) | 들어 있던 것 |
+|---|---|
+| `apps/registry.json` | 설치·활성화한 앱 목록 |
+| `apps/<app-id>.shacsapp/` | 설치된 bundle과 그 안에 직접 넣은 파일 |
+| `apps/app-supervisor/<app-id>/` | 실행 기록(journal: `state.json`, `receipts/`, `lifecycle.lock`) |
+| `authoring/apps/draft-<app-id>/` | 설치 전 초안 |
+| `authoring/flow/` | propose·apply 기록 |
+| `snapshots/app-lifecycle/` | start 시도마다 남은 실행 snapshot |
+| `runtime/app-ledger/` | 017 app ledger(제품 명령이 쓰지 않으며 남아 있을 때만 표시) |
 
-`apps install`은 manifest와 선언 resource/skill/entry file의 digest와 summary만 registry에 저장합니다. Required secret을 선언해도 install/enable 단계에서 값을 읽거나 grant를 만들지 않으며, start admission에서 source 상태를 확인합니다.
+앱마다 registry 상태, 마지막 journal 상태, bundle 유무를 보여줍니다. 마지막 journal 상태가 `starting`·`running`·`stopping`·`recovery_needed`이거나 읽을 수 없는 앱은 process가 아직 실행 중일 수 있으며, shacs-bot은 그것을 확인하거나 멈추지 않았다고 표시합니다. `stopped`·`failed`도 마지막 기록일 뿐 지금 실행 중이 아니라는 보증은 아닙니다. 예전 버전에서 앱 owner를 Ctrl+C로 끝냈다면 앱 process가 별도 process group에서 계속 실행 중일 수 있습니다. 형식이 어긋난 파일은 내용을 보이지 않고 읽을 수 없다는 사실만 보이며, registry에 적힌 경로나 바로가기(symlink)는 따라가지 않습니다. bundle 안 파일 내용과 registry의 비밀·권한 요청도 보이지 않습니다. `snapshots/activation-records.json`은 031 activation 기록이라 앱 자료로 나열하지 않지만 그대로 둡니다.
 
-`apps start`는 enabled registry state, current bundle digest, trusted workspace, required credential source status, persisted activation status를 확인한 뒤 manifest `runtime.command`를 controlled child로 foreground 실행합니다. `apps stop`과 `apps restart`는 같은 AppSupervisor journal에 durable request를 남기고 foreground owner가 graceful cleanup 후 completed receipt를 기록합니다. Restart는 외부 daemon/reexec가 아니라 같은 foreground owner의 새 generation입니다. 중단은 다른 터미널에서 `apps stop`으로 하세요. Unix(macOS·Linux)에서 foreground owner를 Ctrl+C로 끝내면 앱 process는 별도 process group이라 계속 실행되고 journal은 `running`으로 남습니다.
+남은 자료는 자동으로 옮기거나 지우지 않습니다. 필요 없으면 직접 지우세요. 지우기 전에 실행 중일 수 있다고 표시된 앱의 process가 남아 있는지 확인하고(예: `ps -ax | grep <manifest의 runtime command>`), 남아 있으면 직접 멈추세요. bundle 폴더 안에 직접 넣은 파일이 있다면 먼저 옮겨 두세요. readiness, Tasks, agent 실행 기록은 남은 앱 자료를 읽지 않으므로 지우든 두든 결과가 같습니다.
 
-`apps recover`는 live-dispatch 없이, process를 확인하거나 정리하지 않고 lifecycle evidence를 항상 `RecoveryNeeded`(journal 값 `recovery_needed`)로 기록합니다. 현재 CLI·Tasks·API·TUI에는 이 상태를 `Stopped`로 되돌리는 경로가 없습니다. 그 뒤에는 `start`, `disable`, `uninstall`, `apply --update`가 모두 거부되고 readiness가 `blocked`로 남으므로, 정상 중단된 앱에는 실행하지 마세요. `apps disable`/`uninstall`은 lifecycle 기록이 없거나 `Stopped`·`Failed`일 때만 허용합니다. `apps uninstall`은 registry 항목과 설치된 bundle 폴더 전체(직접 넣은 파일 포함)를 지우고, draft와 journal·authoring receipt 같은 historical receipts는 삭제하지 않습니다.
+절차나 지식을 어시스턴트에 주려면 앱 대신 사용자 skill(`<data dir>/skills/<name>/SKILL.md`)을 두세요. 도구 노출은 plugin command tool이나 MCP 설정, 반복 확인은 [명시적으로 맡긴 작업](#명시적으로-맡긴-작업), 명령 실행은 셸이나 승인 경계가 있는 `exec` 도구를 쓰세요.
 
 ## 일회성 CLI 에이전트
 
@@ -906,7 +900,9 @@ Message가 `-`로 시작하는 `agent` direct message는 `--message`/`-m`로 전
 
 ## Tasks 조회와 owner 변경 요청
 
-Spec 035의 Tasks CLI, local API, TUI는 같은 `Spec035TasksProjection`을 소비합니다. Goal, child, workflow, automation, app, recovery 행은 기존 owner record의 locator·freshness·상태·goal budget을 보존하며 별도 task DB를 만들지 않습니다. Owner 자료 누락은 `unavailable`로 표현하며 빈 행을 성공으로 해석하면 안 됩니다. 손상된 durable replay에 child state가 없으면 child coverage는 `unavailable`, 정상 replay의 빈 집합은 `available(0)`으로 구분하도록 보정됐고 F2 재검토에서 확인됐습니다. Recovery 진단은 독립적으로 보존되며 child 수만으로 전체 건강 상태를 판단하지 마세요. App/recovery는 data directory 범위의 관측도 포함하므로 session별 작업 목록으로만 해석하지 마세요.
+Spec 035의 Tasks CLI, local API, TUI는 같은 `Spec035TasksProjection`을 소비합니다. Goal, child, workflow, automation, recovery 행은 기존 owner record의 locator·freshness·상태·goal budget을 보존하며 별도 task DB를 만들지 않습니다. Owner 자료 누락은 `unavailable`로 표현하며 빈 행을 성공으로 해석하면 안 됩니다. 손상된 durable replay에 child state가 없으면 child coverage는 `unavailable`, 정상 replay의 빈 집합은 `available(0)`으로 구분하도록 보정됐고 F2 재검토에서 확인됐습니다. Recovery 진단은 독립적으로 보존되며 child 수만으로 전체 건강 상태를 판단하지 마세요. Recovery는 data directory 범위의 관측도 포함하므로 session별 작업 목록으로만 해석하지 마세요.
+
+앱 owner는 [Spec 043](specs/043-app-capability-retirement/SPEC.md)에서 퇴역했습니다. Tasks는 앱 행을 만들지 않고 남은 앱 자료도 읽지 않습니다. JSON 형식(schema version 1)을 지키려고 `coverage.app` 키는 남지만 값은 항상 `unavailable`이며, 이는 앱 owner가 퇴역했다는 뜻입니다. TUI의 Tasks 요약 줄에는 app 항목이 없습니다.
 
 ```sh
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- tasks --json --workspace /tmp/shacs-ws --data-dir /tmp/shacs-data --session cli:direct
@@ -917,7 +913,7 @@ curl --fail-with-body 'http://127.0.0.1:8900/v1/tasks?session_id=cli%3Adirect'
 
 `GET /v1/tasks`의 기본 session은 `api:default`입니다. CLI와 같은 session을 보려면 `session_id=cli%3Adirect`처럼 값 전체를 URL 인코딩하세요. 현재 parser는 `session_id` 하나만 받으며 빈 값, 추가 query 항목, 잘못된 percent encoding을 거부합니다. 이 조회에는 transport hello가 필요하지 않습니다.
 
-변경 요청은 현재 행이 광고한 action과 locator에 한해 기존 owner handler로 전달됩니다. 지원 조합은 goal `pause`/`resume`, app `stop`/`recover`, recovery `recover`입니다. Child/workflow/automation 변경이나 범용 retry/cancel은 Tasks action으로 지원하지 않습니다. 아래 `OWNER_LOCATOR`에는 조회한 goal 행의 실제 locator를 넣으세요. 이 예시는 해당 goal을 일시 정지하므로 조회 명령이 아닙니다:
+변경 요청은 현재 행이 광고한 action과 locator에 한해 기존 owner handler로 전달됩니다. 지원 조합은 goal `pause`/`resume`, recovery `recover`입니다. Child/workflow/automation/app 변경이나 범용 retry/cancel은 Tasks action으로 지원하지 않으며, 이 owner의 요청은 transport 협상이나 owner 조회 전에 `unsupported tasks owner/action pair`로 거부됩니다(API는 400). 퇴역한 app owner의 `stop`/`recover` 요청도 같으며 남은 앱 자료를 바꾸지 않습니다. 아래 `OWNER_LOCATOR`에는 조회한 goal 행의 실제 locator를 넣으세요. 이 예시는 해당 goal을 일시 정지하므로 조회 명령이 아닙니다:
 
 ```sh
 cargo run --manifest-path crates/Cargo.toml -p shacs-cli -- tasks --json --workspace /tmp/shacs-ws --data-dir /tmp/shacs-data --session cli:direct --owner goal --action pause --locator "$OWNER_LOCATOR" --transport-hello '{"client_id":"client:cli","schema_versions":[1],"mutation_capabilities":["task_pause"]}'
@@ -947,7 +943,7 @@ curl --fail-with-body -H 'Content-Type: application/json' -d '{"client_id":"clie
 }
 ```
 
-API 변경에는 `shacs-bot --config /tmp/shacs-data/config.json serve --workspace /tmp/shacs-ws --bind 127.0.0.1:8900 --allow-api-side-effects`로 활성화한 별도 loopback opt-in이 필요하며 없으면 403입니다. 이 option은 다른 API side effect도 허용하므로 조회만 할 때 켜지 마세요. Opt-in gate를 통과한 뒤 hello 누락·잘못된 요청·schema 불일치는 400, 지원되지 않는 mutation capability는 422입니다. `/v1/transport/hello` 자체는 mutation opt-in 없이 조회할 수 있습니다. **Capability는 호환성 정보이지 인증, permission approval, sandbox 증거가 아닙니다.** 현재 local API에는 인증이 없으며 owner 검증과 기존 권한 경계도 없어지지 않습니다. HTTP 200이나 요청 접수만으로 비동기 app stop의 완료를 추정하지 말고 반환된 owner 상태를 확인하세요.
+API 변경에는 `shacs-bot --config /tmp/shacs-data/config.json serve --workspace /tmp/shacs-ws --bind 127.0.0.1:8900 --allow-api-side-effects`로 활성화한 별도 loopback opt-in이 필요하며 없으면 403입니다. 이 option은 다른 API side effect도 허용하므로 조회만 할 때 켜지 마세요. Opt-in gate를 통과한 뒤 hello 누락·잘못된 요청·schema 불일치는 400, 지원되지 않는 mutation capability는 422입니다. `/v1/transport/hello` 자체는 mutation opt-in 없이 조회할 수 있습니다. **Capability는 호환성 정보이지 인증, permission approval, sandbox 증거가 아닙니다.** 현재 local API에는 인증이 없으며 owner 검증과 기존 권한 경계도 없어지지 않습니다.
 
 ### Reconnect와 전달 관측의 한계
 
@@ -1194,9 +1190,9 @@ Spec 031 release runner는 `shacs-projection` package의 `spec031-release-runner
 cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin spec031-release-runner -- --run-id spec031-current --evidence-root /tmp/spec031-current --repo-root "$(git rev-parse --show-toplevel)" --mode current-worktree
 ```
 
-현재 Spec031 coverage는 66행이며 parent Must Have 13개, Acceptance 14개, Closure Evidence 12개와 PRD000-005의 요구사항을 포함합니다. 외부 owner는 Specs 029/030/032/033/034의 5개이며 전체 status 대신 소비하는 정확한 owner fact와 통과 증거를 검사합니다. 034의 owner fact는 [Spec 044](specs/044-video-analyzer-retirement/SPEC.md) 이후 생성 media 테스트(`crates/shacs-core/tests/spec034_persistence_operations.rs`의 `final_edit_and_variation_candidates_publish_one_complete_record_each`)이고, 새 실행은 `spec031.release_runner.v4`로 기록됩니다. 지워진 영상 분석 테스트를 034 fact로 썼던 이전 v3·v2 결과는 기록된 구성 그대로 판독하며, 그 테스트는 다시 실행하지 않고 [보관 사본](archive/spec034-video-analyzer/README.md)의 sha256으로만 존재를 확인합니다. 제거된 035 owner의 과거 80행은 현행 coverage에 추가하지 않습니다. [035 비활성 보관 자료](archive/spec035/README.md)의 누락·변조는 별도로 차단하며, 행의 존재만으로 실행 증거 통과를 주장하지 않습니다. Missing/unknown fact나 실패 command는 blocked이고 PASS를 합성하지 않습니다. Dirty worktree는 `observations/dirty-worktree.json`과 `reproducibility-observations.json`에 별도 typed observation으로 남으며 failure triage나 semantic verdict에 포함되지 않습니다.
+현재 Spec031 coverage는 65행이며 parent Must Have 13개, Acceptance 14개, Closure Evidence 12개와 PRD000-005의 요구사항을 포함합니다. 외부 owner는 Specs 029/030/033/034의 4개이며 전체 status 대신 소비하는 정확한 owner fact와 통과 증거를 검사합니다. 034의 owner fact는 [Spec 044](specs/044-video-analyzer-retirement/SPEC.md) 이후 생성 media 테스트(`crates/shacs-core/tests/spec034_persistence_operations.rs`의 `final_edit_and_variation_candidates_publish_one_complete_record_each`)입니다. 앱 기능이 [Spec 043](specs/043-app-capability-retirement/SPEC.md)에서 퇴역해 새 실행은 `spec031.release_runner.v5`로 기록되며 032 owner와 `spec031-owner-spec032` 명령이 없습니다. 이전 v4·v3·v2 결과는 032 owner를 포함한 기록된 구성 그대로 판독하고, 지워진 앱 테스트는 다시 실행하지 않고 [앱 보관 사본](archive/spec043-app-environment/README.md)의 sha256으로만 존재를 확인합니다. 지워진 영상 분석 테스트를 034 fact로 썼던 v3·v2 결과도 같은 방식으로 [영상 보관 사본](archive/spec034-video-analyzer/README.md)으로 확인합니다. 제거된 035 owner의 과거 80행은 현행 coverage에 추가하지 않습니다. [035 비활성 보관 자료](archive/spec035/README.md)의 누락·변조는 별도로 차단하며, 행의 존재만으로 실행 증거 통과를 주장하지 않습니다. Missing/unknown fact나 실패 command는 blocked이고 PASS를 합성하지 않습니다. Dirty worktree는 `observations/dirty-worktree.json`과 `reproducibility-observations.json`에 별도 typed observation으로 남으며 failure triage나 semantic verdict에 포함되지 않습니다.
 
-삭제 전 035 classification v2의 45행/6 owner `BLOCKED` 입력과 당시 146행 runner 결과는 역사적 증거이며, 현재 Spec031 runner의 입력이나 완료 판정이 아닙니다. [과거 current-worktree](../.omo/evidence/spec035/closure/final-compiled-runner-current/summary.md)와 [success-fixture](../.omo/evidence/spec035/closure/final-compiled-runner-fixture/summary.md)의 결과를 새 66행 실행으로 재결속하지 않습니다. 과거 fixture 성공은 runner mechanics만 검증했으며 현재 Spec031 closure나 제거된 035의 최종 승인이 아닙니다.
+삭제 전 035 classification v2의 45행/6 owner `BLOCKED` 입력과 당시 146행 runner 결과는 역사적 증거이며, 현재 Spec031 runner의 입력이나 완료 판정이 아닙니다. [과거 current-worktree](../.omo/evidence/spec035/closure/final-compiled-runner-current/summary.md)와 [success-fixture](../.omo/evidence/spec035/closure/final-compiled-runner-fixture/summary.md)의 결과를 새 65행 실행으로 재결속하지 않습니다. 과거 fixture 성공은 runner mechanics만 검증했으며 현재 Spec031 closure나 제거된 035의 최종 승인이 아닙니다.
 
 Runner 자체의 passing fixture는 아래처럼 실행할 수 있습니다. 이 fixture는 artifact writer와 validator의 success path를 확인할 뿐, 현재 checkout의 semantic Spec031 closure를 뜻하지 않습니다:
 
