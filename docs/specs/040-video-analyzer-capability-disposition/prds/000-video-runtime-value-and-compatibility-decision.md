@@ -160,8 +160,8 @@ video analyzer capability와 그 분석 기록 표면을 제품에서 제거한�
 
 ### 후속 구현 범위
 
-- 별도 구현 스펙(번호 미정)이 위 계약 전체를 소유한다. 자료 이전은 없다. note·표면·공개 API·release runner·문서를 한 변경 단위로 바꾸고 analyzer와 분석 기록 전용 코드를 지운다. 이 구현은 다른 신규 기능이나 041의 판정, 043의 구현을 기다리지 않는다.
-- 구현 전까지 현재 동작은 그대로다. 이번 작업에서 [사용 가이드의 Spec 034 media 절](../../../USAGE.md#spec-034-generated-media와-analyzer-diagnostics)에 판정과 확인된 한계를 적었다.
+- 별도 구현 스펙 [044](../../044-video-analyzer-retirement/SPEC.md)가 위 계약 전체를 소유한다. 자료 이전은 없다. note·표면·공개 API·release runner·문서를 한 변경 단위로 바꾸고 analyzer와 분석 기록 전용 코드를 지운다. 이 구현은 다른 신규 기능이나 041의 판정, 043의 구현을 기다리지 않는다.
+- 구현 전까지 현재 동작은 그대로다. 이번 작업에서 [사용 가이드의 Spec 034 media 절](../../../USAGE.md#spec-034-generated-media와-media-diagnostics)에 판정과 확인된 한계를 적었다.
 
 ### 남은 위험과 한계
 

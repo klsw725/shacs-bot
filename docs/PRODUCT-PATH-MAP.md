@@ -33,7 +33,7 @@ CLI/API goal lifecycle과 session 저장 테스트(`crates/shacs-cli/tests/spec0
 |---|---|---|
 | **유지·연결** | session/goal 저장, cron·heartbeat, durable queue, automation outcome, channel 전달은 위 수직 흐름에 필요한 기반이다. 도구 승인·사용자 질문 경계는 실행 안전성과 사용자 개입을 지탱한다. | 위임과 조건·관측값이 각 owner를 통과하도록 연결한다. 도구별 permission approval과 목표 수준의 사용자 결정은 혼동하지 않는다. |
 | **유지·후속 개선** | tool/skill discovery와 workflow recipe, 이미지 생성, 일반 파일 작성·전달은 다양한 일을 처리할 수 있게 한다. 그러나 작업별 하네스 자동 선택·사용자 변경, 계산 검증, 보고서 출처 확인이 이미 완성된 것은 아니다. | 첫 수직 흐름을 닫은 뒤 실제 작업 사례에서 전문 절차가 필요한 곳만 확장한다. |
-| **후순위** | 앱 authoring/lifecycle(`crates/shacs-core/src/runtime/app_supervisor.rs:89`), artifact self-improvement(`crates/shacs-cli/src/improvement_cli.rs:18`), 선택적 video analyzer(`crates/shacs-core/src/runtime/video_analyzer_runtime/invocation.rs:25`)는 현재 중심 경험보다 전문 범위가 넓다. | 기능 확장을 미루되 설치된 앱, 저장 데이터, CLI/API 호출자의 호환성은 보존한다. 방법 학습은 artifact rollback과 구분해 나중에 검증한다. |
+| **후순위** | 앱 authoring/lifecycle(`crates/shacs-core/src/runtime/app_supervisor.rs:89`), artifact self-improvement(`crates/shacs-cli/src/improvement_cli.rs:18`), 선택적 video analyzer(아래와 같이 044에서 제거)는 현재 중심 경험보다 전문 범위가 넓다. | 기능 확장을 미루되 설치된 앱, 저장 데이터, CLI/API 호출자의 호환성은 보존한다. 방법 학습은 artifact rollback과 구분해 나중에 검증한다. |
 | **제거 여부 조사** | `spec031-release-runner` 같은 release evidence 도구는 사용자 어시스턴트의 직접 기능은 아니지만 검증·배포 계약과 테스트가 의존한다. 다른 후보들도 생산 호출자와 테스트가 존재해 dead code라고 볼 수 없다. | 실제 호출·CI·저장 데이터 의존성과 제거 후 대체 검증을 먼저 조사한다. 제품 우선순위가 낮다는 이유만으로 코드를 삭제하지 않는다. |
 
 **첫 수직 흐름은 Spec 036의 현재 self-hosted 범위에서 완료했다.** 기능 삭제 여부는 이 완료를 근거로 자동 결정하지 않으며, 후순위 기능은 각 결정 스펙에서 따로 판정한다.
@@ -44,4 +44,4 @@ CLI/API goal lifecycle과 session 저장 테스트(`crates/shacs-cli/tests/spec0
 
 앱 흐름은 039에서 **제거**로 판정했다([판정 결과](specs/039-app-capability-disposition/SPEC.md#판정-결과-2026-10-24)). 위 표의 호환 보존 원칙대로 남은 앱 자료는 지우지 않고 `apps` 명령은 읽기 전용 퇴역 안내로 바꾸며, 이 구현은 [`043`](specs/043-app-capability-retirement/SPEC.md)이 소유한다.
 
-비디오 분석은 040에서 **제거**로 판정했다([판정 결과](specs/040-video-analyzer-capability-disposition/SPEC.md#판정-결과-2026-10-24)). 위 표의 호환 보존 원칙대로 저장된 영상 첨부와 남은 분석 기록은 지우지 않고 영상 첨부는 계속 unsupported note로 모델에 알리며, analyzer와 분석 기록 표면을 빼는 구현은 별도 작업이다.
+비디오 분석은 040에서 **제거**로 판정했다([판정 결과](specs/040-video-analyzer-capability-disposition/SPEC.md#판정-결과-2026-10-24)). 위 표의 호환 보존 원칙대로 저장된 영상 첨부와 남은 분석 기록은 지우지 않고 영상 첨부는 계속 unsupported note로 모델에 알리며, analyzer와 분석 기록 표면은 [`044`](specs/044-video-analyzer-retirement/SPEC.md)에서 뺐다.

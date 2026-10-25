@@ -4,6 +4,8 @@ Status: Complete (Scoped)
 
 Origin specs: 004, 019, 027
 
+> **퇴역 안내 (2026-10-25):** video analyzer, 분석 기록(Spec035 media projection) 표면과 media evidence replay는 [040](../040-video-analyzer-capability-disposition/SPEC.md)의 판정에 따라 [044](../044-video-analyzer-retirement/SPEC.md)에서 제거했다. 22개 요구사항 중 이것에 근거했던 9개(`034-MH007`–`034-MH010`, `034-AC007`–`034-AC009`, `034-AC011`, `034-AC012`)는 `spec034-release-runner`가 퇴역으로 따로 기록하고, 남은 13개만 현재 coverage로 보고한다. `034-AC006`은 남는 생성 artifact·edit·remote output 검사로 확인한다. 생성 media 동작은 바뀌지 않았다. 이 문서와 [PRD 003](prds/003-video-analyzer-capability-and-evidence.md)·[CLOSURE](CLOSURE.md)의 video analyzer 설명과 22/22 기록은 034 종료 당시의 역사 기록이며, 034의 완료 판정은 바꾸지 않는다.
+
 ## 문서 목적
 
 이 문서는 기존 004, 019, 027이 구현 완료 범위를 닫은 뒤에도 남아 있는 generated media와 rich file context 작업의 새 owner boundary를 고정한다. 019는 OpenAI Images API baseline, `image_generate` tool, local generated image artifact 저장까지 닫는다. 027은 channel attachment intake, safe storage, image, document, audio, video analyzer handoff까지 닫는다. 004는 tool runtime의 현재 call/result 경계를 닫는다.

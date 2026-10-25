@@ -5,6 +5,8 @@ Implemented scope: Channel-neutral v1 attachment storage, safe routing, and anal
 Open work moved to: [034 generated media and rich file context expansion](../034-generated-media-and-rich-file-context-expansion/SPEC.md).
 Not carried forward: Generated media asset management, durable channel delivery guarantees, and full video processing guarantees are outside 027.
 
+> **퇴역 안내 (2026-10-25):** video analyzer handoff와 그 분석 기록 표면은 [040](../040-video-analyzer-capability-disposition/SPEC.md)의 판정에 따라 [044](../044-video-analyzer-retirement/SPEC.md)에서 제거했다. 영상 첨부는 계속 저장되고 모델에는 영상마다 `video content analysis is not supported` 사유의 `unsupported` note 하나가 전달된다. 이 문서와 [PRD 004](prds/004-video-file-context-analysis-and-projection.md)의 video analyzer 설명은 027 종료 당시의 역사 기록이며, 027의 완료 판정은 바꾸지 않는다.
+
 ## 문서 목적
 
 이 문서는 `shacs-bot`의 외부 채널과 local API가 받는 첨부 파일을 하나의 공통 intake 계약으로 정리한다. 핵심 모델은 단순하다. 이미지, 문서, 오디오, 비디오 업로드는 서로 다른 기능이 아니라 같은 channel attachment intake operation이다. 채널에서 온 bytes를 먼저 안전하게 저장하고 정규화한 뒤, runtime context handling 단계에서 파일 종류에 따라 이미지 provider input, 텍스트 추출, best-effort 문서 추출, audio/video context analysis, 또는 note-only projection으로 갈라진다.
