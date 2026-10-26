@@ -1,8 +1,9 @@
 use super::spec036_work_cli::{WorkAction, WorkOptions};
 use super::*;
 use shacs_core::runtime::{
-    ConfigureWebNotifyRequest, ConfirmWebWatchRequest, EntrustedWorkReadRequest, WebCondition,
-    WebFetchLimits, WebPreviewRequest, WebPreviewTarget, WebTextArea,
+    ConfigureWebDeadlineRequest, ConfigureWebNotifyRequest, ConfirmWebWatchRequest,
+    EntrustedWorkReadRequest, WebCondition, WebDeadlineInput, WebFetchLimits, WebPreviewRequest,
+    WebPreviewTarget, WebTextArea,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +30,11 @@ pub enum WebWatchAction {
         target: Option<String>,
         failure_threshold_seconds: Option<u64>,
         config_path: Option<PathBuf>,
+    },
+    Deadline {
+        work_id: String,
+        expected_revision: u64,
+        deadline: Option<WebDeadlineInput>,
     },
 }
 
@@ -123,6 +129,22 @@ pub(super) fn run(options: WorkOptions, action: WebWatchAction) -> Result<String
                 .map_err(runtime)?,
             )
         }
+        WebWatchAction::Deadline {
+            work_id,
+            expected_revision,
+            deadline,
+        } => serde_json::to_value(
+            shacs_core::runtime::configure_web_watch_deadline(
+                &options.workspace,
+                ConfigureWebDeadlineRequest {
+                    work: request(work_id),
+                    expected_revision,
+                    deadline,
+                    now_ms: now_millis(),
+                },
+            )
+            .map_err(runtime)?,
+        ),
     };
     output
         .and_then(|value| serde_json::to_string(&value))
@@ -152,6 +174,11 @@ pub(super) fn parse(
     let mut off = false;
     let mut threshold = None;
     let mut config_path = global_config;
+    let mut deadline_at = None;
+    let mut remind_before = None;
+    let mut remind_now = false;
+    let mut clear = false;
+    let mut deadline_revision = None;
     while let Some(argument) = parser.next() {
         match argument.as_str() {
             "--workspace" | "-w" => workspace = Some(take_path(&mut parser, &argument)?),
@@ -178,6 +205,13 @@ pub(super) fn parse(
             "--off" => off = true,
             "--failure-threshold-seconds" => threshold = Some(number(&mut parser, &argument)?),
             "--config" | "-c" => config_path = Some(take_path(&mut parser, &argument)?),
+            "--at" => deadline_at = Some(take_value(&mut parser, &argument)?),
+            "--remind-before-seconds" => remind_before = Some(number(&mut parser, &argument)?),
+            "--remind-now" => remind_now = true,
+            "--clear" => clear = true,
+            "--expected-deadline-revision" => {
+                deadline_revision = Some(number(&mut parser, &argument)?)
+            }
             "--help" | "-h" => return Ok(CliCommand::Help),
             _ => {
                 return Err(CliError::InvalidArguments(format!(
@@ -242,7 +276,25 @@ pub(super) fn parse(
             failure_threshold_seconds: threshold,
             config_path,
         },
-        _ => return Err(missing("web-preview, web-watch, web-status or web-notify")),
+        "web-deadline" => WebWatchAction::Deadline {
+            work_id,
+            expected_revision: deadline_revision
+                .ok_or_else(|| missing("--expected-deadline-revision"))?,
+            deadline: match (deadline_at, clear) {
+                (Some(at), false) => Some(WebDeadlineInput {
+                    at,
+                    remind_before_seconds: remind_before,
+                    remind_now,
+                }),
+                (None, true) if remind_before.is_none() && !remind_now => None,
+                _ => return Err(missing("--at <RFC 3339 time with offset> or --clear")),
+            },
+        },
+        _ => {
+            return Err(missing(
+                "web-preview, web-watch, web-status, web-notify or web-deadline",
+            ))
+        }
     };
     Ok(CliCommand::Work(WorkOptions {
         workspace,

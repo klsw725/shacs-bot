@@ -5,8 +5,9 @@ use crate::{
 use serde::Deserialize;
 use serde_json::json;
 use shacs_core::runtime::{
-    ConfigureWebNotifyRequest, ConfirmWebWatchRequest, EntrustedWorkReadRequest, ObservationError,
-    WebCondition, WebFetchLimits, WebPreviewRequest, WebPreviewTarget, WebTextArea, WebWatchError,
+    ConfigureWebDeadlineRequest, ConfigureWebNotifyRequest, ConfirmWebWatchRequest,
+    EntrustedWorkReadRequest, ObservationError, WebCondition, WebDeadlineInput, WebFetchLimits,
+    WebPreviewRequest, WebPreviewTarget, WebTextArea, WebWatchError,
 };
 
 #[derive(Deserialize)]
@@ -36,6 +37,20 @@ struct NotifyBody {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DeadlineBody {
+    expected_revision: u64,
+    #[serde(default)]
+    at: Option<String>,
+    #[serde(default)]
+    remind_before_seconds: Option<u64>,
+    #[serde(default)]
+    remind_now: bool,
+    #[serde(default)]
+    clear: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConfirmBody {
     expected_revision: u64,
     url: String,
@@ -54,13 +69,13 @@ pub(crate) fn handle(
         [requester, "entrusted-work", work_id, "web-watch"] => {
             (*requester, *requester, *work_id, None)
         }
-        [requester, "entrusted-work", work_id, "web-watch", action @ ("preview" | "notify")] => {
+        [requester, "entrusted-work", work_id, "web-watch", action @ ("preview" | "notify" | "deadline")] => {
             (*requester, *requester, *work_id, Some(*action))
         }
         [requester, "entrusted-work", owner, work_id, "web-watch"] => {
             (*requester, *owner, *work_id, None)
         }
-        [requester, "entrusted-work", owner, work_id, "web-watch", action @ ("preview" | "notify")] => {
+        [requester, "entrusted-work", owner, work_id, "web-watch", action @ ("preview" | "notify" | "deadline")] => {
             (*requester, *owner, *work_id, Some(*action))
         }
         _ => return None,
@@ -97,6 +112,30 @@ pub(crate) fn handle(
             };
             shacs_core::runtime::configure_web_watch_notifications(&workspace, configure)
                 .map(|settings| json!(settings))
+                .map_err(web_error)
+        }),
+        (ApiMethod::Post, Some("deadline")) => body::<DeadlineBody>(request).and_then(|body| {
+            let deadline = match (body.at, body.clear) {
+                (Some(at), false) => Some(WebDeadlineInput {
+                    at,
+                    remind_before_seconds: body.remind_before_seconds,
+                    remind_now: body.remind_now,
+                }),
+                (None, true) if body.remind_before_seconds.is_none() && !body.remind_now => None,
+                _ => {
+                    return Err(ApiError::invalid_request(
+                        "deadline needs either at or clear",
+                    ))
+                }
+            };
+            let configure = ConfigureWebDeadlineRequest {
+                work,
+                expected_revision: body.expected_revision,
+                deadline,
+                now_ms: adapter.now_ms(),
+            };
+            shacs_core::runtime::configure_web_watch_deadline(&workspace, configure)
+                .map(|view| json!(view))
                 .map_err(web_error)
         }),
         (ApiMethod::Post, Some(_)) => body::<PreviewBody>(request).and_then(|body| {

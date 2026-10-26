@@ -14,13 +14,6 @@ fn check(
     fixture.deliver(due)
 }
 
-fn titles(mails: &[OutboundMessage]) -> Vec<String> {
-    mails
-        .iter()
-        .map(|mail| mail.content.lines().next().unwrap_or_default().to_owned())
-        .collect()
-}
-
 /// Puts a file where the work payload directory was, so every enqueue fails until unblocked.
 fn block_queue(fixture: &Fixture) -> std::io::Result<()> {
     let payloads = fixture.data_dir.join("runtime/work-payloads");

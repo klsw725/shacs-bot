@@ -32,6 +32,21 @@ const SECRET_KEY_FRAGMENTS: &[&str] = &[
     "set_cookie",
 ];
 
+/// Authorization schemes other than Bearer whose name stays visible before the redacted
+/// credentials.
+const AUTHORIZATION_SCHEMES: &[&str] = &[
+    "basic",
+    "bot",
+    "digest",
+    "dpop",
+    "hoba",
+    "mutual",
+    "negotiate",
+    "ntlm",
+    "oauth",
+    "token",
+];
+
 const SECRET_PATH_FRAGMENTS: &[&str] = &[
     "/.env",
     ".env",
@@ -62,6 +77,7 @@ pub fn redact_string(value: &str) -> String {
         return REDACTED.to_owned();
     }
     let value = redact_sensitive_key_values(value);
+    let value = redact_authorization_values(&value);
     let value = redact_inline_env_assignments(&value);
     let value = redact_bearer_tokens(&value);
     redact_token_prefixes(&value)
@@ -120,10 +136,14 @@ fn looks_like_secret_value(value: &str) -> bool {
         || lower.contains("authorization: bearer")
 }
 
+/// A PEM header of any private key: `-----BEGIN PRIVATE KEY-----`, `RSA`, `EC`, `OPENSSH`,
+/// `ENCRYPTED`, PGP `PRIVATE KEY BLOCK` and the like.
 fn contains_private_key_block(value: &str) -> bool {
-    value
-        .to_ascii_lowercase()
-        .contains("-----begin private key-----")
+    let lower = value.to_ascii_lowercase();
+    lower.match_indices("-----begin ").any(|(start, marker)| {
+        let header = &lower[start + marker.len()..];
+        header[..header.find("-----").unwrap_or(header.len())].contains("private key")
+    })
 }
 
 fn looks_like_secret_path(value: &str) -> bool {
@@ -243,9 +263,10 @@ fn parse_sensitive_key_value(value: &str, start: usize) -> Option<SensitiveKeyVa
     })
 }
 
+/// The value of a key ending in `authorization` is left to `redact_authorization_values`,
+/// which reads it whole whatever its scheme, in both `key: value` and `key=value` form.
 fn is_redactable_key_value_key(key: &str) -> bool {
-    let normalized = key.to_ascii_lowercase().replace('-', "_");
-    is_sensitive_key(key) && !normalized.contains("authorization") && !normalized.contains("bearer")
+    is_sensitive_key(key) && !key.to_ascii_lowercase().ends_with("authorization")
 }
 
 fn skip_horizontal_whitespace(value: &str, mut index: usize) -> usize {
@@ -259,10 +280,12 @@ fn skip_horizontal_whitespace(value: &str, mut index: usize) -> usize {
 }
 
 fn find_quoted_value_end(value: &str, mut index: usize, quote: char) -> usize {
+    let mut escaped = false;
     while let Some(character) = value[index..].chars().next() {
-        if character == quote {
+        if character == quote && !escaped {
             break;
         }
+        escaped = character == '\\' && !escaped;
         index += character.len_utf8();
     }
     index
@@ -301,11 +324,82 @@ fn redact_assignment_token(token: &str) -> String {
     if rest.contains(REDACTED) {
         return token.to_owned();
     }
-    if is_sensitive_key(key) || looks_like_secret_value(rest) || looks_like_secret_path(rest) {
+    if is_redactable_key_value_key(key)
+        || looks_like_secret_value(rest)
+        || looks_like_secret_path(rest)
+    {
         format!("{key}={REDACTED}")
     } else {
         token.to_owned()
     }
+}
+
+/// The credentials of an `Authorization` value, whatever its scheme: everything after a known
+/// scheme name, else the whole value, up to its closing quote or the end of the line. A Bearer
+/// value is left to `redact_bearer_tokens`.
+fn redact_authorization_values(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let mut redacted = String::with_capacity(value.len());
+    let mut index = 0;
+    while let Some(found) = lower[index..].find("authorization") {
+        let mut cursor = index + found + "authorization".len();
+        cursor += quote_at(&value[cursor..]).0;
+        cursor = skip_horizontal_whitespace(value, cursor);
+        if !lower[cursor..].starts_with([':', '=']) {
+            redacted.push_str(&value[index..cursor]);
+            index = cursor;
+            continue;
+        }
+        cursor = skip_horizontal_whitespace(value, cursor + 1);
+        let (quote_len, quote) = quote_at(&value[cursor..]);
+        cursor += quote_len;
+        let end = authorization_value_end(value, cursor, quote);
+        let scheme_end = lower[cursor..end]
+            .find(char::is_whitespace)
+            .map_or(end, |offset| cursor + offset);
+        let scheme = &lower[cursor..scheme_end];
+        if scheme == "bearer" {
+            redacted.push_str(&value[index..cursor]);
+            index = cursor;
+            continue;
+        }
+        let credentials = skip_horizontal_whitespace(value, scheme_end);
+        if AUTHORIZATION_SCHEMES.contains(&scheme) && credentials < end {
+            cursor = credentials;
+        }
+        redacted.push_str(&value[index..cursor]);
+        if cursor < end {
+            redacted.push_str(REDACTED);
+        }
+        index = end;
+    }
+    redacted.push_str(&value[index..]);
+    redacted
+}
+
+/// A quote at the start of `text`, plain or escaped (`\"` in JSON inside a string): its length
+/// and, when plain, the character that closes the value it opens. An escaped one closes
+/// nothing, so such a value runs to the end of the line.
+fn quote_at(text: &str) -> (usize, Option<char>) {
+    let mut characters = text.chars();
+    match (characters.next(), characters.next()) {
+        (Some(quote @ ('"' | '\'')), _) => (1, Some(quote)),
+        (Some('\\'), Some('"' | '\'')) => (2, None),
+        _ => (0, None),
+    }
+}
+
+/// Where an `Authorization` value from `start` ends: at its closing quote (not an escaped
+/// one) or at the end of the line.
+fn authorization_value_end(value: &str, start: usize, quote: Option<char>) -> usize {
+    let mut escaped = false;
+    for (offset, character) in value[start..].char_indices() {
+        if matches!(character, '\n' | '\r') || (Some(character) == quote && !escaped) {
+            return start + offset;
+        }
+        escaped = character == '\\' && !escaped;
+    }
+    value.len()
 }
 
 fn redact_bearer_tokens(value: &str) -> String {
@@ -313,7 +407,11 @@ fn redact_bearer_tokens(value: &str) -> String {
     let mut remainder = value;
     loop {
         let lower = remainder.to_ascii_lowercase();
-        let Some(index) = lower.find("bearer ") else {
+        let Some(index) = lower
+            .match_indices("bearer")
+            .map(|(index, _)| index)
+            .find(|index| remainder[index + "bearer".len()..].starts_with(char::is_whitespace))
+        else {
             redacted.push_str(remainder);
             break;
         };
@@ -329,7 +427,7 @@ fn redact_bearer_tokens(value: &str) -> String {
         }
         let token_len = remainder[token_start..]
             .chars()
-            .take_while(|character| is_secret_token_character(*character))
+            .take_while(|character| is_bearer_token_character(*character))
             .map(char::len_utf8)
             .sum::<usize>();
         if token_len == 0 {
@@ -377,6 +475,11 @@ fn redact_token_prefixes(value: &str) -> String {
 
 fn is_secret_token_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+}
+
+/// RFC 6750 `b64token`, which may also hold `~`, `+`, `/` and trailing `=`.
+fn is_bearer_token_character(character: char) -> bool {
+    is_secret_token_character(character) || matches!(character, '~' | '+' | '/' | '=')
 }
 
 #[cfg(test)]
@@ -482,6 +585,80 @@ mod tests {
     }
 
     #[test]
+    fn redact_string_redacts_authorization_credentials_of_any_scheme() {
+        for (text, expected) in [
+            (
+                "Authorization: Basic dXNlcjpwYXNz",
+                format!("Authorization: Basic {REDACTED}"),
+            ),
+            (
+                "proxy-authorization:basic dXNl+cjp/wYXNz== next\nkept",
+                format!("proxy-authorization:basic {REDACTED}\nkept"),
+            ),
+            (
+                "Authorization: dXNlcjpwYXNz and more",
+                format!("Authorization: {REDACTED}"),
+            ),
+            (
+                r#"Authorization: Custom key="s3cr3t" then"#,
+                format!("Authorization: {REDACTED}"),
+            ),
+            (
+                r#"Authorization: Digest username="alice", response="s3cr3t""#,
+                format!("Authorization: Digest {REDACTED}"),
+            ),
+            (
+                r#"{"authorization": "Digest username=\"alice\", response=\"s3cr3t\"", "kept": 1}"#,
+                format!(r#"{{"authorization": "Digest {REDACTED}", "kept": 1}}"#),
+            ),
+            (
+                r#"{"authorization": "Basic dXNlcjpwYXNz"}"#,
+                format!(r#"{{"authorization": "Basic {REDACTED}"}}"#),
+            ),
+            (
+                "Authorization: Bearer abc.def after",
+                format!("Authorization: Bearer {REDACTED} after"),
+            ),
+            (
+                "Authorization: Bearer abc+S3CR3T/xyz~1== after",
+                format!("Authorization: Bearer {REDACTED} after"),
+            ),
+            (
+                "Authorization=Basic dXNlcjpwYXNz",
+                format!("Authorization=Basic {REDACTED}"),
+            ),
+            (
+                r#"Authorization="Basic dXNlcjpwYXNz" kept"#,
+                format!(r#"Authorization="Basic {REDACTED}" kept"#),
+            ),
+            (
+                "bearer: abc+S3CR3T/xyz== kept",
+                format!("bearer: {REDACTED} kept"),
+            ),
+            (
+                "x-authorization-token: S3CR3T kept",
+                format!("x-authorization-token: {REDACTED} kept"),
+            ),
+            (
+                "Authorization: Bearer\tabc+S3CR3T kept",
+                format!("Authorization: Bearer\t{REDACTED} kept"),
+            ),
+            (
+                r#"{\"authorization\": \"Basic dXNlcjpwYXNz\", \"k\": 1}"#,
+                format!(r#"{{\"authorization\": \"Basic {REDACTED}"#),
+            ),
+            (
+                "no authorization needed",
+                "no authorization needed".to_owned(),
+            ),
+        ] {
+            let once = redact_string(text);
+            assert_eq!(once, expected, "{text}");
+            assert_eq!(redact_string(&once), once, "{text}");
+        }
+    }
+
+    #[test]
     fn redact_string_redacts_json_like_sensitive_key_values() {
         let quoted = redact_string(r#"before {"api_key":"plain-secret"} after"#);
         assert_eq!(
@@ -497,6 +674,25 @@ mod tests {
         let single_quoted = redact_string("token='plain-secret' ok=true");
         assert_eq!(single_quoted, format!("token='{REDACTED}' ok=true"));
         assert!(!single_quoted.contains("plain-secret"));
+    }
+
+    #[test]
+    fn redact_string_reads_escaped_quotes_and_every_private_key_header() {
+        let escaped = redact_string(r#"{"password":"abc\"S3CR3T\\","kept":1}"#);
+        assert_eq!(escaped, format!(r#"{{"password":"{REDACTED}","kept":1}}"#));
+        assert_eq!(redact_string(&escaped), escaped);
+        for header in [
+            "RSA PRIVATE KEY",
+            "EC PRIVATE KEY",
+            "OPENSSH PRIVATE KEY",
+            "ENCRYPTED PRIVATE KEY",
+            "PGP PRIVATE KEY BLOCK",
+        ] {
+            let block = format!("goal -----BEGIN {header}----- S3CR3TKEY -----END {header}-----");
+            assert_eq!(redact_string(&block), REDACTED, "{header}");
+        }
+        let certificate = "-----BEGIN CERTIFICATE----- MIIB -----END CERTIFICATE-----";
+        assert_eq!(redact_string(certificate), certificate);
     }
 
     #[test]

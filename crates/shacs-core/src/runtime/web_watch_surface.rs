@@ -16,6 +16,7 @@ use super::web_watch_fetch::{
 };
 use super::web_watch_number::{is_unit_char, parse_plain_decimal, ALL_SEPARATORS};
 use super::web_watch_read::plan_view;
+use super::web_watch_redact::{safe_extraction, safe_text, MAX_ANCHOR_CHARS};
 use super::web_watch_store::{store_web_watches, web_watches};
 use super::web_watch_text::normalize_fragment;
 use super::{
@@ -28,7 +29,6 @@ use super::{
 };
 
 const MAX_NEEDLE_CHARS: usize = 64;
-const MAX_ANCHOR_CHARS: usize = 160;
 
 /// Opaque preview candidate handed back on confirmation; nothing is stored at preview.
 #[derive(Serialize, Deserialize)]
@@ -86,9 +86,9 @@ pub fn preview_web_watch(
                 .map_err(|error| ObservationError::Durable(error.into()))?;
             Ok(WebCandidate {
                 token: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
-                shown_text: candidate.shown_text,
+                shown_text: safe_text(&candidate.shown_text, MAX_ANCHOR_CHARS),
                 value: candidate.value,
-                extraction: candidate.extraction,
+                extraction: safe_extraction(&candidate.extraction),
             })
         })
         .collect::<Result<Vec<_>, WebWatchError>>()?;

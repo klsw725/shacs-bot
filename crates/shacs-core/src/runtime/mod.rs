@@ -154,6 +154,9 @@ pub mod trusted_resources;
 pub mod trusted_runtime;
 mod trusted_tool_before_registry;
 mod web_watch;
+mod web_watch_deadline;
+mod web_watch_deadline_dispatch;
+mod web_watch_deadline_surface;
 mod web_watch_decision;
 mod web_watch_dispatch;
 mod web_watch_extract;
@@ -168,6 +171,7 @@ mod web_watch_notify_surface;
 mod web_watch_number;
 mod web_watch_read;
 mod web_watch_record;
+mod web_watch_redact;
 mod web_watch_store;
 mod web_watch_surface;
 mod web_watch_text;
@@ -189,7 +193,8 @@ pub use activation_store::{
 };
 pub use agent_loop::{
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
-    AgentLoopRunSummary, AgentLoopTurnResult, PermissionModeSetter, ProjectPermissionStoreConfig,
+    AgentLoopRunSummary, AgentLoopTurnResult, ClockMs, PermissionModeSetter,
+    ProjectPermissionStoreConfig,
 };
 pub use autocompact::{AutoCompact, AutoCompactArchiveOutcome, RECENT_SUFFIX_MESSAGES};
 pub use automation::{
@@ -633,6 +638,13 @@ pub use web_watch::{
     WEB_WATCH_METADATA_KEY, WEB_WATCH_MIN_CADENCE_SECONDS, WEB_WATCH_OUTCOME, WEB_WATCH_WORK_KIND,
 };
 use web_watch::{WebWatchEntry, WebWatchPlan};
+pub use web_watch_deadline::{
+    ConfigureWebDeadlineRequest, WebDeadline, WebDeadlineInput, WebDeadlineRecord,
+    WebDeadlineSettings, WebDeadlineView, WebDeadlineWake,
+    WEB_DEADLINE_DEFAULT_REMIND_BEFORE_SECONDS, WEB_DEADLINE_MAX_REMIND_BEFORE_SECONDS,
+    WEB_DEADLINE_MIN_REMIND_BEFORE_SECONDS, WEB_DEADLINE_OUTCOME, WEB_DEADLINE_WORK_KIND,
+};
+pub use web_watch_deadline_surface::configure_web_watch_deadline;
 pub use web_watch_dispatch::{WebWatchExecutor, WebWatchRuntime};
 pub use web_watch_fetch::WebFetchLimits;
 pub use web_watch_notify::{
@@ -642,7 +654,7 @@ pub use web_watch_notify::{
     WEB_NOTIFY_ENQUEUE_RETRY_MS, WEB_NOTIFY_MAX_THRESHOLD_SECONDS, WEB_NOTIFY_PREFIX,
 };
 pub use web_watch_notify_surface::configure_web_watch_notifications;
-pub use web_watch_read::{mask_web_watch_urls, read_web_watch};
+pub use web_watch_read::{mask_web_watch_metadata, read_web_watch};
 pub use web_watch_record::{
     ConfirmWebWatchRequest, WebCandidate, WebCheckResult, WebDecision, WebDecisionReason,
     WebFailureInterval, WebIntervalCloseReason, WebIntervalClosure, WebObservationRecord,

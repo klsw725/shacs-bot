@@ -1,3 +1,5 @@
+#[path = "spec042_web_watch/deadline.rs"]
+mod deadline;
 #[path = "spec042_web_watch/failures.rs"]
 mod failures;
 #[path = "spec042_web_watch/lifecycle.rs"]

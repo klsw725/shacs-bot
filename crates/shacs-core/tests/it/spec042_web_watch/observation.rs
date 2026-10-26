@@ -1,5 +1,6 @@
 use super::support::*;
 use shacs_core::runtime::*;
+use shacs_session::SessionManager;
 
 fn number_value(value: &str) -> WebObservedValue {
     WebObservedValue::Number {
@@ -192,6 +193,74 @@ fn a_phrase_area_is_watched_before_the_phrase_first_appears() -> TestResult {
     assert_eq!(
         decision.current.map(|evidence| evidence.value),
         Some(WebObservedValue::Text { present: true })
+    );
+    Ok(())
+}
+
+#[test]
+fn urls_in_the_phrase_and_its_anchor_are_shown_reduced_but_stored_as_matched() -> TestResult {
+    // Given: a phrase that is a URL with userinfo, query and fragment, right after a link
+    // with a query, so both end up in the extraction.
+    let fixture = Fixture::new()?;
+    let url = fixture.server.url("/item");
+    let phrase = "https://u:pw9@x.test/a?q=s3cr3t#frag9";
+    fixture.server.set(
+        "/item",
+        Page::html(&format!(
+            "<p>see https://y.test/b?ref=r3f#top {phrase} today</p>"
+        )),
+    )?;
+    let preview = fixture.preview(
+        &url,
+        WebPreviewTarget::Text {
+            phrase: phrase.to_owned(),
+            area: None,
+        },
+    )?;
+    let token = &preview.candidates.first().ok_or("no candidate")?.token;
+
+    // When: confirmed, read as status and as session metadata for export, then checked.
+    let configured = fixture.confirm(&url, token, WebCondition::TextAbsent, 1, T0)?;
+    let status = fixture.status()?;
+    let mut session = SessionManager::new(&fixture.workspace)?
+        .load_existing("cli:owner")
+        .ok_or("no session")?;
+    mask_web_watch_metadata(&mut session.metadata);
+    fixture.tick(fixture.next_due()?)?;
+
+    // Then: no view keeps them (the preview only inside its opaque token), and the stored
+    // extraction still finds the phrase.
+    let shown: Vec<_> = preview
+        .candidates
+        .iter()
+        .map(|candidate| (&candidate.shown_text, &candidate.extraction))
+        .collect();
+    let views = [
+        serde_json::to_string(&shown)?,
+        serde_json::to_string(&configured)?,
+        serde_json::to_string(&status)?,
+        serde_json::to_string(&session.metadata)?,
+    ];
+    for view in &views {
+        for secret in ["pw9", "s3cr3t", "frag9", "r3f", "#top"] {
+            assert!(!view.contains(secret), "{secret} in {view}");
+        }
+    }
+    let extraction = status.plan.ok_or("no plan")?.extraction;
+    assert_eq!(extraction.prefix, "https://y.test/b");
+    assert_eq!(
+        extraction.value,
+        WebValueKind::Text {
+            phrase: "https://x.test/a".to_owned()
+        }
+    );
+    let decision = fixture.latest()?.decision;
+    assert_eq!(
+        (decision.verdict, decision.reason),
+        (
+            ObservationVerdict::Suppress,
+            WebDecisionReason::EquivalentValue
+        )
     );
     Ok(())
 }

@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 
+use super::web_watch_gate::ActiveDeadline;
 use super::web_watch_notify_store::WebNotifyEntry;
+use super::web_watch_redact::{safe_text, MAX_PHRASE_CHARS};
 use super::web_watch_store::{WebNotifyPoint, WebWatchLedger};
 use super::{
-    ObservationVerdict, WebCheckResult, WebFailureInterval, WebIntervalCloseReason,
-    WebNotifyContent, WebNotifyDelivery, WebNotifyEnqueue, WebNotifyIntent, WebNotifyKind,
-    WebNotifySettings, WebRecoveredInterval, WebValueKind, WebWatchEntry,
+    ObservationVerdict, WebCheckResult, WebDeadlineRecord, WebFailureInterval,
+    WebIntervalCloseReason, WebNotifyContent, WebNotifyDelivery, WebNotifyEnqueue, WebNotifyIntent,
+    WebNotifyKind, WebNotifySettings, WebRecoveredInterval, WebValueKind, WebWatchEntry,
+    WebWatchWake,
 };
 
 /// Notifications the recorded checks call for under the current settings revision, and a
@@ -79,6 +82,7 @@ pub(super) fn derive_intents(
             url: point.record.request_url.clone(),
             url_digest: point.record.request_url_digest.clone(),
             content,
+            deadline_revision: None,
         });
     };
     for point in &ledger.notify_points {
@@ -95,6 +99,65 @@ pub(super) fn derive_intents(
         }
     }
     intents
+}
+
+/// The reminder of the current deadline once its wake was recorded in the active lineage and
+/// before the deadline, unless one for this deadline revision is already queued.
+pub(super) fn derive_deadline_intent(
+    active: &ActiveDeadline,
+    records: &[WebDeadlineRecord],
+    settings: &WebNotifySettings,
+    facts: &BTreeMap<String, WebNotifyEntry>,
+    now_ms: u64,
+) -> Option<WebNotifyIntent> {
+    let target = settings.target.as_deref()?;
+    let record = records
+        .iter()
+        .rev()
+        .find(|record| record.wake == active.wake)
+        .filter(|_| now_ms < active.deadline.at_ms)?;
+    let event_id = format!(
+        "web-deadline:{}:{}",
+        record.wake.entrusted_work_id, record.wake.deadline_revision
+    );
+    if facts.values().any(|fact| {
+        fact.intent.kind() == WebNotifyKind::Deadline
+            && fact.intent.event_id == event_id
+            && fact.snapshot.enqueue == WebNotifyEnqueue::Enqueued
+            && !fact.snapshot.suppressed_stale
+    }) {
+        return None;
+    }
+    Some(WebNotifyIntent {
+        correlation_id: WebNotifyIntent::correlation(
+            WebNotifyKind::Deadline,
+            &event_id,
+            settings.revision,
+        ),
+        owner_session_id: record.wake.owner_session_id.clone(),
+        entrusted_work_id: record.wake.entrusted_work_id.clone(),
+        target: target.to_owned(),
+        settings_revision: settings.revision,
+        event_id,
+        wake: WebWatchWake {
+            due_at_ms: record.wake.due_at_ms,
+            condition_revision: record.condition_revision,
+            ..active.web_wake.clone()
+        },
+        url: record.url.clone(),
+        url_digest: record.url_digest.clone(),
+        content: WebNotifyContent::Deadline {
+            goal: record.goal.clone(),
+            deadline_at_ms: record.deadline.at_ms,
+            deadline_text: record.deadline.at_text.clone(),
+            remind_at_ms: record.deadline.remind_at_ms,
+            reached_at_ms: record.reached_at_ms,
+            condition: record.condition.clone(),
+            phrase: record.phrase.clone(),
+            latest: record.latest.clone().map(Box::new),
+        },
+        deadline_revision: Some(record.wake.deadline_revision),
+    })
 }
 
 struct Judge<'a> {
@@ -141,7 +204,9 @@ fn events(
                         WebNotifyContent::Change {
                             condition: entry.plan.condition.clone(),
                             phrase: match &entry.plan.extraction.value {
-                                WebValueKind::Text { phrase } => Some(phrase.clone()),
+                                WebValueKind::Text { phrase } => {
+                                    Some(safe_text(phrase, MAX_PHRASE_CHARS))
+                                }
                                 WebValueKind::Number { .. } => None,
                             },
                             previous: Box::new(previous.clone()),

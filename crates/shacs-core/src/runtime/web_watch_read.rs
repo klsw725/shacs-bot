@@ -5,15 +5,19 @@ use shacs_session::SessionMutationGuard;
 
 use super::entrusted_work_access::work_snapshot_from_session;
 use super::entrusted_work_surface::load_owner_session;
+use super::web_watch_deadline_surface::deadline_view;
 use super::web_watch_fetch::{display_url, sha256_ref};
 use super::web_watch_gate::active_web_wake;
 use super::web_watch_notify_store::read_web_notifications;
 use super::web_watch_notify_surface::settings_view;
-use super::web_watch_store::{web_notify_settings, web_watches, WebWatchLedger};
+use super::web_watch_redact::safe_extraction;
+use super::web_watch_store::{
+    web_deadline_settings, web_notify_settings, web_watches, WebWatchLedger,
+};
 use super::{
     EntrustedWorkError, EntrustedWorkReadRequest, ObservationBlock, ObservationNextWake,
-    WebIntervalCloseReason, WebIntervalClosure, WebWatchError, WebWatchPlan, WebWatchPlanView,
-    WebWatchSnapshot, WEB_WATCH_METADATA_KEY,
+    WebExtraction, WebIntervalCloseReason, WebIntervalClosure, WebWatchError, WebWatchPlan,
+    WebWatchPlanView, WebWatchSnapshot, WEB_WATCH_METADATA_KEY,
 };
 
 /// Status of a web watch with query and fragment removed from every URL.
@@ -93,6 +97,9 @@ pub fn read_web_watch(
                 entry.as_ref().map_or(0, |entry| entry.plan.cadence_seconds),
             )
         });
+    let deadline = web_deadline_settings(&session, &request.work_id)
+        .map_err(EntrustedWorkError::Metadata)?
+        .map(|settings| deadline_view(&settings));
     let mut notifications: Vec<_> =
         read_web_notifications(&data_dir.join("runtime/durable-events"))?
             .into_values()
@@ -120,6 +127,7 @@ pub fn read_web_watch(
         next_wake,
         history: ledger.history,
         notify,
+        deadline,
         notifications: notifications
             .into_iter()
             .map(|(_, snapshot)| snapshot)
@@ -128,8 +136,9 @@ pub fn read_web_watch(
 }
 
 /// Session metadata for output outside the session file: every stored web watch URL
-/// without query and fragment, next to the full URL's digest.
-pub fn mask_web_watch_urls(metadata: &mut Map<String, Value>) {
+/// without query and fragment, next to the full URL's digest, and every extraction as
+/// `safe_extraction` shows it (one that cannot be read is left out).
+pub fn mask_web_watch_metadata(metadata: &mut Map<String, Value>) {
     let plans = metadata
         .get_mut(WEB_WATCH_METADATA_KEY)
         .and_then(|store| store.get_mut("watches"))
@@ -138,11 +147,17 @@ pub fn mask_web_watch_urls(metadata: &mut Map<String, Value>) {
         .flatten()
         .filter_map(|watch| watch.get_mut("plan").and_then(Value::as_object_mut));
     for plan in plans {
-        let Some(url) = plan.get("url").and_then(Value::as_str).map(str::to_owned) else {
-            continue;
-        };
-        plan.insert("url".to_owned(), Value::String(display_url(&url)));
-        plan.insert("url_digest".to_owned(), Value::String(sha256_ref(&url)));
+        if let Some(url) = plan.get("url").and_then(Value::as_str).map(str::to_owned) {
+            plan.insert("url".to_owned(), Value::String(display_url(&url)));
+            plan.insert("url_digest".to_owned(), Value::String(sha256_ref(&url)));
+        }
+        let shown = plan
+            .remove("extraction")
+            .and_then(|extraction| serde_json::from_value::<WebExtraction>(extraction).ok())
+            .and_then(|extraction| serde_json::to_value(safe_extraction(&extraction)).ok());
+        if let Some(shown) = shown {
+            plan.insert("extraction".to_owned(), shown);
+        }
     }
 }
 
@@ -150,7 +165,7 @@ pub(super) fn plan_view(plan: &WebWatchPlan) -> WebWatchPlanView {
     WebWatchPlanView {
         url: display_url(&plan.url),
         url_digest: sha256_ref(&plan.url),
-        extraction: plan.extraction.clone(),
+        extraction: safe_extraction(&plan.extraction),
         condition: plan.condition.clone(),
         cadence_seconds: plan.cadence_seconds,
     }

@@ -176,6 +176,79 @@ fn web_notify_needs_an_enabled_email_channel_that_can_send(
     Ok(())
 }
 
+#[test]
+fn web_deadline_is_set_checked_and_cleared_from_the_command_line(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Given: a confirmed watch with an email target.
+    let root = tempfile::tempdir()?;
+    let work = confirmed_watch(root.path())?;
+    let config = root.path().join("config.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({"channels": {"email": {
+            "enabled": true,
+            "consentGranted": true,
+            "smtp": {"host": "127.0.0.1", "port": 2525, "from": "bot@example.test", "security": "plain"}
+        }}}))?,
+    )?;
+    let config = config.to_str().ok_or("path")?;
+    run(
+        root.path(),
+        &[
+            "web-notify",
+            &work.work_id,
+            "--target",
+            "email:user@example.test",
+            "--config",
+            config,
+        ],
+    )?;
+    let deadline = |arguments: &[&str]| {
+        let mut all = vec!["web-deadline", work.work_id.as_str()];
+        all.extend_from_slice(arguments);
+        run(root.path(), &all)
+    };
+
+    // When
+    let set = deadline(&[
+        "--at",
+        "2099-01-01T09:00:00+09:00",
+        "--remind-before-seconds",
+        "3600",
+        "--expected-deadline-revision",
+        "0",
+    ])?;
+    let stale = deadline(&[
+        "--at",
+        "2099-01-02T09:00:00+09:00",
+        "--expected-deadline-revision",
+        "0",
+    ]);
+    let no_offset = deadline(&[
+        "--at",
+        "2099-01-02T09:00:00",
+        "--expected-deadline-revision",
+        "1",
+    ]);
+    let cleared = deadline(&["--clear", "--expected-deadline-revision", "1"])?;
+
+    // Then
+    let set: serde_json::Value = serde_json::from_str(&set)?;
+    assert_eq!(set["revision"], 1);
+    assert_eq!(set["deadline"]["at_text"], "2099-01-01T09:00:00+09:00");
+    assert_eq!(
+        set["deadline"]["remind_at_ms"].as_u64(),
+        set["deadline"]["at_ms"]
+            .as_u64()
+            .map(|at_ms| at_ms - 3_600_000)
+    );
+    assert!(stale.is_err() && no_offset.is_err());
+    let cleared: serde_json::Value = serde_json::from_str(&cleared)?;
+    assert_eq!(cleared["revision"], 2);
+    assert!(cleared["deadline"].is_null());
+    Ok(())
+}
+
 /// A confirmed watch on a local page whose URL carries a secret query and a fragment.
 fn confirmed_watch(root: &Path) -> Result<EntrustedWorkReadRequest, Box<dyn std::error::Error>> {
     SessionManager::new(root)?.save(&Session::new("cli:owner"))?;

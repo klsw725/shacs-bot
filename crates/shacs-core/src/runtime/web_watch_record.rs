@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     EntrustedWorkReadRequest, ObservationBlock, ObservationNextWake, ObservationVerdict,
-    PersistentGoalStatus, WebCheckFailure, WebCondition, WebEvidence, WebExtraction,
-    WebNotificationSnapshot, WebNotifySettingsView, WebObservedValue, WebResponseFacts,
-    WebWatchWake,
+    PersistentGoalStatus, WebCheckFailure, WebCondition, WebDeadlineView, WebEvidence,
+    WebExtraction, WebNotificationSnapshot, WebNotifySettingsView, WebObservedValue,
+    WebResponseFacts, WebWatchWake,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +163,8 @@ pub struct WebWatchSnapshot {
     pub next_wake: ObservationNextWake,
     pub history: Vec<WebObservationRecord>,
     pub notify: Option<WebNotifySettingsView>,
+    #[serde(default)]
+    pub deadline: Option<WebDeadlineView>,
     pub notifications: Vec<WebNotificationSnapshot>,
 }
 

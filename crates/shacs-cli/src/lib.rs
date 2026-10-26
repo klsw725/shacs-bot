@@ -9365,7 +9365,7 @@ pub fn session_export(options: SessionExportOptions) -> Result<SessionExportRepo
     let mut session = manager.load_existing(&options.session).ok_or_else(|| {
         CliError::InvalidArguments(format!("session `{}` was not found", options.session))
     })?;
-    shacs_core::runtime::mask_web_watch_urls(&mut session.metadata);
+    shacs_core::runtime::mask_web_watch_metadata(&mut session.metadata);
     let content = match options.format {
         SessionExportFormat::Json => serde_json::to_string_pretty(&json!({
             "key": session.key,
@@ -16355,7 +16355,7 @@ pub fn help_text() -> String {
         "            Flags: --workspace/-w, --session",
         "  work      Create/read/revise/pause/resume/done/clear entrusted work; observe/observations",
         "            Actions: create, read, revise, pause, resume, done, clear",
-        "            Web page watch: web-preview, web-watch, web-status, web-notify",
+        "            Web page watch: web-preview, web-watch, web-status, web-notify, web-deadline",
         "            Flags: --workspace/-w, --session, --owner-session",
         "  tasks     Print the canonical owner-backed task projection as JSON",
         "            Flags: --workspace/-w, --data-dir, --session, --json",
@@ -18825,6 +18825,7 @@ impl AgentLoopChatCompletionAdapter {
             .config_path
             .parent()
             .map(|data_dir| data_dir.join("runtime").join("durable-events"));
+        config.clock_ms = Some(Arc::new(now_millis));
         config.settings = shacs_providers::GenerationSettings {
             temperature: self.defaults.temperature,
             max_tokens: self.defaults.max_tokens,

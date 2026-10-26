@@ -10,9 +10,9 @@ use shacs_session::Session;
 
 use super::{
     DurableDispatchError, EntrustedWorkMetadataError, ObservationBlock, ObservationError,
-    ObservationNextWake, WebCheckResult, WebFailureInterval, WebIntervalCloseReason,
-    WebIntervalClosure, WebNotifySettings, WebObservationRecord, WebRuntimeGap, WebWatchEntry,
-    WebWatchWake, WEB_WATCH_METADATA_KEY, WEB_WATCH_OUTCOME,
+    ObservationNextWake, WebCheckResult, WebDeadlineSettings, WebFailureInterval,
+    WebIntervalCloseReason, WebIntervalClosure, WebNotifySettings, WebObservationRecord,
+    WebRuntimeGap, WebWatchEntry, WebWatchWake, WEB_WATCH_METADATA_KEY, WEB_WATCH_OUTCOME,
 };
 
 const HISTORY_LIMIT: usize = 32;
@@ -23,6 +23,8 @@ struct WebWatchStore {
     watches: Vec<WebWatchEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     notify: Vec<WebNotifySettings>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deadlines: Vec<WebDeadlineSettings>,
 }
 
 fn read_store(session: &Session) -> Result<WebWatchStore, EntrustedWorkMetadataError> {
@@ -81,6 +83,28 @@ pub(super) fn store_web_notify_settings(
         .notify
         .retain(|stored| stored.work_id != settings.work_id);
     store.notify.push(settings);
+    write_store(session, &store)
+}
+
+pub(super) fn web_deadline_settings(
+    session: &Session,
+    work_id: &str,
+) -> Result<Option<WebDeadlineSettings>, EntrustedWorkMetadataError> {
+    Ok(read_store(session)?
+        .deadlines
+        .into_iter()
+        .find(|settings| settings.work_id == work_id))
+}
+
+pub(super) fn store_web_deadline_settings(
+    session: &mut Session,
+    settings: WebDeadlineSettings,
+) -> Result<(), EntrustedWorkMetadataError> {
+    let mut store = read_store(session)?;
+    store
+        .deadlines
+        .retain(|stored| stored.work_id != settings.work_id);
+    store.deadlines.push(settings);
     write_store(session, &store)
 }
 

@@ -66,6 +66,13 @@ pub fn price_page(price: &str) -> String {
     )
 }
 
+pub fn titles(mails: &[OutboundMessage]) -> Vec<String> {
+    mails
+        .iter()
+        .map(|mail| mail.content.lines().next().unwrap_or_default().to_owned())
+        .collect()
+}
+
 pub fn number(label: &str) -> WebPreviewTarget {
     WebPreviewTarget::Number {
         label: label.to_owned(),
@@ -211,6 +218,10 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new() -> Result<Self, Box<dyn Error>> {
+        Self::with_goal("watch a price")
+    }
+
+    pub fn with_goal(goal_text: &str) -> Result<Self, Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
         SessionManager::new(&workspace)?.save_with_fsync(&Session::new("cli:owner"))?;
@@ -218,7 +229,7 @@ impl Fixture {
             &workspace,
             EntrustedWorkCreateRequest {
                 owner_session_id: "cli:owner".to_owned(),
-                goal_text: "watch a price".to_owned(),
+                goal_text: goal_text.to_owned(),
                 turn_budget: 10,
                 consent: EntrustedWorkConsentProof {
                     kind: EntrustedWorkConsentKind::ExplicitRequest,
@@ -354,6 +365,38 @@ impl Fixture {
         )
     }
 
+    pub fn deadline(
+        &self,
+        at: Option<&str>,
+        remind_before_seconds: Option<u64>,
+        remind_now: bool,
+        expected_revision: u64,
+        now_ms: u64,
+    ) -> Result<WebDeadlineView, WebWatchError> {
+        configure_web_watch_deadline(
+            &self.workspace,
+            ConfigureWebDeadlineRequest {
+                work: self.request(),
+                expected_revision,
+                deadline: at.map(|at| WebDeadlineInput {
+                    at: at.to_owned(),
+                    remind_before_seconds,
+                    remind_now,
+                }),
+                now_ms,
+            },
+        )
+    }
+
+    /// The worker's deadline step at `now_ms` twice: the first may only schedule the wake.
+    pub fn remind(&self, now_ms: u64) -> TestResult {
+        for _ in 0..2 {
+            self.dispatcher()?
+                .process_web_deadlines(&self.runtime(now_ms))?;
+        }
+        Ok(())
+    }
+
     /// The worker's notification step after its checks.
     pub fn route(&self, now_ms: u64) -> TestResult {
         self.dispatcher()?
@@ -387,9 +430,27 @@ impl Fixture {
     /// The agent loop turn for one inbound message, then its durable work closed as the runtime
     /// does after a turn. It must never call a provider.
     pub fn consume(&self, message: InboundMessage) -> Result<AgentLoopTurnResult, Box<dyn Error>> {
+        self.consume_with(message, None)
+    }
+
+    /// The same turn with the agent loop's clock at `now_ms`.
+    pub fn consume_at(
+        &self,
+        message: InboundMessage,
+        now_ms: u64,
+    ) -> Result<AgentLoopTurnResult, Box<dyn Error>> {
+        self.consume_with(message, Some(now_ms))
+    }
+
+    fn consume_with(
+        &self,
+        message: InboundMessage,
+        now_ms: Option<u64>,
+    ) -> Result<AgentLoopTurnResult, Box<dyn Error>> {
         let tools = ToolRegistry::new();
         let mut config = AgentLoopConfig::new(&self.workspace, "unused");
         config.durable_event_root = Some(self.data_dir.join("runtime/durable-events"));
+        config.clock_ms = now_ms.map(|now_ms| -> ClockMs { Arc::new(move || now_ms) });
         let mut agent = AgentLoop::new(
             self.bus.clone(),
             SessionManager::new(&self.workspace)?,
@@ -457,7 +518,7 @@ impl Fixture {
                 break;
             }
             for message in inbound {
-                self.consume(message)?;
+                self.consume_at(message, now_ms)?;
             }
         }
         let mut sent = Vec::new();

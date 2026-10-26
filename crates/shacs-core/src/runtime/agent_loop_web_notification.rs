@@ -74,7 +74,9 @@ impl AgentLoop<'_> {
             })
         };
         let still_current = match load_owner_session(&self.config.workspace, &owner) {
-            Ok((_, session)) => session.key == owner && current(&session, intent)?,
+            Ok((_, session)) => {
+                session.key == owner && current(&session, intent, self.config.now_ms())?
+            }
             Err(_) => false,
         } && (intent.kind() != WebNotifyKind::Recovery
             || failure_went_out(&intent.event_id));

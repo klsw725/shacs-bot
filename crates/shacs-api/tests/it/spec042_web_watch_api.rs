@@ -129,6 +129,21 @@ async fn web_watch_routes_preview_confirm_and_report_masked_status(
     )
     .await?;
     let off = request(local(), "POST", &notify_path, json!({"off": true})).await?;
+    let deadline_path = format!("{path}/deadline");
+    let untargeted = request(
+        local(),
+        "POST",
+        &deadline_path,
+        json!({"expected_revision": 0, "at": "2099-01-01T09:00:00+09:00"}),
+    )
+    .await?;
+    let cleared = request(
+        local(),
+        "POST",
+        &deadline_path,
+        json!({"expected_revision": 0, "clear": true}),
+    )
+    .await?;
     let status = request(api_router(adapter.clone()), "GET", &path, json!({})).await?;
 
     // Then
@@ -151,6 +166,9 @@ async fn web_watch_routes_preview_confirm_and_report_masked_status(
     assert_eq!((off.0, off.1["revision"].clone()), (200, json!(1)));
     assert_eq!(status.0, 200);
     assert_eq!(status.1["notify"]["revision"], 1);
+    assert_eq!(untargeted.0, 400);
+    assert_eq!((cleared.0, cleared.1["revision"].clone()), (200, json!(1)));
+    assert_eq!(status.1["deadline"]["revision"], 1);
     assert_eq!(status.1["next_wake"]["status"], "awaiting_enqueue");
     assert_eq!(status.1["baseline"]["value"]["value"], "12.99");
     let output = status.1.to_string();

@@ -110,7 +110,7 @@ pub(super) fn parse(
     }
     if matches!(
         parser.peek(),
-        Some("web-preview" | "web-watch" | "web-status" | "web-notify")
+        Some("web-preview" | "web-watch" | "web-status" | "web-notify" | "web-deadline")
     ) {
         return super::spec042_web_watch_cli::parse(parser, global_config);
     }

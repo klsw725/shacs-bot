@@ -1,8 +1,11 @@
 use shacs_session::Session;
 
 use super::entrusted_work_access::{bound_current_work, latest_transition_id};
-use super::web_watch_store::web_watches;
-use super::{ObservationBlock, PersistentGoalStatus, WebWatchEntry, WebWatchWake};
+use super::web_watch_store::{web_deadline_settings, web_watches};
+use super::{
+    ObservationBlock, PersistentGoalStatus, WebDeadline, WebDeadlineWake, WebWatchEntry,
+    WebWatchWake,
+};
 
 /// The wake the current owner session allows for `work_id` and its stored watch.
 /// Uses the same goal, consent and lineage gate as 036 local observations.
@@ -51,6 +54,46 @@ pub(super) fn active_web_wake(
         due_at_ms: entry.plan.first_wake_at_ms.max(lineage_start),
     };
     Ok(Some((wake, entry)))
+}
+
+/// The current deadline of `work_id` in the active goal lineage, with the plan's wake, the
+/// watch, the goal text and when the lineage started (a resume starts a new one).
+pub(super) struct ActiveDeadline {
+    pub wake: WebDeadlineWake,
+    pub deadline: WebDeadline,
+    pub goal: String,
+    pub web_wake: WebWatchWake,
+    pub entry: WebWatchEntry,
+    pub lineage_started_at_ms: u64,
+}
+
+pub(super) fn active_deadline(session: &Session, work_id: &str) -> Option<ActiveDeadline> {
+    let (web_wake, entry) = active_web_wake(session, work_id).ok().flatten()?;
+    let settings = web_deadline_settings(session, work_id).ok().flatten()?;
+    let deadline = settings.deadline?;
+    let (_, _, goal) = bound_current_work(session, &session.key, work_id).ok()?;
+    let lineage_started_at_ms = goal
+        .last_transition
+        .iter()
+        .map(|transition| transition.observed_at.as_str())
+        .filter_map(parse_ms)
+        .max()
+        .unwrap_or_default();
+    Some(ActiveDeadline {
+        wake: WebDeadlineWake {
+            entrusted_work_id: web_wake.entrusted_work_id.clone(),
+            owner_session_id: web_wake.owner_session_id.clone(),
+            goal_id: web_wake.goal_id.clone(),
+            goal_transition_id: web_wake.goal_transition_id.clone(),
+            deadline_revision: settings.revision,
+            due_at_ms: deadline.remind_at_ms,
+        },
+        deadline,
+        goal: goal.text,
+        web_wake,
+        entry,
+        lineage_started_at_ms,
+    })
 }
 
 /// The stored watch when `wake` still matches the current lineage and plan.

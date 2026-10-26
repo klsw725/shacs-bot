@@ -512,6 +512,26 @@ impl DurableWorkDispatcher {
         )
     }
 
+    pub(crate) fn record_web_deadline_terminal(
+        &mut self,
+        item: &ReplayWorkItem,
+        record: &super::WebDeadlineRecord,
+    ) -> Result<DurableEventRecord, DurableDispatchError> {
+        self.append_for_item(
+            item,
+            WORK_TERMINAL,
+            &shacs_session::durable_work::WorkTerminalCommit {
+                terminal: WorkTerminal {
+                    work_id: item.work_id.clone(),
+                    terminal_kind: WorkTerminalKind::Succeeded,
+                    outcome_ref: super::WEB_DEADLINE_OUTCOME.to_owned(),
+                    facts: Some(serde_json::to_value(record)?),
+                },
+                cancel_if_requested: true,
+            },
+        )
+    }
+
     pub(crate) fn record_web_watch_terminal(
         &mut self,
         item: &ReplayWorkItem,

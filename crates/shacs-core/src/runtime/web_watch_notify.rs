@@ -40,6 +40,7 @@ pub enum WebNotifyKind {
     Failure,
     Recovery,
     Gap,
+    Deadline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +83,18 @@ pub enum WebNotifyContent {
         to_ms: u64,
         next_check_at_ms: Option<u64>,
     },
+    Deadline {
+        goal: String,
+        deadline_at_ms: u64,
+        deadline_text: String,
+        remind_at_ms: u64,
+        reached_at_ms: u64,
+        condition: WebCondition,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phrase: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        latest: Option<Box<WebEvidence>>,
+    },
 }
 
 impl WebNotifyContent {
@@ -91,6 +104,7 @@ impl WebNotifyContent {
             Self::Failure { .. } => WebNotifyKind::Failure,
             Self::Recovery { .. } => WebNotifyKind::Recovery,
             Self::Gap { .. } => WebNotifyKind::Gap,
+            Self::Deadline { .. } => WebNotifyKind::Deadline,
         }
     }
 }
@@ -108,6 +122,9 @@ pub struct WebNotifyIntent {
     pub url: String,
     pub url_digest: String,
     pub content: WebNotifyContent,
+    /// The deadline revision a deadline reminder is bound to, besides the settings revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_revision: Option<u64>,
 }
 
 impl WebNotifyIntent {

@@ -3,8 +3,9 @@ use std::path::Path;
 use shacs_session::{Session, SessionManager, SessionMutationGuard};
 
 use super::entrusted_work_surface::load_owner_session;
-use super::web_watch_gate::check_web_wake;
-use super::web_watch_notify_events::derive_intents;
+use super::web_watch_deadline_dispatch::read_web_deadline_records;
+use super::web_watch_gate::{active_deadline, check_web_wake};
+use super::web_watch_notify_events::{derive_deadline_intent, derive_intents};
 use super::web_watch_notify_store::{
     append_web_enqueue_failure, append_web_notification_fact, read_web_notifications,
     WebNotifyEntry,
@@ -44,7 +45,7 @@ impl DurableWorkDispatcher {
             retries.sort_by_key(|fact| fact.first_fact_index);
             let mut changed = !retries.is_empty();
             for fact in retries {
-                if current(&session, &fact.intent)? {
+                if current(&session, &fact.intent, runtime.now_ms)? {
                     let pending = fact.last_stage == Some(Stage::EnqueuePending);
                     self.enqueue_web_notification(&root, &fact.intent, pending, runtime.now_ms)?;
                 } else {
@@ -57,7 +58,7 @@ impl DurableWorkDispatcher {
                     && !fact.snapshot.consumption_started
                     && !fact.snapshot.suppressed_stale
             }) {
-                if !current(&session, &fact.intent)? {
+                if !current(&session, &fact.intent, runtime.now_ms)? {
                     append_web_notification_fact(&root, &fact.intent, Stage::SuppressedStale)?;
                     changed = true;
                 }
@@ -72,11 +73,26 @@ impl DurableWorkDispatcher {
                     continue;
                 };
                 let ledger = WebWatchLedger::read(&root, &owner.key, &watch.work_id)?;
-                for intent in derive_intents(&ledger, &watch, &settings, &facts) {
+                let deadline = match active_deadline(&session, &watch.work_id)
+                    .filter(|active| runtime.now_ms >= active.deadline.remind_at_ms)
+                {
+                    Some(active) => derive_deadline_intent(
+                        &active,
+                        &read_web_deadline_records(&root, &owner.key, &watch.work_id)?,
+                        &settings,
+                        &facts,
+                        runtime.now_ms,
+                    ),
+                    None => None,
+                };
+                for intent in derive_intents(&ledger, &watch, &settings, &facts)
+                    .into_iter()
+                    .chain(deadline)
+                {
                     if facts.contains_key(&intent.correlation_id) {
                         continue;
                     }
-                    if !current(&session, &intent)? {
+                    if !current(&session, &intent, runtime.now_ms)? {
                         append_web_notification_fact(&root, &intent, Stage::SuppressedStale)?;
                         continue;
                     }
@@ -133,14 +149,28 @@ fn retry_due(entry: &WebNotifyEntry, now_ms: u64) -> bool {
     }
 }
 
-/// Whether `intent` still matches the owner's current lineage, plan and notification settings.
+/// Whether `intent` still matches the owner's current lineage and notification settings, and
+/// its plan, or for a deadline reminder its deadline revision before the deadline at `now_ms`.
 pub(super) fn current(
     session: &Session,
     intent: &WebNotifyIntent,
+    now_ms: u64,
 ) -> Result<bool, ObservationError> {
     let settings = web_notify_settings(session, &intent.entrusted_work_id)
         .map_err(EntrustedWorkError::Metadata)?;
-    Ok(check_web_wake(session, &intent.wake).is_ok()
+    let lineage = match intent.deadline_revision {
+        Some(revision) => {
+            active_deadline(session, &intent.entrusted_work_id).is_some_and(|active| {
+                active.wake.deadline_revision == revision
+                    && active.wake.owner_session_id == intent.owner_session_id
+                    && active.wake.goal_id == intent.wake.goal_id
+                    && active.wake.goal_transition_id == intent.wake.goal_transition_id
+                    && now_ms < active.deadline.at_ms
+            })
+        }
+        None => check_web_wake(session, &intent.wake).is_ok(),
+    };
+    Ok(lineage
         && settings.is_some_and(|settings| {
             settings.revision == intent.settings_revision
                 && settings.target.as_deref() == Some(intent.target.as_str())

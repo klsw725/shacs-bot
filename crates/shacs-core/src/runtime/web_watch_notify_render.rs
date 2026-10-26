@@ -81,8 +81,41 @@ pub(super) fn render_web_notification(intent: &WebNotifyIntent) -> String {
             time(*to_ms),
             optional_time(*next_check_at_ms),
         ),
+        WebNotifyContent::Deadline {
+            goal,
+            deadline_at_ms,
+            deadline_text,
+            remind_at_ms,
+            reached_at_ms,
+            condition,
+            phrase,
+            latest,
+        } => format!(
+            "Decision deadline reminder\n{page}\nGoal: {}\nDeadline: {} (set as {deadline_text})\n\
+             Time left: {} at this reminder (planned for {})\nCondition: {} (revision {})\n{}",
+            goal.split_whitespace().collect::<Vec<_>>().join(" "),
+            time(*deadline_at_ms),
+            duration_text(deadline_at_ms.saturating_sub(*reached_at_ms)),
+            time(*remind_at_ms),
+            condition_text(condition, phrase.as_deref()),
+            intent.wake.condition_revision,
+            latest.as_ref().map_or_else(
+                || "Latest value: none read yet".to_owned(),
+                |latest| evidence("Latest value", latest)
+            ),
+        ),
     };
     format!("{body}\n{LIMITS}")
+}
+
+fn duration_text(ms: u64) -> String {
+    let minutes = ms / 60_000;
+    format!(
+        "{}d {}h {}m",
+        minutes / 1_440,
+        minutes % 1_440 / 60,
+        minutes % 60
+    )
 }
 
 fn evidence(label: &str, evidence: &WebEvidence) -> String {

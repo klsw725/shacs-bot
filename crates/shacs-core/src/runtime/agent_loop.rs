@@ -284,7 +284,12 @@ pub struct AgentLoopConfig {
     pub provider_runtime_override: Option<RawCredential>,
     pub execution_snapshot_source: LiveExecutionSnapshotSource,
     pub execution_control: Option<AutomationExecutionControl>,
+    /// Current Unix time in ms for time-bound checks such as a reminder past its deadline; the
+    /// system clock when unset.
+    pub clock_ms: Option<ClockMs>,
 }
+
+pub type ClockMs = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectPermissionStoreConfig {
@@ -326,7 +331,14 @@ impl AgentLoopConfig {
             provider_runtime_override: None,
             execution_snapshot_source: LiveExecutionSnapshotSource::default(),
             execution_control: None,
+            clock_ms: None,
         }
+    }
+
+    pub(super) fn now_ms(&self) -> u64 {
+        self.clock_ms
+            .as_ref()
+            .map_or_else(now_unix_ms, |clock| clock())
     }
 }
 
