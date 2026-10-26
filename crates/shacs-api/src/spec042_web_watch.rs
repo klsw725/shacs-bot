@@ -5,8 +5,8 @@ use crate::{
 use serde::Deserialize;
 use serde_json::json;
 use shacs_core::runtime::{
-    ConfirmWebWatchRequest, EntrustedWorkReadRequest, ObservationError, WebCondition,
-    WebFetchLimits, WebPreviewRequest, WebPreviewTarget, WebTextArea, WebWatchError,
+    ConfigureWebNotifyRequest, ConfirmWebWatchRequest, EntrustedWorkReadRequest, ObservationError,
+    WebCondition, WebFetchLimits, WebPreviewRequest, WebPreviewTarget, WebTextArea, WebWatchError,
 };
 
 #[derive(Deserialize)]
@@ -25,6 +25,17 @@ struct PreviewBody {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct NotifyBody {
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    off: bool,
+    #[serde(default)]
+    failure_threshold_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConfirmBody {
     expected_revision: u64,
     url: String,
@@ -39,18 +50,18 @@ pub(crate) fn handle(
 ) -> Option<ApiHttpResponse> {
     let suffix = request.path.strip_prefix("/v1/sessions/")?;
     let parts: Vec<_> = suffix.split('/').collect();
-    let (requester, owner, work_id, preview) = match parts.as_slice() {
+    let (requester, owner, work_id, action) = match parts.as_slice() {
         [requester, "entrusted-work", work_id, "web-watch"] => {
-            (*requester, *requester, *work_id, false)
+            (*requester, *requester, *work_id, None)
         }
-        [requester, "entrusted-work", work_id, "web-watch", "preview"] => {
-            (*requester, *requester, *work_id, true)
+        [requester, "entrusted-work", work_id, "web-watch", action @ ("preview" | "notify")] => {
+            (*requester, *requester, *work_id, Some(*action))
         }
         [requester, "entrusted-work", owner, work_id, "web-watch"] => {
-            (*requester, *owner, *work_id, false)
+            (*requester, *owner, *work_id, None)
         }
-        [requester, "entrusted-work", owner, work_id, "web-watch", "preview"] => {
-            (*requester, *owner, *work_id, true)
+        [requester, "entrusted-work", owner, work_id, "web-watch", action @ ("preview" | "notify")] => {
+            (*requester, *owner, *work_id, Some(*action))
         }
         _ => return None,
     };
@@ -66,8 +77,29 @@ pub(crate) fn handle(
     };
     let guard = adapter.web_watch_network_guard();
     let limits = WebFetchLimits::PRODUCTION;
-    let result = match (request.method, preview) {
-        (ApiMethod::Post, true) => body::<PreviewBody>(request).and_then(|body| {
+    let result = match (request.method, action) {
+        (ApiMethod::Post, Some("notify")) => body::<NotifyBody>(request).and_then(|body| {
+            let target = match (body.target, body.off) {
+                (Some(target), false) => Some(target),
+                (None, true) => None,
+                _ => {
+                    return Err(ApiError::invalid_request(
+                        "notify needs either target or off",
+                    ))
+                }
+            };
+            let configure = ConfigureWebNotifyRequest {
+                work,
+                email_ready: target.is_some() && adapter.web_watch_email_ready(),
+                target,
+                failure_threshold_seconds: body.failure_threshold_seconds,
+                now_ms: adapter.now_ms(),
+            };
+            shacs_core::runtime::configure_web_watch_notifications(&workspace, configure)
+                .map(|settings| json!(settings))
+                .map_err(web_error)
+        }),
+        (ApiMethod::Post, Some(_)) => body::<PreviewBody>(request).and_then(|body| {
             let target =
                 match (body.label, body.phrase, body.until) {
                     (Some(label), None, None) => WebPreviewTarget::Number {
@@ -96,7 +128,7 @@ pub(crate) fn handle(
                 .map(|preview| json!(preview))
                 .map_err(web_error)
         }),
-        (ApiMethod::Post, false) => body::<ConfirmBody>(request).and_then(|body| {
+        (ApiMethod::Post, None) => body::<ConfirmBody>(request).and_then(|body| {
             let confirm = ConfirmWebWatchRequest {
                 work,
                 expected_revision: body.expected_revision,
@@ -110,7 +142,7 @@ pub(crate) fn handle(
                 .map(|configured| json!(configured))
                 .map_err(web_error)
         }),
-        (ApiMethod::Get, false) => match adapter.runtime_data_dir() {
+        (ApiMethod::Get, None) => match adapter.runtime_data_dir() {
             Some(data_dir) => shacs_core::runtime::read_web_watch(&workspace, &data_dir, &work)
                 .map(|snapshot| json!(snapshot))
                 .map_err(web_error),

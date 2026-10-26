@@ -101,15 +101,18 @@ pub(super) fn run(options: WorkOptions) -> Result<String, CliError> {
     serde_json::to_string(&snapshot).map_err(|error| CliError::Runtime(error.to_string()))
 }
 
-pub(super) fn parse(mut parser: ArgParser) -> Result<CliCommand, CliError> {
+pub(super) fn parse(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
     if matches!(parser.peek(), Some("observe" | "observations")) {
         return super::spec036_observation_cli::parse(parser);
     }
     if matches!(
         parser.peek(),
-        Some("web-preview" | "web-watch" | "web-status")
+        Some("web-preview" | "web-watch" | "web-status" | "web-notify")
     ) {
-        return super::spec042_web_watch_cli::parse(parser);
+        return super::spec042_web_watch_cli::parse(parser, global_config);
     }
     if matches!(parser.peek(), Some("--help" | "-h")) {
         return Ok(CliCommand::Help);

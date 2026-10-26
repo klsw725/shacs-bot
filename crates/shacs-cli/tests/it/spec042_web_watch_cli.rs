@@ -77,66 +77,7 @@ fn session_export_shows_the_watched_url_without_query_or_fragment(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Given: a confirmed watch whose URL carries a secret query and a fragment.
     let root = tempfile::tempdir()?;
-    SessionManager::new(root.path())?.save(&Session::new("cli:owner"))?;
-    let created: EntrustedWorkSnapshot = serde_json::from_str(&run(
-        root.path(),
-        &[
-            "create",
-            "watch a price",
-            "--consent",
-            "explicit-request",
-            "--evidence-ref",
-            "cli:user",
-            "--instructions",
-            "tell me when it is cheaper",
-        ],
-    )?)?;
-    let url = format!(
-        "{}/item?token=secret-token#reviews",
-        serve_page("<p>Price: $12.99 per month</p>")?
-    );
-    let work = EntrustedWorkReadRequest {
-        owner_session_id: "cli:owner".to_owned(),
-        requester_target: "cli:owner".to_owned(),
-        work_id: created.work.work_id,
-    };
-    let guard = NetworkGuard::with_ssrf_whitelist(["127.0.0.1/32"]);
-    let limits = WebFetchLimits::PRODUCTION;
-    let preview = preview_web_watch(
-        root.path(),
-        &WebPreviewRequest {
-            work: work.clone(),
-            url: url.clone(),
-            target: WebPreviewTarget::Number {
-                label: "Price:".to_owned(),
-                decimal_comma: false,
-            },
-        },
-        &guard,
-        &limits,
-    )?;
-    let candidate_token = preview
-        .candidates
-        .first()
-        .ok_or("no candidate")?
-        .token
-        .clone();
-    confirm_web_watch(
-        root.path(),
-        ConfirmWebWatchRequest {
-            work: work.clone(),
-            expected_revision: 1,
-            url,
-            candidate_token,
-            condition: WebCondition::AtMost {
-                value: "10".to_owned(),
-            },
-            cadence_seconds: 600,
-            now_ms: 1_800_000_000_000,
-        },
-        &guard,
-        &limits,
-    )?;
+    let work = confirmed_watch(root.path())?;
     let plan = read_web_watch(root.path(), root.path(), &work)?
         .plan
         .ok_or("no plan")?;
@@ -170,6 +111,134 @@ fn session_export_shows_the_watched_url_without_query_or_fragment(
         assert!(export.contains(&plan.url_digest), "{export}");
     }
     Ok(())
+}
+
+#[test]
+fn web_notify_needs_an_enabled_email_channel_that_can_send(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Given: two configs with consent and SMTP settings, one with the channel disabled.
+    let root = tempfile::tempdir()?;
+    let work = confirmed_watch(root.path())?;
+    let config = |enabled: bool| -> Result<String, Box<dyn std::error::Error>> {
+        let path = root.path().join(format!("config-{enabled}.json"));
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"channels": {"email": {
+                "enabled": enabled,
+                "consentGranted": true,
+                "smtp": {"host": "127.0.0.1", "port": 2525, "from": "bot@example.test", "security": "plain"}
+            }}}))?,
+        )?;
+        Ok(path.to_str().ok_or("path")?.to_owned())
+    };
+    let (disabled, enabled) = (config(false)?, config(true)?);
+    let workspace = root.path().to_str().ok_or("path")?;
+    let notify = |before: &[&str], after: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let mut args = before.to_vec();
+        args.extend([
+            "work",
+            "web-notify",
+            &work.work_id,
+            "--target",
+            "email:user@example.test",
+            "--workspace",
+            workspace,
+            "--session",
+            "cli:owner",
+        ]);
+        args.extend(after);
+        Ok(run_command(parse_cli_args(args)?)?)
+    };
+
+    // When: each config before the command, after it, and both with the later one winning.
+    let refused = [
+        notify(&[], &["--config", &disabled]),
+        notify(&["--config", &disabled], &[]),
+    ];
+    let accepted = [
+        notify(&["--config", &enabled], &[])?,
+        notify(&["--config", &disabled], &["--config", &enabled])?,
+    ];
+
+    // Then
+    for result in refused {
+        let error = result
+            .err()
+            .ok_or("a disabled Email channel must be refused")?
+            .to_string();
+        assert!(error.contains("Email channel cannot send"), "{error}");
+    }
+    let revisions = accepted
+        .iter()
+        .map(|output| Ok(serde_json::from_str::<serde_json::Value>(output)?["revision"].clone()))
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    assert_eq!(revisions, [1, 2]);
+    Ok(())
+}
+
+/// A confirmed watch on a local page whose URL carries a secret query and a fragment.
+fn confirmed_watch(root: &Path) -> Result<EntrustedWorkReadRequest, Box<dyn std::error::Error>> {
+    SessionManager::new(root)?.save(&Session::new("cli:owner"))?;
+    let created: EntrustedWorkSnapshot = serde_json::from_str(&run(
+        root,
+        &[
+            "create",
+            "watch a price",
+            "--consent",
+            "explicit-request",
+            "--evidence-ref",
+            "cli:user",
+            "--instructions",
+            "tell me when it is cheaper",
+        ],
+    )?)?;
+    let url = format!(
+        "{}/item?token=secret-token#reviews",
+        serve_page("<p>Price: $12.99 per month</p>")?
+    );
+    let work = EntrustedWorkReadRequest {
+        owner_session_id: "cli:owner".to_owned(),
+        requester_target: "cli:owner".to_owned(),
+        work_id: created.work.work_id,
+    };
+    let guard = NetworkGuard::with_ssrf_whitelist(["127.0.0.1/32"]);
+    let limits = WebFetchLimits::PRODUCTION;
+    let preview = preview_web_watch(
+        root,
+        &WebPreviewRequest {
+            work: work.clone(),
+            url: url.clone(),
+            target: WebPreviewTarget::Number {
+                label: "Price:".to_owned(),
+                decimal_comma: false,
+            },
+        },
+        &guard,
+        &limits,
+    )?;
+    let candidate_token = preview
+        .candidates
+        .first()
+        .ok_or("no candidate")?
+        .token
+        .clone();
+    confirm_web_watch(
+        root,
+        ConfirmWebWatchRequest {
+            work: work.clone(),
+            expected_revision: 1,
+            url,
+            candidate_token,
+            condition: WebCondition::AtMost {
+                value: "10".to_owned(),
+            },
+            cadence_seconds: 600,
+            now_ms: 1_800_000_000_000,
+        },
+        &guard,
+        &limits,
+    )?;
+    Ok(work)
 }
 
 fn serve_page(body: &'static str) -> Result<String, Box<dyn std::error::Error>> {

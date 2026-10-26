@@ -121,6 +121,8 @@ mod method_workflow;
 mod method_workflow_tests;
 #[path = "agent_loop_notification.rs"]
 mod notification;
+#[path = "agent_loop_web_notification.rs"]
+mod web_notification;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkflowDurableFactState {
@@ -778,8 +780,11 @@ impl<'a> AgentLoop<'a> {
         message: InboundMessage,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
         let session_key = self.effective_session_key(&message);
-        if message.owner_accepted_notification().is_some() {
+        if let Some(correlation) = message.owner_accepted_notification() {
             let _turn_guard = self.turn_lock.acquire(session_key.clone())?;
+            if correlation.starts_with(super::WEB_NOTIFY_PREFIX) {
+                return self.process_web_watch_notification(&message, &session_key);
+            }
             return self.process_entrusted_notification(&message, &session_key);
         }
         let routed_command = parse_loop_command_route(&message.content);

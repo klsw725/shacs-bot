@@ -7,7 +7,9 @@ use super::entrusted_work_access::work_snapshot_from_session;
 use super::entrusted_work_surface::load_owner_session;
 use super::web_watch_fetch::{display_url, sha256_ref};
 use super::web_watch_gate::active_web_wake;
-use super::web_watch_store::{web_watches, WebWatchLedger};
+use super::web_watch_notify_store::read_web_notifications;
+use super::web_watch_notify_surface::settings_view;
+use super::web_watch_store::{web_notify_settings, web_watches, WebWatchLedger};
 use super::{
     EntrustedWorkError, EntrustedWorkReadRequest, ObservationBlock, ObservationNextWake,
     WebIntervalCloseReason, WebIntervalClosure, WebWatchError, WebWatchPlan, WebWatchPlanView,
@@ -83,6 +85,24 @@ pub fn read_web_watch(
             at_ms: None,
         });
     }
+    let notify = web_notify_settings(&session, &request.work_id)
+        .map_err(EntrustedWorkError::Metadata)?
+        .map(|settings| {
+            settings_view(
+                &settings,
+                entry.as_ref().map_or(0, |entry| entry.plan.cadence_seconds),
+            )
+        });
+    let mut notifications: Vec<_> =
+        read_web_notifications(&data_dir.join("runtime/durable-events"))?
+            .into_values()
+            .filter(|entry| {
+                entry.intent.owner_session_id == request.owner_session_id
+                    && entry.intent.entrusted_work_id == request.work_id
+            })
+            .map(|entry| (entry.first_fact_index, entry.snapshot))
+            .collect();
+    notifications.sort_by_key(|(index, _)| *index);
     Ok(WebWatchSnapshot {
         work_id: request.work_id.clone(),
         condition_revision: work.work.current_revision,
@@ -99,6 +119,11 @@ pub fn read_web_watch(
         runtime_gaps: ledger.gaps,
         next_wake,
         history: ledger.history,
+        notify,
+        notifications: notifications
+            .into_iter()
+            .map(|(_, snapshot)| snapshot)
+            .collect(),
     })
 }
 

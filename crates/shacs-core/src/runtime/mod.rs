@@ -159,6 +159,12 @@ mod web_watch_dispatch;
 mod web_watch_extract;
 mod web_watch_fetch;
 mod web_watch_gate;
+mod web_watch_notify;
+mod web_watch_notify_dispatch;
+mod web_watch_notify_events;
+mod web_watch_notify_render;
+mod web_watch_notify_store;
+mod web_watch_notify_surface;
 mod web_watch_number;
 mod web_watch_read;
 mod web_watch_record;
@@ -629,6 +635,13 @@ pub use web_watch::{
 use web_watch::{WebWatchEntry, WebWatchPlan};
 pub use web_watch_dispatch::{WebWatchExecutor, WebWatchRuntime};
 pub use web_watch_fetch::WebFetchLimits;
+pub use web_watch_notify::{
+    ConfigureWebNotifyRequest, WebNotificationSnapshot, WebNotifyContent, WebNotifyDelivery,
+    WebNotifyEnqueue, WebNotifyFact, WebNotifyIntent, WebNotifyKind, WebNotifySettings,
+    WebNotifySettingsView, WebNotifyStage, WebRecoveredInterval, WEB_NOTIFY_ENQUEUE_ATTEMPTS,
+    WEB_NOTIFY_ENQUEUE_RETRY_MS, WEB_NOTIFY_MAX_THRESHOLD_SECONDS, WEB_NOTIFY_PREFIX,
+};
+pub use web_watch_notify_surface::configure_web_watch_notifications;
 pub use web_watch_read::{mask_web_watch_urls, read_web_watch};
 pub use web_watch_record::{
     ConfirmWebWatchRequest, WebCandidate, WebCheckResult, WebDecision, WebDecisionReason,

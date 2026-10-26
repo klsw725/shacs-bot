@@ -110,6 +110,80 @@ fn concurrent_dispatchers_cannot_lease_the_same_work_twice() -> Result<(), Box<d
 }
 
 #[test]
+fn a_session_takes_its_due_inbound_in_the_order_it_was_enqueued() -> Result<(), Box<dyn Error>> {
+    // Given: two messages for one session whose work ids sort the other way round.
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let payload_root = root.path().join("payloads");
+    let bus = MessageBus::new();
+    let mut dispatcher =
+        DurableWorkDispatcher::open(&event_root, &payload_root, bus.clone(), "owner-1", 100)?;
+    for (work_id, content) in [("work-b", "first"), ("work-a", "second")] {
+        let message = InboundMessage::new("cli", "user", "direct", content)
+            .with_session_key_override("cli:ordered");
+        dispatcher.enqueue_inbound(work_id, &message, None, None)?;
+    }
+    let state = evaluate_durable_recovery(&event_root, root.path().join("checkpoints"))
+        .state
+        .ok_or("missing pending state")?;
+
+    // When
+    let admission = evaluate_durable_work_recovery(&state.work, &payload_root, 100);
+    let dispatched = dispatcher.dispatch_due(&state.work, &admission, 100)?;
+
+    // Then: the first enqueued goes first, and the session holds the second until it is done.
+    assert_eq!(admission.due_work_ids, vec!["work-b", "work-a"]);
+    assert_eq!(dispatched.leased_work_ids, vec!["work-b"]);
+    assert_eq!(
+        bus.consume_inbound().ok_or("missing inbound")?.content,
+        "first"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_session_waits_for_its_older_inbound_retry_before_the_next() -> Result<(), Box<dyn Error>> {
+    // Given: a full bus, so the first of two messages for one session is scheduled for a retry.
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let payload_root = root.path().join("payloads");
+    let bus = MessageBus::bounded(1);
+    let mut dispatcher =
+        DurableWorkDispatcher::open(&event_root, &payload_root, bus.clone(), "owner-1", 100)?;
+    for (work_id, content) in [("work-b", "first"), ("work-a", "second")] {
+        let message = InboundMessage::new("cli", "user", "direct", content)
+            .with_session_key_override("cli:ordered");
+        dispatcher.enqueue_inbound(work_id, &message, None, None)?;
+    }
+    bus.try_publish_inbound(InboundMessage::new("cli", "user", "other", "filler"))?;
+    let mut dispatch = |now_ms| -> Result<Vec<String>, Box<dyn Error>> {
+        let state = evaluate_durable_recovery(&event_root, root.path().join("checkpoints"))
+            .state
+            .ok_or("missing state")?;
+        let admission = evaluate_durable_work_recovery(&state.work, &payload_root, now_ms);
+        Ok(dispatcher
+            .dispatch_due(&state.work, &admission, now_ms)?
+            .leased_work_ids)
+    };
+    let while_full = dispatch(100)?;
+    bus.consume_inbound().ok_or("missing filler")?;
+
+    // When: the bus has room again before the retry time, then at it.
+    let before_retry = dispatch(200)?;
+    let at_retry = dispatch(350)?;
+
+    // Then
+    assert!(while_full.is_empty());
+    assert!(before_retry.is_empty());
+    assert_eq!(at_retry, vec!["work-b"]);
+    assert_eq!(
+        bus.consume_inbound().ok_or("missing inbound")?.content,
+        "first"
+    );
+    Ok(())
+}
+
+#[test]
 fn durable_dispatch_restores_due_inbound_and_requeues_stale_lease() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let event_root = root.path().join("events");

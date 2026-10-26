@@ -16,7 +16,7 @@ use shacs_session::durable_work::{
     WorkPayloadRef, WorkRequeued, WorkRetryScheduled, WorkTerminal, WorkTerminalKind,
     MAX_DURABLE_WORK_ATTEMPTS, MAX_WORK_PAYLOAD_BYTES,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
@@ -248,12 +248,30 @@ impl DurableWorkDispatcher {
                 .filter(|item| item.state == ReplayWorkState::Leased)
                 .map(|item| item.session_key.clone()),
         );
+        // Inbound waiting for a retry keeps later inbound of its session behind it.
+        let mut retrying: BTreeMap<&str, u64> = BTreeMap::new();
+        for item in state.items.values().filter(|item| {
+            item.work_kind == INBOUND_WORK_KIND
+                && item.state == ReplayWorkState::WaitingRetry
+                && item.cancellation_requested_sequence.is_none()
+        }) {
+            let oldest = retrying
+                .entry(item.session_key.as_str())
+                .or_insert(item.enqueued_sequence);
+            *oldest = (*oldest).min(item.enqueued_sequence);
+        }
         for work_id in &admission.due_work_ids {
             let item = state
                 .items
                 .get(work_id)
                 .ok_or_else(|| DurableDispatchError::MissingWork(work_id.clone()))?;
             if item.work_kind != INBOUND_WORK_KIND {
+                continue;
+            }
+            if retrying
+                .get(item.session_key.as_str())
+                .is_some_and(|oldest| *oldest < item.enqueued_sequence)
+            {
                 continue;
             }
             if !unavailable_sessions.insert(item.session_key.clone()) {
@@ -598,9 +616,10 @@ impl DurableWorkDispatcher {
             );
         }
         message.session_key_override = Some(item.session_key.clone());
-        if item
+        if (item
             .work_id
             .starts_with(super::ENTRUSTED_NOTIFICATION_PREFIX)
+            || item.work_id.starts_with(super::WEB_NOTIFY_PREFIX))
             && item.dedupe_hint.as_deref() == Some(item.work_id.as_str())
         {
             message = message.with_owner_accepted_notification(item.work_id.clone());

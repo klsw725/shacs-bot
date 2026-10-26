@@ -11,8 +11,8 @@ use shacs_session::Session;
 use super::{
     DurableDispatchError, EntrustedWorkMetadataError, ObservationBlock, ObservationError,
     ObservationNextWake, WebCheckResult, WebFailureInterval, WebIntervalCloseReason,
-    WebIntervalClosure, WebObservationRecord, WebRuntimeGap, WebWatchEntry, WebWatchWake,
-    WEB_WATCH_METADATA_KEY, WEB_WATCH_OUTCOME,
+    WebIntervalClosure, WebNotifySettings, WebObservationRecord, WebRuntimeGap, WebWatchEntry,
+    WebWatchWake, WEB_WATCH_METADATA_KEY, WEB_WATCH_OUTCOME,
 };
 
 const HISTORY_LIMIT: usize = 32;
@@ -21,31 +21,78 @@ const HISTORY_LIMIT: usize = 32;
 #[serde(deny_unknown_fields)]
 struct WebWatchStore {
     watches: Vec<WebWatchEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    notify: Vec<WebNotifySettings>,
 }
 
-pub(super) fn web_watches(
-    session: &Session,
-) -> Result<Vec<WebWatchEntry>, EntrustedWorkMetadataError> {
+fn read_store(session: &Session) -> Result<WebWatchStore, EntrustedWorkMetadataError> {
     session
         .metadata
         .get(WEB_WATCH_METADATA_KEY)
         .cloned()
         .map(serde_json::from_value::<WebWatchStore>)
         .transpose()
-        .map(|store| store.unwrap_or_default().watches)
+        .map(Option::unwrap_or_default)
         .map_err(EntrustedWorkMetadataError::Deserialize)
+}
+
+fn write_store(
+    session: &mut Session,
+    store: &WebWatchStore,
+) -> Result<(), EntrustedWorkMetadataError> {
+    let value = serde_json::to_value(store).map_err(EntrustedWorkMetadataError::Serialize)?;
+    session
+        .metadata
+        .insert(WEB_WATCH_METADATA_KEY.to_owned(), value);
+    Ok(())
+}
+
+pub(super) fn web_watches(
+    session: &Session,
+) -> Result<Vec<WebWatchEntry>, EntrustedWorkMetadataError> {
+    read_store(session).map(|store| store.watches)
 }
 
 pub(super) fn store_web_watches(
     session: &mut Session,
     watches: Vec<WebWatchEntry>,
 ) -> Result<(), EntrustedWorkMetadataError> {
-    let value = serde_json::to_value(WebWatchStore { watches })
-        .map_err(EntrustedWorkMetadataError::Serialize)?;
-    session
-        .metadata
-        .insert(WEB_WATCH_METADATA_KEY.to_owned(), value);
-    Ok(())
+    let mut store = read_store(session)?;
+    store.watches = watches;
+    write_store(session, &store)
+}
+
+pub(super) fn web_notify_settings(
+    session: &Session,
+    work_id: &str,
+) -> Result<Option<WebNotifySettings>, EntrustedWorkMetadataError> {
+    Ok(read_store(session)?
+        .notify
+        .into_iter()
+        .find(|settings| settings.work_id == work_id))
+}
+
+pub(super) fn store_web_notify_settings(
+    session: &mut Session,
+    settings: WebNotifySettings,
+) -> Result<(), EntrustedWorkMetadataError> {
+    let mut store = read_store(session)?;
+    store
+        .notify
+        .retain(|stored| stored.work_id != settings.work_id);
+    store.notify.push(settings);
+    write_store(session, &store)
+}
+
+/// A recorded check with the interval state it left, captured when the check is applied so
+/// notification events do not depend on how much history is kept.
+#[derive(Debug, Clone)]
+pub(super) struct WebNotifyPoint {
+    pub record: WebObservationRecord,
+    /// The open interval after a failed check, or the interval a successful check closed.
+    pub interval: Option<WebFailureInterval>,
+    /// Time and plan digest of the last successful check before this one.
+    pub last_success: Option<(u64, String)>,
 }
 
 /// Facts replayed from the durable ledger for one web watch.
@@ -56,6 +103,13 @@ pub(super) struct WebWatchLedger {
     pub last_success: Option<WebObservationRecord>,
     pub intervals: Vec<WebFailureInterval>,
     pub gaps: Vec<WebRuntimeGap>,
+    pub notify_points: Vec<WebNotifyPoint>,
+    /// The latest failed check of the open interval, whatever settings it was recorded with,
+    /// so the interval is judged again when the settings change.
+    pub open_failure: Option<WebNotifyPoint>,
+    /// Runtime gaps of blocked checks after the open interval's last failure; they are left out
+    /// of its length once a later check extends or closes it.
+    blocked_gap_ms: u64,
 }
 
 impl WebWatchLedger {
@@ -67,6 +121,9 @@ impl WebWatchLedger {
             last_success: None,
             intervals: Vec::new(),
             gaps: Vec::new(),
+            notify_points: Vec::new(),
+            open_failure: None,
+            blocked_gap_ms: 0,
         };
         if !root.exists() {
             return Ok(ledger);
@@ -135,44 +192,79 @@ impl WebWatchLedger {
                     reason: WebIntervalCloseReason::LineageChanged,
                     at_ms: None,
                 });
+                self.open_failure = None;
+                self.blocked_gap_ms = 0;
             }
         }
         let open = self
             .intervals
             .last_mut()
             .filter(|interval| interval.closed.is_none());
+        let last_success = self
+            .last_success
+            .as_ref()
+            .map(|success| (success.observed_at_ms, success.wake.plan_digest.clone()));
+        let gap_ms = record
+            .runtime_gap
+            .map_or(0, |gap| gap.to_ms.saturating_sub(gap.from_ms));
+        let mut touched = None;
         match &record.result {
             WebCheckResult::Observed { .. } => {
                 if let Some(open) = open {
+                    open.exclude(gap_ms.saturating_add(std::mem::take(&mut self.blocked_gap_ms)));
                     open.closed = Some(WebIntervalClosure {
                         reason: WebIntervalCloseReason::Recovered,
                         at_ms: Some(record.observed_at_ms),
                     });
+                    touched = Some(open.clone());
                 }
                 self.last_success = Some(record.clone());
+                self.open_failure = None;
             }
-            WebCheckResult::Failed { failure, .. } => match open {
-                Some(open) => {
-                    open.failure_count = open.failure_count.saturating_add(1);
-                    open.last_failure_at_ms = record.observed_at_ms;
-                    open.last_failure = *failure;
+            WebCheckResult::Failed { failure, .. } => {
+                match open {
+                    Some(open) => {
+                        open.failure_count = open.failure_count.saturating_add(1);
+                        open.last_failure_at_ms = record.observed_at_ms;
+                        open.last_failure = *failure;
+                        open.exclude(
+                            gap_ms.saturating_add(std::mem::take(&mut self.blocked_gap_ms)),
+                        );
+                        open.next_check_at_ms = record.next_wake_at_ms;
+                        touched = Some(open.clone());
+                    }
+                    None => {
+                        let interval = WebFailureInterval {
+                            interval_id: format!(
+                                "web-failure:{:x}",
+                                Sha256::digest(record.wake.durable_work_id().as_bytes())
+                            ),
+                            condition_revision: revision,
+                            goal_transition_id: transition,
+                            started_at_ms: record.observed_at_ms,
+                            last_failure_at_ms: record.observed_at_ms,
+                            failure_count: 1,
+                            first_failure: *failure,
+                            last_failure: *failure,
+                            excluded_gap_ms: 0,
+                            next_check_at_ms: record.next_wake_at_ms,
+                            closed: None,
+                        };
+                        touched = Some(interval.clone());
+                        self.intervals.push(interval);
+                    }
                 }
-                None => self.intervals.push(WebFailureInterval {
-                    interval_id: format!(
-                        "web-failure:{:x}",
-                        Sha256::digest(record.wake.durable_work_id().as_bytes())
-                    ),
-                    condition_revision: revision,
-                    goal_transition_id: transition,
-                    started_at_ms: record.observed_at_ms,
-                    last_failure_at_ms: record.observed_at_ms,
-                    failure_count: 1,
-                    first_failure: *failure,
-                    last_failure: *failure,
-                    closed: None,
-                }),
-            },
-            WebCheckResult::Blocked { .. } => {}
+                self.open_failure = Some(WebNotifyPoint {
+                    record: record.clone(),
+                    interval: touched.clone(),
+                    last_success: last_success.clone(),
+                });
+            }
+            WebCheckResult::Blocked { .. } => {
+                if open.is_some() {
+                    self.blocked_gap_ms = self.blocked_gap_ms.saturating_add(gap_ms);
+                }
+            }
         }
         if record.decision.verdict.establishes_baseline() {
             self.comparable = Some(record.clone());
@@ -180,10 +272,18 @@ impl WebWatchLedger {
         if let Some(gap) = record.runtime_gap {
             self.gaps.push(gap);
         }
+        if record.notify_revision.is_some() {
+            self.notify_points.push(WebNotifyPoint {
+                record: record.clone(),
+                interval: touched,
+                last_success,
+            });
+        }
         self.history.push(record);
         trim(&mut self.history);
         trim(&mut self.gaps);
         trim(&mut self.intervals);
+        trim(&mut self.notify_points);
     }
 
     /// Next wake of the lineage `initial` belongs to, following the latest durable item.

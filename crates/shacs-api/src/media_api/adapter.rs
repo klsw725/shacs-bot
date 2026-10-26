@@ -92,6 +92,10 @@ pub trait ChatCompletionAdapter {
         shacs_core::runtime::NetworkGuard::default()
     }
 
+    fn web_watch_email_ready(&self) -> bool {
+        false
+    }
+
     fn now_ms(&self) -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

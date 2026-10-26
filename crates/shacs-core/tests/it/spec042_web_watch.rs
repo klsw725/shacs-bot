@@ -2,6 +2,8 @@
 mod failures;
 #[path = "spec042_web_watch/lifecycle.rs"]
 mod lifecycle;
+#[path = "spec042_web_watch/notify.rs"]
+mod notify;
 #[path = "spec042_web_watch/observation.rs"]
 mod observation;
 #[path = "spec042_web_watch/redirects.rs"]

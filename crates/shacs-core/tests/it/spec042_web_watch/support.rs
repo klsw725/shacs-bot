@@ -1,4 +1,10 @@
 use shacs_core::runtime::*;
+use shacs_core::tools::ToolRegistry;
+use shacs_providers::{LlmResponse, ProviderClient, ProviderError, ProviderRequest};
+use shacs_session::durable_replay::evaluate_durable_recovery;
+use shacs_session::durable_work::{
+    evaluate_durable_work_recovery_for_owner, ReplayWorkState, WorkTerminalKind,
+};
 use shacs_session::{Session, SessionManager};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -151,6 +157,22 @@ fn serve(mut stream: TcpStream, routes: &Mutex<BTreeMap<String, Page>>) {
     let _ = stream.write_all(&bytes);
 }
 
+struct ForbiddenProvider;
+
+impl ProviderClient for ForbiddenProvider {
+    fn chat(&self, _: ProviderRequest) -> Result<LlmResponse, ProviderError> {
+        panic!("a web watch notification must not call a provider")
+    }
+
+    fn chat_stream(
+        &self,
+        request: ProviderRequest,
+        _: &mut dyn FnMut(shacs_providers::ProviderEvent),
+    ) -> Result<LlmResponse, ProviderError> {
+        self.chat(request)
+    }
+}
+
 pub struct Executor;
 
 impl WebWatchExecutor for Executor {
@@ -163,6 +185,19 @@ impl WebWatchExecutor for Executor {
     }
 }
 
+/// A worker whose `tool:before` hook denies every read.
+pub struct BlockingExecutor;
+
+impl WebWatchExecutor for BlockingExecutor {
+    fn prepare(
+        &self,
+        _wake: &WebWatchWake,
+        _display_url: &str,
+    ) -> Result<String, ObservationBlock> {
+        Err(ObservationBlock::HookDenied)
+    }
+}
+
 pub struct Fixture {
     _root: tempfile::TempDir,
     pub workspace: PathBuf,
@@ -171,6 +206,7 @@ pub struct Fixture {
     pub server: Server,
     pub guard: NetworkGuard,
     pub limits: WebFetchLimits,
+    pub bus: MessageBus,
 }
 
 impl Fixture {
@@ -210,6 +246,7 @@ impl Fixture {
                 timeout: Duration::from_secs(1),
                 max_bytes: 64 * 1024,
             },
+            bus: MessageBus::new(),
         })
     }
 
@@ -267,26 +304,167 @@ impl Fixture {
         Ok(self.confirm(&url, token, at_most(at_most_value), 1, T0)?)
     }
 
+    pub fn dispatcher(&self) -> Result<DurableWorkDispatcher, DurableDispatchError> {
+        DurableWorkDispatcher::open(
+            self.data_dir.join("runtime/durable-events"),
+            self.data_dir.join("runtime/work-payloads"),
+            self.bus.clone(),
+            "owner",
+            120_000,
+        )
+    }
+
+    pub fn runtime(&self, now_ms: u64) -> WebWatchRuntime<'_> {
+        WebWatchRuntime {
+            workspace: &self.workspace,
+            data_dir: &self.data_dir,
+            now_ms,
+            guard: &self.guard,
+            limits: self.limits,
+        }
+    }
+
     /// One worker tick at `now_ms` twice: the first may only enqueue the due wake.
     pub fn tick(&self, now_ms: u64) -> TestResult {
+        self.tick_with(now_ms, &Executor)
+    }
+
+    pub fn tick_with(&self, now_ms: u64, executor: &dyn WebWatchExecutor) -> TestResult {
         for _ in 0..2 {
-            let mut dispatcher = DurableWorkDispatcher::open(
-                self.data_dir.join("runtime/durable-events"),
-                self.data_dir.join("runtime/work-payloads"),
-                MessageBus::new(),
-                "owner",
-                120_000,
-            )?;
-            let runtime = WebWatchRuntime {
-                workspace: &self.workspace,
-                data_dir: &self.data_dir,
-                now_ms,
-                guard: &self.guard,
-                limits: self.limits,
-            };
-            dispatcher.process_web_watches(&runtime, &Executor)?;
+            self.dispatcher()?
+                .process_web_watches(&self.runtime(now_ms), executor)?;
         }
         Ok(())
+    }
+
+    pub fn notify(
+        &self,
+        target: Option<&str>,
+        failure_threshold_seconds: Option<u64>,
+    ) -> Result<WebNotifySettingsView, WebWatchError> {
+        configure_web_watch_notifications(
+            &self.workspace,
+            ConfigureWebNotifyRequest {
+                work: self.request(),
+                target: target.map(str::to_owned),
+                failure_threshold_seconds,
+                email_ready: true,
+                now_ms: T0,
+            },
+        )
+    }
+
+    /// The worker's notification step after its checks.
+    pub fn route(&self, now_ms: u64) -> TestResult {
+        self.dispatcher()?
+            .enqueue_web_watch_notifications(&self.runtime(now_ms))?;
+        Ok(())
+    }
+
+    /// Notification inbound work that is due now, as the durable runtime hands it out.
+    pub fn due_inbound(&self, now_ms: u64) -> Result<Vec<InboundMessage>, Box<dyn Error>> {
+        let state = evaluate_durable_recovery(
+            self.data_dir.join("runtime/durable-events"),
+            self.data_dir.join("checkpoints"),
+        )
+        .state
+        .ok_or("durable replay")?;
+        let admission = evaluate_durable_work_recovery_for_owner(
+            &state.work,
+            self.data_dir.join("runtime/work-payloads"),
+            now_ms,
+            Some("owner"),
+        );
+        self.dispatcher()?
+            .dispatch_due(&state.work, &admission, now_ms)?;
+        let mut inbound = Vec::new();
+        while let Some(message) = self.bus.consume_inbound() {
+            inbound.push(message);
+        }
+        Ok(inbound)
+    }
+
+    /// The agent loop turn for one inbound message, then its durable work closed as the runtime
+    /// does after a turn. It must never call a provider.
+    pub fn consume(&self, message: InboundMessage) -> Result<AgentLoopTurnResult, Box<dyn Error>> {
+        let tools = ToolRegistry::new();
+        let mut config = AgentLoopConfig::new(&self.workspace, "unused");
+        config.durable_event_root = Some(self.data_dir.join("runtime/durable-events"));
+        let mut agent = AgentLoop::new(
+            self.bus.clone(),
+            SessionManager::new(&self.workspace)?,
+            ContextBuilder::new(&self.workspace),
+            &tools,
+            &ForbiddenProvider,
+            config,
+        );
+        let work_id = message
+            .metadata
+            .get("durable_work_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let result = agent.process_message(message)?;
+        let state = evaluate_durable_recovery(
+            self.data_dir.join("runtime/durable-events"),
+            self.data_dir.join("checkpoints"),
+        )
+        .state
+        .ok_or("durable replay")?;
+        if let Some(item) = work_id
+            .and_then(|work_id| state.work.items.get(&work_id))
+            .filter(|item| item.state == ReplayWorkState::Leased)
+        {
+            self.dispatcher()?
+                .record_terminal(item, WorkTerminalKind::Succeeded, "agent_turn")?;
+        }
+        Ok(result)
+    }
+
+    /// Ends the handed-out work of `message` without a turn, as when its hand-outs run out.
+    pub fn exhaust(&self, message: &InboundMessage) -> TestResult {
+        let work_id = message
+            .metadata
+            .get("durable_work_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("no durable work id")?;
+        let state = evaluate_durable_recovery(
+            self.data_dir.join("runtime/durable-events"),
+            self.data_dir.join("checkpoints"),
+        )
+        .state
+        .ok_or("durable replay")?;
+        let item = state
+            .work
+            .items
+            .get(work_id)
+            .filter(|item| item.state == ReplayWorkState::Leased)
+            .ok_or("work is not leased")?;
+        self.dispatcher()?.record_terminal(
+            item,
+            WorkTerminalKind::Exhausted,
+            "process_local_bus_attempt_limit",
+        )?;
+        Ok(())
+    }
+
+    /// Route, hand out and consume everything due; returns the mails that were sent. A session
+    /// gets one inbound turn at a time, so hand-outs repeat until nothing is due.
+    pub fn deliver(&self, now_ms: u64) -> Result<Vec<OutboundMessage>, Box<dyn Error>> {
+        self.route(now_ms)?;
+        loop {
+            let inbound = self.due_inbound(now_ms)?;
+            if inbound.is_empty() {
+                break;
+            }
+            for message in inbound {
+                self.consume(message)?;
+            }
+        }
+        let mut sent = Vec::new();
+        while let Some(message) = self.bus.consume_outbound() {
+            sent.push(message);
+        }
+        Ok(sent)
     }
 
     pub fn status(&self) -> Result<WebWatchSnapshot, WebWatchError> {

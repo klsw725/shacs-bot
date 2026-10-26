@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     EntrustedWorkReadRequest, ObservationBlock, ObservationNextWake, ObservationVerdict,
     PersistentGoalStatus, WebCheckFailure, WebCondition, WebEvidence, WebExtraction,
-    WebObservedValue, WebResponseFacts, WebWatchWake,
+    WebNotificationSnapshot, WebNotifySettingsView, WebObservedValue, WebResponseFacts,
+    WebWatchWake,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +68,9 @@ pub struct WebObservationRecord {
     pub next_wake_at_ms: Option<u64>,
     pub execution_snapshot_ref: Option<String>,
     pub decision: WebDecision,
+    /// The 042 notification settings revision in force when this check was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,8 +98,45 @@ pub struct WebFailureInterval {
     pub failure_count: u32,
     pub first_failure: WebCheckFailure,
     pub last_failure: WebCheckFailure,
+    /// Runtime gaps inside the interval; they do not count towards its length.
+    #[serde(default)]
+    pub excluded_gap_ms: u64,
+    /// The next check the last failure scheduled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<WebIntervalClosure>,
+}
+
+impl WebFailureInterval {
+    /// Failing time without runtime gaps: up to the success that closed the interval, or up to
+    /// the last failure while it is open.
+    pub fn failing_for_ms(&self) -> u64 {
+        self.closed
+            .filter(|closure| closure.reason == WebIntervalCloseReason::Recovered)
+            .and_then(|closure| closure.at_ms)
+            .unwrap_or(self.last_failure_at_ms)
+            .saturating_sub(self.started_at_ms)
+            .saturating_sub(self.excluded_gap_ms)
+    }
+
+    pub(super) fn exclude(&mut self, gap_ms: u64) {
+        self.excluded_gap_ms = self.excluded_gap_ms.saturating_add(gap_ms);
+    }
+
+    /// Failing time a notification judges. When the last failure put the next check later
+    /// than one cadence (429/503 backoff, `Retry-After`), nothing can recover before it, so the
+    /// interval counts up to that check instead of staying silent until then.
+    pub fn held_failing_ms(&self, cadence_ms: u64) -> u64 {
+        let held = self
+            .next_check_at_ms
+            .filter(|next| next.saturating_sub(self.last_failure_at_ms) > cadence_ms)
+            .map_or(0, |next| {
+                next.saturating_sub(self.started_at_ms)
+                    .saturating_sub(self.excluded_gap_ms)
+            });
+        self.failing_for_ms().max(held)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +162,8 @@ pub struct WebWatchSnapshot {
     pub runtime_gaps: Vec<WebRuntimeGap>,
     pub next_wake: ObservationNextWake,
     pub history: Vec<WebObservationRecord>,
+    pub notify: Option<WebNotifySettingsView>,
+    pub notifications: Vec<WebNotificationSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

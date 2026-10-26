@@ -2812,7 +2812,7 @@ where
         "onboard" => parse_onboard(parser, global_config),
         "status" => parse_status(parser, global_config),
         "goal" => spec033_cli::parse(parser),
-        "work" => spec036_work_cli::parse(parser),
+        "work" => spec036_work_cli::parse(parser, global_config),
         "tasks" => spec035_tasks_cli::parse(parser, global_config),
         "improve" => improvement_cli::parse(parser, global_config),
         "trajectory" => trajectory_cli::parse(parser, global_config),
@@ -16355,7 +16355,7 @@ pub fn help_text() -> String {
         "            Flags: --workspace/-w, --session",
         "  work      Create/read/revise/pause/resume/done/clear entrusted work; observe/observations",
         "            Actions: create, read, revise, pause, resume, done, clear",
-        "            Web page watch: web-preview, web-watch, web-status",
+        "            Web page watch: web-preview, web-watch, web-status, web-notify",
         "            Flags: --workspace/-w, --session, --owner-session",
         "  tasks     Print the canonical owner-backed task projection as JSON",
         "            Flags: --workspace/-w, --data-dir, --session, --json",
@@ -19822,7 +19822,9 @@ impl AgentLoopChatCompletionAdapter {
         while let Some(message) = outbound_bus.consume_outbound() {
             outbound.push(message);
         }
-        if result.stop_reason.starts_with("entrusted_notification") {
+        if result.stop_reason.starts_with("entrusted_notification")
+            || result.stop_reason.starts_with("web_watch_notification")
+        {
             return Ok((result, outbound));
         }
         if let Some(message) = loop_runtime
@@ -20410,6 +20412,10 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
 
     fn web_watch_network_guard(&self) -> shacs_core::runtime::NetworkGuard {
         web_watch_profile::web_watch_guard()
+    }
+
+    fn web_watch_email_ready(&self) -> bool {
+        spec042_web_watch_cli::email_ready(Some(self.config_path.clone())).unwrap_or(false)
     }
 
     fn now_ms(&self) -> u64 {

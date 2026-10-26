@@ -1,8 +1,8 @@
 use super::spec036_work_cli::{WorkAction, WorkOptions};
 use super::*;
 use shacs_core::runtime::{
-    ConfirmWebWatchRequest, EntrustedWorkReadRequest, WebCondition, WebFetchLimits,
-    WebPreviewRequest, WebPreviewTarget, WebTextArea,
+    ConfigureWebNotifyRequest, ConfirmWebWatchRequest, EntrustedWorkReadRequest, WebCondition,
+    WebFetchLimits, WebPreviewRequest, WebPreviewTarget, WebTextArea,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +24,27 @@ pub enum WebWatchAction {
         work_id: String,
         data_dir: PathBuf,
     },
+    Notify {
+        work_id: String,
+        target: Option<String>,
+        failure_threshold_seconds: Option<u64>,
+        config_path: Option<PathBuf>,
+    },
+}
+
+/// Whether the configured Email channel can send, by the same rule the runtimes use to start
+/// the Email transport: enabled, consented and with SMTP settings.
+pub(super) fn email_ready(config_path: Option<PathBuf>) -> Result<bool, CliError> {
+    let bundle = shacs_config::load_config_or_default(LoadOptions {
+        config_path,
+        workspace_override: None,
+        resolve_env: true,
+        write_back_migrations: false,
+    })
+    .map_err(|error| CliError::Runtime(error.to_string()))?;
+    let plugins = &bundle.config.channels.plugins;
+    Ok(channel_enabled_from_plugins(plugins, EMAIL_CHANNEL, false)
+        && email_runtime_config(plugins).is_some_and(|email| email.smtp.is_some()))
 }
 
 pub(super) fn run(options: WorkOptions, action: WebWatchAction) -> Result<String, CliError> {
@@ -81,13 +102,37 @@ pub(super) fn run(options: WorkOptions, action: WebWatchAction) -> Result<String
             shacs_core::runtime::read_web_watch(&options.workspace, &data_dir, &request(work_id))
                 .map_err(runtime)?,
         ),
+        WebWatchAction::Notify {
+            work_id,
+            target,
+            failure_threshold_seconds,
+            config_path,
+        } => {
+            let email_ready = target.is_some() && email_ready(config_path)?;
+            serde_json::to_value(
+                shacs_core::runtime::configure_web_watch_notifications(
+                    &options.workspace,
+                    ConfigureWebNotifyRequest {
+                        work: request(work_id),
+                        target,
+                        failure_threshold_seconds,
+                        email_ready,
+                        now_ms: now_millis(),
+                    },
+                )
+                .map_err(runtime)?,
+            )
+        }
     };
     output
         .and_then(|value| serde_json::to_string(&value))
         .map_err(|error| CliError::Runtime(error.to_string()))
 }
 
-pub(super) fn parse(mut parser: ArgParser) -> Result<CliCommand, CliError> {
+pub(super) fn parse(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
     let action_name = parser.next().ok_or_else(|| missing("an action"))?;
     let work_id = parser.next().ok_or_else(|| missing("a work id"))?;
     let mut workspace = None;
@@ -103,6 +148,10 @@ pub(super) fn parse(mut parser: ArgParser) -> Result<CliCommand, CliError> {
     let mut conditions = Vec::new();
     let mut cadence = None;
     let mut revision = None;
+    let mut target = None;
+    let mut off = false;
+    let mut threshold = None;
+    let mut config_path = global_config;
     while let Some(argument) = parser.next() {
         match argument.as_str() {
             "--workspace" | "-w" => workspace = Some(take_path(&mut parser, &argument)?),
@@ -125,6 +174,10 @@ pub(super) fn parse(mut parser: ArgParser) -> Result<CliCommand, CliError> {
             "--text-absent" => conditions.push(WebCondition::TextAbsent),
             "--cadence-seconds" => cadence = Some(number(&mut parser, &argument)?),
             "--expected-revision" => revision = Some(number(&mut parser, &argument)?),
+            "--target" => target = Some(take_value(&mut parser, &argument)?),
+            "--off" => off = true,
+            "--failure-threshold-seconds" => threshold = Some(number(&mut parser, &argument)?),
+            "--config" | "-c" => config_path = Some(take_path(&mut parser, &argument)?),
             "--help" | "-h" => return Ok(CliCommand::Help),
             _ => {
                 return Err(CliError::InvalidArguments(format!(
@@ -179,7 +232,17 @@ pub(super) fn parse(mut parser: ArgParser) -> Result<CliCommand, CliError> {
             work_id,
             data_dir: data_dir.ok_or_else(|| missing("--data-dir"))?,
         },
-        _ => return Err(missing("web-preview, web-watch or web-status")),
+        "web-notify" => WebWatchAction::Notify {
+            work_id,
+            target: match (target, off) {
+                (Some(target), false) => Some(target),
+                (None, true) => None,
+                _ => return Err(missing("--target email:<address> or --off")),
+            },
+            failure_threshold_seconds: threshold,
+            config_path,
+        },
+        _ => return Err(missing("web-preview, web-watch, web-status or web-notify")),
     };
     Ok(CliCommand::Work(WorkOptions {
         workspace,

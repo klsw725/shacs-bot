@@ -174,7 +174,7 @@ pub(super) fn append_notification_fact(
     Ok(())
 }
 
-fn writer_instance_ref() -> &'static str {
+pub(super) fn writer_instance_ref() -> &'static str {
     static INSTANCE: OnceLock<String> = OnceLock::new();
     INSTANCE.get_or_init(|| {
         use sha2::{Digest, Sha256};

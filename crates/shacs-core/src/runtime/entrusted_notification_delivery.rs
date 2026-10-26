@@ -1,9 +1,10 @@
 use std::path::Path;
 
 use super::entrusted_notification_store::{append_notification_fact, read_notifications};
+use super::web_watch_notify_store::record_web_notification_delivery;
 use super::{
-    EntrustedNotificationStage, ObservationError, OutboundMessage,
-    ENTRUSTED_NOTIFICATION_CORRELATION,
+    EntrustedNotificationStage, ObservationError, OutboundMessage, WebNotifyStage,
+    ENTRUSTED_NOTIFICATION_CORRELATION, WEB_NOTIFY_PREFIX,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -25,6 +26,14 @@ pub fn record_entrusted_notification_delivery(
     else {
         return Ok(());
     };
+    if correlation.starts_with(WEB_NOTIFY_PREFIX) {
+        let stage = match fact {
+            EntrustedNotificationTransportFact::Pending => WebNotifyStage::OutboundPending,
+            EntrustedNotificationTransportFact::Failed => WebNotifyStage::DeliveryFailed,
+            EntrustedNotificationTransportFact::SentHint => WebNotifyStage::SentHint,
+        };
+        return record_web_notification_delivery(event_root, message, correlation, stage);
+    }
     let entries = read_notifications(event_root)?;
     let Some(entry) = entries.get(correlation) else {
         return Ok(());

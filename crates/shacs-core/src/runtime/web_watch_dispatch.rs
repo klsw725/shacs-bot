@@ -11,7 +11,7 @@ use super::entrusted_work_surface::load_owner_session;
 use super::web_watch_decision::build_record;
 use super::web_watch_fetch::{check_plan, display_url, WebFetchLimits};
 use super::web_watch_gate::{active_web_wake, check_web_wake};
-use super::web_watch_store::{web_watches, WebWatchLedger};
+use super::web_watch_store::{web_notify_settings, web_watches, WebWatchLedger};
 use super::{
     DurableWorkDispatcher, EntrustedWorkError, ObservationBlock, ObservationError,
     ObservationNextWake, WebCheckResult, WebWatchEntry, WebWatchWake, WEB_WATCH_WORK_KIND,
@@ -84,7 +84,19 @@ impl DurableWorkDispatcher {
                 &wake.owner_session_id,
                 &wake.entrusted_work_id,
             )?;
-            let record = build_record(wake, &entry, result, &ledger, runtime.now_ms, snapshot_ref);
+            let (_, session) = load_owner_session(runtime.workspace, &wake.owner_session_id)?;
+            let notify_revision = web_notify_settings(&session, &wake.entrusted_work_id)
+                .map_err(EntrustedWorkError::Metadata)?
+                .filter(|settings| settings.target.is_some())
+                .map(|settings| settings.revision);
+            let record = build_record(
+                wake,
+                &entry,
+                result,
+                &ledger,
+                runtime.now_ms,
+                (snapshot_ref, notify_revision),
+            );
             self.record_web_watch_terminal(item, &record)?;
         }
         self.enqueue_web_watches(runtime)

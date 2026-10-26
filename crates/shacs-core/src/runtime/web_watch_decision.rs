@@ -32,7 +32,7 @@ pub(super) fn build_record(
     result: WebCheckResult,
     ledger: &WebWatchLedger,
     now_ms: u64,
-    execution_snapshot_ref: Option<String>,
+    (execution_snapshot_ref, notify_revision): (Option<String>, Option<u64>),
 ) -> WebObservationRecord {
     let cadence_ms = entry.plan.cadence_seconds.saturating_mul(1000);
     let runtime_gap =
@@ -54,6 +54,7 @@ pub(super) fn build_record(
         next_wake_at_ms,
         execution_snapshot_ref,
         decision,
+        notify_revision,
     }
 }
 

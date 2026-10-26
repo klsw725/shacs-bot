@@ -55,6 +55,7 @@ impl AutomationOwnerAdapters for AgentLoopChatCompletionAdapter {
             .process_entrusted_observations(&runtime, self)
             .and_then(|()| dispatcher.enqueue_entrusted_notifications(&runtime))
             .and_then(|()| dispatcher.process_web_watches(&web, self))
+            .and_then(|()| dispatcher.enqueue_web_watch_notifications(&web))
             .map_err(|error| error.to_string())
     }
     fn snapshot(&self, request: &ProviderRequest) -> Result<ExecutionSnapshot, String> {

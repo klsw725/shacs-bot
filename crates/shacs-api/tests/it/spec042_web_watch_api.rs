@@ -120,6 +120,15 @@ async fn web_watch_routes_preview_confirm_and_report_masked_status(
     let confirm = json!({"expected_revision": 1, "url": url, "candidate": candidate, "condition": {"kind": "at_most", "value": "10"}, "cadence_seconds": 600});
     let configured = request(local(), "POST", &path, confirm.clone()).await?;
     let stale = request(local(), "POST", &path, confirm).await?;
+    let notify_path = format!("{path}/notify");
+    let without_email = request(
+        local(),
+        "POST",
+        &notify_path,
+        json!({"target": "email:user@example.test"}),
+    )
+    .await?;
+    let off = request(local(), "POST", &notify_path, json!({"off": true})).await?;
     let status = request(api_router(adapter.clone()), "GET", &path, json!({})).await?;
 
     // Then
@@ -138,7 +147,10 @@ async fn web_watch_routes_preview_confirm_and_report_masked_status(
     assert_eq!(configured.0, 200);
     assert_eq!(configured.1["condition_revision"], 2);
     assert_eq!(stale.0, 409);
+    assert_eq!(without_email.0, 400);
+    assert_eq!((off.0, off.1["revision"].clone()), (200, json!(1)));
     assert_eq!(status.0, 200);
+    assert_eq!(status.1["notify"]["revision"], 1);
     assert_eq!(status.1["next_wake"]["status"], "awaiting_enqueue");
     assert_eq!(status.1["baseline"]["value"]["value"], "12.99");
     let output = status.1.to_string();

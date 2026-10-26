@@ -773,7 +773,7 @@ pub fn evaluate_durable_work_recovery_for_owner(
     let mut cancellation_requested_count = 0;
     let mut terminal_count = 0;
     let mut next_wake_at_ms = None;
-    let mut due_work_ids = Vec::new();
+    let mut due = Vec::new();
     let mut stale_lease_work_ids = Vec::new();
     let mut issues = Vec::new();
     for item in state.items.values() {
@@ -804,18 +804,14 @@ pub fn evaluate_durable_work_recovery_for_owner(
         }
         match item.state {
             ReplayWorkState::Pending if item.cancellation_requested_sequence.is_none() => {
-                if item.next_wake_at_ms.map_or(true, |wake| wake <= now_ms)
-                    && due_work_ids.len() < MAX_PROJECTED_WORK_IDS
-                {
-                    due_work_ids.push(item.work_id.clone());
+                if item.next_wake_at_ms.map_or(true, |wake| wake <= now_ms) {
+                    due.push(item);
                 }
                 next_wake_at_ms = min_option(next_wake_at_ms, item.next_wake_at_ms);
             }
             ReplayWorkState::WaitingRetry if item.cancellation_requested_sequence.is_none() => {
-                if item.next_wake_at_ms.is_some_and(|wake| wake <= now_ms)
-                    && due_work_ids.len() < MAX_PROJECTED_WORK_IDS
-                {
-                    due_work_ids.push(item.work_id.clone());
+                if item.next_wake_at_ms.is_some_and(|wake| wake <= now_ms) {
+                    due.push(item);
                 }
                 next_wake_at_ms = min_option(next_wake_at_ms, item.next_wake_at_ms);
             }
@@ -841,6 +837,13 @@ pub fn evaluate_durable_work_recovery_for_owner(
             _ => {}
         }
     }
+    // Oldest first: a session takes one due item at a time, in the order it was enqueued.
+    due.sort_by_key(|item| item.enqueued_sequence);
+    let due_work_ids = due
+        .into_iter()
+        .take(MAX_PROJECTED_WORK_IDS)
+        .map(|item| item.work_id.clone())
+        .collect();
     let blocked = issues.iter().any(|issue| {
         matches!(
             issue.kind,
