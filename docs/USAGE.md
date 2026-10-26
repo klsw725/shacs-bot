@@ -183,7 +183,7 @@ serve 또는 channel `runtime start`의 기존 worker가 029 queue에 `web_watch
 
 실패는 모두 `unknown`이며 기준을 바꾸지 않고, 다음 확인을 멈추지 않습니다. 429와 503에는 `Retry-After`(초 또는 HTTP 날짜, 최대 7일)와 연속 횟수에 따른 대기(주기×2ⁿ, 최대 하루)를 주기보다 우선합니다. 한 번의 확인은 redirect 경로 하나만 따라가며 바로 다시 요청하지 않습니다. 첫 요청을 포함한 매 요청 직전에 주소를 다시 검사합니다. 성공한 확인 뒤 첫 실패에서 실패 구간이 시작되고 성공한 추출만 구간을 닫습니다. 어시스턴트가 꺼져 예정 확인이 주기 이상 밀리면 실패가 아니라 `runtime_gap`으로 기록하고 다시 켜지면 밀린 확인을 한 번 바로 실행합니다. 공백은 실패 구간을 닫거나 나누지 않습니다. pause/done/clear 뒤의 예약 확인은 관측 없이 취소되고 열린 구간은 알림 없이 닫힌 것으로 표시됩니다. `web-status`·`GET`은 계획, 첫 기준, 마지막 성공 확인 시각, 현재 판정, 열린 실패 구간(시작 시각·횟수·분류), 기록된 공백, 다음 확인, 최근 32개 기록을 보여줍니다.
 
-**저장하는 것과 하지 않는 것:** 확인한 전체 URL은 위임 owner session 파일에 계획으로만 저장합니다. `session export`(JSON·JSONL)도 다른 출력처럼 이 계획 주소를 query와 fragment를 뺀 주소와 전체 URL의 SHA-256으로 바꿔 내보냅니다. 대화 메시지는 export에 원문 그대로 들어갑니다. 관측 기록, 판정, `web-status`·API 응답과 hook에 넘기는 값은 URL의 query(`?…`)와 fragment(`#…`)를 뺀 주소와 전체 URL의 SHA-256만 담습니다. 응답 본문과 주변 문구는 저장하지 않고, 정규화한 텍스트의 SHA-256, HTTP 상태, 최종 주소, 잘림 여부, 읽은 값만 남깁니다. 앞뒤 고정 문구는 확인한 추출 기준이라서 저장됩니다.
+**저장하는 것과 하지 않는 것:** 확인한 전체 URL은 위임 owner session 파일에 계획으로만 저장합니다. `session export`(JSON·JSONL)도 다른 출력처럼 이 계획 주소를 query와 fragment를 뺀 주소와 전체 URL의 SHA-256으로 바꿔 내보냅니다. 대화 메시지는 export에 원문 그대로 들어갑니다. 관측 기록, 판정, `web-status`·API 응답과 hook에 넘기는 값은 URL의 query(`?…`)와 fragment(`#…`)를 뺀 주소와 전체 URL의 SHA-256만 담습니다. 응답 본문과 주변 문구는 저장하지 않고, 정규화한 텍스트의 SHA-256, HTTP 상태, 최종 주소, 잘림 여부, 읽은 값만 남깁니다. 앞뒤 고정 문구는 확인한 추출 기준이라서 저장됩니다. 다만 `web-preview` 후보, `web-watch` 확인 응답, `web-status`·API 응답과 `session export`는 문구 조건의 문구, 앞뒤 고정 문구와 후보 표시(`shown_text`)를 비밀값을 가리고 그 안의 URL은 scheme·host·path만 남겨(사용자 정보·query·fragment 제거) 보여줍니다. session 파일의 추출 기준은 페이지와 맞춰 볼 수 있도록 원문 그대로 둡니다. 후보의 `token`도 확인할 때 쓰려고 원래 기준을 그대로 담고 있으므로 다른 곳에 남기지 마세요.
 
 **지원하지 않는 것:** JavaScript 실행, 로그인·cookie·인증 header·credential이 필요한 페이지, URL의 사용자 이름·비밀번호, http/https 이외 scheme, 접근 차단이나 이용 제한의 우회, 여러 값·여러 페이지입니다. 내부·사설 주소는 `tools.ssrfWhitelist`와 관계없이 설정 단계와 실행 중 모두 거절합니다. 프록시 환경 변수(`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`)는 쓰지 않고 페이지에 직접 연결합니다. 그래서 프록시를 거쳐야만 밖으로 나갈 수 있는 환경에서는 `network_error`가 됩니다. 주소 확인과 실제 연결 사이에 DNS 응답이 바뀌는 경우까지 막지는 않습니다. 위임 확인은 이 읽기 하나의 근거일 뿐 `web_fetch` 같은 도구 권한이 아니며 예약·구매·발송 승인이 아닙니다. 읽기 전에는 031 실행 snapshot과 030 `tool:before` hook(`web_watch_fetch`, 인자는 query를 뺀 주소)을 거치며 hook이 거절하면 `blocked`로 기록하고 다음 주기에 다시 확인합니다.
 
@@ -200,7 +200,7 @@ shacs-bot work web-notify "$WORK" --workspace "$WS" --session cli:direct --off
 ```
 
 - **설정:** `--target email:<address>`는 위임마다 하나이며 owner session이나 036 `linked_targets`와 따로 저장됩니다. config의 Email 채널이 켜져 있고(`enabled: true`) `consentGranted`와 `smtp` 설정으로 보낼 수 있어야 하며, 그렇지 않거나 `email:`이 아닌 대상은 거절합니다. `--config`는 다른 명령처럼 `shacs-bot --config <path> work web-notify …`로 앞에 써도 되고, 앞뒤에 모두 쓰면 명령 뒤의 값을 씁니다. 실패 알림 기준 시간은 기본 `max(확인 주기×2, 6시간)`이고 `확인 주기×2`~7일에서 바꿀 수 있습니다. 바꿀 때마다 알림 설정 revision이 하나 오르며, 관측 revision과 비교 기준은 그대로입니다. `--off`는 알림을 끕니다. API는 `POST .../web-watch/notify`(`{"target": ..., "failure_threshold_seconds": ...}` 또는 `{"off": true}`)입니다.
-- **변화 알림:** 조건 충족 여부가 바뀐 확인(`notify_candidate`)마다 한 번 보냅니다. 이전/새 값, 조건과 충족 여부, query·fragment를 뺀 주소와 SHA-256, 두 확인의 읽은 시각, 텍스트 digest와 HTTP 상태, 확인 한계, 추적 ID를 담습니다. 실패 중에는 값을 읽지 못하므로 변화 알림이 없습니다.
+- **변화 알림:** 조건 충족 여부가 바뀐 확인(`notify_candidate`)마다 한 번 보냅니다. 이전/새 값, 조건(문구 조건의 문구는 비밀값과 URL의 사용자 정보·query·fragment를 지워서)과 충족 여부, query·fragment를 뺀 주소와 SHA-256, 두 확인의 읽은 시각, 텍스트 digest와 HTTP 상태, 확인 한계, 추적 ID를 담습니다. 실패 중에는 값을 읽지 못하므로 변화 알림이 없습니다.
 - **확인 실패 알림:** 실패 구간이 기준 시간 이상 이어지면 구간마다 한 번 보냅니다(분류, 시작 시각, 마지막 성공 시각, 다음 확인 시각). 구간 길이는 첫 실패부터 셉니다. 아직 실패 중이면 마지막 실패 확인까지, 회복했다면 회복을 확인한 성공까지이며, 어시스턴트가 꺼져 있던 시간은 뺍니다. 기준 시간 전에 회복한 구간은 아무것도 보내지 않고, 회복을 확인한 순간 기준 시간에 이르렀다면 실패 알림 뒤 회복 알림을 보냅니다. 사이트의 `Retry-After`나 429·503 대기 때문에 다음 확인이 기준 시간을 넘겨 잡히면, 그 사이에는 회복을 확인할 수 없으므로 그 실패에서 바로 알립니다. 알림 설정을 바꾸거나 새로 켜도 열린 구간은 이어지며, 다음 확인을 기다리지 않고 마지막 실패 확인까지의 길이를 새 기준 시간으로 바로 다시 판단합니다(이미 넘었으면 바로 알림). 그보다 먼저 성공한 확인이 구간을 닫았더라도, 그 확인이 기록될 때의 설정으로 기준을 넘은 구간이면 실패 알림을 먼저 보내고 이어서 회복을 알립니다. 이미 보낸 실패 알림은 다시 보내지 않습니다.
 - **회복 알림:** 실패 알림을 보낸 구간이 성공으로 닫히면 한 번 보냅니다. 그 성공이 조건 결과도 바꿨다면 회복 사실을 담은 변화 알림 한 통만 보냅니다. 실패 알림이 보내지지 못한 채 queue에서 끝났다면(전달 시도 소진·취소) 회복 알림도 보내지 않고, 변화 알림에서는 회복 문구만 뺍니다. 실패 알림의 보내기가 시작됐다면 그 뒤 SMTP가 실패했더라도 회복은 알립니다.
 - **공백 알림:** 어시스턴트가 꺼져 예정 확인이 기준 시간 이상 밀렸다면, 다시 켜진 뒤 밀린 확인을 바로 하고 공백 기간을 한 번 알립니다. 공백은 실패 구간 길이에 넣지 않으므로 같은 공백 때문에 실패 알림이 따라오지 않습니다. pause/done/clear 상태의 위임은 확인하지 않으므로 공백 알림도 없습니다.
@@ -208,6 +208,23 @@ shacs-bot work web-notify "$WORK" --workspace "$WS" --session cli:direct --off
 알림은 확인을 기록한 그 시점의 알림 설정 revision으로만 만들어지고(열린 실패 구간만은 현재 설정으로 다시 판단), 사건(변화·실패 구간·회복·공백)마다 한 번만 durable queue에 들어갑니다. 재시작, 중복 wake, 재시도에도 같은 사건을 다시 넣지 않습니다. 같은 주소로 가는 알림은 queue에 들어간 순서대로 보내며, 앞선 알림이 다시 넘기기를 기다리는 동안 뒤의 알림도 기다립니다. enqueue 직전과 보내기 직전에 위임의 goal·동의·관측 revision·계획과 알림 설정 revision·대상을 다시 확인하고, 바뀌었으면 보내지 않습니다(`suppressed_stale`). queue에 들어갔지만 아직 보내기 전인 알림도 새 알림을 만들기 전에 같은 확인으로 먼저 억제하므로, 설정을 바꾼 뒤의 실패·회복 판단은 그 알림을 보낸 것으로 치지 않습니다. 보내기를 시작한 뒤 중단되면 다시 보내지 않고 전달 상태를 `unknown`으로 둡니다. 알림 문장은 저장된 사실로만 만들고 모델을 쓰지 않으며, 응답 본문·URL query·credential을 담지 않습니다. `web-status`·`GET`의 `notify`는 현재 설정을, `notifications`는 알림마다 종류·사건·설정 revision·enqueue 상태·enqueue 실패 횟수(`enqueue_failures`)·전달 상태(queue에 들어가기 전이거나 억제된 `not_requested`, `pending`, `sent_hint`, SMTP 실패나 보내기 전에 queue 작업이 끝난 `failed`, `unknown`)를 확인 기록과 따로 보여줍니다. 메일 전송 실패는 확인 성공을 바꾸지 않습니다. queue에 넣지 못한 알림은 enqueue 상태를 `failed`로 남기고 확인과 다른 알림은 그대로 이어가며, 1분 뒤부터 처음 기록된 순서대로 다시 시도해 모두 5번까지 시도합니다. 5번 모두 실패하면 더 시도하지 않고 enqueue `failed`로 남습니다.
 
 메일은 Email 채널을 실행하는 channel runtime(`run`, `runtime start`)이 보냅니다. `serve`의 worker도 확인과 enqueue는 하지만 Email transport를 실행하지 않아 알림이 `pending`으로 남습니다. 이 알림을 보내려면 해당 `serve`를 정상 종료하고 같은 data/workspace로 `runtime start`를 실행합니다. 이때도 보내기 직전에 위임과 알림 설정을 다시 확인하므로 그사이 바뀌었으면 보내지 않습니다(`suppressed_stale`).
+
+### 결정 마감 알림 (Spec 042 PRD 020)
+
+웹페이지 관찰과 Email 알림 대상(`web-notify`)을 정한 위임에 결정 마감을 정하면, 알림 시점에 페이지 값이 바뀌지 않았어도 마감 알림을 한 번 보냅니다.
+
+```sh
+shacs-bot work web-deadline "$WORK" --workspace "$WS" --session cli:direct \
+  --at 2026-11-01T18:00:00+09:00 --expected-deadline-revision 0
+shacs-bot work web-deadline "$WORK" --workspace "$WS" --session cli:direct --clear --expected-deadline-revision 1
+```
+
+- **설정:** `--at`은 시간대 오프셋(`Z`, `+09:00` 등)이 붙은 64자 이하의 RFC 3339 시각만 받으며, 입력한 표기 그대로와 절대 시각을 함께 저장합니다. 알림 시점은 기본 마감 24시간 전이고 `--remind-before-seconds`(60초~30일)로 바꿀 수 있습니다. 마감 revision은 관측 revision과 따로이며 바꿀 때마다 하나 오릅니다. 바꿀 때는 마지막에 본 revision을 `--expected-deadline-revision`으로 주어야 합니다(처음은 0). 마감을 바꾸거나 지워도 관측 revision과 비교 기준은 그대로입니다. 확인된 웹페이지 계획과 Email 알림 대상이 있어야 하며, `--clear`는 대상이 없어도 됩니다. API는 `POST .../web-watch/deadline`(`{"expected_revision": 0, "at": "...", "remind_before_seconds": ..., "remind_now": false}` 또는 `{"expected_revision": 1, "clear": true}`)이고, `web-status`·`GET`의 `deadline`이 현재 설정입니다.
+- **거절:** 이미 지난 마감과 오프셋이 없는 시각은 거절합니다. 마감은 미래지만 알림 시점이 이미 지났다면 `--remind-now`(API `remind_now`)를 명시했을 때만 받고, 이때는 설정 직후 바로 알립니다. 알림 시점이 아직 미래인데 `--remind-now`를 주면 거절합니다.
+- **알림:** worker가 029 durable work로 알림 시점에 한 번 깨어나 위임 목표, 마감(UTC와 입력한 표기), 남은 시간, 조건, 마지막으로 읽은 값과 그 시각을 담아 PRD 010의 알림 대상과 경로로 보냅니다. 마감 revision 하나에 한 번이며 재시작이나 중복 wake에도 다시 보내지 않습니다. 어시스턴트가 꺼져 있어 알림 시점을 지나쳤다면 다시 켜진 뒤 마감 전이면 늦게라도 한 번 보내고, 마감이 지났으면 보내지 않습니다. 마감 전에 queue에 들어간 알림도 보내기 직전에 마감이 지났으면 보내지 않습니다(예: `serve`만 실행하다가 마감 뒤에 channel runtime을 시작한 경우). 목표는 비밀값(Bearer·Basic·Digest 등 scheme과 관계없는 `Authorization:`·`Authorization=` 값, 모든 종류의 private key 블록 포함)과 URL의 사용자 정보·query·fragment(`shop.example/item?…`처럼 scheme 없이 적은 주소 포함)를 지우고 한 줄 240자까지 보여줍니다. 문구 조건의 문구도 알림에서는 같은 방식으로 가립니다.
+- **취소와 재개:** 마감이나 알림 시점을 바꾸거나 지우면, 또는 pause/done/clear나 동의 철회 뒤에는 이전 예약을 취소하고 알리지 않습니다. resume했을 때 알림 시점이 아직 미래면 다시 예약하고, 이미 지났으면 소급해 보내지 않습니다. 마감이 지난 뒤에도 goal이 active면 관측은 계속하고 마감 알림은 더 만들지 않습니다.
+- **오래된 알림:** 마감 알림은 마감 revision과 알림 설정 revision에 함께 묶입니다. enqueue 직전과 보내기 직전에 위임의 goal·동의·lineage, 두 revision, 대상을 다시 확인하고 바뀌었으면 보내지 않습니다(`suppressed_stale`). 대상이 바뀌어 억제됐다면 마감 전인 동안 새 대상으로 한 번 다시 만듭니다.
+- **비보장:** 원격 수신 확인과 exactly-once 전달은 없고, 메일은 channel runtime(`run`, `runtime start`)만 보냅니다. 반복 리마인더, 마감 자동 추정, 마감 뒤 자동 중단이나 자동 행동은 없습니다.
 
 ## Spec 033 goal, improvement, replay
 
