@@ -1,6 +1,6 @@
 # 042. 대화로 맡긴 웹페이지 관찰과 믿을 수 있는 침묵 아키텍처 명세
 
-Status: Planned
+Status: Complete (Scoped)
 
 Consumes: 010 host safety, 029 durable runtime, 030 trusted execution, 031 execution snapshot, 033 goal and automation, 036 entrusted work
 
@@ -71,3 +71,16 @@ Consumes: 010 host safety, 029 durable runtime, 030 trusted execution, 031 execu
 | [030 대화형 위임 요약·확인](prds/030-conversational-entrustment-summary-and-confirmation.md) | 요약 생성·조건 구체화·확인 결속, 위임·관측·알림 설정·마감의 일괄 설정, 대화 조회·수정 | 000, 010, 020 | 실제 대화 진입점의 end-to-end 흐름 |
 
 소유 범위와 수용 조건마다 owner는 하나다. 범위 2·3·4와 수용 조건 2·3은 000, 범위 5·6과 수용 조건 4·5는 010, 범위 7과 수용 조건 6은 020, 범위 1·8과 수용 조건 1·7은 030이 소유한다. 다른 PRD의 결과를 끝까지 이어 확인하는 것은 소비이지 공동 소유가 아니다. 042 최종 판정에는 네 PRD의 종료 증거와 030의 실제 사용자 흐름을 함께 확인하며 별도의 뒤 번호 PRD를 요구하지 않는다.
+
+## 종료 증거 (2026-10-28)
+
+PRD [000](prds/000-web-page-observation-and-condition-decision.md), [010](prds/010-change-failure-recovery-and-gap-notification.md), [020](prds/020-decision-deadline-reminder.md), [030](prds/030-conversational-entrustment-summary-and-confirmation.md)이 각각 독립 Oracle 검토에서 **PASS**를 받고 `Complete (Scoped)`로 닫혔다(000은 10차, 010은 11차, 020은 9차, 030은 23차). 수용 조건마다 owner PRD의 종료 확인이 근거이며, 030의 실제 사용자 흐름이 앞 PRD의 결과를 한 대화와 한 runtime에서 끝까지 이어 확인했다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 release seal이 아니다.
+
+- 조건 1(030): 실제 `runtime start`의 WebSocket 채널 대화에서 요청에 요약 revision 1과 그 ID·revision의 확인·취소 버튼이 나왔고, 같은 발신자의 `응` 뒤에만 위임·관측·첫 기준·알림 설정·마감이 한 번에 생겼으며 동의 근거는 확인한 요약이었다. 일회성 질문, 애매한 답, 이전 revision의 버튼, 재시작 뒤의 확인은 아무것도 만들지 않았다(QA 22/22). 다른 발신자의 답과 버튼, 가장 최근 응답이 아닌 요약에 대한 답, 지원하지 않는 조건·알림 대상과 볼 값을 찾을 수 없는 페이지의 안내는 실제 agent loop 시험이 확인했다(`spec042_web_watch::conversation::` 41개).
+- 조건 2(000, 030): 로컬 HTTP 서버 페이지에서 확인 순간 다시 읽은 값이 첫 기준이 되고 A → 무관한 변화 → B가 무변화·무변화·통지 후보로 남았으며, 확인 순간 값이 바뀌면 다시 확인을 요구했다(000 QA 44/44). 대화 경로에서도 요약 뒤 바뀐 값은 revision 2로 다시 보였고, 페이지에 넣은 지시 문구는 요약과 설정을 바꾸지 못했다(030 QA).
+- 조건 3(000): 내부 주소, 사설 주소로의 redirect, userinfo URL은 시험용 profile 없이, `tools.ssrfWhitelist`에 사설 대역을 넣은 config에서도 설정 단계에서 거절됐다. 정적 내용에서 볼 값의 앞뒤 고정 문구를 찾을 수 없는 페이지는 성공을 합성하지 않고 `static_content_unavailable`로 남았으며(000 시험), 마지막 성공 확인 시각과 현재 상태를 CLI/API로 조회했다.
+- 조건 4·5(010): 기준·무변화·무관한 변화는 침묵하고 B만 이전/새 값·조건·URL·읽은 시각·근거가 담긴 변화 알림으로 한 번 전달됐다. 기준 시간을 넘긴 확인 실패는 실패 알림 한 번, 회복은 회복 알림 한 번이었고 실패 중 변화 알림은 없었다. 기준 시간을 넘게 꺼 두었던 공백은 공백 알림 한 번이었고, 재시작·중복 wake·조건 변경 경합에서 같은 사건의 중복이나 오래된 조건의 알림이 없었다(010 QA 21/21과 010 시험).
+- 조건 6(020): 정한 마감의 알림 시점에 변화가 없어도 마감 알림이 한 번 전달됐고, 마감 변경·pause·done·clear 뒤에는 이전 마감 알림이 없었으며 마감 변경은 비교 기준을 바꾸지 않았다(020 QA 22/22와 020 시험).
+- 조건 7(030): 같은 runtime에서 대화 요청 → 요약 → 확인 → A, A, 무관한 변화, B(변화 메일 한 통) → 기준 시간을 넘긴 실패와 회복(메일 각 한 통) → 대화로 바꾼 실패 알림 시간(기준 유지)과 조건(새 기준) → 마감 알림(한 통)까지 이어졌다. 대화로 물은 마지막 성공 확인 시각과 그때의 값·알림 대상은 저장된 사실과 같았고, 모든 메일은 정한 주소로 갔으며 URL query가 없었다(030 QA 22/22).
+
+각 PRD의 최종 전체 workspace 실행에서 유일한 실패는 043 종료 때 기록한 Spec034 baseline 실패(`runtime::generated_media_release::runner::fixture::tests::mismatch_uses_isolated_tree`)였다. 남은 제한은 각 PRD의 "검증"에 적은 것과 같다(한 대화에 위임 하나와 한 페이지, 목록 밖 표현은 확인이 아님, 앞선 turn에서 읽은 페이지 내용의 영향, 원격 수신 ACK와 exactly-once 전달 없음 등).
