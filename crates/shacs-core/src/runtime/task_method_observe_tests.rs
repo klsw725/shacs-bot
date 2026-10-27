@@ -152,6 +152,96 @@ fn a_read_blocked_by_a_hook_is_a_failed_source_whatever_its_message() {
     assert!(source.content_digest.is_none());
 }
 
+#[test]
+fn a_read_whose_call_id_holds_an_address_is_recorded_as_read() {
+    // Given: a read the provider names with an address, which progress events show by digest.
+    let mut tools = ToolRegistry::new();
+    tools.register(Reader);
+    let read = LlmResponse {
+        finish_reason: "tool_calls".to_owned(),
+        tool_calls: vec![shacs_providers::ToolCallRequest::new(
+            "https://shop.example/item?coupon=secret-ref#checkout",
+            "read_file",
+            serde_json::Map::from_iter([("path".to_owned(), serde_json::json!("notes.md"))]),
+        )],
+        ..LlmResponse::default()
+    };
+    let done = LlmResponse {
+        content: Some("done".to_owned()),
+        ..LlmResponse::default()
+    };
+    let provider = ReadThenAnswer(Mutex::new(vec![done, read]));
+    let observation = Arc::new(Mutex::new(MethodObservation::default()));
+    let mut spec = AgentRunSpec::new(
+        vec![serde_json::json!({"role": "user", "content": "report"})],
+        &tools,
+        &provider,
+        "test-model",
+    );
+    attach(&mut spec, observation.clone());
+    // When
+    let result = AgentRunner::new().run(spec);
+    // Then: the read is the method's source, named without the address's query.
+    assert!(result.is_ok());
+    let observed = lock(&observation);
+    assert_eq!(observed.report_sources.len(), 1);
+    let source = &observed.report_sources[0];
+    assert_eq!(
+        source.status,
+        crate::runtime::task_method_report::SourceStatus::Read
+    );
+    assert!(!source.call_id.contains("secret-ref"), "{}", source.call_id);
+}
+
+#[test]
+fn reads_whose_ids_look_alike_in_diagnostics_are_both_recorded() {
+    // Given: a read under an address and a read under a plain id written like a short digest of
+    // that address.
+    let address = "https://shop.example/item?coupon=secret-ref#checkout";
+    let digest = format!("{:x}", Sha256::digest(address.as_bytes()));
+    let look_alike = format!("call-{}", &digest[..16]);
+    let mut tools = ToolRegistry::new();
+    tools.register(Reader);
+    let read = |id: &str, path: &str| {
+        shacs_providers::ToolCallRequest::new(
+            id,
+            "read_file",
+            serde_json::Map::from_iter([("path".to_owned(), serde_json::json!(path))]),
+        )
+    };
+    let reads = LlmResponse {
+        finish_reason: "tool_calls".to_owned(),
+        tool_calls: vec![read(address, "notes.md"), read(&look_alike, "other.md")],
+        ..LlmResponse::default()
+    };
+    let done = LlmResponse {
+        content: Some("done".to_owned()),
+        ..LlmResponse::default()
+    };
+    let provider = ReadThenAnswer(Mutex::new(vec![done, reads]));
+    let observation = Arc::new(Mutex::new(MethodObservation::default()));
+    let mut spec = AgentRunSpec::new(
+        vec![serde_json::json!({"role": "user", "content": "report"})],
+        &tools,
+        &provider,
+        "test-model",
+    );
+    attach(&mut spec, observation.clone());
+    // When
+    let result = AgentRunner::new().run(spec);
+    // Then: both reads are sources the method read, under two names.
+    assert!(result.is_ok());
+    let observed = lock(&observation);
+    let read_names = observed
+        .report_sources
+        .iter()
+        .filter(|source| source.status == crate::runtime::task_method_report::SourceStatus::Read)
+        .map(|source| source.call_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(observed.report_sources.len(), 2);
+    assert_eq!(read_names.len(), 2, "{read_names:?}");
+}
+
 struct StrictReader;
 impl crate::tools::Tool for StrictReader {
     fn name(&self) -> &str {

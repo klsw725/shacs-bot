@@ -94,9 +94,9 @@ impl JavaScriptToolBeforeHandler {
         let call = context.call();
         let input = JsValue::from_json(
             &json!({
-                "id": call.id,
+                "id": super::runner_spec034::observable_call_id(&call.id),
                 "name": call.name,
-                "arguments": call.arguments,
+                "arguments": super::runner_spec034::plugin_tool_arguments(&call.name, &call.arguments),
             }),
             &mut engine,
         )

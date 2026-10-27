@@ -1,3 +1,4 @@
+use super::runner_spec034::observable_call_id;
 use super::task_method::{EffectOutcome, EvidenceFact, ExternalEffectFact};
 use super::task_method_calc::{run, CalculationRun};
 use super::task_method_image::ImageAttempt;
@@ -94,7 +95,7 @@ impl Capture {
                 (call.name.as_str(), &call.arguments)
             };
             pending.insert(
-                call.id.clone(),
+                observable_call_id(&call.id),
                 Candidate {
                     name: preview(name),
                     digest: digest(arguments),
@@ -112,22 +113,21 @@ impl Capture {
 
     fn record_blocked(&self, blocked: &[RuntimeToolMessage]) {
         for message in blocked {
-            let Some(candidate) = lock(&self.calls).remove(&message.tool_call_id) else {
+            let id = observable_call_id(&message.tool_call_id);
+            let Some(candidate) = lock(&self.calls).remove(&id) else {
                 continue;
             };
             let mut observed = lock(&self.observed);
             if let Some(command) = &candidate.command {
-                observed.calculation_runs.push(run(
-                    &message.tool_call_id,
-                    command,
-                    &message.content,
-                ));
+                observed
+                    .calculation_runs
+                    .push(run(&id, command, &message.content));
             }
             record_result(
                 &mut observed,
                 candidate.report.as_ref(),
                 candidate.image.as_ref(),
-                &message.tool_call_id,
+                &id,
                 &message.content,
                 self.workspace.as_deref(),
                 Some("blocked before it ran"),

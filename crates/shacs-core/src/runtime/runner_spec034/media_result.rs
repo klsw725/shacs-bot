@@ -113,7 +113,11 @@ fn materialize_run_result(
         error_message: result.error_message,
         error_status: result.error_status,
         interrupt: result.interrupt,
-        tool_events: result.tool_events,
+        tool_events: result
+            .tool_events
+            .into_iter()
+            .map(super::observability::observable_tool_event)
+            .collect(),
         had_injections: result.had_injections,
         generated_artifacts,
         recent_auto_mode_denials: result.recent_auto_mode_denials,

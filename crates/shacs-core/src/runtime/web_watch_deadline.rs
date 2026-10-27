@@ -92,7 +92,8 @@ pub struct ConfigureWebDeadlineRequest {
     pub now_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebDeadlineInput {
     /// RFC 3339 with an explicit offset, kept as given.
     pub at: String,

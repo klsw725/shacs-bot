@@ -1143,11 +1143,13 @@ fn tool_execution_identity(spec: &AgentRunSpec<'_>, call_id: &str) -> Option<Exe
     )
 }
 
+/// The name of a tool call in the execution record: as diagnostics name it, or always by its
+/// digest in an image or composed request.
 fn tool_call_key(spec: &AgentRunSpec<'_>, call_id: &str) -> String {
     if spec.quiet_ledger {
         super::quiet_tools::opaque_call_id(call_id)
     } else {
-        call_id.to_owned()
+        observable_call_id(call_id)
     }
 }
 
@@ -2575,19 +2577,31 @@ fn invoke_hook_finalize(
     }
 }
 
+/// A hook that takes no raw arguments sees the calls as diagnostics do; what it holds back is
+/// paired again with the calls as the provider named them.
 fn invoke_hook_block_tool_calls(
     hook: &dyn AgentHook,
     context: &AgentHookContext,
     calls: &[RuntimeToolCall],
 ) -> Vec<RuntimeToolMessage> {
-    let observable_calls;
-    let calls = if hook.receives_tool_arguments() {
-        calls
-    } else {
-        observable_calls = observable_tool_calls(calls);
-        &observable_calls
-    };
-    catch_unwind(AssertUnwindSafe(|| hook.block_tool_calls(context, calls))).unwrap_or_default()
+    if hook.receives_tool_arguments() {
+        return catch_unwind(AssertUnwindSafe(|| hook.block_tool_calls(context, calls)))
+            .unwrap_or_default();
+    }
+    let observable_calls = observable_tool_calls(calls);
+    let mut blocked = catch_unwind(AssertUnwindSafe(|| {
+        hook.block_tool_calls(context, &observable_calls)
+    }))
+    .unwrap_or_default();
+    for message in &mut blocked {
+        if let Some(call) = calls
+            .iter()
+            .find(|call| observable_call_id(&call.id) == message.tool_call_id)
+        {
+            message.tool_call_id = call.id.clone();
+        }
+    }
+    blocked
 }
 
 fn invoke_agent_hook_before_iteration(spec: &AgentRunSpec<'_>, context: &AgentHookContext) {
@@ -3229,6 +3243,22 @@ pub(super) fn tool_event_for_message(
     }
 
     let is_error = is_tool_unsuccessful_message(message);
+    let (detail, result) = if crate::tools::is_web_watch_tool(&message.name) {
+        let result = shacs_utils::progress_events::project_tool_progress_result(
+            &message.name,
+            tool_event_result_value(&message.content),
+        );
+        let detail = match &result {
+            Value::String(text) => event_detail(text),
+            projected => event_detail(&projected.to_string()),
+        };
+        (detail, result)
+    } else {
+        (
+            event_detail(&message.content),
+            tool_event_result_value(&message.content),
+        )
+    };
     ToolEvent {
         name: message.name.clone(),
         status: if is_error {
@@ -3236,10 +3266,10 @@ pub(super) fn tool_event_for_message(
         } else {
             ToolStatus::Ok
         },
-        detail: event_detail(&message.content),
+        detail,
         call_id: Some(message.tool_call_id.clone()),
         arguments: call.map(|call| observable_tool_arguments(&call.name, &call.arguments)),
-        result: Some(tool_event_result_value(&message.content)),
+        result: Some(result),
     }
 }
 
@@ -3364,7 +3394,7 @@ fn tool_call_mapping_event(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let evidence = resolved_bridge_call.map(|resolved_call| BridgeUnderlyingMappingEvidence {
-        bridge_call_id: resolved_call.original_call_id.clone(),
+        bridge_call_id: observable_call_id(&resolved_call.original_call_id),
         bridge_name: resolved_call.bridge_name.clone(),
         underlying_name: resolved_call.underlying_name.clone(),
         scope_digest: resolved_call.scope_digest.clone(),
@@ -3430,7 +3460,7 @@ fn event_detail(content: &str) -> String {
 pub(super) fn emit_events(spec: &AgentRunSpec<'_>, events: &[ToolEvent]) {
     if let Some(callback) = &spec.tool_event_callback {
         for event in events {
-            invoke_tool_event_callback(callback, event);
+            invoke_tool_event_callback(callback, &observable_tool_event(event.clone()));
         }
     }
 }

@@ -268,7 +268,9 @@ fn normalize_tool_candidate(
         "session_id": &input.session_id,
         "turn_id": &input.turn_id,
     }));
-    let provider_tool_call_id = non_empty_redacted(tool_call_id);
+    let provider_tool_call_id = Some(tool_call_id.trim())
+        .filter(|id| !id.is_empty())
+        .and_then(|id| non_empty_redacted(&super::runner_spec034::observable_call_id(id)));
     if provider_tool_call_id.is_none() {
         normalization_errors.push(ActionNormalizationError::MissingToolCallId);
     }
@@ -552,7 +554,9 @@ fn sanitize_origin(origin: PermissionedActionOrigin) -> PermissionedActionOrigin
             scope_digest,
             parent_origin,
         } => PermissionedActionOrigin::DeferredBridge {
-            original_call_id: redact_string(&original_call_id),
+            original_call_id: redact_string(&super::runner_spec034::observable_call_id(
+                &original_call_id,
+            )),
             bridge_name: redact_string(&bridge_name),
             scope_digest: redact_string(&scope_digest),
             parent_origin: Box::new(sanitize_origin(*parent_origin)),

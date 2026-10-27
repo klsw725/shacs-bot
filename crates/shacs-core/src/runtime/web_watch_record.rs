@@ -156,6 +156,10 @@ pub struct WebWatchSnapshot {
     pub plan: Option<WebWatchPlanView>,
     pub baseline: Option<WebEvidence>,
     pub last_success_at_ms: Option<u64>,
+    /// What the read at `last_success_at_ms` found: the current plan's last successful check,
+    /// or its baseline when no check succeeded after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_read: Option<WebEvidence>,
     pub current_decision: Option<WebDecision>,
     pub failure_interval: Option<WebFailureInterval>,
     pub failure_intervals: Vec<WebFailureInterval>,
@@ -168,7 +172,8 @@ pub struct WebWatchSnapshot {
     pub notifications: Vec<WebNotificationSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebPreviewTarget {
     Number {
         label: String,
@@ -182,7 +187,8 @@ pub enum WebPreviewTarget {
 
 /// The text between `label` and the next `until`, offered whether or not the phrase is in
 /// it. Without an area the phrase must already be on the page.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebTextArea {
     pub label: String,
     pub until: String,

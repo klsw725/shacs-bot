@@ -1948,15 +1948,18 @@ pub(crate) fn tool_before_context_payload(
     let calls = calls
         .iter()
         .map(|call| {
+            let id = super::runner_spec034::observable_call_id(&call.id);
+            let arguments =
+                super::runner_spec034::plugin_tool_arguments(&call.name, &call.arguments);
             json!({
-                "id": truncate_chars(&redact_string(&call.id), MAX_CONTEXT_PREVIEW_CHARS),
+                "id": truncate_chars(&redact_string(&id), MAX_CONTEXT_PREVIEW_CHARS),
                 "name": call.name,
-                "arguments": call.arguments,
-                "argument_keys": argument_keys(&call.arguments),
                 "arguments_preview": truncate_chars(
-                    &redact_string(&call.arguments.to_string()),
+                    &redact_string(&arguments.to_string()),
                     MAX_CONTEXT_PREVIEW_CHARS,
                 ),
+                "argument_keys": argument_keys(&arguments),
+                "arguments": arguments,
             })
         })
         .collect::<Vec<_>>();

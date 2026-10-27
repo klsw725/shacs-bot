@@ -9,6 +9,7 @@ mod mcp;
 mod message;
 mod notebook;
 mod propose_entrusted_work;
+mod propose_web_watch;
 mod registry;
 mod sandbox;
 mod schema;
@@ -45,6 +46,14 @@ pub(crate) use propose_entrusted_work::{
     proposal_draft_from_tool_content, EntrustedWorkProposalDraft,
 };
 pub use propose_entrusted_work::{ProposeEntrustedWorkTool, PROPOSE_ENTRUSTED_WORK_TOOL_NAME};
+pub(crate) use propose_web_watch::{
+    is_web_watch_tool, web_watch_proposal_from_tool_content,
+    web_watch_status_request_from_tool_content, WebWatchProposalDraft,
+};
+pub use propose_web_watch::{
+    ProposeWebWatchTool, WebWatchStatusTool, PROPOSE_WEB_WATCH_TOOL_NAME,
+    WEB_WATCH_STATUS_TOOL_NAME,
+};
 pub use registry::{PreparedToolCall, ToolRegistry};
 pub use sandbox::wrap_command;
 pub use schema::{

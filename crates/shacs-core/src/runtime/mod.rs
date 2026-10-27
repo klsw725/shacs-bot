@@ -154,6 +154,10 @@ pub mod trusted_resources;
 pub mod trusted_runtime;
 mod trusted_tool_before_registry;
 mod web_watch;
+mod web_watch_conversation;
+mod web_watch_conversation_setup;
+mod web_watch_conversation_status;
+mod web_watch_conversation_summary;
 mod web_watch_deadline;
 mod web_watch_deadline_dispatch;
 mod web_watch_deadline_surface;
@@ -638,6 +642,10 @@ pub use web_watch::{
     WEB_WATCH_METADATA_KEY, WEB_WATCH_MIN_CADENCE_SECONDS, WEB_WATCH_OUTCOME, WEB_WATCH_WORK_KIND,
 };
 use web_watch::{WebWatchEntry, WebWatchPlan};
+pub use web_watch_conversation::{
+    WebWatchConversationConfig, WEB_WATCH_CANCEL_REPLIES, WEB_WATCH_CONFIRM_REPLIES,
+    WEB_WATCH_SUMMARY_TTL_MS,
+};
 pub use web_watch_deadline::{
     ConfigureWebDeadlineRequest, WebDeadline, WebDeadlineInput, WebDeadlineRecord,
     WebDeadlineSettings, WebDeadlineView, WebDeadlineWake,
@@ -654,13 +662,14 @@ pub use web_watch_notify::{
     WEB_NOTIFY_ENQUEUE_RETRY_MS, WEB_NOTIFY_MAX_THRESHOLD_SECONDS, WEB_NOTIFY_PREFIX,
 };
 pub use web_watch_notify_surface::configure_web_watch_notifications;
-pub use web_watch_read::{mask_web_watch_metadata, read_web_watch};
+pub use web_watch_read::{mask_web_watch_metadata, mask_web_watch_session, read_web_watch};
 pub use web_watch_record::{
     ConfirmWebWatchRequest, WebCandidate, WebCheckResult, WebDecision, WebDecisionReason,
     WebFailureInterval, WebIntervalCloseReason, WebIntervalClosure, WebObservationRecord,
     WebPreview, WebPreviewRequest, WebPreviewTarget, WebRuntimeGap, WebTextArea,
     WebWatchConfigured, WebWatchPlanView, WebWatchSnapshot,
 };
+pub use web_watch_redact::without_url_details;
 pub use web_watch_surface::{confirm_web_watch, preview_web_watch};
 pub use workflow::{
     cancel_runtime_workflow, read_only_child_tool_names, run_live_runtime_workflow,

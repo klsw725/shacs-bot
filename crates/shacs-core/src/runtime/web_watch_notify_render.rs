@@ -108,7 +108,7 @@ pub(super) fn render_web_notification(intent: &WebNotifyIntent) -> String {
     format!("{body}\n{LIMITS}")
 }
 
-fn duration_text(ms: u64) -> String {
+pub(super) fn duration_text(ms: u64) -> String {
     let minutes = ms / 60_000;
     format!(
         "{}d {}h {}m",
@@ -129,7 +129,7 @@ fn evidence(label: &str, evidence: &WebEvidence) -> String {
     )
 }
 
-fn condition_text(condition: &WebCondition, phrase: Option<&str>) -> String {
+pub(super) fn condition_text(condition: &WebCondition, phrase: Option<&str>) -> String {
     let phrase = phrase.unwrap_or_default();
     match condition {
         WebCondition::AtMost { value } => format!("value <= {value}"),
@@ -139,7 +139,7 @@ fn condition_text(condition: &WebCondition, phrase: Option<&str>) -> String {
     }
 }
 
-fn failure_text(failure: WebCheckFailure) -> &'static str {
+pub(super) fn failure_text(failure: WebCheckFailure) -> &'static str {
     match failure {
         WebCheckFailure::NetworkError => "network_error",
         WebCheckFailure::GuardBlocked => "guard_blocked",
@@ -151,7 +151,7 @@ fn failure_text(failure: WebCheckFailure) -> &'static str {
     }
 }
 
-fn time(ms: u64) -> String {
+pub(super) fn time(ms: u64) -> String {
     let utc = i64::try_from(ms)
         .ok()
         .and_then(DateTime::from_timestamp_millis)
@@ -160,6 +160,6 @@ fn time(ms: u64) -> String {
     format!("{utc} ({ms} ms)")
 }
 
-fn optional_time(ms: Option<u64>) -> String {
+pub(super) fn optional_time(ms: Option<u64>) -> String {
     ms.map_or_else(|| "none".to_owned(), time)
 }

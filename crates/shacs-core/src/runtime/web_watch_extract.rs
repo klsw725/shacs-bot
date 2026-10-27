@@ -36,6 +36,14 @@ pub(super) fn extract(
     text: &str,
     extraction: &WebExtraction,
 ) -> Result<WebObservedValue, WebCheckFailure> {
+    extract_shown(text, extraction).map(|(value, _)| value)
+}
+
+/// [`extract`], with the region's text as the page shows it.
+pub(super) fn extract_shown<'a>(
+    text: &'a str,
+    extraction: &WebExtraction,
+) -> Result<(WebObservedValue, &'a str), WebCheckFailure> {
     let matches = region_matches(text, &extraction.prefix, &extraction.suffix);
     if matches.is_empty() {
         return Err(WebCheckFailure::StaticContentUnavailable);
@@ -49,10 +57,10 @@ pub(super) fn extract(
         .and_then(|index| matches.get(index).copied())
         .ok_or(WebCheckFailure::AmbiguousValue)?;
     let region = text[start..end].trim();
-    match &extraction.value {
-        WebValueKind::Text { phrase } => Ok(WebObservedValue::Text {
+    let value = match &extraction.value {
+        WebValueKind::Text { phrase } => WebObservedValue::Text {
             present: region.contains(phrase.as_str()),
-        }),
+        },
         WebValueKind::Number {
             decimal_separator,
             thousands_separator,
@@ -89,9 +97,10 @@ pub(super) fn extract(
             }
             parse_number(&region[run_start..run_end], format)
                 .map(|value| WebObservedValue::Number { value })
-                .ok_or(WebCheckFailure::FormatMismatch)
+                .ok_or(WebCheckFailure::FormatMismatch)?
         }
-    }
+    };
+    Ok((value, region))
 }
 
 /// Deterministic preview candidates; page text only becomes anchors and values.

@@ -2319,11 +2319,17 @@ fn runtime_preview_text(value: &str, max_chars: usize) -> String {
 }
 
 fn runtime_message_preview(message: &InboundMessage) -> String {
-    runtime_preview_text(&message.content, 80)
+    runtime_preview_text(
+        &shacs_core::runtime::without_url_details(&message.content),
+        80,
+    )
 }
 
 fn runtime_response_preview(response: &LlmResponse) -> String {
-    runtime_preview_text(response.content.as_deref().unwrap_or(""), 120)
+    runtime_preview_text(
+        &shacs_core::runtime::without_url_details(response.content.as_deref().unwrap_or("")),
+        120,
+    )
 }
 
 fn runtime_tool_args_preview(name: &str, arguments: &Value) -> String {
@@ -2347,6 +2353,12 @@ fn publish_runtime_notification(
     } else {
         bus.publish_outbound(message);
     }
+}
+
+/// Whether a turn's reply is followed by the session's workflow status. Notifications and web
+/// watch replies are not, so a web watch summary stays the last message its sender sees.
+fn appends_workflow_projection(stop_reason: &str) -> bool {
+    !(stop_reason.starts_with("entrusted_notification") || stop_reason.starts_with("web_watch"))
 }
 
 fn runtime_workflow_projection_message_from_session(
@@ -9365,7 +9377,7 @@ pub fn session_export(options: SessionExportOptions) -> Result<SessionExportRepo
     let mut session = manager.load_existing(&options.session).ok_or_else(|| {
         CliError::InvalidArguments(format!("session `{}` was not found", options.session))
     })?;
-    shacs_core::runtime::mask_web_watch_metadata(&mut session.metadata);
+    shacs_core::runtime::mask_web_watch_session(&mut session);
     let content = match options.format {
         SessionExportFormat::Json => serde_json::to_string_pretty(&json!({
             "key": session.key,
@@ -18826,6 +18838,15 @@ impl AgentLoopChatCompletionAdapter {
             .parent()
             .map(|data_dir| data_dir.join("runtime").join("durable-events"));
         config.clock_ms = Some(Arc::new(now_millis));
+        config.web_watch = self.config_path.parent().map(|data_dir| {
+            shacs_core::runtime::WebWatchConversationConfig {
+                guard: web_watch_profile::web_watch_guard(),
+                limits: shacs_core::runtime::WebFetchLimits::PRODUCTION,
+                data_dir: data_dir.to_path_buf(),
+                email_ready: spec042_web_watch_cli::email_ready(Some(self.config_path.clone()))
+                    .unwrap_or(false),
+            }
+        });
         config.settings = shacs_providers::GenerationSettings {
             temperature: self.defaults.temperature,
             max_tokens: self.defaults.max_tokens,
@@ -19010,7 +19031,10 @@ impl AgentLoopChatCompletionAdapter {
                 ApiError::internal(format!("session manager could not be initialized: {error}"))
             })?
             .load_existing(&turn.session_key)
-            .map(|session| session.messages)
+            .map(|mut session| {
+                shacs_core::runtime::mask_web_watch_session(&mut session);
+                session.messages
+            })
             .unwrap_or_default();
         Ok(RunResult {
             content: turn.final_content.unwrap_or_default(),
@@ -19823,9 +19847,7 @@ impl AgentLoopChatCompletionAdapter {
         while let Some(message) = outbound_bus.consume_outbound() {
             outbound.push(message);
         }
-        if result.stop_reason.starts_with("entrusted_notification")
-            || result.stop_reason.starts_with("web_watch_notification")
-        {
+        if !appends_workflow_projection(&result.stop_reason) {
             return Ok((result, outbound));
         }
         if let Some(message) = loop_runtime
@@ -20198,6 +20220,36 @@ fn replay_token_budget(context_window_tokens: usize, max_output_tokens: usize) -
         / 4
 }
 
+/// A web watch answer (a summary, a confirmation, the stored state) and a question the turn ends
+/// with (headed by the stored state when the turn also asked for it) are the runtime's text, not
+/// the model's stream, so a streaming client gets them after the stream, then the stop reason.
+fn runtime_answer_events(
+    response: &LlmResponse,
+    streamed_text: bool,
+) -> Vec<shacs_providers::ProviderEvent> {
+    let runtime_text =
+        response.finish_reason.starts_with("web_watch") || response.finish_reason == "ask_user";
+    let Some(content) = response
+        .content
+        .as_deref()
+        .filter(|content| !content.is_empty() && runtime_text)
+    else {
+        return Vec::new();
+    };
+    let text = if streamed_text {
+        format!("\n\n{content}")
+    } else {
+        content.to_owned()
+    };
+    vec![
+        shacs_providers::ProviderEvent::TextDelta { text },
+        shacs_providers::ProviderEvent::Finish {
+            usage: Value::Object(Map::new()),
+            reason: response.finish_reason.clone(),
+        },
+    ]
+}
+
 fn llm_response_from_turn(turn: AgentLoopTurnResult) -> LlmResponse {
     let mut response = LlmResponse {
         content: turn.final_content,
@@ -20361,9 +20413,11 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
         let callback = Arc::new(move |event: &shacs_providers::ProviderEvent| {
             let _ = event_tx.send(event.clone());
         });
+        let mut streamed_text = false;
         let result = thread::scope(|scope| {
             let handle = scope.spawn(move || self.run_agent_loop(invocation, Some(callback)));
             for event in event_rx {
+                streamed_text |= matches!(event, shacs_providers::ProviderEvent::TextDelta { .. });
                 on_event(event);
             }
             match handle.join() {
@@ -20372,6 +20426,9 @@ impl ChatCompletionAdapter for AgentLoopChatCompletionAdapter {
             }
         });
         let response = result?;
+        for event in runtime_answer_events(&response, streamed_text) {
+            on_event(event);
+        }
         Ok(response)
     }
 
@@ -32548,6 +32605,151 @@ mod tests {
     }
 
     #[test]
+    fn a_web_watch_reply_is_not_followed_by_the_workflow_status() {
+        for stop_reason in [
+            "web_watch_summary",
+            "web_watch_stale_reply",
+            "web_watch_notification",
+            "entrusted_notification",
+        ] {
+            assert!(!appends_workflow_projection(stop_reason), "{stop_reason}");
+        }
+        assert!(appends_workflow_projection("completed"));
+    }
+
+    #[test]
+    fn a_streaming_client_gets_the_web_watch_answer_after_the_model_stream() {
+        let answer = |reason: &str| LlmResponse {
+            content: Some("Web watch summary `w-1` (revision 1)".to_owned()),
+            finish_reason: reason.to_owned(),
+            ..LlmResponse::default()
+        };
+
+        let after_text = runtime_answer_events(&answer("web_watch_summary"), true);
+        let alone = runtime_answer_events(&answer("web_watch_set_up"), false);
+
+        assert_eq!(
+            after_text,
+            vec![
+                shacs_providers::ProviderEvent::TextDelta {
+                    text: "\n\nWeb watch summary `w-1` (revision 1)".to_owned()
+                },
+                shacs_providers::ProviderEvent::Finish {
+                    usage: Value::Object(Map::new()),
+                    reason: "web_watch_summary".to_owned()
+                },
+            ]
+        );
+        assert!(matches!(
+            alone.first(),
+            Some(shacs_providers::ProviderEvent::TextDelta { text }) if !text.starts_with('\n')
+        ));
+        assert!(runtime_answer_events(&answer("stop"), true).is_empty());
+    }
+
+    #[test]
+    fn the_local_api_shows_the_stored_web_watch_state_before_a_question(
+    ) -> Result<(), Box<dyn Error>> {
+        // Given: two API conversations whose model asks for the web watch state and then asks
+        // the user something.
+        let root = tempfile::tempdir()?;
+        let adapter = |name: &str| {
+            let mut tools = ToolRegistry::new();
+            tools.register(shacs_core::tools::WebWatchStatusTool::new());
+            tools.register(shacs_core::tools::AskUserTool::new());
+            let call = |id: &str, name: &str, arguments: Value| LlmResponse {
+                finish_reason: "tool_calls".to_owned(),
+                tool_calls: vec![ToolCallRequest::new(
+                    id,
+                    name,
+                    arguments.as_object().cloned().unwrap_or_default(),
+                )],
+                ..LlmResponse::default()
+            };
+            scripted_agent_loop_adapter(
+                &root.path().join(name),
+                json!({}),
+                tools,
+                vec![
+                    call("status-1", "web_watch_status", json!({})),
+                    call(
+                        "ask-1",
+                        "ask_user",
+                        json!({"question": "Do you want the price too?"}),
+                    ),
+                ],
+                PermissionMode::Default,
+            )
+        };
+        let invocation = || ChatCompletionInvocation {
+            provider_request: ProviderRequest {
+                messages: vec![json!({"role": "user", "content": "지금 상태 어때?"})],
+                tools: Vec::new(),
+                model: "openai/gpt-5".to_owned(),
+                settings: GenerationSettings::default(),
+                tool_choice: None,
+            },
+            requested_model: Some("openai/gpt-5".to_owned()),
+            session_key: "api:status".to_owned(),
+            media_data_urls: Vec::new(),
+            media_paths: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+        };
+
+        // When: one is asked through the plain API and the other through streaming.
+        let answered = adapter("plain")?.complete_chat(invocation())?;
+        let mut streamed = String::new();
+        adapter("streaming")?.stream_chat(invocation(), &mut |event| {
+            if let shacs_providers::ProviderEvent::TextDelta { text } = event {
+                streamed.push_str(&text);
+            }
+        })?;
+
+        // Then: both carry the stored state before the question.
+        for text in [answered.content.unwrap_or_default(), streamed] {
+            let state = text.find("no web page watch").ok_or("no stored state")?;
+            let question = text
+                .find("Do you want the price too?")
+                .ok_or("no question")?;
+            assert!(state < question, "{text}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_verbose_previews_show_urls_without_query_or_fragment() {
+        let input = InboundMessage::new(
+            "websocket",
+            "user-1",
+            "chat-1",
+            "watch https://shop.example/item?coupon=private-ref#checkout and \
+             shop.example/item?coupon=private-ref#checkout for user@example.test",
+        );
+        let response = LlmResponse {
+            content: Some(
+                "Watching https://shop.example/item?coupon=private-ref and \
+                 shop.example/item#checkout now"
+                    .to_owned(),
+            ),
+            ..LlmResponse::default()
+        };
+
+        for preview in [
+            runtime_message_preview(&input),
+            runtime_response_preview(&response),
+        ] {
+            assert!(preview.contains("https://shop.example/item "), "{preview}");
+            assert!(preview.contains(" shop.example/item "), "{preview}");
+            assert!(
+                !preview.contains("private-ref") && !preview.contains("checkout"),
+                "{preview}"
+            );
+        }
+        assert!(runtime_message_preview(&input).ends_with("for user@example.test"));
+    }
+
+    #[test]
     fn session_list_does_not_create_missing_sessions_dir() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
@@ -36262,17 +36464,63 @@ mod tests {
         calls: Arc<AtomicUsize>,
     ) -> Result<(AgentLoopChatCompletionAdapter, String), Box<dyn Error>> {
         let workspace = root.join("workspace");
+        let mut tools = ToolRegistry::new();
+        tools.register(SurfaceApprovalCountingExecTool { calls });
+        let adapter = scripted_agent_loop_adapter(
+            root,
+            json!({"permissions": {"mode": "auto"}}),
+            tools,
+            vec![
+                LlmResponse {
+                    finish_reason: "tool_calls".to_owned(),
+                    tool_calls: vec![ToolCallRequest::new(
+                        "exec-surface-approval",
+                        "exec",
+                        Map::from_iter([("command".to_owned(), json!("cargo test"))]),
+                    )],
+                    ..LlmResponse::default()
+                },
+                LlmResponse {
+                    content: Some("surface approval resumed".to_owned()),
+                    ..LlmResponse::default()
+                },
+            ],
+            PermissionMode::Auto,
+        )?;
+        let mut config = adapter.loop_config();
+        config.permission_interactive = true;
+        let inbound = InboundMessage::new("cli", "user", "direct", "run cargo test")
+            .with_session_key_override("cli:surface-approval");
+        let (turn, _outbound) =
+            adapter.process_inbound_with_outbound(inbound, config, None, &[])?;
+        if turn.stop_reason != "ask_user" {
+            return Err(format!("fixture did not pause for permission approval: {turn:?}").into());
+        }
+        let raw = SessionManager::new(&workspace)?
+            .read_session_file("cli:surface-approval")
+            .ok_or("missing pending approval session")?;
+        let lineage = raw["metadata"]["pending_permission_approval"]["approval_request_id"]
+            .as_str()
+            .ok_or("missing approval lineage")?
+            .to_owned();
+        Ok((adapter, lineage))
+    }
+
+    /// An agent-loop chat adapter in `root` whose provider answers with `responses` in order.
+    fn scripted_agent_loop_adapter(
+        root: &Path,
+        config: Value,
+        tools: ToolRegistry,
+        responses: Vec<LlmResponse>,
+        mode: PermissionMode,
+    ) -> Result<AgentLoopChatCompletionAdapter, Box<dyn Error>> {
+        let workspace = root.join("workspace");
         let config_path = root.join("config.json");
         let media_dir = root.join("data").join("media").join("api");
         fs::create_dir_all(&workspace)?;
         fs::create_dir_all(&media_dir)?;
-        fs::write(
-            &config_path,
-            serde_json::to_vec(&json!({"permissions": {"mode": "auto"}}))?,
-        )?;
-        let mut tools = ToolRegistry::new();
-        tools.register(SurfaceApprovalCountingExecTool { calls });
-        let adapter = AgentLoopChatCompletionAdapter {
+        fs::write(&config_path, serde_json::to_vec(&config)?)?;
+        Ok(AgentLoopChatCompletionAdapter {
             configured_model: "openai/gpt-5".to_owned(),
             provider_id: "openai".to_owned(),
             defaults: AgentDefaults {
@@ -36284,24 +36532,10 @@ mod tests {
             native_image_input_supported: true,
             client: Arc::new(SequentialProviderClient {
                 captured: Arc::new(Mutex::new(Vec::new())),
-                responses: Mutex::new(VecDeque::from([
-                    LlmResponse {
-                        finish_reason: "tool_calls".to_owned(),
-                        tool_calls: vec![ToolCallRequest::new(
-                            "exec-surface-approval",
-                            "exec",
-                            Map::from_iter([("command".to_owned(), json!("cargo test"))]),
-                        )],
-                        ..LlmResponse::default()
-                    },
-                    LlmResponse {
-                        content: Some("surface approval resumed".to_owned()),
-                        ..LlmResponse::default()
-                    },
-                ])),
+                responses: Mutex::new(VecDeque::from(responses)),
             }),
             retry_mode: ProviderRetryMode::Standard,
-            workspace: workspace.clone(),
+            workspace,
             config_path,
             media_dir,
             tools,
@@ -36322,30 +36556,13 @@ mod tests {
             tool_search: ToolSearchConfig::default(),
             containment_snapshot: None,
             permission_mode_snapshot: PermissionModeSnapshot {
-                mode: PermissionMode::Auto,
+                mode,
                 source: Some("test".to_owned()),
                 scope_ref: None,
             },
             plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
             plugin_skill_roots: Vec::new(),
-        };
-        let mut config = adapter.loop_config();
-        config.permission_interactive = true;
-        let inbound = InboundMessage::new("cli", "user", "direct", "run cargo test")
-            .with_session_key_override("cli:surface-approval");
-        let (turn, _outbound) =
-            adapter.process_inbound_with_outbound(inbound, config, None, &[])?;
-        if turn.stop_reason != "ask_user" {
-            return Err(format!("fixture did not pause for permission approval: {turn:?}").into());
-        }
-        let raw = SessionManager::new(&workspace)?
-            .read_session_file("cli:surface-approval")
-            .ok_or("missing pending approval session")?;
-        let lineage = raw["metadata"]["pending_permission_approval"]["approval_request_id"]
-            .as_str()
-            .ok_or("missing approval lineage")?
-            .to_owned();
-        Ok((adapter, lineage))
+        })
     }
 
     fn write_surface_approval_owner_marker(

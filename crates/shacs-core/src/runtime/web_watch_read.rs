@@ -1,16 +1,17 @@
 use std::path::Path;
 
 use serde_json::{Map, Value};
-use shacs_session::SessionMutationGuard;
+use shacs_session::{Session, SessionMutationGuard};
 
 use super::entrusted_work_access::work_snapshot_from_session;
 use super::entrusted_work_surface::load_owner_session;
+use super::web_watch_conversation::{mask_pending_summary, PENDING_WEB_WATCH_SUMMARY_KEY};
 use super::web_watch_deadline_surface::deadline_view;
 use super::web_watch_fetch::{display_url, sha256_ref};
 use super::web_watch_gate::active_web_wake;
 use super::web_watch_notify_store::read_web_notifications;
 use super::web_watch_notify_surface::settings_view;
-use super::web_watch_redact::safe_extraction;
+use super::web_watch_redact::{safe_extraction, without_url_details_in};
 use super::web_watch_store::{
     web_deadline_settings, web_notify_settings, web_watches, WebWatchLedger,
 };
@@ -19,6 +20,7 @@ use super::{
     WebExtraction, WebIntervalCloseReason, WebIntervalClosure, WebWatchError, WebWatchPlan,
     WebWatchPlanView, WebWatchSnapshot, WEB_WATCH_METADATA_KEY,
 };
+use crate::tools::is_web_watch_tool;
 
 /// Status of a web watch with query and fragment removed from every URL.
 pub fn read_web_watch(
@@ -28,8 +30,17 @@ pub fn read_web_watch(
 ) -> Result<WebWatchSnapshot, WebWatchError> {
     let _guard = SessionMutationGuard::acquire(workspace, &request.owner_session_id)?;
     let (_, session) = load_owner_session(workspace, &request.owner_session_id)?;
-    let work = work_snapshot_from_session(&session, &request.requester_target, &request.work_id)?;
-    let entry = web_watches(&session)
+    web_watch_snapshot(&session, data_dir, request)
+}
+
+/// The same status from an owner `session` the caller already holds.
+pub(super) fn web_watch_snapshot(
+    session: &Session,
+    data_dir: &Path,
+    request: &EntrustedWorkReadRequest,
+) -> Result<WebWatchSnapshot, WebWatchError> {
+    let work = work_snapshot_from_session(session, &request.requester_target, &request.work_id)?;
+    let entry = web_watches(session)
         .map_err(EntrustedWorkError::Metadata)?
         .into_iter()
         .find(|entry| entry.work_id == request.work_id);
@@ -38,7 +49,7 @@ pub fn read_web_watch(
         &request.owner_session_id,
         &request.work_id,
     )?;
-    let current = active_web_wake(&session, &request.work_id);
+    let current = active_web_wake(session, &request.work_id);
     let next_wake = match &current {
         Ok(Some((wake, _))) => ledger.next(wake),
         Ok(None) => ObservationNextWake::NotConfigured,
@@ -69,6 +80,14 @@ pub fn read_web_watch(
         .into_iter()
         .chain(entry.as_ref().map(|entry| entry.baseline.observed_at_ms))
         .max();
+    let last_read = ledger
+        .last_success
+        .as_ref()
+        .filter(|record| Some(&record.wake.plan_digest) == plan_digest.as_ref())
+        .and_then(|record| record.decision.current.clone())
+        .into_iter()
+        .chain(entry.as_ref().map(|entry| entry.baseline.clone()))
+        .max_by_key(|evidence| evidence.observed_at_ms);
     let mut intervals = ledger.intervals;
     if let Some(open) = intervals
         .last_mut()
@@ -89,7 +108,7 @@ pub fn read_web_watch(
             at_ms: None,
         });
     }
-    let notify = web_notify_settings(&session, &request.work_id)
+    let notify = web_notify_settings(session, &request.work_id)
         .map_err(EntrustedWorkError::Metadata)?
         .map(|settings| {
             settings_view(
@@ -97,7 +116,7 @@ pub fn read_web_watch(
                 entry.as_ref().map_or(0, |entry| entry.plan.cadence_seconds),
             )
         });
-    let deadline = web_deadline_settings(&session, &request.work_id)
+    let deadline = web_deadline_settings(session, &request.work_id)
         .map_err(EntrustedWorkError::Metadata)?
         .map(|settings| deadline_view(&settings));
     let mut notifications: Vec<_> =
@@ -117,6 +136,7 @@ pub fn read_web_watch(
         plan: entry.as_ref().map(|entry| plan_view(&entry.plan)),
         baseline: entry.map(|entry| entry.baseline),
         last_success_at_ms,
+        last_read,
         current_decision,
         failure_interval: intervals
             .last()
@@ -136,9 +156,13 @@ pub fn read_web_watch(
 }
 
 /// Session metadata for output outside the session file: every stored web watch URL
-/// without query and fragment, next to the full URL's digest, and every extraction as
-/// `safe_extraction` shows it (one that cannot be read is left out).
+/// without query and fragment, next to the full URL's digest, every extraction as
+/// `safe_extraction` shows it (one that cannot be read is left out), and a pending
+/// conversational summary without its candidate token.
 pub fn mask_web_watch_metadata(metadata: &mut Map<String, Value>) {
+    if let Some(summary) = metadata.get_mut(PENDING_WEB_WATCH_SUMMARY_KEY) {
+        mask_pending_summary(summary);
+    }
     let plans = metadata
         .get_mut(WEB_WATCH_METADATA_KEY)
         .and_then(|store| store.get_mut("watches"))
@@ -158,6 +182,47 @@ pub fn mask_web_watch_metadata(metadata: &mut Map<String, Value>) {
         if let Some(shown) = shown {
             plan.insert("extraction".to_owned(), shown);
         }
+    }
+}
+
+/// A session as `session export` shows it: the web watch metadata masked as above, and every
+/// web watch tool call (`propose_web_watch`, `web_watch_status`, with its id) and output (in
+/// the history, in the checkpoint of an unfinished turn and in a pending approval) with its
+/// addresses reduced to scheme, host and path, since it repeats what the model passed on. The
+/// rest of the export stays as stored, as `session export` keeps raw messages and tool payloads.
+pub fn mask_web_watch_session(session: &mut Session) {
+    mask_web_watch_metadata(&mut session.metadata);
+    session
+        .messages
+        .iter_mut()
+        .chain(session.metadata.values_mut())
+        .for_each(mask_web_watch_calls);
+}
+
+fn mask_web_watch_calls(value: &mut Value) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(mask_web_watch_calls),
+        Value::Object(object) => {
+            let named = |object: &Map<String, Value>| {
+                ["name", "tool_name"].iter().any(|key| {
+                    object
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(is_web_watch_tool)
+                })
+            };
+            let web_watch = named(object)
+                || object
+                    .get("function")
+                    .and_then(Value::as_object)
+                    .is_some_and(named);
+            if web_watch {
+                object.values_mut().for_each(without_url_details_in);
+            } else {
+                object.values_mut().for_each(mask_web_watch_calls);
+            }
+        }
+        _ => {}
     }
 }
 

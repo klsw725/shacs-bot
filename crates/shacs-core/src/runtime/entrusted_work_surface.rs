@@ -22,8 +22,20 @@ pub fn create_entrusted_work(
     validate_create(&request)?;
     let _guard = SessionMutationGuard::acquire(workspace, &request.owner_session_id)?;
     let (mut manager, mut session) = load_owner_session(workspace, &request.owner_session_id)?;
+    let (work, goal) = create_entrusted_work_in(&mut session, request)?;
+    manager.save_with_fsync(&session)?;
+    snapshot(work, &goal)
+}
+
+/// Adds a new work and its goal to the loaded owner `session` without saving it, so a caller
+/// can save it once together with other settings.
+pub(super) fn create_entrusted_work_in(
+    session: &mut Session,
+    request: EntrustedWorkCreateRequest,
+) -> Result<(EntrustedWork, PersistentGoal), EntrustedWorkError> {
+    validate_create(&request)?;
     let previous_goal =
-        persistent_goal_result_from_session(&session).map_err(EntrustedWorkError::GoalMetadata)?;
+        persistent_goal_result_from_session(session).map_err(EntrustedWorkError::GoalMetadata)?;
     if previous_goal
         .as_ref()
         .is_some_and(|goal| !goal.is_terminal())
@@ -58,13 +70,14 @@ pub fn create_entrusted_work(
         goal_transition_ids: vec![transition_id],
         observation_plan: None,
     };
-    let mut works = entrusted_works_from_session(&session).map_err(EntrustedWorkError::Metadata)?;
+    let mut works = entrusted_works_from_session(session).map_err(EntrustedWorkError::Metadata)?;
     if works.iter().any(|stored| stored.work_id == work.work_id) {
         return Err(EntrustedWorkError::WorkAlreadyExists);
     }
     works.push(work.clone());
-    persist(&mut manager, &mut session, &goal, &works)?;
-    snapshot(work, &goal)
+    store_persistent_goal(session, &goal).map_err(EntrustedWorkError::GoalMetadata)?;
+    store_entrusted_works(session, &works).map_err(EntrustedWorkError::Metadata)?;
+    Ok((work, goal))
 }
 
 pub fn read_entrusted_work(

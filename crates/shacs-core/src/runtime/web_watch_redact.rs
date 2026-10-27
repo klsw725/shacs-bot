@@ -1,3 +1,4 @@
+use serde_json::Value;
 use shacs_redaction::redact_string;
 
 use super::{WebExtraction, WebValueKind};
@@ -56,6 +57,51 @@ pub(super) fn safe_text(text: &str, max_chars: usize) -> String {
     bounded
 }
 
+/// Text for diagnostics and exports: every address, with or without a scheme, keeps only its
+/// scheme, host and path (the word rule of [`safe_text`]); other words, mail addresses and the
+/// spacing stay as they are.
+pub fn without_url_details(text: &str) -> String {
+    text.split_inclusive(char::is_whitespace)
+        .map(|piece| {
+            let word = piece.trim_end();
+            format!("{}{}", safe_word(word), &piece[word.len()..])
+        })
+        .collect()
+}
+
+/// Every text in `value` through [`without_url_details`], object keys included (the model can
+/// write an argument name, too); a text that holds a JSON object or array (stored tool call
+/// arguments, tool outputs) is changed inside and kept as JSON text. Keys that become the same
+/// text are told apart by a count, so no entry is lost.
+pub(super) fn without_url_details_in(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            *text = match serde_json::from_str::<Value>(text) {
+                Ok(mut parsed) if parsed.is_object() || parsed.is_array() => {
+                    without_url_details_in(&mut parsed);
+                    parsed.to_string()
+                }
+                _ => without_url_details(text),
+            };
+        }
+        Value::Array(items) => items.iter_mut().for_each(without_url_details_in),
+        Value::Object(object) => {
+            for (key, mut item) in std::mem::take(object) {
+                without_url_details_in(&mut item);
+                let shown = without_url_details(&key);
+                let mut unique = shown.clone();
+                let mut count = 1;
+                while object.contains_key(&unique) {
+                    count += 1;
+                    unique = format!("{shown} ({count})");
+                }
+                object.insert(unique, item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
 /// A word with a URL keeps the text before it and the URL's scheme, host and path, without
 /// userinfo, query or fragment; a URL that cannot be reduced that way is replaced whole.
 fn safe_word(word: &str) -> String {
@@ -96,7 +142,38 @@ fn schemeless_word(word: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_text;
+    use super::{safe_text, without_url_details_in};
+    use serde_json::Value;
+
+    #[test]
+    fn kept_json_keys_lose_their_url_details_and_no_entry_is_lost() -> Result<(), serde_json::Error>
+    {
+        let mut value = serde_json::json!({
+            "arguments": "{\"https://shop.example/item?coupon=priv4te#frag\":\"x\",\
+                          \"https://shop.example/item?coupon=other\":\"y\"}",
+            "https://a.test/p?k=v": {"name": "https://b.test/q?r=s"}
+        });
+
+        without_url_details_in(&mut value);
+
+        let shown = value.to_string();
+        for secret in ["priv4te", "frag", "coupon", "k=v", "r=s"] {
+            assert!(!shown.contains(secret), "{secret} in {shown}");
+        }
+        let arguments: Value =
+            serde_json::from_str(value["arguments"].as_str().unwrap_or_default())?;
+        let mut names = arguments
+            .as_object()
+            .map(|arguments| arguments.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        names.sort();
+        assert_eq!(
+            names,
+            ["https://shop.example/item", "https://shop.example/item (2)"]
+        );
+        assert_eq!(value["https://a.test/p"]["name"], "https://b.test/q");
+        Ok(())
+    }
 
     #[test]
     fn kept_text_has_no_credentials_url_query_or_fragment() {

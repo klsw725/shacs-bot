@@ -123,6 +123,8 @@ mod method_workflow_tests;
 mod notification;
 #[path = "agent_loop_web_notification.rs"]
 mod web_notification;
+#[path = "agent_loop_web_watch.rs"]
+mod web_watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkflowDurableFactState {
@@ -167,6 +169,16 @@ struct WorkProposalAcceptance<'a> {
     session: &'a Session,
     proposal_id: &'a str,
     timestamp: &'a str,
+}
+
+struct CommandReply<'a> {
+    content: &'a str,
+    command: Option<AgentLoopCommandResult>,
+    stop_reason: &'a str,
+    save_session: bool,
+    buttons: Vec<Vec<String>>,
+    /// A web watch reply: it keeps the summary it shows, and the session is saved with fsync.
+    web_watch: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +299,9 @@ pub struct AgentLoopConfig {
     /// Current Unix time in ms for time-bound checks such as a reminder past its deadline; the
     /// system clock when unset.
     pub clock_ms: Option<ClockMs>,
+    /// Page reading and target checks for web watches proposed in conversation; without it a
+    /// proposal is answered with why it cannot be set up here.
+    pub web_watch: Option<crate::runtime::WebWatchConversationConfig>,
 }
 
 pub type ClockMs = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -332,6 +347,7 @@ impl AgentLoopConfig {
             execution_snapshot_source: LiveExecutionSnapshotSource::default(),
             execution_control: None,
             clock_ms: None,
+            web_watch: None,
         }
     }
 
@@ -899,6 +915,12 @@ impl<'a> AgentLoop<'a> {
             return self.handle_loop_command(route.command, &message, session, true, None);
         }
 
+        if web_watch::is_web_watch_command(&message.content) {
+            if let Some(answer) = self.web_watch_reply(&message, &mut session)? {
+                return self.publish_web_watch_reply(&message, session, answer);
+            }
+        }
+
         let action_resume =
             match action::check_reply(&mut session, &message, action::process_epoch())? {
                 action::Reply::Continue => None,
@@ -911,6 +933,10 @@ impl<'a> AgentLoop<'a> {
 
         if pending_permission_wizard(&session).is_some() {
             return self.handle_pending_permission_wizard(&message, session, &session_key);
+        }
+
+        if let Some(answer) = self.web_watch_reply(&message, &mut session)? {
+            return self.publish_web_watch_reply(&message, session, answer);
         }
 
         if let Some(result) = self.prepare_method_request(&message, &mut session)? {
@@ -962,6 +988,7 @@ impl<'a> AgentLoop<'a> {
         let mut media_turn = super::turn!(self, &session_key, MAX_INJECTIONS_PER_TURN);
         let turn_provenance =
             durable_event_provenance(&self.context_builder, &recover_lock(&execution_ledger));
+        let call_start;
         let (mut initial_messages, context_provider_handoff) = if let Some(approval) =
             pending_recent_retry_approval
         {
@@ -1076,6 +1103,7 @@ impl<'a> AgentLoop<'a> {
                     let events =
                         method::image::quiet_events(&session, self.tool_event_callback.clone())?;
                     let held_from = session.messages.len();
+                    call_start = held_from;
                     let fatal_error = self.append_approved_tool_messages(
                         &message,
                         &session_key,
@@ -1314,6 +1342,7 @@ impl<'a> AgentLoop<'a> {
                     let events =
                         method::image::quiet_events(&session, self.tool_event_callback.clone())?;
                     let held_from = session.messages.len();
+                    call_start = held_from;
                     let fatal_error = self.append_approved_tool_messages(
                         &message,
                         &session_key,
@@ -1512,6 +1541,7 @@ impl<'a> AgentLoop<'a> {
             if method::user_turn(&message) {
                 method_finish::record_decision(&mut session, &message.content)?;
             }
+            call_start = session.messages.len();
             append_ask_user_resume(
                 &mut session,
                 &tool_call_id,
@@ -1571,6 +1601,7 @@ impl<'a> AgentLoop<'a> {
                 ),
                 &self.config.extra_context_files,
             );
+            call_start = session.messages.len();
             append_user_turn(&mut session, &message);
             self.choose_learned_method(&message, &mut session);
             let accepted_turn_id = turn_id_for_message(&message, &session);
@@ -1712,7 +1743,10 @@ impl<'a> AgentLoop<'a> {
             method::image::hold_model_text(&session, &mut spec)?;
             crate::runtime::task_method_observe::attach(&mut spec, method_observation.clone());
         }
+        let run_tool_outputs = Arc::new(Mutex::new(Vec::new()));
+        let run_tool_outputs_capture = run_tool_outputs.clone();
         spec.checkpoint_callback = Some(Arc::new(move |checkpoint| {
+            web_watch::keep_tool_outputs(&run_tool_outputs_capture, checkpoint);
             let mut session = recover_lock(&checkpoint_capture);
             session
                 .metadata
@@ -1731,6 +1765,16 @@ impl<'a> AgentLoop<'a> {
                 let error_text = quiet_error
                     .clone()
                     .unwrap_or_else(|| provider_error_text(&error));
+                let web_watch_answer = if method_tools.is_none() {
+                    let outputs = recover_lock(&run_tool_outputs).clone();
+                    self.finish_web_watch_turn(&message, &mut session, &outputs, None, call_start)
+                        .map(|mut answer| {
+                            answer.text = format!("{error_text}\n\n{}", answer.text);
+                            answer
+                        })
+                } else {
+                    None
+                };
                 let method_footer = if method_tracked {
                     method_finish::finish(
                         &mut session,
@@ -1742,7 +1786,27 @@ impl<'a> AgentLoop<'a> {
                 };
                 store_current_execution_snapshot(&mut session, &run_snapshot);
                 action::cancel(&mut session);
-                session.add_message("assistant", error_text.clone(), Map::new());
+                let (error_text, buttons, shows_summary, stop_reason) = match &web_watch_answer {
+                    Some(answer) => {
+                        let history_start = session.messages.len();
+                        let buttons = self.record_web_watch_answer(
+                            &message,
+                            &mut session,
+                            history_start,
+                            answer,
+                        )?;
+                        (
+                            answer.text.clone(),
+                            buttons,
+                            answer.summary.is_some(),
+                            answer.stop_reason.clone(),
+                        )
+                    }
+                    None => {
+                        session.add_message("assistant", error_text.clone(), Map::new());
+                        (error_text, Vec::new(), false, "error".to_owned())
+                    }
+                };
                 let mut error_reply = error_text.clone();
                 let saved = session.messages.len().checked_sub(1);
                 learn_use::conclude(&mut session, &mut error_reply, saved, "provider_error");
@@ -1764,13 +1828,25 @@ impl<'a> AgentLoop<'a> {
                 )?;
                 self.sessions.save(&session)?;
                 let final_content = format!("{error_reply}{method_footer}");
-                let outbound_count = self.publish_error(&message, &session_key, &final_content);
+                if !shows_summary {
+                    crate::runtime::web_watch_conversation::note_other_reply(
+                        &self.config.workspace,
+                        &session_key,
+                    );
+                }
+                self.bus.publish_outbound(outbound_for(
+                    &message,
+                    &session_key,
+                    final_content.clone(),
+                    buttons,
+                    &stop_reason,
+                ));
                 return Ok(AgentLoopTurnResult {
                     session_key,
                     final_content: Some(final_content),
-                    stop_reason: "error".to_owned(),
+                    stop_reason,
                     tools_used: Vec::new(),
-                    outbound_count,
+                    outbound_count: 1,
                     had_injections: false,
                     command: None,
                     ask_user_options: Vec::new(),
@@ -1816,6 +1892,75 @@ impl<'a> AgentLoop<'a> {
             run_result.final_content = Some(prompt);
             run_result.stop_reason = "entrusted_work_proposed".to_owned();
         }
+        let final_answer_sent = run_result.interrupt.is_none()
+            && !self
+                .context_tools
+                .message
+                .as_ref()
+                .is_some_and(MessageTool::sent_in_turn);
+        let mut status_before_question = None;
+        let web_watch_answer = if method_tools.is_none() && final_answer_sent {
+            self.finish_web_watch_turn(
+                &message,
+                &mut session,
+                new_runner_messages,
+                run_result.final_content.as_deref(),
+                call_start,
+            )
+        } else {
+            crate::runtime::web_watch_conversation::demote_pending_summary(&mut session);
+            let answer = if method_tools.is_some() {
+                None
+            } else if run_result.interrupt.is_none() {
+                self.web_watch_proposal_answer(
+                    &message,
+                    &mut session,
+                    new_runner_messages,
+                    call_start,
+                )
+                .or_else(|| self.web_watch_status_answer(&session, new_runner_messages, call_start))
+            } else {
+                if self.config.web_watch.is_some() {
+                    web_watch::note_turn_owner(&mut session, &message, call_start);
+                }
+                self.web_watch_status_answer(&session, new_runner_messages, call_start)
+            };
+            match answer {
+                // The question stays this turn's last message and its call stays open, so the
+                // stored facts go out at the head of the question, not as an answer of their own.
+                Some(status) if run_result.interrupt.is_some() => {
+                    status_before_question = Some(status.text);
+                    None
+                }
+                status => status,
+            }
+        };
+        if web_watch_answer
+            .as_ref()
+            .map_or(true, |answer| answer.summary.is_none())
+        {
+            crate::runtime::web_watch_conversation::note_other_reply(
+                &self.config.workspace,
+                &session.key,
+            );
+        }
+        let (mut web_watch_buttons, shown_summary, runtime_answer) = match web_watch_answer {
+            Some(mut answer) => {
+                let model_error = (run_result.stop_reason == "error")
+                    .then_some(run_result.final_content.as_deref())
+                    .flatten()
+                    .filter(|error| !error.is_empty() && !answer.text.starts_with(error));
+                if let Some(error) = model_error {
+                    answer.text = format!("{error}\n\n{}", answer.text);
+                }
+                let buttons =
+                    self.record_web_watch_answer(&message, &mut session, history_start, &answer)?;
+                run_result.final_content = Some(answer.text);
+                run_result.stop_reason = answer.stop_reason;
+                (buttons, answer.summary.map(|summary| summary.text), true)
+            }
+            None => (Vec::new(), None, false),
+        };
         store_current_execution_snapshot(&mut session, &run_snapshot);
         self.recent_retry_tokens
             .extend(run_result.recent_auto_mode_retry_tokens.clone());
@@ -1841,6 +1986,20 @@ impl<'a> AgentLoop<'a> {
             String::new()
         };
         learn_use::finish(&mut session, &mut run_result, history_start);
+        if shown_summary.is_some_and(|summary| {
+            !run_result
+                .final_content
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&summary)
+        }) {
+            crate::runtime::web_watch_conversation::demote_pending_summary(&mut session);
+            crate::runtime::web_watch_conversation::note_other_reply(
+                &self.config.workspace,
+                &session.key,
+            );
+            web_watch_buttons.clear();
+        }
         let execution_ledger = recover_lock(&execution_ledger);
         let provenance =
             durable_event_provenance_from_snapshot(&turn_provenance, &execution_ledger);
@@ -1875,9 +2034,24 @@ impl<'a> AgentLoop<'a> {
         }
         self.sessions.save(&session)?;
 
+        if let Some(status) = status_before_question {
+            if let Some(
+                RuntimeInterrupt::AskUser { question, .. }
+                | RuntimeInterrupt::PermissionApproval { question, .. },
+            ) = &mut run_result.interrupt
+            {
+                *question = format!("{status}\n\n{question}");
+                run_result.final_content = Some(question.clone());
+            }
+        }
         method_finish::append_footer(&mut run_result, &method_footer);
-        let (outbound_count, ask_user_options) =
-            self.publish_run_outbound(&message, &session_key, &run_result)?;
+        let (outbound_count, ask_user_options) = self.publish_run_outbound(
+            &message,
+            &session_key,
+            &run_result,
+            web_watch_buttons,
+            runtime_answer,
+        )?;
         Ok(AgentLoopTurnResult {
             session_key,
             final_content: run_result.final_content,
@@ -2281,6 +2455,10 @@ impl<'a> AgentLoop<'a> {
             }
             clear_runtime_markers(session);
             self.sessions.save(session)?;
+            crate::runtime::web_watch_conversation::note_other_reply(
+                &self.config.workspace,
+                session_key,
+            );
             self.bus.publish_outbound(outbound_for(
                 message,
                 session_key,
@@ -2369,6 +2547,10 @@ impl<'a> AgentLoop<'a> {
             )?;
         }
         self.sessions.save(session)?;
+        crate::runtime::web_watch_conversation::note_other_reply(
+            &self.config.workspace,
+            session_key,
+        );
         self.bus.publish_outbound(outbound_for(
             message,
             session_key,
@@ -2553,6 +2735,10 @@ impl<'a> AgentLoop<'a> {
                             Some(workflow_provenance),
                         )?;
                         self.sessions.save(session)?;
+                        crate::runtime::web_watch_conversation::note_other_reply(
+                            &self.config.workspace,
+                            session_key,
+                        );
                         self.bus.publish_outbound(outbound_for(
                             message,
                             session_key,
@@ -2738,6 +2924,10 @@ impl<'a> AgentLoop<'a> {
                     json!(cleanup_evidence);
                 self.sessions.save(session)?;
                 let stop_reason = workflow_stop_reason(outcome.run.state);
+                crate::runtime::web_watch_conversation::note_other_reply(
+                    &self.config.workspace,
+                    session_key,
+                );
                 self.bus.publish_outbound(outbound_for(
                     message,
                     session_key,
@@ -2847,6 +3037,7 @@ impl<'a> AgentLoop<'a> {
                 session.metadata.remove(SESSION_PERMISSION_APPROVALS_KEY);
                 session.metadata.remove(SESSION_REMEMBERED_PERMISSIONS_KEY);
                 clear_pending_proposal(&mut session);
+                crate::runtime::web_watch_conversation::clear_pending_summary(&mut session);
                 remove_persistent_goal(&mut session);
                 self.publish_command_response(
                     message,
@@ -3581,12 +3772,71 @@ impl<'a> AgentLoop<'a> {
     fn publish_command_response(
         &mut self,
         message: &InboundMessage,
-        mut session: Session,
+        session: Session,
         content: &str,
         command: Option<AgentLoopCommandResult>,
         stop_reason: &str,
         save_session: bool,
     ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        self.publish_command_reply(
+            message,
+            session,
+            CommandReply {
+                content,
+                command,
+                stop_reason,
+                save_session,
+                buttons: Vec::new(),
+                web_watch: false,
+            },
+        )
+    }
+
+    fn publish_command_response_with_buttons(
+        &mut self,
+        message: &InboundMessage,
+        session: Session,
+        content: &str,
+        buttons: Vec<Vec<String>>,
+        stop_reason: &str,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        self.publish_command_reply(
+            message,
+            session,
+            CommandReply {
+                content,
+                command: None,
+                stop_reason,
+                save_session: true,
+                buttons,
+                web_watch: true,
+            },
+        )
+    }
+
+    fn publish_command_reply(
+        &mut self,
+        message: &InboundMessage,
+        mut session: Session,
+        reply: CommandReply<'_>,
+    ) -> Result<AgentLoopTurnResult, AgentLoopError> {
+        let CommandReply {
+            content,
+            command,
+            stop_reason,
+            save_session,
+            buttons,
+            web_watch,
+        } = reply;
+        if !web_watch {
+            crate::runtime::web_watch_conversation::note_other_reply(
+                &self.config.workspace,
+                &session.key,
+            );
+            if save_session {
+                crate::runtime::web_watch_conversation::demote_pending_summary(&mut session);
+            }
+        }
         let mut reply = content.to_owned();
         if save_session {
             learn_use::conclude_command(&mut session, &mut reply, stop_reason);
@@ -3629,13 +3879,17 @@ impl<'a> AgentLoop<'a> {
                     &RuntimeExecutionLedger::default(),
                 )),
             )?;
-            self.sessions.save(&session)?;
+            if web_watch {
+                self.sessions.save_with_fsync(&session)?;
+            } else {
+                self.sessions.save(&session)?;
+            }
         }
         self.bus.publish_outbound(outbound_for(
             message,
             &session_key,
             content.to_owned(),
-            Vec::new(),
+            buttons,
             stop_reason,
         ));
         Ok(AgentLoopTurnResult {
@@ -3666,11 +3920,15 @@ impl<'a> AgentLoop<'a> {
         )
     }
 
+    /// Publishes the turn's question or final answer. A final answer the runtime made (a web
+    /// watch answer) goes out even when the `message` tool already sent in the turn.
     fn publish_run_outbound(
         &self,
         message: &InboundMessage,
         session_key: &str,
         result: &crate::runtime::AgentRunResult,
+        buttons: Vec<Vec<String>>,
+        runtime_answer: bool,
     ) -> Result<(usize, Vec<String>), AgentLoopError> {
         let mut count = 0;
         let mut ask_options = Vec::new();
@@ -3712,7 +3970,7 @@ impl<'a> AgentLoop<'a> {
             ));
             count += 1;
             ask_options = options.clone();
-        } else if !message_sent_in_turn {
+        } else if !message_sent_in_turn || runtime_answer {
             if let Some(content) = result
                 .final_content
                 .as_ref()
@@ -3722,24 +3980,13 @@ impl<'a> AgentLoop<'a> {
                     message,
                     session_key,
                     content.clone(),
-                    Vec::new(),
+                    buttons,
                     &result.stop_reason,
                 ));
                 count += 1;
             }
         }
         Ok((count, ask_options))
-    }
-
-    fn publish_error(&self, message: &InboundMessage, session_key: &str, content: &str) -> usize {
-        self.bus.publish_outbound(outbound_for(
-            message,
-            session_key,
-            content.to_owned(),
-            Vec::new(),
-            "error",
-        ));
-        1
     }
 
     fn execute_approved_permission_tool(

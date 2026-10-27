@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,6 +66,66 @@ pub fn price_page(price: &str) -> String {
     )
 }
 
+pub fn dispatcher_for(
+    data_dir: &Path,
+    bus: &MessageBus,
+) -> Result<DurableWorkDispatcher, DurableDispatchError> {
+    DurableWorkDispatcher::open(
+        data_dir.join("runtime/durable-events"),
+        data_dir.join("runtime/work-payloads"),
+        bus.clone(),
+        "owner",
+        120_000,
+    )
+}
+
+/// Inbound work that is due at `now_ms`, as the durable runtime hands it out.
+pub fn hand_out(
+    data_dir: &Path,
+    bus: &MessageBus,
+    now_ms: u64,
+) -> Result<Vec<InboundMessage>, Box<dyn Error>> {
+    let state = evaluate_durable_recovery(
+        data_dir.join("runtime/durable-events"),
+        data_dir.join("checkpoints"),
+    )
+    .state
+    .ok_or("durable replay")?;
+    let admission = evaluate_durable_work_recovery_for_owner(
+        &state.work,
+        data_dir.join("runtime/work-payloads"),
+        now_ms,
+        Some("owner"),
+    );
+    dispatcher_for(data_dir, bus)?.dispatch_due(&state.work, &admission, now_ms)?;
+    let mut inbound = Vec::new();
+    while let Some(message) = bus.consume_inbound() {
+        inbound.push(message);
+    }
+    Ok(inbound)
+}
+
+/// Closes the handed-out work `work_id` after its turn, as the runtime does.
+pub fn close_turn(data_dir: &Path, bus: &MessageBus, work_id: Option<String>) -> TestResult {
+    let state = evaluate_durable_recovery(
+        data_dir.join("runtime/durable-events"),
+        data_dir.join("checkpoints"),
+    )
+    .state
+    .ok_or("durable replay")?;
+    if let Some(item) = work_id
+        .and_then(|work_id| state.work.items.get(&work_id))
+        .filter(|item| item.state == ReplayWorkState::Leased)
+    {
+        dispatcher_for(data_dir, bus)?.record_terminal(
+            item,
+            WorkTerminalKind::Succeeded,
+            "agent_turn",
+        )?;
+    }
+    Ok(())
+}
+
 pub fn titles(mails: &[OutboundMessage]) -> Vec<String> {
     mails
         .iter()
@@ -93,7 +153,7 @@ pub struct Server {
 }
 
 impl Server {
-    fn start() -> Result<Self, Box<dyn Error>> {
+    pub fn start() -> Result<Self, Box<dyn Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let base = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
         let routes = Arc::new(Mutex::new(BTreeMap::new()));
@@ -316,13 +376,7 @@ impl Fixture {
     }
 
     pub fn dispatcher(&self) -> Result<DurableWorkDispatcher, DurableDispatchError> {
-        DurableWorkDispatcher::open(
-            self.data_dir.join("runtime/durable-events"),
-            self.data_dir.join("runtime/work-payloads"),
-            self.bus.clone(),
-            "owner",
-            120_000,
-        )
+        dispatcher_for(&self.data_dir, &self.bus)
     }
 
     pub fn runtime(&self, now_ms: u64) -> WebWatchRuntime<'_> {
@@ -406,25 +460,7 @@ impl Fixture {
 
     /// Notification inbound work that is due now, as the durable runtime hands it out.
     pub fn due_inbound(&self, now_ms: u64) -> Result<Vec<InboundMessage>, Box<dyn Error>> {
-        let state = evaluate_durable_recovery(
-            self.data_dir.join("runtime/durable-events"),
-            self.data_dir.join("checkpoints"),
-        )
-        .state
-        .ok_or("durable replay")?;
-        let admission = evaluate_durable_work_recovery_for_owner(
-            &state.work,
-            self.data_dir.join("runtime/work-payloads"),
-            now_ms,
-            Some("owner"),
-        );
-        self.dispatcher()?
-            .dispatch_due(&state.work, &admission, now_ms)?;
-        let mut inbound = Vec::new();
-        while let Some(message) = self.bus.consume_inbound() {
-            inbound.push(message);
-        }
-        Ok(inbound)
+        hand_out(&self.data_dir, &self.bus, now_ms)
     }
 
     /// The agent loop turn for one inbound message, then its durable work closed as the runtime
@@ -465,19 +501,7 @@ impl Fixture {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let result = agent.process_message(message)?;
-        let state = evaluate_durable_recovery(
-            self.data_dir.join("runtime/durable-events"),
-            self.data_dir.join("checkpoints"),
-        )
-        .state
-        .ok_or("durable replay")?;
-        if let Some(item) = work_id
-            .and_then(|work_id| state.work.items.get(&work_id))
-            .filter(|item| item.state == ReplayWorkState::Leased)
-        {
-            self.dispatcher()?
-                .record_terminal(item, WorkTerminalKind::Succeeded, "agent_turn")?;
-        }
+        close_turn(&self.data_dir, &self.bus, work_id)?;
         Ok(result)
     }
 

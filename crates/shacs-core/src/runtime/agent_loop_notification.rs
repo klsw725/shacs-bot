@@ -96,6 +96,10 @@ impl AgentLoop<'_> {
             result.stop_reason = "entrusted_notification_delivery_failed".to_owned();
             return Ok(result);
         }
+        crate::runtime::web_watch_conversation::note_other_reply(
+            &self.config.workspace,
+            session_key,
+        );
         result.stop_reason = "entrusted_notification".to_owned();
         result.final_content = Some(content);
         result.outbound_count = 1;

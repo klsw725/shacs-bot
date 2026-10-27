@@ -9,7 +9,9 @@ use super::entrusted_work_access::{bound_current_work, latest_transition_id};
 use super::entrusted_work_store::store_entrusted_works;
 use super::entrusted_work_surface::load_owner_session;
 use super::web_watch_decision::condition_matches;
-use super::web_watch_extract::{candidates, continues_number, extract, UNSUPPORTED_NUMBER_LEAD};
+use super::web_watch_extract::{
+    candidates, continues_number, extract_shown, UNSUPPORTED_NUMBER_LEAD,
+};
 use super::web_watch_fetch::{
     display_url, read_page, sha256_ref, status_failure, validate_watch_url, ReadPage,
     WebFetchLimits,
@@ -23,9 +25,9 @@ use super::{
     ConfirmWebWatchRequest, EntrustedWork, EntrustedWorkError, EntrustedWorkReadRequest,
     EntrustedWorkRevision, ObservationBlock, ObservationError, PersistentGoal,
     PersistentGoalStatus, WebCandidate, WebCondition, WebEvidence, WebExtraction, WebObservedValue,
-    WebPreview, WebPreviewRequest, WebPreviewTarget, WebTextArea, WebValueKind, WebWatchConfigured,
-    WebWatchEntry, WebWatchError, WebWatchPlan, WEB_TEXT_VERSION, WEB_WATCH_MAX_CADENCE_SECONDS,
-    WEB_WATCH_MIN_CADENCE_SECONDS,
+    WebPreview, WebPreviewRequest, WebPreviewTarget, WebResponseFacts, WebTextArea, WebValueKind,
+    WebWatchConfigured, WebWatchEntry, WebWatchError, WebWatchPlan, WEB_TEXT_VERSION,
+    WEB_WATCH_MAX_CADENCE_SECONDS, WEB_WATCH_MIN_CADENCE_SECONDS,
 };
 
 const MAX_NEEDLE_CHARS: usize = 64;
@@ -47,7 +49,17 @@ pub fn preview_web_watch(
     limits: &WebFetchLimits,
 ) -> Result<WebPreview, WebWatchError> {
     validate_watch_url(&request.url, guard).map_err(WebWatchError::InvalidInput)?;
-    let target = match &request.target {
+    let target = checked_target(&request.target)?;
+    {
+        let _guard = SessionMutationGuard::acquire(workspace, &request.work.owner_session_id)?;
+        let (_, session) = load_owner_session(workspace, &request.work.owner_session_id)?;
+        writable_work(&session, &request.work)?;
+    }
+    preview_page(&request.url, &target, guard, limits)
+}
+
+pub(super) fn checked_target(target: &WebPreviewTarget) -> Result<WebPreviewTarget, WebWatchError> {
+    Ok(match target {
         WebPreviewTarget::Number {
             label,
             decimal_comma,
@@ -65,27 +77,22 @@ pub fn preview_web_watch(
                 None => None,
             },
         },
-    };
-    {
-        let _guard = SessionMutationGuard::acquire(workspace, &request.work.owner_session_id)?;
-        let (_, session) = load_owner_session(workspace, &request.work.owner_session_id)?;
-        writable_work(&session, &request.work)?;
-    }
-    let page = successful_page(&request.url, guard, limits)?;
-    let url_digest = sha256_ref(&request.url);
-    let candidates = candidates(&page.text, &target)
+    })
+}
+
+pub(super) fn preview_page(
+    url: &str,
+    target: &WebPreviewTarget,
+    guard: &NetworkGuard,
+    limits: &WebFetchLimits,
+) -> Result<WebPreview, WebWatchError> {
+    validate_watch_url(url, guard).map_err(WebWatchError::InvalidInput)?;
+    let page = successful_page(url, guard, limits)?;
+    let candidates = candidates(&page.text, target)
         .into_iter()
         .map(|candidate| {
-            let token = CandidateToken {
-                version: 1,
-                url_digest: url_digest.clone(),
-                extraction: candidate.extraction.clone(),
-                shown: candidate.value.clone(),
-            };
-            let bytes = serde_json::to_vec(&token)
-                .map_err(|error| ObservationError::Durable(error.into()))?;
             Ok(WebCandidate {
-                token: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+                token: candidate_token(url, &candidate.extraction, &candidate.value)?,
                 shown_text: safe_text(&candidate.shown_text, MAX_ANCHOR_CHARS),
                 value: candidate.value,
                 extraction: safe_extraction(&candidate.extraction),
@@ -93,13 +100,151 @@ pub fn preview_web_watch(
         })
         .collect::<Result<Vec<_>, WebWatchError>>()?;
     Ok(WebPreview {
-        url: display_url(&request.url),
+        url: display_url(url),
         final_url: page.response.final_url,
         http_status: page.response.http_status,
         truncated: page.response.truncated,
         text_digest: page.response.text_digest,
         candidates,
     })
+}
+
+pub(super) fn candidate_token(
+    url: &str,
+    extraction: &WebExtraction,
+    shown: &WebObservedValue,
+) -> Result<String, WebWatchError> {
+    let token = CandidateToken {
+        version: 1,
+        url_digest: sha256_ref(url),
+        extraction: extraction.clone(),
+        shown: shown.clone(),
+    };
+    let bytes =
+        serde_json::to_vec(&token).map_err(|error| ObservationError::Durable(error.into()))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+pub(super) fn candidate_extraction(token: &str) -> Result<WebExtraction, WebWatchError> {
+    decode_token(token).map(|token| token.extraction)
+}
+
+/// A value read with a confirmed criterion, with its text as the page shows it, made safe like a
+/// preview candidate's.
+pub(super) struct ShownValue {
+    pub value: WebObservedValue,
+    pub shown_text: String,
+}
+
+pub(super) fn read_value(
+    url: &str,
+    extraction: &WebExtraction,
+    guard: &NetworkGuard,
+    limits: &WebFetchLimits,
+) -> Result<ShownValue, WebWatchError> {
+    validate_watch_url(url, guard).map_err(WebWatchError::InvalidInput)?;
+    let page = successful_page(url, guard, limits)?;
+    let (value, shown) =
+        extract_shown(&page.text, extraction).map_err(|failure| WebWatchError::Unreadable {
+            failure,
+            http_status: Some(page.response.http_status),
+        })?;
+    Ok(ShownValue {
+        value,
+        shown_text: safe_text(shown, MAX_ANCHOR_CHARS),
+    })
+}
+
+pub(super) struct ConfirmationCandidate {
+    token: CandidateToken,
+    condition: WebCondition,
+    cadence_seconds: u64,
+}
+
+/// The confirming read: the value is the one the candidate showed.
+pub(super) struct ConfirmedRead {
+    candidate: ConfirmationCandidate,
+    current: WebObservedValue,
+    response: WebResponseFacts,
+}
+
+pub(super) fn confirmation_candidate(
+    url: &str,
+    candidate_token: &str,
+    condition: WebCondition,
+    cadence_seconds: u64,
+    guard: &NetworkGuard,
+) -> Result<ConfirmationCandidate, WebWatchError> {
+    if !(WEB_WATCH_MIN_CADENCE_SECONDS..=WEB_WATCH_MAX_CADENCE_SECONDS).contains(&cadence_seconds) {
+        return Err(WebWatchError::InvalidInput(
+            "cadence must be 600..86400 seconds".to_owned(),
+        ));
+    }
+    validate_watch_url(url, guard).map_err(WebWatchError::InvalidInput)?;
+    let token = decode_token(candidate_token)?;
+    if token.url_digest != sha256_ref(url) {
+        return Err(WebWatchError::InvalidInput(
+            "candidate was previewed for a different URL".to_owned(),
+        ));
+    }
+    let condition = checked_condition(condition, &token.extraction.value)?;
+    Ok(ConfirmationCandidate {
+        token,
+        condition,
+        cadence_seconds,
+    })
+}
+
+/// What the confirming read found: the value the candidate showed, ready to become the
+/// baseline, or another value, with its text as the page shows it.
+pub(super) enum ConfirmingRead {
+    Same(Box<ConfirmedRead>),
+    Changed(ShownValue),
+}
+
+pub(super) fn read_confirming(
+    url: &str,
+    candidate: ConfirmationCandidate,
+    guard: &NetworkGuard,
+    limits: &WebFetchLimits,
+) -> Result<ConfirmingRead, WebWatchError> {
+    let page = successful_page(url, guard, limits)?;
+    let (current, shown) =
+        extract_shown(&page.text, &candidate.token.extraction).map_err(|failure| {
+            WebWatchError::Unreadable {
+                failure,
+                http_status: Some(page.response.http_status),
+            }
+        })?;
+    if current != candidate.token.shown {
+        return Ok(ConfirmingRead::Changed(ShownValue {
+            value: current,
+            shown_text: safe_text(shown, MAX_ANCHOR_CHARS),
+        }));
+    }
+    Ok(ConfirmingRead::Same(Box::new(ConfirmedRead {
+        candidate,
+        current,
+        response: page.response,
+    })))
+}
+
+/// Re-reads the page with the candidate's criterion; a value other than the one shown is
+/// `ValueChanged`, so it never becomes a baseline unseen.
+pub(super) fn read_confirmation(
+    url: &str,
+    candidate: ConfirmationCandidate,
+    guard: &NetworkGuard,
+    limits: &WebFetchLimits,
+) -> Result<ConfirmedRead, WebWatchError> {
+    let shown = candidate.token.shown.clone();
+    match read_confirming(url, candidate, guard, limits)? {
+        ConfirmingRead::Same(confirmed) => Ok(*confirmed),
+        ConfirmingRead::Changed(current) => Err(WebWatchError::ValueChanged {
+            shown,
+            current: current.value,
+        }),
+    }
 }
 
 /// Re-reads the page with the previewed criterion. Only an unchanged value becomes the
@@ -110,21 +255,13 @@ pub fn confirm_web_watch(
     guard: &NetworkGuard,
     limits: &WebFetchLimits,
 ) -> Result<WebWatchConfigured, WebWatchError> {
-    if !(WEB_WATCH_MIN_CADENCE_SECONDS..=WEB_WATCH_MAX_CADENCE_SECONDS)
-        .contains(&request.cadence_seconds)
-    {
-        return Err(WebWatchError::InvalidInput(
-            "cadence must be 600..86400 seconds".to_owned(),
-        ));
-    }
-    validate_watch_url(&request.url, guard).map_err(WebWatchError::InvalidInput)?;
-    let token = decode_token(&request.candidate_token)?;
-    if token.url_digest != sha256_ref(&request.url) {
-        return Err(WebWatchError::InvalidInput(
-            "candidate was previewed for a different URL".to_owned(),
-        ));
-    }
-    let condition = checked_condition(request.condition.clone(), &token.extraction.value)?;
+    let candidate = confirmation_candidate(
+        &request.url,
+        &request.candidate_token,
+        request.condition.clone(),
+        request.cadence_seconds,
+        guard,
+    )?;
     let owner = request.work.owner_session_id.clone();
     {
         let _guard = SessionMutationGuard::acquire(workspace, &owner)?;
@@ -132,23 +269,44 @@ pub fn confirm_web_watch(
         let (works, index, _) = writable_work(&session, &request.work)?;
         expect_revision(&works[index], request.expected_revision)?;
     }
-    let page = successful_page(&request.url, guard, limits)?;
-    let current =
-        extract(&page.text, &token.extraction).map_err(|failure| WebWatchError::Unreadable {
-            failure,
-            http_status: Some(page.response.http_status),
-        })?;
-    if current != token.shown {
-        return Err(WebWatchError::ValueChanged {
-            shown: token.shown,
-            current,
-        });
-    }
+    let read = read_confirmation(&request.url, candidate, guard, limits)?;
     let _guard = SessionMutationGuard::acquire(workspace, &owner)?;
     let (mut manager, mut session) = load_owner_session(workspace, &owner)?;
-    let (mut works, index, goal) = writable_work(&session, &request.work)?;
+    let configured = store_confirmed_watch(
+        &mut session,
+        &request.work,
+        request.expected_revision,
+        request.url,
+        read,
+        request.now_ms,
+    )?;
+    manager.save_with_fsync(&session)?;
+    Ok(configured)
+}
+
+/// Stores the confirmed plan and first baseline in the loaded owner `session` without saving
+/// it: the work revision goes up by one and the next wake is one cadence later.
+pub(super) fn store_confirmed_watch(
+    session: &mut Session,
+    work: &EntrustedWorkReadRequest,
+    expected_revision: u64,
+    url: String,
+    read: ConfirmedRead,
+    now_ms: u64,
+) -> Result<WebWatchConfigured, WebWatchError> {
+    let ConfirmedRead {
+        candidate:
+            ConfirmationCandidate {
+                token,
+                condition,
+                cadence_seconds,
+            },
+        current,
+        response,
+    } = read;
+    let (mut works, index, goal) = writable_work(session, work)?;
     let work = &mut works[index];
-    expect_revision(work, request.expected_revision)?;
+    expect_revision(work, expected_revision)?;
     let conditions = work
         .current_conditions()
         .cloned()
@@ -162,37 +320,34 @@ pub fn confirm_web_watch(
         revision,
         conditions,
         linked_targets: work.linked_targets.clone(),
-        changed_at: request.now_ms.to_string(),
+        changed_at: now_ms.to_string(),
     });
-    let first_wake_at_ms = request
-        .now_ms
-        .saturating_add(request.cadence_seconds.saturating_mul(1000));
+    let first_wake_at_ms = now_ms.saturating_add(cadence_seconds.saturating_mul(1000));
     let plan = WebWatchPlan {
-        url: request.url,
+        url,
         extraction: token.extraction,
         condition,
-        cadence_seconds: request.cadence_seconds,
+        cadence_seconds,
         first_wake_at_ms,
     };
     let entry = WebWatchEntry {
         work_id: work.work_id.clone(),
         baseline: WebEvidence {
             observation_ref: format!("confirmation:{}:{revision}", work.work_id),
-            observed_at_ms: request.now_ms,
+            observed_at_ms: now_ms,
             condition_matches: condition_matches(&plan.condition, &current),
             value: current,
-            response: page.response,
+            response,
         },
         plan,
         baseline_revision: revision,
         baseline_transition_id: latest_transition_id(&goal)?,
     };
-    let mut watches = web_watches(&session).map_err(EntrustedWorkError::Metadata)?;
+    let mut watches = web_watches(session).map_err(EntrustedWorkError::Metadata)?;
     watches.retain(|stored| stored.work_id != entry.work_id);
     watches.push(entry.clone());
-    store_entrusted_works(&mut session, &works).map_err(EntrustedWorkError::Metadata)?;
-    store_web_watches(&mut session, watches).map_err(EntrustedWorkError::Metadata)?;
-    manager.save_with_fsync(&session)?;
+    store_entrusted_works(session, &works).map_err(EntrustedWorkError::Metadata)?;
+    store_web_watches(session, watches).map_err(EntrustedWorkError::Metadata)?;
     Ok(WebWatchConfigured {
         work_id: entry.work_id,
         condition_revision: revision,
@@ -202,7 +357,7 @@ pub fn confirm_web_watch(
     })
 }
 
-fn writable_work(
+pub(super) fn writable_work(
     session: &Session,
     request: &EntrustedWorkReadRequest,
 ) -> Result<(Vec<EntrustedWork>, usize, PersistentGoal), WebWatchError> {
@@ -263,7 +418,7 @@ fn needle(text: &str) -> Result<String, WebWatchError> {
     Ok(normalized)
 }
 
-fn checked_condition(
+pub(super) fn checked_condition(
     condition: WebCondition,
     kind: &WebValueKind,
 ) -> Result<WebCondition, WebWatchError> {

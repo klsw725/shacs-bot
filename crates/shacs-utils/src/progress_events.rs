@@ -74,7 +74,111 @@ pub fn project_tool_progress_arguments(name: &str, arguments: &Value) -> Value {
     match name {
         "tool_search" => project_tool_search_arguments(arguments),
         "tool_describe" | "tool_call" => project_named_bridge_arguments(arguments),
+        "propose_web_watch" => project_web_watch_fields(arguments, &WEB_WATCH_PROPOSAL_FIELDS),
+        "web_watch_status" => project_web_watch_fields(arguments, &["work_id"]),
         _ => redact_value(arguments),
+    }
+}
+
+/// A tool's output as progress and diagnostics show it: a web watch tool's output repeats the
+/// call's fields, so they are projected like its arguments, and its errors (which can repeat a
+/// field the model wrote) keep only that they are errors.
+pub fn project_tool_progress_result(name: &str, result: Value) -> Value {
+    match (name, result) {
+        ("propose_web_watch", Value::Object(mut result)) => {
+            if let Some(proposal) = result.get("proposal") {
+                let projected = project_web_watch_fields(proposal, &WEB_WATCH_PROPOSAL_FIELDS);
+                result.insert("proposal".to_owned(), projected);
+            }
+            Value::Object(result)
+        }
+        ("web_watch_status", Value::Object(mut result)) => {
+            if let Some(work_id) = result.get("work_id") {
+                let shown = web_watch_field("work_id", work_id);
+                result.insert("work_id".to_owned(), shown);
+            }
+            Value::Object(result)
+        }
+        ("propose_web_watch", Value::String(text)) => {
+            refused_or_set(&text, "Error: the web watch proposal was refused")
+        }
+        ("web_watch_status", Value::String(text)) => {
+            refused_or_set(&text, "Error: the web watch status request was refused")
+        }
+        (_, result) => result,
+    }
+}
+
+fn refused_or_set(text: &str, refused: &str) -> Value {
+    Value::String(
+        if text.trim_start().starts_with("Error") {
+            refused
+        } else {
+            "<set>"
+        }
+        .to_owned(),
+    )
+}
+
+/// The fields of a web watch proposal, as the `propose_web_watch` tool takes them.
+const WEB_WATCH_PROPOSAL_FIELDS: [&str; 17] = [
+    "work_id",
+    "url",
+    "value_label",
+    "value_phrase",
+    "area_label",
+    "area_until",
+    "condition",
+    "condition_value",
+    "notify_email",
+    "deadline_at",
+    "goal_text",
+    "cadence_seconds",
+    "failure_threshold_seconds",
+    "remind_before_seconds",
+    "decimal_comma",
+    "remind_now",
+    "clear_deadline",
+];
+
+/// A web watch tool call's address, email and texts can carry a URL query or fragment, a mail
+/// address or words of the user or a page, which diagnostics never show. Numbers and flags
+/// stay, and so do the fields that only name a choice: a condition kind or work id written as
+/// a plain word, and a threshold written as a number. Every other text only shows that it is
+/// set; fields the tool does not take (not in `fields`) are left out.
+fn project_web_watch_fields(arguments: &Value, fields: &[&str]) -> Value {
+    let projected = arguments
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| fields.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), web_watch_field(key, value)));
+    Value::Object(projected.collect())
+}
+
+fn web_watch_field(key: &str, value: &Value) -> Value {
+    let plain_word = |text: &str| {
+        !text.is_empty()
+            && text.len() <= 64
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    };
+    let number = |text: &str| {
+        !text.is_empty()
+            && text.len() <= 32
+            && text.bytes().any(|byte| byte.is_ascii_digit())
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b',' | b'-' | b'+'))
+    };
+    match (key, value) {
+        (_, Value::Bool(_) | Value::Number(_) | Value::Null) => value.clone(),
+        ("condition" | "work_id", Value::String(text)) if plain_word(text) => {
+            Value::String(redact_string(text))
+        }
+        ("condition_value", Value::String(text)) if number(text) => value.clone(),
+        _ => Value::String("<set>".to_owned()),
     }
 }
 
@@ -248,6 +352,86 @@ mod tests {
             }),
         );
         assert_eq!(call, serde_json::json!({"name": "mcp_demo"}));
+    }
+
+    #[test]
+    fn a_web_watch_proposal_shows_no_address_email_or_text() {
+        let proposal = serde_json::json!({
+            "url": "https://shop.example/item?coupon=private-ref#checkout",
+            "goal_text": "PrivateGoal",
+            "value_label": "Price",
+            "value_phrase": "sale",
+            "notify_email": "user@example.test",
+            "condition": "at_most",
+            "condition_value": "12,500",
+            "cadence_seconds": 600,
+            "remind_now": false,
+            "unknown": "kept-nowhere"
+        });
+        let expected = serde_json::json!({
+            "url": "<set>",
+            "goal_text": "<set>",
+            "value_label": "<set>",
+            "value_phrase": "<set>",
+            "notify_email": "<set>",
+            "condition": "at_most",
+            "condition_value": "12,500",
+            "cadence_seconds": 600,
+            "remind_now": false
+        });
+
+        let arguments = project_tool_progress_arguments("propose_web_watch", &proposal);
+        let result = project_tool_progress_result(
+            "propose_web_watch",
+            serde_json::json!({"kind": "web_watch_proposal", "proposal": proposal}),
+        );
+
+        assert_eq!(arguments, expected);
+        assert_eq!(result.get("proposal"), Some(&expected));
+        assert_eq!(
+            project_tool_progress_result(
+                "propose_web_watch",
+                serde_json::json!("Error: unknown field https://x.example/?k=v")
+            ),
+            serde_json::json!("Error: the web watch proposal was refused")
+        );
+        assert_eq!(
+            project_tool_progress_result("read_file", serde_json::json!({"proposal": "kept"})),
+            serde_json::json!({"proposal": "kept"})
+        );
+    }
+
+    #[test]
+    fn a_web_watch_status_request_shows_only_a_work_id_written_as_a_plain_word() {
+        let address = "https://shop.example/item?coupon=private-ref#checkout";
+
+        let plain = project_tool_progress_arguments(
+            "web_watch_status",
+            &serde_json::json!({"work_id": "work-0a1b2c3d4e5f", "unknown": address}),
+        );
+        let arguments = project_tool_progress_arguments(
+            "web_watch_status",
+            &serde_json::json!({"work_id": address}),
+        );
+        let result = project_tool_progress_result(
+            "web_watch_status",
+            serde_json::json!({"kind": "web_watch_status_request", "work_id": address}),
+        );
+        let error = project_tool_progress_result(
+            "web_watch_status",
+            serde_json::json!(format!("Error: work_id {address}")),
+        );
+
+        assert_eq!(plain, serde_json::json!({"work_id": "work-0a1b2c3d4e5f"}));
+        assert_eq!(arguments, serde_json::json!({"work_id": "<set>"}));
+        assert_eq!(
+            result,
+            serde_json::json!({"kind": "web_watch_status_request", "work_id": "<set>"})
+        );
+        assert_eq!(
+            error,
+            serde_json::json!("Error: the web watch status request was refused")
+        );
     }
 
     #[test]

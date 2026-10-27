@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use shacs_session::SessionMutationGuard;
+use shacs_session::{Session, SessionMutationGuard};
 
 use super::entrusted_work_access::bound_current_work;
 use super::entrusted_work_surface::load_owner_session;
@@ -31,28 +31,46 @@ pub fn configure_web_watch_deadline(
         &request.work.work_id,
     )?;
     let work_id = works[index].work_id.clone();
-    if !web_watches(&session)
+    let settings = next_deadline_settings(
+        &session,
+        work_id,
+        request.expected_revision,
+        request.deadline,
+        request.now_ms,
+    )?;
+    store_web_deadline_settings(&mut session, settings.clone())
+        .map_err(EntrustedWorkError::Metadata)?;
+    manager.save_with_fsync(&session)?;
+    Ok(deadline_view(&settings))
+}
+
+/// The next deadline settings revision of `work_id` in `session`, checked as above.
+pub(super) fn next_deadline_settings(
+    session: &Session,
+    work_id: String,
+    expected_revision: u64,
+    input: Option<WebDeadlineInput>,
+    now_ms: u64,
+) -> Result<WebDeadlineSettings, WebWatchError> {
+    if !web_watches(session)
         .map_err(EntrustedWorkError::Metadata)?
         .iter()
         .any(|watch| watch.work_id == work_id)
     {
         return Err(invalid("confirm a web watch before setting a deadline"));
     }
-    let actual = web_deadline_settings(&session, &work_id)
+    let actual = web_deadline_settings(session, &work_id)
         .map_err(EntrustedWorkError::Metadata)?
         .map_or(0, |settings| settings.revision);
-    if request.expected_revision != actual {
+    if expected_revision != actual {
         return Err(EntrustedWorkError::RevisionConflict {
-            expected: request.expected_revision,
+            expected: expected_revision,
             actual,
         }
         .into());
     }
-    let deadline = request
-        .deadline
-        .map(|input| deadline(input, request.now_ms))
-        .transpose()?;
-    let has_target = web_notify_settings(&session, &work_id)
+    let deadline = input.map(|input| deadline(input, now_ms)).transpose()?;
+    let has_target = web_notify_settings(session, &work_id)
         .map_err(EntrustedWorkError::Metadata)?
         .is_some_and(|settings| settings.target.is_some());
     if deadline.is_some() && !has_target {
@@ -60,18 +78,14 @@ pub fn configure_web_watch_deadline(
             "set an email notification target (web-notify) before a deadline",
         ));
     }
-    let settings = WebDeadlineSettings {
+    Ok(WebDeadlineSettings {
         work_id,
         revision: actual
             .checked_add(1)
             .ok_or_else(|| invalid("deadline revision overflow"))?,
         deadline,
-        changed_at_ms: request.now_ms,
-    };
-    store_web_deadline_settings(&mut session, settings.clone())
-        .map_err(EntrustedWorkError::Metadata)?;
-    manager.save_with_fsync(&session)?;
-    Ok(deadline_view(&settings))
+        changed_at_ms: now_ms,
+    })
 }
 
 pub(super) fn deadline_view(settings: &WebDeadlineSettings) -> WebDeadlineView {
@@ -82,7 +96,7 @@ pub(super) fn deadline_view(settings: &WebDeadlineSettings) -> WebDeadlineView {
     }
 }
 
-fn deadline(input: WebDeadlineInput, now_ms: u64) -> Result<WebDeadline, WebWatchError> {
+pub(super) fn deadline(input: WebDeadlineInput, now_ms: u64) -> Result<WebDeadline, WebWatchError> {
     let at_text = input.at.trim().to_owned();
     let at_ms = (at_text.len() <= MAX_AT_TEXT_BYTES)
         .then(|| chrono::DateTime::parse_from_rfc3339(&at_text).ok())

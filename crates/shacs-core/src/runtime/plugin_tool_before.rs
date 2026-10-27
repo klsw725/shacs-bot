@@ -143,7 +143,8 @@ impl PluginRuntimeHookAgentHook {
                     }
                 };
                 if let Some((hook_ref, reason, denial)) = outcome {
-                    self.facts.denial(&hook_ref, &call.id, denial);
+                    let shown_id = super::runner_spec034::observable_call_id(&call.id);
+                    self.facts.denial(&hook_ref, &shown_id, denial);
                     messages.push(blocked_message(call, &hook_ref, &reason));
                     break;
                 }
