@@ -1,12 +1,12 @@
 # Retired Spec031 release runner v2 results
 
-The Spec031 release runner wrote `spec031.release_runner.v2` results during the retired Spec 035 work. [Spec 041](../../specs/041-release-evidence-tooling-disposition/SPEC.md) decided to stop reading them in the current runner, and [Spec 045](../../specs/045-release-runner-scope-reduction/SPEC.md) removes that reader once this record is in place. This folder keeps a separate way to check the ten canonical v2 results and to reproduce the verdicts they had.
+The Spec031 release runner wrote `spec031.release_runner.v2` results during the retired Spec 035 work. [Spec 041](../../specs/041-release-evidence-tooling-disposition/SPEC.md) decided to stop reading them in the current runner, and [Spec 045](../../specs/045-release-runner-scope-reduction/SPEC.md) removed that reader after this record was in place. The current runner rejects every v2 result with `UnsupportedSchema`. This folder keeps a separate way to check the ten canonical v2 results and to reproduce the verdicts they had.
 
 These records are not an active spec, a release approval, or proof that a historical execution happened. A record proves only that a copy of a result has the same bytes as the recorded result. The meaning of a result comes from the pinned validator below and the source it ran against. Each result is read as a result of its own schema (146 rows, six owners). It is not reclassified into the current 65 rows and four owners, and it is not current PASS evidence.
 
 ## The ten results
 
-The results are kept only in the untracked local folder `.omo/worktree-archives/spec035-20260928/evidence/spec035/`. If that folder is lost, these records cannot recreate the results. The 49 test temp outputs under `closure/f1-r01-owned-tmp/` are not covered, as in the Spec 035 handoff. They are kept. The validator with the v2 reader already rejects them with `UnsupportedSchema`, and the runner without it must keep rejecting them.
+The results are kept only in the untracked local folder `.omo/worktree-archives/spec035-20260928/evidence/spec035/`. If that folder is lost, these records cannot recreate the results. The 49 test temp outputs under `closure/f1-r01-owned-tmp/` are not covered, as in the Spec 035 handoff. They are kept. The validator rejected them with `UnsupportedSchema` before the v2 reader was removed and still does.
 
 All ten results have schema `spec031.release_runner.v2`. Only the two G7 results contain `spec035-execution-binding.json`.
 

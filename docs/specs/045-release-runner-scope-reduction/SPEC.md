@@ -1,6 +1,6 @@
 # 045. Spec031 release runner의 범위 축소 구현 명세
 
-Status: Planned
+Status: Complete (Scoped)
 
 Consumes: 041 release evidence tooling disposition decision and its investigation inputs, 031 release artifact contract and `spec031-release-runner`, shared command execution API used by the 030·033·034 runners, 035 inactive archive, 043·044 archived owner facts
 
@@ -75,3 +75,15 @@ Consumes: 041 release evidence tooling disposition decision and its investigatio
 | [020 v2 판독 장치·공개 API 삭제와 문서](prds/020-v2-reader-removal-and-docs.md) | 삭제, 새 `UnsupportedSchema` 테스트, CLI 분기 삭제, 공통 문서 | 000, 010 | 삭제 범위 검색, 041 입력 판독, CLI 관측, runner 테스트, 문서 검색 |
 
 범위 1과 수용 조건 1은 000, 범위 2와 수용 조건 2는 010, 범위 3·4와 수용 조건 3·4·5는 020이 소유한다. 각 PRD는 자기 변경에 맞는 사용자 문서와 Cargo 검증을 함께 끝낸다. 010은 000의 수정이 들어간 commit을 고정 commit으로 삼고, 020은 010의 보존 기록이 있어야 v2 판독을 지울 수 있으므로 번호 순서대로 구현한다. 020이 앞 PRD의 결과를 끝까지 이어 확인하는 것은 소비이지 공동 소유가 아니다. 045 최종 판정에는 세 PRD의 종료 증거를 함께 확인하며 별도의 뒤 번호 PRD를 요구하지 않는다.
+
+## 종료 증거 (2026-10-28)
+
+PRD [000](prds/000-passed-cargo-test-count-check.md), [010](prds/010-v2-result-preservation-record.md), [020](prds/020-v2-reader-removal-and-docs.md)이 각각 독립 Oracle **PASS**를 받았다(000·010은 2차, 020은 1차). 전체 workspace 결과와 상태 줄을 반영한 뒤 수용 조건 1–5와 이 종료 기록도 스펙 차원에서 **PASS**로 판정됐다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 release seal이 아니다. 실행 기록은 로컬 `.omo/evidence/spec045/`(추적하지 않음)에 있다.
+
+- 조건 1: 통과로 기록된 `cargo test`의 개수 없는 기록을 거절한다. 회귀 테스트는 수정 전 소스에서 v5·v4·v3 모두 위조를 받아들였고 수정 뒤에는 거절했다. 041 입력 98쌍에서 판정이 바뀐 것은 m07 위조가 든 9쌍뿐이었다. b05는 명령 검사가 먼저 돌아 `NonzeroTestsFailed`가 됐고, 개수를 맞춘 b05는 `BlockedAsPass` 그대로였다. 개수 없는 실패·시간 초과 기록은 `CommandFailed`·`CommandTimedOut`이다(000).
+- 조건 2: [v2 결과 보존 기록](../../archive/spec031-v2-results/README.md)의 sha256 기록이 원본 10개를 통과시키고 041의 변조 사본을 거절했다. 고정 commit `0f0279973a12af65b9616fc41163748b367fc937`(main에 있음)에서 다시 빌드한 validator가 판정표(G7 두 개 valid, 여덟 개 `UnsupportedSchema`)를 재현했다(010).
+- 조건 3: v2 판독 장치를 지운 뒤 canonical 10개, 임시 출력 49개, m08–m13이 모두 `UnsupportedSchema`이고 v5 입력 판정은 지우기 전과 같다. 지운 이름은 코드에 남지 않았다(020).
+- 조건 4: CLI c01–c09의 출력과 exit code가 041 기록과 같다. fmt, workspace clippy `-D warnings`, `shacs-projection` 테스트가 통과했다. 사용자 승인을 받아 PRD 000과 PRD 020의 커밋 전에 전체 workspace 테스트를 `--no-fail-fast`로 한 번씩 실행했다. 두 번 모두 유일한 실패는 baseline인 Spec034 fixture 테스트(`mismatch_uses_isolated_tree`)였고, 두 실행에서 030·033·034 runner를 포함한 suite별 결과는 지운 v2 테스트와 새 G7 테스트 말고는 같았다(000·020).
+- 조건 5: README·사용 가이드가 v2 결과를 보존 기록과 고정 commit으로 확인하는 방법을 설명하고, 고친 fail-open을 현재 한계로 안내하거나 v2 판독을 현재 기능으로 안내하는 문장이 없다(020).
+
+[남은 위험과 한계](#남은-위험과-한계)는 그대로다. 외부 소비자, 저장소 밖의 v3·v4 결과, 원본 v2 폴더의 보존, v5의 commit/tree 결속은 이 종료로 확인되거나 해결되지 않는다.
