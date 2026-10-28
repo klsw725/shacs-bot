@@ -4,7 +4,7 @@ use super::{
     PluginRuntimeHookAgentHook, PluginRuntimePlugin, RuntimeToolCall, ToolBeforeConfirmation,
     ToolBeforeContext, ToolBeforeDecision, ToolBeforeHandler,
 };
-use crate::runtime::runner::isolate_panic;
+use crate::runtime::runner;
 use serde_json::Value;
 use shacs_projection::{HookDenialReason, HookDiagnosticKind};
 use std::sync::Arc;
@@ -19,7 +19,7 @@ pub(super) fn run_command(
 ) -> Option<(String, String, HookDenialReason)> {
     let hook_ref = hook.plugin_id.clone();
     let result = match owner.mode {
-        PluginHookDispatchMode::LiveDiagnostics => isolate_panic(|| {
+        PluginHookDispatchMode::LiveDiagnostics => runner::isolate_panic(|| {
             owner.executor.execute(&hook_invocation(
                 plugin,
                 hook,

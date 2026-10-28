@@ -2564,10 +2564,12 @@ fn sanitize_hook_message(mut message: Value) -> Value {
 ///
 /// Specs 003, 025 and 030 require hook and callback panics to fail only that hook and let the
 /// runtime continue, so this is the one reviewed `catch_unwind` boundary for them. Use it only
-/// for extension points; panics in the runtime itself must keep propagating.
+/// for extension points; panics in the runtime itself must keep propagating. `McpRuntime::close`
+/// also uses it so that a panicking `McpConnector::close` does not leave the other servers
+/// running; it resumes that panic once every server was tried.
 #[expect(
     clippy::disallowed_methods,
-    reason = "specs 003/025/030 require hook and callback panics to be isolated"
+    reason = "specs 003/025/030 isolate hook and callback panics; MCP close still closes the other servers"
 )]
 pub(crate) fn isolate_panic<T>(operation: impl FnOnce() -> T) -> std::thread::Result<T> {
     panic::catch_unwind(AssertUnwindSafe(operation))

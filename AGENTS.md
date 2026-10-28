@@ -57,7 +57,7 @@
   - 잠금 실패를 빈 목록·`None`·`NotFound` 같은 정상 결과로 바꾸지 않는다. 재시작 뒤 다시 읽지 않는 진단용 기록만 그 쓰기를 건너뛸 수 있다. 커서·체크포인트처럼 나중에 읽는 값을 건너뛰거나 빈 값으로 대신하면 지난 메시지를 다시 처리하게 된다.
   - 반환형에 오류를 담을 수 없으면 `.expect("<무엇> lock poisoned")`로 멈춘다.
   - `Drop`과 `Drop`이 부르는 함수에서는 멈추지 말고 `if let Ok(..) = mutex.lock()`으로 건너뛴다. unwinding 중 두 번째 panic은 프로세스를 바로 abort한다.
-- **`catch_unwind`를 새로 쓰지 말고 검토된 경계를 호출한다**. hook·callback panic 격리는 `crates/shacs-core/src/runtime/runner.rs`의 `isolate_panic`(Spec 003/025/030), facade hook 격리와 external turn panic 복구는 `crates/shacs-cli/src/lib.rs`의 `isolate_panic`(docs/USAGE.md, Spec 029)이다. 나머지 하나는 Spec034 release runner의 최종 검증이다.
+- **`catch_unwind`를 새로 쓰지 말고 검토된 경계를 호출한다**. hook·callback panic 격리는 `crates/shacs-core/src/runtime/runner.rs`의 `isolate_panic`(Spec 003/025/030), facade hook 격리와 external turn panic 복구는 `crates/shacs-cli/src/lib.rs`의 `isolate_panic`(docs/USAGE.md, Spec 029)이다. 나머지 하나는 Spec034 release runner의 최종 검증이다. `McpRuntime::close`도 core의 `isolate_panic`으로 서버마다 `McpConnector::close`를 감싸, 하나가 panic해도 나머지를 닫은 뒤 그 panic을 다시 던진다(이미 unwinding 중이면 던지지 않는다).
 - **도구가 잡지 못하는 규칙**:
   - 하위 모듈이 있는 파일에는 `mod` 선언과 re-export만 두고 구현은 leaf 모듈에 둔다. leaf 모듈 파일 이름은 안의 주된 타입 이름을 따른다.
   - 타입과 trait은 `use`로 가져와 짧은 이름으로 쓰고, 다른 모듈의 자유 함수는 `module::function()`으로 부른다. 파일 전체에서 쓰지 않는 trait은 쓰는 함수 안에서 import한다.

@@ -1,6 +1,5 @@
 use super::media_result::has_generated_artifacts;
-use crate::runtime::runner::isolate_panic;
-use crate::runtime::AgentRunSpec;
+use crate::runtime::{runner, AgentRunSpec};
 use serde_json::Value;
 
 const MAX_INJECTION_CYCLES: usize = 5;
@@ -17,7 +16,7 @@ pub(crate) fn append_mid_turn_injections(
     let injections = spec
         .mid_turn_injection_callback
         .as_ref()
-        .map(|callback| isolate_panic(|| callback()).unwrap_or_default())
+        .map(|callback| runner::isolate_panic(|| callback()).unwrap_or_default())
         .unwrap_or_default();
     if injections.is_empty() {
         return false;

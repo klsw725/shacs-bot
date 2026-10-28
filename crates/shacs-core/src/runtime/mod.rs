@@ -516,6 +516,7 @@ pub use provider_credentials::{
     ProviderCredentialInvocation, ProviderCredentialRuntime,
 };
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
+pub(crate) use runner::isolate_panic;
 pub use runner::{
     AgentHook, AgentHookContext, AgentRunSpec, AgentRunner, CompositeHook,
     ExecutionSnapshotCallback, ExecutionSnapshotResolver, MidTurnInjectionCallback, NoopAgentHook,

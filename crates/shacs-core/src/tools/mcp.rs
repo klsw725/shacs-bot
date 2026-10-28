@@ -1,18 +1,19 @@
 use crate::runtime::{
-    ContainmentSnapshotRef, ProcessExecutionReceipt, ProcessGate, ProcessGateInput,
+    self, ContainmentSnapshotRef, ProcessExecutionReceipt, ProcessGate, ProcessGateInput,
     ProcessRedactedSpawnSummary, ProcessRedactedStatus, ProcessSpawnAuthorization,
     ProcessSpawnReport, ProcessTerminalOutcome,
 };
 use crate::tools::{JsonMap, Tool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use std::{mem, panic};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -661,17 +662,31 @@ fn poisoned_connection_outcome() -> McpCallOutcome {
 #[derive(Default)]
 pub struct McpRuntime {
     connector: Option<Arc<dyn McpConnector>>,
-    connected_servers: Mutex<Vec<String>>,
-    closed: AtomicBool,
+    servers: Mutex<ConnectedServers>,
 }
+
+/// The servers to close and whether `close` already ran. They share one lock so that a server
+/// connected while `close` runs is either closed by `close` or rejected by `connect_and_register`.
+#[derive(Default)]
+struct ConnectedServers {
+    names: Vec<String>,
+    closed: bool,
+}
+
+const RUNTIME_CLOSED: &str = "MCP runtime is closed";
 
 impl McpRuntime {
     pub fn new(connector: Option<Arc<dyn McpConnector>>) -> Self {
         Self {
             connector,
-            connected_servers: Mutex::new(Vec::new()),
-            closed: AtomicBool::new(false),
+            servers: Mutex::new(ConnectedServers::default()),
         }
+    }
+
+    fn lock_servers(&self) -> MutexGuard<'_, ConnectedServers> {
+        self.servers
+            .lock()
+            .expect("MCP connected servers lock poisoned")
     }
 
     /// # Panics
@@ -699,6 +714,10 @@ impl McpRuntime {
                 .collect();
         };
         for spec in specs {
+            if self.lock_servers().closed {
+                reports.push(closed_runtime_report(spec, None));
+                continue;
+            }
             if spec.enabled_tools.is_empty() {
                 reports.push(McpServerConnectionReport {
                     server_name: spec.name.clone(),
@@ -725,6 +744,21 @@ impl McpRuntime {
             }
             match connector.connect(spec) {
                 Ok((client, mut capabilities)) => {
+                    let closed = {
+                        let mut servers = self.lock_servers();
+                        if !servers.closed {
+                            servers.names.push(spec.name.clone());
+                        }
+                        servers.closed
+                    };
+                    if closed {
+                        connector.close(&spec.name);
+                        reports.push(closed_runtime_report(
+                            spec,
+                            connector.startup_receipt(&spec.name),
+                        ));
+                        continue;
+                    }
                     for capability in &mut capabilities {
                         capability.server_name = spec.name.clone();
                         capability.timeout_seconds = spec.timeout_seconds;
@@ -735,10 +769,6 @@ impl McpRuntime {
                         capabilities,
                         &spec.enabled_tools,
                     );
-                    self.connected_servers
-                        .lock()
-                        .expect("MCP connected servers lock poisoned")
-                        .push(spec.name.clone());
                     reports.push(McpServerConnectionReport {
                         server_name: spec.name.clone(),
                         connected: true,
@@ -763,30 +793,75 @@ impl McpRuntime {
         reports
     }
 
+    /// Closes every connected server once and refuses later connections; later calls do
+    /// nothing. Dropping the runtime closes the servers the same way but never panics.
+    ///
+    /// # Panics
+    ///
+    /// Resumes the first panic of `McpConnector::close` after every server was tried, unless the
+    /// thread is already unwinding, where a second panic would abort the process.
     pub fn close(&self) {
-        if self.closed.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let Some(connector) = self.connector.as_ref() else {
+        let Some(payload) = self.close_servers() else {
             return;
         };
-        // The connector may be caller code, so it runs on a copy of the list instead of under
-        // the lock, where its panic would poison the list.
-        let connected_servers = {
-            let Ok(connected_servers) = self.connected_servers.lock() else {
-                return;
+        if thread::panicking() {
+            // Dropping the payload runs a destructor that might panic, which would abort here.
+            mem::forget(payload);
+        } else {
+            panic::resume_unwind(payload);
+        }
+    }
+
+    /// Closes every connected server once, outside the lock so that a connector panic cannot
+    /// poison the server list, and returns the first such panic after every server was tried.
+    fn close_servers(&self) -> Option<Box<dyn Any + Send>> {
+        let names = {
+            let Ok(mut servers) = self.servers.lock() else {
+                return None;
             };
-            connected_servers.clone()
+            if servers.closed {
+                return None;
+            }
+            servers.closed = true;
+            std::mem::take(&mut servers.names)
         };
-        for server in &connected_servers {
-            connector.close(server);
+        let connector = self.connector.as_ref()?;
+        let mut first_panic = None;
+        for name in &names {
+            if let Err(payload) = runtime::isolate_panic(|| connector.close(name)) {
+                if first_panic.is_none() {
+                    first_panic = Some(payload);
+                } else {
+                    // Dropping a panic payload runs its destructor, which may panic as well.
+                    mem::forget(payload);
+                }
+            }
         }
+        first_panic
+    }
+}
+
+fn closed_runtime_report(
+    spec: &McpServerSpec,
+    startup_receipt: Option<ProcessExecutionReceipt>,
+) -> McpServerConnectionReport {
+    McpServerConnectionReport {
+        server_name: spec.name.clone(),
+        connected: false,
+        registered_count: 0,
+        error: Some(RUNTIME_CLOSED.to_owned()),
+        unmatched_enabled_tools: Vec::new(),
+        parent_containment_snapshot: spec.parent_containment_snapshot.clone(),
+        startup_receipt,
     }
 }
 
 impl Drop for McpRuntime {
     fn drop(&mut self) {
-        self.close();
+        if let Some(payload) = self.close_servers() {
+            // Drop must not panic, and dropping the payload runs a destructor that might.
+            mem::forget(payload);
+        }
     }
 }
 
@@ -1504,6 +1579,7 @@ mod tests {
     use super::*;
     use std::io::{BufReader, Cursor};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -1729,20 +1805,83 @@ while read line; do :; done\n",
         assert!(!process_exists(identity.pid));
     }
 
-    struct PanickingCloseConnector;
+    /// Connects any server, records every close, and panics while closing a server whose name
+    /// starts with "bad"; with `payload_panics_on_drop` the panic payload panics when dropped.
+    #[derive(Default)]
+    struct RecordingConnector {
+        connects: AtomicUsize,
+        closed: Mutex<Vec<String>>,
+        payload_panics_on_drop: bool,
+    }
 
-    impl McpConnector for PanickingCloseConnector {
+    struct PanicsOnDrop;
+
+    impl Drop for PanicsOnDrop {
+        fn drop(&mut self) {
+            panic!("panic payload destructor bug");
+        }
+    }
+
+    impl RecordingConnector {
+        fn closed(&self) -> Vec<String> {
+            self.closed
+                .lock()
+                .expect("closed servers lock poisoned")
+                .clone()
+        }
+    }
+
+    impl McpConnector for RecordingConnector {
         fn connect(
             &self,
             _spec: &McpServerSpec,
         ) -> Result<(Arc<dyn McpClient>, Vec<McpCapability>), String> {
+            self.connects.fetch_add(1, Ordering::SeqCst);
             let client: Arc<dyn McpClient> =
                 Arc::new(|_operation: McpOperation| McpCallOutcome::Success(Vec::new()));
             Ok((client, Vec::new()))
         }
 
-        fn close(&self, _server_name: &str) {
-            panic!("connector close bug");
+        fn close(&self, server_name: &str) {
+            self.closed
+                .lock()
+                .expect("closed servers lock poisoned")
+                .push(server_name.to_owned());
+            if server_name.starts_with("bad") {
+                if self.payload_panics_on_drop {
+                    panic::panic_any(PanicsOnDrop);
+                }
+                panic!("connector close bug");
+            }
+        }
+    }
+
+    /// A `RecordingConnector` whose first `connect` tells the test it started and waits until the
+    /// test releases it; later connects go straight through.
+    struct GatedConnector {
+        recorder: RecordingConnector,
+        first_connect: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    }
+
+    impl McpConnector for GatedConnector {
+        fn connect(
+            &self,
+            spec: &McpServerSpec,
+        ) -> Result<(Arc<dyn McpClient>, Vec<McpCapability>), String> {
+            let gate = self
+                .first_connect
+                .lock()
+                .expect("first connect gate lock poisoned")
+                .take();
+            if let Some((started, release)) = gate {
+                let _ = started.send(());
+                let _ = release.recv();
+            }
+            self.recorder.connect(spec)
+        }
+
+        fn close(&self, server_name: &str) {
+            self.recorder.close(server_name);
         }
     }
 
@@ -1764,24 +1903,142 @@ while read line; do :; done\n",
     }
 
     #[test]
-    fn a_panicking_connector_close_leaves_the_server_list_usable() {
-        let runtime = Arc::new(McpRuntime::new(Some(Arc::new(PanickingCloseConnector))));
-        let mut registry = ToolRegistry::new();
-        let first = runtime.connect_and_register(&mut registry, &[fake_server_spec("first")]);
-        assert!(first[0].connected, "the fake connector connects");
+    fn a_panicking_connector_close_still_closes_every_server() {
+        let connector = Arc::new(RecordingConnector::default());
+        let runtime = Arc::new(McpRuntime::new(Some(connector.clone())));
+        let reports = runtime.connect_and_register(
+            &mut ToolRegistry::new(),
+            &[fake_server_spec("bad"), fake_server_spec("good")],
+        );
+        assert!(
+            reports.iter().all(|report| report.connected),
+            "both fake servers connect"
+        );
 
         let closing = Arc::clone(&runtime);
-        let close_panic = std::thread::spawn(move || closing.close()).join();
-        assert!(
-            close_panic.is_err(),
-            "the connector panic reaches the closing thread"
-        );
+        let close = std::thread::spawn(move || closing.close()).join();
 
-        let second = runtime.connect_and_register(&mut registry, &[fake_server_spec("second")]);
         assert!(
-            second[0].connected,
-            "the connected server list is not poisoned by the connector panic"
+            close.is_err(),
+            "the connector panic is resumed after every server was tried"
         );
+        assert_eq!(connector.closed(), ["bad", "good"]);
+    }
+
+    #[test]
+    fn a_server_connected_while_closing_is_closed_and_later_connects_are_refused() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let connector = Arc::new(GatedConnector {
+            recorder: RecordingConnector::default(),
+            first_connect: Mutex::new(Some((started_tx, release_rx))),
+        });
+        let runtime = Arc::new(McpRuntime::new(Some(connector.clone())));
+        let connecting = Arc::clone(&runtime);
+        let racing = std::thread::spawn(move || {
+            connecting.connect_and_register(
+                &mut ToolRegistry::new(),
+                &[fake_server_spec("racing"), fake_server_spec("next")],
+            )
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the connecting thread reaches the connector");
+        runtime.close();
+        release_tx
+            .send(())
+            .expect("the connecting thread waits to be released");
+        let racing = racing.join().expect("the connecting thread finishes");
+
+        assert!(
+            racing
+                .iter()
+                .all(|report| report.error.as_deref() == Some(RUNTIME_CLOSED)),
+            "both servers of the racing call are refused: {racing:?}"
+        );
+        assert_eq!(
+            connector.recorder.closed(),
+            ["racing"],
+            "the server that finished connecting after close is closed instead of left running"
+        );
+        assert_eq!(
+            connector.recorder.connects.load(Ordering::SeqCst),
+            1,
+            "the next server of the same call is not started after close"
+        );
+        let late =
+            runtime.connect_and_register(&mut ToolRegistry::new(), &[fake_server_spec("late")]);
+        assert_eq!(late[0].error.as_deref(), Some(RUNTIME_CLOSED));
+        assert_eq!(
+            connector.recorder.connects.load(Ordering::SeqCst),
+            1,
+            "no server is started after close"
+        );
+    }
+
+    /// Two of the three servers panic on close with payloads that also panic when dropped.
+    fn connected_runtime(connector: &Arc<RecordingConnector>) -> McpRuntime {
+        let runtime = McpRuntime::new(Some(connector.clone()));
+        let reports = runtime.connect_and_register(
+            &mut ToolRegistry::new(),
+            &[
+                fake_server_spec("bad-1"),
+                fake_server_spec("good"),
+                fake_server_spec("bad-2"),
+            ],
+        );
+        assert!(
+            reports.iter().all(|report| report.connected),
+            "every fake server connects"
+        );
+        runtime
+    }
+
+    fn payload_panicking_connector() -> Arc<RecordingConnector> {
+        Arc::new(RecordingConnector {
+            payload_panics_on_drop: true,
+            ..RecordingConnector::default()
+        })
+    }
+
+    #[test]
+    fn dropping_the_runtime_closes_every_server_without_panicking() {
+        let connector = payload_panicking_connector();
+        let runtime = connected_runtime(&connector);
+
+        let dropped = std::thread::spawn(move || drop(runtime)).join();
+
+        let escaped = dropped.is_err();
+        // A payload that escaped would panic when dropped, which the test runner cannot report.
+        mem::forget(dropped);
+        assert!(!escaped, "dropping the runtime must not panic");
+        assert_eq!(connector.closed(), ["bad-1", "good", "bad-2"]);
+    }
+
+    #[test]
+    fn closing_while_unwinding_does_not_abort() {
+        struct CloseOnDrop(McpRuntime);
+
+        impl Drop for CloseOnDrop {
+            fn drop(&mut self) {
+                self.0.close();
+            }
+        }
+
+        let connector = payload_panicking_connector();
+        let runtime = connected_runtime(&connector);
+
+        let unwinding = std::thread::spawn(move || {
+            let _closing = CloseOnDrop(runtime);
+            panic!("unrelated failure");
+        })
+        .join();
+
+        assert!(
+            unwinding.is_err(),
+            "the thread ends with its own panic instead of aborting the process"
+        );
+        assert_eq!(connector.closed(), ["bad-1", "good", "bad-2"]);
     }
 
     #[cfg(unix)]
