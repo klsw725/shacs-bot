@@ -204,6 +204,8 @@ Spec031 release runner의 현재 경로(CLI, v5 생성, v5·v4·v3 판독, 033·
 
 ### 후속 구현 범위와 순서
 
+별도 구현 스펙 [045](../../045-release-runner-scope-reduction/SPEC.md)가 아래 범위와 순서를 소유한다.
+
 1. **fail-open 수정(축소와 별개, 먼저):** 통과로 기록된 `cargo test` 명령은 개수가 있어야 하고 transcript에서 다시 센 값과 같아야 한다. 개수 없는 기록은 실패나 시간 초과일 때만 받아들인다. 이것은 지원하는 모든 schema(v3–v5)의 판독을 강화하는 호환성 변경이다. runner는 개수를 `Option`으로 남기고(`command.rs:70-74`) 결과 줄이 없거나 읽히지 않으면 `None`이 되며(`command.rs:98-100`), 지금 validator는 전체 cargo gate에서 이를 받아들인다(`command_validate.rs:154-156`). 그래서 "통과 + 개수 없음" 기록이 있는 v3·v4·v5 결과는 수정 뒤 새로 거절된다. 이 machine의 v5 두 결과(`cargo test` 기록 27개)와 v2 59개(810개)에는 그런 기록이 없었고(`out/validate-owned-tmp-summary.txt`), 실제 v3·v4 결과는 없어 확인하지 못했다. 회귀 테스트는 `tests/it/`에 두고 v3·v4 변환 fixture에도 같은 기대 결과를 고정한다.
 2. **보존 문서:** 위 (a)–(c)를 만들고 고정 commit validator가 판정표를 재현하는지 확인한다.
 3. **v2 판독 제거:** 같은 변경에서 v2 판독 장치·세 공개 항목·CLI 분기를 지운다. G7 v2 판독을 확인하던 테스트(`spec035_postrun_test.rs`의 `persisted_g7_v2_artifact_keeps_old_locators_and_validates_archived_bytes` 등)는 legacy 모듈과 함께 지우고, G7 binding이 있는 v2 입력이 `UnsupportedSchema`가 되는 테스트를 `tests/it/`에 새로 둔다. 통합 테스트 `rejects_v2_artifact_when_legacy_binding_is_absent`, `rejects_v3_artifact_when_legacy_binding_is_present`(현재 layout이 legacy binding을 나열하면 지금처럼 `UnsupportedSchema`), `persisted_v2_owner_enum_still_reads_spec035`는 그대로 통과해야 한다. `convert_to_legacy_run`은 v4·v3 결과를 만드는 helper이므로 그 판독 테스트(`reads_v4_runs_with_the_retired_app_owner_fact_from_the_archive`, `reads_v3_runs_with_the_retired_video_owner_fact_from_the_archive`)는 바꾸지 않는다. 1단계의 새 거절은 그 사본에서 통과한 `cargo test`의 개수만 비운 별도 입력으로 확인한다.

@@ -1287,9 +1287,9 @@ cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin s
 
 삭제 전 035 classification v2의 45행/6 owner `BLOCKED` 입력과 당시 146행 runner 결과는 역사적 증거이며, 현재 Spec031 runner의 입력이나 완료 판정이 아닙니다. [과거 current-worktree](../.omo/worktree-archives/spec035-20260928/evidence/spec035/closure/final-compiled-runner-current/summary.md)와 [success-fixture](../.omo/worktree-archives/spec035-20260928/evidence/spec035/closure/final-compiled-runner-fixture/summary.md)의 결과를 새 65행 실행으로 재결속하지 않습니다. 과거 fixture 성공은 runner mechanics만 검증했으며 현재 Spec031 closure나 제거된 035의 최종 승인이 아닙니다.
 
-[Spec 041](specs/041-release-evidence-tooling-disposition/SPEC.md#판정-결과-2026-10-25)은 이 runner를 **범위 축소**로 판정했습니다. 위 명령, v5 결과와 v4·v3 판독은 그대로 남고, 새로 만들어지지 않는 v2 결과의 판독은 별도 구현에서 파일별 sha256 기록과 고정 commit의 validator로 옮긴 뒤 지웁니다. 구현 전까지 동작은 지금과 같습니다. 조사에서 확인한 한계는 다음과 같습니다.
+[Spec 041](specs/041-release-evidence-tooling-disposition/SPEC.md#판정-결과-2026-10-25)은 이 runner를 **범위 축소**로 판정했고 [Spec 045](specs/045-release-runner-scope-reduction/SPEC.md)가 구현합니다. 위 명령, v5 결과와 v4·v3 판독은 그대로 남고, 새로 만들어지지 않는 v2 결과의 판독은 파일별 sha256 기록과 고정 commit의 validator로 옮긴 뒤 지웁니다. v2 판독은 아직 지금과 같습니다. 판독과 결과에 관해 알아 둘 점은 다음과 같습니다.
 
-- validator는 `cargo test --workspace` 기록이 통과로 적혀 있고 test 개수가 비어 있으면 transcript를 다시 세지 않아, 손으로 고친 결과를 PASS로 받아들일 수 있습니다. 고칠 때까지 PASS는 runner가 직접 만든 evidence root에서만 믿으세요. 고친 뒤에는 v5·v4·v3 결과 모두 통과한 `cargo test`의 개수가 비어 있으면 거절합니다.
+- 통과로 기록된 `cargo test` 명령은 test 개수가 있어야 하고 transcript에서 다시 센 값과 같아야 하며, 그렇지 않은 v5·v4·v3 결과는 거절합니다. [Spec 045 PRD 000](specs/045-release-runner-scope-reduction/prds/000-passed-cargo-test-count-check.md) 전의 validator는 `cargo test --workspace` 기록의 개수가 비어 있으면 transcript를 다시 세지 않아 손으로 고친 결과를 PASS로 받아들였습니다. 실패하거나 시간 초과로 끝나 개수가 없는 기록은 전처럼 명령 실패로 보고합니다.
 - 결과는 commit을 기록하지 않아 실행 뒤 바뀐 요구사항 문구나 owner status를 알아채지 못합니다. 명령은 repo root 경로에 묶이고 035 보관 자료의 변조와 owner 테스트의 삭제는 거절합니다.
 - 추적하지 않는 `.omo/evidence/spec034/task-12-integration.json`이 없는 checkout에서는 이 파일을 읽는 034 테스트(`mismatch_uses_isolated_tree`)가 실패해 current-worktree 결과가 `BLOCKED`가 됩니다. workspace 명령에 `--no-fail-fast`가 없어 첫 실패 package 뒤의 결과는 transcript에 남지 않습니다.
 

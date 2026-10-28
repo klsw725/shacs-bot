@@ -59,4 +59,4 @@ PRD 000은 실행 비용만 측정하거나 fixture PASS만 얻은 상태로 닫
 - 조사 중 현재 validator가 실패한 `cargo test --workspace` 기록을 통과로 고치고 test 개수를 비우면 PASS로 받아들이는 결함을 찾았다. 축소와 별개로 후속 구현의 첫 단계에서 고친다. 이 수정은 v3–v5 판독도 강화해 "통과 + 개수 없음" 기록을 새로 거절한다. 그때까지 PASS는 runner가 직접 만든 evidence root에서만 믿는다.
 - 이 checkout의 current-worktree 실행은 추적하지 않는 파일을 읽는 034 테스트 하나 때문에 `BLOCKED`다. runner 결함이 아니며 034 쪽 일로 남긴다.
 
-구현은 별도 작업이다. 그때까지 runner 동작은 그대로다. 이 판정은 033·034 runner와 031 snapshot·config 계약을 바꾸지 않고 다른 판정 스펙을 기다리지 않는다.
+구현은 별도 작업으로 [045](../045-release-runner-scope-reduction/SPEC.md)가 소유한다. 그때까지 runner 동작은 그대로다. 이 판정은 033·034 runner와 031 snapshot·config 계약을 바꾸지 않고 다른 판정 스펙을 기다리지 않는다.

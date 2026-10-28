@@ -46,4 +46,4 @@ CLI/API goal lifecycle과 session 저장 테스트(`crates/shacs-cli/tests/spec0
 
 비디오 분석은 040에서 **제거**로 판정했다([판정 결과](specs/040-video-analyzer-capability-disposition/SPEC.md#판정-결과-2026-10-24)). 위 표의 호환 보존 원칙대로 저장된 영상 첨부와 남은 분석 기록은 지우지 않고 영상 첨부는 계속 unsupported note로 모델에 알리며, analyzer와 분석 기록 표면은 [`044`](specs/044-video-analyzer-retirement/SPEC.md)에서 뺐다.
 
-Spec031 release tooling은 041에서 **범위 축소**로 판정했다([판정 결과](specs/041-release-evidence-tooling-disposition/SPEC.md#판정-결과-2026-10-25)). 현재 runner 경로는 대체할 gate가 없어 남기고, 새로 만들어지지 않는 v2 결과의 판독 장치만 sha256 기록과 고정 commit validator로 옮긴 뒤 지운다. 구현은 별도이며 그 전까지 runner 동작은 그대로다.
+Spec031 release tooling은 041에서 **범위 축소**로 판정했다([판정 결과](specs/041-release-evidence-tooling-disposition/SPEC.md#판정-결과-2026-10-25)). 현재 runner 경로는 대체할 gate가 없어 남기고, 새로 만들어지지 않는 v2 결과의 판독 장치만 sha256 기록과 고정 commit validator로 옮긴 뒤 지운다. 구현은 [`045`](specs/045-release-runner-scope-reduction/SPEC.md)가 소유한다.
