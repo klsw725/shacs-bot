@@ -1,10 +1,8 @@
 use shacs_core::runtime::EntrustedObservationSnapshot;
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Child, Command, Stdio},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 pub const OWNER: &str = "email:owner@example.test";

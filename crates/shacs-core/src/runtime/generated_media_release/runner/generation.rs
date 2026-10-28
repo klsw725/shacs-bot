@@ -1,10 +1,15 @@
 use super::super::artifacts::write_json;
 use super::super::catalog;
-use super::super::model::*;
-use shacs_projection::Spec031ReleaseCommandStatus;
-use std::path::Path;
+use super::super::model::{
+    CommandEvidence, CommandStreamSummary, CoverageDocument, DigestRow, ObservationsDocument,
+    OwnerAuditDocument, ResultsDocument, ReviewDocument, SourceManifest,
+    Spec034ReleaseArtifactError, Spec034ReleaseConfig, Spec034ReleaseMode, SummaryDocument,
+    TriageDocument,
+};
 #[cfg(not(test))]
 use super::super::source::MaterializedSource;
+use shacs_projection::Spec031ReleaseCommandStatus;
+use std::path::Path;
 
 #[cfg(not(test))]
 pub fn run_results(
@@ -116,7 +121,11 @@ pub(super) fn write_cleanup_receipt(
     root: &Path,
     cleanup: &super::isolation::CompletedIsolationCleanup,
 ) -> Result<(), Spec034ReleaseArtifactError> {
-    write_json(root, "cleanup-receipt.json", &cleanup.receipt(&config.run_id))
+    write_json(
+        root,
+        "cleanup-receipt.json",
+        &cleanup.receipt(&config.run_id),
+    )
 }
 
 pub fn command_ref(

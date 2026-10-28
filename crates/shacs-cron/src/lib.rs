@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Duration as StdDuration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -328,7 +327,7 @@ impl InMemoryCronService {
     }
 
     fn next_id(&self) -> String {
-        let mut next_id = recover_lock(&self.next_id);
+        let mut next_id = lock(&self.next_id);
         let id = format!("job{:04}", *next_id);
         *next_id += 1;
         id
@@ -357,19 +356,19 @@ impl CronService for InMemoryCronService {
             updated_at_ms: now_ms,
             delete_after_run: request.delete_after_run,
         };
-        recover_lock(&self.jobs).push(job.clone());
+        lock(&self.jobs).push(job.clone());
         job
     }
 
     fn list_jobs(&self) -> Vec<CronJob> {
-        let mut jobs = recover_lock(&self.jobs).clone();
+        let mut jobs = lock(&self.jobs).clone();
         jobs.retain(|job| job.enabled);
         jobs.sort_by_key(|job| job.state.next_run_at_ms.unwrap_or(i64::MAX));
         jobs
     }
 
     fn remove_job(&self, job_id: &str) -> RemoveJobResult {
-        let mut jobs = recover_lock(&self.jobs);
+        let mut jobs = lock(&self.jobs);
         let Some(position) = jobs.iter().position(|job| job.id == job_id) else {
             return RemoveJobResult::NotFound;
         };
@@ -383,7 +382,7 @@ impl CronService for InMemoryCronService {
     fn get_job(&self, job_id: &str) -> Option<CronJob> {
         self.jobs
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("cron jobs lock poisoned")
             .iter()
             .find(|job| job.id == job_id)
             .cloned()
@@ -394,7 +393,7 @@ impl CronService for InMemoryCronService {
         job.state.next_run_at_ms = compute_next_run(&job.schedule, now_ms).ok().flatten();
         job.created_at_ms = now_ms;
         job.updated_at_ms = now_ms;
-        let mut jobs = recover_lock(&self.jobs);
+        let mut jobs = lock(&self.jobs);
         jobs.retain(|existing| existing.id != job.id);
         jobs.push(job.clone());
         job
@@ -402,7 +401,7 @@ impl CronService for InMemoryCronService {
 
     fn enable_job(&self, job_id: &str, enabled: bool) -> Option<CronJob> {
         let now_ms = now_ms();
-        let mut jobs = recover_lock(&self.jobs);
+        let mut jobs = lock(&self.jobs);
         let job = jobs.iter_mut().find(|job| job.id == job_id)?;
         job.enabled = enabled;
         job.updated_at_ms = now_ms;
@@ -416,7 +415,7 @@ impl CronService for InMemoryCronService {
 
     fn update_job(&self, job_id: &str, update: CronJobUpdate) -> UpdateJobResult {
         let now_ms = now_ms();
-        let mut jobs = recover_lock(&self.jobs);
+        let mut jobs = lock(&self.jobs);
         let Some(job) = jobs.iter_mut().find(|job| job.id == job_id) else {
             return UpdateJobResult::NotFound;
         };
@@ -486,27 +485,48 @@ impl PersistentCronService {
         &self.action_path
     }
 
+    /// Job executors run while this lock is held, so an executor panic poisons it; later
+    /// fallible calls then report an I/O error instead of panicking.
+    fn lock_operation(&self) -> io::Result<MutexGuard<'_, ()>> {
+        self.operation
+            .lock()
+            .map_err(|_| io::Error::other("cron operation lock poisoned by a panicking thread"))
+    }
+
+    /// For callers whose result cannot carry an error: a lock poisoned by a panicking job
+    /// executor stops the caller instead of passing for "no jobs" or "not found".
+    fn expect_operation(&self) -> MutexGuard<'_, ()> {
+        self.operation
+            .lock()
+            .expect("cron operation lock poisoned by a panicking job executor")
+    }
+
+    fn refresh_store_or_panic(&self) -> io::Result<CronStore> {
+        let _operation = self.expect_operation();
+        self.refresh_store_unlocked()
+    }
+
     pub fn start(&self) -> io::Result<()> {
-        let _operation = recover_lock(&self.operation);
-        *recover_lock(&self.running) = true;
+        let _operation = self.lock_operation()?;
+        *lock(&self.running) = true;
         let mut store = self.refresh_store_unlocked()?;
         recompute_next_runs(&mut store, now_ms());
         self.save_store(&store)?;
-        *recover_lock(&self.store) = store;
+        *lock(&self.store) = store;
         Ok(())
     }
 
     pub fn stop(&self) {
-        *recover_lock(&self.running) = false;
+        *lock(&self.running) = false;
         self.wake_worker();
     }
 
     pub fn is_running(&self) -> bool {
-        *recover_lock(&self.running)
+        *lock(&self.running)
     }
 
     pub fn refresh_store(&self) -> io::Result<CronStore> {
-        let _operation = recover_lock(&self.operation);
+        let _operation = self.lock_operation()?;
         self.refresh_store_unlocked()
     }
 
@@ -517,12 +537,12 @@ impl PersistentCronService {
             self.save_store(&store)?;
             write_text_atomic(&self.action_path, "")?;
         }
-        *recover_lock(&self.store) = store.clone();
+        *lock(&self.store) = store.clone();
         Ok(store)
     }
 
     pub fn next_wake_at_ms(&self) -> Option<i64> {
-        self.refresh_store()
+        self.refresh_store_or_panic()
             .ok()
             .and_then(|store| next_wake_at_ms(&store))
     }
@@ -532,7 +552,7 @@ impl PersistentCronService {
         due_now_ms: i64,
         executor: &dyn CronJobExecutor,
     ) -> io::Result<Vec<CronRunOutcome>> {
-        let _operation = recover_lock(&self.operation);
+        let _operation = self.lock_operation()?;
         let mut store = self.refresh_store_unlocked()?;
         let mut outcomes = Vec::new();
         let mut index = 0;
@@ -554,7 +574,7 @@ impl PersistentCronService {
             outcomes.push(outcome);
         }
         self.save_store(&store)?;
-        *recover_lock(&self.store) = store;
+        *lock(&self.store) = store;
         Ok(outcomes)
     }
 
@@ -564,7 +584,7 @@ impl PersistentCronService {
         force: bool,
         executor: &dyn CronJobExecutor,
     ) -> io::Result<bool> {
-        let _operation = recover_lock(&self.operation);
+        let _operation = self.lock_operation()?;
         let mut store = self.refresh_store_unlocked()?;
         let Some(position) = store.jobs.iter().position(|job| job.id == job_id) else {
             return Ok(false);
@@ -575,20 +595,20 @@ impl PersistentCronService {
         let now = now_ms();
         let _ = execute_store_job(&mut store, position, now, executor);
         self.save_store(&store)?;
-        *recover_lock(&self.store) = store;
+        *lock(&self.store) = store;
         Ok(true)
     }
 
     fn next_id(&self) -> String {
         let now = now_ms() as u64;
-        let mut next_id = recover_lock(&self.next_id);
+        let mut next_id = lock(&self.next_id);
         let id = format!("{:08x}", now.wrapping_add(*next_id) & 0xffff_ffff);
         *next_id += 1;
         id
     }
 
     fn mutate_store(&self, job: CronJob, action: CronActionKind) -> io::Result<()> {
-        let _operation = recover_lock(&self.operation);
+        let _operation = self.expect_operation();
         let running = self.is_running();
         let mut store = self.refresh_store_unlocked()?;
         match action {
@@ -610,15 +630,17 @@ impl PersistentCronService {
                 }
             }
         }
-        *recover_lock(&self.store) = store;
+        *lock(&self.store) = store;
         self.wake_worker();
         Ok(())
     }
 
     pub fn wake_worker(&self) {
-        let (lock, condvar) = &*self.wake;
-        let mut generation = recover_lock(lock);
-        *generation = generation.wrapping_add(1);
+        let (wake_lock, condvar) = &*self.wake;
+        // `CronSupervisor::drop` calls this, and Drop must not panic.
+        if let Ok(mut generation) = wake_lock.lock() {
+            *generation = generation.wrapping_add(1);
+        }
         condvar.notify_all();
     }
 
@@ -708,15 +730,15 @@ impl CronSupervisor {
         let max_sleep_ms = config.max_sleep_ms.max(1);
         let handle = thread::spawn(move || {
             while !thread_stop.load(Ordering::SeqCst) {
-                let (lock, condvar) = &*wake;
-                let generation = *recover_lock(lock);
+                let (wake_lock, condvar) = &*wake;
+                let generation = *lock(wake_lock);
                 let now = now_ms();
                 let next = thread_service.next_wake_at_ms();
                 let sleep_ms = next
                     .map(|next| next.saturating_sub(now).max(0) as u64)
                     .unwrap_or(max_sleep_ms)
                     .min(max_sleep_ms);
-                let guard = recover_lock(lock);
+                let guard = lock(wake_lock);
                 let _ = condvar.wait_timeout_while(
                     guard,
                     StdDuration::from_millis(sleep_ms),
@@ -791,7 +813,7 @@ impl CronService for PersistentCronService {
 
     fn list_jobs(&self) -> Vec<CronJob> {
         let mut jobs = self
-            .refresh_store()
+            .refresh_store_or_panic()
             .map_or_else(|_| Vec::new(), |store| store.jobs);
         jobs.retain(|job| job.enabled);
         jobs.sort_by_key(|job| job.state.next_run_at_ms.unwrap_or(i64::MAX));
@@ -799,7 +821,7 @@ impl CronService for PersistentCronService {
     }
 
     fn remove_job(&self, job_id: &str) -> RemoveJobResult {
-        let store = self.refresh_store().unwrap_or_default();
+        let store = self.refresh_store_or_panic().unwrap_or_default();
         let Some(job) = store.jobs.iter().find(|job| job.id == job_id).cloned() else {
             return RemoveJobResult::NotFound;
         };
@@ -814,7 +836,7 @@ impl CronService for PersistentCronService {
     }
 
     fn get_job(&self, job_id: &str) -> Option<CronJob> {
-        self.refresh_store()
+        self.refresh_store_or_panic()
             .ok()?
             .jobs
             .into_iter()
@@ -822,7 +844,7 @@ impl CronService for PersistentCronService {
     }
 
     fn register_system_job(&self, mut job: CronJob) -> CronJob {
-        let _operation = recover_lock(&self.operation);
+        let _operation = self.expect_operation();
         let now = now_ms();
         job.state = CronJobState {
             next_run_at_ms: compute_next_run(&job.schedule, now).ok().flatten(),
@@ -834,13 +856,13 @@ impl CronService for PersistentCronService {
         store.jobs.retain(|existing| existing.id != job.id);
         store.jobs.push(job.clone());
         let _ = self.save_store(&store);
-        *recover_lock(&self.store) = store;
+        *lock(&self.store) = store;
         self.wake_worker();
         job
     }
 
     fn enable_job(&self, job_id: &str, enabled: bool) -> Option<CronJob> {
-        let _operation = recover_lock(&self.operation);
+        let _operation = self.expect_operation();
         let now = now_ms();
         let mut store = self.refresh_store_unlocked().ok()?;
         let job = store.jobs.iter_mut().find(|job| job.id == job_id)?;
@@ -858,13 +880,13 @@ impl CronService for PersistentCronService {
             let _ =
                 self.append_action(CronActionKind::Update, serde_json::to_value(&updated).ok()?);
         }
-        *recover_lock(&self.store) = store;
+        *lock(&self.store) = store;
         self.wake_worker();
         Some(updated)
     }
 
     fn update_job(&self, job_id: &str, update: CronJobUpdate) -> UpdateJobResult {
-        let _operation = recover_lock(&self.operation);
+        let _operation = self.expect_operation();
         let now = now_ms();
         let mut store = match self.refresh_store_unlocked() {
             Ok(store) => store,
@@ -883,13 +905,13 @@ impl CronService for PersistentCronService {
         } else if let Ok(value) = serde_json::to_value(&updated) {
             let _ = self.append_action(CronActionKind::Update, value);
         }
-        *recover_lock(&self.store) = store;
+        *lock(&self.store) = store;
         self.wake_worker();
         UpdateJobResult::Updated(Box::new(updated))
     }
 
     fn status(&self) -> CronStatusSnapshot {
-        let store = self.refresh_store().unwrap_or_default();
+        let store = self.refresh_store_or_panic().unwrap_or_default();
         CronStatusSnapshot {
             running: self.is_running(),
             jobs: store.jobs.len(),
@@ -966,10 +988,8 @@ pub fn validate_schedule_for_add(schedule: &CronSchedule) -> Result<(), CronSche
     }
 }
 
-fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().expect("lock poisoned by a panicking thread")
 }
 
 fn now_ms() -> i64 {
@@ -1570,6 +1590,51 @@ mod tests {
     }
 
     #[test]
+    fn executor_panic_fails_later_calls_instead_of_reporting_no_jobs() -> Result<(), Box<dyn Error>>
+    {
+        let root = temp_dir("cron-executor-panic")?;
+        let service = Arc::new(PersistentCronService::new(root.join("jobs.json"))?);
+        let job = service.add_job(AddCronJob {
+            name: "panics".to_owned(),
+            schedule: CronSchedule::every(60_000),
+            message: "run".to_owned(),
+            deliver: false,
+            channel: None,
+            to: None,
+            delete_after_run: false,
+            channel_meta: Value::Object(Default::default()),
+            session_key: None,
+        });
+        service.start()?;
+
+        let runner = Arc::clone(&service);
+        let executor_panic = std::thread::spawn(move || {
+            runner.run_job(
+                &job.id,
+                true,
+                &|_job: &CronJob| -> Result<Option<String>, String> { panic!("executor bug") },
+            )
+        });
+        assert!(
+            executor_panic.join().is_err(),
+            "the executor panic reaches the calling thread"
+        );
+
+        assert!(
+            service.refresh_store().is_err(),
+            "fallible calls report the poisoned operation lock as an I/O error"
+        );
+        let listing = Arc::clone(&service);
+        assert!(
+            std::thread::spawn(move || listing.list_jobs())
+                .join()
+                .is_err(),
+            "list_jobs stops instead of reporting that there are no jobs"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn persistent_run_job_force_executes_disabled_job() -> Result<(), Box<dyn Error>> {
         let root = temp_dir("cron-force")?;
         let service = PersistentCronService::new(root.join("jobs.json"))?;
@@ -1592,13 +1657,13 @@ mod tests {
 
         let calls = Mutex::new(0usize);
         assert!(!service.run_job(&job.id, false, &|_job: &CronJob| {
-            *recover_lock(&calls) += 1;
+            *lock(&calls) += 1;
             Ok(Some("should not run".to_owned()))
         })?);
-        assert_eq!(*recover_lock(&calls), 0);
+        assert_eq!(*lock(&calls), 0);
 
         assert!(service.run_job(&job.id, true, &|_job: &CronJob| {
-            *recover_lock(&calls) += 1;
+            *lock(&calls) += 1;
             Ok(Some("forced".to_owned()))
         })?);
 
@@ -1606,7 +1671,7 @@ mod tests {
         assert!(!updated.enabled);
         assert_eq!(updated.state.last_status, Some(CronRunStatus::Ok));
         assert_eq!(updated.state.run_history.len(), 1);
-        assert_eq!(*recover_lock(&calls), 1);
+        assert_eq!(*lock(&calls), 1);
         Ok(())
     }
 
@@ -1710,7 +1775,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let calls_for_executor = Arc::clone(&calls);
         let executor: Arc<dyn CronJobExecutor> = Arc::new(move |job: &CronJob| {
-            recover_lock(&calls_for_executor).push(job.id.clone());
+            lock(&calls_for_executor).push(job.id.clone());
             Ok(None)
         });
         let supervisor = CronSupervisor::start(
@@ -1749,7 +1814,7 @@ mod tests {
     fn wait_for_call(calls: &Mutex<Vec<String>>, job_id: &str) -> Result<(), Box<dyn Error>> {
         let deadline = Instant::now() + TestDuration::from_secs(2);
         while Instant::now() < deadline {
-            if recover_lock(calls).iter().any(|id| id == job_id) {
+            if lock(calls).iter().any(|id| id == job_id) {
                 return Ok(());
             }
             thread::sleep(TestDuration::from_millis(10));

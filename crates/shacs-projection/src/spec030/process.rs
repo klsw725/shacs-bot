@@ -1,4 +1,6 @@
-use super::*;
+use super::{
+    ProcessAdapterKind, ProcessAdapterSupport, ProcessTerminalOutcome, Spec030Availability,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

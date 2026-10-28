@@ -1,5 +1,4 @@
-use super::live_tests::read_json;
-use super::live_tests::write_artifact;
+use super::live_tests::{read_json, write_artifact};
 use crate::{
     api_router_with_observer, ApiError, ChatCompletionAdapter, ChatCompletionInvocation,
     Spec031ChannelProjectionObserver,
@@ -16,7 +15,8 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
-use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{client_async, WebSocketStream};
 
 struct ProgressAfterDisconnectAdapter {
     workspace: PathBuf,

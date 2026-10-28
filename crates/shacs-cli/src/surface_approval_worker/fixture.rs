@@ -1,7 +1,16 @@
-use super::*;
+use super::{start_surface_approval_worker, SurfaceApprovalWorker};
+use crate::{
+    now_millis, runtime_durable_checkpoint_root, runtime_durable_event_root,
+    AgentLoopChatCompletionAdapter,
+};
+use serde_json::{json, Value};
+use shacs_core::runtime::{SessionManager, SURFACE_APPROVAL_WORK_KIND};
+use shacs_session::durable_replay::evaluate_durable_recovery;
 use std::error::Error;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[path = "fixture/support.rs"]
 mod support;

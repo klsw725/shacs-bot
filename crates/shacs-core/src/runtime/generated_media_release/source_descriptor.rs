@@ -16,7 +16,9 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
-const FILE_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+const FILE_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
 const MAX_TREE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TREE_ENTRIES: usize = 32_768;
 
@@ -41,8 +43,18 @@ pub(super) fn copy_tree(
 ) -> Result<String, Spec034ReleaseArtifactError> {
     std::fs::create_dir_all(target).map_err(Spec034ReleaseArtifactError::Io)?;
     let mut digest = Sha256::new();
-    let mut budget = TreeBudget { bytes: 0, entries: 0 };
-    walk(source, Some(target), Path::new(""), kind, &mut digest, &mut budget)?;
+    let mut budget = TreeBudget {
+        bytes: 0,
+        entries: 0,
+    };
+    walk(
+        source,
+        Some(target),
+        Path::new(""),
+        kind,
+        &mut digest,
+        &mut budget,
+    )?;
     Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
@@ -51,7 +63,10 @@ pub(super) fn digest_tree(
     kind: TreeKind,
 ) -> Result<String, Spec034ReleaseArtifactError> {
     let mut digest = Sha256::new();
-    let mut budget = TreeBudget { bytes: 0, entries: 0 };
+    let mut budget = TreeBudget {
+        bytes: 0,
+        entries: 0,
+    };
     walk(source, None, Path::new(""), kind, &mut digest, &mut budget)?;
     Ok(format!("sha256:{:x}", digest.finalize()))
 }
@@ -64,7 +79,9 @@ fn walk(
     digest: &mut Sha256,
     budget: &mut TreeBudget,
 ) -> Result<(), Spec034ReleaseArtifactError> {
-    let before = directory.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
+    let before = directory
+        .metadata()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     let mut names = read_base_dir(directory)
         .map_err(Spec034ReleaseArtifactError::Io)?
         .map(|entry| entry.map(|value| value.file_name()))
@@ -92,7 +109,14 @@ fn walk(
             if let Some(path) = &child_target {
                 std::fs::create_dir_all(path).map_err(Spec034ReleaseArtifactError::Io)?;
             }
-            walk(&child, child_target.as_deref(), &child_relative, kind, digest, budget)?;
+            walk(
+                &child,
+                child_target.as_deref(),
+                &child_relative,
+                kind,
+                digest,
+                budget,
+            )?;
             continue;
         }
         let descriptor = openat(directory, &name, FILE_FLAGS, Mode::empty())
@@ -129,11 +153,15 @@ fn walk(
                 .truncate(true)
                 .open(&path)
                 .map_err(Spec034ReleaseArtifactError::Io)?;
-            output.write_all(&bytes).map_err(Spec034ReleaseArtifactError::Io)?;
+            output
+                .write_all(&bytes)
+                .map_err(Spec034ReleaseArtifactError::Io)?;
             preserve_mode(&path, &file_after)?;
         }
     }
-    let after = directory.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
+    let after = directory
+        .metadata()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     same_snapshot(&before, &after)
         .then_some(())
         .ok_or(Spec034ReleaseArtifactError::DigestMismatch)
@@ -198,7 +226,9 @@ pub(super) fn open_anchored_directory(
             .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
         File::from(descriptor)
     } else {
-        anchor.try_clone().map_err(Spec034ReleaseArtifactError::Io)?
+        anchor
+            .try_clone()
+            .map_err(Spec034ReleaseArtifactError::Io)?
     };
     for component in path.components() {
         let name: OsString = match component {

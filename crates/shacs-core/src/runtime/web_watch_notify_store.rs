@@ -1,4 +1,5 @@
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
+use std::path::Path;
 
 use shacs_session::durable_event::{
     DurableEventInput, DurableEventPayload, DurableEventStore, WEB_WATCH_NOTIFICATION_FACT,

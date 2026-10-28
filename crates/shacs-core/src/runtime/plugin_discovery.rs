@@ -3,9 +3,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use shacs_config::{Config, ConfigContext, EnvSource};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 const SUPPORTED_SCHEMA_VERSION: u64 = 1;
 

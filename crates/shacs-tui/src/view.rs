@@ -3,10 +3,8 @@ use crate::state::{
 };
 use crate::trusted_runtime_view::trusted_runtime_lines;
 use crate::workflow_view::session_workflow_progress_view;
-use ratatui::{
-    prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph},
-};
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 pub fn draw_tui(frame: &mut Frame<'_>, state: &TuiState) {

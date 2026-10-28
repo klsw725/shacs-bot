@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 
 fn fixture() -> Result<(tempfile::TempDir, PathBuf, PathBuf), Spec034ReleaseArtifactError> {
     let root = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
@@ -51,8 +52,8 @@ fn original_library_a_b_a_during_copy_is_rejected() -> Result<(), Spec034Release
 }
 
 #[test]
-fn rust_source_subtree_is_not_copied_into_runtime_cache(
-) -> Result<(), Spec034ReleaseArtifactError> {
+fn rust_source_subtree_is_not_copied_into_runtime_cache() -> Result<(), Spec034ReleaseArtifactError>
+{
     let root = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
     let source = root.path().join("lib");
     let target = root.path().join("cached-lib");
@@ -65,8 +66,7 @@ fn rust_source_subtree_is_not_copied_into_runtime_cache(
     copy_runtime_tree(&source, &target, &source)?;
     assert!(!target.join("rustlib/src").exists());
     assert_eq!(
-        std::fs::read(target.join("runtime.dylib"))
-            .map_err(Spec034ReleaseArtifactError::Io)?,
+        std::fs::read(target.join("runtime.dylib")).map_err(Spec034ReleaseArtifactError::Io)?,
         b"runtime"
     );
     Ok(())
@@ -78,8 +78,7 @@ fn malicious_preseeded_runtime_tree_never_becomes_cache_baseline(
     let (root, rustc, tools) = fixture()?;
     let target = root.path().join("controlled/lib");
     std::fs::create_dir(&target).map_err(Spec034ReleaseArtifactError::Io)?;
-    std::fs::write(target.join("driver"), b"forged")
-        .map_err(Spec034ReleaseArtifactError::Io)?;
+    std::fs::write(target.join("driver"), b"forged").map_err(Spec034ReleaseArtifactError::Io)?;
     let result = prepare("rustc", &rustc, &tools);
     assert!(matches!(
         result,

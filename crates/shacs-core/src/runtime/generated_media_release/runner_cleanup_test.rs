@@ -19,7 +19,9 @@ fn renamed_isolation_root_with_replacement_never_publishes(
         std::fs::rename(root, &displaced).expect("displace retained root");
         std::fs::create_dir(root).expect("install replacement root");
         std::fs::write(root.join("replacement"), b"B").expect("write replacement sentinel");
-        recorded.borrow_mut().extend([root.to_path_buf(), displaced]);
+        recorded
+            .borrow_mut()
+            .extend([root.to_path_buf(), displaced]);
     });
 
     // When: the runner reaches cleanup before final validation.
@@ -57,7 +59,9 @@ fn isolation_root_a_b_a_swap_never_publishes() -> Result<(), Box<dyn std::error:
         std::fs::rename(&replacement, root).expect("install replacement root");
         std::fs::rename(root, &replacement).expect("restore replacement root");
         std::fs::rename(&displaced, root).expect("restore retained root");
-        recorded.borrow_mut().extend([root.to_path_buf(), replacement]);
+        recorded
+            .borrow_mut()
+            .extend([root.to_path_buf(), replacement]);
     });
 
     // When: the runner reaches cleanup before final validation.
@@ -69,9 +73,10 @@ fn isolation_root_a_b_a_swap_never_publishes() -> Result<(), Box<dyn std::error:
     );
 
     // Then: vnode rename history blocks proof, preserves B, and prevents publication.
-    let replacement_preserved = paths.borrow().get(1).is_some_and(|root| {
-        std::fs::read(root.join("sentinel")).is_ok_and(|bytes| bytes == b"B")
-    });
+    let replacement_preserved = paths
+        .borrow()
+        .get(1)
+        .is_some_and(|root| std::fs::read(root.join("sentinel")).is_ok_and(|bytes| bytes == b"B"));
     cleanup_paths(&paths.borrow())?;
     assert_cleanup_blocked(result, &evidence, replacement_preserved);
     Ok(())
@@ -117,7 +122,9 @@ fn pre_unlink_root_replacement_never_publishes() -> Result<(), Box<dyn std::erro
         let displaced = root.with_extension("late-displaced-a");
         std::fs::rename(root, &displaced).expect("displace verified root");
         std::fs::create_dir(root).expect("install empty replacement root");
-        recorded.borrow_mut().extend([root.to_path_buf(), displaced]);
+        recorded
+            .borrow_mut()
+            .extend([root.to_path_buf(), displaced]);
     });
 
     // When: cleanup reaches its final pathname identity check.
@@ -143,7 +150,10 @@ fn assert_cleanup_blocked(
     retained: bool,
 ) {
     assert!(
-        matches!(result, Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })),
+        matches!(
+            result,
+            Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })
+        ),
         "{result:?}"
     );
     assert!(retained);
@@ -186,8 +196,14 @@ fn config(repo: &Path, evidence: &Path, run_id: &str) -> Spec034ReleaseConfig {
 
 fn test_repo() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let parent = workspace.canonicalize()?.parent().ok_or("workspace parent")?.to_path_buf();
-    let repo = tempfile::Builder::new().prefix(".spec034-cleanup-test-").tempdir_in(parent)?;
+    let parent = workspace
+        .canonicalize()?
+        .parent()
+        .ok_or("workspace parent")?
+        .to_path_buf();
+    let repo = tempfile::Builder::new()
+        .prefix(".spec034-cleanup-test-")
+        .tempdir_in(parent)?;
     std::fs::write(repo.path().join("source.txt"), b"approved")?;
     for locator in catalog::FIXTURES {
         let path = repo.path().join(locator);
@@ -196,12 +212,30 @@ fn test_repo() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
     }
     git(repo.path(), &["init", "--quiet"])?;
     git(repo.path(), &["add", "."])?;
-    git(repo.path(), &["-c", "user.name=Spec034 Test", "-c", "user.email=spec034@example.invalid", "commit", "--quiet", "-m", "fixture"])?;
+    git(
+        repo.path(),
+        &[
+            "-c",
+            "user.name=Spec034 Test",
+            "-c",
+            "user.email=spec034@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    )?;
     Ok(repo)
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    if !Command::new("git").arg("-C").arg(repo).args(args).status()?.success() {
+    if !Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .status()?
+        .success()
+    {
         return Err("git fixture command failed".into());
     }
     Ok(())

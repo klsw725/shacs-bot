@@ -5,8 +5,7 @@ fn io<T>(result: std::io::Result<T>) -> Result<T, Spec034ReleaseArtifactError> {
 }
 
 #[test]
-fn pre_commit_source_replacement_never_succeeds() -> Result<(), Spec034ReleaseArtifactError>
-{
+fn pre_commit_source_replacement_never_succeeds() -> Result<(), Spec034ReleaseArtifactError> {
     // Given: a verified staging handle and a valid-looking replacement directory.
     let root = io(tempfile::tempdir())?;
     let root = io(root.path().canonicalize())?;
@@ -52,21 +51,28 @@ fn pre_commit_source_replacement_never_succeeds() -> Result<(), Spec034ReleaseAr
 }
 
 #[test]
-fn post_verification_identity_match_publishes_normally() -> Result<(), Spec034ReleaseArtifactError> {
+fn post_verification_identity_match_publishes_normally() -> Result<(), Spec034ReleaseArtifactError>
+{
     // Given
     let root = io(tempfile::tempdir())?;
     let root = io(root.path().canonicalize())?;
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"verified"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"verified",
+    ))?;
     let staging = staging.finalize_marker("run")?;
 
     // When
     destination.publish_with(&staging, || {})?;
 
     // Then
-    assert_eq!(io(std::fs::read(evidence.join("manifest.json")))?, b"verified");
+    assert_eq!(
+        io(std::fs::read(evidence.join("manifest.json")))?,
+        b"verified"
+    );
     Ok(())
 }
 
@@ -78,7 +84,10 @@ fn physical_commit_can_be_finalized_through_preserved_handle(
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"verified"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"verified",
+    ))?;
 
     let staging = staging.finalize_marker("run")?;
     destination.publish(staging)?;
@@ -88,14 +97,17 @@ fn physical_commit_can_be_finalized_through_preserved_handle(
 }
 
 #[test]
-fn artifact_inserted_after_final_seal_is_never_published(
-) -> Result<(), Spec034ReleaseArtifactError> {
+fn artifact_inserted_after_final_seal_is_never_published() -> Result<(), Spec034ReleaseArtifactError>
+{
     let root = io(tempfile::tempdir())?;
     let root = io(root.path().canonicalize())?;
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"verified"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"verified",
+    ))?;
     let staging = staging.finalize_marker("run")?;
 
     let result = destination.publish_with_hooks(
@@ -126,7 +138,10 @@ fn marker_overwrite_before_final_verification_never_succeeds(
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"verified"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"verified",
+    ))?;
     let staging = staging.finalize_marker("run")?;
 
     let result = destination.publish_with_hooks(
@@ -166,7 +181,10 @@ fn manifest_overwrite_after_final_verification_is_commit_unknown(
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"verified"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"verified",
+    ))?;
     let staging = staging.finalize_marker("run")?;
 
     let result = destination.publish_with_hooks(
@@ -186,7 +204,10 @@ fn manifest_overwrite_after_final_verification_is_commit_unknown(
         ))
     ));
     assert!(!evidence.exists());
-    assert_eq!(io(std::fs::read(staging.path().join("manifest.json")))?, b"overwritten");
+    assert_eq!(
+        io(std::fs::read(staging.path().join("manifest.json")))?,
+        b"overwritten"
+    );
     assert!(crate::runtime::audit_spec034_release_artifacts_against(
         staging.path(),
         Path::new(env!("CARGO_MANIFEST_DIR")),
@@ -204,10 +225,16 @@ fn post_rename_replacement_is_quarantined_from_configured_destination(
     let displaced = root.join("validated-evidence");
     let replacement = root.join("replacement");
     io(std::fs::create_dir(&replacement))?;
-    io(std::fs::write(replacement.join("manifest.json"), b"replacement"))?;
+    io(std::fs::write(
+        replacement.join("manifest.json"),
+        b"replacement",
+    ))?;
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"validated"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"validated",
+    ))?;
     let staging = staging.finalize_marker("run")?;
 
     let result = destination.publish_with_post_rename_hook(&staging, || {
@@ -222,7 +249,10 @@ fn post_rename_replacement_is_quarantined_from_configured_destination(
         ))
     ));
     assert!(!evidence.exists());
-    assert_eq!(io(std::fs::read(displaced.join("manifest.json")))?, b"validated");
+    assert_eq!(
+        io(std::fs::read(displaced.join("manifest.json")))?,
+        b"validated"
+    );
     assert!(root
         .read_dir()
         .map_err(Spec034ReleaseArtifactError::Io)?
@@ -242,7 +272,10 @@ fn post_fsync_mutation_between_aggregate_captures_is_durably_quarantined(
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"validated"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"validated",
+    ))?;
     let staging = staging.finalize_marker("run")?;
 
     let result = destination.publish_with_post_fsync_hook(&staging, || {

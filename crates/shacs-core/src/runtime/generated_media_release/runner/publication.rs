@@ -3,7 +3,6 @@ use super::super::model::{
     PUBLICATION_STATUS_SCHEMA,
 };
 use super::super::CommittedPublicationIdentity;
-use std::path::Path;
 
 #[path = "publication/binding.rs"]
 mod binding;
@@ -11,12 +10,14 @@ pub(super) use binding::FinalSourceBinding;
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 mod platform {
-    use super::*;
-    use rustix::fs::{
-        fsync, mkdirat, renameat_with, statat, unlinkat, AtFlags, Mode, OFlags, RenameFlags,
+    use super::{
+        CommittedPublicationIdentity, PublicationStage, PublicationStatus,
+        PublicationStatusDocument, Spec034ReleaseArtifactError, PUBLICATION_STATUS_SCHEMA,
     };
+    use rustix::fs::{fsync, renameat_with, statat, AtFlags, OFlags, RenameFlags};
     use std::ffi::{OsStr, OsString};
     use std::fs::File;
+    use std::path::Path;
 
     mod aggregate;
     mod components;
@@ -25,13 +26,13 @@ mod platform {
     mod quarantine;
     mod seal;
     mod staging;
+    #[cfg(test)]
+    use marker::MarkerSyncFailure;
     use path::{open_anchor, open_child, parse};
-    use staging::{same_handle, same_handle_path};
     #[cfg(test)]
     pub use staging::StagingDirectory;
     pub use staging::ValidatedStagingDirectory;
-    #[cfg(test)]
-    use marker::MarkerSyncFailure;
+    use staging::{same_handle, same_handle_path};
 
     const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
         .union(OFlags::DIRECTORY)
@@ -238,7 +239,6 @@ mod platform {
         pub(super) fn inject_destination_sync_failure(&mut self) {
             self.destination_sync_failure = true;
         }
-
     }
 
     fn unknown_commit() -> Spec034ReleaseArtifactError {
@@ -246,19 +246,19 @@ mod platform {
     }
 
     #[cfg(all(test, unix))]
+    mod approved_snapshot_tests;
+    #[cfg(all(test, unix))]
     mod durability_tests;
-    #[cfg(all(test, unix))]
-    mod race_tests;
-    #[cfg(all(test, unix))]
-    mod race_snapshot_tests;
     #[cfg(all(test, unix))]
     mod quarantine_tests;
     #[cfg(all(test, unix))]
-    mod toolchain_binding_tests;
+    mod race_snapshot_tests;
     #[cfg(all(test, unix))]
-    mod approved_snapshot_tests;
+    mod race_tests;
     #[cfg(all(test, unix))]
     mod tests;
+    #[cfg(all(test, unix))]
+    mod toolchain_binding_tests;
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]

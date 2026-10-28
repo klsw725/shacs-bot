@@ -15,19 +15,17 @@ use shacs_core::runtime::{
 };
 use shacs_core::tools::{
     ask_user_options_from_messages, ask_user_outbound, ask_user_tool_result_messages,
-    pending_ask_user_id, AskUserTool, CronTool,
-};
-use shacs_core::tools::{
     assemble_tool_surface, estimate_serialized_schema_tokens, is_transient_mcp_error,
-    normalize_schema_for_openai, register_mcp_capabilities, sanitize_mcp_name, tool_parameters,
-    tool_parameters_schema, wrap_command, ActivationState, EditFileTool, ExecConfig, ExecTool,
-    FileState, JsonMap, McpCallOutcome, McpCapability, McpCapabilityKind, McpClient, McpConnector,
-    McpErrorKind, McpOperation, McpPromptArgument, McpRuntime, McpServerSpec, McpStartupGate,
-    McpTransportKind, NotebookEditTool, ObjectSchema, OutboundMessage, PathContext, ReadFileTool,
-    Schema, SearchHttpClient, SearchHttpResponse, SelfRuntimeState, SelfTool, SpawnRequest,
-    StdioMcpConnector, StringSchema, Tool, ToolCallExecutionContext, ToolParameters, ToolRegistry,
-    ToolResult, ToolSurfaceAssemblyInput, UreqWebSearchClient, WebClient, WebFetchConfig,
-    WebFetchTool, WebSearchClient, WebSearchConfig, WebSearchResult, WebSearchTool, WriteFileTool,
+    normalize_schema_for_openai, pending_ask_user_id, register_mcp_capabilities, sanitize_mcp_name,
+    tool_parameters, tool_parameters_schema, wrap_command, ActivationState, AskUserTool, CronTool,
+    EditFileTool, ExecConfig, ExecTool, FileState, JsonMap, McpCallOutcome, McpCapability,
+    McpCapabilityKind, McpClient, McpConnector, McpErrorKind, McpOperation, McpPromptArgument,
+    McpRuntime, McpServerSpec, McpStartupGate, McpTransportKind, NotebookEditTool, ObjectSchema,
+    OutboundMessage, PathContext, ReadFileTool, Schema, SearchHttpClient, SearchHttpResponse,
+    SelfRuntimeState, SelfTool, SpawnRequest, StdioMcpConnector, StringSchema, Tool,
+    ToolCallExecutionContext, ToolParameters, ToolRegistry, ToolResult, ToolSurfaceAssemblyInput,
+    UreqWebSearchClient, WebClient, WebFetchConfig, WebFetchTool, WebSearchClient, WebSearchConfig,
+    WebSearchResult, WebSearchTool, WriteFileTool,
 };
 use shacs_cron::{
     system_job, CronJobState, CronRunStatus, CronSchedule, CronService, InMemoryCronService,
@@ -3572,7 +3570,7 @@ fn mcp_runtime_connects_registers_and_closes_servers() -> Result<(), Box<dyn Err
         fn close(&self, server_name: &str) {
             self.closed
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .expect("closed lock poisoned")
                 .push(server_name.to_owned());
         }
     }

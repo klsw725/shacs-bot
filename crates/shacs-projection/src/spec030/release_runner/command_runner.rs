@@ -1,7 +1,10 @@
 use super::bwrap_runner::collect_bwrap;
 use super::command_contract::{required_ids, CommandEvidenceMode, LIFECYCLE_COMMAND};
 use super::fixture;
-use super::model::*;
+use super::model::{
+    Spec030ExternalEvidence, Spec030ReleaseArtifactError, Spec030ReleaseBlocker,
+    Spec030ReleaseRunnerConfig, Spec030ReleaseRunnerMode, Spec030SurfaceOwnerEvidence,
+};
 use super::records::push_blocker;
 use super::semantic::fixture_surface_assertions;
 use super::surface_runner::collect_surfaces;

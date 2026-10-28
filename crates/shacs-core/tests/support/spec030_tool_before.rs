@@ -48,7 +48,7 @@ impl QueueProvider {
     pub fn saw_tool_message(&self, call_id: &str, content: &str) -> bool {
         self.requests
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("requests lock poisoned")
             .iter()
             .flat_map(|request| request.messages.iter())
             .any(|message| {
@@ -64,11 +64,11 @@ impl ProviderClient for QueueProvider {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
         self.requests
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("requests lock poisoned")
             .push(request);
         self.responses
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("responses lock poisoned")
             .pop()
             .unwrap_or_else(|| Ok(LlmResponse::default()))
     }

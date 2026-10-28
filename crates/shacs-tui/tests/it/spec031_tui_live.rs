@@ -6,10 +6,8 @@ use shacs_session::{Session, SessionManager};
 use shacs_tui::action_runner::run_surface_action;
 use shacs_tui::live_source::{RuntimeProjectionSource, SessionRuntimeSource};
 use std::error::Error;
-use std::fs;
-use std::thread;
-use std::time::Instant;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{fs, thread};
 
 #[test]
 fn real_live_source_detects_owner_state_changes() -> Result<(), Box<dyn Error>> {

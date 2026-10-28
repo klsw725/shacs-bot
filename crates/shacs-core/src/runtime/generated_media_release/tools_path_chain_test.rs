@@ -24,8 +24,8 @@ fn original_cargo_and_rustc_swap_does_not_change_controlled_snapshots(
 }
 
 #[test]
-fn cargo_and_rustc_ancestor_a_b_a_break_path_chain_seals(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cargo_and_rustc_ancestor_a_b_a_break_path_chain_seals() -> Result<(), Box<dyn std::error::Error>>
+{
     for name in ["cargo", "rustc"] {
         let root = tempfile::tempdir()?;
         let ancestor = root.path().join("toolchain");
@@ -45,14 +45,17 @@ fn cargo_and_rustc_ancestor_a_b_a_break_path_chain_seals(
         std::fs::remove_dir_all(&ancestor)?;
         std::fs::rename(&displaced, &ancestor)?;
 
-        assert!(matches!(sealed.verify(), Err(Spec034ReleaseArtifactError::DigestMismatch)));
+        assert!(matches!(
+            sealed.verify(),
+            Err(Spec034ReleaseArtifactError::DigestMismatch)
+        ));
     }
     Ok(())
 }
 
 #[test]
-fn original_git_swap_does_not_change_controlled_snapshot(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn original_git_swap_does_not_change_controlled_snapshot() -> Result<(), Box<dyn std::error::Error>>
+{
     let root = tempfile::tempdir()?;
     let toolchain = root.path().join("toolchain");
     let displaced = root.path().join("toolchain-a");
@@ -86,6 +89,9 @@ fn controlled_root_entry_a_b_a_breaks_full_ancestor_metadata_seal(
     std::fs::write(&marker, b"mutation")?;
     std::fs::remove_file(&marker)?;
 
-    assert!(matches!(toolchain.verify(), Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        toolchain.verify(),
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     Ok(())
 }

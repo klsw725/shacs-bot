@@ -1,13 +1,9 @@
-use ratatui::{
-    backend::TestBackend,
-    prelude::*,
-    widgets::{Block, Borders},
-    Terminal,
-};
-use shacs_tui::{
-    state::{ApprovalLineage, RuntimeSnapshot, SessionKey, TuiState},
-    view::{draw_tui, render_lines_for_width},
-};
+use ratatui::backend::TestBackend;
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders};
+use ratatui::Terminal;
+use shacs_tui::state::{ApprovalLineage, RuntimeSnapshot, SessionKey, TuiState};
+use shacs_tui::view::{draw_tui, render_lines_for_width};
 use std::error::Error;
 
 #[test]

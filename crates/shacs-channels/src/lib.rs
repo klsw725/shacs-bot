@@ -328,6 +328,9 @@ impl ChannelRegistry {
         Self::default()
     }
 
+    /// # Panics
+    ///
+    /// Panics if two builtin channel descriptors share a name.
     pub fn with_builtin_channels() -> Self {
         let mut registry = Self::new();
         for descriptor in builtin_channel_descriptors() {

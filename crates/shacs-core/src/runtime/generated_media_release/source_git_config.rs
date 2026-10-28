@@ -23,7 +23,10 @@ pub(super) struct GitConfigSeal {
 #[cfg(test)]
 enum ConfigPathSeal {
     Present(ConfigFileSeal),
-    Absent { path: PathBuf, parent: PathChainSeal },
+    Absent {
+        path: PathBuf,
+        parent: PathChainSeal,
+    },
 }
 
 #[cfg(test)]
@@ -50,8 +53,8 @@ struct ConfigFileSnapshot {
 impl GitConfigSeal {
     pub fn capture(root: &Path) -> Result<Self, Spec034ReleaseArtifactError> {
         let dot_git = root.join(".git");
-        let metadata = std::fs::symlink_metadata(&dot_git)
-            .map_err(Spec034ReleaseArtifactError::Io)?;
+        let metadata =
+            std::fs::symlink_metadata(&dot_git).map_err(Spec034ReleaseArtifactError::Io)?;
         if metadata.file_type().is_symlink() {
             return Err(Spec034ReleaseArtifactError::InvalidConfig);
         }
@@ -143,9 +146,7 @@ fn absent_seal(path: &Path) -> Result<ConfigPathSeal, Spec034ReleaseArtifactErro
 }
 
 #[cfg(test)]
-fn read_and_seal(
-    path: &Path,
-) -> Result<(Vec<u8>, ConfigFileSeal), Spec034ReleaseArtifactError> {
+fn read_and_seal(path: &Path) -> Result<(Vec<u8>, ConfigFileSeal), Spec034ReleaseArtifactError> {
     read_and_seal_with(path, || {})
 }
 
@@ -156,7 +157,9 @@ fn read_and_seal_with(
 ) -> Result<(Vec<u8>, ConfigFileSeal), Spec034ReleaseArtifactError> {
     let descriptor = open(
         path,
-        OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC),
+        OFlags::RDONLY
+            .union(OFlags::NOFOLLOW)
+            .union(OFlags::CLOEXEC),
         Mode::empty(),
     )
     .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
@@ -199,11 +202,13 @@ impl ConfigFileSeal {
     #[cfg(unix)]
     fn verify_path_identity(&self) -> Result<(), Spec034ReleaseArtifactError> {
         use std::os::unix::fs::MetadataExt;
-        let path = std::fs::symlink_metadata(&self.path).map_err(Spec034ReleaseArtifactError::Io)?;
-        let opened = self.file.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
-        (path.file_type().is_file()
-            && path.dev() == opened.dev()
-            && path.ino() == opened.ino())
+        let path =
+            std::fs::symlink_metadata(&self.path).map_err(Spec034ReleaseArtifactError::Io)?;
+        let opened = self
+            .file
+            .metadata()
+            .map_err(Spec034ReleaseArtifactError::Io)?;
+        (path.file_type().is_file() && path.dev() == opened.dev() && path.ino() == opened.ino())
             .then_some(())
             .ok_or(Spec034ReleaseArtifactError::DigestMismatch)
     }
@@ -219,7 +224,10 @@ impl ConfigFileSnapshot {
     fn capture(file: &File, bytes: Vec<u8>) -> Result<Self, Spec034ReleaseArtifactError> {
         use std::os::unix::fs::MetadataExt;
         let metadata = file.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
-        if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES || bytes.len() as u64 != metadata.len() {
+        if !metadata.is_file()
+            || metadata.len() > MAX_CONFIG_BYTES
+            || bytes.len() as u64 != metadata.len()
+        {
             return Err(Spec034ReleaseArtifactError::InvalidConfig);
         }
         Ok(Self {
@@ -245,7 +253,10 @@ impl ConfigFileSnapshot {
 #[cfg(all(test, unix))]
 fn read_descriptor(file: &File) -> Result<Vec<u8>, Spec034ReleaseArtifactError> {
     use std::os::unix::fs::FileExt;
-    let size = file.metadata().map_err(Spec034ReleaseArtifactError::Io)?.len();
+    let size = file
+        .metadata()
+        .map_err(Spec034ReleaseArtifactError::Io)?
+        .len();
     if size > MAX_CONFIG_BYTES {
         return Err(Spec034ReleaseArtifactError::InvalidConfig);
     }

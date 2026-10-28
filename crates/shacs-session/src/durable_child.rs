@@ -16,9 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::{fmt, fs};
 
 pub const MAX_RETAINED_TERMINAL_CHILDREN: usize = 512;
 pub const MAX_RETAINED_CHILD_DECISIONS: usize = 512;

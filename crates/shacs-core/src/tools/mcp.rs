@@ -241,7 +241,7 @@ impl McpConnector for StdioMcpConnector {
             .map_err(|error| error.to_string())?;
         self.startup_receipts
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map_err(|_| "MCP startup receipts lock poisoned".to_owned())?
             .insert(spec.name.clone(), receipt.clone());
         if receipt.dispatch_count == 0 {
             return Err(format!(
@@ -257,7 +257,7 @@ impl McpConnector for StdioMcpConnector {
         })??;
         self.connections
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map_err(|_| "MCP connections lock poisoned".to_owned())?
             .insert(spec.name.clone(), client.clone());
         Ok((client, capabilities))
     }
@@ -265,22 +265,19 @@ impl McpConnector for StdioMcpConnector {
     fn startup_receipt(&self, server_name: &str) -> Option<ProcessExecutionReceipt> {
         self.startup_receipts
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("MCP startup receipts lock poisoned")
             .get(server_name)
             .cloned()
     }
 
     fn close(&self, server_name: &str) {
-        if let Some(connection) = self
-            .connections
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(server_name)
-        {
-            connection
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .close();
+        let Ok(mut connections) = self.connections.lock() else {
+            return;
+        };
+        if let Some(connection) = connections.remove(server_name) {
+            if let Ok(mut connection) = connection.lock() {
+                connection.close();
+            }
         }
     }
 }
@@ -626,30 +623,39 @@ impl Drop for StdioMcpConnection {
 
 impl McpClient for Mutex<StdioMcpConnection> {
     fn call_tool(&self, name: &str, arguments: JsonMap, timeout_seconds: u64) -> McpCallOutcome {
-        self.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .call_outcome(
-                "tools/call",
-                json!({"name": name, "arguments": Value::Object(arguments)}),
-                timeout_seconds,
-            )
+        let Ok(mut connection) = self.lock() else {
+            return poisoned_connection_outcome();
+        };
+        connection.call_outcome(
+            "tools/call",
+            json!({"name": name, "arguments": Value::Object(arguments)}),
+            timeout_seconds,
+        )
     }
 
     fn read_resource(&self, uri: &str, timeout_seconds: u64) -> McpCallOutcome {
-        self.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .call_outcome("resources/read", json!({"uri": uri}), timeout_seconds)
+        let Ok(mut connection) = self.lock() else {
+            return poisoned_connection_outcome();
+        };
+        connection.call_outcome("resources/read", json!({"uri": uri}), timeout_seconds)
     }
 
     fn get_prompt(&self, name: &str, arguments: JsonMap, timeout_seconds: u64) -> McpCallOutcome {
-        self.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .call_outcome(
-                "prompts/get",
-                json!({"name": name, "arguments": Value::Object(arguments)}),
-                timeout_seconds,
-            )
+        let Ok(mut connection) = self.lock() else {
+            return poisoned_connection_outcome();
+        };
+        connection.call_outcome(
+            "prompts/get",
+            json!({"name": name, "arguments": Value::Object(arguments)}),
+            timeout_seconds,
+        )
     }
+}
+
+fn poisoned_connection_outcome() -> McpCallOutcome {
+    McpCallOutcome::Error(McpErrorKind::Other {
+        type_name: "MCP connection lock poisoned".to_owned(),
+    })
 }
 
 #[derive(Default)]
@@ -668,6 +674,10 @@ impl McpRuntime {
         }
     }
 
+    /// # Panics
+    ///
+    /// Panics if the connected server list lock is poisoned, which only happens after another
+    /// thread panicked while holding it.
     pub fn connect_and_register(
         &self,
         registry: &mut ToolRegistry,
@@ -727,7 +737,7 @@ impl McpRuntime {
                     );
                     self.connected_servers
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .expect("MCP connected servers lock poisoned")
                         .push(spec.name.clone());
                     reports.push(McpServerConnectionReport {
                         server_name: spec.name.clone(),
@@ -757,15 +767,19 @@ impl McpRuntime {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        if let Some(connector) = self.connector.as_ref() {
-            for server in self
-                .connected_servers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .iter()
-            {
-                connector.close(server);
-            }
+        let Some(connector) = self.connector.as_ref() else {
+            return;
+        };
+        // The connector may be caller code, so it runs on a copy of the list instead of under
+        // the lock, where its panic would poison the list.
+        let connected_servers = {
+            let Ok(connected_servers) = self.connected_servers.lock() else {
+                return;
+            };
+            connected_servers.clone()
+        };
+        for server in &connected_servers {
+            connector.close(server);
         }
     }
 }
@@ -1715,6 +1729,61 @@ while read line; do :; done\n",
         assert!(!process_exists(identity.pid));
     }
 
+    struct PanickingCloseConnector;
+
+    impl McpConnector for PanickingCloseConnector {
+        fn connect(
+            &self,
+            _spec: &McpServerSpec,
+        ) -> Result<(Arc<dyn McpClient>, Vec<McpCapability>), String> {
+            let client: Arc<dyn McpClient> =
+                Arc::new(|_operation: McpOperation| McpCallOutcome::Success(Vec::new()));
+            Ok((client, Vec::new()))
+        }
+
+        fn close(&self, _server_name: &str) {
+            panic!("connector close bug");
+        }
+    }
+
+    fn fake_server_spec(name: &str) -> McpServerSpec {
+        McpServerSpec {
+            name: name.to_owned(),
+            r#type: Some("stdio".to_owned()),
+            command: Some("unused".to_owned()),
+            args: Vec::new(),
+            env: Vec::new(),
+            clear_env: false,
+            url: None,
+            headers: Vec::new(),
+            timeout_seconds: 5,
+            enabled_tools: vec!["*".to_owned()],
+            parent_containment_snapshot: None,
+            startup_gate: None,
+        }
+    }
+
+    #[test]
+    fn a_panicking_connector_close_leaves_the_server_list_usable() {
+        let runtime = Arc::new(McpRuntime::new(Some(Arc::new(PanickingCloseConnector))));
+        let mut registry = ToolRegistry::new();
+        let first = runtime.connect_and_register(&mut registry, &[fake_server_spec("first")]);
+        assert!(first[0].connected, "the fake connector connects");
+
+        let closing = Arc::clone(&runtime);
+        let close_panic = std::thread::spawn(move || closing.close()).join();
+        assert!(
+            close_panic.is_err(),
+            "the connector panic reaches the closing thread"
+        );
+
+        let second = runtime.connect_and_register(&mut registry, &[fake_server_spec("second")]);
+        assert!(
+            second[0].connected,
+            "the connected server list is not poisoned by the connector panic"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn stdio_mcp_close_terminates_descendant_after_direct_parent_exits_first() {
@@ -1745,7 +1814,7 @@ while read line; do :; done\n",
     fn stdio_process_test_guard() -> std::sync::MutexGuard<'static, ()> {
         STDIO_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("stdio process test lock poisoned")
     }
 
     #[cfg(unix)]

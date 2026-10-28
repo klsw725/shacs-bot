@@ -6,8 +6,8 @@ fn io<T>(result: std::io::Result<T>) -> Result<T, Spec034ReleaseArtifactError> {
 }
 
 #[test]
-fn approved_artifact_deletion_before_marker_is_rejected(
-) -> Result<(), Spec034ReleaseArtifactError> {
+fn approved_artifact_deletion_before_marker_is_rejected() -> Result<(), Spec034ReleaseArtifactError>
+{
     let root = io(tempfile::tempdir())?;
     let root = io(root.path().canonicalize())?;
     let evidence = root.join("evidence");
@@ -24,7 +24,10 @@ fn approved_artifact_deletion_before_marker_is_rejected(
         super::super::FinalSourceBinding::fixture(),
     );
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     assert!(!evidence.exists());
     Ok(())
 }
@@ -49,7 +52,10 @@ fn approved_artifact_mutate_restore_before_marker_is_rejected(
         super::super::FinalSourceBinding::fixture(),
     );
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     assert!(!evidence.exists());
     Ok(())
 }

@@ -1,5 +1,16 @@
-use shacs_projection::*;
-use std::{error::Error, io};
+use shacs_projection::{
+    Spec031ActionRef, Spec031ApprovalCapability, Spec031ApprovalState, Spec031Availability,
+    Spec031Capability, Spec031ConstructionError, Spec031ContextCapability, Spec031Count,
+    Spec031DiagnosticsCapability, Spec031Digest, Spec031Envelope, Spec031EnvelopeInput,
+    Spec031Freshness, Spec031InclusionReason, Spec031Lineage, Spec031MediaCapability,
+    Spec031ObservedAtUnixMs, Spec031ParentRef, Spec031ProgressCapability, Spec031ProgressDelivery,
+    Spec031ProjectionKind, Spec031ReadinessCapability, Spec031Reason, Spec031ReasonCode,
+    Spec031ReleaseEvidenceCapability, Spec031SafeSummary, Spec031SchemaVersion,
+    Spec031SessionCapability, Spec031Severity, Spec031Source, Spec031SourceOwner,
+    Spec031SubjectRef, Spec031VersionError,
+};
+use std::error::Error;
+use std::io;
 
 fn base_input(
     capability: Spec031Capability,

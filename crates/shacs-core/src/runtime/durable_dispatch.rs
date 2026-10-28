@@ -19,8 +19,7 @@ use shacs_session::durable_work::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const INBOUND_WORK_KIND: &str = "agent.inbound_turn";
 const INBOUND_PAYLOAD_TYPE: &str = "shacs.inbound_message.v1";

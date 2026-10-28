@@ -52,7 +52,7 @@ pub(super) fn png(width: u32, height: u32) -> Vec<u8> {
             crc ^= u32::from(*byte);
             for _ in 0..8 {
                 crc = if crc & 1 == 1 {
-                    0xEDB8_8320 ^ (crc >> 1)
+                    0xedb8_8320 ^ (crc >> 1)
                 } else {
                     crc >> 1
                 };

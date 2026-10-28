@@ -2,28 +2,19 @@ use crate::runtime::entrusted_work_conversation::{
     clear_pending_proposal, pending_proposal, proposal_from_runner_messages, store_pending_proposal,
 };
 use crate::runtime::permission_pattern::session_approval_reuse_pattern;
-use crate::runtime::tool_execution::permissioned_action_input_from_context;
 use crate::runtime::tool_execution::{
-    session_remembered_context_digest, session_remembered_context_digest_for_input,
+    permissioned_action_input_from_context, session_remembered_context_digest,
+    session_remembered_context_digest_for_input,
 };
 use crate::runtime::{
-    apply_context_safety_gate, build_context_provider_handoff, correlate_approval,
-    discover_context_files, dispatch_bridge_tool_calls, parse_context_references,
-    resolve_context_reference,
-};
-use crate::runtime::{
-    build_goal_completion_evaluation_request, clear_goal, create_persistent_goal,
-    mark_goal_blocked, mark_goal_done, pause_goal, persistent_goal_from_session, record_goal_stop,
-    remove_persistent_goal, resume_goal, store_persistent_goal,
-};
-use crate::runtime::{
-    build_workflow_checkpoint, decide_workflow_admission,
-    run_live_runtime_workflow_with_checkpoint_callback, runtime_workflow_diagnostics,
-    workflow_projection, RuntimeWorkflowLiveInput, RuntimeWorkflowLiveOptions,
-    RuntimeWorkflowLiveWorktreeConfig,
-};
-use crate::runtime::{
-    AgentHook, AgentRunSpec, AgentRunner, ApprovalActor, ApprovalCacheEntry, ApprovalDecision,
+    apply_context_safety_gate, build_context_provider_handoff,
+    build_goal_completion_evaluation_request, build_workflow_checkpoint, clear_goal,
+    correlate_approval, create_persistent_goal, decide_workflow_admission, discover_context_files,
+    dispatch_bridge_tool_calls, mark_goal_blocked, mark_goal_done, parse_context_references,
+    pause_goal, persistent_goal_from_session, record_goal_stop, remove_persistent_goal,
+    resolve_context_reference, resume_goal, run_live_runtime_workflow_with_checkpoint_callback,
+    runtime_workflow_diagnostics, store_persistent_goal, workflow_projection, AgentHook,
+    AgentRunSpec, AgentRunner, ApprovalActor, ApprovalCacheEntry, ApprovalDecision,
     ApprovalDecisionKind, ApprovalRequest, AutoCompact, AutoCompactArchiveOutcome,
     AutoEvaluatorVerdict, AutomationExecutionControl, ContainmentSnapshotRef, ContextBudgetInput,
     ContextBuildRequest, ContextBuilder, ContextFileDiscoveryOptions, ContextFileProjection,
@@ -39,9 +30,10 @@ use crate::runtime::{
     RecentAutoModeDenial, RecentAutoModeDenialStore, RecentAutoModeRetryToken,
     RecentAutoModeRetryTokenConsumeError, RecentAutoModeRetryTokenMatch,
     RecentAutoModeRetryTokenStore, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
-    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, Session,
-    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionHistoryOptions, SessionManager,
-    SessionRememberedPermissionDiagnostic, SessionRememberedPermissionRule,
+    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage,
+    RuntimeWorkflowLiveInput, RuntimeWorkflowLiveOptions, RuntimeWorkflowLiveWorktreeConfig,
+    Session, SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionHistoryOptions,
+    SessionManager, SessionRememberedPermissionDiagnostic, SessionRememberedPermissionRule,
     SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnCancelOutcome,
     SessionTurnGuard, SessionTurnLock, SubagentExecutionConfig, SubagentOutcomeKind,
     SubagentRuntime, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
@@ -626,7 +618,7 @@ impl<'a> AgentLoop<'a> {
     }
 
     pub fn execution_snapshots(&self) -> Vec<ExecutionSnapshot> {
-        recover_lock(&self.execution_snapshots).clone()
+        lock(&self.execution_snapshots).clone()
     }
 
     pub fn active_session_keys(&self) -> Vec<String> {
@@ -987,7 +979,7 @@ impl<'a> AgentLoop<'a> {
         let execution_ledger = Arc::new(Mutex::new(execution_ledger_for_turn(&message, &session)));
         let mut media_turn = super::turn!(self, &session_key, MAX_INJECTIONS_PER_TURN);
         let turn_provenance =
-            durable_event_provenance(&self.context_builder, &recover_lock(&execution_ledger));
+            durable_event_provenance(&self.context_builder, &lock(&execution_ledger));
         let call_start;
         let (mut initial_messages, context_provider_handoff) = if let Some(approval) =
             pending_recent_retry_approval
@@ -1117,7 +1109,7 @@ impl<'a> AgentLoop<'a> {
                     if let Some(error) = fatal_error {
                         let error = method::image::quiet_failure(&session, error)?;
                         clear_runtime_markers(&mut session);
-                        store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
+                        store_runtime_execution(&mut session, &lock(&execution_ledger));
                         session.add_message("assistant", error.clone(), Map::new());
                         let mut error = error;
                         let saved = session.messages.len().checked_sub(1);
@@ -1373,7 +1365,7 @@ impl<'a> AgentLoop<'a> {
                     if let Some(error) = fatal_error {
                         let error = method::image::quiet_failure(&session, error)?;
                         clear_runtime_markers(&mut session);
-                        store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
+                        store_runtime_execution(&mut session, &lock(&execution_ledger));
                         session.add_message("assistant", error.clone(), Map::new());
                         let mut error = error;
                         let saved = session.messages.len().checked_sub(1);
@@ -1733,8 +1725,8 @@ impl<'a> AgentLoop<'a> {
         let run_snapshot = Arc::new(Mutex::new(None));
         let run_snapshot_capture = run_snapshot.clone();
         spec.execution_snapshot_callback = Arc::new(move |snapshot| {
-            recover_lock(&execution_snapshots).push(snapshot.clone());
-            *recover_lock(&run_snapshot_capture) = Some(snapshot.clone());
+            lock(&execution_snapshots).push(snapshot.clone());
+            *lock(&run_snapshot_capture) = Some(snapshot.clone());
         });
         spec.tool_event_callback = self.tool_event_callback.clone();
         spec.provider_event_callback = self.provider_event_callback.clone();
@@ -1747,12 +1739,12 @@ impl<'a> AgentLoop<'a> {
         let run_tool_outputs_capture = run_tool_outputs.clone();
         spec.checkpoint_callback = Some(Arc::new(move |checkpoint| {
             web_watch::keep_tool_outputs(&run_tool_outputs_capture, checkpoint);
-            let mut session = recover_lock(&checkpoint_capture);
+            let mut session = lock(&checkpoint_capture);
             session
                 .metadata
                 .insert(RUNTIME_CHECKPOINT_KEY.to_owned(), checkpoint.clone());
-            store_runtime_execution(&mut session, &recover_lock(&checkpoint_execution_ledger));
-            let _ = recover_lock(&checkpoint_manager_capture).save(&session);
+            store_runtime_execution(&mut session, &lock(&checkpoint_execution_ledger));
+            let _ = lock(&checkpoint_manager_capture).save(&session);
         }));
         if method_tracked {
             method::image::quiet_checkpoints(&session, &mut spec)?;
@@ -1766,7 +1758,7 @@ impl<'a> AgentLoop<'a> {
                     .clone()
                     .unwrap_or_else(|| provider_error_text(&error));
                 let web_watch_answer = if method_tools.is_none() {
-                    let outputs = recover_lock(&run_tool_outputs).clone();
+                    let outputs = lock(&run_tool_outputs).clone();
                     self.finish_web_watch_turn(&message, &mut session, &outputs, None, call_start)
                         .map(|mut answer| {
                             answer.text = format!("{error_text}\n\n{}", answer.text);
@@ -1811,7 +1803,7 @@ impl<'a> AgentLoop<'a> {
                 let saved = session.messages.len().checked_sub(1);
                 learn_use::conclude(&mut session, &mut error_reply, saved, "provider_error");
                 clear_runtime_markers(&mut session);
-                let mut execution_ledger = recover_lock(&execution_ledger);
+                let mut execution_ledger = lock(&execution_ledger);
                 if quiet_error.is_some() {
                     method::image::quiet_provider_details(&mut execution_ledger, &turn_id);
                 }
@@ -1966,10 +1958,10 @@ impl<'a> AgentLoop<'a> {
             .extend(run_result.recent_auto_mode_retry_tokens.clone());
         store_recent_auto_mode_denials(&mut session, run_result.recent_auto_mode_denials.clone());
         clear_runtime_markers(&mut session);
-        store_runtime_execution(&mut session, &recover_lock(&execution_ledger));
+        store_runtime_execution(&mut session, &lock(&execution_ledger));
         store_pending_permission_approval(
             &mut session,
-            &run_result.interrupt,
+            run_result.interrupt.as_ref(),
             &tool_context,
             &message,
             &session_key,
@@ -2000,7 +1992,7 @@ impl<'a> AgentLoop<'a> {
             );
             web_watch_buttons.clear();
         }
-        let execution_ledger = recover_lock(&execution_ledger);
+        let execution_ledger = lock(&execution_ledger);
         let provenance =
             durable_event_provenance_from_snapshot(&turn_provenance, &execution_ledger);
         let outcome_count = execution_ledger.outcomes.len();
@@ -2670,7 +2662,7 @@ impl<'a> AgentLoop<'a> {
                 let mut checkpoint_callback =
                     move |payload: &shacs_workflow::WorkflowRuntimeCheckpointPayload| {
                         let checkpoint = &payload.checkpoint;
-                        let mut session = recover_lock(&checkpoint_capture);
+                        let mut session = lock(&checkpoint_capture);
                         session.metadata.insert(
                             RUNTIME_CHECKPOINT_KEY.to_owned(),
                             json!({
@@ -2680,7 +2672,7 @@ impl<'a> AgentLoop<'a> {
                                 "recipe_evidence": recipe_evidence_for_checkpoint.clone(),
                             }),
                         );
-                        let _ = recover_lock(&checkpoint_manager_capture).save(&session);
+                        let _ = lock(&checkpoint_manager_capture).save(&session);
                     };
                 let mut execution_config =
                     self.workflow_subagent_execution_config(&plan, session, session_key);
@@ -4324,14 +4316,17 @@ struct MessageDeliveryTargetGuard {
 
 impl MessageDeliveryTargetGuard {
     fn new(target: MessageDeliveryTarget, channel: String, chat_id: String) -> Self {
-        *recover_lock(&target) = Some((channel, chat_id));
+        *lock(&target) = Some((channel, chat_id));
         Self { target }
     }
 }
 
 impl Drop for MessageDeliveryTargetGuard {
     fn drop(&mut self) {
-        *recover_lock(&self.target) = None;
+        // Drop must not panic: a second panic while unwinding aborts the process.
+        if let Ok(mut target) = self.target.lock() {
+            *target = None;
+        }
     }
 }
 
@@ -4344,7 +4339,7 @@ struct BusMessageSender {
 
 impl MessageSender for BusMessageSender {
     fn send(&self, message: crate::tools::OutboundMessage) -> Result<(), String> {
-        let allowed_target = recover_lock(&self.current_target).clone();
+        let allowed_target = lock(&self.current_target).clone();
         if let Some((channel, chat_id)) = allowed_target {
             if message.channel != channel || message.chat_id != chat_id {
                 return Err("cross-target message delivery is not allowed in AgentLoop".to_owned());
@@ -5173,7 +5168,7 @@ fn store_current_execution_snapshot(
     session: &mut Session,
     snapshot: &Arc<Mutex<Option<ExecutionSnapshot>>>,
 ) {
-    let snapshot = recover_lock(snapshot).clone();
+    let snapshot = lock(snapshot).clone();
     if let Some(snapshot) = snapshot.and_then(|snapshot| serde_json::to_value(snapshot).ok()) {
         session
             .metadata
@@ -5530,7 +5525,7 @@ fn permission_wizard_reply_matches_request(
 
 fn store_pending_permission_approval(
     session: &mut Session,
-    interrupt: &Option<RuntimeInterrupt>,
+    interrupt: Option<&RuntimeInterrupt>,
     tool_context: &ToolExecutionContext,
     message: &InboundMessage,
     session_key: &str,
@@ -6631,10 +6626,8 @@ fn provider_error_text(error: &ProviderError) -> String {
     format!("Sorry, I encountered an error calling the AI model: {error}")
 }
 
-fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().expect("lock poisoned by a panicking thread")
 }
 
 fn now_iso() -> String {

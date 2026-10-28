@@ -13,9 +13,15 @@ fn handle_a_and_path_b_content_never_mix_during_a_b_a_race(
     let replacement = root.join("path-b");
     let destination = EvidenceDestination::prepare(&root.join("evidence"))?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"content-a"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"content-a",
+    ))?;
     io(std::fs::create_dir(&replacement))?;
-    io(std::fs::write(replacement.join("manifest.json"), b"content-b"))?;
+    io(std::fs::write(
+        replacement.join("manifest.json"),
+        b"content-b",
+    ))?;
     io(std::fs::write(replacement.join("extra.json"), b"content-b"))?;
     let staging_path = staging.path().to_path_buf();
 
@@ -26,8 +32,14 @@ fn handle_a_and_path_b_content_never_mix_during_a_b_a_race(
         assert!(std::fs::rename(&displaced, &staging_path).is_ok());
     });
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::DigestMismatch)));
-    assert_eq!(io(std::fs::read(replacement.join("manifest.json")))?, b"content-b");
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
+    assert_eq!(
+        io(std::fs::read(replacement.join("manifest.json")))?,
+        b"content-b"
+    );
     Ok(())
 }
 
@@ -39,7 +51,10 @@ fn inventory_add_and_read_file_mutation_between_snapshots_are_rejected(
         let root = io(root.path().canonicalize())?;
         let destination = EvidenceDestination::prepare(&root.join("evidence"))?;
         let staging = destination.staging()?;
-        io(std::fs::write(staging.path().join("manifest.json"), b"first"))?;
+        io(std::fs::write(
+            staging.path().join("manifest.json"),
+            b"first",
+        ))?;
         let staging_path = staging.path().to_path_buf();
 
         let result = staging.finalize_marker_for_test("run", || {
@@ -51,7 +66,10 @@ fn inventory_add_and_read_file_mutation_between_snapshots_are_rejected(
             assert!(std::fs::write(path, b"second").is_ok());
         });
 
-        assert!(matches!(result, Err(Spec034ReleaseArtifactError::DigestMismatch)));
+        assert!(matches!(
+            result,
+            Err(Spec034ReleaseArtifactError::DigestMismatch)
+        ));
     }
     Ok(())
 }

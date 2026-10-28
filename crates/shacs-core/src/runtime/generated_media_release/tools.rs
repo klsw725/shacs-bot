@@ -2,14 +2,12 @@ use super::artifacts::digest_bytes;
 use super::model::{PortableToolIdentity, Spec034ReleaseArtifactError};
 use super::path_chain::PathChainSeal;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub(super) mod control;
-use control::controlled_temp_root;
-use control::ControlLease;
-use control::ToolRoot;
+use control::{controlled_temp_root, ControlLease, ToolRoot};
 mod cache_key;
 use cache_key::rust_tool_candidates;
 pub(super) use cache_key::tool_cache_key;
@@ -18,20 +16,20 @@ mod execution_context;
 use execution_context::ToolchainExecutionContext;
 mod monitor;
 use monitor::ExecutionLedger;
-pub(super) mod linker;
 mod binding;
+pub(super) mod linker;
 pub(super) use binding::RetiredToolchain;
 mod support;
-use support::{minimal_command, monitor_paths, reject_root_cargo_config, set_read_only_closure};
 #[cfg(test)]
 pub(super) use support::release_tempdir;
+use support::{minimal_command, monitor_paths, reject_root_cargo_config, set_read_only_closure};
+mod dependencies;
+#[path = "tools/resolved.rs"]
+mod resolved;
+mod runtime_libraries;
 pub(super) mod spawn;
 #[cfg(not(test))]
 mod vendor;
-mod dependencies;
-mod runtime_libraries;
-#[path = "tools/resolved.rs"]
-mod resolved;
 
 const MAX_TOOL_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -132,16 +130,15 @@ impl ResolvedToolchain {
             monitored.extend(monitor_paths(path)?);
         }
         let ledger = ExecutionLedger::arm(&monitored)?;
-        let mut toolchain =
-            Self::from_resolved(
-                (home, cargo_home, target),
-                (cargo, rustc, rustdoc),
-                ledger,
-                vendor.as_ref().map(|(path, _)| path.as_path()),
-                linker_path,
-                linker_seals,
-                linker_identity,
-            )?;
+        let mut toolchain = Self::from_resolved(
+            (home, cargo_home, target),
+            (cargo, rustc, rustdoc),
+            ledger,
+            vendor.as_ref().map(|(path, _)| path.as_path()),
+            linker_path,
+            linker_seals,
+            linker_identity,
+        )?;
         toolchain.cache_binding = Some(cache_binding);
         #[cfg(not(test))]
         {
@@ -191,10 +188,7 @@ impl ResolvedToolchain {
         })
     }
 
-    pub fn command(
-        &self,
-        manifest: &Path,
-    ) -> Result<Command, Spec034ReleaseArtifactError> {
+    pub fn command(&self, manifest: &Path) -> Result<Command, Spec034ReleaseArtifactError> {
         self.verify()?;
         let manifest = manifest
             .canonicalize()
@@ -219,7 +213,10 @@ impl ResolvedToolchain {
             .env("CARGO_BUILD_RUSTC_WRAPPER", "")
             .env("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", "");
         #[cfg(all(not(test), target_vendor = "apple", target_arch = "aarch64"))]
-        command.env("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", &self.linker_path);
+        command.env(
+            "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER",
+            &self.linker_path,
+        );
         #[cfg(all(not(test), target_vendor = "apple", target_arch = "x86_64"))]
         command.env("CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER", &self.linker_path);
         #[cfg(not(test))]
@@ -240,7 +237,6 @@ impl ResolvedToolchain {
         self.verify()?;
         spawn::spawn_verified(command, stdout, stderr, &self.ledger)
     }
-
 }
 
 #[cfg(test)]

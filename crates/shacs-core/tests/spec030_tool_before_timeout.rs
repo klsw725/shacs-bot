@@ -117,7 +117,7 @@ impl ProviderClient for QueueProvider {
     fn chat(&self, _request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
         self.0
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("provider responses lock poisoned")
             .pop()
             .unwrap_or_else(|| Ok(LlmResponse::default()))
     }

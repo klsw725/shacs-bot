@@ -1,4 +1,5 @@
-use super::*;
+use super::{canonical_missing_path, Spec034ReleaseArtifactError};
+use std::path::{Path, PathBuf};
 
 pub(super) fn resolve(
     repo: &Path,
@@ -23,13 +24,15 @@ pub(super) fn resolve(
     validate_owned_directory(repo, &root)?;
     for child in ["locks", "objects"] {
         let path = root.join(child);
-        std::fs::create_dir(&path).or_else(|error| {
-            error
-                .kind()
-                .eq(&std::io::ErrorKind::AlreadyExists)
-                .then_some(())
-                .ok_or(error)
-        }).map_err(Spec034ReleaseArtifactError::Io)?;
+        std::fs::create_dir(&path)
+            .or_else(|error| {
+                error
+                    .kind()
+                    .eq(&std::io::ErrorKind::AlreadyExists)
+                    .then_some(())
+                    .ok_or(error)
+            })
+            .map_err(Spec034ReleaseArtifactError::Io)?;
         validate_owned_directory(repo, &path)?;
     }
     Ok(root)
@@ -56,9 +59,14 @@ fn reject_cargo_target(repo: &Path, root: &Path) -> Result<(), Spec034ReleaseArt
     if root.starts_with(&default_target) {
         return Err(Spec034ReleaseArtifactError::InvalidConfig);
     }
-    if let Some(configured) = std::env::var_os("CARGO_TARGET_DIR").filter(|value| !value.is_empty()) {
+    if let Some(configured) = std::env::var_os("CARGO_TARGET_DIR").filter(|value| !value.is_empty())
+    {
         let configured = PathBuf::from(configured);
-        let configured = if configured.is_absolute() { configured } else { repo.join(configured) };
+        let configured = if configured.is_absolute() {
+            configured
+        } else {
+            repo.join(configured)
+        };
         if root.starts_with(canonical_missing_path(&configured)?) {
             return Err(Spec034ReleaseArtifactError::InvalidConfig);
         }

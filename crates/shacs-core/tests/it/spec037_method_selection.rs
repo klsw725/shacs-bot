@@ -95,16 +95,19 @@ impl Provider {
         }
     }
     fn calls(&self) -> usize {
-        self.requests.lock().unwrap().len()
+        self.requests.lock().expect("requests lock poisoned").len()
     }
 }
 impl ProviderClient for Provider {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
-        self.requests.lock().unwrap().push(request);
+        self.requests
+            .lock()
+            .expect("requests lock poisoned")
+            .push(request);
         Ok(self
             .responses
             .lock()
-            .unwrap()
+            .expect("responses lock poisoned")
             .pop_front()
             .expect("unexpected provider call"))
     }
@@ -184,7 +187,10 @@ fn call(name: &str, arguments: Value) -> LlmResponse {
         tool_calls: vec![ToolCallRequest::new(
             format!("call-{name}"),
             name,
-            arguments.as_object().unwrap().clone(),
+            arguments
+                .as_object()
+                .expect("tool call arguments are a JSON object")
+                .clone(),
         )],
         ..LlmResponse::default()
     }

@@ -15,9 +15,8 @@ use shacs_session::durable_work::{
     MAX_RETAINED_RUNTIME_REQUESTS, MAX_RETAINED_TERMINAL_WORK_ITEMS,
 };
 use std::error::Error;
-use std::fs;
 use std::sync::mpsc;
-use std::thread;
+use std::{fs, thread};
 
 fn append(
     events: &mut DurableEventStore,

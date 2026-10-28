@@ -1,7 +1,6 @@
 use serde_json::{json, Value};
-use shacs_core::generated_media::ArtifactStore;
 use shacs_core::generated_media::{
-    GeneratedArtifactRef, GenerationOperation, ProjectionDisclosure, RetentionPolicy,
+    ArtifactStore, GeneratedArtifactRef, GenerationOperation, ProjectionDisclosure, RetentionPolicy,
 };
 use shacs_core::runtime::{AgentRunResult, AgentRunSpec, AgentRunner};
 use shacs_core::tools::{ImageGenerateTool, ToolRegistry};
@@ -89,7 +88,7 @@ fn approved_tool_persists_before_artifact_only_success_without_blank_retry(
     spec.checkpoint_callback = Some(Arc::new(move |checkpoint| {
         checkpoint_sink
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("checkpoint sink lock poisoned")
             .push(checkpoint.clone());
     }));
 

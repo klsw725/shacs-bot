@@ -6,7 +6,10 @@ use super::*;
 pub(super) struct Recorder(pub(super) Arc<Mutex<String>>);
 impl Recorder {
     fn note(&self, seen: impl std::fmt::Debug) {
-        self.0.lock().unwrap().push_str(&format!("{seen:?}\n"));
+        self.0
+            .lock()
+            .expect("recorder log lock poisoned")
+            .push_str(&format!("{seen:?}\n"));
     }
 }
 impl AgentHook for Recorder {
@@ -49,7 +52,7 @@ fn recorded(
     let mut agent = image_runtime(dir.path(), vec![media], &tools, &provider)?
         .with_agent_hook(Arc::new(Recorder(seen.clone())));
     let answer = output(agent.process_message(inbound(message))?);
-    let seen = seen.lock().unwrap().clone();
+    let seen = seen.lock().expect("recorder log lock poisoned").clone();
     Ok((answer, seen))
 }
 

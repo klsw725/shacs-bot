@@ -1,13 +1,13 @@
 use super::redaction::{
     construction_error, sanitize_lineage, sanitize_reason, Spec031ConstructionViolation,
 };
-use super::Spec031ConstructionError;
 use super::{
-    Spec031Availability, Spec031Capability, Spec031Lineage, Spec031ProjectionKind, Spec031Reason,
-    Spec031SchemaVersion, Spec031Severity, Spec031Source,
+    Spec031Availability, Spec031Capability, Spec031ConstructionError, Spec031Lineage,
+    Spec031ProjectionKind, Spec031Reason, Spec031SchemaVersion, Spec031Severity, Spec031Source,
 };
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

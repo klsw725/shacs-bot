@@ -2,13 +2,12 @@ use super::lifecycle::{
     Spec031LifecycleError, Spec031LifecycleInput, Spec031RecoveryState, Spec031RuntimeControlState,
     Spec031TerminalOutcome,
 };
-use super::lifecycle_reason;
 use super::{
-    Spec031ApprovalCapability, Spec031ApprovalState, Spec031Availability, Spec031Capability,
-    Spec031ConstructionError, Spec031DiagnosticsCapability, Spec031Envelope, Spec031EnvelopeInput,
-    Spec031Lineage, Spec031ProgressCapability, Spec031ProgressDelivery, Spec031ProjectionKind,
-    Spec031Reason, Spec031ReasonCode, Spec031SafeSummary, Spec031SchemaVersion, Spec031Severity,
-    Spec031Source, Spec031SourceOwner,
+    lifecycle_reason, Spec031ApprovalCapability, Spec031ApprovalState, Spec031Availability,
+    Spec031Capability, Spec031ConstructionError, Spec031DiagnosticsCapability, Spec031Envelope,
+    Spec031EnvelopeInput, Spec031Lineage, Spec031ProgressCapability, Spec031ProgressDelivery,
+    Spec031ProjectionKind, Spec031Reason, Spec031ReasonCode, Spec031SafeSummary,
+    Spec031SchemaVersion, Spec031Severity, Spec031Source, Spec031SourceOwner,
 };
 
 pub(super) fn approval(

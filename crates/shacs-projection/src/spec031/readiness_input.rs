@@ -3,7 +3,8 @@ use super::{
     Spec031ReadinessObservation, Spec031ReadinessRequirement, Spec031ReasonCode,
     Spec031SafeSummary,
 };
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spec031ReadinessAggregationError {

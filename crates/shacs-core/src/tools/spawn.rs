@@ -1,5 +1,6 @@
-use crate::tools::SchemaFragment;
-use crate::tools::{JsonMap, StringSchema, Tool, ToolParameters, ToolResult, ValidationError};
+use crate::tools::{
+    JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters, ToolResult, ValidationError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cell::RefCell;

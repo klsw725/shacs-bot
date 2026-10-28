@@ -3,11 +3,16 @@
 //! session metadata and are given back to the model in the request's own
 //! later runs. `MethodStore::save` drops them once the request is not active.
 
-use super::*;
+use super::{
+    json, reported, MethodId, MethodRequest, MethodStore, Selection, Session, ToolRegistry,
+    RUNTIME_EXECUTION_KEY,
+};
 use crate::runtime::quiet_tools::{
     output_text, quiet_execution_record, quiet_text, quiet_tool_message, rename_unoffered,
 };
 use crate::runtime::task_method_store::HELD_RESULTS_KEY;
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 #[path = "agent_loop_method_held_tests.rs"]

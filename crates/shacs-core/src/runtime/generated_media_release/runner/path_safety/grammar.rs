@@ -50,9 +50,9 @@ fn valid_authority(text: &str) -> bool {
         };
         return host.parse::<Ipv6Addr>().is_ok() && valid_port_suffix(port);
     }
-    let (host, port) = host_port.rsplit_once(':').map_or((host_port, None), |(host, port)| {
-        (host, Some(port))
-    });
+    let (host, port) = host_port
+        .rsplit_once(':')
+        .map_or((host_port, None), |(host, port)| (host, Some(port)));
     valid_host(host) && port.map_or(true, valid_port)
 }
 
@@ -62,9 +62,17 @@ fn valid_host(host: &str) -> bool {
         && host.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
-                && label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-                && label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
-                && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
 }
 
@@ -74,14 +82,35 @@ fn valid_userinfo(value: &str) -> bool {
     while index < bytes.len() {
         let byte = bytes[index];
         if byte == b'%' {
-            if bytes.get(index + 1).map_or(true, |value| !value.is_ascii_hexdigit())
-                || bytes.get(index + 2).map_or(true, |value| !value.is_ascii_hexdigit())
+            if bytes
+                .get(index + 1)
+                .map_or(true, |value| !value.is_ascii_hexdigit())
+                || bytes
+                    .get(index + 2)
+                    .map_or(true, |value| !value.is_ascii_hexdigit())
             {
                 return false;
             }
             index += 3;
         } else if byte.is_ascii_alphanumeric()
-            || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b':')
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+            )
         {
             index += 1;
         } else {
@@ -96,7 +125,9 @@ fn valid_port_suffix(value: &str) -> bool {
 }
 
 fn valid_port(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) && value.parse::<u16>().is_ok()
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<u16>().is_ok()
 }
 
 fn scheme_character(character: char) -> bool {
@@ -106,5 +137,8 @@ fn scheme_character(character: char) -> bool {
 fn uri_terminator(character: char) -> bool {
     character.is_whitespace()
         || character.is_control()
-        || matches!(character, '(' | ')' | '{' | '}' | '"' | '\'' | '`' | '<' | '>' | '|')
+        || matches!(
+            character,
+            '(' | ')' | '{' | '}' | '"' | '\'' | '`' | '<' | '>' | '|'
+        )
 }

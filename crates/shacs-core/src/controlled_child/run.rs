@@ -1,8 +1,8 @@
 use super::output::{join_reader, spawn_reader};
-use super::process_group;
 use super::{
-    descendant_cleanup_capability, empty_receipt, ControlledChildAbort, ControlledChildAdapter,
-    ControlledChildCommand, ControlledChildError, ControlledChildOutcome, ControlledChildReceipt,
+    descendant_cleanup_capability, empty_receipt, process_group, ControlledChildAbort,
+    ControlledChildAdapter, ControlledChildCommand, ControlledChildError, ControlledChildOutcome,
+    ControlledChildReceipt,
 };
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};

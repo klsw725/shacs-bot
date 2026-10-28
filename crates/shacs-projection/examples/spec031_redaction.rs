@@ -1,5 +1,12 @@
-use shacs_projection::*;
-use std::{error::Error, io};
+use shacs_projection::{
+    Spec031ActionRef, Spec031Availability, Spec031Capability, Spec031ConstructionError,
+    Spec031Count, Spec031DiagnosticsCapability, Spec031Digest, Spec031Envelope,
+    Spec031EnvelopeInput, Spec031Freshness, Spec031Lineage, Spec031ObservedAtUnixMs,
+    Spec031ParentRef, Spec031ProjectionKind, Spec031Reason, Spec031ReasonCode, Spec031SafeSummary,
+    Spec031SchemaVersion, Spec031Severity, Spec031Source, Spec031SourceOwner, Spec031SubjectRef,
+};
+use std::error::Error;
+use std::io;
 
 fn input(summary: &str) -> Result<Spec031EnvelopeInput, Spec031ConstructionError> {
     Ok(Spec031EnvelopeInput {

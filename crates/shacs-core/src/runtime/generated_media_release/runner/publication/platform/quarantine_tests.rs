@@ -45,8 +45,7 @@ fn preoccupied_legacy_rejected_name_never_leaves_configured_evidence_visible(
 }
 
 #[test]
-fn forced_collisions_preserve_visible_bytes(
-) -> Result<(), Spec034ReleaseArtifactError> {
+fn forced_collisions_preserve_visible_bytes() -> Result<(), Spec034ReleaseArtifactError> {
     let temporary = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
     let root = temporary
         .path()
@@ -69,7 +68,11 @@ fn forced_collisions_preserve_visible_bytes(
     super::quarantine::quarantine_visible_with(
         destination.parent(),
         OsStr::new("evidence"),
-        || generated.next().ok_or(Spec034ReleaseArtifactError::InvalidConfig),
+        || {
+            generated
+                .next()
+                .ok_or(Spec034ReleaseArtifactError::InvalidConfig)
+        },
     )?;
 
     assert!(!evidence.exists());

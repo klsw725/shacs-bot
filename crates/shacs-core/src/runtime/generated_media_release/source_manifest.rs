@@ -1,9 +1,12 @@
-use super::*;
+use super::{
+    validate_locator, ConfinedSourceReader, SourceFile, SourceFileState, SourceManifest,
+    SourceRootContext, SourceSnapshot, Spec034ReleaseArtifactError, MAX_SOURCE_BYTES,
+};
 use rustix::fs::{open, Mode, OFlags};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::path::Component;
+use std::path::{Component, Path};
 
 const MAX_SOURCE_FILES: usize = 4_096;
 
@@ -172,7 +175,9 @@ fn snapshot_index(
 ) -> Result<tempfile::NamedTempFile, Spec034ReleaseArtifactError> {
     let descriptor = open(
         context.git_dir().join("index"),
-        OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC),
+        OFlags::RDONLY
+            .union(OFlags::NOFOLLOW)
+            .union(OFlags::CLOEXEC),
         Mode::empty(),
     )
     .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;

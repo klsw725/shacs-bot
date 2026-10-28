@@ -163,9 +163,18 @@ mod notification_tests {
     fn notification_waits_for_its_own_turn_instead_of_provider_injection() -> std::io::Result<()> {
         let root = tempfile::tempdir()?;
         let bus = MessageBus::new();
-        bus.publish_inbound(InboundMessage::new("email", "system", "owner", "")
-            .with_owner_accepted_notification("notification:test".to_owned()));
-        let callback = mid_turn_injection_callback(bus.clone(), "email:owner".to_owned(), None, ContextBuilder::new(root.path()), 3, |_| false);
+        bus.publish_inbound(
+            InboundMessage::new("email", "system", "owner", "")
+                .with_owner_accepted_notification("notification:test".to_owned()),
+        );
+        let callback = mid_turn_injection_callback(
+            bus.clone(),
+            "email:owner".to_owned(),
+            None,
+            ContextBuilder::new(root.path()),
+            3,
+            |_| false,
+        );
 
         let injected = callback();
 

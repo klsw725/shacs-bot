@@ -5,9 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::path::{Component, Path};
 
-pub(super) fn parse(
-    path: &Path,
-) -> Result<(bool, Vec<OsString>), Spec034ReleaseArtifactError> {
+pub(super) fn parse(path: &Path) -> Result<(bool, Vec<OsString>), Spec034ReleaseArtifactError> {
     let mut absolute = false;
     let mut components = Vec::new();
     for component in path.components() {
@@ -26,9 +24,7 @@ pub(super) fn parse(
     Ok((absolute, components))
 }
 
-pub(super) fn open_anchor(
-    absolute: bool,
-) -> Result<OwnedFd, Spec034ReleaseArtifactError> {
+pub(super) fn open_anchor(absolute: bool) -> Result<OwnedFd, Spec034ReleaseArtifactError> {
     let path = if absolute {
         Path::new("/")
     } else {

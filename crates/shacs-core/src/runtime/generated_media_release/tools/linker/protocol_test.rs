@@ -52,7 +52,8 @@ fn forged_receipt_helper() -> Result<(), Box<dyn std::error::Error>> {
 fn unknown_target_executable_receipt_is_rejected() -> Result<(), Spec034ReleaseArtifactError> {
     let root = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
     let identity = spawn::capture_process_identity(
-        i32::try_from(std::process::id()).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
+        i32::try_from(std::process::id())
+            .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
     )?;
     let receipts = LinkerReceipts::prepare(root.path(), identity.clone(), identity)?;
     let receipt = LinkerReceipt {
@@ -83,7 +84,8 @@ fn captured_identity_verifies_after_short_lived_target_exit(
     std::fs::copy(&source, &output).map_err(Spec034ReleaseArtifactError::Io)?;
     let identity = spawn::capture_static_identity(&output)?;
     let wrapper = spawn::capture_process_identity(
-        i32::try_from(std::process::id()).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
+        i32::try_from(std::process::id())
+            .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
     )?;
     let receipts = LinkerReceipts::prepare(root.path(), wrapper.clone(), wrapper)?;
     let metadata = std::fs::metadata(&output).map_err(Spec034ReleaseArtifactError::Io)?;

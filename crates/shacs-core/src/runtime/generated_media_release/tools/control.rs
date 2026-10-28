@@ -129,8 +129,8 @@ fn restore_owner_write(path: &std::path::Path) {
 fn restore_owner_write(_path: &std::path::Path) {}
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-pub(super) fn controlled_temp_root(
-) -> Result<(ControlLease, ToolRoot), Spec034ReleaseArtifactError> {
+pub(super) fn controlled_temp_root() -> Result<(ControlLease, ToolRoot), Spec034ReleaseArtifactError>
+{
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -143,14 +143,11 @@ pub(super) fn controlled_temp_root(
         .prefix(".shacs-spec034-tools-")
         .tempdir_in(parent)
         .map_err(Spec034ReleaseArtifactError::Io)?;
-    Ok((
-        control,
-        ToolRoot(root),
-    ))
+    Ok((control, ToolRoot(root)))
 }
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
-pub(super) fn controlled_temp_root(
-) -> Result<(ControlLease, ToolRoot), Spec034ReleaseArtifactError> {
+pub(super) fn controlled_temp_root() -> Result<(ControlLease, ToolRoot), Spec034ReleaseArtifactError>
+{
     Err(Spec034ReleaseArtifactError::InvalidConfig)
 }

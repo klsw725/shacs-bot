@@ -103,14 +103,17 @@ fn verbose_run(replies: &[LlmResponse]) -> Result<(String, String), Box<dyn Erro
             if count == 0 {
                 return;
             }
-            sink.lock().unwrap().extend_from_slice(&bytes[..count]);
+            sink.lock()
+                .expect("stderr sink lock poisoned")
+                .extend_from_slice(&bytes[..count]);
         }
     });
     let frames = exchange(port, "Generate an image of a red square");
     let _ = child.kill();
     let _ = child.wait();
     let _ = reader.join();
-    let stderr = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
+    let stderr =
+        String::from_utf8_lossy(&stderr.lock().expect("stderr sink lock poisoned")).into_owned();
     Ok((frames?, stderr))
 }
 

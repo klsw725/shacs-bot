@@ -13,7 +13,9 @@ fn group_disappearance_is_polled_to_esrch() -> Result<(), Spec034ReleaseArtifact
 fn group_probe_error_and_timeout_fail_cleanup() {
     assert!(matches!(
         wait_until_group_disappears(
-            || Err(Spec034ReleaseArtifactError::Io(std::io::Error::other("probe"))),
+            || Err(Spec034ReleaseArtifactError::Io(std::io::Error::other(
+                "probe"
+            ))),
             || {}
         ),
         Err(Spec034ReleaseArtifactError::Io(_))
@@ -37,7 +39,9 @@ fn later_cleanup_is_aggregated_after_group_probe_failure() {
     let mut failure = None;
     super::super::descendants::accumulate(
         &mut failure,
-        Err(Spec034ReleaseArtifactError::Io(std::io::Error::other("group probe"))),
+        Err(Spec034ReleaseArtifactError::Io(std::io::Error::other(
+            "group probe",
+        ))),
     );
     super::super::descendants::accumulate(
         &mut failure,
@@ -55,7 +59,10 @@ fn process_group_termination_reaps_descendants() -> Result<(), Box<dyn std::erro
     let root = tempfile::tempdir()?;
     let pid_file = root.path().join("descendant.pid");
     let mut command = std::process::Command::new("/bin/bash");
-    command.args(["-c", &format!("sleep 60 & echo $! > '{}' && wait", pid_file.display())]);
+    command.args([
+        "-c",
+        &format!("sleep 60 & echo $! > '{}' && wait", pid_file.display()),
+    ]);
     configure_process_group(&mut command)?;
     let child = command.spawn()?;
     let identity = super::super::super::super::tools::spawn::capture_process_identity(
@@ -170,17 +177,26 @@ impl DescendantMonitor for FakeMonitor {
 }
 
 struct FakeControl {
-    captured: Option<Result<super::super::super::super::tools::spawn::ProcessIdentity, Spec034ReleaseArtifactError>>,
+    captured: Option<
+        Result<
+            super::super::super::super::tools::spawn::ProcessIdentity,
+            Spec034ReleaseArtifactError,
+        >,
+    >,
 }
 
 impl FakeControl {
     fn identity(identity: super::super::super::super::tools::spawn::ProcessIdentity) -> Self {
-        Self { captured: Some(Ok(identity)) }
+        Self {
+            captured: Some(Ok(identity)),
+        }
     }
 
     fn capture_error() -> Self {
         Self {
-            captured: Some(Err(Spec034ReleaseArtifactError::Io(std::io::Error::other("capture")))),
+            captured: Some(Err(Spec034ReleaseArtifactError::Io(std::io::Error::other(
+                "capture",
+            )))),
         }
     }
 }
@@ -189,8 +205,13 @@ impl ProcessGroupControl for FakeControl {
     fn capture_identity(
         &mut self,
         _pid: i32,
-    ) -> Result<super::super::super::super::tools::spawn::ProcessIdentity, Spec034ReleaseArtifactError> {
-        self.captured.take().unwrap_or(Err(Spec034ReleaseArtifactError::InvalidConfig))
+    ) -> Result<
+        super::super::super::super::tools::spawn::ProcessIdentity,
+        Spec034ReleaseArtifactError,
+    > {
+        self.captured
+            .take()
+            .unwrap_or(Err(Spec034ReleaseArtifactError::InvalidConfig))
     }
 
     fn kill_group(&mut self, _pid: i32) -> Result<(), Spec034ReleaseArtifactError> {
@@ -202,10 +223,7 @@ impl ProcessGroupControl for FakeControl {
     }
 }
 
-fn identity(
-    pid: i32,
-    start: u64,
-) -> super::super::super::super::tools::spawn::ProcessIdentity {
+fn identity(pid: i32, start: u64) -> super::super::super::super::tools::spawn::ProcessIdentity {
     super::super::super::super::tools::spawn::ProcessIdentity {
         pid,
         parent_pid: 0,

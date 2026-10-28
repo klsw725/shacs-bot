@@ -28,6 +28,9 @@ pub fn command(id: &str, tests_run: u64, tests_failed: u64) -> Spec031ReleaseCom
     }
 }
 
+/// # Panics
+///
+/// Panics if the fixture run id is rejected by `Spec031ReleaseRunId::try_new`.
 pub fn valid_artifacts() -> Spec031ReleaseRunArtifacts {
     Spec031ReleaseRunArtifacts {
         schema: SPEC031_RELEASE_RUNNER_SCHEMA.to_owned(),

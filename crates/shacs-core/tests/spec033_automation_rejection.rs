@@ -1,16 +1,13 @@
 #[path = "spec033_automation_results.rs"]
 mod fixtures;
 use fixtures::{lifecycle_input, requirements, snapshot, source_event};
-use shacs_core::runtime::AutomationDeliveryResult;
-use shacs_core::runtime::SandboxMode;
 use shacs_core::runtime::{
-    own_automation_lifecycle, AutomationExecutionRequirements, AutomationJobResult,
-    AutomationLifecycleInput, AutomationNoDispatchReason, AutomationScheduleKind,
+    own_automation_lifecycle, AutomationDeliveryResult, AutomationExecutionRequirements,
+    AutomationJobResult, AutomationLifecycleInput, AutomationNoDispatchReason,
+    AutomationScheduleKind, ExecutionSnapshot, ExecutionSnapshotInput, SandboxMode,
 };
-use shacs_core::runtime::{ExecutionSnapshot, ExecutionSnapshotInput};
 use shacs_eval::evaluator::AutomationExecutionMode;
-use shacs_projection::CredentialStatus;
-use shacs_projection::SandboxFallback;
+use shacs_projection::{CredentialStatus, SandboxFallback};
 
 #[test]
 fn duplicate_superseded_and_recursion_fail_closed() {

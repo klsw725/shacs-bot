@@ -8,15 +8,15 @@ use shacs_channels::WebSocketServerEvent;
 use shacs_projection::Spec031Envelope;
 use shacs_providers::LlmResponse;
 use socket2::SockRef;
-use std::env;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
+use std::{env, fs};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
-use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{client_async, WebSocketStream};
 
 struct SlowAdapter {
     workspace: PathBuf,

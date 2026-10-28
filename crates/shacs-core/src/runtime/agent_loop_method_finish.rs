@@ -1,5 +1,11 @@
-use super::*;
-use crate::runtime::task_method::*;
+use super::{
+    lock, now_iso, pending_ask_user_id, pending_permission_approval, pending_recent_retry_approval,
+    pending_workflow, AgentLoop, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport,
+    Session,
+};
+use crate::runtime::task_method::{
+    EffectOutcome, EvidenceFact, ExternalEffectFact, Gate, MethodId, RequestState, UserDecision,
+};
 use crate::runtime::task_method_apply::apply_observation;
 use crate::runtime::task_method_calc::run;
 use crate::runtime::task_method_compose::{is_calc_line, is_image_line};
@@ -10,6 +16,8 @@ use crate::runtime::task_method_observe::{
 use crate::runtime::task_method_observe_report::{record_result, report_call};
 use crate::runtime::task_method_render::footer;
 use crate::runtime::task_method_store::{preview, MethodStore};
+use serde_json::Value;
+use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 #[path = "agent_loop_method_finish_tests.rs"]
@@ -38,7 +46,7 @@ impl AgentLoop<'_> {
         call: &RuntimeToolCall,
         report: &RuntimeToolExecutionReport,
     ) {
-        let mut observation = recover_lock(observation);
+        let mut observation = lock(observation);
         let (name, arguments) = if call.name == "tool_call" {
             (
                 call.arguments
@@ -114,7 +122,7 @@ pub(super) fn finish(
     let Some(request) = store.active.as_mut() else {
         return Ok(String::new());
     };
-    let mut observed = recover_lock(observation);
+    let mut observed = lock(observation);
     for mut fact in observed.effects.drain(..) {
         fact.selection_revision = request.selection.revision;
         request.external_effect_facts.push(fact);
@@ -159,16 +167,16 @@ pub(super) fn finish_run(
             .lines()
             .filter(|line| !(image && is_image_line(line)) && !(composed && is_calc_line(line)))
             .collect();
-        recover_lock(observation).report_outputs.push(
-            crate::runtime::task_method_report_parse::output(
+        lock(observation)
+            .report_outputs
+            .push(crate::runtime::task_method_report_parse::output(
                 crate::runtime::task_method_report::OutputKind::Answer,
                 "answer",
                 &text.join("\n"),
-            ),
-        );
+            ));
     }
     for artifact in &result.generated_artifacts {
-        recover_lock(observation)
+        lock(observation)
             .evidence
             .push(EvidenceFact::GeneratedArtifact {
                 reference: preview(

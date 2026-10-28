@@ -1,9 +1,9 @@
-use super::super::model::Spec034ReleaseArtifactError;
 use super::super::artifacts::ArtifactSnapshot;
+use super::super::model::Spec034ReleaseArtifactError;
 use serde_json::Value;
 
-mod grammar;
 mod encoding;
+mod grammar;
 
 #[cfg(test)]
 pub(super) fn redact_host_paths(text: &str) -> String {
@@ -22,8 +22,8 @@ pub(super) fn validate_snapshot(
     snapshot: &ArtifactSnapshot,
 ) -> Result<(), Spec034ReleaseArtifactError> {
     for (name, bytes) in snapshot.files() {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
         if checked_contains_host_path(text)?
             || contains_secret(text)
             || decoded_json_contains_host_path(name, text)?
@@ -77,8 +77,8 @@ fn checked_contains_host_path(text: &str) -> Result<bool, Spec034ReleaseArtifact
     if next_host_path(text, 0).is_some() {
         return Ok(true);
     }
-    let layers = encoding::decoded_layers(text)
-        .map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
+    let layers =
+        encoding::decoded_layers(text).map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
     Ok(layers
         .iter()
         .any(|decoded| next_host_path(decoded, 0).is_some()))
@@ -184,7 +184,9 @@ fn is_host_path_at(text: &str, start: usize, character: char, boundary: bool) ->
 fn path_end(text: &str, start: usize) -> usize {
     text[start..]
         .char_indices()
-        .find_map(|(offset, character)| (offset > 0 && terminator(character)).then_some(start + offset))
+        .find_map(|(offset, character)| {
+            (offset > 0 && terminator(character)).then_some(start + offset)
+        })
         .unwrap_or(text.len())
 }
 
@@ -216,7 +218,9 @@ fn path_token_character(character: char) -> bool {
 }
 
 fn terminator(character: char) -> bool {
-    character.is_whitespace() || character.is_control() || matches!(character, ')' | ']' | '}' | '"' | '\'' | '`')
+    character.is_whitespace()
+        || character.is_control()
+        || matches!(character, ')' | ']' | '}' | '"' | '\'' | '`')
 }
 
 #[cfg(test)]

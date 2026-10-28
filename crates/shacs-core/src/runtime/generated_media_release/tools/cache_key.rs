@@ -14,7 +14,11 @@ pub(in crate::runtime::generated_media_release) fn tool_cache_key(
     let (cargo, rustc, rustdoc) = rust_tool_candidates();
     let mut digest = Sha256::new();
     digest.update(b"spec034.tool-cache.v2\0");
-    digest.update(if cfg!(test) { &b"test\0"[..] } else { &b"release\0"[..] });
+    digest.update(if cfg!(test) {
+        &b"test\0"[..]
+    } else {
+        &b"release\0"[..]
+    });
     let mut dependencies = BTreeSet::new();
     for (role, candidates) in [("cargo", cargo), ("rustc", rustc), ("rustdoc", rustdoc)] {
         let path = candidates
@@ -44,14 +48,13 @@ pub(in crate::runtime::generated_media_release) fn tool_cache_key(
     Ok(key)
 }
 
-fn hash_file_into(
-    digest: &mut Sha256,
-    path: &Path,
-) -> Result<(), Spec034ReleaseArtifactError> {
+fn hash_file_into(digest: &mut Sha256, path: &Path) -> Result<(), Spec034ReleaseArtifactError> {
     let mut file = File::open(path).map_err(Spec034ReleaseArtifactError::Io)?;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
-        let read = file.read(&mut buffer).map_err(Spec034ReleaseArtifactError::Io)?;
+        let read = file
+            .read(&mut buffer)
+            .map_err(Spec034ReleaseArtifactError::Io)?;
         if read == 0 {
             return Ok(());
         }

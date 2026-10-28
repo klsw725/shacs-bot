@@ -33,10 +33,7 @@ impl QueueExecutor {
     }
 
     fn count(&self) -> usize {
-        self.calls
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .len()
+        self.calls.lock().expect("calls lock poisoned").len()
     }
 }
 
@@ -44,11 +41,11 @@ impl PluginHookCommandExecutor for QueueExecutor {
     fn execute(&self, invocation: &PluginHookCommandInvocation) -> PluginHookCallbackResult {
         self.calls
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("calls lock poisoned")
             .push(invocation.clone());
         self.results
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("results lock poisoned")
             .pop()
             .unwrap_or_else(|| PluginHookCallbackResult::Output(json!({})))
     }
@@ -73,7 +70,7 @@ impl ToolBeforeHandler for RecordingHandler {
     fn evaluate(&self, _context: &ToolBeforeContext<'_>) -> ToolBeforeDecision {
         self.calls
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("calls lock poisoned")
             .push(self.key);
         assert!(!self.panic, "intentional trusted hook panic");
         self.decision.clone()
@@ -244,7 +241,7 @@ fn spec030_tool_before_failures_record_diagnostics_and_continue_in_order() {
 
     assert!(blocked.is_empty());
     assert_eq!(
-        *calls.lock().unwrap_or_else(|error| error.into_inner()),
+        *calls.lock().expect("calls lock poisoned"),
         vec!["b-panic", "z-continue"]
     );
     let kinds = hook

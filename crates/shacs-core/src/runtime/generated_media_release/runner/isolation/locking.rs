@@ -50,9 +50,7 @@ pub(super) fn lock_target(
     Ok(lock)
 }
 
-pub(super) fn canonical_missing_path(
-    path: &Path,
-) -> Result<PathBuf, Spec034ReleaseArtifactError> {
+pub(super) fn canonical_missing_path(path: &Path) -> Result<PathBuf, Spec034ReleaseArtifactError> {
     let mut missing = Vec::new();
     let mut cursor = path;
     while !cursor.exists() {

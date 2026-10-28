@@ -20,7 +20,8 @@ use shacs_redaction::{
     RedactionEvidence, RedactionEvidenceRef, SafeSecretSummary, SecretLocator, SecretRef,
     SecretRefId, SecretRefKind, SecretSourceKind,
 };
-use std::{cell::Cell, error::Error};
+use std::cell::Cell;
+use std::error::Error;
 
 fn envelope(mode: PermissionMode) -> ProcessExecutionEnvelope {
     ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {

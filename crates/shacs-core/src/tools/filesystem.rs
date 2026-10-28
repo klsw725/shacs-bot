@@ -1,7 +1,6 @@
-use crate::tools::SchemaFragment;
 use crate::tools::{
-    BooleanSchema, FileState, IntegerSchema, JsonMap, StringSchema, Tool, ToolParameters,
-    ToolResult,
+    BooleanSchema, FileState, IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool,
+    ToolParameters, ToolResult,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 pub const SPEC031_SCHEMA_VERSION: u32 = 1;
 

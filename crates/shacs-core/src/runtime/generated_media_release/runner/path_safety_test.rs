@@ -114,8 +114,12 @@ fn host_path_detection_preserves_control_state_across_sequence_spaces() {
         assert!(contains_host_path(path), "host path accepted: {path:?}");
     }
     assert!(!contains_host_path("ordinary whitespace separated text"));
-    assert!(contains_host_path("ordinary label /Users/alice/private.txt"));
-    assert!(!contains_host_path("\u{1b}c\nlabel/Users/alice/private.txt"));
+    assert!(contains_host_path(
+        "ordinary label /Users/alice/private.txt"
+    ));
+    assert!(!contains_host_path(
+        "\u{1b}c\nlabel/Users/alice/private.txt"
+    ));
 }
 
 #[test]
@@ -134,7 +138,10 @@ fn host_path_detection_rejects_nested_posix_drive_and_unc_encoding() {
         "%255C%255Cserver%255Cshare%255Cprivate.txt",
         "%25255C%25255Cserver%25255Cshare",
     ] {
-        assert!(contains_host_path(text), "nested host path accepted: {text}");
+        assert!(
+            contains_host_path(text),
+            "nested host path accepted: {text}"
+        );
     }
 }
 
@@ -155,8 +162,11 @@ fn artifact_scan_rejects_secret_shaped_prose() -> Result<(), Box<dyn std::error:
     ] {
         let root = tempfile::tempdir()?;
         std::fs::write(root.path().join("command.stdout"), payload)?;
-    let snapshot = ArtifactSnapshot::capture(&root.path().canonicalize()?)?;
-        assert!(validate_snapshot(&snapshot).is_err(), "secret accepted: {payload}");
+        let snapshot = ArtifactSnapshot::capture(&root.path().canonicalize()?)?;
+        assert!(
+            validate_snapshot(&snapshot).is_err(),
+            "secret accepted: {payload}"
+        );
     }
     Ok(())
 }

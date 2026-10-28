@@ -418,8 +418,8 @@ impl DurableEventStore {
         let root = fs::canonicalize(root)?;
         let path = root.join("events.log");
         let lock_path = root.join("events.lock");
-        let process_lock = process_lock_for(&path);
-        let mut guard = recover_lock(&process_lock);
+        let process_lock = process_lock_for(&path)?;
+        let mut guard = lock(&process_lock)?;
         let _file_lock = acquire_file_lock(&lock_path)?;
         reject_symlink(&path)?;
         let created = match create_event_file(&path) {
@@ -503,7 +503,7 @@ impl DurableEventStore {
         if !self.compatibility.is_current() {
             return Err(DurableEventError::ReadOnly(self.compatibility.clone()).into());
         }
-        let mut guard = recover_lock(&self.process_lock);
+        let mut guard = lock(&self.process_lock)?;
         let _file_lock = acquire_file_lock(&self.lock_path)?;
         let current = read_tail_state(&self.path, &self.registry)?;
         if !file_metadata_matches_stamp(&self.path, guard.stamp.as_ref())? {
@@ -632,7 +632,7 @@ impl DurableEventStore {
     }
 
     pub fn scan(&self, max_records: usize) -> Result<DurableEventScan, DurableEventError> {
-        let mut guard = recover_lock(&self.process_lock);
+        let mut guard = lock(&self.process_lock)?;
         let _file_lock = acquire_file_lock(&self.lock_path)?;
         let scan = scan_path(&self.path, &self.registry, max_records)?;
         let stamp = file_stamp(&self.path)?;
@@ -649,7 +649,7 @@ impl DurableEventStore {
         after_sequence: u64,
         visitor: impl FnMut(&DurableEventRecord),
     ) -> Result<DurableEventVisitSummary, DurableEventError> {
-        let mut guard = recover_lock(&self.process_lock);
+        let mut guard = lock(&self.process_lock)?;
         let _file_lock = acquire_file_lock(&self.lock_path)?;
         let summary = visit_path(&self.path, &self.registry, after_sequence, visitor)?;
         let stamp = file_stamp(&self.path)?;
@@ -1199,24 +1199,26 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
     OpenOptions::new().read(true).open(path)?.sync_all()
 }
 
-fn process_lock_for(path: &Path) -> Arc<Mutex<ProcessStoreState>> {
+fn process_lock_for(path: &Path) -> Result<Arc<Mutex<ProcessStoreState>>, DurableEventError> {
     static LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<ProcessStoreState>>>>> =
         OnceLock::new();
     let locks = LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut locks = recover_lock(locks);
+    let mut locks = lock(locks)?;
     if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
-        return lock;
+        return Ok(lock);
     }
     locks.retain(|_, lock| lock.strong_count() > 0);
     let lock = Arc::new(Mutex::new(ProcessStoreState::default()));
     locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
-    lock
+    Ok(lock)
 }
 
-fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, DurableEventError> {
+    mutex.lock().map_err(|_| {
+        DurableEventError::Io(std::io::Error::other(
+            "durable event store lock poisoned by a panicking thread",
+        ))
+    })
 }
 
 #[cfg(test)]

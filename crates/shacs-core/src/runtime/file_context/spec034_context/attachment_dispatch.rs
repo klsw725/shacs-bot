@@ -4,7 +4,8 @@ use super::super::{
     MAX_STORED_ATTACHMENT_BYTES, MAX_TEXT_LENGTH,
 };
 use super::attachment_routing::MediaRootRouting;
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde_json::json;
 use shacs_utils::attachments::{
     detect_attachment_mime, AttachmentContentFamily, AttachmentHandoffStatus,

@@ -13,9 +13,8 @@ use shacs_session::durable_event::{
     DurableEventInput, DurableEventPayload, DurableEventStore, RUNTIME_RESTART_REQUESTED,
     RUNTIME_STOP_REQUESTED,
 };
-use std::fmt;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{fmt, io};
 
 pub use approval::{
     request_surface_approval, surface_approval_availability, SurfaceApprovalAvailability,

@@ -1,8 +1,24 @@
-use super::super::*;
-use shacs_core::tools::{JsonMap, Tool, ToolResult};
-use shacs_providers::ProviderRequest;
+#[cfg(not(test))]
+use crate::runtime_permission_rule_containment_from_snapshot;
+use crate::{
+    runtime_owner_id, runtime_ownership_marker_path, runtime_ownership_marker_value,
+    write_runtime_marker_atomically, AgentLoopChatCompletionAdapter,
+};
+use serde_json::{json, Map, Value};
+use shacs_core::runtime::{
+    InboundMessage, PermissionMode, PermissionModeSnapshot, PluginRuntimeSnapshot, SessionTurnLock,
+    ToolSearchConfig,
+};
+use shacs_core::tools::{JsonMap, Tool, ToolRegistry, ToolResult};
+use shacs_providers::{
+    AgentDefaults, LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest,
+    ProviderRetryMode,
+};
+use std::collections::BTreeMap;
 use std::error::Error;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub(super) fn adapter(
     config_path: &Path,

@@ -1,4 +1,9 @@
-use super::super::*;
+use super::super::{metadata_string, ExternalTransportChannelAdapter};
+use serde_json::{Map, Value};
+use shacs_channels::{ChannelAdapter, ChannelError, OutboundMessage};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread;
 
 impl ChannelAdapter for ExternalTransportChannelAdapter {
     fn name(&self) -> &str {

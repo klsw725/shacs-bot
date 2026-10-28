@@ -53,6 +53,10 @@ pub enum Spec031ExternalReceiptRefKind {
 }
 
 impl Spec031ExternalOwnerRef {
+    /// # Panics
+    ///
+    /// Panics if the reference no longer matches the owner ref grammar it was
+    /// validated against when it was constructed.
     pub fn kind(&self) -> Spec031ExternalRefKind {
         let (scheme, segments) =
             parse_external_ref(self.as_str()).expect("typed owner ref grammar");
@@ -69,6 +73,10 @@ impl Spec031ExternalOwnerRef {
 }
 
 impl Spec031ExternalOwnerReceiptRef {
+    /// # Panics
+    ///
+    /// Panics if the reference no longer matches the receipt ref grammar it was
+    /// validated against when it was constructed.
     pub fn kind(&self) -> Spec031ExternalReceiptRefKind {
         let (scheme, segments) =
             parse_external_ref(self.as_str()).expect("typed receipt ref grammar");

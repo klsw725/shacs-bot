@@ -1,5 +1,6 @@
+use super::entrusted_comparison::decision_id;
 use super::{
-    entrusted_comparison::decision_id, ObservationComparisonEvidence, ObservationComparisonLimit,
+    ObservationComparisonEvidence, ObservationComparisonLimit,
     ObservationComparisonReason as Reason, ObservationDecision, ObservationRecord,
     ObservationResult, ObservationVerdict as Verdict,
 };

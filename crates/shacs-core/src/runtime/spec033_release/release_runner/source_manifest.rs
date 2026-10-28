@@ -1,6 +1,8 @@
-use super::*;
+use super::{
+    release_artifacts, Spec033DigestRow, Spec033ReleaseArtifactError, Spec033SourceManifest,
+};
 use sha2::{Digest, Sha256};
-use std::path::Component;
+use std::path::{Component, Path};
 
 const SOURCE_ROOTS: [&str; 4] = ["README.md", "crates/Cargo.lock", "crates", "docs"];
 const EXCLUDED_TOOLING_ROOTS: [&str; 2] = ["docs/refs", "docs/specs/.codegraph"];

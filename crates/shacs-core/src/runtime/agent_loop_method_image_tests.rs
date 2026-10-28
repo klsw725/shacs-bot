@@ -1,5 +1,12 @@
 use super::*;
-use shacs_providers::{LlmResponse, ProviderRequest};
+use crate::runtime::agent_loop::{compile_read_only_workflow_plan, store_pending_workflow};
+use crate::runtime::{
+    AgentLoopConfig, ContextBuilder, MessageBus, PermissionModeSnapshot, SessionManager,
+    WorkflowAdmissionInput, WorkflowHarnessPlan,
+};
+use shacs_providers::{LlmResponse, ProviderClient, ProviderError, ProviderRequest};
+use shacs_session::durable_event::{DurableEventPayload, DurableEventStore, WORKFLOW_FAILED};
+use std::error::Error;
 
 struct ImageTool;
 impl crate::tools::Tool for ImageTool {

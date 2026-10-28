@@ -2,7 +2,8 @@ use crate::{SessionRuntimeExecutionProjection, SessionUxDiagnostics};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionDiagnosticsAggregate {
@@ -74,6 +75,8 @@ where
         .serialize(serializer)
 }
 
+// Allowed: serde `serialize_with` passes the field as `&Option<String>`.
+#[allow(clippy::ref_option)]
 fn serialize_optional_safe_string<S>(
     value: &Option<String>,
     serializer: S,

@@ -23,7 +23,7 @@ impl RecordingInteraction {
     fn events(&self) -> Vec<(String, &'static str)> {
         self.0
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("interaction events lock poisoned")
             .clone()
     }
 }
@@ -32,7 +32,7 @@ impl ToolBeforeInteraction for RecordingInteraction {
     fn confirm(&self, request: &ToolBeforeConfirmRequest) -> ToolBeforeConfirmation {
         self.0
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("interaction events lock poisoned")
             .push((request.call_id.clone(), "confirm"));
         ToolBeforeConfirmation::Confirmed
     }
@@ -40,7 +40,7 @@ impl ToolBeforeInteraction for RecordingInteraction {
     fn select(&self, request: &ToolBeforeSelectRequest) -> Option<String> {
         self.0
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("interaction events lock poisoned")
             .push((request.call_id.clone(), "select"));
         request.options.first().cloned()
     }
@@ -48,7 +48,7 @@ impl ToolBeforeInteraction for RecordingInteraction {
     fn notify(&self, request: &ToolBeforeNotifyRequest) {
         self.0
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("interaction events lock poisoned")
             .push((request.call_id.clone(), "notify"));
     }
 }

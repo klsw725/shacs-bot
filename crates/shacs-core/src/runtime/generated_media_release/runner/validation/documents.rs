@@ -1,9 +1,9 @@
-use super::{catalog, command_passed, command_ref, ArtifactSnapshot};
 use super::super::{
     CleanupReceipt, CommandEvidence, CoverageDocument, DigestRow, ObservationsDocument,
     OwnerAuditDocument, ResultsDocument, ReviewDocument, Spec034ReleaseArtifactError,
     Spec034ReleaseManifest, Spec034ReleaseMode, SummaryDocument, TriageDocument,
 };
+use super::{catalog, command_passed, command_ref, ArtifactSnapshot};
 
 pub(super) fn validate(
     snapshot: &ArtifactSnapshot,
@@ -75,7 +75,9 @@ pub(super) fn validate(
 fn valid_digest(value: &str) -> bool {
     value.len() == 71
         && value.starts_with("sha256:")
-        && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn validate_coverage(

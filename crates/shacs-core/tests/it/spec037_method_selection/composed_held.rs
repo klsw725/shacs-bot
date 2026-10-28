@@ -9,7 +9,13 @@ const HELD: &str = "task_method_held_results_v1";
 struct Failing(Provider);
 impl ProviderClient for Failing {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
-        if self.0.responses.lock().unwrap().is_empty() {
+        if self
+            .0
+            .responses
+            .lock()
+            .expect("responses lock poisoned")
+            .is_empty()
+        {
             return Err(ProviderError::Api {
                 status: Some(500),
                 message: "provider unavailable".to_owned(),

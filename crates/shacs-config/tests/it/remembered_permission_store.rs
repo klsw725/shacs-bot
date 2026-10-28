@@ -3,12 +3,11 @@ use shacs_config::{
     RememberedPermissionRemoveByPrefixOutcome, RememberedPermissionRule,
     RememberedPermissionStoreErrorKind,
 };
-use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
-use std::thread;
+use std::{fs, thread};
 
 use crate::remembered_permission_store_support as support;
 

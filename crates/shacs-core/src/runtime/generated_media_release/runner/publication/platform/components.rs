@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    open_child, same_handle_path, CreatedComponent, EvidenceDestination, PublicationStage,
+    Spec034ReleaseArtifactError,
+};
+use rustix::fs::{fsync, mkdirat, unlinkat, AtFlags, Mode};
+use std::ffi::OsStr;
 
 impl EvidenceDestination {
     pub(super) fn open_components(
@@ -29,11 +34,7 @@ impl EvidenceDestination {
                     let child = match open_child(&self.handles[parent_index], name) {
                         Ok(child) => child,
                         Err(_) => {
-                            let _ = unlinkat(
-                                &self.handles[parent_index],
-                                name,
-                                AtFlags::REMOVEDIR,
-                            );
+                            let _ = unlinkat(&self.handles[parent_index], name, AtFlags::REMOVEDIR);
                             return Err(Spec034ReleaseArtifactError::InvalidConfig);
                         }
                     };

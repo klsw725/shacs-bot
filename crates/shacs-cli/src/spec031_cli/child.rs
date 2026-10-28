@@ -1,4 +1,5 @@
-use super::{reason_summary, render::envelope_line, severity};
+use super::render::envelope_line;
+use super::{reason_summary, severity};
 use crate::opaque_ref;
 use shacs_projection::{
     Spec031ActionRef, Spec031Availability, Spec031Capability, Spec031ConstructionError,

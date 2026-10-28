@@ -1,9 +1,10 @@
 use super::*;
-use crate::runtime::select_token_estimator;
 use crate::runtime::trusted_runtime::{
     LocalSpec030ProjectionProvider, Spec030FactStore, WorkspaceTrustObservation,
 };
-use crate::runtime::{ContextProviderHandoff, RequiredBudgetEvidence, RequiredContextKind};
+use crate::runtime::{
+    select_token_estimator, ContextProviderHandoff, RequiredBudgetEvidence, RequiredContextKind,
+};
 use serde_json::json;
 use shacs_projection::Spec030ProjectionProvider;
 

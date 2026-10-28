@@ -1,8 +1,6 @@
-use shacs_tui::{
-    live_source::{RuntimeProjectionSource, SessionRuntimeSource},
-    state::{SessionKey, TuiState},
-    view::render_lines,
-};
+use shacs_tui::live_source::{RuntimeProjectionSource, SessionRuntimeSource};
+use shacs_tui::state::{SessionKey, TuiState};
+use shacs_tui::view::render_lines;
 use std::path::{Path, PathBuf};
 
 pub(super) fn render(

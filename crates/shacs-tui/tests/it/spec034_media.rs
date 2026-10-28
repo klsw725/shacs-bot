@@ -1,11 +1,11 @@
 use serde_json::json;
 use shacs_session::{Session, SessionManager};
-use shacs_tui::{
-    live_source::{RuntimeProjectionSource, SessionRuntimeSource},
-    state::TuiState,
-    view::render_lines,
-};
-use std::{error::Error, fs, path::Path};
+use shacs_tui::live_source::{RuntimeProjectionSource, SessionRuntimeSource};
+use shacs_tui::state::TuiState;
+use shacs_tui::view::render_lines;
+use std::error::Error;
+use std::fs;
+use std::path::Path;
 
 const LEFTOVER_RECORD: &str = r#"{"schema_version":1,"kind":"media_capability","state":"extraction_failed","reason":{"code":"extraction_failed","safe_summary":"media extraction failed"},"lineage":{"artifact_ref":"spec034://media/artifact/7b1dfd5bb5d3258aa9d9c556171a55c5b2a8dc847bb042faa489277a53f627ee"},"freshness":"unavailable","disclosure":{"status":"unavailable"},"owner_facts":{"unavailable_reasons":["missing_analyzer_owner_ref"]}}"#;
 const CORRUPT_RECORD: &str =

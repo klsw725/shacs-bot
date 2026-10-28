@@ -1,10 +1,16 @@
-use super::*;
+use super::{
+    Spec035AdapterScope, Spec035ContainmentGuarantee, Spec035DeliveryGuarantee,
+    Spec035DisclosureBoundary, Spec035DisclosureState, Spec035EphemeralConfirmationState,
+    Spec035FinalDeliveryState, Spec035HookDenialState, Spec035OwnerSurface, Spec035ProgressState,
+    Spec035SandboxFallback, Spec035SandboxRuntimeState,
+};
 use crate::{
     ProcessAdapterKind, Spec031ActionRef, Spec031ApprovalState, Spec031Count, Spec031Freshness,
     Spec031ObservedAtUnixMs, Spec031SafeSummary, Spec031SubjectRef, TrustedCodeDisclosure,
 };
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 pub const SPEC035_REVISED_SCHEMA_VERSION: u32 = 1;
 

@@ -1,7 +1,6 @@
 use super::*;
-use std::fs;
-use std::io;
 use std::path::PathBuf;
+use std::{fs, io};
 
 #[test]
 fn orders_nested_files_from_root_to_current() -> io::Result<()> {

@@ -26,7 +26,10 @@ mod tool_before_interaction;
 mod trajectory_cli;
 mod web_watch_profile;
 pub use runtime_cleanup::{RemovedRuntimePath, RemovedRuntimePathKind, RuntimeCleanupReceipt};
-use spec035_cli_media::wiring::*;
+use spec035_cli_media::wiring::{
+    format_runtime_inspect, production_tool_registry, runtime_inspect_inner,
+    runtime_inspect_with_owner,
+};
 pub use spec035_revised::{
     render_spec035_revised_json, render_spec035_revised_projection,
     render_spec035_transport_rejection,
@@ -72,8 +75,8 @@ use shacs_core::runtime::{
     build_plugin_runtime_snapshot, build_plugin_surface_projection,
     build_spec031_extension_projection, build_spec035_tasks_projection, ceiling_for_origin,
     containment_permission_proof_for_process_gate, discover_context_files, discover_plugins,
-    parse_context_references, plugin_hook_catalog, register_plugin_runtime_tools,
-    request_runtime_control, resolve_context_reference,
+    parse_context_references, plugin_hook_catalog, request_runtime_control,
+    resolve_context_reference,
     runtime_stop_request_marker_path as core_runtime_stop_request_marker_path,
     serialize_spec035_tasks_projection, ActionNormalizationState, AgentHook, AgentHookContext,
     AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopTurnResult, CompositeHook,
@@ -81,32 +84,28 @@ use shacs_core::runtime::{
     ContextBuilder, ContextDiagnosticsInput, ContextDiagnosticsSummary,
     ContextFileDiagnosticsSummary, ContextFileDiscoveryOptions, ContextReferenceDiagnosticsSummary,
     ContextReferenceResolverConfig, CoreDiagnosticsAggregateInput,
-    CredentialResolvingImageGenerationClient, CredentialResolvingProviderClient, DiscoveredPlugin,
-    DockerContainmentSnapshot, DreamLifecycle, DurableWorkDispatcher, HeartbeatError,
-    HeartbeatNotifier, HeartbeatResponseEvaluator, HeartbeatService, HeartbeatTaskExecutor,
-    HeartbeatWorker, InboundMessage, InheritedPermissionContext, McpLifecycle, MessageBus,
-    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionRuleInput,
-    PermissionedAction, PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError,
-    PluginHookCatalog, PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
+    CredentialResolvingProviderClient, DiscoveredPlugin, DockerContainmentSnapshot, DreamLifecycle,
+    DurableWorkDispatcher, HeartbeatError, HeartbeatNotifier, HeartbeatResponseEvaluator,
+    HeartbeatService, HeartbeatTaskExecutor, HeartbeatWorker, InboundMessage,
+    InheritedPermissionContext, McpLifecycle, MessageBus, PermissionCeilingSnapshot,
+    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
+    PermissionedActionOrigin, PluginCommandDispatcher, PluginDiscoveryError, PluginHookCatalog,
+    PluginHookDescriptor, PluginHookDispatchSink, PluginHookDispatchSummary,
     PluginProcessPermissionContext, PluginRuntimeHookAgentHook, PluginRuntimeSnapshot, PluginState,
     PluginSurfaceProjection, ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
     ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
     ProcessGateTerminalPrecondition, ProcessIdentity, ProcessPluginHookCommandExecutor,
     ProcessRedactedCommand, ProjectPermissionStoreConfig, ProviderClientResolutionRequest,
-    ProviderCredentialClientConfig, ProviderCredentialRuntime, ProviderNotificationEvaluator,
-    RuntimeBoundaryOrigin, RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall,
-    SafetyCapability, Session, SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome,
-    SessionTurnLock, SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
+    ProviderCredentialRuntime, ProviderNotificationEvaluator, RuntimeBoundaryOrigin,
+    RuntimeCapabilityReport, RuntimeCapabilityStatus, RuntimeToolCall, SafetyCapability, Session,
+    SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome, SessionTurnLock,
+    SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
     SubagentExecutionConfig, SubagentRuntime, SurfaceActionOutcomeKind, SurfaceActionRequestKind,
-    SurfaceApprovalRequest, ToolEvent, ToolSearchConfig, ToolSearchMode, ToolStatus,
-    HEARTBEAT_FILE_NAME, SURFACE_APPROVAL_WORK_KIND,
+    ToolEvent, ToolSearchConfig, ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
-    AskUserTool, CronTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
-    ImageGenerateTool, ImageGenerateToolConfig, ListDirTool, McpRuntime, McpServerConnectionReport,
-    McpServerSpec, McpStartupGate, MessageTool, NetworkGuard, PathContext, ReadFileTool,
-    SelfRuntimeState, SelfTool, SpawnTool, StdioMcpConnector, ToolRegistry, WebFetchConfig,
-    WebFetchTool, WebSearchConfig, WebSearchTool, WriteFileTool,
+    McpRuntime, McpServerConnectionReport, McpServerSpec, McpStartupGate, MessageTool,
+    NetworkGuard, SpawnTool, ToolRegistry,
 };
 use shacs_cron::{CronSupervisor, CronSupervisorConfig, PersistentCronService};
 use shacs_projection::{
@@ -118,9 +117,8 @@ use shacs_projection::{
     RememberedPermissionStoreHealthInput,
 };
 use shacs_providers::{
-    chat_with_retry, prepare_provider_request, resolve_image_generation_provider, AgentDefaults,
-    ImageGenerationResolutionRequest, LlmResponse, ProviderClient, ProviderError, ProviderEvent,
-    ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
+    chat_with_retry, prepare_provider_request, AgentDefaults, LlmResponse, ProviderClient,
+    ProviderError, ProviderEvent, ProviderRegistry, ProviderRetryMode, ResolvedProviderClient,
 };
 use shacs_redaction::redact_string;
 use shacs_session::durable_child::{
@@ -177,7 +175,6 @@ use shacs_utils::progress_events::{
 };
 use shacs_workflow::{WorkflowPattern, WorkflowRecipeReadiness};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fmt;
 use std::fs::{self, File};
 #[cfg(any(test, debug_assertions))]
 use std::io::Seek;
@@ -185,14 +182,13 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{fmt, thread};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect as websocket_connect, Message as WebSocketMessage, WebSocket};
 
@@ -2190,9 +2186,20 @@ impl Drop for ShacsBot {
     }
 }
 
+/// Runs `operation`, turning its panic into `Err` instead of unwinding further.
+///
+/// The programmatic facade promises that lifecycle and observability hook panics do not stop
+/// the runtime (docs/USAGE.md), and Spec 029 requires a panicking external turn to record a
+/// failed terminal and release its session. This is the one reviewed `catch_unwind` boundary
+/// for those cases; do not use it elsewhere.
+#[allow(clippy::disallowed_methods)]
+fn isolate_panic<T>(operation: impl FnOnce() -> T) -> thread::Result<T> {
+    panic::catch_unwind(AssertUnwindSafe(operation))
+}
+
 fn emit_lifecycle_hooks(hooks: &[ShacsBotLifecycleHook], event: ShacsBotLifecycleEvent) {
     for hook in hooks {
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(&event))).is_err() {
+        if isolate_panic(|| hook(&event)).is_err() {
             eprintln!(
                 "shacs bot lifecycle hook panicked during {}",
                 lifecycle_event_label(&event)
@@ -2218,7 +2225,7 @@ fn emit_observability_hooks(
     event: ShacsBotObservabilityEvent,
 ) {
     for hook in hooks {
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(&event))).is_err() {
+        if isolate_panic(|| hook(&event)).is_err() {
             eprintln!(
                 "shacs bot observability hook panicked during {}",
                 observability_event_label(&event)
@@ -3603,7 +3610,7 @@ fn runtime_containment_classify(evidence: RuntimeContainmentEvidence) -> Runtime
     } else if evidence.official_package_marker && !evidence.container_markers.is_empty() {
         (
             Some(true),
-            Some(runtime_containment_backend("official-container", &evidence.exec_sandbox_backend)),
+            Some(runtime_containment_backend("official-container", evidence.exec_sandbox_backend.as_deref())),
             format!(
                 "official package marker and container runtime evidence observed ({}); kernel-level isolation not claimed",
                 evidence.container_markers.join(", ")
@@ -3612,7 +3619,7 @@ fn runtime_containment_classify(evidence: RuntimeContainmentEvidence) -> Runtime
     } else if !evidence.container_markers.is_empty() {
         (
             Some(true),
-            Some(runtime_containment_backend("container", &evidence.exec_sandbox_backend)),
+            Some(runtime_containment_backend("container", evidence.exec_sandbox_backend.as_deref())),
             format!(
                 "recognized container runtime evidence observed ({}); kernel-level isolation not claimed",
                 evidence.container_markers.join(", ")
@@ -3621,7 +3628,7 @@ fn runtime_containment_classify(evidence: RuntimeContainmentEvidence) -> Runtime
     } else if evidence.official_package_marker {
         (
             None,
-            Some(runtime_containment_backend("official-package", &evidence.exec_sandbox_backend)),
+            Some(runtime_containment_backend("official-package", evidence.exec_sandbox_backend.as_deref())),
             "official package marker observed without container runtime evidence; containment not observed".to_owned(),
         )
     } else if let Some(exec_sandbox_backend) = &evidence.exec_sandbox_backend {
@@ -3648,7 +3655,7 @@ fn runtime_containment_classify(evidence: RuntimeContainmentEvidence) -> Runtime
     inspect
 }
 
-fn runtime_containment_backend(kind: &str, exec_sandbox_backend: &Option<String>) -> String {
+fn runtime_containment_backend(kind: &str, exec_sandbox_backend: Option<&str>) -> String {
     match exec_sandbox_backend {
         Some(exec_sandbox_backend) => format!("{kind}+{exec_sandbox_backend}"),
         None => kind.to_owned(),
@@ -3960,8 +3967,8 @@ fn permission_config_snapshot_from_config_path(
     Ok(snapshot)
 }
 
-fn permission_containment_precondition_met(snapshot: &Option<ContainmentSnapshotRef>) -> bool {
-    snapshot.as_ref().and_then(|snapshot| snapshot.contained) == Some(true)
+fn permission_containment_precondition_met(snapshot: Option<&ContainmentSnapshotRef>) -> bool {
+    snapshot.and_then(|snapshot| snapshot.contained) == Some(true)
 }
 
 fn permission_mode_source_name(source: PermissionModeSource) -> &'static str {
@@ -11231,7 +11238,7 @@ impl ExternalTransportRuntimeContext {
         let _enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .map_err(|_| "durable inbound enqueue lock poisoned".to_owned())?;
         let mut durable_message = message.clone();
         if durable_message.session_key_override.is_none() {
             durable_message.session_key_override = self.unified_session_key.clone();
@@ -11604,7 +11611,9 @@ fn run_external_agent_processor(
                 let enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
                     .get_or_init(|| Mutex::new(()))
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .map_err(|_| {
+                        CliError::Runtime("durable inbound enqueue lock poisoned".to_owned())
+                    })?;
                 let open_work_count = match durable_work_state_for_owner(
                     &durable_work.data_dir,
                     durable_work.dispatcher.lease_owner_ref(),
@@ -12252,7 +12261,7 @@ fn enqueue_remaining_external_inbound(
         let _enqueue_guard = DURABLE_INBOUND_ENQUEUE_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .map_err(|_| CliError::Runtime("durable inbound enqueue lock poisoned".to_owned()))?;
         let (state, admission) = durable_work_state_for_owner(
             &durable_work.data_dir,
             durable_work.dispatcher.lease_owner_ref(),
@@ -12459,13 +12468,13 @@ fn spawn_external_agent_turn(
             .and_then(Value::as_str)
             .map(str::to_owned);
         let retry_message = message.clone();
-        let result = match catch_unwind(AssertUnwindSafe(|| {
+        let result = match isolate_panic(|| {
             adapter.process_external_inbound_with_streaming(
                 message,
                 adapter.loop_config(),
                 &runtime_bus,
             )
-        })) {
+        }) {
             Ok(Ok((turn, outbound, subagent_runtime))) => ExternalAgentTurnResult {
                 session_key,
                 outbound,
@@ -12955,11 +12964,18 @@ fn outbound_route_key(message: &OutboundMessage) -> String {
     )
 }
 
-fn load_metadata_json(path: &Path) -> Value {
-    let _guard = CHANNEL_METADATA_LOCK
+/// A poisoned lock stops the caller. Reading an empty cursor instead would make a restarted
+/// worker fetch old messages again, and a skipped write would leave a stale cursor or pending
+/// hint for the next start to read.
+fn lock_channel_metadata() -> MutexGuard<'static, ()> {
+    CHANNEL_METADATA_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .expect("channel metadata lock poisoned")
+}
+
+fn load_metadata_json(path: &Path) -> Value {
+    let _guard = lock_channel_metadata();
     load_metadata_json_unlocked(path)
 }
 
@@ -13496,7 +13512,7 @@ fn record_pending_inbound_hint(path: &Path, message: &InboundMessage) -> Result<
     let _guard = CHANNEL_METADATA_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .map_err(|_| "channel metadata lock poisoned".to_owned())?;
     let mut root = load_metadata_json_unlocked(path);
     if root.get("restart_state").is_none() {
         set_restart_state_envelope(&mut root, &message.channel, None, None);
@@ -13540,10 +13556,7 @@ fn clear_pending_inbound_hint(data_dir: &Path, message: &InboundMessage) {
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let _guard = CHANNEL_METADATA_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = lock_channel_metadata();
         let mut root = load_metadata_json_unlocked(&path);
         let Some(pending) = root
             .get_mut("pending_inbound")
@@ -13593,10 +13606,7 @@ fn record_delivery_state(
     status: &str,
     last_error: Option<&str>,
 ) {
-    let _guard = CHANNEL_METADATA_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock_channel_metadata();
     let mut root = load_metadata_json_unlocked(path);
     if !root.get("deliveries").is_some_and(Value::is_array) {
         root["deliveries"] = json!([]);
@@ -13665,10 +13675,7 @@ fn load_telegram_offset(path: &Path) -> i64 {
 }
 
 fn save_telegram_offset(path: &Path, offset: i64) {
-    let _guard = CHANNEL_METADATA_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock_channel_metadata();
     let mut root = load_metadata_json_unlocked(path);
     root["offset"] = json!(offset);
     set_restart_state_envelope(
@@ -13697,10 +13704,7 @@ fn load_discord_last_ids(path: &Path) -> BTreeMap<String, String> {
 }
 
 fn save_discord_last_ids(path: &Path, last_ids: &BTreeMap<String, String>) {
-    let _guard = CHANNEL_METADATA_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock_channel_metadata();
     let mut root = load_metadata_json_unlocked(path);
     root["last_ids"] = json!(last_ids);
     set_restart_state_envelope(
@@ -13762,10 +13766,7 @@ fn load_email_seen_uid_state(path: &Path, key: &str) -> EmailSeenUidState {
 }
 
 fn save_email_seen_uid_state(path: &Path, key: &str, state: &EmailSeenUidState) {
-    let _guard = CHANNEL_METADATA_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock_channel_metadata();
     let mut root = load_metadata_json_unlocked(path);
     if !root.get("mailboxes").is_some_and(Value::is_object) {
         root["mailboxes"] = json!({});
@@ -13839,10 +13840,7 @@ fn load_discord_gateway_resume_state(path: &Path, token: &str) -> DiscordGateway
 }
 
 fn save_discord_gateway_resume_state(path: &Path, state: &DiscordGatewayResumeState, token: &str) {
-    let _guard = CHANNEL_METADATA_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock_channel_metadata();
     let mut root = load_metadata_json_unlocked(path);
     root["session_id"] = json!(state.session_id);
     root["sequence"] = json!(state.sequence);
@@ -13881,10 +13879,7 @@ fn canonical_discord_gateway_resume_value(root: &Value) -> Value {
 }
 
 fn clear_discord_gateway_resume_state(path: &Path) {
-    let _guard = CHANNEL_METADATA_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock_channel_metadata();
     let mut root = load_metadata_json_unlocked(path);
     if let Some(object) = root.as_object_mut() {
         for key in [
@@ -18947,7 +18942,7 @@ impl AgentLoopChatCompletionAdapter {
         }
         let config_path = self.config_path.clone();
         let containment_precondition_met =
-            permission_containment_precondition_met(&self.containment_snapshot);
+            permission_containment_precondition_met(self.containment_snapshot.as_ref());
         config.permission_mode_setter = Some(Arc::new(move |mode| {
             patch_permission_mode_config(&config_path, mode).map_err(|error| error.to_string())?;
             permission_mode_snapshot_from_config_path(&config_path, containment_precondition_met)
@@ -18959,7 +18954,7 @@ impl AgentLoopChatCompletionAdapter {
     fn current_permission_config_snapshot(&self) -> PermissionConfigSnapshot {
         permission_config_snapshot_from_config_path(
             &self.config_path,
-            permission_containment_precondition_met(&self.containment_snapshot),
+            permission_containment_precondition_met(self.containment_snapshot.as_ref()),
         )
         .unwrap_or_else(|_| {
             reload_failure_permission_config_snapshot(&self.permission_mode_snapshot)
@@ -22215,8 +22210,12 @@ mod tests {
         PluginExecutableCommand, PluginHookCallbackResult, PluginHookDispatchAttempt,
         PluginHookEvent, PluginManifestSource, PluginRuntimeHook, PluginRuntimePlugin,
         ProcExecSummary, RuntimeBoundaryOrigin, SafetyCapability, Session,
+        SURFACE_APPROVAL_WORK_KIND,
     };
-    use shacs_core::tools::{JsonMap, Tool, ToolCallExecutionContext, ToolResult};
+    use shacs_core::tools::{
+        ExecConfig, ExecTool, JsonMap, PathContext, ReadFileTool, Tool, ToolCallExecutionContext,
+        ToolResult, WriteFileTool,
+    };
     use shacs_providers::{
         GenerationSettings, ProviderClient, ProviderEvent, ProviderRequest, ToolCallRequest,
     };

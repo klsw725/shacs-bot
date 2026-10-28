@@ -7,7 +7,9 @@ use shacs_core::runtime::trusted_runtime::{
     TraceDisclosureUpdate,
 };
 use shacs_projection::*;
-use std::{net::TcpListener, sync::Arc, thread::JoinHandle};
+use std::net::TcpListener;
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 struct Server {
     stop: Option<tokio::sync::oneshot::Sender<()>>,

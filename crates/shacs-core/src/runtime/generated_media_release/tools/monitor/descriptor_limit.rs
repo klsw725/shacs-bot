@@ -8,13 +8,15 @@ pub(super) fn ensure(path_count: usize) -> Result<(), Spec034ReleaseArtifactErro
         .checked_mul(DESCRIPTORS_PER_PATH)
         .and_then(|count| count.checked_add(DESCRIPTOR_HEADROOM))
         .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
-    let required = libc::rlim_t::try_from(required)
-        .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
+    let required =
+        libc::rlim_t::try_from(required).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
     let mut limits = std::mem::MaybeUninit::<libc::rlimit>::uninit();
     // SAFETY: [Category 4 - uninitialized memory] `getrlimit` initializes the complete output
     // on success, and the value is only assumed initialized after a zero return status.
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limits.as_mut_ptr()) } != 0 {
-        return Err(Spec034ReleaseArtifactError::Io(std::io::Error::last_os_error()));
+        return Err(Spec034ReleaseArtifactError::Io(
+            std::io::Error::last_os_error(),
+        ));
     }
     // SAFETY: [Category 4 - uninitialized memory] the successful call above initialized it.
     let mut limits = unsafe { limits.assume_init() };
@@ -28,7 +30,9 @@ pub(super) fn ensure(path_count: usize) -> Result<(), Spec034ReleaseArtifactErro
     // SAFETY: [Category 8 - FFI boundary] `limits` is fully initialized and preserves the hard
     // limit returned by the kernel; only the current process soft limit is raised.
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) } != 0 {
-        return Err(Spec034ReleaseArtifactError::Io(std::io::Error::last_os_error()));
+        return Err(Spec034ReleaseArtifactError::Io(
+            std::io::Error::last_os_error(),
+        ));
     }
     Ok(())
 }

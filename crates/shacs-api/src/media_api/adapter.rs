@@ -1,9 +1,8 @@
 use crate::{
-    ApiError, ApiModel, ChatCompletionInvocation, Spec031ApiProjection, Spec035TasksStreamEvent,
-};
-use crate::{
-    DiagnosticsKind, DiagnosticsRecord, DiagnosticsSeverity, DiagnosticsSnapshot,
-    RememberedPermissionProjection, Spec030RuntimeProjection, Spec030UnavailableReason,
+    ApiError, ApiModel, ChatCompletionInvocation, DiagnosticsKind, DiagnosticsRecord,
+    DiagnosticsSeverity, DiagnosticsSnapshot, RememberedPermissionProjection,
+    Spec030RuntimeProjection, Spec030UnavailableReason, Spec031ApiProjection,
+    Spec035TasksStreamEvent,
 };
 use serde_json::{json, Value};
 use shacs_channels::WebSocketServerEvent;

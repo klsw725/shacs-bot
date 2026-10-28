@@ -1,14 +1,17 @@
-use super::*;
+use super::{
+    digest_bytes, rust_tool_candidates, PathChainSeal, ResolvedTool, Spec034ReleaseArtifactError,
+    MAX_TOOL_BYTES,
+};
 use crate::runtime::generated_media_release::source_descriptor::{
     copy_tree, digest_tree, open_anchored_directory, read_file, TreeKind,
 };
-use rustix::fs::{fsync, renameat_with, RenameFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
+use std::path::Path;
 
 mod payload;
-use payload::*;
+use payload::{collect_files, publish_or_verify, seal_cache_payload, sync_tree};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -115,9 +118,12 @@ fn resolve_with_hook(
         seal_cache_payload(&entry.map_err(Spec034ReleaseArtifactError::Io)?.path())?;
     }
     let manifest = CacheManifest::capture(&stage_root, [&cargo, &rustc, &rustdoc])?;
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(Spec034ReleaseArtifactError::Json)?;
-    super::super::artifacts::durable_write(&stage_root.join("cache-manifest.json"), &manifest_bytes)?;
+    let manifest_bytes =
+        serde_json::to_vec_pretty(&manifest).map_err(Spec034ReleaseArtifactError::Json)?;
+    super::super::artifacts::durable_write(
+        &stage_root.join("cache-manifest.json"),
+        &manifest_bytes,
+    )?;
     seal_cache_payload(&stage_root)?;
     sync_tree(&stage_root)?;
     after_stage();
@@ -137,21 +143,10 @@ fn resolve_with_hook(
     if copied_digest != manifest.tree_digest {
         return Err(Spec034ReleaseArtifactError::DigestMismatch);
     }
-    let mut rustc = ResolvedTool::resolve_into(
-        "rustc",
-        vec![run_tools.join("rustc")],
-        run_tools,
-    )?;
-    let mut rustdoc = ResolvedTool::resolve_into(
-        "rustdoc",
-        vec![run_tools.join("rustdoc")],
-        run_tools,
-    )?;
-    let mut cargo = ResolvedTool::resolve_into(
-        "cargo",
-        vec![run_tools.join("cargo")],
-        run_tools,
-    )?;
+    let mut rustc = ResolvedTool::resolve_into("rustc", vec![run_tools.join("rustc")], run_tools)?;
+    let mut rustdoc =
+        ResolvedTool::resolve_into("rustdoc", vec![run_tools.join("rustdoc")], run_tools)?;
+    let mut cargo = ResolvedTool::resolve_into("cargo", vec![run_tools.join("cargo")], run_tools)?;
     cargo.reseal()?;
     rustc.reseal()?;
     rustdoc.reseal()?;

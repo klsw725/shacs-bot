@@ -1,5 +1,6 @@
-use crate::tools::SchemaFragment;
-use crate::tools::{JsonMap, StringSchema, Tool, ToolParameters, ToolResult, ValidationError};
+use crate::tools::{
+    JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters, ToolResult, ValidationError,
+};
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -181,8 +182,8 @@ impl SelfTool {
     }
 
     pub fn set_context(&self, channel: impl Into<String>, chat_id: impl Into<String>) {
-        *recover_lock(&self.channel) = channel.into();
-        *recover_lock(&self.chat_id) = chat_id.into();
+        *lock(&self.channel) = channel.into();
+        *lock(&self.chat_id) = chat_id.into();
     }
 }
 
@@ -254,7 +255,7 @@ impl Tool for SelfTool {
 
 impl SelfTool {
     fn inspect(&self, key: Option<&str>) -> String {
-        let state = recover_lock(&self.state);
+        let state = lock(&self.state);
         let Some(key) = key.filter(|key| !key.trim().is_empty()) else {
             return inspect_all(&state);
         };
@@ -317,7 +318,7 @@ impl SelfTool {
         if new_value > max {
             return format!("Error: '{key}' must be <= {max}");
         }
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         let old = state.values.insert(key.to_owned(), json!(new_value));
         if key == "max_iterations" {
             state.max_iterations_syncs += 1;
@@ -332,7 +333,7 @@ impl SelfTool {
         if new_value.len() < min_len {
             return format!("Error: '{key}' must be at least {min_len} characters");
         }
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         let old = state.values.insert(key.to_owned(), json!(new_value));
         format!(
             "Set {key} = {:?} (was {})",
@@ -345,7 +346,7 @@ impl SelfTool {
         if let Err(error) = validate_json_safe(&value, 0) {
             return format!("Error: {error}");
         }
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         if let Some(old) = state.values.get(key) {
             if scalar_type(old).is_some() && scalar_type(old) != scalar_type(&value) {
                 return format!(
@@ -384,7 +385,7 @@ impl SelfTool {
         if let Err(error) = validate_json_safe(&value, 0) {
             return format!("Error: {error}");
         }
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         match resolve_path_mut(&mut state.values, parent_path) {
             Ok(Value::Object(parent)) => {
                 parent.insert(leaf.to_owned(), value.clone());
@@ -575,8 +576,6 @@ fn is_sensitive(name: &str) -> bool {
             .any(|part| SENSITIVE_NAMES.contains(&part))
 }
 
-fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().expect("lock poisoned by a panicking thread")
 }

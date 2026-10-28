@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn malicious_git_worktree_and_include_config_are_rejected(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn malicious_git_worktree_and_include_config_are_rejected() -> Result<(), Box<dyn std::error::Error>>
+{
     for config in [
         "[core]\n\tworktree = /tmp/elsewhere\n",
         "[include]\n\tpath = /tmp/forged-config\n",
@@ -129,7 +129,10 @@ fn late_worktree_config_creation_breaks_source_seal() -> Result<(), Box<dyn std:
 
     std::fs::write(repo.path().join(".git/config.worktree"), b"[core]\n")?;
 
-    assert!(matches!(seal.verify(), Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        seal.verify(),
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     Ok(())
 }
 
@@ -164,7 +167,10 @@ fn config_rename_after_read_cannot_establish_reopened_baseline(
         assert!(std::fs::write(&config, b"[alias]\n").is_ok());
     });
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     Ok(())
 }
 
@@ -244,5 +250,8 @@ fn git(repo: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
         .arg(repo)
         .args(args)
         .status()?;
-    status.success().then_some(()).ok_or_else(|| "git failed".into())
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "git failed".into())
 }

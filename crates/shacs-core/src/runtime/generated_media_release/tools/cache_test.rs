@@ -1,4 +1,6 @@
+use super::payload::make_writable;
 use super::*;
+use std::path::PathBuf;
 
 fn paths() -> Result<(tempfile::TempDir, PathBuf), Spec034ReleaseArtifactError> {
     let root = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
@@ -14,8 +16,7 @@ fn malicious_preseeded_tool_cache_is_rebuilt_from_source_closure(
 ) -> Result<(), Spec034ReleaseArtifactError> {
     let (_root, tools) = paths()?;
     std::fs::create_dir_all(&tools).map_err(Spec034ReleaseArtifactError::Io)?;
-    std::fs::write(tools.join("cargo"), b"forged")
-        .map_err(Spec034ReleaseArtifactError::Io)?;
+    std::fs::write(tools.join("cargo"), b"forged").map_err(Spec034ReleaseArtifactError::Io)?;
     std::fs::write(
         tools
             .parent()
@@ -57,7 +58,10 @@ fn cache_root_a_b_a_during_fresh_verification_is_rejected(
         assert!(std::fs::rename(&displaced, &cache).is_ok());
     });
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     Ok(())
 }
 
@@ -73,7 +77,12 @@ fn verified_cache_hit_removes_read_only_stage() -> Result<(), Spec034ReleaseArti
     let mut stages = std::fs::read_dir(parent)
         .map_err(Spec034ReleaseArtifactError::Io)?
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".toolchain-stage-"));
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".toolchain-stage-")
+        });
 
     assert!(stages.next().is_none());
     Ok(())
@@ -93,7 +102,12 @@ fn published_cache_files_and_directories_are_non_writable(
     let mut pending = vec![cache.to_path_buf()];
     while let Some(path) = pending.pop() {
         let metadata = std::fs::symlink_metadata(&path).map_err(Spec034ReleaseArtifactError::Io)?;
-        assert_eq!(metadata.permissions().mode() & 0o222, 0, "writable cache path: {}", path.display());
+        assert_eq!(
+            metadata.permissions().mode() & 0o222,
+            0,
+            "writable cache path: {}",
+            path.display()
+        );
         if metadata.is_dir() {
             for entry in std::fs::read_dir(path).map_err(Spec034ReleaseArtifactError::Io)? {
                 pending.push(entry.map_err(Spec034ReleaseArtifactError::Io)?.path());
@@ -113,6 +127,9 @@ fn cache_binding_rejects_directory_injection() -> Result<(), Spec034ReleaseArtif
     make_writable(cache)?;
     std::fs::create_dir(cache.join("injected")).map_err(Spec034ReleaseArtifactError::Io)?;
 
-    assert!(matches!(binding.verify(), Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        binding.verify(),
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     Ok(())
 }

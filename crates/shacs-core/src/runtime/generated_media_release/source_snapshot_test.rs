@@ -13,7 +13,14 @@ fn linked_worktree_uses_controlled_common_and_worktree_git_metadata(
     commit(&repository)?;
     git(
         &repository,
-        &["worktree", "add", "--quiet", "-b", "linked", linked.to_str().ok_or("linked path")?],
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "linked",
+            linked.to_str().ok_or("linked path")?,
+        ],
     )?;
 
     let context = SourceRootContext::resolve(&linked)
@@ -89,7 +96,10 @@ fn bounded_read_rejects_transient_content_restored_before_confirmation(
         || std::fs::write(&path, b"approved").expect("restore approved bytes"),
     );
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     Ok(())
 }
 
@@ -117,5 +127,8 @@ fn git(repository: &Path, arguments: &[&str]) -> Result<(), Box<dyn std::error::
         .arg(repository)
         .args(arguments)
         .status()?;
-    status.success().then_some(()).ok_or_else(|| "git failed".into())
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "git failed".into())
 }

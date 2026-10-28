@@ -1,9 +1,8 @@
 use shacs_cli::spec031_surface_approval_fixture::FixtureRuntime;
 use std::error::Error;
-use std::fs;
 use std::path::PathBuf;
-use std::thread;
 use std::time::Duration;
+use std::{fs, thread};
 
 fn main() {
     if let Err(error) = run() {

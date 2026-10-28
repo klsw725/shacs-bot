@@ -1,7 +1,7 @@
 use super::artifact_manifest::{
     build_spec030_artifact_manifest, Spec030ArtifactManifest, ARTIFACT_MANIFEST_PATH,
 };
-use super::model::*;
+use super::model::{Spec030ReleaseArtifactError, Spec030ReleaseRunArtifacts};
 use super::source_manifest::{build_spec030_source_manifest, Spec030SourceManifest};
 use super::writer::render_summary;
 use serde::de::DeserializeOwned;

@@ -12,7 +12,10 @@ fn pre_rename_sync_failure_never_exposes_validated_marker(
     let evidence = root.join("evidence");
     let destination = EvidenceDestination::prepare(&evidence)?;
     let mut staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"manifest"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"manifest",
+    ))?;
     staging.inject_marker_sync_failure(MarkerSyncFailure::BeforeRenameDirectory);
 
     let result = staging.finalize_marker("run");
@@ -36,7 +39,10 @@ fn successful_marker_rename_publishes_complete_validated_document(
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"manifest"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"manifest",
+    ))?;
 
     let staging = staging.finalize_marker("run")?;
     destination.publish(staging)?;
@@ -56,7 +62,10 @@ fn post_rename_parent_sync_failure_is_commit_unknown() -> Result<(), Spec034Rele
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"manifest"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"manifest",
+    ))?;
     let staging = staging.finalize_marker("run")?;
     destination.inject_destination_sync_failure();
 

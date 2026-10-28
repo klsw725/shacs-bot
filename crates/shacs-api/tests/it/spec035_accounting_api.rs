@@ -6,11 +6,11 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use shacs_api::serve_api_listener;
 use spec035_reconnect_support::{adapter, release_events};
-use std::env;
-use std::fs;
+use std::{env, fs};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{client_async, WebSocketStream};
 
 #[tokio::test]
 async fn normal_websocket_reconnect_preserves_progress_and_final_accounting(

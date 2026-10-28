@@ -1,4 +1,4 @@
-use super::*;
+use super::{Spec030Availability, Spec030RuntimeProjection, Spec030UnavailableReason};
 use std::fmt::Debug;
 
 pub trait Spec030ProjectionProvider {

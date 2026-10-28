@@ -1,4 +1,9 @@
-use super::runner_spec034::*;
+use super::runner_spec034::{
+    append_mid_turn_injections, has_generated_artifacts, normalize_tool_message,
+    observable_call_id, observable_llm_response, observable_provider_event,
+    observable_tool_arguments, observable_tool_calls, observable_tool_event, prepare_run,
+    redact_string, ProviderStreamCounts, ToolResultArtifactRef,
+};
 use crate::runtime::quiet_tools::quiet_tool_calls;
 use crate::runtime::tool_execution::{
     effective_permission_rule_input, permission_decision_for_action,
@@ -8,17 +13,16 @@ use crate::runtime::tool_search::{
     BridgeToolExecutionReport, BridgeUnderlyingMappingEvidence, ToolDescribeEvidence,
     ToolSearchActivationReason, ToolSearchDiagnosticsSummary, ToolSearchQueryEvidence,
 };
-use crate::runtime::ContextProviderHandoff;
 use crate::runtime::{
     classifier_decision_evidence, dispatch_bridge_tool_calls_with_context_resolver,
     recent_auto_mode_denial_from_classifier_decision, skipped_classifier_evidence,
     AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, CancellationToken, ClassifierAttemptStatus,
-    ClassifierEvidenceInput, ClassifierFallbackCause, EvaluatorConfidence, EvaluatorScopeMatch,
-    ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope,
-    ExecutionSnapshot, ExecutionSnapshotInput, PendingExecution, PermissionMode,
-    PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyReason,
-    PermissionedAction, PromptInjectionSignal, ProviderExecutionHandoff, ProviderOutcomeKind,
-    RecentAutoModeDenial, RecentAutoModeRetryToken, ResolvedDeferredToolCall,
+    ClassifierEvidenceInput, ClassifierFallbackCause, ContextProviderHandoff, EvaluatorConfidence,
+    EvaluatorScopeMatch, ExecutionDomain, ExecutionIdentity, ExecutionOutcome,
+    ExecutionOutcomeFact, ExecutionScope, ExecutionSnapshot, ExecutionSnapshotInput,
+    PendingExecution, PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind,
+    PermissionPolicyReason, PermissionedAction, PromptInjectionSignal, ProviderExecutionHandoff,
+    ProviderOutcomeKind, RecentAutoModeDenial, RecentAutoModeRetryToken, ResolvedDeferredToolCall,
     RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
     RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage,
     SafetyCapability, ToolExecutionContext, ToolFailureClass, ToolInterruptKind, ToolOutcomeKind,
@@ -35,7 +39,7 @@ use shacs_providers::{
     ProviderRetryWaiter, ThreadRetryWaiter,
 };
 use std::collections::{BTreeMap, HashSet};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -214,10 +218,8 @@ impl AgentHook for CompositeHook {
         calls: &[RuntimeToolCall],
     ) -> Vec<RuntimeToolMessage> {
         for hook in &self.hooks {
-            let blocked = catch_unwind(AssertUnwindSafe(|| {
-                hook.block_tool_calls_quietly(context, calls)
-            }))
-            .unwrap_or_default();
+            let blocked =
+                isolate_panic(|| hook.block_tool_calls_quietly(context, calls)).unwrap_or_default();
             if !blocked.is_empty() {
                 return blocked;
             }
@@ -1081,9 +1083,7 @@ fn with_execution_ledger<T>(
     operation: impl FnOnce(&mut RuntimeExecutionLedger) -> T,
 ) -> Option<T> {
     let ledger = spec.execution_ledger.as_ref()?;
-    let mut ledger = ledger
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut ledger = ledger.lock().expect("execution ledger lock poisoned");
     Some(operation(&mut ledger))
 }
 
@@ -2458,7 +2458,7 @@ struct CallbackRetryWaiter<'a> {
 impl ProviderRetryWaiter for CallbackRetryWaiter<'_> {
     fn wait(&mut self, delay_s: f64, message: &str) {
         let callback = self.callback.clone();
-        let _ = catch_unwind(AssertUnwindSafe(|| callback(delay_s, message)));
+        let _ = isolate_panic(|| callback(delay_s, message));
         self.thread.wait(delay_s, message);
     }
 }
@@ -2517,15 +2517,15 @@ fn sanitize_checkpoint_assistant_message(mut message: Value) -> Value {
 }
 
 fn invoke_provider_event_callback(callback: &ProviderEventCallback, event: &ProviderEvent) {
-    let _ = catch_unwind(AssertUnwindSafe(|| callback(event)));
+    let _ = isolate_panic(|| callback(event));
 }
 
 fn invoke_checkpoint_callback(callback: &CheckpointCallback, checkpoint: &Value) {
-    let _ = catch_unwind(AssertUnwindSafe(|| callback(checkpoint)));
+    let _ = isolate_panic(|| callback(checkpoint));
 }
 
 fn invoke_tool_event_callback(callback: &ToolEventCallback, event: &ToolEvent) {
-    let _ = catch_unwind(AssertUnwindSafe(|| callback(event)));
+    let _ = isolate_panic(|| callback(event));
 }
 
 fn hook_context(iteration: usize, messages: &[Value]) -> AgentHookContext {
@@ -2560,8 +2560,18 @@ fn sanitize_hook_message(mut message: Value) -> Value {
     message
 }
 
+/// Runs a hook or callback so that its panic does not stop the agent run.
+///
+/// Specs 003, 025 and 030 require hook and callback panics to fail only that hook and let the
+/// runtime continue, so this is the one reviewed `catch_unwind` boundary for them. Use it only
+/// for extension points; panics in the runtime itself must keep propagating.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn isolate_panic<T>(operation: impl FnOnce() -> T) -> std::thread::Result<T> {
+    panic::catch_unwind(AssertUnwindSafe(operation))
+}
+
 fn invoke_hook_lifecycle(callback: impl FnOnce()) {
-    let _ = catch_unwind(AssertUnwindSafe(callback));
+    let _ = isolate_panic(callback);
 }
 
 fn invoke_hook_finalize(
@@ -2569,9 +2579,7 @@ fn invoke_hook_finalize(
     context: &AgentHookContext,
     content: String,
 ) -> String {
-    match catch_unwind(AssertUnwindSafe(|| {
-        hook.finalize_content(context, content.clone())
-    })) {
+    match isolate_panic(|| hook.finalize_content(context, content.clone())) {
         Ok(content) => content,
         Err(_) => content,
     }
@@ -2585,14 +2593,11 @@ fn invoke_hook_block_tool_calls(
     calls: &[RuntimeToolCall],
 ) -> Vec<RuntimeToolMessage> {
     if hook.receives_tool_arguments() {
-        return catch_unwind(AssertUnwindSafe(|| hook.block_tool_calls(context, calls)))
-            .unwrap_or_default();
+        return isolate_panic(|| hook.block_tool_calls(context, calls)).unwrap_or_default();
     }
     let observable_calls = observable_tool_calls(calls);
-    let mut blocked = catch_unwind(AssertUnwindSafe(|| {
-        hook.block_tool_calls(context, &observable_calls)
-    }))
-    .unwrap_or_default();
+    let mut blocked =
+        isolate_panic(|| hook.block_tool_calls(context, &observable_calls)).unwrap_or_default();
     for message in &mut blocked {
         if let Some(call) = calls
             .iter()

@@ -3,7 +3,8 @@ use shacs_api::{api_router, ChatCompletionAdapter};
 use shacs_session::{
     PermissionApprovalReceipt, PermissionApprovalTerminalState, Session, SessionManager,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 struct WorkspaceAdapter(PathBuf);

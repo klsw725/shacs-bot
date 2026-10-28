@@ -5,7 +5,8 @@ use shacs_core::runtime::*;
 use shacs_session::{Session, SessionManager};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 /// Test adapter: unlike the product adapter it allows the local test server.

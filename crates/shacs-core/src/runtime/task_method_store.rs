@@ -1,4 +1,4 @@
-use super::task_method::*;
+use super::task_method::{Gate, MethodId, MethodRequest, Reason, RequestState, SelectionSource};
 use super::task_method_classify::{classify, intents, selection};
 use super::task_method_image::ImageEvidence;
 use super::task_method_report::ReportEvidence;

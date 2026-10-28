@@ -141,7 +141,14 @@ impl RunnerIsolation {
         let target = root.path().join("target");
         let tools = root.path().join("toolchain/tools");
         let cache_tools = cache.join("toolchain/tools");
-        for path in [&home, &cargo_home, &source_parent, &target, &tools, &cache_tools] {
+        for path in [
+            &home,
+            &cargo_home,
+            &source_parent,
+            &target,
+            &tools,
+            &cache_tools,
+        ] {
             std::fs::create_dir_all(path).map_err(Spec034ReleaseArtifactError::Io)?;
         }
         let retained_root = RetainedRoot::capture(root.path())?;

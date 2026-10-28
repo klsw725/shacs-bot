@@ -1,6 +1,7 @@
 use super::model::Spec031ReleaseArtifactError as Error;
 use super::spec035_execution_io::decode;
-use serde::{de::IgnoredAny, Deserialize, Serialize};
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

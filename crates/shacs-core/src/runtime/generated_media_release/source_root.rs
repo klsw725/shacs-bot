@@ -1,9 +1,9 @@
 use super::super::model::Spec034ReleaseArtifactError;
 use super::super::path_chain::PathChainSeal;
 use super::super::source_descriptor::{copy_tree, digest_tree, TreeKind};
-use super::source_fixture::FixtureBinding;
 use super::super::source_git_snapshot::GitMetadataSnapshot;
 use super::super::tools::ResolvedTool;
+use super::source_fixture::FixtureBinding;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -65,8 +65,11 @@ impl SourceRootContext {
         let live_identity = RootIdentity::capture(&reader.root_metadata()?)?;
         after_root_open();
         let live_handle = reader.into_root();
-        if RootIdentity::capture(&live_handle.metadata().map_err(Spec034ReleaseArtifactError::Io)?)?
-            != live_identity
+        if RootIdentity::capture(
+            &live_handle
+                .metadata()
+                .map_err(Spec034ReleaseArtifactError::Io)?,
+        )? != live_identity
         {
             return Err(Spec034ReleaseArtifactError::DigestMismatch);
         }
@@ -134,7 +137,8 @@ impl SourceRootContext {
                 .live_handle
                 .metadata()
                 .map_err(Spec034ReleaseArtifactError::Io)?,
-        )? != self.live_identity {
+        )? != self.live_identity
+        {
             return Err(Spec034ReleaseArtifactError::DigestMismatch);
         }
         Ok(())
@@ -159,8 +163,8 @@ impl SourceRootContext {
                 self.live_digest,
                 self.controlled_digest,
                 self.git_metadata.source_digest(),
-                self.git_metadata.controlled_digest()
-                ,self.fixtures.digest()
+                self.git_metadata.controlled_digest(),
+                self.fixtures.digest()
             )
             .as_bytes(),
         )
@@ -187,7 +191,7 @@ impl SourceRootContext {
 #[cfg(unix)]
 impl RootIdentity {
     fn capture(metadata: &std::fs::Metadata) -> Result<Self, Spec034ReleaseArtifactError> {
-    use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::MetadataExt;
         if !metadata.is_dir() {
             return Err(Spec034ReleaseArtifactError::InvalidConfig);
         }

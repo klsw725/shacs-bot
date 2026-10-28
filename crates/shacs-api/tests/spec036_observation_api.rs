@@ -3,7 +3,8 @@ use serde_json::{json, Value};
 use shacs_api::{api_router, api_router_with_local_mutations, ChatCompletionAdapter};
 use shacs_core::runtime::*;
 use shacs_session::{Session, SessionManager};
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 struct Adapter(PathBuf);

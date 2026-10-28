@@ -217,7 +217,7 @@ impl CodexHttpTransport for RuntimeCancellingTransport {
         *self
             .observed_timeout
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = timeout;
+            .expect("observed timeout lock poisoned") = timeout;
         let frames = [
             concat!(
                 "event: response.output_item.added\n",

@@ -2,9 +2,9 @@ use crate::tools::filesystem::{
     raw_candidate_path, reject_existing_symlink_components, resolve_creatable_path, resolve_path,
     PathContext,
 };
-use crate::tools::SchemaFragment;
 use crate::tools::{
-    FileState, IntegerSchema, JsonMap, StringSchema, Tool, ToolParameters, ToolResult,
+    FileState, IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters,
+    ToolResult,
 };
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};

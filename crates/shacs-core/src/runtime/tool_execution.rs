@@ -499,7 +499,7 @@ impl<'a> RuntimeToolExecutor<'a> {
     fn prepared_calls(&self) -> MutexGuard<'_, Vec<CachedPreparedCall>> {
         self.prepared_calls
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("prepared tool calls lock poisoned")
     }
 }
 

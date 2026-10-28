@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shacs_eval::evaluator::stable_sha256_digest;
-use shacs_eval::evaluator::{EvidenceRef, RedactionStatus};
+use shacs_eval::evaluator::{stable_sha256_digest, EvidenceRef, RedactionStatus};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

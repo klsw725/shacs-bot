@@ -10,7 +10,9 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
-const FILE_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+const FILE_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
 
 pub(in crate::runtime::generated_media_release) struct ConfinedSourceReader {
     root: File,
@@ -25,7 +27,11 @@ impl ConfinedSourceReader {
         root: &Path,
     ) -> Result<Self, Spec034ReleaseArtifactError> {
         let absolute = root.is_absolute();
-        let anchor = if absolute { Path::new("/") } else { Path::new(".") };
+        let anchor = if absolute {
+            Path::new("/")
+        } else {
+            Path::new(".")
+        };
         let descriptor = openat(CWD, anchor, DIRECTORY_FLAGS, Mode::empty())
             .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
         let mut current: File = descriptor.into();
@@ -46,7 +52,9 @@ impl ConfinedSourceReader {
     pub(in crate::runtime::generated_media_release) fn root_metadata(
         &self,
     ) -> Result<Metadata, Spec034ReleaseArtifactError> {
-        self.root.metadata().map_err(Spec034ReleaseArtifactError::Io)
+        self.root
+            .metadata()
+            .map_err(Spec034ReleaseArtifactError::Io)
     }
 
     pub(in crate::runtime::generated_media_release) fn into_root(self) -> File {
@@ -102,12 +110,7 @@ impl ConfinedSourceReader {
         after_file_open: impl FnOnce(),
     ) -> Result<Option<Vec<u8>>, Spec034ReleaseArtifactError> {
         Ok(self
-            .read_with_metadata_hooks(
-                locator,
-                max_bytes,
-                after_first_ancestor,
-                after_file_open,
-            )?
+            .read_with_metadata_hooks(locator, max_bytes, after_first_ancestor, after_file_open)?
             .map(|(bytes, _)| bytes))
     }
 
@@ -135,7 +138,13 @@ impl ConfinedSourceReader {
         after_file_open: impl FnOnce(),
         after_bounded_read: impl FnOnce(),
     ) -> Result<Option<(Vec<u8>, Metadata)>, Spec034ReleaseArtifactError> {
-        self.read_with_all_hooks(locator, max_bytes, || {}, after_file_open, after_bounded_read)
+        self.read_with_all_hooks(
+            locator,
+            max_bytes,
+            || {},
+            after_file_open,
+            after_bounded_read,
+        )
     }
 
     fn read_with_all_hooks(

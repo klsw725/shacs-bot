@@ -2,9 +2,8 @@ use super::{ImageOperationContractError, ImageOperationOptions, ImageOperationRe
 use crate::error::ProviderError;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::fmt;
-use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fmt, process};
 
 const OPENAI_IMAGE_EDIT_PATH: &str = "/images/edits";
 const MAX_MULTIPART_OVERHEAD_BYTES: usize = 64 * 1024;

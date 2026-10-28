@@ -98,10 +98,7 @@ fn capture_entry(
     Ok(())
 }
 
-fn set_entry_permissions(
-    path: &Path,
-    read_only: bool,
-) -> Result<(), Spec034ReleaseArtifactError> {
+fn set_entry_permissions(path: &Path, read_only: bool) -> Result<(), Spec034ReleaseArtifactError> {
     let metadata = std::fs::symlink_metadata(path).map_err(Spec034ReleaseArtifactError::Io)?;
     if metadata.is_dir() {
         for child in std::fs::read_dir(path).map_err(Spec034ReleaseArtifactError::Io)? {

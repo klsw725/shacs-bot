@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 
 pub(crate) struct ExecutionLedger;
 
@@ -10,9 +11,7 @@ impl ExecutionLedger {
         Err(Spec034ReleaseArtifactError::InvalidConfig)
     }
 
-    pub(crate) fn ensure_capacity(
-        _path_count: usize,
-    ) -> Result<(), Spec034ReleaseArtifactError> {
+    pub(crate) fn ensure_capacity(_path_count: usize) -> Result<(), Spec034ReleaseArtifactError> {
         Err(Spec034ReleaseArtifactError::InvalidConfig)
     }
 

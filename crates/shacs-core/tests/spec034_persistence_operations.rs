@@ -2,11 +2,10 @@
 mod support;
 
 use shacs_core::generated_media::{
-    ArtifactHandlingPolicy, ArtifactId, ArtifactPublicationMetadata, ArtifactPublisher,
-    ArtifactStore, GenerationOptionsSummary, ImageOperationService, ProjectionDisclosure,
-    RetentionPolicy,
+    ArtifactHandlingPolicy, ArtifactId, ArtifactImageOperationRequest, ArtifactPublicationMetadata,
+    ArtifactPublisher, ArtifactStore, GenerationOperation, GenerationOptionsSummary,
+    ImageOperationService, ProjectionDisclosure, RetentionPolicy,
 };
-use shacs_core::generated_media::{ArtifactImageOperationRequest, GenerationOperation};
 use std::collections::BTreeMap;
 use std::error::Error;
 use support::{artifact_count, persist_image, CountingClient, PNG};

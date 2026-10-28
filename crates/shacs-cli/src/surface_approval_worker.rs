@@ -1,4 +1,22 @@
-use super::*;
+use super::{
+    automation_worker, classify_runtime_ownership_marker, durable_work_admission_error,
+    durable_work_state_for_owner, now_millis, read_runtime_ownership_marker,
+    runtime_durable_event_root, runtime_durable_work_payload_root, runtime_ownership_marker_path,
+    sleep_with_stop, AgentLoopChatCompletionAdapter, CliError, RuntimeOwnershipMutationLock,
+    RuntimeOwnershipState, SessionManager, DURABLE_WORK_LEASE_DURATION_MS,
+};
+use shacs_api::ApiError;
+use shacs_core::runtime::{
+    AgentLoop, DurableWorkDispatcher, MessageBus, SurfaceActionOutcomeKind, SurfaceApprovalRequest,
+    SURFACE_APPROVAL_WORK_KIND,
+};
+use shacs_redaction::redact_string;
+use shacs_session::durable_work::WorkTerminalKind;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 pub(crate) struct SurfaceApprovalWorker {
     stop: Arc<AtomicBool>,

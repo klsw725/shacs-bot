@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 
+[lints]
+workspace = true
+
 [dependencies]
 cap-std = "4.0.2"
 serde = { version = "1", features = ["derive"] }

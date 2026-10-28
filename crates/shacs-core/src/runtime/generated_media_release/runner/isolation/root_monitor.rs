@@ -32,11 +32,19 @@ impl RenameMonitor {
     pub(super) fn drain(&self) -> Result<(), Spec034ReleaseArtifactError> {
         use nix::sys::event::{EvFlags, FilterFlag};
         let mut events = [empty_event(); 8];
-        let timeout = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-        let count = self.queue.kevent(&[], &mut events, Some(timeout)).map_err(nix_io)?;
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let count = self
+            .queue
+            .kevent(&[], &mut events, Some(timeout))
+            .map_err(nix_io)?;
         let fatal = FilterFlag::NOTE_DELETE | FilterFlag::NOTE_RENAME | FilterFlag::NOTE_REVOKE;
         if events[..count].iter().any(|event| {
-            event.flags().intersects(EvFlags::EV_ERROR | EvFlags::EV_EOF)
+            event
+                .flags()
+                .intersects(EvFlags::EV_ERROR | EvFlags::EV_EOF)
                 || event.fflags().intersects(fatal)
         }) {
             return Err(Spec034ReleaseArtifactError::CleanupIdentityMismatch);
@@ -47,8 +55,14 @@ impl RenameMonitor {
     pub(super) fn confirm_unlinked(&self) -> Result<(), Spec034ReleaseArtifactError> {
         use nix::sys::event::{EvFlags, FilterFlag};
         let mut events = [empty_event(); 2];
-        let timeout = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-        let count = self.queue.kevent(&[], &mut events, Some(timeout)).map_err(nix_io)?;
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let count = self
+            .queue
+            .kevent(&[], &mut events, Some(timeout))
+            .map_err(nix_io)?;
         let valid = count == 1
             && !events[0].flags().contains(EvFlags::EV_ERROR)
             && events[0].fflags().contains(FilterFlag::NOTE_DELETE)
@@ -92,7 +106,6 @@ impl RenameMonitor {
     pub(super) fn drain(&self) -> Result<(), Spec034ReleaseArtifactError> {
         Ok(())
     }
-
 
     pub(super) fn confirm_unlinked(&self) -> Result<(), Spec034ReleaseArtifactError> {
         Ok(())

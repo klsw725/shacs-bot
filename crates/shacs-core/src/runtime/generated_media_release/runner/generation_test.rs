@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::generated_media_release::model::PortableProcessReceipt;
 
 #[test]
 fn command_stream_summary_never_publishes_raw_prose() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,7 +15,10 @@ fn command_stream_summary_never_publishes_raw_prose() -> Result<(), Box<dyn std:
     assert!(!text.contains("session=opaque"));
     let summary: CommandStreamSummary = serde_json::from_slice(&published)?;
     assert_eq!(summary.byte_count, raw.len() as u64);
-    assert_eq!(summary.digest, super::super::super::artifacts::digest_bytes(raw));
+    assert_eq!(
+        summary.digest,
+        super::super::super::artifacts::digest_bytes(raw)
+    );
     Ok(())
 }
 

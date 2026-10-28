@@ -17,7 +17,11 @@ fn cleanup_binding_digest_substitution_before_manifest_capture_never_publishes(
 
     // When: the runner captures a manifest over the substituted receipt.
     let result = run_with_publication_hooks(
-        &config(repo.path(), &evidence, "spec034-cleanup-binding-pre-manifest"),
+        &config(
+            repo.path(),
+            &evidence,
+            "spec034-cleanup-binding-pre-manifest",
+        ),
         validation::validate_pending_with_git,
         |_| {},
         |_| {},
@@ -42,7 +46,11 @@ fn cleanup_binding_digest_substitution_after_validation_never_publishes(
 
     // When: the validated typed receipt is substituted before publication binding.
     let result = run_with_publication_hooks(
-        &config(repo.path(), &evidence, "spec034-cleanup-binding-post-validation"),
+        &config(
+            repo.path(),
+            &evidence,
+            "spec034-cleanup-binding-post-validation",
+        ),
         validation::validate_pending_with_git,
         |_| {},
         |_| {},
@@ -55,8 +63,7 @@ fn cleanup_binding_digest_substitution_after_validation_never_publishes(
 }
 
 #[test]
-fn source_mutation_at_final_hook_never_publishes(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn source_mutation_at_final_hook_never_publishes() -> Result<(), Box<dyn std::error::Error>> {
     let repo = test_repo()?;
     let root = tempfile::tempdir()?;
     let evidence = root.path().canonicalize()?.join("release");
@@ -78,8 +85,7 @@ fn source_mutation_at_final_hook_never_publishes(
 }
 
 #[test]
-fn fixture_mutation_at_final_hook_never_publishes(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn fixture_mutation_at_final_hook_never_publishes() -> Result<(), Box<dyn std::error::Error>> {
     let repo = test_repo()?;
     let root = tempfile::tempdir()?;
     let evidence = root.path().canonicalize()?.join("release");
@@ -115,7 +121,10 @@ fn cleanup_failure_after_commands_never_publishes() -> Result<(), Box<dyn std::e
         |_| {},
     );
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::CleanupFailed(_))));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::CleanupFailed(_))
+    ));
     assert!(!evidence.exists());
     Ok(())
 }
@@ -138,7 +147,10 @@ fn source_swap_between_adoption_and_command_never_invokes_executor(
     });
     std::fs::write(repo.path().join("source.txt"), b"approved")?;
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     Ok(())
 }
@@ -157,7 +169,8 @@ fn config(repo: &Path, evidence: &Path, run_id: &str) -> Spec034ReleaseConfig {
 fn substitute_cleanup_digest_file(root: &Path) {
     let path = root.join("cleanup-receipt.json");
     let bytes = std::fs::read(&path).expect("read cleanup receipt");
-    let mut receipt: CleanupReceipt = serde_json::from_slice(&bytes).expect("parse cleanup receipt");
+    let mut receipt: CleanupReceipt =
+        serde_json::from_slice(&bytes).expect("parse cleanup receipt");
     receipt.cleanup_binding_digest = SUBSTITUTE_CLEANUP_DIGEST.to_owned();
     let bytes = serde_json::to_vec_pretty(&receipt).expect("serialize cleanup receipt");
     std::fs::write(path, bytes).expect("substitute cleanup digest");
@@ -198,7 +211,11 @@ fn test_repo() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("git").arg("-C").arg(repo).args(args).status()?;
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .status()?;
     if !status.success() {
         return Err("git fixture command failed".into());
     }

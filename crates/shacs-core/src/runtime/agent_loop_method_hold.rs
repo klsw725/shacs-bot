@@ -3,12 +3,14 @@
 //! (see `quiet_tools`; the outputs a turn saves are held in `held`). The
 //! method observation, attached after these, keeps the full view.
 
-use super::*;
+use super::{reported, AgentRunSpec, Session, ToolRegistry};
 use crate::runtime::quiet_tools::{
     quiet_event, quiet_finish_reason, quiet_id, quiet_media, quiet_tool_message, quiet_usage,
     rename_unoffered, UNOFFERED_TOOL,
 };
 use crate::runtime::ToolEventCallback;
+use serde_json::Value;
+use std::sync::Arc;
 
 /// None of the model's words in an image or composed request leave the run
 /// as it goes: text, reasoning and tool-call input deltas are held back (only

@@ -133,7 +133,8 @@ impl ProcessGroupControl for SystemProcessGroupControl {
     fn capture_identity(
         &mut self,
         pid: i32,
-    ) -> Result<super::super::super::tools::spawn::ProcessIdentity, Spec034ReleaseArtifactError> {
+    ) -> Result<super::super::super::tools::spawn::ProcessIdentity, Spec034ReleaseArtifactError>
+    {
         super::super::super::tools::spawn::capture_process_identity(pid)
     }
 
@@ -172,9 +173,9 @@ fn validate_group_probe(result: nix::Result<()>) -> Result<bool, Spec034ReleaseA
         Ok(()) => Ok(true),
         Err(nix::errno::Errno::ESRCH) => Ok(false),
         Err(nix::errno::Errno::EPERM) => Ok(true),
-        Err(error) => Err(Spec034ReleaseArtifactError::Io(std::io::Error::from_raw_os_error(
-            error as i32,
-        ))),
+        Err(error) => Err(Spec034ReleaseArtifactError::Io(
+            std::io::Error::from_raw_os_error(error as i32),
+        )),
     }
 }
 
@@ -204,7 +205,10 @@ pub(super) fn terminate_process_group<C: ReapChild, M: DescendantMonitor>(
     let mut failure = Some(Spec034ReleaseArtifactError::InvalidConfig);
     super::descendants::accumulate(
         &mut failure,
-        child.wait_reaped().map(|_| ()).map_err(Spec034ReleaseArtifactError::Io),
+        child
+            .wait_reaped()
+            .map(|_| ())
+            .map_err(Spec034ReleaseArtifactError::Io),
     );
     super::descendants::accumulate(&mut failure, descendants.terminate_and_verify());
     super::descendants::accumulate(&mut failure, descendants.close());

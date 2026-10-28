@@ -37,7 +37,7 @@ impl ToolBeforeHandler for RegisteredHandler {
         let call_id = context.call().id.clone();
         self.calls
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("calls lock poisoned")
             .push(call_id.clone());
         match call_id.as_str() {
             "block" => ToolBeforeDecision::Block {
@@ -113,7 +113,7 @@ fn production_registry_activates_only_configured_trusted_workspace_handler(
     std::env::remove_var("SHACS_DEBUG_FAKE_PROVIDER_RESPONSES");
 
     assert_eq!(
-        *calls.lock().unwrap_or_else(|error| error.into_inner()),
+        *calls.lock().expect("calls lock poisoned"),
         ["allow", "block", "timeout"]
     );
     let hooks = active.trusted_runtime_projection().hooks().clone();

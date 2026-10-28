@@ -1,11 +1,10 @@
 use super::artifacts::{digest_bytes, durable_write};
 use super::model::Spec034ReleaseArtifactError;
 use super::source_descriptor::{
-    copy_tree, digest_tree, open_anchored_directory, open_optional_directory,
-    read_file, TreeKind,
+    copy_tree, digest_tree, open_anchored_directory, open_optional_directory, read_file, TreeKind,
 };
-use sha2::{Digest, Sha256};
 use rustix::fs::{openat, Mode, OFlags};
+use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -41,20 +40,17 @@ impl GitMetadataSnapshot {
                 open_anchored_directory(repository, Path::new(path))?
             }
         };
-        let source_common = match read_file(
-            &source_git,
-            OsStr::new("commondir"),
-            MAX_CONTROL_FILE_BYTES,
-        )? {
-            Some(bytes) => {
-                let text = std::str::from_utf8(&bytes)
-                    .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
-                open_anchored_directory(&source_git, Path::new(text.trim()))?
-            }
-            None => source_git
-                .try_clone()
-                .map_err(Spec034ReleaseArtifactError::Io)?,
-        };
+        let source_common =
+            match read_file(&source_git, OsStr::new("commondir"), MAX_CONTROL_FILE_BYTES)? {
+                Some(bytes) => {
+                    let text = std::str::from_utf8(&bytes)
+                        .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
+                    open_anchored_directory(&source_git, Path::new(text.trim()))?
+                }
+                None => source_git
+                    .try_clone()
+                    .map_err(Spec034ReleaseArtifactError::Io)?,
+            };
         let config_digest = config_digest(&source_common, &source_git)?;
         reject_alternates(&source_common)?;
         let directory = controlled_worktree.join(".git");
@@ -76,7 +72,8 @@ impl GitMetadataSnapshot {
             .map_err(Spec034ReleaseArtifactError::Io)?;
         let controlled_git = File::open(&directory).map_err(Spec034ReleaseArtifactError::Io)?;
         let controlled_digest = digest_tree(&controlled_git, TreeKind::ControlledGit)?;
-        let source_digest = combine_digest(&combine_digest(&common_digest, &git_digest), &config_digest);
+        let source_digest =
+            combine_digest(&combine_digest(&common_digest, &git_digest), &config_digest);
         Ok(Self {
             source_git,
             source_common,
@@ -104,8 +101,7 @@ impl GitMetadataSnapshot {
         let git = digest_tree(&self.source_git, TreeKind::Git)?;
         let config = config_digest(&self.source_common, &self.source_git)?;
         if combine_digest(&combine_digest(&common, &git), &config) != self.source_digest
-            || digest_tree(&self.controlled_git, TreeKind::ControlledGit)?
-                != self.controlled_digest
+            || digest_tree(&self.controlled_git, TreeKind::ControlledGit)? != self.controlled_digest
         {
             return Err(Spec034ReleaseArtifactError::DigestMismatch);
         }
@@ -125,10 +121,7 @@ fn open_git_directory(repository: &File) -> Result<Option<File>, Spec034ReleaseA
     }
 }
 
-fn config_digest(
-    common: &File,
-    git: &File,
-) -> Result<String, Spec034ReleaseArtifactError> {
+fn config_digest(common: &File, git: &File) -> Result<String, Spec034ReleaseArtifactError> {
     let mut digest = Sha256::new();
     for (directory, name) in [(common, "config"), (git, "config.worktree")] {
         digest.update(name.as_bytes());

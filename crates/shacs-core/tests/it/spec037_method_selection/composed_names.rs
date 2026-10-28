@@ -19,14 +19,16 @@ fn observed(
     let mut agent = runtime(dir.path(), tools, &provider)?
         .with_agent_hook(Arc::new(Diagnostic(seen.clone())))
         .with_tool_event_callback(Arc::new(move |event| {
-            sink.lock().unwrap().push_str(&format!("{event:?}\n"));
+            sink.lock()
+                .expect("seen log lock poisoned")
+                .push_str(&format!("{event:?}\n"));
         }));
     agent.process_message(inbound(ask))?;
     let mut shown = Vec::new();
     for message in then {
         shown.push(output(agent.process_message(inbound(message))?));
     }
-    let seen = seen.lock().unwrap().clone();
+    let seen = seen.lock().expect("seen log lock poisoned").clone();
     Ok((shown, seen))
 }
 

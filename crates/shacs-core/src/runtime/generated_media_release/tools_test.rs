@@ -11,15 +11,28 @@ fn release_temp_directories_are_identifiable() -> Result<(), Box<dyn std::error:
         .ok_or("controlled root name")?
         .to_string_lossy()
         .starts_with(".shacs-spec034-tools-"));
-    assert_eq!(toolchain.home.file_name().and_then(|name| name.to_str()), Some("home"));
     assert_eq!(
-        toolchain.cargo_home.file_name().and_then(|name| name.to_str()),
+        toolchain.home.file_name().and_then(|name| name.to_str()),
+        Some("home")
+    );
+    assert_eq!(
+        toolchain
+            .cargo_home
+            .file_name()
+            .and_then(|name| name.to_str()),
         Some("cargo-home")
     );
-    assert_eq!(toolchain.target.file_name().and_then(|name| name.to_str()), Some("target"));
+    assert_eq!(
+        toolchain.target.file_name().and_then(|name| name.to_str()),
+        Some("target")
+    );
     let root = root.to_path_buf();
     drop(toolchain);
-    assert!(!root.exists(), "controlled root survived drop: {}", root.display());
+    assert!(
+        !root.exists(),
+        "controlled root survived drop: {}",
+        root.display()
+    );
     Ok(())
 }
 
@@ -75,7 +88,9 @@ fn fake_path_child() -> Result<(), Box<dyn std::error::Error>> {
     let resolved = ResolvedTool::cargo()?;
     assert_eq!(resolved.identity.name, "cargo");
     assert!(resolved.identity.executable_digest.starts_with("sha256:"));
-    assert!(!resolved.path.starts_with(std::env::var_os("PATH").ok_or("PATH")?));
+    assert!(!resolved
+        .path
+        .starts_with(std::env::var_os("PATH").ok_or("PATH")?));
     Ok(())
 }
 
@@ -115,7 +130,10 @@ fn ambient_cargo_home_wrapper_cannot_run() -> Result<(), Box<dyn std::error::Err
     let marker = root.path().join("wrapper-ran");
     std::fs::create_dir_all(&cargo_home)?;
     std::fs::create_dir_all(project.join("src"))?;
-    std::fs::write(project.join("Cargo.toml"), b"[package]\nname='probe'\nversion='0.1.0'\n")?;
+    std::fs::write(
+        project.join("Cargo.toml"),
+        b"[package]\nname='probe'\nversion='0.1.0'\n",
+    )?;
     std::fs::write(project.join("src/lib.rs"), b"pub fn probe() {}\n")?;
     let wrapper = root.path().join("wrapper.sh");
     std::fs::write(
@@ -225,7 +243,10 @@ fn write_runner_config(root: &Path, marker: &Path) -> Result<(), Box<dyn std::er
     let cargo = root.join(".cargo");
     let runner = root.join("fake-runner.sh");
     std::fs::create_dir(&cargo)?;
-    std::fs::write(&runner, format!("#!/bin/sh\ntouch '{}'\nexec \"$@\"\n", marker.display()))?;
+    std::fs::write(
+        &runner,
+        format!("#!/bin/sh\ntouch '{}'\nexec \"$@\"\n", marker.display()),
+    )?;
     std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700))?;
     std::fs::write(
         cargo.join("config.toml"),

@@ -46,6 +46,9 @@ fn materialized_snapshot_ancestor_a_b_a_breaks_execution_seal(
     std::fs::remove_dir(&ancestor)?;
     std::fs::rename(&displaced, &ancestor)?;
 
-    assert!(matches!(execution.verify(), Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        execution.verify(),
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     Ok(())
 }

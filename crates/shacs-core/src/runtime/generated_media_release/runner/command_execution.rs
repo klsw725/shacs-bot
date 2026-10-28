@@ -1,4 +1,8 @@
-use super::super::model::*;
+use super::super::model::Spec034ReleaseArtifactError;
+#[cfg(not(test))]
+use super::super::model::{
+    CommandEvidence, PortableCommandRecord, PortableProcessReceipt, Spec034ReleaseConfig,
+};
 #[cfg(not(test))]
 use super::super::source::MaterializedSource;
 #[cfg(not(test))]
@@ -16,10 +20,10 @@ use std::path::Path;
 #[cfg(not(test))]
 use std::time::Instant;
 
-#[path = "command_execution/process_group.rs"]
-mod process_group;
 #[path = "command_execution/descendants.rs"]
 mod descendants;
+#[path = "command_execution/process_group.rs"]
+mod process_group;
 #[cfg(not(test))]
 use process_group::terminate_process_group;
 
@@ -32,9 +36,15 @@ struct RunningCommand {
 
 #[cfg(not(test))]
 impl RunningCommand {
-    fn new(child: super::super::tools::spawn::ExecutionChild) -> Result<Self, Spec034ReleaseArtifactError> {
+    fn new(
+        child: super::super::tools::spawn::ExecutionChild,
+    ) -> Result<Self, Spec034ReleaseArtifactError> {
         let descendants = descendants::DescendantTracker::new(child.id())?;
-        Ok(Self { child, descendants, cleaned: false })
+        Ok(Self {
+            child,
+            descendants,
+            cleaned: false,
+        })
     }
 
     fn cleanup(&mut self) -> Result<(), Spec034ReleaseArtifactError> {
@@ -65,9 +75,10 @@ pub fn run(
     source_digest: &str,
     toolchain: &ResolvedToolchain,
 ) -> Result<Vec<CommandEvidence>, Spec034ReleaseArtifactError> {
-    super::command_specs::COMMAND_SPECS.iter()
-    .map(|spec| run_one(config, output, execution, source_digest, toolchain, spec))
-    .collect()
+    super::command_specs::COMMAND_SPECS
+        .iter()
+        .map(|spec| run_one(config, output, execution, source_digest, toolchain, spec))
+        .collect()
 }
 
 #[cfg(not(test))]
@@ -79,14 +90,7 @@ fn run_one(
     toolchain: &ResolvedToolchain,
     spec: &super::command_specs::CommandSpec,
 ) -> Result<CommandEvidence, Spec034ReleaseArtifactError> {
-    run_one_inner(
-        config,
-        output,
-        execution,
-        source_digest,
-        toolchain,
-        spec,
-    )
+    run_one_inner(config, output, execution, source_digest, toolchain, spec)
 }
 
 #[cfg(not(test))]
@@ -103,19 +107,18 @@ fn run_one_inner(
     let mut stderr_file = tempfile::tempfile().map_err(Spec034ReleaseArtifactError::Io)?;
     let manifest = execution.path().join("crates/Cargo.toml");
     let mut command = toolchain.command(&manifest)?;
-    command
-        .args([
-            "test",
-            "--manifest-path",
-            manifest
-                .to_str()
-                .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?,
-            "--locked",
-            "-p",
-            spec.package,
-            "--test",
-            spec.target,
-        ]);
+    command.args([
+        "test",
+        "--manifest-path",
+        manifest
+            .to_str()
+            .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?,
+        "--locked",
+        "-p",
+        spec.package,
+        "--test",
+        spec.target,
+    ]);
     execution.verify()?;
     toolchain.verify()?;
     let child = toolchain.spawn_cargo(&command, &stdout_file, &stderr_file)?;
@@ -147,10 +150,10 @@ fn run_one_inner(
     execution.verify()?;
     let stdout = read_bounded(&mut stdout_file)?;
     let stderr = read_bounded(&mut stderr_file)?;
-    let stdout_text = std::str::from_utf8(&stdout)
-        .map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
-    let tests = parse_cargo_test_counts(stdout_text)
-        .ok_or(Spec034ReleaseArtifactError::InvalidEvidence)?;
+    let stdout_text =
+        std::str::from_utf8(&stdout).map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
+    let tests =
+        parse_cargo_test_counts(stdout_text).ok_or(Spec034ReleaseArtifactError::InvalidEvidence)?;
     let id = format!("spec034-{}", spec.kind);
     let stdout_path = format!("{id}.stdout");
     let stderr_path = format!("{id}.stderr");

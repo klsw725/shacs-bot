@@ -14,10 +14,8 @@ use super::tool_before::{
 };
 use super::trusted_runtime::Spec030FactStore;
 use super::{RuntimeToolCall, RuntimeToolMessage};
-use serde_json::Value;
-use shacs_projection::{HookDenialReason, HookDiagnosticKind, HookRuntimeProjection};
+use shacs_projection::HookRuntimeProjection;
 use shacs_providers::LlmResponse;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 mod entries;

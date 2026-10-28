@@ -19,6 +19,9 @@ pub fn write_trajectory(
     Ok(store.write(input)?)
 }
 
+/// # Panics
+///
+/// Panics if the fixture snapshot cannot be built.
 pub fn recorded_trajectory() -> RecordedTrajectoryInput {
     RecordedTrajectoryInput {
         trajectory_id: "trajectory-004".to_owned(),

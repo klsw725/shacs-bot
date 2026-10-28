@@ -128,7 +128,7 @@ mod tests {
         fn prompt(&self, _prompt: &str) -> String {
             self.replies
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
+                .expect("fake prompt replies lock poisoned")
                 .pop_front()
                 .unwrap_or_default()
         }
@@ -136,7 +136,7 @@ mod tests {
         fn notify(&self, message: &str) {
             self.notifications
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
+                .expect("fake prompt notifications lock poisoned")
                 .push(message.to_owned());
         }
     }
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(
             *io.notifications
                 .lock()
-                .unwrap_or_else(|error| error.into_inner()),
+                .expect("fake prompt notifications lock poisoned"),
             vec!["ready"]
         );
     }

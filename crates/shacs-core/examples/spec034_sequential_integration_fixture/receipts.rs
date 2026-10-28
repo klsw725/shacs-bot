@@ -6,7 +6,15 @@ use shacs_projection::Spec034PrimaryPrd;
 use std::error::Error;
 
 macro_rules! observed {
-    ($rows:ident, $id:literal, $name:literal, $prd:ident, $source:literal, $value:expr, $condition:expr) => {
+    (
+        $rows:ident,
+        $id:literal,
+        $name:literal,
+        $prd:ident,
+        $source:literal,
+        $value:expr,
+        $condition:expr
+    ) => {
         $rows.push(ObservedReceipt::from_observation(ReceiptDraft {
             requirement_id: $id,
             name: $name,

@@ -3,8 +3,9 @@ use super::command_contract::{
     lifecycle_record_matches, required_ids, validate_exact_ids, CommandEvidenceMode,
     LifecycleCwdRoots,
 };
+use super::model::*;
+use super::runner::run_with_command_evidence_mode;
 use super::semantic::fixture_surface_assertions;
-use super::{model::*, runner::run_with_command_evidence_mode};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

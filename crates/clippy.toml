@@ -1,0 +1,10 @@
+# Google Rust style guide rules enforced through clippy. The lint levels live in
+# `[workspace.lints.clippy]` in Cargo.toml.
+
+# Tests may panic for assertions, so `unwrap()` stays allowed in test code.
+allow-unwrap-in-tests = true
+
+disallowed-methods = [
+    { path = "std::sync::PoisonError::into_inner", reason = "Google Rust style: never reach inside a poisoned mutex" },
+    { path = "std::panic::catch_unwind", reason = "Google Rust style: catch_unwind is only allowed as reviewed defense in depth" },
+]

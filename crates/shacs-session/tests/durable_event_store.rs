@@ -5,11 +5,10 @@ use shacs_session::durable_event::{
     DurableEventStore, SESSION_TURN_ACCEPTED, SESSION_TURN_COMPLETED,
 };
 use std::error::Error;
-use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{fs, thread};
 
 fn input(kind: &str, message: &str) -> DurableEventInput {
     let mut input = DurableEventInput::new(
@@ -57,6 +56,31 @@ fn rewrite_frame(
         .join("\n");
     rewritten.push('\n');
     fs::write(path, rewritten)?;
+    Ok(())
+}
+
+#[test]
+fn durable_event_store_reports_a_lock_poisoned_by_a_panicking_visitor() -> Result<(), Box<dyn Error>>
+{
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("runtime").join("durable-events");
+    let mut store = DurableEventStore::open(&event_root)?;
+    store.append(input(SESSION_TURN_ACCEPTED, "accepted"))?;
+
+    let visitor_root = event_root.clone();
+    let visitor = thread::spawn(move || {
+        let reader = DurableEventStore::open(&visitor_root).expect("a second handle opens");
+        let _ = reader.visit_from_sequence(0, |_record| panic!("visitor bug"));
+    });
+    assert!(
+        visitor.join().is_err(),
+        "the visitor panic reaches the visiting thread"
+    );
+
+    assert!(
+        matches!(store.scan(10), Err(DurableEventError::Io(_))),
+        "a store lock poisoned by the visitor is reported as an error, not a panic"
+    );
     Ok(())
 }
 

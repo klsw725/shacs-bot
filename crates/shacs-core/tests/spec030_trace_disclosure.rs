@@ -1,6 +1,7 @@
 use shacs_core::runtime::trusted_runtime::LocalSpec030ProjectionProvider;
 use shacs_projection::{DataSurface, Spec030ProjectionProvider, TraceStatus};
-use std::{error::Error, fs};
+use std::error::Error;
+use std::fs;
 
 #[test]
 fn disabled_trace_keeps_extension_data_disclosure() -> Result<(), Box<dyn Error>> {

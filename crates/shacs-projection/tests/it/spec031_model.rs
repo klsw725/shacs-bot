@@ -1,7 +1,9 @@
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::json;
 use shacs_projection::*;
-use std::{error::Error, fmt::Debug};
+use std::error::Error;
+use std::fmt::Debug;
 
 fn assert_round_trips<T>(value: T) -> Result<(), Box<dyn Error>>
 where
@@ -120,8 +122,7 @@ fn spec031_model_round_trips_kind_source_severity_freshness_and_capability_varia
 }
 
 fn capability_variants() -> [Spec031Capability; 13] {
-    use shacs_projection::Spec031Capability as Capability;
-    use shacs_projection::Spec031InclusionReason as Inclusion;
+    use shacs_projection::{Spec031Capability as Capability, Spec031InclusionReason as Inclusion};
 
     fn count(value: u64) -> Spec031Count {
         Spec031Count::new(value)

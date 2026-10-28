@@ -1,9 +1,10 @@
 use super::spec036_work_cli::{WorkAction, WorkOptions};
-use super::*;
+use super::{now_millis, take_path, take_value, ArgParser, CliCommand, CliError};
 use shacs_core::runtime::{
     ConfigureObservationRequest, EntrustedObservationPlan, EntrustedWorkReadRequest,
     ObservationComparisonPolicy, ObservationCriterion, ObservationSource,
 };
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservationAction {

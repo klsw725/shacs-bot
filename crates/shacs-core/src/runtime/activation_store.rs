@@ -4,10 +4,8 @@ use super::activation_record::{
 use super::activation_wire::{parse_document, ActivationDocument};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fmt;
-use std::fs;
-use std::io;
 use std::path::PathBuf;
+use std::{fmt, fs, io};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationMutation {

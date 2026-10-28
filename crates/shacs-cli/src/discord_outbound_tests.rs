@@ -2,11 +2,10 @@ use super::*;
 use serde_json::{Map, Value};
 use shacs_channels::{OutboundMessage, DISCORD_CHANNEL};
 use std::error::Error;
-use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
-use std::thread;
+use std::{fs, thread};
 
 #[test]
 fn multipart_contains_image_and_document_when_media_is_present() -> Result<(), Box<dyn Error>> {

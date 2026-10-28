@@ -576,7 +576,7 @@ impl SubagentRuntime {
             }
             None => false,
         };
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         let active_count = state
             .session_tasks
             .get(&envelope.session_id)
@@ -624,8 +624,8 @@ impl SubagentRuntime {
     }
 
     pub fn mark_running(&self, child_task_id: &str) -> Option<SubagentStatus> {
-        let _transition = recover_lock(&self.transition_lock);
-        let envelope = recover_lock(&self.state)
+        let _transition = lock(&self.transition_lock);
+        let envelope = lock(&self.state)
             .tasks
             .get(child_task_id)
             .map(|record| record.envelope.clone())?;
@@ -644,7 +644,7 @@ impl SubagentRuntime {
     }
 
     pub fn cancel_by_session(&self, session_id: &str) -> usize {
-        let task_ids = recover_lock(&self.state)
+        let task_ids = lock(&self.state)
             .session_tasks
             .get(session_id)
             .cloned()
@@ -656,11 +656,11 @@ impl SubagentRuntime {
     }
 
     pub fn running_count(&self) -> usize {
-        recover_lock(&self.state).tasks.len()
+        lock(&self.state).tasks.len()
     }
 
     pub fn running_count_by_session(&self, session_id: &str) -> usize {
-        recover_lock(&self.state)
+        lock(&self.state)
             .session_tasks
             .get(session_id)
             .map(BTreeSet::len)
@@ -668,14 +668,14 @@ impl SubagentRuntime {
     }
 
     pub fn snapshot(&self, child_task_id: &str) -> Option<SubagentStatus> {
-        recover_lock(&self.state)
+        lock(&self.state)
             .tasks
             .get(child_task_id)
             .map(|record| record.status.clone())
     }
 
     pub fn execution_ledger_snapshot(&self) -> RuntimeExecutionLedger {
-        recover_lock(&self.execution_ledger).clone()
+        lock(&self.execution_ledger).clone()
     }
 
     pub fn update_progress(
@@ -683,7 +683,7 @@ impl SubagentRuntime {
         child_task_id: &str,
         update: SubagentProgressUpdate,
     ) -> Option<SubagentStatus> {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         let record = state.tasks.get_mut(child_task_id)?;
         record.status.state = subagent_state_from_phase(&update.phase);
         record.status.iteration = update.iteration;
@@ -702,7 +702,7 @@ impl SubagentRuntime {
     }
 
     pub fn classify_active_result(&self, result: &ChildResultEnvelope) -> MergeDecision {
-        let state = recover_lock(&self.state);
+        let state = lock(&self.state);
         let Some(record) = state.tasks.get(&result.child_task_id) else {
             if let Some(decision) =
                 inactive_result_decision(&self.execution_ledger_snapshot(), result)
@@ -784,9 +784,9 @@ impl SubagentRuntime {
         &self,
         result: ChildResultEnvelope,
     ) -> (MergeDecision, Option<InboundMessage>) {
-        let _transition = recover_lock(&self.transition_lock);
+        let _transition = lock(&self.transition_lock);
         let decision = self.classify_active_result(&result);
-        let expected = recover_lock(&self.state)
+        let expected = lock(&self.state)
             .tasks
             .get(&result.child_task_id)
             .map(|record| record.envelope.clone());
@@ -1011,7 +1011,7 @@ impl SubagentRuntime {
     }
 
     fn cancellation_token(&self, child_task_id: &str) -> Option<CancellationToken> {
-        recover_lock(&self.state)
+        lock(&self.state)
             .tasks
             .get(child_task_id)
             .map(|record| record.cancellation_token.clone())
@@ -1065,7 +1065,7 @@ impl SubagentRuntime {
             serde_json::to_value(late_result_decision_for_merge(decision))
                 .unwrap_or(Value::String("accepted".to_owned())),
         );
-        let expected = recover_lock(&self.state)
+        let expected = lock(&self.state)
             .tasks
             .get(&result.child_task_id)
             .map(|record| record.envelope.clone());
@@ -1085,7 +1085,7 @@ impl SubagentRuntime {
     }
 
     fn announcement_context(&self, result: &ChildResultEnvelope) -> (String, String) {
-        recover_lock(&self.state)
+        lock(&self.state)
             .tasks
             .get(&result.child_task_id)
             .map(|record| {
@@ -1098,14 +1098,14 @@ impl SubagentRuntime {
     }
 
     fn update_state(&self, child_task_id: &str, next: SubagentState) -> Option<SubagentStatus> {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         let record = state.tasks.get_mut(child_task_id)?;
         record.status.state = next;
         Some(record.status.clone())
     }
 
     fn apply_finish(&self, result: &ChildResultEnvelope, decision: &MergeDecision) {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         let Some(record) = state.tasks.get(&result.child_task_id) else {
             self.record_subagent_result(result, None, decision);
             return;
@@ -1154,7 +1154,7 @@ impl SubagentRuntime {
     }
 
     fn begin_subagent_execution(&self, envelope: &SpawnEnvelope) {
-        let mut ledger = recover_lock(&self.execution_ledger);
+        let mut ledger = lock(&self.execution_ledger);
         ledger.begin(PendingExecution {
             identity: execution_identity_from_spawn(envelope),
             domain: ExecutionDomain::Subagent,
@@ -1170,7 +1170,7 @@ impl SubagentRuntime {
     ) -> LateResultDecision {
         let fact = subagent_execution_fact(result, expected, decision)
             .with_detail(format!("subagent merge decision: {decision:?}"));
-        recover_lock(&self.execution_ledger).record(fact)
+        lock(&self.execution_ledger).record(fact)
     }
 
     fn record_durable_spawn(&self, envelope: &SpawnEnvelope) -> Result<(), String> {
@@ -1324,8 +1324,8 @@ impl SubagentRuntime {
     }
 
     fn request_child_cancellation(&self, child_task_id: &str) -> bool {
-        let _transition = recover_lock(&self.transition_lock);
-        let mut state = recover_lock(&self.state);
+        let _transition = lock(&self.transition_lock);
+        let mut state = lock(&self.state);
         let Some(record) = state.tasks.get_mut(child_task_id) else {
             return false;
         };
@@ -1868,6 +1868,6 @@ fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
-fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
-    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().expect("lock poisoned by a panicking thread")
 }

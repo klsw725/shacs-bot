@@ -301,7 +301,5 @@ fn save(path: &Path, document: &LocalDocument) -> Result<(), LocalImprovementBlo
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock().expect("lock poisoned by a panicking thread")
 }

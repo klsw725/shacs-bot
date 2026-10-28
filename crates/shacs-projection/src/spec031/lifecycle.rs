@@ -2,7 +2,8 @@ use super::{
     lifecycle_envelope, Spec031ActionRef, Spec031ApprovalState, Spec031Envelope,
     Spec031ObservedAtUnixMs, Spec031ParentRef, Spec031ProgressDelivery, Spec031SubjectRef,
 };
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec031LifecycleLineage {

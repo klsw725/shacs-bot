@@ -16,7 +16,13 @@ enum Fails {
 struct Quoting(Provider, Fails);
 impl ProviderClient for Quoting {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
-        if !self.0.responses.lock().unwrap().is_empty() {
+        if !self
+            .0
+            .responses
+            .lock()
+            .expect("responses lock poisoned")
+            .is_empty()
+        {
             return self.0.chat(request);
         }
         let quoted = request

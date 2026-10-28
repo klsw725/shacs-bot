@@ -1,5 +1,7 @@
-use super::*;
+use super::{PathChainSeal, Spec034ReleaseArtifactError};
 use std::collections::{BTreeSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const MAX_DEPENDENCIES: usize = 256;
 const MAX_HELPER_OUTPUT: usize = 1024 * 1024;
@@ -56,11 +58,15 @@ pub(super) fn capture_for_tool(
     executable: &Path,
 ) -> Result<DependencyClosure, Spec034ReleaseArtifactError> {
     #[cfg(test)]
-    if std::env::temp_dir().canonicalize().ok().is_some_and(|temporary| {
-        executable
-            .canonicalize()
-            .map_or(true, |path| !path.starts_with(temporary))
-    }) {
+    if std::env::temp_dir()
+        .canonicalize()
+        .ok()
+        .is_some_and(|temporary| {
+            executable
+                .canonicalize()
+                .map_or(true, |path| !path.starts_with(temporary))
+        })
+    {
         return Ok(DependencyClosure {
             seals: Vec::new(),
             paths: Vec::new(),
@@ -107,10 +113,13 @@ fn resolve_macos(
         let name = Path::new(value)
             .file_name()
             .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
-        [tool_root.join("lib").join(name), binary.parent().unwrap_or(Path::new("/")).join(name)]
-            .into_iter()
-            .find(|candidate| candidate.is_file())
-            .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?
+        [
+            tool_root.join("lib").join(name),
+            binary.parent().unwrap_or(Path::new("/")).join(name),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?
     } else if value.starts_with('/') {
         PathBuf::from(value)
     } else {
@@ -139,7 +148,11 @@ fn direct_dependencies(
             let value = trimmed
                 .split_once("=>")
                 .map(|(_, path)| path.trim().split_whitespace().next().unwrap_or(""))
-                .or_else(|| trimmed.starts_with('/').then(|| trimmed.split_whitespace().next().unwrap_or("")))?;
+                .or_else(|| {
+                    trimmed
+                        .starts_with('/')
+                        .then(|| trimmed.split_whitespace().next().unwrap_or(""))
+                })?;
             (!system_dependency(value)).then_some(value)
         })
         .map(|value| {
@@ -216,7 +229,10 @@ mod tests {
 
         std::fs::write(dependency, b"mutated").map_err(Spec034ReleaseArtifactError::Io)?;
 
-        assert!(matches!(closure.verify(), Err(Spec034ReleaseArtifactError::DigestMismatch)));
+        assert!(matches!(
+            closure.verify(),
+            Err(Spec034ReleaseArtifactError::DigestMismatch)
+        ));
         Ok(())
     }
 }

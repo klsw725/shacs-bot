@@ -1,6 +1,7 @@
 use super::*;
-use std::time::Duration;
+use crate::runtime::generated_media_release::model::CommandStreamSummary;
 use std::sync::Mutex;
+use std::time::Duration;
 
 static RUNNER_LOCK: Mutex<()> = Mutex::new(());
 
@@ -41,7 +42,12 @@ fn invalid_config_creates_no_run_root_residue() -> Result<(), Box<dyn std::error
     ));
     assert!(std::fs::read_dir(parent.path())?.all(|entry| {
         entry
-            .map(|entry| !entry.file_name().to_string_lossy().starts_with(".shacs-spec034-run-"))
+            .map(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".shacs-spec034-run-")
+            })
             .unwrap_or(false)
     }));
     Ok(())
@@ -72,12 +78,16 @@ fn final_semantic_failure_leaves_commit_status_unknown() -> Result<(), Box<dyn s
 
     // Then
     let error = result.expect_err("injected final validation must fail");
-    assert!(!evidence.exists(), "failed evidence became visible after {error:?}");
+    assert!(
+        !evidence.exists(),
+        "failed evidence became visible after {error:?}"
+    );
     Ok(())
 }
 
 #[test]
-fn final_semantic_panic_never_publishes_validated_marker() -> Result<(), Box<dyn std::error::Error>> {
+fn final_semantic_panic_never_publishes_validated_marker() -> Result<(), Box<dyn std::error::Error>>
+{
     let _runner = RUNNER_LOCK.lock().map_err(|_| "runner lock poisoned")?;
     let root = tempfile::tempdir()?;
     let evidence = root.path().canonicalize()?.join("release");
@@ -187,8 +197,11 @@ fn marker_overwrite_before_publication_verification_blocks_runner(
         &config,
         validation::validate_pending_with_git,
         |staging| {
-            std::fs::write(staging.join("publication-status.json"), b"overwritten marker")
-                .expect("overwrite marker");
+            std::fs::write(
+                staging.join("publication-status.json"),
+                b"overwritten marker",
+            )
+            .expect("overwrite marker");
         },
         |_| {},
     );
@@ -231,7 +244,10 @@ fn fresh_attestation_rejects_consistent_stream_summary_forgery(
 
     let result = attestation.verify_snapshot("sha256:source", &snapshot, &toolchain);
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::InvalidEvidence)));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::InvalidEvidence)
+    ));
     Ok(())
 }
 

@@ -1,4 +1,6 @@
-use super::model::*;
+use super::model::{
+    BlockerRow, DigestRow, OwnerAudit, RequirementRow, RetiredRequirementRow, ReviewRecord,
+};
 use shacs_projection::{
     spec034_current_requirements, spec034_requirement_is_retired, Spec034OwnerFactKind,
     Spec034ReviewKind, SPEC034_REQUIREMENTS, SPEC034_RETIRED_BY,

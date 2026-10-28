@@ -6,7 +6,8 @@ use shacs_projection::{
     SandboxFilesystemPolicy, SandboxNetworkPolicy, Spec030UnavailableReason,
     Spec030ValidationError, Spec030ValidationViolation,
 };
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustedRuntimeInput {

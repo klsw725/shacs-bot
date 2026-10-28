@@ -1,5 +1,6 @@
-use crate::tools::SchemaFragment;
-use crate::tools::{IntegerSchema, JsonMap, StringSchema, Tool, ToolParameters, ToolResult};
+use crate::tools::{
+    IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters, ToolResult,
+};
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Value};

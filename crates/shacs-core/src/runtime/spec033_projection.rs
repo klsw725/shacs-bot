@@ -5,7 +5,6 @@ use shacs_projection::{
     Spec033OwnerFact, Spec033ReplayFact, Spec033ReplayStatus, Spec033RollbackCandidateFact,
     Spec033SelfImprovementFact, Spec033Snapshot, Spec033VerifyFact,
 };
-use shacs_session::durable_replay::evaluate_durable_recovery;
 use shacs_session::Session;
 use std::path::{Path, PathBuf};
 

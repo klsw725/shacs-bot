@@ -1,9 +1,6 @@
 use super::super::artifacts::ArtifactSnapshot;
-use super::super::model::{
-    CommandEvidence, CommandStreamSummary, Spec034ReleaseArtifactError,
-};
-use super::super::tools::RetiredToolchain;
-use super::super::tools::ResolvedToolchain;
+use super::super::model::{CommandEvidence, CommandStreamSummary, Spec034ReleaseArtifactError};
+use super::super::tools::{ResolvedToolchain, RetiredToolchain};
 use shacs_projection::{Spec031ReleaseCommandStatus, Spec031ReleaseGateKind};
 
 pub(super) fn validate(
@@ -43,7 +40,10 @@ fn validate_identities(
     cargo: &super::super::model::PortableToolIdentity,
     rustc: &super::super::model::PortableToolIdentity,
 ) -> Result<(), Spec034ReleaseArtifactError> {
-    for (evidence, spec) in commands.iter().zip(super::command_specs::COMMAND_SPECS.iter()) {
+    for (evidence, spec) in commands
+        .iter()
+        .zip(super::command_specs::COMMAND_SPECS.iter())
+    {
         validate_one(snapshot, evidence, source_digest, cargo, rustc, spec)?;
     }
     Ok(())

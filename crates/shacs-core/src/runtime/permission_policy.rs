@@ -1,9 +1,7 @@
 use crate::runtime::{
-    evaluate_inherited_ceiling, StaticRuleDecision, StaticRuleDecisionKind, StaticRuleReason,
-};
-use crate::runtime::{
-    ApprovalCorrelation, ApprovalCorrelationError, InheritedPermissionContext, PermissionMode,
-    PermissionedAction, SafetyCapability,
+    evaluate_inherited_ceiling, ApprovalCorrelation, ApprovalCorrelationError,
+    InheritedPermissionContext, PermissionMode, PermissionedAction, SafetyCapability,
+    StaticRuleDecision, StaticRuleDecisionKind, StaticRuleReason,
 };
 use serde::{Deserialize, Serialize};
 use shacs_config::{RememberedPermissionEffect, RememberedPermissionMatcher, WorkspacePathScope};

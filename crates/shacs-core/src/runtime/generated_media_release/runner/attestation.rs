@@ -36,7 +36,12 @@ impl FreshExecutionAttestation {
         toolchain: &ResolvedToolchain,
     ) -> Result<(), Spec034ReleaseArtifactError> {
         let results: ResultsDocument = snapshot.json("results.json")?;
-        command_validation::validate_resolved(snapshot, &results.commands, source_digest, toolchain)?;
+        command_validation::validate_resolved(
+            snapshot,
+            &results.commands,
+            source_digest,
+            toolchain,
+        )?;
         let linker_digest = toolchain.linker_attestation_digest()?;
         (self.source_digest == source_digest
             && self.commands == results.commands

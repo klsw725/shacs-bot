@@ -12,16 +12,22 @@ impl AgentHook for Diagnostic {
     fn before_iteration(&self, context: &AgentHookContext) {
         self.0
             .lock()
-            .unwrap()
+            .expect("diagnostic log lock poisoned")
             .push_str(&format!("{:?}\n", context.messages));
     }
     fn before_execute_tools(&self, context: &AgentHookContext, calls: &[RuntimeToolCall]) {
         let seen = format!("{:?} {calls:?}\n", context.messages);
-        self.0.lock().unwrap().push_str(&seen);
+        self.0
+            .lock()
+            .expect("diagnostic log lock poisoned")
+            .push_str(&seen);
     }
     fn after_response(&self, context: &AgentHookContext, response: &LlmResponse) {
         let seen = format!("{:?} {response:?}\n", context.messages);
-        self.0.lock().unwrap().push_str(&seen);
+        self.0
+            .lock()
+            .expect("diagnostic log lock poisoned")
+            .push_str(&seen);
     }
 }
 
@@ -38,7 +44,10 @@ impl AgentHook for Policy {
         calls: &[RuntimeToolCall],
     ) -> Vec<RuntimeToolMessage> {
         let judged = format!("{calls:?}");
-        self.0.lock().unwrap().push_str(&judged);
+        self.0
+            .lock()
+            .expect("policy log lock poisoned")
+            .push_str(&judged);
         calls
             .iter()
             .filter(|call| call.arguments.to_string().contains("blue"))

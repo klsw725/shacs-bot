@@ -1,4 +1,13 @@
-use super::*;
+use super::{
+    hook_invocation, tool_before_context_payload, AgentHookContext, PluginHookCallbackResult,
+    PluginHookDispatchAttempt, PluginHookDispatchMode, PluginHookEvent, PluginRuntimeHook,
+    PluginRuntimeHookAgentHook, PluginRuntimePlugin, RuntimeToolCall, ToolBeforeConfirmation,
+    ToolBeforeContext, ToolBeforeDecision, ToolBeforeHandler,
+};
+use crate::runtime::runner::isolate_panic;
+use serde_json::Value;
+use shacs_projection::{HookDenialReason, HookDiagnosticKind};
+use std::sync::Arc;
 
 pub(super) fn run_command(
     owner: &PluginRuntimeHookAgentHook,
@@ -10,13 +19,13 @@ pub(super) fn run_command(
 ) -> Option<(String, String, HookDenialReason)> {
     let hook_ref = hook.plugin_id.clone();
     let result = match owner.mode {
-        PluginHookDispatchMode::LiveDiagnostics => catch_unwind(AssertUnwindSafe(|| {
+        PluginHookDispatchMode::LiveDiagnostics => isolate_panic(|| {
             owner.executor.execute(&hook_invocation(
                 plugin,
                 hook,
                 tool_before_context_payload(context, std::slice::from_ref(call)),
             ))
-        }))
+        })
         .unwrap_or_else(|_| {
             owner.facts.diagnostic(&hook_ref, HookDiagnosticKind::Panic);
             PluginHookCallbackResult::Error("plugin hook panicked".to_owned())
@@ -50,25 +59,24 @@ pub(super) fn run_trusted(
         .name(format!("tool-before-{hook_ref}"))
         .spawn(move || {
             let context = ToolBeforeContext::new(&call, interaction.as_ref());
-            let decision = catch_unwind(AssertUnwindSafe(|| handler.evaluate(&context)));
-            let _ = sender.send(decision);
+            let _ = sender.send(handler.evaluate(&context));
         });
     if spawned.is_err() {
         owner.facts.diagnostic(&hook_ref, HookDiagnosticKind::Panic);
         return None;
     }
     match receiver.recv_timeout(timeout) {
-        Ok(Ok(ToolBeforeDecision::Allow)) => None,
-        Ok(Ok(ToolBeforeDecision::Block { reason })) => {
+        Ok(ToolBeforeDecision::Allow) => None,
+        Ok(ToolBeforeDecision::Block { reason }) => {
             Some((hook_ref, reason, HookDenialReason::ExtensionBlocked))
         }
-        Ok(Ok(ToolBeforeDecision::InvalidOutput)) => {
+        Ok(ToolBeforeDecision::InvalidOutput) => {
             owner
                 .facts
                 .diagnostic(&hook_ref, HookDiagnosticKind::InvalidOutput);
             None
         }
-        Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             owner.facts.diagnostic(&hook_ref, HookDiagnosticKind::Panic);
             None
         }

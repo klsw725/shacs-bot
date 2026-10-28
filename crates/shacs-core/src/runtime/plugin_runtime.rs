@@ -16,8 +16,7 @@ use crate::runtime::{
 };
 use crate::tools::{JsonMap, Tool, ToolRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use serde_json::Value;
+use serde_json::{json, Value};
 use shacs_command::{
     is_builtin_command_name, PluginCommandRoute, PluginCommandRouter, PluginCommandSpec,
 };
@@ -1813,7 +1812,7 @@ fn drain_pending_outputs_until<L: Read, R: Read>(
     loop {
         drain_pending_output(stdout);
         drain_pending_output(stderr);
-        if pending_output_closed(stdout) && pending_output_closed(stderr) {
+        if pending_output_closed(stdout.as_ref()) && pending_output_closed(stderr.as_ref()) {
             return;
         }
         if Instant::now() >= deadline {
@@ -1823,9 +1822,8 @@ fn drain_pending_outputs_until<L: Read, R: Read>(
     }
 }
 
-fn pending_output_closed<R>(pending: &Option<PendingHookOutput<R>>) -> bool {
+fn pending_output_closed<R>(pending: Option<&PendingHookOutput<R>>) -> bool {
     pending
-        .as_ref()
         .and_then(|pending| pending.reader.as_ref())
         .is_none()
 }
@@ -1833,10 +1831,14 @@ fn pending_output_closed<R>(pending: &Option<PendingHookOutput<R>>) -> bool {
 #[cfg(unix)]
 fn set_nonblocking_stdio<T: AsRawFd>(stdio: &T) -> std::io::Result<()> {
     let fd = stdio.as_raw_fd();
+    // SAFETY: [Category 8 - FFI boundary] `fd` belongs to `stdio`, which stays borrowed for
+    // the whole call, and F_GETFL only reads the descriptor flags.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: [Category 8 - FFI boundary] `fd` is still the borrowed open descriptor and
+    // F_SETFL only adds O_NONBLOCK to the flags read above.
     if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -1891,6 +1893,9 @@ fn cleanup_plugin_hook_child_group(child_id: u32) {
     let Ok(pid) = i32::try_from(child_id) else {
         return;
     };
+    // SAFETY: [Category 8 - FFI boundary] `kill` takes no pointers; hook children are spawned
+    // with `process_group(0)`, so `-pid` names the hook's own group, and a group that is
+    // already gone only yields ESRCH.
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
     }

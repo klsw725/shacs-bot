@@ -1,4 +1,7 @@
-use super::task_method::*;
+use super::task_method::{
+    Availability, ClaimState, EvidenceFact, Gate, MethodId, MethodRequest, Readiness, Selection,
+    SelectionSource, Support, ValidationClaim,
+};
 use super::task_method_calc_render::{acceptance, summary as calc_summary};
 use super::task_method_compose::{
     availability_note, method_name, parts_line, planned_checks, protocol,

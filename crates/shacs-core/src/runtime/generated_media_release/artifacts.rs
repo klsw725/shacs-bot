@@ -1,4 +1,4 @@
-use super::model::*;
+use super::model::{DigestRow, Spec034ReleaseArtifactError};
 use super::source::{validate_locator, ConfinedSourceReader};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -129,16 +129,10 @@ impl ArtifactSnapshot {
         &self.root
     }
 
-    pub(super) fn sealed_files(
-        &self,
-    ) -> impl Iterator<Item = (&str, &[u8], &ArtifactMetadata)> {
-        self.files.iter().map(|(name, artifact)| {
-            (
-                name.as_str(),
-                artifact.bytes.as_slice(),
-                &artifact.metadata,
-            )
-        })
+    pub(super) fn sealed_files(&self) -> impl Iterator<Item = (&str, &[u8], &ArtifactMetadata)> {
+        self.files
+            .iter()
+            .map(|(name, artifact)| (name.as_str(), artifact.bytes.as_slice(), &artifact.metadata))
     }
 
     #[cfg(test)]
@@ -213,10 +207,7 @@ pub fn write_json(
     durable_write(&root.join(locator), &bytes)
 }
 
-pub(super) fn durable_write(
-    path: &Path,
-    bytes: &[u8],
-) -> Result<(), Spec034ReleaseArtifactError> {
+pub(super) fn durable_write(path: &Path, bytes: &[u8]) -> Result<(), Spec034ReleaseArtifactError> {
     durable_write_with(path, bytes, |file| file.sync_all())
 }
 

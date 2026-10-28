@@ -49,11 +49,23 @@ fn source_manifest_binds_all_git_visible_files_and_full_dirty_state(
     }
     commit_fixture(&repo)?;
     let baseline = collect(&repo)?;
-    for locator in ["Dockerfile", "AGENTS.md", ".env.example", "compose.yaml", "config.toml"] {
+    for locator in [
+        "Dockerfile",
+        "AGENTS.md",
+        ".env.example",
+        "compose.yaml",
+        "config.toml",
+    ] {
         assert!(baseline.files.iter().any(|file| file.locator == locator));
     }
-    assert!(!baseline.files.iter().any(|file| file.locator.starts_with(".omo/")));
-    assert!(!baseline.files.iter().any(|file| file.locator.contains("/target/")));
+    assert!(!baseline
+        .files
+        .iter()
+        .any(|file| file.locator.starts_with(".omo/")));
+    assert!(!baseline
+        .files
+        .iter()
+        .any(|file| file.locator.contains("/target/")));
 
     std::fs::write(repo.join(".omo/evidence.json"), b"changed\n")?;
     assert!(collect(&repo)?.worktree_dirty);
@@ -68,7 +80,10 @@ fn source_manifest_binds_all_git_visible_files_and_full_dirty_state(
     let changed = collect(&repo)?;
     assert!(changed.worktree_dirty);
     for locator in ["Dockerfile", "AGENTS.md", ".env.example", "local.override"] {
-        assert!(changed.files.iter().any(|file| file.locator == locator && file.modified));
+        assert!(changed
+            .files
+            .iter()
+            .any(|file| file.locator == locator && file.modified));
     }
     Ok(())
 }
@@ -76,11 +91,15 @@ fn source_manifest_binds_all_git_visible_files_and_full_dirty_state(
 #[test]
 fn nul_paths_reject_invalid_utf8() {
     let paths = nul_paths(b"crates/good.rs\0crates/\xff.rs\0");
-    assert!(matches!(paths, Err(Spec034ReleaseArtifactError::InvalidConfig)));
+    assert!(matches!(
+        paths,
+        Err(Spec034ReleaseArtifactError::InvalidConfig)
+    ));
 }
 
 #[test]
-fn source_manifest_records_unstaged_and_staged_deletions() -> Result<(), Box<dyn std::error::Error>> {
+fn source_manifest_records_unstaged_and_staged_deletions() -> Result<(), Box<dyn std::error::Error>>
+{
     for staged in [false, true] {
         let root = tempfile::tempdir()?;
         let repo = root.path().join("repo");
@@ -89,7 +108,10 @@ fn source_manifest_records_unstaged_and_staged_deletions() -> Result<(), Box<dyn
         std::fs::write(repo.join("tracked.txt"), b"present")?;
         commit_fixture(&repo)?;
         let clean = collect(&repo)?;
-        assert!(clean.files.iter().all(|file| file.state == SourceFileState::Present));
+        assert!(clean
+            .files
+            .iter()
+            .all(|file| file.state == SourceFileState::Present));
         std::fs::remove_file(repo.join("tracked.txt"))?;
         if staged {
             git(&repo, &["add", "-u"])?;
@@ -97,7 +119,11 @@ fn source_manifest_records_unstaged_and_staged_deletions() -> Result<(), Box<dyn
 
         let deleted = collect(&repo)?;
 
-        let row = deleted.files.iter().find(|file| file.locator == "tracked.txt").ok_or("missing tombstone")?;
+        let row = deleted
+            .files
+            .iter()
+            .find(|file| file.locator == "tracked.txt")
+            .ok_or("missing tombstone")?;
         assert_eq!(row.state, SourceFileState::Deleted);
         assert!(row.digest.is_none());
         assert!(row.modified);
@@ -118,11 +144,21 @@ fn source_manifest_records_rename_and_recreation() -> Result<(), Box<dyn std::er
     git(&repo, &["mv", "old.txt", "new.txt"])?;
     let renamed = collect(&repo)?;
     assert_eq!(
-        renamed.files.iter().find(|file| file.locator == "old.txt").ok_or("old missing")?.state,
+        renamed
+            .files
+            .iter()
+            .find(|file| file.locator == "old.txt")
+            .ok_or("old missing")?
+            .state,
         SourceFileState::Deleted
     );
     assert_eq!(
-        renamed.files.iter().find(|file| file.locator == "new.txt").ok_or("new missing")?.state,
+        renamed
+            .files
+            .iter()
+            .find(|file| file.locator == "new.txt")
+            .ok_or("new missing")?
+            .state,
         SourceFileState::Present
     );
 
@@ -130,10 +166,20 @@ fn source_manifest_records_rename_and_recreation() -> Result<(), Box<dyn std::er
     let recreated = collect(&repo)?;
 
     assert_eq!(
-        recreated.files.iter().find(|file| file.locator == "old.txt").ok_or("recreated missing")?.state,
+        recreated
+            .files
+            .iter()
+            .find(|file| file.locator == "old.txt")
+            .ok_or("recreated missing")?
+            .state,
         SourceFileState::Present
     );
-    assert!(recreated.files.iter().find(|file| file.locator == "old.txt").and_then(|file| file.digest.as_ref()).is_some());
+    assert!(recreated
+        .files
+        .iter()
+        .find(|file| file.locator == "old.txt")
+        .and_then(|file| file.digest.as_ref())
+        .is_some());
     Ok(())
 }
 
@@ -208,8 +254,8 @@ fn materialized_execution_snapshot_survives_live_s_b_s_replacement(
 
 #[cfg(unix)]
 #[test]
-fn materialized_execution_seal_rejects_mutate_and_restore(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn materialized_execution_seal_rejects_mutate_and_restore() -> Result<(), Box<dyn std::error::Error>>
+{
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir()?;
     let repo = root.path().join("repo");
@@ -224,21 +270,37 @@ fn materialized_execution_seal_rejects_mutate_and_restore(
     std::fs::write(&tested, b"B")?;
     std::fs::write(&tested, b"S")?;
 
-    assert!(matches!(execution.verify(), Err(Spec034ReleaseArtifactError::DigestMismatch)));
+    assert!(matches!(
+        execution.verify(),
+        Err(Spec034ReleaseArtifactError::DigestMismatch)
+    ));
     Ok(())
 }
 
 fn commit_fixture(repo: &Path) -> Result<(), Box<dyn std::error::Error>> {
     git(repo, &["init", "--quiet"])?;
     git(repo, &["add", "."])?;
-    git(repo, &[
-        "-c", "user.name=Spec034 Test", "-c", "user.email=spec034@example.invalid",
-        "commit", "--quiet", "-m", "fixture",
-    ])
+    git(
+        repo,
+        &[
+            "-c",
+            "user.name=Spec034 Test",
+            "-c",
+            "user.email=spec034@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    )
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("git").arg("-C").arg(repo).args(args).status()?;
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .status()?;
     if !status.success() {
         return Err("git fixture command failed".into());
     }

@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use shacs_projection::*;
-use std::{error::Error, fs};
+use std::error::Error;
+use std::fs;
 
 const CONFLICTING_DUPLICATE: &str = r#"{"schema_version":2,"generation":"generation-current","capability_decisions":[{"capability":"task_stop","support":{"status":"supported"}},{"capability":"task_stop","support":{"status":"unsupported","reason":"capability_unavailable"}}]}"#;
 const IDENTICAL_DUPLICATE: &str = r#"{"schema_version":2,"generation":"generation-current","capability_decisions":[{"capability":"task_stop","support":{"status":"supported"}},{"capability":"task_stop","support":{"status":"supported"}}]}"#;

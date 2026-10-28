@@ -1,7 +1,10 @@
 use super::super::artifacts::{validate_digest_rows, ArtifactSnapshot};
-use super::super::catalog;
-use super::super::model::*;
-use super::super::source;
+use super::super::model::{
+    CleanupReceipt, CommandEvidence, PublicationStage, PublicationStatus,
+    PublicationStatusDocument, Spec034ReleaseArtifactError, Spec034ReleaseManifest,
+    Spec034StructuralAudit, PUBLICATION_STATUS_SCHEMA, RELEASE_SCHEMA,
+};
+use super::super::{catalog, source};
 use super::generation::{command_passed, command_ref};
 use std::path::Path;
 
@@ -44,7 +47,12 @@ impl<'a> PendingValidationContext<'a> {
         toolchain: &'a super::super::tools::RetiredToolchain,
         cleanup: &'a super::isolation::CompletedIsolationCleanup,
     ) -> Self {
-        Self { root, source_root, toolchain, cleanup }
+        Self {
+            root,
+            source_root,
+            toolchain,
+            cleanup,
+        }
     }
 
     #[cfg(test)]
@@ -151,7 +159,11 @@ pub(super) fn validate_pending_with_git(
     let (manifest, cleanup_receipt) =
         validate_snapshot(&snapshot, context.source_root, context.toolchain)?;
     context.cleanup.verify_receipt(&cleanup_receipt)?;
-    Ok(ValidatedSnapshot { manifest, snapshot, cleanup_receipt })
+    Ok(ValidatedSnapshot {
+        manifest,
+        snapshot,
+        cleanup_receipt,
+    })
 }
 
 fn validate_snapshot(
@@ -160,19 +172,17 @@ fn validate_snapshot(
     toolchain: &super::super::tools::RetiredToolchain,
 ) -> Result<(Spec034ReleaseManifest, CleanupReceipt), Spec034ReleaseArtifactError> {
     let (manifest, commands, cleanup_receipt) = validate_snapshot_structure(snapshot, source_root)?;
-    super::command_validation::validate(
-        snapshot,
-        &commands,
-        &manifest.source.digest,
-        toolchain,
-    )?;
+    super::command_validation::validate(snapshot, &commands, &manifest.source.digest, toolchain)?;
     Ok((manifest, cleanup_receipt))
 }
 
 fn validate_snapshot_structure(
     snapshot: &ArtifactSnapshot,
     source_root: &source::SourceRootContext,
-) -> Result<(Spec034ReleaseManifest, Vec<CommandEvidence>, CleanupReceipt), Spec034ReleaseArtifactError> {
+) -> Result<
+    (Spec034ReleaseManifest, Vec<CommandEvidence>, CleanupReceipt),
+    Spec034ReleaseArtifactError,
+> {
     let manifest: Spec034ReleaseManifest = snapshot.json("manifest.json")?;
     if !super::config::valid_run_id(&manifest.run_id)
         || manifest.schema != RELEASE_SCHEMA

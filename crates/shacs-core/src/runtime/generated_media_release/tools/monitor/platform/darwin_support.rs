@@ -43,10 +43,7 @@ pub(super) fn create_queue() -> Result<File, Spec034ReleaseArtifactError> {
     Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
-pub(super) fn register(
-    queue: &File,
-    entries: &[Entry],
-) -> Result<(), Spec034ReleaseArtifactError> {
+pub(super) fn register(queue: &File, entries: &[Entry]) -> Result<(), Spec034ReleaseArtifactError> {
     let changes = entries
         .iter()
         .map(|entry| libc::kevent {
@@ -65,8 +62,7 @@ pub(super) fn register(
         libc::kevent(
             queue.as_raw_fd(),
             changes.as_ptr(),
-            i32::try_from(changes.len())
-                .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
+            i32::try_from(changes.len()).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
             receipts.as_mut_ptr(),
             i32::try_from(receipts.len())
                 .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
@@ -74,8 +70,7 @@ pub(super) fn register(
         )
     };
     if count
-        != i32::try_from(changes.len())
-            .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?
+        != i32::try_from(changes.len()).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?
         || receipts
             .iter()
             .any(|event| event.flags & libc::EV_ERROR == 0 || event.data != 0)

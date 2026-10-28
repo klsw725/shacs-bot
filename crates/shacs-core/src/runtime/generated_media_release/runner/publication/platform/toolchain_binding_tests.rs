@@ -1,15 +1,14 @@
 use super::*;
+use crate::runtime::generated_media_release::runner::publication::FinalSourceBinding;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
-fn cargo_replace_restore_after_hook_never_publishes(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cargo_replace_restore_after_hook_never_publishes() -> Result<(), Box<dyn std::error::Error>> {
     assert_tool_replace_restore("cargo")
 }
 
 #[test]
-fn rustc_replace_restore_after_hook_never_publishes(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn rustc_replace_restore_after_hook_never_publishes() -> Result<(), Box<dyn std::error::Error>> {
     assert_tool_replace_restore("rustc")
 }
 
@@ -27,13 +26,14 @@ fn assert_tool_replace_restore(name: &str) -> Result<(), Box<dyn std::error::Err
     let rustc = tools.join("rustc");
     write_tool(&cargo, "cargo 1.0.0")?;
     write_tool(&rustc, "rustc 1.0.0")?;
-    let toolchain = crate::runtime::generated_media_release::tools::ResolvedToolchain::resolve_tools_for_test(
-        home,
-        cargo_home,
-        target,
-        cargo.clone(),
-        rustc,
-    )?;
+    let toolchain =
+        crate::runtime::generated_media_release::tools::ResolvedToolchain::resolve_tools_for_test(
+            home,
+            cargo_home,
+            target,
+            cargo.clone(),
+            rustc,
+        )?;
     let attacked = tools.join(name);
     let displaced = tools.join(format!("{name}-approved"));
     let evidence = root.join("evidence");

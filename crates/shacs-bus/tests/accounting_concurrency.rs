@@ -34,18 +34,16 @@ fn recv_watchdog<T>(receiver: &Receiver<T>) -> T {
 
 fn open_gate(pair: &(Mutex<bool>, Condvar)) {
     let (lock, condvar) = pair;
-    let mut open = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut open = lock.lock().expect("gate lock poisoned");
     *open = true;
     condvar.notify_all();
 }
 
 fn wait_gate(pair: &(Mutex<bool>, Condvar)) {
     let (lock, condvar) = pair;
-    let mut open = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut open = lock.lock().expect("gate lock poisoned");
     while !*open {
-        open = condvar
-            .wait(open)
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        open = condvar.wait(open).expect("condvar lock poisoned");
     }
 }
 

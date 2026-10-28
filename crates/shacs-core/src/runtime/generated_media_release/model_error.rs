@@ -8,7 +8,9 @@ pub enum Spec034ReleaseArtifactError {
     InvalidEvidence,
     DigestMismatch,
     CleanupIdentityMismatch,
-    CleanupResidual { leak_count: u8 },
+    CleanupResidual {
+        leak_count: u8,
+    },
     Io(std::io::Error),
     Json(serde_json::Error),
     Command(shacs_projection::Spec031ReleaseArtifactError),

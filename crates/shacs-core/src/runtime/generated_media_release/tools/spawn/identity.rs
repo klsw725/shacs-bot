@@ -1,6 +1,6 @@
-use super::{static_cdhash, Spec034ReleaseArtifactError};
 #[cfg(target_vendor = "apple")]
 use super::{live_cdhash, process_executable};
+use super::{static_cdhash, Spec034ReleaseArtifactError};
 #[cfg(target_vendor = "apple")]
 use crate::runtime::generated_media_release::artifacts::digest_bytes;
 #[cfg(target_vendor = "apple")]
@@ -92,7 +92,9 @@ fn capture_process_identity_with(
 }
 
 #[cfg(target_vendor = "apple")]
-fn process_details(pid: libc::pid_t) -> Result<(u64, u64, libc::pid_t), Spec034ReleaseArtifactError> {
+fn process_details(
+    pid: libc::pid_t,
+) -> Result<(u64, u64, libc::pid_t), Spec034ReleaseArtifactError> {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
         .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
@@ -147,11 +149,14 @@ pub(crate) fn capture_static_identity(
     executable: &std::path::Path,
 ) -> Result<ProcessIdentity, Spec034ReleaseArtifactError> {
     use std::os::unix::fs::MetadataExt;
-    let executable = executable.canonicalize().map_err(Spec034ReleaseArtifactError::Io)?;
+    let executable = executable
+        .canonicalize()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     let mut file = File::open(&executable).map_err(Spec034ReleaseArtifactError::Io)?;
     let metadata = file.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(Spec034ReleaseArtifactError::Io)?;
+    file.read_to_end(&mut bytes)
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     Ok(ProcessIdentity {
         pid: 0,
         parent_pid: 0,
@@ -177,5 +182,8 @@ pub(crate) fn capture_static_identity(
 fn static_cdhash_rejects_unsupported_platform() {
     let executable = std::path::Path::new("/bin/sh");
     let result = static_cdhash(executable);
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::InvalidConfig)));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::InvalidConfig)
+    ));
 }

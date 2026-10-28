@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    digest_bytes, minimal_command, set_read_only_closure, ExecutionLedger,
+    Spec034ReleaseArtifactError,
+};
 use serde::Deserialize;
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,11 +113,18 @@ fn lock_packages(bytes: &[u8]) -> Result<BTreeMap<String, String>, Spec034Releas
     .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
     lock.package
         .into_iter()
-        .filter(|package| package.source.as_deref().is_some_and(|source| source.starts_with("registry+")))
+        .filter(|package| {
+            package
+                .source
+                .as_deref()
+                .is_some_and(|source| source.starts_with("registry+"))
+        })
         .map(|package| {
             Ok((
                 format!("{}-{}", package.name, package.version),
-                package.checksum.ok_or(Spec034ReleaseArtifactError::InvalidConfig)?,
+                package
+                    .checksum
+                    .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?,
             ))
         })
         .collect()
@@ -127,21 +137,30 @@ fn validate_vendor(
     let mut observed = BTreeSet::new();
     let mut digest = sha2::Sha256::new();
     for entry in sorted_entries(vendor)? {
-        let metadata = std::fs::symlink_metadata(entry.path()).map_err(Spec034ReleaseArtifactError::Io)?;
+        let metadata =
+            std::fs::symlink_metadata(entry.path()).map_err(Spec034ReleaseArtifactError::Io)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(Spec034ReleaseArtifactError::InvalidConfig);
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let package_checksum = expected.get(&name).ok_or(Spec034ReleaseArtifactError::DigestMismatch)?;
+        let package_checksum = expected
+            .get(&name)
+            .ok_or(Spec034ReleaseArtifactError::DigestMismatch)?;
         let checksum_bytes = std::fs::read(entry.path().join(".cargo-checksum.json"))
             .map_err(Spec034ReleaseArtifactError::Io)?;
-        let checksum: CargoChecksum = serde_json::from_slice(&checksum_bytes)
-            .map_err(Spec034ReleaseArtifactError::Json)?;
+        let checksum: CargoChecksum =
+            serde_json::from_slice(&checksum_bytes).map_err(Spec034ReleaseArtifactError::Json)?;
         if checksum.package.as_deref() != Some(package_checksum) {
             return Err(Spec034ReleaseArtifactError::DigestMismatch);
         }
         let mut files = BTreeSet::new();
-        validate_files(&entry.path(), &entry.path(), &checksum.files, &mut files, &mut digest)?;
+        validate_files(
+            &entry.path(),
+            &entry.path(),
+            &checksum.files,
+            &mut files,
+            &mut digest,
+        )?;
         let expected_files = checksum.files.keys().cloned().collect::<BTreeSet<_>>();
         if files != expected_files {
             return Err(Spec034ReleaseArtifactError::DigestMismatch);
@@ -181,7 +200,9 @@ fn validate_files(
             continue;
         }
         let bytes = std::fs::read(&path).map_err(Spec034ReleaseArtifactError::Io)?;
-        let actual = digest_bytes(&bytes).trim_start_matches("sha256:").to_owned();
+        let actual = digest_bytes(&bytes)
+            .trim_start_matches("sha256:")
+            .to_owned();
         if expected.get(&relative) != Some(&actual) {
             return Err(Spec034ReleaseArtifactError::DigestMismatch);
         }

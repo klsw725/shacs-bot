@@ -1,5 +1,7 @@
-use crate::tools::{ArraySchema, JsonMap, StringSchema, Tool, ToolParameters, ToolResult};
-use crate::tools::{SchemaFragment, ValidationError};
+use crate::tools::{
+    ArraySchema, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters, ToolResult,
+    ValidationError,
+};
 use serde_json::{json, Map, Value};
 
 const STRUCTURED_BUTTON_CHANNELS: &[&str] = &["telegram", "websocket"];

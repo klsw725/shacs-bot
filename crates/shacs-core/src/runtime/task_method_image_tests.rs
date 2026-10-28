@@ -44,7 +44,7 @@ fn stated_size_format_and_count_are_read_and_later_text_overrides() {
 fn png_jpeg_and_webp_headers_give_format_and_pixel_size() {
     // Given
     let jpeg = [
-        0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 0, 0, 0xFF, 0xC0, 0, 17, 8, 0, 48, 0, 64, 3, 0, 0,
+        0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0, 48, 0, 64, 3, 0, 0,
     ];
     let mut webp = b"RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0".to_vec();
     webp.extend([63, 0, 0, 47, 0, 0]);

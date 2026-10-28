@@ -6,10 +6,8 @@ use shacs_projection::{
     Spec033EvidenceSource, Spec033GoalBudgetFact, Spec033GoalFact, Spec033GoalOwner,
     Spec033GoalStatus, Spec033Owner, Spec033OwnerFact, Spec033Snapshot,
 };
-use shacs_tui::{
-    state::{RuntimeSnapshot, TuiState},
-    view::render_lines,
-};
+use shacs_tui::state::{RuntimeSnapshot, TuiState};
+use shacs_tui::view::render_lines;
 use std::error::Error;
 use tui_session::fixture_session;
 

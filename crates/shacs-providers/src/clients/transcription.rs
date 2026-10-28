@@ -2,12 +2,10 @@ use crate::config::ProviderConfig;
 use crate::error::ProviderError;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::env;
-use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
-use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{env, fs, process};
 
 const DEFAULT_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_TRANSCRIPTION_RESPONSE_BYTES: usize = 1024 * 1024;

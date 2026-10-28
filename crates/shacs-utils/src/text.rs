@@ -1,4 +1,5 @@
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use chrono::{DateTime, Local, SecondsFormat};
 use chrono_tz::Tz;
 use regex::Regex;

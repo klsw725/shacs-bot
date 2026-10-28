@@ -39,7 +39,7 @@ struct QueueState<T> {
     // Lock order is queue -> accounting. Queue mutations update their counters
     // while the queue guard is still held, so snapshots cannot observe half of
     // an accepted/emitted/dropped transition.
-    queue: Mutex<VecDeque<T>>,
+    queue: Mutex<QueuedMessages<T>>,
     accounting: Mutex<QueueAccountingCounters>,
     available: Condvar,
     capacity: Option<usize>,
@@ -47,10 +47,27 @@ struct QueueState<T> {
     push_wait_hook: Mutex<Option<PushWaitHook>>,
 }
 
+struct QueuedMessages<T> {
+    items: VecDeque<T>,
+    // Set while `drain_matching` runs the caller's matcher without holding the lock, so a
+    // panicking matcher cannot poison it. Every other operation waits until it clears, as it
+    // used to wait for the lock.
+    draining: bool,
+}
+
+impl<T> Default for QueuedMessages<T> {
+    fn default() -> Self {
+        Self {
+            items: VecDeque::new(),
+            draining: false,
+        }
+    }
+}
+
 impl<T> Default for QueueState<T> {
     fn default() -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(QueuedMessages::default()),
             accounting: Mutex::new(QueueAccountingCounters::default()),
             available: Condvar::new(),
             capacity: None,
@@ -149,7 +166,7 @@ impl MessageBus {
 impl<T> QueueState<T> {
     fn bounded(capacity: usize) -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(QueuedMessages::default()),
             accounting: Mutex::new(QueueAccountingCounters::default()),
             available: Condvar::new(),
             capacity: Some(capacity),
@@ -162,16 +179,13 @@ impl<T> QueueState<T> {
         let mut queue = self.lock_queue();
         while self
             .capacity
-            .is_some_and(|capacity| queue.len() >= capacity)
+            .is_some_and(|capacity| queue.items.len() >= capacity)
         {
             #[cfg(test)]
             self.notify_push_waiting();
-            queue = self
-                .available
-                .wait(queue)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            queue = self.wait_for_change(queue);
         }
-        queue.push_back(message);
+        queue.items.push_back(message);
         self.lock_accounting().accept();
         self.available.notify_all();
     }
@@ -179,11 +193,11 @@ impl<T> QueueState<T> {
     fn try_push(&self, message: T) -> Result<(), MessageBusError> {
         let mut queue = self.lock_queue();
         if let Some(capacity) = self.capacity {
-            if queue.len() >= capacity {
+            if queue.items.len() >= capacity {
                 return Err(MessageBusError::QueueFull { capacity });
             }
         }
-        queue.push_back(message);
+        queue.items.push_back(message);
         self.lock_accounting().accept();
         self.available.notify_one();
         Ok(())
@@ -193,19 +207,19 @@ impl<T> QueueState<T> {
         let mut queue = self.lock_queue();
         if self
             .capacity
-            .is_some_and(|capacity| queue.len() >= capacity)
-            && queue.pop_front().is_some()
+            .is_some_and(|capacity| queue.items.len() >= capacity)
+            && queue.items.pop_front().is_some()
         {
             self.lock_accounting().drop_one();
         }
-        queue.push_back(message);
+        queue.items.push_back(message);
         self.lock_accounting().accept();
         self.available.notify_all();
     }
 
     fn try_pop(&self) -> Option<T> {
         let mut queue = self.lock_queue();
-        let item = queue.pop_front();
+        let item = queue.items.pop_front();
         if item.is_some() {
             self.lock_accounting().emit();
             self.available.notify_all();
@@ -216,15 +230,12 @@ impl<T> QueueState<T> {
     fn pop_blocking(&self) -> T {
         let mut queue = self.lock_queue();
         loop {
-            if let Some(message) = queue.pop_front() {
+            if let Some(message) = queue.items.pop_front() {
                 self.lock_accounting().emit();
                 self.available.notify_all();
                 return message;
             }
-            queue = self
-                .available
-                .wait(queue)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            queue = self.wait_for_change(queue);
         }
     }
 
@@ -235,54 +246,78 @@ impl<T> QueueState<T> {
         if limit == 0 {
             return Vec::new();
         }
-        let mut queue = self.lock_queue();
-        let mut retained = VecDeque::with_capacity(queue.len());
-        let mut drained = Vec::new();
-        while let Some(item) = queue.pop_front() {
-            if drained.len() < limit && matcher(&item) {
+        let mut held = HeldMessages::take(self);
+        let mut selected = Vec::with_capacity(held.items.len());
+        let mut matched = 0;
+        for item in &held.items {
+            let take = matched < limit && matcher(item);
+            matched += usize::from(take);
+            selected.push(take);
+        }
+        let mut retained = VecDeque::with_capacity(held.items.len() - matched);
+        let mut drained = Vec::with_capacity(matched);
+        for (item, take) in std::mem::take(&mut held.items).into_iter().zip(selected) {
+            if take {
                 drained.push(item);
             } else {
                 retained.push_back(item);
             }
         }
-        *queue = retained;
-        if !drained.is_empty() {
-            self.lock_accounting().emit_many(drained.len());
-            self.available.notify_all();
-        }
+        held.finish(retained, drained.len());
         drained
     }
 
     fn len(&self) -> usize {
-        self.lock_queue().len()
+        self.lock_queue().items.len()
     }
 
     fn accounting_snapshot(&self) -> QueueAccountingSnapshot {
         let queue = self.lock_queue();
         let accounting = *self.lock_accounting();
-        QueueAccountingSnapshot::current(queue.len(), self.capacity, accounting)
+        QueueAccountingSnapshot::current(queue.items.len(), self.capacity, accounting)
     }
 
     fn accounting_snapshot_and_reset(&self) -> QueueAccountingSnapshot {
         let queue = self.lock_queue();
         let accounting = self.lock_accounting().reset();
-        QueueAccountingSnapshot::current(queue.len(), self.capacity, accounting)
+        QueueAccountingSnapshot::current(queue.items.len(), self.capacity, accounting)
     }
 
     fn record_coalesced(&self, count: u64) {
         self.lock_accounting().coalesce(count);
     }
 
-    fn lock_queue(&self) -> MutexGuard<'_, VecDeque<T>> {
-        self.queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// Locks the queue once no drain is in progress.
+    fn lock_queue(&self) -> MutexGuard<'_, QueuedMessages<T>> {
+        let queue = self.queue.lock().expect("message queue lock poisoned");
+        self.wait_until_idle(queue)
+    }
+
+    /// Waits for the next queue change, then for any drain in progress to finish.
+    fn wait_for_change<'a>(
+        &self,
+        queue: MutexGuard<'a, QueuedMessages<T>>,
+    ) -> MutexGuard<'a, QueuedMessages<T>> {
+        let queue = self
+            .available
+            .wait(queue)
+            .expect("message queue lock poisoned");
+        self.wait_until_idle(queue)
+    }
+
+    fn wait_until_idle<'a>(
+        &self,
+        queue: MutexGuard<'a, QueuedMessages<T>>,
+    ) -> MutexGuard<'a, QueuedMessages<T>> {
+        self.available
+            .wait_while(queue, |queue| queue.draining)
+            .expect("message queue lock poisoned")
     }
 
     fn lock_accounting(&self) -> MutexGuard<'_, QueueAccountingCounters> {
         self.accounting
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("queue accounting lock poisoned")
     }
 
     #[cfg(test)]
@@ -290,7 +325,7 @@ impl<T> QueueState<T> {
         *self
             .push_wait_hook
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+            .expect("push wait hook lock poisoned") = Some(hook);
     }
 
     #[cfg(test)]
@@ -298,14 +333,67 @@ impl<T> QueueState<T> {
         let hook = self
             .push_wait_hook
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("push wait hook lock poisoned")
             .clone();
         if let Some(hook) = hook {
             let (lock, condvar) = &*hook;
-            let mut waiting = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut waiting = lock.lock().expect("push wait signal lock poisoned");
             *waiting = true;
             condvar.notify_all();
         }
+    }
+}
+
+/// Messages taken out of a queue while `drain_matching` runs the caller's matcher.
+struct HeldMessages<'a, T> {
+    queue: &'a QueueState<T>,
+    items: VecDeque<T>,
+    finished: bool,
+}
+
+impl<'a, T> HeldMessages<'a, T> {
+    fn take(queue: &'a QueueState<T>) -> Self {
+        let mut state = queue.lock_queue();
+        state.draining = true;
+        let items = std::mem::take(&mut state.items);
+        Self {
+            queue,
+            items,
+            finished: false,
+        }
+    }
+
+    /// Puts the retained messages back and reopens the queue. Every other operation waited
+    /// while it was draining, so the queue is still empty.
+    fn finish(mut self, retained: VecDeque<T>, drained: usize) {
+        let mut state = self
+            .queue
+            .queue
+            .lock()
+            .expect("message queue lock poisoned");
+        state.items = retained;
+        state.draining = false;
+        if drained > 0 {
+            self.queue.lock_accounting().emit_many(drained);
+        }
+        drop(state);
+        self.finished = true;
+        self.queue.available.notify_all();
+    }
+}
+
+impl<T> Drop for HeldMessages<'_, T> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        // The matcher panicked: put every message back in order. Drop must not panic, since a
+        // second panic while unwinding aborts the process.
+        if let Ok(mut state) = self.queue.queue.lock() {
+            state.items = std::mem::take(&mut self.items);
+            state.draining = false;
+        }
+        self.queue.available.notify_all();
     }
 }
 
@@ -318,11 +406,11 @@ mod tests {
 
     fn wait_for_hook(pair: &(Mutex<bool>, Condvar)) {
         let (lock, condvar) = pair;
-        let mut observed = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut observed = lock.lock().expect("push wait signal lock poisoned");
         while !*observed {
             let (next, timeout) = condvar
                 .wait_timeout(observed, Duration::from_secs(5))
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .expect("push wait signal lock poisoned");
             assert!(!timeout.timed_out(), "producer should reach wait boundary");
             observed = next;
         }
@@ -414,7 +502,7 @@ mod tests {
             .inbound
             .push_wait_hook
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("push wait hook lock poisoned")
             .as_ref()
             .expect("push wait hook")
             .clone();
@@ -511,5 +599,28 @@ mod tests {
             .map(|message| message.content)
             .collect::<Vec<_>>();
         assert_eq!(retained, ["b1", "a3", "b2"]);
+    }
+
+    #[test]
+    fn a_panicking_matcher_keeps_every_message_and_the_bus_usable() {
+        let bus = MessageBus::new();
+        for content in ["one", "two"] {
+            bus.publish_inbound(InboundMessage::new("telegram", "user", "chat", content));
+        }
+        let draining_bus = bus.clone();
+        let matcher_panic = thread::spawn(move || {
+            draining_bus.drain_inbound_matching(1, |_| panic!("matcher bug"))
+        })
+        .join();
+        assert!(
+            matcher_panic.is_err(),
+            "the matcher panic reaches the draining thread"
+        );
+
+        bus.publish_inbound(InboundMessage::new("telegram", "user", "chat", "three"));
+        let contents = std::iter::from_fn(|| bus.consume_inbound())
+            .map(|message| message.content)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, ["one", "two", "three"]);
     }
 }

@@ -63,7 +63,9 @@ impl ExecutionChild {
 
     fn terminate_and_reap_with(
         &mut self,
-        mut capture: impl FnMut(libc::pid_t) -> Result<super::ProcessIdentity, Spec034ReleaseArtifactError>,
+        mut capture: impl FnMut(
+            libc::pid_t,
+        ) -> Result<super::ProcessIdentity, Spec034ReleaseArtifactError>,
         mut signal: impl FnMut(libc::pid_t) -> Result<(), Spec034ReleaseArtifactError>,
     ) -> Result<(), Spec034ReleaseArtifactError> {
         let termination = match capture(self.pid) {
@@ -88,8 +90,8 @@ impl ExecutionChild {
 }
 
 fn signal_process_group(pid: libc::pid_t) -> Result<(), Spec034ReleaseArtifactError> {
-    let group = rustix::process::Pid::from_raw(pid)
-        .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
+    let group =
+        rustix::process::Pid::from_raw(pid).ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
     match rustix::process::kill_process_group(group, rustix::process::Signal::KILL) {
         Ok(()) => Ok(()),
         Err(error) if error == rustix::io::Errno::SRCH => Ok(()),
@@ -129,15 +131,24 @@ mod tests {
         let identity = super::super::capture_process_identity(pid)?;
         std::mem::forget(child);
 
-        let panic = std::panic::catch_unwind(|| {
-            let _guard = ExecutionChild { pid, identity, status: None, cleaned: false };
+        let panicked = std::thread::spawn(move || {
+            let _guard = ExecutionChild {
+                pid,
+                identity,
+                status: None,
+                cleaned: false,
+            };
             panic!("exercise guard drop");
-        });
+        })
+        .join();
 
-        assert!(panic.is_err());
+        assert!(panicked.is_err());
         for _ in 0..200 {
             let target = nix::unistd::Pid::from_raw(pid);
-            if matches!(nix::sys::signal::kill(target, None), Err(nix::errno::Errno::ESRCH)) {
+            if matches!(
+                nix::sys::signal::kill(target, None),
+                Err(nix::errno::Errno::ESRCH)
+            ) {
                 return Ok(());
             }
             std::thread::yield_now();
@@ -175,7 +186,11 @@ mod tests {
 
         let result = child.terminate_and_reap_with(
             |_| Ok(expected.clone()),
-            |_| Err(Spec034ReleaseArtifactError::Io(std::io::Error::other("signal"))),
+            |_| {
+                Err(Spec034ReleaseArtifactError::Io(std::io::Error::other(
+                    "signal",
+                )))
+            },
         );
 
         assert!(result.is_err());
@@ -205,7 +220,10 @@ mod tests {
             },
         );
 
-        assert!(matches!(result, Err(Spec034ReleaseArtifactError::CleanupIdentityMismatch)));
+        assert!(matches!(
+            result,
+            Err(Spec034ReleaseArtifactError::CleanupIdentityMismatch)
+        ));
         assert_eq!(signals, 0);
         assert!(child.status.is_some());
         Ok(())

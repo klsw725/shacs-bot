@@ -1,10 +1,16 @@
-use super::*;
+use super::{process_due_automation, AgentLoopChatCompletionAdapter, AutomationOwnerAdapters};
 use sha2::{Digest, Sha256};
+use shacs_core::runtime::{
+    AutomationDispatchRequest, AutomationExecutionReceipt, AutomationHookEvaluation,
+    AutomationJobResult, ExecutionSnapshot,
+};
 use shacs_eval::completion_boundary::EvaluatorRoute;
 use shacs_eval::evaluator::{
     ConfidenceBand, EvidenceKind, EvidenceRef, ProjectionStatus, RedactionStatus,
     ReplayDatasetItem, TaskOutcomeClass, VerdictKind,
 };
+use shacs_providers::ProviderRequest;
+use std::path::Path;
 use std::sync::Mutex;
 
 pub(crate) fn record_no_provider_trajectory(

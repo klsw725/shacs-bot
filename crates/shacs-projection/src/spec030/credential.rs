@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    CredentialFingerprintStatus, CredentialSource, CredentialStatus, RefreshSerializationStatus,
+    Spec030Availability,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -36,8 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::time::{timeout, Duration};
 
 // allow: SIZE_OK — preexisting API facade; new media behavior lives in focused media_api modules
@@ -590,9 +589,8 @@ impl WebSocketQueueAccounting {
             let envelope = self
                 .tracker
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .observe_ws_delivery(&key, delivery, observation);
-            if let Ok(Some(envelope)) = envelope {
+                .map(|mut tracker| tracker.observe_ws_delivery(&key, delivery, observation));
+            if let Ok(Ok(Some(envelope))) = envelope {
                 observe_spec031_envelope(self.observer.as_ref(), envelope);
             }
         }
@@ -633,7 +631,7 @@ impl WebSocketReconnectScope {
     fn prime(&mut self, connection: StreamConnectionState) {
         self.registered
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("stream connection registry lock poisoned")
             .insert(connection.key.clone(), connection.clone());
         self.touch(&connection.key);
         self.by_key.insert(connection.key.clone(), connection);
@@ -649,12 +647,12 @@ impl WebSocketReconnectScope {
         self.by_key.entry(key.clone()).or_insert_with(|| {
             self.registered
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .expect("stream connection registry lock poisoned")
                 .entry(key.clone())
                 .or_insert_with(|| {
                     tracker
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .expect("reconnect tracker lock poisoned")
                         .connect_ws(&key)
                 })
                 .clone()
@@ -685,7 +683,7 @@ impl WebSocketReconnectScope {
                 self.by_key.remove(&candidate);
                 self.registered
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .expect("stream connection registry lock poisoned")
                     .remove(&candidate);
             }
         }
@@ -1621,7 +1619,7 @@ async fn handle_websocket_connection(
         let connection = state
             .reconnect_tracker
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("reconnect tracker lock poisoned")
             .connect_ws(&key);
         let generation = connection.generation;
         let reconnect_gap = connection.gap;
@@ -1805,7 +1803,7 @@ async fn send_websocket_event_with_observation(
         }
         reconnect_tracker
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map_err(|_| ApiError::internal("reconnect tracker lock poisoned"))?
             .record_ws(ws_connection, reconnect_observation.sequence);
         return Err(ApiError::internal("websocket client disconnected"));
     }
@@ -1840,13 +1838,13 @@ async fn send_websocket_event_with_observation(
         observe_spec031_envelope(spec031_channel_observer, envelope);
         reconnect_tracker
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map_err(|_| ApiError::internal("reconnect tracker lock poisoned"))?
             .record_ws(ws_connection, reconnect_observation.sequence);
         return Err(ApiError::internal("websocket client disconnected"));
     }
     reconnect_tracker
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .map_err(|_| ApiError::internal("reconnect tracker lock poisoned"))?
         .record_ws(ws_connection, reconnect_observation.sequence);
     observe_spec031_envelope(spec031_channel_observer, envelope);
     Ok(())
@@ -2381,10 +2379,14 @@ fn stream_chat_request_axum(
         .as_deref()
         .map(|client_id| spec035_reconnect::stable_reconnect_key(client_id, &session_key))
         .unwrap_or_else(|| session_key.clone());
-    let sse_connection = reconnect_tracker
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .connect_sse(&reconnect_key, reconnect.last_event_id.as_deref());
+    let sse_connection = match reconnect_tracker.lock() {
+        Ok(mut tracker) => tracker.connect_sse(&reconnect_key, reconnect.last_event_id.as_deref()),
+        Err(_) => {
+            return axum_response_from_api(error_response(ApiError::internal(
+                "reconnect tracker lock poisoned",
+            )))
+        }
+    };
     let spec035_bootstrap = match reconnect.spec035_client_id {
         Some(_) => match spec035_reconnect::Spec035ReconnectConnection::bootstrap(
             adapter.as_ref(),
@@ -2514,7 +2516,7 @@ fn stream_chat_request_axum(
                         }
                         reconnect_tracker
                             .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .map_err(|_| ApiError::internal("reconnect tracker lock poisoned"))?
                             .record_sse(&sse_connection, reconnect_observation.sequence);
                     }
                     if tx
@@ -3124,11 +3126,10 @@ mod tests {
     use shacs_session::{Session, SessionManager};
     use socket2::SockRef;
     use std::error::Error;
-    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
-    use std::thread;
     use std::time::Duration as StdDuration;
+    use std::{fs, thread};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::oneshot;

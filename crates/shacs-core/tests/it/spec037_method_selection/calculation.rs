@@ -12,7 +12,13 @@ impl Tool for ScriptedExec {
         json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})
     }
     fn execute(&self, _: JsonMap) -> ToolResult {
-        ToolResult::Text(self.0.lock().unwrap().pop_front().expect("unexpected exec"))
+        ToolResult::Text(
+            self.0
+                .lock()
+                .expect("exec outputs lock poisoned")
+                .pop_front()
+                .expect("unexpected exec"),
+        )
     }
 }
 

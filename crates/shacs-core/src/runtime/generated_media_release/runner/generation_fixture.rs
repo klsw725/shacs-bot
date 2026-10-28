@@ -1,4 +1,7 @@
 use super::*;
+use crate::runtime::generated_media_release::model::{
+    PortableCommandRecord, PortableProcessReceipt,
+};
 use shacs_projection::{
     Spec031ReleaseCommandStatus, Spec031ReleaseGateKind, Spec031ReleaseTestCounts,
 };
@@ -9,15 +12,10 @@ pub(crate) fn fixture_results(
     source_digest: &str,
     toolchain: &super::super::super::tools::ResolvedToolchain,
 ) -> Result<ResultsDocument, Spec034ReleaseArtifactError> {
-    let commands = super::super::command_specs::COMMAND_SPECS.iter().map(|spec| {
-        command(
-            output,
-            source_digest,
-            toolchain,
-            spec,
-        )
-    })
-    .collect::<Result<Vec<_>, _>>()?;
+    let commands = super::super::command_specs::COMMAND_SPECS
+        .iter()
+        .map(|spec| command(output, source_digest, toolchain, spec))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(ResultsDocument {
         schema: "spec034.results.v2".to_owned(),
         run_id: config.run_id.clone(),

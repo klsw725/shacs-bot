@@ -1,5 +1,6 @@
 use super::{Spec031Lineage, Spec031Reason};
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Spec031ConstructionViolation {

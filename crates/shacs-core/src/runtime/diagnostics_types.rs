@@ -8,7 +8,8 @@ use crate::runtime::{
     StaticPolicyPrecedence, WorkspaceComparisonOutcome,
 };
 use serde::{Deserialize, Serialize, Serializer};
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 pub struct CoreDiagnosticsAggregateInput<'a> {
     pub permission: &'a PermissionDiagnosticsSummary,
@@ -168,6 +169,8 @@ where
     serializer.serialize_str(&safe_string(value))
 }
 
+// Allowed: serde `serialize_with` passes the field as `&Option<String>`.
+#[allow(clippy::ref_option)]
 fn serialize_optional_safe_string<S>(
     value: &Option<String>,
     serializer: S,

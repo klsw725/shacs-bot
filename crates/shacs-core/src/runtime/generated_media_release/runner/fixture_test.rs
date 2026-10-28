@@ -98,7 +98,10 @@ fn digest_stays_bound_when_fixture_root_is_replaced() -> Result<(), Box<dyn std:
 
     assert_eq!(
         rows[0].digest,
-        format!("sha256:{:x}", Sha256::digest(catalog::FIXTURES[0].as_bytes()))
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(catalog::FIXTURES[0].as_bytes())
+        )
     );
     Ok(())
 }

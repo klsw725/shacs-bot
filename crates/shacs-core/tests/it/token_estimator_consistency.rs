@@ -19,7 +19,7 @@ impl ProviderClient for CapturingClient {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
         self.requests
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("requests lock poisoned")
             .push(request);
         Ok(LlmResponse {
             content: Some("ok".to_owned()),
@@ -73,9 +73,7 @@ fn live_agent_loop_snapshot_uses_handoff_estimator_and_evidence() {
         .first()
         .unwrap_or_else(|| panic!("execution snapshot missing"));
     let estimator = select_token_estimator("anthropic", "claude-test");
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock().expect("requests lock poisoned");
     let request = requests
         .first()
         .unwrap_or_else(|| panic!("provider request missing"));

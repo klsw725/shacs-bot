@@ -1,9 +1,11 @@
-use super::*;
+use super::seal::FinalStagingSeal;
+use super::{open_child, EvidenceDestination, Spec034ReleaseArtifactError};
 use crate::runtime::generated_media_release::artifacts::ArtifactSnapshot;
 use rustix::fd::AsFd;
-use rustix::fs::{fstat, AtFlags};
-use super::seal::FinalStagingSeal;
-use std::path::PathBuf;
+use rustix::fs::{fstat, statat, AtFlags};
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::path::{Path, PathBuf};
 
 pub struct StagingDirectory {
     directory: Option<tempfile::TempDir>,
@@ -44,7 +46,8 @@ impl StagingDirectory {
         if !same_handle_path(&self.parent, &self.name, &self.handle) {
             return Err(Spec034ReleaseArtifactError::InvalidConfig);
         }
-        let staging = fstat(&self.handle).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
+        let staging =
+            fstat(&self.handle).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
         let parent = fstat(&self.parent).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
         (staging.st_dev == parent.st_dev)
             .then_some(())
@@ -129,12 +132,8 @@ impl StagingDirectory {
     ) -> Result<ValidatedStagingDirectory, Spec034ReleaseArtifactError> {
         let approved = ArtifactSnapshot::capture(self.path())?;
         let marker = self.write_marker(run_id, &approved)?;
-        let seal = FinalStagingSeal::capture_for_test(
-            &self.handle,
-            approved,
-            marker,
-            after_inventory,
-        )?;
+        let seal =
+            FinalStagingSeal::capture_for_test(&self.handle, approved, marker, after_inventory)?;
         Ok(ValidatedStagingDirectory {
             staging: self,
             seal,

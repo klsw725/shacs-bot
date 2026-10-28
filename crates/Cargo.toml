@@ -24,6 +24,16 @@ members = [
 ]
 resolver = "2"
 
+# Google Rust style guide checks (https://google.github.io/styleguide/rustguide.html).
+# Disallowed methods are configured in clippy.toml.
+[workspace.lints.clippy]
+missing_panics_doc = "warn"
+needless_for_each = "warn"
+ref_option = "warn"
+undocumented_unsafe_blocks = "warn"
+unwrap_used = "warn"
+wildcard_imports = "warn"
+
 [profile.dev]
 debug = 0
 

@@ -1,11 +1,13 @@
-use super::*;
+use super::{PublicationStage, PublicationStatusDocument, Spec034ReleaseArtifactError};
 use crate::runtime::generated_media_release::artifacts::{
     digest_bytes, ArtifactMetadata, ArtifactSnapshot,
 };
 use crate::runtime::generated_media_release::source::validate_locator;
-use rustix::fs::{openat, Mode, OFlags};
-use std::io::Read;
+use rustix::fs::{openat, statat, AtFlags, Mode, OFlags};
 use sha2::{Digest, Sha256};
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::Read;
 
 const MAX_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -44,8 +46,8 @@ impl FinalStagingSeal {
         marker: super::marker::FsyncedMarker,
         after_inventory: impl FnOnce(),
     ) -> Result<Self, Spec034ReleaseArtifactError> {
-        let status: PublicationStatusDocument = serde_json::from_slice(&marker.bytes)
-            .map_err(Spec034ReleaseArtifactError::Json)?;
+        let status: PublicationStatusDocument =
+            serde_json::from_slice(&marker.bytes).map_err(Spec034ReleaseArtifactError::Json)?;
         let current = Self::capture_stable(handle, after_inventory)?;
         if current.root.device() != approved.root_metadata().device()
             || current.root.inode() != approved.root_metadata().inode()
@@ -87,9 +89,7 @@ impl FinalStagingSeal {
             .ok_or(Spec034ReleaseArtifactError::DigestMismatch)
     }
 
-    fn capture_once(
-        handle: &File,
-    ) -> Result<Self, Spec034ReleaseArtifactError> {
+    fn capture_once(handle: &File) -> Result<Self, Spec034ReleaseArtifactError> {
         let identity = handle.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
         let mut names = cap_primitives::fs::read_base_dir(handle)
             .map_err(Spec034ReleaseArtifactError::Io)?
@@ -111,7 +111,9 @@ impl FinalStagingSeal {
             let descriptor = openat(
                 handle,
                 name.as_str(),
-                OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC),
+                OFlags::RDONLY
+                    .union(OFlags::NOFOLLOW)
+                    .union(OFlags::CLOEXEC),
                 Mode::empty(),
             )
             .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
@@ -133,8 +135,8 @@ impl FinalStagingSeal {
                 return Err(Spec034ReleaseArtifactError::DigestMismatch);
             }
             if name == super::marker::STATUS_FINAL {
-                let status: PublicationStatusDocument = serde_json::from_slice(&bytes)
-                    .map_err(Spec034ReleaseArtifactError::Json)?;
+                let status: PublicationStatusDocument =
+                    serde_json::from_slice(&bytes).map_err(Spec034ReleaseArtifactError::Json)?;
                 content_digest = Some(status.content_digest);
             }
             entries.push(SealedEntry {
@@ -175,12 +177,11 @@ impl FinalStagingSeal {
         parent: &File,
         name: &OsStr,
     ) -> Result<(), Spec034ReleaseArtifactError> {
-        let identity = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(|_| unknown())?;
+        let identity = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| unknown())?;
         (device_as_u64(identity.st_dev)? == self.root.device()
             && identity.st_ino == self.root.inode())
-            .then_some(())
-            .ok_or_else(unknown)
+        .then_some(())
+        .ok_or_else(unknown)
     }
 
     pub(super) fn verify_post_rename(

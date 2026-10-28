@@ -4,7 +4,9 @@ use shacs_config::{save_config_to_path, Config};
 use shacs_projection::{
     Spec031Availability, Spec031ReadinessComponentKind, Spec031ReadinessRequirement,
 };
-use std::{error::Error, fs, path::Path};
+use std::error::Error;
+use std::fs;
+use std::path::Path;
 
 type TestResult = Result<(), Box<dyn Error>>;
 

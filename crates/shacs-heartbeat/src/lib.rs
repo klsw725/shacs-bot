@@ -8,13 +8,12 @@ use shacs_eval::evaluator::{
 use shacs_providers::{
     GenerationSettings, LlmResponse, ProviderClient, ProviderError, ProviderRequest,
 };
-use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::{fmt, fs};
 
 pub const HEARTBEAT_FILE_NAME: &str = "HEARTBEAT.md";
 pub const HEARTBEAT_TOOL_NAME: &str = "heartbeat";
@@ -226,14 +225,7 @@ impl HeartbeatWorker {
         let interval = Duration::from_secs(service.interval_s().max(1));
         let handle = thread::spawn(move || {
             while !thread_stop.load(Ordering::SeqCst) {
-                let (lock, condvar) = &*thread_wake;
-                let pending = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                let (mut pending, _) = condvar
-                    .wait_timeout_while(pending, interval, |pending| {
-                        !*pending && !thread_stop.load(Ordering::SeqCst)
-                    })
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                *pending = false;
+                wait_for_wake(&thread_wake, interval, &thread_stop);
                 if thread_stop.load(Ordering::SeqCst) {
                     break;
                 }
@@ -255,7 +247,9 @@ impl HeartbeatWorker {
 
     pub fn wake(&self) {
         let (lock, condvar) = &*self.wake;
-        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        if let Ok(mut pending) = lock.lock() {
+            *pending = true;
+        }
         condvar.notify_all();
     }
 
@@ -272,6 +266,17 @@ impl HeartbeatWorker {
             Ok(())
         }
     }
+}
+
+fn wait_for_wake(wake: &(Mutex<bool>, Condvar), interval: Duration, stop: &AtomicBool) {
+    let (lock, condvar) = wake;
+    let pending = lock.lock().expect("heartbeat wake lock poisoned");
+    let (mut pending, _) = condvar
+        .wait_timeout_while(pending, interval, |pending| {
+            !*pending && !stop.load(Ordering::SeqCst)
+        })
+        .expect("heartbeat wake lock poisoned");
+    *pending = false;
 }
 
 impl Drop for HeartbeatWorker {

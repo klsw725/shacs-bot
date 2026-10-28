@@ -69,7 +69,7 @@ impl ProviderClient for FixtureProvider {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.responses
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("responses lock poisoned")
             .pop_front()
             .ok_or_else(|| provider_error("unexpected provider retry"))
     }

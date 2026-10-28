@@ -1,4 +1,4 @@
-use super::*;
+use super::{digest_bytes, PortableToolIdentity, ResolvedToolchain, Spec034ReleaseArtifactError};
 
 pub(in crate::runtime::generated_media_release) struct RetiredToolchain {
     cargo: PortableToolIdentity,
@@ -32,7 +32,9 @@ impl ResolvedToolchain {
     }
 
     #[cfg(not(test))]
-    pub(in crate::runtime::generated_media_release) fn verify_execution_ledger(&self) -> Result<(), Spec034ReleaseArtifactError> {
+    pub(in crate::runtime::generated_media_release) fn verify_execution_ledger(
+        &self,
+    ) -> Result<(), Spec034ReleaseArtifactError> {
         self.linker_receipts.verify()?;
         self.ledger.verify()
     }
@@ -45,11 +47,15 @@ impl ResolvedToolchain {
         self.linker_receipts.verify_identity(identity)
     }
 
-    pub(in crate::runtime::generated_media_release) fn linker_attestation_digest(&self) -> Result<String, Spec034ReleaseArtifactError> {
+    pub(in crate::runtime::generated_media_release) fn linker_attestation_digest(
+        &self,
+    ) -> Result<String, Spec034ReleaseArtifactError> {
         self.linker_receipts.attestation_digest()
     }
 
-    pub(in crate::runtime::generated_media_release) fn binding_digest(&self) -> Result<String, Spec034ReleaseArtifactError> {
+    pub(in crate::runtime::generated_media_release) fn binding_digest(
+        &self,
+    ) -> Result<String, Spec034ReleaseArtifactError> {
         self.verify()?;
         let bytes = serde_json::to_vec(&(
             self.cargo.identity(),
@@ -58,18 +64,22 @@ impl ResolvedToolchain {
             &self.cargo.runtime_inventory,
             &self.rustc.runtime_inventory,
             &self.rustdoc.runtime_inventory,
-            self.cache_binding.as_ref().map(|binding| (
-                &binding.source_closure_digest,
-                &binding.manifest_digest,
-                &binding.tree_digest,
-            )),
+            self.cache_binding.as_ref().map(|binding| {
+                (
+                    &binding.source_closure_digest,
+                    &binding.manifest_digest,
+                    &binding.tree_digest,
+                )
+            }),
             self.linker_attestation_digest()?,
             #[cfg(not(test))]
-            self.vendor_binding.as_ref().map(|binding| (
-                &binding.lock_digest,
-                &binding.tree_digest,
-                &binding.inventory_digest,
-            )),
+            self.vendor_binding.as_ref().map(|binding| {
+                (
+                    &binding.lock_digest,
+                    &binding.tree_digest,
+                    &binding.inventory_digest,
+                )
+            }),
         ))
         .map_err(Spec034ReleaseArtifactError::Json)?;
         Ok(digest_bytes(&bytes))
@@ -89,11 +99,15 @@ impl ResolvedToolchain {
 }
 
 impl RetiredToolchain {
-    pub(in crate::runtime::generated_media_release) fn cargo_identity(&self) -> &PortableToolIdentity {
+    pub(in crate::runtime::generated_media_release) fn cargo_identity(
+        &self,
+    ) -> &PortableToolIdentity {
         &self.cargo
     }
 
-    pub(in crate::runtime::generated_media_release) fn rustc_identity(&self) -> &PortableToolIdentity {
+    pub(in crate::runtime::generated_media_release) fn rustc_identity(
+        &self,
+    ) -> &PortableToolIdentity {
         &self.rustc
     }
 

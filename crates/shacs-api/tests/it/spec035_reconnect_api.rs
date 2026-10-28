@@ -4,13 +4,13 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use shacs_api::serve_api_listener;
 use spec035_reconnect_support::{adapter, release_events};
-use std::env;
-use std::fs;
 use std::path::PathBuf;
+use std::{env, fs};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{client_async, WebSocketStream};
 
 #[tokio::test]
 async fn sse_reconnect_uses_stable_identity_across_two_source_ports(

@@ -50,7 +50,7 @@ impl SessionTurnLock {
         session_key: String,
         consume_pending_cancellation: bool,
     ) -> Result<SessionTurnGuard, SessionTurnAcquireError> {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         let pending_cancellation = if consume_pending_cancellation {
             match state.reserved_sessions.get(&session_key) {
                 Some(reservation) if reservation.cancelled => {
@@ -86,15 +86,11 @@ impl SessionTurnLock {
     }
 
     pub fn active_session_keys(&self) -> Vec<String> {
-        recover_lock(&self.state)
-            .active_sessions
-            .keys()
-            .cloned()
-            .collect()
+        lock(&self.state).active_sessions.keys().cloned().collect()
     }
 
     pub fn busy_session_keys(&self) -> Vec<String> {
-        let state = recover_lock(&self.state);
+        let state = lock(&self.state);
         let mut keys = state
             .active_sessions
             .keys()
@@ -105,20 +101,18 @@ impl SessionTurnLock {
     }
 
     pub fn is_active(&self, session_key: &str) -> bool {
-        recover_lock(&self.state)
-            .active_sessions
-            .contains_key(session_key)
+        lock(&self.state).active_sessions.contains_key(session_key)
     }
 
     pub fn is_busy(&self, session_key: &str) -> bool {
-        let state = recover_lock(&self.state);
+        let state = lock(&self.state);
         state.active_sessions.contains_key(session_key)
             || state.reserved_sessions.contains_key(session_key)
     }
 
     pub fn reserve(&self, session_key: impl Into<String>) -> SessionTurnReservation {
         let session_key = session_key.into();
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         state.next_reservation_id = state.next_reservation_id.wrapping_add(1);
         let id = state.next_reservation_id;
         state.reserved_sessions.insert(
@@ -137,14 +131,11 @@ impl SessionTurnLock {
     }
 
     pub fn cancellation_token(&self, session_key: &str) -> Option<CancellationToken> {
-        recover_lock(&self.state)
-            .active_sessions
-            .get(session_key)
-            .cloned()
+        lock(&self.state).active_sessions.get(session_key).cloned()
     }
 
     pub fn cancel(&self, session_key: &str) -> bool {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         if let Some(token) = state.active_sessions.get(session_key) {
             token.cancel();
             true
@@ -154,7 +145,7 @@ impl SessionTurnLock {
     }
 
     pub fn cancel_active_or_reserved(&self, session_key: &str) -> SessionTurnCancelOutcome {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         if let Some(token) = state.active_sessions.get(session_key) {
             token.cancel();
             SessionTurnCancelOutcome::Active
@@ -183,7 +174,7 @@ pub struct SessionTurnReservation {
 
 impl SessionTurnReservation {
     pub fn bind_to_current_thread(&self) {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         if let Some(reservation) = state.reserved_sessions.get_mut(&self.session_key) {
             if reservation.id == self.id && !reservation.cancelled {
                 reservation.owner = Some(std::thread::current().id());
@@ -194,7 +185,10 @@ impl SessionTurnReservation {
 
 impl Drop for SessionTurnReservation {
     fn drop(&mut self) {
-        let mut state = recover_lock(&self.state);
+        // Drop must not panic: a second panic while unwinding aborts the process.
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
         if state
             .reserved_sessions
             .get(&self.session_key)
@@ -225,9 +219,10 @@ impl SessionTurnGuard {
 
 impl Drop for SessionTurnGuard {
     fn drop(&mut self) {
-        recover_lock(&self.state)
-            .active_sessions
-            .remove(&self.session_key);
+        // Drop must not panic: a second panic while unwinding aborts the process.
+        if let Ok(mut state) = self.state.lock() {
+            state.active_sessions.remove(&self.session_key);
+        }
     }
 }
 
@@ -354,7 +349,7 @@ impl LoopTaskRegistry {
     }
 
     pub fn register(&self, task: ActiveLoopTask) -> LoopTaskRegisterResult {
-        let mut tasks = recover_lock(&self.tasks);
+        let mut tasks = lock(&self.tasks);
         if tasks.contains_key(task.session_key()) {
             return LoopTaskRegisterResult::DuplicateActive {
                 session_key: task.session_key().to_owned(),
@@ -365,13 +360,13 @@ impl LoopTaskRegistry {
     }
 
     pub fn complete(&self, session_key: &str) -> Option<ActiveLoopTaskSnapshot> {
-        recover_lock(&self.tasks)
+        lock(&self.tasks)
             .remove(session_key)
             .map(|task| task.snapshot())
     }
 
     pub fn cancel(&self, session_key: &str) -> LoopTaskCancelResult {
-        let tasks = recover_lock(&self.tasks);
+        let tasks = lock(&self.tasks);
         let Some(task) = tasks.get(session_key) else {
             return LoopTaskCancelResult::NoAsyncTask;
         };
@@ -380,19 +375,19 @@ impl LoopTaskRegistry {
     }
 
     pub fn snapshot(&self, session_key: &str) -> Option<ActiveLoopTaskSnapshot> {
-        recover_lock(&self.tasks)
+        lock(&self.tasks)
             .get(session_key)
             .map(ActiveLoopTask::snapshot)
     }
 
     pub fn cancellation_token(&self, session_key: &str) -> Option<CancellationToken> {
-        recover_lock(&self.tasks)
+        lock(&self.tasks)
             .get(session_key)
             .map(ActiveLoopTask::cancellation_token)
     }
 
     pub fn snapshots(&self) -> Vec<ActiveLoopTaskSnapshot> {
-        recover_lock(&self.tasks)
+        lock(&self.tasks)
             .values()
             .map(ActiveLoopTask::snapshot)
             .collect()
@@ -445,6 +440,35 @@ impl StreamDeltaCoalescer {
     }
 }
 
-fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
-    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().expect("lock poisoned by a panicking thread")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionTurnLock;
+    use std::sync::Arc;
+
+    #[test]
+    fn turn_guards_drop_without_panicking_after_the_state_lock_is_poisoned() {
+        // Given
+        let turn_lock = SessionTurnLock::new();
+        let reservation = turn_lock.reserve("chat:reserved");
+        let guard = turn_lock
+            .acquire("chat:active")
+            .expect("an idle session can be acquired");
+        let state = Arc::clone(&turn_lock.state);
+        let poisoner = std::thread::spawn(move || {
+            let _held = state.lock();
+            panic!("poison the session turn state");
+        });
+        assert!(
+            poisoner.join().is_err(),
+            "the helper thread panics while holding the state lock"
+        );
+
+        // When / Then: dropping either guard must not panic.
+        drop(guard);
+        drop(reservation);
+    }
 }

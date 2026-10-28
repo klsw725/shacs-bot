@@ -3,12 +3,10 @@ mod tui_session;
 
 use shacs_core::runtime::SurfaceAction;
 use shacs_projection::{Spec030RuntimeProjection, Spec030UnavailableReason};
-use shacs_tui::{
-    input::TuiInput,
-    state::{ApprovalLineage, RuntimeSnapshot, SessionKey, TuiState},
-    update::{apply_input, apply_snapshot, approval_by_lineage, UpdateEffect},
-    view::render_lines,
-};
+use shacs_tui::input::TuiInput;
+use shacs_tui::state::{ApprovalLineage, RuntimeSnapshot, SessionKey, TuiState};
+use shacs_tui::update::{apply_input, apply_snapshot, approval_by_lineage, UpdateEffect};
+use shacs_tui::view::render_lines;
 use std::error::Error;
 use tui_session::fixture_session;
 

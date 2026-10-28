@@ -47,7 +47,7 @@ impl Spec030FactStore {
 
     pub fn snapshot(&self) -> Spec030FactSnapshot {
         Spec030FactSnapshot {
-            input: recover_lock(&self.state).clone(),
+            input: lock(&self.state).clone(),
         }
     }
 
@@ -56,7 +56,7 @@ impl Spec030FactStore {
     }
 
     pub(crate) fn publish_hooks(&self, hooks: HookRuntimeProjection) {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         match &mut *state {
             TrustedRuntimeInput::Available(facts) => facts.hooks = hooks,
             TrustedRuntimeInput::Unavailable(_) => {}
@@ -64,7 +64,7 @@ impl Spec030FactStore {
     }
 
     pub(crate) fn hook_projection(&self) -> Option<HookRuntimeProjection> {
-        match &*recover_lock(&self.state) {
+        match &*lock(&self.state) {
             TrustedRuntimeInput::Available(facts) => Some(facts.hooks.clone()),
             TrustedRuntimeInput::Unavailable(_) => None,
         }
@@ -114,7 +114,7 @@ impl Spec030FactStore {
         adapter: ProcessAdapterKind,
         outcome: ProcessOutcomeProjection,
     ) -> Result<(), Spec030FactStoreError> {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         let facts = available_facts(&mut state)?;
         let observation = facts
             .process_adapters
@@ -169,7 +169,7 @@ impl Spec030FactStore {
         &self,
         update: impl FnOnce(&mut TrustedRuntimeOwnerFacts),
     ) -> Result<(), Spec030FactStoreError> {
-        let mut state = recover_lock(&self.state);
+        let mut state = lock(&self.state);
         update(available_facts(&mut state)?);
         Ok(())
     }
@@ -258,6 +258,6 @@ const fn capabilities_present(capabilities: shacs_projection::ProcessAdapterCapa
         || capabilities.generation_fencing
 }
 
-fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
-    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().expect("lock poisoned by a panicking thread")
 }

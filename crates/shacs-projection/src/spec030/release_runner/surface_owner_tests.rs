@@ -1,8 +1,6 @@
+use super::model::{Spec030ReleaseRunId, Spec030ReleaseRunnerConfig, Spec030ReleaseRunnerMode};
 use super::surface_owner::ephemeral_port;
-use super::{
-    model::{Spec030ReleaseRunId, Spec030ReleaseRunnerConfig, Spec030ReleaseRunnerMode},
-    surface_runner::prepare,
-};
+use super::surface_runner::prepare;
 use crate::release_evidence::EvidenceWriter;
 use std::net::TcpListener;
 use std::path::PathBuf;

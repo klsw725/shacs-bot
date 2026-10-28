@@ -1,4 +1,6 @@
-use super::super::*;
+use super::super::AgentLoopChatCompletionAdapter;
+use shacs_core::runtime::ContextBuilder;
+use std::path::Path;
 
 impl AgentLoopChatCompletionAdapter {
     pub(crate) fn context_builder(&self) -> ContextBuilder {

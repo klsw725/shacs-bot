@@ -79,8 +79,7 @@ fn cleanup_accepts_expected_root_content_changes() -> Result<(), Spec034ReleaseA
         .parent()
         .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?
         .to_path_buf();
-    std::fs::create_dir(root.join("expected-output"))
-        .map_err(Spec034ReleaseArtifactError::Io)?;
+    std::fs::create_dir(root.join("expected-output")).map_err(Spec034ReleaseArtifactError::Io)?;
 
     isolation.cleanup()?;
 
@@ -93,13 +92,18 @@ fn cleanup_accepts_expected_root_content_changes() -> Result<(), Spec034ReleaseA
 fn cleanup_proves_normal_retained_root_unlink() -> Result<(), Spec034ReleaseArtifactError> {
     // Given: an unchanged retained isolation root with a normal parent entry.
     let parent = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
-    let canonical = parent.path().canonicalize().map_err(Spec034ReleaseArtifactError::Io)?;
+    let canonical = parent
+        .path()
+        .canonicalize()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     let repo = canonical.join("repo");
     std::fs::create_dir(&repo).map_err(Spec034ReleaseArtifactError::Io)?;
     let isolation = RunnerIsolation::prepare(&repo, &canonical.join("evidence"), None)?;
-    let root = isolation.source_parent().parent().ok_or(
-        Spec034ReleaseArtifactError::InvalidConfig,
-    )?.to_path_buf();
+    let root = isolation
+        .source_parent()
+        .parent()
+        .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?
+        .to_path_buf();
 
     // When: cleanup unlinks the exact parent entry.
     let cleanup = isolation.cleanup()?;
@@ -117,25 +121,44 @@ fn cleanup_rejects_renamed_root_and_preserves_same_uid_replacement(
     use std::os::unix::fs::MetadataExt;
     // Given: retained root A is moved away and same-owner replacement B takes its name.
     let parent = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
-    let canonical = parent.path().canonicalize().map_err(Spec034ReleaseArtifactError::Io)?;
+    let canonical = parent
+        .path()
+        .canonicalize()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     let repo = canonical.join("repo");
     std::fs::create_dir(&repo).map_err(Spec034ReleaseArtifactError::Io)?;
     let isolation = RunnerIsolation::prepare(&repo, &canonical.join("evidence"), None)?;
-    let root = isolation.source_parent().parent().ok_or(
-        Spec034ReleaseArtifactError::InvalidConfig,
-    )?.to_path_buf();
+    let root = isolation
+        .source_parent()
+        .parent()
+        .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?
+        .to_path_buf();
     let displaced = canonical.join("displaced-a");
     std::fs::rename(&root, &displaced).map_err(Spec034ReleaseArtifactError::Io)?;
     std::fs::create_dir(&root).map_err(Spec034ReleaseArtifactError::Io)?;
     std::fs::write(root.join("replacement"), b"B").map_err(Spec034ReleaseArtifactError::Io)?;
-    assert_eq!(root.metadata().map_err(Spec034ReleaseArtifactError::Io)?.uid(), displaced.metadata().map_err(Spec034ReleaseArtifactError::Io)?.uid());
+    assert_eq!(
+        root.metadata()
+            .map_err(Spec034ReleaseArtifactError::Io)?
+            .uid(),
+        displaced
+            .metadata()
+            .map_err(Spec034ReleaseArtifactError::Io)?
+            .uid()
+    );
 
     // When: cleanup attempts to retire the retained isolation.
     let result = isolation.cleanup();
 
     // Then: cleanup fails closed without deleting either the replacement or leaked A.
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })));
-    assert_eq!(std::fs::read(root.join("replacement")).map_err(Spec034ReleaseArtifactError::Io)?, b"B");
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })
+    ));
+    assert_eq!(
+        std::fs::read(root.join("replacement")).map_err(Spec034ReleaseArtifactError::Io)?,
+        b"B"
+    );
     assert!(displaced.is_dir());
     Ok(())
 }
@@ -145,13 +168,18 @@ fn cleanup_rejects_renamed_root_and_preserves_same_uid_replacement(
 fn cleanup_rejects_root_a_b_a_swap() -> Result<(), Spec034ReleaseArtifactError> {
     // Given: A is displaced, B occupies A's name, B is restored, and A returns.
     let parent = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
-    let canonical = parent.path().canonicalize().map_err(Spec034ReleaseArtifactError::Io)?;
+    let canonical = parent
+        .path()
+        .canonicalize()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     let repo = canonical.join("repo");
     std::fs::create_dir(&repo).map_err(Spec034ReleaseArtifactError::Io)?;
     let isolation = RunnerIsolation::prepare(&repo, &canonical.join("evidence"), None)?;
-    let root = isolation.source_parent().parent().ok_or(
-        Spec034ReleaseArtifactError::InvalidConfig,
-    )?.to_path_buf();
+    let root = isolation
+        .source_parent()
+        .parent()
+        .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?
+        .to_path_buf();
     let displaced = canonical.join("displaced-a");
     let replacement = canonical.join("replacement-b");
     std::fs::create_dir(&replacement).map_err(Spec034ReleaseArtifactError::Io)?;
@@ -165,8 +193,14 @@ fn cleanup_rejects_root_a_b_a_swap() -> Result<(), Spec034ReleaseArtifactError> 
     let result = isolation.cleanup();
 
     // Then: rename history still invalidates cleanup and B remains untouched.
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })));
-    assert_eq!(std::fs::read(replacement.join("sentinel")).map_err(Spec034ReleaseArtifactError::Io)?, b"B");
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })
+    ));
+    assert_eq!(
+        std::fs::read(replacement.join("sentinel")).map_err(Spec034ReleaseArtifactError::Io)?,
+        b"B"
+    );
     Ok(())
 }
 
@@ -176,20 +210,28 @@ fn cleanup_rejects_event_uncertainty_without_constructing_proof(
 ) -> Result<(), Spec034ReleaseArtifactError> {
     // Given: an intact retained root whose vnode event history is uncertain.
     let parent = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
-    let canonical = parent.path().canonicalize().map_err(Spec034ReleaseArtifactError::Io)?;
+    let canonical = parent
+        .path()
+        .canonicalize()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     let repo = canonical.join("repo");
     std::fs::create_dir(&repo).map_err(Spec034ReleaseArtifactError::Io)?;
     let isolation = RunnerIsolation::prepare(&repo, &canonical.join("evidence"), None)?;
-    let root = isolation.source_parent().parent().ok_or(
-        Spec034ReleaseArtifactError::InvalidConfig,
-    )?.to_path_buf();
+    let root = isolation
+        .source_parent()
+        .parent()
+        .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?
+        .to_path_buf();
     RunnerIsolation::inject_next_monitor_uncertainty();
 
     // When: cleanup attempts to establish exact-root absence.
     let result = isolation.cleanup();
 
     // Then: no proof exists and the uncertain root is retained rather than deleted.
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })
+    ));
     assert!(root.is_dir());
     Ok(())
 }
@@ -200,13 +242,18 @@ fn cleanup_rejects_replacement_installed_immediately_before_unlink(
 ) -> Result<(), Spec034ReleaseArtifactError> {
     // Given: final path verification passes before A is displaced and empty B takes its name.
     let parent = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
-    let canonical = parent.path().canonicalize().map_err(Spec034ReleaseArtifactError::Io)?;
+    let canonical = parent
+        .path()
+        .canonicalize()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     let repo = canonical.join("repo");
     std::fs::create_dir(&repo).map_err(Spec034ReleaseArtifactError::Io)?;
     let isolation = RunnerIsolation::prepare(&repo, &canonical.join("evidence"), None)?;
-    let root = isolation.source_parent().parent().ok_or(
-        Spec034ReleaseArtifactError::InvalidConfig,
-    )?.to_path_buf();
+    let root = isolation
+        .source_parent()
+        .parent()
+        .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?
+        .to_path_buf();
     let displaced = canonical.join("late-displaced-a");
     let hook_displaced = displaced.clone();
     RunnerIsolation::inject_next_pre_unlink_hook(move |root| {
@@ -222,7 +269,10 @@ fn cleanup_rejects_replacement_installed_immediately_before_unlink(
     let replacement_preserved = root.is_dir();
     std::fs::remove_dir_all(&root).map_err(Spec034ReleaseArtifactError::Io)?;
     std::fs::remove_dir_all(&displaced).map_err(Spec034ReleaseArtifactError::Io)?;
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::CleanupResidual { leak_count: 1 })
+    ));
     assert!(original_remained_linked);
     assert!(replacement_preserved);
     Ok(())

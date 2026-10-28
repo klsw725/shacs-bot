@@ -31,12 +31,7 @@ pub(crate) fn prepare_run(mut spec: AgentRunSpec<'_>) -> (AgentRunSpec<'_>, Vec<
 }
 
 pub(crate) fn has_generated_artifacts() -> bool {
-    ACTIVE_ARTIFACT_SINKS.with(|sinks| {
-        sinks
-            .borrow()
-            .last()
-            .is_some_and(|sink| !sink.is_empty())
-    })
+    ACTIVE_ARTIFACT_SINKS.with(|sinks| sinks.borrow().last().is_some_and(|sink| !sink.is_empty()))
 }
 
 pub(super) fn observe_tool_message(message: &RuntimeToolMessage) {

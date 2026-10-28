@@ -254,10 +254,10 @@ Channel config는 원본 nanobot과 같은 `channels.<name>` 형태를 우선합
 
 ## 검증
 
-Cargo 명령은 `crates/Cargo.toml` workspace manifest를 명시해서 실행합니다:
+Cargo 명령은 `crates/Cargo.toml` workspace manifest를 명시해서 실행합니다. 코드 스타일은 [Google Rust Style Guide](https://google.github.io/styleguide/rustguide.html)를 따르며, 그중 rustfmt 옵션 두 개는 안정판 rustfmt에서 명령줄 `--config`로만 적용되므로 `cargo fmt`에 함께 붙입니다:
 
 ```sh
-cargo fmt --manifest-path crates/Cargo.toml --all -- --check
+cargo fmt --manifest-path crates/Cargo.toml --all -- --check --config imports_granularity=Module,format_macro_matchers=true
 cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings
 cargo test --manifest-path crates/Cargo.toml --workspace
 cargo clean --manifest-path crates/Cargo.toml
@@ -267,7 +267,7 @@ cargo build --manifest-path crates/Cargo.toml -p shacs-cli
 Channel crate를 수정한 경우:
 
 ```sh
-cargo fmt --manifest-path crates/Cargo.toml -p shacs-channels -- --check
+cargo fmt --manifest-path crates/Cargo.toml -p shacs-channels -- --check --config imports_granularity=Module,format_macro_matchers=true
 cargo clippy --manifest-path crates/Cargo.toml -p shacs-channels --all-targets -- -D warnings
 cargo test --manifest-path crates/Cargo.toml -p shacs-channels
 cargo clean --manifest-path crates/Cargo.toml

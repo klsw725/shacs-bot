@@ -1,6 +1,7 @@
 // allow: SIZE_OK — preexisting attachment catalog; Spec034 diff is two canonical analyzer terminal-status variants
 use crate::text::{detect_image_mime, safe_filename};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use shacs_redaction::redact_string;

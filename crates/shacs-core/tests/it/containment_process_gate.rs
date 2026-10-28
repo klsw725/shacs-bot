@@ -13,7 +13,8 @@ use shacs_core::runtime::{
     RedactedPolicySafetySummary, RuntimeBoundaryKind, RuntimeBoundaryOrigin, SafetyCapability,
     WorkspaceScopeProof,
 };
-use std::{cell::Cell, error::Error};
+use std::cell::Cell;
+use std::error::Error;
 
 #[test]
 fn process_gate_never_spawns_on_non_admitted_containment_proof() -> Result<(), Box<dyn Error>> {

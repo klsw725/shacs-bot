@@ -1,6 +1,5 @@
 use std::io::{self, BufRead, Write};
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 use crate::agent_repl::input::{parse_line, ReplInput};

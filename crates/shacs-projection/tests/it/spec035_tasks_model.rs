@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use shacs_projection::*;
-use std::{error::Error, fs};
+use std::error::Error;
+use std::fs;
 
 fn owner(kind: Spec035TaskOwnerKind, locator: &str) -> Result<Spec035TaskOwner, Box<dyn Error>> {
     Ok(Spec035TaskOwner::try_new(kind, locator)?)

@@ -1,6 +1,7 @@
 use super::support::{Fixture, TestResult, OWNER};
 use shacs_core::runtime::*;
-use shacs_session::{durable_event::SESSION_TURN_ACCEPTED, SessionManager};
+use shacs_session::durable_event::SESSION_TURN_ACCEPTED;
+use shacs_session::SessionManager;
 
 #[test]
 fn lifecycle_and_condition_changes_before_enqueue_suppress_notifications() -> TestResult {

@@ -63,8 +63,7 @@ fn birth(metadata: &Metadata) -> Result<(i64, i64), Spec034ReleaseArtifactError>
         .duration_since(UNIX_EPOCH)
         .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
     Ok((
-        i64::try_from(created.as_secs())
-            .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
+        i64::try_from(created.as_secs()).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
         i64::from(created.subsec_nanos()),
     ))
 }

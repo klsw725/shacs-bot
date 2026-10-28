@@ -45,7 +45,7 @@ impl ProviderClient for QueueProvider {
     fn chat(&self, _request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
         self.0
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("provider responses lock poisoned")
             .pop()
             .unwrap_or_else(|| Ok(LlmResponse::default()))
     }
@@ -76,8 +76,7 @@ impl CapturingExecutor {
 impl PluginHookCommandExecutor for CapturingExecutor {
     fn execute(&self, invocation: &PluginHookCommandInvocation) -> PluginHookCallbackResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        *self.input.lock().unwrap_or_else(|error| error.into_inner()) =
-            Some(invocation.stdin_payload.clone());
+        *self.input.lock().expect("input lock poisoned") = Some(invocation.stdin_payload.clone());
         PluginHookCallbackResult::Output(json!({}))
     }
 }
@@ -119,7 +118,7 @@ impl Tool for CountingNormalizedTool {
 
     fn execute(&self, params: JsonMap) -> ToolResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        *self.input.lock().unwrap_or_else(|error| error.into_inner()) = Some(params);
+        *self.input.lock().expect("input lock poisoned") = Some(params);
         "normalized-output".into()
     }
 }
@@ -191,14 +190,14 @@ fn spec030_tool_before_hook_receives_once_prepared_normalized_input() {
     let hook_input = executor
         .input
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .expect("executor lock poisoned")
         .clone()
         .unwrap_or_else(|| panic!("missing hook input"));
     assert_eq!(hook_input["context"]["tools"][0]["arguments"]["count"], 7);
     assert_eq!(
         tool_input
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("tool input lock poisoned")
             .as_ref()
             .and_then(|input| input.get("count")),
         Some(&json!(7))

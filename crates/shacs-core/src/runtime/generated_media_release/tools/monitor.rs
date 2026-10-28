@@ -1,9 +1,6 @@
-use super::Spec034ReleaseArtifactError;
 #[cfg(target_vendor = "apple")]
 use super::digest_bytes;
-#[cfg(target_vendor = "apple")]
-use std::path::Path;
-use std::path::PathBuf;
+use super::Spec034ReleaseArtifactError;
 
 #[cfg(target_vendor = "apple")]
 #[path = "monitor/descriptor_limit.rs"]
@@ -11,7 +8,7 @@ mod descriptor_limit;
 
 #[cfg(target_vendor = "apple")]
 mod platform {
-    use super::*;
+    use super::{digest_bytes, Spec034ReleaseArtifactError};
     use std::ffi::CString;
     use std::fs::{File, Metadata};
     use std::io::{Read, Seek};
@@ -19,6 +16,7 @@ mod platform {
     use std::os::macos::fs::MetadataExt as MacMetadataExt;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -78,7 +76,9 @@ mod platform {
             })
         }
 
-        pub(crate) fn ensure_capacity(path_count: usize) -> Result<(), Spec034ReleaseArtifactError> {
+        pub(crate) fn ensure_capacity(
+            path_count: usize,
+        ) -> Result<(), Spec034ReleaseArtifactError> {
             super::descriptor_limit::ensure(path_count)
         }
 
@@ -91,7 +91,11 @@ mod platform {
             paths: &[PathBuf],
             queue: ExecutionQueue,
         ) -> Result<Self, Spec034ReleaseArtifactError> {
-            require_apfs(paths.first().ok_or(Spec034ReleaseArtifactError::InvalidConfig)?)?;
+            require_apfs(
+                paths
+                    .first()
+                    .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?,
+            )?;
             super::descriptor_limit::ensure(paths.len())?;
             let mut entries = paths
                 .iter()
@@ -102,7 +106,11 @@ mod platform {
                 entry.baseline = entry.capture()?;
             }
             let fatal = Arc::clone(&queue.fatal);
-            let ledger = Self { queue, entries, fatal };
+            let ledger = Self {
+                queue,
+                entries,
+                fatal,
+            };
             ledger.verify()?;
             Ok(ledger)
         }
@@ -113,7 +121,10 @@ mod platform {
             }
             let mut events = [empty_event(); 64];
             loop {
-                let timeout = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                let timeout = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
                 // SAFETY: [Category 8 - FFI boundary] `events` is writable for its declared
                 // length, `queue` is a live kqueue descriptor, and timeout is initialized.
                 let count = unsafe {
@@ -129,13 +140,16 @@ mod platform {
                 };
                 if count < 0 {
                     self.fatal.store(true, Ordering::Release);
-                    return Err(Spec034ReleaseArtifactError::Io(std::io::Error::last_os_error()));
+                    return Err(Spec034ReleaseArtifactError::Io(
+                        std::io::Error::last_os_error(),
+                    ));
                 }
                 if count == 0 {
                     break;
                 }
                 for event in events.iter().take(
-                    usize::try_from(count).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
+                    usize::try_from(count)
+                        .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
                 ) {
                     if event.flags & (libc::EV_ERROR | libc::EV_EOF) != 0
                         || event.fflags & FATAL_EVENTS != 0
@@ -175,10 +189,15 @@ mod platform {
             // SAFETY: [Category 8 - FFI boundary] the C path is NUL-terminated and flags do
             // not require a mode argument. A negative descriptor is rejected before wrapping.
             let descriptor = unsafe {
-                libc::open(raw.as_ptr(), libc::O_EVTONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                libc::open(
+                    raw.as_ptr(),
+                    libc::O_EVTONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
             };
             if descriptor < 0 {
-                return Err(Spec034ReleaseArtifactError::Io(std::io::Error::last_os_error()));
+                return Err(Spec034ReleaseArtifactError::Io(
+                    std::io::Error::last_os_error(),
+                ));
             }
             // SAFETY: [Category 12 - invalid free] successful `open` returns one owned file
             // descriptor and ownership is transferred exactly once into `File`.
@@ -200,7 +219,10 @@ mod platform {
         }
 
         fn capture(&self) -> Result<Baseline, Spec034ReleaseArtifactError> {
-            let descriptor = self.event.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
+            let descriptor = self
+                .event
+                .metadata()
+                .map_err(Spec034ReleaseArtifactError::Io)?;
             let path = std::fs::symlink_metadata(&self.path)
                 .map_err(|_| Spec034ReleaseArtifactError::DigestMismatch)?;
             if descriptor.dev() != path.dev() || descriptor.ino() != path.ino() {
@@ -213,7 +235,8 @@ mod platform {
                     let mut file = file.try_clone().map_err(Spec034ReleaseArtifactError::Io)?;
                     file.rewind().map_err(Spec034ReleaseArtifactError::Io)?;
                     let mut bytes = Vec::new();
-                    file.read_to_end(&mut bytes).map_err(Spec034ReleaseArtifactError::Io)?;
+                    file.read_to_end(&mut bytes)
+                        .map_err(Spec034ReleaseArtifactError::Io)?;
                     Ok::<_, Spec034ReleaseArtifactError>(digest_bytes(&bytes))
                 })
                 .transpose()?;
@@ -224,23 +247,40 @@ mod platform {
     impl Baseline {
         const fn empty() -> Self {
             Self {
-                device: 0, inode: 0, mode: 0, uid: 0, gid: 0, flags: 0, links: 0, size: 0,
-                modified_seconds: 0, modified_nanoseconds: 0, changed_seconds: 0,
-                changed_nanoseconds: 0, digest: None,
+                device: 0,
+                inode: 0,
+                mode: 0,
+                uid: 0,
+                gid: 0,
+                flags: 0,
+                links: 0,
+                size: 0,
+                modified_seconds: 0,
+                modified_nanoseconds: 0,
+                changed_seconds: 0,
+                changed_nanoseconds: 0,
+                digest: None,
             }
         }
 
         fn from_metadata(metadata: &Metadata, digest: Option<String>) -> Self {
             Self {
-                device: metadata.dev(), inode: metadata.ino(), mode: metadata.mode(),
-                uid: metadata.uid(), gid: metadata.gid(), flags: metadata.st_flags(),
-                links: metadata.nlink(), size: metadata.size(),
-                modified_seconds: metadata.mtime(), modified_nanoseconds: metadata.mtime_nsec(),
-                changed_seconds: metadata.ctime(), changed_nanoseconds: metadata.ctime_nsec(), digest,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                mode: metadata.mode(),
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+                flags: metadata.st_flags(),
+                links: metadata.nlink(),
+                size: metadata.size(),
+                modified_seconds: metadata.mtime(),
+                modified_nanoseconds: metadata.mtime_nsec(),
+                changed_seconds: metadata.ctime(),
+                changed_nanoseconds: metadata.ctime_nsec(),
+                digest,
             }
         }
     }
-
 }
 
 #[cfg(not(target_vendor = "apple"))]

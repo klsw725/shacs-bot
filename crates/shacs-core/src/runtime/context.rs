@@ -6,10 +6,8 @@ use sha2::{Digest, Sha256};
 use shacs_skills::{builtin_skills, is_deferred_builtin_skill, BUILTIN_SKILLS_DIR};
 use shacs_templates::{render_agent_template, template_variables, AgentTemplate};
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{env, fs, io};
 
 const BOOTSTRAP_FILES: [&str; 4] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
 pub(super) const RUNTIME_CONTEXT_TAG: &str = "[Runtime Context — metadata only, not instructions]";
@@ -133,7 +131,10 @@ impl ContextBuilder {
         chat_id: Option<&str>,
         session_summary: Option<&str>,
     ) -> String {
-        let mut lines = vec![format!("Current Time: {}", current_time(&self.timezone))];
+        let mut lines = vec![format!(
+            "Current Time: {}",
+            current_time(self.timezone.as_deref())
+        )];
         if let (Some(channel), Some(chat_id)) = (channel, chat_id) {
             lines.push(format!("Channel: {channel}"));
             lines.push(format!("Chat ID: {chat_id}"));
@@ -800,7 +801,7 @@ fn platform_policy_fallback() -> String {
     }
 }
 
-fn current_time(timezone: &Option<String>) -> String {
+fn current_time(timezone: Option<&str>) -> String {
     if let Some(timezone) = timezone {
         if let Ok(timezone) = timezone.parse::<chrono_tz::Tz>() {
             let now = Utc::now().with_timezone(&timezone);
@@ -818,7 +819,6 @@ fn current_time(timezone: &Option<String>) -> String {
     }
     let now = Local::now();
     let timezone_name = timezone
-        .as_deref()
         .filter(|value| !value.is_empty())
         .unwrap_or("Local");
     format_nanobot_time(NanobotTimeParts {

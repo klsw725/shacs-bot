@@ -1,5 +1,4 @@
-use super::spec035_test_counts::workspace_counts;
-use super::spec035_test_counts::TargetSummary;
+use super::spec035_test_counts::{workspace_counts, TargetSummary};
 use std::path::Path;
 
 #[test]

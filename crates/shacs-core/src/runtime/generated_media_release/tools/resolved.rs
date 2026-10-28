@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    controlled_temp_root, digest_bytes, minimal_command, OpenOptions, PathChainSeal,
+    PortableToolIdentity, ResolvedTool, Spec034ReleaseArtifactError, Write, MAX_TOOL_BYTES,
+};
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 impl ResolvedTool {
     #[cfg(test)]
@@ -76,7 +83,9 @@ impl ResolvedTool {
                     .create_new(true)
                     .open(&path)
                     .map_err(Spec034ReleaseArtifactError::Io)?;
-                copied.write_all(&bytes).map_err(Spec034ReleaseArtifactError::Io)?;
+                copied
+                    .write_all(&bytes)
+                    .map_err(Spec034ReleaseArtifactError::Io)?;
                 copied.sync_all().map_err(Spec034ReleaseArtifactError::Io)?;
                 preserve_executable_mode(&path, &metadata)?;
             }
@@ -144,7 +153,6 @@ impl ResolvedTool {
         }
         Ok(())
     }
-
 }
 
 #[cfg(unix)]
@@ -168,8 +176,11 @@ fn preserve_executable_mode(
     metadata: &std::fs::Metadata,
 ) -> Result<(), Spec034ReleaseArtifactError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(metadata.mode() & 0o777))
-        .map_err(Spec034ReleaseArtifactError::Io)
+    std::fs::set_permissions(
+        path,
+        std::fs::Permissions::from_mode(metadata.mode() & 0o777),
+    )
+    .map_err(Spec034ReleaseArtifactError::Io)
 }
 
 #[cfg(not(unix))]

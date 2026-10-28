@@ -1,9 +1,9 @@
-use super::model::*;
+use super::model::{SourceFile, SourceFileState, SourceManifest, Spec034ReleaseArtifactError};
 use super::path_chain::PathChainSeal;
 #[cfg(test)]
 use super::tools::release_tempdir;
-use std::path::{Component, Path, PathBuf};
 use sha2::{Digest, Sha256};
+use std::path::{Component, Path, PathBuf};
 
 #[path = "source_seal.rs"]
 mod source_seal;

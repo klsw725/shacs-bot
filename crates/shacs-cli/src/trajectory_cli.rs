@@ -1,5 +1,11 @@
-use super::*;
+use super::{
+    automation_worker, take_path, take_value, AgentLoopChatCompletionAdapter, ArgParser,
+    CliCommand, CliError,
+};
 use serde::Serialize;
+use shacs_config::{load_config, LoadOptions};
+use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrajectoryOptions {

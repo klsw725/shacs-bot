@@ -1,8 +1,7 @@
 use std::collections::BTreeSet;
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::{env, fs};
 
 #[path = "check_changed_rust_loc/marker_policy.rs"]
 mod marker_policy;

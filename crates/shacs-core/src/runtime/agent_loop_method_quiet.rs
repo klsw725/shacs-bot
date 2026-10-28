@@ -8,12 +8,14 @@
 //! policy) still gets the arguments of the tools the model was offered as
 //! written.
 
-use super::*;
+use super::{json, AgentHook, RuntimeToolCall, RuntimeToolMessage};
 use crate::runtime::quiet_tools::{
     quiet_arguments, quiet_finish_reason, quiet_id, quiet_tool_calls, quiet_tool_message,
     quiet_usage, rename_unoffered, UNOFFERED_TOOL,
 };
 use crate::runtime::AgentHookContext;
+use serde_json::{Map, Value};
+use std::sync::Arc;
 
 pub(super) struct Quiet {
     pub(super) rest: Arc<dyn AgentHook>,

@@ -55,7 +55,11 @@ fn cargo_clean_preserves_sealed_external_cache() -> Result<(), Box<dyn std::erro
     std::fs::set_permissions(&cache_root, std::fs::Permissions::from_mode(0o700))?;
     std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600))?;
     let output = output?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(std::fs::read(marker)?, b"immutable-cache");
     isolation.cleanup()?;
     Ok(())

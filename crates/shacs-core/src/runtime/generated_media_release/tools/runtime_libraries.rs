@@ -1,4 +1,6 @@
-use super::*;
+use super::{OpenOptions, PathChainSeal, Spec034ReleaseArtifactError};
+use std::fs::File;
+use std::path::Path;
 
 pub(super) fn prepare(
     name: &str,
@@ -91,8 +93,8 @@ fn copy_runtime_tree(
             continue;
         }
         let target_path = target.join(entry.file_name());
-        let metadata = std::fs::symlink_metadata(&source_path)
-            .map_err(Spec034ReleaseArtifactError::Io)?;
+        let metadata =
+            std::fs::symlink_metadata(&source_path).map_err(Spec034ReleaseArtifactError::Io)?;
         if metadata.file_type().is_symlink() {
             let resolved = source_path
                 .canonicalize()
@@ -160,8 +162,7 @@ fn collect_seals(
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(Spec034ReleaseArtifactError::Io)?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(Spec034ReleaseArtifactError::Io)?;
         if metadata.file_type().is_symlink() {
             return Err(Spec034ReleaseArtifactError::InvalidConfig);
         }

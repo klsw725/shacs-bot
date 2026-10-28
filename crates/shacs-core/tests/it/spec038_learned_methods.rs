@@ -62,25 +62,31 @@ impl Provider {
     fn last(&self) -> ProviderRequest {
         self.requests
             .lock()
-            .unwrap()
+            .expect("requests lock poisoned")
             .last()
             .cloned()
             .expect("a provider call")
     }
     fn calls(&self) -> usize {
-        self.requests.lock().unwrap().len()
+        self.requests.lock().expect("requests lock poisoned").len()
     }
     fn requests(&self) -> Vec<ProviderRequest> {
-        self.requests.lock().unwrap().clone()
+        self.requests
+            .lock()
+            .expect("requests lock poisoned")
+            .clone()
     }
 }
 impl ProviderClient for Provider {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
-        self.requests.lock().unwrap().push(request);
+        self.requests
+            .lock()
+            .expect("requests lock poisoned")
+            .push(request);
         let response = self
             .responses
             .lock()
-            .unwrap()
+            .expect("responses lock poisoned")
             .pop_front()
             .expect("unexpected provider call");
         if response.content.as_deref() == Some(FAILED) {

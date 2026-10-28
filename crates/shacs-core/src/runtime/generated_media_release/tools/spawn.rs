@@ -41,8 +41,8 @@ pub(super) fn process_executable(
     use std::os::unix::ffi::OsStringExt;
 
     let mut bytes = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    let capacity = u32::try_from(bytes.len())
-        .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
+    let capacity =
+        u32::try_from(bytes.len()).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
     // SAFETY: [Category 8 - FFI boundary] `bytes` is writable for `capacity` bytes and
     // `proc_pidpath` only writes within the caller-supplied buffer.
     let count = unsafe { libc::proc_pidpath(pid, bytes.as_mut_ptr().cast(), capacity) };
@@ -81,7 +81,9 @@ pub(super) fn spawn_verified(
 
 #[cfg(target_vendor = "apple")]
 mod darwin {
-    use super::*;
+    use super::Spec034ReleaseArtifactError;
+    #[cfg(not(test))]
+    use super::{capture_process_identity, ExecutionChild, ExecutionLedger};
     use core_foundation::base::TCFType;
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::number::CFNumber;
@@ -89,14 +91,22 @@ mod darwin {
     use core_foundation_sys::base::{CFRelease, CFTypeRef, OSStatus};
     use core_foundation_sys::data::{CFDataGetBytePtr, CFDataGetLength, CFDataRef};
     use core_foundation_sys::dictionary::{CFDictionaryGetValue, CFDictionaryRef};
-    use security_framework_sys::code_signing::*;
+    use security_framework_sys::code_signing::{
+        kSecCSNoNetworkAccess, kSecCSStrictValidate, kSecGuestAttributePid, SecCSFlags,
+        SecCodeCheckValidity, SecCodeCopyGuestWithAttributes, SecStaticCodeCheckValidity,
+        SecStaticCodeCreateWithPath, SecStaticCodeRef,
+    };
     #[cfg(not(test))]
     use std::ffi::{CString, OsStr};
+    #[cfg(not(test))]
+    use std::fs::File;
     #[cfg(not(test))]
     use std::os::fd::AsRawFd;
     #[cfg(not(test))]
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
+    #[cfg(not(test))]
+    use std::process::Command;
 
     unsafe extern "C" {
         static kSecCodeInfoUnique: core_foundation_sys::string::CFStringRef;
@@ -146,8 +156,16 @@ mod darwin {
         // SAFETY: [Category 4 - uninitialized memory] the successful initializer above wrote
         // the complete file-actions object.
         let mut actions = unsafe { actions.assume_init() };
-        spawn_call(unsafe { libc::posix_spawn_file_actions_adddup2(&mut actions, stdout.as_raw_fd(), 1) })?;
-        spawn_call(unsafe { libc::posix_spawn_file_actions_adddup2(&mut actions, stderr.as_raw_fd(), 2) })?;
+        // SAFETY: [Category 8 - FFI boundary] `actions` is initialized and `stdout` stays
+        // borrowed for the call, so its descriptor is open while it is recorded.
+        spawn_call(unsafe {
+            libc::posix_spawn_file_actions_adddup2(&mut actions, stdout.as_raw_fd(), 1)
+        })?;
+        // SAFETY: [Category 8 - FFI boundary] `actions` is initialized and `stderr` stays
+        // borrowed for the call, so its descriptor is open while it is recorded.
+        spawn_call(unsafe {
+            libc::posix_spawn_file_actions_adddup2(&mut actions, stderr.as_raw_fd(), 2)
+        })?;
         let cwd = c_string(
             command
                 .get_current_dir()
@@ -157,6 +175,8 @@ mod darwin {
         // SAFETY: [Category 8 - FFI boundary] `actions` is initialized and `cwd` is a live,
         // NUL-terminated absolute path for the duration of the call.
         spawn_call(unsafe { posix_spawn_file_actions_addchdir_np(&mut actions, cwd.as_ptr()) })?;
+        // SAFETY: [Category 4 - uninitialized memory] `attributes` points to writable storage
+        // sized and aligned for one posix_spawnattr_t value.
         spawn_call(unsafe { libc::posix_spawnattr_init(attributes.as_mut_ptr()) })?;
         // SAFETY: [Category 4 - uninitialized memory] the successful initializer above wrote
         // the complete spawn-attribute object.
@@ -164,7 +184,11 @@ mod darwin {
         let flags = libc::POSIX_SPAWN_START_SUSPENDED
             | libc::POSIX_SPAWN_SETPGROUP
             | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
+        // SAFETY: [Category 8 - FFI boundary] `attributes` is initialized and `flags` only
+        // combines POSIX_SPAWN_* bits that Darwin defines.
         spawn_call(unsafe { libc::posix_spawnattr_setflags(&mut attributes, flags as i16) })?;
+        // SAFETY: [Category 8 - FFI boundary] `attributes` is initialized and process group 0
+        // asks for a new group led by the child.
         spawn_call(unsafe { libc::posix_spawnattr_setpgroup(&mut attributes, 0) })?;
         ledger.verify()?;
         let mut pid = 0;
@@ -188,7 +212,12 @@ mod darwin {
         }
         spawn_call(status)?;
         let identity = capture_process_identity(pid)?;
-        let child = ExecutionChild { pid, identity, status: None, cleaned: false };
+        let child = ExecutionChild {
+            pid,
+            identity,
+            status: None,
+            cleaned: false,
+        };
         if live_cdhash(pid)? != expected || ledger.verify().is_err() {
             // SAFETY: [Category 8 - FFI boundary] `pid` is a positive child PID returned by
             // posix_spawn and SIGKILL is a valid signal number.
@@ -198,13 +227,16 @@ mod darwin {
         // SAFETY: [Category 8 - FFI boundary] the child is intentionally suspended and the
         // validated positive PID may be resumed with SIGCONT.
         if unsafe { libc::kill(pid, libc::SIGCONT) } != 0 {
-            return Err(Spec034ReleaseArtifactError::Io(std::io::Error::last_os_error()));
+            return Err(Spec034ReleaseArtifactError::Io(
+                std::io::Error::last_os_error(),
+            ));
         }
         Ok(child)
     }
 
     pub(super) fn static_cdhash(path: &Path) -> Result<Vec<u8>, Spec034ReleaseArtifactError> {
-        let url = CFURL::from_path(path, false).ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
+        let url =
+            CFURL::from_path(path, false).ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
         let mut code = std::ptr::null_mut();
         // SAFETY: [Category 8 - FFI boundary] URL is a live CF object and `code` is writable;
         // success guarantees a retained non-null SecStaticCodeRef.
@@ -227,12 +259,23 @@ mod darwin {
 
     pub(super) fn live_cdhash(pid: libc::pid_t) -> Result<Vec<u8>, Spec034ReleaseArtifactError> {
         let number = CFNumber::from(pid);
-        let key = unsafe { core_foundation::string::CFString::wrap_under_get_rule(kSecGuestAttributePid) };
+        // SAFETY: [Category 8 - FFI boundary] `kSecGuestAttributePid` is a constant CFString
+        // exported by Security.framework, and the get rule makes the wrapper retain it.
+        let key = unsafe {
+            core_foundation::string::CFString::wrap_under_get_rule(kSecGuestAttributePid)
+        };
         let attrs = CFDictionary::from_CFType_pairs(&[(key, number)]);
         let mut code = std::ptr::null_mut();
         // SAFETY: [Category 8 - FFI boundary] the dictionary contains the required numeric PID
         // attribute and `code` is writable; success returns one retained SecCodeRef.
-        status(unsafe { SecCodeCopyGuestWithAttributes(std::ptr::null_mut(), attrs.as_concrete_TypeRef(), 0, &mut code) })?;
+        status(unsafe {
+            SecCodeCopyGuestWithAttributes(
+                std::ptr::null_mut(),
+                attrs.as_concrete_TypeRef(),
+                0,
+                &mut code,
+            )
+        })?;
         // SAFETY: [Category 8 - FFI boundary] the guest lookup returned a live code object and
         // the null requirement requests intrinsic live-code validation.
         status(unsafe {
@@ -250,15 +293,29 @@ mod darwin {
 
     fn cdhash(code: SecStaticCodeRef) -> Result<Vec<u8>, Spec034ReleaseArtifactError> {
         let mut information = std::ptr::null();
+        // SAFETY: [Category 8 - FFI boundary] callers pass a live code object and
+        // `information` is writable; success returns one retained CFDictionary.
         status(unsafe { SecCodeCopySigningInformation(code, 1 << 1, &mut information) })?;
-        let value = unsafe { CFDictionaryGetValue(information, kSecCodeInfoUnique.cast()) } as CFDataRef;
+        // SAFETY: [Category 8 - FFI boundary] `information` is the live dictionary returned
+        // above and `kSecCodeInfoUnique` is a constant key exported by Security.framework; the
+        // value is borrowed from the dictionary, which Security documents as CFData.
+        let value =
+            unsafe { CFDictionaryGetValue(information, kSecCodeInfoUnique.cast()) } as CFDataRef;
         if value.is_null() {
+            // SAFETY: [Category 12 - invalid free] `information` was returned retained by the
+            // copy call above and is released exactly once on this early return.
             unsafe { CFRelease(information.cast()) };
             return Err(Spec034ReleaseArtifactError::InvalidConfig);
         }
+        // SAFETY: [Category 8 - FFI boundary] `value` is a non-null CFData owned by
+        // `information`, which is still alive.
         let length = usize::try_from(unsafe { CFDataGetLength(value) })
             .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?;
+        // SAFETY: [Category 8 - FFI boundary] the byte pointer of the live CFData is valid for
+        // `length` bytes, and the bytes are copied out before `information` is released.
         let bytes = unsafe { std::slice::from_raw_parts(CFDataGetBytePtr(value), length) }.to_vec();
+        // SAFETY: [Category 12 - invalid free] `information` was returned retained by the copy
+        // call above and is released exactly once after its bytes were copied.
         unsafe { CFRelease(information as CFTypeRef) };
         Ok(bytes)
     }
@@ -285,6 +342,8 @@ mod darwin {
     }
 
     fn status(value: OSStatus) -> Result<(), Spec034ReleaseArtifactError> {
-        (value == 0).then_some(()).ok_or(Spec034ReleaseArtifactError::InvalidConfig)
+        (value == 0)
+            .then_some(())
+            .ok_or(Spec034ReleaseArtifactError::InvalidConfig)
     }
 }

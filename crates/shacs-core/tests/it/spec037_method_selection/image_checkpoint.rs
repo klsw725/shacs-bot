@@ -15,7 +15,10 @@ impl SessionFileSpy {
             .flatten()
         {
             if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                self.seen.lock().unwrap().push_str(&text);
+                self.seen
+                    .lock()
+                    .expect("seen log lock poisoned")
+                    .push_str(&text);
             }
         }
     }

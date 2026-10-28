@@ -60,9 +60,15 @@ fn normal_absolute_nested_destination_publishes_atomically(
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
     use std::os::unix::fs::MetadataExt;
-    assert_eq!(io(staging.path().metadata())?.dev(), io(staging.path().parent().ok_or(
-        Spec034ReleaseArtifactError::InvalidConfig,
-    )?.metadata())?.dev());
+    assert_eq!(
+        io(staging.path().metadata())?.dev(),
+        io(staging
+            .path()
+            .parent()
+            .ok_or(Spec034ReleaseArtifactError::InvalidConfig,)?
+            .metadata())?
+        .dev()
+    );
     io(std::fs::write(staging.path().join("manifest.json"), b"{}"))?;
     let staging = staging.finalize_marker("run")?;
 
@@ -104,7 +110,10 @@ fn staging_name_replacement_never_publishes_unverified_directory(
     let displaced = root.join("displaced-staging");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let staging = destination.staging()?;
-    io(std::fs::write(staging.path().join("manifest.json"), b"verified"))?;
+    io(std::fs::write(
+        staging.path().join("manifest.json"),
+        b"verified",
+    ))?;
     let staging = staging.finalize_marker("run")?;
 
     let result = destination.publish_with(&staging, || {
@@ -125,7 +134,10 @@ fn staging_name_replacement_never_publishes_unverified_directory(
         Path::new(env!("CARGO_MANIFEST_DIR")),
     )
     .is_err());
-    assert_eq!(io(std::fs::read(displaced.join("manifest.json")))?, b"verified");
+    assert_eq!(
+        io(std::fs::read(displaced.join("manifest.json")))?,
+        b"verified"
+    );
     Ok(())
 }
 
@@ -135,9 +147,11 @@ fn same_device_foreign_parent_is_rejected() -> Result<(), Spec034ReleaseArtifact
     let root = io(root.path().canonicalize())?;
     let foreign_parent = root.join("foreign");
     io(std::fs::create_dir(&foreign_parent))?;
-    let foreign = tempfile::tempdir_in(&foreign_parent)
-        .map_err(Spec034ReleaseArtifactError::Io)?;
-    io(std::fs::write(foreign.path().join("manifest.json"), b"foreign"))?;
+    let foreign = tempfile::tempdir_in(&foreign_parent).map_err(Spec034ReleaseArtifactError::Io)?;
+    io(std::fs::write(
+        foreign.path().join("manifest.json"),
+        b"foreign",
+    ))?;
     let foreign = StagingDirectory::capture_for_test(foreign)?.finalize_marker("run")?;
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
@@ -168,23 +182,19 @@ fn post_mkdir_open_failure_cleans_empty_and_preserves_concurrent_marker(
     let root = io(tempfile::tempdir())?;
     let root = io(root.path().canonicalize())?;
     let empty = root.join("empty/child/evidence");
-    let empty_result = std::panic::catch_unwind(|| {
-        EvidenceDestination::prepare_with(&empty, |_| {
-            Err(Spec034ReleaseArtifactError::InvalidConfig)
-        })
+    let empty_result = EvidenceDestination::prepare_with(&empty, |_| {
+        Err(Spec034ReleaseArtifactError::InvalidConfig)
     });
-    assert!(matches!(empty_result, Ok(Err(_))));
+    assert!(empty_result.is_err());
     assert!(!root.join("empty").exists());
 
     let marker = root.join("marked/concurrent-marker");
     let marked = root.join("marked/child/evidence");
-    let marked_result = std::panic::catch_unwind(|| {
-        EvidenceDestination::prepare_with(&marked, |_| {
-            io(std::fs::write(&marker, b"not runner owned"))?;
-            Err(Spec034ReleaseArtifactError::InvalidConfig)
-        })
+    let marked_result = EvidenceDestination::prepare_with(&marked, |_| {
+        io(std::fs::write(&marker, b"not runner owned"))?;
+        Err(Spec034ReleaseArtifactError::InvalidConfig)
     });
-    assert!(matches!(marked_result, Ok(Err(_))));
+    assert!(marked_result.is_err());
     assert_eq!(io(std::fs::read(marker))?, b"not runner owned");
     Ok(())
 }
@@ -199,9 +209,9 @@ fn cross_filesystem_staging_is_replaced_by_destination_sibling(
     let Some(other) = [Path::new("/dev/shm"), Path::new("/tmp")]
         .into_iter()
         .find(|candidate| {
-            candidate
-                .metadata()
-                .is_ok_and(|metadata| metadata.dev() != root.metadata().map_or(0, |root| root.dev()))
+            candidate.metadata().is_ok_and(|metadata| {
+                metadata.dev() != root.metadata().map_or(0, |root| root.dev())
+            })
         })
     else {
         return Ok(());
@@ -209,16 +219,25 @@ fn cross_filesystem_staging_is_replaced_by_destination_sibling(
     let evidence = root.join("evidence");
     let mut destination = EvidenceDestination::prepare(&evidence)?;
     let foreign = tempfile::tempdir_in(other).map_err(Spec034ReleaseArtifactError::Io)?;
-    io(std::fs::write(foreign.path().join("manifest.json"), b"foreign"))?;
+    io(std::fs::write(
+        foreign.path().join("manifest.json"),
+        b"foreign",
+    ))?;
     let foreign = StagingDirectory::capture_for_test(foreign)?.finalize_marker("run")?;
     assert!(destination.publish(foreign).is_err());
     assert!(!evidence.exists());
 
     let mut sibling = destination.staging()?;
-    io(std::fs::write(sibling.path().join("manifest.json"), b"sibling"))?;
+    io(std::fs::write(
+        sibling.path().join("manifest.json"),
+        b"sibling",
+    ))?;
     let sibling = sibling.finalize_marker("run")?;
     destination.publish(sibling)?;
 
-    assert_eq!(io(std::fs::read(evidence.join("manifest.json")))?, b"sibling");
+    assert_eq!(
+        io(std::fs::read(evidence.join("manifest.json")))?,
+        b"sibling"
+    );
     Ok(())
 }

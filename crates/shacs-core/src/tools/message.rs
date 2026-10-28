@@ -1,5 +1,7 @@
-use crate::tools::{ArraySchema, JsonMap, StringSchema, Tool, ToolParameters};
-use crate::tools::{SchemaFragment, ToolResult, ValidationError};
+use crate::tools::{
+    ArraySchema, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters, ToolResult,
+    ValidationError,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -133,7 +135,7 @@ impl MessageTool {
     }
 
     pub fn set_sender(&self, sender: Arc<dyn MessageSender>) {
-        *recover_lock(&self.sender) = Some(sender);
+        *lock(&self.sender) = Some(sender);
     }
 
     pub fn start_turn(&self) {
@@ -278,7 +280,7 @@ impl MessageTool {
         if channel.is_empty() || chat_id.is_empty() {
             return "Error: No target channel/chat specified".to_owned();
         }
-        let sender = recover_lock(&self.sender).clone();
+        let sender = lock(&self.sender).clone();
         let Some(sender) = sender else {
             return "Error: Message sending not configured".to_owned();
         };
@@ -423,8 +425,6 @@ fn is_valid_tag_continuation(value: char) -> bool {
     value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | ':' | '>' | '/')
 }
 
-fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().expect("lock poisoned by a panicking thread")
 }

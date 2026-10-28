@@ -1,4 +1,5 @@
-use std::{error::Error, fs, io};
+use std::error::Error;
+use std::{fs, io};
 
 use serde_json::{json, Value};
 

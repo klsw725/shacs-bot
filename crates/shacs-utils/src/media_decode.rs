@@ -1,5 +1,6 @@
 use crate::text::safe_filename;
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use regex::Regex;
 use std::fs;
 use std::path::Path;

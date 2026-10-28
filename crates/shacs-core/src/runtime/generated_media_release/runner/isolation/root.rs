@@ -1,6 +1,6 @@
-use super::Spec034ReleaseArtifactError;
 use super::root_identity::RootIdentity;
 use super::root_monitor::RenameMonitor;
+use super::Spec034ReleaseArtifactError;
 use rustix::fs::{fchmod, openat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags};
 use sha2::{Digest, Sha256};
 use std::ffi::{CStr, OsString};
@@ -42,21 +42,27 @@ impl RetainedRoot {
     }
 
     pub(super) fn capture(path: &Path) -> Result<Self, Spec034ReleaseArtifactError> {
-        let parent_path = path.parent().ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
-        let root_name = path.file_name().ok_or(Spec034ReleaseArtifactError::InvalidConfig)?.to_owned();
+        let parent_path = path
+            .parent()
+            .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
+        let root_name = path
+            .file_name()
+            .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?
+            .to_owned();
         let parent = File::open(parent_path).map_err(Spec034ReleaseArtifactError::Io)?;
-        let parent_identity = RootIdentity::capture(
-            &parent
-                .metadata()
-                .map_err(Spec034ReleaseArtifactError::Io)?,
-        )?;
-        let root = File::from(openat(
-            &parent,
-            &root_name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ).map_err(io)?);
-        let identity = RootIdentity::capture(&root.metadata().map_err(Spec034ReleaseArtifactError::Io)?)?;
+        let parent_identity =
+            RootIdentity::capture(&parent.metadata().map_err(Spec034ReleaseArtifactError::Io)?)?;
+        let root = File::from(
+            openat(
+                &parent,
+                &root_name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(io)?,
+        );
+        let identity =
+            RootIdentity::capture(&root.metadata().map_err(Spec034ReleaseArtifactError::Io)?)?;
         let monitor = RenameMonitor::arm(&root)?;
         let retained = Self {
             parent,
@@ -84,7 +90,10 @@ impl RetainedRoot {
         self.identity.owner
     }
 
-    pub(super) fn cleanup(mut self, event_uncertain: bool) -> Result<String, Spec034ReleaseArtifactError> {
+    pub(super) fn cleanup(
+        mut self,
+        event_uncertain: bool,
+    ) -> Result<String, Spec034ReleaseArtifactError> {
         self.cleanup_on_drop = false;
         if event_uncertain {
             return Err(residual());
@@ -113,7 +122,12 @@ impl RetainedRoot {
     }
 
     fn verify_initial_identity(&self) -> Result<(), Spec034ReleaseArtifactError> {
-        let descriptor = RootIdentity::capture(&self.root.metadata().map_err(Spec034ReleaseArtifactError::Io)?)?;
+        let descriptor = RootIdentity::capture(
+            &self
+                .root
+                .metadata()
+                .map_err(Spec034ReleaseArtifactError::Io)?,
+        )?;
         if !descriptor.same_object(self.identity) {
             return Err(Spec034ReleaseArtifactError::CleanupIdentityMismatch);
         }
@@ -131,7 +145,8 @@ impl RetainedRoot {
             &std::fs::symlink_metadata(&self.parent_path)
                 .map_err(Spec034ReleaseArtifactError::Io)?,
         )?;
-        if !descriptor.same_object(self.parent_identity) || !path.same_object(self.parent_identity) {
+        if !descriptor.same_object(self.parent_identity) || !path.same_object(self.parent_identity)
+        {
             return Err(Spec034ReleaseArtifactError::CleanupIdentityMismatch);
         }
         Ok(())
@@ -139,7 +154,10 @@ impl RetainedRoot {
 
     fn verify_path_entry(&self) -> Result<(), Spec034ReleaseArtifactError> {
         let entry = statat(&self.parent, &self.root_name, AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
-        if stat_device(&entry)? != self.identity.device || entry.st_ino != self.identity.inode || entry.st_uid != self.identity.owner {
+        if stat_device(&entry)? != self.identity.device
+            || entry.st_ino != self.identity.inode
+            || entry.st_uid != self.identity.owner
+        {
             return Err(Spec034ReleaseArtifactError::CleanupIdentityMismatch);
         }
         Ok(())
@@ -148,7 +166,10 @@ impl RetainedRoot {
     fn verify_unlinked(&self) -> Result<(), Spec034ReleaseArtifactError> {
         use std::os::unix::fs::MetadataExt;
         self.monitor.confirm_unlinked()?;
-        let metadata = self.root.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
+        let metadata = self
+            .root
+            .metadata()
+            .map_err(Spec034ReleaseArtifactError::Io)?;
         let descriptor = RootIdentity::capture(&metadata)?;
         if !descriptor.same_object(self.identity) || !link_state_proves_unlinked(metadata.nlink()) {
             return Err(Spec034ReleaseArtifactError::CleanupIdentityMismatch);
@@ -176,7 +197,9 @@ impl Drop for RetainedRoot {
 
 fn remove_contents(directory: &File, owner: u32) -> Result<(), Spec034ReleaseArtifactError> {
     use std::os::unix::fs::MetadataExt;
-    let metadata = directory.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
+    let metadata = directory
+        .metadata()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     if metadata.uid() != owner {
         return Err(Spec034ReleaseArtifactError::CleanupIdentityMismatch);
     }
@@ -198,10 +221,21 @@ fn remove_contents(directory: &File, owner: u32) -> Result<(), Spec034ReleaseArt
 fn remove_entry(parent: &File, name: &CStr, owner: u32) -> Result<(), Spec034ReleaseArtifactError> {
     let before = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
     if FileType::from_raw_mode(before.st_mode).is_dir() {
-        let child = File::from(openat(parent, name, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()).map_err(io)?);
+        let child = File::from(
+            openat(
+                parent,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(io)?,
+        );
         let opened = child.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
         use std::os::unix::fs::MetadataExt;
-        if opened.dev() != stat_device(&before)? || opened.ino() != before.st_ino || opened.uid() != owner {
+        if opened.dev() != stat_device(&before)?
+            || opened.ino() != before.st_ino
+            || opened.uid() != owner
+        {
             return Err(Spec034ReleaseArtifactError::CleanupIdentityMismatch);
         }
         remove_contents(&child, owner)?;

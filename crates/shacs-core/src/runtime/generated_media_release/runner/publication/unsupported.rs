@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 
 pub struct EvidenceDestination;
 
@@ -61,19 +62,12 @@ mod tests {
     fn runner_facing_api_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let root = root.path().canonicalize()?;
-        let snapshot = crate::runtime::generated_media_release::artifacts::ArtifactSnapshot::capture(
-            &root,
-        )?;
-        let staging = StagingDirectory {
-            path: root.clone(),
-        };
+        let snapshot =
+            crate::runtime::generated_media_release::artifacts::ArtifactSnapshot::capture(&root)?;
+        let staging = StagingDirectory { path: root.clone() };
         assert_eq!(staging.path(), root);
         assert!(staging
-            .finalize_approved_marker(
-                "run",
-                snapshot,
-                super::super::FinalSourceBinding::fixture(),
-            )
+            .finalize_approved_marker("run", snapshot, super::super::FinalSourceBinding::fixture(),)
             .is_err());
         assert!(EvidenceDestination::prepare(&root).is_err());
         let mut destination = EvidenceDestination;

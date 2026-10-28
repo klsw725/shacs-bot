@@ -56,10 +56,7 @@ fn agent_loop_snapshot_attaches_only_current_admitted_activation_ref() -> Result
             Arc::new(move |_resource| {
                 Some(ActivationSnapshotCandidate::new(
                     activation.clone(),
-                    current
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
+                    current.lock().expect("current lock poisoned").clone(),
                 ))
             })
         });
@@ -79,9 +76,7 @@ fn agent_loop_snapshot_attaches_only_current_admitted_activation_ref() -> Result
 
     // When
     runtime.process_message(InboundMessage::new("cli", "direct", "user", "first"))?;
-    *current
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActivationCurrentIdentity::new(
+    *current.lock().expect("current lock poisoned") = ActivationCurrentIdentity::new(
         WorkspaceTrustRef::new("workspace:sha256:owner-b"),
         "source:project:.shacs/skills/formatter",
         "sha256:deps-a",

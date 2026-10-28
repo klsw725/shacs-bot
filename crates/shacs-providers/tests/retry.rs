@@ -6,8 +6,7 @@ use shacs_providers::{
     LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest, ProviderRetryMode,
     ProviderRetryWaiter, RetryStopReason, ThreadRetryWaiter,
 };
-use std::collections::BTreeMap;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

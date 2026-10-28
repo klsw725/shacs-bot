@@ -1,20 +1,20 @@
-use crossterm::{
-    event::{self, Event},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+use crossterm::event::{self, Event};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
-use shacs_tui::{
-    action_runner::{run_surface_action, run_tasks_action, TasksActionRequest},
-    input::{key_to_input, TuiInput},
-    live_source::{RuntimeProjectionSource, SessionRuntimeSource},
-    state::{SessionKey, TuiState, UiStatus},
-    update::{
-        apply_action_outcome, apply_input, apply_snapshot, apply_task_action_result, UpdateEffect,
-    },
-    view::draw_tui,
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+use shacs_tui::action_runner::{run_surface_action, run_tasks_action, TasksActionRequest};
+use shacs_tui::input::{key_to_input, TuiInput};
+use shacs_tui::live_source::{RuntimeProjectionSource, SessionRuntimeSource};
+use shacs_tui::state::{SessionKey, TuiState, UiStatus};
+use shacs_tui::update::{
+    apply_action_outcome, apply_input, apply_snapshot, apply_task_action_result, UpdateEffect,
 };
-use std::{io, time::Duration};
+use shacs_tui::view::draw_tui;
+use std::io;
+use std::time::Duration;
 
 mod cli_options;
 mod once;

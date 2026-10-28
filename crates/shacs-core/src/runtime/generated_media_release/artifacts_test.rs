@@ -87,7 +87,10 @@ fn inventory_stays_on_one_descriptor_during_s_b_s_root_race(
         |_| {},
     )?;
 
-    assert_eq!(snapshot.files().map(|(name, _)| name).collect::<Vec<_>>(), ["a.json", "b.json"]);
+    assert_eq!(
+        snapshot.files().map(|(name, _)| name).collect::<Vec<_>>(),
+        ["a.json", "b.json"]
+    );
     Ok(())
 }
 
@@ -108,8 +111,7 @@ fn snapshot_reads_open_leaf_when_name_is_replaced() -> Result<(), Box<dyn std::e
         |locator| {
             if locator == "results.json" {
                 std::fs::rename(&path, &displaced).expect("displace leaf");
-                std::fs::write(&path, br#"{"state":"replacement"}"#)
-                    .expect("write replacement");
+                std::fs::write(&path, br#"{"state":"replacement"}"#).expect("write replacement");
             }
         },
     )?;

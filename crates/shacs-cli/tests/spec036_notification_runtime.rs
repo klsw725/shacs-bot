@@ -6,7 +6,9 @@ mod stale;
 mod support;
 
 use shacs_core::runtime::{EntrustedNotificationDeliveryState as Delivery, ObservationVerdict};
-use std::{fs, sync::atomic::Ordering, time::Duration};
+use std::fs;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 use support::{Runtime, TestResult};
 
 #[test]

@@ -60,7 +60,7 @@ const APPROVED_MARKERS: &[(&str, &str)] = &[
     ),
     (
         "crates/shacs-core/src/runtime/mod.rs",
-        "preexisting runtime API index; Spec034 declarations and re-exports expand from one focused module macro",
+        "preexisting runtime API index; Spec034 modules are declared and re-exported here",
     ),
     (
         "crates/shacs-core/src/runtime/runner.rs",

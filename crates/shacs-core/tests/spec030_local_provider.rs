@@ -4,7 +4,8 @@ use shacs_projection::{
     ResourceLoadStatus, SandboxStatus, Spec030ProjectionProvider, Spec030RuntimeStatus,
     Spec030UnavailableReason, TraceDestination, TraceStatus,
 };
-use std::{error::Error, fs};
+use std::error::Error;
+use std::fs;
 
 #[test]
 fn local_spec030_provider_defaults_unobserved_facts_to_non_positive_states(

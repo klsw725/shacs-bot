@@ -1,15 +1,18 @@
-use super::*;
+use super::{
+    method, now_iso, AgentLoop, AgentLoopError, AgentLoopTurnResult, InboundMessage, Session,
+};
 use crate::runtime::learned_method::{LearnedMethod, LearnedMethodState, MethodDecision};
 use crate::runtime::learned_method_decide::{confirm, record_check, reject, review_code};
 use crate::runtime::learned_method_edit::{deactivate, edit, restore};
 use crate::runtime::learned_method_evidence::{collect, digest};
 use crate::runtime::learned_method_generate::{Generator, Proposal};
 use crate::runtime::learned_method_render::{self as render, Checked};
-use crate::runtime::learned_method_render_changes as changed;
-use crate::runtime::learned_method_render_decisions as decided;
 use crate::runtime::learned_method_source::injected;
 use crate::runtime::learned_method_store::LearnedMethodStore;
 use crate::runtime::learned_method_verify::TaskOutcome;
+use crate::runtime::{
+    learned_method_render_changes as changed, learned_method_render_decisions as decided,
+};
 use shacs_command::LearnCommandArgs;
 
 const USAGE: &str = "Usage: /learn, /learn list, /learn show <id> [v<N>], /learn confirm <id>, /learn reject <id> v<N>, /learn verify <id>, /learn match <request>, /learn edit <id> v<N> purpose|applies <text>, /learn edit <id> v<N> premise|step <k> <text>, /learn edit <id> v<N> remove premise|step <k>, /learn deactivate <id> v<N>, or /learn restore <id> v<N>.";

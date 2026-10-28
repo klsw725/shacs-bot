@@ -18,7 +18,7 @@
 
 - **Rust는 `cargo`로만 다룬다**. 빌드/실행/테스트/체크를 다른 언어용 도구로 우회하지 말 것. 빠른 검증은 `cargo check`, 빌드는 `cargo build`, 배포용 빌드는 `cargo build --release`, 테스트는 `cargo test`를 기본으로 본다.
 - **빌드 전에는 기존 빌드 데이터를 정리한다**. 빌드 산출물이 과도하게 누적되지 않도록 `cargo clean --manifest-path crates/Cargo.toml`을 먼저 실행한 뒤 `cargo build --manifest-path crates/Cargo.toml`을 실행한다. `cargo check`/`clippy`/`test` 앞에서는 `cargo clean`을 실행하지 않는다. 매번 처음부터 다시 컴파일하게 된다.
-- **포맷/린트는 Cargo 하위 명령 기준**. 포맷은 `cargo fmt`, 린트는 `cargo clippy`를 사용한다. 검증 단계에서는 가능하면 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`까지 확인할 것.
+- **포맷/린트는 Cargo 하위 명령 기준**. 포맷은 `cargo fmt -- --config imports_granularity=Module,format_macro_matchers=true`, 린트는 `cargo clippy`를 사용한다. 검증 단계에서는 가능하면 같은 `--config`를 붙인 `cargo fmt -- --check`와 `cargo clippy --all-targets -- -D warnings`까지 확인할 것. `--config`를 붙이는 이유는 아래 'Google Rust 스타일'에 있다.
 - **Rust toolchain component를 전제로 생각하지 말 것**. `rustfmt`, `clippy`가 없다면 `rustup component add rustfmt clippy`가 먼저다.
 - **레포 루트 추측 실행 금지**. Rust workspace는 `crates/Cargo.toml`이므로 저장소 루트에서 `cargo --manifest-path crates/Cargo.toml ...` 형태로 명시 실행하라.
 - **`crates/`는 Rust workspace root**다. 하위 `shacs-*` 디렉터리는 workspace member crate이며, 루트 저장소에는 Cargo workspace manifest를 두지 않는다.
@@ -41,11 +41,34 @@
 
 - **`unwrap()` / `expect()` 남발 금지**. 초기 프로토타입이 아니라면 실패 맥락을 드러내는 에러 전파나 메시지를 우선하라.
 - **커밋할 코드에 `dbg!`, `todo!`, `unimplemented!` 남기지 말 것**. 디버깅 흔적과 미완성 표식을 런타임 경로에 남기지 않는다.
-- **`#[allow(...)]`로 경고를 눌러서 끝내지 말 것**. 특히 clippy/rustc 경고를 회피용 attribute로 덮지 말고 원인을 먼저 해결하라.
+- **`#[allow(...)]`로 경고를 눌러서 끝내지 말 것**. 특히 clippy/rustc 경고를 회피용 attribute로 덮지 말고 원인을 먼저 해결하라. 원인을 없앨 수 없는 검토된 예외만 아래 'Google Rust 스타일'에 적은 방식으로 표시한다.
+
+## Google Rust 스타일
+
+- **새로 쓰거나 고치는 Rust 코드는 [Google Rust Style Guide](https://google.github.io/styleguide/rustguide.html)를 따른다**. 주변 기존 코드가 다르게 쓰여 있어도 새 줄은 이 규칙을 따르되, 손대지 않는 기존 코드를 이 규칙만을 이유로 고치지 않는다. 이 저장소는 Google 분류상 application code라 API 설계 규칙은 강한 권장이고, `[chrome]`·`[Fuchsia]` 표시 규칙(작은 crate, 평평한 파일 배치, `async` 금지 등)은 적용하지 않는다.
+- **rustfmt의 Google 옵션 두 개는 명령줄로만 적용된다**. `imports_granularity = "Module"`과 `format_macro_matchers = true`는 nightly 전용이라 안정판 rustfmt는 `crates/rustfmt.toml`에 적어도 경고만 내고 무시한다. 그래서 `cargo fmt`에는 항상 `-- --config imports_granularity=Module,format_macro_matchers=true`를 붙인다. 옵션 없이 돌린 `--check`도 통과하므로 위반을 잡지 못한다.
+- **`cargo fmt`는 `mod` 선언을 따라가며 파일을 찾는다**. 모듈 선언을 `macro_rules!` 안에 두면 그 아래 파일 전체가 포맷과 `--check`에서 조용히 빠진다(Spec034 모듈 97개 파일이 그랬다). 모듈 선언을 매크로로 감싸지 말 것.
+- **lint 수준은 `crates/Cargo.toml`의 `[workspace.lints.clippy]`, 금지 메서드와 테스트 `unwrap()` 허용은 `crates/clippy.toml`에 있다**. 새 member crate에는 `[lints]` 아래 `workspace = true`를 넣어야 이 검사가 적용된다.
+- **검토된 예외만 `#[allow(<lint>)]`로 표시하고, 이유는 바로 위 `// Allowed: ...` 주석이나 그 함수의 문서 주석에 적는다**. `#[expect]`와 lint attribute의 `reason =`은 Rust 1.81부터라 `rust-version = "1.75"`로 선언된 이 workspace에서는 쓰지 않는다. 지금 예외는 serde `serialize_with` 함수가 받아야 하는 `&Option<T>` 인자(`clippy::ref_option`)와 아래 `catch_unwind` 경계뿐이다. 새 예외가 필요하면 먼저 사용자에게 묻는다.
+- **poisoned `Mutex`의 값을 꺼내 쓰지 않는다**. `PoisonError::into_inner`는 clippy가 막는다. 잠금 실패는 이렇게 다룬다.
+  - 콜백이나 trait 구현처럼 호출자가 넘긴 코드는 잠금을 쥔 채 부르지 않는다. 그 panic이 잠금을 망가뜨리면 뒤의 호출이 모두 멈춘다(그래서 message bus matcher와 MCP connector `close`는 잠금 밖에서 돈다). 잠금 밖으로 뺄 수 없으면(durable event visitor, cron executor) 그 잠금의 실패를 `Result` 오류로 돌려준다.
+  - 그 밖에도 호출자가 처리할 수 있으면 오류로 돌려준다.
+  - 잠금 실패를 빈 목록·`None`·`NotFound` 같은 정상 결과로 바꾸지 않는다. 재시작 뒤 다시 읽지 않는 진단용 기록만 그 쓰기를 건너뛸 수 있다. 커서·체크포인트처럼 나중에 읽는 값을 건너뛰거나 빈 값으로 대신하면 지난 메시지를 다시 처리하게 된다.
+  - 반환형에 오류를 담을 수 없으면 `.expect("<무엇> lock poisoned")`로 멈춘다.
+  - `Drop`과 `Drop`이 부르는 함수에서는 멈추지 말고 `if let Ok(..) = mutex.lock()`으로 건너뛴다. unwinding 중 두 번째 panic은 프로세스를 바로 abort한다.
+- **`catch_unwind`를 새로 쓰지 말고 검토된 경계를 호출한다**. hook·callback panic 격리는 `crates/shacs-core/src/runtime/runner.rs`의 `isolate_panic`(Spec 003/025/030), facade hook 격리와 external turn panic 복구는 `crates/shacs-cli/src/lib.rs`의 `isolate_panic`(docs/USAGE.md, Spec 029)이다. 나머지 하나는 Spec034 release runner의 최종 검증이다.
+- **도구가 잡지 못하는 규칙**:
+  - 하위 모듈이 있는 파일에는 `mod` 선언과 re-export만 두고 구현은 leaf 모듈에 둔다. leaf 모듈 파일 이름은 안의 주된 타입 이름을 따른다.
+  - 타입과 trait은 `use`로 가져와 짧은 이름으로 쓰고, 다른 모듈의 자유 함수는 `module::function()`으로 부른다. 파일 전체에서 쓰지 않는 trait은 쓰는 함수 안에서 import한다.
+  - 인자는 감싼 타입이 아니라 데이터를 빌려 받는다(`&str`, `&[T]`, `Option<&T>`). application code에서는 `impl Into<T>` 인자를 쓰지 않고, 뜻이 드러나지 않는 `bool` 인자는 enum으로 바꾼다.
+  - `Rc`/`Arc`, 빌림 대신 쓰는 `.clone()`은 소유 구조가 지나치게 복잡해질 때만 쓴다.
+  - `.into()`·`.parse()`·긴 iterator chain의 결과에는 변수 타입을 적는다. `for` 머리에 combinator chain을 만들지 말고 변수에 담아 쓴다.
+  - 값이 있는지 확인한 뒤 `unwrap()`하지 말고 `if let`/`match`로 받는다. panic이 필요하면 이유를 적은 `expect()`를 쓰고, `assert!`에는 왜 성립해야 하는지 메시지를 붙인다.
+  - 문자열을 셋 이상 잇거나 치환할 때는 `format!`/`write!`을 쓴다. 프로젝트 밖 사람이 모를 약어를 쓰지 않는다.
 
 ## 검증 기준
 
-- **Rust 변경의 마무리 검증 순서**는 `cargo fmt --manifest-path crates/Cargo.toml --all -- --check` → `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings` → `cargo test --manifest-path crates/Cargo.toml -p <변경한 package> -q`다. 수정할 때마다 돌리지 말고 작업 끝에 실행하며, 변경한 package가 여러 개면 `-p`를 반복한다.
+- **Rust 변경의 마무리 검증 순서**는 `cargo fmt --manifest-path crates/Cargo.toml --all -- --check --config imports_granularity=Module,format_macro_matchers=true` → `cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings` → `cargo test --manifest-path crates/Cargo.toml -p <변경한 package> -q`다. 수정할 때마다 돌리지 말고 작업 끝에 실행하며, 변경한 package가 여러 개면 `-p`를 반복한다.
 - **전체 테스트(`cargo test --manifest-path crates/Cargo.toml --workspace -q`)는 사용자 승인 없이 돌리지 않는다**. 다른 crate가 쓰는 공개 동작을 바꿨으면 실제 사용처를 찾아 그 package의 관련 테스트만 돌린다. 영향 범위를 좁히기 어렵거나 Rust 코드 변경을 커밋하기 전이면 전체 테스트를 돌릴지 먼저 묻는다. `clippy --workspace --all-targets`는 다른 crate의 타입 오류는 잡지만 동작이 바뀐 것은 잡지 못한다.
 - **검증 범위를 명시**. 전체 workspace면 `--workspace`, 특정 crate면 `-p <package>`를 붙여 어느 crate를 검증하는지 분명히 하라.
 - **사용자가 요청하지 않은 언어/서브프로젝트까지 한꺼번에 건드리지 말 것**. Rust를 건드렸다고 해서 다른 툴체인까지 리팩토링하지 않는다.

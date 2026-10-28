@@ -20,7 +20,7 @@ impl PluginHookCommandExecutor for QueueExecutor {
     fn execute(&self, _invocation: &PluginHookCommandInvocation) -> PluginHookCallbackResult {
         self.0
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .expect("hook results lock poisoned")
             .pop()
             .unwrap_or_else(|| PluginHookCallbackResult::Output(json!({})))
     }

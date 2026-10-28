@@ -36,17 +36,20 @@ impl Provider {
     }
 
     fn calls(&self) -> usize {
-        self.requests.lock().unwrap().len()
+        self.requests.lock().expect("requests lock poisoned").len()
     }
 }
 
 impl ProviderClient for Provider {
     fn chat(&self, request: ProviderRequest) -> Result<LlmResponse, ProviderError> {
-        self.requests.lock().unwrap().push(request);
+        self.requests
+            .lock()
+            .expect("requests lock poisoned")
+            .push(request);
         Ok(self
             .responses
             .lock()
-            .unwrap()
+            .expect("responses lock poisoned")
             .pop_front()
             .expect("unexpected provider continuation"))
     }

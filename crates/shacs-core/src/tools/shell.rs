@@ -8,10 +8,9 @@ use crate::runtime::sandbox_adapter::{
 use crate::runtime::trusted_runtime::Spec030FactStore;
 use crate::runtime::ProcessExecutionReceipt;
 use crate::tools::filesystem::PathContext;
-use crate::tools::SchemaFragment;
 use crate::tools::{
-    IntegerSchema, JsonMap, StringSchema, Tool, ToolCallExecutionContext, ToolParameters,
-    ToolResult,
+    IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool, ToolCallExecutionContext,
+    ToolParameters, ToolResult,
 };
 use serde_json::Value;
 use shacs_config::{ExecSandboxFallbackConfig, ExecSandboxNetworkConfig, ExecSandboxPolicyConfig};

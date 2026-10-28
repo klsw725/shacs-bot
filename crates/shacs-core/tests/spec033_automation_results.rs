@@ -40,6 +40,9 @@ pub fn source_event(mode: AutomationExecutionMode) -> AutomationSourceEvent {
     }
 }
 
+/// # Panics
+///
+/// Panics if `ExecutionSnapshot::create` rejects the fixture input.
 pub fn snapshot(mode: SandboxMode, fallback: SandboxFallback) -> ExecutionSnapshot {
     ExecutionSnapshot::create(ExecutionSnapshotInput {
         snapshot_id: "snapshot-1".to_owned(),
@@ -105,6 +108,9 @@ pub fn requirements() -> AutomationExecutionRequirements {
     }
 }
 
+/// # Panics
+///
+/// Panics if the snapshot has no semantic compatibility digest.
 pub fn lifecycle_input<'a>(
     event: &'a AutomationSourceEvent,
     snapshot: &'a ExecutionSnapshot,

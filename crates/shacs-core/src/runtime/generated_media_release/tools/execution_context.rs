@@ -68,12 +68,11 @@ impl ToolchainExecutionContext {
     }
 }
 
-fn create_config(path: PathBuf, expected: &[u8]) -> Result<ConfigFileSeal, Spec034ReleaseArtifactError> {
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
+fn create_config(
+    path: PathBuf,
+    expected: &[u8],
+) -> Result<ConfigFileSeal, Spec034ReleaseArtifactError> {
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut file) => {
             file.write_all(expected)
                 .map_err(Spec034ReleaseArtifactError::Io)?;
@@ -119,9 +118,7 @@ impl ConfigFileSeal {
             .try_clone()
             .map_err(Spec034ReleaseArtifactError::Io)?;
         let mut bytes = Vec::new();
-        handle
-            .rewind()
-            .map_err(Spec034ReleaseArtifactError::Io)?;
+        handle.rewind().map_err(Spec034ReleaseArtifactError::Io)?;
         handle
             .read_to_end(&mut bytes)
             .map_err(Spec034ReleaseArtifactError::Io)?;
@@ -136,9 +133,7 @@ fn reject_alternate_configs(
     home_cargo: &Path,
 ) -> Result<(), Spec034ReleaseArtifactError> {
     for entry in std::fs::read_dir(cargo_home).map_err(Spec034ReleaseArtifactError::Io)? {
-        let name = entry
-            .map_err(Spec034ReleaseArtifactError::Io)?
-            .file_name();
+        let name = entry.map_err(Spec034ReleaseArtifactError::Io)?.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("config") && name != "config" && name != "config.toml" {
             return Err(Spec034ReleaseArtifactError::DigestMismatch);
@@ -179,7 +174,9 @@ fn prepare_cargo_home(cargo_home: &Path) -> Result<(), Spec034ReleaseArtifactErr
 fn config_bytes(vendor: Option<&Path>) -> Result<Vec<u8>, Spec034ReleaseArtifactError> {
     let mut config = String::from("[net]\noffline = true\n");
     if let Some(vendor) = vendor {
-        let vendor = vendor.to_str().ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
+        let vendor = vendor
+            .to_str()
+            .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
         config.push_str("\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = ");
         config.push_str(&serde_json::to_string(vendor).map_err(Spec034ReleaseArtifactError::Json)?);
         config.push('\n');

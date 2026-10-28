@@ -1,8 +1,7 @@
 use super::{LinkerReceipt, MAX_RECEIPT_BYTES};
+use crate::runtime::generated_media_release::tools::monitor::{ExecutionLedger, ExecutionQueue};
 use crate::runtime::generated_media_release::tools::{
-    digest_bytes,
-    monitor::{ExecutionLedger, ExecutionQueue},
-    spawn, Spec034ReleaseArtifactError,
+    digest_bytes, spawn, Spec034ReleaseArtifactError,
 };
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -47,13 +46,17 @@ impl LinkerReceipts {
         }
         #[cfg(target_vendor = "apple")]
         {
-            let target = target.canonicalize().map_err(Spec034ReleaseArtifactError::Io)?;
+            let target = target
+                .canonicalize()
+                .map_err(Spec034ReleaseArtifactError::Io)?;
             let socket_path = target.join(format!(".spec034-linker-{}.sock", std::process::id()));
-            let listener = UnixListener::bind(&socket_path).map_err(Spec034ReleaseArtifactError::Io)?;
-            listener.set_nonblocking(true).map_err(Spec034ReleaseArtifactError::Io)?;
-            let nonce = digest_bytes(
-                format!("{}:{}", socket_path.display(), wrapper.digest).as_bytes(),
-            );
+            let listener =
+                UnixListener::bind(&socket_path).map_err(Spec034ReleaseArtifactError::Io)?;
+            listener
+                .set_nonblocking(true)
+                .map_err(Spec034ReleaseArtifactError::Io)?;
+            let nonce =
+                digest_bytes(format!("{}:{}", socket_path.display(), wrapper.digest).as_bytes());
             let queue = ExecutionLedger::new_queue()?;
             Ok(Self {
                 listener,
@@ -68,7 +71,10 @@ impl LinkerReceipts {
         }
     }
 
-    pub(in crate::runtime::generated_media_release::tools) fn configure(&self, command: &mut std::process::Command) {
+    pub(in crate::runtime::generated_media_release::tools) fn configure(
+        &self,
+        command: &mut std::process::Command,
+    ) {
         command
             .env(MODE_ENV, MODE_VALUE)
             .env(SOCKET_ENV, &self.socket_path)
@@ -100,7 +106,10 @@ impl LinkerReceipts {
             .map_err(Spec034ReleaseArtifactError::Io)?;
         let mut encoded = Vec::new();
         BufReader::new(&stream)
-            .take(u64::try_from(MAX_RECEIPT_BYTES + 1).map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?)
+            .take(
+                u64::try_from(MAX_RECEIPT_BYTES + 1)
+                    .map_err(|_| Spec034ReleaseArtifactError::InvalidConfig)?,
+            )
             .read_until(b'\n', &mut encoded)
             .map_err(Spec034ReleaseArtifactError::Io)?;
         if encoded.last() != Some(&b'\n') || encoded.len() > MAX_RECEIPT_BYTES {
@@ -120,14 +129,19 @@ impl LinkerReceipts {
         ExecutionLedger::ensure_capacity(retained.saturating_add(1))?;
         let monitor = ExecutionLedger::arm_on(&[output], self.queue.clone())?;
         monitor.verify()?;
-        let mut state = self.state.lock().map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
         if state
             .insert(receipt.path.clone(), VerifiedReceipt { receipt, monitor })
             .is_some()
         {
             return Err(Spec034ReleaseArtifactError::InvalidEvidence);
         }
-        stream.write_all(ACK).map_err(Spec034ReleaseArtifactError::Io)
+        stream
+            .write_all(ACK)
+            .map_err(Spec034ReleaseArtifactError::Io)
     }
 
     fn verify_receipt(
@@ -138,7 +152,9 @@ impl LinkerReceipts {
         use std::os::unix::fs::MetadataExt;
         let relative = Path::new(&receipt.path);
         if relative.is_absolute()
-            || relative.components().any(|part| !matches!(part, Component::Normal(_)))
+            || relative
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
         {
             return Err(Spec034ReleaseArtifactError::InvalidEvidence);
         }
@@ -146,22 +162,32 @@ impl LinkerReceipts {
         let (path, mut file, preserved_inode) = open_output(&original, relative)?;
         let metadata = file.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
         if metadata.size() != receipt.size
-            || (preserved_inode && (metadata.dev() != receipt.device || metadata.ino() != receipt.inode))
+            || (preserved_inode
+                && (metadata.dev() != receipt.device || metadata.ino() != receipt.inode))
         {
             return Err(Spec034ReleaseArtifactError::DigestMismatch);
         }
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(Spec034ReleaseArtifactError::Io)?;
-        if digest_bytes(&bytes) != receipt.digest || spawn::static_cdhash(&path)? != receipt.cdhash {
+        file.read_to_end(&mut bytes)
+            .map_err(Spec034ReleaseArtifactError::Io)?;
+        if digest_bytes(&bytes) != receipt.digest || spawn::static_cdhash(&path)? != receipt.cdhash
+        {
             return Err(Spec034ReleaseArtifactError::DigestMismatch);
         }
         Ok((receipt, path))
     }
 
-    pub(in crate::runtime::generated_media_release::tools) fn verify(&self) -> Result<(), Spec034ReleaseArtifactError> {
+    pub(in crate::runtime::generated_media_release::tools) fn verify(
+        &self,
+    ) -> Result<(), Spec034ReleaseArtifactError> {
         self.drain()?;
-        let state = self.state.lock().map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
-        state.values().try_for_each(|receipt| receipt.monitor.verify())
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
+        state
+            .values()
+            .try_for_each(|receipt| receipt.monitor.verify())
     }
 
     pub(in crate::runtime::generated_media_release::tools) fn verify_identity(
@@ -172,23 +198,39 @@ impl LinkerReceipts {
         if !identity.executable.starts_with(&self.target) {
             return Ok(());
         }
-        let state = self.state.lock().map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
         let receipt = state
             .values()
-            .find(|receipt| receipt.receipt.digest == identity.digest && receipt.receipt.cdhash == identity.cdhash)
+            .find(|receipt| {
+                receipt.receipt.digest == identity.digest
+                    && receipt.receipt.cdhash == identity.cdhash
+            })
             .ok_or(Spec034ReleaseArtifactError::DigestMismatch)?;
         receipt.monitor.verify()
     }
 
-    pub(in crate::runtime::generated_media_release::tools) fn attestation_digest(&self) -> Result<String, Spec034ReleaseArtifactError> {
+    pub(in crate::runtime::generated_media_release::tools) fn attestation_digest(
+        &self,
+    ) -> Result<String, Spec034ReleaseArtifactError> {
         self.verify()?;
-        let state = self.state.lock().map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| Spec034ReleaseArtifactError::InvalidEvidence)?;
         #[cfg(not(test))]
         if state.is_empty() {
             return Err(Spec034ReleaseArtifactError::InvalidEvidence);
         }
-        let receipts = state.values().map(|value| &value.receipt).collect::<Vec<_>>();
-        Ok(digest_bytes(&serde_json::to_vec(&receipts).map_err(Spec034ReleaseArtifactError::Json)?))
+        let receipts = state
+            .values()
+            .map(|value| &value.receipt)
+            .collect::<Vec<_>>();
+        Ok(digest_bytes(
+            &serde_json::to_vec(&receipts).map_err(Spec034ReleaseArtifactError::Json)?,
+        ))
     }
 }
 
@@ -205,12 +247,16 @@ fn open_output(
     match std::fs::File::open(original) {
         Ok(file) => Ok((original.to_path_buf(), file, true)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let name = relative.file_name().and_then(|name| name.to_str())
+            let name = relative
+                .file_name()
+                .and_then(|name| name.to_str())
                 .ok_or(Spec034ReleaseArtifactError::InvalidEvidence)?;
             if !name.starts_with("build_script_build-") {
                 return Err(Spec034ReleaseArtifactError::DigestMismatch);
             }
-            let finalized = original.parent().ok_or(Spec034ReleaseArtifactError::InvalidEvidence)?
+            let finalized = original
+                .parent()
+                .ok_or(Spec034ReleaseArtifactError::InvalidEvidence)?
                 .join("build-script-build");
             let file = std::fs::File::open(&finalized)
                 .map_err(|_| Spec034ReleaseArtifactError::DigestMismatch)?;
@@ -229,12 +275,17 @@ fn peer_pid(stream: &UnixStream) -> Result<libc::pid_t, Spec034ReleaseArtifactEr
     // owns a connected AF_UNIX descriptor; LOCAL_PEERPID writes one pid_t on success.
     let status = unsafe {
         libc::getsockopt(
-            stream.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID,
-            (&mut pid as *mut libc::pid_t).cast(), &mut length,
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut length,
         )
     };
     if status != 0 || length as usize != std::mem::size_of::<libc::pid_t>() {
-        return Err(Spec034ReleaseArtifactError::Io(std::io::Error::last_os_error()));
+        return Err(Spec034ReleaseArtifactError::Io(
+            std::io::Error::last_os_error(),
+        ));
     }
     Ok(pid)
 }

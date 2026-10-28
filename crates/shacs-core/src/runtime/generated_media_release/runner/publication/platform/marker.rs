@@ -1,6 +1,10 @@
 use super::staging::StagingDirectory;
-use super::*;
+use super::{
+    PublicationStage, PublicationStatus, PublicationStatusDocument, Spec034ReleaseArtifactError,
+    PUBLICATION_STATUS_SCHEMA,
+};
 use rustix::fs::{fsync, openat, renameat_with, Mode, OFlags, RenameFlags};
+use std::fs::File;
 use std::io::Write;
 
 use crate::runtime::generated_media_release::artifacts::{ArtifactMetadata, ArtifactSnapshot};
@@ -38,13 +42,8 @@ impl StagingDirectory {
             .union(OFlags::EXCL)
             .union(OFlags::NOFOLLOW)
             .union(OFlags::CLOEXEC);
-        let descriptor = openat(
-            &self.handle,
-            STATUS_TEMP,
-            flags,
-            Mode::from_raw_mode(0o600),
-        )
-        .map_err(|_| unknown(PublicationStage::MarkerCreate))?;
+        let descriptor = openat(&self.handle, STATUS_TEMP, flags, Mode::from_raw_mode(0o600))
+            .map_err(|_| unknown(PublicationStage::MarkerCreate))?;
         let mut file: File = descriptor.into();
         file.write_all(&bytes)
             .map_err(|_| unknown(PublicationStage::MarkerWrite))?;

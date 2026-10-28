@@ -1,5 +1,7 @@
-use super::*;
-use rustix::fs::fsync;
+use super::{PublicationStage, Spec034ReleaseArtifactError};
+use rustix::fs::{fsync, renameat_with, RenameFlags};
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
 use std::io::Read;
 
 const MAX_QUARANTINE_ATTEMPTS: usize = 8;
@@ -18,13 +20,7 @@ pub(super) fn quarantine_visible_with(
 ) -> Result<(), Spec034ReleaseArtifactError> {
     for _ in 0..MAX_QUARANTINE_ATTEMPTS {
         let rejected = next_name()?;
-        match renameat_with(
-            parent,
-            leaf,
-            parent,
-            &rejected,
-            RenameFlags::NOREPLACE,
-        ) {
+        match renameat_with(parent, leaf, parent, &rejected, RenameFlags::NOREPLACE) {
             Ok(()) => {
                 fsync(parent).map_err(|_| quarantine_failure())?;
                 return Ok(());

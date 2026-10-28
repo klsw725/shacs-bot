@@ -2,8 +2,8 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
-fn cargo_config_replace_restore_blocks_command_evidence(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cargo_config_replace_restore_blocks_command_evidence() -> Result<(), Box<dyn std::error::Error>>
+{
     let toolchain = ResolvedToolchain::resolve()?;
     let config = toolchain.cargo_home_path().join("config.toml");
     let displaced = toolchain.cargo_home_path().join("config.approved");
@@ -34,7 +34,10 @@ fn cargo_config_absence_and_alternate_are_rejected() -> Result<(), Box<dyn std::
     drop(toolchain);
 
     let toolchain = ResolvedToolchain::resolve()?;
-    std::fs::write(toolchain.cargo_home_path().join("config.local"), b"[build]\n")?;
+    std::fs::write(
+        toolchain.cargo_home_path().join("config.local"),
+        b"[build]\n",
+    )?;
     assert!(toolchain.verify().is_err());
     Ok(())
 }

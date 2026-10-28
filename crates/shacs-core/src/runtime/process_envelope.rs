@@ -1,6 +1,7 @@
 use crate::runtime::{PermissionSecretRefEvidence, PermissionedAction, PolicySafetySnapshotRef};
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -27,14 +27,17 @@ fn recursive_observation_retains_descendant_after_it_escapes_parent_tree(
         |pid| Ok(identity(pid, 1)),
     )?;
 
-    assert_eq!(tracker.tracked.keys().copied().collect::<Vec<_>>(), vec![20, 30]);
+    assert_eq!(
+        tracker.tracked.keys().copied().collect::<Vec<_>>(),
+        vec![20, 30]
+    );
     Ok(())
 }
 
 #[cfg(target_vendor = "apple")]
 #[test]
-fn observable_setsid_double_fork_is_retained_and_killed(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn observable_setsid_double_fork_is_retained_and_killed() -> Result<(), Box<dyn std::error::Error>>
+{
     let root = tempfile::tempdir()?;
     let pid_path = root.path().join("escaped.pid");
     let script = r#"
@@ -91,7 +94,10 @@ fn pid_reuse_never_signals_the_replacement() {
         |_| Ok(true),
     );
 
-    assert!(matches!(result, Err(Spec034ReleaseArtifactError::CombinedFailure { .. })));
+    assert!(matches!(
+        result,
+        Err(Spec034ReleaseArtifactError::CombinedFailure { .. })
+    ));
     assert!(signalled.is_empty());
 }
 

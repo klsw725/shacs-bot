@@ -28,11 +28,8 @@ impl ResolvedToolchain {
         let cargo = ResolvedTool::resolve("cargo", vec![cargo])?;
         let rustc = ResolvedTool::resolve("rustc", vec![rustc])?;
         let rustdoc = ResolvedTool::resolve("rustdoc", vec![rustdoc])?;
-        let ledger = ExecutionLedger::arm(&[
-            cargo.path.clone(),
-            rustc.path.clone(),
-            rustdoc.path.clone(),
-        ])?;
+        let ledger =
+            ExecutionLedger::arm(&[cargo.path.clone(), rustc.path.clone(), rustdoc.path.clone()])?;
         let linker_path = linker::fixed_linker()?;
         let linker_seals = vec![PathChainSeal::capture_digest_leaf(&linker_path)?];
         let linker_identity = spawn::capture_process_identity(

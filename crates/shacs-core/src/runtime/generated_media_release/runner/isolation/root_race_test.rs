@@ -5,7 +5,10 @@ fn nested_file_replacement_immediately_before_unlink_is_preserved(
 ) -> Result<(), Spec034ReleaseArtifactError> {
     // Given: retained root A contains a file displaced after its earlier identity read.
     let parent = tempfile::tempdir().map_err(Spec034ReleaseArtifactError::Io)?;
-    let canonical = parent.path().canonicalize().map_err(Spec034ReleaseArtifactError::Io)?;
+    let canonical = parent
+        .path()
+        .canonicalize()
+        .map_err(Spec034ReleaseArtifactError::Io)?;
     let root = canonical.join("retained-root");
     let nested = root.join("nested");
     let displaced = canonical.join("displaced-nested-a");

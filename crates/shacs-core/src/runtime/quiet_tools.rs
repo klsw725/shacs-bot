@@ -92,8 +92,9 @@ pub(crate) fn quiet_usage(usage: &Value) -> Value {
 pub(crate) fn quiet_media(
     seen: &shacs_providers::ProviderMediaLifecycleObservation,
 ) -> Option<shacs_providers::ProviderMediaLifecycleObservation> {
-    use shacs_providers::ProviderMediaLifecycleObservation as Seen;
-    use shacs_providers::ProviderMediaLifecycleStatus as Status;
+    use shacs_providers::{
+        ProviderMediaLifecycleObservation as Seen, ProviderMediaLifecycleStatus as Status,
+    };
     let digest = Sha256::digest(seen.candidate_id().as_str().as_bytes());
     let id = shacs_providers::ProviderMediaCandidateId::new(format!("sha256-{digest:x}")).ok()?;
     let sequence = seen.sequence();

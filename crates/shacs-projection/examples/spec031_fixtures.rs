@@ -2,7 +2,8 @@ use shacs_projection::{
     spec031_canonical_fixture_registry, spec031_missing_external_owner_evidence,
     Spec031FixtureFamily, Spec031ReasonCode,
 };
-use std::{error::Error, io};
+use std::error::Error;
+use std::io;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let registry = spec031_canonical_fixture_registry()?;

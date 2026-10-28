@@ -1,7 +1,12 @@
 mod header;
 
 use self::header::runtime_inspect_header;
-use super::super::*;
+use super::super::{
+    configured_label, format_channel_restart_state_line, opaque_ref, optional_bool_label,
+    runtime_capability_label, spec031_cli, RuntimeInspectReport,
+};
+use shacs_redaction::redact_string;
+use shacs_session::durable_migration::DurableMigrationAction;
 
 pub(crate) fn format_runtime_inspect(report: RuntimeInspectReport) -> String {
     let state = runtime_inspect_header(&report);

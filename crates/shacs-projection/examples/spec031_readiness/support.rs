@@ -1,4 +1,8 @@
-use shacs_projection::*;
+use shacs_projection::{
+    Spec031Availability, Spec031ConstructionError, Spec031Count, Spec031Freshness,
+    Spec031ObservedAtUnixMs, Spec031ReadinessComponentKind, Spec031ReadinessObservation,
+    Spec031ReadinessRequirement, Spec031ReasonCode, Spec031SafeSummary,
+};
 
 const NOW: Spec031ObservedAtUnixMs = Spec031ObservedAtUnixMs::new(31);
 

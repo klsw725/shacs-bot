@@ -196,6 +196,8 @@ impl ToolBeforeRuntimeFacts {
     }
 
     fn lock(&self) -> MutexGuard<'_, ToolBeforeRuntimeState> {
-        self.state.lock().unwrap_or_else(|error| error.into_inner())
+        self.state
+            .lock()
+            .expect("tool-before runtime state lock poisoned")
     }
 }

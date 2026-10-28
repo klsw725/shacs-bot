@@ -13,7 +13,9 @@ fn a_rerun_supersedes_earlier_checks_and_other_revisions_do_not_count() {
     .runs;
     // When
     let rerun = evaluate(&runs, 1);
-    runs.iter_mut().for_each(|run| run.selection_revision = 2);
+    for run in &mut runs {
+        run.selection_revision = 2;
+    }
     let other_revision = evaluate(&runs, 3);
     // Then
     assert_eq!(rerun.state, CalcState::Unverified);

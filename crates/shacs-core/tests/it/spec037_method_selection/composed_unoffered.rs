@@ -19,7 +19,10 @@ impl AgentHook for Judge {
         _: &AgentHookContext,
         calls: &[RuntimeToolCall],
     ) -> Vec<RuntimeToolMessage> {
-        self.0.lock().unwrap().push_str(&format!("{calls:?}\n"));
+        self.0
+            .lock()
+            .expect("policy log lock poisoned")
+            .push_str(&format!("{calls:?}\n"));
         Vec::new()
     }
 }
@@ -75,7 +78,10 @@ fn streaming<'a>(
         config,
     )
     .with_provider_event_callback(Arc::new(move |event| {
-        events.lock().unwrap().push_str(&format!("{event:?}\n"));
+        events
+            .lock()
+            .expect("events log lock poisoned")
+            .push_str(&format!("{event:?}\n"));
     })))
 }
 

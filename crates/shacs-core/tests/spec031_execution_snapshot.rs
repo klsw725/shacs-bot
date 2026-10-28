@@ -4,21 +4,18 @@ use shacs_core::runtime::trusted_runtime::{
     LocalSpec030ProjectionProvider, Spec030FactStore, WorkspaceTrustObservation,
 };
 use shacs_core::runtime::{
-    trusted_runtime_fact_refs, AdapterSandboxRef, ConfigMigrationState, ConfigSnapshotRef,
-    ContextInclusion, ContextSourceSnapshot, CredentialSnapshotRef, DataDisclosureWarning,
-    ExecutionSnapshot, ExecutionSnapshotInput, ProfileSelectionSnapshot, ProviderInputSnapshot,
-    ReplayContract, ResourceIdentitySnapshot, SandboxMode, SelectedIdentitySnapshot,
-    TokenBudgetSnapshot, TrustedRuntimeFactRef,
-};
-use shacs_core::runtime::{
-    ActiveLoopTask, AgentLoop, AgentLoopConfig, AgentRunSpec, AgentRunner, CancellationToken,
-    ContextBuilder, InboundMessage, MessageBus, SessionManager,
+    trusted_runtime_fact_refs, ActiveLoopTask, AdapterSandboxRef, AgentLoop, AgentLoopConfig,
+    AgentRunSpec, AgentRunner, CancellationToken, ConfigMigrationState, ConfigSnapshotRef,
+    ContextBuilder, ContextInclusion, ContextSourceSnapshot, CredentialSnapshotRef,
+    DataDisclosureWarning, ExecutionSnapshot, ExecutionSnapshotInput, InboundMessage, MessageBus,
+    ProfileSelectionSnapshot, ProviderInputSnapshot, ReplayContract, ResourceIdentitySnapshot,
+    SandboxMode, SelectedIdentitySnapshot, SessionManager, TokenBudgetSnapshot,
+    TrustedRuntimeFactRef,
 };
 use shacs_core::tools::ToolRegistry;
-use shacs_projection::Spec030ProjectionProvider;
 use shacs_projection::{
     CredentialFingerprintStatus, CredentialSource, CredentialStatus, DataSurface,
-    ProcessAdapterKind, SandboxFallback,
+    ProcessAdapterKind, SandboxFallback, Spec030ProjectionProvider,
 };
 use shacs_providers::{LlmResponse, ProviderClient, ProviderError, ProviderEvent, ProviderRequest};
 use std::error::Error;
@@ -216,9 +213,7 @@ fn runner_freezes_fresh_snapshot_before_provider_handoff() -> Result<(), Box<dyn
     spec.execution_snapshot_resolver = {
         let sequence = Arc::clone(&sequence);
         Arc::new(move |_request| {
-            let mut value = sequence
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut value = sequence.lock().expect("sequence lock poisoned");
             *value += 1;
             Ok(input(&format!("execution:{}", *value), 31_000 + *value))
         })
@@ -228,7 +223,7 @@ fn runner_freezes_fresh_snapshot_before_provider_handoff() -> Result<(), Box<dyn
         Arc::new(move |snapshot| {
             snapshots
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .expect("snapshots lock poisoned")
                 .push(snapshot.clone());
         })
     };
@@ -238,9 +233,7 @@ fn runner_freezes_fresh_snapshot_before_provider_handoff() -> Result<(), Box<dyn
     AgentRunner::new().run(spec)?;
 
     // Then
-    let captured = snapshots
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let captured = snapshots.lock().expect("snapshots lock poisoned");
     assert_eq!(captured.len(), 2);
     assert_ne!(captured[0].snapshot_id, captured[1].snapshot_id);
     assert_eq!(captured[0].provider.model, "gpt-test");

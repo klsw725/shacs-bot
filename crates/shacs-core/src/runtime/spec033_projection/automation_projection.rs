@@ -1,10 +1,12 @@
-use super::*;
 use shacs_eval::completion_boundary::EvaluatorRoute;
 use shacs_projection::{
     Spec033AutomationFact, Spec033AutomationJobStatus, Spec033DeliveryStatus,
-    Spec033HookConfirmationFact,
+    Spec033EvidenceSource, Spec033HookConfirmationFact, Spec033Owner, Spec033OwnerFact,
+    Spec033Snapshot,
 };
+use shacs_session::durable_replay::evaluate_durable_recovery;
 use shacs_session::durable_work::{DurableWorkPayloadStore, ReplayWorkItem, ReplayWorkState};
+use std::path::Path;
 
 pub(super) fn populate(snapshot: &mut Spec033Snapshot, data_dir: &Path, session_id: &str) {
     let Some(work) = latest(data_dir, session_id) else {

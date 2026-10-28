@@ -1,6 +1,12 @@
 use super::revised_delivery::delivery_projection;
 use super::revised_runtime::runtime_controls;
-use super::*;
+use super::{
+    Spec035DecisionProjection, Spec035DisclosureBoundary, Spec035DisclosureState,
+    Spec035DurableApprovalProjection, Spec035EphemeralConfirmationProjection,
+    Spec035EphemeralConfirmationState, Spec035HookDenialProjection, Spec035HookDenialState,
+    Spec035OwnerSurface, Spec035ResourceDisclosureProjection, Spec035RevisedProjection,
+    Spec035RevisedProjectionInput,
+};
 use crate::{
     HookDenialProjection, HookDenialReason, Spec030Availability, Spec030RuntimeProjection,
     Spec031ActionRef, Spec031Capability, Spec031ConstructionError, Spec031Envelope,

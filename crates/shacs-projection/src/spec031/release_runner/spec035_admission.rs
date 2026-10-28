@@ -1,5 +1,8 @@
 use super::model::{Spec031ReleaseArtifactError as Error, Spec031ReleaseRunId};
-use super::spec035_admission_model::*;
+use super::spec035_admission_model::{
+    Admission, AdmissionSchema, CompositionDisposition, OriginalTarget, ReleaseDisposition,
+    Spec035ReceiptAdmissionReport, WorkspaceAudit, WorkspaceReceipt,
+};
 use super::spec035_evidence_io::{evidence_error, sha256};
 use super::spec035_execution_io::{decode, read_bound};
 use super::spec035_execution_model::FileRef;

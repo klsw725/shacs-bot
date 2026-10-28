@@ -1,4 +1,4 @@
-use super::*;
+use super::{AgentLoop, Session, SessionManager};
 use crate::runtime::learned_method::LearnedMethod;
 use crate::runtime::learned_method_evidence::digest;
 use crate::runtime::learned_method_recheck::{recheck, recheck_check, Sources};
@@ -6,6 +6,7 @@ use crate::runtime::learned_method_render::Checked;
 use crate::runtime::learned_method_store::{LearnedMethodStore, LearnedMethodStoreError};
 use shacs_session::SessionSummary;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
 use std::{fs, io};
 
 /// Finds sessions by key digest. A session is taken as deleted only when

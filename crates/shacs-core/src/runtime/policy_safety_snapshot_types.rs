@@ -1,6 +1,7 @@
 use crate::runtime::{ContainmentSnapshotRef, PermissionModeSnapshot, SafetyCapability};
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 pub const POLICY_SAFETY_SNAPSHOT_SCHEMA_V1: &str = "policy_safety_snapshot.v1";
 

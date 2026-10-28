@@ -1,10 +1,9 @@
 use serde_json::{json, Map, Value};
-use shacs_providers::ProviderSpec;
 use shacs_providers::{
     find_by_name, finish_reason_from_openai_responses, interpolate_env, prepare_provider_request,
     provider_client_from_config, provider_specs, resolve_azure_openai_api_base,
     resolve_provider_client, AgentDefaults, GenerationSettings, LlmResponse, ProviderConfig,
-    ProviderError, ProviderRegistry, ProvidersConfig, ToolCallRequest,
+    ProviderError, ProviderRegistry, ProviderSpec, ProvidersConfig, ToolCallRequest,
 };
 use std::collections::BTreeMap;
 use std::error::Error;

@@ -1,7 +1,5 @@
-use super::{
-    smtp,
-    support::{Runtime, TestResult},
-};
+use super::smtp;
+use super::support::{Runtime, TestResult};
 use shacs_core::runtime::{EntrustedNotificationDeliveryState, EntrustedNotificationEnqueueState};
 
 #[test]

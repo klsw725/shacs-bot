@@ -1,5 +1,7 @@
-use crate::{metadata_bool, metadata_string, metadata_truthy, OutboundMessage};
-use crate::{project_spec031_channel_event, ChannelSpec031ProjectionInput};
+use crate::{
+    metadata_bool, metadata_string, metadata_truthy, project_spec031_channel_event,
+    ChannelSpec031ProjectionInput, OutboundMessage,
+};
 use shacs_projection::{
     project_spec035_revised_owner_facts, Spec030RuntimeProjection, Spec030UnavailableReason,
     Spec031ConstructionError, Spec031Envelope, Spec031ProgressDelivery, Spec035OwnerSurface,

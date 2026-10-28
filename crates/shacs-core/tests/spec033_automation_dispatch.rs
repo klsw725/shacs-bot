@@ -12,8 +12,7 @@ use shacs_core::runtime::{
     SandboxMode,
 };
 use shacs_eval::evaluator::{AutomationExecutionMode, AutomationRunState};
-use shacs_projection::HookDenialReason;
-use shacs_projection::SandboxFallback;
+use shacs_projection::{HookDenialReason, SandboxFallback};
 use shacs_session::durable_event::{
     DurableEventInput, DurableEventPayload, DurableEventStore, WORK_ENQUEUED,
 };

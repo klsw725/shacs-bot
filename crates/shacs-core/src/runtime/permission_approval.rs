@@ -1,6 +1,6 @@
+use crate::runtime::permission_action::secret_ref_correlation_material;
 use crate::runtime::{
-    permission_action::secret_ref_correlation_material, PermissionSecretRefEvidence,
-    PermissionSecretRefStatus, PolicySafetySnapshotRef,
+    PermissionSecretRefEvidence, PermissionSecretRefStatus, PolicySafetySnapshotRef,
 };
 use serde::{Deserialize, Serialize};
 use shacs_config::{RememberedPermissionEffect, RememberedPermissionMatcher};

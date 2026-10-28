@@ -1,7 +1,9 @@
 use super::Spec034ReleaseArtifactError;
 #[cfg(not(test))]
 use crate::runtime::generated_media_release::tools::spawn::capture_observed_process_identity;
-use crate::runtime::generated_media_release::tools::spawn::{capture_process_identity, ProcessIdentity};
+use crate::runtime::generated_media_release::tools::spawn::{
+    capture_process_identity, ProcessIdentity,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(super) struct DescendantTracker {
@@ -102,7 +104,10 @@ impl DescendantTracker {
         for (&pid, expected) in &self.tracked {
             let absent = match capture(pid) {
                 Err(Spec034ReleaseArtifactError::Io(error))
-                    if error.raw_os_error() == Some(libc::ESRCH) => true,
+                    if error.raw_os_error() == Some(libc::ESRCH) =>
+                {
+                    true
+                }
                 Ok(current) if expected.same_launch(&current) => match present(pid) {
                     Ok(present) => !present,
                     Err(error) => {
@@ -119,7 +124,10 @@ impl DescendantTracker {
                 }
             };
             if !absent {
-                accumulate(&mut failure, Err(Spec034ReleaseArtifactError::CommandFailed));
+                accumulate(
+                    &mut failure,
+                    Err(Spec034ReleaseArtifactError::CommandFailed),
+                );
             }
         }
         failure.map_or(Ok(()), Err)
@@ -168,8 +176,8 @@ fn direct_children(_parent: i32) -> Result<Vec<i32>, Spec034ReleaseArtifactError
 }
 
 fn signal(raw: i32) -> Result<(), Spec034ReleaseArtifactError> {
-    let pid = rustix::process::Pid::from_raw(raw)
-        .ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
+    let pid =
+        rustix::process::Pid::from_raw(raw).ok_or(Spec034ReleaseArtifactError::InvalidConfig)?;
     match rustix::process::kill_process(pid, rustix::process::Signal::KILL) {
         Ok(()) => Ok(()),
         Err(error) if error == rustix::io::Errno::SRCH => Ok(()),
@@ -183,7 +191,9 @@ fn exists(raw: i32) -> Result<bool, Spec034ReleaseArtifactError> {
     match nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw), None) {
         Ok(()) | Err(nix::errno::Errno::EPERM) => Ok(true),
         Err(nix::errno::Errno::ESRCH) => Ok(false),
-        Err(error) => Err(Spec034ReleaseArtifactError::Io(std::io::Error::from_raw_os_error(error as i32))),
+        Err(error) => Err(Spec034ReleaseArtifactError::Io(
+            std::io::Error::from_raw_os_error(error as i32),
+        )),
     }
 }
 

@@ -14,9 +14,7 @@ pub(super) fn inject_before_manifest_capture(hook: impl FnOnce(&Path) + 'static)
     BEFORE_MANIFEST_CAPTURE.with(|slot| slot.replace(Some(Box::new(hook))));
 }
 
-pub(super) fn inject_after_pending_validation(
-    hook: impl FnOnce(&mut CleanupReceipt) + 'static,
-) {
+pub(super) fn inject_after_pending_validation(hook: impl FnOnce(&mut CleanupReceipt) + 'static) {
     AFTER_PENDING_VALIDATION.with(|slot| slot.replace(Some(Box::new(hook))));
 }
 

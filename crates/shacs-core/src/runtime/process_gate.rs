@@ -5,7 +5,8 @@ use crate::runtime::{
     ProcessEnvelopeAdmission, ProcessExecutionEnvelope, ProcessIdentity, ProcessRedactedCommand,
 };
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt};
+use std::error::Error;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

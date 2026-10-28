@@ -6,7 +6,9 @@ use shacs_core::runtime::{
     SubagentRuntime, ToolOutcomeKind,
 };
 use shacs_session::{Session, SessionManager};
-use std::{error::Error, fs, path::Path};
+use std::error::Error;
+use std::fs;
+use std::path::Path;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
