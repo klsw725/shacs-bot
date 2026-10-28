@@ -136,7 +136,6 @@ fn add_success_fixture(
     write_evidence_index(writer, artifacts)?;
     artifacts.coverage_matrix = coverage_entries(
         &config.evidence_root,
-        &config.repo_root,
         &artifacts.schema,
         Spec031CoverageStatus::Pass,
         &artifacts.command_registry,
@@ -193,7 +192,6 @@ fn add_current_worktree_triage(
     write_evidence_index(writer, artifacts)?;
     artifacts.coverage_matrix = coverage_entries(
         &config.evidence_root,
-        &config.repo_root,
         &artifacts.schema,
         Spec031CoverageStatus::Blocked,
         &artifacts.command_registry,

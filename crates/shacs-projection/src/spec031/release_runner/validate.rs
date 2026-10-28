@@ -4,7 +4,6 @@ use super::coverage_audit_validate::validate_external_audits;
 use super::coverage_validate::validate_coverage_matrix;
 use super::model::{
     Spec031ReleaseArtifactError, Spec031ReleaseCommandRecord, Spec031ReleaseRunArtifacts,
-    SPEC031_RELEASE_RUNNER_SCHEMA_V2,
 };
 use super::receipts::{
     validate_cleanup_receipts, validate_reproducibility_observations, validate_triage_receipts,
@@ -14,95 +13,34 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+/// Retired Spec035-bound v2 runs listed this file; a current layout that lists it is not read.
+const LEGACY_SPEC035_BINDING: &str = "spec035-execution-binding.json";
+
 pub fn validate_spec031_release_artifacts(
     artifacts: &Spec031ReleaseRunArtifacts,
 ) -> Result<(), Spec031ReleaseArtifactError> {
     validate_spec031_release_artifacts_with_repo_root(artifacts, &default_repo_root()?)
 }
 
-pub(super) fn validate_pending_artifacts(
-    artifacts: &Spec031ReleaseRunArtifacts,
-    repo_root: &Path,
-) -> Result<(), Spec031ReleaseArtifactError> {
-    let binding: super::spec035_execution_model::ExecutionBinding = super::validate::read_json(
-        Path::new(&artifacts.evidence_root),
-        super::spec035_execution::BINDING,
-    )?;
-    if binding.run_id != artifacts.run_id.as_str()
-        || artifacts.fixture_registry != ["fixtures/current-worktree.json"]
-    {
-        return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
-    }
-    if binding.source_sha256 == super::archive_integrity::G7_SOURCE_SHA256 {
-        super::archive_integrity::validate_legacy_g7(repo_root)?;
-    } else {
-        super::spec035_execution::preflight_bound(repo_root, Path::new(&artifacts.evidence_root))?;
-    }
-    let blocked: HashSet<_> = artifacts
-        .coverage_matrix
-        .iter()
-        .filter(|row| row.status == super::coverage::Spec031CoverageStatus::Blocked)
-        .map(|row| row.requirement_id.clone())
-        .collect();
-    if blocked != super::spec035_catalog::postrun_ids()
-        || !artifacts.failure_triage.is_empty()
-        || artifacts
-            .external_audits
-            .iter()
-            .any(|audit| audit.status != super::coverage::Spec031ExternalAuditStatus::Pass)
-    {
-        return Err(Spec031ReleaseArtifactError::BlockedExternalEvidence);
-    }
-    validate_phase(artifacts, repo_root, true)
-}
-
 pub fn validate_spec031_release_artifacts_with_repo_root(
     artifacts: &Spec031ReleaseRunArtifacts,
     repo_root: &Path,
 ) -> Result<(), Spec031ReleaseArtifactError> {
-    if artifacts.schema == SPEC031_RELEASE_RUNNER_SCHEMA_V2
-        && super::archive_integrity::has_g7_binding(Path::new(&artifacts.evidence_root))
-    {
-        return validate_pending_artifacts(artifacts, repo_root);
-    }
-    if artifacts.fixture_registry == ["fixtures/current-worktree.json"]
-        && Path::new(&artifacts.evidence_root)
-            .join(super::spec035_postrun::SEAL)
-            .exists()
-    {
-        return super::spec035_postrun::validate_seal(artifacts, repo_root);
-    }
-    validate_phase(artifacts, repo_root, false)
-}
-
-fn validate_phase(
-    artifacts: &Spec031ReleaseRunArtifacts,
-    repo_root: &Path,
-    pending: bool,
-) -> Result<(), Spec031ReleaseArtifactError> {
     let has_legacy_binding = artifacts
         .manifest_files
         .iter()
-        .any(|file| file == super::spec035_execution::BINDING);
-    let current_layout = super::model::is_current_layout(&artifacts.schema);
-    let supported = if current_layout {
-        !has_legacy_binding
-    } else {
-        artifacts.schema == SPEC031_RELEASE_RUNNER_SCHEMA_V2 && has_legacy_binding
-    };
-    if !supported {
+        .any(|file| file == LEGACY_SPEC035_BINDING);
+    if !super::model::is_current_layout(&artifacts.schema) || has_legacy_binding {
         return Err(Spec031ReleaseArtifactError::UnsupportedSchema);
     }
-    if current_layout {
-        if !artifacts
-            .manifest_files
-            .iter()
-            .any(|file| file == super::archive_integrity::RECEIPT)
-        {
-            return Err(Spec031ReleaseArtifactError::MissingRequiredArtifact);
-        }
-        super::archive_integrity::validate_receipt(Path::new(&artifacts.evidence_root), repo_root)?;
+    if !artifacts
+        .manifest_files
+        .iter()
+        .any(|file| file == super::archive_integrity::RECEIPT)
+    {
+        return Err(Spec031ReleaseArtifactError::MissingRequiredArtifact);
     }
+    super::archive_integrity::validate_receipt(Path::new(&artifacts.evidence_root), repo_root)?;
     if REQUIRED_ARTIFACTS
         .iter()
         .any(|required| !artifacts.manifest_files.iter().any(|file| file == required))
@@ -127,12 +65,7 @@ fn validate_phase(
     validate_external_audits(artifacts, repo_root)?;
     validate_cleanup_receipts(artifacts)?;
     validate_reproducibility_observations(artifacts)?;
-    if pending {
-        super::coverage_validate::validate_matrix_phase(artifacts, repo_root, true)?;
-    } else {
-        validate_coverage_matrix(artifacts, repo_root)?;
-    }
-    Ok(())
+    validate_coverage_matrix(artifacts, repo_root)
 }
 
 fn default_repo_root() -> Result<PathBuf, Spec031ReleaseArtifactError> {
@@ -172,29 +105,23 @@ fn validate_evidence_root(
     if observations != artifacts.reproducibility_observations {
         return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
     }
-    if super::model::is_current_layout(&artifacts.schema) {
-        let commands: Vec<Spec031ReleaseCommandRecord> = read_json(&root, "command-registry.json")?;
-        if commands != artifacts.command_registry {
-            return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
-        }
-        let fixtures: Vec<String> = read_json(&root, "fixture-registry.json")?;
-        if fixtures != artifacts.fixture_registry {
-            return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
-        }
-        let cleanup: Vec<String> = read_json(&root, "cleanup-registry.json")?;
-        if cleanup != artifacts.cleanup_registry {
-            return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
-        }
+    let commands: Vec<Spec031ReleaseCommandRecord> = read_json(&root, "command-registry.json")?;
+    if commands != artifacts.command_registry {
+        return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
     }
-    if super::model::is_current_layout(&artifacts.schema) {
-        let index: serde_json::Value = read_json(&root, "evidence-index.json")?;
-        if index != super::runner_outputs::evidence_index(artifacts) {
-            return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
-        }
+    let fixtures: Vec<String> = read_json(&root, "fixture-registry.json")?;
+    if fixtures != artifacts.fixture_registry {
+        return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
     }
-    if super::model::is_current_layout(&artifacts.schema) {
-        validate_summary(&root, artifacts)?;
+    let cleanup: Vec<String> = read_json(&root, "cleanup-registry.json")?;
+    if cleanup != artifacts.cleanup_registry {
+        return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
     }
+    let index: serde_json::Value = read_json(&root, "evidence-index.json")?;
+    if index != super::runner_outputs::evidence_index(artifacts) {
+        return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
+    }
+    validate_summary(&root, artifacts)?;
     for entry in &artifacts.fixture_registry {
         require_unique_path(&mut seen_paths, entry)?;
         require_safe_file(&root, entry)?;

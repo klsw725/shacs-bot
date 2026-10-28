@@ -162,18 +162,3 @@ fn archive_has_test(repo_root: &Path, archive: &str, sha256: &str, fact: &str) -
     let test_name = fact.split_once('#').map_or("", |(_, name)| name);
     digest == sha256 && String::from_utf8(bytes).is_ok_and(|text| text.contains(test_name))
 }
-
-pub(super) fn legacy_spec035_owner_fact() -> &'static ExternalOwnerFactDescriptor {
-    static FACT: ExternalOwnerFactDescriptor = ExternalOwnerFactDescriptor {
-        owner: Spec031ExternalOwnerId::Spec035,
-        slug: "spec035",
-        source_locator:
-            "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md",
-        source_status_locator:
-            "docs/specs/035-ui-projection-diagnostics-and-release-evidence-parity/SPEC.md:3",
-        fact_artifacts: &[".omo/evidence/spec035/prd000-009/manifest.json"],
-        command_result_ids: &["spec031-owner-spec035"],
-        blocked_reason: "retained Spec035 execution evidence is missing, stale, or blocked",
-    };
-    &FACT
-}

@@ -1,12 +1,6 @@
 #[cfg(test)]
 #[path = "audit_test.rs"]
 mod audit_test;
-#[cfg(test)]
-#[path = "spec035_evidence_test.rs"]
-mod spec035_evidence_test;
-#[cfg(test)]
-#[path = "spec035_ingestion_gap_test.rs"]
-mod spec035_ingestion_gap_test;
 
 use super::coverage::{
     artifact_hash, Spec031ArtifactMediaType, Spec031ExternalAuditRow, Spec031ExternalAuditStatus,
@@ -32,20 +26,10 @@ pub(super) fn add_external_audits(
     writer
         .create_dir_all("external")
         .map_err(|_| Spec031ReleaseArtifactError::Io)?;
-    let legacy_spec035 = artifacts
-        .manifest_files
-        .iter()
-        .any(|file| file == super::spec035_execution::BINDING);
-    let mut specs = external_owner_facts_for(&artifacts.schema);
-    if legacy_spec035 {
-        specs.push(super::external_audit_facts::legacy_spec035_owner_fact());
-    }
-    for spec in specs {
+    for spec in external_owner_facts_for(&artifacts.schema) {
         let observed_source_status = observed_status(config, spec)?;
         let implementation_artifacts = if all_pass {
             write_success_fixture_facts(writer, spec)?
-        } else if spec.slug == "spec035" && legacy_spec035 {
-            vec![super::spec035_execution::MANIFEST.to_owned()]
         } else {
             spec.fact_artifacts
                 .iter()
@@ -150,14 +134,6 @@ fn audit_passes(
     artifacts: &Spec031ReleaseRunArtifacts,
     implementation_artifacts: &[String],
 ) -> Result<(), Spec031ReleaseArtifactError> {
-    if spec.slug == "spec035"
-        && artifacts
-            .manifest_files
-            .iter()
-            .any(|file| file == super::spec035_execution::BINDING)
-    {
-        super::spec035_execution::preflight_bound(&config.repo_root, &config.evidence_root)?;
-    }
     if implementation_artifacts.is_empty()
         || !implementation_artifacts.iter().all(|artifact| {
             owner_fact_exists(

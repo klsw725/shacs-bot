@@ -58,27 +58,6 @@ const ARCHIVED_FILES: [(&str, &str); 12] = [
         "c83fe741136453166908642013279246be2d02c9170e9e1d5b90b29c87502233",
     ),
 ];
-const G7_FILES: [(&str, &str); 2] = [
-    (
-        "docs/archive/spec035/g7/CLOSURE.md",
-        "a4eec6073d8e1e84448c112256c9091ad97bfc6922f824625b4f91348023174b",
-    ),
-    (
-        "docs/archive/spec035/g7/SPEC.md",
-        "a850344cd16ee15b0423e6ed76d0628451009add9cbfd34406bb3131aac3e472",
-    ),
-];
-pub(super) const G7_SOURCE_SHA256: &str =
-    "2b5a6754893848100e9b2c02d24dc4458590e49cff8314da53e3941a88116c4a";
-
-pub(super) fn has_g7_binding(evidence_root: &Path) -> bool {
-    super::validate::read_json::<super::spec035_execution_model::ExecutionBinding>(
-        evidence_root,
-        super::spec035_execution::BINDING,
-    )
-    .is_ok_and(|binding| binding.source_sha256 == G7_SOURCE_SHA256)
-}
-
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ArchiveIntegrityReceipt {
@@ -129,13 +108,6 @@ pub(super) fn validate_receipt(
         return Err(Spec031ReleaseArtifactError::ArtifactMismatch);
     }
     validate_spec035_archive(repo)
-}
-
-pub(super) fn validate_legacy_g7(repo: &Path) -> Result<(), Spec031ReleaseArtifactError> {
-    for (path, expected) in G7_FILES {
-        validate_digest(repo, path, expected)?;
-    }
-    Ok(())
 }
 
 fn validate_digest(

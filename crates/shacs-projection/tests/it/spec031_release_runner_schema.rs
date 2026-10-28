@@ -8,6 +8,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::time::Duration;
 
+const LEGACY_BINDING: &str = "spec035-execution-binding.json";
+const G7_SOURCE_SHA256: &str = "2b5a6754893848100e9b2c02d24dc4458590e49cff8314da53e3941a88116c4a";
+
 #[test]
 fn rejects_v2_artifact_when_legacy_binding_is_absent() -> Result<(), Box<dyn std::error::Error>> {
     let (_evidence, mut artifacts) = current_artifacts("v2-without-legacy-binding")?;
@@ -15,6 +18,27 @@ fn rejects_v2_artifact_when_legacy_binding_is_absent() -> Result<(), Box<dyn std
 
     let error = validate_spec031_release_artifacts(&artifacts)
         .expect_err("v2 is reserved for bound legacy artifacts");
+
+    assert_eq!(error, Spec031ReleaseArtifactError::UnsupportedSchema);
+    Ok(())
+}
+
+#[test]
+fn rejects_v2_artifact_with_g7_binding() -> Result<(), Box<dyn std::error::Error>> {
+    let (_evidence, mut artifacts) = current_artifacts("v2-with-g7-binding")?;
+    fs::write(
+        std::path::Path::new(&artifacts.evidence_root).join(LEGACY_BINDING),
+        serde_json::to_vec(&serde_json::json!({
+            "run_id": artifacts.run_id.as_str(),
+            "manifest_sha256": "0".repeat(64),
+            "source_sha256": G7_SOURCE_SHA256,
+        }))?,
+    )?;
+    artifacts.schema = "spec031.release_runner.v2".to_owned();
+    artifacts.manifest_files.push(LEGACY_BINDING.to_owned());
+
+    let error = shacs_projection::validate_spec031_release_artifacts(&artifacts)
+        .expect_err("v2 artifacts are no longer read");
 
     assert_eq!(error, Spec031ReleaseArtifactError::UnsupportedSchema);
     Ok(())

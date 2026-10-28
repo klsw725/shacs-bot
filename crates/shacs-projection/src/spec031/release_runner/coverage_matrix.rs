@@ -13,7 +13,6 @@ use std::path::Path;
 
 pub(super) fn coverage_entries(
     root: &Path,
-    repo_root: &Path,
     schema: &str,
     external_status: Spec031CoverageStatus,
     commands: &[Spec031ReleaseCommandRecord],
@@ -24,15 +23,7 @@ pub(super) fn coverage_entries(
     push_command_rows(root, &mut entries, commands)?;
     push_artifact_rows(root, &mut entries, commands)?;
     push_external_rows(root, &mut entries, schema, external_status, audits)?;
-    if super::model::is_current_layout(schema) {
-        push_archived_source_row(root, &mut entries, commands)?;
-    } else if schema == super::model::SPEC031_RELEASE_RUNNER_SCHEMA_V2 {
-        entries.push(legacy_spec035_external_row(root, audits)?);
-        let g7 = super::archive_integrity::has_g7_binding(root);
-        entries.extend(super::spec035_coverage::coverage_rows(
-            root, audits, repo_root, g7,
-        )?);
-    }
+    push_archived_source_row(root, &mut entries, commands)?;
     Ok(entries)
 }
 
@@ -160,35 +151,6 @@ fn push_external_rows(
         });
     }
     Ok(())
-}
-
-pub(super) fn legacy_spec035_external_row(
-    root: &Path,
-    audits: &[Spec031ExternalAuditRow],
-) -> Result<Spec031ReleaseCoverageEntry, Spec031ReleaseArtifactError> {
-    let audit = audits
-        .iter()
-        .find(|audit| owner_slug(audit.owner) == "spec035")
-        .ok_or(Spec031ReleaseArtifactError::UnmappedCoverageRequirement)?;
-    let status = match audit.status {
-        Spec031ExternalAuditStatus::Pass => Spec031CoverageStatus::Pass,
-        Spec031ExternalAuditStatus::Blocked => Spec031CoverageStatus::Blocked,
-    };
-    Ok(Spec031ReleaseCoverageEntry {
-        requirement_id: "spec031:external:spec035".to_owned(),
-        kind: Spec031CoverageRequirementKind::ExternalOwner,
-        source_locator: audit.source_status_locator.clone(),
-        owner: "spec031".to_owned(),
-        status,
-        evidence_kind: Spec031CoverageEvidenceKind::ExternalAudit,
-        evidence_class: Spec031TypedEvidenceClass::ExternalAuditMarkdown,
-        artifact_media_type: Spec031ArtifactMediaType::Markdown,
-        artifact_hash: artifact_hash(root, &audit.artifact)?,
-        artifact: audit.artifact.clone(),
-        command_result_id: None,
-        reason: "external owner verdict is derived from observed spec status and audit inputs"
-            .to_owned(),
-    })
 }
 
 fn command_source(command_id: &str) -> String {

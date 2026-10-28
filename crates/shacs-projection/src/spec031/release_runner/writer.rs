@@ -58,13 +58,8 @@ pub(super) fn write_spec031_release_artifacts_with(
 }
 
 pub(super) fn summary_status(artifacts: &Spec031ReleaseRunArtifacts) -> &'static str {
-    let legacy_spec035 = artifacts
-        .manifest_files
-        .iter()
-        .any(|file| file == super::spec035_execution::BINDING);
     let expected_external_audits =
-        super::external_audit_facts::external_owner_facts_for(&artifacts.schema).len()
-            + usize::from(legacy_spec035);
+        super::external_audit_facts::external_owner_facts_for(&artifacts.schema).len();
     if !artifacts.failure_triage.is_empty()
         || artifacts.command_registry.is_empty()
         || artifacts.command_registry.iter().any(|command| {
@@ -86,13 +81,7 @@ pub(super) fn summary_status(artifacts: &Spec031ReleaseRunArtifacts) -> &'static
         .filter(|row| row.status == super::coverage::Spec031CoverageStatus::Blocked)
         .map(|row| row.requirement_id.clone())
         .collect();
-    if legacy_spec035 && artifacts.fixture_registry == ["fixtures/current-worktree.json"] {
-        if blocked == super::spec035_catalog::postrun_ids() {
-            "pending-final-audit"
-        } else {
-            "BLOCKED"
-        }
-    } else if blocked.is_empty()
+    if blocked.is_empty()
         && matches!(
             artifacts.fixture_registry.as_slice(),
             [fixture]
