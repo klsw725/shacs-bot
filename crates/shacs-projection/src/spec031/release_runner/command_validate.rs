@@ -151,7 +151,11 @@ fn validate_cargo_test_evidence(
     if !is_cargo_test(&record.argv) {
         return Ok(());
     }
-    if record.gate == Spec031ReleaseGateKind::FullCargoGate && record.tests.is_none() {
+    // A passed run must carry counts; a failed or timed-out run is rejected by its status.
+    if record.gate == Spec031ReleaseGateKind::FullCargoGate
+        && record.tests.is_none()
+        && record.status != Spec031ReleaseCommandStatus::Passed
+    {
         return Ok(());
     }
     let stdout = fs::read_to_string(stdout_path)

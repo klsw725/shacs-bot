@@ -42,6 +42,10 @@ pub mod spec031_redaction;
 pub mod spec031_redaction_boundaries;
 #[path = "spec031_release_runner_cli.rs"]
 pub mod spec031_release_runner_cli;
+#[path = "spec031_release_runner_counts.rs"]
+pub mod spec031_release_runner_counts;
+#[path = "spec031_release_runner_fixture.rs"]
+pub mod spec031_release_runner_fixture;
 #[path = "spec031_release_runner_schema.rs"]
 pub mod spec031_release_runner_schema;
 #[path = "spec031_release_runner_triage.rs"]
