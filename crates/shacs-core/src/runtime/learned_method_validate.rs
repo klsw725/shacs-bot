@@ -109,14 +109,14 @@ pub(super) fn record_holds(record: &MethodEvidence, session: &str) -> bool {
         && fields_fit
         && id_form(&record.id)
         && digest_form(&record.digest)
-        && record.material_digest.as_deref().map_or(true, digest_form)
+        && record.material_digest.as_deref().is_none_or(digest_form)
         && ref_index(&record.source_ref, session, call).is_some()
         && [&record.id, &record.source_ref, &record.digest]
             .iter()
             .all(|field| tiny(field))
         && [&record.at, &record.tool, &record.material_digest]
             .iter()
-            .all(|field| field.as_deref().map_or(true, tiny))
+            .all(|field| field.as_deref().is_none_or(tiny))
 }
 
 /// Digest lists of a task's identity, as `learned_method_tasks::task_identity`
@@ -195,7 +195,7 @@ pub(super) fn within_limits(version: &LearnedMethodVersion) -> bool {
         && version.steps.iter().all(|step| {
             short(&step.text)
                 && citations(&step.evidence)
-                && step.model_note.as_deref().map_or(true, short)
+                && step.model_note.as_deref().is_none_or(short)
         })
         && version.unverified.iter().all(|item| short(item))
         && version.excluded.iter().all(|item| tiny(&item.evidence))

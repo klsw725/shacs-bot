@@ -76,7 +76,7 @@ pub(super) fn paired_result<'a>(
     messages[index + 1..]
         .iter()
         .take_while(|message| {
-            calls(message).map_or(true, |calls| calls.iter().all(|other| call_id(other) != id))
+            calls(message).is_none_or(|calls| calls.iter().all(|other| call_id(other) != id))
         })
         .filter(|message| {
             role(message) == "tool"

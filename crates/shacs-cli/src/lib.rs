@@ -2020,7 +2020,8 @@ pub fn format_token_count(tokens: usize) -> String {
     let first_group = raw.len() % 3;
     for (index, ch) in raw.chars().enumerate() {
         if index > 0
-            && (index == first_group || (index > first_group && (index - first_group) % 3 == 0))
+            && (index == first_group
+                || (index > first_group && (index - first_group).is_multiple_of(3)))
         {
             out.push(',');
         }
@@ -2070,25 +2071,23 @@ impl ShacsBot {
             workspace_override: options.workspace_override,
             resolve_env: true,
         })
-        .map_err(|error| {
+        .inspect_err(|error| {
             emit_lifecycle_hooks(
                 &lifecycle_hooks,
                 ShacsBotLifecycleEvent::InitFailed {
                     error: error.to_string(),
                 },
             );
-            error
         })?;
         let adapter =
             AgentLoopChatCompletionAdapter::from_bundle(bundle, options.allow_side_effects)
-                .map_err(|error| {
+                .inspect_err(|error| {
                     emit_lifecycle_hooks(
                         &lifecycle_hooks,
                         ShacsBotLifecycleEvent::InitFailed {
                             error: error.to_string(),
                         },
                     );
-                    error
                 })?;
         emit_lifecycle_hooks(&lifecycle_hooks, ShacsBotLifecycleEvent::InitCompleted);
         Ok(Self {
@@ -2192,7 +2191,10 @@ impl Drop for ShacsBot {
 /// the runtime (docs/USAGE.md), and Spec 029 requires a panicking external turn to record a
 /// failed terminal and release its session. This is the one reviewed `catch_unwind` boundary
 /// for those cases; do not use it elsewhere.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "documented hook isolation and Spec 029 external turn panic recovery"
+)]
 fn isolate_panic<T>(operation: impl FnOnce() -> T) -> thread::Result<T> {
     panic::catch_unwind(AssertUnwindSafe(operation))
 }

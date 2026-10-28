@@ -338,7 +338,7 @@ fn range_word(text: &str) -> Option<&'static str> {
             && text[word.len()..]
                 .chars()
                 .next()
-                .map_or(true, char::is_whitespace)
+                .is_none_or(char::is_whitespace)
     })
 }
 

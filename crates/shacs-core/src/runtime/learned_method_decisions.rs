@@ -34,7 +34,7 @@ pub(super) fn decisions_hold(method: &LearnedMethod) -> bool {
                 .filter(|decision| decision.version == version.version)
                 .collect();
             decisions.iter().enumerate().all(|(index, decision)| {
-                decision.check.as_ref().map_or(true, |check| {
+                decision.check.as_ref().is_none_or(|check| {
                     refused(version, &decisions[..index], decision.kind, check).is_none()
                 })
             })

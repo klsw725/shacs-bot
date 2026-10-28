@@ -1447,13 +1447,12 @@ impl<'a> AppliedToolContext<'a> {
             (tool, previous)
         });
 
-        let spawn = tools.spawn.as_ref().map(|tool| {
+        let spawn = tools.spawn.as_ref().inspect(|tool| {
             tool.set_context(
                 context.channel.clone(),
                 context.chat_id.clone(),
                 context.session_key.clone(),
             );
-            tool
         });
 
         Self {

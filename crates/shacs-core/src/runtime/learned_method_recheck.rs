@@ -75,12 +75,12 @@ pub(super) fn recheck_check(
                     StepSupport::UserStated | StepSupport::UserEdited
                 )
             });
-            words.map_or(true, |step| {
+            words.is_none_or(|step| {
                 redone.evidence.iter().all(|id| {
                     found
                         .texts
                         .get(id.as_str())
-                        .map_or(true, |source| quotes(&step.text, &shown_form(source)))
+                        .is_none_or(|source| quotes(&step.text, &shown_form(source)))
                 })
             })
         });
@@ -180,7 +180,7 @@ fn quotes_hold(version: &LearnedMethodVersion, texts: &BTreeMap<&str, &str>) -> 
         ids.iter().all(|id| {
             texts
                 .get(id.as_str())
-                .map_or(true, |source| quotes(text, &shown_form(source)))
+                .is_none_or(|source| quotes(text, &shown_form(source)))
         })
     };
     version

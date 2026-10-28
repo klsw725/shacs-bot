@@ -91,7 +91,7 @@ fn add_command_blockers(
             && command
                 .tests
                 .as_ref()
-                .map_or(true, |tests| tests.tests_run == 0)
+                .is_none_or(|tests| tests.tests_run == 0)
         {
             push_blocker(blockers, "zero_tests", &command.id);
         }

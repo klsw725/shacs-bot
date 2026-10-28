@@ -87,7 +87,7 @@ fn validate_provider_config(
         && config
             .api_key
             .as_deref()
-            .map_or(true, |api_key| api_key.trim().is_empty())
+            .is_none_or(|api_key| api_key.trim().is_empty())
     {
         return Err(ProviderError::AuthRequired {
             provider_id: spec.name.to_owned(),

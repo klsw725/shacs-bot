@@ -139,8 +139,8 @@ fn number(text: &str) -> bool {
         && whole
             .chars()
             .all(|ch| ch.is_ascii_digit() || matches!(ch, ',' | '_'))
-        && fraction.map_or(true, digits)
-        && exponent.map_or(true, |e| digits(e.strip_prefix(['-', '+']).unwrap_or(e)))
+        && fraction.is_none_or(digits)
+        && exponent.is_none_or(|e| digits(e.strip_prefix(['-', '+']).unwrap_or(e)))
 }
 
 fn entry(value: &Value) -> String {

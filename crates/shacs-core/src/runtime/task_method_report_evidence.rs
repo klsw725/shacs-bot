@@ -69,7 +69,7 @@ impl ReportEvidence {
             .count();
         // Outputs of this revision dropped by the limit stay visible as unchecked.
         self.dropped_outputs
-            .extend(std::iter::repeat(revision).take(dropped));
+            .extend(std::iter::repeat_n(revision, dropped));
         let excess = self.dropped_outputs.len().saturating_sub(64);
         self.dropped_outputs.drain(..excess);
     }

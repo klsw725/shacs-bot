@@ -31,12 +31,14 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(encoded: &str) -> Result<Vec<u8>, DurableDispatchError> {
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         return Err(malformed());
     }
     encoded
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Ok((hex_digit(pair[0])? << 4) | hex_digit(pair[1])?))
         .collect()
 }

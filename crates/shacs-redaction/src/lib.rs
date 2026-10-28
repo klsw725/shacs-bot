@@ -242,14 +242,13 @@ fn parse_sensitive_key_value(value: &str, start: usize) -> Option<SensitiveKeyVa
     // redacting twice changes nothing.
     if value[value_start..].starts_with(REDACTED) {
         let marker_end = value_start + REDACTED.len();
-        let ends_there =
-            value[marker_end..]
-                .chars()
-                .next()
-                .map_or(true, |next| match value_quote {
-                    Some(quote) => next == quote,
-                    None => next.is_whitespace() || matches!(next, ',' | '}' | ']'),
-                });
+        let ends_there = value[marker_end..]
+            .chars()
+            .next()
+            .is_none_or(|next| match value_quote {
+                Some(quote) => next == quote,
+                None => next.is_whitespace() || matches!(next, ',' | '}' | ']'),
+            });
         if ends_there {
             return Some(SensitiveKeyValueMatch {
                 value_start,

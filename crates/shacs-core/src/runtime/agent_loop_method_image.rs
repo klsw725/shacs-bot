@@ -168,7 +168,7 @@ pub(in crate::runtime::agent_loop) fn answer(
             && message
                 .get("tool_calls")
                 .and_then(Value::as_array)
-                .map_or(true, Vec::is_empty)
+                .is_none_or(Vec::is_empty)
     }) {
         message["content"] = Value::String(answer.clone());
     }

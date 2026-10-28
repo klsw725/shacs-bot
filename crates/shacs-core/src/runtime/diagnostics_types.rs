@@ -169,8 +169,10 @@ where
     serializer.serialize_str(&safe_string(value))
 }
 
-// Allowed: serde `serialize_with` passes the field as `&Option<String>`.
-#[allow(clippy::ref_option)]
+#[expect(
+    clippy::ref_option,
+    reason = "serde `serialize_with` passes the field as `&Option<String>`"
+)]
 fn serialize_optional_safe_string<S>(
     value: &Option<String>,
     serializer: S,

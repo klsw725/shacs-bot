@@ -53,7 +53,7 @@ fn valid_authority(text: &str) -> bool {
     let (host, port) = host_port
         .rsplit_once(':')
         .map_or((host_port, None), |(host, port)| (host, Some(port)));
-    valid_host(host) && port.map_or(true, valid_port)
+    valid_host(host) && port.is_none_or(valid_port)
 }
 
 fn valid_host(host: &str) -> bool {
@@ -84,10 +84,10 @@ fn valid_userinfo(value: &str) -> bool {
         if byte == b'%' {
             if bytes
                 .get(index + 1)
-                .map_or(true, |value| !value.is_ascii_hexdigit())
+                .is_none_or(|value| !value.is_ascii_hexdigit())
                 || bytes
                     .get(index + 2)
-                    .map_or(true, |value| !value.is_ascii_hexdigit())
+                    .is_none_or(|value| !value.is_ascii_hexdigit())
             {
                 return false;
             }

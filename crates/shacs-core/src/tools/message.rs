@@ -409,7 +409,7 @@ fn strip_malformed_opening_tag(text: &str, tag: &str) -> String {
         let should_strip = after_tag
             .chars()
             .next()
-            .map_or(true, |next| !is_valid_tag_continuation(next));
+            .is_none_or(|next| !is_valid_tag_continuation(next));
         if should_strip {
             remaining = after_tag;
         } else {

@@ -134,7 +134,7 @@ pub(super) fn basis_note(checked: &Checked) -> &'static str {
         .iter()
         .position(|other| std::ptr::eq(other, decision));
     let seen = index.and_then(|index| checked.checks.get(&index));
-    let rechecked = decision.check.as_ref().map_or(true, |check| {
+    let rechecked = decision.check.as_ref().is_none_or(|check| {
         check
             .evidence
             .iter()

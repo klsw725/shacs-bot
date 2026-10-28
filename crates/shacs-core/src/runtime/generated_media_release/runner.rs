@@ -171,8 +171,10 @@ fn run_with_publication_hooks_and_linker_image(
             non_guarantees: catalog::non_guarantees(),
         };
         write_json(staging.path(), "manifest.json", &manifest)?;
-        // Allowed: a panicking final validator must fail closed, never publish.
-        #[allow(clippy::disallowed_methods)]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a panicking final validator must fail closed as invalid evidence, never publish"
+        )]
         let final_validation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             final_validator(validation::PendingValidationContext::new(
                 staging.path(),

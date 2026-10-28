@@ -1929,7 +1929,7 @@ impl<'a> AgentLoop<'a> {
         };
         if web_watch_answer
             .as_ref()
-            .map_or(true, |answer| answer.summary.is_none())
+            .is_none_or(|answer| answer.summary.is_none())
         {
             crate::runtime::web_watch_conversation::note_other_reply(
                 &self.config.workspace,

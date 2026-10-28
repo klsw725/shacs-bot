@@ -35,6 +35,7 @@
 - **`Cargo.lock`은 프로그램이라면 버전 관리에 포함하는 쪽을 기본으로 본다**. manifest를 바꾸지 않았는데 lockfile만 덮어쓰지 말 것. 수동 편집도 금지.
 - **빌드 산출물은 Cargo 기본 위치를 따른다**. workspace target directory는 `crates/target/`이다. `target/`을 소스처럼 다루지 말고, 필요 이상으로 다른 언어 산출물과 섞지 말 것.
 - **재현성이 필요하면 toolchain을 명시할 것**. 최소 지원 버전은 `Cargo.toml`의 `rust-version`, 저장소 차원 고정이 필요하면 `rust-toolchain.toml`을 사용한다.
+- **`rust-version`은 21개 crate가 같은 값(지금 `1.88`)을 쓴다**. `Cargo.lock`의 의존성이 요구하는 가장 높은 `rust-version`과 `Dockerfile`의 `rust:<버전>` 이미지에 맞춘 값이니, 바꿀 때는 셋을 함께 바꾼다. clippy는 이 값을 기준으로 더 새 표준 라이브러리 기능을 막고(`incompatible_msrv`) 그 버전에서 쓸 수 있는 문법을 제안한다.
 - **자동화/CI성 명령은 가능하면 `--locked`를 우선 고려**. 의도치 않은 lockfile 갱신을 막는다.
 
 ## 위반하면 일관성 깨지는 것
@@ -49,7 +50,7 @@
 - **rustfmt의 Google 옵션 두 개는 명령줄로만 적용된다**. `imports_granularity = "Module"`과 `format_macro_matchers = true`는 nightly 전용이라 안정판 rustfmt는 `crates/rustfmt.toml`에 적어도 경고만 내고 무시한다. 그래서 `cargo fmt`에는 항상 `-- --config imports_granularity=Module,format_macro_matchers=true`를 붙인다. 옵션 없이 돌린 `--check`도 통과하므로 위반을 잡지 못한다.
 - **`cargo fmt`는 `mod` 선언을 따라가며 파일을 찾는다**. 모듈 선언을 `macro_rules!` 안에 두면 그 아래 파일 전체가 포맷과 `--check`에서 조용히 빠진다(Spec034 모듈 97개 파일이 그랬다). 모듈 선언을 매크로로 감싸지 말 것.
 - **lint 수준은 `crates/Cargo.toml`의 `[workspace.lints.clippy]`, 금지 메서드와 테스트 `unwrap()` 허용은 `crates/clippy.toml`에 있다**. 새 member crate에는 `[lints]` 아래 `workspace = true`를 넣어야 이 검사가 적용된다.
-- **검토된 예외만 `#[allow(<lint>)]`로 표시하고, 이유는 바로 위 `// Allowed: ...` 주석이나 그 함수의 문서 주석에 적는다**. `#[expect]`와 lint attribute의 `reason =`은 Rust 1.81부터라 `rust-version = "1.75"`로 선언된 이 workspace에서는 쓰지 않는다. 지금 예외는 serde `serialize_with` 함수가 받아야 하는 `&Option<T>` 인자(`clippy::ref_option`)와 아래 `catch_unwind` 경계뿐이다. 새 예외가 필요하면 먼저 사용자에게 묻는다.
+- **검토된 예외만 `#[expect(<lint>, reason = "...")]`로 표시한다**. `#[allow]`와 달리 예외가 필요 없어지면 경고가 나서 남지 않는다. 지금 예외는 serde `serialize_with` 함수가 받아야 하는 `&Option<T>` 인자(`clippy::ref_option`)와 아래 `catch_unwind` 경계뿐이다. 새 예외가 필요하면 먼저 사용자에게 묻는다.
 - **poisoned `Mutex`의 값을 꺼내 쓰지 않는다**. `PoisonError::into_inner`는 clippy가 막는다. 잠금 실패는 이렇게 다룬다.
   - 콜백이나 trait 구현처럼 호출자가 넘긴 코드는 잠금을 쥔 채 부르지 않는다. 그 panic이 잠금을 망가뜨리면 뒤의 호출이 모두 멈춘다(그래서 message bus matcher와 MCP connector `close`는 잠금 밖에서 돈다). 잠금 밖으로 뺄 수 없으면(durable event visitor, cron executor) 그 잠금의 실패를 `Result` 오류로 돌려준다.
   - 그 밖에도 호출자가 처리할 수 있으면 오류로 돌려준다.

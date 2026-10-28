@@ -145,7 +145,7 @@ impl ImageOperationRequest {
             Self::Mask(request) => &mut request.options.model,
             Self::Variation(request) => &mut request.options.model,
         };
-        if model.as_deref().map(str::trim).map_or(true, str::is_empty) {
+        if model.as_deref().map(str::trim).is_none_or(str::is_empty) {
             *model = Some(default_model.to_owned());
         }
     }

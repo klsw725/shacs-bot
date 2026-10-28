@@ -222,7 +222,7 @@ fn apply(
             return Err(EntrustedWorkError::RevisionConflict { expected, actual }.into());
         }
     }
-    let notify_changed = setup.change.as_ref().map_or(true, |change| change.notify);
+    let notify_changed = setup.change.as_ref().is_none_or(|change| change.notify);
     if !notify_changed && setup.notify_target.is_some() {
         email_sendable(config.email_ready)?;
     }

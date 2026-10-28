@@ -121,7 +121,7 @@ impl ProviderConfig {
             environment: source
                 .and_then(|source| source.environment_name().map(str::to_owned))
                 .or(environment),
-            local_auth: source.map_or(true, |source| source.local_auth),
+            local_auth: source.is_none_or(|source| source.local_auth),
             command: source.and_then(|source| source.command_line().map(str::to_owned)),
         }
     }

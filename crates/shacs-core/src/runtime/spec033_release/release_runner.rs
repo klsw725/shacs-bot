@@ -214,7 +214,7 @@ fn run_check(
         || record
             .tests
             .as_ref()
-            .map_or(true, |tests| tests.tests_run == 0)
+            .is_none_or(|tests| tests.tests_run == 0)
     {
         return Err(Spec033ReleaseArtifactError::CommandFailed);
     }

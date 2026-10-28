@@ -198,7 +198,7 @@ fn immediate_path_boundary(text: &str, position: usize) -> bool {
     text[..position]
         .chars()
         .next_back()
-        .map_or(true, |character| !path_token_character(character))
+        .is_none_or(|character| !path_token_character(character))
 }
 
 fn line_has_ansi_control(prefix: &str) -> bool {

@@ -407,13 +407,14 @@ fn written_whole(text: &str, needle: &str) -> bool {
     let touching = |character: char| !character.is_ascii() || character.is_whitespace();
     !needle.is_empty()
         && text.match_indices(needle).any(|(start, _)| {
-            let starts = text[..start].chars().next_back().map_or(true, |before| {
-                touching(before) || "([{<\"':".contains(before)
-            });
+            let starts = text[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|before| touching(before) || "([{<\"':".contains(before));
             let mut after = text[start + needle.len()..].chars();
             let ends = match after.next() {
                 None => true,
-                Some('.') => after.next().map_or(true, touching),
+                Some('.') => after.next().is_none_or(touching),
                 Some(next) => touching(next) || ",;!)]}>\"'".contains(next),
             };
             starts && ends

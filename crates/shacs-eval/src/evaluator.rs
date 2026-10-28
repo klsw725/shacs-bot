@@ -3812,33 +3812,33 @@ pub fn ledger_inspect_matches_subject(
     query
         .correlation_id
         .as_ref()
-        .map_or(true, |id| id == &subject.correlation_id)
+        .is_none_or(|id| id == &subject.correlation_id)
         && query
             .session_id
             .as_ref()
-            .map_or(true, |id| subject.session_id.as_ref() == Some(id))
+            .is_none_or(|id| subject.session_id.as_ref() == Some(id))
         && query
             .goal_id
             .as_ref()
-            .map_or(true, |id| subject.goal_id.as_ref() == Some(id))
+            .is_none_or(|id| subject.goal_id.as_ref() == Some(id))
         && query
             .job_id
             .as_ref()
-            .map_or(true, |id| subject.job_id.as_ref() == Some(id))
+            .is_none_or(|id| subject.job_id.as_ref() == Some(id))
         && query
             .proposal_id
             .as_ref()
-            .map_or(true, |id| subject.proposal_id.as_ref() == Some(id))
+            .is_none_or(|id| subject.proposal_id.as_ref() == Some(id))
         && query
             .trajectory_id
             .as_ref()
-            .map_or(true, |id| subject.trajectory_id.as_ref() == Some(id))
+            .is_none_or(|id| subject.trajectory_id.as_ref() == Some(id))
         && query
             .from_ms
-            .map_or(true, |from_ms| subject.created_at_ms >= from_ms)
+            .is_none_or(|from_ms| subject.created_at_ms >= from_ms)
         && query
             .to_ms
-            .map_or(true, |to_ms| subject.created_at_ms <= to_ms)
+            .is_none_or(|to_ms| subject.created_at_ms <= to_ms)
 }
 
 pub fn ledger_subject_for_record(record: &EvaluatorLedgerRecord) -> LedgerInspectSubject {

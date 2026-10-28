@@ -878,7 +878,7 @@ impl AgentRunner {
                 .content
                 .clone()
                 .map(|content| content.trim().to_owned());
-            let is_blank = final_content.as_deref().map_or(true, str::is_empty);
+            let is_blank = final_content.as_deref().is_none_or(str::is_empty);
             if is_blank && !has_generated_artifacts() {
                 empty_content_retries += 1;
                 if model.hook_streamed {
@@ -2565,7 +2565,10 @@ fn sanitize_hook_message(mut message: Value) -> Value {
 /// Specs 003, 025 and 030 require hook and callback panics to fail only that hook and let the
 /// runtime continue, so this is the one reviewed `catch_unwind` boundary for them. Use it only
 /// for extension points; panics in the runtime itself must keep propagating.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "specs 003/025/030 require hook and callback panics to be isolated"
+)]
 pub(crate) fn isolate_panic<T>(operation: impl FnOnce() -> T) -> std::thread::Result<T> {
     panic::catch_unwind(AssertUnwindSafe(operation))
 }

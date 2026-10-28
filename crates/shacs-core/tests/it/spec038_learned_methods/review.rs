@@ -85,7 +85,7 @@ fn confirming_takes_the_reviewed_version_and_code_and_grants_no_permission(
     assert!(
         remembered
             .and_then(|rules| rules["rules"].as_array())
-            .map_or(true, Vec::is_empty),
+            .is_none_or(Vec::is_empty),
         "{remembered:?}"
     );
     assert!(

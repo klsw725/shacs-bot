@@ -35,16 +35,16 @@ pub(super) fn validate_processes(
         ("--evidence-root", artifacts.evidence_root.as_str()),
     ];
     let mut flags = HashSet::new();
-    let mut pairs = arguments.chunks_exact(2);
-    for pair in &mut pairs {
-        if !flags.insert(pair[0].as_str())
-            || !(expected.contains(&(pair[0].as_str(), pair[1].as_str()))
-                || pair == ["--phase", "run"])
+    let (pairs, remainder) = arguments.as_chunks::<2>();
+    for pair in pairs {
+        let [flag, value] = pair;
+        if !flags.insert(flag.as_str())
+            || !(expected.contains(&(flag.as_str(), value.as_str())) || *pair == ["--phase", "run"])
         {
             return Err(Error::InvalidCommandEvidence);
         }
     }
-    if !pairs.remainder().is_empty() || expected.iter().any(|(flag, _)| !flags.contains(flag)) {
+    if !remainder.is_empty() || expected.iter().any(|(flag, _)| !flags.contains(flag)) {
         return Err(Error::InvalidCommandEvidence);
     }
     if read_bound(root, &exit.stdout)? != b"pending-final-audit\n" {

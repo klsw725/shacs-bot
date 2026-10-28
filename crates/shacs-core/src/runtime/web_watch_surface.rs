@@ -463,7 +463,7 @@ fn decode_token(token: &str) -> Result<CandidateToken, WebWatchError> {
             matches!(decimal_separator, '.' | ',')
                 && !extraction.prefix.ends_with(UNSUPPORTED_NUMBER_LEAD)
                 && !continues_number(&extraction.suffix)
-                && thousands_separator.map_or(true, |separator| {
+                && thousands_separator.is_none_or(|separator| {
                     separator != *decimal_separator && ALL_SEPARATORS.contains(&separator)
                 })
                 && [unit_before, unit_after].into_iter().flatten().all(|unit| {

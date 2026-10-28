@@ -804,7 +804,7 @@ pub fn evaluate_durable_work_recovery_for_owner(
         }
         match item.state {
             ReplayWorkState::Pending if item.cancellation_requested_sequence.is_none() => {
-                if item.next_wake_at_ms.map_or(true, |wake| wake <= now_ms) {
+                if item.next_wake_at_ms.is_none_or(|wake| wake <= now_ms) {
                     due.push(item);
                 }
                 next_wake_at_ms = min_option(next_wake_at_ms, item.next_wake_at_ms);

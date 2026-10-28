@@ -103,7 +103,7 @@ impl Capture {
                     command: exec_command(name, arguments),
                     report: report_call(name, arguments),
                     image: image_call(name, arguments),
-                    effect: self.tools.get(name).map_or(true, |tool| !tool.read_only()),
+                    effect: self.tools.get(name).is_none_or(|tool| !tool.read_only()),
                 },
             );
         }
