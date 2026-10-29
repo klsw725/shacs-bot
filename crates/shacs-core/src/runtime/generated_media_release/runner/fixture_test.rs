@@ -2,12 +2,10 @@ use super::*;
 
 #[test]
 fn mismatch_uses_isolated_tree() -> Result<(), Box<dyn std::error::Error>> {
-    let canonical = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()?;
-    let canonical_path = canonical.join(catalog::FIXTURES[0]);
+    let canonical = fixture_tree()?;
+    let canonical_path = canonical.path().join(catalog::FIXTURES[0]);
     let canonical_bytes = std::fs::read(&canonical_path)?;
-    let root = copy_canonical_fixtures(&canonical)?;
+    let root = copy_canonical_fixtures(canonical.path())?;
     let expected = digests(root.path())?;
 
     std::fs::write(root.path().join(catalog::FIXTURES[0]), b"isolated tamper")?;

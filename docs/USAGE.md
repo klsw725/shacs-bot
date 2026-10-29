@@ -1290,10 +1290,9 @@ cargo run --manifest-path crates/Cargo.toml --locked -p shacs-projection --bin s
 [Spec 041](specs/041-release-evidence-tooling-disposition/SPEC.md#판정-결과-2026-10-25)은 이 runner를 **범위 축소**로 판정했고 [Spec 045](specs/045-release-runner-scope-reduction/SPEC.md)가 구현했습니다. 위 명령, v5 결과와 v4·v3 판독은 그대로입니다. 새로 만들어지지 않는 v2 결과의 판독 장치와 소비자가 없던 공개 API(`inspect_spec035_receipt_admission`, `Spec035ReceiptAdmissionReport`, `Spec031ReleaseArtifactError::Spec035Evidence`)는 지웠습니다. 판독과 결과에 관해 알아 둘 점은 다음과 같습니다.
 
 - v2 결과는 `UnsupportedSchema`로 거절하며 PASS가 되지 않습니다. 보존 대상인 canonical v2 결과 10개는 [v2 결과 보존 기록](archive/spec031-v2-results/README.md)으로 확인합니다. 결과마다 파일별 sha256 기록으로 byte가 같은지 보고(`shasum -a 256 -c`와 파일 목록 비교를 함께 씁니다), 당시 판정이 필요하면 그 README의 고정 commit에서 다시 빌드한 validator로 재현합니다. 이 기록은 byte 동일성만 증명하며 v2 결과를 현재 release PASS로 다시 해석하지 않습니다.
-
 - 통과로 기록된 `cargo test` 명령은 test 개수가 있어야 하고 transcript에서 다시 센 값과 같아야 하며, 그렇지 않은 v5·v4·v3 결과는 거절합니다. [Spec 045 PRD 000](specs/045-release-runner-scope-reduction/prds/000-passed-cargo-test-count-check.md) 전의 validator는 `cargo test --workspace` 기록의 개수가 비어 있으면 transcript를 다시 세지 않아 손으로 고친 결과를 PASS로 받아들였습니다. 실패하거나 시간 초과로 끝나 개수가 없는 기록은 전처럼 명령 실패로 보고합니다.
 - 결과는 commit을 기록하지 않아 실행 뒤 바뀐 요구사항 문구나 owner status를 알아채지 못합니다. 명령은 repo root 경로에 묶이고 035 보관 자료의 변조와 owner 테스트의 삭제는 거절합니다.
-- 추적하지 않는 `.omo/evidence/spec034/task-12-integration.json`이 없는 checkout에서는 이 파일을 읽는 034 테스트(`mismatch_uses_isolated_tree`)가 실패해 current-worktree 결과가 `BLOCKED`가 됩니다. workspace 명령에 `--no-fail-fast`가 없어 첫 실패 package 뒤의 결과는 transcript에 남지 않습니다.
+- workspace 명령에 `--no-fail-fast`가 없어 첫 실패 package 뒤의 결과는 transcript에 남지 않습니다.
 
 Runner 자체의 passing fixture는 아래처럼 실행할 수 있습니다. 이 fixture는 artifact writer와 validator의 success path를 확인할 뿐, 현재 checkout의 semantic Spec031 closure를 뜻하지 않습니다:
 
