@@ -531,6 +531,126 @@ shacs-bot skills recipes --all --workspace /tmp/ws
 
 `skills list`는 `onboard`가 `builtin_skills/`를 materialize하기 전에도 embedded active built-in skill을 포함합니다. Deferred built-in skill은 reference-only source로 보관되며 `onboard`, `skills list`, `skills show`에는 나오지 않습니다. Workspace skill은 built-in skill을 shadow할 수 있습니다. Shadowed, conflicted, malformed 같은 비활성 diagnostic까지 보려면 `skills list --all`을 사용하세요. `skills show`는 source, status, body hash, requirements, install metadata, diagnostics를 출력하고, 해당 skill이 workflow recipe metadata를 갖고 있으면 recipe summary도 함께 보여줍니다. `skills recipes`는 active and ready recipe만 기본 표시하고, malformed/conflicted source까지 보려면 `--all`을 사용합니다. Recipe metadata는 `workflow.recipe.id`, `workflow.recipe.pattern`, `workflow.recipe.prompt_template_ref` 같은 skill frontmatter 또는 `metadata.shacs.workflow_recipe` JSON에서 읽는 read-only harness input이며, permission grant, hidden tool access, plugin code 실행 권한을 만들지 않습니다. ClawHub search/install/update는 remote marketplace 범위이므로 현재 numbered open spec으로 이관하지 않았으며 지원 명령으로 취급하지 않습니다.
 
+## 기억 검색
+
+어시스턴트의 기억은 두 파일입니다. `memory/MEMORY.md`는 Dream이 정리한 오래 둘 사실이고, `memory/history.jsonl`은 지난 대화를 요약해 쌓은 기록입니다. `memory_search` 도구는 이 두 파일에서 질문과 **글자가 같은 항목**과 **뜻이 가까운 항목**을 함께 찾습니다. 그래서 "회의록을"처럼 조사가 붙거나, "포폴"처럼 줄여 쓰거나, 다른 말로 물어도 옛 기억을 찾을 수 있습니다. 어시스턴트는 기억을 찾을 때 먼저 `memory_search`를 쓰고, 정확한 글자나 시각이 필요할 때 `grep`을 씁니다(`memory` skill 안내).
+
+뜻 검색은 이 컴퓨터 안에서 돌아가는 모델로 계산합니다. 기억 내용은 컴퓨터 밖으로 나가지 않으며, 별도 서버(Ollama 등)나 클라우드 API를 쓰지 않습니다. 인터넷은 아래의 모델 설치에서만 씁니다. 도구는 기억 파일을 읽기만 하고 고치지 않습니다.
+
+허구의 한국어 기록(항목 59개)과 질문 35개로 잰 상위 3개 적중률은 기본 모델로 88.6%(31개), 같은 낱말 규칙으로 글자만 찾는 grep 방식으로 54.3%(19개)였습니다. 줄임말 질문은 7개 중 6개, 다른 표현 질문은 7개 중 4개를 찾았습니다(grep 방식은 1개, 2개).
+
+### 모델 설치와 색인
+
+모델 파일은 한 번 설치합니다. Hugging Face에서 판(revision)을 고정한 파일을 받아 크기와 sha256을 확인한 뒤, data directory(config 파일이 있는 폴더)의 `runtime/memory-search/models/` 아래에 둡니다. 확인에 실패한 파일은 쓰지 않습니다. 대화 중에는 모델을 내려받지 않습니다.
+
+```sh
+shacs-bot memory model install
+shacs-bot memory model install --model nlpai-lab/KURE-v1
+```
+
+| 모델 | 내려받는 크기 | 특징 |
+|---|---|---|
+| `dragonkue/multilingual-e5-small-ko-v2` (기본) | 약 490 MB | 가볍고 빠름 |
+| `nlpai-lab/KURE-v1` | 약 2.3 GB | 더 크고 느림 |
+
+색인은 검색할 때마다 기억 파일에 맞춰 저절로 고쳐집니다. 색인은 data directory의 `runtime/memory-search/index/` 아래 workspace마다 SQLite 파일 하나이며, 원본이 아니므로 지워도 다음 검색에서 다시 만들어집니다. 검색 한 번은 아직 벡터(뜻 검색용 숫자 목록)가 없는 항목을 최대 256개까지만 계산하고, 남은 개수를 결과에 알립니다. 모델을 처음 설치한 뒤에는 모든 항목의 벡터를 한 번에 계산해 두면 좋습니다:
+
+```sh
+shacs-bot memory index --workspace ~/.shacs-bot/workspace
+```
+
+모델이 없으면 `memory index`는 글자 색인만 맞추고, 모델을 설치하라는 안내와 함께 실패로 끝납니다.
+
+### 설정
+
+`config.json`의 `agents.defaults.memorySearch`로 정합니다:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "memorySearch": {
+        "enable": true,
+        "model": "dragonkue/multilingual-e5-small-ko-v2"
+      }
+    }
+  }
+}
+```
+
+- `enable`(기본 `true`): `false`면 모델을 올리지 않고 글자로만 찾습니다. 도구는 그대로 있고, 결과에 뜻 검색을 껐다고 적힙니다. `memory index`도 글자 색인만 맞추고 성공합니다.
+- `model`: 위 두 모델 id만 받습니다. 다른 값이면 runtime 시작(`run`·`serve`·`ask`·`agent` 등)과 `memory index`·`memory search`가 알려진 id를 보여 주는 config 오류로 멈춥니다. 모델을 바꾸면 그 모델을 설치하세요. 색인은 다음 검색이나 `memory index`에서 새 모델로 처음부터 다시 만들어지고, 두 모델의 벡터가 섞이지 않습니다.
+- 검색 결과는 `agents.defaults.maxToolResultChars`(기본 16,000자) 안에 맞춥니다. 이 값은 `0`(제한 없음)이거나 1,000 이상이어야 합니다. 1부터 999 사이면 runtime 시작과 `memory search`가 config 오류로 멈춥니다.
+
+### 직접 검색하기
+
+```sh
+shacs-bot memory search "포폴 언제 고쳤지?" --workspace ~/.shacs-bot/workspace
+shacs-bot memory search "치과 예약" --limit 10 --json
+```
+
+`--limit`은 1부터 20까지이고 기본은 5입니다. `--json`을 붙이면 어시스턴트가 받는 것과 같은 JSON을 그대로 냅니다. 없으면 같은 내용을 사람이 읽기 쉬운 형식으로 냅니다. 검색 결과를 냈으면 결과에 `error`가 있어도 종료 코드는 0이므로, `error`는 결과 안에서 확인하세요.
+
+### 결과 읽기
+
+결과에는 다음이 들어 있습니다.
+
+- **`results`**: 순위대로 항목마다 `key`, 출처(`source`), 기억 파일에 있는 그대로의 `text`, 찾은 방법(`matched_by`: 글자 `text`, 뜻 `semantic`, 둘 다 `both`)이 있습니다.
+  - `MEMORY.md` 항목의 출처는 `first_line`·`last_line`(줄 번호)입니다.
+  - history 항목의 출처는 `cursor`·`timestamp`·`item`(그 기록 안에서 몇 번째 항목인지, 0부터)입니다.
+- **`semantic`**: 뜻 검색을 썼으면 `available`이고, 못 썼으면 `unavailable`과 이유(`reason`)·설명(`detail`)입니다.
+- **`index`**: 색인 상태입니다(아래).
+- **`error`**(있을 때만): 검색하지 못한 이유입니다.
+
+뜻 검색을 못 써도 질문의 낱말이 그대로 들어 있는 항목은 글자 검색으로 찾으며, 대화는 멈추지 않습니다. 이유와 할 일은 다음과 같습니다.
+
+| `semantic.reason` | 뜻 | 할 일 |
+|---|---|---|
+| `disabled` | `memorySearch.enable`이 `false` | 쓰려면 `true`로 바꿉니다 |
+| `model_missing` | 모델 파일이 없음 | `detail` 끝의 명령(`shacs-bot memory model install --model <설정한 id>`)으로 설치합니다 |
+| `model_unverified` | 모델 파일의 크기·sha256이 다르거나, 바로가기(symlink)이거나, 읽을 수 없음 | 같은 명령으로 다시 설치합니다 |
+| `model_load_failed` | 확인한 파일로 모델을 만들지 못함 | `detail`을 확인합니다 |
+| `embedding_failed` | 벡터 계산에 실패함 | 다시 시도합니다 |
+| `invalid_query_embedding` | 질문의 벡터가 쓸 수 없는 값임 | 다른 말로 물어봅니다 |
+| `not_requested` | 질문에 찾을 낱말이 없음(기호만 있는 경우 등) | 낱말을 넣어 다시 묻습니다 |
+| `index_unavailable` | 색인을 쓸 수 없어 기억 파일을 직접 읽어 글자로만 찾음 | `detail`을 확인합니다. 색인 파일은 지워도 됩니다 |
+| `index_superseded` | 다른 모델을 설정한 다른 process가 색인을 다시 만듦 | 같은 data directory를 쓰는 process들의 `memorySearch.model`을 맞춥니다 |
+| `source_unreadable` | 기억 파일을 읽을 수 없음 | 파일 권한과 형식을 확인합니다 |
+
+`index.status`는 다음 중 하나입니다.
+
+- `complete`: 계산할 벡터가 남지 않았습니다.
+- `incomplete`: `vectors_remaining`개 항목의 벡터를 아직 계산하지 않았고, 그 항목은 글자로만 찾습니다.
+- `index_unavailable`: 색인을 쓰지 못했습니다.
+
+`vectors_failed`는 모델이 쓸 수 없는 벡터를 낸 항목 수입니다. 이 항목들은 `complete`여도 벡터가 없어 글자로만 찾습니다. `skipped_history_lines`는 `history.jsonl`에서 읽지 못해 건너뛴 줄 수입니다.
+
+`error.code`는 다음 중 하나입니다.
+
+- `empty_query`: 찾을 낱말이 없습니다.
+- `source_unreadable`: 기억 파일을 읽을 수 없습니다.
+- `result_limit_exceeded`: 아래를 보세요.
+- `search_unavailable`: 같은 process에서 앞선 검색이 비정상 종료되었습니다. shacs-bot을 다시 시작하세요.
+
+결과가 `maxToolResultChars`를 넘으면 순위가 낮은 항목의 `text`부터 줄이고, 줄인 항목에 `text_truncated`와 원래 글자 수를 붙입니다. 모든 `text`를 비워도 넘으면 항목 없이 상태만 담은 결과와 `result_limit_exceeded`를 냅니다.
+
+### 한계
+
+- **날짜로 찾는 질문:** 검색은 기억의 글만 봅니다. 기록이 저장된 시각(`timestamp`)으로 거르지 않으므로 "어제 뭐 했지", "10월 19일에 뭐 했지"처럼 시점으로 묻는 질문은 글에 그 날짜나 단서가 적혀 있을 때만 잘 찾습니다. 시각이 정확히 필요하면 `grep`으로 `history.jsonl`의 `timestamp`를 찾으세요.
+- **개인 규모:** 검색마다 기억 파일을 다시 읽고 모든 벡터와 비교합니다. 수만 항목, 기억 파일 수 MB 정도를 전제로 합니다.
+- **메모리와 시간:** 모델은 첫 뜻 검색 때 process에 올라가고 process가 끝날 때까지 남습니다. Apple Silicon(macOS) release 빌드에서 잰 값은 다음과 같습니다.
+  - 기본 모델: process 메모리가 약 1.3 GB 늘었고, 올리는 데 약 1.8초 걸렸습니다. 벡터가 없는 항목 59개를 계산하는 첫 검색은 약 0.5초, 색인이 다 찬 뒤의 검색 하나는 약 26 ms(10회 중앙값)였습니다.
+  - KURE-v1: 올리는 동안 메모리가 약 3.2 GB까지 올랐고, 약 8.5초 걸렸습니다.
+- **arm64 Docker image:** 뜻 검색 모델을 돌리는 라이브러리 때문에, arm64 image는 FP16 산술 확장(`FEAT_FP16`, Linux `/proc/cpuinfo`의 `fphp`·`asimdhp`)을 실제로 갖춘 CPU에서만 돕니다(예: Apple Silicon, AWS Graviton2 이후). 이 확장은 같은 ARMv8.2-A CPU에서도 있을 수도 없을 수도 있으며, Raspberry Pi 4 같은 ARMv8.0 CPU에서는 쓸 수 없습니다.
+- **Linux arm64에서 직접 빌드:** Docker 밖에서 Linux arm64로 빌드할 때는 같은 이유로 `RUSTFLAGS="-C target-feature=+fp16"`를 붙여야 compile됩니다. macOS와 Linux x86_64에서는 필요 없습니다.
+
+  ```sh
+  cargo clean --manifest-path crates/Cargo.toml
+  RUSTFLAGS="-C target-feature=+fp16" cargo build --manifest-path crates/Cargo.toml -p shacs-cli --release --locked
+  ```
+
+  Spec 031 release runner는 환경 변수를 넘겨주므로 같은 flag를 붙여 실행하면 됩니다. Spec 034 release runner는 내부 Cargo 실행의 환경을 비우고 Cargo 설정을 거절하므로 Linux arm64에서는 지원하지 않습니다.
+
 ## 앱
 
 앱 기능(`.shacsapp` authoring과 lifecycle)은 [Spec 039](specs/039-app-capability-disposition/SPEC.md#판정-결과-2026-10-24)의 판정에 따라 [Spec 043](specs/043-app-capability-retirement/SPEC.md)에서 퇴역했습니다. `shacs-bot apps …`와 별칭 `app`은 하위 명령(`init`, `propose`, `apply`, `install`, `list`, `inspect`, `enable`, `disable`, `start`, `stop`, `restart`, `recover`, `uninstall`)이나 인자와 관계없이 같은 퇴역 안내를 출력하고 종료 코드 1로 끝납니다. 이 안내는 아무것도 실행·설치·중단·삭제하지 않으며 파일·폴더·lock을 만들지 않습니다. 이전처럼 `apps`를 부르던 개인 스크립트는 이 종료 코드로 실패합니다.

@@ -4,6 +4,7 @@ use super::super::{
 };
 use shacs_config::{ConfigBundle, ConfigError, ProcessEnv};
 use shacs_core::generated_media::ArtifactStore;
+use shacs_core::memory_search::{MemorySearch, MemorySearchPaths, MemorySearchSettings};
 use shacs_core::runtime::{
     discover_plugins, register_plugin_runtime_tools, CredentialResolvingImageGenerationClient,
     ProviderCredentialClientConfig, ProviderCredentialRuntime,
@@ -11,8 +12,9 @@ use shacs_core::runtime::{
 use shacs_core::tools::{
     AskUserTool, CronTool, EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool,
     ImageGenerateTool, ImageGenerateToolConfig, ListDirTool, McpRuntime, McpServerConnectionReport,
-    MessageTool, PathContext, ReadFileTool, SelfRuntimeState, SelfTool, StdioMcpConnector,
-    ToolRegistry, WebFetchConfig, WebFetchTool, WebSearchConfig, WebSearchTool, WriteFileTool,
+    MemorySearchTool, MessageTool, PathContext, ReadFileTool, SelfRuntimeState, SelfTool,
+    StdioMcpConnector, ToolRegistry, WebFetchConfig, WebFetchTool, WebSearchConfig, WebSearchTool,
+    WriteFileTool,
 };
 use shacs_cron::PersistentCronService;
 use shacs_providers::{
@@ -71,6 +73,13 @@ pub(crate) fn production_tool_registry(
     registry.register(ListDirTool::new(path_context.clone()));
     registry.register(GlobTool::new(path_context.clone()));
     registry.register(GrepTool::new(path_context.clone()));
+    let memory_search = MemorySearchSettings::from_config(&bundle.config.agents.defaults)
+        .map_err(CliError::Config)?;
+    registry.register(MemorySearchTool::new(Arc::new(MemorySearch::configured(
+        &memory_search,
+        MemorySearchPaths::new(&bundle.context.data_dir)?,
+        workspace.clone(),
+    ))));
     let message_tool = if allow_side_effect_tools {
         let tool = MessageTool::new(workspace).with_media_roots([bundle.context.media_dir(None)]);
         registry.register(tool.clone());

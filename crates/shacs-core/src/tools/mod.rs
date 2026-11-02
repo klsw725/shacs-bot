@@ -6,6 +6,7 @@ mod file_state;
 mod filesystem;
 mod image_generation;
 mod mcp;
+mod memory_search_tool;
 mod message;
 mod notebook;
 mod propose_entrusted_work;
@@ -40,6 +41,7 @@ pub use mcp::{
     McpResourceWrapper, McpRuntime, McpServerConnectionReport, McpServerSpec, McpStartupGate,
     McpToolWrapper, McpTransportKind, StdioMcpConnector,
 };
+pub use memory_search_tool::{MemorySearchTool, MEMORY_SEARCH_TOOL_NAME};
 pub use message::{MessageSender, MessageTool, OutboundMessage};
 pub use notebook::NotebookEditTool;
 pub(crate) use propose_entrusted_work::{

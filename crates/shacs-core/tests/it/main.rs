@@ -96,5 +96,11 @@ pub mod spec037_method_selection;
 pub mod spec038_learned_methods;
 #[path = "spec042_web_watch.rs"]
 pub mod spec042_web_watch;
+#[path = "spec047_memory_index.rs"]
+pub mod spec047_memory_index;
+#[path = "spec047_memory_search.rs"]
+pub mod spec047_memory_search;
+#[path = "spec047_model_files.rs"]
+pub mod spec047_model_files;
 #[path = "token_estimator_consistency.rs"]
 pub mod token_estimator_consistency;

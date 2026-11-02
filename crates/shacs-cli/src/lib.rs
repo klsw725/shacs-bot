@@ -6,6 +6,7 @@ mod automation_producer;
 mod automation_worker;
 mod discord_outbound;
 mod improvement_cli;
+mod memory_cli;
 mod notification_delivery;
 mod observation_worker;
 mod onboard_wizard;
@@ -256,6 +257,7 @@ pub enum CliCommand {
     Tasks(spec035_tasks_cli::TasksOptions),
     Improve(ImprovementOptions),
     Trajectory(trajectory_cli::TrajectoryOptions),
+    Memory(memory_cli::MemoryOptions),
     RuntimeInspect(RuntimeInspectOptions),
     TrustedRuntimeInspect(RuntimeInspectOptions, spec030_cli::Spec030CliFormat),
     RuntimeDiagnostics(RuntimeDiagnosticsOptions),
@@ -2756,6 +2758,7 @@ pub fn run_command(command: CliCommand) -> Result<String, CliError> {
         CliCommand::Tasks(options) => spec035_tasks_cli::run(options),
         CliCommand::Improve(options) => improvement_cli::run(options),
         CliCommand::Trajectory(options) => trajectory_cli::run(options),
+        CliCommand::Memory(options) => memory_cli::run(options),
         CliCommand::RuntimeInspect(options) => runtime_inspect(options).map(format_runtime_inspect),
         CliCommand::TrustedRuntimeInspect(options, format) => {
             let observation =
@@ -2837,6 +2840,7 @@ where
         "tasks" => spec035_tasks_cli::parse(parser, global_config),
         "improve" => improvement_cli::parse(parser, global_config),
         "trajectory" => trajectory_cli::parse(parser, global_config),
+        "memory" => memory_cli::parse(parser, global_config),
         "runtime" => parse_runtime(parser, global_config),
         "session" | "sessions" => parse_session(parser, global_config),
         "skills" | "skill" => parse_skills(parser, global_config),
@@ -16375,6 +16379,9 @@ pub fn help_text() -> String {
         "  trajectory Record a replayable local production automation trajectory",
         "            Actions: record",
         "            Flags: --workspace/-w, --store, --trajectory-id, --instruction",
+        "  memory    Install the local memory search model, build the index, and search memory",
+        "            Actions: model install [--model <id>], index, search <query> [--limit <1-20>] [--json]",
+        "            Flags: --workspace/-w",
         "  runtime   Start, stop, restart, inspect trusted-runtime, migrate config/data, and inspect snapshot/activation diagnostics",
         "  session   Manage local session files",
         "  skills    List skills, inspect entries, and discover workflow recipes",

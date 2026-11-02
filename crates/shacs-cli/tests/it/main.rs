@@ -42,3 +42,5 @@ pub mod spec038_learn_repl;
 pub mod spec042_web_watch_cli;
 #[path = "spec043_leftover_apps.rs"]
 pub mod spec043_leftover_apps;
+#[path = "spec047_memory_cli.rs"]
+pub mod spec047_memory_cli;

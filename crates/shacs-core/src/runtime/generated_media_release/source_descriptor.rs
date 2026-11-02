@@ -19,8 +19,16 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
 const FILE_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
-const MAX_TREE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_TREE_ENTRIES: usize = 32_768;
+const SOURCE_TREE_LIMITS: TreeLimits = TreeLimits {
+    bytes: 512 * 1024 * 1024,
+    entries: 32_768,
+};
+/// The `cargo vendor` result, the tool cache and runtime libraries. The vendored dependencies
+/// of Spec 047 outgrew the source tree limits.
+const DEPENDENCY_TREE_LIMITS: TreeLimits = TreeLimits {
+    bytes: 2 * 1024 * 1024 * 1024,
+    entries: 131_072,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum TreeKind {
@@ -31,9 +39,37 @@ pub(super) enum TreeKind {
     Cache,
 }
 
-struct TreeBudget {
+impl TreeKind {
+    fn limits(self) -> TreeLimits {
+        match self {
+            Self::Cache => DEPENDENCY_TREE_LIMITS,
+            Self::Worktree | Self::LiveWorktree | Self::Git | Self::ControlledGit => {
+                SOURCE_TREE_LIMITS
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TreeLimits {
     bytes: u64,
     entries: usize,
+}
+
+struct TreeBudget {
+    limits: TreeLimits,
+    bytes: u64,
+    entries: usize,
+}
+
+impl TreeBudget {
+    fn new(limits: TreeLimits) -> Self {
+        Self {
+            limits,
+            bytes: 0,
+            entries: 0,
+        }
+    }
 }
 
 pub(super) fn copy_tree(
@@ -41,12 +77,18 @@ pub(super) fn copy_tree(
     target: &Path,
     kind: TreeKind,
 ) -> Result<String, Spec034ReleaseArtifactError> {
+    copy_tree_within(source, target, kind, kind.limits())
+}
+
+fn copy_tree_within(
+    source: &File,
+    target: &Path,
+    kind: TreeKind,
+    limits: TreeLimits,
+) -> Result<String, Spec034ReleaseArtifactError> {
     std::fs::create_dir_all(target).map_err(Spec034ReleaseArtifactError::Io)?;
     let mut digest = Sha256::new();
-    let mut budget = TreeBudget {
-        bytes: 0,
-        entries: 0,
-    };
+    let mut budget = TreeBudget::new(limits);
     walk(
         source,
         Some(target),
@@ -62,11 +104,16 @@ pub(super) fn digest_tree(
     source: &File,
     kind: TreeKind,
 ) -> Result<String, Spec034ReleaseArtifactError> {
+    digest_tree_within(source, kind, kind.limits())
+}
+
+fn digest_tree_within(
+    source: &File,
+    kind: TreeKind,
+    limits: TreeLimits,
+) -> Result<String, Spec034ReleaseArtifactError> {
     let mut digest = Sha256::new();
-    let mut budget = TreeBudget {
-        bytes: 0,
-        entries: 0,
-    };
+    let mut budget = TreeBudget::new(limits);
     walk(source, None, Path::new(""), kind, &mut digest, &mut budget)?;
     Ok(format!("sha256:{:x}", digest.finalize()))
 }
@@ -95,7 +142,7 @@ fn walk(
             continue;
         }
         budget.entries += 1;
-        if budget.entries > MAX_TREE_ENTRIES {
+        if budget.entries > budget.limits.entries {
             return Err(Spec034ReleaseArtifactError::InvalidEvidence);
         }
         if let Ok(child) = open_directory(directory, &name) {
@@ -128,7 +175,7 @@ fn walk(
         }
         let mut bytes = Vec::new();
         Read::by_ref(&mut file)
-            .take(MAX_TREE_BYTES.saturating_sub(budget.bytes) + 1)
+            .take(budget.limits.bytes.saturating_sub(budget.bytes) + 1)
             .read_to_end(&mut bytes)
             .map_err(Spec034ReleaseArtifactError::Io)?;
         budget.bytes = budget
@@ -136,9 +183,7 @@ fn walk(
             .checked_add(bytes.len() as u64)
             .ok_or(Spec034ReleaseArtifactError::InvalidEvidence)?;
         let file_after = file.metadata().map_err(Spec034ReleaseArtifactError::Io)?;
-        if budget.bytes > MAX_TREE_BYTES || !same_snapshot(&file_before, &file_after) {
-            return Err(Spec034ReleaseArtifactError::DigestMismatch);
-        }
+        check_read(budget, &file_before, &file_after)?;
         digest.update(b"f\0");
         digest.update(child_relative.as_os_str().as_encoded_bytes());
         digest.update([0]);
@@ -165,6 +210,22 @@ fn walk(
     same_snapshot(&before, &after)
         .then_some(())
         .ok_or(Spec034ReleaseArtifactError::DigestMismatch)
+}
+
+/// A file that changed while it was read is a mismatch even when the tree is also over its byte
+/// limit.
+fn check_read(
+    budget: &TreeBudget,
+    before: &Metadata,
+    after: &Metadata,
+) -> Result<(), Spec034ReleaseArtifactError> {
+    if !same_snapshot(before, after) {
+        return Err(Spec034ReleaseArtifactError::DigestMismatch);
+    }
+    if budget.bytes > budget.limits.bytes {
+        return Err(Spec034ReleaseArtifactError::InvalidEvidence);
+    }
+    Ok(())
 }
 
 fn excluded(relative: &Path, kind: TreeKind) -> bool {
@@ -265,3 +326,7 @@ pub(super) fn read_file(
     }
     Ok(Some(bytes))
 }
+
+#[cfg(test)]
+#[path = "source_descriptor_test.rs"]
+mod tests;

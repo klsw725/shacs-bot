@@ -1,5 +1,7 @@
 FROM rust:1.88-bookworm AS builder
 
+ARG TARGETARCH
+
 WORKDIR /app
 
 RUN apt-get update \
@@ -8,7 +10,10 @@ RUN apt-get update \
 
 COPY crates ./crates
 
-RUN cargo build --manifest-path crates/Cargo.toml -p shacs-cli --release --locked
+# On arm64, gemm-f16 (used by candle for memory search) only compiles with the FP16
+# instructions, so the arm64 image needs a CPU that has them (Spec 047).
+RUN if [ "$TARGETARCH" = "arm64" ]; then export RUSTFLAGS="-C target-feature=+fp16"; fi; \
+    cargo build --manifest-path crates/Cargo.toml -p shacs-cli --release --locked
 
 FROM node:24-bookworm-slim AS node
 

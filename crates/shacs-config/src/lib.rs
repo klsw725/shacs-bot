@@ -152,6 +152,8 @@ pub struct AgentDefaults {
     pub consolidation_ratio: f64,
     #[serde(default)]
     pub dream: DreamConfig,
+    #[serde(default)]
+    pub memory_search: MemorySearchConfig,
 }
 
 impl Default for AgentDefaults {
@@ -175,6 +177,7 @@ impl Default for AgentDefaults {
             max_messages: default_max_messages(),
             consolidation_ratio: default_consolidation_ratio(),
             dream: DreamConfig::default(),
+            memory_search: MemorySearchConfig::default(),
         }
     }
 }
@@ -202,6 +205,24 @@ impl Default for DreamConfig {
             max_batch_size: default_dream_max_batch_size(),
             max_iterations: default_dream_max_iterations(),
             annotate_line_ages: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemorySearchConfig {
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    #[serde(default = "default_memory_search_model")]
+    pub model: String,
+}
+
+impl Default for MemorySearchConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            model: default_memory_search_model(),
         }
     }
 }
@@ -848,6 +869,7 @@ pub enum ConfigError {
         state: ConfigMigrationFileState,
     },
     MigrationBackupMismatch,
+    Invalid(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -876,6 +898,7 @@ impl std::fmt::Display for ConfigError {
             Self::MigrationBackupMismatch => {
                 formatter.write_str("config migration backup does not match transaction marker")
             }
+            Self::Invalid(error) => write!(formatter, "config is invalid: {error}"),
         }
     }
 }
@@ -1468,6 +1491,10 @@ fn default_dream_max_iterations() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_memory_search_model() -> String {
+    "dragonkue/multilingual-e5-small-ko-v2".to_owned()
 }
 
 fn default_send_max_retries() -> u32 {
