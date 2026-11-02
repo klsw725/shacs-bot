@@ -6,9 +6,18 @@ use shacs_providers::{LlmResponse, ProviderClient, ProviderError, ProviderEvent,
 use shacs_session::durable_child::{
     ChildSpawned, DurableChildRecorder, ReplayChildTaskState, CHILD_RESULT_REENTRY_PAYLOAD_TYPE,
 };
+use shacs_session::durable_event::DurableEventStore;
 use shacs_session::durable_replay::evaluate_durable_recovery;
 use shacs_session::durable_work::{ReplayWorkState, WorkTerminalKind};
 use std::error::Error;
+use std::path::Path;
+
+fn stored_events(event_root: &Path) -> Result<String, Box<dyn Error>> {
+    let records = DurableEventStore::open(event_root)?
+        .scan(usize::MAX)?
+        .records;
+    Ok(serde_json::to_string(&records)?)
+}
 
 struct UnusedProvider;
 
@@ -57,7 +66,7 @@ fn subagent_runtime_persists_spawn_running_and_accepted_result() -> Result<(), B
         .result_ref
         .as_deref()
         .is_some_and(|value| value.starts_with("child-result:")));
-    let events = std::fs::read_to_string(root.path().join("events.log"))?;
+    let events = stored_events(root.path())?;
     assert!(!events.contains("raw child result must not be durable inline"));
     let traces = std::fs::read_to_string(
         root.path()
@@ -126,7 +135,7 @@ fn subagent_runtime_restart_discards_late_success_after_durable_cancellation(
     let (decision, message) = restarted.finish_child(late_success);
     assert!(matches!(decision, MergeDecision::DiscardAsLate { .. }));
     assert!(message.is_none());
-    let events = std::fs::read_to_string(root.path().join("events.log"))?;
+    let events = stored_events(root.path())?;
     assert!(!events.contains("late raw success"));
     Ok(())
 }
@@ -351,7 +360,7 @@ fn accepted_result_ref_resolves_to_reentry_artifact_and_enqueues_parent_after_ev
         Some(shacs_core::runtime::OwnerAcceptedAutomationResult::SubagentTerminal { result_ref })
             if result_ref == "child-reentry"
     ));
-    let events = std::fs::read_to_string(event_root.join("events.log"))?;
+    let events = stored_events(&event_root)?;
     assert!(!events.contains("raw child result must live only in the payload artifact"));
     Ok(())
 }
@@ -406,7 +415,7 @@ fn spawned_child_has_resolvable_run_artifact_and_idempotent_child_run_work(
             .count(),
         1
     );
-    let events = std::fs::read_to_string(event_root.join("events.log"))?;
+    let events = stored_events(&event_root)?;
     assert!(!events.contains("secret-token"));
     Ok(())
 }

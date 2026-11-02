@@ -1,8 +1,9 @@
 use crate::durable_event::{
-    DurableEventAppendError, DurableEventError, DurableEventInput, DurableEventPayload,
-    DurableEventRecord, DurableEventStore, RUNTIME_RESTART_REQUESTED, RUNTIME_STOP_REQUESTED,
-    WORK_CANCELLED, WORK_CANCEL_REQUESTED, WORK_ENQUEUED, WORK_LEASED, WORK_REQUEUED,
-    WORK_RETRY_SCHEDULED, WORK_TERMINAL,
+    AppendStage, DecidedAppend, DecidedAppendError, DurableEventAppendError, DurableEventError,
+    DurableEventInput, DurableEventPayload, DurableEventRecord, DurableEventStore,
+    DurableWorkStateError, WorkAppendContext, WorkDecision, RUNTIME_RESTART_REQUESTED,
+    RUNTIME_STOP_REQUESTED, WORK_CANCELLED, WORK_CANCEL_REQUESTED, WORK_ENQUEUED, WORK_LEASED,
+    WORK_REQUEUED, WORK_RETRY_SCHEDULED, WORK_TERMINAL,
 };
 use fs4::FileExt as Fs4FileExt;
 use serde::{Deserialize, Serialize};
@@ -945,44 +946,52 @@ impl DurableWorkEnqueuer {
         })
     }
 
+    /// Enqueues the work, or returns its enqueue event when the same work already exists. The
+    /// limits and the existing work are judged inside the write transaction of the event.
     pub fn enqueue(
         &mut self,
         input: DurableWorkEnqueueInput,
     ) -> Result<DurableEventRecord, DurableWorkEnqueueError> {
         let _lock = acquire_work_enqueue_lock(&self.enqueue_lock_path)?;
-        ensure_event_log_quota(&self.events)?;
-        let state = replay_work_state(&self.events)?;
-        if let Some(existing) = state.items.get(&input.work_id) {
-            if existing.work_kind != input.work_kind
-                || existing.session_key != input.session_key
-                || existing.turn_id != input.turn_id
-                || existing.effect_id != input.effect_id
-                || existing.dedupe_hint != input.dedupe_hint
-                || existing.payload_ref != input.payload_ref
-            {
-                return Err(DurableWorkEnqueueError::IdentityConflict(input.work_id));
+        let decided = self.events.append_deciding(|context| {
+            ensure_event_log_quota(context)?;
+            let state = context.work().map_err(work_state_error)?;
+            if let Some(existing) = state.items.get(&input.work_id) {
+                if existing.work_kind != input.work_kind
+                    || existing.session_key != input.session_key
+                    || existing.turn_id != input.turn_id
+                    || existing.effect_id != input.effect_id
+                    || existing.dedupe_hint != input.dedupe_hint
+                    || existing.payload_ref != input.payload_ref
+                {
+                    return Err(DurableWorkEnqueueError::IdentityConflict(input.work_id));
+                }
+                return existing_enqueue(context, existing).map(WorkDecision::Settled);
             }
-            return enqueued_record(&self.events, &input.work_id)?
-                .ok_or(DurableWorkEnqueueError::MissingWork(input.work_id));
+            ensure_open_work_quota(state)?;
+            let payload = WorkEnqueued {
+                work_id: input.work_id,
+                work_kind: input.work_kind,
+                payload_ref: input.payload_ref,
+                dedupe_hint: input.dedupe_hint,
+                next_wake_at_ms: input.next_wake_at_ms,
+                effect_id: input.effect_id,
+            };
+            let mut event = DurableEventInput::new(
+                input.session_key,
+                WORK_ENQUEUED,
+                DurableEventPayload::inline("durable_work", serde_json::to_value(&payload)?),
+            );
+            event.turn_id = input.turn_id;
+            event.causation_id = payload.effect_id;
+            Ok(WorkDecision::Append(Box::new(event)))
+        });
+        match decided {
+            Ok(DecidedAppend::Appended(record)) => Ok(*record),
+            Ok(DecidedAppend::Settled(record)) => Ok(record),
+            Err(DecidedAppendError::Decision(error)) => Err(error),
+            Err(DecidedAppendError::Append(error)) => Err(error.into_error().into()),
         }
-        ensure_enqueue_quotas(&self.events, &state)?;
-        let payload = WorkEnqueued {
-            work_id: input.work_id,
-            work_kind: input.work_kind,
-            payload_ref: input.payload_ref,
-            dedupe_hint: input.dedupe_hint,
-            next_wake_at_ms: input.next_wake_at_ms,
-            effect_id: input.effect_id,
-        };
-        let data = serde_json::to_value(&payload)?;
-        let mut event = DurableEventInput::new(
-            input.session_key,
-            WORK_ENQUEUED,
-            DurableEventPayload::inline("durable_work", data),
-        );
-        event.turn_id = input.turn_id;
-        event.causation_id = payload.effect_id.clone();
-        Ok(self.events.append(event)?)
     }
 
     pub fn acquire_mutation_lock(&self) -> Result<DurableWorkMutationGuard, DurableWorkError> {
@@ -1004,10 +1013,12 @@ impl DurableWorkEnqueuer {
             data,
             input,
             write_content_addressed,
-            |events, event| events.append_classified(event),
+            |_stage| Ok(()),
         )
     }
 
+    /// The payload is written inside the write transaction of the event, once the limits and
+    /// the existing work are judged, and removed again when the event is not committed.
     fn enqueue_json_with_writers(
         &mut self,
         payloads: &DurableWorkPayloadStore,
@@ -1015,53 +1026,61 @@ impl DurableWorkEnqueuer {
         data: &Value,
         input: DurableWorkEnqueueJsonInput,
         write_payload: impl FnOnce(&Path, &[u8]) -> Result<(), DurableWorkError>,
-        append: impl FnOnce(
-            &mut DurableEventStore,
-            DurableEventInput,
-        ) -> Result<DurableEventRecord, DurableEventAppendError>,
+        hook: impl FnMut(AppendStage) -> std::io::Result<()>,
     ) -> Result<DurableEventRecord, DurableWorkEnqueueError> {
         let _lock = acquire_work_enqueue_lock(&self.enqueue_lock_path)?;
-        ensure_event_log_quota(&self.events)?;
-        let state = replay_work_state(&self.events)?;
-        let payload_ref = payloads.payload_ref(payload_type, data)?;
-        let payload = WorkEnqueued {
-            work_id: input.work_id,
-            work_kind: input.work_kind,
-            payload_ref,
-            dedupe_hint: input.dedupe_hint,
-            next_wake_at_ms: input.next_wake_at_ms,
-            effect_id: input.effect_id,
-        };
-        if let Some(existing) = state.items.get(&payload.work_id) {
-            if existing.work_kind != payload.work_kind
-                || existing.session_key != input.session_key
-                || existing.turn_id != input.turn_id
-                || existing.effect_id != payload.effect_id
-                || existing.dedupe_hint != payload.dedupe_hint
-                || existing.payload_ref != payload.payload_ref
-            {
-                return Err(DurableWorkEnqueueError::IdentityConflict(payload.work_id));
-            }
-            return enqueued_record(&self.events, &payload.work_id)?
-                .ok_or(DurableWorkEnqueueError::MissingWork(payload.work_id));
-        }
-        ensure_enqueue_quotas(&self.events, &state)?;
-        let payload_write = payloads.write_json_guarded(payload_type, data, write_payload)?;
-        let data = serde_json::to_value(&payload)?;
-        let mut event = DurableEventInput::new(
-            input.session_key,
-            WORK_ENQUEUED,
-            DurableEventPayload::inline("durable_work", data),
+        let mut payload_write = None;
+        let decided = self.events.append_deciding_with_hook(
+            |context| {
+                ensure_event_log_quota(context)?;
+                let state = context.work().map_err(work_state_error)?;
+                let payload = WorkEnqueued {
+                    work_id: input.work_id,
+                    work_kind: input.work_kind,
+                    payload_ref: payloads.payload_ref(payload_type, data)?,
+                    dedupe_hint: input.dedupe_hint,
+                    next_wake_at_ms: input.next_wake_at_ms,
+                    effect_id: input.effect_id,
+                };
+                if let Some(existing) = state.items.get(&payload.work_id) {
+                    if existing.work_kind != payload.work_kind
+                        || existing.session_key != input.session_key
+                        || existing.turn_id != input.turn_id
+                        || existing.effect_id != payload.effect_id
+                        || existing.dedupe_hint != payload.dedupe_hint
+                        || existing.payload_ref != payload.payload_ref
+                    {
+                        return Err(DurableWorkEnqueueError::IdentityConflict(payload.work_id));
+                    }
+                    return existing_enqueue(context, existing).map(WorkDecision::Settled);
+                }
+                ensure_open_work_quota(state)?;
+                payload_write =
+                    Some(payloads.write_json_guarded(payload_type, data, write_payload)?);
+                let mut event = DurableEventInput::new(
+                    input.session_key,
+                    WORK_ENQUEUED,
+                    DurableEventPayload::inline("durable_work", serde_json::to_value(&payload)?),
+                );
+                event.turn_id = input.turn_id;
+                event.causation_id = payload.effect_id;
+                Ok(WorkDecision::Append(Box::new(event)))
+            },
+            hook,
         );
-        event.turn_id = input.turn_id;
-        event.causation_id = payload.effect_id.clone();
-        match append(&mut self.events, event) {
-            Ok(record) => Ok(record),
-            Err(DurableEventAppendError::DefinitelyNotCommitted(error)) => {
-                payload_write.rollback()?;
+        match decided {
+            Ok(DecidedAppend::Appended(record)) => Ok(*record),
+            Ok(DecidedAppend::Settled(record)) => Ok(record),
+            Err(DecidedAppendError::Decision(error)) => Err(error),
+            Err(DecidedAppendError::Append(DurableEventAppendError::DefinitelyNotCommitted(
+                error,
+            ))) => {
+                if let Some(payload_write) = payload_write {
+                    payload_write.rollback()?;
+                }
                 Err(error.into())
             }
-            Err(DurableEventAppendError::CommitUnknown(error)) => {
+            Err(DecidedAppendError::Append(DurableEventAppendError::CommitUnknown(error))) => {
                 Err(DurableWorkEnqueueError::CommitUnknown(error))
             }
         }
@@ -1470,29 +1489,16 @@ fn write_content_addressed_with_sync(
     Ok(())
 }
 
-fn replay_work_state(
-    events: &DurableEventStore,
-) -> Result<DurableWorkReplayState, DurableWorkEnqueueError> {
-    let mut state = DurableWorkReplayState::default();
-    let mut reducer_error = None;
-    events.visit_from_sequence(0, |event| {
-        if reducer_error.is_none() {
-            reducer_error = apply_persisted_durable_work_event(&mut state, event).err();
+fn work_state_error(error: DurableWorkStateError) -> DurableWorkEnqueueError {
+    match error {
+        DurableWorkStateError::Event(error) => DurableWorkEnqueueError::Event(error),
+        DurableWorkStateError::Reducer(error) => {
+            DurableWorkEnqueueError::Work(DurableWorkError::Validation(error.to_string()))
         }
-    })?;
-    if let Some(error) = reducer_error {
-        return Err(DurableWorkEnqueueError::Work(DurableWorkError::Validation(
-            error.to_string(),
-        )));
     }
-    Ok(state)
 }
 
-fn ensure_enqueue_quotas(
-    events: &DurableEventStore,
-    state: &DurableWorkReplayState,
-) -> Result<(), DurableWorkError> {
-    ensure_event_log_quota(events)?;
+fn ensure_open_work_quota(state: &DurableWorkReplayState) -> Result<(), DurableWorkError> {
     let open_work_count = state
         .items
         .values()
@@ -1506,8 +1512,8 @@ fn ensure_enqueue_quotas(
     Ok(())
 }
 
-fn ensure_event_log_quota(events: &DurableEventStore) -> Result<(), DurableWorkError> {
-    if events.path().metadata()?.len() >= MAX_DURABLE_WORK_EVENT_LOG_BYTES {
+fn ensure_event_log_quota(context: &WorkAppendContext<'_>) -> Result<(), DurableWorkError> {
+    if context.storage_bytes()? >= MAX_DURABLE_WORK_EVENT_LOG_BYTES {
         return Err(DurableWorkError::Validation(format!(
             "durable event log exceeds {MAX_DURABLE_WORK_EVENT_LOG_BYTES} bytes"
         )));
@@ -1515,20 +1521,24 @@ fn ensure_event_log_quota(events: &DurableEventStore) -> Result<(), DurableWorkE
     Ok(())
 }
 
-fn enqueued_record(
-    events: &DurableEventStore,
-    work_id: &str,
-) -> Result<Option<DurableEventRecord>, DurableEventError> {
-    let scan = events.scan(usize::MAX)?;
-    Ok(scan.records.into_iter().find(|record| {
-        record.kind == WORK_ENQUEUED
-            && match &record.payload {
-                DurableEventPayload::Inline { data, .. } => {
-                    data.get("work_id").and_then(Value::as_str) == Some(work_id)
+/// The event that enqueued `existing`, read at the sequence the work state recorded for it.
+fn existing_enqueue(
+    context: &WorkAppendContext<'_>,
+    existing: &ReplayWorkItem,
+) -> Result<DurableEventRecord, DurableWorkEnqueueError> {
+    context
+        .event_at(existing.enqueued_sequence)?
+        .filter(|record| {
+            record.kind == WORK_ENQUEUED
+                && match &record.payload {
+                    DurableEventPayload::Inline { data, .. } => {
+                        data.get("work_id").and_then(Value::as_str)
+                            == Some(existing.work_id.as_str())
+                    }
+                    DurableEventPayload::Artifact { .. } => false,
                 }
-                DurableEventPayload::Artifact { .. } => false,
-            }
-    }))
+        })
+        .ok_or_else(|| DurableWorkEnqueueError::MissingWork(existing.work_id.clone()))
 }
 
 fn acquire_work_enqueue_lock(path: &Path) -> Result<File, DurableWorkError> {
@@ -1581,9 +1591,22 @@ fn reject_symlink(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::durable_event::{DurableEventFrameDurable, WORK_ENQUEUED};
+    use crate::durable_event::{AppendStage, WORK_ENQUEUED};
     use serde_json::json;
     use std::cell::{Cell, RefCell};
+
+    fn fail_at(
+        failing: AppendStage,
+        message: &'static str,
+    ) -> impl FnMut(AppendStage) -> std::io::Result<()> {
+        move |stage| {
+            if stage == failing {
+                Err(std::io::Error::other(message))
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DurabilityStep {
@@ -1605,12 +1628,13 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_json_rolls_back_new_payload_when_frame_is_unwritten() -> Result<(), Box<dyn Error>> {
+    fn enqueue_json_rolls_back_new_payload_when_event_is_not_committed(
+    ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let event_root = root.path().join("events");
         let payloads = DurableWorkPayloadStore::open(root.path().join("payloads"))?;
         let mut enqueuer = DurableWorkEnqueuer::open(&event_root)?;
-        let payload = json!({"message": "unwritten"});
+        let payload = json!({"message": "uncommitted"});
         let payload_ref = payloads.payload_ref("test.payload", &payload)?;
 
         let error = enqueuer
@@ -1618,16 +1642,12 @@ mod tests {
                 &payloads,
                 "test.payload",
                 &payload,
-                enqueue_input("work-unwritten"),
+                enqueue_input("work-uncommitted"),
                 write_content_addressed,
-                |events, event| {
-                    events.append_with_writer(event, |_path, _bytes| {
-                        Err(std::io::Error::other("injected before write"))
-                    })
-                },
+                fail_at(AppendStage::BeforeCommit, "injected before commit"),
             )
             .err()
-            .ok_or("expected unwritten append failure")?;
+            .ok_or("expected uncommitted append failure")?;
 
         assert!(matches!(error, DurableWorkEnqueueError::Event(_)));
         assert!(payloads.verify(&payload_ref).is_err());
@@ -1638,45 +1658,41 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_json_rolls_back_new_payload_when_frame_is_partial() -> Result<(), Box<dyn Error>> {
+    fn enqueue_json_retry_succeeds_after_an_uncommitted_event() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let event_root = root.path().join("events");
         let payloads = DurableWorkPayloadStore::open(root.path().join("payloads"))?;
         let mut enqueuer = DurableWorkEnqueuer::open(&event_root)?;
-        let payload = json!({"message": "partial"});
-        let payload_ref = payloads.payload_ref("test.payload", &payload)?;
+        let payload = json!({"message": "interrupted"});
 
         let error = enqueuer
             .enqueue_json_with_writers(
                 &payloads,
                 "test.payload",
                 &payload,
-                enqueue_input("work-partial"),
+                enqueue_input("work-interrupted"),
                 write_content_addressed,
-                |events, event| {
-                    events.append_with_writer(event, |path, bytes| {
-                        let mut file = OpenOptions::new().append(true).open(path)?;
-                        file.write_all(&bytes[..bytes.len() / 2])?;
-                        file.sync_all()?;
-                        Err(std::io::Error::other("injected partial write"))
-                    })
-                },
+                fail_at(AppendStage::BeforeCommit, "injected interruption"),
             )
             .err()
-            .ok_or("expected partial append failure")?;
-
+            .ok_or("expected interrupted append failure")?;
         assert!(matches!(error, DurableWorkEnqueueError::Event(_)));
-        assert!(payloads.verify(&payload_ref).is_err());
-        let events = DurableEventStore::open(&event_root)?;
-        let scan = events.scan(1)?;
-        assert!(scan.records.is_empty());
-        assert!(scan.incomplete_tail);
-        assert!(!events.is_writable());
+
+        let record = enqueuer.enqueue_json(
+            &payloads,
+            "test.payload",
+            &payload,
+            enqueue_input("work-interrupted"),
+        )?;
+        assert_eq!(record.sequence, 1);
+        let scan = DurableEventStore::open(&event_root)?.scan(10)?;
+        assert_eq!(scan.records, vec![record]);
+        assert!(!scan.incomplete_tail);
         Ok(())
     }
 
     #[test]
-    fn enqueue_json_keeps_payload_when_event_frame_is_durable() -> Result<(), Box<dyn Error>> {
+    fn enqueue_json_keeps_payload_when_event_is_committed() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let event_root = root.path().join("events");
         let payloads = DurableWorkPayloadStore::open(root.path().join("payloads"))?;
@@ -1689,15 +1705,7 @@ mod tests {
             &payload,
             enqueue_input("work-1"),
             write_content_addressed,
-            |events, event| {
-                events.append_with_writer(event, |path, bytes| {
-                    let mut file = OpenOptions::new().append(true).open(path)?;
-                    file.write_all(bytes)?;
-                    file.flush()?;
-                    file.sync_all()?;
-                    Ok(DurableEventFrameDurable)
-                })
-            },
+            |_stage| Ok(()),
         )?;
 
         assert_eq!(record.kind, WORK_ENQUEUED);
@@ -1710,12 +1718,12 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_json_preserves_payload_when_event_sync_is_unknown() -> Result<(), Box<dyn Error>> {
+    fn enqueue_json_preserves_payload_when_event_commit_is_unknown() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let event_root = root.path().join("events");
         let payloads = DurableWorkPayloadStore::open(root.path().join("payloads"))?;
         let mut enqueuer = DurableWorkEnqueuer::open(&event_root)?;
-        let payload = json!({"message": "sync-unknown"});
+        let payload = json!({"message": "commit-unknown"});
         let payload_ref = payloads.payload_ref("test.payload", &payload)?;
 
         let error = enqueuer
@@ -1723,16 +1731,9 @@ mod tests {
                 &payloads,
                 "test.payload",
                 &payload,
-                enqueue_input("work-sync-unknown"),
+                enqueue_input("work-commit-unknown"),
                 write_content_addressed,
-                |events, event| {
-                    events.append_with_writer(event, |path, bytes| {
-                        let mut file = OpenOptions::new().append(true).open(path)?;
-                        file.write_all(bytes)?;
-                        file.flush()?;
-                        Err(std::io::Error::other("injected event sync failure"))
-                    })
-                },
+                fail_at(AppendStage::AfterCommit, "injected after commit"),
             )
             .err()
             .ok_or("expected event commit to remain unknown")?;
@@ -1744,54 +1745,41 @@ mod tests {
             &payloads,
             "test.payload",
             &payload,
-            enqueue_input("work-sync-unknown"),
+            enqueue_input("work-commit-unknown"),
         )?;
         assert_eq!(recovered.sequence, 1);
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
-    fn enqueue_json_preserves_payload_when_commit_readback_fails() -> Result<(), Box<dyn Error>> {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn enqueue_json_succeeds_when_cache_refresh_fails_after_commit() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let event_root = root.path().join("events");
         let payloads = DurableWorkPayloadStore::open(root.path().join("payloads"))?;
         let mut enqueuer = DurableWorkEnqueuer::open(&event_root)?;
-        let event_path = event_root.join("events.log");
-        let payload = json!({"message": "commit-unknown"});
-        let payload_ref = payloads.payload_ref("test.payload", &payload)?;
+        let payload = json!({"message": "refresh-failed"});
 
-        let result = enqueuer.enqueue_json_with_writers(
+        let record = enqueuer.enqueue_json_with_writers(
             &payloads,
             "test.payload",
             &payload,
-            enqueue_input("work-unknown"),
+            enqueue_input("work-refresh"),
             write_content_addressed,
-            |events, event| {
-                events.append_with_writer(event, |path, bytes| {
-                    let mut file = OpenOptions::new().append(true).open(path)?;
-                    file.write_all(bytes)?;
-                    file.sync_all()?;
-                    fs::set_permissions(path, fs::Permissions::from_mode(0o200))?;
-                    Err(std::io::Error::other("injected after durable write"))
-                })
-            },
-        );
-        fs::set_permissions(&event_path, fs::Permissions::from_mode(0o600))?;
-        let error = result.err().ok_or("expected commit-unknown failure")?;
+            fail_at(AppendStage::CacheRefresh, "injected cache refresh failure"),
+        )?;
 
-        assert!(matches!(error, DurableWorkEnqueueError::CommitUnknown(_)));
-        assert_eq!(payloads.read_json(&payload_ref)?, payload);
-        let mut reopened = DurableWorkEnqueuer::open(&event_root)?;
-        let recovered = reopened.enqueue_json(
+        let enqueued: WorkEnqueued = match record.payload {
+            DurableEventPayload::Inline { data, .. } => serde_json::from_value(data)?,
+            DurableEventPayload::Artifact { .. } => return Err("expected inline event".into()),
+        };
+        assert_eq!(payloads.read_json(&enqueued.payload_ref)?, payload);
+        let next = enqueuer.enqueue_json(
             &payloads,
             "test.payload",
-            &payload,
-            enqueue_input("work-unknown"),
+            &json!({"message": "next"}),
+            enqueue_input("work-next"),
         )?;
-        assert_eq!(recovered.sequence, 1);
+        assert_eq!(next.sequence, 2);
         Ok(())
     }
 
@@ -1832,12 +1820,11 @@ mod tests {
                         }
                     })
                 },
-                |_events, _event| {
+                |_stage| {
                     append_called.set(true);
-                    Err(DurableEventError::Validation(
-                        "event append must not run after payload sync failure".to_owned(),
-                    )
-                    .into())
+                    Err(std::io::Error::other(
+                        "event append must not run after payload sync failure",
+                    ))
                 },
             )
             .err()
@@ -1866,10 +1853,11 @@ mod tests {
                     Ok(())
                 })
             },
-            |events, event| {
-                let record = events.append_classified(event)?;
-                order.borrow_mut().push(DurabilityStep::Event);
-                Ok(record)
+            |stage| {
+                if stage == AppendStage::AfterCommit {
+                    order.borrow_mut().push(DurabilityStep::Event);
+                }
+                Ok(())
             },
         )?;
 

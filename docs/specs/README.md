@@ -41,6 +41,7 @@
 | [`043-app-capability-retirement`](043-app-capability-retirement/SPEC.md) | `Complete (Scoped)`: 039 판정대로 `apps`를 읽기 전용 퇴역 안내로 바꾸고, readiness·Tasks·agent 실행 기록에서 앱 의존을 빼고, `shacs-app`과 앱 전용 코드·테스트를 지웠으며 spec030·spec031(v5)·spec033 runner를 맞췄다. 세 PRD와 스펙 차원 Oracle PASS([종료 증거](043-app-capability-retirement/SPEC.md#종료-증거-2026-10-25)); 전체 출시 seal 아님. 남은 앱 자료는 지우거나 고쳐 쓰지 않음 | 030, 031, 039 |
 | [`044-video-analyzer-retirement`](044-video-analyzer-retirement/SPEC.md) | `Complete (Scoped)`: 040 판정대로 분석 기록을 읽던 inspect·diagnostics·API·WebSocket·TUI·채널을 기록이 없을 때의 결과로 고정하고, 영상 첨부는 고정 `unsupported` 안내로 남기며, analyzer·분석 기록·replay 코드와 테스트를 지우고 034·Spec031 runner를 맞췄다. 세 PRD와 스펙 차원 Oracle PASS([종료 증거](044-video-analyzer-retirement/SPEC.md#종료-증거-2026-10-25)); 전체 출시 seal 아님. 남은 첨부·기록은 지우거나 고쳐 쓰지 않음 | 027, 031, 034, 040 |
 | [`045-release-runner-scope-reduction`](045-release-runner-scope-reduction/SPEC.md) | `Complete (Scoped)`: 041 판정대로 통과로 기록된 `cargo test`의 개수 없는 기록을 거절하게 validator fail-open을 고치고(000), canonical v2 결과 10개의 sha256 기록과 고정 commit validator라는 보존 경로를 남긴 뒤(010), v2 판독 장치·소비자 없는 공개 API·CLI 분기를 지웠다(020). CLI·v5 생성·v5–v3 판독·공용 명령 실행 API는 그대로. 세 PRD 독립 Oracle PASS([종료 증거](045-release-runner-scope-reduction/SPEC.md#종료-증거-2026-10-28)); 전체 출시 seal 아님 | 031, 041 |
+| [`046-sqlite-durable-event-store`](046-sqlite-durable-event-store/SPEC.md) | `Complete (Scoped)`: durable event store를 `events.log`에서 append만 허용하는 SQLite 파일로 바꾸되 `DurableEventStore` 공개 입구와 029 계약의 뜻을 유지했고(000), 자주 읽는 소비자와 work 상태를 만드는 경로가 필요한 행만 읽게 했다(010). 관계없는 행이 30만 개여도 enqueue·웹 감시 읽기·work 상태 갱신이 decode하는 행 수는 같다. 옛 `events.log`는 옮기지 않으며 남아 있으면 writable start를 막는다. 첫 open과 recovery admission은 지금처럼 전체를 읽는다. 두 PRD 독립 Oracle PASS([종료 증거](046-sqlite-durable-event-store/SPEC.md#종료-증거-2026-11-01)); 전체 출시 seal 아님 | 029, 031, 034, 036, 042 |
 
 ## 읽는 순서 권장
 
@@ -92,6 +93,7 @@
 43. `043-app-capability-retirement`
 44. `044-video-analyzer-retirement`
 45. `045-release-runner-scope-reduction`
+46. `046-sqlite-durable-event-store`
 
 ## 운영 원칙
 

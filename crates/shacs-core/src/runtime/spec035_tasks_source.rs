@@ -3,6 +3,7 @@ use super::{
     Spec035RecoveryOwnerFact, Spec035TasksOwnerSnapshots, Spec035TasksOwnerSource,
 };
 use shacs_projection::{Spec031Freshness, Spec031ObservedAtUnixMs, Spec035TasksProjection};
+use shacs_session::durable_event::DurableEventStore;
 use shacs_session::durable_replay::evaluate_durable_recovery;
 use shacs_session::SessionManager;
 use shacs_workflow::WorkflowProjection;
@@ -90,7 +91,7 @@ fn populate_durable_owners(
     session_id: &str,
 ) {
     let event_root = data_dir.join("runtime/durable-events");
-    if !event_root.join("events.log").exists() {
+    if !DurableEventStore::entries_present(&event_root).unwrap_or(true) {
         return;
     }
     let admission =

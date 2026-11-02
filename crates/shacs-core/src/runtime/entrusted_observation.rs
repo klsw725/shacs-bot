@@ -6,6 +6,7 @@ use super::{DurableDispatchError, EntrustedWorkError, EntrustedWorkReadRequest};
 pub const ENTRUSTED_OBSERVATION_WORK_KIND: &str = "entrusted.observation";
 pub const ENTRUSTED_OBSERVATION_OUTCOME: &str = "entrusted_observation";
 pub const MAX_OBSERVATION_BYTES: u64 = 64 * 1024;
+pub(super) const OBSERVATION_WORK_ID_PREFIX: &str = "observation:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,7 +75,7 @@ impl ObservationWake {
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(self.goal_transition_id.as_bytes());
         format!(
-            "observation:{}:{}:{digest:x}:",
+            "{OBSERVATION_WORK_ID_PREFIX}{}:{}:{digest:x}:",
             self.entrusted_work_id, self.condition_revision
         )
     }

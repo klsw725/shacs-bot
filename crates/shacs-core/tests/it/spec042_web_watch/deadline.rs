@@ -1,6 +1,7 @@
 use super::support::*;
 use chrono::{DateTime, FixedOffset};
 use shacs_core::runtime::*;
+use shacs_session::durable_event::DurableEventStore;
 use std::error::Error;
 
 const TARGET: &str = "email:user@example.test";
@@ -24,6 +25,14 @@ fn seoul(ms: u64) -> Result<String, Box<dyn Error>> {
         .ok_or("time")?
         .with_timezone(&offset)
         .to_rfc3339())
+}
+
+/// Every stored durable event of the fixture, as JSON.
+fn durable_log(fixture: &Fixture) -> Result<String, Box<dyn Error>> {
+    let records = DurableEventStore::open(fixture.data_dir.join("runtime/durable-events"))?
+        .scan(usize::MAX)?
+        .records;
+    Ok(serde_json::to_string(&records)?)
 }
 
 /// The worker's deadline step at `now_ms`, then its notification step and the hand-out.
@@ -298,7 +307,7 @@ fn the_reminder_carries_no_credentials_or_url_query_from_the_goal() -> TestResul
 
     // When
     let mails = step(&fixture, T0 + 2 * DAY)?;
-    let log = std::fs::read_to_string(fixture.data_dir.join("runtime/durable-events/events.log"))?;
+    let log = durable_log(&fixture)?;
 
     // Then: neither the mail nor the durable deadline and notification facts keep them.
     assert_eq!(titles(&mails), vec!["Decision deadline reminder"]);
@@ -350,7 +359,7 @@ fn a_phrase_with_a_url_shows_no_credentials_or_query_in_any_mail() -> TestResult
     fixture.tick(due)?;
     let mut mails = fixture.deliver(due)?;
     mails.extend(step(&fixture, T0 + 2 * DAY)?);
-    let log = std::fs::read_to_string(fixture.data_dir.join("runtime/durable-events/events.log"))?;
+    let log = durable_log(&fixture)?;
 
     // Then: both mails show the URL reduced; no mail and no durable fact keeps the rest.
     assert_eq!(

@@ -1,10 +1,16 @@
+use serde_json::json;
 use shacs_session::durable_child::{
     ChildCancelRequested, ChildResultDecisionKind, ChildResultRecorded, ChildRunning, ChildSpawned,
     DurableChildRecorder, ReplayChildTaskState,
 };
 use shacs_session::durable_event::DurableEventStore;
 use shacs_session::durable_replay::{apply_durable_event, DurableReplayState};
+use shacs_session::durable_work::{
+    apply_persisted_durable_work_event, DurableWorkReplayState, WorkPayloadRef, WorkTerminalKind,
+};
 use std::error::Error;
+use std::path::Path;
+use std::process::Command;
 
 fn spawn(child_task_id: &str) -> ChildSpawned {
     ChildSpawned {
@@ -293,5 +299,75 @@ fn running_and_cancel_events_require_full_spawn_correlation() -> Result<(), Box<
         state.children.items["child-transition-identity"].state,
         ReplayChildTaskState::Spawned
     );
+    Ok(())
+}
+
+#[test]
+fn durable_child_recorder_step_child() -> Result<(), Box<dyn Error>> {
+    let Ok(root) = std::env::var("SHACS_DURABLE_CHILD_STEP_ROOT") else {
+        return Ok(());
+    };
+    let child_task_id = std::env::var("SHACS_DURABLE_CHILD_STEP_TASK")?;
+    let recorder = DurableChildRecorder::open(&root)?;
+    recorder.lease_child_run_work(&child_task_id, "owner-b", 100, 1_000)?;
+    if std::env::var("SHACS_DURABLE_CHILD_STEP")? == "finish" {
+        recorder.finish_child_run_work(&child_task_id, WorkTerminalKind::Succeeded, "done")?;
+    }
+    Ok(())
+}
+
+fn child_step_in_another_process(
+    root: &Path,
+    step: &str,
+    child_task_id: &str,
+) -> Result<(), Box<dyn Error>> {
+    let status = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("durable_child_recorder_step_child")
+        .arg("--nocapture")
+        .env("SHACS_DURABLE_CHILD_STEP_ROOT", root)
+        .env("SHACS_DURABLE_CHILD_STEP", step)
+        .env("SHACS_DURABLE_CHILD_STEP_TASK", child_task_id)
+        .status()?;
+    if !status.success() {
+        return Err(format!("the other process could not {step} {child_task_id}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn durable_child_recorder_judges_work_another_process_changed() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let recorder = DurableChildRecorder::open(root.path())?;
+    for child_task_id in ["child-1", "child-2"] {
+        recorder.ensure_child_run_work(
+            "session",
+            "turn:parent",
+            child_task_id,
+            &format!("spawn:{child_task_id}"),
+            WorkPayloadRef::inline("shacs.child_run.v1", json!({"child": child_task_id}))?,
+        )?;
+    }
+    let events = DurableEventStore::open(root.path())?;
+    events.work_state()?;
+
+    child_step_in_another_process(root.path(), "lease", "child-1")?;
+    child_step_in_another_process(root.path(), "finish", "child-2")?;
+    let refused = recorder.lease_child_run_work("child-1", "owner-a", 500, 1_000);
+    let rows = events.scan(usize::MAX)?.records.len();
+    recorder.finish_child_run_work("child-2", WorkTerminalKind::Succeeded, "done-again")?;
+
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.contains("not leaseable from Leased")),
+        "{refused:?}"
+    );
+    assert_eq!(events.scan(usize::MAX)?.records.len(), rows);
+    let mut replayed = DurableWorkReplayState::default();
+    for record in events.scan(usize::MAX)?.records {
+        apply_persisted_durable_work_event(&mut replayed, &record)?;
+    }
+    assert_eq!(events.work_state()?, replayed);
     Ok(())
 }

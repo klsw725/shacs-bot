@@ -14,7 +14,8 @@ use shacs_core::runtime::{
 use shacs_eval::evaluator::{AutomationExecutionMode, AutomationRunState};
 use shacs_projection::{HookDenialReason, SandboxFallback};
 use shacs_session::durable_event::{
-    DurableEventInput, DurableEventPayload, DurableEventStore, WORK_ENQUEUED,
+    DurableEventInput, DurableEventPayload, DurableEventStore, DURABLE_EVENT_DATABASE_FILE,
+    WORK_ENQUEUED,
 };
 use shacs_session::durable_replay::evaluate_durable_recovery;
 use shacs_session::durable_work::{
@@ -242,7 +243,7 @@ fn automation_enqueue_fails_closed_without_orphaning_payload_at_event_log_quota(
         DurableWorkDispatcher::open(&events, &payloads, MessageBus::new(), "owner", 100)?;
     std::fs::OpenOptions::new()
         .write(true)
-        .open(events.join("events.log"))?
+        .open(events.join(DURABLE_EVENT_DATABASE_FILE))?
         .set_len(512 * 1024 * 1024)?;
     let current = snapshot(SandboxMode::Active, SandboxFallback::NotApplicable);
 

@@ -698,6 +698,7 @@ pub enum DurableRecoveryIssueKind {
     IncompleteTail,
     ReducerViolation,
     OrphanCheckpoint,
+    LegacyEventLog,
 }
 
 impl DurableRecoveryIssueKind {
@@ -710,6 +711,7 @@ impl DurableRecoveryIssueKind {
             Self::IncompleteTail => "incomplete_tail",
             Self::ReducerViolation => "reducer_violation",
             Self::OrphanCheckpoint => "orphan_checkpoint",
+            Self::LegacyEventLog => "legacy_event_log",
         }
     }
 }
@@ -726,6 +728,7 @@ pub enum DurableRecoveryHint {
     RewriteCheckpoint,
     DiscardIncompleteTail,
     InspectEventStore,
+    RemoveLegacyEventLog,
 }
 
 impl DurableRecoveryHint {
@@ -734,6 +737,7 @@ impl DurableRecoveryHint {
             Self::RewriteCheckpoint => "rewrite_checkpoint",
             Self::DiscardIncompleteTail => "discard_incomplete_tail",
             Self::InspectEventStore => "inspect_event_store",
+            Self::RemoveLegacyEventLog => "remove_legacy_event_log",
         }
     }
 }
@@ -773,25 +777,32 @@ pub fn evaluate_durable_recovery(
 ) -> DurableReplayAdmission {
     let event_root = event_root.as_ref();
     let checkpoint_root = checkpoint_root.as_ref();
-    let event_path = event_root.join("events.log");
-    if !event_path.exists() {
-        let orphaned = checkpoint_root.exists()
-            && fs::read_dir(checkpoint_root)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-                .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"));
-        if orphaned {
-            return blocked_admission(
-                DurableRecoveryIssueKind::OrphanCheckpoint,
-                "checkpoint exists without a durable event store",
-            );
+    let event_store = match DurableEventStore::open_existing(event_root) {
+        Ok(Some(store)) => store,
+        Ok(None) => {
+            let orphaned = checkpoint_root.exists()
+                && fs::read_dir(checkpoint_root)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        entry.path().extension().and_then(|ext| ext.to_str()) == Some("json")
+                    });
+            if orphaned {
+                return blocked_admission(
+                    DurableRecoveryIssueKind::OrphanCheckpoint,
+                    "checkpoint exists without a durable event store",
+                );
+            }
+            return DurableReplayAdmission::healthy_event_zero();
         }
-        return DurableReplayAdmission::healthy_event_zero();
-    }
-    let event_store = match DurableEventStore::open(event_root) {
-        Ok(store) => store,
+        Err(error @ DurableEventError::LegacyLogPresent) => {
+            return DurableReplayAdmission {
+                recovery_hints: vec![DurableRecoveryHint::RemoveLegacyEventLog],
+                ..blocked_admission(DurableRecoveryIssueKind::LegacyEventLog, &error.to_string())
+            };
+        }
         Err(error) => return event_error_admission(error),
     };
     let event_scan = match event_store.scan(0) {
@@ -889,21 +900,6 @@ pub fn evaluate_durable_recovery(
                 detail: error.to_string(),
             }],
             recovery_hints: vec![DurableRecoveryHint::InspectEventStore],
-        };
-    }
-    if summary.incomplete_tail {
-        issues.push(DurableRecoveryIssue {
-            kind: DurableRecoveryIssueKind::IncompleteTail,
-            detail: "durable event store has an incomplete final frame".to_owned(),
-        });
-        return DurableReplayAdmission {
-            status: DurableRecoveryStatus::Recoverable,
-            writable: false,
-            state: Some(state),
-            checkpoint_used,
-            replayed_event_count: summary.visited,
-            issues,
-            recovery_hints: vec![DurableRecoveryHint::DiscardIncompleteTail],
         };
     }
     let used_fallback = !issues.is_empty();

@@ -1,16 +1,17 @@
 use crate::durable_event::{
-    DurableEventError, DurableEventInput, DurableEventPayload, DurableEventRecord,
-    DurableEventStore, CHILD_CANCEL_REQUESTED, CHILD_RESULT_RECORDED, CHILD_RUNNING, CHILD_SPAWNED,
-    WORK_CANCELLED, WORK_CANCEL_REQUESTED, WORK_ENQUEUED, WORK_LEASED, WORK_TERMINAL,
+    DecidedAppend, DecidedAppendError, DurableEventError, DurableEventInput, DurableEventPayload,
+    DurableEventRecord, DurableEventStore, WorkDecision, CHILD_CANCEL_REQUESTED,
+    CHILD_RESULT_RECORDED, CHILD_RUNNING, CHILD_SPAWNED, WORK_CANCELLED, WORK_CANCEL_REQUESTED,
+    WORK_ENQUEUED, WORK_LEASED, WORK_TERMINAL,
 };
 use crate::durable_trace::{
     opaque_trace_ref, DurableTraceCorrelation, DurableTraceInput, DurableTraceSeverity,
     DurableTraceStore,
 };
 use crate::durable_work::{
-    apply_persisted_durable_work_event, DurableWorkEnqueueInput, DurableWorkEnqueueJsonInput,
-    DurableWorkEnqueuer, DurableWorkPayloadStore, DurableWorkReplayState, WorkCancellation,
-    WorkLeased, WorkPayloadRef, WorkTerminal, WorkTerminalKind,
+    DurableWorkEnqueueInput, DurableWorkEnqueueJsonInput, DurableWorkEnqueuer,
+    DurableWorkPayloadStore, DurableWorkReplayState, ReplayWorkItem, WorkCancellation, WorkLeased,
+    WorkPayloadRef, WorkTerminal, WorkTerminalKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -234,6 +235,29 @@ struct ChildEventAppend<'a> {
     payload_type: &'a str,
 }
 
+fn work_event<'a>(item: &'a ReplayWorkItem, kind: &'a str) -> ChildEventAppend<'a> {
+    ChildEventAppend {
+        session_id: &item.session_key,
+        turn_id: item.turn_id.as_deref(),
+        causation_id: item.effect_id.as_deref(),
+        correlation_id: None,
+        kind,
+        payload_type: "durable_work",
+    }
+}
+
+fn child_event_input(event: &ChildEventAppend<'_>, data: Value) -> DurableEventInput {
+    let mut input = DurableEventInput::new(
+        event.session_id,
+        event.kind,
+        DurableEventPayload::inline(event.payload_type, data),
+    );
+    input.turn_id = event.turn_id.map(str::to_owned);
+    input.causation_id = event.causation_id.map(str::to_owned);
+    input.correlation_id = event.correlation_id.map(str::to_owned);
+    input
+}
+
 impl DurableChildRecorder {
     pub fn open(event_root: impl AsRef<Path>) -> Result<Self, DurableEventError> {
         Self::open_with_payload_root(
@@ -377,33 +401,24 @@ impl DurableChildRecorder {
         leased_at_ms: u64,
         lease_duration_ms: u64,
     ) -> Result<(), String> {
-        let state = self.replay_work_state()?;
         let work_id = child_run_work_id(child_task_id);
-        let item = state
-            .items
-            .get(&work_id)
-            .ok_or_else(|| format!("durable child run work is missing: {work_id}"))?;
-        if !matches!(
-            item.state,
-            crate::durable_work::ReplayWorkState::Pending
-                | crate::durable_work::ReplayWorkState::WaitingRetry
-        ) {
-            return Err(format!(
-                "durable child run work is not leaseable from {:?}: {work_id}",
-                item.state
-            ));
-        }
-        let attempt = item.attempt.saturating_add(1);
-        self.append(
-            ChildEventAppend {
-                session_id: &item.session_key,
-                turn_id: item.turn_id.as_deref(),
-                causation_id: item.effect_id.as_deref(),
-                correlation_id: None,
-                kind: WORK_LEASED,
-                payload_type: "durable_work",
-            },
-            serde_json::to_value(WorkLeased {
+        self.append_decided(|state| {
+            let item = state
+                .items
+                .get(&work_id)
+                .ok_or_else(|| format!("durable child run work is missing: {work_id}"))?;
+            if !matches!(
+                item.state,
+                crate::durable_work::ReplayWorkState::Pending
+                    | crate::durable_work::ReplayWorkState::WaitingRetry
+            ) {
+                return Err(format!(
+                    "durable child run work is not leaseable from {:?}: {work_id}",
+                    item.state
+                ));
+            }
+            let attempt = item.attempt.saturating_add(1);
+            let data = serde_json::to_value(WorkLeased {
                 work_id: work_id.clone(),
                 lease_id: format!("lease-{work_id}-{attempt}-{leased_at_ms}"),
                 lease_owner_ref: lease_owner_ref.to_owned(),
@@ -411,10 +426,10 @@ impl DurableChildRecorder {
                 leased_at_ms,
                 lease_expires_at_ms: leased_at_ms.saturating_add(lease_duration_ms.max(1)),
             })
-            .map_err(|error| error.to_string())?,
-        )
+            .map_err(|error| error.to_string())?;
+            Ok(Some((work_event(item, WORK_LEASED), data)))
+        })
         .map(|_| ())
-        .map_err(|error| error.to_string())
     }
 
     pub fn finish_child_run_work(
@@ -423,85 +438,62 @@ impl DurableChildRecorder {
         terminal_kind: WorkTerminalKind,
         outcome_ref: &str,
     ) -> Result<(), String> {
-        let state = self.replay_work_state()?;
         let work_id = child_run_work_id(child_task_id);
-        let item = state
-            .items
-            .get(&work_id)
-            .ok_or_else(|| format!("durable child run work is missing: {work_id}"))?;
-        if item.state.is_terminal() {
-            return Ok(());
-        }
-        self.append(
-            ChildEventAppend {
-                session_id: &item.session_key,
-                turn_id: item.turn_id.as_deref(),
-                causation_id: item.effect_id.as_deref(),
-                correlation_id: None,
-                kind: WORK_TERMINAL,
-                payload_type: "durable_work",
-            },
-            serde_json::to_value(WorkTerminal {
-                work_id,
+        self.append_decided(|state| {
+            let item = state
+                .items
+                .get(&work_id)
+                .ok_or_else(|| format!("durable child run work is missing: {work_id}"))?;
+            if item.state.is_terminal() {
+                return Ok(None);
+            }
+            let data = serde_json::to_value(WorkTerminal {
+                work_id: work_id.clone(),
                 terminal_kind,
                 outcome_ref: outcome_ref.to_owned(),
                 facts: None,
             })
-            .map_err(|error| error.to_string())?,
-        )
+            .map_err(|error| error.to_string())?;
+            Ok(Some((work_event(item, WORK_TERMINAL), data)))
+        })
         .map(|_| ())
-        .map_err(|error| error.to_string())
     }
 
     pub fn cancel_child_run_work(&self, child_task_id: &str, reason: &str) -> Result<(), String> {
-        let state = self.replay_work_state()?;
         let work_id = child_run_work_id(child_task_id);
-        let Some(item) = state.items.get(&work_id) else {
-            return Ok(());
-        };
-        if item.state.is_terminal() {
+        let cancellation = serde_json::to_value(WorkCancellation {
+            work_id: work_id.clone(),
+            reason: reason.to_owned(),
+        })
+        .map_err(|error| error.to_string())?;
+        let mut open = false;
+        self.append_decided(|state| {
+            let Some(item) = state.items.get(&work_id) else {
+                return Ok(None);
+            };
+            if item.state.is_terminal() {
+                return Ok(None);
+            }
+            open = true;
+            if item.cancellation_requested_sequence.is_some() {
+                return Ok(None);
+            }
+            Ok(Some((
+                work_event(item, WORK_CANCEL_REQUESTED),
+                cancellation.clone(),
+            )))
+        })?;
+        if !open {
             return Ok(());
         }
-        if item.cancellation_requested_sequence.is_none() {
-            self.append(
-                ChildEventAppend {
-                    session_id: &item.session_key,
-                    turn_id: item.turn_id.as_deref(),
-                    causation_id: item.effect_id.as_deref(),
-                    correlation_id: None,
-                    kind: WORK_CANCEL_REQUESTED,
-                    payload_type: "durable_work",
-                },
-                serde_json::to_value(WorkCancellation {
-                    work_id: work_id.clone(),
-                    reason: reason.to_owned(),
-                })
-                .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-        }
-        let state = self.replay_work_state()?;
-        let item = state
-            .items
-            .get(&work_id)
-            .ok_or_else(|| format!("durable child run work is missing: {work_id}"))?;
-        self.append(
-            ChildEventAppend {
-                session_id: &item.session_key,
-                turn_id: item.turn_id.as_deref(),
-                causation_id: item.effect_id.as_deref(),
-                correlation_id: None,
-                kind: WORK_CANCELLED,
-                payload_type: "durable_work",
-            },
-            serde_json::to_value(WorkCancellation {
-                work_id,
-                reason: reason.to_owned(),
-            })
-            .map_err(|error| error.to_string())?,
-        )
+        self.append_decided(|state| {
+            let item = state
+                .items
+                .get(&work_id)
+                .ok_or_else(|| format!("durable child run work is missing: {work_id}"))?;
+            Ok(Some((work_event(item, WORK_CANCELLED), cancellation)))
+        })
         .map(|_| ())
-        .map_err(|error| error.to_string())
     }
 
     pub fn ensure_parent_reentry_work(
@@ -804,22 +796,10 @@ impl DurableChildRecorder {
     }
 
     fn replay_work_state(&self) -> Result<DurableWorkReplayState, String> {
-        let store = DurableEventStore::open(&self.event_root).map_err(|error| error.to_string())?;
-        let mut state = DurableWorkReplayState::default();
-        let mut reducer_error = None;
-        store
-            .visit_from_sequence(0, |event| {
-                if reducer_error.is_none() {
-                    if let Err(error) = apply_persisted_durable_work_event(&mut state, event) {
-                        reducer_error = Some(error.to_string());
-                    }
-                }
-            })
-            .map_err(|error| error.to_string())?;
-        if let Some(error) = reducer_error {
-            return Err(error);
-        }
-        Ok(state)
+        DurableEventStore::open(&self.event_root)
+            .map_err(|error| error.to_string())?
+            .work_state()
+            .map_err(|error| error.to_string())
     }
 
     fn append(
@@ -828,17 +808,42 @@ impl DurableChildRecorder {
         data: Value,
     ) -> Result<DurableEventRecord, DurableEventError> {
         let mut store = DurableEventStore::open(&self.event_root)?;
-        let mut input = DurableEventInput::new(
-            event.session_id,
-            event.kind,
-            DurableEventPayload::inline(event.payload_type, data.clone()),
-        );
-        input.turn_id = event.turn_id.map(str::to_owned);
-        input.causation_id = event.causation_id.map(str::to_owned);
-        input.correlation_id = event.correlation_id.map(str::to_owned);
-        let record = store.append(input)?;
+        let record = store.append(child_event_input(&event, data.clone()))?;
         self.append_trace_after_commit(&record, &data);
         Ok(record)
+    }
+
+    /// Appends the event `decide` builds from the work state, or nothing for `None`. The work
+    /// state is caught up and judged inside the write transaction of that event.
+    fn append_decided(
+        &self,
+        decide: impl FnOnce(
+            &DurableWorkReplayState,
+        ) -> Result<Option<(ChildEventAppend<'_>, Value)>, String>,
+    ) -> Result<Option<DurableEventRecord>, String> {
+        let mut store =
+            DurableEventStore::open(&self.event_root).map_err(|error| error.to_string())?;
+        let mut traced = None;
+        let decided = store.append_deciding(|context| {
+            let state = context.work().map_err(|error| error.to_string())?;
+            let Some((event, data)) = decide(state)? else {
+                return Ok(WorkDecision::Settled(()));
+            };
+            let input = child_event_input(&event, data.clone());
+            traced = Some(data);
+            Ok(WorkDecision::Append(Box::new(input)))
+        });
+        match decided {
+            Ok(DecidedAppend::Appended(record)) => {
+                if let Some(data) = traced {
+                    self.append_trace_after_commit(&record, &data);
+                }
+                Ok(Some(*record))
+            }
+            Ok(DecidedAppend::Settled(())) => Ok(None),
+            Err(DecidedAppendError::Decision(error)) => Err(error),
+            Err(DecidedAppendError::Append(error)) => Err(error.into_error().to_string()),
+        }
     }
 
     fn append_trace_after_commit(&self, record: &DurableEventRecord, data: &Value) {

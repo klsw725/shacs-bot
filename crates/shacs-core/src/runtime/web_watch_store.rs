@@ -2,12 +2,15 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use shacs_session::durable_event::{DurableEventPayload, DurableEventStore, WORK_TERMINAL};
+use shacs_session::durable_event::{
+    DurableEventFilter, DurableEventPayload, DurableEventStore, WORK_TERMINAL,
+};
 use shacs_session::durable_work::{
     apply_persisted_durable_work_event, DurableWorkReplayState, ReplayWorkState, WorkTerminal,
 };
 use shacs_session::Session;
 
+use super::durable_dispatch::visit_durable_events;
 use super::{
     DurableDispatchError, EntrustedWorkMetadataError, ObservationBlock, ObservationError,
     ObservationNextWake, WebCheckResult, WebDeadlineSettings, WebFailureInterval,
@@ -119,6 +122,10 @@ pub(super) struct WebNotifyPoint {
     pub last_success: Option<(u64, String)>,
 }
 
+fn ledger_prefix(work_id: &str) -> String {
+    format!("web-watch:{work_id}:")
+}
+
 /// Facts replayed from the durable ledger for one web watch.
 pub(super) struct WebWatchLedger {
     pub state: DurableWorkReplayState,
@@ -138,6 +145,20 @@ pub(super) struct WebWatchLedger {
 
 impl WebWatchLedger {
     pub fn read(root: &Path, owner: &str, work_id: &str) -> Result<Self, ObservationError> {
+        let filters = [DurableEventFilter {
+            session_id: Some(owner.to_owned()),
+            work_id_prefix: Some(ledger_prefix(work_id)),
+            ..DurableEventFilter::default()
+        }];
+        Self::read_through(root, owner, work_id, Some(&filters))
+    }
+
+    pub(super) fn read_through(
+        root: &Path,
+        owner: &str,
+        work_id: &str,
+        filters: Option<&[DurableEventFilter]>,
+    ) -> Result<Self, ObservationError> {
         let mut ledger = Self {
             state: DurableWorkReplayState::default(),
             history: Vec::new(),
@@ -153,47 +174,46 @@ impl WebWatchLedger {
             return Ok(ledger);
         }
         let store = DurableEventStore::open(root).map_err(DurableDispatchError::from)?;
-        let prefix = format!("web-watch:{work_id}:");
+        let prefix = ledger_prefix(work_id);
         let mut failure = None;
-        let summary = store
-            .visit_from_sequence(0, |event| {
-                if failure.is_some() || event.session_id != owner {
-                    return;
-                }
-                let DurableEventPayload::Inline { data, .. } = &event.payload else {
-                    return;
-                };
-                if !data
-                    .get("work_id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|id| id.starts_with(&prefix))
-                {
-                    return;
-                }
-                if let Err(error) = apply_persisted_durable_work_event(&mut ledger.state, event) {
-                    failure = Some(DurableDispatchError::InvalidWork(error.to_string()));
-                    return;
-                }
-                if event.kind != WORK_TERMINAL {
-                    return;
-                }
-                let parsed =
-                    serde_json::from_value::<WorkTerminal>(data.clone()).and_then(|terminal| {
-                        if terminal.outcome_ref != WEB_WATCH_OUTCOME {
-                            return Ok(None);
-                        }
-                        terminal
-                            .facts
-                            .map(serde_json::from_value::<WebObservationRecord>)
-                            .transpose()
-                    });
-                match parsed {
-                    Ok(Some(record)) => ledger.apply(record),
-                    Ok(None) => {}
-                    Err(error) => failure = Some(DurableDispatchError::Serialization(error)),
-                }
-            })
-            .map_err(DurableDispatchError::from)?;
+        let summary = visit_durable_events(&store, filters, |event| {
+            if failure.is_some() || event.session_id != owner {
+                return;
+            }
+            let DurableEventPayload::Inline { data, .. } = &event.payload else {
+                return;
+            };
+            if !data
+                .get("work_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| id.starts_with(&prefix))
+            {
+                return;
+            }
+            if let Err(error) = apply_persisted_durable_work_event(&mut ledger.state, event) {
+                failure = Some(DurableDispatchError::InvalidWork(error.to_string()));
+                return;
+            }
+            if event.kind != WORK_TERMINAL {
+                return;
+            }
+            let parsed =
+                serde_json::from_value::<WorkTerminal>(data.clone()).and_then(|terminal| {
+                    if terminal.outcome_ref != WEB_WATCH_OUTCOME {
+                        return Ok(None);
+                    }
+                    terminal
+                        .facts
+                        .map(serde_json::from_value::<WebObservationRecord>)
+                        .transpose()
+                });
+            match parsed {
+                Ok(Some(record)) => ledger.apply(record),
+                Ok(None) => {}
+                Err(error) => failure = Some(DurableDispatchError::Serialization(error)),
+            }
+        })
+        .map_err(DurableDispatchError::from)?;
         if let Some(error) = failure {
             return Err(error.into());
         }

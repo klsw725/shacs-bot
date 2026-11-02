@@ -22221,7 +22221,7 @@ mod tests {
     use shacs_providers::{
         GenerationSettings, ProviderClient, ProviderEvent, ProviderRequest, ToolCallRequest,
     };
-    use shacs_session::durable_event::{WORK_LEASED, WORK_TERMINAL};
+    use shacs_session::durable_event::{DURABLE_EVENT_DATABASE_FILE, WORK_LEASED, WORK_TERMINAL};
     use shacs_session::durable_work::WorkTerminal;
     use shacs_templates::WorkspaceSyncOutcome;
     use std::collections::{BTreeMap, VecDeque};
@@ -25264,9 +25264,12 @@ mod tests {
             "owner-unsupported-stop",
             100,
         )?;
-        let event_path = runtime_durable_event_root(root.path()).join("events.log");
-        let events_before = fs::read(&event_path)?;
-        assert!(events_before.is_empty());
+        let event_root = runtime_durable_event_root(root.path());
+        let events_before = DurableEventStore::logical_digest_existing(&event_root)?;
+        assert_eq!(
+            DurableEventStore::open(&event_root)?.scan(1)?.last_sequence,
+            None
+        );
         let captured = Arc::new(Mutex::new(Vec::<ProviderRequest>::new()));
         let adapter = Arc::new(external_media_test_adapter(root.path(), captured.clone())?);
         let mut transport_context =
@@ -25292,7 +25295,10 @@ mod tests {
             !published,
             "unsupported hello must reject production intake"
         );
-        assert_eq!(fs::read(event_path)?, events_before);
+        assert_eq!(
+            DurableEventStore::logical_digest_existing(&event_root)?,
+            events_before
+        );
         let (state, admission) =
             durable_work_state_for_owner(root.path(), dispatcher.lease_owner_ref())?;
         assert!(admission.writable);
@@ -29173,9 +29179,17 @@ mod tests {
         );
         input.turn_id = Some("turn-1".to_owned());
         events.append(input)?;
-        let event_path = event_root.join("events.log");
-        let mut file = fs::OpenOptions::new().append(true).open(event_path)?;
-        writeln!(file, "{{malformed}}")?;
+        drop(events);
+        let database = event_root.join(DURABLE_EVENT_DATABASE_FILE);
+        let bytes = fs::read(&database)?;
+        let stored = br#""content_hash":"sha256:one""#;
+        let start = bytes
+            .windows(stored.len())
+            .position(|window| window == stored)
+            .ok_or("stored record not found in the database file")?;
+        let mut damaged = bytes;
+        damaged[start..start + stored.len()].copy_from_slice(br#""content_hash":"sha256:two""#);
+        fs::write(&database, damaged)?;
 
         let inspected = runtime_inspect(RuntimeInspectOptions {
             config_path: Some(config_path.clone()),
@@ -29194,6 +29208,138 @@ mod tests {
         assert!(error
             .to_string()
             .contains("durable recovery status blocked"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_inspect_and_start_refuse_a_legacy_event_log_or_orphan_sidecars(
+    ) -> Result<(), Box<dyn Error>> {
+        enum Leftover {
+            LegacyFile,
+            LegacyBrokenSymlink,
+            LegacyDirectory,
+            OrphanWal,
+            OrphanShm,
+            LegacyAndWal,
+        }
+
+        type Snapshot = Vec<(PathBuf, &'static str, Vec<u8>, std::time::SystemTime)>;
+
+        fn snapshot(root: &Path) -> Result<Snapshot, Box<dyn Error>> {
+            let mut entries = Vec::new();
+            let mut pending = vec![root.to_path_buf()];
+            while let Some(directory) = pending.pop() {
+                for entry in fs::read_dir(&directory)? {
+                    let path = entry?.path();
+                    let metadata = fs::symlink_metadata(&path)?;
+                    let (kind, content) = if metadata.file_type().is_symlink() {
+                        (
+                            "symlink",
+                            fs::read_link(&path)?.into_os_string().into_encoded_bytes(),
+                        )
+                    } else if metadata.is_dir() {
+                        pending.push(path.clone());
+                        ("directory", Vec::new())
+                    } else {
+                        ("file", fs::read(&path)?)
+                    };
+                    entries.push((
+                        path.strip_prefix(root)?.to_path_buf(),
+                        kind,
+                        content,
+                        metadata.modified()?,
+                    ));
+                }
+            }
+            entries.sort();
+            Ok(entries)
+        }
+
+        for leftover in [
+            Leftover::LegacyFile,
+            Leftover::LegacyBrokenSymlink,
+            Leftover::LegacyDirectory,
+            Leftover::OrphanWal,
+            Leftover::OrphanShm,
+            Leftover::LegacyAndWal,
+        ] {
+            let root = tempfile::tempdir()?;
+            let config_path = root.path().join("config.json");
+            let workspace = root.path().join("workspace");
+            let mut config = Config::default();
+            config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
+            save_config_to_path(&config, &config_path)?;
+            let report = runtime_inspect(RuntimeInspectOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+            })?;
+            let event_root = runtime_durable_event_root(&report.data_dir);
+            fs::create_dir_all(&event_root)?;
+            let legacy = event_root.join("events.log");
+            let wal = event_root.join(format!("{DURABLE_EVENT_DATABASE_FILE}-wal"));
+            let legacy_left = match leftover {
+                Leftover::LegacyFile => {
+                    fs::write(&legacy, b"{\"frame_version\":1}\n")?;
+                    true
+                }
+                Leftover::LegacyBrokenSymlink => {
+                    std::os::unix::fs::symlink(event_root.join("missing"), &legacy)?;
+                    true
+                }
+                Leftover::LegacyDirectory => {
+                    fs::create_dir(&legacy)?;
+                    fs::write(legacy.join("kept"), b"kept")?;
+                    true
+                }
+                Leftover::OrphanWal => {
+                    fs::write(&wal, b"left behind")?;
+                    false
+                }
+                Leftover::OrphanShm => {
+                    fs::write(
+                        event_root.join(format!("{DURABLE_EVENT_DATABASE_FILE}-shm")),
+                        b"left behind",
+                    )?;
+                    false
+                }
+                Leftover::LegacyAndWal => {
+                    fs::write(&legacy, b"{\"frame_version\":1}\n")?;
+                    fs::write(&wal, b"left behind")?;
+                    true
+                }
+            };
+            let before = snapshot(&event_root)?;
+
+            let inspected = runtime_inspect(RuntimeInspectOptions {
+                config_path: Some(config_path.clone()),
+                workspace_override: None,
+            })?;
+            assert_eq!(
+                inspected.lifecycle.durable_recovery.status,
+                DurableRecoveryStatus::Blocked
+            );
+            let output = format_runtime_inspect(inspected);
+            let expected_hint = if legacy_left {
+                "Durable recovery hint: remove_legacy_event_log"
+            } else {
+                "Durable recovery hint: inspect_event_store"
+            };
+            assert!(output.contains(expected_hint), "{output}");
+            let error = load_runtime_config(RuntimeConfigOptions {
+                config_path: Some(config_path),
+                workspace_override: None,
+                resolve_env: false,
+            })
+            .expect_err("a leftover durable event file must block runtime start admission");
+            let refusal = error.to_string();
+            assert!(
+                refusal.contains("stored-data migration plan is blocked")
+                    || refusal.contains("durable recovery status blocked"),
+                "{refusal}"
+            );
+            assert_eq!(snapshot(&event_root)?, before);
+        }
         Ok(())
     }
 
@@ -29260,7 +29406,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_inspect_shows_incomplete_tail_recovery_hint() -> Result<(), Box<dyn Error>> {
+    fn runtime_inspect_ignores_a_torn_wal_tail() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let config_path = root.path().join("config.json");
         let workspace = root.path().join("workspace");
@@ -29282,10 +29428,12 @@ mod tests {
             ),
         );
         input.turn_id = Some("turn-1".to_owned());
-        events.append(input)?;
-        let mut bytes = fs::read(events.path())?;
-        bytes.truncate(bytes.len().saturating_sub(8));
-        fs::write(events.path(), bytes)?;
+        events.append(input.clone())?;
+        let wal = event_root.join(format!("{DURABLE_EVENT_DATABASE_FILE}-wal"));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&wal)?
+            .write_all(b"torn frame")?;
 
         let inspected = runtime_inspect(RuntimeInspectOptions {
             config_path: Some(config_path),
@@ -29293,10 +29441,12 @@ mod tests {
         })?;
         assert_eq!(
             inspected.lifecycle.durable_recovery.status,
-            DurableRecoveryStatus::Recoverable
+            DurableRecoveryStatus::Healthy
         );
         let output = format_runtime_inspect(inspected);
-        assert!(output.contains("Durable recovery hint: discard_incomplete_tail"));
+        assert!(output.contains("Durable recovery: healthy (writable=true"));
+        assert!(!output.contains("Durable recovery hint"));
+        assert_eq!(events.append(input)?.sequence, 2);
         Ok(())
     }
 
@@ -30589,7 +30739,7 @@ mod tests {
         assert!(!api_snapshot_text.contains(raw_supervision_detail));
         let recovery_issue = DurableRecoveryIssue {
             kind: shacs_session::durable_replay::DurableRecoveryIssueKind::EventCorrupt,
-            detail: "/Users/alice/ClientA/runtime/durable-events/events.log is a symlink"
+            detail: "/Users/alice/ClientA/runtime/durable-events/events.sqlite3 is a symlink"
                 .to_owned(),
         };
         let issue_projection = durable_recovery_issue_projection(&recovery_issue).to_string();

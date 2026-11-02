@@ -3,17 +3,19 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use shacs_session::durable_event::{
-    DurableEventInput, DurableEventPayload, DurableEventStore, ENTRUSTED_NOTIFICATION_FACT,
-    WORK_ENQUEUED, WORK_TERMINAL,
+    DurableEventFilter, DurableEventInput, DurableEventPayload, DurableEventStore,
+    ENTRUSTED_NOTIFICATION_FACT, WORK_ENQUEUED, WORK_TERMINAL,
 };
 use shacs_session::durable_work::{WorkEnqueued, WorkTerminal, WorkTerminalKind};
 
+use super::durable_dispatch::visit_durable_events;
+use super::entrusted_observation::OBSERVATION_WORK_ID_PREFIX;
 use super::{
     DurableDispatchError, EntrustedNotificationDeliveryState as Delivery,
     EntrustedNotificationEnqueueState as Enqueue, EntrustedNotificationFact,
     EntrustedNotificationIntent, EntrustedNotificationSnapshot,
     EntrustedNotificationStage as Stage, ObservationBlock, ObservationError, ObservationRecord,
-    ENTRUSTED_OBSERVATION_OUTCOME,
+    ENTRUSTED_NOTIFICATION_PREFIX, ENTRUSTED_OBSERVATION_OUTCOME,
 };
 
 pub(super) struct NotificationEntry {
@@ -25,86 +27,110 @@ pub(super) struct NotificationEntry {
 pub(super) fn read_notifications(
     root: &Path,
 ) -> Result<BTreeMap<String, NotificationEntry>, ObservationError> {
+    let filters = [
+        DurableEventFilter {
+            kinds: Some(vec![WORK_TERMINAL.to_owned()]),
+            work_id_prefix: Some(OBSERVATION_WORK_ID_PREFIX.to_owned()),
+            ..DurableEventFilter::default()
+        },
+        DurableEventFilter {
+            kinds: Some(vec![WORK_ENQUEUED.to_owned()]),
+            work_id_prefix: Some(ENTRUSTED_NOTIFICATION_PREFIX.to_owned()),
+            ..DurableEventFilter::default()
+        },
+        DurableEventFilter {
+            kinds: Some(vec![ENTRUSTED_NOTIFICATION_FACT.to_owned()]),
+            ..DurableEventFilter::default()
+        },
+    ];
+    read_notifications_through(root, Some(&filters))
+}
+
+/// A terminal counts only under the work id of its observation wake, and an enqueue only under
+/// the correlation id of an entry, made by [`EntrustedNotificationIntent::from_record`]; the
+/// filters of [`read_notifications`] so keep every event an entry can use.
+pub(super) fn read_notifications_through(
+    root: &Path,
+    filters: Option<&[DurableEventFilter]>,
+) -> Result<BTreeMap<String, NotificationEntry>, ObservationError> {
     let mut entries: BTreeMap<String, NotificationEntry> = BTreeMap::new();
     if !root.exists() {
         return Ok(entries);
     }
     let store = DurableEventStore::open(root).map_err(DurableDispatchError::from)?;
     let mut failure = None;
-    let summary = store
-        .visit_from_sequence(0, |event| {
-            if failure.is_some() {
-                return;
-            }
-            let DurableEventPayload::Inline { data, .. } = &event.payload else {
-                return;
-            };
-            let result = (|| -> Result<(), serde_json::Error> {
-                match event.kind.as_str() {
-                    WORK_TERMINAL => {
-                        let terminal: WorkTerminal = serde_json::from_value(data.clone())?;
-                        if terminal.outcome_ref != ENTRUSTED_OBSERVATION_OUTCOME
-                            || terminal.terminal_kind != WorkTerminalKind::Succeeded
-                        {
-                            return Ok(());
-                        }
-                        let Some(facts) = terminal.facts else {
-                            return Ok(());
-                        };
-                        let observation: ObservationRecord = serde_json::from_value(facts)?;
-                        if observation.wake.owner_session_id != event.session_id
-                            || observation.wake.durable_work_id() != terminal.work_id
-                        {
-                            return Ok(());
-                        }
-                        if let Some(intent) = EntrustedNotificationIntent::from_record(&observation)
-                        {
-                            entries.entry(intent.correlation_id.clone()).or_insert(
-                                NotificationEntry {
-                                    observation,
-                                    snapshot: EntrustedNotificationSnapshot {
-                                        intent,
-                                        enqueue: Enqueue::Pending,
-                                        consumption_started: false,
-                                        suppressed_stale: false,
-                                        delivery: Delivery::NotRequested,
-                                    },
-                                    last_stage: None,
+    let summary = visit_durable_events(&store, filters, |event| {
+        if failure.is_some() {
+            return;
+        }
+        let DurableEventPayload::Inline { data, .. } = &event.payload else {
+            return;
+        };
+        let result = (|| -> Result<(), serde_json::Error> {
+            match event.kind.as_str() {
+                WORK_TERMINAL => {
+                    let terminal: WorkTerminal = serde_json::from_value(data.clone())?;
+                    if terminal.outcome_ref != ENTRUSTED_OBSERVATION_OUTCOME
+                        || terminal.terminal_kind != WorkTerminalKind::Succeeded
+                    {
+                        return Ok(());
+                    }
+                    let Some(facts) = terminal.facts else {
+                        return Ok(());
+                    };
+                    let observation: ObservationRecord = serde_json::from_value(facts)?;
+                    if observation.wake.owner_session_id != event.session_id
+                        || observation.wake.durable_work_id() != terminal.work_id
+                    {
+                        return Ok(());
+                    }
+                    if let Some(intent) = EntrustedNotificationIntent::from_record(&observation) {
+                        entries
+                            .entry(intent.correlation_id.clone())
+                            .or_insert(NotificationEntry {
+                                observation,
+                                snapshot: EntrustedNotificationSnapshot {
+                                    intent,
+                                    enqueue: Enqueue::Pending,
+                                    consumption_started: false,
+                                    suppressed_stale: false,
+                                    delivery: Delivery::NotRequested,
                                 },
-                            );
-                        }
+                                last_stage: None,
+                            });
                     }
-                    WORK_ENQUEUED => {
-                        let work: WorkEnqueued = serde_json::from_value(data.clone())?;
-                        if let Some(entry) = entries.get_mut(&work.work_id) {
-                            if event.session_id == entry.snapshot.intent.owner_session_id
-                                && work.work_kind == "agent.inbound_turn"
-                                && work.dedupe_hint.as_deref() == Some(work.work_id.as_str())
-                            {
-                                entry.snapshot.enqueue = Enqueue::Enqueued;
-                                entry.snapshot.delivery = Delivery::Pending;
-                            }
-                        }
-                    }
-                    ENTRUSTED_NOTIFICATION_FACT => {
-                        let fact: EntrustedNotificationFact = serde_json::from_value(data.clone())?;
-                        if let Some(entry) = entries.get_mut(&fact.intent.correlation_id) {
-                            if fact.intent == entry.snapshot.intent
-                                && event.session_id == fact.intent.owner_session_id
-                            {
-                                apply_fact(entry, &fact);
-                            }
-                        }
-                    }
-                    _ => {}
                 }
-                Ok(())
-            })();
-            if let Err(error) = result {
-                failure = Some(DurableDispatchError::from(error));
+                WORK_ENQUEUED => {
+                    let work: WorkEnqueued = serde_json::from_value(data.clone())?;
+                    if let Some(entry) = entries.get_mut(&work.work_id) {
+                        if event.session_id == entry.snapshot.intent.owner_session_id
+                            && work.work_kind == "agent.inbound_turn"
+                            && work.dedupe_hint.as_deref() == Some(work.work_id.as_str())
+                        {
+                            entry.snapshot.enqueue = Enqueue::Enqueued;
+                            entry.snapshot.delivery = Delivery::Pending;
+                        }
+                    }
+                }
+                ENTRUSTED_NOTIFICATION_FACT => {
+                    let fact: EntrustedNotificationFact = serde_json::from_value(data.clone())?;
+                    if let Some(entry) = entries.get_mut(&fact.intent.correlation_id) {
+                        if fact.intent == entry.snapshot.intent
+                            && event.session_id == fact.intent.owner_session_id
+                        {
+                            apply_fact(entry, &fact);
+                        }
+                    }
+                }
+                _ => {}
             }
-        })
-        .map_err(DurableDispatchError::from)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            failure = Some(DurableDispatchError::from(error));
+        }
+    })
+    .map_err(DurableDispatchError::from)?;
     if let Some(error) = failure {
         return Err(error.into());
     }

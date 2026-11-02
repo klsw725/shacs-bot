@@ -1,8 +1,11 @@
+use rusqlite::config::DbConfig;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use shacs_session::durable_event::{
-    DurableEventInput, DurableEventPayload, DurableEventStore, SESSION_TURN_ACCEPTED,
-    SESSION_TURN_COMPLETED, SESSION_TURN_FAILED, WORKFLOW_COMPLETED, WORKFLOW_PLANNED,
+    DurableEventInput, DurableEventPayload, DurableEventStore, DURABLE_EVENT_DATABASE_FILE,
+    LEGACY_DURABLE_EVENT_LOG_FILE, SESSION_TURN_ACCEPTED, SESSION_TURN_COMPLETED,
+    SESSION_TURN_FAILED, WORKFLOW_COMPLETED, WORKFLOW_PLANNED,
 };
 use shacs_session::durable_replay::{
     apply_durable_event, evaluate_durable_recovery, DurableCheckpointStore, DurableRecoveryHint,
@@ -30,27 +33,31 @@ fn checksum(value: &Value) -> Result<String, Box<dyn Error>> {
     ))
 }
 
-fn rewrite_event_frame(
-    path: &Path,
-    index: usize,
+/// Rewrites one stored record outside the store, with a matching checksum and schema version
+/// column, so that only what `mutate` changed differs from what the store wrote.
+fn rewrite_event_record(
+    event_root: &Path,
+    sequence: i64,
     mutate: impl FnOnce(&mut Value),
 ) -> Result<(), Box<dyn Error>> {
-    let mut frames = fs::read_to_string(path)?
-        .lines()
-        .map(serde_json::from_str::<Value>)
-        .collect::<Result<Vec<_>, _>>()?;
-    let frame = frames.get_mut(index).ok_or("missing event frame")?;
-    mutate(frame);
-    let record = frame["record"].clone();
-    frame["record_length"] = json!(serde_json::to_vec(&record)?.len());
-    frame["checksum"] = Value::String(checksum(&record)?);
-    let mut text = frames
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\n");
-    text.push('\n');
-    fs::write(path, text)?;
+    let connection = Connection::open(event_root.join(DURABLE_EVENT_DATABASE_FILE))?;
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
+    let text: String = connection.query_row(
+        "SELECT record FROM events WHERE sequence = ?1",
+        [sequence],
+        |row| row.get(0),
+    )?;
+    let mut record: Value = serde_json::from_str(&text)?;
+    mutate(&mut record);
+    connection.execute(
+        "UPDATE events SET record = ?1, checksum = ?2, schema_version = ?3 WHERE sequence = ?4",
+        params![
+            serde_json::to_string(&record)?,
+            checksum(&record)?,
+            record["schema_version"].as_i64(),
+            sequence
+        ],
+    )?;
     Ok(())
 }
 
@@ -391,7 +398,7 @@ fn durable_replay_falls_back_when_checkpoint_is_ahead_of_events() -> Result<(), 
 }
 
 #[test]
-fn durable_replay_classifies_incomplete_tail_as_recoverable() -> Result<(), Box<dyn Error>> {
+fn durable_replay_ignores_an_uncommitted_append() -> Result<(), Box<dyn Error>> {
     let root = tempfile::tempdir()?;
     let event_root = root.path().join("events");
     let mut events = DurableEventStore::open(&event_root)?;
@@ -401,30 +408,90 @@ fn durable_replay_classifies_incomplete_tail_as_recoverable() -> Result<(), Box<
         SESSION_TURN_ACCEPTED,
         json!({"content_hash": "sha256:one", "media_count": 0}),
     ))?;
-    events.append(input(
-        "session-1",
-        "turn-1",
-        SESSION_TURN_COMPLETED,
-        json!({"stop_reason": "completed"}),
-    ))?;
-    let mut bytes = fs::read(events.path())?;
-    bytes.truncate(bytes.len().saturating_sub(8));
-    fs::write(events.path(), bytes)?;
+    let wal = events
+        .root()
+        .join(format!("{DURABLE_EVENT_DATABASE_FILE}-wal"));
+    let wal_before = fs::metadata(&wal).map_or(0, |metadata| metadata.len());
+    let writer = Connection::open(events.path())?;
+    writer.pragma_update(None, "cache_size", 2_i64)?;
+    writer.execute_batch("BEGIN IMMEDIATE")?;
+    for sequence in 2..64_i64 {
+        writer.execute(
+            "INSERT INTO events (sequence, event_id, session_id, kind, schema_version, \
+             recorded_at, record, checksum) VALUES (?1, ?2, 'session-1', ?3, 1, 'never', ?4, \
+             'sha256:never')",
+            params![
+                sequence,
+                format!("event-{sequence:020}"),
+                SESSION_TURN_COMPLETED,
+                "x".repeat(16 * 1024)
+            ],
+        )?;
+    }
+    assert!(fs::metadata(&wal)?.len() > wal_before);
 
     let admission = evaluate_durable_recovery(&event_root, root.path().join("checkpoints"));
-    assert_eq!(admission.status, DurableRecoveryStatus::Recoverable);
-    assert!(!admission.writable);
+    drop(writer);
+
+    assert_eq!(admission.status, DurableRecoveryStatus::Healthy);
+    assert!(admission.writable);
     assert_eq!(
         admission.state.and_then(|state| state.applied_through),
         Some(1)
     );
+    assert!(admission.issues.is_empty());
+    assert!(admission.recovery_hints.is_empty());
+    Ok(())
+}
+
+#[test]
+fn durable_replay_blocks_a_legacy_event_log_until_it_is_removed() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let checkpoint_root = root.path().join("checkpoints");
+    fs::create_dir_all(&event_root)?;
+    let legacy = event_root.join(LEGACY_DURABLE_EVENT_LOG_FILE);
+    fs::write(&legacy, b"{\"frame_version\":1}\n")?;
+
+    let blocked = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    assert_eq!(blocked.status, DurableRecoveryStatus::Blocked);
+    assert!(!blocked.writable);
+    assert!(blocked
+        .issues
+        .iter()
+        .any(|issue| issue.kind == DurableRecoveryIssueKind::LegacyEventLog));
+    assert_eq!(
+        blocked.recovery_hints,
+        vec![DurableRecoveryHint::RemoveLegacyEventLog]
+    );
+    assert_eq!(fs::read(&legacy)?, b"{\"frame_version\":1}\n");
+    assert!(!event_root.join(DURABLE_EVENT_DATABASE_FILE).exists());
+
+    fs::remove_file(&legacy)?;
+    let healthy = evaluate_durable_recovery(&event_root, &checkpoint_root);
+    assert_eq!(healthy.status, DurableRecoveryStatus::Healthy);
+    assert!(healthy.writable);
+    Ok(())
+}
+
+#[test]
+fn durable_replay_blocks_sidecars_without_a_database() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    fs::create_dir_all(&event_root)?;
+    fs::write(
+        event_root.join(format!("{DURABLE_EVENT_DATABASE_FILE}-wal")),
+        b"left behind",
+    )?;
+
+    let admission = evaluate_durable_recovery(&event_root, root.path().join("checkpoints"));
+    assert_eq!(admission.status, DurableRecoveryStatus::Blocked);
+    assert!(!admission.writable);
     assert!(admission
         .issues
         .iter()
-        .any(|issue| issue.kind == DurableRecoveryIssueKind::IncompleteTail));
-    assert!(admission
-        .recovery_hints
-        .contains(&DurableRecoveryHint::DiscardIncompleteTail));
+        .any(|issue| issue.kind == DurableRecoveryIssueKind::EventCorrupt));
+    assert!(!event_root.join(DURABLE_EVENT_DATABASE_FILE).exists());
     Ok(())
 }
 
@@ -446,9 +513,7 @@ fn durable_replay_blocks_middle_corruption_and_preserves_failed_reducer_state(
         SESSION_TURN_COMPLETED,
         json!({"stop_reason": "completed"}),
     ))?;
-    rewrite_event_frame(events.path(), 1, |frame| {
-        frame["record"]["sequence"] = json!(3)
-    })?;
+    rewrite_event_record(&event_root, 2, |record| record["sequence"] = json!(3))?;
     let corrupt =
         evaluate_durable_recovery(&event_root, corruption_root.path().join("checkpoints"));
     assert_eq!(corrupt.status, DurableRecoveryStatus::Blocked);
@@ -496,9 +561,7 @@ fn durable_replay_marks_unknown_event_schema_inspect_only() -> Result<(), Box<dy
         SESSION_TURN_ACCEPTED,
         json!({"content_hash": "sha256:one", "media_count": 0}),
     ))?;
-    rewrite_event_frame(events.path(), 0, |frame| {
-        frame["record"]["schema_version"] = json!(2)
-    })?;
+    rewrite_event_record(&event_root, 1, |record| record["schema_version"] = json!(2))?;
     let admission = evaluate_durable_recovery(&event_root, root.path().join("checkpoints"));
     assert_eq!(admission.status, DurableRecoveryStatus::InspectOnly);
     assert!(!admission.writable);

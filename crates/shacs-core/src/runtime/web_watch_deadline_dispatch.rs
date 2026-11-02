@@ -1,12 +1,15 @@
 use std::path::Path;
 
-use shacs_session::durable_event::{DurableEventPayload, DurableEventStore, WORK_TERMINAL};
+use shacs_session::durable_event::{
+    DurableEventFilter, DurableEventPayload, DurableEventStore, WORK_TERMINAL,
+};
 use shacs_session::durable_work::{
     evaluate_durable_work_recovery_for_owner, DurableWorkEnqueueJsonInput, ReplayWorkItem,
     ReplayWorkState, WorkTerminal,
 };
 use shacs_session::{SessionManager, SessionMutationGuard};
 
+use super::durable_dispatch::visit_durable_events;
 use super::entrusted_work_surface::load_owner_session;
 use super::web_watch_fetch::{display_url, sha256_ref};
 use super::web_watch_gate::{active_deadline, ActiveDeadline};
@@ -165,39 +168,49 @@ pub(super) fn read_web_deadline_records(
     owner: &str,
     work_id: &str,
 ) -> Result<Vec<WebDeadlineRecord>, ObservationError> {
+    let filters = [DurableEventFilter {
+        session_id: Some(owner.to_owned()),
+        kinds: Some(vec![WORK_TERMINAL.to_owned()]),
+        ..DurableEventFilter::default()
+    }];
+    read_web_deadline_records_through(root, owner, work_id, Some(&filters))
+}
+
+pub(super) fn read_web_deadline_records_through(
+    root: &Path,
+    owner: &str,
+    work_id: &str,
+    filters: Option<&[DurableEventFilter]>,
+) -> Result<Vec<WebDeadlineRecord>, ObservationError> {
     let mut records = Vec::new();
     if !root.exists() {
         return Ok(records);
     }
     let store = DurableEventStore::open(root).map_err(DurableDispatchError::from)?;
     let mut failure = None;
-    let summary = store
-        .visit_from_sequence(0, |event| {
-            if failure.is_some() || event.session_id != owner || event.kind != WORK_TERMINAL {
-                return;
+    let summary = visit_durable_events(&store, filters, |event| {
+        if failure.is_some() || event.session_id != owner || event.kind != WORK_TERMINAL {
+            return;
+        }
+        let DurableEventPayload::Inline { data, .. } = &event.payload else {
+            return;
+        };
+        let parsed = serde_json::from_value::<WorkTerminal>(data.clone()).and_then(|terminal| {
+            if terminal.outcome_ref != WEB_DEADLINE_OUTCOME {
+                return Ok(None);
             }
-            let DurableEventPayload::Inline { data, .. } = &event.payload else {
-                return;
-            };
-            let parsed =
-                serde_json::from_value::<WorkTerminal>(data.clone()).and_then(|terminal| {
-                    if terminal.outcome_ref != WEB_DEADLINE_OUTCOME {
-                        return Ok(None);
-                    }
-                    terminal
-                        .facts
-                        .map(serde_json::from_value::<WebDeadlineRecord>)
-                        .transpose()
-                });
-            match parsed {
-                Ok(Some(record)) if record.wake.entrusted_work_id == work_id => {
-                    records.push(record)
-                }
-                Ok(_) => {}
-                Err(error) => failure = Some(DurableDispatchError::Serialization(error)),
-            }
-        })
-        .map_err(DurableDispatchError::from)?;
+            terminal
+                .facts
+                .map(serde_json::from_value::<WebDeadlineRecord>)
+                .transpose()
+        });
+        match parsed {
+            Ok(Some(record)) if record.wake.entrusted_work_id == work_id => records.push(record),
+            Ok(_) => {}
+            Err(error) => failure = Some(DurableDispatchError::Serialization(error)),
+        }
+    })
+    .map_err(DurableDispatchError::from)?;
     if let Some(error) = failure {
         return Err(error.into());
     }

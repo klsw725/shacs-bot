@@ -4,7 +4,8 @@ use shacs_core::runtime::{
 };
 use shacs_session::durable_child::DurableChildRecorder;
 use shacs_session::durable_event::{
-    DurableEventInput, DurableEventPayload, DurableEventStore, WORK_ENQUEUED,
+    DurableEventInput, DurableEventPayload, DurableEventStore, DURABLE_EVENT_DATABASE_FILE,
+    WORK_ENQUEUED,
 };
 use shacs_session::durable_replay::evaluate_durable_recovery;
 use shacs_session::durable_trace::DurableTraceStore;
@@ -626,7 +627,7 @@ fn generic_enqueue_fails_closed_when_event_log_reaches_quota() -> Result<(), Box
     )?;
     std::fs::OpenOptions::new()
         .write(true)
-        .open(event_root.join("events.log"))?
+        .open(event_root.join(DURABLE_EVENT_DATABASE_FILE))?
         .set_len(512 * 1024 * 1024)?;
 
     // When
@@ -811,7 +812,7 @@ fn child_and_dispatch_enqueue_admit_only_one_final_open_work_slot() -> Result<()
         .write(true)
         .create(true)
         .truncate(false)
-        .open(event_root.join("events.lock"))?;
+        .open(event_root.join("work-enqueue.lock"))?;
     event_lock.lock_exclusive()?;
     let dispatcher_event_root = event_root.clone();
     let dispatcher_payload_root = payload_root.clone();

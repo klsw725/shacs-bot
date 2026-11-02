@@ -4,7 +4,8 @@ use crate::durable_child::{
 };
 use crate::durable_event::{
     DurableEventInput, DurableEventPayload, DurableEventStore, CHILD_SPAWNED,
-    SESSION_TURN_ACCEPTED, WORK_ENQUEUED, WORK_LEASED, WORK_RETRY_SCHEDULED,
+    DURABLE_EVENT_DATABASE_FILE, SESSION_TURN_ACCEPTED, WORK_ENQUEUED, WORK_LEASED,
+    WORK_RETRY_SCHEDULED,
 };
 use crate::durable_replay::{evaluate_durable_recovery, DurableCheckpointStore};
 use crate::durable_trace::{DurableTraceInput, DurableTraceSeverity, DurableTraceStore};
@@ -93,11 +94,11 @@ impl DurableMigrationFamily {
             Self::SessionMetadata => roots.workspace.join("sessions"),
             Self::Event => runtime_root(&roots.data_dir)
                 .join("durable-events")
-                .join("events.log"),
+                .join(DURABLE_EVENT_DATABASE_FILE),
             Self::Checkpoint => runtime_root(&roots.data_dir).join("durable-checkpoints"),
             Self::Queue | Self::Scheduler | Self::Child => runtime_root(&roots.data_dir)
                 .join("durable-events")
-                .join("events.log"),
+                .join(DURABLE_EVENT_DATABASE_FILE),
             Self::Channel => runtime_root(&roots.data_dir)
                 .join("channels")
                 .join("worker-metadata"),
@@ -133,9 +134,7 @@ impl DurableMigrationResource {
     fn path(self, roots: &MigrationRoots) -> PathBuf {
         match self {
             Self::WorkspaceSessions => roots.workspace.join("sessions"),
-            Self::DurableEventsLog => runtime_root(&roots.data_dir)
-                .join("durable-events")
-                .join("events.log"),
+            Self::DurableEventsLog => runtime_root(&roots.data_dir).join("durable-events"),
             Self::DurableCheckpoints => runtime_root(&roots.data_dir).join("durable-checkpoints"),
             Self::ChannelWorkerMetadata => runtime_root(&roots.data_dir)
                 .join("channels")
@@ -1507,6 +1506,9 @@ fn resource_digest(
     if resource == DurableMigrationResource::DurableDiagnostics {
         return durable_diagnostics_digest(roots);
     }
+    if resource == DurableMigrationResource::DurableEventsLog {
+        return durable_events_digest(roots);
+    }
     let mut hasher = Sha256::new();
     hasher.update(resource.as_str().as_bytes());
     let path = resource.path(roots);
@@ -1515,6 +1517,24 @@ fn resource_digest(
             hasher.update(display_relative(&roots.data_dir, &file).as_bytes());
             hash_file_into(&file, &mut hasher)?;
         }
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// The durable event store is digested by its logical content (store version, schema and every
+/// event column), because the bytes of a SQLite database and its WAL do not stay fixed.
+fn durable_events_digest(roots: &MigrationRoots) -> Result<String, DurableMigrationError> {
+    let mut hasher = Sha256::new();
+    hasher.update(
+        DurableMigrationResource::DurableEventsLog
+            .as_str()
+            .as_bytes(),
+    );
+    let root = DurableMigrationResource::DurableEventsLog.path(roots);
+    let digest = DurableEventStore::logical_digest_existing(&root)
+        .map_err(|error| DurableMigrationError::Validation(error.to_string()))?;
+    if let Some(digest) = digest {
+        hasher.update(digest.as_bytes());
     }
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
@@ -2060,16 +2080,68 @@ mod tests {
     }
 
     #[test]
-    fn current_log_larger_than_four_mib_inventories_with_streaming_digest(
+    fn durable_events_digest_changes_only_with_logical_content() -> Result<(), Box<dyn Error>> {
+        use rusqlite::config::DbConfig;
+        use rusqlite::Connection;
+
+        let root = tempfile::tempdir()?;
+        let roots = MigrationRoots::new(root.path(), root.path());
+        let event_root = runtime_root(root.path()).join("durable-events");
+        let mut events = DurableEventStore::open(&event_root)?;
+        for message in ["one", "two"] {
+            events.append(DurableEventInput::new(
+                "session-1",
+                SESSION_TURN_ACCEPTED,
+                DurableEventPayload::inline("turn_fact", json!({"message": message})),
+            ))?;
+        }
+        drop(events);
+        let database = event_root.join(DURABLE_EVENT_DATABASE_FILE);
+        let change = |sql: &str| -> Result<(), Box<dyn Error>> {
+            let connection = Connection::open(&database)?;
+            connection.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
+            connection.execute_batch(sql)?;
+            Ok(())
+        };
+        let baseline = durable_events_digest(&roots)?;
+        change("VACUUM")?;
+        assert_eq!(durable_events_digest(&roots)?, baseline);
+
+        let mut seen = vec![baseline];
+        for sql in [
+            "UPDATE events SET session_id = 'session-2' WHERE sequence = 2",
+            "DELETE FROM events WHERE sequence = 2",
+            "INSERT INTO events (sequence, event_id, session_id, kind, schema_version, \
+             recorded_at, record, checksum) VALUES (3, 'event-3', 'session-1', \
+             'session.turn_accepted', 1, 'added', '{}', 'sha256:added')",
+            "CREATE INDEX events_by_recorded_at ON events (recorded_at)",
+            "PRAGMA user_version = 2",
+            "UPDATE events SET session_id = 'session-3' WHERE sequence = 1",
+        ] {
+            change(sql)?;
+            let digest = durable_events_digest(&roots)?;
+            assert!(!seen.contains(&digest), "{sql}");
+            seen.push(digest);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn current_event_store_larger_than_four_mib_inventories_with_streaming_digest(
     ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
-        let log = runtime_root(root.path())
-            .join("durable-events")
-            .join("events.log");
-        fs::create_dir_all(log.parent().ok_or("missing parent")?)?;
-        let mut file = File::create(&log)?;
-        file.write_all(&vec![b'x'; MAX_MIGRATION_FILE_BYTES + 1024])?;
-        file.sync_all()?;
+        let mut events = DurableEventStore::open(runtime_root(root.path()).join("durable-events"))?;
+        let filler: Vec<u64> = vec![1_000_000_000; 5_000];
+        let mut stored_bytes = 0;
+        while stored_bytes <= MAX_MIGRATION_FILE_BYTES + 1024 {
+            let record = events.append(DurableEventInput::new(
+                "session-1",
+                SESSION_TURN_ACCEPTED,
+                DurableEventPayload::inline("migration_filler", json!({"filler": filler})),
+            ))?;
+            stored_bytes += serde_json::to_vec(&record)?.len();
+        }
+        drop(events);
         let plan = plan_durable_migration(root.path(), DurableConfigCompatibility::Readable)?;
         assert!(!plan.blocked);
         assert!(plan
@@ -2155,13 +2227,13 @@ mod tests {
             },
         )
         .expect_err("expected interruption");
-        let log = runtime_root(root.path())
-            .join("durable-events")
-            .join("events.log");
-        OpenOptions::new()
-            .append(true)
-            .open(&log)?
-            .write_all(b"external-change\n")?;
+        DurableEventStore::open(runtime_root(root.path()).join("durable-events"))?.append(
+            DurableEventInput::new(
+                "session-1",
+                SESSION_TURN_ACCEPTED,
+                DurableEventPayload::inline("external_change", json!({"change": "external"})),
+            ),
+        )?;
         let error = run_durable_migration(
             root.path(),
             DurableMigrationRunMode::Resume,
@@ -2435,14 +2507,13 @@ mod tests {
             DurableConfigCompatibility::Readable,
             DurableMigrationOptions::default(),
         )?;
-        OpenOptions::new()
-            .append(true)
-            .open(
-                runtime_root(root.path())
-                    .join("durable-events")
-                    .join("events.log"),
-            )?
-            .write_all(b"post-complete-write\n")?;
+        DurableEventStore::open(runtime_root(root.path()).join("durable-events"))?.append(
+            DurableEventInput::new(
+                "session-1",
+                SESSION_TURN_ACCEPTED,
+                DurableEventPayload::inline("post_complete_write", json!({"change": "after"})),
+            ),
+        )?;
         let report = run_durable_migration(
             root.path(),
             DurableMigrationRunMode::Resume,

@@ -1,3 +1,4 @@
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -10,8 +11,6 @@ use shacs_session::durable_work::{
     ReplayWorkState, WorkEnqueued, WorkPayloadRef, WorkTerminal, WorkTerminalKind,
 };
 use std::error::Error;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::Path;
 
 fn append(
@@ -55,8 +54,9 @@ fn terminal(outcome_ref: &str) -> WorkTerminal {
     }
 }
 
-fn append_legacy_frame(
-    event_path: &Path,
+/// Stores a terminal the way an earlier release did, without the checks today's append makes.
+fn insert_legacy_terminal(
+    database: &Path,
     previous: &DurableEventRecord,
     payload: WorkTerminal,
 ) -> Result<(), Box<dyn Error>> {
@@ -74,17 +74,24 @@ fn append_legacy_frame(
         provenance: previous.provenance.clone(),
         recorded_at: "2026-08-13T12:41:08.795Z".to_owned(),
     };
-    let record_bytes = serde_json::to_vec(&serde_json::to_value(&record)?)?;
-    let frame = json!({
-        "frame_version": 1,
-        "record_length": record_bytes.len(),
-        "checksum": format!("sha256:{:x}", Sha256::digest(&record_bytes)),
-        "record": record,
-    });
-    let mut file = OpenOptions::new().append(true).open(event_path)?;
-    serde_json::to_writer(&mut file, &frame)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
+    let text = serde_json::to_string(&serde_json::to_value(&record)?)?;
+    Connection::open(database)?.execute(
+        "INSERT INTO events (sequence, event_id, session_id, turn_id, kind, work_id, \
+         schema_version, recorded_at, record, checksum) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            i64::try_from(record.sequence)?,
+            record.event_id,
+            record.session_id,
+            record.turn_id,
+            record.kind,
+            "automation-route-suppress-legacy",
+            i64::from(record.schema_version),
+            record.recorded_at,
+            text,
+            format!("sha256:{:x}", Sha256::digest(text.as_bytes())),
+        ],
+    )?;
     Ok(())
 }
 
@@ -100,7 +107,7 @@ fn persisted_v1_suppress_terminal_without_lease_remains_replayable() -> Result<(
         .records
         .pop()
         .ok_or("missing enqueued event")?;
-    append_legacy_frame(events.path(), &enqueued, terminal("no_notification"))?;
+    insert_legacy_terminal(events.path(), &enqueued, terminal("no_notification"))?;
 
     let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
 
@@ -132,7 +139,7 @@ fn persisted_v1_unleased_terminal_outside_legacy_contract_stays_blocked(
         .records
         .pop()
         .ok_or("missing enqueued event")?;
-    append_legacy_frame(events.path(), &enqueued, terminal("forged_success"))?;
+    insert_legacy_terminal(events.path(), &enqueued, terminal("forged_success"))?;
 
     let replay = evaluate_durable_recovery(&event_root, &checkpoint_root);
 

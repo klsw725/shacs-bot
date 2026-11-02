@@ -2,16 +2,17 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use shacs_session::durable_event::{
-    DurableEventInput, DurableEventPayload, DurableEventStore, WEB_WATCH_NOTIFICATION_FACT,
-    WORK_CANCELLED, WORK_ENQUEUED, WORK_TERMINAL,
+    DurableEventFilter, DurableEventInput, DurableEventPayload, DurableEventStore,
+    WEB_WATCH_NOTIFICATION_FACT, WORK_CANCELLED, WORK_ENQUEUED, WORK_TERMINAL,
 };
 use shacs_session::durable_work::{WorkEnqueued, WorkTerminal, WorkTerminalKind};
 
+use super::durable_dispatch::visit_durable_events;
 use super::entrusted_notification_store::writer_instance_ref;
 use super::{
     DurableDispatchError, ObservationBlock, ObservationError, OutboundMessage,
     WebNotificationSnapshot, WebNotifyDelivery as Delivery, WebNotifyEnqueue as Enqueue,
-    WebNotifyFact, WebNotifyIntent, WebNotifyStage as Stage,
+    WebNotifyFact, WebNotifyIntent, WebNotifyStage as Stage, WEB_NOTIFY_PREFIX,
 };
 
 pub(super) struct WebNotifyEntry {
@@ -27,79 +28,103 @@ pub(super) struct WebNotifyEntry {
 pub(super) fn read_web_notifications(
     root: &Path,
 ) -> Result<BTreeMap<String, WebNotifyEntry>, ObservationError> {
+    let filters = [
+        DurableEventFilter {
+            kinds: Some(vec![WEB_WATCH_NOTIFICATION_FACT.to_owned()]),
+            ..DurableEventFilter::default()
+        },
+        DurableEventFilter {
+            kinds: Some(
+                [WORK_ENQUEUED, WORK_TERMINAL, WORK_CANCELLED]
+                    .map(str::to_owned)
+                    .to_vec(),
+            ),
+            work_id_prefix: Some(WEB_NOTIFY_PREFIX.to_owned()),
+            ..DurableEventFilter::default()
+        },
+    ];
+    read_web_notifications_through(root, Some(&filters))
+}
+
+/// Work events reach an entry only through its correlation id, and every correlation id is made
+/// by [`WebNotifyIntent::correlation`] under [`WEB_NOTIFY_PREFIX`]; the filters of
+/// [`read_web_notifications`] so keep every event an entry can use.
+pub(super) fn read_web_notifications_through(
+    root: &Path,
+    filters: Option<&[DurableEventFilter]>,
+) -> Result<BTreeMap<String, WebNotifyEntry>, ObservationError> {
     let mut entries: BTreeMap<String, WebNotifyEntry> = BTreeMap::new();
     if !root.exists() {
         return Ok(entries);
     }
     let store = DurableEventStore::open(root).map_err(DurableDispatchError::from)?;
     let mut failure = None;
-    let summary = store
-        .visit_from_sequence(0, |event| {
-            if failure.is_some() {
-                return;
-            }
-            let DurableEventPayload::Inline { data, .. } = &event.payload else {
-                return;
-            };
-            let result = (|| -> Result<(), serde_json::Error> {
-                match event.kind.as_str() {
-                    WEB_WATCH_NOTIFICATION_FACT => {
-                        let fact: WebNotifyFact = serde_json::from_value(data.clone())?;
-                        if event.session_id != fact.intent.owner_session_id {
-                            return Ok(());
-                        }
-                        let first_fact_index = entries.len();
-                        let entry = entries
-                            .entry(fact.intent.correlation_id.clone())
-                            .or_insert_with(|| WebNotifyEntry {
-                                snapshot: snapshot(&fact.intent),
-                                intent: fact.intent.clone(),
-                                last_stage: None,
-                                last_failed_at_ms: 0,
-                                first_fact_index,
-                            });
-                        if entry.intent == fact.intent {
-                            apply_fact(entry, &fact);
-                        }
+    let summary = visit_durable_events(&store, filters, |event| {
+        if failure.is_some() {
+            return;
+        }
+        let DurableEventPayload::Inline { data, .. } = &event.payload else {
+            return;
+        };
+        let result = (|| -> Result<(), serde_json::Error> {
+            match event.kind.as_str() {
+                WEB_WATCH_NOTIFICATION_FACT => {
+                    let fact: WebNotifyFact = serde_json::from_value(data.clone())?;
+                    if event.session_id != fact.intent.owner_session_id {
+                        return Ok(());
                     }
-                    WORK_ENQUEUED => {
-                        let work: WorkEnqueued = serde_json::from_value(data.clone())?;
-                        if let Some(entry) = entries.get_mut(&work.work_id) {
-                            if event.session_id == entry.intent.target
-                                && work.work_kind == "agent.inbound_turn"
-                                && work.dedupe_hint.as_deref() == Some(work.work_id.as_str())
-                            {
-                                entry.snapshot.enqueue = Enqueue::Enqueued;
-                                entry.snapshot.delivery = Delivery::Pending;
-                            }
-                        }
+                    let first_fact_index = entries.len();
+                    let entry = entries
+                        .entry(fact.intent.correlation_id.clone())
+                        .or_insert_with(|| WebNotifyEntry {
+                            snapshot: snapshot(&fact.intent),
+                            intent: fact.intent.clone(),
+                            last_stage: None,
+                            last_failed_at_ms: 0,
+                            first_fact_index,
+                        });
+                    if entry.intent == fact.intent {
+                        apply_fact(entry, &fact);
                     }
-                    WORK_TERMINAL | WORK_CANCELLED => {
-                        let ended_unsent = event.kind == WORK_CANCELLED
-                            || serde_json::from_value::<WorkTerminal>(data.clone())?.terminal_kind
-                                != WorkTerminalKind::Succeeded;
-                        let entry = data
-                            .get("work_id")
-                            .and_then(serde_json::Value::as_str)
-                            .and_then(|work_id| entries.get_mut(work_id));
-                        if let Some(entry) = entry.filter(|entry| {
-                            ended_unsent
-                                && event.session_id == entry.intent.target
-                                && !entry.snapshot.consumption_started
-                                && !entry.snapshot.suppressed_stale
-                        }) {
-                            entry.snapshot.delivery = Delivery::Failed;
-                        }
-                    }
-                    _ => {}
                 }
-                Ok(())
-            })();
-            if let Err(error) = result {
-                failure = Some(DurableDispatchError::from(error));
+                WORK_ENQUEUED => {
+                    let work: WorkEnqueued = serde_json::from_value(data.clone())?;
+                    if let Some(entry) = entries.get_mut(&work.work_id) {
+                        if event.session_id == entry.intent.target
+                            && work.work_kind == "agent.inbound_turn"
+                            && work.dedupe_hint.as_deref() == Some(work.work_id.as_str())
+                        {
+                            entry.snapshot.enqueue = Enqueue::Enqueued;
+                            entry.snapshot.delivery = Delivery::Pending;
+                        }
+                    }
+                }
+                WORK_TERMINAL | WORK_CANCELLED => {
+                    let ended_unsent = event.kind == WORK_CANCELLED
+                        || serde_json::from_value::<WorkTerminal>(data.clone())?.terminal_kind
+                            != WorkTerminalKind::Succeeded;
+                    let entry = data
+                        .get("work_id")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|work_id| entries.get_mut(work_id));
+                    if let Some(entry) = entry.filter(|entry| {
+                        ended_unsent
+                            && event.session_id == entry.intent.target
+                            && !entry.snapshot.consumption_started
+                            && !entry.snapshot.suppressed_stale
+                    }) {
+                        entry.snapshot.delivery = Delivery::Failed;
+                    }
+                }
+                _ => {}
             }
-        })
-        .map_err(DurableDispatchError::from)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            failure = Some(DurableDispatchError::from(error));
+        }
+    })
+    .map_err(DurableDispatchError::from)?;
     if let Some(error) = failure {
         return Err(error.into());
     }

@@ -22,6 +22,8 @@ Cross-owner boundaries:
 2. 029 owns its closed redaction-before-persistence/export boundary. [030](../030-trusted-agent-runtime-and-operational-controls/SPEC.md) owns trusted-runtime data disclosure and explicitly does not provide a unified redaction taxonomy or typed secret reference model; 029 does not weaken or reopen its existing durable projection rules.
 3. 029 owns owner lease/heartbeat/supervision state transitions. 031 owns where owner markers live and which runtime directories each process may mutate.
 
+Storage replacement: [046](../046-sqlite-durable-event-store/SPEC.md) PRD 000 replaces the durable event store's `runtime/durable-events/events.log` with the SQLite file `runtime/durable-events/events.sqlite3`. Record schema, sequence, schema registry and compatibility, write-failure classification, checkpoint and its forgery check, and writable admission keep the meaning this spec gives them. The storage format, the stored-version check, the handling of a leftover `events.log`, and the absence of an incomplete tail (an uncommitted SQLite transaction is never visible, so `discard incomplete tail` no longer occurs) follow 046.
+
 ## 목적
 
 이 문서는 기존 001, 002, 005, 006, 011, 012, 014, 015에서 current architecture closure 밖으로 남긴 durable runtime, recovery, stored-data migration 계약을 새 owner 범위로 모은다.

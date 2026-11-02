@@ -124,7 +124,9 @@ fn recover_command_with_supported_hello(root: &Path) -> Command {
 }
 
 fn owner_bytes(root: &Path) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
-    let events = std::fs::read(root.join("runtime/durable-events/events.log"))?;
+    let events = DurableEventStore::logical_digest_existing(&root.join("runtime/durable-events"))?
+        .ok_or("missing durable event store")?
+        .into_bytes();
     let checkpoints = DurableCheckpointStore::open(root.join("runtime/durable-checkpoints"))?;
     let mut bytes = vec![events];
     for path in checkpoints.candidate_paths()? {

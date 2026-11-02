@@ -22,6 +22,8 @@ mod context_resolvers;
 mod context_safety;
 mod diagnostics;
 mod durable_dispatch;
+#[cfg(test)]
+mod durable_filtered_reads_tests;
 mod entrusted_comparison;
 mod entrusted_comparison_cancelled;
 mod entrusted_comparison_evaluate;

@@ -1,15 +1,16 @@
 use shacs_bus::{InboundMessage, MessageBus, MessageBusError, OwnerAcceptedAutomationResult};
 use shacs_session::durable_event::{
-    DurableEventError, DurableEventInput, DurableEventPayload, DurableEventRecord,
-    DurableEventStore, WORK_CANCELLED, WORK_CANCEL_REQUESTED, WORK_ENQUEUED, WORK_LEASED,
-    WORK_REQUEUED, WORK_RETRY_SCHEDULED, WORK_TERMINAL,
+    DurableEventError, DurableEventFilter, DurableEventInput, DurableEventPayload,
+    DurableEventRecord, DurableEventStore, DurableEventVisitSummary, DurableWorkStateError,
+    WORK_CANCELLED, WORK_CANCEL_REQUESTED, WORK_ENQUEUED, WORK_LEASED, WORK_REQUEUED,
+    WORK_RETRY_SCHEDULED, WORK_TERMINAL,
 };
 use shacs_session::durable_trace::{
     opaque_trace_ref, DurableTraceCorrelation, DurableTraceInput, DurableTraceSeverity,
     DurableTraceStore,
 };
 use shacs_session::durable_work::{
-    apply_persisted_durable_work_event, DurableWorkAdmission, DurableWorkEnqueueError,
+    DurableWorkAdmission, DurableWorkEnqueueError,
     DurableWorkEnqueueInput as SessionWorkEnqueueInput, DurableWorkEnqueueJsonInput,
     DurableWorkEnqueuer, DurableWorkError, DurableWorkPayloadStore, DurableWorkReplayState,
     ReplayWorkItem, ReplayWorkState, RuntimeControlRequested, WorkCancellation, WorkLeased,
@@ -205,19 +206,12 @@ impl DurableWorkDispatcher {
     }
 
     pub(crate) fn replay_work_state(&self) -> Result<DurableWorkReplayState, DurableDispatchError> {
-        let mut state = DurableWorkReplayState::default();
-        let mut reducer_error = None;
-        self.events.visit_from_sequence(0, |event| {
-            if reducer_error.is_none() {
-                if let Err(error) = apply_persisted_durable_work_event(&mut state, event) {
-                    reducer_error = Some(error.to_string());
-                }
+        self.events.work_state().map_err(|error| match error {
+            DurableWorkStateError::Event(error) => DurableDispatchError::Event(error),
+            DurableWorkStateError::Reducer(error) => {
+                DurableDispatchError::InvalidWork(error.to_string())
             }
-        })?;
-        if let Some(error) = reducer_error {
-            return Err(DurableDispatchError::InvalidWork(error));
-        }
-        Ok(state)
+        })
     }
 
     pub fn dispatch_due(
@@ -792,6 +786,19 @@ impl DurableWorkDispatcher {
             ..DurableTraceCorrelation::default()
         };
         let _ = store.append(input);
+    }
+}
+
+/// Visits the events `filters` select, or every event for `None`. Consumer reads pass their
+/// filters; their equivalence tests read every event through the same code.
+pub(super) fn visit_durable_events(
+    store: &DurableEventStore,
+    filters: Option<&[DurableEventFilter]>,
+    visitor: impl FnMut(&DurableEventRecord),
+) -> Result<DurableEventVisitSummary, DurableEventError> {
+    match filters {
+        Some(filters) => store.visit_matching(filters, visitor),
+        None => store.visit_from_sequence(0, visitor),
     }
 }
 

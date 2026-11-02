@@ -1,21 +1,27 @@
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use shacs_session::durable_event::{
-    DurableEventInput, DurableEventPayload, DurableEventStore, RUNTIME_RESTART_REQUESTED,
+    DurableEventError, DurableEventInput, DurableEventPayload, DurableEventRecord,
+    DurableEventStore, DURABLE_EVENT_DATABASE_FILE, RUNTIME_RESTART_REQUESTED,
     RUNTIME_STOP_REQUESTED, WORK_CANCELLED, WORK_CANCEL_REQUESTED, WORK_ENQUEUED, WORK_LEASED,
     WORK_REQUEUED, WORK_RETRY_SCHEDULED, WORK_TERMINAL,
 };
 use shacs_session::durable_replay::evaluate_durable_recovery;
 use shacs_session::durable_work::{
     apply_durable_work_event, evaluate_durable_work_recovery,
-    evaluate_durable_work_recovery_for_owner, DurableWorkPayloadStore,
-    DurableWorkRecoveryIssueKind, DurableWorkRecoveryStatus, DurableWorkReplayState,
-    ReplayWorkState, RuntimeControlRequested, WorkCancellation, WorkEnqueued, WorkLeased,
-    WorkPayloadRef, WorkRequeued, WorkRetryScheduled, WorkTerminal, WorkTerminalKind,
+    evaluate_durable_work_recovery_for_owner, DurableWorkEnqueueError, DurableWorkEnqueueInput,
+    DurableWorkEnqueuer, DurableWorkPayloadStore, DurableWorkRecoveryIssueKind,
+    DurableWorkRecoveryStatus, DurableWorkReplayState, ReplayWorkState, RuntimeControlRequested,
+    WorkCancellation, WorkEnqueued, WorkLeased, WorkPayloadRef, WorkRequeued, WorkRetryScheduled,
+    WorkTerminal, WorkTerminalKind, MAX_DURABLE_WORK_EVENT_LOG_BYTES,
     MAX_RETAINED_RUNTIME_REQUESTS, MAX_RETAINED_TERMINAL_WORK_ITEMS,
 };
+use std::collections::BTreeMap;
 use std::error::Error;
+use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 fn append(
@@ -599,5 +605,372 @@ fn durable_work_rejects_retry_after_cancellation_request() -> Result<(), Box<dyn
     assert!(state.work.items["work-1"]
         .cancellation_requested_sequence
         .is_some());
+    Ok(())
+}
+
+const RACE_WORK_ITEMS: usize = 20;
+
+fn wait_for(path: &Path) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            return Err(format!("timed out waiting for {}", path.display()).into());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+#[test]
+fn durable_work_race_child() -> Result<(), Box<dyn Error>> {
+    let Ok(root) = std::env::var("SHACS_DURABLE_WORK_RACE_ROOT") else {
+        return Ok(());
+    };
+    let owner = std::env::var("SHACS_DURABLE_WORK_RACE_OWNER")?;
+    let root = Path::new(&root);
+    let mut events = DurableEventStore::open(root.join("events"))?;
+    fs::write(root.join(format!("ready-{owner}")), b"ready")?;
+    wait_for(&root.join("go"))?;
+    let mut outcomes = Vec::new();
+    for index in 0..RACE_WORK_ITEMS {
+        let work_id = format!("race-{index}");
+        let lease = WorkLeased {
+            lease_id: format!("lease-{work_id}-{owner}"),
+            lease_owner_ref: owner.clone(),
+            ..leased(&work_id)
+        };
+        let terminal = WorkTerminal {
+            work_id,
+            terminal_kind: WorkTerminalKind::Succeeded,
+            outcome_ref: format!("done-by-{owner}"),
+            facts: None,
+        };
+        for (kind, payload) in [
+            (WORK_LEASED, serde_json::to_value(&lease)?),
+            (WORK_TERMINAL, serde_json::to_value(&terminal)?),
+        ] {
+            let appended = events.append(DurableEventInput::new(
+                "session-1",
+                kind,
+                DurableEventPayload::inline("durable_work", payload),
+            ));
+            outcomes.push(match appended {
+                Ok(record) => json!({"accepted": serde_json::to_value(&record)?}),
+                Err(DurableEventError::Validation(reason)) => json!({"rejected": reason}),
+                Err(error) => return Err(error.into()),
+            });
+        }
+    }
+    fs::write(
+        root.join(format!("outcomes-{owner}.json")),
+        serde_json::to_vec(&outcomes)?,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn independent_processes_racing_on_the_same_work_keep_one_valid_history(
+) -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let mut events = DurableEventStore::open(&event_root)?;
+    for index in 0..RACE_WORK_ITEMS {
+        append(
+            &mut events,
+            WORK_ENQUEUED,
+            &enqueued(&format!("race-{index}"), None)?,
+        )?;
+    }
+    let owners = ["owner-a", "owner-b"];
+    let executable = std::env::current_exe()?;
+    let mut children = Vec::new();
+    for owner in owners {
+        children.push(
+            Command::new(&executable)
+                .arg("--exact")
+                .arg("durable_work_race_child")
+                .arg("--nocapture")
+                .env("SHACS_DURABLE_WORK_RACE_ROOT", root.path())
+                .env("SHACS_DURABLE_WORK_RACE_OWNER", owner)
+                .spawn()?,
+        );
+    }
+    for owner in owners {
+        wait_for(&root.path().join(format!("ready-{owner}")))?;
+    }
+    fs::write(root.path().join("go"), b"go")?;
+    for mut child in children {
+        assert!(child.wait()?.success());
+    }
+
+    let stored: BTreeMap<u64, DurableEventRecord> = events
+        .scan(usize::MAX)?
+        .records
+        .into_iter()
+        .map(|record| (record.sequence, record))
+        .collect();
+    let mut accepted: BTreeMap<u64, DurableEventRecord> = BTreeMap::new();
+    for owner in owners {
+        let outcomes: Vec<Value> = serde_json::from_slice(&fs::read(
+            root.path().join(format!("outcomes-{owner}.json")),
+        )?)?;
+        for outcome in outcomes {
+            if let Some(reason) = outcome["rejected"].as_str() {
+                assert!(reason.contains("is invalid for work"), "{reason}");
+                continue;
+            }
+            let record: DurableEventRecord = serde_json::from_value(outcome["accepted"].clone())?;
+            assert_eq!(
+                stored.get(&record.sequence),
+                Some(&record),
+                "an accepted transition was lost"
+            );
+            accepted.insert(record.sequence, record);
+        }
+    }
+    let first_transition = RACE_WORK_ITEMS as u64 + 1;
+    let transitions: Vec<u64> = stored
+        .range(first_transition..)
+        .map(|(sequence, _)| *sequence)
+        .collect();
+    assert_eq!(accepted.keys().copied().collect::<Vec<u64>>(), transitions);
+    assert_eq!(accepted.len(), RACE_WORK_ITEMS * 2);
+
+    let mut replayed = DurableWorkReplayState::default();
+    for record in stored.values() {
+        apply_durable_work_event(&mut replayed, record)?;
+    }
+    for index in 0..RACE_WORK_ITEMS {
+        let item = &replayed.items[&format!("race-{index}")];
+        assert_eq!(item.state, ReplayWorkState::Terminal);
+        assert_eq!(item.attempt, 1);
+    }
+    let stale = events.append(DurableEventInput::new(
+        "session-1",
+        WORK_LEASED,
+        DurableEventPayload::inline("durable_work", serde_json::to_value(leased("race-0"))?),
+    ));
+    assert!(
+        matches!(&stale, Err(DurableEventError::Validation(reason)) if reason.contains("is invalid for work")),
+        "{stale:?}"
+    );
+    let recovery = evaluate_durable_recovery(&event_root, root.path().join("checkpoints"));
+    assert!(recovery.writable, "{:?}", recovery.issues);
+    assert_eq!(recovery.state.ok_or("missing replay state")?.work, replayed);
+    Ok(())
+}
+
+#[test]
+fn enqueue_is_refused_when_the_wal_alone_reaches_the_event_log_quota() -> Result<(), Box<dyn Error>>
+{
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let input = |work_id: &str| -> Result<DurableWorkEnqueueInput, Box<dyn Error>> {
+        Ok(DurableWorkEnqueueInput {
+            work_id: work_id.to_owned(),
+            work_kind: "test.generic".to_owned(),
+            session_key: "session-1".to_owned(),
+            turn_id: None,
+            effect_id: None,
+            payload_ref: WorkPayloadRef::inline("test.generic.v1", json!({"value": work_id}))?,
+            dedupe_hint: None,
+            next_wake_at_ms: None,
+        })
+    };
+    let mut enqueuer = DurableWorkEnqueuer::open(&event_root)?;
+    enqueuer.enqueue(input("before-quota")?)?;
+    let database = event_root.join(DURABLE_EVENT_DATABASE_FILE);
+    assert!(fs::metadata(&database)?.len() < MAX_DURABLE_WORK_EVENT_LOG_BYTES);
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(event_root.join(format!("{DURABLE_EVENT_DATABASE_FILE}-wal")))?
+        .set_len(MAX_DURABLE_WORK_EVENT_LOG_BYTES)?;
+
+    let error = enqueuer
+        .enqueue(input("at-quota")?)
+        .expect_err("the WAL counts toward the event log quota");
+
+    assert!(error.to_string().contains("durable event log exceeds"));
+    Ok(())
+}
+
+const ENQUEUE_RACE_ROUNDS: usize = 20;
+
+fn race_enqueue_input(
+    work_id: String,
+    dedupe_hint: Option<String>,
+    value: &str,
+) -> Result<DurableWorkEnqueueInput, Box<dyn Error>> {
+    Ok(DurableWorkEnqueueInput {
+        work_id,
+        work_kind: "test.race".to_owned(),
+        session_key: "session-1".to_owned(),
+        turn_id: None,
+        effect_id: None,
+        payload_ref: WorkPayloadRef::inline("test.race.v1", json!({"value": value}))?,
+        dedupe_hint,
+        next_wake_at_ms: None,
+    })
+}
+
+/// The same work from both owners, one dedupe value under a work id of each owner, and one
+/// work id that each owner enqueues with its own payload.
+fn race_enqueue_inputs(
+    round: usize,
+    owner: &str,
+) -> Result<Vec<DurableWorkEnqueueInput>, Box<dyn Error>> {
+    Ok(vec![
+        race_enqueue_input(format!("same-{round}"), None, "shared")?,
+        race_enqueue_input(
+            format!("dedupe-{round}-{owner}"),
+            Some(format!("hint-{round}")),
+            owner,
+        )?,
+        race_enqueue_input(format!("conflict-{round}"), None, owner)?,
+    ])
+}
+
+#[test]
+fn durable_work_enqueue_race_child() -> Result<(), Box<dyn Error>> {
+    let Ok(root) = std::env::var("SHACS_DURABLE_WORK_ENQUEUE_RACE_ROOT") else {
+        return Ok(());
+    };
+    let owner = std::env::var("SHACS_DURABLE_WORK_ENQUEUE_RACE_OWNER")?;
+    let root = Path::new(&root);
+    let mut enqueuer = DurableWorkEnqueuer::open(root.join("events"))?;
+    fs::write(root.join(format!("ready-{owner}")), b"ready")?;
+    wait_for(&root.join("go"))?;
+    let mut outcomes = Vec::new();
+    for round in 0..ENQUEUE_RACE_ROUNDS {
+        for input in race_enqueue_inputs(round, &owner)? {
+            outcomes.push(match enqueuer.enqueue(input) {
+                Ok(record) => json!({"enqueued": serde_json::to_value(&record)?}),
+                Err(DurableWorkEnqueueError::IdentityConflict(work_id)) => {
+                    json!({"conflict": work_id})
+                }
+                Err(error) => return Err(error.into()),
+            });
+        }
+    }
+    fs::write(
+        root.join(format!("outcomes-{owner}.json")),
+        serde_json::to_vec(&outcomes)?,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn independent_processes_enqueueing_the_same_work_get_the_sequential_outcome(
+) -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let event_root = root.path().join("events");
+    let events = DurableEventStore::open(&event_root)?;
+    let owners = ["owner-a", "owner-b"];
+    let executable = std::env::current_exe()?;
+    let mut children = Vec::new();
+    for owner in owners {
+        children.push(
+            Command::new(&executable)
+                .arg("--exact")
+                .arg("durable_work_enqueue_race_child")
+                .arg("--nocapture")
+                .env("SHACS_DURABLE_WORK_ENQUEUE_RACE_ROOT", root.path())
+                .env("SHACS_DURABLE_WORK_ENQUEUE_RACE_OWNER", owner)
+                .spawn()?,
+        );
+    }
+    for owner in owners {
+        wait_for(&root.path().join(format!("ready-{owner}")))?;
+    }
+    fs::write(root.path().join("go"), b"go")?;
+    for mut child in children {
+        assert!(child.wait()?.success());
+    }
+
+    let stored: BTreeMap<u64, DurableEventRecord> = events
+        .scan(usize::MAX)?
+        .records
+        .into_iter()
+        .map(|record| (record.sequence, record))
+        .collect();
+    let mut outcomes = BTreeMap::new();
+    for owner in owners {
+        let owner_outcomes: Vec<Value> = serde_json::from_slice(&fs::read(
+            root.path().join(format!("outcomes-{owner}.json")),
+        )?)?;
+        for outcome in &owner_outcomes {
+            if let Some(record) = outcome.get("enqueued") {
+                let record: DurableEventRecord = serde_json::from_value(record.clone())?;
+                assert_eq!(stored.get(&record.sequence), Some(&record), "{owner}");
+            }
+        }
+        outcomes.insert(owner, owner_outcomes);
+    }
+    let enqueued_ids: Vec<&str> = stored
+        .values()
+        .filter_map(|record| match &record.payload {
+            DurableEventPayload::Inline { data, .. } if record.kind == WORK_ENQUEUED => {
+                data.get("work_id").and_then(Value::as_str)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(enqueued_ids.len(), ENQUEUE_RACE_ROUNDS * 4);
+    let state = events.work_state()?;
+    for round in 0..ENQUEUE_RACE_ROUNDS {
+        let [same_a, dedupe_a, conflict_a] = &outcomes["owner-a"][round * 3..round * 3 + 3] else {
+            return Err("owner-a outcomes are incomplete".into());
+        };
+        let [same_b, dedupe_b, conflict_b] = &outcomes["owner-b"][round * 3..round * 3 + 3] else {
+            return Err("owner-b outcomes are incomplete".into());
+        };
+        let same = format!("same-{round}");
+        assert_eq!(same_a["enqueued"], same_b["enqueued"], "{same}");
+        assert_eq!(
+            enqueued_ids.iter().filter(|id| **id == same).count(),
+            1,
+            "{same}"
+        );
+
+        assert!(dedupe_a.get("enqueued").is_some() && dedupe_b.get("enqueued").is_some());
+        let first = &state.items[&format!("dedupe-{round}-owner-a")];
+        let second = &state.items[&format!("dedupe-{round}-owner-b")];
+        let (kept, superseded) = if first.enqueued_sequence < second.enqueued_sequence {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert_eq!(kept.state, ReplayWorkState::Pending);
+        assert_eq!(superseded.terminal_kind, Some(WorkTerminalKind::Superseded));
+        assert_eq!(
+            superseded
+                .terminal_facts
+                .as_ref()
+                .and_then(|facts| facts["supersedes_work_id"].as_str()),
+            Some(kept.work_id.as_str())
+        );
+
+        let conflict = format!("conflict-{round}");
+        let winners: Vec<&Value> = [conflict_a, conflict_b]
+            .into_iter()
+            .filter(|outcome| outcome.get("enqueued").is_some())
+            .collect();
+        assert_eq!(winners.len(), 1, "{conflict}");
+        assert!(
+            [conflict_a, conflict_b]
+                .into_iter()
+                .any(|outcome| outcome["conflict"] == json!(conflict)),
+            "{conflict}"
+        );
+        let winner = &state.items[&conflict];
+        let winner_record: DurableEventRecord =
+            serde_json::from_value(winners[0]["enqueued"].clone())?;
+        assert_eq!(
+            winner.enqueued_sequence, winner_record.sequence,
+            "{conflict}"
+        );
+    }
     Ok(())
 }

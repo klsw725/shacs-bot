@@ -1,17 +1,23 @@
 use std::path::Path;
 
 use shacs_session::durable_event::{
-    DurableEventPayload, DurableEventStore, WORK_CANCELLED, WORK_TERMINAL,
+    DurableEventFilter, DurableEventPayload, DurableEventStore, WORK_CANCELLED, WORK_TERMINAL,
 };
 use shacs_session::durable_work::{
     apply_persisted_durable_work_event, DurableWorkReplayState, ReplayWorkState, WorkTerminal,
 };
 
+use super::durable_dispatch::visit_durable_events;
+use super::entrusted_observation::OBSERVATION_WORK_ID_PREFIX;
 use super::{
     DurableDispatchError, EntrustedWorkReadRequest, ObservationBlock, ObservationError,
     ObservationNextWake, ObservationRecord, ObservationResult, ObservationWake,
     ENTRUSTED_OBSERVATION_OUTCOME,
 };
+
+fn ledger_prefix(request: &EntrustedWorkReadRequest) -> String {
+    format!("{OBSERVATION_WORK_ID_PREFIX}{}:", request.work_id)
+}
 
 pub(super) struct ObservationLedger {
     pub state: DurableWorkReplayState,
@@ -22,6 +28,19 @@ pub(super) struct ObservationLedger {
 
 impl ObservationLedger {
     pub fn read(root: &Path, request: &EntrustedWorkReadRequest) -> Result<Self, ObservationError> {
+        let filters = [DurableEventFilter {
+            session_id: Some(request.owner_session_id.clone()),
+            work_id_prefix: Some(ledger_prefix(request)),
+            ..DurableEventFilter::default()
+        }];
+        Self::read_through(root, request, Some(&filters))
+    }
+
+    pub(super) fn read_through(
+        root: &Path,
+        request: &EntrustedWorkReadRequest,
+        filters: Option<&[DurableEventFilter]>,
+    ) -> Result<Self, ObservationError> {
         let mut ledger = Self {
             state: DurableWorkReplayState::default(),
             history: Vec::new(),
@@ -32,80 +51,75 @@ impl ObservationLedger {
             return Ok(ledger);
         }
         let store = DurableEventStore::open(root).map_err(DurableDispatchError::from)?;
-        let prefix = format!("observation:{}:", request.work_id);
+        let prefix = ledger_prefix(request);
         let mut failure = None;
-        let summary = store
-            .visit_from_sequence(0, |event| {
-                if failure.is_some() || event.session_id != request.owner_session_id {
-                    return;
-                }
-                let DurableEventPayload::Inline { data, .. } = &event.payload else {
-                    return;
-                };
-                if !data
-                    .get("work_id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|id| id.starts_with(&prefix))
+        let summary = visit_durable_events(&store, filters, |event| {
+            if failure.is_some() || event.session_id != request.owner_session_id {
+                return;
+            }
+            let DurableEventPayload::Inline { data, .. } = &event.payload else {
+                return;
+            };
+            if !data
+                .get("work_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| id.starts_with(&prefix))
+            {
+                return;
+            }
+            if let Err(error) = apply_persisted_durable_work_event(&mut ledger.state, event) {
+                failure = Some(DurableDispatchError::InvalidWork(error.to_string()));
+                return;
+            }
+            if event.kind == WORK_CANCELLED {
+                match super::entrusted_comparison_cancelled::from_event(root, event, &ledger.state)
                 {
-                    return;
+                    Ok(decision) => ledger.push_decision(decision),
+                    Err(error) => failure = Some(error),
                 }
-                if let Err(error) = apply_persisted_durable_work_event(&mut ledger.state, event) {
-                    failure = Some(DurableDispatchError::InvalidWork(error.to_string()));
-                    return;
-                }
-                if event.kind == WORK_CANCELLED {
-                    match super::entrusted_comparison_cancelled::from_event(
-                        root,
-                        event,
-                        &ledger.state,
-                    ) {
-                        Ok(decision) => ledger.push_decision(decision),
-                        Err(error) => failure = Some(error),
+                return;
+            }
+            if event.kind != WORK_TERMINAL {
+                return;
+            }
+            let parsed =
+                serde_json::from_value::<WorkTerminal>(data.clone()).and_then(|terminal| {
+                    if terminal.outcome_ref != ENTRUSTED_OBSERVATION_OUTCOME {
+                        return Ok(None);
                     }
-                    return;
-                }
-                if event.kind != WORK_TERMINAL {
-                    return;
-                }
-                let parsed =
-                    serde_json::from_value::<WorkTerminal>(data.clone()).and_then(|terminal| {
-                        if terminal.outcome_ref != ENTRUSTED_OBSERVATION_OUTCOME {
-                            return Ok(None);
+                    terminal
+                        .facts
+                        .map(serde_json::from_value::<ObservationRecord>)
+                        .transpose()
+                });
+            match parsed {
+                Ok(Some(record)) => {
+                    if let Some(decision) = &record.decision {
+                        if decision.verdict.establishes_baseline() {
+                            ledger.baseline = Some(record.clone());
                         }
-                        terminal
-                            .facts
-                            .map(serde_json::from_value::<ObservationRecord>)
-                            .transpose()
-                    });
-                match parsed {
-                    Ok(Some(record)) => {
-                        if let Some(decision) = &record.decision {
-                            if decision.verdict.establishes_baseline() {
-                                ledger.baseline = Some(record.clone());
-                            }
-                            ledger.push_decision(decision.clone());
-                        } else {
-                            let mut legacy = record.clone();
-                            if let ObservationResult::Observed { summary, .. } = &mut legacy.result
-                            {
-                                *summary = None;
-                            }
-                            let mut decision =
-                                super::entrusted_comparison_evaluate::compare(&legacy, None, None);
-                            decision.basis =
-                                super::ObservationDecisionBasis::LegacyObservationUncompared;
-                            ledger.push_decision(decision);
+                        ledger.push_decision(decision.clone());
+                    } else {
+                        let mut legacy = record.clone();
+                        if let ObservationResult::Observed { summary, .. } = &mut legacy.result {
+                            *summary = None;
                         }
-                        ledger.history.push(record);
-                        if ledger.history.len() > 32 {
-                            ledger.history.remove(0);
-                        }
+                        let mut decision =
+                            super::entrusted_comparison_evaluate::compare(&legacy, None, None);
+                        decision.basis =
+                            super::ObservationDecisionBasis::LegacyObservationUncompared;
+                        ledger.push_decision(decision);
                     }
-                    Ok(None) => {}
-                    Err(error) => failure = Some(DurableDispatchError::Serialization(error)),
+                    ledger.history.push(record);
+                    if ledger.history.len() > 32 {
+                        ledger.history.remove(0);
+                    }
                 }
-            })
-            .map_err(DurableDispatchError::from)?;
+                Ok(None) => {}
+                Err(error) => failure = Some(DurableDispatchError::Serialization(error)),
+            }
+        })
+        .map_err(DurableDispatchError::from)?;
         if let Some(error) = failure {
             return Err(error.into());
         }
