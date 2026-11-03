@@ -2137,11 +2137,9 @@ impl OpenAiResponsesStreamState {
                 }
             }
             Some("response.function_call_arguments.delta") => {
-                let call_id = value
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("call_0")
-                    .to_owned();
+                let call_id = self
+                    .arguments_call_id(&value)
+                    .unwrap_or_else(|| "call_0".to_owned());
                 let delta = value
                     .get("delta")
                     .and_then(Value::as_str)
@@ -2159,8 +2157,8 @@ impl OpenAiResponsesStreamState {
                 }
             }
             Some("response.function_call_arguments.done") => {
-                if let Some(call_id) = value.get("call_id").and_then(Value::as_str) {
-                    if let Some(buffer) = self.tool_buffers.get_mut(call_id) {
+                if let Some(call_id) = self.arguments_call_id(&value) {
+                    if let Some(buffer) = self.tool_buffers.get_mut(&call_id) {
                         buffer.arguments = value
                             .get("arguments")
                             .and_then(Value::as_str)
@@ -2215,6 +2213,19 @@ impl OpenAiResponsesStreamState {
             _ => {}
         }
         Ok(false)
+    }
+
+    /// The Responses API names the call in argument events by `item_id` only, so the
+    /// item is mapped back to the call it was added under.
+    fn arguments_call_id(&self, value: &Value) -> Option<String> {
+        if let Some(call_id) = value.get("call_id").and_then(Value::as_str) {
+            return Some(call_id.to_owned());
+        }
+        let item_id = value.get("item_id").and_then(Value::as_str)?;
+        self.tool_buffers
+            .iter()
+            .find(|(_, buffer)| buffer.id == item_id)
+            .map(|(call_id, _)| call_id.clone())
     }
 
     pub(crate) fn finish(

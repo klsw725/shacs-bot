@@ -170,6 +170,39 @@ fn codex_stream_parser_maps_responses_events() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn codex_stream_parser_joins_item_keyed_arguments_to_their_call() -> Result<(), Box<dyn Error>> {
+    let body = concat!(
+        "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"search\",\"arguments\":\"\"}}\n\n",
+        "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{\\\"query\\\":\"}\n\n",
+        "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"\\\"rust\\\"}\"}\n\n",
+        "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"output_index\":0,\"arguments\":\"{\\\"query\\\":\\\"rust\\\"}\"}\n\n",
+        "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"search\",\"arguments\":\"{\\\"query\\\":\\\"rust\\\"}\"}}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+    );
+    let mut events = Vec::new();
+    let response = parse_codex_stream(body, &mut |event| events.push(event))?;
+    let delta_ids: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ToolCallDelta { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    if response.tool_calls.len() != 1
+        || response.tool_calls[0].id != "call_1|fc_1"
+        || response.tool_calls[0].name != "search"
+        || response.tool_calls[0].arguments["query"] != "rust"
+        || delta_ids != ["call_1|fc_1", "call_1|fc_1"]
+    {
+        return Err(format!(
+            "Codex item-keyed arguments drifted: response={response:?} events={events:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
 fn codex_stream_parser_preserves_raw_malformed_tool_arguments() -> Result<(), Box<dyn Error>> {
     let body = concat!(
         "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"search\",\"arguments\":\"{bad\"}}\n\n",
