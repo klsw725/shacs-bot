@@ -294,7 +294,7 @@ Shacs는 사용자가 직접 설치·운영하는 trusted local agent runtime을
 - `trusted_native_fallback`: sandbox가 unavailable이면 경고 뒤 native 실행 가능.
 - `sandbox_required`: sandbox가 active가 아니면 해당 adapter 실행 거부.
 
-기존 permission mode, approval, redaction, containment primitive는 호환성 또는 닫힌 owner baseline으로 남을 수 있지만 이 foundation의 future 통합 모델은 아니다.
+기존 permission mode, approval, redaction, containment primitive는 호환성 또는 닫힌 owner baseline으로 남을 수 있지만 이 foundation의 future 통합 모델은 아니다. 예외로 `auto` mode의 판정(사용자 규칙, 바로 허용, transcript classifier, 거절 뒤 계속하기), 모든 mode에 적용되는 사용자 규칙(allow·ask·deny), 비밀 파일 규칙, critical path 제거 질문은 [Spec 048](specs/048-transcript-classifier-auto-mode/SPEC.md)이 소유하는 현재 계약이다([TRUST-MODEL-DECISION 2026-11-04 개정](TRUST-MODEL-DECISION.md#2026-11-04-개정-auto-mode-판정)).
 
 ---
 

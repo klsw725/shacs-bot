@@ -52,3 +52,11 @@ Shacs의 기본 실행 모델을 중앙 permission-safety 계약 중심에서 Pr
 - Specs 005와 025의 닫힌 Markdown·command-backed baseline은 유지하고, executable resource와 in-process extension의 open work를 030으로 넘긴다.
 - Spec 032는 install·activation·inspect·revoke lifecycle을 소유하지만 permission provenance를 만들지 않는다.
 - Spec 031은 config/auth locator schema와 migration을 소유하고, raw auth store lifecycle은 030이 소유한다.
+
+## 2026-11-04 개정: auto mode 판정
+
+사용자 결정으로 `auto` mode의 판정을 Claude Code auto mode와 같은 구조로 다시 목표에 둔다. 소유는 [Spec 048](specs/048-transcript-classifier-auto-mode/SPEC.md)이다.
+
+1. 위 "제거하는 목표" 중 중앙 permission mode와 remembered rule은 Spec 048이 정한 범위에 한해 다시 현재 계약이다. 그 범위는 `auto` mode의 판정(사용자 규칙, 바로 허용, transcript classifier, 거절 뒤 계속하기), 모든 mode에 적용되는 사용자 규칙(allow·ask·deny), 비밀 파일 규칙, critical path 제거 질문이다.
+2. Permission classifier accounting(비용 회계), unified policy/safety snapshot, universal process envelope, digest-bound authorization은 계속 목표가 아니다.
+3. Trusted local agent runtime 전제(사용자가 고른 resource 신뢰, 선택적 sandbox, 사용자 OS 권한 실행)는 그대로다. auto mode는 보안 경계나 권한 증명이 아니라 묻는 횟수를 줄이면서 위험한 동작을 거르는 장치다.
