@@ -3,6 +3,7 @@ mod activation_record;
 mod activation_store;
 mod activation_wire;
 mod agent_loop;
+mod auto_mode;
 mod autocompact;
 mod automation;
 mod automation_adapter;
@@ -202,6 +203,11 @@ pub use agent_loop::{
     AgentLoopRunSummary, AgentLoopTurnResult, ClockMs, PermissionModeSetter,
     ProjectPermissionStoreConfig,
 };
+pub use auto_mode::{
+    ApprovalExplanation, AutoAllow, AutoModeClassifier, AutoModeSlots, ClassifierContextFiles,
+    PermissionEnvironment, PermissionEnvironmentInput, PermissionMaterials, RawRuleLists,
+    RuleDiagnostic, RuleEffect, RuleProblem, SlotOverrides, UserPermissionRules, DEFAULTS_MARKER,
+};
 pub use autocompact::{AutoCompact, AutoCompactArchiveOutcome, RECENT_SUFFIX_MESSAGES};
 pub use automation::{
     coordinate_automation_run, AutomationCoordinationOutcome, AutomationPrd008LinkageMetadata,
@@ -231,15 +237,15 @@ pub use automation_production::{
     AutomationTaskOutcomeRecord, ConservativeAutomationTaskOutcomeEvaluator,
 };
 pub use classifier_evidence::{
-    classifier_decision_evidence, skipped_classifier_evidence, AccountingState,
-    AccountingUnavailableReason, AccountingValue, ClassifierActionCorrelation,
+    classifier_decision_evidence, skipped_classifier_evidence, with_classifier_stages,
+    AccountingState, AccountingUnavailableReason, AccountingValue, ClassifierActionCorrelation,
     ClassifierAttemptStatus, ClassifierCostAccounting, ClassifierDecisionEvidence,
     ClassifierDisposition, ClassifierEvidenceId, ClassifierEvidenceInput,
     ClassifierEvidenceSchemaId, ClassifierFallbackCause, ClassifierFallbackEvidence,
     ClassifierLatencyAccounting, ClassifierModelEvidence, ClassifierRequestCorrelation,
-    ClassifierRouteEvidence, ClassifierRouteKind, ClassifierTokenAccounting,
-    ClassifierVerdictEvidence, RedactedDiagnosticRef, StaticPolicyPrecedence,
-    CLASSIFIER_EVIDENCE_SCHEMA_V1,
+    ClassifierRouteEvidence, ClassifierRouteKind, ClassifierStageEvidence,
+    ClassifierTokenAccounting, ClassifierVerdictEvidence, RedactedDiagnosticRef,
+    StaticPolicyPrecedence, CLASSIFIER_EVIDENCE_SCHEMA_V1,
 };
 pub use containment_permission::{
     containment_permission_proof_for_process_gate, evaluate_containment_permission,
@@ -507,9 +513,10 @@ pub use process_envelope::{
 };
 pub use process_gate::{
     ProcessContainmentProofCandidate, ProcessExecutionReceipt, ProcessGate, ProcessGateError,
-    ProcessGateInput, ProcessGateTerminalPrecondition, ProcessRedactedSpawnSummary,
-    ProcessRedactedStatus, ProcessRedactedStreamKind, ProcessRedactedStreamSummary,
-    ProcessSpawnAuthorization, ProcessSpawnReport, ProcessTerminalOutcome,
+    ProcessGateInput, ProcessGatePolicyMaterials, ProcessGateTerminalPrecondition,
+    ProcessRedactedSpawnSummary, ProcessRedactedStatus, ProcessRedactedStreamKind,
+    ProcessRedactedStreamSummary, ProcessSpawnAuthorization, ProcessSpawnReport,
+    ProcessTerminalOutcome,
 };
 pub(crate) use provider_credentials::ProviderInvocationClient;
 pub use provider_credentials::{

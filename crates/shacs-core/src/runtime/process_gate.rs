@@ -1,8 +1,9 @@
 use crate::runtime::{
     decide_permission, evaluate_static_rules, ApprovalCorrelation, AutoEvaluatorVerdict,
-    ContainmentPermissionProof, InheritedPermissionContext, PermissionPolicyDecision,
-    PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionRuleInput, ProcessAdapterKind,
-    ProcessEnvelopeAdmission, ProcessExecutionEnvelope, ProcessIdentity, ProcessRedactedCommand,
+    ContainmentPermissionProof, InheritedPermissionContext, PermissionMaterials,
+    PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyInput,
+    PermissionRuleInput, ProcessAdapterKind, ProcessEnvelopeAdmission, ProcessExecutionEnvelope,
+    ProcessIdentity, ProcessRedactedCommand, RememberedPermissionPolicyMatch,
 };
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -116,6 +117,16 @@ pub struct ProcessGateInput {
     pub interactive: bool,
     pub terminal_precondition: ProcessGateTerminalPrecondition,
     pub now_unix_ms: u64,
+    pub policy_materials: ProcessGatePolicyMaterials,
+}
+
+/// The rest of what the tool execution decision used, so the gate decides
+/// the same way (Spec 048 PRD 000 scope 1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessGatePolicyMaterials {
+    pub remembered_rules: Vec<RememberedPermissionPolicyMatch>,
+    pub remembered_store_unavailable: bool,
+    pub materials: Option<PermissionMaterials>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,9 +202,10 @@ impl ProcessGate {
             evaluator: input.evaluator.clone(),
             approval: input.approval.clone(),
             inherited_context: input.inherited_context.clone(),
-            remembered_rules: Vec::new(),
-            remembered_store_unavailable: false,
+            remembered_rules: input.policy_materials.remembered_rules.clone(),
+            remembered_store_unavailable: input.policy_materials.remembered_store_unavailable,
             interactive: input.interactive,
+            materials: input.policy_materials.materials.clone(),
         });
         if input.terminal_precondition != ProcessGateTerminalPrecondition::Ready
             || !containment_proof_admits(&input)

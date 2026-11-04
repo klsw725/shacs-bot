@@ -3246,6 +3246,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         record_channel_delivery: false,
         cancellation_token: None,
         deadline: None,
+        permission_environment: None,
     };
 
     let report = RuntimeToolExecutor::new(&registry).execute_tool_calls(

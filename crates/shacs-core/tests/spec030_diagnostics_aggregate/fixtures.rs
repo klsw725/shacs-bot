@@ -166,6 +166,8 @@ pub fn classifier_evidence(
         disposition: ClassifierDisposition::FailedClosed,
         fallback: None,
         diagnostics: Vec::new(),
+        stages: Vec::new(),
+        matched_rule: None,
     }
 }
 

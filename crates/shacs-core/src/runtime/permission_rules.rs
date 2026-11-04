@@ -378,7 +378,7 @@ fn is_classifiable_target_value(value: &str) -> bool {
     !trimmed.is_empty() && trimmed != REDACTED
 }
 
-fn classify_target_value(
+pub(crate) fn classify_target_value(
     value: &str,
     configured_targets: &[String],
 ) -> Option<ProtectedTargetClass> {

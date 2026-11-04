@@ -1,6 +1,6 @@
 use crate::tools::{
     BooleanSchema, FileState, IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool,
-    ToolParameters, ToolResult,
+    ToolCallExecutionContext, ToolParameters, ToolResult,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -284,6 +284,13 @@ impl Tool for ReadFileTool {
         true
     }
 
+    fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
+        let path = params.get("path").and_then(Value::as_str)?;
+        resolve_path(path, &self.context)
+            .err()
+            .map(|error| format!("Error reading file: {error}"))
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult {
         let path = params
             .get("path")
@@ -470,6 +477,14 @@ impl Tool for WriteFileTool {
             .to_json_schema()
     }
 
+    fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
+        let path = params.get("path").and_then(Value::as_str)?;
+        resolve_creatable_path(path, &self.context)
+            .and_then(|target| reject_symlink_target(&target))
+            .err()
+            .map(|error| format!("Error writing file: {error}"))
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult {
         let path = params
             .get("path")
@@ -570,6 +585,15 @@ impl Tool for EditFileTool {
             .property("text", StringSchema::new("Text to insert or replace with"))
             .required(["path", "op"])
             .to_json_schema()
+    }
+
+    fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
+        let path = params.get("path").and_then(Value::as_str)?;
+        reject_existing_symlink_components(&raw_candidate_path(path, &self.context))
+            .and_then(|()| resolve_path(path, &self.context))
+            .and_then(|target| reject_symlink_target(&target))
+            .err()
+            .map(|error| format!("Error editing file: {error}"))
     }
 
     fn execute(&self, params: JsonMap) -> ToolResult {
@@ -783,7 +807,22 @@ impl Tool for ListDirTool {
         true
     }
 
+    fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
+        let path = params.get("path").and_then(Value::as_str)?;
+        resolve_path(path, &self.context)
+            .err()
+            .map(|error| format!("Error listing directory: {error}"))
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult {
+        self.execute_with_context(params, &ToolCallExecutionContext::default())
+    }
+
+    fn execute_with_context(
+        &self,
+        params: JsonMap,
+        context: &ToolCallExecutionContext,
+    ) -> ToolResult {
         let path = params
             .get("path")
             .and_then(Value::as_str)
@@ -798,7 +837,7 @@ impl Tool for ListDirTool {
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(200);
 
-        match self.list_dir(path, recursive, max_entries) {
+        match self.list_dir(path, recursive, max_entries, &|path| context.hides(path)) {
             Ok(text) => text.into(),
             Err(error) => format!("Error listing directory: {error}").into(),
         }
@@ -806,7 +845,13 @@ impl Tool for ListDirTool {
 }
 
 impl ListDirTool {
-    fn list_dir(&self, path: &str, recursive: bool, max_entries: usize) -> Result<String, String> {
+    fn list_dir(
+        &self,
+        path: &str,
+        recursive: bool,
+        max_entries: usize,
+        hides: &dyn Fn(&Path) -> bool,
+    ) -> Result<String, String> {
         if path.is_empty() {
             return Err("Unknown path".to_owned());
         }
@@ -820,10 +865,13 @@ impl ListDirTool {
 
         let mut entries = Vec::new();
         if recursive {
-            collect_recursive(&root, &root, max_entries, &mut entries)?;
+            collect_recursive(&root, &root, max_entries, &mut entries, hides)?;
         } else {
             for entry in sorted_read_dir(&root)? {
-                if entry_is_symlink(&entry) || ignored_name(&entry.file_name().to_string_lossy()) {
+                if entry_is_symlink(&entry)
+                    || ignored_name(&entry.file_name().to_string_lossy())
+                    || hides(&entry.path())
+                {
                     continue;
                 }
                 if entries.len() < max_entries {
@@ -863,11 +911,12 @@ fn collect_recursive(
     current: &Path,
     max_entries: usize,
     entries: &mut Vec<String>,
+    hides: &dyn Fn(&Path) -> bool,
 ) -> Result<(), String> {
     for entry in sorted_read_dir(current)? {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if entry_is_symlink(&entry) || ignored_name(&name) {
+        if entry_is_symlink(&entry) || ignored_name(&name) || hides(&path) {
             continue;
         }
         if entries.len() < max_entries {
@@ -883,7 +932,7 @@ fn collect_recursive(
             });
         }
         if path.is_dir() {
-            collect_recursive(root, &path, max_entries, entries)?;
+            collect_recursive(root, &path, max_entries, entries, hides)?;
         }
     }
     Ok(())

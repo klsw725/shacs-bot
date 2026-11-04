@@ -4,6 +4,7 @@ use super::runner_spec034::{
     observable_tool_arguments, observable_tool_calls, observable_tool_event, prepare_run,
     redact_string, ProviderStreamCounts, ToolResultArtifactRef,
 };
+use crate::runtime::auto_mode::classifier_review;
 use crate::runtime::quiet_tools::quiet_tool_calls;
 use crate::runtime::tool_execution::{
     effective_permission_rule_input, permission_decision_for_action,
@@ -16,16 +17,17 @@ use crate::runtime::tool_search::{
 use crate::runtime::{
     classifier_decision_evidence, dispatch_bridge_tool_calls_with_context_resolver,
     recent_auto_mode_denial_from_classifier_decision, skipped_classifier_evidence,
-    AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, CancellationToken, ClassifierAttemptStatus,
-    ClassifierEvidenceInput, ClassifierFallbackCause, ContextProviderHandoff, EvaluatorConfidence,
-    EvaluatorScopeMatch, ExecutionDomain, ExecutionIdentity, ExecutionOutcome,
-    ExecutionOutcomeFact, ExecutionScope, ExecutionSnapshot, ExecutionSnapshotInput,
-    PendingExecution, PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind,
-    PermissionPolicyReason, PermissionedAction, PromptInjectionSignal, ProviderExecutionHandoff,
-    ProviderOutcomeKind, RecentAutoModeDenial, RecentAutoModeRetryToken, ResolvedDeferredToolCall,
-    RuntimeAssistantToolCallMessage, RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt,
-    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage,
-    SafetyCapability, ToolExecutionContext, ToolFailureClass, ToolInterruptKind, ToolOutcomeKind,
+    with_classifier_stages, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, AutoModeClassifier,
+    CancellationToken, ClassifierAttemptStatus, ClassifierEvidenceInput, ClassifierFallbackCause,
+    ContextProviderHandoff, EvaluatorConfidence, EvaluatorScopeMatch, ExecutionDomain,
+    ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope, ExecutionSnapshot,
+    ExecutionSnapshotInput, PendingExecution, PermissionMode, PermissionPolicyDecision,
+    PermissionPolicyDecisionKind, PermissionPolicyReason, PermissionedAction,
+    PromptInjectionSignal, ProviderExecutionHandoff, ProviderOutcomeKind, RecentAutoModeDenial,
+    RecentAutoModeRetryToken, ResolvedDeferredToolCall, RuntimeAssistantToolCallMessage,
+    RuntimeContextTools, RuntimeExecutionLedger, RuntimeInterrupt, RuntimeToolCall,
+    RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage, SafetyCapability,
+    ToolExecutionContext, ToolFailureClass, ToolInterruptKind, ToolOutcomeKind,
 };
 use crate::tools::{
     assemble_tool_surface, bridge_tool_names, DeferredToolCatalog, ToolRegistry,
@@ -253,6 +255,7 @@ pub struct AgentRunSpec<'a> {
     pub tools: &'a ToolRegistry,
     pub client: &'a dyn ProviderClient,
     pub permission_classifier_client: Option<&'a dyn ProviderClient>,
+    pub auto_mode_classifier: Option<AutoModeClassifier<'a>>,
     pub model: String,
     pub settings: GenerationSettings,
     pub max_iterations: usize,
@@ -301,6 +304,7 @@ impl<'a> AgentRunSpec<'a> {
             tools,
             client,
             permission_classifier_client: None,
+            auto_mode_classifier: None,
             model: model.into(),
             settings: GenerationSettings::default(),
             max_iterations: 200,
@@ -687,6 +691,7 @@ impl AgentRunner {
                     current_catalog.as_ref(),
                     &spec,
                     &executor,
+                    &messages,
                 );
                 recent_auto_mode_denials.extend(report.recent_auto_mode_denials.clone());
                 recent_auto_mode_retry_tokens.extend(report.recent_auto_mode_retry_tokens.clone());
@@ -1205,12 +1210,13 @@ fn execute_tool_dispatch(
     catalog: Option<&DeferredToolCatalog>,
     spec: &AgentRunSpec<'_>,
     executor: &RuntimeToolExecutor<'_>,
+    run_messages: &[Value],
 ) -> ToolDispatchReport {
     let Some(catalog) = catalog else {
-        return direct_tool_dispatch(calls, spec, executor);
+        return direct_tool_dispatch(calls, spec, executor, run_messages);
     };
     if !calls.iter().any(is_bridge_tool_call) {
-        return direct_tool_dispatch(calls, spec, executor);
+        return direct_tool_dispatch(calls, spec, executor, run_messages);
     }
 
     let mut messages = Vec::new();
@@ -1227,7 +1233,7 @@ fn execute_tool_dispatch(
         }
         let segment = calls[segment_start..index].to_vec();
         if bridge_segment {
-            let report = dispatch_bridge_segment(segment, catalog, spec, executor);
+            let report = dispatch_bridge_segment(segment, catalog, spec, executor, run_messages);
             let fatal = report
                 .results
                 .iter()
@@ -1261,7 +1267,7 @@ fn execute_tool_dispatch(
                 };
             }
         } else {
-            let report = direct_runtime_report(segment, spec, executor);
+            let report = direct_runtime_report(segment, spec, executor, run_messages);
             let fatal = report
                 .messages
                 .iter()
@@ -1311,6 +1317,7 @@ fn dispatch_bridge_segment(
     catalog: &DeferredToolCatalog,
     spec: &AgentRunSpec<'_>,
     executor: &RuntimeToolExecutor<'_>,
+    run_messages: &[Value],
 ) -> BridgeToolExecutionReport {
     let bridge_context_resolver =
         |resolved_call: &ResolvedDeferredToolCall, context: &ToolExecutionContext| {
@@ -1319,6 +1326,7 @@ fn dispatch_bridge_segment(
                 context,
                 spec,
                 executor,
+                run_messages,
             )
         };
     if !spec.fail_on_tool_error {
@@ -1388,8 +1396,9 @@ fn direct_tool_dispatch(
     calls: Vec<RuntimeToolCall>,
     spec: &AgentRunSpec<'_>,
     executor: &RuntimeToolExecutor<'_>,
+    run_messages: &[Value],
 ) -> ToolDispatchReport {
-    let report = direct_runtime_report(calls, spec, executor);
+    let report = direct_runtime_report(calls, spec, executor, run_messages);
     ToolDispatchReport {
         messages: report.messages,
         interrupt: report.interrupt,
@@ -1404,12 +1413,13 @@ fn direct_runtime_report(
     calls: Vec<RuntimeToolCall>,
     spec: &AgentRunSpec<'_>,
     executor: &RuntimeToolExecutor<'_>,
+    run_messages: &[Value],
 ) -> RuntimeToolExecutionReport {
-    if spec.permission_classifier_client.is_some()
+    if (spec.permission_classifier_client.is_some() || spec.auto_mode_classifier.is_some())
         && spec.tool_context.permission_auto_approval.enabled
         && spec.tool_context.permission_mode_snapshot.mode == PermissionMode::Auto
     {
-        return direct_runtime_report_with_classifier(calls, spec, executor);
+        return direct_runtime_report_with_classifier(calls, spec, executor, run_messages);
     }
     if spec.fail_on_tool_error {
         return direct_runtime_report_fail_fast(calls, spec, executor);
@@ -1464,6 +1474,7 @@ fn direct_runtime_report_with_classifier(
     calls: Vec<RuntimeToolCall>,
     spec: &AgentRunSpec<'_>,
     executor: &RuntimeToolExecutor<'_>,
+    run_messages: &[Value],
 ) -> RuntimeToolExecutionReport {
     let mut messages = Vec::new();
     let mut skipped_tool_calls = Vec::new();
@@ -1472,10 +1483,10 @@ fn direct_runtime_report_with_classifier(
     let mut recent_auto_mode_retry_tokens = Vec::new();
 
     for (index, call) in calls.iter().cloned().enumerate() {
-        let context = tool_context_with_classifier_verdict(&call, spec, executor);
+        let context = tool_context_with_classifier_verdict(&call, spec, executor, run_messages);
         let action =
             executor.normalize_tool_call(&call, permissioned_action_input_from_context(&context));
-        let decision = permission_decision_for_action(&action, &context);
+        let decision = permission_decision_for_action(executor.registry(), &action, &context);
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
@@ -1549,18 +1560,28 @@ fn tool_context_with_classifier_verdict(
     call: &RuntimeToolCall,
     spec: &AgentRunSpec<'_>,
     executor: &RuntimeToolExecutor<'_>,
+    run_messages: &[Value],
 ) -> ToolExecutionContext {
     let mut context = spec.tool_context.clone();
     if context.permission_evaluator.is_some() || !context.permission_auto_approval.enabled {
         return context;
     }
+    let action =
+        executor.normalize_tool_call(call, permissioned_action_input_from_context(&context));
+    if context.permission_environment.is_some() {
+        let review = AutoModeReview {
+            pending_call_id: &call.id,
+            action: &action,
+            run_messages,
+            phase: "classifier_gate",
+        };
+        return auto_mode_reviewed_context(review, context, spec, executor);
+    }
     let Some(classifier) = spec.permission_classifier_client else {
         return context;
     };
-    let action =
-        executor.normalize_tool_call(call, permissioned_action_input_from_context(&context));
     let review_context = context_for_classifier_review(&action, &context);
-    let decision = permission_decision_for_action(&action, &review_context);
+    let decision = permission_decision_for_action(executor.registry(), &action, &review_context);
     if !classifier_reviewable_policy_decision(&decision, &action) {
         set_classifier_evidence(
             &mut context,
@@ -1646,7 +1667,8 @@ fn tool_context_with_classifier_verdict(
     );
     let mut evaluated_context = context.clone();
     evaluated_context.permission_evaluator = Some(attempt.verdict.clone());
-    let final_decision = permission_decision_for_action(&action, &evaluated_context);
+    let final_decision =
+        permission_decision_for_action(executor.registry(), &action, &evaluated_context);
     let evidence = classifier_decision_evidence(ClassifierEvidenceInput {
         created_at_unix_ms: attempt.started_at_unix_ms,
         completed_at_unix_ms: Some(attempt.completed_at_unix_ms),
@@ -1681,21 +1703,31 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
     base_context: &ToolExecutionContext,
     spec: &AgentRunSpec<'_>,
     executor: &RuntimeToolExecutor<'_>,
+    run_messages: &[Value],
 ) -> ToolExecutionContext {
     let mut context = base_context.clone();
     if context.permission_evaluator.is_some() || !context.permission_auto_approval.enabled {
         return context;
     }
-    let Some(classifier) = spec.permission_classifier_client else {
-        return context;
-    };
     let action = crate::runtime::normalize_resolved_deferred_tool_call(
         executor.registry(),
         resolved_call,
         permissioned_action_input_from_context(&context),
     );
+    if context.permission_environment.is_some() {
+        let review = AutoModeReview {
+            pending_call_id: &resolved_call.original_call_id,
+            action: &action,
+            run_messages,
+            phase: "bridge_classifier_gate",
+        };
+        return auto_mode_reviewed_context(review, context, spec, executor);
+    }
+    let Some(classifier) = spec.permission_classifier_client else {
+        return context;
+    };
     let review_context = context_for_classifier_review(&action, &context);
-    let decision = permission_decision_for_action(&action, &review_context);
+    let decision = permission_decision_for_action(executor.registry(), &action, &review_context);
     if !classifier_reviewable_policy_decision(&decision, &action) {
         set_classifier_evidence(
             &mut context,
@@ -1780,7 +1812,8 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
     );
     let mut evaluated_context = context.clone();
     evaluated_context.permission_evaluator = Some(attempt.verdict.clone());
-    let final_decision = permission_decision_for_action(&action, &evaluated_context);
+    let final_decision =
+        permission_decision_for_action(executor.registry(), &action, &evaluated_context);
     let evidence = classifier_decision_evidence(ClassifierEvidenceInput {
         created_at_unix_ms: attempt.started_at_unix_ms,
         completed_at_unix_ms: Some(attempt.completed_at_unix_ms),
@@ -1801,6 +1834,92 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
             gate_reason: Some("classifier_invoked"),
             action: &action,
             decision: Some(&decision),
+            evaluator: Some(&attempt.verdict),
+            evaluator_source: Some("permission_classifier"),
+            context: &context,
+        },
+    );
+    context.permission_evaluator = Some(attempt.verdict);
+    context
+}
+
+struct AutoModeReview<'r> {
+    pending_call_id: &'r str,
+    action: &'r PermissionedAction,
+    run_messages: &'r [Value],
+    phase: &'static str,
+}
+
+/// Spec 048 PRD 000 scope 10: the decision is computed without the classifier
+/// first, and the classifier is called only when that decision is row 16.
+fn auto_mode_reviewed_context(
+    review: AutoModeReview<'_>,
+    mut context: ToolExecutionContext,
+    spec: &AgentRunSpec<'_>,
+    executor: &RuntimeToolExecutor<'_>,
+) -> ToolExecutionContext {
+    let action = review.action;
+    let decision = permission_decision_for_action(executor.registry(), action, &context);
+    let classifier = spec
+        .auto_mode_classifier
+        .as_ref()
+        .filter(|_| decision.reason == PermissionPolicyReason::EvaluatorUnavailable);
+    let Some(classifier) = classifier else {
+        let gate_reason = if decision.reason == PermissionPolicyReason::EvaluatorUnavailable {
+            "classifier_unavailable"
+        } else {
+            "decided_before_classifier"
+        };
+        emit_auto_permission_diagnostic(
+            spec,
+            AutoPermissionDiagnosticInput {
+                phase: review.phase,
+                gate_reason: Some(gate_reason),
+                action,
+                decision: Some(&decision),
+                evaluator: None,
+                evaluator_source: None,
+                context: &context,
+            },
+        );
+        return context;
+    };
+    let reviewed = classifier_review::review(
+        classifier,
+        review.run_messages,
+        review.pending_call_id,
+        action,
+        executor.registry(),
+        classifier_time_source(spec),
+    );
+    let attempt = reviewed.attempt;
+    let mut evaluated_context = context.clone();
+    evaluated_context.permission_evaluator = Some(attempt.verdict.clone());
+    let final_decision =
+        permission_decision_for_action(executor.registry(), action, &evaluated_context);
+    let evidence = classifier_decision_evidence(ClassifierEvidenceInput {
+        created_at_unix_ms: attempt.started_at_unix_ms,
+        completed_at_unix_ms: Some(attempt.completed_at_unix_ms),
+        model_id: &classifier.model,
+        action,
+        initial_decision: &decision,
+        final_decision: &final_decision,
+        request_payload: &reviewed.payload,
+        verdict: &attempt.verdict,
+        usage: attempt.usage.as_ref(),
+        attempt_status: attempt.status,
+    });
+    set_classifier_evidence(
+        &mut context,
+        with_classifier_stages(evidence, attempt.stages, attempt.rule),
+    );
+    emit_auto_permission_diagnostic(
+        spec,
+        AutoPermissionDiagnosticInput {
+            phase: review.phase,
+            gate_reason: Some("classifier_invoked"),
+            action,
+            decision: Some(&final_decision),
             evaluator: Some(&attempt.verdict),
             evaluator_source: Some("permission_classifier"),
             context: &context,

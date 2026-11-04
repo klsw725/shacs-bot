@@ -88,7 +88,9 @@ auto mode에서 각 action은 아래 순서를 지나고, 먼저 걸린 단계�
    - `exec` 안전 장치가 막는 명령(기본 deny pattern의 `rm -r`·`rm -f`, sandbox 없이 workspace 밖 경로를 적은 명령)에는 이 질문을 하지 않는다(소유 범위 6). auto mode는 거절하고, 다른 mode는 022 판정 뒤 tool이 거절한다. 그래서 질문에서 승인한 제거는 실행된다.
 6. **tool이 스스로 거절할 호출:** tool이 실행 때 거절할 호출은 판정이 미리 알아 묻거나 classifier에 보내지 않는다. auto mode는 그 호출을 거절하고 tool이 낼 이유를 그대로 돌려준다. 다른 mode에서는 048이 더한 질문(비밀 파일 읽기, critical path)을 그 호출에 하지 않는다. tool 실행 때의 검사는 그대로 다시 돈다.
    - file tool은 지금처럼 그 실행이 허용하는 폴더(production에서는 workspace와 media 폴더) 밖을 읽거나 쓰지 못한다(004). 그래서 Claude Code의 "workspace 밖 첫 읽기" 질문은 두지 않는다.
-   - `exec`는 010의 안전 장치를 지난다: deny pattern(기본은 `rm -r`·`rm -f`·`dd if=`·`shutdown` 등), 내부·사설 주소, 그리고 sandbox가 없거나 `restrictToWorkspace`가 켜졌을 때의 workspace guard(`../`, workspace·media 폴더 밖의 절대 경로와 `~` 경로). 이 안전 장치를 지나는 명령만 4단계의 classifier가 본다.
+   - `exec`는 010의 안전 장치를 지난다: deny pattern(기본은 `rm -r`·`rm -f`·`dd if=`·`shutdown` 등), 내부·사설 주소, 그리고 sandbox가 없거나 `restrictToWorkspace`가 켜졌을 때의 workspace guard(`../`, workspace·media 폴더 밖의 절대 경로와 `~` 경로).
+   - process gate를 지나는 실행은 030의 격리 증명이 들여보내야 시작된다. 지금 공식 container 밖(격리를 확인할 수 없는 native 실행)에서는 gate가 process를 시작하지 않는다.
+   - 이 검사들을 지나는 명령만 4단계의 classifier가 본다.
    - 확인은 tool마다 실행 때와 같은 함수로 하고 파일과 process를 바꾸지 않는다. 정확한 방식은 PRD 000이 정한다.
 7. **classifier 입력:**
    - 고정 template, 설정 slot, context assembly가 읽는 instruction 파일, system 안내의 skill 목록(이름·설명·위치), 이번 run까지의 세션 기록 중 사용자 메시지와 어시스턴트의 도구 호출(이름과 인자, 파일 읽기·목록·검색 호출은 뺀다), 판정할 action을 넣는다.
@@ -159,7 +161,7 @@ auto mode에서 각 action은 아래 순서를 지나고, 먼저 걸린 단계�
 | 비밀 파일 | 없다 | `.env.json`과 비밀 옮기기 migration | `config.json`을 읽어도 되게 한다 |
 | sandbox와 deny | sandbox를 켜면 `Read` deny를 OS 수준으로도 강제한다 | 하지 않는다. 규칙은 file tool과 명령 분석이 찾은 명령에만 걸린다 | sandbox adapter는 030 소유이고 Mac 직접 실행에는 sandbox가 없다 |
 | workspace 밖 file tool 읽기·쓰기 | 밖 읽기는 처음에 네 가지 답으로 묻고, network 경로 읽기는 따로 묻는다. `blockReadsOutsideWorkingDirectories`·`blockWritesOutsideWorkingDirectories`를 켜면 file tool이 거절한다 | 묻지 않고 거절한다. file tool이 지금처럼 workspace와 media 폴더 밖을 다루지 못하므로(두 설정이 늘 켜진 것과 같다) 그 질문과 설정을 두지 않는다 | file tool의 범위는 004의 동작이고 이 스펙은 그 범위를 바꾸지 않는다 |
-| 명령의 안전 장치 | 없다. 승인한 critical path 제거와 classifier가 허용한 명령은 실행된다 | 010의 `exec` 안전 장치가 deny pattern(`rm -r`·`rm -f`·`dd if=` 등)에 맞는 명령과, sandbox가 없을 때 workspace 밖 절대 경로·`~` 경로·`../`를 적은 명령을 막는다. 048은 이런 명령을 묻거나 classifier에 보내지 않고 거절한다. 승인하거나 허용한 명령 중 안전 장치를 지나는 것은 실행된다 | 010 소유의 안전 장치를 바꾸지 않는다. sandbox 없이 host에서 도는 실행의 마지막 보호다 |
+| 명령의 안전 장치 | 없다. 승인한 critical path 제거와 classifier가 허용한 명령은 실행된다 | 010의 `exec` 안전 장치가 deny pattern(`rm -r`·`rm -f`·`dd if=` 등)에 맞는 명령과, sandbox가 없을 때 workspace 밖 절대 경로·`~` 경로·`../`를 적은 명령을 막는다. 030의 process gate는 격리를 확인할 수 없는 실행(공식 container 밖)을 시작하지 않는다. 048은 이런 명령을 묻거나 classifier에 보내지 않고 거절한다. 승인하거나 허용한 명령 중 이 검사들을 지나는 것은 실행된다 | 010·030 소유의 검사를 바꾸지 않는다. sandbox 없이 host에서 도는 실행의 마지막 보호다 |
 | 규칙과 설정의 출처 | user·project·local·managed 설정과 CLI 인자의 규칙을 합치고, project allow 규칙은 workspace trust를 거친다. `autoMode`는 user·managed 설정과 `--settings`에서 읽는다 | 고른 user-local config 하나에서만 읽는다. 출처 사이의 우선순위와 workspace trust 단계가 없다 | 지금 config 로더가 config 파일 하나만 읽는다(031). workspace에서 온 규칙을 쓰지 않는 것은 Claude Code가 project의 `autoMode`를 읽지 않는 까닭과 같다 |
 | 규칙의 도구 이름 | `Bash`, `Read`, `Edit`, `WebFetch`, `Agent(이름)`, `mcp__<server>__<tool>`, 인자 match `Tool(param:value)`, `Cd`·`Skill` 규칙 | `exec`, `read`, `edit`, `web_fetch`, `spawn`, `mcp_<server>_…`. 인자 match, `spawn(이름)`, `Cd`·`Skill`에 해당하는 규칙은 없다 | shacs-bot의 tool과 인자가 다르다 |
 | 명령 규칙이 보는 글 | 쓴 글자 그대로 맞춘다(`git 'push'`는 `Bash(git push *)`에 맞지 않는다). allow에서도 알려진 안전한 환경 변수 대입을 뗀다 | 따옴표를 푼 낱말로 맞춘다. allow는 환경 변수 대입을 떼지 않는다 | 따옴표로 deny를 피하지 못하게 하고, 안전한 변수 목록을 따로 두지 않는다 |
@@ -210,7 +212,7 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 ## 수용 조건
 
 1. auto mode에서 action 종류 × 사용자 규칙 × classifier 응답 × 대화형 여부의 판정이 PRD 000의 표와 같다.
-   - action 종류: workspace·media 폴더 안 읽기, file tool의 범위 밖 읽기·쓰기, workspace 안 쓰기, 보호 경로 쓰기, symlink를 따라가면 보호 경로나 workspace 밖인 명령 쓰기, 리디렉션 대상이 workspace 밖인 명령, 비밀 파일 읽기·쓰기, critical path 제거, 요약할 수 있는·없는 명령(Docker 안팎), 웹, MCP, 하위 작업, 지금 대화방·다른 곳으로 보내기, 예약, 그림 생성, config 변경.
+   - action 종류: workspace·media 폴더 안 읽기, file tool의 범위 밖 읽기·쓰기, workspace 안 쓰기, 보호 경로 쓰기, symlink를 따라가면 보호 경로나 workspace 밖인 명령 쓰기, 리디렉션 대상이 workspace 밖인 명령, 비밀 파일 읽기·쓰기, critical path 제거, Docker 안의 요약할 수 있는·없는 명령과 격리 증명이 없는 Docker 밖 명령, 웹, MCP, 하위 작업, 지금 대화방·다른 곳으로 보내기, 예약, 그림 생성, config 변경.
    - 사용자 규칙: 없음, 좁은 allow, 넓은 allow, ask, deny.
    - classifier 응답: 허용, 막음, 판정 없음.
    - 다른 mode의 기존 판정 테스트는 그대로 통과하고, deny와 ask 규칙, 비밀 파일 규칙, critical path 제거 질문은 모든 mode에서 적용된다.
@@ -250,7 +252,7 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 - classifier는 틀릴 수 있다. Claude Code는 실제 위험 동작의 17%를 놓쳤다고 밝혔고, 이 수치는 그쪽 model과 prompt 기준이다. 048의 classifier는 model과 prompt가 달라 측정값이 없고, 수용 조건 10의 묶음은 작은 표본이다. 신중한 사람의 검토를 대신하지 않으며 Docker 안에서 쓰는 것을 권한다.
 - deny·ask 규칙과 비밀 파일 규칙은 file tool과, 명령 분석이 경로를 찾은 명령에만 걸린다. 파일 이름을 명령에 쓰지 않고 파일을 여는 프로그램(미리 만들어 둔 스크립트 등)은 막거나 묻지 못한다(Claude Code와 같다). auto mode에서는 그때 classifier가 마지막 방어선이다. 같은 컨테이너·사용자로 도는 명령은 OS 권한으로 그 파일을 읽을 수 있다.
 - 비밀 파일 읽기를 승인하면 그 내용이 AI provider로 가고 세션 기록과 tool 결과 파일에 남는다. auto가 아닌 mode에서도 지금은 거절되는 인증 저장소 읽기를 승인할 수 있게 된다.
-- auto mode에서는 보호 경로 쓰기, 비밀·설정·자기 수정 capability, Docker 밖 명령 실행이 classifier 판단에 맡겨진다. 022의 static deny와 격리 조건보다 약하다.
+- auto mode에서는 보호 경로 쓰기, 비밀·설정·자기 수정 capability, Docker 안의 요약할 수 없는 명령이 classifier 판단에 맡겨진다. 022의 static deny와 요약 조건보다 약하다.
 - auto mode에서는 deny·ask 규칙에 맞지 않는 workspace 안 파일을 묻지 않고 읽는다(Claude Code와 같다). 사용자가 workspace에 둔 다른 비밀 파일은 직접 deny나 ask 규칙을 적어야 한다.
 - 설정에 mode가 없는 대화형 사용자는 처음부터 classifier 판단으로 움직인다.
 - 기본 classifier model이 어시스턴트와 같아서 같은 실수를 함께 할 수 있다.
@@ -260,7 +262,7 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 - 넓은 기억 규칙이 auto mode에서 멈추므로 그 규칙에 기대던 명령도 classifier를 거친다.
 - 도구 결과 검사는 경고만 붙인다. 어시스턴트가 경고를 무시하면 classifier가 마지막 방어선이다.
 - 명령 분석은 셸과 똑같이 명령을 읽지 못한다. 분석할 수 없는 명령은 allow 규칙으로 허용되지 않고 classifier가 본다.
-- sandbox 없이 host에서 도는 실행에서는 010의 `exec` 안전 장치가 workspace 밖 경로를 적은 명령과 `rm -r`·`rm -f`를 승인과 상관없이 막는다(지금과 같다). 그런 일은 사용자가 직접 하거나 sandbox를 켜야 한다.
+- 010의 `exec` 안전 장치는 `rm -r`·`rm -f`와, sandbox가 없으면 workspace 밖 경로를 적은 명령을 승인과 상관없이 막는다. 공식 container 밖에서는 030의 process gate가 명령을 시작하지 않는다. 둘 다 지금과 같으며, 그런 일은 사용자가 직접 하거나 container·sandbox 설정을 바꿔야 한다.
 - critical path 검사는 `rm`·`rmdir`만 본다. 다른 명령(`find -delete`, `mv`, 스크립트)으로 같은 폴더를 지우는 것은 auto mode에서는 classifier만 막고, 다른 mode에서는 022 판정을 따른다(Claude Code와 같다). 검사가 놓친 `rm`도 `bypass_permissions`에서는 그대로 실행된다.
 - `.env.json`을 쓰는 이 판으로 옮긴 config는 이전 판이 읽지 못한다(`${이름}`을 풀 값이 없다). 옮기기가 끝나면 백업이 없으므로, 이전 판으로 돌아가려면 `${이름}` 자리에 값을 다시 적어야 한다.
 

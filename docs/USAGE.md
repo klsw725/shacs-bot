@@ -311,7 +311,7 @@ Config 문자열 값은 load 시 `${ENV_NAME}` 형태의 environment variable re
 
 스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. MCP 도구가 결과에 `isError: true`를 붙여 스스로 실패를 알리면, 그 결과는 성공 내용이 아니라 `(MCP tool call failed: <도구가 보낸 글>)` 형식의 실패로 전달됩니다. 빈 문자열은 `requires.env`를 만족하지 않습니다. Secret 값을 넣은 config 파일은 커밋하거나 공유하지 마세요.
 
-`permissions.mode`는 provider tool 실행 경로가 소비하는 permission policy gate 설정입니다. Rust runtime은 `default`, `plan`, `accept_edits`, `auto`, `dont_ask`, `bypass_permissions` 값을 파싱해 safe fallback/diagnostics를 만들고, provider tool call과 deferred bridge call을 실행 직전 permission mode snapshot과 policy decision에 통과시킵니다. `allow`만 즉시 tool 실행으로 이어지고, `deny`는 실행하지 않은 permission outcome으로 provider-visible tool result에 남습니다. `ask`는 channel runtime에서 사용자에게 승인 질문을 보내며, 사용자는 여섯 가지 decision을 답할 수 있습니다: `1`/`approve`는 pending tool call 한 번만 실행하고, `2`/`deny` 또는 `cancel`은 한 번 취소하며, `3`/`approve_session`은 현재 session에서 session key, permission context, requested scope가 같은 후속 action을 재사용 승인하고, `4`/`approve_project`는 현재 project의 `permissions.json`에 matching action rule을 저장하고, `5`/`deny_session`은 현재 session에서 matching action을 재사용 거절하고, `6`/`deny_project`는 현재 project의 `permissions.json`에 matching deny rule을 저장합니다. `exec`의 단순 shell 명령은 OpenCode식 arity prefix를 사용하므로 `cargo test --workspace`를 승인하면 `cargo test *`가 재사용 패턴으로 저장되고 같은 prefix의 후속 명령도 같은 rule에 매칭될 수 있습니다. Shell 제어 문자나 따옴표를 포함한 복합 명령은 기존 action digest exact match를 유지합니다. 파일 계열 tool은 workspace 상대 exact path 또는 subtree matcher, `web_fetch`는 origin matcher, MCP tool은 wrapped tool name matcher, 그 외 action은 exact action matcher로 요약됩니다. 승인 질문의 `Reusable pattern` 항목에서 실제 저장될 패턴 또는 `exact action` 요약을 확인할 수 있습니다. `ask_user`는 여전히 별도 user interruption tool이며 formal approval decision으로 해석되지 않습니다. `auto`는 user-local opt-in이나 명시적 실행 source 없이 workspace config만으로 활성화되지 않고, `bypass_permissions`는 격리 precondition이 충족된 명시적 opt-in일 때만 normalized snapshot에서 유지됩니다. `auto`에서는 public target을 다루는 built-in `web_search`/`web_fetch`, workspace 일반 파일 read/edit, `pwd`, `cargo fmt --check`를 별도 질문 없이 실행합니다. `cargo check/test/clippy/build`는 confirmed non-privileged containment 안에서만 자동 승인하며, 이미지 생성, 외부 메시지 전송, secret 접근, protected target, runtime 설정과 파괴적·network·secret exec는 계속 승인 또는 거절 경계를 유지합니다.
+`permissions.mode`는 provider tool 실행 경로가 소비하는 permission policy gate 설정입니다. Rust runtime은 `default`, `plan`, `accept_edits`, `auto`, `dont_ask`, `bypass_permissions` 값을 파싱해 safe fallback/diagnostics를 만들고, provider tool call과 deferred bridge call을 실행 직전 permission mode snapshot과 policy decision에 통과시킵니다. `allow`만 즉시 tool 실행으로 이어지고, `deny`는 실행하지 않은 permission outcome으로 provider-visible tool result에 남습니다. `ask`는 channel runtime에서 사용자에게 승인 질문을 보내며, 사용자는 여섯 가지 decision을 답할 수 있습니다: `1`/`approve`는 pending tool call 한 번만 실행하고, `2`/`deny` 또는 `cancel`은 한 번 취소하며, `3`/`approve_session`은 현재 session에서 session key, permission context, requested scope가 같은 후속 action을 재사용 승인하고, `4`/`approve_project`는 현재 project의 `permissions.json`에 matching action rule을 저장하고, `5`/`deny_session`은 현재 session에서 matching action을 재사용 거절하고, `6`/`deny_project`는 현재 project의 `permissions.json`에 matching deny rule을 저장합니다. `exec`의 단순 shell 명령은 OpenCode식 arity prefix를 사용하므로 `cargo test --workspace`를 승인하면 `cargo test *`가 재사용 패턴으로 저장되고 같은 prefix의 후속 명령도 같은 rule에 매칭될 수 있습니다. Shell 제어 문자나 따옴표를 포함한 복합 명령은 기존 action digest exact match를 유지합니다. 파일 계열 tool은 workspace 상대 exact path 또는 subtree matcher, `web_fetch`는 origin matcher, MCP tool은 wrapped tool name matcher, 그 외 action은 exact action matcher로 요약됩니다. 승인 질문의 `Reusable pattern` 항목에서 실제 저장될 패턴 또는 `exact action` 요약을 확인할 수 있습니다. `ask_user`는 여전히 별도 user interruption tool이며 formal approval decision으로 해석되지 않습니다. `auto`는 user-local opt-in이나 명시적 실행 source 없이 workspace config만으로 활성화되지 않고, `bypass_permissions`는 격리 precondition이 충족된 명시적 opt-in일 때만 normalized snapshot에서 유지됩니다. `auto`의 판정 순서와 모든 mode에 걸리는 사용자 규칙·비밀 파일·critical path는 아래 [auto mode와 사용자 권한 규칙](#auto-mode와-사용자-권한-규칙)을 보세요.
 
 현재 project lifetime으로 저장된 remembered permission rule은 config 파일의 parent data directory에 있는 `permissions.json`에 저장됩니다. Rule은 canonical workspace id bucket별로 분리되며, 현재 workspace에 저장된 rule은 CLI에서 별도로 확인하거나 제거할 수 있습니다:
 
@@ -324,6 +324,86 @@ shacs-bot permissions revoke <rule-id-prefix> --workspace /tmp/ws
 `permissions list`와 `permissions inspect`는 remembered permission store를 읽기만 하며, store 파일이 없으면 새 파일을 만들지 않습니다. 출력은 rule id prefix, effect, matcher 요약, timestamp/count 같은 redacted projection만 보여주고 workspace 절대 경로나 raw action payload를 출력하지 않습니다. `permissions revoke`는 현재 canonical workspace bucket에서만 동작하며, rule id prefix가 없거나 여러 rule에 동시에 매칭되면 store를 변경하지 않고 실패합니다. Store가 malformed, oversized, symlink, non-regular file이면 read surface는 raw store content나 secret-like text를 출력하지 않고 실패하며, runtime은 remembered rule을 신뢰하지 않고 fail closed합니다. Remembered allow는 protected target, static deny, permission ceiling, containment precondition을 우회하지 않습니다. 이 기능은 완전한 sandboxing, 완전한 redaction, prompt/tool/repo content 기반 permission grant, 모든 process start에 대한 universal gate를 보장하지 않습니다.
 
 같은 read-only projection은 local API `GET /v1/permissions`와 TUI remembered permissions view에서도 사용됩니다. API endpoint는 mutation을 받지 않으며, TUI도 rule id/effect/matcher/store health 요약만 렌더링합니다.
+
+### auto mode와 사용자 권한 규칙
+
+[Spec 048](specs/048-transcript-classifier-auto-mode/SPEC.md) 이후 `auto` mode는 Claude Code auto mode와 같은 순서로 action을 판정합니다. 먼저 걸린 줄이 결정하고, "묻기"는 대화형 실행(CLI `agent`·`ask`, 외부 channel, WebSocket)이면 승인 질문, 비대화형 실행(local API, cron·heartbeat, 위임 작업 관찰, subagent)이면 거절입니다.
+
+1. 정규화 오류, 상속 한도 위반, capability가 없는 tool은 거절합니다(`ask_user`는 허용).
+2. 비밀 파일 쓰기, `permissions.deny` 규칙, 기억된 거절은 거절합니다.
+3. tool이 실행 전에 스스로 거절할 호출은 묻지 않고 거절하며, tool이 낼 글을 그대로 돌려줍니다. file tool이 허용한 폴더(workspace, media) 밖의 대상, `exec` 안전 장치(`tools.exec`의 deny pattern과 allow pattern, 내부·사설 주소, `restrictToWorkspace`가 켜졌거나 sandbox가 없을 때의 `../`와 workspace 밖 절대 경로·`~` 경로)가 막는 명령, 격리 증명이 없는 process 실행이 여기에 듭니다. 공식 container 밖의 native 실행에서는 격리 증명이 없어 `exec`가 시작되지 않습니다.
+4. `permissions.json`을 읽을 수 없으면 묻습니다.
+5. 승인 질문에서 승인한 바로 그 호출은 허용합니다.
+6. 비밀 파일 읽기, `permissions.ask` 규칙, critical path 제거, symlink를 따라가면 보호 경로인 쓰기는 묻습니다. 이 질문은 한 번 승인(`1`)과 한 번 거절(`2`)만 받고, 다른 답에는 아무것도 실행하지 않고 같은 질문을 다시 보입니다.
+7. `permissions.allow` 규칙과 기억된 허용(세션·프로젝트, 세션 승인 cache)은 허용합니다. 넓은 규칙, 보호 경로 쓰기, workspace 밖으로 나가는 `exec` 리디렉션 대상에는 쓰지 않습니다.
+8. symlink를 따라가면 workspace 밖인 쓰기는 묻습니다.
+9. 읽기만 하는 file tool과, 보호 경로가 아닌 workspace 안 쓰기(`permissions.autoApproval.allowWorkspaceEdits`가 켜졌을 때)는 허용합니다.
+10. 나머지는 transcript classifier가 봅니다. 허용이면 실행하고, 막거나 판정하지 못하면 묻습니다.
+
+다른 mode에서도 비밀 파일 쓰기, deny 규칙, 기억된 거절은 거절이고, 비밀 파일 읽기와 critical path 제거는 그 호출을 승인할 때만 실행하며, ask 규칙은 허용될 호출을 묻기로 바꿉니다. `dont_ask`에서는 이 묻기가 거절이고, `bypass_permissions`에서도 이 규칙은 걸립니다. 022의 정적 규칙과 local 자동 승인, `permissions.autoApproval`의 `allowProcExecVerification`·`requireDockerContainmentForExec`는 auto mode에서 쓰지 않으며, `protectedTargets`는 보호 경로에 더해집니다.
+
+#### allow·ask·deny 규칙
+
+user-local config(`--config`로 고른 파일, 기본은 `~/.shacs-bot/config.json`)의 `permissions.allow`·`permissions.ask`·`permissions.deny`에 Claude Code 문법의 규칙을 shacs-bot tool 이름으로 적습니다. workspace의 `config.json`이나 instruction 파일에 적은 규칙은 읽지 않습니다.
+
+```json
+{
+  "permissions": {
+    "mode": "auto",
+    "allow": ["exec(git status)", "exec(cargo test *)", "web_fetch(domain:docs.rs)", "mcp_github"],
+    "ask": ["exec(git push *)", "read(.env)"],
+    "deny": ["exec(git push --force *)", "read(//etc/**)", "edit(secrets/**)"]
+  }
+}
+```
+
+- `exec`, `exec(<pattern>)`: `*`는 공백을 포함한 아무 글에 맞습니다. 끝의 ` *`와 `:*`는 앞부분만 있는 명령에도 맞습니다(`exec(ls *)`는 `ls`와 `ls -la`에 맞고 `lsof`에는 맞지 않습니다). `&&`, `||`, `;`, `|`로 이은 명령은 deny·ask는 하나라도 맞으면, allow는 모두 맞아야 걸립니다. `timeout`·`nohup`·`xargs` 같은 감싸기와 앞의 환경 변수 대입은 떼고 봅니다.
+- `read`, `edit`, `read(<경로>)`, `edit(<경로>)`: 경로는 gitignore 문법입니다. `//`는 절대 경로, `~/`는 home, `/`는 config 파일의 폴더, 그 밖은 workspace 기준이고, 이름만 적으면(`.env`) 어느 깊이에서든 맞습니다. 경로는 적은 그대로와 symlink를 따라간 경로를 함께 봅니다. `read` deny는 쓰기도 막고, `read` deny·ask에 맞는 경로는 `list_dir`·`glob`·`grep`이 폴더를 훑는 결과에서도 빠집니다.
+- `web_fetch(domain:<host>)`(`*.example.com` 지원), `mcp_<server>`, 그 밖의 tool 이름(`message`, `cron`, `spawn`, `image_generate`, `my` 등). deny·ask는 tool 자리에 glob(`mcp_*`)을 받습니다.
+- 판정 순서는 deny → ask → allow입니다. auto mode에서는 넓은 allow 규칙을 쓰지 않습니다: `exec`, `exec(*)`, 셸·실행기를 통째로 여는 pattern(`python3 *`, `bash -lc *`), `sudo`·`env`·`ssh` 같은 감싸기, 패키지 실행기(`npx *`, `npm run *`, `cargo run *`), `py*`처럼 그 이름들을 덮는 pattern, `spawn` allow. 규칙은 지우지 않으며 다른 mode에서는 그대로 씁니다. `permissions.autoMode.classifyAllShell`을 켜면 auto mode에서 `exec` allow 규칙을 모두 쓰지 않습니다.
+- 읽을 수 없는 규칙(빈 글, 괄호 짝 오류, tool이 받지 않는 지정)과 글자 배열이 아닌 목록은 쓰지 않고 진단에 남깁니다. 목록마다 200개, 규칙마다 1,000자까지 받습니다.
+
+#### 비밀 파일
+
+active data 폴더(config 파일이 있는 폴더)의 `auth.json`, 그 원자적 저장의 임시 파일, `auth/` 아래는 모든 mode에서 비밀 파일입니다.
+
+- `list_dir`·`glob`·`grep`이 폴더를 훑을 때 결과에 나오지 않고 내용도 읽히지 않습니다.
+- 그 파일을 지정해 읽는 action(`read_file`, `path`로 준 `grep`, `cat`, `<` 리디렉션, here-doc이나 `python3 -c` 코드 안의 이름)은 매번 한 번 승인·거절만 받는 질문이 됩니다. 승인하면 내용이 AI provider로 가고 세션 기록에 남습니다.
+- 쓰는 action(`write_file`, `edit_file`, `>`, `tee`, `rm`, `mv` 등)은 거절합니다. hard link와 symlink도 같은 파일로 봅니다.
+- 명령 분석은 셸을 실행하지 않고 글을 나누므로 셸과 똑같이 읽는다고 보장하지 않습니다. 변수로 이어 붙인 경로처럼 글에 이름이 나오지 않는 꼴은 놓칠 수 있습니다. data 폴더가 workspace 밖이면 file tool은 원래 그 파일에 닿지 못하고, sandbox가 없는 `exec`는 workspace 밖 절대 경로를 적은 명령을 막습니다.
+
+#### critical path 제거
+
+모든 mode에서 `rm`·`rmdir`가 `/`, root 바로 아래의 폴더, home, workspace와 data 폴더(그 상위 폴더 포함), 그 바로 아래를 가리키는 glob, mounted drive(`/Volumes/<drive>`, `/mnt/<name>` 등)를 지울 수 있으면 한 번 승인·거절만 받는 질문을 냅니다. `$`가 든 대상은 변수를 빈 글로 바꿔서도 보고, 대상을 확인할 수 없는 명령(풀 수 없는 `cd` 뒤의 상대 경로, 분석할 수 없는 명령 안의 `rm`)도 묻습니다. 이 질문은 allow 규칙이나 classifier로 넘어가지 않습니다. `exec` 안전 장치가 막는 명령(기본 deny pattern의 `rm -r`·`rm -f` 등)에는 묻지 않고 3번처럼 거절합니다.
+
+#### transcript classifier
+
+classifier는 그 run과 같은 provider로 두 단계를 거칩니다. 1단계는 한 낱말로 답하고, `no`가 아니면 2단계에서 규칙과 이유를 JSON으로 답합니다. 보는 것은 사용자 메시지, 어시스턴트의 앞선 tool 호출(파일 읽기·목록·검색은 뺍니다), instruction 파일과 skill 목록, 판정할 action뿐이며 어시스턴트의 글과 tool 결과는 보지 않습니다. 단계마다 60초 안에 답이 없거나 답을 읽을 수 없으면 판정 없음입니다. 막으면 승인 질문의 `Why:` 줄에 `Auto mode blocked this: [규칙] 이유`가, 판정 없음이면 `Auto mode could not check this action`이 나옵니다. subagent와 workflow 자식 run에는 classifier가 없어 이 줄의 action은 거절됩니다.
+
+`permissions.autoMode`로 classifier 규칙을 바꿉니다.
+
+```json
+{
+  "permissions": {
+    "autoMode": {
+      "environment": ["$defaults", "[Home NAS] nas.local and its shares belong to the user."],
+      "softDeny": ["$defaults", "[No Purchases] Buying anything."],
+      "classifierModel": "small-model-id",
+      "classifyAllShell": false
+    }
+  }
+}
+```
+
+`environment`, `hardDeny`, `softDeny`, `allow`(Claude Code 표기 `hard_deny`·`soft_deny`도 받습니다)를 적으면 그 기본 목록을 바꾸고, `"$defaults"`를 넣으면 그 자리에 기본 항목이 들어갑니다. 항목의 `{workspace}`와 `{conversation}`은 판정 때 workspace 경로와 `<channel>:<chat_id>`로 채워집니다. `classifierModel`이 없으면 그 run의 model을 씁니다. 목록마다 64개, 항목마다 1,000자까지 받으며, `autoMode`를 읽을 수 없으면(모양이 틀림, 한도 초과, `"$defaults"`가 두 번, 같은 목록을 두 표기로 적음) auto mode 대신 `default`로 시작하고 진단에 남깁니다.
+
+```sh
+shacs-bot permissions auto-mode defaults
+shacs-bot permissions auto-mode defaults --label "Data"
+shacs-bot permissions auto-mode config --config ~/.shacs-bot/config.json
+```
+
+`defaults`는 기본 목록을, `config`는 설정을 적용한 목록과 `classifierModel`·`classifyAllShell`, 읽은 allow·ask·deny 규칙, 진단(쓰지 않은 규칙과 이유, 경고, `autoMode`를 읽을 수 없음)을 JSON으로 보입니다. `--label`은 `[이름]`이 그 글로 시작하는(대소문자 무시) 항목만 남깁니다. 둘 다 provider를 부르지 않고 placeholder는 채우지 않습니다.
 
 현재 config, provider field, workflow recipe discovery 상태를 확인합니다:
 
@@ -720,7 +800,7 @@ Provider 호출 전에 built-in slash command는 로컬에서 처리됩니다:
 - `/stop`: 등록된 active task에 cancellation을 요청합니다.
 - `/restart`: 로컬 restart 요청을 acknowledge합니다. Rust CLI는 현재 process를 in-place로 교체하지 않고, runtime lifecycle의 `runtime restart`도 안전 종료 의도만 남깁니다. 새 process 시작은 다음 명시적 start나 외부 OS supervisor의 책임입니다.
 - `/goal [status|pause|resume|clear|done|blocked <reason>|<text>]`: 현재 session의 persistent goal metadata를 설정하거나 상태를 바꿉니다. 새 목표를 설정하려면 기존 active goal을 먼저 `/goal clear`로 정리해야 합니다.
-- `/permission`: `permissions.mode`를 `default`, `auto`, `bypass_permissions` 중 하나로 저장하는 대화형 wizard를 시작합니다. 현재 `auto`를 선택하면 `permissions.mode: "auto"`가 저장되고, 런타임은 이를 auto approval opt-in으로 해석해 정적 안전 규칙과 local capability allowlist를 통과한 낮은 위험 action을 먼저 자동 승인합니다. `permissions.autoApproval`은 protected target과 exec containment 같은 세부 옵션을 조정하는 블록입니다. 이 local fast path로 해결되지 않은 direct tool action과 resolved deferred bridge tool action 중 current user message로 scope 판단이 가능하고 classifier capability ceiling을 통과한 action은 같은 provider/model을 사용하는 auto-mode classifier 평가를 거쳐 high-confidence requested-scope allow일 때만 실행됩니다. `proc_exec`가 command summary unavailable 또는 containment unknown으로 `ask`가 된 경우는 classifier allow 대상이 아니며 approval prompt로 남습니다. Classifier 오류, 낮은 confidence, scope 불일치, parse failure, user scope 부재, classifier ceiling 밖 capability는 interactive session에서는 permission prompt로, non-interactive 경로에서는 deny로 접힙니다. `bypass_permissions`는 먼저 선택한 뒤 정확히 `confirm bypass_permissions`로 한 번 더 확인해야 저장되며, 저장된 값은 이후 turn의 permission snapshot에 반영됩니다. `cancel`은 진행 중인 wizard를 취소합니다.
+- `/permission`: `permissions.mode`를 `default`, `auto`, `bypass_permissions` 중 하나로 저장하는 대화형 wizard를 시작합니다. `auto`를 선택하면 `permissions.mode: "auto"`가 저장되고, 이후 turn은 [auto mode와 사용자 권한 규칙](#auto-mode와-사용자-권한-규칙)의 순서로 판정합니다. `bypass_permissions`는 먼저 선택한 뒤 정확히 `confirm bypass_permissions`로 한 번 더 확인해야 저장되며, 저장된 값은 이후 turn의 permission snapshot에 반영됩니다. `cancel`은 진행 중인 wizard를 취소합니다.
 - `/permission recent`: 최근 auto-mode classifier denial을 sanitized summary로 보여줍니다. `/permission recent retry <denial_id>`는 interactive channel에서 같은 denied action을 한 번 실행하기 위한 formal approval을 만들며, raw payload를 session metadata에 저장하지 않습니다. 같은 owner가 일회성 token을 소비하고 승인 상관관계를 검증한 뒤 executor에 전달한 경우, 기존 terminal receipt에 `recent_retry_<denial_id>`의 `consumed` 사실을 별도로 남깁니다. 원래 approval의 `denied` 이력은 유지되며, TUI는 최신 retry lineage를 표시합니다. 이 기록은 도구 성공이나 재사용 권한이 아니고 token을 저장·복원하지 않습니다. TUI의 recent retry 승인 버튼은 계속 unavailable이며 원래 session channel에서 응답해야 합니다.
 - `/permission rules`: 현재 project remembered permission rule을 list합니다. `/permission inspect <rule-id-prefix>`와 `/permission revoke <rule-id-prefix>`는 CLI `permissions inspect`/`permissions revoke`와 같은 current workspace bucket projection/revoke semantics를 사용합니다.
 - `/history [n]`: 최근 visible user/assistant message를 보여줍니다. 기본값은 10, 최대값은 50입니다.

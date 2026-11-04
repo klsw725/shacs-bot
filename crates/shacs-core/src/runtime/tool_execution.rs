@@ -1,3 +1,5 @@
+use crate::runtime::auto_mode::action_materials::{self, StandingApprovals};
+use crate::runtime::auto_mode::approval_why;
 use crate::runtime::permission_action::normalize_prepared_runtime_tool_call;
 use crate::runtime::permission_pattern::{
     session_approval_reuse_matches, session_approval_reuse_pattern,
@@ -7,17 +9,18 @@ use crate::runtime::{
     approval_decision_options, containment_permission_proof_for_process_gate, correlate_approval,
     correlate_policy_safety_snapshot_ref, decide_permission, evaluate_static_rules,
     normalize_runtime_tool_call, ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError,
-    ApprovalDecisionKind, ApprovalRequest, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind,
-    ContainmentSnapshotRef, EvaluatorConfidence, EvaluatorScopeMatch, InheritedPermissionContext,
-    PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot, PermissionPolicyDecision,
-    PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionPolicyReason,
-    PermissionRuleInput, PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
-    ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
-    ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput, ProcessGateInput,
+    ApprovalDecisionKind, ApprovalExplanation, ApprovalRequest, AutoEvaluatorVerdict,
+    AutoEvaluatorVerdictKind, ContainmentSnapshotRef, EvaluatorConfidence, EvaluatorScopeMatch,
+    InheritedPermissionContext, PermissionCeilingSnapshot, PermissionEnvironment, PermissionMode,
+    PermissionModeSnapshot, PermissionPolicyDecision, PermissionPolicyDecisionKind,
+    PermissionPolicyInput, PermissionPolicyReason, PermissionRuleInput, PermissionedAction,
+    PermissionedActionInput, PermissionedActionOrigin, ProcExecSummary, ProcessAdapterKind,
+    ProcessContainmentProofCandidate, ProcessEnvelopeAdmission, ProcessExecutionEnvelope,
+    ProcessExecutionEnvelopeInput, ProcessGateInput, ProcessGatePolicyMaterials,
     ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
     ProjectPermissionStoreConfig, RecentAutoModeDenial, RecentAutoModeRetryToken, SafetyCapability,
-    SessionApprovalCacheEntry, SessionRememberedPermissionRule, StaticRuleDecision,
-    StaticRuleDecisionKind,
+    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionRememberedPermissionRule,
+    StaticRuleDecision, StaticRuleDecisionKind,
 };
 use crate::tools::{
     CronTool, MessageTool, PreparedToolCall, SpawnTool, ToolCallExecutionContext, ToolRegistry,
@@ -28,7 +31,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use shacs_config::{AutoApprovalConfig, RememberedPermissionEffect, RememberedPermissionFileStore};
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -215,6 +218,8 @@ pub struct ToolExecutionContext {
     pub project_permission_store: Option<ProjectPermissionStoreConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_workspace: Option<PathBuf>,
+    #[serde(skip, default)]
+    pub permission_environment: Option<Arc<PermissionEnvironment>>,
     pub in_cron_context: bool,
     pub record_channel_delivery: bool,
     #[serde(skip, default)]
@@ -243,6 +248,7 @@ impl Default for ToolExecutionContext {
             permission_session_remembered_rules: Vec::new(),
             project_permission_store: None,
             active_workspace: None,
+            permission_environment: None,
             in_cron_context: false,
             record_channel_delivery: false,
             cancellation_token: None,
@@ -401,7 +407,7 @@ impl<'a> RuntimeToolExecutor<'a> {
         for (original_index, call) in tool_calls.into_iter().enumerate() {
             let action =
                 self.normalize_tool_call(&call, permissioned_action_input_from_context(context));
-            let evaluation = permission_evaluation_for_action(&action, context);
+            let evaluation = permission_evaluation_for_action(self.registry, &action, context);
             let decision = evaluation.decision.clone();
             permissioned_actions.push(action.clone());
             if !decision.can_handoff_to_tool_runtime {
@@ -416,16 +422,17 @@ impl<'a> RuntimeToolExecutor<'a> {
                     return report;
                 }
                 if decision.kind == PermissionPolicyDecisionKind::Ask {
+                    let explanation = evaluation.approval_explanation();
                     return RuntimeToolExecutionReport {
                         messages,
-                        interrupt: Some(permission_approval_interrupt(call, &action)),
+                        interrupt: Some(permission_approval_interrupt(call, &action, &explanation)),
                         skipped_tool_calls: all_calls[original_index + 1..].to_vec(),
                         permissioned_actions,
                         recent_auto_mode_denials: Vec::new(),
                         recent_auto_mode_retry_tokens: Vec::new(),
                     };
                 }
-                messages.push(permission_block_message(&call.id, &call.name, &decision));
+                messages.push(evaluation.block_message(&call.id, &call.name));
                 update_project_remembered_rule_metadata(context, &decision);
                 continue;
             }
@@ -482,6 +489,57 @@ impl<'a> RuntimeToolExecutor<'a> {
             recent_auto_mode_denials: Vec::new(),
             recent_auto_mode_retry_tokens: Vec::new(),
         }
+    }
+
+    /// Runs calls whose permission is already decided (deferred bridge
+    /// calls), each with the evaluation that allowed it, so the process gate
+    /// and the scan filter see what the decision saw.
+    pub(crate) fn execute_decided_calls(
+        &self,
+        calls: Vec<DecidedToolCall>,
+        concurrent_tools: bool,
+    ) -> RuntimeToolExecutionReport {
+        let all_calls = calls
+            .iter()
+            .map(|decided| decided.call.clone())
+            .collect::<Vec<_>>();
+        let permissioned_actions = calls
+            .iter()
+            .map(|decided| decided.action.clone())
+            .collect::<Vec<_>>();
+        let mut messages = Vec::new();
+        let mut batches: Vec<(ToolExecutionContext, Vec<IndexedToolCall>, bool)> = Vec::new();
+        for (original_index, decided) in calls.into_iter().enumerate() {
+            let entry = IndexedToolCall {
+                original_index,
+                context: tool_call_execution_context(
+                    self.registry,
+                    &decided.action,
+                    decided.evaluation,
+                    &decided.context,
+                ),
+                call: decided.call,
+            };
+            let together = concurrent_tools && can_batch_concurrently(self.registry, &entry.call);
+            match batches.last_mut() {
+                Some((_, batch, true)) if together => batch.push(entry),
+                _ => batches.push((decided.context, vec![entry], together)),
+            }
+        }
+        for (context, mut batch, together) in batches {
+            let _guard = AppliedToolContext::apply(&self.context_tools, &context);
+            if let Some(report) = flush_allowed_batch(
+                self,
+                &mut batch,
+                together,
+                &mut messages,
+                &all_calls,
+                &permissioned_actions,
+            ) {
+                return report;
+            }
+        }
+        RuntimeToolExecutionReport::completed(messages)
     }
 
     fn has_prepared(&self, call: &RuntimeToolCall) -> bool {
@@ -554,36 +612,128 @@ pub(crate) fn permissioned_action_input_from_context(
 }
 
 pub(crate) fn permission_decision_for_action(
+    registry: &ToolRegistry,
     action: &PermissionedAction,
     context: &ToolExecutionContext,
 ) -> PermissionPolicyDecision {
-    permission_evaluation_for_action(action, context).decision
+    permission_evaluation_for_action(registry, action, context).decision
+}
+
+/// A call with the decision that allowed it.
+#[derive(Debug, Clone)]
+pub(crate) struct DecidedToolCall {
+    pub(crate) call: RuntimeToolCall,
+    pub(crate) action: PermissionedAction,
+    pub(crate) evaluation: PermissionEvaluation,
+    pub(crate) context: ToolExecutionContext,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PermissionEvaluation {
+pub(crate) struct PermissionEvaluation {
     rule_input: PermissionRuleInput,
     evaluator: Option<AutoEvaluatorVerdict>,
     approval: Option<ApprovalCorrelation>,
     inherited_context: Option<InheritedPermissionContext>,
     interactive: bool,
-    decision: PermissionPolicyDecision,
+    policy_materials: ProcessGatePolicyMaterials,
+    pub(crate) decision: PermissionPolicyDecision,
 }
 
-fn permission_evaluation_for_action(
+impl PermissionEvaluation {
+    /// What a call the decision does not run returns: the text the tool would
+    /// print when it would refuse the call itself (Spec 048 PRD 000 scope 2,
+    /// row 5), the permission reason otherwise.
+    pub(crate) fn block_message(&self, tool_call_id: &str, name: &str) -> RuntimeToolMessage {
+        let refusal = self
+            .policy_materials
+            .materials
+            .as_ref()
+            .filter(|_| self.decision.reason == PermissionPolicyReason::ToolRefusal)
+            .and_then(|materials| materials.preflight_refusal.clone());
+        match refusal {
+            Some(content) => RuntimeToolMessage {
+                tool_call_id: tool_call_id.to_owned(),
+                name: name.to_owned(),
+                content,
+            },
+            None => permission_block_message(tool_call_id, name, &self.decision),
+        }
+    }
+
+    pub(crate) fn approval_explanation(&self) -> ApprovalExplanation {
+        approval_why::approval_explanation(
+            &self.decision,
+            self.policy_materials.materials.as_ref(),
+            self.evaluator.as_ref(),
+        )
+    }
+}
+
+pub(crate) fn permission_evaluation_for_action(
+    registry: &ToolRegistry,
     action: &PermissionedAction,
     context: &ToolExecutionContext,
 ) -> PermissionEvaluation {
     let rule_input = effective_permission_rule_input(action, context);
     let static_rule_decision = evaluate_static_rules(action, &rule_input);
+    let user_rules_apply = context.permission_environment.is_some();
+    let auto_mode = action.permission_mode_snapshot.mode == PermissionMode::Auto;
     let evaluator = context.permission_evaluator.clone().or_else(|| {
-        auto_approval_evaluator_for_action(action, &static_rule_decision, &rule_input, context)
+        (!(user_rules_apply && auto_mode))
+            .then(|| {
+                auto_approval_evaluator_for_action(
+                    action,
+                    &static_rule_decision,
+                    &rule_input,
+                    context,
+                )
+            })
+            .flatten()
     });
     let project_state = project_remembered_policy_matches(action, context);
     let mut remembered_rules = session_remembered_policy_matches(action, context);
     remembered_rules.extend(project_state.matches);
-    let approval = permission_approval_for_action(action, context);
+    let this_call = context
+        .permission_approval_cache
+        .as_ref()
+        .map(|entry| approval_cache_correlation(entry, action));
+    let session = session_approval_for_action(action, context);
+    let approval = if user_rules_apply && auto_mode {
+        this_call.clone()
+    } else {
+        this_call
+            .clone()
+            .or_else(|| session.as_ref().map(|(correlation, _)| correlation.clone()))
+    };
     let inherited_context = inherited_context_for_action(action, context);
+    let materials = action_materials::action_materials(
+        registry,
+        action,
+        context,
+        || process_gate_refusal(registry, action, &rule_input, inherited_context.as_ref()),
+        StandingApprovals {
+            this_call_approved: this_call
+                .as_ref()
+                .is_some_and(ApprovalCorrelation::is_approved),
+            remembered: &remembered_rules,
+            session: session
+                .filter(|(correlation, _)| correlation.is_approved())
+                .map(|(correlation, pattern)| {
+                    (
+                        format!(
+                            "session_approval:{}",
+                            correlation.approval_ref.unwrap_or_default()
+                        ),
+                        pattern,
+                    )
+                }),
+        },
+    );
+    let policy_materials = ProcessGatePolicyMaterials {
+        remembered_rules: remembered_rules.clone(),
+        remembered_store_unavailable: project_state.store_unavailable,
+        materials,
+    };
     let decision = decide_permission(PermissionPolicyInput {
         action: action.clone(),
         static_rule_decision,
@@ -593,6 +743,7 @@ fn permission_evaluation_for_action(
         remembered_rules,
         remembered_store_unavailable: project_state.store_unavailable,
         interactive: context.permission_interactive,
+        materials: policy_materials.materials.clone(),
     });
     PermissionEvaluation {
         rule_input,
@@ -600,8 +751,33 @@ fn permission_evaluation_for_action(
         approval,
         inherited_context,
         interactive: context.permission_interactive,
+        policy_materials,
         decision,
     }
+}
+
+/// The text `exec` returns when the process gate's containment proof will not
+/// admit the launch, as outside the official container today (Spec 048 PRD
+/// 000 scope 9).
+fn process_gate_refusal(
+    registry: &ToolRegistry,
+    action: &PermissionedAction,
+    rule_input: &PermissionRuleInput,
+    inherited_context: Option<&InheritedPermissionContext>,
+) -> Option<String> {
+    if !action.capabilities.contains(&SafetyCapability::ProcExec) {
+        return None;
+    }
+    let envelope = process_envelope_for_action(registry, action, rule_input).ok()?;
+    let proof = containment_permission_proof_for_process_gate(
+        &envelope,
+        rule_input,
+        inherited_context,
+        now_unix_ms(),
+    )
+    .ok()?;
+    (proof.admission != ProcessEnvelopeAdmission::Admit)
+        .then(|| "Error: Process launch blocked by permission gate (Denied)".to_owned())
 }
 
 struct ProjectRememberedPolicyState {
@@ -960,6 +1136,7 @@ fn stable_session_approval_origin(origin: &PermissionedActionOrigin) -> Value {
 pub(crate) fn permission_approval_interrupt(
     call: RuntimeToolCall,
     action: &PermissionedAction,
+    explanation: &ApprovalExplanation,
 ) -> RuntimeInterrupt {
     let now = now_unix_ms();
     let approval_request_id = format!(
@@ -968,7 +1145,16 @@ pub(crate) fn permission_approval_interrupt(
     );
     let expires_at_unix_ms = now.saturating_add(PERMISSION_APPROVAL_TTL_MS);
     let risk_summary = format!("Run tool `{}`", action.tool_name);
-    let options = approval_decision_options();
+    let options = approval_decision_options()
+        .into_iter()
+        .filter(|option| {
+            !explanation.once_only
+                || matches!(
+                    option.decision,
+                    ApprovalDecisionKind::Approved | ApprovalDecisionKind::Denied
+                )
+        })
+        .collect::<Vec<_>>();
     let allowed_decisions = options
         .iter()
         .map(|option| option.decision)
@@ -986,21 +1172,36 @@ pub(crate) fn permission_approval_interrupt(
     };
     let arguments = action.redacted_arguments.to_string();
     let target_summary = approval_target_summary(action);
-    let session_reuse_summary =
-        session_approval_reuse_pattern(action).unwrap_or_else(|| "exact action only".to_owned());
+    let session_reuse_summary = if explanation.once_only {
+        "none (this question takes one-time answers only)".to_owned()
+    } else {
+        session_approval_reuse_pattern(action).unwrap_or_else(|| "exact action only".to_owned())
+    };
+    let why = explanation
+        .why
+        .as_ref()
+        .map(|why| format!("Why: {why}\n"))
+        .unwrap_or_default();
+    let replies = if explanation.once_only {
+        "Reply with `1` or `approve` to run it once, or `2` or `deny` to cancel."
+    } else {
+        "Reply with `1` or `approve` to run it once, `2` or `deny` to cancel once, `3` or `approve_session` to approve matching actions in this session, `4` or `approve_project` to approve matching actions in this project, `5` or `deny_session` to deny matching actions in this session, or `6` or `deny_project` to deny matching actions in this project."
+    };
     RuntimeInterrupt::PermissionApproval {
         approval_request_id: approval_request_id.clone(),
         approval_request: Box::new(approval_request),
         tool_call: call,
         question: format!(
-            "Permission approval required before running tool `{}`.\n\nRisk: {}\nTarget: {}\nScope: {}\nReusable pattern: {}\nExpires at (unix ms): {}\nArguments: `{}`\n\nReply with `1` or `approve` to run it once, `2` or `deny` to cancel once, `3` or `approve_session` to approve matching actions in this session, `4` or `approve_project` to approve matching actions in this project, `5` or `deny_session` to deny matching actions in this session, or `6` or `deny_project` to deny matching actions in this project.\n\nApproval id: `{}`",
+            "Permission approval required before running tool `{}`.\n\nRisk: {}\n{}Target: {}\nScope: {}\nReusable pattern: {}\nExpires at (unix ms): {}\nArguments: `{}`\n\n{}\n\nApproval id: `{}`",
             action.tool_name,
             risk_summary,
+            why,
             target_summary,
             action.session_id,
             session_reuse_summary,
             expires_at_unix_ms,
             arguments,
+            replies,
             approval_request_id
         ),
         options: options
@@ -1022,29 +1223,28 @@ fn approval_target_summary(action: &PermissionedAction) -> String {
         .join(", ")
 }
 
-fn permission_approval_for_action(
+/// The session approval that matches the action, with its command pattern
+/// when it was stored as one.
+fn session_approval_for_action(
     action: &PermissionedAction,
     context: &ToolExecutionContext,
-) -> Option<ApprovalCorrelation> {
-    if let Some(entry) = &context.permission_approval_cache {
-        return Some(approval_cache_correlation(entry, action));
-    }
-    for entry in &context.permission_session_approval_cache {
-        let Some(session_key) = context.session_key.as_deref() else {
-            continue;
-        };
-        if entry.session_key != session_key {
-            continue;
-        }
-        if entry.approval.decision.decision != ApprovalDecisionKind::ApprovedForSession {
-            continue;
-        }
-        let correlation = session_approval_cache_correlation(entry, action);
-        if let Some(correlation) = correlation {
-            return Some(correlation);
-        }
-    }
-    None
+) -> Option<(ApprovalCorrelation, Option<String>)> {
+    let session_key = context.session_key.as_deref()?;
+    context
+        .permission_session_approval_cache
+        .iter()
+        .filter(|entry| {
+            entry.session_key == session_key
+                && entry.approval.decision.decision == ApprovalDecisionKind::ApprovedForSession
+        })
+        .find_map(|entry| {
+            let correlation = session_approval_cache_correlation(entry, action)?;
+            let pattern = match &entry.reuse_match {
+                SessionApprovalReuseMatch::ExecCommandPattern { pattern } => Some(pattern.clone()),
+                SessionApprovalReuseMatch::ExactAction => None,
+            };
+            Some((correlation, pattern))
+        })
 }
 
 fn session_approval_cache_correlation(
@@ -1337,12 +1537,12 @@ fn execute_one_tool(
     }
 }
 
-pub(super) fn process_gate_input_for_action(
+fn process_envelope_for_action(
     registry: &ToolRegistry,
     action: &PermissionedAction,
-    evaluation: PermissionEvaluation,
-) -> Result<ProcessGateInput, String> {
-    let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
+    rule_input: &PermissionRuleInput,
+) -> Result<ProcessExecutionEnvelope, String> {
+    ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
         identity: ProcessIdentity::new(
             format!("tool:{}", action.action_id),
             action.session_id.clone(),
@@ -1352,7 +1552,7 @@ pub(super) fn process_gate_input_for_action(
         action: action.clone(),
         required_secret_ref_count: 0,
         redacted_command: ProcessRedactedCommand {
-            command_family: process_command_family(&evaluation.rule_input),
+            command_family: process_command_family(rule_input),
             redacted_summary: format!("{} process execution", action.tool_name),
             redacted_targets: action
                 .target_refs
@@ -1361,7 +1561,15 @@ pub(super) fn process_gate_input_for_action(
                 .collect(),
         },
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())
+}
+
+pub(super) fn process_gate_input_for_action(
+    registry: &ToolRegistry,
+    action: &PermissionedAction,
+    evaluation: PermissionEvaluation,
+) -> Result<ProcessGateInput, String> {
+    let envelope = process_envelope_for_action(registry, action, &evaluation.rule_input)?;
     let now_unix_ms = now_unix_ms();
     let containment_proof = containment_permission_proof_for_process_gate(
         &envelope,
@@ -1380,6 +1588,7 @@ pub(super) fn process_gate_input_for_action(
         interactive: evaluation.interactive,
         terminal_precondition: ProcessGateTerminalPrecondition::Ready,
         now_unix_ms,
+        policy_materials: evaluation.policy_materials,
     })
 }
 

@@ -2685,6 +2685,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         permission_session_remembered_rules: Vec::new(),
         project_permission_store: None,
         active_workspace: None,
+        permission_environment: None,
         in_cron_context: false,
         record_channel_delivery: true,
         cancellation_token: None,

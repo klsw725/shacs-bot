@@ -102,5 +102,7 @@ pub mod spec047_memory_index;
 pub mod spec047_memory_search;
 #[path = "spec047_model_files.rs"]
 pub mod spec047_model_files;
+#[path = "spec048_auto_mode.rs"]
+pub mod spec048_auto_mode;
 #[path = "token_estimator_consistency.rs"]
 pub mod token_estimator_consistency;

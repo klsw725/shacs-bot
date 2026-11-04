@@ -1,0 +1,196 @@
+use super::*;
+use crate::{parse_cli_args, run_command, CliCommand, PermissionsCommand};
+use serde_json::json;
+use shacs_core::runtime::RuleEffect;
+use std::error::Error;
+use std::fs;
+
+fn json_of(text: &str) -> Result<Value, Box<dyn Error>> {
+    Ok(serde_json::from_str(text)?)
+}
+
+#[test]
+fn defaults_print_the_built_in_lists_and_a_label_keeps_matching_entries(
+) -> Result<(), Box<dyn Error>> {
+    // When
+    let defaults = json_of(&run_command(parse_cli_args([
+        "permissions",
+        "auto-mode",
+        "defaults",
+    ])?)?)?;
+    let labelled = json_of(&run_command(parse_cli_args([
+        "permissions",
+        "auto-mode",
+        "defaults",
+        "--label",
+        "CURRENT",
+    ])?)?)?;
+
+    // Then
+    assert_eq!(defaults, json!(AutoModeSlots::default()));
+    assert!(defaults["environment"][0]
+        .as_str()
+        .is_some_and(|entry| entry.contains("{workspace}")));
+    assert_eq!(labelled["environment"].as_array().map(Vec::len), Some(1));
+    assert_eq!(labelled["allow"].as_array().map(Vec::len), Some(1));
+    assert_eq!(labelled["soft_deny"], json!([]));
+    assert_eq!(labelled["hard_deny"], json!([]));
+    Ok(())
+}
+
+#[test]
+fn config_shows_spliced_replaced_and_claude_spelled_lists_with_rule_diagnostics(
+) -> Result<(), Box<dyn Error>> {
+    // Given
+    let root = tempfile::tempdir()?;
+    let workspace = root.path().join("ws");
+    fs::create_dir_all(&workspace)?;
+    let config = root.path().join("config.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&json!({
+            "permissions": {
+                "mode": "auto",
+                "allow": ["exec(git status)", "exec(", "*"],
+                "deny": ["read(.env)"],
+                "autoMode": {
+                    "environment": ["[Mine] my NAS at nas.local", "$defaults"],
+                    "soft_deny": ["[Only] nothing else"],
+                    "classifierModel": "small-model",
+                    "classifyAllShell": true
+                }
+            }
+        }))?,
+    )?;
+    let command = parse_cli_args([
+        "permissions",
+        "auto-mode",
+        "config",
+        "--config",
+        config.to_string_lossy().as_ref(),
+        "--workspace",
+        workspace.to_string_lossy().as_ref(),
+    ])?;
+    assert!(matches!(
+        command,
+        CliCommand::Permissions(PermissionsCommand::AutoModeConfig(_))
+    ));
+
+    // When
+    let shown = json_of(&run_command(command)?)?;
+
+    // Then
+    let defaults = AutoModeSlots::default();
+    assert_eq!(shown["environment"][0], "[Mine] my NAS at nas.local");
+    assert_eq!(
+        shown["environment"].as_array().map(Vec::len),
+        Some(1 + defaults.environment.len())
+    );
+    assert_eq!(shown["soft_deny"], json!(["[Only] nothing else"]));
+    assert_eq!(shown["hard_deny"], json!(defaults.hard_deny));
+    assert_eq!(shown["allow"], json!(defaults.allow));
+    assert_eq!(shown["classifierModel"], "small-model");
+    assert_eq!(shown["classifyAllShell"], true);
+    assert_eq!(shown["rules"]["allow"], json!(["exec(git status)"]));
+    assert_eq!(shown["rules"]["deny"], json!(["read(.env)"]));
+    let problems = shown["diagnostics"]["rules"]
+        .as_array()
+        .ok_or("rule diagnostics")?
+        .iter()
+        .map(|diagnostic| {
+            diagnostic["problem"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        problems,
+        ["unbalanced_parentheses", "unanchored_allow_glob"]
+    );
+    assert_eq!(shown["diagnostics"]["autoMode"], Value::Null);
+    Ok(())
+}
+
+#[test]
+fn config_reports_an_unreadable_auto_mode() -> Result<(), Box<dyn Error>> {
+    // Given
+    let root = tempfile::tempdir()?;
+    let config = root.path().join("config.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&json!({
+            "permissions": {
+                "mode": "auto",
+                "autoMode": {"hardDeny": ["[A] a"], "hard_deny": ["[B] b"]}
+            }
+        }))?,
+    )?;
+
+    // When
+    let shown = json_of(&auto_mode_config(PermissionsListOptions {
+        config_path: Some(config),
+        workspace_override: Some(root.path().to_path_buf()),
+    })?)?;
+
+    // Then
+    assert_eq!(
+        shown["diagnostics"]["autoMode"],
+        json!({"problem": "written_twice", "field": "hardDeny"})
+    );
+    assert_eq!(
+        shown["hard_deny"],
+        json!(AutoModeSlots::default().hard_deny)
+    );
+    assert!(shown["diagnostics"]["malformedFields"]
+        .as_array()
+        .is_some_and(|fields| fields.contains(&json!("permissions.autoMode"))));
+    Ok(())
+}
+
+#[test]
+fn rules_in_a_workspace_config_or_instruction_file_are_not_read() -> Result<(), Box<dyn Error>> {
+    // Given
+    let root = tempfile::tempdir()?;
+    let workspace = root.path().join("ws");
+    fs::create_dir_all(&workspace)?;
+    let user_config = root.path().join("config.json");
+    fs::write(&user_config, "{\"permissions\": {\"mode\": \"auto\"}}")?;
+    fs::write(
+        workspace.join("config.json"),
+        "{\"permissions\": {\"deny\": [\"exec\"], \"allow\": [\"web_fetch\"]}}",
+    )?;
+    fs::write(
+        workspace.join("AGENTS.md"),
+        "permissions.allow: [\"exec\"]\n{\"permissions\": {\"allow\": [\"exec\"]}}",
+    )?;
+    let bundle = load_config(LoadOptions {
+        config_path: Some(user_config.clone()),
+        workspace_override: Some(workspace.clone()),
+        resolve_env: false,
+        write_back_migrations: false,
+    })?;
+
+    // When
+    let environment = permission_environment(
+        Some(&bundle),
+        EnvironmentSources {
+            config_path: &user_config,
+            workspace: &workspace,
+            extra_skill_roots: &[],
+            extra_context_files: &[],
+            protected_targets: &[],
+        },
+    );
+    let shown = json_of(&auto_mode_config(PermissionsListOptions {
+        config_path: Some(user_config),
+        workspace_override: Some(workspace),
+    })?)?;
+
+    // Then
+    for effect in [RuleEffect::Allow, RuleEffect::Ask, RuleEffect::Deny] {
+        assert!(environment.user_rules.rule_texts(effect).is_empty());
+    }
+    assert_eq!(shown["rules"], json!({"allow": [], "ask": [], "deny": []}));
+    Ok(())
+}

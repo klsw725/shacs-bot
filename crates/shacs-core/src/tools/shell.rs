@@ -166,6 +166,16 @@ impl Tool for ExecTool {
         true
     }
 
+    fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
+        let command = params.get("command").and_then(Value::as_str)?;
+        let working_dir = params.get("working_dir").and_then(Value::as_str);
+        let refusal = match self.resolve_working_dir(working_dir) {
+            Ok(cwd) => self.guard_command(command, &cwd),
+            Err(error) => Some(error),
+        };
+        refusal.map(|error| format!("Error executing command: {error}"))
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult {
         self.execute_with_context(params, &ToolCallExecutionContext::default())
     }

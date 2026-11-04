@@ -26,7 +26,8 @@ pub(super) fn tool_call_execution_context(
     } else {
         ToolCallExecutionContext::default()
     }
-    .with_provider_invocation(provider_invocation);
+    .with_provider_invocation(provider_invocation)
+    .with_hidden_paths(context.permission_environment.clone());
     match (
         action.capabilities.contains(&SafetyCapability::ProcExec),
         context.cancellation_token.as_ref(),

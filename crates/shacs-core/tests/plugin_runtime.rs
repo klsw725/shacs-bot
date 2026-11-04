@@ -1686,6 +1686,7 @@ fn plugin_process_gate_input(
         interactive: false,
         terminal_precondition: ProcessGateTerminalPrecondition::Ready,
         now_unix_ms: 1,
+        policy_materials: shacs_core::runtime::ProcessGatePolicyMaterials::default(),
     }
 }
 

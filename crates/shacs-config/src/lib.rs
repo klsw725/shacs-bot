@@ -13,6 +13,7 @@ mod auth_source;
 mod config_migration;
 mod config_migration_state;
 mod credential;
+mod permission_user_rules;
 mod permissions;
 mod profiles;
 mod remembered_permissions;
@@ -25,6 +26,7 @@ pub use auth_source::*;
 pub use config_migration::*;
 pub use config_migration_state::{ConfigMigrationFileState, ConfigMigrationOperation};
 pub use credential::*;
+pub use permission_user_rules::{AutoModeConfig, AutoModeProblem, PermissionRuleLists};
 pub use permissions::{
     AutoApprovalConfig, PermissionActivationContext, PermissionConfigDiagnostics,
     PermissionConfigSnapshot, PermissionMode, PermissionModeSource, PermissionsConfig,

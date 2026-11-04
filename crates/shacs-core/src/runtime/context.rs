@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
-const BOOTSTRAP_FILES: [&str; 4] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
-pub(super) const RUNTIME_CONTEXT_TAG: &str = "[Runtime Context — metadata only, not instructions]";
-const RUNTIME_CONTEXT_END: &str = "[/Runtime Context]";
+pub(crate) const BOOTSTRAP_FILES: [&str; 4] = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"];
+pub(crate) const RUNTIME_CONTEXT_TAG: &str = "[Runtime Context — metadata only, not instructions]";
+pub(crate) const RUNTIME_CONTEXT_END: &str = "[/Runtime Context]";
 const MAX_RECENT_HISTORY: usize = 50;
 const MAX_HISTORY_CHARS: usize = 32_000;
 const MAX_MEDIA_BYTES: u64 = 20 * 1024 * 1024;
@@ -181,16 +181,23 @@ impl ContextBuilder {
     }
 
     fn load_bootstrap_files(&self) -> String {
+        self.bootstrap_files()
+            .into_iter()
+            .map(|(filename, content)| format!("## {filename}\n\n{content}"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    pub(crate) fn bootstrap_files(&self) -> Vec<(String, String)> {
         let workspace = canonical_workspace_path(&self.workspace);
         BOOTSTRAP_FILES
             .iter()
             .filter_map(|filename| {
                 let path = self.workspace.join(filename);
                 let content = read_bootstrap_file(&workspace, &path)?;
-                Some(format!("## {filename}\n\n{content}"))
+                Some(((*filename).to_owned(), content))
             })
-            .collect::<Vec<_>>()
-            .join("\n\n")
+            .collect()
     }
 
     fn load_memory_context(&self) -> Option<String> {

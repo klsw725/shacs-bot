@@ -2226,8 +2226,9 @@ while :; do /bin/sleep 30; done\n",
             PermissionModeSnapshot, PermissionRuleInput, PermissionedAction,
             PermissionedActionOrigin, ProcExecSummary, ProcessAdapterKind,
             ProcessContainmentProofCandidate, ProcessExecutionEnvelope,
-            ProcessExecutionEnvelopeInput, ProcessGateTerminalPrecondition, ProcessIdentity,
-            ProcessRedactedCommand, RuntimeBoundaryOrigin, SafetyCapability,
+            ProcessExecutionEnvelopeInput, ProcessGatePolicyMaterials,
+            ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
+            RuntimeBoundaryOrigin, SafetyCapability,
         };
 
         let action = PermissionedAction {
@@ -2319,6 +2320,7 @@ while :; do /bin/sleep 30; done\n",
                 interactive: false,
                 terminal_precondition: ProcessGateTerminalPrecondition::Ready,
                 now_unix_ms: 200,
+                policy_materials: ProcessGatePolicyMaterials::default(),
             },
         }
     }

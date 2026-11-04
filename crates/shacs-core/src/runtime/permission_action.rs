@@ -243,15 +243,7 @@ fn normalize_tool_candidate(
     let secret_ref_evidence =
         secret_ref_evidence_from_arguments(arguments, tool_name, &mut normalization_errors);
     let argument_digest = digest_json(&redacted_arguments);
-    let mut capabilities = infer_capabilities(registry, tool_name);
-    if capabilities.is_empty()
-        && tool_name != "ask_user"
-        && registry.get(tool_name).is_some_and(|tool| tool.read_only())
-    {
-        capabilities.push(SafetyCapability::FsRead);
-    }
-    capabilities.sort_by_key(|capability| capability_label(*capability));
-    capabilities.dedup();
+    let capabilities = tool_capabilities(registry, tool_name);
     let target_refs = target_refs_from_arguments(&redacted_arguments);
     let action_digest = digest_json(&action_digest_material(
         tool_name,
@@ -591,6 +583,19 @@ fn action_id(
         "snapshot_digest": snapshot_digest,
     }));
     format!("action_{}", digest.chars().take(32).collect::<String>())
+}
+
+pub(crate) fn tool_capabilities(registry: &ToolRegistry, tool_name: &str) -> Vec<SafetyCapability> {
+    let mut capabilities = infer_capabilities(registry, tool_name);
+    if capabilities.is_empty()
+        && tool_name != "ask_user"
+        && registry.get(tool_name).is_some_and(|tool| tool.read_only())
+    {
+        capabilities.push(SafetyCapability::FsRead);
+    }
+    capabilities.sort_by_key(|capability| capability_label(*capability));
+    capabilities.dedup();
+    capabilities
 }
 
 fn infer_capabilities(registry: &ToolRegistry, tool_name: &str) -> Vec<SafetyCapability> {

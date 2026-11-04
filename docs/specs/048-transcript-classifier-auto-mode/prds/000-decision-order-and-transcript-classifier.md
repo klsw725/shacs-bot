@@ -1,6 +1,6 @@
 # PRD 000. 판정 순서와 transcript classifier
 
-Status: Planned
+Status: Implemented, closure blocked
 
 Depends on: 없음. 뒤 번호 PRD에 의존하지 않는다.
 
@@ -149,6 +149,7 @@ auto mode의 action을 사용자 규칙 → 바로 허용 → 사용자에게 �
    - `Tool` trait에 실행 전 거절 이유를 돌려주는 확인(이름 예: `preflight_refusal`)을 더한다. 기본은 거절 없음이다. 실행 때와 같은 함수를 부르고 파일과 process를 바꾸지 않는다.
      - file tool(`read_file`, `list_dir`, `glob`, `grep`, `write_file`, `edit_file`, `notebook_edit`): `resolve_path`·`resolve_creatable_path`와 같은 범위 검사. 그 run의 `PathContext`가 허용하는 폴더(`allowed_dir`, `media_dir`, `extra_allowed_dirs`) 밖과 learned-method store를 거절한다. production tool registry(`production_tool_registry`)는 workspace와 media 폴더를 허용하고, `allowed_dir`가 없는 run(workspace 제한을 끈 subagent)은 범위 제한이 없다.
      - `exec`: `resolve_working_dir`와 `guard_command`. 010의 deny pattern(기본은 `rm -r`·`rm -f`·`dd if=`·`shutdown` 등), allow pattern, 내부·사설 주소, workspace guard(`restrictToWorkspace`가 켜졌거나 sandbox가 없으면 `../`와 workspace·media 폴더 밖의 절대 경로·`~` 경로를 막는다)가 막는 명령을 거절한다.
+   - process gate를 지나는 호출(`exec`와 process adapter가 있는 tool)은 030의 격리 증명(`containment_permission_proof_for_process_gate`)이 `Admit`가 아니면 실행 전에 거절할 호출로 본다. 지금 공식 container 밖(격리를 확인할 수 없는 native 실행)에서는 이 증명이 `AskRequired`라 gate가 process를 시작하지 않는다. 증명은 tool 실행 판정이 gate 입력을 만들 때와 같은 재료로 계산하고, 이유는 tool이 낼 `Error: Process launch blocked by permission gate (Denied)`다.
    - runner와 tool 실행 판정이 이 이유를 재료로 받는다. deferred bridge 호출은 실제 tool로 확인한다. 거절 이유는 tool이 낼 글 그대로다.
    - Claude Code의 "workspace 밖 첫 읽기" 질문과 network 경로 질문은 두지 않는다. file tool의 범위(004)와 `exec` 안전 장치(010)는 바꾸지 않는다.
 10. **runner의 classifier 단계:** auto mode에서 직접 호출과 deferred bridge 호출(`tool_context_with_classifier_verdict`, `tool_context_with_resolved_bridge_classifier_verdict`를 대신한다)마다 판정을 classifier 없이 먼저 계산한다. 결과가 16번이면 classifier를 부르고 그 판정을 `ToolExecutionContext.permission_evaluator`에 넣어 실행 판정이 쓰게 한다. 그 밖의 결과면 classifier를 부르지 않는다.
@@ -297,13 +298,13 @@ auto mode의 action을 사용자 규칙 → 바로 허용 → 사용자에게 �
 
 ## Acceptance Criteria
 
-1. auto mode 판정 시험이 아래 표와 같다. "묻기"는 대화형이면 승인 질문, 비대화형이면 거절이다. "classifier"는 classifier가 허용하면 실행하고, 막거나 판정이 없으면 묻는다. 각 칸을 대화형·비대화형, 직접·deferred 호출로 확인한다.
+1. auto mode 판정 시험이 아래 표와 같다. "묻기"는 대화형이면 승인 질문, 비대화형이면 거절이다. "classifier"는 classifier가 허용하면 실행하고, 막거나 판정이 없으면 묻는다. 각 칸을 대화형·비대화형으로, 직접 호출로 확인한다. deferred 호출은 Tool Search가 미루는 MCP·plugin tool에만 있으므로(`tools/tool_search.rs`의 `is_deferrable`) 그 줄을 deferred 호출로도 확인한다. process adapter가 있는 plugin tool은 격리 증명이 없는 설정의 거절과, 승인한 deferred 호출의 실행도 확인한다.
 
    | action | 규칙 없음 | 좁은 allow | 넓은 allow | ask | deny |
    |---|---|---|---|---|---|
    | workspace 안 읽기 | 실행 | 실행 | 해당 없음 | 묻기 | 거절 |
    | media 폴더(첨부) 읽기 | 실행 | 실행 | 해당 없음 | 묻기 | 거절 |
-   | tool이 실행 전에 거절할 호출(file tool의 범위 밖 대상, `rm -rf build`, sandbox 없이 workspace 밖 절대 경로를 적은 명령) | 거절 | 거절 | 거절 | 거절 | 거절 |
+   | tool이 실행 전에 거절할 호출(file tool의 범위 밖 대상, `rm -rf build`, sandbox 없이 workspace 밖 절대 경로를 적은 명령, 격리 증명이 없는 Docker 밖 명령) | 거절 | 거절 | 거절 | 거절 | 거절 |
    | workspace 안 쓰기 | 실행 | 실행 | 해당 없음 | 묻기 | 거절 |
    | 보호 경로 쓰기 | classifier | classifier | 해당 없음 | 묻기 | 거절 |
    | canonical 경로만 보호 경로인 명령 쓰기 | 묻기 | 묻기 | 묻기 | 묻기 | 거절 |
@@ -312,7 +313,7 @@ auto mode의 action을 사용자 규칙 → 바로 허용 → 사용자에게 �
    | 비밀 파일 읽기 | 묻기 | 묻기 | 해당 없음 | 묻기 | 거절 |
    | 비밀 파일 쓰기 | 거절 | 거절 | 해당 없음 | 거절 | 거절 |
    | critical path 제거 | 묻기 | 묻기 | 묻기 | 묻기 | 거절 |
-   | 요약할 수 있는·없는 명령(Docker 안팎) | classifier | 실행 | classifier | 묻기 | 거절 |
+   | Docker 안의 요약할 수 있는·없는 명령 | classifier | 실행 | classifier | 묻기 | 거절 |
    | 웹 가져오기·검색 | classifier | 실행 | 해당 없음 | 묻기 | 거절 |
    | MCP tool | classifier | 실행 | 해당 없음 | 묻기 | 거절 |
    | 하위 작업(`spawn`) | classifier | classifier | 해당 없음 | 묻기 | 거절 |
@@ -324,7 +325,7 @@ auto mode의 action을 사용자 규칙 → 바로 허용 → 사용자에게 �
    - classifier 칸은 가짜 provider로 허용·막음·판정 없음(오류, 시간 초과, 읽을 수 없는 답) 셋을 확인한다.
    - "좁은 allow"는 그 action에 맞는 범위 4의 규칙이다. 기억된 허용(세션·프로젝트)과 세션 승인 cache도 같은 결과다. 명령 쓰기와 리디렉션 줄의 "좁은 allow"는 명령에만 맞는 allow 규칙이다.
    - 비밀 파일 읽기 줄은 workspace를 data 폴더로 둔 설정의 file tool과, `exec` 안전 장치가 막지 않는 `cat` 같은 명령으로 확인한다.
-   - 명령 쓰기·리디렉션·critical path 줄은 `exec` 안전 장치가 그 명령을 막지 않는 꼴(상대 경로, `rm --recursive --force`, `rmdir`)이나, deny pattern을 비우고 sandbox를 둔 가짜 exec 설정으로 확인한다.
+   - 명령 줄은 격리 증명이 `Admit`인 설정(공식 container와 같은 containment snapshot)에서 확인한다. 명령 쓰기·리디렉션·critical path 줄은 `exec` 안전 장치가 그 명령을 막지 않는 꼴(상대 경로, `rm --recursive --force`, `rmdir`)이나, deny pattern을 비우고 sandbox를 둔 가짜 exec 설정으로 확인한다.
    - `allowWorkspaceEdits`가 거짓이면 workspace 안 쓰기는 classifier다.
    - auto mode의 옛 기대를 담은 기존 시험은 이 표에 맞게 고치고, 고친 시험과 까닭을 기록한다.
 2. 다른 mode 시험: 여섯 mode × (비밀 파일 읽기·쓰기, critical path 제거, 설정 deny·ask, 기억된 거절) × 대화형 여부가 범위 3과 같다. `bypass_permissions`에서도 deny와 ask, 비밀 파일, critical path가 걸리고 allow는 의미가 없다. `dont_ask`에서는 묻기가 거절이다. 그 밖의 기존 판정 시험은 그대로 통과한다.
@@ -347,7 +348,7 @@ auto mode의 action을 사용자 규칙 → 바로 허용 → 사용자에게 �
 7. 비밀 파일 시험: 여섯 mode에서 `read_file`·그 파일을 `path`로 준 `grep`·`cat`·`<` 리디렉션·`cd <data 폴더> && cat auth.json`·here-doc 본문과 `python3 -c` 코드 안의 이름이 묻기가 되고, 질문에 답이 둘뿐이며, 승인하면 그 호출만 실행되고 다음 읽기는 다시 묻는다. 거절하면 읽지 않는다. `write_file`·`edit_file`·`>`·`tee`·`rm`·`mv`는 거절된다. `list_dir`·`glob`·`grep`으로 data 폴더를 훑으면 결과에 없고 내용도 읽지 않는다. symlink와 hard link(file tool과 `cat` 모두)도 같다. file tool 시험은 workspace를 data 폴더로 둔 설정에서 하고, `bypass_permissions`에서도 같다.
 8. 보호 경로 시험: auto mode에서 범위 7의 각 종류(plugin root 포함)를 쓰는 action이 allow 규칙이 있어도 classifier로 간다. canonical 경로만 보호 경로인 `exec` 리디렉션은 묻는다. 보호 경로가 아닌 workspace 쓰기는 classifier를 부르지 않는다.
 9. critical path 시험: deny pattern을 비우고 sandbox를 둔 가짜 exec 설정의 여섯 mode에서 범위 8의 대상마다 `rm -r --force <대상>`·`rmdir <대상>`, 대상 폴더 바로 아래 glob, `logs/*/*`, mounted drive 모양, 변수(`"$DIR"/*`, `"$TMPDIR/mnt"`), 대상을 풀 수 없는 `cd` 뒤의 상대 경로, `bash -c 'rm -rf ~'`, `rm`이 든 분석할 수 없는 명령이 답이 둘인 질문이 되고(비대화형·`dont_ask`는 거절), classifier를 부르지 않으며, allow 규칙으로 넘어가지 않는다. 승인하면 그 명령이 가짜 process까지 간다. `sh -c 'rm -rf "$1"/*' _ build`처럼 값이 있는 위치 매개변수와 `rm -f "$OUT/report.txt"`는 critical path가 아니다. 기본 exec 설정에서는 `rm --recursive --force <workspace>`가 질문이 되고, `rm -rf <workspace>`와 `rm -r ~`에는 critical path 질문이 나오지 않는다(auto mode는 5번으로 거절하고, 다른 mode는 022 판정 뒤 tool이 거절한다).
-10. 실행 전 거절 시험: auto mode에서 file tool의 범위 밖을 가리키는 `read_file`·`list_dir`·`grep`·`write_file`과, 기본 exec 설정에서 `exec` 안전 장치가 막는 명령(`rm -rf build`, workspace 밖 절대 경로, `../`)이 승인 질문과 classifier 없이 거절되고, 이유가 tool이 낼 글과 같다. media 폴더의 첨부 읽기는 묻지 않고 실행된다. `allowed_dir`가 없는 tool registry의 run에서는 밖 읽기가 14번으로 허용되고, sandbox가 있는 exec 설정에서는 workspace 밖 경로를 적은 명령이 classifier로 간다. 다른 mode에서는 이런 호출에 비밀 파일·critical path 질문이 나오지 않는다.
+10. 실행 전 거절 시험: auto mode에서 file tool의 범위 밖을 가리키는 `read_file`·`list_dir`·`grep`·`write_file`, 기본 exec 설정에서 `exec` 안전 장치가 막는 명령(`rm -rf build`, workspace 밖 절대 경로, `../`), 격리 증명이 `Admit`가 아닌 설정(native)의 `exec`가 승인 질문과 classifier 없이 거절되고, 이유가 tool이 낼 글과 같다. media 폴더의 첨부 읽기는 묻지 않고 실행된다. `allowed_dir`가 없는 tool registry의 run에서는 밖 읽기가 14번으로 허용되고, sandbox가 있는 exec 설정에서는 workspace 밖 경로를 적은 명령이 classifier로 간다. 다른 mode에서는 이런 호출에 비밀 파일·critical path 질문이 나오지 않는다.
 11. CLI 시험: `permissions auto-mode defaults`가 기본값과 같고 `--label`이 맞는 항목만 보이며, `config`가 `$defaults` 끼워 넣기, 바꾼 목록, Claude Code 표기의 목록, 쓰지 않은 규칙의 진단을 보인다.
 12. fmt, workspace clippy `-D warnings`, 변경한 package 테스트가 통과한다.
 
@@ -359,3 +360,33 @@ auto mode의 action을 사용자 규칙 → 바로 허용 → 사용자에게 �
 4. Cargo 검증 기록.
 
 PRD 000은 PRD 010–050 없이 닫힌다.
+
+## 구현 메모 및 검증 근거 (2026-11-04)
+
+- 구현:
+  - `crates/shacs-core/src/runtime/auto_mode/`: 규칙 문법과 match(`permission_rule`, `exec_pattern`, `path_pattern`, `host_pattern`, `rule_match`), 명령 분석(`shell_token`, `shell_command`, `shell_paths`), 비밀 파일(`secret_file`), 보호 경로(`protected_path`), critical path(`critical_path`), 판정 재료(`permission_materials`, `action_materials`), 판정 순서(`auto_decision`), 질문의 `Why:`(`approval_why`), classifier(`classifier_slots`, `classifier_request`, `classifier_stage`, `classifier_review`).
+  - 판정 연결: `permission_policy.rs`, `tool_execution.rs`(실행 전 거절은 tool이 낼 글 그대로), `process_gate.rs`(같은 재료), `tool_search.rs`(bridge 판정의 평가로 실행), runner의 16번 classifier 단계, agent loop의 turn별 classifier 준비와 한 번 승인·거절 질문.
+  - tool: 실행 전 거절 확인, `list_dir`·`glob`·`grep` 훑기 걸러내기.
+  - config·CLI: `permissions.allow|ask|deny`, `permissions.autoMode`(저장 때 원문 유지), `permissions auto-mode defaults [--label]`·`config`, 시작 때 진단 한 줄.
+  - 문서: `docs/USAGE.md` "auto mode와 사용자 권한 규칙", `README.md` 권한 문단.
+- 계획 밖에서 고친 것:
+  - deferred bridge 실행이 `bypass_permissions`와 꾸민 격리 정보로 한 번 더 판정하던 것을 없애고, bridge 판정의 평가로 실행한다. 상속 한도가 있으면 허용된 deferred 호출이 모두 거절되던 결함과, native에서 꾸민 격리 증명으로 process가 시작될 수 있던 위험이 함께 없어졌다. 동시 실행은 tool의 `concurrency_safe`로 나눈다.
+  - 승인한 호출의 실행에 permission environment를 다시 붙인다(세션에 저장한 문맥에는 남지 않는다).
+  - web watch session export가 저장한 질문 글의 URL query도 가린다.
+- 시험:
+  - `tests/it/spec048_auto_mode/` 통합 시험 36개: 판정 표(직접 호출, 대화형·비대화형, classifier 허용·막음·판정 없음), deferred 호출(MCP·plugin), 다른 mode, process gate, classifier 요청·단계·deadline·model, agent loop 흐름(유튜브 요약, 막힌 업로드, 한 번 승인·거절 질문, 승인한 deferred 호출), 비밀 파일(여섯 mode, link, 다시 저장한 뒤의 hard link, 훑기), 보호 경로, critical path, 실행 전 거절.
+  - 단위 시험: auto_mode 58개, `shacs-config` `permission_user_rules_tests.rs`, `shacs-cli` `auto_mode_cli_tests.rs`.
+- 고친 기존 시험과 까닭:
+  - 필드 추가만(동작 같음): `tests/permission_policy.rs`, `tests/spec030_classifier_baseline.rs`, `tests/runtime.rs`, `tests/runtime_loop.rs`, `tests/tools.rs`, `tests/it/process_gate.rs`, `tests/it/containment_process_gate.rs`, `tests/plugin_runtime.rs`, `tests/spec030_diagnostics_aggregate/fixtures.rs`, `src/tools/mcp.rs`와 `shacs-cli` 시험의 gate 입력.
+  - `shacs-cli` `direct_message_asks_before_auto_mode_protected_target_action`: 보호 경로 쓰기는 표대로 classifier로 가므로, classifier 요청과 `Why: Auto mode could not check this action`을 확인한다.
+  - `shacs-cli` `surface_approval_fixture`: 격리 증명이 없는 `exec`를 auto mode가 5번으로 거절하므로, 승인 표면을 시험하는 이 fixture는 `default` mode를 쓴다.
+  - `shacs-cli` `public_adapter_approval_reuses_stored_scope_and_ceiling_for_real_exec`: 메모리에서만 정한 `default` mode를 config에 저장해 이름대로 `default`로 돈다.
+- 남은 제한:
+  - 판정 재료는 022처럼 redaction한 인자로 만든다. redaction이 지우는 절대 경로(`auth`·`token` 등이 든 것)는 2번에서 모든 mode에서 거절되므로, 절대 경로로 비밀 파일을 읽으면 묻지 않고 거절한다.
+  - native Mac 실행에서는 격리 증명이 없어 auto mode의 `exec`가 시작되지 않는다(030의 gate 동작).
+  - 새 module 6개가 250줄 지침을 넘는다.
+- classifier 요청의 redaction한 예: 로컬 `.omo/evidence/spec048/classifier-request-sample.txt`(추적하지 않음).
+- Cargo 검증: Google 옵션을 붙인 `cargo fmt --all -- --check`, workspace `cargo clippy --all-targets -- -D warnings` 통과. `shacs-core` lib 447 passed, 통합 시험은 `spec034_release_runner` 6개 중 5개(`InvalidConfig`)를 빼고 통과했다. 이 5개는 HEAD를 저장소 밖에 clone한 사본에서도 실패하며, 046·047 종료 기록의 이 checkout 조건과 같다. `shacs-config`, `shacs-cli` package 시험 통과.
+- Oracle 독립 검토: 구현 1차(hard link inode 목록, deferred 시험), 2차(bridge handoff의 꾸민 격리와 훑기 걸러내기), 3차(bridge 동시 실행) BLOCKED 뒤 4차 **PASS**. 기록은 로컬 `.omo/evidence/spec048/plan-review.md`와 `implementation.md`.
+- 종료를 막는 것: 전체 workspace 시험과 034 runner의 사본 실행은 사용자 승인을 받아 돌린다.
+

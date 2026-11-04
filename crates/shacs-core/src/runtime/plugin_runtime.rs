@@ -804,6 +804,7 @@ fn plugin_process_gate_input(
         interactive: false,
         terminal_precondition: options.terminal_precondition,
         now_unix_ms,
+        policy_materials: crate::runtime::ProcessGatePolicyMaterials::default(),
     }
 }
 

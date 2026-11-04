@@ -2152,6 +2152,7 @@ fn exec_process_gate_input(
         interactive: false,
         terminal_precondition: precondition,
         now_unix_ms: 200,
+        policy_materials: shacs_core::runtime::ProcessGatePolicyMaterials::default(),
     })
 }
 
@@ -4052,6 +4053,7 @@ fn mcp_startup_gate(server_name: &str, command_family: &str) -> McpStartupGate {
             interactive: false,
             terminal_precondition: ProcessGateTerminalPrecondition::Ready,
             now_unix_ms: 200,
+            policy_materials: shacs_core::runtime::ProcessGatePolicyMaterials::default(),
         },
     }
 }

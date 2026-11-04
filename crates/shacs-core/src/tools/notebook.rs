@@ -82,6 +82,21 @@ impl Tool for NotebookEditTool {
             .to_json_schema()
     }
 
+    fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
+        let path = params.get("path").and_then(Value::as_str)?;
+        let candidate = raw_candidate_path(path, &self.context);
+        let checked = reject_existing_symlink_components(&candidate).and_then(|()| {
+            if candidate.exists() {
+                resolve_path(path, &self.context)
+            } else {
+                resolve_creatable_path(path, &self.context)
+            }
+        });
+        checked
+            .err()
+            .map(|error| format!("Error editing notebook: {error}"))
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult {
         let path = params
             .get("path")

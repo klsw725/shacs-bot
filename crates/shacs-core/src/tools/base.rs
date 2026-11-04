@@ -1,7 +1,9 @@
 use crate::controlled_child::ControlledChildAbort;
-use crate::runtime::{ProcessAdapterKind, ProcessGateInput};
+use crate::runtime::{PermissionEnvironment, ProcessAdapterKind, ProcessGateInput};
 use serde_json::{json, Map, Value};
 use shacs_providers::ProviderInvocation;
+use std::path::Path;
+use std::sync::Arc;
 
 mod casting;
 mod validation;
@@ -84,6 +86,7 @@ pub struct ToolCallExecutionContext {
     pub(crate) process_gate_input: Option<ProcessGateInput>,
     pub(crate) process_abort: Option<ControlledChildAbort>,
     provider_invocation: Option<ProviderInvocation>,
+    hidden_paths: Option<Arc<PermissionEnvironment>>,
 }
 
 impl ToolCallExecutionContext {
@@ -92,7 +95,21 @@ impl ToolCallExecutionContext {
             process_gate_input,
             process_abort: None,
             provider_invocation: None,
+            hidden_paths: None,
         }
+    }
+
+    pub fn with_hidden_paths(mut self, environment: Option<Arc<PermissionEnvironment>>) -> Self {
+        self.hidden_paths = environment;
+        self
+    }
+
+    /// Whether a folder scan must leave `path` out (Spec 048 PRD 000 scopes
+    /// 4 and 5).
+    pub fn hides(&self, path: &Path) -> bool {
+        self.hidden_paths
+            .as_ref()
+            .is_some_and(|environment| environment.hidden_from_scans(path))
     }
 
     pub fn with_process_abort(mut self, process_abort: ControlledChildAbort) -> Self {
@@ -107,6 +124,10 @@ impl ToolCallExecutionContext {
 
     pub fn provider_invocation(&self) -> Option<&ProviderInvocation> {
         self.provider_invocation.as_ref()
+    }
+
+    pub fn process_gate_input(&self) -> Option<&ProcessGateInput> {
+        self.process_gate_input.as_ref()
     }
 }
 
@@ -143,6 +164,13 @@ pub trait Tool: Send + Sync {
     }
 
     fn process_adapter_kind(&self) -> Option<ProcessAdapterKind> {
+        None
+    }
+
+    /// Why `execute` would refuse these arguments before acting, found with
+    /// the checks `execute` runs and without touching files or processes.
+    /// The permission decision refuses such calls without asking (Spec 048).
+    fn preflight_refusal(&self, _params: &JsonMap) -> Option<String> {
         None
     }
 

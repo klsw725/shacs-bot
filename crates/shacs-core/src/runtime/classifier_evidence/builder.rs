@@ -7,8 +7,8 @@ use super::types::{
     ClassifierDecisionEvidence, ClassifierDisposition, ClassifierEvidenceId,
     ClassifierEvidenceSchemaId, ClassifierFallbackCause, ClassifierFallbackEvidence,
     ClassifierLatencyAccounting, ClassifierModelEvidence, ClassifierRequestCorrelation,
-    ClassifierRouteEvidence, ClassifierRouteKind, ClassifierVerdictEvidence,
-    StaticPolicyPrecedence,
+    ClassifierRouteEvidence, ClassifierRouteKind, ClassifierStageEvidence,
+    ClassifierVerdictEvidence, StaticPolicyPrecedence,
 };
 use crate::runtime::{
     AutoEvaluatorVerdict, PermissionPolicyDecision, PermissionPolicyDecisionKind,
@@ -82,7 +82,22 @@ pub fn classifier_decision_evidence(
         disposition: disposition_for_decision(input.final_decision, input.attempt_status),
         fallback: fallback_for_attempt(input.attempt_status),
         diagnostics,
+        stages: Vec::new(),
+        matched_rule: None,
     };
+    refresh_evidence_id(&mut evidence);
+    evidence
+}
+
+/// Adds the per-stage results and the rule that decided (Spec 048 PRD 000
+/// scope 12) without the request or answer text.
+pub fn with_classifier_stages(
+    mut evidence: ClassifierDecisionEvidence,
+    stages: Vec<ClassifierStageEvidence>,
+    matched_rule: Option<String>,
+) -> ClassifierDecisionEvidence {
+    evidence.stages = stages;
+    evidence.matched_rule = matched_rule;
     refresh_evidence_id(&mut evidence);
     evidence
 }
@@ -103,10 +118,17 @@ fn action_correlation(action: &PermissionedAction) -> ClassifierActionCorrelatio
 fn precedence_for_decision(decision: &PermissionPolicyDecision) -> StaticPolicyPrecedence {
     match decision.reason {
         PermissionPolicyReason::CeilingViolation => StaticPolicyPrecedence::CeilingWins,
-        PermissionPolicyReason::StaticDeny | PermissionPolicyReason::ProtectedTarget => {
-            StaticPolicyPrecedence::StaticDenyWins
-        }
-        PermissionPolicyReason::StaticAskRequired => {
+        PermissionPolicyReason::StaticDeny
+        | PermissionPolicyReason::ProtectedTarget
+        | PermissionPolicyReason::UserRuleDeny
+        | PermissionPolicyReason::SecretFileWrite
+        | PermissionPolicyReason::ToolRefusal => StaticPolicyPrecedence::StaticDenyWins,
+        PermissionPolicyReason::StaticAskRequired
+        | PermissionPolicyReason::UserRuleAsk
+        | PermissionPolicyReason::SecretFileRead
+        | PermissionPolicyReason::CriticalPathRemoval
+        | PermissionPolicyReason::ProtectedPathThroughSymlink
+        | PermissionPolicyReason::OutsideWorkspaceThroughSymlink => {
             StaticPolicyPrecedence::StaticAskBlocksClassifier
         }
         PermissionPolicyReason::EvaluatorUnavailable => {
@@ -123,9 +145,10 @@ fn precedence_for_decision(decision: &PermissionPolicyDecision) -> StaticPolicyP
         | PermissionPolicyReason::RememberedAllow
         | PermissionPolicyReason::RememberedDeny
         | PermissionPolicyReason::RememberedStoreUnavailable
-        | PermissionPolicyReason::LocalUserInteraction => {
-            StaticPolicyPrecedence::ClassifierReviewable
-        }
+        | PermissionPolicyReason::LocalUserInteraction
+        | PermissionPolicyReason::UserRuleAllow
+        | PermissionPolicyReason::WorkspaceRead
+        | PermissionPolicyReason::WorkspaceEdit => StaticPolicyPrecedence::ClassifierReviewable,
     }
 }
 
@@ -152,10 +175,20 @@ fn success_disposition(decision: &PermissionPolicyDecision) -> ClassifierDisposi
         PermissionPolicyReason::EvaluatorUncertain => ClassifierDisposition::DenyCandidateRecorded,
         PermissionPolicyReason::PromptInjectionSignal => ClassifierDisposition::AskUser,
         PermissionPolicyReason::CeilingViolation => ClassifierDisposition::NotInvokedCeiling,
-        PermissionPolicyReason::StaticDeny | PermissionPolicyReason::ProtectedTarget => {
-            ClassifierDisposition::NotInvokedStaticPolicy
-        }
+        PermissionPolicyReason::StaticDeny
+        | PermissionPolicyReason::ProtectedTarget
+        | PermissionPolicyReason::UserRuleDeny
+        | PermissionPolicyReason::SecretFileWrite
+        | PermissionPolicyReason::ToolRefusal => ClassifierDisposition::NotInvokedStaticPolicy,
         PermissionPolicyReason::StaticAskRequired
+        | PermissionPolicyReason::UserRuleAsk
+        | PermissionPolicyReason::UserRuleAllow
+        | PermissionPolicyReason::SecretFileRead
+        | PermissionPolicyReason::CriticalPathRemoval
+        | PermissionPolicyReason::ProtectedPathThroughSymlink
+        | PermissionPolicyReason::OutsideWorkspaceThroughSymlink
+        | PermissionPolicyReason::WorkspaceRead
+        | PermissionPolicyReason::WorkspaceEdit
         | PermissionPolicyReason::EvaluatorAllow
         | PermissionPolicyReason::EvaluatorUnavailable
         | PermissionPolicyReason::ModeBaselineAllow

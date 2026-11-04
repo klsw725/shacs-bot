@@ -1,5 +1,6 @@
+use crate::permission_user_rules::{self, AutoModeConfig, AutoModeProblem, PermissionRuleLists};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const ALL_SAFETY_CAPABILITIES: &[SafetyCapability] = &[
@@ -192,6 +193,14 @@ pub struct PermissionsConfig {
     pub mode: PermissionMode,
     #[serde(default)]
     pub auto_approval: AutoApprovalConfig,
+    #[serde(flatten)]
+    written_user_rules: Map<String, Value>,
+    #[serde(skip)]
+    pub user_rules: PermissionRuleLists,
+    #[serde(skip)]
+    pub auto_mode: AutoModeConfig,
+    #[serde(skip)]
+    auto_mode_problem: Option<AutoModeProblem>,
     #[serde(skip)]
     mode_configured: bool,
     #[serde(skip)]
@@ -203,6 +212,10 @@ impl Default for PermissionsConfig {
         Self {
             mode: PermissionMode::Default,
             auto_approval: AutoApprovalConfig::default(),
+            written_user_rules: Map::new(),
+            user_rules: PermissionRuleLists::default(),
+            auto_mode: AutoModeConfig::default(),
+            auto_mode_problem: None,
             mode_configured: false,
             diagnostics: PermissionConfigDiagnostics::default(),
         }
@@ -213,12 +226,19 @@ impl PermissionsConfig {
     pub fn is_default(&self) -> bool {
         self.mode == PermissionMode::Default
             && self.auto_approval == AutoApprovalConfig::default()
+            && self.written_user_rules.is_empty()
             && !self.mode_configured
             && self.diagnostics == PermissionConfigDiagnostics::default()
     }
 
     pub fn diagnostics(&self) -> &PermissionConfigDiagnostics {
         &self.diagnostics
+    }
+
+    /// Why `permissions.autoMode` could not be read; auto mode then starts as
+    /// `default`.
+    pub fn auto_mode_problem(&self) -> Option<&AutoModeProblem> {
+        self.auto_mode_problem.as_ref()
     }
 
     pub fn normalized_snapshot(
@@ -346,10 +366,41 @@ impl PermissionsConfig {
             })
             .unwrap_or_default();
 
+        let (user_rules, malformed_lists) = permission_user_rules::rule_lists(object);
+        for name in malformed_lists {
+            diagnostics
+                .malformed_fields
+                .push(format!("permissions.{name}"));
+            diagnostics.warnings.push(format!(
+                "permissions.{name} was ignored because it is not a list of strings"
+            ));
+        }
+        let (auto_mode, auto_mode_problem) =
+            match permission_user_rules::auto_mode(object.get("autoMode")) {
+                Ok(auto_mode) => (auto_mode, None),
+                Err(problem) => {
+                    mode = PermissionMode::Default;
+                    mode_configured = false;
+                    diagnostics
+                        .malformed_fields
+                        .push("permissions.autoMode".to_owned());
+                    diagnostics.safe_fallback_reason =
+                        Some("malformed_auto_mode_config".to_owned());
+                    diagnostics
+                        .warnings
+                        .push(format!("autoMode config was ignored: {problem}"));
+                    (AutoModeConfig::default(), Some(problem))
+                }
+            };
+
         diagnostics.normalized_mode = mode;
         Self {
             mode,
             auto_approval,
+            written_user_rules: permission_user_rules::written_fields(object),
+            user_rules,
+            auto_mode,
+            auto_mode_problem,
             mode_configured,
             diagnostics,
         }

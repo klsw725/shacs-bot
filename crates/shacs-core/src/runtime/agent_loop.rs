@@ -1,3 +1,4 @@
+use crate::runtime::auto_mode::classifier_review::{turn_classifier, TurnClassifierInput};
 use crate::runtime::entrusted_work_conversation::{
     clear_pending_proposal, pending_proposal, proposal_from_runner_messages, store_pending_proposal,
 };
@@ -113,6 +114,8 @@ mod method_workflow;
 mod method_workflow_tests;
 #[path = "agent_loop_notification.rs"]
 mod notification;
+#[path = "agent_loop_once_only.rs"]
+mod once_only;
 #[path = "agent_loop_web_notification.rs"]
 mod web_notification;
 #[path = "agent_loop_web_watch.rs"]
@@ -201,6 +204,8 @@ struct PendingPermissionApproval {
     sender_id: String,
     #[serde(default)]
     status: PendingPermissionApprovalStatus,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    question: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +286,7 @@ pub struct AgentLoopConfig {
     pub permission_auto_approval: AutoApprovalConfig,
     pub permission_ceiling_snapshot: Option<PermissionCeilingSnapshot>,
     pub permission_evaluator: Option<AutoEvaluatorVerdict>,
+    pub permission_environment: Option<Arc<crate::runtime::PermissionEnvironment>>,
     pub permission_interactive: bool,
     pub project_permission_store: Option<ProjectPermissionStoreConfig>,
     pub permission_mode_setter: Option<PermissionModeSetter>,
@@ -331,6 +337,7 @@ impl AgentLoopConfig {
             permission_auto_approval: AutoApprovalConfig::default(),
             permission_ceiling_snapshot: None,
             permission_evaluator: None,
+            permission_environment: None,
             permission_interactive: false,
             project_permission_store: None,
             permission_mode_setter: None,
@@ -1203,6 +1210,17 @@ impl<'a> AgentLoop<'a> {
                     true,
                 );
             }
+            let reply = parse_permission_approval_reply(&message.content);
+            if let Some(question) = once_only::repeated_question(&approval, reply) {
+                return self.publish_command_response(
+                    &message,
+                    session,
+                    &question,
+                    None,
+                    "permission_approval_pending",
+                    true,
+                );
+            }
             match parse_permission_approval_reply(&message.content) {
                 PermissionApprovalReply::Approve
                 | PermissionApprovalReply::ApproveSession
@@ -1676,6 +1694,7 @@ impl<'a> AgentLoop<'a> {
             ),
             project_permission_store: self.config.project_permission_store.clone(),
             active_workspace: Some(self.config.workspace.clone()),
+            permission_environment: self.config.permission_environment.clone(),
             in_cron_context: false,
             record_channel_delivery: self.config.record_channel_delivery,
             cancellation_token: None,
@@ -1709,6 +1728,16 @@ impl<'a> AgentLoop<'a> {
         spec.context_window_tokens = self.config.context_window_tokens;
         spec.context_block_limit = self.config.context_block_limit;
         spec.context_provider_handoff = context_provider_handoff;
+        spec.auto_mode_classifier = turn_classifier(TurnClassifierInput {
+            environment: self.config.permission_environment.as_deref(),
+            context_builder: &self.context_builder,
+            handoff: spec.context_provider_handoff.as_ref(),
+            workspace: &self.config.workspace,
+            conversation: format!("{}:{}", message.channel, message.chat_id),
+            client: self.client,
+            invocation: &provider_invocation,
+            run_model: &self.config.model,
+        });
         spec.concurrent_tools = self.config.concurrent_tools;
         spec.fail_on_tool_error = self.config.fail_on_tool_error;
         media_turn.apply(&mut spec, tool_context.clone());
@@ -2963,6 +2992,7 @@ impl<'a> AgentLoop<'a> {
         config.permission_session_remembered_rules =
             session_remembered_permission_rules(session, session_key, None, now_unix_ms());
         config.project_permission_store = self.config.project_permission_store.clone();
+        config.permission_environment = self.config.permission_environment.clone();
         config.max_iterations = self.config.max_iterations;
         config.max_tool_result_chars = self.config.max_tool_result_chars;
         config.fail_on_tool_error = self.config.fail_on_tool_error;
@@ -4017,6 +4047,7 @@ impl<'a> AgentLoop<'a> {
         context.permission_approval_cache = Some(approval_cache);
         context.permission_session_approval_cache = Vec::new();
         context.permission_session_remembered_rules = Vec::new();
+        context.permission_environment = self.config.permission_environment.clone();
         if bridge_tool_names().contains(&tool_call.name.as_str()) {
             let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
                 definitions: self.tools.definitions(),
@@ -5534,6 +5565,7 @@ fn store_pending_permission_approval(
         approval_request_id,
         approval_request,
         tool_call,
+        question,
         ..
     }) = interrupt
     else {
@@ -5549,6 +5581,7 @@ fn store_pending_permission_approval(
         chat_id: message.chat_id.clone(),
         sender_id: message.sender_id.clone(),
         status: PendingPermissionApprovalStatus::Pending,
+        question: question.clone(),
     }) {
         set_pending_permission_approval_value(session, value);
     }

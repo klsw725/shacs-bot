@@ -255,6 +255,7 @@ fn policy_input(
         remembered_rules: Vec::new(),
         remembered_store_unavailable: false,
         interactive: true,
+        materials: None,
     }
 }
 

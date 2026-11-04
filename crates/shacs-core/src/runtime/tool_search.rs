@@ -1,14 +1,13 @@
 use crate::runtime::tool_execution::{
-    permission_approval_interrupt, permission_block_message, permission_decision_for_action,
-    permissioned_action_input_from_context,
+    permission_approval_interrupt, permission_evaluation_for_action,
+    permissioned_action_input_from_context, DecidedToolCall, PermissionEvaluation,
 };
 use crate::runtime::{
     normalize_resolved_deferred_tool_call, recent_auto_mode_denial_from_classifier_decision,
-    ContainerNetworkMode, ContainerRuntimeKind, DockerContainmentSnapshot, PermissionMode,
-    PermissionModeSnapshot, PermissionPolicyDecisionKind, PermissionRuleInput, PermissionedAction,
-    ProcExecSummary, RecentAutoModeDenial, RecentAutoModeRetryToken, RuntimeInterrupt,
-    RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor, RuntimeToolMessage,
-    ToolExecutionContext, ToolSearchMode, ToolSearchRuntimeInput,
+    PermissionPolicyDecisionKind, PermissionedAction, RecentAutoModeDenial,
+    RecentAutoModeRetryToken, RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport,
+    RuntimeToolExecutor, RuntimeToolMessage, ToolExecutionContext, ToolSearchMode,
+    ToolSearchRuntimeInput,
 };
 use crate::tools::{
     bridge_tool_names, ActivationState, DeferredToolCatalog, ToolRegistry, ToolSurfaceAssembly,
@@ -423,6 +422,7 @@ pub(crate) fn dispatch_bridge_tool_calls_with_context_resolver(
                     bridge_call: bridge_call.clone(),
                     resolved_call,
                     execution_context: None,
+                    decided: None,
                 });
             }
             BridgeAction::Error(error) => {
@@ -462,6 +462,7 @@ struct PendingResolvedCall {
     bridge_call: BridgeToolCall,
     resolved_call: ResolvedDeferredToolCall,
     execution_context: Option<ToolExecutionContext>,
+    decided: Option<(PermissionedAction, PermissionEvaluation)>,
 }
 
 pub(super) enum BridgeAction {
@@ -632,7 +633,9 @@ fn flush_pending(
             &entry.resolved_call,
             permissioned_action_input_from_context(entry_context),
         );
-        let decision = permission_decision_for_action(&action, entry_context);
+        let evaluation =
+            permission_evaluation_for_action(executor.registry(), &action, entry_context);
+        let decision = evaluation.decision.clone();
         report.permissioned_actions.push(action.clone());
         report.resolved_calls.push(entry.resolved_call.clone());
         if let Some(evaluator) = entry_context.permission_evaluator.as_ref() {
@@ -671,6 +674,7 @@ fn flush_pending(
                 report.interrupt = Some(permission_approval_interrupt(
                     entry.bridge_call.to_runtime_call(),
                     &action,
+                    &evaluation.approval_explanation(),
                 ));
                 if let Some(position) = all_pending.iter().position(|candidate| {
                     candidate.resolved_call.original_call_id == entry.resolved_call.original_call_id
@@ -685,15 +689,15 @@ fn flush_pending(
                 return true;
             }
             report.push_resolved_message(
-                permission_block_message(
+                evaluation.block_message(
                     &entry.resolved_call.original_call_id,
                     &entry.bridge_call.bridge_name,
-                    &decision,
                 ),
                 entry.resolved_call.clone(),
             );
             continue;
         }
+        entry.decided = Some((action, evaluation));
         executable_pending.push(entry.clone());
         if (!concurrent_tools
             || !can_bridge_batch_concurrently(executor.registry(), &entry.resolved_call))
@@ -782,112 +786,33 @@ fn flush_executable_pending(
     false
 }
 
+/// Runs the allowed resolved calls with the evaluations that allowed them;
+/// nothing is decided again.
 fn bridge_runtime_report(
     executable_pending: &[PendingResolvedCall],
     executor: &RuntimeToolExecutor<'_>,
     context: &ToolExecutionContext,
     concurrent_tools: bool,
 ) -> RuntimeToolExecutionReport {
-    if executable_pending
+    let own_contexts = executable_pending
         .iter()
-        .any(|entry| entry.execution_context.is_some())
-    {
-        return execute_bridge_pending_with_individual_contexts(
-            executable_pending,
-            executor,
-            context,
-        );
-    }
-    let tool_calls = executable_pending
+        .any(|entry| entry.execution_context.is_some());
+    let calls = executable_pending
         .iter()
-        .map(|entry| entry.resolved_call.to_runtime_call())
-        .collect::<Vec<_>>();
-    let bridge_context = bridge_handoff_execution_context(context);
-    if concurrent_tools {
-        executor.execute_tool_calls_concurrent(tool_calls, &bridge_context)
-    } else {
-        executor.execute_tool_calls(tool_calls, &bridge_context)
-    }
-}
-
-fn execute_bridge_pending_with_individual_contexts(
-    executable_pending: &[PendingResolvedCall],
-    executor: &RuntimeToolExecutor<'_>,
-    default_context: &ToolExecutionContext,
-) -> RuntimeToolExecutionReport {
-    let mut messages = Vec::new();
-    let mut skipped_tool_calls = Vec::new();
-    let mut permissioned_actions = Vec::new();
-    let mut recent_auto_mode_denials = Vec::new();
-    let mut recent_auto_mode_retry_tokens = Vec::new();
-    for (index, entry) in executable_pending.iter().enumerate() {
-        let source_context = entry.execution_context.as_ref().unwrap_or(default_context);
-        let bridge_context = bridge_handoff_execution_context(source_context);
-        let mut report = executor
-            .execute_tool_calls(vec![entry.resolved_call.to_runtime_call()], &bridge_context);
-        messages.append(&mut report.messages);
-        permissioned_actions.append(&mut report.permissioned_actions);
-        recent_auto_mode_denials.append(&mut report.recent_auto_mode_denials);
-        recent_auto_mode_retry_tokens.append(&mut report.recent_auto_mode_retry_tokens);
-        if let Some(interrupt) = report.interrupt {
-            skipped_tool_calls.extend(
-                executable_pending[index + 1..]
-                    .iter()
-                    .map(|pending| pending.resolved_call.to_runtime_call()),
-            );
-            return RuntimeToolExecutionReport {
-                messages,
-                interrupt: Some(interrupt),
-                skipped_tool_calls,
-                permissioned_actions,
-                recent_auto_mode_denials,
-                recent_auto_mode_retry_tokens,
-            };
-        }
-        skipped_tool_calls.append(&mut report.skipped_tool_calls);
-    }
-    RuntimeToolExecutionReport {
-        messages,
-        interrupt: None,
-        skipped_tool_calls,
-        permissioned_actions,
-        recent_auto_mode_denials,
-        recent_auto_mode_retry_tokens,
-    }
-}
-
-fn bridge_handoff_execution_context(context: &ToolExecutionContext) -> ToolExecutionContext {
-    ToolExecutionContext {
-        permission_mode_snapshot: PermissionModeSnapshot {
-            mode: PermissionMode::BypassPermissions,
-            source: Some("deferred_bridge_permission_handoff".to_owned()),
-            scope_ref: context.permission_mode_snapshot.scope_ref.clone(),
-        },
-        permission_rule_input: PermissionRuleInput {
-            containment: DockerContainmentSnapshot {
-                contained: Some(true),
-                runtime: ContainerRuntimeKind::Docker,
-                root_user: Some(false),
-                privileged: Some(false),
-                host_mounts_summary: Vec::new(),
-                network_mode: ContainerNetworkMode::None,
-                digest: Some("deferred-bridge-permission-handoff".to_owned()),
-                summary: Some("deferred bridge permission already evaluated".to_owned()),
-            },
-            protected_targets: Vec::new(),
-            proc_exec_summary: Some(ProcExecSummary {
-                command_family: "deferred_bridge".to_owned(),
-                target_refs: Vec::new(),
-                destructive: false,
-                network: false,
-                secret_exposure: false,
-                summary_available: true,
-            }),
-        },
-        permission_evaluator: None,
-        permission_approval_cache: None,
-        ..context.clone()
-    }
+        .filter_map(|entry| {
+            let (action, evaluation) = entry.decided.clone()?;
+            Some(DecidedToolCall {
+                call: entry.resolved_call.to_runtime_call(),
+                action,
+                evaluation,
+                context: entry
+                    .execution_context
+                    .clone()
+                    .unwrap_or_else(|| context.clone()),
+            })
+        })
+        .collect();
+    executor.execute_decided_calls(calls, concurrent_tools && !own_contexts)
 }
 
 fn can_bridge_batch_concurrently(

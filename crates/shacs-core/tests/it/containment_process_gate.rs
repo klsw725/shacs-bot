@@ -117,6 +117,7 @@ fn process_input() -> Result<ProcessGateInput, Box<dyn Error>> {
         interactive: false,
         terminal_precondition: ProcessGateTerminalPrecondition::Ready,
         now_unix_ms: 200,
+        policy_materials: shacs_core::runtime::ProcessGatePolicyMaterials::default(),
     })
 }
 

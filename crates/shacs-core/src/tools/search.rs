@@ -3,8 +3,8 @@ use crate::tools::filesystem::{
     PathContext,
 };
 use crate::tools::{
-    BooleanSchema, IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool, ToolParameters,
-    ToolResult,
+    BooleanSchema, IntegerSchema, JsonMap, SchemaFragment, StringSchema, Tool,
+    ToolCallExecutionContext, ToolParameters, ToolResult,
 };
 use glob::Pattern;
 use regex::RegexBuilder;
@@ -82,7 +82,22 @@ impl Tool for GlobTool {
         true
     }
 
+    fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
+        let path = params.get("path").and_then(Value::as_str).unwrap_or(".");
+        resolve_path(path, &self.context)
+            .err()
+            .map(|error| format!("Error finding files: {error}"))
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult {
+        self.execute_with_context(params, &ToolCallExecutionContext::default())
+    }
+
+    fn execute_with_context(
+        &self,
+        params: JsonMap,
+        context: &ToolCallExecutionContext,
+    ) -> ToolResult {
         let pattern = params
             .get("pattern")
             .and_then(Value::as_str)
@@ -106,23 +121,41 @@ impl Tool for GlobTool {
             .and_then(Value::as_str)
             .unwrap_or("files");
 
-        match self.glob(pattern, path, head_limit, max_results, offset, entry_type) {
+        let request = GlobRequest {
+            pattern,
+            path,
+            limit: limit_from(head_limit, max_results, DEFAULT_HEAD_LIMIT),
+            offset,
+            entry_type,
+        };
+        match self.glob(&request, &|path| context.hides(path)) {
             Ok(text) => text.into(),
             Err(error) => format!("Error finding files: {error}").into(),
         }
     }
 }
 
+struct GlobRequest<'a> {
+    pattern: &'a str,
+    path: &'a str,
+    limit: Option<usize>,
+    offset: usize,
+    entry_type: &'a str,
+}
+
 impl GlobTool {
     fn glob(
         &self,
-        pattern: &str,
-        path: &str,
-        head_limit: Option<usize>,
-        max_results: Option<usize>,
-        offset: usize,
-        entry_type: &str,
+        request: &GlobRequest<'_>,
+        hides: &dyn Fn(&Path) -> bool,
     ) -> Result<String, String> {
+        let GlobRequest {
+            pattern,
+            path,
+            limit,
+            offset,
+            entry_type,
+        } = *request;
         let root = resolve_path(path, &self.context)?;
         if !root.exists() {
             return Ok(format!("Error: Path not found: {path}"));
@@ -134,10 +167,9 @@ impl GlobTool {
             Pattern::new(&normalize_pattern(pattern)).map_err(|error| error.to_string())?;
         let include_files = matches!(entry_type, "files" | "both");
         let include_dirs = matches!(entry_type, "dirs" | "both");
-        let limit = limit_from(head_limit, max_results, DEFAULT_HEAD_LIMIT);
 
         let mut matches = Vec::new();
-        for entry in collect_entries(&root, include_files, include_dirs)? {
+        for entry in collect_entries(&root, include_files, include_dirs, hides)? {
             let relative = entry
                 .strip_prefix(&root)
                 .map_err(|error| error.to_string())?
@@ -217,8 +249,23 @@ impl Tool for GrepTool {
         true
     }
 
+    fn preflight_refusal(&self, params: &JsonMap) -> Option<String> {
+        let path = params.get("path").and_then(Value::as_str).unwrap_or(".");
+        resolve_path(path, &self.context)
+            .err()
+            .map(|error| format!("Error searching files: {error}"))
+    }
+
     fn execute(&self, params: JsonMap) -> ToolResult {
-        match self.grep(params) {
+        self.execute_with_context(params, &ToolCallExecutionContext::default())
+    }
+
+    fn execute_with_context(
+        &self,
+        params: JsonMap,
+        context: &ToolCallExecutionContext,
+    ) -> ToolResult {
+        match self.grep(params, &|path| context.hides(path)) {
             Ok(text) => text.into(),
             Err(error) => format!("Error searching files: {error}").into(),
         }
@@ -226,7 +273,7 @@ impl Tool for GrepTool {
 }
 
 impl GrepTool {
-    fn grep(&self, params: JsonMap) -> Result<String, String> {
+    fn grep(&self, params: JsonMap, hides: &dyn Fn(&Path) -> bool) -> Result<String, String> {
         let pattern = params
             .get("pattern")
             .and_then(Value::as_str)
@@ -305,7 +352,7 @@ impl GrepTool {
         let mut result_chars = 0usize;
         let mut content_truncated = false;
 
-        for file_path in collect_files(&target)? {
+        for file_path in collect_files(&target, hides)? {
             let relative = file_path
                 .strip_prefix(&root)
                 .map_err(|error| error.to_string())?
@@ -415,9 +462,10 @@ fn collect_entries(
     root: &Path,
     include_files: bool,
     include_dirs: bool,
+    hides: &dyn Fn(&Path) -> bool,
 ) -> Result<Vec<PathBuf>, String> {
     let mut entries = Vec::new();
-    collect_entries_inner(root, include_files, include_dirs, &mut entries)?;
+    collect_entries_inner(root, include_files, include_dirs, hides, &mut entries)?;
     Ok(entries)
 }
 
@@ -425,19 +473,20 @@ fn collect_entries_inner(
     current: &Path,
     include_files: bool,
     include_dirs: bool,
+    hides: &dyn Fn(&Path) -> bool,
     entries: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     for entry in sorted_read_dir(current)? {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if entry_is_symlink(&entry) || ignored_name(&name) {
+        if entry_is_symlink(&entry) || ignored_name(&name) || hides(&path) {
             continue;
         }
         if path.is_dir() {
             if include_dirs {
                 entries.push(path.clone());
             }
-            collect_entries_inner(&path, include_files, include_dirs, entries)?;
+            collect_entries_inner(&path, include_files, include_dirs, hides, entries)?;
         } else if include_files {
             entries.push(path);
         }
@@ -445,11 +494,13 @@ fn collect_entries_inner(
     Ok(())
 }
 
-fn collect_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+/// A file named directly is searched as asked; a folder's walk leaves out
+/// what `hides` names.
+fn collect_files(root: &Path, hides: &dyn Fn(&Path) -> bool) -> Result<Vec<PathBuf>, String> {
     if root.is_file() {
         return Ok(vec![root.to_path_buf()]);
     }
-    collect_entries(root, true, false)
+    collect_entries(root, true, false, hides)
 }
 
 fn normalize_pattern(pattern: &str) -> String {

@@ -2,6 +2,7 @@ use crate::runtime::{
     AutoEvaluatorVerdictKind, EvaluatorConfidence, EvaluatorScopeMatch, SafetyCapability,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const CLASSIFIER_EVIDENCE_SCHEMA_V1: &str = "permission_classifier_evidence.v1";
 
@@ -24,6 +25,19 @@ pub struct ClassifierDecisionEvidence {
     pub fallback: Option<ClassifierFallbackEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<RedactedDiagnosticRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<ClassifierStageEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_rule: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassifierStageEvidence {
+    pub stage: u8,
+    pub outcome: String,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub usage: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

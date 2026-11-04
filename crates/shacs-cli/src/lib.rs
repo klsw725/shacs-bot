@@ -1,6 +1,7 @@
 // allow: SIZE_OK — preexisting CLI composition root; Spec034 retains five typed module/field/diagnostics fixture hooks
 mod agent_repl;
 mod apps_retirement;
+mod auto_mode_cli;
 mod automation_outcome;
 mod automation_producer;
 mod automation_worker;
@@ -456,6 +457,8 @@ pub enum PermissionsCommand {
     List(PermissionsListOptions),
     Inspect(PermissionsIdOptions),
     Revoke(PermissionsIdOptions),
+    AutoModeDefaults { label: Option<String> },
+    AutoModeConfig(PermissionsListOptions),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6951,6 +6954,10 @@ fn run_permissions_command(command: PermissionsCommand) -> Result<String, CliErr
         PermissionsCommand::Revoke(options) => {
             permissions_revoke(options).map(format_permissions_revoke)
         }
+        PermissionsCommand::AutoModeDefaults { label } => {
+            auto_mode_cli::auto_mode_defaults(label.as_deref())
+        }
+        PermissionsCommand::AutoModeConfig(options) => auto_mode_cli::auto_mode_config(options),
     }
 }
 
@@ -16387,7 +16394,8 @@ pub fn help_text() -> String {
         "  skills    List skills, inspect entries, and discover workflow recipes",
         "  plugins   List, inspect, doctor, enable, or disable plugin state and surfaces",
         "  hooks     List and inspect plugin hook metadata",
-        "  permissions List, inspect, or revoke remembered permission rules",
+        "  permissions List, inspect, or revoke remembered permission rules; print auto mode rules",
+        "            Actions: list, inspect <id>, revoke <id>, auto-mode defaults [--label <prefix>], auto-mode config",
         "  channels  List channel registry/config status",
         "  context   Inspect context files and dry-run inline @ references",
         "  ask       Send one message through the local AgentLoop",
@@ -17086,13 +17094,14 @@ fn parse_permissions(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "permissions requires `list`, `inspect`, or `revoke`".to_owned(),
+            "permissions requires `list`, `inspect`, `revoke`, or `auto-mode`".to_owned(),
         ));
     };
     match action.as_str() {
         "list" | "ls" => Ok(CliCommand::Permissions(PermissionsCommand::List(
             parse_permissions_list_options(parser, global_config, "list")?,
         ))),
+        "auto-mode" => parse_permissions_auto_mode(parser, global_config),
         "inspect" | "show" => Ok(CliCommand::Permissions(PermissionsCommand::Inspect(
             parse_permissions_id_options(parser, global_config, "inspect")?,
         ))),
@@ -17103,6 +17112,40 @@ fn parse_permissions(
         other => Err(CliError::InvalidArguments(format!(
             "unknown permissions subcommand `{other}`"
         ))),
+    }
+}
+
+fn parse_permissions_auto_mode(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+) -> Result<CliCommand, CliError> {
+    match parser.next().as_deref() {
+        Some("defaults") => {
+            let mut label = None;
+            while let Some(arg) = parser.next() {
+                match arg.as_str() {
+                    "--label" => {
+                        label = Some(parser.next().ok_or_else(|| {
+                            CliError::InvalidArguments("--label requires a value".to_owned())
+                        })?)
+                    }
+                    other => {
+                        return Err(CliError::InvalidArguments(format!(
+                            "unknown permissions auto-mode defaults argument `{other}`"
+                        )))
+                    }
+                }
+            }
+            Ok(CliCommand::Permissions(
+                PermissionsCommand::AutoModeDefaults { label },
+            ))
+        }
+        Some("config") => Ok(CliCommand::Permissions(PermissionsCommand::AutoModeConfig(
+            parse_permissions_list_options(parser, global_config, "auto-mode config")?,
+        ))),
+        _ => Err(CliError::InvalidArguments(
+            "permissions auto-mode requires `defaults` or `config`".to_owned(),
+        )),
     }
 }
 
@@ -18657,6 +18700,7 @@ impl AgentLoopChatCompletionAdapter {
         allow_side_effect_tools: bool,
         mut trusted_extensions: shacs_core::runtime::TrustedToolBeforeRegistry,
     ) -> Result<Self, CliError> {
+        auto_mode_cli::report_rule_problems(&bundle);
         let defaults = bundle.config.agents.defaults.clone();
         let registry = ProviderRegistry::new();
         let provider_match = registry.match_provider(
@@ -18865,22 +18909,24 @@ impl AgentLoopChatCompletionAdapter {
             .context_block_limit
             .map(|value| value as usize);
         config.provider_id.clone_from(&self.provider_id);
-        config.extra_context_files = load_config(LoadOptions {
+        let bundle = load_config(LoadOptions {
             config_path: Some(self.config_path.clone()),
             workspace_override: Some(self.workspace.clone()),
             resolve_env: false,
             write_back_migrations: false,
         })
-        .ok()
-        .and_then(|bundle| {
-            bundle
-                .config
-                .resolve_profiles()
-                .ok()
-                .and_then(|profiles| profiles.context)
-                .map(|profile| profile.value.files.iter().map(PathBuf::from).collect())
-        })
-        .unwrap_or_default();
+        .ok();
+        config.extra_context_files = bundle
+            .as_ref()
+            .and_then(|bundle| {
+                bundle
+                    .config
+                    .resolve_profiles()
+                    .ok()
+                    .and_then(|profiles| profiles.context)
+                    .map(|profile| profile.value.files.iter().map(PathBuf::from).collect())
+            })
+            .unwrap_or_default();
         config.tool_search = self.tool_search;
         config.execution_snapshot_source = self.execution_snapshot_source();
         config.history_options = SessionHistoryOptions {
@@ -18949,6 +18995,18 @@ impl AgentLoopChatCompletionAdapter {
                 workspace_id,
             });
         }
+        let mut skill_roots = vec![adapter_user_skills_dir(&self.config_path)];
+        skill_roots.extend(self.plugin_skill_roots.iter().cloned());
+        config.permission_environment = Some(Arc::new(auto_mode_cli::permission_environment(
+            bundle.as_ref(),
+            auto_mode_cli::EnvironmentSources {
+                config_path: &self.config_path,
+                workspace: &self.workspace,
+                extra_skill_roots: &skill_roots,
+                extra_context_files: &config.extra_context_files,
+                protected_targets: &config.permission_rule_input.protected_targets,
+            },
+        )));
         let config_path = self.config_path.clone();
         let containment_precondition_met =
             permission_containment_precondition_met(self.containment_snapshot.as_ref());
@@ -19882,6 +19940,7 @@ impl AgentLoopChatCompletionAdapter {
         subagent.permission_rule_input = config.permission_rule_input.clone();
         subagent.permission_ceiling_snapshot = config.permission_ceiling_snapshot.clone();
         subagent.project_permission_store = config.project_permission_store.clone();
+        subagent.permission_environment = config.permission_environment.clone();
         subagent.provider_runtime_override = config.provider_runtime_override.clone();
         subagent.max_iterations = config.max_iterations;
         subagent.max_tool_result_chars = config.max_tool_result_chars;
@@ -20972,6 +21031,7 @@ fn mcp_startup_gate(
             interactive: false,
             terminal_precondition: ProcessGateTerminalPrecondition::Ready,
             now_unix_ms: 0,
+            policy_materials: shacs_core::runtime::ProcessGatePolicyMaterials::default(),
         },
     })
 }
@@ -27274,6 +27334,7 @@ mod tests {
         let workspace = bundle.context.workspace.clone();
         let scope_ref = opaque_workspace_scope_ref_for_test(&workspace)?;
         bundle.config.permissions.mode = PermissionMode::Default;
+        save_config_to_path(&bundle.config, &bundle.context.config_path)?;
         let path_context = PathContext {
             workspace: Some(workspace.clone()),
             allowed_dir: Some(workspace.clone()),
@@ -27618,6 +27679,7 @@ mod tests {
             interactive: false,
             terminal_precondition: ProcessGateTerminalPrecondition::Ready,
             now_unix_ms: 0,
+            policy_materials: shacs_core::runtime::ProcessGatePolicyMaterials::default(),
         })))
     }
 
@@ -34561,11 +34623,17 @@ mod tests {
         )?;
 
         assert!(output.contains("Permission approval required"), "{output}");
-        assert!(!workspace.join("protected.txt").exists());
-        assert_eq!(
-            captured.lock().map_err(|_| "captured lock poisoned")?.len(),
-            1
+        assert!(
+            output.contains("Why: Auto mode could not check this action"),
+            "{output}"
         );
+        assert!(!workspace.join("protected.txt").exists());
+        let captured = captured.lock().map_err(|_| "captured lock poisoned")?;
+        assert_eq!(captured.len(), 2);
+        let classifier_system = captured[1].messages[0]["content"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(classifier_system.starts_with("You review one pending action of shacs-bot"));
         Ok(())
     }
 
@@ -36626,7 +36694,7 @@ mod tests {
         tools.register(SurfaceApprovalCountingExecTool { calls });
         let adapter = scripted_agent_loop_adapter(
             root,
-            json!({"permissions": {"mode": "auto"}}),
+            json!({"permissions": {"mode": "default"}}),
             tools,
             vec![
                 LlmResponse {
@@ -36643,7 +36711,7 @@ mod tests {
                     ..LlmResponse::default()
                 },
             ],
-            PermissionMode::Auto,
+            PermissionMode::Default,
         )?;
         let mut config = adapter.loop_config();
         config.permission_interactive = true;

@@ -398,6 +398,7 @@ pub struct SubagentExecutionConfig {
     pub allowed_tools: Option<Vec<String>>,
     pub permission_session_remembered_rules: Vec<SessionRememberedPermissionRule>,
     pub project_permission_store: Option<crate::runtime::ProjectPermissionStoreConfig>,
+    pub permission_environment: Option<Arc<crate::runtime::PermissionEnvironment>>,
     pub provider_runtime_override: Option<RawCredential>,
     /// The confirmed learned method (Spec038) the parent request uses, added
     /// to each child's system prompt.
@@ -430,6 +431,7 @@ impl SubagentExecutionConfig {
             exec_env: BTreeMap::new(),
             allowed_tools: None,
             permission_session_remembered_rules: Vec::new(),
+            permission_environment: None,
             project_permission_store: None,
             provider_runtime_override: None,
             learned_method_guidance: None,
@@ -923,6 +925,7 @@ impl SubagentRuntime {
             permission_session_remembered_rules: config.permission_session_remembered_rules.clone(),
             project_permission_store: config.project_permission_store.clone(),
             active_workspace: Some(config.workspace.clone()),
+            permission_environment: config.permission_environment.clone(),
             in_cron_context: false,
             record_channel_delivery: false,
             cancellation_token: Some(cancellation_token.clone()),

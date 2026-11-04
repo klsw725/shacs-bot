@@ -212,10 +212,12 @@ fn mask_web_watch_calls(value: &mut Value) {
                 })
             };
             let web_watch = named(object)
-                || object
-                    .get("function")
-                    .and_then(Value::as_object)
-                    .is_some_and(named);
+                || ["function", "tool_call"].iter().any(|key| {
+                    object
+                        .get(*key)
+                        .and_then(Value::as_object)
+                        .is_some_and(named)
+                });
             if web_watch {
                 object.values_mut().for_each(without_url_details_in);
             } else {

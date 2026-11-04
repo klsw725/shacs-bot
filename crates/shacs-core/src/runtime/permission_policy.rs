@@ -1,3 +1,4 @@
+use crate::runtime::auto_mode::{auto_decision, PermissionMaterials};
 use crate::runtime::{
     evaluate_inherited_ceiling, ApprovalCorrelation, ApprovalCorrelationError,
     InheritedPermissionContext, PermissionMode, PermissionedAction, SafetyCapability,
@@ -34,6 +35,17 @@ pub enum PermissionPolicyReason {
     RememberedStoreUnavailable,
     CeilingViolation,
     LocalUserInteraction,
+    UserRuleAllow,
+    UserRuleAsk,
+    UserRuleDeny,
+    SecretFileRead,
+    SecretFileWrite,
+    CriticalPathRemoval,
+    ProtectedPathThroughSymlink,
+    OutsideWorkspaceThroughSymlink,
+    ToolRefusal,
+    WorkspaceRead,
+    WorkspaceEdit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +87,8 @@ pub struct PermissionPolicyInput {
     #[serde(default)]
     pub remembered_store_unavailable: bool,
     pub interactive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materials: Option<PermissionMaterials>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,7 +153,20 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
             );
         }
     }
+    let Some(materials) = input.materials.clone() else {
+        return decide_without_user_rules(input);
+    };
+    if input.action.permission_mode_snapshot.mode == PermissionMode::Auto {
+        return auto_decision::decide_auto_mode(&input, &materials);
+    }
+    if let Some(early) = auto_decision::before_mode_rules(&input, &materials) {
+        return early;
+    }
+    let decided = decide_without_user_rules(input.clone());
+    auto_decision::after_mode_rules(&input, &materials, decided)
+}
 
+fn decide_without_user_rules(input: PermissionPolicyInput) -> PermissionPolicyDecision {
     if input.static_rule_decision.kind == StaticRuleDecisionKind::Deny {
         return static_deny_decision(&input);
     }
@@ -232,6 +259,17 @@ pub fn decide_permission(input: PermissionPolicyInput) -> PermissionPolicyDecisi
         return ask_or_deny(input.interactive, PermissionPolicyReason::StaticAskRequired);
     }
 
+    if input
+        .materials
+        .as_ref()
+        .is_some_and(|materials| materials.allow_rule.is_some())
+    {
+        return decision(
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::UserRuleAllow,
+            DecisionRefs::default(),
+        );
+    }
     if let Some(rule) =
         strongest_remembered_match(&input.remembered_rules, RememberedPermissionEffect::Allow)
     {
@@ -357,7 +395,7 @@ fn static_deny_reason(decision: &StaticRuleDecision) -> PermissionPolicyReason {
     }
 }
 
-fn decide_auto(
+pub(crate) fn decide_auto(
     evaluator: Option<AutoEvaluatorVerdict>,
     interactive: bool,
 ) -> PermissionPolicyDecision {
@@ -399,7 +437,10 @@ fn decide_auto(
     )
 }
 
-fn ask_or_deny(interactive: bool, reason: PermissionPolicyReason) -> PermissionPolicyDecision {
+pub(crate) fn ask_or_deny(
+    interactive: bool,
+    reason: PermissionPolicyReason,
+) -> PermissionPolicyDecision {
     if interactive {
         decision(
             PermissionPolicyDecisionKind::Ask,
@@ -441,7 +482,7 @@ fn ask_or_deny_with_evaluator(
     }
 }
 
-fn strongest_remembered_match(
+pub(crate) fn strongest_remembered_match(
     rules: &[RememberedPermissionPolicyMatch],
     effect: RememberedPermissionEffect,
 ) -> Option<&RememberedPermissionPolicyMatch> {
@@ -466,7 +507,7 @@ fn matcher_specificity(matcher: &RememberedPermissionMatcher) -> u8 {
     }
 }
 
-fn remembered_decision(
+pub(crate) fn remembered_decision(
     kind: PermissionPolicyDecisionKind,
     reason: PermissionPolicyReason,
     rule: &RememberedPermissionPolicyMatch,
