@@ -1,6 +1,6 @@
 # PRD 000. 판정 순서와 transcript classifier
 
-Status: Implemented, closure blocked
+Status: Complete (Scoped)
 
 Depends on: 없음. 뒤 번호 PRD에 의존하지 않는다.
 
@@ -379,7 +379,7 @@ PRD 000은 PRD 010–050 없이 닫힌다.
 - 고친 기존 시험과 까닭:
   - 필드 추가만(동작 같음): `tests/permission_policy.rs`, `tests/spec030_classifier_baseline.rs`, `tests/runtime.rs`, `tests/runtime_loop.rs`, `tests/tools.rs`, `tests/it/process_gate.rs`, `tests/it/containment_process_gate.rs`, `tests/plugin_runtime.rs`, `tests/spec030_diagnostics_aggregate/fixtures.rs`, `src/tools/mcp.rs`와 `shacs-cli` 시험의 gate 입력.
   - `shacs-cli` `direct_message_asks_before_auto_mode_protected_target_action`: 보호 경로 쓰기는 표대로 classifier로 가므로, classifier 요청과 `Why: Auto mode could not check this action`을 확인한다.
-  - `shacs-cli` `surface_approval_fixture`: 격리 증명이 없는 `exec`를 auto mode가 5번으로 거절하므로, 승인 표면을 시험하는 이 fixture는 `default` mode를 쓴다.
+  - `shacs-cli` `surface_approval_fixture`와 `shacs-tui` 시험이 쓰는 `spec031_surface_approval_fixture`(`surface_approval_worker/fixture`): 격리 증명이 없는 `exec`를 auto mode가 5번으로 거절하므로, 승인 표면을 시험하는 이 fixture들은 `default` mode를 쓴다.
   - `shacs-cli` `public_adapter_approval_reuses_stored_scope_and_ceiling_for_real_exec`: 메모리에서만 정한 `default` mode를 config에 저장해 이름대로 `default`로 돈다.
 - 남은 제한:
   - 판정 재료는 022처럼 redaction한 인자로 만든다. redaction이 지우는 절대 경로(`auth`·`token` 등이 든 것)는 2번에서 모든 mode에서 거절되므로, 절대 경로로 비밀 파일을 읽으면 묻지 않고 거절한다.
@@ -388,5 +388,12 @@ PRD 000은 PRD 010–050 없이 닫힌다.
 - classifier 요청의 redaction한 예: 로컬 `.omo/evidence/spec048/classifier-request-sample.txt`(추적하지 않음).
 - Cargo 검증: Google 옵션을 붙인 `cargo fmt --all -- --check`, workspace `cargo clippy --all-targets -- -D warnings` 통과. `shacs-core` lib 447 passed, 통합 시험은 `spec034_release_runner` 6개 중 5개(`InvalidConfig`)를 빼고 통과했다. 이 5개는 HEAD를 저장소 밖에 clone한 사본에서도 실패하며, 046·047 종료 기록의 이 checkout 조건과 같다. `shacs-config`, `shacs-cli` package 시험 통과.
 - Oracle 독립 검토: 구현 1차(hard link inode 목록, deferred 시험), 2차(bridge handoff의 꾸민 격리와 훑기 걸러내기), 3차(bridge 동시 실행) BLOCKED 뒤 4차 **PASS**. 기록은 로컬 `.omo/evidence/spec048/plan-review.md`와 `implementation.md`.
-- 종료를 막는 것: 전체 workspace 시험과 034 runner의 사본 실행은 사용자 승인을 받아 돌린다.
+
+## 종료 확인 (2026-11-04)
+
+- 전체 workspace 시험: 사용자 승인을 받아 `--no-fail-fast`로 실행했다.
+  - 첫 실행에서 `shacs-tui` 시험 2개가 실패했다. 이 시험들이 쓰는 승인 표면 fixture(`spec031_surface_approval_fixture`)가 auto mode에서 격리 증명 없는 `exec`를 써서, 5번으로 거절되어 승인 질문이 나오지 않았다. 위의 `shacs-cli` fixture와 같이 `default` mode로 바꿨다.
+  - 고친 뒤 다시 실행한 결과는 suite 210개, 3,509 passed / 0 failed / 8 ignored, exit 0이다(로컬 `.omo/evidence/spec048/closure/workspace-tests.log`).
+- 034 runner: 이 checkout에는 runner가 거절하는 추적하지 않는 로컬 symlink와 큰 `docs/refs/`가 있고 로컬 fixture가 없어, 047과 같은 방식으로 짧은 경로의 사본(지금 작업 상태를 담은 clone과 보관해 둔 fixture)에서 `cargo test --locked -p shacs-core --test spec034_release_runner`를 실행했다. 6 passed / 0 failed, exit 0이다(로컬 `.omo/evidence/spec048/closure/spec034-runner-copy.sh`, `spec034-runner-copy.log`).
+- 남은 제한은 위 "남은 제한"과 같다.
 

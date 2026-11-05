@@ -37,7 +37,7 @@ impl FixtureRuntime {
         fs::create_dir_all(data_dir.join("media").join("api"))?;
         fs::write(
             &config_path,
-            serde_json::to_vec(&json!({"permissions": {"mode": "auto"}}))?,
+            serde_json::to_vec(&json!({"permissions": {"mode": "default"}}))?,
         )?;
         let calls = Arc::new(AtomicUsize::new(0));
         let adapter = Arc::new(adapter(&config_path, &workspace, calls.clone()));

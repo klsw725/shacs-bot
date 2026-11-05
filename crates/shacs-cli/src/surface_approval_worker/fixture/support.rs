@@ -66,7 +66,7 @@ pub(super) fn adapter(
         #[cfg(not(test))]
         permission_rule_containment: runtime_permission_rule_containment_from_snapshot(None),
         permission_mode_snapshot: PermissionModeSnapshot {
-            mode: PermissionMode::Auto,
+            mode: PermissionMode::Default,
             source: Some("spec031-test-fixture".to_owned()),
             scope_ref: None,
         },
