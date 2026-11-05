@@ -5,7 +5,7 @@ use crate::runtime::entrusted_work_conversation::{
 use crate::runtime::permission_pattern::session_approval_reuse_pattern;
 use crate::runtime::tool_execution::{
     permissioned_action_input_from_context, session_remembered_context_digest,
-    session_remembered_context_digest_for_input,
+    session_remembered_context_digest_for_input, PERMISSION_APPROVAL_TTL_MS,
 };
 use crate::runtime::{
     apply_context_safety_gate, build_context_provider_handoff,
@@ -95,6 +95,8 @@ const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 
 #[path = "agent_loop_action.rs"]
 mod action;
+#[path = "agent_loop_auto_mode.rs"]
+mod auto_mode_turn;
 #[path = "agent_loop_learn.rs"]
 mod learn;
 #[path = "agent_loop_learn_sources.rs"]
@@ -224,6 +226,10 @@ struct PendingRecentRetryApproval {
     requester_digest: String,
     #[serde(default)]
     status: PendingPermissionApprovalStatus,
+    /// Asked in an auto mode run: approving adds the user's approval for the
+    /// assistant to retry instead of running the call (Spec 048 PRD 020).
+    #[serde(default)]
+    auto_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1013,19 +1019,60 @@ impl<'a> AgentLoop<'a> {
             }
             match parse_permission_approval_reply(&message.content) {
                 PermissionApprovalReply::Approve => {
-                    let token_result = self.recent_retry_tokens.consume(
-                        &approval.denial_id,
-                        RecentAutoModeRetryTokenMatch {
-                            action_digest: &approval.action_digest,
-                            argument_digest: &approval.argument_digest,
-                            snapshot_digest: &approval.snapshot_digest,
-                            policy_safety_snapshot_ref: approval
-                                .policy_safety_snapshot_ref
-                                .as_ref(),
-                            secret_ref_evidence: &approval.secret_ref_evidence,
-                        },
-                        now_unix_ms(),
-                    );
+                    if approval.auto_mode != auto_mode_turn::active(&self.config) {
+                        session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                        return self.publish_command_response(
+                            &message,
+                            session,
+                            "The permission mode changed since this retry question, so the blocked call was not run. Run `/permission recent retry` again if it is still needed.",
+                            None,
+                            "permission_recent_retry_closed",
+                            true,
+                        );
+                    }
+                    // Auto mode checks the call can still be shown before
+                    // using up its token (Spec 048 PRD 020 scope 6).
+                    let shown = if approval.auto_mode {
+                        let checked = self
+                            .recent_retry_tokens
+                            .peek_any_age(&approval.denial_id)
+                            .cloned()
+                            .map_err(recent_retry_closed_message)
+                            .and_then(|token| self.retry_call_shown(&token).map_err(str::to_owned));
+                        match checked {
+                            Ok(shown) => Some(shown),
+                            Err(refusal) => {
+                                session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                                return self.publish_command_response(
+                                    &message,
+                                    session,
+                                    &refusal,
+                                    None,
+                                    "permission_recent_retry_closed",
+                                    true,
+                                );
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let expected = RecentAutoModeRetryTokenMatch {
+                        action_digest: &approval.action_digest,
+                        argument_digest: &approval.argument_digest,
+                        snapshot_digest: &approval.snapshot_digest,
+                        policy_safety_snapshot_ref: approval.policy_safety_snapshot_ref.as_ref(),
+                        secret_ref_evidence: &approval.secret_ref_evidence,
+                    };
+                    let token_result = if approval.auto_mode {
+                        self.recent_retry_tokens
+                            .consume_any_age(&approval.denial_id, expected)
+                    } else {
+                        self.recent_retry_tokens.consume(
+                            &approval.denial_id,
+                            expected,
+                            now_unix_ms(),
+                        )
+                    };
                     let token = match token_result {
                         Ok(token) => token,
                         Err(error) => {
@@ -1056,12 +1103,15 @@ impl<'a> AgentLoop<'a> {
                         request: approval_request,
                         decision,
                     };
-                    if !correlate_approval(
-                        &approval_cache.request,
-                        &approval_cache.decision,
-                        now_unix_ms(),
-                    )
-                    .is_approved()
+                    // An auto mode question keeps the loop's clock, as when
+                    // it was asked.
+                    let now = if approval.auto_mode {
+                        self.config.now_ms()
+                    } else {
+                        now_unix_ms()
+                    };
+                    if !correlate_approval(&approval_cache.request, &approval_cache.decision, now)
+                        .is_approved()
                     {
                         session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
                         return self.publish_command_response(
@@ -1073,82 +1123,125 @@ impl<'a> AgentLoop<'a> {
                             true,
                         );
                     }
-                    let mut executing_approval = approval.clone();
-                    executing_approval.status = PendingPermissionApprovalStatus::Executing;
-                    set_pending_recent_retry_approval(&mut session, &executing_approval);
-                    self.sessions.save(&session)?;
-                    let report = self.execute_approved_permission_payload(&token, approval_cache);
-                    if method_tracked {
-                        self.observe_method_approved(
-                            &method_observation,
-                            token.tool_call(),
-                            &report,
+                    if let Some((tool, arguments)) = shown {
+                        // Auto mode does not run the stored call: the user's
+                        // approval goes into the conversation, and the
+                        // assistant's retry passes the classifier again
+                        // (Spec 048 PRD 020 scope 6).
+                        remove_recent_auto_mode_denial(&mut session, &approval.denial_id);
+                        auto_mode_turn::clear_consecutive(&mut session);
+                        session.record_permission_approval_receipt(
+                            shacs_session::PermissionApprovalReceipt {
+                                approval_request_id: approval.approval_request_id.clone(),
+                                action_digest: approval.action_digest.clone(),
+                                snapshot_digest: approval.snapshot_digest.clone(),
+                                state: shacs_session::PermissionApprovalTerminalState::Consumed,
+                                recorded_at_unix_ms: now_unix_ms(),
+                            },
                         );
-                        method_finish::finish(
-                            &mut session,
-                            &method_observation,
-                            crate::runtime::task_method::RequestState::InProgress,
+                        session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                        call_start = session.messages.len();
+                        auto_mode_turn::add_approval(&mut session, &tool, &arguments);
+                        let history = session.get_history_with_options(self.config.history_options);
+                        let mut messages = vec![json!({
+                            "role": "system",
+                            "content": self.context_builder.build_system_prompt(Some(&message.channel)),
+                        })];
+                        messages.extend(history);
+                        let context_provider_handoff = build_live_context_provider_handoff(
+                            &self.config.workspace,
+                            &message.content,
+                            &messages,
+                            current_working_directory(),
+                            self.config.context_block_limit,
+                            crate::runtime::select_token_estimator(
+                                &self.config.provider_id,
+                                &self.config.model,
+                            ),
+                            &self.config.extra_context_files,
+                        );
+                        (messages, Some(context_provider_handoff))
+                    } else {
+                        let mut executing_approval = approval.clone();
+                        executing_approval.status = PendingPermissionApprovalStatus::Executing;
+                        set_pending_recent_retry_approval(&mut session, &executing_approval);
+                        self.sessions.save(&session)?;
+                        let report =
+                            self.execute_approved_permission_payload(&token, approval_cache);
+                        if method_tracked {
+                            self.observe_method_approved(
+                                &method_observation,
+                                token.tool_call(),
+                                &report,
+                            );
+                            method_finish::finish(
+                                &mut session,
+                                &method_observation,
+                                crate::runtime::task_method::RequestState::InProgress,
+                            )?;
+                        }
+                        session.record_permission_approval_receipt(
+                            shacs_session::PermissionApprovalReceipt {
+                                approval_request_id: approval.approval_request_id.clone(),
+                                action_digest: approval.action_digest.clone(),
+                                snapshot_digest: approval.snapshot_digest.clone(),
+                                state: shacs_session::PermissionApprovalTerminalState::Consumed,
+                                recorded_at_unix_ms: now_unix_ms(),
+                            },
+                        );
+                        let events = method::image::quiet_events(
+                            &session,
+                            self.tool_event_callback.clone(),
                         )?;
-                    }
-                    session.record_permission_approval_receipt(
-                        shacs_session::PermissionApprovalReceipt {
-                            approval_request_id: approval.approval_request_id.clone(),
-                            action_digest: approval.action_digest.clone(),
-                            snapshot_digest: approval.snapshot_digest.clone(),
-                            state: shacs_session::PermissionApprovalTerminalState::Consumed,
-                            recorded_at_unix_ms: now_unix_ms(),
-                        },
-                    );
-                    let events =
-                        method::image::quiet_events(&session, self.tool_event_callback.clone())?;
-                    let held_from = session.messages.len();
-                    call_start = held_from;
-                    let fatal_error = self.append_approved_tool_messages(
-                        &message,
-                        &session_key,
-                        &mut session,
-                        &execution_ledger,
-                        report.messages,
-                        events,
-                    );
-                    method::image::hold_results(&mut session, held_from)?;
-                    session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
-                    if let Some(error) = fatal_error {
-                        let error = method::image::quiet_failure(&session, error)?;
-                        clear_runtime_markers(&mut session);
-                        store_runtime_execution(&mut session, &lock(&execution_ledger));
-                        session.add_message("assistant", error.clone(), Map::new());
-                        let mut error = error;
-                        let saved = session.messages.len().checked_sub(1);
-                        learn_use::conclude(&mut session, &mut error, saved, "tool_error");
-                        return self.publish_command_response(
+                        let held_from = session.messages.len();
+                        call_start = held_from;
+                        let fatal_error = self.append_approved_tool_messages(
                             &message,
-                            session,
-                            &error,
-                            None,
-                            "tool_error",
-                            true,
+                            &session_key,
+                            &mut session,
+                            &execution_ledger,
+                            report.messages,
+                            events,
                         );
+                        method::image::hold_results(&mut session, held_from)?;
+                        session.metadata.remove(PENDING_RECENT_RETRY_APPROVAL_KEY);
+                        if let Some(error) = fatal_error {
+                            let error = method::image::quiet_failure(&session, error)?;
+                            clear_runtime_markers(&mut session);
+                            store_runtime_execution(&mut session, &lock(&execution_ledger));
+                            session.add_message("assistant", error.clone(), Map::new());
+                            let mut error = error;
+                            let saved = session.messages.len().checked_sub(1);
+                            learn_use::conclude(&mut session, &mut error, saved, "tool_error");
+                            return self.publish_command_response(
+                                &message,
+                                session,
+                                &error,
+                                None,
+                                "tool_error",
+                                true,
+                            );
+                        }
+                        let history = session.get_history_with_options(self.config.history_options);
+                        let mut messages = vec![json!({
+                            "role": "system",
+                            "content": self.context_builder.build_system_prompt(Some(&message.channel)),
+                        })];
+                        messages.extend(history);
+                        let context_provider_handoff = build_live_context_provider_handoff(
+                            &self.config.workspace,
+                            &message.content,
+                            &messages,
+                            current_working_directory(),
+                            self.config.context_block_limit,
+                            crate::runtime::select_token_estimator(
+                                &self.config.provider_id,
+                                &self.config.model,
+                            ),
+                            &self.config.extra_context_files,
+                        );
+                        (messages, Some(context_provider_handoff))
                     }
-                    let history = session.get_history_with_options(self.config.history_options);
-                    let mut messages = vec![json!({
-                        "role": "system",
-                        "content": self.context_builder.build_system_prompt(Some(&message.channel)),
-                    })];
-                    messages.extend(history);
-                    let context_provider_handoff = build_live_context_provider_handoff(
-                        &self.config.workspace,
-                        &message.content,
-                        &messages,
-                        current_working_directory(),
-                        self.config.context_block_limit,
-                        crate::runtime::select_token_estimator(
-                            &self.config.provider_id,
-                            &self.config.model,
-                        ),
-                        &self.config.extra_context_files,
-                    );
-                    (messages, Some(context_provider_handoff))
                 }
                 PermissionApprovalReply::ApproveSession
                 | PermissionApprovalReply::ApproveProject
@@ -1182,7 +1275,11 @@ impl<'a> AgentLoop<'a> {
                     return self.publish_command_response(
                         &message,
                         session,
-                        "Recent retry approval pending. Reply with `1` or `approve` to run the exact denied action once, or `2`/`deny` to cancel. `approve_session` is not available for recent retry.",
+                        if approval.auto_mode {
+                            "Recent retry approval pending. Reply with `1` or `approve` to let the assistant try the blocked call once more (auto mode checks it again), or `2`/`deny` to cancel."
+                        } else {
+                            "Recent retry approval pending. Reply with `1` or `approve` to run the exact denied action once, or `2`/`deny` to cancel. `approve_session` is not available for recent retry."
+                        },
                         None,
                         "permission_recent_retry_pending",
                         true,
@@ -1251,39 +1348,8 @@ impl<'a> AgentLoop<'a> {
                     executing_approval.status = PendingPermissionApprovalStatus::Executing;
                     set_pending_permission_approval(&mut session, &executing_approval);
                     self.sessions.save(&session)?;
-                    let action_input =
-                        permissioned_action_input_from_context(&approval.tool_context);
                     let approved_action =
-                        if bridge_tool_names().contains(&approval.tool_call.name.as_str()) {
-                            let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
-                                definitions: self.tools.definitions(),
-                                runtime: crate::runtime::ToolSearchRuntimeInput {
-                                    config: self.config.tool_search,
-                                    context_window_tokens: self.config.context_window_tokens,
-                                },
-                            });
-                            match super::tool_search::resolve_bridge_call(
-                                &crate::runtime::BridgeToolCall::from_runtime(&approval.tool_call),
-                                tool_surface.catalog.as_ref(),
-                                self.tools,
-                            ) {
-                                super::tool_search::BridgeAction::Execute(resolved) => {
-                                    Some(crate::runtime::normalize_resolved_deferred_tool_call(
-                                        self.tools,
-                                        &resolved,
-                                        action_input,
-                                    ))
-                                }
-                                super::tool_search::BridgeAction::Immediate(_)
-                                | super::tool_search::BridgeAction::Error(_) => None,
-                            }
-                        } else {
-                            Some(crate::runtime::normalize_runtime_tool_call(
-                                self.tools,
-                                &approval.tool_call,
-                                action_input,
-                            ))
-                        };
+                        self.reply_call_action(&approval.tool_call, &approval.tool_context);
                     let correlation = approved_action.as_ref().map_or_else(
                         || {
                             crate::runtime::ApprovalCorrelation::rejected(
@@ -1348,6 +1414,9 @@ impl<'a> AgentLoop<'a> {
                         shacs_session::PermissionApprovalTerminalState::Rejected
                     };
                     record_permission_approval_terminal(&mut session, &approval, terminal_state);
+                    if approval_is_valid {
+                        auto_mode_turn::clear_consecutive(&mut session);
+                    }
                     let executed_action = report.permissioned_actions.first().cloned();
                     let events =
                         method::image::quiet_events(&session, self.tool_event_callback.clone())?;
@@ -1459,7 +1528,9 @@ impl<'a> AgentLoop<'a> {
                             let action = crate::runtime::normalize_runtime_tool_call(
                                 self.tools,
                                 &approval.tool_call,
-                                permissioned_action_input_from_context(&approval.tool_context),
+                                permissioned_action_input_from_context(
+                                    &self.reply_tool_context(&approval.tool_context),
+                                ),
                             );
                             match reply {
                                 PermissionApprovalReply::DenySession => {
@@ -1636,6 +1707,7 @@ impl<'a> AgentLoop<'a> {
             method::image::restore_results(&mut session, &mut initial_messages)?;
         }
         learn_use::guide(&session, &mut initial_messages);
+        auto_mode_turn::guide(&self.config, &mut initial_messages);
         let turn_id = turn_id_for_message(&message, &session);
         let session_context_digest =
             session_remembered_context_digest_for_input(&PermissionedActionInput {
@@ -1652,6 +1724,7 @@ impl<'a> AgentLoop<'a> {
                 permission_mode_snapshot: self.config.permission_mode_snapshot.clone(),
                 containment_snapshot: self.config.containment_snapshot.clone(),
                 intent_snapshot: None,
+                permission_environment: None,
             });
         self.sessions.save(&session)?;
 
@@ -1699,6 +1772,7 @@ impl<'a> AgentLoop<'a> {
             record_channel_delivery: self.config.record_channel_delivery,
             cancellation_token: None,
             deadline: None,
+            permission_auto_mode_escalation: None,
         };
         let provider_invocation: ProviderInvocation = media_turn.invoke(|content| {
             is_builtin_command(content) || crate::tools::ask_action::is_command(content)
@@ -1728,6 +1802,7 @@ impl<'a> AgentLoop<'a> {
         spec.context_window_tokens = self.config.context_window_tokens;
         spec.context_block_limit = self.config.context_block_limit;
         spec.context_provider_handoff = context_provider_handoff;
+        spec.auto_mode_blocks = auto_mode_turn::blocks(&session);
         spec.auto_mode_classifier = turn_classifier(TurnClassifierInput {
             environment: self.config.permission_environment.as_deref(),
             context_builder: &self.context_builder,
@@ -1779,7 +1854,10 @@ impl<'a> AgentLoop<'a> {
             method::image::quiet_checkpoints(&session, &mut spec)?;
         }
 
-        let mut run_result = match self.runner.run(spec) {
+        let auto_mode_blocks = spec.auto_mode_blocks.clone();
+        let run = self.runner.run(spec);
+        auto_mode_turn::store_blocks(&self.config, &mut session, &auto_mode_blocks);
+        let mut run_result = match run {
             Ok(result) => result,
             Err(error) => {
                 let quiet_error = method::image::quiet_provider_error(&session, &error)?;
@@ -3058,6 +3136,7 @@ impl<'a> AgentLoop<'a> {
                 learn_use::reset(&mut session);
                 session.metadata.remove(SESSION_PERMISSION_APPROVALS_KEY);
                 session.metadata.remove(SESSION_REMEMBERED_PERMISSIONS_KEY);
+                session.metadata.remove(auto_mode_turn::BLOCK_COUNTS_KEY);
                 clear_pending_proposal(&mut session);
                 crate::runtime::web_watch_conversation::clear_pending_summary(&mut session);
                 remove_persistent_goal(&mut session);
@@ -3217,6 +3296,7 @@ impl<'a> AgentLoop<'a> {
                     &session,
                     &self.recent_retry_tokens,
                     now_unix_ms(),
+                    auto_mode_turn::active(&self.config),
                 );
                 self.publish_command_response(
                     message,
@@ -3730,8 +3810,16 @@ impl<'a> AgentLoop<'a> {
                 save_session,
             );
         }
-        let token = match self.recent_retry_tokens.peek(denial_id, now_unix_ms()) {
-            Ok(token) => token,
+        // Auto mode's retry never runs the stored call, so the verdict's
+        // lifetime does not limit it (Spec 048 PRD 020 scope 5).
+        let auto_mode = auto_mode_turn::active(&self.config);
+        let peeked = if auto_mode {
+            self.recent_retry_tokens.peek_any_age(denial_id)
+        } else {
+            self.recent_retry_tokens.peek(denial_id, now_unix_ms())
+        };
+        let token = match peeked {
+            Ok(token) => token.clone(),
             Err(error) => {
                 if !matches!(error, RecentAutoModeRetryTokenConsumeError::Missing) {
                     self.recent_retry_tokens.invalidate(denial_id);
@@ -3762,6 +3850,23 @@ impl<'a> AgentLoop<'a> {
                 save_session,
             );
         }
+        let shown = if auto_mode {
+            match self.retry_call_shown(&token) {
+                Ok(shown) => Some(shown),
+                Err(refusal) => {
+                    return self.publish_command_response(
+                        message,
+                        session,
+                        refusal,
+                        Some(AgentLoopCommandResult::Permission),
+                        "permission_recent_retry_unavailable",
+                        save_session,
+                    );
+                }
+            }
+        } else {
+            None
+        };
         let approval_request_id = recent_retry_approval_request_id(&denial.denial_id);
         let pending = PendingRecentRetryApproval {
             denial_id: denial.denial_id.clone(),
@@ -3772,15 +3877,34 @@ impl<'a> AgentLoop<'a> {
             policy_safety_snapshot_ref: denial.policy_safety_snapshot_ref.clone(),
             secret_ref_evidence: denial.secret_ref_evidence.clone(),
             tool_name: denial.tool_name.clone(),
-            expires_at_unix_ms: token.expires_at_unix_ms(),
+            expires_at_unix_ms: if auto_mode {
+                self.config
+                    .now_ms()
+                    .saturating_add(PERMISSION_APPROVAL_TTL_MS)
+            } else {
+                token.expires_at_unix_ms()
+            },
             requester_digest: recent_retry_requester_digest(message, &session.key),
             status: PendingPermissionApprovalStatus::Pending,
+            auto_mode,
         };
         set_pending_recent_retry_approval(&mut session, &pending);
-        let content = format!(
-            "Recent retry approval required for denial `{}`. Reply with `1` or `approve` to run the exact denied `{}` action once, or `2`/`deny` to cancel. `approve_session` is not available for recent retry. Approval id: `{}`",
-            denial.denial_id, denial.tool_name, approval_request_id
-        );
+        let content = match shown {
+            Some((tool, arguments)) => format!(
+                "Recent retry approval required for denial `{}`. Auto mode blocked this `{tool}` call{}:\n{arguments}\nReply with `1` or `approve` to let the assistant try it once more (auto mode checks it again), or `2`/`deny` to cancel. Approval id: `{}`",
+                denial.denial_id,
+                denial
+                    .classifier_rule
+                    .as_deref()
+                    .map(|rule| format!(" ({rule})"))
+                    .unwrap_or_default(),
+                approval_request_id
+            ),
+            None => format!(
+                "Recent retry approval required for denial `{}`. Reply with `1` or `approve` to run the exact denied `{}` action once, or `2`/`deny` to cancel. `approve_session` is not available for recent retry. Approval id: `{}`",
+                denial.denial_id, denial.tool_name, approval_request_id
+            ),
+        };
         self.publish_command_response(
             message,
             session,
@@ -4033,6 +4157,69 @@ impl<'a> AgentLoop<'a> {
             token.tool_context().clone(),
             approval_cache,
         )
+    }
+
+    /// A stored question's context with this turn's permission environment,
+    /// which is not serialized, so the reply normalizes the call as the
+    /// question did (Spec 048 PRD 010 scope 10).
+    fn reply_tool_context(&self, stored: &ToolExecutionContext) -> ToolExecutionContext {
+        let mut context = stored.clone();
+        context.permission_environment = self.config.permission_environment.clone();
+        context
+    }
+
+    /// A stored call normalized as it was asked, through the deferred bridge
+    /// when it is a bridge call.
+    fn reply_call_action(
+        &self,
+        call: &RuntimeToolCall,
+        stored: &ToolExecutionContext,
+    ) -> Option<PermissionedAction> {
+        let input = permissioned_action_input_from_context(&self.reply_tool_context(stored));
+        if !bridge_tool_names().contains(&call.name.as_str()) {
+            return Some(crate::runtime::normalize_runtime_tool_call(
+                self.tools, call, input,
+            ));
+        }
+        let tool_surface = assemble_tool_surface(ToolSurfaceAssemblyInput {
+            definitions: self.tools.definitions(),
+            runtime: crate::runtime::ToolSearchRuntimeInput {
+                config: self.config.tool_search,
+                context_window_tokens: self.config.context_window_tokens,
+            },
+        });
+        match super::tool_search::resolve_bridge_call(
+            &crate::runtime::BridgeToolCall::from_runtime(call),
+            tool_surface.catalog.as_ref(),
+            self.tools,
+        ) {
+            super::tool_search::BridgeAction::Execute(resolved) => Some(
+                crate::runtime::normalize_resolved_deferred_tool_call(self.tools, &resolved, input),
+            ),
+            super::tool_search::BridgeAction::Immediate(_)
+            | super::tool_search::BridgeAction::Error(_) => None,
+        }
+    }
+
+    /// The call a retry token holds, as `/permission recent` shows and
+    /// approves it in auto mode (Spec 048 PRD 020 scope 6), or why it cannot
+    /// be approved here.
+    fn retry_call_shown(
+        &self,
+        token: &RecentAutoModeRetryToken,
+    ) -> Result<(String, String), &'static str> {
+        if !self
+            .config
+            .permission_environment
+            .as_ref()
+            .is_some_and(|environment| environment.secret_values_current())
+        {
+            return Err("Recent retry cannot show this call now: .env.json could not be read in this turn, so its values may not all be hidden. The blocked call was not run; try again once .env.json can be read.");
+        }
+        let action = self
+            .reply_call_action(token.tool_call(), token.tool_context())
+            .ok_or("Recent retry could not read this call again. The blocked call was not run; request the action again if still needed.")?;
+        auto_mode_turn::shown_call(&action).ok_or("This blocked call is too long to approve here, so it was not run. If you intended it, tell the assistant in a message.")
     }
 
     fn execute_approved_permission_call(
@@ -5488,10 +5675,23 @@ fn recent_auto_mode_denials(session: &Session) -> Vec<RecentAutoModeDenial> {
         .unwrap_or_default()
 }
 
+fn remove_recent_auto_mode_denial(session: &mut Session, denial_id: &str) {
+    let mut denials = recent_auto_mode_denials(session);
+    denials.retain(|denial| denial.denial_id != denial_id);
+    if let Ok(value) = serde_json::to_value(denials) {
+        session
+            .metadata
+            .insert(RECENT_AUTO_MODE_DENIALS_KEY.to_owned(), value);
+    }
+}
+
+/// `auto_mode`: a retry in this run asks the assistant to try again, so the
+/// verdict's lifetime does not limit it (Spec 048 PRD 020 scope 5).
 fn format_recent_auto_mode_denials(
     session: &Session,
     retry_tokens: &RecentAutoModeRetryTokenStore,
     now_unix_ms: u64,
+    auto_mode: bool,
 ) -> String {
     let denials = recent_auto_mode_denials(session);
     if denials.is_empty() {
@@ -5507,21 +5707,27 @@ fn format_recent_auto_mode_denials(
             .map(|capability| format!("{capability:?}"))
             .collect::<Vec<_>>()
             .join(",");
+        let available = if auto_mode {
+            retry_tokens.holds(&denial.denial_id)
+        } else {
+            retry_tokens.is_available(&denial.denial_id, now_unix_ms)
+        };
         lines.push(format!(
-            "- id={} tool={} capabilities=[{}] verdict={:?} confidence={:?} scope={:?} action={} snapshot={} retry_state={}",
+            "- id={} tool={}{} capabilities=[{}] verdict={:?} confidence={:?} scope={:?} action={} snapshot={} retry_state={}",
             denial.denial_id,
             denial.tool_name,
+            denial
+                .classifier_rule
+                .as_deref()
+                .map(|rule| format!(" rule={rule}"))
+                .unwrap_or_default(),
             capabilities,
             denial.classifier_verdict,
             denial.classifier_confidence,
             denial.classifier_scope_match,
             action_digest,
             snapshot_digest,
-            if retry_tokens.is_available(&denial.denial_id, now_unix_ms) {
-                "available"
-            } else {
-                "unavailable"
-            },
+            if available { "available" } else { "unavailable" },
         ));
     }
     lines.join("\n")
@@ -5973,6 +6179,9 @@ fn store_session_approval_cache_entry(
     approval: ApprovalCacheEntry,
     action: &PermissionedAction,
 ) {
+    if action.has_hidden_arguments() {
+        return;
+    }
     let reuse_match = session_approval_reuse_pattern(action)
         .map(|pattern| SessionApprovalReuseMatch::ExecCommandPattern { pattern })
         .unwrap_or(SessionApprovalReuseMatch::ExactAction);
@@ -6857,6 +7066,7 @@ mod tests {
             classifier_confidence: EvaluatorConfidence::High,
             classifier_scope_match: EvaluatorScopeMatch::Requested,
             retryable: true,
+            classifier_rule: None,
         }
     }
 

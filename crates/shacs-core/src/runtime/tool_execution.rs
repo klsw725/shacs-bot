@@ -1,5 +1,5 @@
 use crate::runtime::auto_mode::action_materials::{self, StandingApprovals};
-use crate::runtime::auto_mode::approval_why;
+use crate::runtime::auto_mode::{approval_why, blocked_call};
 use crate::runtime::permission_action::normalize_prepared_runtime_tool_call;
 use crate::runtime::permission_pattern::{
     session_approval_reuse_matches, session_approval_reuse_pattern,
@@ -10,17 +10,18 @@ use crate::runtime::{
     correlate_policy_safety_snapshot_ref, decide_permission, evaluate_static_rules,
     normalize_runtime_tool_call, ApprovalCacheEntry, ApprovalCorrelation, ApprovalCorrelationError,
     ApprovalDecisionKind, ApprovalExplanation, ApprovalRequest, AutoEvaluatorVerdict,
-    AutoEvaluatorVerdictKind, ContainmentSnapshotRef, EvaluatorConfidence, EvaluatorScopeMatch,
-    InheritedPermissionContext, PermissionCeilingSnapshot, PermissionEnvironment, PermissionMode,
-    PermissionModeSnapshot, PermissionPolicyDecision, PermissionPolicyDecisionKind,
-    PermissionPolicyInput, PermissionPolicyReason, PermissionRuleInput, PermissionedAction,
-    PermissionedActionInput, PermissionedActionOrigin, ProcExecSummary, ProcessAdapterKind,
-    ProcessContainmentProofCandidate, ProcessEnvelopeAdmission, ProcessExecutionEnvelope,
-    ProcessExecutionEnvelopeInput, ProcessGateInput, ProcessGatePolicyMaterials,
-    ProcessGateTerminalPrecondition, ProcessIdentity, ProcessRedactedCommand,
-    ProjectPermissionStoreConfig, RecentAutoModeDenial, RecentAutoModeRetryToken, SafetyCapability,
-    SessionApprovalCacheEntry, SessionApprovalReuseMatch, SessionRememberedPermissionRule,
-    StaticRuleDecision, StaticRuleDecisionKind,
+    AutoEvaluatorVerdictKind, AutoModeEscalation, ContainmentSnapshotRef, EvaluatorConfidence,
+    EvaluatorScopeMatch, InheritedPermissionContext, PermissionCeilingSnapshot,
+    PermissionEnvironment, PermissionMode, PermissionModeSnapshot, PermissionPolicyDecision,
+    PermissionPolicyDecisionKind, PermissionPolicyInput, PermissionPolicyReason,
+    PermissionRuleInput, PermissionedAction, PermissionedActionInput, PermissionedActionOrigin,
+    ProcExecSummary, ProcessAdapterKind, ProcessContainmentProofCandidate,
+    ProcessEnvelopeAdmission, ProcessExecutionEnvelope, ProcessExecutionEnvelopeInput,
+    ProcessGateInput, ProcessGatePolicyMaterials, ProcessGateTerminalPrecondition, ProcessIdentity,
+    ProcessRedactedCommand, ProjectPermissionStoreConfig, RecentAutoModeDenial,
+    RecentAutoModeRetryToken, SafetyCapability, SessionApprovalCacheEntry,
+    SessionApprovalReuseMatch, SessionRememberedPermissionRule, StaticRuleDecision,
+    StaticRuleDecisionKind,
 };
 use crate::tools::{
     CronTool, MessageTool, PreparedToolCall, SpawnTool, ToolCallExecutionContext, ToolRegistry,
@@ -36,7 +37,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const ERROR_HINT: &str = "\n\n[Analyze the error above and try a different approach.]";
-const PERMISSION_APPROVAL_TTL_MS: u64 = 10 * 60 * 1000;
+pub(crate) const PERMISSION_APPROVAL_TTL_MS: u64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeToolCall {
@@ -206,6 +207,10 @@ pub struct ToolExecutionContext {
     pub permission_ceiling_snapshot: Option<PermissionCeilingSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_evaluator: Option<AutoEvaluatorVerdict>,
+    /// Set on one call's context when the auto mode block counts reached a
+    /// limit with it (Spec 048 PRD 020 scope 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_auto_mode_escalation: Option<AutoModeEscalation>,
     #[serde(default)]
     pub permission_interactive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,6 +247,7 @@ impl Default for ToolExecutionContext {
             permission_auto_approval: AutoApprovalConfig::default(),
             permission_ceiling_snapshot: None,
             permission_evaluator: None,
+            permission_auto_mode_escalation: None,
             permission_interactive: false,
             permission_approval_cache: None,
             permission_session_approval_cache: Vec::new(),
@@ -608,6 +614,7 @@ pub(crate) fn permissioned_action_input_from_context(
         permission_mode_snapshot: context.permission_mode_snapshot.clone(),
         containment_snapshot: context.containment_snapshot.clone(),
         intent_snapshot: None,
+        permission_environment: context.permission_environment.clone(),
     }
 }
 
@@ -644,19 +651,27 @@ impl PermissionEvaluation {
     /// print when it would refuse the call itself (Spec 048 PRD 000 scope 2,
     /// row 5), the permission reason otherwise.
     pub(crate) fn block_message(&self, tool_call_id: &str, name: &str) -> RuntimeToolMessage {
-        let refusal = self
-            .policy_materials
-            .materials
-            .as_ref()
+        let materials = self.policy_materials.materials.as_ref();
+        let refusal = materials
             .filter(|_| self.decision.reason == PermissionPolicyReason::ToolRefusal)
             .and_then(|materials| materials.preflight_refusal.clone());
-        match refusal {
-            Some(content) => RuntimeToolMessage {
-                tool_call_id: tool_call_id.to_owned(),
-                name: name.to_owned(),
-                content,
-            },
-            None => permission_block_message(tool_call_id, name, &self.decision),
+        // Only row 16 of auto mode refuses for these reasons where the
+        // decision materials exist (Spec 048 PRD 020 scope 2).
+        let classifier_row = materials.is_some()
+            && matches!(
+                self.decision.reason,
+                PermissionPolicyReason::EvaluatorUncertain
+                    | PermissionPolicyReason::EvaluatorUnavailable
+            );
+        let content = match refusal {
+            Some(content) => content,
+            None if classifier_row => blocked_call::tool_result(self.evaluator.as_ref()),
+            None => return permission_block_message(tool_call_id, name, &self.decision),
+        };
+        RuntimeToolMessage {
+            tool_call_id: tool_call_id.to_owned(),
+            name: name.to_owned(),
+            content,
         }
     }
 
@@ -951,7 +966,7 @@ fn proc_exec_summary_for_action(action: &PermissionedAction) -> Option<ProcExecS
         return None;
     }
     let command = action
-        .redacted_arguments
+        .decision_arguments()
         .get("command")
         .and_then(Value::as_str)?;
     let tokens = simple_verification_command_tokens(command)?;
@@ -1145,10 +1160,14 @@ pub(crate) fn permission_approval_interrupt(
     );
     let expires_at_unix_ms = now.saturating_add(PERMISSION_APPROVAL_TTL_MS);
     let risk_summary = format!("Run tool `{}`", action.tool_name);
+    // A call holding an `.env.json` value cannot be remembered: its masked
+    // text would match other calls once the value changes (Spec 048 PRD 010
+    // scope 9).
+    let once_only = explanation.once_only || action.has_hidden_arguments();
     let options = approval_decision_options()
         .into_iter()
         .filter(|option| {
-            !explanation.once_only
+            !once_only
                 || matches!(
                     option.decision,
                     ApprovalDecisionKind::Approved | ApprovalDecisionKind::Denied
@@ -1172,17 +1191,21 @@ pub(crate) fn permission_approval_interrupt(
     };
     let arguments = action.redacted_arguments.to_string();
     let target_summary = approval_target_summary(action);
-    let session_reuse_summary = if explanation.once_only {
+    let session_reuse_summary = if once_only {
         "none (this question takes one-time answers only)".to_owned()
     } else {
         session_approval_reuse_pattern(action).unwrap_or_else(|| "exact action only".to_owned())
     };
-    let why = explanation
-        .why
-        .as_ref()
-        .map(|why| format!("Why: {why}\n"))
-        .unwrap_or_default();
-    let replies = if explanation.once_only {
+    let hidden_note = (once_only && !explanation.once_only).then_some(
+        "the call holds a value from .env.json, shown as [secret NAME], so it takes one-time answers only.",
+    );
+    let why = match (explanation.why.as_deref(), hidden_note) {
+        (Some(why), Some(note)) => format!("Why: {why} Also, {note}\n"),
+        (Some(why), None) => format!("Why: {why}\n"),
+        (None, Some(note)) => format!("Why: {note}\n"),
+        (None, None) => String::new(),
+    };
+    let replies = if once_only {
         "Reply with `1` or `approve` to run it once, or `2` or `deny` to cancel."
     } else {
         "Reply with `1` or `approve` to run it once, `2` or `deny` to cancel once, `3` or `approve_session` to approve matching actions in this session, `4` or `approve_project` to approve matching actions in this project, `5` or `deny_session` to deny matching actions in this session, or `6` or `deny_project` to deny matching actions in this project."
@@ -1271,7 +1294,7 @@ fn session_approval_cache_correlation(
     }
     if let Err(error) = correlate_policy_safety_snapshot_ref(
         approval.request.policy_safety_snapshot_ref.as_ref(),
-        action.policy_safety_snapshot_ref.as_ref(),
+        action.decision_policy_safety_snapshot_ref(),
         now_unix_ms(),
     ) {
         return Some(ApprovalCorrelation::rejected(error));

@@ -382,7 +382,7 @@ PRD 000은 PRD 010–050 없이 닫힌다.
   - `shacs-cli` `surface_approval_fixture`와 `shacs-tui` 시험이 쓰는 `spec031_surface_approval_fixture`(`surface_approval_worker/fixture`): 격리 증명이 없는 `exec`를 auto mode가 5번으로 거절하므로, 승인 표면을 시험하는 이 fixture들은 `default` mode를 쓴다.
   - `shacs-cli` `public_adapter_approval_reuses_stored_scope_and_ceiling_for_real_exec`: 메모리에서만 정한 `default` mode를 config에 저장해 이름대로 `default`로 돈다.
 - 남은 제한:
-  - 판정 재료는 022처럼 redaction한 인자로 만든다. redaction이 지우는 절대 경로(`auth`·`token` 등이 든 것)는 2번에서 모든 mode에서 거절되므로, 절대 경로로 비밀 파일을 읽으면 묻지 않고 거절한다.
+  - 판정 재료는 022처럼 redaction한 인자로 만든다. redaction이 지우는 절대 경로(`auth`·`token` 등이 든 것)는 2번에서 모든 mode에서 거절되므로, 절대 경로로 비밀 파일을 읽으면 묻지 않고 거절한다. (2026-11-05: file tool은 [PRD 010](010-secret-file-split.md) 범위 9가 고쳤다. 비밀 파일을 가리키는 경로는 판정용 인자에서 되살려 묻는다.)
   - native Mac 실행에서는 격리 증명이 없어 auto mode의 `exec`가 시작되지 않는다(030의 gate 동작).
   - 새 module 6개가 250줄 지침을 넘는다.
 - classifier 요청의 redaction한 예: 로컬 `.omo/evidence/spec048/classifier-request-sample.txt`(추적하지 않음).

@@ -1629,6 +1629,7 @@ fn plugin_process_gate_input(
         secret_ref_evidence: Vec::new(),
         normalization_state: shacs_core::runtime::ActionNormalizationState::Ready,
         normalization_errors: Vec::new(),
+        decision: Default::default(),
     };
     let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
         identity: ProcessIdentity::new(

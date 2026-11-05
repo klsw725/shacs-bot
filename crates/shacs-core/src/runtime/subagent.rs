@@ -930,6 +930,7 @@ impl SubagentRuntime {
             record_channel_delivery: false,
             cancellation_token: Some(cancellation_token.clone()),
             deadline: None,
+            permission_auto_mode_escalation: None,
         };
         spec.max_iterations_message =
             Some("Task completed but no final response was generated.".to_owned());

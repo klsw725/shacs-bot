@@ -4,7 +4,7 @@ use super::runner_spec034::{
     observable_tool_arguments, observable_tool_calls, observable_tool_event, prepare_run,
     redact_string, ProviderStreamCounts, ToolResultArtifactRef,
 };
-use crate::runtime::auto_mode::classifier_review;
+use crate::runtime::auto_mode::{blocked_call, classifier_review};
 use crate::runtime::quiet_tools::quiet_tool_calls;
 use crate::runtime::tool_execution::{
     effective_permission_rule_input, permission_decision_for_action,
@@ -17,8 +17,9 @@ use crate::runtime::tool_search::{
 use crate::runtime::{
     classifier_decision_evidence, dispatch_bridge_tool_calls_with_context_resolver,
     recent_auto_mode_denial_from_classifier_decision, skipped_classifier_evidence,
-    with_classifier_stages, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, AutoModeClassifier,
-    CancellationToken, ClassifierAttemptStatus, ClassifierEvidenceInput, ClassifierFallbackCause,
+    with_classifier_stages, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, AutoModeBlockCounts,
+    AutoModeBlocks, AutoModeClassifier, AutoModeEscalation, CancellationToken,
+    ClassifierAttemptStatus, ClassifierEvidenceInput, ClassifierFallbackCause,
     ContextProviderHandoff, EvaluatorConfidence, EvaluatorScopeMatch, ExecutionDomain,
     ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact, ExecutionScope, ExecutionSnapshot,
     ExecutionSnapshotInput, PendingExecution, PermissionMode, PermissionPolicyDecision,
@@ -256,6 +257,9 @@ pub struct AgentRunSpec<'a> {
     pub client: &'a dyn ProviderClient,
     pub permission_classifier_client: Option<&'a dyn ProviderClient>,
     pub auto_mode_classifier: Option<AutoModeClassifier<'a>>,
+    /// The auto mode block counts the run's calls share (Spec 048 PRD 020
+    /// scope 4). The agent loop starts them from the session.
+    pub auto_mode_blocks: AutoModeBlocks,
     pub model: String,
     pub settings: GenerationSettings,
     pub max_iterations: usize,
@@ -305,6 +309,7 @@ impl<'a> AgentRunSpec<'a> {
             client,
             permission_classifier_client: None,
             auto_mode_classifier: None,
+            auto_mode_blocks: AutoModeBlocks::default(),
             model: model.into(),
             settings: GenerationSettings::default(),
             max_iterations: 200,
@@ -384,6 +389,12 @@ pub struct ToolSearchRuntimeInput {
     pub config: ToolSearchConfig,
     pub context_window_tokens: Option<usize>,
 }
+
+/// The tool event that shows a call auto mode did not run (Spec 048 PRD 020
+/// scope 8).
+pub const AUTO_MODE_BLOCK_EVENT: &str = "auto_mode_block";
+/// How every result of a call the permission decision did not run starts.
+pub(crate) const PERMISSION_DENIED: &str = "Permission denied";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -686,6 +697,7 @@ impl AgentRunner {
                         recent_auto_mode_retry_tokens,
                     ));
                 }
+                spec.auto_mode_blocks.begin_dispatch();
                 let report = execute_tool_dispatch(
                     executable_calls,
                     current_catalog.as_ref(),
@@ -707,7 +719,7 @@ impl AgentRunner {
                     .collect::<BTreeMap<_, _>>();
                 let mut fatal_outcome_content = None;
                 for raw_message in &report.messages {
-                    let event = tool_event_for_message(
+                    let mut event = tool_event_for_message(
                         raw_message,
                         executable_calls_by_id.get(&raw_message.tool_call_id),
                         current_catalog.as_ref(),
@@ -715,6 +727,11 @@ impl AgentRunner {
                             .get(&raw_message.tool_call_id)
                             .copied(),
                     );
+                    // A call auto mode did not run reads like any refusal,
+                    // whatever words the classifier's reason has.
+                    if spec.auto_mode_blocks.did_not_run(&raw_message.tool_call_id) {
+                        event.status = ToolStatus::Ok;
+                    }
                     let (normalized, fatal) = finalize_tool_message(&spec, raw_message.clone());
                     if fatal {
                         fatal_outcome_content = Some(normalized.content.clone());
@@ -1415,9 +1432,13 @@ fn direct_runtime_report(
     executor: &RuntimeToolExecutor<'_>,
     run_messages: &[Value],
 ) -> RuntimeToolExecutionReport {
-    if (spec.permission_classifier_client.is_some() || spec.auto_mode_classifier.is_some())
-        && spec.tool_context.permission_auto_approval.enabled
-        && spec.tool_context.permission_mode_snapshot.mode == PermissionMode::Auto
+    // Every auto mode run passes the classifier row, whether or not it has a
+    // classifier or 022 auto approval turned on, as subagent runs do not
+    // (Spec 048 PRD 020 scope 4).
+    if auto_mode_run(&spec.tool_context)
+        || ((spec.permission_classifier_client.is_some() || spec.auto_mode_classifier.is_some())
+            && spec.tool_context.permission_auto_approval.enabled
+            && spec.tool_context.permission_mode_snapshot.mode == PermissionMode::Auto)
     {
         return direct_runtime_report_with_classifier(calls, spec, executor, run_messages);
     }
@@ -1500,6 +1521,7 @@ fn direct_runtime_report_with_classifier(
                     .as_ref()
                     .map(|_| "permission_classifier"),
                 context: &context,
+                blocks: None,
             },
         );
         if let Some(evaluator) = context.permission_evaluator.as_ref() {
@@ -1556,6 +1578,13 @@ fn direct_runtime_report_with_classifier(
     }
 }
 
+/// A run that decides by the auto mode table (Spec 048 PRD 000): auto mode
+/// with a permission environment.
+fn auto_mode_run(context: &ToolExecutionContext) -> bool {
+    context.permission_environment.is_some()
+        && context.permission_mode_snapshot.mode == PermissionMode::Auto
+}
+
 fn tool_context_with_classifier_verdict(
     call: &RuntimeToolCall,
     spec: &AgentRunSpec<'_>,
@@ -1563,12 +1592,15 @@ fn tool_context_with_classifier_verdict(
     run_messages: &[Value],
 ) -> ToolExecutionContext {
     let mut context = spec.tool_context.clone();
-    if context.permission_evaluator.is_some() || !context.permission_auto_approval.enabled {
+    let auto_mode_run = auto_mode_run(&context);
+    if !auto_mode_run
+        && (!context.permission_auto_approval.enabled || context.permission_evaluator.is_some())
+    {
         return context;
     }
     let action =
         executor.normalize_tool_call(call, permissioned_action_input_from_context(&context));
-    if context.permission_environment.is_some() {
+    if auto_mode_run {
         let review = AutoModeReview {
             pending_call_id: &call.id,
             action: &action,
@@ -1603,6 +1635,7 @@ fn tool_context_with_classifier_verdict(
                 evaluator: context.permission_evaluator.as_ref(),
                 evaluator_source: None,
                 context: &context,
+                blocks: None,
             },
         );
         return context;
@@ -1628,6 +1661,7 @@ fn tool_context_with_classifier_verdict(
                 evaluator: context.permission_evaluator.as_ref(),
                 evaluator_source: None,
                 context: &context,
+                blocks: None,
             },
         );
         return context;
@@ -1653,6 +1687,7 @@ fn tool_context_with_classifier_verdict(
                 evaluator: context.permission_evaluator.as_ref(),
                 evaluator_source: None,
                 context: &context,
+                blocks: None,
             },
         );
         return context;
@@ -1692,6 +1727,7 @@ fn tool_context_with_classifier_verdict(
             evaluator: Some(&attempt.verdict),
             evaluator_source: Some("permission_classifier"),
             context: &context,
+            blocks: None,
         },
     );
     context.permission_evaluator = Some(attempt.verdict);
@@ -1706,7 +1742,10 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
     run_messages: &[Value],
 ) -> ToolExecutionContext {
     let mut context = base_context.clone();
-    if context.permission_evaluator.is_some() || !context.permission_auto_approval.enabled {
+    let auto_mode_run = auto_mode_run(&context);
+    if !auto_mode_run
+        && (!context.permission_auto_approval.enabled || context.permission_evaluator.is_some())
+    {
         return context;
     }
     let action = crate::runtime::normalize_resolved_deferred_tool_call(
@@ -1714,7 +1753,7 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
         resolved_call,
         permissioned_action_input_from_context(&context),
     );
-    if context.permission_environment.is_some() {
+    if auto_mode_run {
         let review = AutoModeReview {
             pending_call_id: &resolved_call.original_call_id,
             action: &action,
@@ -1749,6 +1788,7 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
                 evaluator: context.permission_evaluator.as_ref(),
                 evaluator_source: None,
                 context: &context,
+                blocks: None,
             },
         );
         return context;
@@ -1774,6 +1814,7 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
                 evaluator: context.permission_evaluator.as_ref(),
                 evaluator_source: None,
                 context: &context,
+                blocks: None,
             },
         );
         return context;
@@ -1799,6 +1840,7 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
                 evaluator: context.permission_evaluator.as_ref(),
                 evaluator_source: None,
                 context: &context,
+                blocks: None,
             },
         );
         return context;
@@ -1837,6 +1879,7 @@ fn tool_context_with_resolved_bridge_classifier_verdict(
             evaluator: Some(&attempt.verdict),
             evaluator_source: Some("permission_classifier"),
             context: &context,
+            blocks: None,
         },
     );
     context.permission_evaluator = Some(attempt.verdict);
@@ -1850,8 +1893,9 @@ struct AutoModeReview<'r> {
     phase: &'static str,
 }
 
-/// Spec 048 PRD 000 scope 10: the decision is computed without the classifier
-/// first, and the classifier is called only when that decision is row 16.
+/// Spec 048 PRD 000 scope 10 and PRD 020 scope 4: the decision is computed
+/// without a verdict first. Only a row-16 call gets the classifier's verdict
+/// (or one set beforehand), is counted, and may escalate.
 fn auto_mode_reviewed_context(
     review: AutoModeReview<'_>,
     mut context: ToolExecutionContext,
@@ -1859,74 +1903,164 @@ fn auto_mode_reviewed_context(
     executor: &RuntimeToolExecutor<'_>,
 ) -> ToolExecutionContext {
     let action = review.action;
+    let preset = context.permission_evaluator.take();
     let decision = permission_decision_for_action(executor.registry(), action, &context);
-    let classifier = spec
-        .auto_mode_classifier
-        .as_ref()
-        .filter(|_| decision.reason == PermissionPolicyReason::EvaluatorUnavailable);
-    let Some(classifier) = classifier else {
-        let gate_reason = if decision.reason == PermissionPolicyReason::EvaluatorUnavailable {
-            "classifier_unavailable"
-        } else {
-            "decided_before_classifier"
-        };
+    if decision.reason != PermissionPolicyReason::EvaluatorUnavailable {
+        if decision.kind == PermissionPolicyDecisionKind::Allow {
+            spec.auto_mode_blocks.mark_ran(review.pending_call_id);
+        }
+        context.permission_evaluator = preset;
         emit_auto_permission_diagnostic(
             spec,
             AutoPermissionDiagnosticInput {
                 phase: review.phase,
-                gate_reason: Some(gate_reason),
+                gate_reason: Some("decided_before_classifier"),
                 action,
                 decision: Some(&decision),
                 evaluator: None,
                 evaluator_source: None,
                 context: &context,
+                blocks: None,
             },
         );
         return context;
+    }
+    let classifier = spec.auto_mode_classifier.as_ref();
+    let (gate_reason, reviewed) = match (&preset, classifier) {
+        (Some(_), _) => ("preset_verdict", None),
+        (None, Some(classifier)) => (
+            "classifier_invoked",
+            Some(classifier_review::review(
+                classifier,
+                review.run_messages,
+                review.pending_call_id,
+                action,
+                executor.registry(),
+                classifier_time_source(spec),
+            )),
+        ),
+        (None, None) => ("classifier_unavailable", None),
     };
-    let reviewed = classifier_review::review(
-        classifier,
-        review.run_messages,
-        review.pending_call_id,
-        action,
-        executor.registry(),
-        classifier_time_source(spec),
-    );
-    let attempt = reviewed.attempt;
-    let mut evaluated_context = context.clone();
-    evaluated_context.permission_evaluator = Some(attempt.verdict.clone());
-    let final_decision =
-        permission_decision_for_action(executor.registry(), action, &evaluated_context);
-    let evidence = classifier_decision_evidence(ClassifierEvidenceInput {
-        created_at_unix_ms: attempt.started_at_unix_ms,
-        completed_at_unix_ms: Some(attempt.completed_at_unix_ms),
-        model_id: &classifier.model,
-        action,
-        initial_decision: &decision,
-        final_decision: &final_decision,
-        request_payload: &reviewed.payload,
-        verdict: &attempt.verdict,
-        usage: attempt.usage.as_ref(),
-        attempt_status: attempt.status,
+    context.permission_evaluator = preset.or_else(|| {
+        reviewed
+            .as_ref()
+            .map(|reviewed| reviewed.attempt.verdict.clone())
     });
-    set_classifier_evidence(
-        &mut context,
-        with_classifier_stages(evidence, attempt.stages, attempt.rule),
-    );
+    let mut final_decision = permission_decision_for_action(executor.registry(), action, &context);
+    let blocks = if final_decision.kind == PermissionPolicyDecisionKind::Allow {
+        Some((spec.auto_mode_blocks.allowed(), None))
+    } else if turn_ended(spec) {
+        context.permission_evaluator = Some(blocked_call::turn_ended_verdict(
+            classifier_now_unix_ms(spec),
+        ));
+        final_decision = permission_decision_for_action(executor.registry(), action, &context);
+        None
+    } else {
+        let (counts, escalation) = spec.auto_mode_blocks.blocked();
+        if escalation.is_some() {
+            context.permission_auto_mode_escalation = escalation;
+            final_decision = permission_decision_for_action(executor.registry(), action, &context);
+        }
+        Some((counts, escalation))
+    };
+    if final_decision.kind == PermissionPolicyDecisionKind::Allow {
+        spec.auto_mode_blocks.mark_ran(review.pending_call_id);
+    } else {
+        spec.auto_mode_blocks.mark_not_run(review.pending_call_id);
+    }
+    if let (Some(reviewed), Some(classifier)) = (reviewed, classifier) {
+        let attempt = reviewed.attempt;
+        let evidence = classifier_decision_evidence(ClassifierEvidenceInput {
+            created_at_unix_ms: attempt.started_at_unix_ms,
+            completed_at_unix_ms: Some(attempt.completed_at_unix_ms),
+            model_id: &classifier.model,
+            action,
+            initial_decision: &decision,
+            final_decision: &final_decision,
+            request_payload: &reviewed.payload,
+            verdict: &attempt.verdict,
+            usage: attempt.usage.as_ref(),
+            attempt_status: attempt.status,
+        });
+        set_classifier_evidence(
+            &mut context,
+            with_classifier_stages(evidence, attempt.stages, attempt.rule),
+        );
+    }
+    let verdict = context.permission_evaluator.as_ref();
+    let blocks = blocks.map(|(counts, escalation)| AutoModeBlockDiagnostics {
+        outcome: if final_decision.kind == PermissionPolicyDecisionKind::Allow {
+            "allowed"
+        } else if blocked_call::blocked(verdict) {
+            "blocked"
+        } else {
+            "no_verdict"
+        },
+        rule: blocked_call::rule_name(verdict),
+        counts,
+        escalation,
+    });
     emit_auto_permission_diagnostic(
         spec,
         AutoPermissionDiagnosticInput {
             phase: review.phase,
-            gate_reason: Some("classifier_invoked"),
+            gate_reason: Some(gate_reason),
             action,
             decision: Some(&final_decision),
-            evaluator: Some(&attempt.verdict),
-            evaluator_source: Some("permission_classifier"),
+            evaluator: verdict,
+            evaluator_source: (gate_reason == "classifier_invoked")
+                .then_some("permission_classifier"),
             context: &context,
+            blocks: blocks.as_ref(),
         },
     );
-    context.permission_evaluator = Some(attempt.verdict);
+    if let Some(blocks) = blocks
+        .as_ref()
+        .filter(|_| final_decision.kind == PermissionPolicyDecisionKind::Deny)
+    {
+        emit_auto_mode_block_event(spec, action, verdict, blocks);
+    }
     context
+}
+
+/// The run's turn was stopped or ran out of time, so calls the classifier
+/// did not allow are not counted (Spec 048 PRD 020 scope 4).
+fn turn_ended(spec: &AgentRunSpec<'_>) -> bool {
+    cancellation_requested(spec)
+        || spec
+            .deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        || spec
+            .auto_mode_classifier
+            .as_ref()
+            .is_some_and(|classifier| classifier.invocation.is_cancelled())
+}
+
+/// The notice for a call auto mode did not run (Spec 048 PRD 020 scope 8).
+/// It waits like the permission diagnostics, so method observation and
+/// observability do not take it for a tool result.
+fn emit_auto_mode_block_event(
+    spec: &AgentRunSpec<'_>,
+    action: &PermissionedAction,
+    verdict: Option<&AutoEvaluatorVerdict>,
+    blocks: &AutoModeBlockDiagnostics,
+) {
+    let event = ToolEvent {
+        name: AUTO_MODE_BLOCK_EVENT.to_owned(),
+        status: ToolStatus::Waiting,
+        detail: blocked_call::notice(&action.tool_name, verdict),
+        call_id: Some(action.action_id.clone()),
+        arguments: None,
+        result: Some(json!({
+            "tool": &action.tool_name,
+            "outcome": blocks.outcome,
+            "rule": blocks.rule,
+            "consecutive": blocks.counts.consecutive,
+            "total": blocks.counts.total,
+            "escalation": blocks.escalation,
+        })),
+    };
+    emit_events(spec, std::slice::from_ref(&event));
 }
 
 fn context_for_classifier_review(
@@ -1949,6 +2083,16 @@ struct AutoPermissionDiagnosticInput<'a> {
     evaluator: Option<&'a AutoEvaluatorVerdict>,
     evaluator_source: Option<&'static str>,
     context: &'a ToolExecutionContext,
+    blocks: Option<&'a AutoModeBlockDiagnostics<'a>>,
+}
+
+/// What row 16 did with a call and the block counts after it (Spec 048 PRD
+/// 020 scope 9). The rule is a rule entry's name; no arguments or reasons.
+struct AutoModeBlockDiagnostics<'a> {
+    outcome: &'static str,
+    rule: Option<&'a str>,
+    counts: AutoModeBlockCounts,
+    escalation: Option<AutoModeEscalation>,
 }
 
 fn emit_auto_permission_diagnostic(
@@ -1984,6 +2128,10 @@ fn emit_auto_permission_diagnostic(
             .proc_exec_summary
             .as_ref()
             .is_some_and(|summary| summary.summary_available),
+        "auto_mode_outcome": input.blocks.map(|blocks| blocks.outcome),
+        "classifier_rule": input.blocks.and_then(|blocks| blocks.rule),
+        "block_counts": input.blocks.map(|blocks| blocks.counts),
+        "escalation": input.blocks.and_then(|blocks| blocks.escalation),
     });
     let detail = serde_json::to_string(&payload)
         .unwrap_or_else(|_| "{\"phase\":\"auto_permission_diagnostic_failed\"}".to_owned());
@@ -2905,7 +3053,9 @@ fn tool_outcome_for_message(
     spec: &AgentRunSpec<'_>,
     message: &RuntimeToolMessage,
 ) -> ToolOutcomeKind {
-    if is_tool_cancelled_message(message) {
+    if spec.auto_mode_blocks.did_not_run(&message.tool_call_id) {
+        ToolOutcomeKind::Completed
+    } else if is_tool_cancelled_message(message) {
         ToolOutcomeKind::Cancelled
     } else if is_tool_timeout_message(message) {
         ToolOutcomeKind::TimedOut
@@ -3317,7 +3467,9 @@ pub(super) fn finalize_tool_message(
 ) -> (RuntimeToolMessage, bool) {
     let fatal = fatal_tool_message(spec, &raw_message);
     let outcome = tool_outcome_for_message(spec, &raw_message);
-    let spawn_completed = matches!(outcome, ToolOutcomeKind::Completed);
+    // A `spawn` auto mode did not run started nothing, whatever its text says.
+    let spawn_completed = matches!(outcome, ToolOutcomeKind::Completed)
+        && !spec.auto_mode_blocks.did_not_run(&raw_message.tool_call_id);
     let normalized = normalize_tool_message(spec, raw_message.clone());
     record_tool_message_outcome(
         spec,
@@ -3529,6 +3681,15 @@ fn tool_call_mapping_event(
         scope_digest: resolved_call.scope_digest.clone(),
     });
 
+    let mut result = serde_json::json!({
+        "mapping_evidence": evidence,
+        "scope_digest": scope_digest,
+    });
+    // The mapping says nothing of the call's own result, so a refusal is
+    // carried for the method observation (Spec 048 PRD 020 scope 2).
+    if message.content.starts_with(PERMISSION_DENIED) {
+        result["denied"] = Value::String(message.content.clone());
+    }
     ToolEvent {
         name: message.name.clone(),
         status,
@@ -3543,10 +3704,7 @@ fn tool_call_mapping_event(
             .unwrap_or_else(|| format!("tool_call rejected {requested_name}")),
         call_id: Some(message.tool_call_id.clone()),
         arguments: None,
-        result: Some(serde_json::json!({
-            "mapping_evidence": evidence,
-            "scope_digest": scope_digest,
-        })),
+        result: Some(result),
     }
 }
 
@@ -3604,9 +3762,12 @@ fn fatal_tool_error(spec: &AgentRunSpec<'_>, messages: &[RuntimeToolMessage]) ->
     })
 }
 
+/// A call auto mode did not run never stops the run: its text is auto
+/// mode's, and a classifier reason may use a tool's violation words.
 fn fatal_tool_message(spec: &AgentRunSpec<'_>, message: &RuntimeToolMessage) -> bool {
-    is_workspace_violation(&message.content)
-        || (spec.fail_on_tool_error && is_tool_unsuccessful_message(message))
+    !spec.auto_mode_blocks.did_not_run(&message.tool_call_id)
+        && (is_workspace_violation(&message.content)
+            || (spec.fail_on_tool_error && is_tool_unsuccessful_message(message)))
 }
 
 pub(super) fn is_tool_unsuccessful_message(message: &RuntimeToolMessage) -> bool {

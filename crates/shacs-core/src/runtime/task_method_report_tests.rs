@@ -249,3 +249,22 @@ fn only_semicolons_separate_cited_sources() {
     );
     assert_eq!(verdict.state, ReportState::Linked);
 }
+
+#[test]
+fn a_page_auto_mode_did_not_fetch_is_a_failed_source() {
+    // Given
+    let blocked = "Permission denied by auto mode: [Data Exfiltration] sends notes in the query. This call did not run.";
+
+    // When
+    let fetched = source(
+        "call",
+        SourceKind::Web,
+        "https://example.com/?q=notes",
+        blocked,
+        None,
+    );
+
+    // Then
+    assert_eq!(fetched.status, SourceStatus::Failed);
+    assert!(fetched.content_digest.is_none());
+}

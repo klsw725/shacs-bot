@@ -2690,6 +2690,7 @@ fn runtime_applies_message_and_spawn_context() -> Result<(), Box<dyn Error>> {
         record_channel_delivery: true,
         cancellation_token: None,
         deadline: None,
+        permission_auto_mode_escalation: None,
     };
 
     let report = executor.execute_tool_calls(

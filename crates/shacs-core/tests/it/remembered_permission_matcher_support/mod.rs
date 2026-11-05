@@ -72,6 +72,7 @@ pub fn action(
             },
             containment_snapshot: None,
             intent_snapshot: None,
+            permission_environment: None,
         },
     )
 }

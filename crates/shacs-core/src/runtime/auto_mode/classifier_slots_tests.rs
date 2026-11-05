@@ -24,3 +24,27 @@ fn user_lists_replace_defaults_unless_they_splice_them_in() {
     assert_eq!(labelled.soft_deny.len(), 1);
     assert!(labelled.allow.is_empty());
 }
+
+#[test]
+fn rule_labels_come_from_the_rule_lists_only() {
+    // Given
+    let soft_deny = vec![
+        "[Mine] my rule".to_owned(),
+        "no label here".to_owned(),
+        "[ ] empty label".to_owned(),
+    ];
+    let slots = AutoModeSlots::resolve(SlotOverrides {
+        soft_deny: Some(&soft_deny),
+        ..SlotOverrides::default()
+    });
+
+    // When
+    let labels = slots.rule_labels();
+
+    // Then
+    assert!(labels.contains(&"Credential Exfiltration".to_owned()));
+    assert!(labels.contains(&"Mine".to_owned()));
+    assert!(labels.contains(&"Public Reading".to_owned()));
+    assert!(!labels.contains(&"Workspace".to_owned()));
+    assert!(!labels.iter().any(String::is_empty));
+}

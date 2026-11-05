@@ -3247,6 +3247,7 @@ fn subagent_permissioned_action_context_inherits_snapshots_and_origin() -> Resul
         cancellation_token: None,
         deadline: None,
         permission_environment: None,
+        permission_auto_mode_escalation: None,
     };
 
     let report = RuntimeToolExecutor::new(&registry).execute_tool_calls(
@@ -5009,6 +5010,7 @@ fn recent_auto_mode_denial_store_caps_at_twenty_newest_records() -> Result<(), B
             classifier_confidence: EvaluatorConfidence::High,
             classifier_scope_match: EvaluatorScopeMatch::Unrelated,
             retryable: true,
+            classifier_rule: None,
         });
     }
 
@@ -5054,6 +5056,7 @@ fn recent_auto_mode_denial_store_extend_keeps_newest_first_input_order(
                 classifier_confidence: EvaluatorConfidence::High,
                 classifier_scope_match: EvaluatorScopeMatch::Unrelated,
                 retryable: true,
+                classifier_rule: None,
             }),
     );
 
@@ -5294,6 +5297,7 @@ fn sample_recent_denial(label: &str) -> RecentAutoModeDenial {
         classifier_confidence: EvaluatorConfidence::High,
         classifier_scope_match: EvaluatorScopeMatch::Unrelated,
         retryable: true,
+        classifier_rule: None,
     }
 }
 

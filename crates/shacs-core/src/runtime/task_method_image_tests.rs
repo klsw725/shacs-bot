@@ -107,6 +107,7 @@ fn provider_and_runtime_failures_map_to_their_own_states() {
         ("Error: Image generation provider failure: code=image_generation_provider_error status=500", AttemptStatus::Failed),
         ("Error: Image generation media write failure: could not write image artifact: Permission denied (os error 13)", AttemptStatus::WriteFailed),
         ("Permission denied by user.", AttemptStatus::Denied),
+        ("Permission denied by auto mode: [Affecting Others] posts elsewhere. This call did not run.", AttemptStatus::Denied),
         ("[Tool call skipped because the turn was cancelled]", AttemptStatus::Cancelled),
         ("{\"artifacts\": []}", AttemptStatus::Failed),
     ];

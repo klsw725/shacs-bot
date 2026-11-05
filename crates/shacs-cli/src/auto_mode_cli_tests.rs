@@ -194,3 +194,106 @@ fn rules_in_a_workspace_config_or_instruction_file_are_not_read() -> Result<(), 
     assert_eq!(shown["rules"], json!({"allow": [], "ask": [], "deny": []}));
     Ok(())
 }
+
+#[test]
+fn a_turn_that_cannot_read_env_json_keeps_the_last_values_and_the_rules(
+) -> Result<(), Box<dyn Error>> {
+    // Given
+    let root = tempfile::tempdir()?;
+    let config_path = root.path().join("config.json");
+    let workspace = root.path().join("ws");
+    fs::create_dir_all(&workspace)?;
+    fs::write(
+        &config_path,
+        "{\"permissions\": {\"deny\": [\"exec(whoami)\"]}}",
+    )?;
+    fs::write(
+        root.path().join(".env.json"),
+        "{\"SHACS_CHANNELS_DISCORD_TOKEN\": \"cache-canary-value-1\"}",
+    )?;
+    let bundle = load_config(LoadOptions {
+        config_path: Some(config_path.clone()),
+        workspace_override: Some(workspace.clone()),
+        resolve_env: false,
+        write_back_migrations: false,
+    })?;
+    let sources = || EnvironmentSources {
+        config_path: &config_path,
+        workspace: &workspace,
+        extra_skill_roots: &[],
+        extra_context_files: &[],
+        protected_targets: &[],
+    };
+
+    // When
+    let read = permission_environment(Some(&bundle), sources());
+    fs::write(root.path().join(".env.json"), "{\"broken\": ")?;
+    let kept = permission_environment(Some(&bundle), sources());
+
+    // Then
+    assert!(read.secret_values_current());
+    assert!(!kept.secret_values_current());
+    for environment in [&read, &kept] {
+        assert_eq!(
+            environment.secret_values().mask("x cache-canary-value-1 y"),
+            "x [secret SHACS_CHANNELS_DISCORD_TOKEN] y"
+        );
+        assert_eq!(
+            environment.user_rules.rule_texts(RuleEffect::Deny),
+            vec!["exec(whoami)"]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_call_auto_mode_did_not_run_becomes_a_visible_notice_in_the_conversation() {
+    // Given
+    let event = ToolEvent {
+        name: AUTO_MODE_BLOCK_EVENT.to_owned(),
+        status: shacs_core::runtime::ToolStatus::Waiting,
+        detail: "`exec` blocked by auto mode · [Data Exfiltration] · /permission recent".to_owned(),
+        call_id: Some("action_1".to_owned()),
+        arguments: None,
+        result: Some(json!({
+            "tool": "exec",
+            "outcome": "blocked",
+            "rule": "[Data Exfiltration]",
+            "consecutive": 1,
+            "total": 1,
+            "escalation": null,
+        })),
+    };
+    let other = ToolEvent {
+        name: "exec".to_owned(),
+        ..event.clone()
+    };
+    let routing = serde_json::Map::from_iter([("thread_id".to_owned(), json!("t1"))]);
+
+    // When
+    let notice = block_notification(&event, "discord", "chat_1", &routing, Some("m1"));
+    let ignored = block_notification(&other, "discord", "chat_1", &routing, None);
+
+    // Then
+    let notice = notice.expect("a notice for the blocked call");
+    assert_eq!(notice.channel, "discord");
+    assert_eq!(notice.chat_id, "chat_1");
+    assert_eq!(notice.reply_to.as_deref(), Some("m1"));
+    assert_eq!(
+        notice.content,
+        "`exec` blocked by auto mode · [Data Exfiltration] · /permission recent"
+    );
+    assert_eq!(notice.metadata["thread_id"], "t1");
+    assert_eq!(
+        notice.metadata["runtime_notification"],
+        json!({
+            "kind": "auto_mode",
+            "phase": "block",
+            "tool": "exec",
+            "outcome": "blocked",
+            "rule": "[Data Exfiltration]",
+        })
+    );
+    assert!(crate::is_visible_runtime_notification(&notice));
+    assert!(ignored.is_none());
+}

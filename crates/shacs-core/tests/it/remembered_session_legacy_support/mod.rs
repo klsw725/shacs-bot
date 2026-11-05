@@ -251,5 +251,6 @@ fn legacy_context_digest(session_key: &str) -> String {
         },
         containment_snapshot: None,
         intent_snapshot: None,
+        permission_environment: None,
     })
 }

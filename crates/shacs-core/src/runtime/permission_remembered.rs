@@ -17,6 +17,12 @@ pub fn safe_remembered_permission_matcher(
     action: &PermissionedAction,
     active_workspace: &Path,
 ) -> Result<SafeRememberedPermissionMatcher, RememberedPermissionMatcherError> {
+    if action.has_hidden_arguments() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an action holding an .env.json value or a secret-file path cannot be remembered",
+        ));
+    }
     let workspace = canonical_workspace(active_workspace)?;
     let matcher = if action.normalization_state == ActionNormalizationState::Ready
         && !contains_redacted(&action.redacted_arguments)
@@ -38,7 +44,7 @@ pub fn remembered_permission_matcher_matches(
     let workspace = canonical_workspace(active_workspace)?;
     let matches = match matcher {
         RememberedPermissionMatcher::ExactAction { action_digest } => {
-            action_digest == &action.action_digest
+            action_digest == action.decision_action_digest()
         }
         RememberedPermissionMatcher::ExecPrefix { tokens } => {
             exec_command(action).is_some_and(|command| {
@@ -204,19 +210,22 @@ fn path_matches(scope: &WorkspacePathScope, pattern: &str, candidate: &str) -> b
     }
 }
 
+/// Remembered rules are stored only from actions whose views are equal
+/// and matched on the decision view, so masking never changes a match (Spec
+/// 048 PRD 010 scope 9).
 fn exec_command(action: &PermissionedAction) -> Option<&str> {
     (action.tool_name == "exec")
-        .then(|| action.redacted_arguments.get("command"))
+        .then(|| action.decision_arguments().get("command"))
         .flatten()
         .and_then(Value::as_str)
 }
 
 fn action_path(action: &PermissionedAction) -> Option<&str> {
-    action
-        .redacted_arguments
+    let arguments = action.decision_arguments();
+    arguments
         .get("path")
-        .or_else(|| action.redacted_arguments.get("file_path"))
-        .or_else(|| action.redacted_arguments.get("file"))
+        .or_else(|| arguments.get("file_path"))
+        .or_else(|| arguments.get("file"))
         .and_then(Value::as_str)
         .or_else(|| default_search_path(action))
 }
@@ -226,7 +235,10 @@ fn default_search_path(action: &PermissionedAction) -> Option<&str> {
 }
 
 fn action_url(action: &PermissionedAction) -> Option<&str> {
-    action.redacted_arguments.get("url").and_then(Value::as_str)
+    action
+        .decision_arguments()
+        .get("url")
+        .and_then(Value::as_str)
 }
 
 fn normalized_web_origin(url: &str) -> Option<String> {

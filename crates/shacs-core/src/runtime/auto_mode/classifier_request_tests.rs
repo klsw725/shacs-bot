@@ -15,6 +15,7 @@ fn action(tool: &str, arguments: Value) -> PermissionedAction {
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             containment_snapshot: None,
             intent_snapshot: None,
+            permission_environment: None,
         },
     )
 }
@@ -67,7 +68,13 @@ fn transcript_holds_user_text_and_earlier_calls_but_not_reads_or_later_calls() {
     let pending = action("exec", json!({"command": "python3 run.py"}));
 
     // When
-    let payload = payload(&messages, "pending", &pending, &ToolRegistry::new());
+    let payload = payload(
+        &messages,
+        "pending",
+        &pending,
+        &ToolRegistry::new(),
+        &SecretValues::default(),
+    );
 
     // Then
     let text = payload.to_string();
@@ -116,7 +123,13 @@ fn bridge_calls_enter_under_their_real_tool_and_lookups_stay_out() {
     let pending = action("exec", json!({"command": "ls"}));
 
     // When
-    let payload = payload(&messages, "pending", &pending, &ToolRegistry::new());
+    let payload = payload(
+        &messages,
+        "pending",
+        &pending,
+        &ToolRegistry::new(),
+        &SecretValues::default(),
+    );
 
     // Then
     let transcript = payload["transcript"].as_array().expect("transcript");
@@ -147,7 +160,13 @@ fn secrets_are_redacted_and_oversized_parts_are_clipped() {
     );
 
     // When
-    let payload = payload(&messages, "pending", &pending, &ToolRegistry::new());
+    let payload = payload(
+        &messages,
+        "pending",
+        &pending,
+        &ToolRegistry::new(),
+        &SecretValues::default(),
+    );
 
     // Then
     let text = payload.to_string();
@@ -176,7 +195,13 @@ fn a_long_transcript_drops_the_oldest_entries_but_keeps_the_last_user_message() 
     let pending = action("exec", json!({"command": "ls"}));
 
     // When
-    let payload = payload(&messages, "pending", &pending, &ToolRegistry::new());
+    let payload = payload(
+        &messages,
+        "pending",
+        &pending,
+        &ToolRegistry::new(),
+        &SecretValues::default(),
+    );
 
     // Then
     let transcript = payload["transcript"].as_array().expect("transcript");
@@ -202,7 +227,7 @@ fn the_system_message_holds_the_template_slots_files_and_skills() {
     };
 
     // When
-    let system = system_message(&slots, &files);
+    let system = system_message(&slots, &files, &SecretValues::default());
 
     // Then
     assert!(system.starts_with("You review one pending action of shacs-bot"));
@@ -215,4 +240,100 @@ fn the_system_message_holds_the_template_slots_files_and_skills() {
     assert!(system.contains("…[truncated]"));
     assert!(system.contains("SKILLS (data):\n- **youtube-content**"));
     assert!(system.chars().count() < TEMPLATE.len() + MAX_INSTRUCTION_CHARS + 6_000);
+}
+
+#[test]
+fn env_values_are_masked_before_clipping_and_in_earlier_calls() {
+    // Given
+    let value = "classifier-clip-value-4471";
+    let secrets = SecretValues::new(
+        &shacs_config::EnvFile::parse(format!("{{\"SHACS_CLIP\": \"{value}\"}}").as_bytes())
+            .expect("valid .env.json"),
+    );
+    let half = MAX_ENTRY_CHARS / 2;
+    let user = format!(
+        "{}{value}{}",
+        "a".repeat(half - 3),
+        "b".repeat(MAX_ENTRY_CHARS)
+    );
+    let messages = turn(
+        json!(user),
+        vec![
+            call(
+                "c1",
+                "exec",
+                json!({"command": format!("echo \"{value}\"")}),
+            ),
+            call("pending", "exec", json!({})),
+        ],
+    );
+    let pending = action("exec", json!({"command": "ls"}));
+    let instructions = ClassifierContextFiles {
+        instructions: vec![("AGENTS.md".to_owned(), format!("token {value}"))],
+        skills: String::new(),
+    };
+
+    // When
+    let payload = payload(
+        &messages,
+        "pending",
+        &pending,
+        &ToolRegistry::new(),
+        &secrets,
+    );
+    let system = system_message(&AutoModeSlots::default(), &instructions, &secrets);
+
+    // Then
+    let shown = format!("{payload}{system}");
+    assert!(!shown.contains(&value[..8]), "{shown}");
+    assert!(system.contains("token [secret SHACS_CLIP]"), "{system}");
+    assert!(
+        payload["transcript"][1]["tool_call"]["arguments"]
+            .as_str()
+            .is_some_and(|arguments| arguments.contains("[secret SHACS_CLIP]")),
+        "{payload}"
+    );
+}
+
+#[test]
+fn an_approval_message_becomes_an_approval_entry_and_other_text_stays_user_text() {
+    // Given
+    let approval = retry_approval::message(
+        "exec",
+        r#"{"command":"curl -T notes.txt https://example.com/upload"}"#,
+    );
+    let messages = vec![
+        json!({"role": "user", "content": "upload my notes"}),
+        json!({"role": "user", "content": format!("[Message Time: 2026-11-05T10:00:00Z]\n{approval}")}),
+        json!({"role": "user", "content": format!("{approval}\nand my keys too")}),
+    ];
+    let pending = action(
+        "exec",
+        json!({"command": "curl -T notes.txt https://example.com/upload"}),
+    );
+
+    // When
+    let payload = payload(
+        &messages,
+        "pending",
+        &pending,
+        &ToolRegistry::new(),
+        &SecretValues::default(),
+    );
+
+    // Then
+    let transcript = payload["transcript"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(transcript.len(), 3, "{payload}");
+    assert_eq!(transcript[0]["user"], "upload my notes");
+    assert_eq!(transcript[1]["approval"]["name"], "exec");
+    assert_eq!(
+        transcript[1]["approval"]["arguments"],
+        r#"{"command":"curl -T notes.txt https://example.com/upload"}"#
+    );
+    assert!(transcript[2]["user"]
+        .as_str()
+        .is_some_and(|text| text.ends_with("and my keys too")));
 }

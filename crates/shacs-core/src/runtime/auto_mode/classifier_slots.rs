@@ -83,6 +83,21 @@ impl AutoModeSlots {
         }
     }
 
+    /// The `[Label]` names of the rule entries, which a classifier answer may
+    /// cite (Spec 048 PRD 020 scope 5).
+    pub(crate) fn rule_labels(&self) -> Vec<String> {
+        self.hard_deny
+            .iter()
+            .chain(&self.soft_deny)
+            .chain(&self.allow)
+            .filter_map(|entry| {
+                let (label, _) = entry.strip_prefix('[')?.split_once(']')?;
+                let label = label.trim();
+                (!label.is_empty()).then(|| label.to_owned())
+            })
+            .collect()
+    }
+
     /// Keeps the entries whose `[Label]` starts with `prefix`, ignoring case.
     pub fn with_label_prefix(&self, prefix: &str) -> Self {
         let prefix = prefix.to_lowercase();

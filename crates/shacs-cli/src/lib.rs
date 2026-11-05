@@ -65,11 +65,11 @@ use shacs_channels::{
 use shacs_command::{parse_loop_command, LoopCommand};
 use shacs_config::{
     config_context, default_config_path, ensure_runtime_dirs, load_auth_store, load_config,
-    load_config_with_env, resolve_config_env_refs, save_auth_store_to_path, save_config_to_path,
-    ApiConfig, ConfigBundle, ConfigError, EnvSource, LoadOptions, OAuthRefresh,
-    OAuthRefreshRequest, PermissionActivationContext, PermissionConfigSnapshot,
-    PermissionModeSource, ProcessEnv, ProviderAuth, ProviderConfig, RawCredential,
-    RememberedPermissionFileStore, WorkspacePermissionId,
+    load_config_with_env, save_auth_store_to_path, save_config_to_path, ApiConfig, ConfigBundle,
+    ConfigError, EnvSource, LoadOptions, OAuthRefresh, OAuthRefreshRequest,
+    PermissionActivationContext, PermissionConfigSnapshot, PermissionModeSource, ProcessEnv,
+    ProviderAuth, ProviderConfig, RawCredential, RememberedPermissionFileStore,
+    WorkspacePermissionId,
 };
 use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
@@ -2525,7 +2525,7 @@ fn is_visible_runtime_notification(message: &shacs_channels::OutboundMessage) ->
                 .get("runtime_notification")
                 .and_then(|value| value.get("kind"))
                 .and_then(Value::as_str),
-            Some("subagent")
+            Some("subagent" | "auto_mode")
         )
 }
 
@@ -2710,6 +2710,27 @@ fn selected_skill_notification_callback(
             &routing_metadata,
             reply_to.as_deref(),
             std::slice::from_ref(&skill_name),
+        ) {
+            publish_runtime_notification(&bus, live_sink.as_ref(), notification);
+        }
+    })
+}
+
+fn auto_mode_block_notification_callback(
+    bus: MessageBus,
+    live_sink: Option<RuntimeNotificationSink>,
+    channel: String,
+    chat_id: String,
+    routing_metadata: Map<String, Value>,
+    reply_to: Option<String>,
+) -> RuntimeToolEventCallback {
+    Arc::new(move |event: &ToolEvent| {
+        if let Some(notification) = auto_mode_cli::block_notification(
+            event,
+            &channel,
+            &chat_id,
+            &routing_metadata,
+            reply_to.as_deref(),
         ) {
             publish_runtime_notification(&bus, live_sink.as_ref(), notification);
         }
@@ -2960,7 +2981,12 @@ fn load_runtime_config_with_admission(
         bundle.config.agents.defaults.workspace = workspace.to_string_lossy().to_string();
     }
     if resolve_env {
-        resolve_config_env_refs(&mut bundle.config, env)?;
+        let env_file = shacs_config::resolve_config_with_env_file(
+            &mut bundle.config,
+            &bundle.context.config_path,
+            env,
+        )?;
+        auto_mode_cli::remember_env_file(&bundle.context.config_path, &env_file);
     }
     bundle.context = config_context(
         Some(bundle.context.config_path.clone()),
@@ -5466,12 +5492,18 @@ fn guard_runtime_ownership_acquire_admission(bundle: &ConfigBundle) -> Result<()
     guard_runtime_durable_recovery_admission(data_dir)
 }
 
+/// Either config migration's marker, the schema one or the secrets one
+/// (Spec 048 PRD 010 scope 8), blocks runtime start until it is recovered.
 fn guard_config_migration_admission(config_path: &Path) -> Result<(), CliError> {
-    let marker = shacs_config::config_migration_marker_path(config_path);
-    if marker.exists() {
-        return Err(CliError::Config(
-            shacs_config::ConfigError::MigrationInterrupted { marker },
-        ));
+    for marker in [
+        shacs_config::config_migration_marker_path(config_path),
+        shacs_config::secrets_migration_marker_path(config_path),
+    ] {
+        if marker.exists() {
+            return Err(CliError::Config(
+                shacs_config::ConfigError::MigrationInterrupted { marker },
+            ));
+        }
     }
     Ok(())
 }
@@ -16449,9 +16481,12 @@ fn management_help_text(topic: ManagementHelpTopic) -> String {
             "Usage: shacs-bot runtime config-migrate [OPTIONS]",
             "",
             "Options:",
-            "  --dry-run            Preview JSON config migration",
-            "  --apply              Apply JSON config migration",
-            "  --recover            Restore an interrupted migration backup",
+            "  --dry-run            Preview JSON config migration and the secrets to move",
+            "                       into .env.json (fields and names, never values)",
+            "  --apply              Apply JSON config migration, then move secrets into",
+            "                       .env.json and leave ${NAME} in the config",
+            "  --recover            Undo an interrupted secrets move, or restore an",
+            "                       interrupted migration backup",
             "  -c, --config <path>  Use an explicit config file",
         ]
         .join("\n"),
@@ -19741,6 +19776,14 @@ impl AgentLoopChatCompletionAdapter {
             routing_metadata.clone(),
             reply_to.clone(),
         );
+        let block_notification_callback = auto_mode_block_notification_callback(
+            outbound_bus.clone(),
+            live_notification_sink.clone(),
+            message.channel.clone(),
+            message.chat_id.clone(),
+            routing_metadata.clone(),
+            reply_to.clone(),
+        );
         let subagent_runtime = match subagent_runtime {
             Some(runtime) => runtime.attach_bus(bus.clone()),
             None => {
@@ -19837,7 +19880,8 @@ impl AgentLoopChatCompletionAdapter {
         let mut agent_hook: Option<Arc<dyn AgentHook>> = self
             .runtime_verbose
             .then(|| Arc::new(RuntimeVerboseLogHook) as Arc<dyn AgentHook>);
-        let mut tool_event_callbacks = vec![skill_notification_callback];
+        let mut tool_event_callbacks =
+            vec![skill_notification_callback, block_notification_callback];
         if self.runtime_verbose {
             tool_event_callbacks.push(runtime_verbose_tool_event_callback());
         }
@@ -20988,6 +21032,7 @@ fn mcp_startup_gate(
         secret_ref_evidence: Vec::new(),
         normalization_state: ActionNormalizationState::Ready,
         normalization_errors: Vec::new(),
+        decision: Default::default(),
     };
     let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
         identity: ProcessIdentity::new(format!("mcp:{server_name}"), "mcp-startup", "mcp-startup"),
@@ -27623,6 +27668,7 @@ mod tests {
             secret_ref_evidence: Vec::new(),
             normalization_state: ActionNormalizationState::Ready,
             normalization_errors: Vec::new(),
+            decision: Default::default(),
         };
         let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
             identity,
@@ -34528,8 +34574,8 @@ mod tests {
     }
 
     #[test]
-    fn direct_message_asks_before_auto_mode_protected_target_action() -> Result<(), Box<dyn Error>>
-    {
+    fn direct_message_refuses_an_unchecked_auto_mode_protected_target_action(
+    ) -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
         let media_dir = root.path().join("data").join("media").join("api");
@@ -34572,15 +34618,29 @@ mod tests {
             native_image_input_supported: true,
             client: Arc::new(SequentialProviderClient {
                 captured: captured.clone(),
-                responses: Mutex::new(VecDeque::from([LlmResponse {
-                    tool_calls: vec![ToolCallRequest::new(
-                        "call-protected-write",
-                        "write_file",
-                        arguments,
-                    )],
-                    finish_reason: "tool_calls".to_owned(),
-                    ..LlmResponse::default()
-                }])),
+                responses: Mutex::new(VecDeque::from([
+                    LlmResponse {
+                        tool_calls: vec![ToolCallRequest::new(
+                            "call-protected-write",
+                            "write_file",
+                            arguments,
+                        )],
+                        finish_reason: "tool_calls".to_owned(),
+                        ..LlmResponse::default()
+                    },
+                    LlmResponse {
+                        content: Some("maybe".to_owned()),
+                        ..LlmResponse::default()
+                    },
+                    LlmResponse {
+                        content: Some("not a verdict".to_owned()),
+                        ..LlmResponse::default()
+                    },
+                    LlmResponse {
+                        content: Some("I left protected.txt alone.".to_owned()),
+                        ..LlmResponse::default()
+                    },
+                ])),
             }),
             retry_mode: ProviderRetryMode::Standard,
             workspace: workspace.clone(),
@@ -34622,18 +34682,22 @@ mod tests {
             },
         )?;
 
-        assert!(output.contains("Permission approval required"), "{output}");
-        assert!(
-            output.contains("Why: Auto mode could not check this action"),
-            "{output}"
-        );
+        // Spec 048 PRD 020: the classifier gave no verdict, so the write is
+        // refused without a question and the run goes on to the assistant.
+        assert!(output.contains("I left protected.txt alone."), "{output}");
+        assert!(!output.contains("Permission approval required"), "{output}");
         assert!(!workspace.join("protected.txt").exists());
         let captured = captured.lock().map_err(|_| "captured lock poisoned")?;
-        assert_eq!(captured.len(), 2);
+        assert_eq!(captured.len(), 4);
         let classifier_system = captured[1].messages[0]["content"]
             .as_str()
             .unwrap_or_default();
         assert!(classifier_system.starts_with("You review one pending action of shacs-bot"));
+        let returned = serde_json::to_string(&captured[3].messages)?;
+        assert!(
+            returned.contains("Permission denied: auto mode could not check this call (the classifier answer could not be read), so it did not run."),
+            "{returned}"
+        );
         Ok(())
     }
 

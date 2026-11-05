@@ -2205,6 +2205,7 @@ fn exec_permissioned_action(mode: PermissionMode) -> PermissionedAction {
         secret_ref_evidence: Vec::new(),
         normalization_state: ActionNormalizationState::Ready,
         normalization_errors: Vec::new(),
+        decision: Default::default(),
     }
 }
 
@@ -3990,6 +3991,7 @@ fn mcp_startup_gate(server_name: &str, command_family: &str) -> McpStartupGate {
         secret_ref_evidence: Vec::new(),
         normalization_state: ActionNormalizationState::Ready,
         normalization_errors: Vec::new(),
+        decision: Default::default(),
     };
     let envelope = ProcessExecutionEnvelope::try_from_input(ProcessExecutionEnvelopeInput {
         identity: ProcessIdentity::new(format!("mcp:{server_name}"), "session-mcp", "turn-mcp"),

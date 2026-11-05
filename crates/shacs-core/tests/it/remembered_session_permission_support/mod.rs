@@ -204,6 +204,7 @@ fn legacy_context_digest(session_key: &str) -> String {
             },
             containment_snapshot: None,
             intent_snapshot: None,
+            permission_environment: None,
         },
     );
     shacs_core::runtime::session_remembered_context_digest(&action)

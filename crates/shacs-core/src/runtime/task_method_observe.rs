@@ -1,3 +1,4 @@
+use super::runner::PERMISSION_DENIED;
 use super::runner_spec034::observable_call_id;
 use super::task_method::{EffectOutcome, EvidenceFact, ExternalEffectFact};
 use super::task_method_calc::{run, CalculationRun};
@@ -134,17 +135,21 @@ impl Capture {
     }
 
     fn event(&self, event: &ToolEvent) {
-        let outcome = match event.status {
-            ToolStatus::Waiting => return,
-            ToolStatus::Skipped => EffectOutcome::Cancelled,
-            ToolStatus::Ok => EffectOutcome::Completed,
-            ToolStatus::Error => failure_outcome(&event.detail),
-        };
-        let output = match &event.result {
+        let result = match &event.result {
             Some(Value::String(text)) => text.clone(),
             Some(other) => other.to_string(),
             None => event.detail.clone(),
         };
+        let denied = refusal(event, &result).map(str::to_owned);
+        let outcome = match (&event.status, &denied) {
+            (ToolStatus::Waiting, _) => return,
+            (ToolStatus::Skipped, _) => EffectOutcome::Cancelled,
+            (ToolStatus::Ok, Some(refusal)) => failure_outcome(refusal),
+            (ToolStatus::Ok, None) => EffectOutcome::Completed,
+            (ToolStatus::Error, _) => failure_outcome(&event.detail),
+        };
+        // A refused bridge call's output is its refusal, as a direct call's.
+        let output = denied.clone().unwrap_or(result);
         let Some(candidate) = event
             .call_id
             .as_ref()
@@ -177,8 +182,11 @@ impl Capture {
             observed.calculation_runs.push(run(id, command, &output));
         }
         if let Some(id) = &event.call_id {
-            let not_completed =
-                (event.status != ToolStatus::Ok).then_some("the tool reported an error");
+            let not_completed = if denied.is_some() {
+                Some("blocked before it ran")
+            } else {
+                (event.status != ToolStatus::Ok).then_some("the tool reported an error")
+            };
             record_result(
                 &mut observed,
                 candidate.report.as_ref(),
@@ -205,6 +213,20 @@ impl Capture {
             }
         }
     }
+}
+
+/// The refusal text of a call the permission decision did not run: its
+/// result, or for a bridge call the refusal its mapping event carries
+/// (Spec 048 PRD 020 scope 2).
+fn refusal<'e>(event: &'e ToolEvent, output: &'e str) -> Option<&'e str> {
+    let carried = event
+        .result
+        .as_ref()
+        .and_then(|result| result.get("denied"))
+        .and_then(Value::as_str);
+    carried
+        .or(Some(output))
+        .filter(|text| text.trim_start().starts_with(PERMISSION_DENIED))
 }
 
 pub(crate) fn digest(arguments: &Value) -> String {

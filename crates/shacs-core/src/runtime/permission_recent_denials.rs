@@ -1,3 +1,4 @@
+use crate::runtime::auto_mode::blocked_call;
 use crate::runtime::{
     AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, EvaluatorConfidence, EvaluatorScopeMatch,
     PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyReason,
@@ -29,6 +30,10 @@ pub struct RecentAutoModeDenial {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_ref_evidence: Vec<PermissionSecretRefEvidence>,
     pub decision_reason: PermissionPolicyReason,
+    /// The rule entry the classifier cited, `[Unknown Rule]` when it named
+    /// none of them (Spec 048 PRD 020 scope 5). Never the model's own text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_rule: Option<String>,
     pub classifier_verdict: AutoEvaluatorVerdictKind,
     pub classifier_confidence: EvaluatorConfidence,
     pub classifier_scope_match: EvaluatorScopeMatch,
@@ -220,13 +225,52 @@ impl RecentAutoModeRetryTokenStore {
         expected: RecentAutoModeRetryTokenMatch<'_>,
         now_unix_ms: u64,
     ) -> Result<RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError> {
+        self.consume_checked(denial_id, expected, Some(now_unix_ms))
+    }
+
+    /// Whether an unused token waits for the denial, at any age. Auto mode's
+    /// retry never runs the stored call, so the verdict's lifetime does not
+    /// limit it (Spec 048 PRD 020 scope 5).
+    pub fn holds(&self, denial_id: &str) -> bool {
+        self.tokens
+            .get(denial_id)
+            .is_some_and(|entry| !entry.consumed)
+    }
+
+    /// `peek` without the verdict's lifetime, for auto mode's retry.
+    pub fn peek_any_age(
+        &self,
+        denial_id: &str,
+    ) -> Result<&RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError> {
+        match self.tokens.get(denial_id) {
+            None => Err(RecentAutoModeRetryTokenConsumeError::Missing),
+            Some(entry) if entry.consumed => Err(RecentAutoModeRetryTokenConsumeError::Consumed),
+            Some(entry) => Ok(&entry.token),
+        }
+    }
+
+    /// `consume` without the verdict's lifetime, for auto mode's retry.
+    pub fn consume_any_age(
+        &mut self,
+        denial_id: &str,
+        expected: RecentAutoModeRetryTokenMatch<'_>,
+    ) -> Result<RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError> {
+        self.consume_checked(denial_id, expected, None)
+    }
+
+    fn consume_checked(
+        &mut self,
+        denial_id: &str,
+        expected: RecentAutoModeRetryTokenMatch<'_>,
+        now_unix_ms: Option<u64>,
+    ) -> Result<RecentAutoModeRetryToken, RecentAutoModeRetryTokenConsumeError> {
         let Some(entry) = self.tokens.get_mut(denial_id) else {
             return Err(RecentAutoModeRetryTokenConsumeError::Missing);
         };
         if entry.consumed {
             return Err(RecentAutoModeRetryTokenConsumeError::Consumed);
         }
-        if now_unix_ms > entry.token.expires_at_unix_ms {
+        if now_unix_ms.is_some_and(|now| now > entry.token.expires_at_unix_ms) {
             entry.consumed = true;
             return Err(RecentAutoModeRetryTokenConsumeError::Expired);
         }
@@ -323,6 +367,7 @@ pub fn recent_auto_mode_denial_from_classifier_decision(
         policy_safety_snapshot_ref: action.policy_safety_snapshot_ref.clone(),
         secret_ref_evidence: action.secret_ref_evidence.clone(),
         decision_reason: decision.reason.clone(),
+        classifier_rule: blocked_call::rule_name(Some(evaluator)).map(str::to_owned),
         classifier_verdict: evaluator.verdict,
         classifier_confidence: evaluator.confidence,
         classifier_scope_match: evaluator.scope_match,
@@ -366,3 +411,7 @@ fn digest_json(value: &Value) -> String {
     hasher.update(value.to_string().as_bytes());
     format!("{:x}", hasher.finalize())
 }
+
+#[cfg(test)]
+#[path = "permission_recent_denials_tests.rs"]
+mod tests;

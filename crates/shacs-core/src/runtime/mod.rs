@@ -204,9 +204,10 @@ pub use agent_loop::{
     ProjectPermissionStoreConfig,
 };
 pub use auto_mode::{
-    ApprovalExplanation, AutoAllow, AutoModeClassifier, AutoModeSlots, ClassifierContextFiles,
-    PermissionEnvironment, PermissionEnvironmentInput, PermissionMaterials, RawRuleLists,
-    RuleDiagnostic, RuleEffect, RuleProblem, SlotOverrides, UserPermissionRules, DEFAULTS_MARKER,
+    ApprovalExplanation, AutoAllow, AutoModeBlockCounts, AutoModeBlocks, AutoModeClassifier,
+    AutoModeEscalation, AutoModeSlots, ClassifierContextFiles, PermissionEnvironment,
+    PermissionEnvironmentInput, PermissionMaterials, RawRuleLists, RuleDiagnostic, RuleEffect,
+    RuleProblem, SecretValues, SlotOverrides, UserPermissionRules, DEFAULTS_MARKER,
 };
 pub use autocompact::{AutoCompact, AutoCompactArchiveOutcome, RECENT_SUFFIX_MESSAGES};
 pub use automation::{
@@ -410,10 +411,10 @@ pub use memory_skill_curator::{
 };
 pub use permission_action::{
     normalize_resolved_deferred_tool_call, normalize_runtime_tool_call, ActionNormalizationError,
-    ActionNormalizationState, ContainmentSnapshotRef, IntentSnapshotRef, PermissionDecisionInput,
-    PermissionMode, PermissionModeSnapshot, PermissionSecretRefEvidence, PermissionSecretRefStatus,
-    PermissionedAction, PermissionedActionInput, PermissionedActionOrigin, SafetyCapability,
-    TargetRef,
+    ActionNormalizationState, ContainmentSnapshotRef, DecisionArguments, IntentSnapshotRef,
+    PermissionDecisionInput, PermissionMode, PermissionModeSnapshot, PermissionSecretRefEvidence,
+    PermissionSecretRefStatus, PermissionedAction, PermissionedActionInput,
+    PermissionedActionOrigin, SafetyCapability, TargetRef,
 };
 pub use permission_approval::{
     approval_decision_options, correlate_approval, correlate_policy_safety_snapshot_ref,
@@ -530,7 +531,7 @@ pub use runner::{
     AgentHook, AgentHookContext, AgentRunSpec, AgentRunner, CompositeHook,
     ExecutionSnapshotCallback, ExecutionSnapshotResolver, MidTurnInjectionCallback, NoopAgentHook,
     ProviderEventCallback, RetryWaitCallback, ToolEvent, ToolEventCallback, ToolSearchConfig,
-    ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
+    ToolSearchMode, ToolSearchRuntimeInput, ToolStatus, AUTO_MODE_BLOCK_EVENT,
 };
 pub use self_improvement::{
     runtime_improvement_apply_readiness, runtime_improvement_apply_record,

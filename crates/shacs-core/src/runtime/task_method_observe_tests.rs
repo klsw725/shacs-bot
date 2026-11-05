@@ -320,3 +320,96 @@ fn reads_stopped_before_preparation_keep_the_requested_locator() {
         );
     }
 }
+
+fn capture() -> Capture {
+    Capture {
+        tools: ToolRegistry::new(),
+        calls: Mutex::new(BTreeMap::new()),
+        observed: Arc::new(Mutex::new(MethodObservation::default())),
+        turn_id: "turn_1".to_owned(),
+        workspace: None,
+    }
+}
+
+fn finished(call_id: &str, name: &str, result: Value) -> ToolEvent {
+    ToolEvent {
+        name: name.to_owned(),
+        status: ToolStatus::Ok,
+        detail: "finished".to_owned(),
+        call_id: Some(observable_call_id(call_id)),
+        arguments: None,
+        result: Some(result),
+    }
+}
+
+const REFUSED: &str =
+    "Permission denied by auto mode: [Data Exfiltration] sends notes. This call did not run.";
+
+#[test]
+fn a_refused_write_is_a_denied_effect_and_no_written_file() {
+    // Given
+    let capture = capture();
+    capture.record_calls(&[
+        RuntimeToolCall::new(
+            "w1",
+            "write_file",
+            serde_json::json!({"path": "notes.md", "content": "x"}),
+        ),
+        RuntimeToolCall::new(
+            "w2",
+            "write_file",
+            serde_json::json!({"path": "done.md", "content": "x"}),
+        ),
+    ]);
+
+    // When
+    capture.event(&finished(
+        "w1",
+        "write_file",
+        Value::String(REFUSED.to_owned()),
+    ));
+    capture.event(&finished(
+        "w2",
+        "write_file",
+        Value::String("Wrote done.md".to_owned()),
+    ));
+
+    // Then
+    let observed = lock(&capture.observed);
+    let outcomes = observed
+        .effects
+        .iter()
+        .map(|effect| effect.outcome)
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes, [EffectOutcome::Denied, EffectOutcome::Completed]);
+    let written = observed
+        .evidence
+        .iter()
+        .filter(|fact| matches!(fact, EvidenceFact::WrittenFile { .. }))
+        .count();
+    assert_eq!(written, 1);
+}
+
+#[test]
+fn a_refused_bridge_call_is_a_denied_effect_by_the_refusal_its_mapping_carries() {
+    // Given
+    let capture = capture();
+    capture.record_calls(&[RuntimeToolCall::new(
+        "b1",
+        "tool_call",
+        serde_json::json!({"name": "mcp_github_create_issue", "arguments": {"title": "x"}}),
+    )]);
+
+    // When
+    capture.event(&finished(
+        "b1",
+        "tool_call",
+        serde_json::json!({"mapping_evidence": null, "scope_digest": "scope", "denied": REFUSED}),
+    ));
+
+    // Then
+    let observed = lock(&capture.observed);
+    assert_eq!(observed.effects.len(), 1);
+    assert_eq!(observed.effects[0].outcome, EffectOutcome::Denied);
+    assert_eq!(observed.effects[0].tool_name, "mcp_github_create_issue");
+}

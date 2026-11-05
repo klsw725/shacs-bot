@@ -180,7 +180,7 @@ pub fn classify_permission_action(
     input: &PermissionRuleInput,
 ) -> CapabilityClassification {
     let target_classes = action
-        .target_refs
+        .decision_target_refs()
         .iter()
         .map(|target| classify_target(target, &input.protected_targets))
         .collect::<Vec<_>>();

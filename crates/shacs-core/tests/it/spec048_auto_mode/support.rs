@@ -2,10 +2,10 @@ use serde_json::Value;
 use shacs_config::AutoApprovalConfig;
 use shacs_core::runtime::{
     ceiling_for_origin, ApprovalActor, ApprovalCacheEntry, ApprovalDecision, ApprovalDecisionKind,
-    ApprovalRequest, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, ContainerNetworkMode,
-    ContainerRuntimeKind, ContainmentSnapshotRef, DockerContainmentSnapshot, EvaluatorConfidence,
-    EvaluatorScopeMatch, PermissionEnvironment, PermissionEnvironmentInput, PermissionMode,
-    PermissionModeSnapshot, PermissionRuleInput, ProcessAdapterKind, ProcessGate,
+    ApprovalRequest, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, AutoModeEscalation,
+    ContainerNetworkMode, ContainerRuntimeKind, ContainmentSnapshotRef, DockerContainmentSnapshot,
+    EvaluatorConfidence, EvaluatorScopeMatch, PermissionEnvironment, PermissionEnvironmentInput,
+    PermissionMode, PermissionModeSnapshot, PermissionRuleInput, ProcessAdapterKind, ProcessGate,
     ProcessSpawnReport, ProcessTerminalOutcome, RawRuleLists, RuntimeBoundaryOrigin,
     RuntimeInterrupt, RuntimeToolCall, RuntimeToolExecutionReport, RuntimeToolExecutor,
     SafetyCapability, SlotOverrides, ToolExecutionContext,
@@ -33,6 +33,10 @@ pub const ALL_MODES: [PermissionMode; 6] = [
     PermissionMode::BypassPermissions,
 ];
 pub const SECRET_TOKEN: &str = "spec048-secret-token-value";
+/// What row 16 returns when the call had no classifier (Spec 048 PRD 020).
+pub const NOT_CHECKED: &str = "Permission denied: auto mode could not check this call (auto mode's classifier is not available in this run), so it did not run.";
+/// What row 16 returns for the test block verdict.
+pub const BLOCKED: &str = "Permission denied by auto mode: [Data Exfiltration] sends files to an unnamed host. This call did not run.";
 pub const PLUGIN_TOOL: &str = "pdf_merge";
 pub const RECORDED_TOOLS: [&str; 8] = [
     "web_fetch",
@@ -109,6 +113,29 @@ impl Setup {
     }
 
     pub fn environment(&self, rules: &Rules) -> Arc<PermissionEnvironment> {
+        self.environment_with(rules, true)
+    }
+
+    /// `env_file_current` false is a turn whose `.env.json` could not be
+    /// read again.
+    pub fn environment_with(
+        &self,
+        rules: &Rules,
+        env_file_current: bool,
+    ) -> Arc<PermissionEnvironment> {
+        let env_file =
+            shacs_config::EnvFile::load(&self.data.join("config.json")).unwrap_or_default();
+        self.environment_from(rules, &env_file, env_file_current)
+    }
+
+    /// An environment with given `.env.json` values, as the CLI builds from
+    /// the values it last read when the file cannot be read again.
+    pub fn environment_from(
+        &self,
+        rules: &Rules,
+        env_file: &shacs_config::EnvFile,
+        env_file_current: bool,
+    ) -> Arc<PermissionEnvironment> {
         Arc::new(PermissionEnvironment::new(PermissionEnvironmentInput {
             workspace: &self.workspace,
             data_folder: &self.data,
@@ -126,6 +153,8 @@ impl Setup {
             classify_all_shell: rules.classify_all_shell,
             slots: SlotOverrides::default(),
             classifier_model: None,
+            env_file,
+            env_file_current,
         }))
     }
 
@@ -215,6 +244,7 @@ impl Setup {
                 RuntimeBoundaryOrigin::UserTurn,
             )),
             permission_evaluator: options.verdict.map(verdict),
+            permission_auto_mode_escalation: options.escalation,
             permission_interactive: options.interactive,
             active_workspace: Some(self.workspace.clone()),
             permission_environment: Some(self.environment(&options.rules)),
@@ -282,6 +312,7 @@ pub struct Options {
     pub contained: bool,
     pub allow_workspace_edits: bool,
     pub verdict: Option<Verdict>,
+    pub escalation: Option<AutoModeEscalation>,
 }
 
 impl Options {
@@ -297,6 +328,7 @@ impl Options {
             contained: true,
             allow_workspace_edits: true,
             verdict: None,
+            escalation: None,
         }
     }
 
@@ -312,6 +344,13 @@ impl Options {
 
     pub fn native(mut self) -> Self {
         self.contained = false;
+        self
+    }
+
+    /// The block counts reached the limit in a row with this call, so row 16
+    /// asks instead of refusing.
+    pub fn escalated(mut self) -> Self {
+        self.escalation = Some(AutoModeEscalation::Consecutive);
         self
     }
 }
@@ -393,6 +432,12 @@ impl Outcome {
             Self::Refused(reason) => Some(reason),
             Self::Ran(_) | Self::Asked(_) => None,
         }
+    }
+
+    /// The call reached row 16 with no classifier and was refused there.
+    pub fn not_checked(&self) -> bool {
+        self.refusal()
+            .is_some_and(|reason| reason.starts_with(NOT_CHECKED))
     }
 }
 

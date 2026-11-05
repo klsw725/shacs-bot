@@ -65,6 +65,8 @@ fn environment(
         classify_all_shell: false,
         slots: SlotOverrides::default(),
         classifier_model: None,
+        env_file: &shacs_config::EnvFile::default(),
+        env_file_current: true,
     })
 }
 
@@ -83,6 +85,7 @@ fn materials(
             permission_mode_snapshot: PermissionModeSnapshot::default(),
             containment_snapshot: None,
             intent_snapshot: None,
+            permission_environment: None,
         },
     );
     permission_materials(MaterialsInput {

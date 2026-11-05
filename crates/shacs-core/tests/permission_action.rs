@@ -117,6 +117,7 @@ fn input() -> PermissionedActionInput {
             summary: Some("docker".to_owned()),
         }),
         intent_snapshot: None,
+        permission_environment: None,
     }
 }
 
@@ -618,6 +619,7 @@ fn snapshot_and_origin_material_do_not_expose_raw_secret() -> Result<(), Box<dyn
                 summary: Some("summary bearer sk-summary-secret".to_owned()),
             }),
             intent_snapshot: None,
+            permission_environment: None,
         },
     );
     let serialized = serde_json::to_string(&action)?;

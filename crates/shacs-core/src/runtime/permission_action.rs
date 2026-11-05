@@ -1,8 +1,9 @@
+use crate::runtime::auto_mode::action_secrets;
 use crate::runtime::{
-    CapabilityCeilingRef, PolicySafetyProvenanceKind, PolicySafetyProvenanceRef,
-    PolicySafetySnapshot, PolicySafetySnapshotCreationReason, PolicySafetySnapshotError,
-    PolicySafetySnapshotInput, PolicySafetySnapshotRef, PolicySafetySourceKind,
-    PolicySafetySourceRef, ResolvedDeferredToolCall, RuntimeToolCall,
+    CapabilityCeilingRef, PermissionEnvironment, PolicySafetyProvenanceKind,
+    PolicySafetyProvenanceRef, PolicySafetySnapshot, PolicySafetySnapshotCreationReason,
+    PolicySafetySnapshotError, PolicySafetySnapshotInput, PolicySafetySnapshotRef,
+    PolicySafetySourceKind, PolicySafetySourceRef, ResolvedDeferredToolCall, RuntimeToolCall,
 };
 use crate::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,9 @@ pub use shacs_config::{PermissionMode, SafetyCapability};
 use shacs_redaction::{
     redact_string, redact_value, RedactionEvidence, RedactionEvidenceRef, SecretRef, REDACTED,
 };
+use std::borrow::Cow;
+use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionModeSnapshot {
@@ -126,6 +130,41 @@ pub struct PermissionedActionInput {
     pub containment_snapshot: Option<ContainmentSnapshotRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_snapshot: Option<IntentSnapshotRef>,
+    /// Masks `.env.json` values and restores secret-file paths during
+    /// normalization (Spec 048 PRD 010 scopes 9 and 10). Never serialized.
+    #[serde(skip)]
+    pub permission_environment: Option<Arc<PermissionEnvironment>>,
+}
+
+/// The arguments decisions read when they differ from `redacted_arguments`:
+/// before `.env.json` masking and with secret-file paths restored (Spec 048
+/// PRD 010 scope 9). Kept in memory only; equality and `Debug` ignore it.
+#[derive(Clone, Default)]
+pub struct DecisionArguments(Option<Box<DecisionArgumentsInner>>);
+
+#[derive(Clone)]
+struct DecisionArgumentsInner {
+    arguments: Value,
+    action_digest: String,
+    policy_safety_snapshot_ref: Option<PolicySafetySnapshotRef>,
+}
+
+impl PartialEq for DecisionArguments {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for DecisionArguments {}
+
+impl fmt::Debug for DecisionArguments {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(if self.0.is_some() {
+            "DecisionArguments(hidden)"
+        } else {
+            "DecisionArguments(same)"
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +193,47 @@ pub struct PermissionedAction {
     pub secret_ref_evidence: Vec<PermissionSecretRefEvidence>,
     pub normalization_state: ActionNormalizationState,
     pub normalization_errors: Vec<ActionNormalizationError>,
+    #[serde(skip)]
+    pub decision: DecisionArguments,
+}
+
+impl PermissionedAction {
+    /// The arguments permission decisions read (Spec 048 PRD 010 scope 9).
+    pub(crate) fn decision_arguments(&self) -> &Value {
+        self.decision
+            .0
+            .as_ref()
+            .map_or(&self.redacted_arguments, |decision| &decision.arguments)
+    }
+
+    /// The action digest of the decision arguments, which remembered rules
+    /// and session approvals match.
+    pub(crate) fn decision_action_digest(&self) -> &str {
+        self.decision
+            .0
+            .as_ref()
+            .map_or(&self.action_digest, |decision| &decision.action_digest)
+    }
+
+    pub(crate) fn decision_policy_safety_snapshot_ref(&self) -> Option<&PolicySafetySnapshotRef> {
+        match &self.decision.0 {
+            Some(decision) => decision.policy_safety_snapshot_ref.as_ref(),
+            None => self.policy_safety_snapshot_ref.as_ref(),
+        }
+    }
+
+    pub(crate) fn decision_target_refs(&self) -> Cow<'_, [TargetRef]> {
+        match &self.decision.0 {
+            Some(decision) => Cow::Owned(target_refs_from_arguments(&decision.arguments)),
+            None => Cow::Borrowed(&self.target_refs),
+        }
+    }
+
+    /// Whether masking or a restored path made the views differ; such an
+    /// action takes one-time answers and is never remembered.
+    pub fn has_hidden_arguments(&self) -> bool {
+        self.decision.0.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,8 +318,15 @@ fn normalize_tool_candidate(
     prepared: bool,
 ) -> PermissionedAction {
     let input = sanitize_input(input);
+    let environment = input.permission_environment.clone();
     let mut normalization_errors = Vec::new();
-    let redacted_arguments = checked_redacted_arguments(arguments, &mut normalization_errors);
+    let views = action_secrets::argument_views(
+        tool_name,
+        arguments,
+        checked_redacted_arguments(arguments, &mut normalization_errors),
+        environment.as_deref(),
+    );
+    let redacted_arguments = views.exposed;
     let secret_ref_evidence =
         secret_ref_evidence_from_arguments(arguments, tool_name, &mut normalization_errors);
     let argument_digest = digest_json(&redacted_arguments);
@@ -252,6 +339,27 @@ fn normalize_tool_candidate(
         &capabilities,
         &secret_ref_evidence,
     ));
+    let decision = DecisionArguments(views.decision.map(|arguments| {
+        let action_digest = digest_json(&action_digest_material(
+            tool_name,
+            &digest_json(&arguments),
+            &target_refs_from_arguments(&arguments),
+            &capabilities,
+            &secret_ref_evidence,
+        ));
+        let policy_safety_snapshot_ref = policy_safety_snapshot_ref(
+            &input,
+            &capabilities,
+            input.containment_snapshot.clone(),
+            &action_digest,
+        )
+        .ok();
+        Box::new(DecisionArgumentsInner {
+            arguments,
+            action_digest,
+            policy_safety_snapshot_ref,
+        })
+    }));
     let snapshot_digest = digest_json(&json!({
         "permission_mode_snapshot": &input.permission_mode_snapshot,
         "containment_snapshot": &input.containment_snapshot,
@@ -270,7 +378,7 @@ fn normalize_tool_candidate(
         if let Err(detail) = registry.prepare_call(tool_name, arguments.clone()) {
             normalization_errors.push(ActionNormalizationError::InvalidArguments {
                 tool_name: tool_name.to_owned(),
-                detail: redact_string(&detail),
+                detail: action_secrets::mask_shown(environment.as_deref(), &redact_string(&detail)),
             });
         }
     } else if !prepared {
@@ -320,6 +428,7 @@ fn normalize_tool_candidate(
         secret_ref_evidence,
         normalization_state,
         normalization_errors,
+        decision,
     }
 }
 
@@ -487,6 +596,7 @@ fn sanitize_input(input: PermissionedActionInput) -> PermissionedActionInput {
             .containment_snapshot
             .map(sanitize_containment_snapshot),
         intent_snapshot: input.intent_snapshot.map(sanitize_intent_snapshot),
+        permission_environment: input.permission_environment,
     }
 }
 

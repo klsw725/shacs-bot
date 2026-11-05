@@ -60,6 +60,7 @@ fn action(
         secret_ref_evidence: Vec::new(),
         normalization_state: ActionNormalizationState::Ready,
         normalization_errors: Vec::new(),
+        decision: Default::default(),
     }
 }
 

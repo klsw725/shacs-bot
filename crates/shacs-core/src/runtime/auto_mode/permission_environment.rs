@@ -8,6 +8,7 @@ use super::permission_rule::{RawRuleLists, UserPermissionRules};
 use super::protected_path::{ProtectedPaths, ProtectedPathsInput};
 use super::rule_match::{self, PathPair};
 use super::secret_file::SecretFiles;
+use super::secret_values::SecretValues;
 use super::{real_path, shell_command};
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,11 @@ pub struct PermissionEnvironmentInput<'a> {
     pub classify_all_shell: bool,
     pub slots: SlotOverrides<'a>,
     pub classifier_model: Option<&'a str>,
+    /// The `.env.json` values to mask (Spec 048 PRD 010 scope 10), and
+    /// whether they were read for this turn rather than kept from an earlier
+    /// read.
+    pub env_file: &'a shacs_config::EnvFile,
+    pub env_file_current: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -40,6 +46,10 @@ pub struct PermissionEnvironment {
     pub(crate) classify_all_shell: bool,
     pub slots: AutoModeSlots,
     pub classifier_model: Option<String>,
+    pub(crate) secret_values: SecretValues,
+    /// The classifier is not called when the values could not be read for
+    /// this turn (Spec 048 PRD 010 scope 10).
+    pub(crate) secret_values_current: bool,
 }
 
 impl PermissionEnvironment {
@@ -50,7 +60,7 @@ impl PermissionEnvironment {
             .map_or_else(|| input.data_folder.to_path_buf(), Path::to_path_buf);
         Self {
             user_rules: UserPermissionRules::parse(input.rules, input.mcp_servers),
-            secret_files: SecretFiles::new(input.data_folder),
+            secret_files: SecretFiles::new(input.data_folder, input.config_file),
             protected_paths: ProtectedPaths::new(ProtectedPathsInput {
                 workspace: input.workspace,
                 data_folder: input.data_folder,
@@ -67,7 +77,20 @@ impl PermissionEnvironment {
             classify_all_shell: input.classify_all_shell,
             slots: AutoModeSlots::resolve(input.slots),
             classifier_model: input.classifier_model.map(str::to_owned),
+            secret_values: SecretValues::new(input.env_file),
+            secret_values_current: input.env_file_current,
         }
+    }
+
+    /// The `.env.json` values this environment masks.
+    pub fn secret_values(&self) -> &SecretValues {
+        &self.secret_values
+    }
+
+    /// Whether the values were read for this turn; the classifier is not
+    /// called otherwise.
+    pub fn secret_values_current(&self) -> bool {
+        self.secret_values_current
     }
 
     pub(crate) fn bases(&self) -> PathBases<'_> {

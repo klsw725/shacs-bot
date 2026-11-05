@@ -2,6 +2,7 @@
 //! context (Spec 048 PRD 000 scopes 1, 4 and 9).
 
 use super::exec_pattern::ExecPattern;
+use super::permission_environment::PermissionEnvironment;
 use super::permission_materials::{self, AutoAllow, MaterialsInput, PermissionMaterials};
 use crate::runtime::{
     PermissionMode, PermissionedAction, RememberedPermissionPolicyMatch, ToolExecutionContext,
@@ -28,7 +29,7 @@ pub(crate) fn action_materials(
     let auto_mode = action.permission_mode_snapshot.mode == PermissionMode::Auto;
     let tool_refusal = registry.get(&action.tool_name).and_then(|tool| {
         action
-            .redacted_arguments
+            .decision_arguments()
             .as_object()
             .and_then(|params| tool.preflight_refusal(params))
     });
@@ -40,6 +41,10 @@ pub(crate) fn action_materials(
         preflight_refusal: tool_refusal.or_else(process_refusal),
     });
     materials.this_call_approved = approvals.this_call_approved;
+    materials.auto_mode_escalation = context
+        .permission_auto_mode_escalation
+        .filter(|_| auto_mode);
+    mask_shown_text(&mut materials, environment);
     if auto_mode && !materials.auto_allow_blocked {
         materials.auto_allow = materials
             .allow_rule
@@ -53,6 +58,25 @@ pub(crate) fn action_materials(
             });
     }
     Some(materials)
+}
+
+/// Text from the materials reaches approval questions and tool results, so
+/// `.env.json` values in it are masked (Spec 048 PRD 010 scope 9). Decisions
+/// only test whether it is there.
+fn mask_shown_text(materials: &mut PermissionMaterials, environment: &PermissionEnvironment) {
+    let texts = [
+        &mut materials.deny_rule,
+        &mut materials.ask_rule,
+        &mut materials.allow_rule,
+        &mut materials.secret_name,
+        &mut materials.critical_removal,
+        &mut materials.symlinked_protected_write,
+        &mut materials.symlinked_outside_write,
+        &mut materials.preflight_refusal,
+    ];
+    for text in texts.into_iter().flatten() {
+        *text = environment.secret_values.mask(text);
+    }
 }
 
 fn remembered_allow(rules: &[RememberedPermissionPolicyMatch]) -> Option<AutoAllow> {

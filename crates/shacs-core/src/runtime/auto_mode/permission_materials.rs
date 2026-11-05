@@ -2,6 +2,7 @@
 //! 000 scope 2). They travel with the action so the tool execution decision
 //! and the process gate decide the same way.
 
+use super::block_counts::AutoModeEscalation;
 use super::critical_path::{self, CriticalRemoval};
 use super::permission_environment::PermissionEnvironment;
 use super::rule_match::{
@@ -14,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-const READ_TOOLS: &[&str] = &["read_file", "list_dir", "glob", "grep"];
-const WRITE_TOOLS: &[&str] = &["write_file", "edit_file", "notebook_edit"];
+pub(crate) const READ_TOOLS: &[&str] = &["read_file", "list_dir", "glob", "grep", "notebook_read"];
+pub(crate) const WRITE_TOOLS: &[&str] = &["write_file", "edit_file", "notebook_edit"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionMaterials {
@@ -59,6 +60,10 @@ pub struct PermissionMaterials {
     /// action in auto mode (row 12 conditions).
     #[serde(default)]
     pub auto_allow_blocked: bool,
+    /// The block counts reached a limit with this call, so row 16 asks
+    /// instead of refusing (Spec 048 PRD 020 scope 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_mode_escalation: Option<AutoModeEscalation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,7 +90,7 @@ struct RedirectTarget {
 pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMaterials {
     let environment = input.environment;
     let action = input.action;
-    let arguments = &action.redacted_arguments;
+    let arguments = action.decision_arguments();
     let file = file_access(action, environment);
     let mut redirect_targets = Vec::new();
     let mut critical_removal = None;
@@ -184,6 +189,7 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
         auto_allow_blocked: protected_write
             || action.tool_name == "spawn"
             || (is_exec && (!targets_allowed || environment.classify_all_shell)),
+        auto_mode_escalation: None,
     }
 }
 
@@ -200,7 +206,7 @@ fn file_access(
         return None;
     };
     let text = action
-        .redacted_arguments
+        .decision_arguments()
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or(".");

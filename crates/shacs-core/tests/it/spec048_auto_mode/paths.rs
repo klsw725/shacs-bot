@@ -7,8 +7,6 @@ use shacs_core::tools::{ExecConfig, ExecTool, PathContext, ReadFileTool, Tool, T
 use std::fs;
 use std::os::unix::fs::symlink;
 
-const COULD_NOT_CHECK: &str = "Why: Auto mode could not check this action";
-
 fn finish(failures: Vec<String>) -> TestResult {
     if failures.is_empty() {
         Ok(())
@@ -53,10 +51,7 @@ fn writes_to_each_protected_kind_go_to_the_classifier_even_with_an_allow_rule() 
         );
 
         // Then
-        if !outcome
-            .question()
-            .is_some_and(|question| question.text.contains(COULD_NOT_CHECK))
-        {
+        if !outcome.not_checked() {
             failures.push(format!("{target}: {outcome:?}"));
         }
         if fs::read_to_string(setup.workspace.join(target)).is_ok_and(|text| text == "x") {
@@ -227,12 +222,7 @@ fn bound_positional_parameters_and_named_files_are_not_critical() -> TestResult 
         );
 
         // Then
-        let question = outcome.question().ok_or("not asked")?;
-        assert!(
-            question.text.contains(COULD_NOT_CHECK),
-            "{command}: {}",
-            question.text
-        );
+        assert!(outcome.not_checked(), "{command}: {outcome:?}");
     }
     Ok(())
 }
@@ -396,8 +386,7 @@ fn attachments_reads_without_a_range_and_sandboxed_exec_follow_the_table() -> Te
         matches!(&unbounded_read, Outcome::Ran(text) if text.contains("outside text")),
         "{unbounded_read:?}"
     );
-    let question = sandboxed.question().ok_or("sandboxed exec not asked")?;
-    assert!(question.text.contains(COULD_NOT_CHECK));
+    assert!(sandboxed.not_checked(), "{sandboxed:?}");
     Ok(())
 }
 

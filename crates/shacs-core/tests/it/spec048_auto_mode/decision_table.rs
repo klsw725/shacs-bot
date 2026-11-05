@@ -1,5 +1,8 @@
-use super::support::{call, run, Exec, Options, Outcome, Rules, Setup, TestResult, Verdict};
+use super::support::{
+    call, run, Exec, Options, Outcome, Rules, Setup, TestResult, Verdict, BLOCKED, NOT_CHECKED,
+};
 use serde_json::{json, Value};
+use shacs_core::runtime::AutoModeEscalation;
 use std::os::unix::fs::symlink;
 
 #[derive(Debug, Clone, Copy)]
@@ -351,17 +354,20 @@ fn setup_for(row: &Row) -> Result<Setup, Box<dyn std::error::Error>> {
 }
 
 /// What a cell means for one run: whether the call ran, was asked, or was
-/// refused, and with which words.
+/// refused, and with which words. Row 16 refuses what the classifier did
+/// not allow, and asks instead when the block counts reached a limit
+/// (Spec 048 PRD 020).
 fn check(
     row: &Row,
     column: usize,
     interactive: bool,
     verdict: Option<Verdict>,
+    escalation: Option<AutoModeEscalation>,
     outcome: &Outcome,
 ) -> Result<(), String> {
     let cell = row.cells[column];
     let label = format!(
-        "{} / column {column} / interactive {interactive} / verdict {verdict:?}: {outcome:?}",
+        "{} / column {column} / interactive {interactive} / verdict {verdict:?} / escalation {escalation:?}: {outcome:?}",
         row.name
     );
     let asked_or_refused = |why: &str, reason: &str| match outcome {
@@ -369,19 +375,28 @@ fn check(
         Outcome::Refused(text) if !interactive && text.contains(reason) => Ok(()),
         _ => Err(label.clone()),
     };
+    let stopped = |why: &str, refusal: &str| match escalation {
+        Some(_) => asked_or_refused(
+            &format!("{why}. Auto mode stopped 3 calls in a row, so it asks you now."),
+            refusal,
+        ),
+        None => match outcome {
+            Outcome::Refused(text) if text.starts_with(refusal) => Ok(()),
+            _ => Err(label.clone()),
+        },
+    };
     match (cell, verdict) {
         (Cell::Run, _) | (Cell::Classifier, Some(Verdict::Allow)) => {
             outcome.ran().then_some(()).ok_or(label.clone())
         }
         (Cell::Ask, _) => asked_or_refused("Permission approval required", "Permission denied"),
         (Cell::Deny, _) => outcome.refusal().map(|_| ()).ok_or(label.clone()),
-        (Cell::Classifier, None) => asked_or_refused(
-            "Why: Auto mode could not check this action",
-            "EvaluatorUnavailable",
-        ),
-        (Cell::Classifier, Some(Verdict::Block)) => asked_or_refused(
+        (Cell::Classifier, None) => {
+            stopped("Why: Auto mode could not check this action", NOT_CHECKED)
+        }
+        (Cell::Classifier, Some(Verdict::Block)) => stopped(
             "Why: Auto mode blocked this: [Data Exfiltration] sends files to an unnamed host",
-            "EvaluatorUncertain",
+            BLOCKED,
         ),
         (Cell::Refuse(prefix), _) => match outcome {
             Outcome::Ran(text) if text.starts_with(prefix) => Ok(()),
@@ -405,25 +420,30 @@ fn auto_mode_decides_each_cell_of_the_table() -> TestResult {
             };
             for interactive in [true, false] {
                 for verdict in verdicts {
-                    // Given
-                    let setup = setup_for(&row)?;
-                    let (registry, recorded) = setup.registry(row.exec);
-                    let mut options =
-                        Options::auto(interactive).rules(column_rules(&row, column, &setup));
-                    options.contained = row.contained;
-                    options.verdict = *verdict;
-                    let context = setup.context(&options);
-                    let (tool, arguments) = (row.call)(&setup);
+                    for escalation in [None, Some(AutoModeEscalation::Consecutive)] {
+                        // Given
+                        let setup = setup_for(&row)?;
+                        let (registry, recorded) = setup.registry(row.exec);
+                        let mut options =
+                            Options::auto(interactive).rules(column_rules(&row, column, &setup));
+                        options.contained = row.contained;
+                        options.verdict = *verdict;
+                        options.escalation = escalation;
+                        let context = setup.context(&options);
+                        let (tool, arguments) = (row.call)(&setup);
 
-                    // When
-                    let outcome = run(&registry, &context, call(tool, arguments));
+                        // When
+                        let outcome = run(&registry, &context, call(tool, arguments));
 
-                    // Then
-                    if let Err(failure) = check(&row, column, interactive, *verdict, &outcome) {
-                        failures.push(failure);
-                    }
-                    if !outcome.ran() && !recorded.launched().is_empty() {
-                        failures.push(format!("{} launched without running", row.name));
+                        // Then
+                        if let Err(failure) =
+                            check(&row, column, interactive, *verdict, escalation, &outcome)
+                        {
+                            failures.push(failure);
+                        }
+                        if !outcome.ran() && !recorded.launched().is_empty() {
+                            failures.push(format!("{} launched without running", row.name));
+                        }
                     }
                 }
             }
@@ -453,10 +473,7 @@ fn workspace_writes_go_to_the_classifier_without_allow_workspace_edits() -> Test
     );
 
     // Then
-    let question = outcome.question().ok_or("not asked")?;
-    assert!(question
-        .text
-        .contains("Why: Auto mode could not check this action"));
+    assert!(outcome.not_checked(), "{outcome:?}");
     assert!(!setup.workspace.join("new.txt").exists());
     Ok(())
 }

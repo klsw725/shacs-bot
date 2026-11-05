@@ -1,13 +1,13 @@
-//! The auth store of the active data folder (Spec 048 PRD 000 scope 5): kept
-//! out of folder scans, asked about on every read, never written by the
-//! assistant's tools.
+//! The secret files of the active data folder: the auth store (Spec 048 PRD
+//! 000 scope 5), `.env.json` and the config migrations' backups and secrets
+//! marker (PRD 010 scope 9). They are kept out of folder scans, asked about
+//! on every read and never written by the assistant's tools.
 
 use super::{real_path, shell_command};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 const AUTH_FILE: &str = "auth.json";
-const AUTH_TEMP_PREFIX: &str = ".auth.json.tmp-";
 const AUTH_FOLDER: &str = "auth";
 const MAX_SCANNED_FILES: usize = 4_096;
 const MAX_SCAN_DEPTH: usize = 16;
@@ -15,16 +15,33 @@ const MAX_SCAN_DEPTH: usize = 16;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SecretFiles {
     folders: Vec<PathBuf>,
+    /// The secret file names directly in the data folder; each one's atomic
+    /// save writes `.<name>.tmp-*` beside it.
+    files: Vec<String>,
 }
 
 impl SecretFiles {
-    pub fn new(data_folder: &Path) -> Self {
+    pub fn new(data_folder: &Path, config_file: &Path) -> Self {
         let mut folders = vec![shell_command::normalize(data_folder)];
         let real = real_path::real_path(data_folder);
         if !folders.contains(&real) {
             folders.push(real);
         }
-        Self { folders }
+        let [config_backup, env_file_backup] =
+            shacs_config::secrets_migration_backup_paths(config_file);
+        let mut files = vec![AUTH_FILE.to_owned(), shacs_config::ENV_FILE_NAME.to_owned()];
+        files.extend(
+            [
+                shacs_config::config_migration_backup_path(config_file),
+                shacs_config::secrets_migration_marker_path(config_file),
+                config_backup,
+                env_file_backup,
+            ]
+            .iter()
+            .filter_map(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned()),
+        );
+        Self { folders, files }
     }
 
     /// Whether `path` is an auth store file under any spelling, a symlink to
@@ -34,7 +51,7 @@ impl SecretFiles {
         spellings.iter().any(|spelling| {
             self.folders
                 .iter()
-                .any(|folder| is_auth_store_path(folder, spelling))
+                .any(|folder| self.is_secret_path(folder, spelling))
         }) || self.hard_link(path)
     }
 
@@ -60,9 +77,18 @@ impl SecretFiles {
     /// Text that names a secret file: absolute paths, paths relative to the
     /// given working folders, and the dotted file names.
     pub(crate) fn names(&self, working_folders: &[PathBuf]) -> Vec<String> {
-        let mut names = vec![AUTH_FILE.to_owned(), AUTH_TEMP_PREFIX.to_owned()];
+        let mut names = Vec::new();
+        for file in &self.files {
+            names.push(file.clone());
+            names.push(temp_prefix(file));
+        }
         for folder in &self.folders {
-            for target in [folder.join(AUTH_FILE), folder.join(AUTH_FOLDER)] {
+            let targets = self
+                .files
+                .iter()
+                .map(|file| folder.join(file))
+                .chain([folder.join(AUTH_FOLDER)]);
+            for target in targets {
                 names.push(target.display().to_string());
                 for working in working_folders {
                     if let Ok(relative) = target.strip_prefix(working) {
@@ -92,7 +118,7 @@ impl SecretFiles {
         let identity = (metadata.dev(), metadata.ino());
         self.folders
             .iter()
-            .any(|folder| store_holds(folder, identity).unwrap_or(true))
+            .any(|folder| self.store_holds(folder, identity).unwrap_or(true))
     }
 
     #[cfg(not(unix))]
@@ -101,49 +127,59 @@ impl SecretFiles {
     }
 }
 
-fn is_auth_store_path(folder: &Path, path: &Path) -> bool {
-    let Ok(relative) = path.strip_prefix(folder) else {
-        return false;
-    };
-    let mut parts = relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => part.to_str(),
-            _ => None,
-        });
-    match parts.next() {
-        Some(AUTH_FOLDER) => true,
-        Some(name) if name == AUTH_FILE || name.starts_with(AUTH_TEMP_PREFIX) => {
-            parts.next().is_none()
+impl SecretFiles {
+    fn is_secret_name(&self, name: &str) -> bool {
+        self.files
+            .iter()
+            .any(|file| name == file || name.starts_with(&temp_prefix(file)))
+    }
+
+    fn is_secret_path(&self, folder: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(folder) else {
+            return false;
+        };
+        let mut parts = relative
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(part) => part.to_str(),
+                _ => None,
+            });
+        match parts.next() {
+            Some(AUTH_FOLDER) => true,
+            Some(name) if self.is_secret_name(name) => parts.next().is_none(),
+            _ => false,
         }
-        _ => false,
+    }
+
+    /// Whether the secret files in `folder` include one with `identity`;
+    /// `None` when they could not be read within the limits.
+    #[cfg(unix)]
+    fn store_holds(&self, folder: &Path, identity: (u64, u64)) -> Option<bool> {
+        let mut budget = MAX_SCANNED_FILES;
+        let Some(entries) = read_folder(folder)? else {
+            return Some(false);
+        };
+        for entry in entries {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let found = if self.is_secret_name(&name) {
+                is_identity(&entry.path(), identity)?
+            } else if name == AUTH_FOLDER {
+                tree_holds(&entry.path(), identity, 0, &mut budget)?
+            } else {
+                false
+            };
+            if found {
+                return Some(true);
+            }
+        }
+        Some(false)
     }
 }
 
-/// Whether the auth store in `folder` holds a file with `identity`; `None`
-/// when the store could not be read within the limits.
-#[cfg(unix)]
-fn store_holds(folder: &Path, identity: (u64, u64)) -> Option<bool> {
-    let mut budget = MAX_SCANNED_FILES;
-    let Some(entries) = read_folder(folder)? else {
-        return Some(false);
-    };
-    for entry in entries {
-        let entry = entry.ok()?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let found = if name == AUTH_FILE || name.starts_with(AUTH_TEMP_PREFIX) {
-            is_identity(&entry.path(), identity)?
-        } else if name == AUTH_FOLDER {
-            tree_holds(&entry.path(), identity, 0, &mut budget)?
-        } else {
-            false
-        };
-        if found {
-            return Some(true);
-        }
-    }
-    Some(false)
+fn temp_prefix(file: &str) -> String {
+    format!(".{file}.tmp-")
 }
 
 #[cfg(unix)]

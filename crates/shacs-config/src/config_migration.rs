@@ -68,6 +68,10 @@ pub fn config_migration_marker_path(path: &Path) -> PathBuf {
     marker_path(path)
 }
 
+pub fn config_migration_backup_path(path: &Path) -> PathBuf {
+    backup_path(path)
+}
+
 pub fn begin_config_migration_apply(path: &Path) -> Result<PendingConfigMigration, ConfigError> {
     ensure_uninterrupted(path)?;
     let plan = plan(path)?;
@@ -234,12 +238,10 @@ fn plan(path: &Path) -> Result<MigrationPlan, ConfigError> {
     })
 }
 
+/// The secrets migration's marker blocks this migration too (Spec 048 PRD
+/// 010 scope 6).
 fn ensure_uninterrupted(path: &Path) -> Result<(), ConfigError> {
-    let marker = marker_path(path);
-    if marker.exists() {
-        return Err(ConfigError::MigrationInterrupted { marker });
-    }
-    Ok(())
+    crate::secrets_migration::ensure_no_marker(path)
 }
 
 fn marker_path(path: &Path) -> PathBuf {

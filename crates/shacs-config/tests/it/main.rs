@@ -16,3 +16,7 @@ pub mod remembered_permission_store_failures;
 pub mod remembered_permission_store_support;
 #[path = "spec031_migration_cas.rs"]
 pub mod spec031_migration_cas;
+#[path = "spec048_env_file.rs"]
+pub mod spec048_env_file;
+#[path = "spec048_secrets_migration.rs"]
+pub mod spec048_secrets_migration;

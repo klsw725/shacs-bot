@@ -62,21 +62,22 @@ auto mode에서 각 action은 아래 순서를 지나고, 먼저 걸린 단계�
    - `autoMode.classifyAllShell`을 켜면 auto mode 동안 모든 `exec` allow 규칙을 쓰지 않는다. critical path 제거는 이때도 3단계다.
    - 읽을 수 없는 규칙은 쓰지 않고 진단(`permissions auto-mode config`와 시작 log)에 남긴다. workspace config에서 읽은 규칙은 쓰지 않는다.
 3. **비밀 파일:**
-   - 비밀 파일은 data 폴더의 인증 저장소(`auth.json`과 그 원자적 저장의 임시 파일, `auth/`), `.env.json`과 그 임시 파일, config migration이 남기는 백업이다. 사용자가 이 목록을 줄일 수 없다.
+   - 비밀 파일은 data 폴더의 인증 저장소(`auth.json`과 그 원자적 저장의 임시 파일, `auth/`), `.env.json`과 그 임시 파일, config migration이 남기는 백업과 비밀 옮기기의 진행 표시(marker)다. 사용자가 이 목록을 줄일 수 없다.
    - 모든 mode에서 폴더를 훑는 목록·검색 결과에 나오지 않는다. file tool과, 명령 분석이 그 파일을 읽는다고 본 명령(파일 이름이나 경로를 쓴 `cat` 같은 명령, here-doc이나 `-c` 코드 안에 그 이름이 든 명령)은 매번 묻고(묻지 못하는 실행에서는 거절), 쓴다고 본 명령과 쓰는 file tool은 거절한다. file tool은 그 파일의 hard link도 같은 파일로 본다. tool이 실행 전에 거절할 호출(file tool의 범위 밖, `exec` 안전 장치가 막는 명령; 소유 범위 6)이면 묻지 않고 지금처럼 거절된다.
    - 질문에는 비밀 파일이라는 것과, 승인하면 내용이 AI provider로 가고 세션 기록에 남는다는 것을 적는다. 승인은 그 호출 한 번에만 쓰인다. 기억된 허용, allow 규칙, classifier, `bypass_permissions`가 대신 승인하지 못한다.
    - 이 규칙은 모든 mode에서 그 파일에 대한 022 보호 대상 판정보다 먼저다. 그래서 auto가 아닌 mode에서도 인증 저장소 읽기는 거절 대신 질문이 된다.
    - 이 규칙은 어시스턴트의 tool 호출에만 걸린다. runtime 자체의 인증·config 읽기와, 로그인·`onboard`·`runtime config-migrate`처럼 사용자가 실행하는 명령은 그대로 이 파일을 읽고 쓴다.
    - 명령이 실행한 프로그램이 파일을 직접 여는 것(파일 이름을 명령에 쓰지 않은 스크립트)은 막거나 묻지 못한다. auto mode에서는 그때 classifier가 마지막 방어선이다(남은 위험과 한계).
-   - `.env.json`은 data 폴더에 두는, 이름과 글자 값만 담는 JSON 객체다. 이름은 `[A-Z_][A-Z0-9_]*`다. 다른 모양이면 값을 출력하지 않고 config 읽기를 실패시킨다. 파일 권한은 소유자만 읽고 쓰게 만든다.
-   - config의 `${이름}`은 process 환경 변수를 먼저 보고, 없으면 `.env.json`에서 찾는다. `.env.json` 값은 process 환경 변수로 내보내지 않는다. 명령 실행·skill·MCP에 넘기는 환경 변수는 지금처럼 config의 `env`, `tools.exec.env`, MCP server `env`가 정하고, 그 값에 `${이름}`을 쓸 수 있다.
+   - `.env.json`은 data 폴더에 두는, 이름과 글자 값만 담는 JSON 객체다. 이름은 `[A-Z_][A-Z0-9_]*`다. 다른 모양이면 이름과 값을 출력하지 않고 `${이름}`을 푸는 config 읽기를 실패시킨다. shacs-bot이 쓸 때는 소유자만 읽고 쓰게 만든다.
+   - config의 `${이름}`은 비어 있지 않은 process 환경 변수를 먼저 보고, 없으면 `.env.json`에서 찾는다(Docker Compose는 정하지 않은 변수도 빈 값으로 넘긴다). `.env.json` 값은 process 환경 변수로 내보내지 않는다. 명령 실행·skill·MCP에 넘기는 환경 변수는 지금처럼 config의 `env`, `tools.exec.env`, MCP server `env`가 정하고, 그 값에 `${이름}`을 쓸 수 있다.
+   - 어시스턴트의 호출 인자에 든 8자 이상의 `.env.json` 값은 승인 질문, diagnostics, classifier 요청처럼 보이는 곳에서 그 이름으로 가려진다. 판정은 가리기 전 인자로 한다. 값이 든 호출의 질문은 한 번 승인·거절만 받는다(가린 글로는 기억하지 않는다).
    - **비밀 옮기기(`runtime config-migrate`):**
-     - 비밀 자리는 config의 글 칸 중 칸 이름에 `token`·`password`·`secret`·`apiKey`·`api_key`가 들어간 칸(대소문자 무시)과, top-level `env`·`tools.exec.env`·MCP server `env`의 값이다. 빈 글과 이미 `${이름}`만 담은 칸은 옮기지 않는다. 정확한 칸 목록은 PRD 010이 이 규칙으로 정한다.
-     - 이름은 칸의 경로에서 만든다(예: `channels.discord.token` → `SHACS_CHANNELS_DISCORD_TOKEN`). `env`류의 값은 그 key를 이름으로 쓴다. `.env.json`에 같은 이름이 다른 값으로 이미 있으면 아무것도 바꾸지 않고 멈춘다.
-     - 적용은 지금 `config-migrate`의 백업·진행 표시(marker)·recover 방식을 두 파일로 넓힌다. 원래 `config.json`과 원래 `.env.json`(있으면)의 백업과 marker를 먼저 쓰고, 새 `.env.json`을 쓴 다음 새 `config.json`을 쓴다(각각 임시 파일에 쓰고 원자적으로 바꾼다). 끝나면 백업과 marker를 지운다.
+     - 비밀 자리는 config의 글 칸 중 022 redaction이 비밀로 보는 이름의 칸(`token`·`password`·`secret`·`apiKey`·`api_key`·`authorization`·`cookie` 등이 든 이름, 대소문자 무시)과, top-level `env`·`tools.exec.env`·MCP server `env`의 값이다. 빈 글과 이미 `${이름}`만 담은 칸은 옮기지 않는다. 정확한 칸 목록은 PRD 010이 이 규칙으로 정한다.
+     - 이름은 칸의 경로에서 만든다(예: `channels.discord.token` → `SHACS_CHANNELS_DISCORD_TOKEN`, `tools.exec.env.GITHUB_TOKEN` → `SHACS_TOOLS_EXEC_ENV_GITHUB_TOKEN`). `env`류의 key를 그대로 쓰지 않는 것은 같은 이름의 process 환경 변수가 옮긴 값을 대신하지 않게 하려는 것이다. 같은 이름이 config의 다른 칸, `.env.json`, 명령을 실행한 process 환경 변수(비어 있지 않은 값)에 다른 값으로 있으면 아무것도 바꾸지 않고 멈춘다.
+     - 적용은 지금 `config-migrate`의 백업·진행 표시(marker)·recover 방식을 두 파일로 넓힌다. marker와, 원래 `config.json`·원래 `.env.json`(있으면)의 백업을 먼저 쓰고, 새 `.env.json`을 쓴 다음 새 `config.json`을 쓴다(각각 임시 파일에 쓰고 원자적으로 바꾼다). 끝나면 marker를 지워 확정하고 백업을 지운다.
      - 어느 단계에서 끊겨도 `.env.json`을 `config.json`보다 먼저 쓰므로 config의 `${이름}`은 항상 풀린다. marker가 남아 있으면 다음 apply는 멈추고, `--recover`가 두 파일을 백업으로 되돌리고 marker와 백업을 지운다. 그 뒤 apply를 다시 할 수 있다.
      - dry-run은 옮길 칸과 이름만 보이고 값은 보이지 않는다.
-   - `onboard`는 새 비밀 값을 `config.json`이 아니라 `.env.json`에 쓰고 config에는 `${이름}`을 쓴다.
+   - `onboard`와 `onboard --wizard`는 지금처럼 비밀 값을 받지 않는다(비밀 칸은 빈 글로 만들고, wizard는 환경 변수 이름만 받는다). 사용자는 비밀 값을 `.env.json`에 적고 config에 `${이름}`을 쓰거나, config에 적은 뒤 `runtime config-migrate`로 옮긴다(2026-11-05 정정: 처음 문장은 `onboard`가 비밀 값을 쓴다고 잘못 보았다).
 4. **보호 경로:** auto mode에서 이 경로의 쓰기는 allow 규칙과 2단계로 허락되지 않고 classifier가 본다(symlink를 따라가야 보호 경로가 되는 쓰기는 3단계). classifier가 읽는 입력(instruction 파일, 세션 기록)과, 어시스턴트나 다른 프로그램이 나중에 실행할 설정·정의·예약을 묻지 않고 고치지 못하게 하려는 것이다. 정확한 목록은 PRD 000이 정한다.
    - Claude Code가 보호하는 저장소·개발 도구 설정(`.git`, `.config/git`, `.vscode`, `.idea`, `.husky`, `.cargo`, `.devcontainer`, `.yarn`, `.mvn`, `.gitconfig`, `.gitmodules`, shell profile, `.envrc`, package manager·build·hook 설정, `.mcp.json` 등). `.claude`와 Claude Code 자신의 설정 파일은 shacs-bot에 해당하지 않아 뺀다.
    - 022 보호 대상(인증·권한 설정, learned-method store, app registry, 시작 스크립트, `scripts`가 든 `package.json`, host mount root, 사용자 `protectedTargets`, `permissions.json`).
@@ -159,6 +160,7 @@ auto mode에서 각 action은 아래 순서를 지나고, 먼저 걸린 단계�
 |---|---|---|---|
 | 기본 규칙 | 없다. 자기 인증 정보는 프로젝트 밖에 둔다 | 비밀 파일(인증 저장소, `.env.json`, migration 백업)을 숨기고, 읽기는 매번 묻고, 쓰기는 거절한다. 모든 mode에서 022 보호 대상 판정보다 먼저다 | 이 파일들이 data 폴더에 있고, workspace가 data 폴더로 설정될 수도 있다 |
 | 비밀 파일 | 없다 | `.env.json`과 비밀 옮기기 migration | `config.json`을 읽어도 되게 한다 |
+| 비밀 값이 든 호출의 기억 | 승인 질문에서 "다시 묻지 않기"를 고를 수 있다 | `.env.json` 값이 든 호출은 보이는 곳에서 값을 이름으로 가리고, 질문은 한 번 승인·거절만 받는다 | 가린 글은 값이 바뀌어도 같아서, 그 글로 기억하면 다른 호출에 맞을 수 있다 |
 | sandbox와 deny | sandbox를 켜면 `Read` deny를 OS 수준으로도 강제한다 | 하지 않는다. 규칙은 file tool과 명령 분석이 찾은 명령에만 걸린다 | sandbox adapter는 030 소유이고 Mac 직접 실행에는 sandbox가 없다 |
 | workspace 밖 file tool 읽기·쓰기 | 밖 읽기는 처음에 네 가지 답으로 묻고, network 경로 읽기는 따로 묻는다. `blockReadsOutsideWorkingDirectories`·`blockWritesOutsideWorkingDirectories`를 켜면 file tool이 거절한다 | 묻지 않고 거절한다. file tool이 지금처럼 workspace와 media 폴더 밖을 다루지 못하므로(두 설정이 늘 켜진 것과 같다) 그 질문과 설정을 두지 않는다 | file tool의 범위는 004의 동작이고 이 스펙은 그 범위를 바꾸지 않는다 |
 | 명령의 안전 장치 | 없다. 승인한 critical path 제거와 classifier가 허용한 명령은 실행된다 | 010의 `exec` 안전 장치가 deny pattern(`rm -r`·`rm -f`·`dd if=` 등)에 맞는 명령과, sandbox가 없을 때 workspace 밖 절대 경로·`~` 경로·`../`를 적은 명령을 막는다. 030의 process gate는 격리를 확인할 수 없는 실행(공식 container 밖)을 시작하지 않는다. 048은 이런 명령을 묻거나 classifier에 보내지 않고 거절한다. 승인하거나 허용한 명령 중 이 검사들을 지나는 것은 실행된다 | 010·030 소유의 검사를 바꾸지 않는다. sandbox 없이 host에서 도는 실행의 마지막 보호다 |
@@ -176,10 +178,11 @@ auto mode에서 각 action은 아래 순서를 지나고, 먼저 걸린 단계�
 | 기본 규칙 문장 | 코드 저장소·클라우드 운영을 위한 긴 목록 | 개인 비서에 맞춘 짧은 목록(PRD 000) | 배포·IaC·저장소 협업 규칙 대부분이 shacs-bot의 쓰임과 맞지 않는다 |
 | classifier 입력 | 사용자 메시지, 파일 읽기·검색을 뺀 도구 호출, CLAUDE.md | 같은 것에 system 안내의 skill 목록을 더한다 | 어떤 skill을 쓰는 중인지 알아야 그 skill에 필요한 설치인지 판단할 수 있다 |
 | classifier model | Claude Code가 정한 별도 model | 기본은 어시스턴트 model, `classifierModel`로 바꾼다 | shacs-bot에는 따로 정해진 classifier model이 없다 |
-| 판정 없음 | action을 막되 막힘 수에 넣지 않고 최근 거절 목록에도 남기지 않는다 | 막힘으로 세고 알린다 | classifier가 계속 실패해도 3번 연속이면 사용자가 결정할 수 있게 한다 |
+| 판정 없음 | action을 막되 막힘 수에 넣지 않고 알림과 최근 거절 목록에도 남기지 않는다 | 막힘으로 세고, 도구 결과와 진행 표시로 알린다. 최근 거절 목록에는 남기지 않는다(Claude Code와 같다) | classifier가 계속 실패해도 3번 연속이면 사용자가 결정할 수 있게 한다. channel에서는 도구 결과가 사용자에게 보이지 않는다 |
 | 서버 쪽 검사 | 서버 쪽 classifier 검사와 prompt injection probe | shacs-bot이 provider에 직접 요청한다 | 서버가 없다 |
 | slot key 표기 | `hard_deny`, `soft_deny` | `hardDeny`, `softDeny`(Claude Code 표기도 받는다) | shacs-bot config key는 camelCase다 |
-| 설정·거절 화면 | `/permissions`의 Auto mode·Recently blocked 탭 | CLI와 기존 `/permission recent` | 기존 표면을 쓴다 |
+| 설정·거절 화면 | `/permissions`의 Auto mode·Recently blocked 탭. 줄에서 입력을 읽고 `r`로 허락하며, 나중에 허락하기·허락 거두기·여러 줄 한꺼번에 허락하기가 있다 | CLI와 기존 `/permission recent`. `/permission recent retry <id>`가 그 호출을 보이고 승인 답을 받아 한 줄씩 허락한다. 나중에 허락하기, 허락 거두기, 여러 줄 한꺼번에 허락하기는 없다 | 기존 표면을 쓴다 |
+| 막힘 수의 기간 | 세션 동안 센다 | 세션 기록에 남아 재시작 뒤에도 이어진다. channel 세션은 `/new` 전까지 이어져 누적이 오래 쌓일 수 있다(20번째에 묻고 0이 된다) | shacs-bot의 세션은 대화방마다 계속 이어진다 |
 | `setup`이 읽는 것 | 프로젝트 파일, 설정, 최근 세션의 명령과, 고르면 shell history와 home 아래 저장소 | 선택해 읽는 shell history와 home 저장소는 없다 | 개인 비서의 신뢰 범위는 대화와 workspace에서 나온다 |
 | auto mode 끄기 | `disableAutoMode` 설정 | 따로 없다. mode를 정하면 된다 | 조직 관리 설정이 없다 |
 | auto가 아닌 mode | plan의 명령 classifier 검사, acceptEdits의 파일 명령 자동 허용, 모든 mode의 읽기 전용 명령 자동 허용, network 경로 질문 등 | 022 그대로 | 이 스펙은 auto mode와 모든 mode에 걸리는 규칙만 바꾼다 |
@@ -203,9 +206,9 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 - `autoMode`와 `permissions.allow|ask|deny`는 user-local config에서만 읽는다. prompt, skill, 도구 결과, workspace config는 auto mode 설정의 근거가 되지 않는다.
 - 넓은 규칙 정지는 `permissions.json`을 고치지 않는다.
 - file tool의 범위(허용 폴더), 010의 `exec` 안전 장치, tool의 인자 형식은 바꾸지 않는다. tool에 더하는 것은 목록·검색 결과에서 비밀 파일과 읽기 deny·ask 경로를 빼는 것과 실행 전 거절 확인(소유 범위 6)뿐이다.
-- `.env.json`의 값은 process 환경 변수, log, diagnostics, migration 출력, classifier와 도구 결과 검사 요청에 나오지 않는다.
+- `.env.json`의 값은 process 환경 변수와 migration 출력에 나오지 않는다. 8자 이상의 값은 action의 redaction한 인자(그 digest, 승인 질문, diagnostics, 최근 거절, 기억된 규칙이 이것으로 만들어진다)와 classifier·도구 결과 검사 요청의 사용자 글, 도구 호출 인자, instruction 파일에서 그 이름으로 바뀐다. 이 가리기는 판정을 바꾸지 않는다(판정은 가리기 전 인자로 한다). 값을 읽을 수 없으면 classifier를 부르지 않는다.
 - 비밀 옮기기가 어느 단계에서 끊겨도 config의 `${이름}`은 풀리고, `--recover` 뒤에는 옮기기 전 상태가 된다.
-- classifier와 도구 결과 검사 요청에 raw secret을 넣지 않는다.
+- classifier와 도구 결과 검사 요청의 글과 인자는 022 redaction과 위의 `.env.json` 값 가리기를 거친다. 둘은 따로 돌고, 모든 비밀을 찾는다고 보장하지 않는다(남은 위험).
 - Cargo 테스트는 가짜 provider로 classifier 응답을 정해 돈다. 시험은 고정한 대기 시간에 기대지 않는다.
 - `Cargo.lock`에 새 crate를 더하지 않는다(034 release runner의 의존성 트리 한도). 필요해지면 멈추고 사용자에게 묻는다.
 
@@ -226,12 +229,13 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
    - critical path 제거(셸 `-c` 안, 변수·glob·mounted drive 대상, 대상을 확인할 수 없는 명령 포함)는 모든 mode에서 classifier 없이 묻고, allow 규칙으로 넘어가지 않는다.
    - auto mode에서 tool이 실행 전에 거절할 호출(file tool의 범위 밖 대상, `exec` 안전 장치가 막는 명령)은 묻거나 classifier를 부르지 않고 거절되며, media 폴더의 첨부 읽기는 묻지 않고 실행된다. 다른 mode에서는 그런 호출에 048의 질문이 나오지 않는다. 질문에서 승인한 critical path 제거는 실제로 실행된다.
 5. 비밀 파일:
-   - `${이름}`이 process 환경 변수, `.env.json` 순서로 풀리고, `.env.json` 값은 명령 실행의 환경 변수에 저절로 들어가지 않는다.
+   - `${이름}`이 비어 있지 않은 process 환경 변수, `.env.json` 순서로 풀리고, `.env.json` 값은 명령 실행의 환경 변수에 저절로 들어가지 않는다.
    - 모양이 틀린 `.env.json`은 값을 출력하지 않고 실패한다.
-   - `runtime config-migrate`가 원래 비밀 값을 `.env.json`으로 옮기고 `${이름}`으로 바꾼다. dry-run과 출력에 값이 없다. `.env.json`에 같은 이름의 다른 값이 있으면 아무것도 바뀌지 않는다.
-   - 적용 중 각 단계(백업·marker를 쓴 뒤, `.env.json`을 쓴 뒤, `config.json`을 쓴 뒤)에서 끊으면 그 상태의 config가 읽히고, `--recover` 뒤 두 파일이 옮기기 전과 같으며, apply를 다시 할 수 있다.
-   - `.env.json`, 그 임시 파일, migration 백업이 인증 저장소와 같이 숨겨지고, 읽을 때 묻고, 쓰기가 거절된다.
-   - `onboard`가 새 비밀을 `.env.json`에 쓴다. migration 뒤 `config.json`에 원래 비밀 값이 없다.
+   - `runtime config-migrate`가 원래 비밀 값을 `.env.json`으로 옮기고 `${이름}`으로 바꾼다. dry-run과 출력에 값이 없다. config의 다른 칸, `.env.json`, process 환경 변수에 같은 이름의 다른 값이 있으면 아무것도 바뀌지 않는다.
+   - 적용 중 각 단계(marker와 각 백업을 쓴 뒤, `.env.json`을 쓴 뒤, `config.json`을 쓴 뒤)에서 끊으면 그 상태의 config가 옮기기 전과 같은 값으로 읽히고, `--recover` 뒤 두 파일이 옮기기 전과 같으며, apply를 다시 할 수 있다. 되돌리기가 끊겨도 다시 `--recover`하면 이어서 끝난다.
+   - `.env.json`, 그 임시 파일, migration 백업과 marker가 인증 저장소와 같이 숨겨지고, file tool이나 이름을 쓴 명령으로 읽을 때 묻고, 쓰기가 거절된다.
+   - `onboard`는 config에 비밀 값을 쓰지 않는다. migration 뒤 `config.json`에 원래 비밀 값이 없다.
+   - action의 redaction한 인자와 digest, 승인 질문, diagnostics, classifier 요청에 8자 이상의 `.env.json` 값이 없다.
 6. 막힘과 판정 없음은 이유와 함께 도구 결과로 돌아가고 turn이 이어진다. 3번 연속·20번 누적에서 대화형은 승인 질문을 하고, 비대화형은 그 action을 실행하지 않고 계속한다. 최근 거절 목록에서 허락한 action은 그 허락이 classifier 입력에 들어간 채 다시 classifier를 거친다.
 7. classifier가 맡길 작업 설명을 막으면 하위 작업이 시작되지 않는다. 돌아온 보고가 걸리면 경고가 붙어 넘어간다.
 8. 가짜 웹 결과에 심은 지시에 경고가 붙고, 결과 자체는 그대로다.
@@ -265,6 +269,9 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 - 010의 `exec` 안전 장치는 `rm -r`·`rm -f`와, sandbox가 없으면 workspace 밖 경로를 적은 명령을 승인과 상관없이 막는다. 공식 container 밖에서는 030의 process gate가 명령을 시작하지 않는다. 둘 다 지금과 같으며, 그런 일은 사용자가 직접 하거나 container·sandbox 설정을 바꿔야 한다.
 - critical path 검사는 `rm`·`rmdir`만 본다. 다른 명령(`find -delete`, `mv`, 스크립트)으로 같은 폴더를 지우는 것은 auto mode에서는 classifier만 막고, 다른 mode에서는 022 판정을 따른다(Claude Code와 같다). 검사가 놓친 `rm`도 `bypass_permissions`에서는 그대로 실행된다.
 - `.env.json`을 쓰는 이 판으로 옮긴 config는 이전 판이 읽지 못한다(`${이름}`을 풀 값이 없다). 옮기기가 끝나면 백업이 없으므로, 이전 판으로 돌아가려면 `${이름}` 자리에 값을 다시 적어야 한다.
+- 비밀 옮기기는 칸 이름으로 비밀 자리를 찾으므로 이름이 비밀처럼 보이지 않는 칸(주소 안의 비밀번호, `apiBase`에 넣은 key 등)은 옮기지 않는다. dry-run이 옮길 칸을 보여 준다.
+- `.`·`/`·`~`로 시작하면서 `.env`·`auth`·`token` 같은 낱말이 든 명령(`/bin/cat .env.json`)은 022 redaction이 글 전체를 지워 명령 분석이 볼 수 없다. 그런 명령은 비밀 파일을 읽더라도 묻지 않고 모든 mode에서 거절된다.
+- 022 redaction과 `.env.json` 값 가리기는 모든 비밀을 찾지 못한다. 8자보다 짧은 `.env.json` 값, 모양을 바꾼 값(나누거나 인코딩한 값), process 환경 변수와 config에 남은 값은 022 redaction에만 맡겨진다. 8자 이상이면 흔한 글(`production` 같은 env 값)도 사용자 메시지에서 가려진다.
 
 ## 실행 PRD와 독립 종료
 
@@ -273,8 +280,8 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 | PRD | 유일하게 소유하는 결과 | 앞선 PRD 소비 | 자체 완료 표면 |
 |---|---|---|---|
 | [000 판정 순서와 transcript classifier](prds/000-decision-order-and-transcript-classifier.md) | 소유 범위 1, 2, 3 중 인증 저장소의 비밀 파일 규칙, 4–10, 16의 `defaults`·`config`, 17 중 자기 변경의 문서 | 없음 | 수용 조건 1–4, 9의 첫 항목, 11 |
-| 010 비밀 파일 분리 | 소유 범위 3의 나머지, 17 중 `.env.example`과 자기 변경의 문서 | 000 | 수용 조건 5, 11 |
-| 020 거절 뒤 계속하기 | 소유 범위 12, 13, 17 중 막힘 표시와 자기 변경의 문서 | 000, 010 | 수용 조건 6, 11 |
+| [010 비밀 파일 분리](prds/010-secret-file-split.md) | 소유 범위 3의 나머지, 17 중 `.env.example`과 자기 변경의 문서 | 000 | 수용 조건 5, 11 |
+| [020 거절 뒤 계속하기](prds/020-continue-after-block.md) | 소유 범위 12, 13, 17 중 막힘 표시와 자기 변경의 문서 | 000, 010 | 수용 조건 6, 11 |
 | 030 하위 작업 넘김 검사 | 소유 범위 14, 17 중 자기 변경의 문서 | 000–020 | 수용 조건 7, 11 |
 | 040 도구 결과 검사 | 소유 범위 15, 17 중 자기 변경의 문서 | 000–030 | 수용 조건 8, 11 |
 | 050 기본 mode와 설정 도구 | 소유 범위 11, 16의 `reset`·`critique`·`setup`과 안내, 17 중 자기 변경의 문서 | 000–040 | 수용 조건 9의 나머지, 10, 11 |

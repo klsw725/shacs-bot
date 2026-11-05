@@ -307,9 +307,34 @@ shacs-bot --config /tmp/shacs-config.json onboard --wizard --workspace /tmp/ws
 
 `onboard --wizard`는 raw secret 값을 묻거나 저장하지 않는 secret-ref-only line-driven wizard입니다. 현재 명령은 `provider <provider-id> env <ENV_VAR>`, `finish`, `cancel`, `restart`, `help`입니다. `provider` 명령은 ASCII uppercase letter로 시작하고 1..64자 범위이며 uppercase/digit/underscore만 포함하고, semantic word를 나누는 non-edge underscore가 하나 이상 있는 environment variable reference만 받습니다. 반복 underscore, edge underscore, lowercase, URL/userinfo, assignment, JWT/base64-like token, long alphanumeric token, raw secret-like word는 거부되며 입력값을 stdout/stderr/error/marker에 echo하지 않습니다. 기존 provider `apiKey`/`api_key` 또는 `apiKeyRef`/`api_key_ref`가 있으면 덮어쓰지 않고 실패합니다. `finish` 전 EOF는 partial로 끝나며 typed resume marker에 provider/env ref 진행 상태만 저장합니다. 완료 출력은 별도 aggregate readiness와 함께 실제 local Spec030 owner의 credential/disclosure/decision 관측 및 Spec031 config/profile의 `credential_declarations`, profile selection과 source flag를 표시합니다. 선언은 credential 존재·해석 성공·readiness·권한 부여의 증거가 아닙니다. 이 경로는 environment secret 해석, credential command 실행이나 OAuth refresh를 하지 않으며, 관측하지 못한 runtime credential 상태는 `unavailable`로 유지합니다. [Wizard 보정 증거](../.omo/evidence/spec035/closure/f1-wizard-owner-remediation.json)의 resolved/denied mapper fixture는 live credential·승인 QA가 아닙니다.
 
-Config 문자열 값은 load 시 `${ENV_NAME}` 형태의 environment variable reference를 해석합니다. 예를 들어 provider key는 config에 `"apiKey": "${OPENROUTER_API_KEY}"`로 남겨두고 실행 환경에서 값을 제공할 수 있으며, migration write-back은 실제 secret 값을 config 파일에 저장하지 않습니다. 참조한 environment variable이 없으면 config load가 실패합니다.
+Config 문자열 값은 load 시 `${이름}` 형태의 참조를 풉니다. 값은 비어 있지 않은 process 환경 변수에서 먼저 찾고, 없으면 config 파일과 같은 폴더(data 폴더)의 `.env.json`에서 찾습니다. 둘 다 없고 빈 process 환경 변수만 있으면 빈 글이 되고, 그것도 없으면 config load가 이름만 적은 오류로 실패합니다. Docker Compose는 정하지 않은 provider 변수도 빈 값으로 넘기므로, 빈 값은 `.env.json`을 가리지 않습니다. 예를 들어 provider key는 config에 `"apiKey": "${OPENROUTER_API_KEY}"`로 남겨두고 실행 환경이나 `.env.json`에서 값을 제공할 수 있으며, migration write-back은 실제 secret 값을 config 파일에 저장하지 않습니다.
 
-스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. MCP 도구가 결과에 `isError: true`를 붙여 스스로 실패를 알리면, 그 결과는 성공 내용이 아니라 `(MCP tool call failed: <도구가 보낸 글>)` 형식의 실패로 전달됩니다. 빈 문자열은 `requires.env`를 만족하지 않습니다. Secret 값을 넣은 config 파일은 커밋하거나 공유하지 마세요.
+#### `.env.json`과 비밀 옮기기
+
+`.env.json`은 data 폴더(기본 `~/.shacs-bot`)에 두는 비밀 파일입니다. 이름은 `[A-Z_][A-Z0-9_]*`이고 값은 글인 JSON 객체 하나입니다:
+
+```json
+{
+  "SHACS_CHANNELS_DISCORD_TOKEN": "discord bot token",
+  "SHACS_PROVIDERS_OPENROUTER_API_KEY": "sk-or-..."
+}
+```
+
+- 직접 만들면 `chmod 600 ~/.shacs-bot/.env.json`으로 소유자만 읽고 쓰게 하세요. shacs-bot이 쓸 때는 0600으로 씁니다.
+- 모양이 틀리면(JSON 아님, 객체 아님, 이름 형식, 글이 아닌 값, 같은 이름 두 번) `${이름}`을 푸는 config 읽기(runtime 시작 등)가 몇 번째 항목인지만 적은 오류로 실패합니다. 이름과 값은 출력하지 않습니다. `status`·`onboard`처럼 `${이름}`을 풀지 않는 명령은 이 파일을 읽지 않습니다.
+- 값은 process 환경 변수로 내보내지 않습니다. `exec`·skill·MCP에는 지금처럼 top-level `env`, `tools.exec.env`, `tools.mcpServers.<name>.env`에 적은 변수만 들어가고, 그 값에 `${이름}`을 쓸 수 있습니다.
+- provider의 `apiKeyRef`·`credentialSource.environment`(onboard wizard가 쓰는 환경 변수 참조)와 provider 기본 환경 변수(`OPENROUTER_API_KEY` 등)는 지금처럼 process 환경 변수에서만 찾습니다. `.env.json` 값을 provider key로 쓰려면 `apiKey`에 `${이름}`을 적으세요.
+- `onboard`와 `onboard --wizard`는 비밀 값을 받지 않습니다. onboard 뒤에는 비밀 값을 `.env.json`에 적고 config에 `${이름}`을 쓰거나, config에 값을 적은 뒤 아래처럼 `runtime config-migrate --apply`로 옮기세요.
+
+`runtime config-migrate`는 schema migration에 더해 config의 비밀 값을 `.env.json`으로 옮깁니다. 출력 JSON의 `secrets`에 옮길 칸(`moved`), 옮기지 않은 칸(`kept`), 멈춘 까닭(`conflicts`)이 칸 경로와 이름으로만 나오고 값은 나오지 않습니다.
+
+- 옮기는 칸: 이름이 비밀처럼 보이는 글 칸(`token`·`password`·`secret`·`apiKey`·`api_key`·`authorization`·`cookie` 등이 든 이름. 022 redaction과 같은 판정)과 top-level `env`, `tools.exec.env`, `tools.mcpServers.<name>.env`의 모든 값입니다. 빈 값, 이미 `${이름}` 하나뿐인 값, `apiKeyRef` 안은 건너뛰고, `Bearer ${TOKEN}`처럼 `${`가 섞인 값은 옮기지 않고 `kept`로 보입니다. 이름이 비밀처럼 보이지 않는 칸(주소 안의 비밀번호 등)은 옮기지 않으니 dry-run 결과를 확인하세요.
+- 이름은 칸의 경로로 만듭니다: `channels.discord.token` → `SHACS_CHANNELS_DISCORD_TOKEN`, `tools.exec.env.GITHUB_TOKEN` → `SHACS_TOOLS_EXEC_ENV_GITHUB_TOKEN`. config의 그 칸에는 `${이름}`이 남습니다.
+- 같은 이름이 config의 다른 칸, `.env.json`, 명령을 실행한 process 환경 변수(비어 있지 않은 값)에 다른 값으로 있으면 아무것도 바꾸지 않고 실패합니다. Docker에서 runtime을 돌린다면 같은 container 환경에서 실행하세요(`docker compose run --rm shacs-cli runtime config-migrate --apply`).
+- `--apply`는 진행 표시(`config.json.secrets-migration-in-progress`)와 백업을 먼저 쓰고 `.env.json`, `config.json` 순서로 씁니다. 그래서 중간에 끊겨도 config는 옮기기 전과 같은 값으로 풀립니다. 진행 표시가 남아 있으면 apply와 runtime 시작이 멈추고, `--recover`가 두 파일을 옮기기 전으로 되돌립니다. 진행 표시는 없는데 백업만 남았으면(끝난 apply나 되돌리기가 백업을 지우기 전에 끊김) `--recover`나 다음 apply가 백업만 지웁니다(`removedBackups`).
+- 옮기기가 끝나면 되돌릴 백업이 없고, 이 판으로 옮긴 config는 이전 판이 읽지 못합니다. 이전 판으로 돌아가려면 `${이름}` 자리에 값을 다시 적어야 합니다.
+
+스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. MCP 도구가 결과에 `isError: true`를 붙여 스스로 실패를 알리면, 그 결과는 성공 내용이 아니라 `(MCP tool call failed: <도구가 보낸 글>)` 형식의 실패로 전달됩니다. 빈 문자열은 `requires.env`를 만족하지 않습니다. 비밀 값은 `.env.json`에 두고 config에는 `${이름}`을 쓰세요. Secret 값을 넣은 config 파일이나 `.env.json`은 커밋하거나 공유하지 마세요.
 
 `permissions.mode`는 provider tool 실행 경로가 소비하는 permission policy gate 설정입니다. Rust runtime은 `default`, `plan`, `accept_edits`, `auto`, `dont_ask`, `bypass_permissions` 값을 파싱해 safe fallback/diagnostics를 만들고, provider tool call과 deferred bridge call을 실행 직전 permission mode snapshot과 policy decision에 통과시킵니다. `allow`만 즉시 tool 실행으로 이어지고, `deny`는 실행하지 않은 permission outcome으로 provider-visible tool result에 남습니다. `ask`는 channel runtime에서 사용자에게 승인 질문을 보내며, 사용자는 여섯 가지 decision을 답할 수 있습니다: `1`/`approve`는 pending tool call 한 번만 실행하고, `2`/`deny` 또는 `cancel`은 한 번 취소하며, `3`/`approve_session`은 현재 session에서 session key, permission context, requested scope가 같은 후속 action을 재사용 승인하고, `4`/`approve_project`는 현재 project의 `permissions.json`에 matching action rule을 저장하고, `5`/`deny_session`은 현재 session에서 matching action을 재사용 거절하고, `6`/`deny_project`는 현재 project의 `permissions.json`에 matching deny rule을 저장합니다. `exec`의 단순 shell 명령은 OpenCode식 arity prefix를 사용하므로 `cargo test --workspace`를 승인하면 `cargo test *`가 재사용 패턴으로 저장되고 같은 prefix의 후속 명령도 같은 rule에 매칭될 수 있습니다. Shell 제어 문자나 따옴표를 포함한 복합 명령은 기존 action digest exact match를 유지합니다. 파일 계열 tool은 workspace 상대 exact path 또는 subtree matcher, `web_fetch`는 origin matcher, MCP tool은 wrapped tool name matcher, 그 외 action은 exact action matcher로 요약됩니다. 승인 질문의 `Reusable pattern` 항목에서 실제 저장될 패턴 또는 `exact action` 요약을 확인할 수 있습니다. `ask_user`는 여전히 별도 user interruption tool이며 formal approval decision으로 해석되지 않습니다. `auto`는 user-local opt-in이나 명시적 실행 source 없이 workspace config만으로 활성화되지 않고, `bypass_permissions`는 격리 precondition이 충족된 명시적 opt-in일 때만 normalized snapshot에서 유지됩니다. `auto`의 판정 순서와 모든 mode에 걸리는 사용자 규칙·비밀 파일·critical path는 아래 [auto mode와 사용자 권한 규칙](#auto-mode와-사용자-권한-규칙)을 보세요.
 
@@ -338,7 +363,7 @@ shacs-bot permissions revoke <rule-id-prefix> --workspace /tmp/ws
 7. `permissions.allow` 규칙과 기억된 허용(세션·프로젝트, 세션 승인 cache)은 허용합니다. 넓은 규칙, 보호 경로 쓰기, workspace 밖으로 나가는 `exec` 리디렉션 대상에는 쓰지 않습니다.
 8. symlink를 따라가면 workspace 밖인 쓰기는 묻습니다.
 9. 읽기만 하는 file tool과, 보호 경로가 아닌 workspace 안 쓰기(`permissions.autoApproval.allowWorkspaceEdits`가 켜졌을 때)는 허용합니다.
-10. 나머지는 transcript classifier가 봅니다. 허용이면 실행하고, 막거나 판정하지 못하면 묻습니다.
+10. 나머지는 transcript classifier가 봅니다. 허용이면 실행하고, 막거나 판정하지 못하면 실행하지 않고 그 까닭을 tool 결과로 어시스턴트에게 돌려준 뒤 turn을 잇습니다. 3번 연속이나 한 세션에서 20번 막혔을 때만 묻습니다([막힌 뒤](#막힌-뒤)).
 
 다른 mode에서도 비밀 파일 쓰기, deny 규칙, 기억된 거절은 거절이고, 비밀 파일 읽기와 critical path 제거는 그 호출을 승인할 때만 실행하며, ask 규칙은 허용될 호출을 묻기로 바꿉니다. `dont_ask`에서는 이 묻기가 거절이고, `bypass_permissions`에서도 이 규칙은 걸립니다. 022의 정적 규칙과 local 자동 승인, `permissions.autoApproval`의 `allowProcExecVerification`·`requireDockerContainmentForExec`는 auto mode에서 쓰지 않으며, `protectedTargets`는 보호 경로에 더해집니다.
 
@@ -365,12 +390,14 @@ user-local config(`--config`로 고른 파일, 기본은 `~/.shacs-bot/config.js
 
 #### 비밀 파일
 
-active data 폴더(config 파일이 있는 폴더)의 `auth.json`, 그 원자적 저장의 임시 파일, `auth/` 아래는 모든 mode에서 비밀 파일입니다.
+active data 폴더(config 파일이 있는 폴더)의 `auth.json`, 그 원자적 저장의 임시 파일, `auth/` 아래, `.env.json`과 그 임시 파일, config migration의 백업(`config.json.migration-backup`, `config.json.secrets-migration-backup`, `config.json.secrets-migration-env-backup`)과 비밀 옮기기의 진행 표시(`config.json.secrets-migration-in-progress`)는 모든 mode에서 비밀 파일입니다. config 파일 이름이 다르면 백업과 진행 표시도 그 이름을 따릅니다.
 
 - `list_dir`·`glob`·`grep`이 폴더를 훑을 때 결과에 나오지 않고 내용도 읽히지 않습니다.
 - 그 파일을 지정해 읽는 action(`read_file`, `path`로 준 `grep`, `cat`, `<` 리디렉션, here-doc이나 `python3 -c` 코드 안의 이름)은 매번 한 번 승인·거절만 받는 질문이 됩니다. 승인하면 내용이 AI provider로 가고 세션 기록에 남습니다.
 - 쓰는 action(`write_file`, `edit_file`, `>`, `tee`, `rm`, `mv` 등)은 거절합니다. hard link와 symlink도 같은 파일로 봅니다.
 - 명령 분석은 셸을 실행하지 않고 글을 나누므로 셸과 똑같이 읽는다고 보장하지 않습니다. 변수로 이어 붙인 경로처럼 글에 이름이 나오지 않는 꼴은 놓칠 수 있습니다. data 폴더가 workspace 밖이면 file tool은 원래 그 파일에 닿지 못하고, sandbox가 없는 `exec`는 workspace 밖 절대 경로를 적은 명령을 막습니다.
+- file tool에 `.env.json`이나 비밀 파일의 절대 경로를 줘도 묻습니다. 다만 `.`·`/`·`~`로 시작하면서 `.env`·`auth`·`token` 같은 낱말이 든 명령(`/bin/cat .env.json`)은 redaction이 명령 글을 통째로 가려 판정할 수 없으므로 묻지 않고 거절됩니다.
+- `.env.json`의 8자 이상인 값이 호출 인자나 사용자 메시지에 들어 있으면 승인 질문, diagnostics, classifier 요청에서 `[secret 이름]`으로 가려집니다. 판정은 가리기 전 인자로 합니다. 그런 호출의 질문은 한 번 승인·거절만 받고 기억되지 않습니다. 8자보다 짧은 값이나 모양을 바꾼 값은 가리지 못하고, 8자 이상이면 흔한 글(`production` 같은 env 값)도 가려집니다. turn을 시작할 때 `.env.json`을 읽지 못하면 앞서 읽은 값으로 계속 가리고, 그 turn에는 classifier를 부르지 않습니다(판정 없음).
 
 #### critical path 제거
 
@@ -378,7 +405,22 @@ active data 폴더(config 파일이 있는 폴더)의 `auth.json`, 그 원자적
 
 #### transcript classifier
 
-classifier는 그 run과 같은 provider로 두 단계를 거칩니다. 1단계는 한 낱말로 답하고, `no`가 아니면 2단계에서 규칙과 이유를 JSON으로 답합니다. 보는 것은 사용자 메시지, 어시스턴트의 앞선 tool 호출(파일 읽기·목록·검색은 뺍니다), instruction 파일과 skill 목록, 판정할 action뿐이며 어시스턴트의 글과 tool 결과는 보지 않습니다. 단계마다 60초 안에 답이 없거나 답을 읽을 수 없으면 판정 없음입니다. 막으면 승인 질문의 `Why:` 줄에 `Auto mode blocked this: [규칙] 이유`가, 판정 없음이면 `Auto mode could not check this action`이 나옵니다. subagent와 workflow 자식 run에는 classifier가 없어 이 줄의 action은 거절됩니다.
+classifier는 그 run과 같은 provider로 두 단계를 거칩니다. 1단계는 한 낱말로 답하고, `no`가 아니면 2단계에서 규칙과 이유를 JSON으로 답합니다. 보는 것은 사용자 메시지, 어시스턴트의 앞선 tool 호출(파일 읽기·목록·검색은 뺍니다), instruction 파일과 skill 목록, 판정할 action뿐이며 어시스턴트의 글과 tool 결과는 보지 않습니다. 단계마다 60초 안에 답이 없거나 답을 읽을 수 없으면 판정 없음입니다. 2단계 답의 규칙 이름은 `hardDeny`·`softDeny`·`allow` 항목의 `[이름]` 중 하나일 때만 쓰고, 다른 이름은 `[Unknown Rule]`이 됩니다. subagent와 workflow 자식 run에는 아직 classifier가 없어 이 줄의 action은 판정 없음으로 거절됩니다.
+
+#### 막힌 뒤
+
+classifier가 막거나 판정하지 못한 호출은 실행하지 않고, 사용자에게 바로 묻지도 않습니다. 어시스턴트는 아래 tool 결과를 받고 더 안전한 방법을 찾거나, 그 호출이 꼭 필요하면 멈추고 사용자에게 묻습니다.
+
+- 막음: `Permission denied by auto mode: [규칙] 이유. This call did not run.` 뒤에 "우회하지 말고 더 안전한 방법을 찾거나 사용자에게 물어라"는 안내.
+- 판정 없음: `Permission denied: auto mode could not check this call (까닭), so it did not run.` 뒤에 같은 안내.
+
+막힘 수는 세션마다 셉니다. classifier가 막거나 판정하지 못하면 연속과 누적이 1씩 늘고, classifier가 허용하거나 사용자가 승인 질문에 승인으로 답하거나 최근 거절 목록에서 허락하면 연속이 0이 됩니다. 연속이 3이 되거나 누적이 20이 되면, 대화형 실행은 그 호출을 기존 승인 질문으로 묻고(`Why:` 끝에 `Auto mode stopped 3 calls in a row, so it asks you now.` 또는 `… 20 calls in this session …`), 비대화형 실행은 그대로 거절하고 이어 갑니다. 누적은 20에 닿으면 0이 되고, 연속은 거절로 답하면 그대로라 다음 막힘도 묻습니다. 셈은 세션 기록에 남아 재시작 뒤에도 이어지고 `/new`가 지웁니다. 사용자가 멈춘 turn이나 시간 한도가 지난 turn의 호출은 세지 않습니다. 규칙(1–9번 줄)으로 정해진 호출은 세지도 되돌리지도 않습니다.
+
+막히거나 판정 없는 호출마다 그 대화방에 알림이 갑니다: ``` `exec` blocked by auto mode · [Data Exfiltration] · /permission recent ``` 또는 ``` `exec` not run · auto mode could not check it ```. 알림, diagnostics의 `permission_auto_approval` event(`auto_mode_outcome`, `classifier_rule`, `block_counts`, `escalation`), 최근 거절 목록에는 규칙 이름만 있고 호출 인자와 이유는 없습니다. 판정 없음은 최근 거절 목록에 남지 않습니다.
+
+막힌 호출이 맞는 일이었다면 `/permission recent`에서 그 id를 찾아 `/permission recent retry <id>`를 보냅니다. auto mode에서는 그 호출(tool 이름과 가린 인자)을 보이고, `approve`로 답하면 "이 호출을 한 번 더 시도해도 된다"는 사용자 메시지가 대화에 들어가고 어시스턴트가 이어서 다시 시도합니다. 다시 낸 호출도 classifier가 보며(그 메시지를 허락으로 읽습니다), 규칙이나 세션 승인은 만들지 않습니다. 인자가 3,000자를 넘거나 그 turn에 `.env.json`을 읽지 못했으면 이 길로 허락할 수 없으니 대화로 말해 주세요. 같은 process가 막은 호출만 허락할 수 있고, 질문과 답 사이에 mode가 바뀌면 닫힙니다. 다른 mode의 `/permission recent retry`는 그 호출을 한 번 직접 실행합니다.
+
+auto mode run의 system 안내 끝에는 "흔한 단계는 확인을 묻지 말고 진행하고, 사용자 요청이나 쓰는 skill이 확인을 요구할 때만 묻는다"는 문장이 붙습니다. workspace의 `SOUL.md` 기본 문장("여러 단계 작업은 계획을 보이고 확인을 기다린다")이 있으면 어시스턴트가 여전히 물을 수 있습니다.
 
 `permissions.autoMode`로 classifier 규칙을 바꿉니다.
 
@@ -484,7 +526,7 @@ shacs-bot runtime migrate --resume --workspace /tmp/ws
 
 Migration runner는 session metadata, event, checkpoint, queue, scheduler, channel, child, trace, diagnostics artifact family를 분리해 inventory합니다. Real run은 첫 mutation 전에 ledger를 쓰고 family별 no-op/transformed/failed/blocked 결과를 남기며, bounded backup은 complete verification 뒤 정리합니다. Dry-run은 source data와 marker를 만들거나 바꾸지 않습니다. 현재 config/profile file은 029 runner가 변환하지 않고 readable/incompatible compatibility 결과만 admission에 결합합니다. CLI projection은 opaque refs와 digest만 표시하고 raw secret, payload, absolute host path를 migration detail로 출력하지 않습니다.
 
-Config/profile/auth-source declaration migration은 Spec 031의 별도 JSON-compatible command입니다. Dry-run/apply/recover는 env placeholder와 auth locator를 secret 값으로 writeback하지 않으며 TOML로 전환하지 않습니다:
+Config/profile/auth-source declaration migration은 Spec 031의 별도 JSON-compatible command입니다. Dry-run/apply/recover는 env placeholder와 auth locator를 secret 값으로 writeback하지 않으며 TOML로 전환하지 않습니다. 같은 명령이 config의 비밀 값을 `.env.json`으로 옮기는 일도 합니다([`.env.json`과 비밀 옮기기](#envjson과-비밀-옮기기)):
 
 ```sh
 shacs-bot runtime config-migrate --dry-run --config /tmp/config.json
@@ -801,7 +843,7 @@ Provider 호출 전에 built-in slash command는 로컬에서 처리됩니다:
 - `/restart`: 로컬 restart 요청을 acknowledge합니다. Rust CLI는 현재 process를 in-place로 교체하지 않고, runtime lifecycle의 `runtime restart`도 안전 종료 의도만 남깁니다. 새 process 시작은 다음 명시적 start나 외부 OS supervisor의 책임입니다.
 - `/goal [status|pause|resume|clear|done|blocked <reason>|<text>]`: 현재 session의 persistent goal metadata를 설정하거나 상태를 바꿉니다. 새 목표를 설정하려면 기존 active goal을 먼저 `/goal clear`로 정리해야 합니다.
 - `/permission`: `permissions.mode`를 `default`, `auto`, `bypass_permissions` 중 하나로 저장하는 대화형 wizard를 시작합니다. `auto`를 선택하면 `permissions.mode: "auto"`가 저장되고, 이후 turn은 [auto mode와 사용자 권한 규칙](#auto-mode와-사용자-권한-규칙)의 순서로 판정합니다. `bypass_permissions`는 먼저 선택한 뒤 정확히 `confirm bypass_permissions`로 한 번 더 확인해야 저장되며, 저장된 값은 이후 turn의 permission snapshot에 반영됩니다. `cancel`은 진행 중인 wizard를 취소합니다.
-- `/permission recent`: 최근 auto-mode classifier denial을 sanitized summary로 보여줍니다. `/permission recent retry <denial_id>`는 interactive channel에서 같은 denied action을 한 번 실행하기 위한 formal approval을 만들며, raw payload를 session metadata에 저장하지 않습니다. 같은 owner가 일회성 token을 소비하고 승인 상관관계를 검증한 뒤 executor에 전달한 경우, 기존 terminal receipt에 `recent_retry_<denial_id>`의 `consumed` 사실을 별도로 남깁니다. 원래 approval의 `denied` 이력은 유지되며, TUI는 최신 retry lineage를 표시합니다. 이 기록은 도구 성공이나 재사용 권한이 아니고 token을 저장·복원하지 않습니다. TUI의 recent retry 승인 버튼은 계속 unavailable이며 원래 session channel에서 응답해야 합니다.
+- `/permission recent`: 최근 auto-mode classifier denial을 sanitized summary로 보여줍니다(막은 규칙 이름은 `rule=[…]`). `/permission recent retry <denial_id>`는 interactive channel에서 같은 denied action을 한 번 실행하기 위한 formal approval을 만들며, raw payload를 session metadata에 저장하지 않습니다. auto mode에서는 그 action을 직접 실행하지 않고 어시스턴트가 다시 시도하게 합니다([막힌 뒤](#막힌-뒤)). 같은 owner가 일회성 token을 소비하고 승인 상관관계를 검증한 뒤 executor에 전달한 경우, 기존 terminal receipt에 `recent_retry_<denial_id>`의 `consumed` 사실을 별도로 남깁니다. 원래 approval의 `denied` 이력은 유지되며, TUI는 최신 retry lineage를 표시합니다. 이 기록은 도구 성공이나 재사용 권한이 아니고 token을 저장·복원하지 않습니다. TUI의 recent retry 승인 버튼은 계속 unavailable이며 원래 session channel에서 응답해야 합니다.
 - `/permission rules`: 현재 project remembered permission rule을 list합니다. `/permission inspect <rule-id-prefix>`와 `/permission revoke <rule-id-prefix>`는 CLI `permissions inspect`/`permissions revoke`와 같은 current workspace bucket projection/revoke semantics를 사용합니다.
 - `/history [n]`: 최근 visible user/assistant message를 보여줍니다. 기본값은 10, 최대값은 50입니다.
 - `/dream`: 설정된 Dream memory consolidation을 한 번 실행합니다.
@@ -1510,6 +1552,7 @@ export SHACS_GID=$(id -g)
 mkdir -p ~/.shacs-bot
 docker compose run --rm shacs-cli onboard   # first-time setup
 vim ~/.shacs-bot/config.json                # add API keys or provider config
+docker compose run --rm shacs-cli runtime config-migrate --apply   # move secrets into .env.json
 docker compose up -d shacs-gateway          # start channel runtime
 ```
 
@@ -1543,7 +1586,7 @@ docker compose logs -f shacs-gateway
 docker compose down
 ```
 
-Provider secret은 로컬 config/environment workflow로 제공하세요. Image 안에 secret을 bake하지 마세요. 기본 container UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. Docker containment는 permission mode나 side-effect gate를 없애는 근거가 아니며, unsafe privileged evidence가 보이면 permissive permission mode는 safe fallback으로 내려갑니다. Permission denied가 계속 나면 host에서 `sudo chown -R 1000:1000 ~/.shacs-bot`로 ownership을 맞추거나 Podman의 `--userns=keep-id` 같은 실행 user 전략을 사용하세요.
+Provider secret은 `.env.json`(config에는 `${이름}`), `auth.json` workflow, 또는 Compose가 넘기는 환경 변수로 제공하세요. Image 안에 secret을 bake하지 마세요. 기본 container UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. Docker containment는 permission mode나 side-effect gate를 없애는 근거가 아니며, unsafe privileged evidence가 보이면 permissive permission mode는 safe fallback으로 내려갑니다. Permission denied가 계속 나면 host에서 `sudo chown -R 1000:1000 ~/.shacs-bot`로 ownership을 맞추거나 Podman의 `--userns=keep-id` 같은 실행 user 전략을 사용하세요.
 
 ## 아직 남은 명령 범위
 

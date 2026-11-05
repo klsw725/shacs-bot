@@ -18,7 +18,7 @@ fn auth_store_files_are_secret_under_any_spelling_symlink_or_hard_link(
     fs::hard_link(data.join("auth/codex.json"), workspace.join("copy.json"))?;
 
     // When
-    let secrets = SecretFiles::new(&data);
+    let secrets = SecretFiles::new(&data, &data.join("config.json"));
 
     // Then
     for secret in [
@@ -40,7 +40,10 @@ fn auth_store_files_are_secret_under_any_spelling_symlink_or_hard_link(
 #[test]
 fn secret_names_include_absolute_relative_and_dotted_names() {
     // Given
-    let secrets = SecretFiles::new(Path::new("/nonexistent/data"));
+    let secrets = SecretFiles::new(
+        Path::new("/nonexistent/data"),
+        Path::new("/nonexistent/data/config.json"),
+    );
 
     // When
     let names = secrets.names(&[PathBuf::from("/nonexistent")]);
@@ -62,6 +65,52 @@ fn secret_names_include_absolute_relative_and_dotted_names() {
 }
 
 #[test]
+fn the_env_file_migration_backups_and_secrets_marker_are_secret() -> Result<(), Box<dyn Error>> {
+    // Given
+    let root = tempfile::tempdir()?;
+    let data = fs::canonicalize(root.path())?.join("data");
+    let workspace = data.with_file_name("ws");
+    fs::create_dir_all(&data)?;
+    fs::create_dir(&workspace)?;
+    let secret_names = [
+        ".env.json",
+        "..env.json.tmp-12-34",
+        "settings.json.migration-backup",
+        "settings.json.secrets-migration-in-progress",
+        "settings.json.secrets-migration-backup",
+        "settings.json.secrets-migration-env-backup",
+        ".settings.json.secrets-migration-backup.tmp-5",
+    ];
+    for name in secret_names {
+        fs::write(data.join(name), "{}")?;
+    }
+    fs::write(data.join("settings.json"), "{}")?;
+    fs::write(data.join("settings.json.migration-in-progress"), "{}")?;
+    fs::hard_link(data.join(".env.json"), workspace.join("copied-env.json"))?;
+
+    // When
+    let secrets = SecretFiles::new(&data, &data.join("settings.json"));
+    let names = secrets.names(std::slice::from_ref(&data));
+
+    // Then
+    for name in secret_names {
+        assert!(secrets.contains(&data.join(name)), "{name}");
+    }
+    assert!(secrets.contains(&workspace.join("copied-env.json")));
+    assert!(!secrets.contains(&data.join("settings.json")));
+    assert!(!secrets.contains(&data.join("settings.json.migration-in-progress")));
+    assert!(!secrets.contains(&workspace.join(".env.json")));
+    for expected in [".env.json", "settings.json.secrets-migration-backup"] {
+        assert!(
+            names.contains(&expected.to_owned()),
+            "{expected} in {names:?}"
+        );
+    }
+    assert_eq!(secrets.display_name(&data.join(".env.json")), ".env.json");
+    Ok(())
+}
+
+#[test]
 fn hard_links_are_checked_against_the_store_as_it_is_now() -> Result<(), Box<dyn Error>> {
     // Given
     let root = tempfile::tempdir()?;
@@ -70,7 +119,7 @@ fn hard_links_are_checked_against_the_store_as_it_is_now() -> Result<(), Box<dyn
     fs::create_dir_all(data.join("auth"))?;
     fs::create_dir(&workspace)?;
     fs::write(data.join("auth.json"), "{}")?;
-    let secrets = SecretFiles::new(&data);
+    let secrets = SecretFiles::new(&data, &data.join("config.json"));
     fs::write(data.join(".auth.json.tmp-1"), "{\"new\": true}")?;
     fs::rename(data.join(".auth.json.tmp-1"), data.join("auth.json"))?;
     fs::hard_link(data.join("auth.json"), workspace.join("replaced.json"))?;
@@ -109,7 +158,7 @@ fn an_unreadable_store_makes_every_linked_file_secret() -> Result<(), Box<dyn Er
     fs::hard_link(workspace.join("own.txt"), workspace.join("own-link.txt"))?;
     fs::write(workspace.join("single.txt"), "mine")?;
     fs::set_permissions(data.join("auth"), fs::Permissions::from_mode(0o000))?;
-    let secrets = SecretFiles::new(&data);
+    let secrets = SecretFiles::new(&data, &data.join("config.json"));
     let readable = fs::read_dir(data.join("auth")).is_ok();
 
     // When

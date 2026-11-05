@@ -13,19 +13,25 @@ mod auth_source;
 mod config_migration;
 mod config_migration_state;
 mod credential;
+mod env_file;
 mod permission_user_rules;
 mod permissions;
 mod profiles;
 mod remembered_permissions;
 mod runtime_layout;
 mod schema;
+mod secret_places;
 mod secret_ref;
+mod secrets_migration;
 mod trusted_runtime_config;
 
 pub use auth_source::*;
 pub use config_migration::*;
 pub use config_migration_state::{ConfigMigrationFileState, ConfigMigrationOperation};
 pub use credential::*;
+pub use env_file::{
+    config_env, env_file_path, is_env_name, ConfigEnv, EnvFile, EnvFileProblem, ENV_FILE_NAME,
+};
 pub use permission_user_rules::{AutoModeConfig, AutoModeProblem, PermissionRuleLists};
 pub use permissions::{
     AutoApprovalConfig, PermissionActivationContext, PermissionConfigDiagnostics,
@@ -41,7 +47,15 @@ pub use remembered_permissions::{
 };
 pub use runtime_layout::*;
 pub use schema::*;
+pub use secret_places::{ConflictReason, KeptReason, KeptSecret, MovedSecret, SecretConflict};
 pub use secret_ref::{provider_secret_refs, ConfigSecretRef};
+pub use secrets_migration::{
+    apply_secrets_migration, apply_secrets_migration_observed, dry_run_secrets_migration,
+    recover_secrets_migration, recover_secrets_migration_observed, secrets_migration_backup_paths,
+    secrets_migration_marker_path, secrets_migration_needs_recover, SecretsApplyStep,
+    SecretsMigrationAction, SecretsMigrationEvidence, SecretsMigrationFile, SecretsRecoverStep,
+    StepControl,
+};
 pub use trusted_runtime_config::*;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -872,6 +886,13 @@ pub enum ConfigError {
     },
     MigrationBackupMismatch,
     Invalid(String),
+    EnvFile(EnvFileProblem),
+    SecretsMigrationStopped(Vec<SecretConflict>),
+    SecretsMigrationConflict {
+        file: SecretsMigrationFile,
+        operation: ConfigMigrationOperation,
+        state: ConfigMigrationFileState,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -901,6 +922,26 @@ impl std::fmt::Display for ConfigError {
                 formatter.write_str("config migration backup does not match transaction marker")
             }
             Self::Invalid(error) => write!(formatter, "config is invalid: {error}"),
+            Self::EnvFile(problem) => {
+                write!(formatter, "config {ENV_FILE_NAME} is invalid: {problem}")
+            }
+            Self::SecretsMigrationStopped(conflicts) => write!(
+                formatter,
+                "config secrets migration stopped without changes: {}",
+                conflicts
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            Self::SecretsMigrationConflict {
+                file,
+                operation,
+                state,
+            } => write!(
+                formatter,
+                "config secrets migration {operation:?} rejected {file} state {state:?}"
+            ),
         }
     }
 }
@@ -1078,7 +1119,7 @@ pub fn load_config_with_env(
         config.agents.defaults.workspace = default_workspace();
     }
     if options.resolve_env {
-        resolve_config_env_refs(&mut config, env)?;
+        resolve_config_with_env_file(&mut config, &config_path, env)?;
     }
     if config.agents.defaults.workspace.trim().is_empty() {
         config.agents.defaults.workspace = default_workspace();
@@ -1252,6 +1293,18 @@ pub fn resolve_config_env_refs(
     resolve_env_value(&mut value, env).map_err(ConfigError::Env)?;
     *config = serde_json::from_value(value)?;
     Ok(())
+}
+
+/// Resolves `${NAME}` from a non-empty `env` value, then the `.env.json`
+/// next to `config_path` (Spec 048 PRD 010 scope 2), and returns that file.
+pub fn resolve_config_with_env_file(
+    config: &mut Config,
+    config_path: &Path,
+    env: &impl EnvSource,
+) -> Result<EnvFile, ConfigError> {
+    let env = config_env(config_path, env)?;
+    resolve_config_env_refs(config, &env)?;
+    Ok(env.env_file().clone())
 }
 
 pub fn interpolate_env(input: &str, env: &BTreeMap<String, String>) -> Result<String, String> {

@@ -139,6 +139,7 @@ fn a_command_that_ends_something_else_leaves_the_request_waiting_for_its_answer(
         classifier_confidence: EvaluatorConfidence::High,
         classifier_scope_match: EvaluatorScopeMatch::Requested,
         retryable: true,
+        classifier_rule: None,
     };
     session.metadata.insert(
         "recent_auto_mode_denials".to_owned(),

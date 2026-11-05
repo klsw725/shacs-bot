@@ -1,15 +1,54 @@
 //! Spec 048 PRD 000: the permission environment that the agent loop decides
-//! with, and `permissions auto-mode defaults|config`.
+//! with, and `permissions auto-mode defaults|config`. PRD 020: the notice of
+//! a call auto mode did not run.
 
 use crate::{CliError, PermissionsListOptions};
-use serde_json::{json, Value};
-use shacs_config::{load_config, AutoModeConfig, ConfigBundle, LoadOptions, PermissionsConfig};
+use serde_json::{json, Map, Value};
+use shacs_channels::OutboundMessage;
+use shacs_config::{
+    load_config, AutoModeConfig, ConfigBundle, EnvFile, LoadOptions, PermissionsConfig,
+};
 use shacs_core::runtime::{
     AutoModeSlots, PermissionEnvironment, PermissionEnvironmentInput, RawRuleLists, RuleEffect,
-    SlotOverrides, UserPermissionRules,
+    SlotOverrides, ToolEvent, UserPermissionRules, AUTO_MODE_BLOCK_EVENT,
 };
 use shacs_redaction::redact_string;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// The `.env.json` values each config path last read in this process. A turn
+/// that cannot read the file again keeps masking with them (Spec 048 PRD 010
+/// scope 10).
+static LAST_ENV_FILES: Mutex<BTreeMap<PathBuf, EnvFile>> = Mutex::new(BTreeMap::new());
+
+/// Remembers the values read for `config_path`, such as runtime start's
+/// `${NAME}` read.
+pub(crate) fn remember_env_file(config_path: &Path, env_file: &EnvFile) {
+    LAST_ENV_FILES
+        .lock()
+        .expect("last .env.json values lock poisoned")
+        .insert(config_path.to_path_buf(), env_file.clone());
+}
+
+/// This turn's `.env.json` and whether it was read now rather than kept
+/// from an earlier read.
+fn current_env_file(config_path: &Path) -> (EnvFile, bool) {
+    match EnvFile::load(config_path) {
+        Ok(env_file) => {
+            remember_env_file(config_path, &env_file);
+            (env_file, true)
+        }
+        Err(_) => {
+            let kept = LAST_ENV_FILES
+                .lock()
+                .expect("last .env.json values lock poisoned")
+                .get(config_path)
+                .cloned();
+            (kept.unwrap_or_default(), false)
+        }
+    }
+}
 
 pub(crate) struct EnvironmentSources<'a> {
     pub(crate) config_path: &'a Path,
@@ -34,6 +73,7 @@ pub(crate) fn permission_environment(
         .map_or_else(|| sources.workspace.to_path_buf(), Path::to_path_buf);
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
     let auto_mode = &permissions.auto_mode;
+    let (env_file, env_file_current) = current_env_file(sources.config_path);
     PermissionEnvironment::new(PermissionEnvironmentInput {
         workspace: sources.workspace,
         data_folder: &data_folder,
@@ -47,11 +87,45 @@ pub(crate) fn permission_environment(
         classify_all_shell: auto_mode.classify_all_shell,
         slots: slot_overrides(auto_mode),
         classifier_model: auto_mode.classifier_model.as_deref(),
+        env_file: &env_file,
+        env_file_current,
     })
 }
 
 /// A startup line on standard error when rules or `autoMode` were left out;
 /// `permissions auto-mode config` shows which and why.
+/// The notice for a call auto mode did not run, sent to the conversation
+/// like the skill notice (Spec 048 PRD 020 scope 8). It holds the tool and
+/// the rule only.
+pub(crate) fn block_notification(
+    event: &ToolEvent,
+    channel: &str,
+    chat_id: &str,
+    routing_metadata: &Map<String, Value>,
+    reply_to: Option<&str>,
+) -> Option<OutboundMessage> {
+    if event.name != AUTO_MODE_BLOCK_EVENT {
+        return None;
+    }
+    let result = event.result.as_ref();
+    let field = |name: &str| result.and_then(|result| result.get(name)).cloned();
+    let mut metadata = routing_metadata.clone();
+    metadata.insert(
+        "runtime_notification".to_owned(),
+        json!({
+            "kind": "auto_mode",
+            "phase": "block",
+            "tool": field("tool"),
+            "outcome": field("outcome"),
+            "rule": field("rule"),
+        }),
+    );
+    let mut message =
+        OutboundMessage::new(channel, chat_id, event.detail.clone()).with_metadata(metadata);
+    message.reply_to = reply_to.map(str::to_owned);
+    Some(message)
+}
+
 pub(crate) fn report_rule_problems(bundle: &ConfigBundle) {
     let permissions = &bundle.config.permissions;
     let rules = UserPermissionRules::parse(raw_rules(permissions), &mcp_servers(Some(bundle)));

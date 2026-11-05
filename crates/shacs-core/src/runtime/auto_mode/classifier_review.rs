@@ -6,6 +6,7 @@ use super::classifier_request::{self, ClassifierContextFiles};
 use super::classifier_slots::AutoModeSlots;
 use super::classifier_stage::{self, ClassifierAttempt, ClassifierCall};
 use super::permission_environment::PermissionEnvironment;
+use super::secret_values::SecretValues;
 use crate::runtime::{ContextBuilder, ContextProviderHandoff, PermissionedAction};
 use crate::tools::ToolRegistry;
 use serde_json::Value;
@@ -21,6 +22,10 @@ pub struct AutoModeClassifier<'a> {
     pub invocation: ProviderInvocation,
     pub model: String,
     pub system: String,
+    /// The `.env.json` values masked in requests (Spec 048 PRD 010 scope 10).
+    pub secrets: SecretValues,
+    /// The rule names an answer may cite (Spec 048 PRD 020 scope 5).
+    pub rule_labels: Vec<String>,
 }
 
 impl<'a> AutoModeClassifier<'a> {
@@ -30,12 +35,15 @@ impl<'a> AutoModeClassifier<'a> {
         model: impl Into<String>,
         slots: &AutoModeSlots,
         files: &ClassifierContextFiles,
+        secrets: &SecretValues,
     ) -> Self {
         Self {
             client,
             invocation,
             model: model.into(),
-            system: classifier_request::system_message(slots, files),
+            system: classifier_request::system_message(slots, files, secrets),
+            secrets: secrets.clone(),
+            rule_labels: slots.rule_labels(),
         }
     }
 }
@@ -51,10 +59,15 @@ pub(crate) struct TurnClassifierInput<'i, 'c> {
     pub(crate) run_model: &'i str,
 }
 
+/// `None` leaves row 16 without a verdict: no permission environment, or
+/// `.env.json` could not be read for this turn so its values may not all be
+/// masked (Spec 048 PRD 010 scope 10).
 pub(crate) fn turn_classifier<'c>(
     input: TurnClassifierInput<'_, 'c>,
 ) -> Option<AutoModeClassifier<'c>> {
-    let environment = input.environment?;
+    let environment = input
+        .environment
+        .filter(|environment| environment.secret_values_current)?;
     let mut instructions = input.context_builder.bootstrap_files();
     instructions.extend(
         input
@@ -85,6 +98,7 @@ pub(crate) fn turn_classifier<'c>(
         model,
         &slots,
         &files,
+        &environment.secret_values,
     ))
 }
 
@@ -101,13 +115,20 @@ pub(crate) fn review(
     registry: &ToolRegistry,
     now_unix_ms: &dyn Fn() -> u64,
 ) -> ClassifierReview {
-    let payload = classifier_request::payload(messages, pending_call_id, action, registry);
+    let payload = classifier_request::payload(
+        messages,
+        pending_call_id,
+        action,
+        registry,
+        &classifier.secrets,
+    );
     let attempt = classifier_stage::classify(&ClassifierCall {
         client: classifier.client,
         invocation: &classifier.invocation,
         model: &classifier.model,
         system: &classifier.system,
         payload: &payload,
+        rule_labels: &classifier.rule_labels,
         now_unix_ms,
     });
     ClassifierReview { attempt, payload }

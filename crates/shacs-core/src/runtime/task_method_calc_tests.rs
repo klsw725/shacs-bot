@@ -182,3 +182,18 @@ fn a_result_line_states_only_a_number_and_a_short_unit_on_one_line() {
         assert!(run.marker_error.is_some());
     }
 }
+
+#[test]
+fn a_calculation_auto_mode_did_not_run_is_denied() {
+    // Given
+    let blocked = "Permission denied by auto mode: [Untrusted Code] runs a fetched script. This call did not run. Do not try to get around this.";
+    let unchecked = "Permission denied: auto mode could not check this call (the classifier did not answer in time), so it did not run.";
+
+    // When
+    let runs = [run("x", "c", blocked), run("y", "c", unchecked)];
+
+    // Then
+    for parsed in runs {
+        assert_eq!(parsed.status, RunStatus::Denied);
+    }
+}

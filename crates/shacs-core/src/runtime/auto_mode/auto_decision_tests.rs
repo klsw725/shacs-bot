@@ -1,9 +1,9 @@
 use super::*;
 use crate::runtime::{
     decide_permission, normalize_runtime_tool_call, ApprovalCorrelation, AutoEvaluatorVerdict,
-    AutoEvaluatorVerdictKind, EvaluatorConfidence, EvaluatorScopeMatch, PermissionModeSnapshot,
-    PermissionedActionInput, PermissionedActionOrigin, RuleDiagnostics, RuntimeToolCall,
-    StaticRuleDecision,
+    AutoEvaluatorVerdictKind, AutoModeEscalation, EvaluatorConfidence, EvaluatorScopeMatch,
+    PermissionModeSnapshot, PermissionedActionInput, PermissionedActionOrigin, RuleDiagnostics,
+    RuntimeToolCall, StaticRuleDecision,
 };
 use crate::tools::ToolRegistry;
 use serde_json::json;
@@ -28,6 +28,7 @@ fn input(
             },
             containment_snapshot: None,
             intent_snapshot: None,
+            permission_environment: None,
         },
     );
     PermissionPolicyInput {
@@ -151,11 +152,136 @@ fn auto_mode_sends_the_rest_to_the_classifier() {
     // Then
     assert_eq!(
         unreviewed,
-        (Ask, PermissionPolicyReason::EvaluatorUnavailable)
+        (Deny, PermissionPolicyReason::EvaluatorUnavailable)
     );
     assert_eq!(
         outcome(reviewed),
         (Allow, PermissionPolicyReason::EvaluatorAllow)
+    );
+}
+
+fn verdict(
+    kind: AutoEvaluatorVerdictKind,
+    confidence: EvaluatorConfidence,
+) -> AutoEvaluatorVerdict {
+    AutoEvaluatorVerdict {
+        verdict: kind,
+        confidence,
+        scope_match: EvaluatorScopeMatch::Requested,
+        risk_summary: "[Data Exfiltration] sends notes".to_owned(),
+        evidence_refs: Vec::new(),
+        expires_at_unix_ms: u64::MAX,
+        evaluator_ref: Some("auto-mode-classifier".to_owned()),
+        prompt_injection_signals: Vec::new(),
+    }
+}
+
+#[test]
+fn row_sixteen_refuses_what_it_does_not_allow_and_asks_once_escalated() {
+    let high = EvaluatorConfidence::High;
+    let mut signalled = verdict(AutoEvaluatorVerdictKind::AllowCandidate, high);
+    signalled.prompt_injection_signals = vec![crate::runtime::PromptInjectionSignal {
+        source_ref: "web".to_owned(),
+        reason: "instructions".to_owned(),
+        confidence: high,
+    }];
+    let cases = [
+        (None, PermissionPolicyReason::EvaluatorUnavailable),
+        (
+            Some(verdict(AutoEvaluatorVerdictKind::DenyCandidate, high)),
+            PermissionPolicyReason::EvaluatorUncertain,
+        ),
+        (
+            Some(verdict(
+                AutoEvaluatorVerdictKind::Timeout,
+                EvaluatorConfidence::Unknown,
+            )),
+            PermissionPolicyReason::EvaluatorUncertain,
+        ),
+        (
+            Some(verdict(AutoEvaluatorVerdictKind::AskUser, high)),
+            PermissionPolicyReason::EvaluatorUncertain,
+        ),
+        (
+            Some(verdict(
+                AutoEvaluatorVerdictKind::AllowCandidate,
+                EvaluatorConfidence::Medium,
+            )),
+            PermissionPolicyReason::EvaluatorUncertain,
+        ),
+        (Some(signalled), PermissionPolicyReason::EvaluatorUncertain),
+    ];
+    for (given, reason) in cases {
+        for interactive in [true, false] {
+            for escalation in [None, Some(AutoModeEscalation::Consecutive)] {
+                // Given
+                let materials = PermissionMaterials {
+                    auto_mode_escalation: escalation,
+                    ..PermissionMaterials::default()
+                };
+                let mut call = input("exec", PermissionMode::Auto, materials, interactive);
+                call.evaluator = given.clone();
+
+                // When
+                let decided = outcome(call);
+
+                // Then
+                let kind = if escalation.is_some() && interactive {
+                    Ask
+                } else {
+                    Deny
+                };
+                assert_eq!(decided, (kind, reason.clone()), "{given:?} {escalation:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_escalation_changes_nothing_but_row_sixteen() {
+    // Given
+    let escalated = |materials: PermissionMaterials| PermissionMaterials {
+        auto_mode_escalation: Some(AutoModeEscalation::Total),
+        ..materials
+    };
+    let mut allowed = input(
+        "exec",
+        PermissionMode::Auto,
+        escalated(PermissionMaterials::default()),
+        true,
+    );
+    allowed.evaluator = Some(verdict(
+        AutoEvaluatorVerdictKind::AllowCandidate,
+        EvaluatorConfidence::High,
+    ));
+    let read = input(
+        "read_file",
+        PermissionMode::Auto,
+        escalated(PermissionMaterials::default()),
+        false,
+    );
+    let denied = input(
+        "exec",
+        PermissionMode::Auto,
+        escalated(PermissionMaterials {
+            deny_rule: Some("exec(ls)".to_owned()),
+            ..PermissionMaterials::default()
+        }),
+        true,
+    );
+
+    // When / Then
+    assert_eq!(
+        outcome(allowed),
+        (Allow, PermissionPolicyReason::EvaluatorAllow)
+    );
+    assert_eq!(
+        outcome(read),
+        (Allow, PermissionPolicyReason::WorkspaceRead)
+    );
+    assert_eq!(
+        outcome(denied),
+        (Deny, PermissionPolicyReason::UserRuleDeny)
     );
 }
 

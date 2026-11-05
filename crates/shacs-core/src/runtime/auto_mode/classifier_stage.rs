@@ -2,6 +2,7 @@
 //! scope 12): a one-word answer first, then a reasoned JSON verdict when the
 //! first stage does not allow. Each stage has its own 60-second deadline.
 
+use super::blocked_call::UNKNOWN_RULE;
 use super::classifier_request::{self, STAGE_ONE, STAGE_TWO};
 use crate::runtime::{
     AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, ClassifierAttemptStatus,
@@ -20,7 +21,6 @@ use std::time::{Duration, Instant};
 pub(crate) const STAGE_DEADLINE: Duration = Duration::from_secs(60);
 pub(crate) const CLASSIFIER_REF: &str = "auto-mode-classifier";
 const VERDICT_TTL_MS: u64 = 5 * 60 * 1000;
-const MAX_RULE_CHARS: usize = 80;
 const MAX_REASON_CHARS: usize = 300;
 
 pub(crate) struct ClassifierCall<'a> {
@@ -29,6 +29,8 @@ pub(crate) struct ClassifierCall<'a> {
     pub(crate) model: &'a str,
     pub(crate) system: &'a str,
     pub(crate) payload: &'a Value,
+    /// The `[Label]` names of the run's rule entries.
+    pub(crate) rule_labels: &'a [String],
     pub(crate) now_unix_ms: &'a dyn Fn() -> u64,
 }
 
@@ -92,7 +94,7 @@ pub(crate) fn classify(call: &ClassifierCall<'_>) -> ClassifierAttempt {
     let Some(reasoned) = second.content.as_deref().and_then(parse_reasoned) else {
         return attempt.failed(Failure::Unreadable);
     };
-    let rule = clipped(reasoned.rule.as_deref().unwrap_or("none"), MAX_RULE_CHARS);
+    let rule = known_rule(call.rule_labels, reasoned.rule.as_deref());
     let reason = clipped(
         reasoned.reason.as_deref().unwrap_or_default(),
         MAX_REASON_CHARS,
@@ -100,15 +102,32 @@ pub(crate) fn classify(call: &ClassifierCall<'_>) -> ClassifierAttempt {
     match reasoned.decision.trim().to_lowercase().as_str() {
         "allow" => {
             let verdict = verdict(call, AutoEvaluatorVerdictKind::AllowCandidate, &reason);
-            attempt.finish(verdict, ClassifierAttemptStatus::Success, Some(rule))
+            attempt.finish(verdict, ClassifierAttemptStatus::Success, rule)
         }
         "block" => {
-            let summary = format!("[{}] {reason}", rule.trim_matches(['[', ']']));
+            let rule = rule.unwrap_or_else(|| UNKNOWN_RULE.to_owned());
+            let summary = format!("{rule} {reason}");
             let verdict = verdict(call, AutoEvaluatorVerdictKind::DenyCandidate, &summary);
             attempt.finish(verdict, ClassifierAttemptStatus::Success, Some(rule))
         }
         _ => attempt.failed(Failure::Unreadable),
     }
+}
+
+/// The rule a stage-two answer cites, as a rule entry names it, so the
+/// model's own text never leaves as a rule name (Spec 048 PRD 020 scope 5).
+/// `none` and no rule are no name; a name no entry has is `[Unknown Rule]`.
+fn known_rule(labels: &[String], rule: Option<&str>) -> Option<String> {
+    let cited = rule?.trim().trim_matches(['[', ']']).trim().to_lowercase();
+    if cited.is_empty() || cited == "none" {
+        return None;
+    }
+    Some(
+        labels
+            .iter()
+            .find(|label| label.to_lowercase() == cited)
+            .map_or_else(|| UNKNOWN_RULE.to_owned(), |label| format!("[{label}]")),
+    )
 }
 
 impl Attempt<'_, '_> {

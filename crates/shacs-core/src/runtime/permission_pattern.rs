@@ -1,16 +1,22 @@
 use crate::runtime::{PermissionedAction, SessionApprovalReuseMatch};
 use serde_json::Value;
 
+/// Matches on the decision view: entries come only from actions whose views
+/// are equal, so masking never changes a match (Spec 048 PRD 010 scope 9).
 pub(crate) fn session_approval_reuse_matches(
     reuse_match: &SessionApprovalReuseMatch,
     approved_action_digest: &str,
     action: &PermissionedAction,
 ) -> bool {
     match reuse_match {
-        SessionApprovalReuseMatch::ExactAction => approved_action_digest == action.action_digest,
-        SessionApprovalReuseMatch::ExecCommandPattern { pattern } => {
-            exec_command(action).is_some_and(|command| command_matches_pattern(command, pattern))
+        SessionApprovalReuseMatch::ExactAction => {
+            approved_action_digest == action.decision_action_digest()
         }
+        SessionApprovalReuseMatch::ExecCommandPattern { pattern } => (action.tool_name == "exec")
+            .then(|| action.decision_arguments().get("command"))
+            .flatten()
+            .and_then(Value::as_str)
+            .is_some_and(|command| command_matches_pattern(command, pattern)),
     }
 }
 

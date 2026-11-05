@@ -38,6 +38,7 @@ fn action() -> PermissionedAction {
         secret_ref_evidence: vec![secret_evidence()],
         normalization_state: ActionNormalizationState::Ready,
         normalization_errors: Vec::new(),
+        decision: Default::default(),
     }
 }
 

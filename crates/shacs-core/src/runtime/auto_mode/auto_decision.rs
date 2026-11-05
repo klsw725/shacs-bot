@@ -3,9 +3,10 @@
 
 use super::permission_materials::{AutoAllow, PermissionMaterials};
 use crate::runtime::permission_policy::{
-    ask_or_deny, decide_auto, remembered_decision, strongest_remembered_match,
+    ask_or_deny, remembered_decision, strongest_remembered_match,
 };
 use crate::runtime::{
+    AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, EvaluatorConfidence, EvaluatorScopeMatch,
     PermissionMode, PermissionPolicyDecision, PermissionPolicyDecisionKind, PermissionPolicyInput,
     PermissionPolicyReason, SafetyCapability, StaticRuleDecisionKind, StaticRuleReason,
 };
@@ -116,7 +117,57 @@ pub(crate) fn decide_auto_mode(
             PermissionPolicyReason::WorkspaceEdit,
         );
     }
-    decide_auto(input.evaluator.clone(), interactive)
+    classifier_row(input, materials, interactive)
+}
+
+/// Row 16 (Spec 048 PRD 020 scope 1): the classifier's allow runs the call.
+/// A block or no verdict refuses it, and asks instead when the block counts
+/// reached a limit with this call.
+fn classifier_row(
+    input: &PermissionPolicyInput,
+    materials: &PermissionMaterials,
+    interactive: bool,
+) -> PermissionPolicyDecision {
+    let Some(verdict) = &input.evaluator else {
+        return stopped(
+            materials,
+            interactive,
+            PermissionPolicyReason::EvaluatorUnavailable,
+        );
+    };
+    let mut decision = if classifier_allows(verdict) {
+        decided(
+            PermissionPolicyDecisionKind::Allow,
+            PermissionPolicyReason::EvaluatorAllow,
+        )
+    } else {
+        stopped(
+            materials,
+            interactive,
+            PermissionPolicyReason::EvaluatorUncertain,
+        )
+    };
+    decision.evaluator_ref = verdict.evaluator_ref.clone();
+    decision
+}
+
+fn classifier_allows(verdict: &AutoEvaluatorVerdict) -> bool {
+    verdict.verdict == AutoEvaluatorVerdictKind::AllowCandidate
+        && verdict.confidence == EvaluatorConfidence::High
+        && verdict.scope_match == EvaluatorScopeMatch::Requested
+        && verdict.prompt_injection_signals.is_empty()
+}
+
+fn stopped(
+    materials: &PermissionMaterials,
+    interactive: bool,
+    reason: PermissionPolicyReason,
+) -> PermissionPolicyDecision {
+    if materials.auto_mode_escalation.is_some() {
+        ask_or_deny(interactive, reason)
+    } else {
+        decided(PermissionPolicyDecisionKind::Deny, reason)
+    }
 }
 
 /// The additions that come before the mode's own rules outside auto mode:
