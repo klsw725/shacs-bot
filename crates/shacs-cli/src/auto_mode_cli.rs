@@ -9,8 +9,8 @@ use shacs_config::{
     load_config, AutoModeConfig, ConfigBundle, EnvFile, LoadOptions, PermissionsConfig,
 };
 use shacs_core::runtime::{
-    AutoModeSlots, PermissionEnvironment, PermissionEnvironmentInput, RawRuleLists, RuleEffect,
-    SlotOverrides, ToolEvent, UserPermissionRules, AUTO_MODE_BLOCK_EVENT,
+    is_auto_mode_block_notice, AutoModeSlots, PermissionEnvironment, PermissionEnvironmentInput,
+    RawRuleLists, RuleEffect, SlotOverrides, ToolEvent, UserPermissionRules,
 };
 use shacs_redaction::redact_string;
 use std::collections::BTreeMap;
@@ -104,7 +104,7 @@ pub(crate) fn block_notification(
     routing_metadata: &Map<String, Value>,
     reply_to: Option<&str>,
 ) -> Option<OutboundMessage> {
-    if event.name != AUTO_MODE_BLOCK_EVENT {
+    if !is_auto_mode_block_notice(event) {
         return None;
     }
     let result = event.result.as_ref();

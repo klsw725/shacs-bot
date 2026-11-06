@@ -6,11 +6,11 @@ use super::harness::{answer, calls, spec, tool_call, RoutingProvider, BLOCK};
 use super::support::{Exec, Options, Setup, TestResult, PLUGIN_TOOL};
 use serde_json::{json, Value};
 use shacs_core::runtime::{
-    AgentRunResult, AgentRunSpec, AgentRunner, AutoEvaluatorVerdict, AutoEvaluatorVerdictKind,
-    AutoModeBlockCounts, AutoModeBlocks, CancellationToken, EvaluatorConfidence,
-    EvaluatorScopeMatch, ExecutionDomain, ExecutionOutcome, ExecutionScope, RuntimeExecutionLedger,
-    RuntimeInterrupt, ToolEvent, ToolOutcomeKind, ToolSearchConfig, ToolSearchMode,
-    AUTO_MODE_BLOCK_EVENT,
+    is_auto_mode_block_notice, AgentRunResult, AgentRunSpec, AgentRunner, AutoEvaluatorVerdict,
+    AutoEvaluatorVerdictKind, AutoModeBlockCounts, AutoModeBlocks, CancellationToken,
+    EvaluatorConfidence, EvaluatorScopeMatch, ExecutionDomain, ExecutionOutcome, ExecutionScope,
+    RuntimeExecutionLedger, RuntimeInterrupt, ToolEvent, ToolOutcomeKind, ToolSearchConfig,
+    ToolSearchMode, AUTO_MODE_BLOCK_EVENT,
 };
 use shacs_providers::ToolCallRequest;
 use std::fs;
@@ -618,7 +618,7 @@ fn a_stopped_or_late_turn_counts_nothing_more_and_shows_nothing_more() -> TestRe
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
     stopped.tool_event_callback = Some(Arc::new(move |event: &ToolEvent| {
-        if event.name == AUTO_MODE_BLOCK_EVENT {
+        if is_auto_mode_block_notice(event) {
             token.cancel();
         }
         if let Ok(mut events) = sink.lock() {

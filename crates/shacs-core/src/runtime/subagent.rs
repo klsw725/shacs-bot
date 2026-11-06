@@ -1,12 +1,16 @@
 // allow: SIZE_OK — preexisting subagent runtime; Spec034 diff is one ToolExecutionContext fixture field hook
+use crate::runtime::auto_mode::classifier_review::{
+    child_classifier, ChildClassifier, ChildClassifierInput,
+};
+use crate::runtime::auto_mode::report_review;
 use crate::runtime::{
     AgentRunResult, AgentRunSpec, AgentRunner, CancellationToken, ContainmentSnapshotRef,
     ContextBuilder, ExecutionDomain, ExecutionIdentity, ExecutionOutcome, ExecutionOutcomeFact,
     ExecutionScope, InboundMessage, LateResultDecision, MessageBus, OwnerAcceptedAutomationResult,
-    PendingExecution, PermissionCeilingSnapshot, PermissionModeSnapshot, PermissionRuleInput,
-    ProviderInvocationClient, RuntimeCapabilityReport, RuntimeCapabilityStatus,
-    RuntimeExecutionLedger, SessionRememberedPermissionRule, SubagentOutcomeKind, ToolEvent,
-    ToolExecutionContext, ToolStatus,
+    PendingExecution, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
+    PermissionRuleInput, ProviderInvocationClient, RuntimeCapabilityReport,
+    RuntimeCapabilityStatus, RuntimeExecutionLedger, SessionRememberedPermissionRule,
+    SubagentOutcomeKind, ToolEvent, ToolExecutionContext, ToolStatus,
 };
 use crate::tools::{
     EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool, PathContext,
@@ -32,6 +36,9 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT_CHILD_ID: AtomicU64 = AtomicU64::new(1);
+/// The end of an auto mode subagent's system prompt (Spec 048 PRD 030
+/// scope 3).
+const AUTO_MODE_GUIDANCE: &str = "\n\n---\n\n# Auto Mode\n\nAuto mode is on: a classifier checks your tool calls, and no one can approve a refused call for you. Stay within the task you were given. If a call you need is refused, do not try to get around it; finish what you can and say in your final response what was refused.";
 static CHILD_ID_NAMESPACE: OnceLock<u128> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,6 +410,15 @@ pub struct SubagentExecutionConfig {
     /// The confirmed learned method (Spec038) the parent request uses, added
     /// to each child's system prompt.
     pub learned_method_guidance: Option<String>,
+    /// Instruction files a turn adds besides the workspace's own, which an
+    /// auto mode child's classifier reads too (Spec 048 PRD 030 scope 2).
+    pub extra_context_files: Vec<PathBuf>,
+    /// The conversation the parent turn answers in, for that classifier's
+    /// trust boundary. `None` uses the spawn's origin channel and chat.
+    pub classifier_conversation: Option<String>,
+    /// Whether auto mode reviews the child's finished work before its report
+    /// is handed back (Spec 048 PRD 030 scope 4).
+    pub auto_mode_report_review: bool,
 }
 
 impl SubagentExecutionConfig {
@@ -435,6 +451,9 @@ impl SubagentExecutionConfig {
             project_permission_store: None,
             provider_runtime_override: None,
             learned_method_guidance: None,
+            extra_context_files: Vec::new(),
+            classifier_conversation: None,
+            auto_mode_report_review: true,
         }
     }
 }
@@ -880,15 +899,20 @@ impl SubagentRuntime {
         cancellation_token: CancellationToken,
     ) -> ChildResultEnvelope {
         let registry = build_subagent_tool_registry(config);
+        let context_builder =
+            ContextBuilder::new(&config.workspace).with_configured_env(config.exec_env.clone());
+        // Spec 048 PRD 030: an auto mode child gets its own classifier,
+        // guidance and return review.
+        let auto_mode = config.permission_mode_snapshot.mode == PermissionMode::Auto
+            && config.permission_environment.is_some();
         let system_prompt = format!(
-            "{}{}",
-            ContextBuilder::new(&config.workspace)
-                .with_configured_env(config.exec_env.clone())
-                .build_subagent_prompt(),
+            "{}{}{}",
+            context_builder.build_subagent_prompt(),
             config
                 .learned_method_guidance
                 .as_deref()
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            if auto_mode { AUTO_MODE_GUIDANCE } else { "" }
         );
         let messages = vec![
             json!({"role": "system", "content": system_prompt}),
@@ -897,8 +921,25 @@ impl SubagentRuntime {
         let provider_invocation =
             cancellation_token.provider_invocation(config.provider_runtime_override.clone());
         let provider_client = ProviderInvocationClient::new(client, &provider_invocation);
+        let classifier = auto_mode
+            .then(|| {
+                child_classifier(ChildClassifierInput {
+                    environment: config.permission_environment.as_deref(),
+                    context_builder: &context_builder,
+                    workspace: &config.workspace,
+                    extra_context_files: &config.extra_context_files,
+                    conversation: config.classifier_conversation.clone().unwrap_or_else(|| {
+                        format!("{}:{}", envelope.origin_channel, envelope.origin_chat_id)
+                    }),
+                    client,
+                    invocation: &provider_invocation,
+                    run_model: &config.model,
+                })
+            })
+            .flatten();
         let mut spec =
             AgentRunSpec::new(messages, &registry, &provider_client, config.model.clone());
+        spec.auto_mode_classifier = classifier.as_ref().map(|child| child.classifier.clone());
         spec.settings = config.settings.clone();
         spec.retry_mode = config.retry_mode;
         spec.max_iterations = config.max_iterations;
@@ -961,7 +1002,12 @@ impl SubagentRuntime {
                 if let Some(observation) = &config.method_observation {
                     crate::runtime::task_method_observe::record_artifacts(observation, &result);
                 }
-                self.child_result_from_agent_run(envelope, result)
+                let reviewer =
+                    (auto_mode && config.auto_mode_report_review).then_some(ReportReviewer {
+                        classifier: classifier.as_ref(),
+                        registry: &registry,
+                    });
+                self.child_result_from_agent_run(envelope, result, reviewer)
             }
             Err(error) => {
                 let mut result = ChildResultEnvelope::from_spawn(
@@ -979,6 +1025,7 @@ impl SubagentRuntime {
         &self,
         envelope: &SpawnEnvelope,
         result: AgentRunResult,
+        reviewer: Option<ReportReviewer<'_, '_>>,
     ) -> ChildResultEnvelope {
         let status = match result.stop_reason.as_str() {
             "cancelled" => ChildResultStatus::Cancelled,
@@ -993,12 +1040,36 @@ impl SubagentRuntime {
                 .clone()
                 .unwrap_or_else(|| "Task completed but no final response was generated.".to_owned())
         };
+        // Spec 048 PRD 030 scope 4: the review adds a warning or a note
+        // before the whole report and records only its outcome.
+        let review = reviewer.map(|reviewer| {
+            report_review::review(
+                reviewer.classifier,
+                &envelope.task_goal,
+                &result.messages,
+                &summary,
+                reviewer.registry,
+            )
+        });
+        let summary = match &review {
+            Some(review) => review.reported(&summary),
+            None => summary,
+        };
         let mut envelope_result = ChildResultEnvelope::from_spawn(envelope, status, summary);
         envelope_result.error = result.error.clone();
         envelope_result.budget_usage = Some(json!(result.usage));
+        envelope_result.observations = review
+            .as_ref()
+            .map(|review| json!({ report_review::EVENT: review.record() }));
         let tool_events = result
             .tool_events
             .iter()
+            .cloned()
+            .chain(
+                review
+                    .as_ref()
+                    .map(|review| review.event(&envelope.child_task_id)),
+            )
             .map(|event| serde_json::to_value(event).unwrap_or(Value::Null))
             .collect::<Vec<_>>();
         let _ = self.update_progress(
@@ -1466,6 +1537,13 @@ pub fn build_subagent_tool_registry(config: &SubagentExecutionConfig) -> ToolReg
     registry
 }
 
+/// What reviews an auto mode child's finished work (Spec 048 PRD 030 scope
+/// 4). Without a classifier the report gets the note.
+struct ReportReviewer<'r, 'c> {
+    classifier: Option<&'r ChildClassifier<'c>>,
+    registry: &'r ToolRegistry,
+}
+
 impl SubagentSpawner for SubagentRuntime {
     fn spawn(&self, request: SpawnRequest) -> Result<String, String> {
         self.spawn_from_request(request)
@@ -1774,6 +1852,19 @@ fn format_subagent_announcement(
     label: &str,
     task: &str,
 ) -> String {
+    // The header stays one line, so the parent's classifier always knows
+    // the message for a report (Spec 048 PRD 030 scope 5).
+    let label = label
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let label = label.as_str();
     let status_text = match result.status {
         ChildResultStatus::Completed => "completed successfully",
         ChildResultStatus::Failed => "failed",

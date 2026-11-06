@@ -81,3 +81,30 @@ fn the_notice_shows_the_tool_and_rule_only() {
     );
     assert_eq!(rule("no rule here"), None);
 }
+
+#[test]
+fn only_the_runtime_notice_counts_as_one_not_a_tool_of_the_same_name() {
+    // Given
+    let notice = crate::runtime::ToolEvent {
+        name: crate::runtime::AUTO_MODE_BLOCK_EVENT.to_owned(),
+        status: crate::runtime::ToolStatus::Waiting,
+        detail: "`exec` blocked by auto mode · [Data Exfiltration] · /permission recent".to_owned(),
+        call_id: Some("action_1".to_owned()),
+        arguments: None,
+        result: Some(serde_json::json!({"tool": "exec", "outcome": "blocked"})),
+    };
+    let tool_runs = crate::runtime::ToolEvent {
+        status: crate::runtime::ToolStatus::Ok,
+        arguments: Some(serde_json::json!({"path": "notes.md"})),
+        ..notice.clone()
+    };
+    let tool_waits = crate::runtime::ToolEvent {
+        result: Some(serde_json::json!({"outcome": "something else"})),
+        ..notice.clone()
+    };
+
+    // When / Then
+    assert!(crate::runtime::is_auto_mode_block_notice(&notice));
+    assert!(!crate::runtime::is_auto_mode_block_notice(&tool_runs));
+    assert!(!crate::runtime::is_auto_mode_block_notice(&tool_waits));
+}

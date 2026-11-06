@@ -1,9 +1,11 @@
 //! Runs the two-stage classifier for one pending action (Spec 048 PRD 000
 //! scope 12): a one-word answer first, then a reasoned JSON verdict when the
-//! first stage does not allow. Each stage has its own 60-second deadline.
+//! first stage does not allow. Each stage has its own 60-second deadline. A
+//! subagent's finished work goes through the same stages with its own words
+//! (PRD 030 scope 4).
 
 use super::blocked_call::UNKNOWN_RULE;
-use super::classifier_request::{self, STAGE_ONE, STAGE_TWO};
+use super::classifier_request::{self, REVIEW_STAGE_ONE, REVIEW_STAGE_TWO, STAGE_ONE, STAGE_TWO};
 use crate::runtime::{
     AutoEvaluatorVerdict, AutoEvaluatorVerdictKind, ClassifierAttemptStatus,
     ClassifierStageEvidence, EvaluatorConfidence, EvaluatorScopeMatch,
@@ -23,12 +25,38 @@ pub(crate) const CLASSIFIER_REF: &str = "auto-mode-classifier";
 const VERDICT_TTL_MS: u64 = 5 * 60 * 1000;
 const MAX_REASON_CHARS: usize = 300;
 
+/// The two stage instructions and the stage-two decisions of one review.
+/// A stage-one `no` always lets the subject through.
+pub(crate) struct Stages {
+    one: &'static str,
+    two: &'static str,
+    allow: &'static str,
+    block: &'static str,
+}
+
+/// A pending action: allow it or block it.
+pub(crate) const ACTION_STAGES: Stages = Stages {
+    one: STAGE_ONE,
+    two: STAGE_TWO,
+    allow: "allow",
+    block: "block",
+};
+
+/// A subagent's finished work: pass it or flag it (Spec 048 PRD 030).
+pub(crate) const REVIEW_STAGES: Stages = Stages {
+    one: REVIEW_STAGE_ONE,
+    two: REVIEW_STAGE_TWO,
+    allow: "pass",
+    block: "flag",
+};
+
 pub(crate) struct ClassifierCall<'a> {
     pub(crate) client: &'a dyn ProviderClient,
     pub(crate) invocation: &'a ProviderInvocation,
     pub(crate) model: &'a str,
     pub(crate) system: &'a str,
     pub(crate) payload: &'a Value,
+    pub(crate) stages: &'a Stages,
     /// The `[Label]` names of the run's rule entries.
     pub(crate) rule_labels: &'a [String],
     pub(crate) now_unix_ms: &'a dyn Fn() -> u64,
@@ -61,11 +89,53 @@ struct Attempt<'c, 'a> {
     usage: BTreeMap<String, u64>,
 }
 
-enum Failure {
+pub(crate) enum Failure {
     Stopped,
     TimedOut,
     Provider,
     Unreadable,
+}
+
+/// One classifier request under the stage deadline, or the turn's deadline
+/// when that comes first. The caller checks for a stopped turn first.
+pub(crate) fn chat_once(
+    client: &dyn ProviderClient,
+    invocation: &ProviderInvocation,
+    model: &str,
+    system: &str,
+    user: String,
+    max_tokens: u32,
+) -> Result<LlmResponse, Failure> {
+    let request = ProviderRequest {
+        messages: vec![
+            json!({"role": "system", "content": system}),
+            json!({"role": "user", "content": user}),
+        ],
+        tools: Vec::new(),
+        model: model.to_owned(),
+        settings: GenerationSettings {
+            temperature: 0.0,
+            max_tokens,
+            reasoning_effort: None,
+        },
+        tool_choice: None,
+    };
+    let stage_deadline = Instant::now() + STAGE_DEADLINE;
+    let deadline = invocation
+        .deadline()
+        .map_or(stage_deadline, |turn_deadline| {
+            turn_deadline.min(stage_deadline)
+        });
+    let invocation = invocation.clone().with_deadline(deadline);
+    client
+        .chat_with_invocation(request, &invocation)
+        .map_err(|error| {
+            if is_timeout(&error) {
+                Failure::TimedOut
+            } else {
+                Failure::Provider
+            }
+        })
 }
 
 pub(crate) fn classify(call: &ClassifierCall<'_>) -> ClassifierAttempt {
@@ -75,7 +145,7 @@ pub(crate) fn classify(call: &ClassifierCall<'_>) -> ClassifierAttempt {
         stages: Vec::new(),
         usage: BTreeMap::new(),
     };
-    let first = match attempt.ask(STAGE_ONE, 64, 1) {
+    let first = match attempt.ask(call.stages.one, 64, 1) {
         Ok(response) => response,
         Err(failure) => return attempt.failed(failure),
     };
@@ -87,7 +157,7 @@ pub(crate) fn classify(call: &ClassifierCall<'_>) -> ClassifierAttempt {
         );
         return attempt.finish(verdict, ClassifierAttemptStatus::Success, None);
     }
-    let second = match attempt.ask(STAGE_TWO, 1_024, 2) {
+    let second = match attempt.ask(call.stages.two, 1_024, 2) {
         Ok(response) => response,
         Err(failure) => return attempt.failed(failure),
     };
@@ -99,18 +169,17 @@ pub(crate) fn classify(call: &ClassifierCall<'_>) -> ClassifierAttempt {
         reasoned.reason.as_deref().unwrap_or_default(),
         MAX_REASON_CHARS,
     );
-    match reasoned.decision.trim().to_lowercase().as_str() {
-        "allow" => {
-            let verdict = verdict(call, AutoEvaluatorVerdictKind::AllowCandidate, &reason);
-            attempt.finish(verdict, ClassifierAttemptStatus::Success, rule)
-        }
-        "block" => {
-            let rule = rule.unwrap_or_else(|| UNKNOWN_RULE.to_owned());
-            let summary = format!("{rule} {reason}");
-            let verdict = verdict(call, AutoEvaluatorVerdictKind::DenyCandidate, &summary);
-            attempt.finish(verdict, ClassifierAttemptStatus::Success, Some(rule))
-        }
-        _ => attempt.failed(Failure::Unreadable),
+    let decision = reasoned.decision.trim().to_lowercase();
+    if decision == call.stages.allow {
+        let verdict = verdict(call, AutoEvaluatorVerdictKind::AllowCandidate, &reason);
+        attempt.finish(verdict, ClassifierAttemptStatus::Success, rule)
+    } else if decision == call.stages.block {
+        let rule = rule.unwrap_or_else(|| UNKNOWN_RULE.to_owned());
+        let summary = format!("{rule} {reason}");
+        let verdict = verdict(call, AutoEvaluatorVerdictKind::DenyCandidate, &summary);
+        attempt.finish(verdict, ClassifierAttemptStatus::Success, Some(rule))
+    } else {
+        attempt.failed(Failure::Unreadable)
     }
 }
 
@@ -141,33 +210,15 @@ impl Attempt<'_, '_> {
         if call.invocation.is_cancelled() {
             return Err(Failure::Stopped);
         }
-        let request = ProviderRequest {
-            messages: vec![
-                json!({"role": "system", "content": call.system}),
-                json!({
-                    "role": "user",
-                    "content": classifier_request::user_message(call.payload, instruction),
-                }),
-            ],
-            tools: Vec::new(),
-            model: call.model.to_owned(),
-            settings: GenerationSettings {
-                temperature: 0.0,
-                max_tokens,
-                reasoning_effort: None,
-            },
-            tool_choice: None,
-        };
-        let stage_deadline = Instant::now() + STAGE_DEADLINE;
-        let deadline = call
-            .invocation
-            .deadline()
-            .map_or(stage_deadline, |turn_deadline| {
-                turn_deadline.min(stage_deadline)
-            });
-        let invocation = call.invocation.clone().with_deadline(deadline);
         let started = (call.now_unix_ms)();
-        let result = call.client.chat_with_invocation(request, &invocation);
+        let result = chat_once(
+            call.client,
+            call.invocation,
+            call.model,
+            call.system,
+            classifier_request::user_message(call.payload, instruction),
+            max_tokens,
+        );
         let usage = result
             .as_ref()
             .map(|response| response.usage.clone())
@@ -175,13 +226,6 @@ impl Attempt<'_, '_> {
         for (key, value) in &usage {
             *self.usage.entry(key.clone()).or_default() += value;
         }
-        let result = result.map_err(|error| {
-            if is_timeout(&error) {
-                Failure::TimedOut
-            } else {
-                Failure::Provider
-            }
-        });
         let outcome = match &result {
             Ok(_) => "answered",
             Err(Failure::TimedOut) => "timed_out",

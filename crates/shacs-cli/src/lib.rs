@@ -19985,6 +19985,7 @@ impl AgentLoopChatCompletionAdapter {
         subagent.permission_ceiling_snapshot = config.permission_ceiling_snapshot.clone();
         subagent.project_permission_store = config.project_permission_store.clone();
         subagent.permission_environment = config.permission_environment.clone();
+        subagent.extra_context_files = config.extra_context_files.clone();
         subagent.provider_runtime_override = config.provider_runtime_override.clone();
         subagent.max_iterations = config.max_iterations;
         subagent.max_tool_result_chars = config.max_tool_result_chars;

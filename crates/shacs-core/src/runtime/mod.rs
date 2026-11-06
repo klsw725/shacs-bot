@@ -528,10 +528,10 @@ pub use provider_credentials::{
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub(crate) use runner::isolate_panic;
 pub use runner::{
-    AgentHook, AgentHookContext, AgentRunSpec, AgentRunner, CompositeHook,
-    ExecutionSnapshotCallback, ExecutionSnapshotResolver, MidTurnInjectionCallback, NoopAgentHook,
-    ProviderEventCallback, RetryWaitCallback, ToolEvent, ToolEventCallback, ToolSearchConfig,
-    ToolSearchMode, ToolSearchRuntimeInput, ToolStatus, AUTO_MODE_BLOCK_EVENT,
+    is_auto_mode_block_notice, AgentHook, AgentHookContext, AgentRunSpec, AgentRunner,
+    CompositeHook, ExecutionSnapshotCallback, ExecutionSnapshotResolver, MidTurnInjectionCallback,
+    NoopAgentHook, ProviderEventCallback, RetryWaitCallback, ToolEvent, ToolEventCallback,
+    ToolSearchConfig, ToolSearchMode, ToolSearchRuntimeInput, ToolStatus, AUTO_MODE_BLOCK_EVENT,
 };
 pub use self_improvement::{
     runtime_improvement_apply_readiness, runtime_improvement_apply_record,

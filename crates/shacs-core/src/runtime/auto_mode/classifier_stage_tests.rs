@@ -79,6 +79,7 @@ fn run(provider: &ScriptedProvider, invocation: &ProviderInvocation) -> Classifi
         model: "classifier-model",
         system: "SYSTEM",
         payload: &payload,
+        stages: &ACTION_STAGES,
         rule_labels: &crate::runtime::AutoModeSlots::default().rule_labels(),
         now_unix_ms: &|| 1_000,
     })
@@ -274,4 +275,53 @@ fn an_earlier_turn_deadline_is_kept() {
     // Then
     let remaining = provider.requests()[0].1.expect("deadline");
     assert!(remaining <= Duration::from_secs(5));
+}
+
+#[test]
+fn the_review_stages_pass_or_flag_the_work() {
+    // Given
+    let payload = json!({"task": "t", "calls": [], "report": "r"});
+    let labels = crate::runtime::AutoModeSlots::default().rule_labels();
+    let cases = [
+        (vec![Ok("No.")], AutoEvaluatorVerdictKind::AllowCandidate, 1),
+        (
+            vec![Ok("yes"), Ok("{\"decision\": \"pass\", \"rule\": \"none\", \"reason\": \"fine\"}")],
+            AutoEvaluatorVerdictKind::AllowCandidate,
+            2,
+        ),
+        (
+            vec![Ok("yes"), Ok("{\"decision\": \"flag\", \"rule\": \"[Data Exfiltration]\", \"reason\": \"asks to upload\"}")],
+            AutoEvaluatorVerdictKind::DenyCandidate,
+            2,
+        ),
+        (
+            vec![Ok("yes"), Ok("{\"decision\": \"block\", \"rule\": \"none\", \"reason\": \"x\"}")],
+            AutoEvaluatorVerdictKind::ParseFailure,
+            2,
+        ),
+    ];
+    for (answers, expected, requests) in cases {
+        let provider = ScriptedProvider::new(answers);
+
+        // When
+        let attempt = classify(&ClassifierCall {
+            client: &provider,
+            invocation: &ProviderInvocation::default(),
+            model: "classifier-model",
+            system: "REVIEW SYSTEM",
+            payload: &payload,
+            stages: &REVIEW_STAGES,
+            rule_labels: &labels,
+            now_unix_ms: &|| 1_000,
+        });
+
+        // Then
+        assert_eq!(attempt.verdict.verdict, expected);
+        let sent = provider.requests();
+        assert_eq!(sent.len(), requests);
+        let first = sent[0].0.messages[1]["content"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(first.ends_with(REVIEW_STAGE_ONE), "{first}");
+    }
 }

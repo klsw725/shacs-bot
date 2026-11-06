@@ -8,7 +8,7 @@ use crate::runtime::{
 };
 
 const GUIDANCE: &str = " Do not try to get around this, for example by doing the same thing with another tool or command. Find a safer way to do what the user asked, keep working on parts that do not need this call, or stop and ask the user if this call is essential.";
-const NO_CLASSIFIER: &str = "auto mode's classifier is not available in this run";
+pub(crate) const NO_CLASSIFIER: &str = "auto mode's classifier is not available in this run";
 /// The cause of a call the turn ended before auto mode could check.
 pub(crate) const TURN_ENDED: &str = "the turn ended first";
 pub(crate) const UNKNOWN_RULE: &str = "[Unknown Rule]";

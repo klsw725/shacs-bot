@@ -174,11 +174,34 @@ fn redact_sensitive_key_values(value: &str) -> String {
             let Some(character) = value[index..].chars().next() else {
                 break;
             };
-            redacted.push(character);
-            index += character.len_utf8();
+            // A key starting later in the same run of key characters ends
+            // where this one ends, so its fragments are this key's too and it
+            // cannot match either. Skipping the run keeps a long run (base64,
+            // minified code) from taking quadratic time.
+            let end = if is_key_character(character) {
+                key_run_end(value, index)
+            } else {
+                index + character.len_utf8()
+            };
+            redacted.push_str(&value[index..end]);
+            index = end;
         }
     }
     redacted
+}
+
+fn is_key_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+}
+
+fn key_run_end(value: &str, mut index: usize) -> usize {
+    while let Some(character) = value[index..].chars().next() {
+        if !is_key_character(character) {
+            break;
+        }
+        index += character.len_utf8();
+    }
+    index
 }
 
 struct SensitiveKeyValueMatch {
@@ -197,12 +220,7 @@ fn parse_sensitive_key_value(value: &str, start: usize) -> Option<SensitiveKeyVa
     }
 
     let key_start = index;
-    while let Some(character) = value[index..].chars().next() {
-        if !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-')) {
-            break;
-        }
-        index += character.len_utf8();
-    }
+    index = key_run_end(value, index);
     if index == key_start {
         return None;
     }
@@ -445,10 +463,12 @@ fn redact_token_prefixes(value: &str) -> String {
     let mut index = 0;
     while index < value.len() {
         let tail = &value[index..];
-        let Some(prefix) = prefixes
-            .iter()
-            .find(|prefix| tail.to_ascii_lowercase().starts_with(**prefix))
-        else {
+        // Only the prefix's own length is compared, so a long text is not
+        // lowered again at every position.
+        let Some(prefix) = prefixes.iter().find(|prefix| {
+            tail.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        }) else {
             let Some(character) = tail.chars().next() else {
                 break;
             };
@@ -654,6 +674,63 @@ mod tests {
             let once = redact_string(text);
             assert_eq!(once, expected, "{text}");
             assert_eq!(redact_string(&once), once, "{text}");
+        }
+    }
+
+    /// The scan before runs were skipped: every position is tried.
+    fn redact_sensitive_key_values_position_by_position(value: &str) -> String {
+        let mut redacted = String::with_capacity(value.len());
+        let mut index = 0;
+        while index < value.len() {
+            if let Some(match_) = parse_sensitive_key_value(value, index) {
+                redacted.push_str(&value[index..match_.value_start]);
+                redacted.push_str(REDACTED);
+                index = match_.value_end;
+            } else {
+                let Some(character) = value[index..].chars().next() else {
+                    break;
+                };
+                redacted.push(character);
+                index += character.len_utf8();
+            }
+        }
+        redacted
+    }
+
+    #[test]
+    fn skipping_key_runs_changes_no_redaction() {
+        let long_run = format!("{} token: S3CR3T kept", "a".repeat(3_000));
+        let cases = [
+            "xtoken: S3CR3T kept",
+            "my_api_key=S3CR3T rest",
+            "x-authorization: kept token=S3CR3T",
+            "\"apikey\": \"S3CR3T\", \"k\": 1",
+            "'secret':'S3CR3T' next",
+            "notakey: plain value",
+            "émoji🙂token: S3CR3T fin",
+            "password=[REDACTED] tail",
+            "-token- : S3CR3T",
+            "tokentoken:: S3CR3T",
+            long_run.as_str(),
+        ];
+        for case in cases {
+            assert_eq!(
+                redact_sensitive_key_values(case),
+                redact_sensitive_key_values_position_by_position(case),
+                "{}",
+                case.chars().take(80).collect::<String>()
+            );
+        }
+        let huge_run = format!("{} token: S3CR3T kept", "a".repeat(200_000));
+        assert!(redact_string(&huge_run).ends_with(&format!("token: {REDACTED} kept")));
+        for (text, expected) in [
+            ("key SK-abcdef123 end", format!("key {REDACTED} end")),
+            ("Ghp_abcdef end", format!("{REDACTED} end")),
+            ("ya29.x", REDACTED.to_owned()),
+            ("sk- alone", "sk- alone".to_owned()),
+            ("émoji sk-éé", "émoji sk-éé".to_owned()),
+        ] {
+            assert_eq!(redact_token_prefixes(text), expected, "{text}");
         }
     }
 

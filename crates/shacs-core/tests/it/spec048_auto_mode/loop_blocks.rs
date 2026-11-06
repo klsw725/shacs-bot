@@ -471,7 +471,9 @@ fn an_auto_mode_retry_question_lasts_ten_minutes_on_the_loops_clock() -> TestRes
             ],
             blocks(2),
         );
-        let start = super::support::now_unix_ms();
+        // A base far from real time, so a real-time stamp anywhere in the
+        // decision would show.
+        let start = 1_000_000_000_000;
         let clock = Arc::new(AtomicU64::new(start));
         let read = clock.clone();
         let mut config = agent_loop_config(&setup, true);

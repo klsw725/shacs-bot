@@ -83,7 +83,7 @@ pub(in crate::runtime::agent_loop) fn hold_model_text(
         spec.tool_event_callback = Some(Arc::new(move |event: &crate::runtime::ToolEvent| {
             // An auto mode notice holds no arguments or output (Spec 048
             // PRD 020 scope 8).
-            if event.call_id.is_none() || event.name == crate::runtime::AUTO_MODE_BLOCK_EVENT {
+            if event.call_id.is_none() || crate::runtime::is_auto_mode_block_notice(event) {
                 callback(event);
             } else if offered.contains(&event.name) {
                 callback(&quiet_event(event));

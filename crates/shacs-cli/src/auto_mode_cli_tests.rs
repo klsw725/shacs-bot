@@ -1,7 +1,7 @@
 use super::*;
 use crate::{parse_cli_args, run_command, CliCommand, PermissionsCommand};
 use serde_json::json;
-use shacs_core::runtime::RuleEffect;
+use shacs_core::runtime::{RuleEffect, AUTO_MODE_BLOCK_EVENT};
 use std::error::Error;
 use std::fs;
 
@@ -296,4 +296,11 @@ fn a_call_auto_mode_did_not_run_becomes_a_visible_notice_in_the_conversation() {
     );
     assert!(crate::is_visible_runtime_notification(&notice));
     assert!(ignored.is_none());
+    let same_named_tool = ToolEvent {
+        status: shacs_core::runtime::ToolStatus::Ok,
+        arguments: Some(json!({"secret": "tool argument"})),
+        result: Some(json!({"outcome": "blocked", "output": "tool output"})),
+        ..event.clone()
+    };
+    assert!(block_notification(&same_named_tool, "discord", "chat_1", &routing, None).is_none());
 }

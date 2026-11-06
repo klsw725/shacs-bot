@@ -4,7 +4,7 @@ use super::runner_spec034::{
     observable_tool_arguments, observable_tool_calls, observable_tool_event, prepare_run,
     redact_string, ProviderStreamCounts, ToolResultArtifactRef,
 };
-use crate::runtime::auto_mode::{blocked_call, classifier_review};
+use crate::runtime::auto_mode::{blocked_call, classifier_review, result_check};
 use crate::runtime::quiet_tools::quiet_tool_calls;
 use crate::runtime::tool_execution::{
     effective_permission_rule_input, permission_decision_for_action,
@@ -396,6 +396,21 @@ pub const AUTO_MODE_BLOCK_EVENT: &str = "auto_mode_block";
 /// How every result of a call the permission decision did not run starts.
 pub(crate) const PERMISSION_DENIED: &str = "Permission denied";
 
+/// Whether an event is the runtime's notice of a call auto mode did not run,
+/// not a tool that happens to share its name: the notice waits, carries no
+/// arguments, and says what auto mode did (Spec 048 PRD 020 scope 8).
+pub fn is_auto_mode_block_notice(event: &ToolEvent) -> bool {
+    event.name == AUTO_MODE_BLOCK_EVENT
+        && event.status == ToolStatus::Waiting
+        && event.arguments.is_none()
+        && event
+            .result
+            .as_ref()
+            .and_then(|result| result.get("outcome"))
+            .and_then(Value::as_str)
+            .is_some_and(|outcome| matches!(outcome, "blocked" | "no_verdict"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
@@ -738,6 +753,13 @@ impl AgentRunner {
                     }
                     emit_events(&spec, std::slice::from_ref(&event));
                     tool_events.push(event);
+                    let tool = resolved_bridge_calls_by_id
+                        .get(&raw_message.tool_call_id)
+                        .map_or(raw_message.name.as_str(), |resolved| {
+                            resolved.underlying_name.as_str()
+                        });
+                    let returned = tool_returned(&report.executed_call_ids, raw_message);
+                    let normalized = checked_tool_message(&spec, tool, normalized, returned);
                     completed_tool_results.push(normalized.to_json());
                     completed_tool_messages.push(normalized.clone());
                     messages.push(normalized.to_json());
@@ -1215,6 +1237,7 @@ struct ToolDispatchReport {
     resolved_bridge_calls: Vec<ResolvedDeferredToolCall>,
     recent_auto_mode_denials: Vec<RecentAutoModeDenial>,
     recent_auto_mode_retry_tokens: Vec<RecentAutoModeRetryToken>,
+    executed_call_ids: Vec<String>,
 }
 
 struct IterationToolUse {
@@ -1241,6 +1264,7 @@ fn execute_tool_dispatch(
     let mut skipped_tool_calls = Vec::new();
     let mut recent_auto_mode_denials = Vec::new();
     let mut recent_auto_mode_retry_tokens = Vec::new();
+    let mut executed_call_ids = Vec::new();
     let mut index = 0;
     while index < calls.len() {
         let segment_start = index;
@@ -1258,6 +1282,7 @@ fn execute_tool_dispatch(
             resolved_bridge_calls.extend(report.resolved_calls);
             recent_auto_mode_denials.extend(report.recent_auto_mode_denials);
             recent_auto_mode_retry_tokens.extend(report.recent_auto_mode_retry_tokens);
+            executed_call_ids.extend(report.executed_call_ids);
             messages.extend(report.results.into_iter().map(|result| result.message));
             if let Some(interrupt) = report.interrupt {
                 skipped_tool_calls.extend(report.skipped_tool_calls);
@@ -1269,6 +1294,7 @@ fn execute_tool_dispatch(
                     resolved_bridge_calls,
                     recent_auto_mode_denials,
                     recent_auto_mode_retry_tokens,
+                    executed_call_ids,
                 };
             }
             skipped_tool_calls.extend(report.skipped_tool_calls);
@@ -1281,6 +1307,7 @@ fn execute_tool_dispatch(
                     resolved_bridge_calls,
                     recent_auto_mode_denials,
                     recent_auto_mode_retry_tokens,
+                    executed_call_ids,
                 };
             }
         } else {
@@ -1292,6 +1319,7 @@ fn execute_tool_dispatch(
             messages.extend(report.messages);
             recent_auto_mode_denials.extend(report.recent_auto_mode_denials);
             recent_auto_mode_retry_tokens.extend(report.recent_auto_mode_retry_tokens);
+            executed_call_ids.extend(report.executed_call_ids);
             if let Some(interrupt) = report.interrupt {
                 skipped_tool_calls.extend(report.skipped_tool_calls);
                 skipped_tool_calls.extend_from_slice(&calls[index..]);
@@ -1302,6 +1330,7 @@ fn execute_tool_dispatch(
                     resolved_bridge_calls,
                     recent_auto_mode_denials,
                     recent_auto_mode_retry_tokens,
+                    executed_call_ids,
                 };
             }
             skipped_tool_calls.extend(report.skipped_tool_calls);
@@ -1314,6 +1343,7 @@ fn execute_tool_dispatch(
                     resolved_bridge_calls,
                     recent_auto_mode_denials,
                     recent_auto_mode_retry_tokens,
+                    executed_call_ids,
                 };
             }
         }
@@ -1326,6 +1356,7 @@ fn execute_tool_dispatch(
         resolved_bridge_calls,
         recent_auto_mode_denials,
         recent_auto_mode_retry_tokens,
+        executed_call_ids,
     }
 }
 
@@ -1366,6 +1397,7 @@ fn dispatch_bridge_segment(
         permissioned_actions: Vec::new(),
         recent_auto_mode_denials: Vec::new(),
         recent_auto_mode_retry_tokens: Vec::new(),
+        executed_call_ids: Vec::new(),
     };
     for (index, call) in calls.iter().cloned().enumerate() {
         let mut report = dispatch_bridge_tool_calls_with_context_resolver(
@@ -1395,6 +1427,9 @@ fn dispatch_bridge_segment(
         combined
             .recent_auto_mode_retry_tokens
             .append(&mut report.recent_auto_mode_retry_tokens);
+        combined
+            .executed_call_ids
+            .append(&mut report.executed_call_ids);
         if let Some(interrupt) = report.interrupt {
             combined.interrupt = Some(interrupt);
             combined
@@ -1423,6 +1458,7 @@ fn direct_tool_dispatch(
         resolved_bridge_calls: Vec::new(),
         recent_auto_mode_denials: report.recent_auto_mode_denials,
         recent_auto_mode_retry_tokens: report.recent_auto_mode_retry_tokens,
+        executed_call_ids: report.executed_call_ids,
     }
 }
 
@@ -1477,6 +1513,9 @@ fn direct_runtime_report_fail_fast(
         combined
             .recent_auto_mode_retry_tokens
             .append(&mut report.recent_auto_mode_retry_tokens);
+        combined
+            .executed_call_ids
+            .append(&mut report.executed_call_ids);
         if let Some(interrupt) = report.interrupt {
             combined.interrupt = Some(interrupt);
             combined
@@ -1502,6 +1541,7 @@ fn direct_runtime_report_with_classifier(
     let mut permissioned_actions = Vec::new();
     let mut recent_auto_mode_denials = Vec::new();
     let mut recent_auto_mode_retry_tokens = Vec::new();
+    let mut executed_call_ids = Vec::new();
 
     for (index, call) in calls.iter().cloned().enumerate() {
         let context = tool_context_with_classifier_verdict(&call, spec, executor, run_messages);
@@ -1548,6 +1588,7 @@ fn direct_runtime_report_with_classifier(
         permissioned_actions.append(&mut report.permissioned_actions);
         recent_auto_mode_denials.append(&mut report.recent_auto_mode_denials);
         recent_auto_mode_retry_tokens.append(&mut report.recent_auto_mode_retry_tokens);
+        executed_call_ids.append(&mut report.executed_call_ids);
         if let Some(interrupt) = report.interrupt {
             skipped_tool_calls.extend_from_slice(&calls[index + 1..]);
             return RuntimeToolExecutionReport {
@@ -1557,6 +1598,7 @@ fn direct_runtime_report_with_classifier(
                 permissioned_actions,
                 recent_auto_mode_denials,
                 recent_auto_mode_retry_tokens,
+                executed_call_ids,
             };
         }
         if spec.fail_on_tool_error
@@ -1575,6 +1617,7 @@ fn direct_runtime_report_with_classifier(
         permissioned_actions,
         recent_auto_mode_denials,
         recent_auto_mode_retry_tokens,
+        executed_call_ids,
     }
 }
 
@@ -2021,6 +2064,42 @@ fn auto_mode_reviewed_context(
         emit_auto_mode_block_event(spec, action, verdict, blocks);
     }
     context
+}
+
+/// Spec 048 PRD 040: in an auto mode run, what a tool returned is checked
+/// for text aimed at the assistant before it reads it. A flagged result
+/// keeps its text and gets the warning after it; events and records keep
+/// the original.
+pub(super) fn checked_tool_message(
+    spec: &AgentRunSpec<'_>,
+    tool: &str,
+    mut message: RuntimeToolMessage,
+    returned: bool,
+) -> RuntimeToolMessage {
+    if !returned || !auto_mode_run(&spec.tool_context) {
+        return message;
+    }
+    let Some(text) = result_check::checked_text(&message.content) else {
+        return message;
+    };
+    let outcome = result_check::check(spec.auto_mode_classifier.as_ref(), tool, &text);
+    let event = result_check::event(&observable_call_id(&message.tool_call_id), tool, outcome);
+    emit_events(spec, std::slice::from_ref(&event));
+    if outcome == result_check::Outcome::Flagged {
+        message.content = format!("{}\n\n{}", message.content, result_check::WARNING);
+    }
+    message
+}
+
+/// Whether a raw message holds what a tool returned (Spec 048 PRD 040 scope
+/// 1): its call ran, so it is no refusal of the permission decision however
+/// it reads, and it has text, so the runtime's no-output note does not take
+/// its place.
+pub(super) fn tool_returned(
+    executed_call_ids: &[String],
+    raw_message: &RuntimeToolMessage,
+) -> bool {
+    executed_call_ids.contains(&raw_message.tool_call_id) && !raw_message.content.trim().is_empty()
 }
 
 /// The run's turn was stopped or ran out of time, so calls the classifier

@@ -36,6 +36,10 @@ mod permission_rule;
 mod protected_path;
 #[path = "auto_mode/real_path.rs"]
 mod real_path;
+#[path = "auto_mode/report_review.rs"]
+pub(crate) mod report_review;
+#[path = "auto_mode/result_check.rs"]
+pub(crate) mod result_check;
 #[path = "auto_mode/retry_approval.rs"]
 pub(crate) mod retry_approval;
 #[path = "auto_mode/rule_match.rs"]

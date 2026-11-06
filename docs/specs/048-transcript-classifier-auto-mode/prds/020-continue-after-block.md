@@ -175,11 +175,15 @@ PRD 020은 PRD 030–050 없이 닫힌다.
   - 막은 판정의 규칙 이름은 모든 표면이 같은 함수(`rule_name`)로 보인다(요약에 `[이름]`이 없으면 `[Unknown Rule]`).
   - auto mode 다시 시도 질문의 만료와 답의 확인은 agent loop의 시계(`AgentLoopConfig.clock_ms`, 기본은 지금 시각)를 쓴다. 시험이 10분을 대기 없이 확인한다.
   - SPEC 표의 설정·거절 화면 행에 나중에 허락·허락 거두기·여러 줄 허락이 없다는 문장을 더했다.
+- 구현 확인 검토에서 고친 것:
+  - `auto_mode_block` 알림을 이름만으로 알아보지 않는다. 같은 이름의 tool을 등록하면 그 인자와 결과가 그림·여러 단계 방법 turn의 가리기를 지나고 대화방 알림처럼 나갈 수 있었다. 이제 `is_auto_mode_block_notice`(이름, `Waiting`, 인자 없음, 결과의 `outcome`이 `blocked`·`no_verdict`)로 알아보고, 방법 turn의 가리기(`agent_loop_method_hold`)와 CLI 알림(`auto_mode_cli::block_notification`)이 같은 함수를 쓴다.
+  - auto mode 다시 시도 답의 결정 시각(`decided_at_unix_ms`)도 질문의 만료·답의 확인과 같은 시계(`AgentLoopConfig.now_ms()`)를 쓴다. 전에는 결정 시각만 실제 시각이라 시계를 바꾼 run에서 유효한 승인이 만료로 닫힐 수 있었다. 기본 시계는 실제 시각이라 실행 중인 runtime의 동작은 같다.
 
 ### 시험
 
 - 단위: `block_counts_tests`(연속·누적·되돌림·dispatch), `blocked_call_tests`(도구 결과·알림 글), `retry_approval_tests`(꼴과 꼴이 아닌 것), `classifier_stage_tests`(모르는 규칙 이름), `classifier_slots_tests`(규칙 이름), `classifier_request_tests`(허락 항목), `auto_decision_tests`(16번의 판정 모양 × 대화형 × 넘어감, 넘어감이 다른 줄을 바꾸지 않음), `permission_recent_denials_tests`(유효 시간 없는 확인·사용, digest 확인), `task_method_observe_tests`(거절한 쓰기·bridge 호출), `task_method_calc_tests`·`task_method_image_tests`·`task_method_report_tests`(새 거절 글의 `Denied`·실패한 자료), `auto_mode_cli_tests`(알림).
 - 통합 `tests/it/spec048_auto_mode/`: `blocks.rs` 13개(막힘의 도구 결과와 run 잇기 직접·bridge, 판정 없음 네 경우의 글·셈·목록 없음, 위반 문구가 든 이유와 실행 기록 `Completed`, 막힌 `spawn`의 하위 작업 기록 없음, 같은 dispatch의 같은 id, 다음 dispatch의 같은 id의 진짜 위반, 연속 셋, 허용과 앞선 줄, 직접·bridge 섞기와 classifier도 022 auto approval도 없는 run(subagent 꼴), 누적 20과 함께 닿기, 멈춘 turn과 지난 시간 한도, 알림·diagnostics·기록에 인자·값·이유 없음과 `[Unknown Rule]`, bridge plugin 막힘의 `denied`), `loop_blocks.rs` 9개(세션의 셈·모양이 틀린 칸·provider 오류, 넘어간 질문의 `1`·`3`·`4`, 거절과 `/new`, 안내, 최근 거절 허락의 허용·막힘, 지난 판정의 허락, 긴 호출·읽지 못한 값·바뀐 mode, 질문의 10분(9분은 되고 11분은 닫힘), 넘어간 deferred 호출의 승인). 공통 provider와 run 설정은 `harness.rs`로 옮겼다.
+- 구현 확인 검토 뒤 더한 시험: `blocked_call_tests::only_the_runtime_notice_counts_as_one_not_a_tool_of_the_same_name`(같은 이름의 `Ok` event·다른 `outcome`은 알림이 아님), `auto_mode_cli_tests`(같은 이름 tool event는 대화방 알림을 만들지 않음), `loop_blocks.rs`의 10분 시험은 실제 시각과 먼 시계(1,000,000,000,000)로 돌아 결정 시각에 실제 시각이 섞이면 실패한다.
 
 ### 고친 기존 시험과 까닭
 
@@ -205,9 +209,13 @@ PRD 000이 "막음과 판정 없음은 묻기"로 정했던 것을 이 PRD가 "�
 - `git diff --exit-code crates/Cargo.lock`: 바뀌지 않음.
 - 변경한 package 시험, 마지막 실행(`.omo/evidence/spec048/prd020/package-tests-round2.log`): `shacs-cli` 모두 통과, `shacs-core` lib 모두 통과, `shacs-core` 통합 시험은 `spec034_release_runner` 6개 중 5개 실패(`InvalidConfig`, 이 작업 전부터 같은 실패이며 짧은 경로 clone이 필요하다) 말고 모두 통과.
   - 앞선 실행(`package-tests.log`)에서는 PRD 000 때의 `shacs-cli` 질문 시험 하나가 실패해 고쳤고, `spec033_release_runner`가 시험 중 원본을 고친 탓에 `DigestMismatch`로 실패했다(원본을 그대로 둔 다시 실행에서 통과).
+- 짧은 경로 clone 확인(2026-11-05): 커밋 `efcfc00`을 `/private/tmp/shacs-s48/clone`에 받아 `spec034_release_runner`를 돌렸고 6개 모두 통과했다(`.omo/evidence/spec048/closure/spec034-runner-copy-prd020.log`).
+- 구현 확인 검토의 수정 뒤(PRD 030·040 수정과 함께, `.omo/evidence/spec048/oracle-fixes/package-tests.log`): `shacs-redaction`·`shacs-cli`·`shacs-core` lib 모두 통과, `shacs-core` 통합 시험은 `spec034_release_runner` 6개 중 5개(`InvalidConfig`, 위와 같은 경로 길이 문제) 말고 모두 통과(`it` 587개). fmt(기본·Google 옵션 둘 다)와 workspace clippy `-D warnings` 통과, `Cargo.lock` 그대로.
 - 전체 workspace 시험은 사용자 승인 뒤에 돈다.
 
 ### Oracle 검토
 
 - 계획: 1차 BLOCKED(4 major, 10 minor) → 2차 BLOCKED(3 major) → 3차 BLOCKED(1 major) → 4차 PASS. 기록은 `.omo/evidence/spec048/plan-review.md`.
 - 구현: 1차 세션은 판정 전에 끊겼지만 subagent run의 셈 누락을 찾았고, 고친 뒤 새 세션의 2차가 PASS(blocker·major 없음). 2차의 minor 일곱 건(같은 id, 막힌 `spawn`, 방법 turn의 알림, token 쓰기 순서, 규칙 이름 일관성, 시험 공백, SPEC 문장)은 위 "구현 검토에서 고친 것"과 시험으로 반영했다.
+- 구현 확인 검토(`bg_3c58b0f6`, 세션 `ses_e53b60057ffefObuPRUFr7ePNr`, Oracle 토큰 만료로 네 번 미룬 끝에 받음): BLOCKED. 일곱 건 중 다섯(같은 id, 막힌 `spawn`, token 쓰기 순서, 규칙 이름, 시험·SPEC)은 맞고, major 둘(방법 turn이 알림을 이름만으로 알아봄, 다시 시도 결정 시각의 시계)은 위 "구현 확인 검토에서 고친 것"으로 고쳤다.
+- 수정 확인(`bg_ecdc8f1d`, 세션 `ses_e53411ae3fferEuEWhP0UTHAcF`, 앞의 두 번은 결과를 읽지 못해 다시 돌림): PASS. minor 하나(`tests/it/spec048_auto_mode/blocks.rs`의 시험 callback이 이름만으로 알림을 알아봄)는 `is_auto_mode_block_notice`로 바꿨다.

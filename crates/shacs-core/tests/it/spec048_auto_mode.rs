@@ -2,7 +2,8 @@
 //! mode gains, the process gate parity and the transcript classifier. PRD
 //! 010 acceptance: the `.env.json` secret files and value masking. PRD 020
 //! acceptance: blocks returned as tool results, block counts, escalation and
-//! approvals from the recent list.
+//! approvals from the recent list. PRD 030 acceptance: subagent handoff,
+//! calls and return checks. PRD 040 acceptance: tool result checks.
 
 #[path = "spec048_auto_mode/blocks.rs"]
 mod blocks;
@@ -22,7 +23,11 @@ mod loop_blocks;
 mod other_modes;
 #[path = "spec048_auto_mode/paths.rs"]
 mod paths;
+#[path = "spec048_auto_mode/result_checks.rs"]
+mod result_checks;
 #[path = "spec048_auto_mode/secret_files.rs"]
 mod secret_files;
+#[path = "spec048_auto_mode/subagents.rs"]
+mod subagents;
 #[path = "spec048_auto_mode/support.rs"]
 mod support;

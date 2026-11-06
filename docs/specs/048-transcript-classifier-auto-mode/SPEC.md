@@ -179,7 +179,9 @@ auto mode에서 각 action은 아래 순서를 지나고, 먼저 걸린 단계�
 | classifier 입력 | 사용자 메시지, 파일 읽기·검색을 뺀 도구 호출, CLAUDE.md | 같은 것에 system 안내의 skill 목록을 더한다 | 어떤 skill을 쓰는 중인지 알아야 그 skill에 필요한 설치인지 판단할 수 있다 |
 | classifier model | Claude Code가 정한 별도 model | 기본은 어시스턴트 model, `classifierModel`로 바꾼다 | shacs-bot에는 따로 정해진 classifier model이 없다 |
 | 판정 없음 | action을 막되 막힘 수에 넣지 않고 알림과 최근 거절 목록에도 남기지 않는다 | 막힘으로 세고, 도구 결과와 진행 표시로 알린다. 최근 거절 목록에는 남기지 않는다(Claude Code와 같다) | classifier가 계속 실패해도 3번 연속이면 사용자가 결정할 수 있게 한다. channel에서는 도구 결과가 사용자에게 보이지 않는다 |
-| 서버 쪽 검사 | 서버 쪽 classifier 검사와 prompt injection probe | shacs-bot이 provider에 직접 요청한다 | 서버가 없다 |
+| 서버 쪽 검사 | 서버 쪽 classifier 검사와 prompt injection probe | shacs-bot이 provider에 직접 요청한다. 도구 결과 검사도 client에서 `classifierModel`로 한다(PRD 040) | 서버가 없다 |
+| 하위 작업 보고의 전달 | 보고는 Agent tool의 결과로 돌아와 classifier가 보지 않는다 | spawn 하위 작업의 보고는 끝난 뒤 parent 세션에 사용자 role의 announcement로 들어간다. parent classifier는 그 꼴의 메시지를 사용자 메시지로 넣지 않는다(PRD 030) | shacs-bot의 하위 작업은 background에서 돌고 끝나면 새 turn으로 돌아온다 |
+| workflow 자식 | 없다 | workflow 자식 run도 하위 작업 classifier와 안내를 받지만, 맡길 때·돌아올 때 검사는 없다 | 사용자 turn이 workflow를 시작하고, workflow가 자식 보고를 검증·종합한다(검증 자식의 보고는 글로 판정을 읽는다) |
 | slot key 표기 | `hard_deny`, `soft_deny` | `hardDeny`, `softDeny`(Claude Code 표기도 받는다) | shacs-bot config key는 camelCase다 |
 | 설정·거절 화면 | `/permissions`의 Auto mode·Recently blocked 탭. 줄에서 입력을 읽고 `r`로 허락하며, 나중에 허락하기·허락 거두기·여러 줄 한꺼번에 허락하기가 있다 | CLI와 기존 `/permission recent`. `/permission recent retry <id>`가 그 호출을 보이고 승인 답을 받아 한 줄씩 허락한다. 나중에 허락하기, 허락 거두기, 여러 줄 한꺼번에 허락하기는 없다 | 기존 표면을 쓴다 |
 | 막힘 수의 기간 | 세션 동안 센다 | 세션 기록에 남아 재시작 뒤에도 이어진다. channel 세션은 `/new` 전까지 이어져 누적이 오래 쌓일 수 있다(20번째에 묻고 0이 된다) | shacs-bot의 세션은 대화방마다 계속 이어진다 |
@@ -282,8 +284,8 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 | [000 판정 순서와 transcript classifier](prds/000-decision-order-and-transcript-classifier.md) | 소유 범위 1, 2, 3 중 인증 저장소의 비밀 파일 규칙, 4–10, 16의 `defaults`·`config`, 17 중 자기 변경의 문서 | 없음 | 수용 조건 1–4, 9의 첫 항목, 11 |
 | [010 비밀 파일 분리](prds/010-secret-file-split.md) | 소유 범위 3의 나머지, 17 중 `.env.example`과 자기 변경의 문서 | 000 | 수용 조건 5, 11 |
 | [020 거절 뒤 계속하기](prds/020-continue-after-block.md) | 소유 범위 12, 13, 17 중 막힘 표시와 자기 변경의 문서 | 000, 010 | 수용 조건 6, 11 |
-| 030 하위 작업 넘김 검사 | 소유 범위 14, 17 중 자기 변경의 문서 | 000–020 | 수용 조건 7, 11 |
-| 040 도구 결과 검사 | 소유 범위 15, 17 중 자기 변경의 문서 | 000–030 | 수용 조건 8, 11 |
-| 050 기본 mode와 설정 도구 | 소유 범위 11, 16의 `reset`·`critique`·`setup`과 안내, 17 중 자기 변경의 문서 | 000–040 | 수용 조건 9의 나머지, 10, 11 |
+| [030 하위 작업 넘김 검사](prds/030-subagent-handoff-checks.md) | 소유 범위 14, 17 중 자기 변경의 문서 | 000–020 | 수용 조건 7, 11 |
+| [040 도구 결과 검사](prds/040-tool-result-check.md) | 소유 범위 15, 17 중 자기 변경의 문서 | 000–030 | 수용 조건 8, 11 |
+| [050 기본 mode와 설정 도구](prds/050-default-mode-and-setup-tools.md) | 소유 범위 11, 16의 `reset`·`critique`·`setup`과 안내, 17 중 자기 변경의 문서 | 000–040 | 수용 조건 9의 나머지, 10, 11 |
 
 수용 조건 11은 각 PRD가 자기 변경에 대해 확인한다. 번호 순서대로 구현한다.

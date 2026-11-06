@@ -1095,20 +1095,21 @@ impl<'a> AgentLoop<'a> {
                             .as_deref()
                             .unwrap_or(&session.key),
                     );
-                    let decision = recent_retry_approval_decision(
-                        &approval_request,
-                        ApprovalDecisionKind::Approved,
-                    );
-                    let approval_cache = ApprovalCacheEntry {
-                        request: approval_request,
-                        decision,
-                    };
                     // An auto mode question keeps the loop's clock, as when
-                    // it was asked.
+                    // it was asked, for the decision and its check alike.
                     let now = if approval.auto_mode {
                         self.config.now_ms()
                     } else {
                         now_unix_ms()
+                    };
+                    let decision = recent_retry_approval_decision(
+                        &approval_request,
+                        ApprovalDecisionKind::Approved,
+                        now,
+                    );
+                    let approval_cache = ApprovalCacheEntry {
+                        request: approval_request,
+                        decision,
                     };
                     if !correlate_approval(&approval_cache.request, &approval_cache.decision, now)
                         .is_approved()
@@ -1200,7 +1201,7 @@ impl<'a> AgentLoop<'a> {
                             &session_key,
                             &mut session,
                             &execution_ledger,
-                            report.messages,
+                            report,
                             events,
                         );
                         method::image::hold_results(&mut session, held_from)?;
@@ -1427,7 +1428,7 @@ impl<'a> AgentLoop<'a> {
                         &session_key,
                         &mut session,
                         &execution_ledger,
-                        report.messages,
+                        report,
                         events,
                     );
                     method::image::hold_results(&mut session, held_from)?;
@@ -2784,6 +2785,8 @@ impl<'a> AgentLoop<'a> {
                 let mut execution_config =
                     self.workflow_subagent_execution_config(&plan, session, session_key);
                 execution_config.learned_method_guidance = learn_use::guidance(session);
+                execution_config.classifier_conversation =
+                    Some(format!("{}:{}", message.channel, message.chat_id));
                 let method_observation = Arc::new(Mutex::new(
                     crate::runtime::task_method_observe::MethodObservation::with_media_roots(
                         self.config.media_roots.clone(),
@@ -3076,6 +3079,11 @@ impl<'a> AgentLoop<'a> {
         config.fail_on_tool_error = self.config.fail_on_tool_error;
         config.allow_side_effect_tools = false;
         config.enable_exec = false;
+        config.extra_context_files = self.config.extra_context_files.clone();
+        // The workflow checks and combines its children's reports; a warning
+        // before a verifier's report would break reading its verdict (Spec
+        // 048 PRD 030 scope 4).
+        config.auto_mode_report_review = false;
         config
     }
 
@@ -4376,7 +4384,7 @@ impl<'a> AgentLoop<'a> {
         session_key: &str,
         session: &mut Session,
         execution_ledger: &Arc<Mutex<RuntimeExecutionLedger>>,
-        messages: Vec<RuntimeToolMessage>,
+        report: RuntimeToolExecutionReport,
         tool_event_callback: Option<ToolEventCallback>,
     ) -> Option<String> {
         let mut spec = AgentRunSpec::new(
@@ -4396,7 +4404,27 @@ impl<'a> AgentLoop<'a> {
         spec.execution_ledger = Some(execution_ledger.clone());
         spec.quiet_ledger = method::image::quiet_ledger(session);
         spec.tool_event_callback = tool_event_callback;
-        let calls = messages
+        // Spec 048 PRD 040: an approved call's result is checked like any
+        // other before the assistant reads it.
+        spec.tool_context.permission_mode_snapshot = self.config.permission_mode_snapshot.clone();
+        spec.tool_context.permission_environment = self.config.permission_environment.clone();
+        let runtime_override = self.config.provider_runtime_override.clone();
+        let invocation = self.turn_lock.cancellation_token(session_key).map_or_else(
+            || ProviderInvocation::uncancelled(runtime_override.clone()),
+            |token| token.provider_invocation(runtime_override.clone()),
+        );
+        spec.auto_mode_classifier = turn_classifier(TurnClassifierInput {
+            environment: self.config.permission_environment.as_deref(),
+            context_builder: &self.context_builder,
+            handoff: None,
+            workspace: &self.config.workspace,
+            conversation: format!("{}:{}", message.channel, message.chat_id),
+            client: self.client,
+            invocation: &invocation,
+            run_model: &self.config.model,
+        });
+        let calls = report
+            .messages
             .iter()
             .map(|message| {
                 RuntimeToolCall::new(
@@ -4407,16 +4435,27 @@ impl<'a> AgentLoop<'a> {
             })
             .collect::<Vec<_>>();
         crate::runtime::runner::begin_tool_executions(&spec, &calls);
+        // An approved question holds one call. Its action names the tool the
+        // decision saw: the underlying one of a deferred bridge call.
+        let tool = report
+            .permissioned_actions
+            .first()
+            .map(|action| action.tool_name.clone());
         let mut fatal_error = None;
-        for raw_message in messages {
+        for raw_message in report.messages {
             let event =
                 crate::runtime::runner::tool_event_for_message(&raw_message, None, None, None);
+            let tool = tool.clone().unwrap_or_else(|| raw_message.name.clone());
+            let returned =
+                crate::runtime::runner::tool_returned(&report.executed_call_ids, &raw_message);
             let (tool_message, fatal) =
                 crate::runtime::runner::finalize_tool_message(&spec, raw_message);
             crate::runtime::runner::emit_events(&spec, std::slice::from_ref(&event));
             if fatal_error.is_none() && fatal {
                 fatal_error = Some(tool_message.content.clone());
             }
+            let tool_message =
+                crate::runtime::runner::checked_tool_message(&spec, &tool, tool_message, returned);
             append_session_message(session, tool_message.to_json());
         }
         fatal_error
@@ -6278,6 +6317,7 @@ fn approval_decision(
 fn recent_retry_approval_decision(
     approval_request: &ApprovalRequest,
     decision: ApprovalDecisionKind,
+    decided_at_unix_ms: u64,
 ) -> ApprovalDecision {
     ApprovalDecision {
         approval_request_id: approval_request.approval_request_id.clone(),
@@ -6286,7 +6326,7 @@ fn recent_retry_approval_decision(
         decision,
         approved_scope: approval_request.requested_scope.clone(),
         actor: ApprovalActor::LocalUser,
-        decided_at_unix_ms: now_unix_ms(),
+        decided_at_unix_ms,
         consumed: false,
         policy_safety_snapshot_ref: approval_request.policy_safety_snapshot_ref.clone(),
         secret_ref_evidence: approval_request.secret_ref_evidence.clone(),

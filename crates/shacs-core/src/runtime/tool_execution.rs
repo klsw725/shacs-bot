@@ -173,6 +173,10 @@ pub struct RuntimeToolExecutionReport {
     pub recent_auto_mode_denials: Vec<RecentAutoModeDenial>,
     #[serde(skip, default)]
     pub recent_auto_mode_retry_tokens: Vec<RecentAutoModeRetryToken>,
+    /// Ids of the calls whose tool ran. A message with any other id is the
+    /// runtime's own, such as a refusal (Spec 048 PRD 040 scope 1).
+    #[serde(skip, default)]
+    pub executed_call_ids: Vec<String>,
 }
 
 impl RuntimeToolExecutionReport {
@@ -184,6 +188,7 @@ impl RuntimeToolExecutionReport {
             permissioned_actions: Vec::new(),
             recent_auto_mode_denials: Vec::new(),
             recent_auto_mode_retry_tokens: Vec::new(),
+            executed_call_ids: Vec::new(),
         }
     }
 }
@@ -409,6 +414,7 @@ impl<'a> RuntimeToolExecutor<'a> {
         let all_calls = tool_calls.clone();
         let mut pending_batch = Vec::new();
         let mut permissioned_actions = Vec::new();
+        let mut executed_call_ids = Vec::new();
 
         for (original_index, call) in tool_calls.into_iter().enumerate() {
             let action =
@@ -422,6 +428,7 @@ impl<'a> RuntimeToolExecutor<'a> {
                     &mut pending_batch,
                     concurrent_tools,
                     &mut messages,
+                    &mut executed_call_ids,
                     &all_calls,
                     &permissioned_actions,
                 ) {
@@ -436,6 +443,7 @@ impl<'a> RuntimeToolExecutor<'a> {
                         permissioned_actions,
                         recent_auto_mode_denials: Vec::new(),
                         recent_auto_mode_retry_tokens: Vec::new(),
+                        executed_call_ids,
                     };
                 }
                 messages.push(evaluation.block_message(&call.id, &call.name));
@@ -458,6 +466,7 @@ impl<'a> RuntimeToolExecutor<'a> {
                 &mut pending_batch,
                 concurrent_tools,
                 &mut messages,
+                &mut executed_call_ids,
                 &all_calls,
                 &permissioned_actions,
             ) {
@@ -469,6 +478,7 @@ impl<'a> RuntimeToolExecutor<'a> {
                 &mut pending_batch,
                 concurrent_tools,
                 &mut messages,
+                &mut executed_call_ids,
                 &all_calls,
                 &permissioned_actions,
             ) {
@@ -481,6 +491,7 @@ impl<'a> RuntimeToolExecutor<'a> {
             &mut pending_batch,
             concurrent_tools,
             &mut messages,
+            &mut executed_call_ids,
             &all_calls,
             &permissioned_actions,
         ) {
@@ -494,6 +505,7 @@ impl<'a> RuntimeToolExecutor<'a> {
             permissioned_actions,
             recent_auto_mode_denials: Vec::new(),
             recent_auto_mode_retry_tokens: Vec::new(),
+            executed_call_ids,
         }
     }
 
@@ -514,6 +526,7 @@ impl<'a> RuntimeToolExecutor<'a> {
             .map(|decided| decided.action.clone())
             .collect::<Vec<_>>();
         let mut messages = Vec::new();
+        let mut executed_call_ids = Vec::new();
         let mut batches: Vec<(ToolExecutionContext, Vec<IndexedToolCall>, bool)> = Vec::new();
         for (original_index, decided) in calls.into_iter().enumerate() {
             let entry = IndexedToolCall {
@@ -539,13 +552,17 @@ impl<'a> RuntimeToolExecutor<'a> {
                 &mut batch,
                 together,
                 &mut messages,
+                &mut executed_call_ids,
                 &all_calls,
                 &permissioned_actions,
             ) {
                 return report;
             }
         }
-        RuntimeToolExecutionReport::completed(messages)
+        RuntimeToolExecutionReport {
+            executed_call_ids,
+            ..RuntimeToolExecutionReport::completed(messages)
+        }
     }
 
     fn has_prepared(&self, call: &RuntimeToolCall) -> bool {
@@ -1421,6 +1438,7 @@ fn flush_allowed_batch(
     batch: &mut Vec<IndexedToolCall>,
     concurrent_tools: bool,
     messages: &mut Vec<RuntimeToolMessage>,
+    executed_call_ids: &mut Vec<String>,
     all_calls: &[RuntimeToolCall],
     permissioned_actions: &[PermissionedAction],
 ) -> Option<RuntimeToolExecutionReport> {
@@ -1434,7 +1452,7 @@ fn flush_allowed_batch(
     };
     batch.clear();
     for result in results {
-        match result.outcome {
+        let content = match result.outcome {
             ToolResult::AskUserInterrupt { question, options } => {
                 return Some(RuntimeToolExecutionReport {
                     messages: std::mem::take(messages),
@@ -1448,19 +1466,18 @@ fn flush_allowed_batch(
                     permissioned_actions: permissioned_actions.to_vec(),
                     recent_auto_mode_denials: Vec::new(),
                     recent_auto_mode_retry_tokens: Vec::new(),
+                    executed_call_ids: std::mem::take(executed_call_ids),
                 });
             }
-            ToolResult::Text(content) => messages.push(RuntimeToolMessage {
-                tool_call_id: result.call.id,
-                name: result.call.name,
-                content: append_error_hint(content),
-            }),
-            ToolResult::Json(value) => messages.push(RuntimeToolMessage {
-                tool_call_id: result.call.id,
-                name: result.call.name,
-                content: value.to_string(),
-            }),
-        }
+            ToolResult::Text(content) => append_error_hint(content),
+            ToolResult::Json(value) => value.to_string(),
+        };
+        executed_call_ids.push(result.call.id.clone());
+        messages.push(RuntimeToolMessage {
+            tool_call_id: result.call.id,
+            name: result.call.name,
+            content,
+        });
     }
     None
 }

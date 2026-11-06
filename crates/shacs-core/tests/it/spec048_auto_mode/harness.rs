@@ -1,5 +1,6 @@
 //! The fake provider and run setup the Spec 048 auto mode tests share: one
-//! provider answers both the assistant and the classifier.
+//! provider answers the assistant, the classifier, the classifier's review
+//! of a subagent's work and the check of each tool result.
 
 use super::support::{Options, Setup};
 use serde_json::{json, Map, Value};
@@ -16,6 +17,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const CLASSIFIER_SYSTEM: &str = "You review one pending action of shacs-bot";
+const REVIEW_SYSTEM: &str = "You review the finished work of a subagent of shacs-bot";
+const CHECK_SYSTEM: &str = "You check one tool result";
 pub const BLOCK: &str = "{\"decision\": \"block\", \"rule\": \"[Data Exfiltration]\", \"reason\": \"uploads notes.md to a host the user never named\"}";
 
 /// One provider for both the assistant and the classifier, as the agent loop
@@ -26,6 +29,10 @@ pub struct RoutingProvider {
     classifier: Mutex<VecDeque<Result<String, String>>>,
     classifier_requests: Mutex<Vec<(ProviderRequest, Option<Duration>)>>,
     assistant_requests: Mutex<Vec<ProviderRequest>>,
+    reviews: Mutex<VecDeque<Result<String, String>>>,
+    review_requests: Mutex<Vec<ProviderRequest>>,
+    checks: Mutex<VecDeque<Result<String, String>>>,
+    check_requests: Mutex<Vec<ProviderRequest>>,
 }
 
 impl RoutingProvider {
@@ -40,7 +47,74 @@ impl RoutingProvider {
             ),
             classifier_requests: Mutex::new(Vec::new()),
             assistant_requests: Mutex::new(Vec::new()),
+            reviews: Mutex::new(VecDeque::new()),
+            review_requests: Mutex::new(Vec::new()),
+            checks: Mutex::new(VecDeque::new()),
+            check_requests: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Answers for the tool result checks, in order. Without one a check
+    /// answers `no`.
+    pub fn with_checks(self, checks: Vec<Result<&str, &str>>) -> Self {
+        if let Ok(mut queue) = self.checks.lock() {
+            queue.extend(
+                checks
+                    .into_iter()
+                    .map(|answer| answer.map(str::to_owned).map_err(str::to_owned)),
+            );
+        }
+        self
+    }
+
+    pub fn check_requests(&self) -> Vec<ProviderRequest> {
+        self.check_requests
+            .lock()
+            .map(|requests| requests.clone())
+            .unwrap_or_default()
+    }
+
+    /// The JSON payload each tool result check carried.
+    pub fn check_payloads(&self) -> Vec<Value> {
+        self.check_requests()
+            .iter()
+            .filter_map(|request| {
+                let user = request.messages.get(1)?.get("content")?.as_str()?;
+                let (payload, _) = user.rsplit_once("\n\n")?;
+                serde_json::from_str(payload).ok()
+            })
+            .collect()
+    }
+
+    /// Answers for the classifier's reviews of subagent work, in order.
+    pub fn with_reviews(self, reviews: Vec<Result<&str, &str>>) -> Self {
+        if let Ok(mut queue) = self.reviews.lock() {
+            queue.extend(
+                reviews
+                    .into_iter()
+                    .map(|answer| answer.map(str::to_owned).map_err(str::to_owned)),
+            );
+        }
+        self
+    }
+
+    pub fn review_requests(&self) -> Vec<ProviderRequest> {
+        self.review_requests
+            .lock()
+            .map(|requests| requests.clone())
+            .unwrap_or_default()
+    }
+
+    /// The JSON payload each review request carried.
+    pub fn review_payloads(&self) -> Vec<Value> {
+        self.review_requests()
+            .iter()
+            .filter_map(|request| {
+                let user = request.messages.get(1)?.get("content")?.as_str()?;
+                let (payload, _) = user.rsplit_once("\n\n")?;
+                serde_json::from_str(payload).ok()
+            })
+            .collect()
     }
 
     /// The requests the assistant answers got, in order.
@@ -76,11 +150,46 @@ impl RoutingProvider {
         request: ProviderRequest,
         remaining: Option<Duration>,
     ) -> Result<LlmResponse, ProviderError> {
-        let classifier = request
+        let system = request
             .messages
             .first()
             .and_then(|message| message["content"].as_str())
-            .is_some_and(|system| system.starts_with(CLASSIFIER_SYSTEM));
+            .unwrap_or_default();
+        if system.starts_with(CHECK_SYSTEM) {
+            if let Ok(mut requests) = self.check_requests.lock() {
+                requests.push(request);
+            }
+            let answer = self
+                .checks
+                .lock()
+                .map_err(|_| api_error("lock"))?
+                .pop_front()
+                .unwrap_or_else(|| Ok("no".to_owned()));
+            return answer
+                .map(|content| LlmResponse {
+                    content: Some(content),
+                    ..LlmResponse::default()
+                })
+                .map_err(|message| api_error(&message));
+        }
+        if system.starts_with(REVIEW_SYSTEM) {
+            if let Ok(mut requests) = self.review_requests.lock() {
+                requests.push(request);
+            }
+            let answer = self
+                .reviews
+                .lock()
+                .map_err(|_| api_error("lock"))?
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected review".to_owned()));
+            return answer
+                .map(|content| LlmResponse {
+                    content: Some(content),
+                    ..LlmResponse::default()
+                })
+                .map_err(|message| api_error(&message));
+        }
+        let classifier = system.starts_with(CLASSIFIER_SYSTEM);
         if !classifier {
             if let Ok(mut requests) = self.assistant_requests.lock() {
                 requests.push(request);

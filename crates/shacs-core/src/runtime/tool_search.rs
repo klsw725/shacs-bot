@@ -241,6 +241,10 @@ pub struct BridgeToolExecutionReport {
     pub recent_auto_mode_denials: Vec<RecentAutoModeDenial>,
     #[serde(skip, default)]
     pub recent_auto_mode_retry_tokens: Vec<RecentAutoModeRetryToken>,
+    /// The original ids of the calls whose underlying tool ran, as in
+    /// [`RuntimeToolExecutionReport::executed_call_ids`].
+    #[serde(skip, default)]
+    pub executed_call_ids: Vec<String>,
 }
 
 impl BridgeToolExecutionReport {
@@ -263,6 +267,7 @@ impl BridgeToolExecutionReport {
             permissioned_actions: self.permissioned_actions,
             recent_auto_mode_denials: self.recent_auto_mode_denials,
             recent_auto_mode_retry_tokens: self.recent_auto_mode_retry_tokens,
+            executed_call_ids: self.executed_call_ids,
         }
     }
 
@@ -275,6 +280,7 @@ impl BridgeToolExecutionReport {
             permissioned_actions: Vec::new(),
             recent_auto_mode_denials: Vec::new(),
             recent_auto_mode_retry_tokens: Vec::new(),
+            executed_call_ids: Vec::new(),
         }
     }
 
@@ -739,6 +745,9 @@ fn flush_executable_pending(
     }
     let runtime_report =
         bridge_runtime_report(executable_pending, executor, context, concurrent_tools);
+    report
+        .executed_call_ids
+        .extend(runtime_report.executed_call_ids);
     for message in runtime_report.messages {
         let Some(pending_call) = pending_call_by_id(executable_pending, &message.tool_call_id)
         else {
