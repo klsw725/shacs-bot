@@ -54,6 +54,8 @@ mod shell_command;
 mod shell_paths;
 #[path = "auto_mode/shell_token.rs"]
 mod shell_token;
+#[path = "auto_mode/user_only_file.rs"]
+mod user_only_file;
 
 pub use approval_why::ApprovalExplanation;
 pub use block_counts::{AutoModeBlockCounts, AutoModeBlocks, AutoModeEscalation};
@@ -66,3 +68,6 @@ pub use permission_rule::{
     RawRuleLists, RuleDiagnostic, RuleEffect, RuleProblem, UserPermissionRules,
 };
 pub use secret_values::SecretValues;
+pub use user_only_file::{
+    marker_path as auto_mode_marker_path, DEFAULT_NOTICE_MARKER, SETUP_HINT_OFF_MARKER,
+};

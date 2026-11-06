@@ -2870,7 +2870,7 @@ fn invoke_checkpoint_callback(callback: &CheckpointCallback, checkpoint: &Value)
     let _ = isolate_panic(|| callback(checkpoint));
 }
 
-fn invoke_tool_event_callback(callback: &ToolEventCallback, event: &ToolEvent) {
+pub(crate) fn invoke_tool_event_callback(callback: &ToolEventCallback, event: &ToolEvent) {
     let _ = isolate_panic(|| callback(event));
 }
 

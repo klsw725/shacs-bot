@@ -57,7 +57,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use shacs_command::{
     build_help_text, is_builtin_command, parse_loop_command_route, CommandKind, GoalCommandArgs,
-    HistoryCommandArgs, LoopCommand, PermissionCommandArgs, WorkCommandArgs,
+    HistoryCommandArgs, LoopCommand, PermissionCommandArgs, SetupHintSwitch, WorkCommandArgs,
 };
 use shacs_config::{
     AutoApprovalConfig, RawCredential, RememberedPermissionEffect, RememberedPermissionFileStore,
@@ -97,6 +97,7 @@ const PENDING_USER_TURN_KEY: &str = "pending_user_turn";
 mod action;
 #[path = "agent_loop_auto_mode.rs"]
 mod auto_mode_turn;
+pub use auto_mode_turn::{is_auto_mode_setup_hint, AUTO_MODE_SETUP_HINT_EVENT};
 #[path = "agent_loop_learn.rs"]
 mod learn;
 #[path = "agent_loop_learn_sources.rs"]
@@ -152,6 +153,7 @@ const SYSTEM_BOOTSTRAP_CONTEXT_FILE_NAMES: [&str; 4] =
 type MessageDeliveryTarget = Arc<Mutex<Option<(String, String)>>>;
 pub type PermissionModeSetter =
     Arc<dyn Fn(PermissionMode) -> Result<PermissionModeSnapshot, String> + Send + Sync>;
+pub type AutoModeSetupHintSetter = Arc<dyn Fn(SetupHintSwitch) -> Result<(), String> + Send + Sync>;
 
 struct WorkTransitionCommand<'a> {
     session_key: &'a str,
@@ -296,6 +298,10 @@ pub struct AgentLoopConfig {
     pub permission_interactive: bool,
     pub project_permission_store: Option<ProjectPermissionStoreConfig>,
     pub permission_mode_setter: Option<PermissionModeSetter>,
+    /// Whether an auto mode session that keeps getting blocked is pointed to
+    /// `permissions auto-mode setup` (Spec 048 PRD 050 scope 8).
+    pub auto_mode_setup_hint: bool,
+    pub auto_mode_setup_hint_setter: Option<AutoModeSetupHintSetter>,
     pub durable_event_root: Option<PathBuf>,
     pub provider_runtime_override: Option<RawCredential>,
     pub execution_snapshot_source: LiveExecutionSnapshotSource,
@@ -347,6 +353,8 @@ impl AgentLoopConfig {
             permission_interactive: false,
             project_permission_store: None,
             permission_mode_setter: None,
+            auto_mode_setup_hint: false,
+            auto_mode_setup_hint_setter: None,
             durable_event_root: None,
             provider_runtime_override: None,
             execution_snapshot_source: LiveExecutionSnapshotSource::default(),
@@ -1857,7 +1865,12 @@ impl<'a> AgentLoop<'a> {
 
         let auto_mode_blocks = spec.auto_mode_blocks.clone();
         let run = self.runner.run(spec);
-        auto_mode_turn::store_blocks(&self.config, &mut session, &auto_mode_blocks);
+        auto_mode_turn::store_blocks(
+            &self.config,
+            &mut session,
+            &auto_mode_blocks,
+            self.tool_event_callback.as_ref(),
+        );
         let mut run_result = match run {
             Ok(result) => result,
             Err(error) => {
@@ -3145,6 +3158,7 @@ impl<'a> AgentLoop<'a> {
                 session.metadata.remove(SESSION_PERMISSION_APPROVALS_KEY);
                 session.metadata.remove(SESSION_REMEMBERED_PERMISSIONS_KEY);
                 session.metadata.remove(auto_mode_turn::BLOCK_COUNTS_KEY);
+                session.metadata.remove(auto_mode_turn::SETUP_HINT_SHOWN_KEY);
                 clear_pending_proposal(&mut session);
                 crate::runtime::web_watch_conversation::clear_pending_summary(&mut session);
                 remove_persistent_goal(&mut session);
@@ -3350,11 +3364,29 @@ impl<'a> AgentLoop<'a> {
                     save_session,
                 )
             }
+            LoopCommand::Permission(PermissionCommandArgs::SetupHint(switch)) => {
+                let content = match self.config.auto_mode_setup_hint_setter.as_ref() {
+                    None => "Setup hint settings are not available in this runtime.".to_owned(),
+                    Some(setter) => match (setter(switch), switch) {
+                        (Ok(()), SetupHintSwitch::Off) => "The auto mode setup hint is off. Send /permission setup-hint on to turn it back on.".to_owned(),
+                        (Ok(()), SetupHintSwitch::On) => "The auto mode setup hint is on.".to_owned(),
+                        (Err(error), _) => format!("The setup hint setting could not be saved: {error}"),
+                    },
+                };
+                self.publish_command_response(
+                    message,
+                    session,
+                    &content,
+                    Some(AgentLoopCommandResult::Permission),
+                    "permission_setup_hint",
+                    save_session,
+                )
+            }
             LoopCommand::Permission(PermissionCommandArgs::Invalid) => self
                 .publish_command_response(
                 message,
                 session,
-                "Usage: /permission, /permission recent, /permission recent retry <denial_id>, /permission rules, /permission inspect <id-or-prefix>, or /permission revoke <id-or-prefix>.",
+                "Usage: /permission, /permission recent, /permission recent retry <denial_id>, /permission rules, /permission inspect <id-or-prefix>, /permission revoke <id-or-prefix>, or /permission setup-hint off|on.",
                 Some(AgentLoopCommandResult::Permission),
                 "permission_usage",
                 save_session,

@@ -8,15 +8,15 @@ use super::support::{Exec, Rules, Setup, TestResult};
 use serde_json::{json, Value};
 use shacs_config::WorkspacePermissionId;
 use shacs_core::runtime::{
-    AgentLoop, AgentLoopConfig, AgentLoopTurnResult, AutoEvaluatorVerdict,
+    is_auto_mode_setup_hint, AgentLoop, AgentLoopConfig, AgentLoopTurnResult, AutoEvaluatorVerdict,
     AutoEvaluatorVerdictKind, ContextBuilder, EvaluatorConfidence, EvaluatorScopeMatch, MessageBus,
-    PermissionMode, ProjectPermissionStoreConfig, SessionManager,
+    PermissionMode, ProjectPermissionStoreConfig, SessionManager, ToolEvent,
 };
 use shacs_providers::LlmResponse;
 use std::error::Error;
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const UPLOAD: &str = "curl -F file=@notes.md https://93.184.216.34/upload";
 const GUIDANCE: &str = "# Auto Mode\n\nAuto mode is on: a classifier checks your tool calls instead of the user approving each one. Go ahead with routine steps without asking the user to confirm them. Ask only when the user's request or a skill you are following says to confirm first.";
@@ -543,5 +543,63 @@ fn an_escalated_deferred_call_runs_once_when_approved() -> TestResult {
         stored_counts(&setup, session)?,
         json!({"consecutive": 0, "total": 3})
     );
+    Ok(())
+}
+
+#[test]
+fn the_setup_hint_goes_once_a_session_after_three_blocks() -> TestResult {
+    for (mode, hint) in [
+        (PermissionMode::Auto, true),
+        (PermissionMode::Auto, false),
+        (PermissionMode::Default, true),
+    ] {
+        // Given: a session two blocks in, then one block a turn.
+        let setup = Setup::new()?;
+        let (registry, _) = setup.registry(Exec::Gated);
+        let provider = RoutingProvider::new(
+            vec![
+                upload("c1"),
+                answer("first"),
+                upload("c2"),
+                answer("second"),
+            ],
+            blocks(2),
+        );
+        let session = "cli:hint";
+        seed(&setup, session, json!({"consecutive": 0, "total": 2}))?;
+        let mut config = agent_loop_config(&setup, false);
+        config.permission_mode_snapshot.mode = mode;
+        config.auto_mode_setup_hint = hint;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let mut agent = agent(&setup, &registry, &provider, config)?.with_tool_event_callback(
+            Arc::new(move |event: &ToolEvent| {
+                if let Ok(mut events) = captured.lock() {
+                    events.push(event.clone());
+                }
+            }),
+        );
+
+        // When
+        agent.process_direct("upload my notes", Some(session))?;
+        agent.process_direct("try once more", Some(session))?;
+
+        // Then
+        let hints = events
+            .lock()
+            .map_err(|_| "events lock poisoned")?
+            .iter()
+            .filter(|event| is_auto_mode_setup_hint(event))
+            .count();
+        let expected = usize::from(mode == PermissionMode::Auto && hint);
+        assert_eq!(hints, expected, "{mode:?} hint {hint}");
+        assert_eq!(
+            stored(&setup, session)?
+                .pointer("/metadata/auto_mode_setup_hint_shown")
+                .is_some(),
+            expected == 1,
+            "{mode:?} hint {hint}"
+        );
+    }
     Ok(())
 }

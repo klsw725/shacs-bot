@@ -76,6 +76,7 @@ pub(crate) fn repl_turn_options(options: &AgentReplOptions, input: &str) -> AskO
         max_tokens: options.max_tokens,
         allow_side_effects: options.allow_side_effects,
         markdown: options.markdown,
+        verbose: false,
     }
 }
 
@@ -87,7 +88,7 @@ pub(crate) fn execute_repl_turn(
     let ask_options = repl_turn_options(options, input);
     let mut invocation = direct_message_invocation(&adapter.configured_model, &ask_options)?;
     invocation.session_key = cli_session_key(options.session.as_deref());
-    let mut config = adapter.loop_config();
+    let mut config = adapter.loop_config_for(crate::run_permission_mode::RunKind::Interactive);
     config.permission_interactive = true;
     config.settings.temperature = invocation
         .temperature

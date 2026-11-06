@@ -1,6 +1,6 @@
 # 048. transcript classifier auto mode 구현 명세
 
-Status: Planned
+Status: Open (implemented, closure blocked)
 
 Consumes: 004·020 tool 실행·file tool이 다룰 수 있는 폴더·deferred bridge 호출, 008 data 폴더 배치, 010 `exec` 안전 장치, 009·026 context assembly와 context file이 읽는 instruction 파일, 011 subagent 실행과 상속, 012 channel·cron·heartbeat·local API run의 대화형 여부, 013 승인 질문, 014 diagnostics, 022 permission mode·capability·static rule·보호 대상·승인 correlation·기억된 규칙·최근 거절, 025 plugin root 위치, 030 `tool:before` hook·trusted runtime profile·인증 저장소·process gate, 031 config schema·`${이름}` 해석·`runtime config-migrate`
 
@@ -186,6 +186,7 @@ auto mode에서 각 action은 아래 순서를 지나고, 먼저 걸린 단계�
 | 설정·거절 화면 | `/permissions`의 Auto mode·Recently blocked 탭. 줄에서 입력을 읽고 `r`로 허락하며, 나중에 허락하기·허락 거두기·여러 줄 한꺼번에 허락하기가 있다 | CLI와 기존 `/permission recent`. `/permission recent retry <id>`가 그 호출을 보이고 승인 답을 받아 한 줄씩 허락한다. 나중에 허락하기, 허락 거두기, 여러 줄 한꺼번에 허락하기는 없다 | 기존 표면을 쓴다 |
 | 막힘 수의 기간 | 세션 동안 센다 | 세션 기록에 남아 재시작 뒤에도 이어진다. channel 세션은 `/new` 전까지 이어져 누적이 오래 쌓일 수 있다(20번째에 묻고 0이 된다) | shacs-bot의 세션은 대화방마다 계속 이어진다 |
 | `setup`이 읽는 것 | 프로젝트 파일, 설정, 최근 세션의 명령과, 고르면 shell history와 home 아래 저장소 | 선택해 읽는 shell history와 home 저장소는 없다 | 개인 비서의 신뢰 범위는 대화와 workspace에서 나온다 |
+| `setup`이 쓰는 목록 | 기본 항목을 풀어 쓴 목록에 초안을 더해 쓴다 | `"$defaults"`를 남기고 그 뒤에 초안을 더한다(목록이 없으면 `["$defaults", …]`). 초안 일부만 고르기는 없다 | 기본 항목이 다음 판의 기본값을 따르게 한다 |
 | auto mode 끄기 | `disableAutoMode` 설정 | 따로 없다. mode를 정하면 된다 | 조직 관리 설정이 없다 |
 | auto가 아닌 mode | plan의 명령 classifier 검사, acceptEdits의 파일 명령 자동 허용, 모든 mode의 읽기 전용 명령 자동 허용, network 경로 질문 등 | 022 그대로 | 이 스펙은 auto mode와 모든 mode에 걸리는 규칙만 바꾼다 |
 | Claude Code에만 있는 기능에 묶인 규칙 | PostToolUse `classifierContext`, 지울 명령 앞의 `git status` 첨부, 명령별 sandbox 허용 domain, `requiresUserInteraction` MCP, 조직의 connector `ask`, mod의 `tool.check`, `--restricted`, 세션 사이 메시지 보호 | 없다 | shacs-bot에 해당 기능이 없다 |
@@ -289,3 +290,5 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 | [050 기본 mode와 설정 도구](prds/050-default-mode-and-setup-tools.md) | 소유 범위 11, 16의 `reset`·`critique`·`setup`과 안내, 17 중 자기 변경의 문서 | 000–040 | 수용 조건 9의 나머지, 10, 11 |
 
 수용 조건 11은 각 PRD가 자기 변경에 대해 확인한다. 번호 순서대로 구현한다.
+
+2026-11-06: PRD 000–040은 `Complete (Scoped)`이고 PRD 050은 구현했다. 이 스펙은 사용자 승인 뒤의 평가 실행(수용 조건 10)으로 PRD 050이 닫힐 때 닫는다.

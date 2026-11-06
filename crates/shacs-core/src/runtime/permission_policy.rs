@@ -40,6 +40,7 @@ pub enum PermissionPolicyReason {
     UserRuleDeny,
     SecretFileRead,
     SecretFileWrite,
+    UserOnlyFileWrite,
     CriticalPathRemoval,
     ProtectedPathThroughSymlink,
     OutsideWorkspaceThroughSymlink,

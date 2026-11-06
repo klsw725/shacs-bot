@@ -49,25 +49,8 @@ impl LocalAuthStore {
         let mut store = self
             .load()
             .map_err(|_| store_error(CredentialStatus::RefreshFailed, false))?;
-        let fingerprint_is_current = match store.fingerprint(provider_id) {
-            Some(actual) => &actual == expected_fingerprint,
-            None => true,
-        };
-        if !fingerprint_is_current {
-            return Err(store_error(CredentialStatus::Missing, true));
-        }
-        let auth = store
-            .providers
-            .get(provider_id)
-            .cloned()
-            .ok_or_else(|| store_error(CredentialStatus::Missing, false))?;
-        if auth.kind != "oauth" {
-            return Err(store_error(CredentialStatus::Missing, false));
-        }
-        if match auth.expires {
-            Some(expires) => expires > now,
-            None => true,
-        } {
+        let auth = stored_oauth(&store, provider_id, expected_fingerprint)?;
+        if unexpired(&auth, now) {
             return Ok(local_resolved(auth));
         }
         let refresh_token = auth
@@ -90,6 +73,27 @@ impl LocalAuthStore {
         save_auth_store_to_path(&store, &self.path)
             .map_err(|_| store_error(CredentialStatus::RefreshFailed, false))?;
         Ok(local_resolved(refreshed))
+    }
+
+    /// The stored OAuth credential without taking the lock or refreshing,
+    /// for commands that write nothing: an expired one is refused. Saves
+    /// replace the file whole, so a read without the lock still sees one
+    /// version of it.
+    pub fn read_oauth(
+        &self,
+        provider_id: &str,
+        expected_fingerprint: &CredentialFingerprint,
+        now: u64,
+    ) -> Result<ResolvedCredential, CredentialError> {
+        let store = self
+            .load()
+            .map_err(|_| store_error(CredentialStatus::Missing, false))?;
+        let auth = stored_oauth(&store, provider_id, expected_fingerprint)?;
+        if unexpired(&auth, now) {
+            Ok(local_resolved(auth))
+        } else {
+            Err(store_error(CredentialStatus::Expired, false))
+        }
     }
 
     fn lock(&self) -> Result<File, ConfigError> {
@@ -145,6 +149,33 @@ impl OAuthRefresh {
         self.account_id = account_id;
         self
     }
+}
+
+fn stored_oauth(
+    store: &AuthStore,
+    provider_id: &str,
+    expected_fingerprint: &CredentialFingerprint,
+) -> Result<ProviderAuth, CredentialError> {
+    let fingerprint_is_current = match store.fingerprint(provider_id) {
+        Some(actual) => &actual == expected_fingerprint,
+        None => true,
+    };
+    if !fingerprint_is_current {
+        return Err(store_error(CredentialStatus::Missing, true));
+    }
+    let auth = store
+        .providers
+        .get(provider_id)
+        .cloned()
+        .ok_or_else(|| store_error(CredentialStatus::Missing, false))?;
+    if auth.kind != "oauth" {
+        return Err(store_error(CredentialStatus::Missing, false));
+    }
+    Ok(auth)
+}
+
+fn unexpired(auth: &ProviderAuth, now: u64) -> bool {
+    auth.expires.is_none_or(|expires| expires > now)
 }
 
 fn local_resolved(auth: ProviderAuth) -> ResolvedCredential {

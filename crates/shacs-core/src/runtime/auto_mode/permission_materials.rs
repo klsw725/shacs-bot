@@ -9,7 +9,7 @@ use super::rule_match::{
     self, AllowOptions, CommandPart, CommandSubject, FileAccess, PathPair, RuleSubject,
 };
 use super::shell_paths::{self, PathSource, PathWord};
-use super::{real_path, shell_command};
+use super::{real_path, shell_command, user_only_file};
 use crate::runtime::PermissionedAction;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,6 +42,10 @@ pub struct PermissionMaterials {
     pub this_call_approved: bool,
     #[serde(default)]
     pub secret_write: bool,
+    /// Writes a marker file only the user changes in auto mode, or replaces
+    /// the folder that holds them (Spec 048 PRD 050 scope 8).
+    #[serde(default)]
+    pub user_only_write: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub critical_removal: Option<String>,
     #[serde(default)]
@@ -93,6 +97,7 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
     let arguments = action.decision_arguments();
     let file = file_access(action, environment);
     let mut redirect_targets = Vec::new();
+    let mut glob_writes = Vec::new();
     let mut critical_removal = None;
     let command = (action.tool_name == "exec")
         .then(|| arguments.get("command").and_then(Value::as_str))
@@ -111,7 +116,12 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
                 &environment.critical_folders,
                 &environment.home,
             );
-            command_subject(&analysis, &environment.home, &mut redirect_targets)
+            command_subject(
+                &analysis,
+                &environment.home,
+                &mut redirect_targets,
+                &mut glob_writes,
+            )
         });
     let subject = RuleSubject {
         tool_name: &action.tool_name,
@@ -164,6 +174,12 @@ pub(crate) fn permission_materials(input: MaterialsInput<'_>) -> PermissionMater
         secret_name: secret_path.or(text_name),
         this_call_approved: false,
         secret_write: writes.iter().any(|pair| secrets.contains(&pair.requested)),
+        user_only_write: user_only_write(
+            environment,
+            &writes,
+            &glob_writes,
+            subject.command.as_ref(),
+        ),
         critical_removal: critical_removal.map(|removal| match removal {
             CriticalRemoval::Folder(path) => path.display().to_string(),
             CriticalRemoval::Unverifiable(reason) => reason.to_owned(),
@@ -226,10 +242,35 @@ fn pairs(words: &[PathWord]) -> Vec<PathPair> {
         .collect()
 }
 
+/// A write of a marker only the user changes, by its path, by a glob that
+/// may match it, or by code text that names it.
+fn user_only_write(
+    environment: &PermissionEnvironment,
+    writes: &[PathPair],
+    glob_writes: &[PathBuf],
+    command: Option<&CommandSubject>,
+) -> bool {
+    let markers = &environment.user_only_files;
+    writes
+        .iter()
+        .any(|pair| markers.written_by(&pair.requested))
+        || glob_writes
+            .iter()
+            .any(|pattern| markers.pattern_may_write(pattern))
+        || command.is_some_and(|command| {
+            command
+                .text_regions
+                .iter()
+                .chain(&command.unanalyzed_text)
+                .any(|text| user_only_file::names_a_marker(text))
+        })
+}
+
 fn command_subject(
     analysis: &shell_command::ShellCommand,
     home: &Path,
     redirect_targets: &mut Vec<RedirectTarget>,
+    glob_writes: &mut Vec<PathBuf>,
 ) -> CommandSubject {
     let mut text_regions = analysis.text_regions.clone();
     let parts = analysis
@@ -237,6 +278,9 @@ fn command_subject(
         .iter()
         .map(|subcommand| {
             let paths = shell_paths::subcommand_paths(subcommand, home);
+            for word in paths.writes.iter().filter(|word| word.word.unquoted_glob) {
+                glob_writes.extend(word.paths.iter().cloned());
+            }
             for word in paths.reads.iter().chain(&paths.writes) {
                 if word.unknown_base {
                     text_regions.push(word.word.text.clone());

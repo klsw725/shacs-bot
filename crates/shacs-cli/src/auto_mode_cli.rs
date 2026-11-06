@@ -9,8 +9,9 @@ use shacs_config::{
     load_config, AutoModeConfig, ConfigBundle, EnvFile, LoadOptions, PermissionsConfig,
 };
 use shacs_core::runtime::{
-    is_auto_mode_block_notice, AutoModeSlots, PermissionEnvironment, PermissionEnvironmentInput,
-    RawRuleLists, RuleEffect, SlotOverrides, ToolEvent, UserPermissionRules,
+    is_auto_mode_block_notice, is_auto_mode_setup_hint, AutoModeSlots, PermissionEnvironment,
+    PermissionEnvironmentInput, RawRuleLists, RuleEffect, SlotOverrides, ToolEvent,
+    UserPermissionRules,
 };
 use shacs_redaction::redact_string;
 use std::collections::BTreeMap;
@@ -21,6 +22,7 @@ use std::sync::Mutex;
 /// that cannot read the file again keeps masking with them (Spec 048 PRD 010
 /// scope 10).
 static LAST_ENV_FILES: Mutex<BTreeMap<PathBuf, EnvFile>> = Mutex::new(BTreeMap::new());
+const DEFAULT_ON_TEXT: &str = "Auto mode is on because permissions.mode is not set: a classifier checks the assistant's tool calls instead of asking you each time. Set permissions.mode to \"default\" to be asked again. See shacs-bot permissions auto-mode config.";
 
 /// Remembers the values read for `config_path`, such as runtime start's
 /// `${NAME}` read.
@@ -92,26 +94,34 @@ pub(crate) fn permission_environment(
     })
 }
 
-/// A startup line on standard error when rules or `autoMode` were left out;
-/// `permissions auto-mode config` shows which and why.
+pub(crate) struct NoticeRoute<'a> {
+    pub(crate) channel: &'a str,
+    pub(crate) chat_id: &'a str,
+    pub(crate) routing_metadata: &'a Map<String, Value>,
+    pub(crate) reply_to: Option<&'a str>,
+}
+
 /// The notice for a call auto mode did not run, sent to the conversation
 /// like the skill notice (Spec 048 PRD 020 scope 8). It holds the tool and
-/// the rule only.
-pub(crate) fn block_notification(
+/// the rule only. PRD 050 scope 8: the setup hint goes the same way.
+pub(crate) fn event_notification(
     event: &ToolEvent,
-    channel: &str,
-    chat_id: &str,
-    routing_metadata: &Map<String, Value>,
-    reply_to: Option<&str>,
+    route: &NoticeRoute<'_>,
 ) -> Option<OutboundMessage> {
+    if is_auto_mode_setup_hint(event) {
+        return Some(notice(
+            route,
+            json!({"kind": "auto_mode", "phase": "setup_hint"}),
+            &event.detail,
+        ));
+    }
     if !is_auto_mode_block_notice(event) {
         return None;
     }
     let result = event.result.as_ref();
     let field = |name: &str| result.and_then(|result| result.get(name)).cloned();
-    let mut metadata = routing_metadata.clone();
-    metadata.insert(
-        "runtime_notification".to_owned(),
+    Some(notice(
+        route,
         json!({
             "kind": "auto_mode",
             "phase": "block",
@@ -119,13 +129,29 @@ pub(crate) fn block_notification(
             "outcome": field("outcome"),
             "rule": field("rule"),
         }),
-    );
-    let mut message =
-        OutboundMessage::new(channel, chat_id, event.detail.clone()).with_metadata(metadata);
-    message.reply_to = reply_to.map(str::to_owned);
-    Some(message)
+        &event.detail,
+    ))
 }
 
+pub(crate) fn default_on_notification(route: &NoticeRoute<'_>) -> OutboundMessage {
+    notice(
+        route,
+        json!({"kind": "auto_mode", "phase": "default_on"}),
+        DEFAULT_ON_TEXT,
+    )
+}
+
+fn notice(route: &NoticeRoute<'_>, notification: Value, text: &str) -> OutboundMessage {
+    let mut metadata = route.routing_metadata.clone();
+    metadata.insert("runtime_notification".to_owned(), notification);
+    let mut message =
+        OutboundMessage::new(route.channel, route.chat_id, text).with_metadata(metadata);
+    message.reply_to = route.reply_to.map(str::to_owned);
+    message
+}
+
+/// A startup line on standard error when rules or `autoMode` were left out;
+/// `permissions auto-mode config` shows which and why.
 pub(crate) fn report_rule_problems(bundle: &ConfigBundle) {
     let permissions = &bundle.config.permissions;
     let rules = UserPermissionRules::parse(raw_rules(permissions), &mcp_servers(Some(bundle)));
@@ -174,6 +200,7 @@ pub(crate) fn auto_mode_config(options: PermissionsListOptions) -> Result<String
             .collect::<Vec<_>>()
     };
     pretty(&json!({
+        "mode": mode_field(permissions),
         "environment": slots.environment,
         "hard_deny": slots.hard_deny,
         "soft_deny": slots.soft_deny,
@@ -192,6 +219,36 @@ pub(crate) fn auto_mode_config(options: PermissionsListOptions) -> Result<String
             "warnings": permissions.diagnostics().warnings,
         },
     }))
+}
+
+fn mode_field(permissions: &PermissionsConfig) -> Value {
+    let malformed = &permissions.diagnostics().malformed_fields;
+    let unreadable = if malformed.iter().any(|field| field == "permissions") {
+        Some("permissions is not an object".to_owned())
+    } else if malformed
+        .iter()
+        .any(|field| field == "permissions.autoApproval")
+    {
+        Some("permissions.autoApproval could not be read".to_owned())
+    } else {
+        permissions
+            .auto_mode_problem()
+            .map(|problem| format!("permissions.autoMode was ignored: {problem}"))
+    };
+    let unknown_mode = malformed.iter().any(|field| field == "permissions.mode");
+    match (permissions.written_mode(), unreadable) {
+        (Some(written), _) if unknown_mode => json!({
+            "written": written,
+            "effective": "default",
+            "reason": "permissions.mode is not a known mode",
+        }),
+        (Some(written), Some(reason)) => {
+            json!({"written": written, "effective": "default", "reason": reason})
+        }
+        (Some(_), None) => json!(permissions.mode().as_str()),
+        (None, Some(reason)) => json!({"effective": "default", "reason": reason}),
+        (None, None) => json!({"interactive": "auto", "nonInteractive": "default"}),
+    }
 }
 
 fn raw_rules(permissions: &PermissionsConfig) -> RawRuleLists<'_> {

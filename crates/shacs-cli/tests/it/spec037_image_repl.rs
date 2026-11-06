@@ -124,6 +124,7 @@ impl Fixture {
         }
         let config: Config = serde_json::from_value(json!({
             "agents":{"defaults":{"workspace":workspace,"provider":"custom","model":"test-model"}},
+            "permissions":{"mode":"default"},
             "providers":{"custom":{"apiKey":"sk-isolated-fixture","apiBase":"http://127.0.0.1:1/v1"},"openai":openai},
             "tools":{"exec":{"enable":false},"web":{"enable":false},
                 "imageGeneration":{"enable":true,"provider":"openai","model":"gpt-image-1"}}

@@ -1,4 +1,4 @@
-use super::ProviderCredentialRuntime;
+use super::{LocalAuthAccess, ProviderCredentialRuntime};
 use shacs_config::{
     CredentialFamily, CredentialFingerprintStatus, CredentialResolutionInput, CredentialSource,
     CredentialSourceDeclaration, CredentialStatus, CredentialStatusSnapshot, LocalAuthStore,
@@ -39,6 +39,13 @@ impl ProviderCredentialRuntime {
                     },
                 )
                 .map(Some),
+            CredentialFamily::OAuth
+                if entry.kind == "oauth" && self.local_auth_access == LocalAuthAccess::ReadOnly =>
+            {
+                store
+                    .read_oauth(provider_id, &declaration.fingerprint(), now_millis())
+                    .map(Some)
+            }
             CredentialFamily::OAuth if entry.kind == "oauth" => store
                 .resolve_oauth(
                     provider_id,

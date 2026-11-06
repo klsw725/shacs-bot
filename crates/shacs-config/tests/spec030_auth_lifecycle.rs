@@ -82,6 +82,32 @@ fn spec030_auth_expired_oauth_refreshes_and_saves() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn spec030_auth_read_only_oauth_takes_no_lock_and_refuses_an_expired_token(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let store = LocalAuthStore::new(root.path().join("auth.json"));
+    let fingerprint = CredentialFingerprint::from_descriptor("oauth-source");
+    let mut auth = AuthStore::default();
+    auth.providers
+        .insert("openai".to_owned(), oauth("current", "refresh", 200));
+    auth.set_fingerprint("openai", fingerprint.clone());
+    store.save(&auth)?;
+    std::fs::remove_file(root.path().join("auth.json.lock"))?;
+
+    let current = store.read_oauth("openai", &fingerprint, 100)?;
+    let expired = store.read_oauth("openai", &fingerprint, 300);
+
+    assert_eq!(current.transport().value(), "current");
+    assert_eq!(
+        expired.map(|_| ()).map_err(|error| error.status().status),
+        Err(CredentialStatus::Expired)
+    );
+    assert!(!root.path().join("auth.json.lock").exists());
+    assert_eq!(store.load()?, auth);
+    Ok(())
+}
+
+#[test]
 fn spec030_auth_refresh_failure_has_raw_free_status() -> Result<(), Box<dyn std::error::Error>> {
     let root = tempfile::tempdir()?;
     let store = LocalAuthStore::new(root.path().join("auth.json"));

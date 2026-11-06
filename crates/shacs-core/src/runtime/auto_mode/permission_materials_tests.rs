@@ -132,6 +132,80 @@ fn secret_files_are_found_through_file_tools_command_paths_and_command_text(
 }
 
 #[test]
+fn user_only_markers_and_their_folder_are_found_through_file_tools_and_command_paths(
+) -> Result<(), Box<dyn Error>> {
+    // Given
+    let folders = folders()?;
+    let environment = environment(&folders, &["exec(touch *)", "write"], false);
+    let runtime = folders.data.join("runtime");
+    let off = runtime.join("auto-mode-setup-hint-off");
+    let notice = runtime.join("auto-mode-default-notice");
+    let writes = [
+        ("write_file", json!({"path": off.display().to_string()})),
+        ("edit_file", json!({"path": notice.display().to_string()})),
+        (
+            "exec",
+            json!({"command": format!("touch {}", off.display())}),
+        ),
+        (
+            "exec",
+            json!({"command": format!("rm -f {}", notice.display())}),
+        ),
+        (
+            "exec",
+            json!({"command": format!("echo x > {}", off.display())}),
+        ),
+        (
+            "exec",
+            json!({"command": format!("mv {} /tmp/old", runtime.display())}),
+        ),
+        (
+            "exec",
+            json!({"command": format!("rm -rf {}/../runtime", runtime.display())}),
+        ),
+        (
+            "exec",
+            json!({"command": format!("rm {}/auto-mode-*", runtime.display())}),
+        ),
+        (
+            "exec",
+            json!({"command": format!("rm -f {}/*", runtime.display())}),
+        ),
+        (
+            "exec",
+            json!({"command": format!("rm {}/r?ntime/auto-mode-setup-hint-off", folders.data.display())}),
+        ),
+        (
+            "exec",
+            json!({"command": "python3 -c \"import os; os.remove('auto-mode-setup-hint-off')\""}),
+        ),
+    ];
+
+    // When / Then
+    for (tool, arguments) in writes {
+        let found = materials(&environment, tool, arguments.clone());
+        assert!(found.user_only_write, "{tool} {arguments}");
+    }
+    let read = materials(
+        &environment,
+        "read_file",
+        json!({"path": off.display().to_string()}),
+    );
+    let beside = materials(
+        &environment,
+        "exec",
+        json!({"command": format!("touch {}", runtime.join("other").display())}),
+    );
+    let logs = materials(
+        &environment,
+        "exec",
+        json!({"command": format!("rm {}/*.log", runtime.display())}),
+    );
+    assert!(!read.user_only_write && !beside.user_only_write && !logs.user_only_write);
+    Ok(())
+}
+
+#[test]
 fn protected_and_linked_writes_and_workspace_edits_are_told_apart() -> Result<(), Box<dyn Error>> {
     // Given
     let folders = folders()?;

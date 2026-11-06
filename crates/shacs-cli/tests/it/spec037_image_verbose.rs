@@ -73,6 +73,7 @@ fn verbose_run(replies: &[LlmResponse]) -> Result<(String, String), Box<dyn Erro
     fs::create_dir_all(&workspace)?;
     let config: Config = serde_json::from_value(json!({
         "agents":{"defaults":{"workspace":workspace,"provider":"custom","model":"test-model"}},
+        "permissions":{"mode":"default"},
         "providers":{"custom":{"apiKey":"sk-isolated-fixture","apiBase":"http://127.0.0.1:1/v1"},
             "openai":{"apiKey":"sk-local-image-fixture","apiBase":"http://127.0.0.1:1/v1"}},
         "tools":{"exec":{"enable":false},"web":{"enable":false},

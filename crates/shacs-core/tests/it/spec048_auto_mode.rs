@@ -3,7 +3,8 @@
 //! 010 acceptance: the `.env.json` secret files and value masking. PRD 020
 //! acceptance: blocks returned as tool results, block counts, escalation and
 //! approvals from the recent list. PRD 030 acceptance: subagent handoff,
-//! calls and return checks. PRD 040 acceptance: tool result checks.
+//! calls and return checks. PRD 040 acceptance: tool result checks. PRD
+//! 050 acceptance: the setup hint and the markers only the user changes.
 
 #[path = "spec048_auto_mode/blocks.rs"]
 mod blocks;

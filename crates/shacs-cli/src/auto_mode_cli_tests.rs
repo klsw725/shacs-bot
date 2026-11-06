@@ -1,7 +1,7 @@
 use super::*;
 use crate::{parse_cli_args, run_command, CliCommand, PermissionsCommand};
 use serde_json::json;
-use shacs_core::runtime::{RuleEffect, AUTO_MODE_BLOCK_EVENT};
+use shacs_core::runtime::{RuleEffect, AUTO_MODE_BLOCK_EVENT, AUTO_MODE_SETUP_HINT_EVENT};
 use std::error::Error;
 use std::fs;
 
@@ -109,6 +109,7 @@ fn config_shows_spliced_replaced_and_claude_spelled_lists_with_rule_diagnostics(
         ["unbalanced_parentheses", "unanchored_allow_glob"]
     );
     assert_eq!(shown["diagnostics"]["autoMode"], Value::Null);
+    assert_eq!(shown["mode"], "auto");
     Ok(())
 }
 
@@ -145,6 +146,44 @@ fn config_reports_an_unreadable_auto_mode() -> Result<(), Box<dyn Error>> {
     assert!(shown["diagnostics"]["malformedFields"]
         .as_array()
         .is_some_and(|fields| fields.contains(&json!("permissions.autoMode"))));
+    assert_eq!(shown["mode"]["written"], "auto");
+    assert_eq!(shown["mode"]["effective"], "default");
+    Ok(())
+}
+
+#[test]
+fn config_shows_the_mode_runs_start_in() -> Result<(), Box<dyn Error>> {
+    for (permissions, mode) in [
+        (
+            json!({"allow": ["read"]}),
+            json!({"interactive": "auto", "nonInteractive": "default"}),
+        ),
+        (
+            json!({"mode": "defualt"}),
+            json!({"written": "defualt", "effective": "default", "reason": "permissions.mode is not a known mode"}),
+        ),
+        (
+            json!({"autoApproval": "on"}),
+            json!({"effective": "default", "reason": "permissions.autoApproval could not be read"}),
+        ),
+    ] {
+        // Given
+        let root = tempfile::tempdir()?;
+        let config = root.path().join("config.json");
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({"permissions": permissions}))?,
+        )?;
+
+        // When
+        let shown = json_of(&auto_mode_config(PermissionsListOptions {
+            config_path: Some(config),
+            workspace_override: Some(root.path().to_path_buf()),
+        })?)?;
+
+        // Then
+        assert_eq!(shown["mode"], mode, "{permissions}");
+    }
     Ok(())
 }
 
@@ -269,10 +308,24 @@ fn a_call_auto_mode_did_not_run_becomes_a_visible_notice_in_the_conversation() {
         ..event.clone()
     };
     let routing = serde_json::Map::from_iter([("thread_id".to_owned(), json!("t1"))]);
+    let route = NoticeRoute {
+        channel: "discord",
+        chat_id: "chat_1",
+        routing_metadata: &routing,
+        reply_to: Some("m1"),
+    };
+    let hint = ToolEvent {
+        name: AUTO_MODE_SETUP_HINT_EVENT.to_owned(),
+        detail: "Auto mode has stopped several calls".to_owned(),
+        call_id: None,
+        result: Some(json!({"phase": "setup_hint"})),
+        ..event.clone()
+    };
 
     // When
-    let notice = block_notification(&event, "discord", "chat_1", &routing, Some("m1"));
-    let ignored = block_notification(&other, "discord", "chat_1", &routing, None);
+    let notice = event_notification(&event, &route);
+    let ignored = event_notification(&other, &route);
+    let hinted = event_notification(&hint, &route);
 
     // Then
     let notice = notice.expect("a notice for the blocked call");
@@ -302,5 +355,16 @@ fn a_call_auto_mode_did_not_run_becomes_a_visible_notice_in_the_conversation() {
         result: Some(json!({"outcome": "blocked", "output": "tool output"})),
         ..event.clone()
     };
-    assert!(block_notification(&same_named_tool, "discord", "chat_1", &routing, None).is_none());
+    assert!(event_notification(&same_named_tool, &route).is_none());
+    let hinted = hinted.expect("a notice for the setup hint");
+    assert_eq!(hinted.content, "Auto mode has stopped several calls");
+    assert_eq!(
+        hinted.metadata["runtime_notification"],
+        json!({"kind": "auto_mode", "phase": "setup_hint"})
+    );
+    let same_named_hint = ToolEvent {
+        call_id: Some("call_1".to_owned()),
+        ..hint
+    };
+    assert!(event_notification(&same_named_hint, &route).is_none());
 }

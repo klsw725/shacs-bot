@@ -105,6 +105,35 @@ fn auto_mode_follows_the_decision_table_order() {
         outcome(approved(input("write_file", auto, write_secret, true))),
         (Deny, PermissionPolicyReason::SecretFileWrite)
     );
+    let user_only_with_rule = PermissionMaterials {
+        user_only_write: true,
+        auto_allow: Some(AutoAllow::Rule {
+            rule: "write".to_owned(),
+        }),
+        ..PermissionMaterials::default()
+    };
+    assert_eq!(
+        outcome(approved(input(
+            "write_file",
+            auto,
+            user_only_with_rule.clone(),
+            true
+        ))),
+        (Deny, PermissionPolicyReason::UserOnlyFileWrite)
+    );
+    let unmarked = PermissionMaterials {
+        user_only_write: false,
+        ..user_only_with_rule.clone()
+    };
+    assert_eq!(
+        outcome(input(
+            "write_file",
+            PermissionMode::Default,
+            user_only_with_rule,
+            true
+        )),
+        outcome(input("write_file", PermissionMode::Default, unmarked, true))
+    );
     let critical_with_rule = PermissionMaterials {
         critical_removal: Some("/".to_owned()),
         auto_allow: Some(AutoAllow::Rule {

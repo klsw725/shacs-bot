@@ -22,6 +22,7 @@ impl Fixture {
         let config_path = root.path().join("config.json");
         let config: Config = serde_json::from_value(json!({
             "agents":{"defaults":{"workspace":workspace,"provider":"custom","model":"test-model"}},
+            "permissions":{"mode":"default"},
             "providers":{"custom":{"apiKey":"sk-isolated-fixture","apiBase":"http://127.0.0.1:1/v1"}},
             "tools":{"exec":{"enable":true},"web":{"enable":false}}
         }))?;

@@ -26,7 +26,7 @@ fn rule_lists_are_read_and_a_list_that_is_not_strings_is_dropped_whole() {
     let malformed = &config.diagnostics().malformed_fields;
     assert!(malformed.contains(&"permissions.ask".to_owned()));
     assert!(malformed.contains(&"permissions.deny".to_owned()));
-    assert_eq!(config.mode, PermissionMode::Auto);
+    assert_eq!(config.mode(), PermissionMode::Auto);
 }
 
 #[test]

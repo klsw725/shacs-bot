@@ -351,7 +351,15 @@ pub enum PermissionCommandArgs {
     Rules,
     Inspect(String),
     Revoke(String),
+    SetupHint(SetupHintSwitch),
     Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupHintSwitch {
+    Off,
+    On,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -560,6 +568,11 @@ fn parse_permission_args(args: &str) -> PermissionCommandArgs {
             PermissionCommandArgs::Invalid,
             PermissionCommandArgs::Revoke,
         ),
+        "setup-hint" => match after_first.trim().to_ascii_lowercase().as_str() {
+            "off" => PermissionCommandArgs::SetupHint(SetupHintSwitch::Off),
+            "on" => PermissionCommandArgs::SetupHint(SetupHintSwitch::On),
+            _ => PermissionCommandArgs::Invalid,
+        },
         _ => PermissionCommandArgs::Invalid,
     }
 }
@@ -636,6 +649,7 @@ pub fn build_help_text() -> String {
         "/permission rules — Show remembered permission rules for this workspace",
         "/permission inspect <id-or-prefix> — Show one remembered permission rule",
         "/permission revoke <id-or-prefix> — Revoke one remembered permission rule",
+        "/permission setup-hint off|on — Stop or resume the auto mode setup hint",
         "/goal [status|pause|resume|clear|done|blocked <reason>|<text>] — Manage the persistent goal",
         "/work create|read|edit|pause|resume|done|clear|accept|decline — Manage explicitly entrusted work",
         "/method [status|list|use <general|calculation|report|image>|auto|history|accept|revise] — Select the active request method or a one-shot method for the next request; accept records your acceptance of the latest result; revise makes your next message a new version of the latest report or image",

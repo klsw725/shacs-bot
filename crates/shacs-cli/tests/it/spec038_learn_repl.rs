@@ -112,6 +112,7 @@ fn repl_proposes_a_candidate_without_running_tools_and_keeps_a_confirmation_acro
     )?;
     let config: Config = serde_json::from_value(json!({
         "agents": {"defaults": {"workspace": workspace, "provider": "custom", "model": "test-model"}},
+        "permissions": {"mode": "default"},
         "providers": {"custom": {"apiKey": "sk-isolated-fixture", "apiBase": "http://127.0.0.1:1/v1"}},
         "tools": {"web": {"enable": false}}
     }))?;

@@ -83,6 +83,15 @@ pub struct ProviderCredentialRuntime {
     command_timeout: Duration,
     command_abort: ControlledChildAbort,
     oauth_refresher: Option<Arc<dyn OAuthCredentialRefresher>>,
+    local_auth_access: LocalAuthAccess,
+}
+
+/// Whether resolving a local OAuth credential may take the store's lock
+/// and save a refreshed token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalAuthAccess {
+    RefreshAndSave,
+    ReadOnly,
 }
 
 impl ProviderCredentialRuntime {
@@ -102,7 +111,16 @@ impl ProviderCredentialRuntime {
             command_timeout: Duration::from_secs(10),
             command_abort: ControlledChildAbort::new(),
             oauth_refresher: None,
+            local_auth_access: LocalAuthAccess::RefreshAndSave,
         }
+    }
+
+    /// Local sign-ins are read without the lock and never saved; an expired
+    /// OAuth credential is refused rather than refreshed, as a command that
+    /// writes nothing needs (Spec 048 PRD 050 scopes 6 and 7).
+    pub fn without_local_auth_writes(mut self) -> Self {
+        self.local_auth_access = LocalAuthAccess::ReadOnly;
+        self
     }
 
     pub fn with_environment(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {

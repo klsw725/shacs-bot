@@ -198,13 +198,16 @@ impl AgentLoopChatCompletionAdapter {
         })?;
         let bus = MessageBus::new();
         let tools = self.tools.clone();
+        // The question came from an interactive run; its approval must meet
+        // the same mode (Spec 048 PRD 050 scope 2).
+        let config = self.loop_config_for(crate::run_permission_mode::RunKind::Interactive);
         let mut loop_runtime = AgentLoop::new(
             bus,
             sessions,
             self.context_builder(),
             &tools,
             self.client.as_ref(),
-            self.loop_config(),
+            config,
         )
         .with_session_turn_lock(self.session_turn_lock.clone());
         if let Some(message_tool) = &self.message_tool {

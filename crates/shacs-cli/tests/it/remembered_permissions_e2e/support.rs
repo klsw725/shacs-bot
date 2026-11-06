@@ -1,5 +1,5 @@
 use serde_json::json;
-use shacs_config::{save_config_to_path, Config, ProviderConfig};
+use shacs_config::{save_config_to_path, Config, PermissionMode, ProviderConfig};
 use shacs_providers::{LlmResponse, ToolCallRequest};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,7 @@ pub fn write_config(root: &Path, workspace: &Path) -> Result<PathBuf, Box<dyn st
     config.agents.defaults.provider = "custom".to_owned();
     config.agents.defaults.model = "test-model".to_owned();
     config.agents.defaults.max_tool_iterations = 2;
+    config.permissions.set_mode(PermissionMode::Default);
     config.providers.insert(
         "custom".to_owned(),
         ProviderConfig {

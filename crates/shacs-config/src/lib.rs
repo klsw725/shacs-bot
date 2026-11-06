@@ -12,6 +12,7 @@ use std::{fs, process};
 mod auth_source;
 mod config_migration;
 mod config_migration_state;
+mod config_write;
 mod credential;
 mod env_file;
 mod permission_user_rules;
@@ -28,6 +29,9 @@ mod trusted_runtime_config;
 pub use auth_source::*;
 pub use config_migration::*;
 pub use config_migration_state::{ConfigMigrationFileState, ConfigMigrationOperation};
+pub use config_write::{
+    write_config_value_atomically, write_config_value_if_unchanged, ConfigWriteError,
+};
 pub use credential::*;
 pub use env_file::{
     config_env, env_file_path, is_env_name, ConfigEnv, EnvFile, EnvFileProblem, ENV_FILE_NAME,
@@ -1189,6 +1193,12 @@ pub fn save_auth_store_to_path(store: &AuthStore, path: &Path) -> Result<(), Con
 }
 
 fn write_secret_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temp_path = write_secret_temp_file(path, bytes)?;
+    fs::rename(&temp_path, path)?;
+    Ok(())
+}
+
+fn write_secret_temp_file(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     let temp_path = secret_temp_path(path);
     let mut options = fs::OpenOptions::new();
     options.create_new(true).write(true);
@@ -1211,8 +1221,7 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let permissions = std::fs::Permissions::from_mode(0o600);
         fs::set_permissions(&temp_path, permissions)?;
     }
-    fs::rename(&temp_path, path)?;
-    Ok(())
+    Ok(temp_path)
 }
 
 fn secret_temp_path(path: &Path) -> PathBuf {
@@ -1873,7 +1882,7 @@ mod tests {
             }
         }))
         .map_err(|error| error.to_string())?;
-        assert_eq!(config.permissions.mode, PermissionMode::Auto);
+        assert_eq!(config.permissions.mode(), PermissionMode::Auto);
         assert!(config.permissions.auto_approval.enabled);
         assert_eq!(
             config.permissions.auto_approval.protected_targets,
@@ -1894,7 +1903,7 @@ mod tests {
             "permissions": {"mode": "sk-secret-mode"}
         }))
         .map_err(|error| error.to_string())?;
-        assert_eq!(malformed.permissions.mode, PermissionMode::Default);
+        assert_eq!(malformed.permissions.mode(), PermissionMode::Default);
         assert!(malformed
             .permissions
             .diagnostics()

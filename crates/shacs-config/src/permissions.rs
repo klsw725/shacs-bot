@@ -1,5 +1,6 @@
 use crate::permission_user_rules::{self, AutoModeConfig, AutoModeProblem, PermissionRuleLists};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -85,6 +86,9 @@ pub enum PermissionModeSource {
     CliFlag,
     LocalApiRequest,
     SessionCommand,
+    /// The user-local config writes no mode and the run is interactive, so
+    /// it starts in auto (Spec 048 PRD 050 scope 2).
+    InteractiveDefault,
     DefaultFallback,
 }
 
@@ -96,6 +100,7 @@ impl PermissionModeSource {
             "cli_flag" | "cli-flag" => Some(Self::CliFlag),
             "local_api_request" | "local-api-request" => Some(Self::LocalApiRequest),
             "session_command" | "session-command" => Some(Self::SessionCommand),
+            "interactive_default" | "interactive-default" => Some(Self::InteractiveDefault),
             "default_fallback" | "default-fallback" => Some(Self::DefaultFallback),
             _ => None,
         }
@@ -106,7 +111,8 @@ impl PermissionModeSource {
             Self::UserLocalConfig
             | Self::CliFlag
             | Self::LocalApiRequest
-            | Self::SessionCommand => true,
+            | Self::SessionCommand
+            | Self::InteractiveDefault => true,
             Self::WorkspaceConfig => context.user_local_auto_opt_in,
             Self::DefaultFallback => false,
         }
@@ -158,6 +164,9 @@ impl SafetyCapability {
 pub struct PermissionActivationContext {
     pub user_local_auto_opt_in: bool,
     pub containment_precondition_met: bool,
+    /// The run can ask the user (`permission_interactive`); a user-local
+    /// config without a mode starts such a run in auto.
+    pub interactive_run: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,23 +196,24 @@ impl Default for AutoApprovalConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// The `permissions` section. Saving writes back what the user wrote, so a
+/// save never adds a mode or repairs a field that could not be read (Spec
+/// 048 PRD 050 scope 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionsConfig {
-    pub mode: PermissionMode,
-    #[serde(default)]
+    mode: PermissionMode,
+    /// `mode` as written, malformed or not.
+    written_mode: Option<Value>,
     pub auto_approval: AutoApprovalConfig,
-    #[serde(flatten)]
+    /// `autoApproval` as written when it could not be read.
+    unreadable_auto_approval: Option<Value>,
+    /// The whole section as written when it is not an object.
+    unreadable_section: Option<Value>,
     written_user_rules: Map<String, Value>,
-    #[serde(skip)]
     pub user_rules: PermissionRuleLists,
-    #[serde(skip)]
     pub auto_mode: AutoModeConfig,
-    #[serde(skip)]
     auto_mode_problem: Option<AutoModeProblem>,
-    #[serde(skip)]
     mode_configured: bool,
-    #[serde(skip)]
     diagnostics: PermissionConfigDiagnostics,
 }
 
@@ -211,7 +221,10 @@ impl Default for PermissionsConfig {
     fn default() -> Self {
         Self {
             mode: PermissionMode::Default,
+            written_mode: None,
             auto_approval: AutoApprovalConfig::default(),
+            unreadable_auto_approval: None,
+            unreadable_section: None,
             written_user_rules: Map::new(),
             user_rules: PermissionRuleLists::default(),
             auto_mode: AutoModeConfig::default(),
@@ -222,13 +235,64 @@ impl Default for PermissionsConfig {
     }
 }
 
+impl Serialize for PermissionsConfig {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let Some(section) = &self.unreadable_section {
+            return section.serialize(serializer);
+        }
+        let mut map = serializer.serialize_map(None)?;
+        if let Some(mode) = &self.written_mode {
+            map.serialize_entry("mode", mode)?;
+        }
+        match &self.unreadable_auto_approval {
+            Some(written) => map.serialize_entry("autoApproval", written)?,
+            None => map.serialize_entry("autoApproval", &self.auto_approval)?,
+        }
+        for (key, value) in &self.written_user_rules {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
 impl PermissionsConfig {
     pub fn is_default(&self) -> bool {
-        self.mode == PermissionMode::Default
+        self.written_mode.is_none()
+            && self.unreadable_section.is_none()
+            && self.unreadable_auto_approval.is_none()
             && self.auto_approval == AutoApprovalConfig::default()
             && self.written_user_rules.is_empty()
-            && !self.mode_configured
             && self.diagnostics == PermissionConfigDiagnostics::default()
+    }
+
+    /// The mode read from `permissions.mode`; `default` when it is missing,
+    /// malformed, or the section could not be read.
+    pub fn mode(&self) -> PermissionMode {
+        self.mode
+    }
+
+    pub fn written_mode(&self) -> Option<&Value> {
+        self.written_mode.as_ref()
+    }
+
+    /// Writes `mode` as the user's own choice, keeping everything else as
+    /// written, the way the `/permission` wizard writes it.
+    pub fn set_mode(&mut self, mode: PermissionMode) {
+        let mut section = match serde_json::to_value(&*self) {
+            Ok(Value::Object(section)) => section,
+            _ => Map::new(),
+        };
+        section.insert("mode".to_owned(), Value::String(mode.as_str().to_owned()));
+        *self = Self::from_value(&Value::Object(section));
+    }
+
+    /// No mode is written and the rest of the section can be read, so an
+    /// interactive run may start in auto by default.
+    fn interactive_default_allowed(&self) -> bool {
+        self.written_mode.is_none()
+            && self.unreadable_section.is_none()
+            && self.unreadable_auto_approval.is_none()
+            && self.auto_mode_problem.is_none()
     }
 
     pub fn diagnostics(&self) -> &PermissionConfigDiagnostics {
@@ -248,14 +312,23 @@ impl PermissionsConfig {
     ) -> PermissionConfigSnapshot {
         let source = if self.mode_configured {
             requested_source
+        } else if requested_source == PermissionModeSource::UserLocalConfig
+            && context.interactive_run
+            && self.interactive_default_allowed()
+        {
+            PermissionModeSource::InteractiveDefault
         } else {
             PermissionModeSource::DefaultFallback
         };
+        let mut mode = if source == PermissionModeSource::InteractiveDefault {
+            PermissionMode::Auto
+        } else {
+            self.mode
+        };
         let mut diagnostics = self.diagnostics.clone();
         diagnostics.source = source;
-        diagnostics.normalized_mode = self.mode;
+        diagnostics.normalized_mode = mode;
 
-        let mut mode = self.mode;
         let mut snapshot_source = source;
         if mode == PermissionMode::Auto && !source.permits_auto(context) {
             diagnostics.rejected_source = Some(source);
@@ -323,13 +396,16 @@ impl PermissionsConfig {
                 .warnings
                 .push("permissions config was ignored because it is not an object".to_owned());
             return Self {
+                unreadable_section: Some(value.clone()),
                 diagnostics,
                 ..Self::default()
             };
         };
 
         let mut diagnostics = PermissionConfigDiagnostics::default();
-        let mut mode_configured = object.contains_key("mode");
+        let written_mode = object.get("mode").cloned();
+        let mut unreadable_auto_approval = None;
+        let mut mode_configured = written_mode.is_some();
         let mut mode = object
             .get("mode")
             .map(|value| {
@@ -351,6 +427,7 @@ impl PermissionsConfig {
             .get("autoApproval")
             .map(|value| {
                 serde_json::from_value::<AutoApprovalConfig>(value.clone()).unwrap_or_else(|_| {
+                    unreadable_auto_approval = Some(value.clone());
                     mode = PermissionMode::Default;
                     mode_configured = false;
                     diagnostics
@@ -396,7 +473,10 @@ impl PermissionsConfig {
         diagnostics.normalized_mode = mode;
         Self {
             mode,
+            written_mode,
             auto_approval,
+            unreadable_auto_approval,
+            unreadable_section: None,
             written_user_rules: permission_user_rules::written_fields(object),
             user_rules,
             auto_mode,
@@ -574,6 +654,7 @@ mod tests {
             PermissionActivationContext {
                 user_local_auto_opt_in: true,
                 containment_precondition_met: false,
+                interactive_run: false,
             },
         );
         assert_eq!(accepted.mode, PermissionMode::Auto);
@@ -593,6 +674,7 @@ mod tests {
             PermissionActivationContext {
                 user_local_auto_opt_in: true,
                 containment_precondition_met: true,
+                interactive_run: false,
             },
         );
         assert_eq!(workspace.mode, PermissionMode::Default);
@@ -616,6 +698,7 @@ mod tests {
             PermissionActivationContext {
                 user_local_auto_opt_in: false,
                 containment_precondition_met: true,
+                interactive_run: false,
             },
         );
         assert_eq!(contained.mode, PermissionMode::BypassPermissions);
@@ -670,6 +753,78 @@ mod tests {
         assert!(!snapshot
             .baseline_candidate_capabilities
             .contains(&SafetyCapability::ProcExec));
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_mode_starts_only_interactive_user_local_runs_in_auto() -> Result<(), String> {
+        let interactive = PermissionActivationContext {
+            interactive_run: true,
+            ..PermissionActivationContext::default()
+        };
+        let unset: PermissionsConfig = serde_json::from_value(json!({"allow": ["read"]}))
+            .map_err(|error| error.to_string())?;
+        let auto = unset.normalized_snapshot(PermissionModeSource::UserLocalConfig, interactive);
+        assert_eq!(auto.mode, PermissionMode::Auto);
+        assert_eq!(auto.source, PermissionModeSource::InteractiveDefault);
+        assert_eq!(
+            auto.diagnostics.source,
+            PermissionModeSource::InteractiveDefault
+        );
+        assert!(auto.auto_approval.enabled);
+        for (source, context) in [
+            (
+                PermissionModeSource::UserLocalConfig,
+                PermissionActivationContext::default(),
+            ),
+            (PermissionModeSource::WorkspaceConfig, interactive),
+        ] {
+            let snapshot = unset.normalized_snapshot(source, context);
+            assert_eq!(snapshot.mode, PermissionMode::Default, "{source:?}");
+            assert_eq!(snapshot.source, PermissionModeSource::DefaultFallback);
+        }
+        for written in [
+            json!({"mode": "default"}),
+            json!({"mode": "defualt"}),
+            json!({"autoApproval": "bad"}),
+            json!({"autoMode": "on"}),
+            json!("not an object"),
+        ] {
+            let config: PermissionsConfig =
+                serde_json::from_value(written.clone()).map_err(|error| error.to_string())?;
+            let snapshot =
+                config.normalized_snapshot(PermissionModeSource::UserLocalConfig, interactive);
+            assert_eq!(snapshot.mode, PermissionMode::Default, "{written}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn saving_writes_back_only_what_was_written() -> Result<(), String> {
+        for (written, saved_mode) in [
+            (json!({"allow": ["read"]}), None),
+            (json!({"mode": "default"}), Some(json!("default"))),
+            (json!({"mode": "auto"}), Some(json!("auto"))),
+            (json!({"mode": "defualt"}), Some(json!("defualt"))),
+        ] {
+            let config: PermissionsConfig =
+                serde_json::from_value(written.clone()).map_err(|error| error.to_string())?;
+            let saved = serde_json::to_value(&config).map_err(|error| error.to_string())?;
+            assert_eq!(saved.get("mode").cloned(), saved_mode, "{written}");
+        }
+        for unreadable in [json!({"autoApproval": "bad"}), json!("off")] {
+            let config: PermissionsConfig =
+                serde_json::from_value(unreadable.clone()).map_err(|error| error.to_string())?;
+            let saved = serde_json::to_value(&config).map_err(|error| error.to_string())?;
+            assert_eq!(saved, unreadable);
+        }
+        let mut chosen: PermissionsConfig =
+            serde_json::from_value(json!({"deny": ["exec"]})).map_err(|error| error.to_string())?;
+        chosen.set_mode(PermissionMode::Auto);
+        assert_eq!(chosen.mode(), PermissionMode::Auto);
+        let saved = serde_json::to_value(&chosen).map_err(|error| error.to_string())?;
+        assert_eq!(saved["mode"], json!("auto"));
+        assert_eq!(saved["deny"], json!(["exec"]));
         Ok(())
     }
 }

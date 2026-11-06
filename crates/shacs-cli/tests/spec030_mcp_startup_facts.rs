@@ -20,7 +20,9 @@ fn production_startup_projects_configured_and_failed_mcp_transport_outcomes(
     config.agents.defaults.provider = "custom".to_owned();
     config.agents.defaults.model = "test-model".to_owned();
     config.agents.defaults.workspace = workspace.to_string_lossy().into_owned();
-    config.permissions.mode = PermissionMode::BypassPermissions;
+    config
+        .permissions
+        .set_mode(PermissionMode::BypassPermissions);
     let mut connected = mcp_config("python3", vec!["*".to_owned()]);
     connected.args = vec![server.to_string_lossy().into_owned()];
     let mut failed = mcp_config("unused", vec!["*".to_owned()]);

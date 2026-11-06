@@ -37,6 +37,12 @@ pub(crate) fn decide_auto_mode(
             )
         };
     }
+    if materials.user_only_write {
+        return decided(
+            PermissionPolicyDecisionKind::Deny,
+            PermissionPolicyReason::UserOnlyFileWrite,
+        );
+    }
     if let Some(denied) = denied_by_user(input, materials) {
         return denied;
     }

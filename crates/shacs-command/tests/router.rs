@@ -2,7 +2,7 @@ use shacs_command::{
     build_help_text, is_builtin_command, is_builtin_command_name, normalize_channel_command,
     parse_loop_command, parse_loop_command_route, CommandId, CommandKind, CommandRouter,
     GoalCommandArgs, HistoryCommandArgs, LoopCommand, PermissionCommandArgs, PluginCommandRouter,
-    PluginCommandSpec, WorkCommandArgs,
+    PluginCommandSpec, SetupHintSwitch, WorkCommandArgs,
 };
 use std::error::Error;
 
@@ -85,6 +85,16 @@ fn loop_command_parser_matches_builtin_router_semantics() {
     );
     assert_eq!(
         parse_loop_command("/permission auto"),
+        Some(LoopCommand::Permission(PermissionCommandArgs::Invalid))
+    );
+    assert_eq!(
+        parse_loop_command("/permission setup-hint OFF"),
+        Some(LoopCommand::Permission(PermissionCommandArgs::SetupHint(
+            SetupHintSwitch::Off
+        )))
+    );
+    assert_eq!(
+        parse_loop_command("/permission setup-hint maybe"),
         Some(LoopCommand::Permission(PermissionCommandArgs::Invalid))
     );
     assert_eq!(parse_loop_command("/stop please"), None);

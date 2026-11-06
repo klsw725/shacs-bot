@@ -2,16 +2,24 @@
 mod agent_repl;
 mod apps_retirement;
 mod auto_mode_cli;
+mod auto_mode_critique;
+mod auto_mode_markers;
+mod auto_mode_reset;
+mod auto_mode_setup;
 mod automation_outcome;
 mod automation_producer;
 mod automation_worker;
+mod consent_prompt;
 mod discord_outbound;
 mod improvement_cli;
 mod memory_cli;
 mod notification_delivery;
 mod observation_worker;
 mod onboard_wizard;
+mod review_provider;
+mod run_permission_mode;
 mod runtime_cleanup;
+mod setup_material;
 pub mod spec030_cli;
 mod spec030_startup_facts;
 mod spec031_cli;
@@ -75,7 +83,7 @@ use shacs_core::runtime::{
     apply_context_safety_gate, build_context_diagnostics_summary, build_context_provider_handoff,
     build_core_diagnostics_aggregate, build_permission_diagnostics_summary,
     build_plugin_runtime_snapshot, build_plugin_surface_projection,
-    build_spec031_extension_projection, build_spec035_tasks_projection, ceiling_for_origin,
+    build_spec031_extension_projection, build_spec035_tasks_projection,
     containment_permission_proof_for_process_gate, discover_context_files, discover_plugins,
     parse_context_references, plugin_hook_catalog, request_runtime_control,
     resolve_context_reference,
@@ -224,6 +232,14 @@ const WEBSOCKET_STREAM_FLUSH_CHARS: usize = 32;
 const EXTERNAL_SESSION_PENDING_LIMIT: usize = 20;
 const EXTERNAL_TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(7);
 const EXTERNAL_TYPING_INDICATOR_KEY: &str = "_typing_indicator";
+/// The auto mode events a verbose run writes one line for, by name only, so
+/// the line holds no arguments, results, rules or reasons (Spec 048 PRD 050
+/// scope 9).
+const AUTO_MODE_VERBOSE_EVENTS: [&str; 3] = [
+    shacs_core::runtime::AUTO_MODE_BLOCK_EVENT,
+    "tool_result_check",
+    "auto_mode_report_review",
+];
 const DURABLE_WORK_ID_METADATA: &str = "durable_work_id";
 const DURABLE_SESSION_REF_METADATA: &str = "durable_session_ref";
 const MAX_CHANNEL_METADATA_BYTES: u64 = 1024 * 1024;
@@ -459,6 +475,18 @@ pub enum PermissionsCommand {
     Revoke(PermissionsIdOptions),
     AutoModeDefaults { label: Option<String> },
     AutoModeConfig(PermissionsListOptions),
+    AutoModeReset(AutoModeWriteOptions),
+    AutoModeCritique(PermissionsListOptions),
+    AutoModeSetup(AutoModeWriteOptions),
+}
+
+/// `permissions auto-mode reset|setup`: they write the user-local config
+/// only after `y`, or with `--yes`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AutoModeWriteOptions {
+    pub config_path: Option<PathBuf>,
+    pub workspace_override: Option<PathBuf>,
+    pub yes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -697,6 +725,7 @@ pub struct AskOptions {
     pub max_tokens: Option<u32>,
     pub allow_side_effects: bool,
     pub markdown: bool,
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -800,6 +829,7 @@ impl Default for AskOptions {
             max_tokens: None,
             allow_side_effects: false,
             markdown: true,
+            verbose: false,
         }
     }
 }
@@ -1951,6 +1981,21 @@ impl From<std::io::Error> for CliError {
     }
 }
 
+impl From<shacs_config::ConfigWriteError> for CliError {
+    fn from(error: shacs_config::ConfigWriteError) -> Self {
+        match error {
+            shacs_config::ConfigWriteError::Changed => Self::Runtime(
+                "config.json changed while this command ran; nothing was written. Run it again."
+                    .to_owned(),
+            ),
+            shacs_config::ConfigWriteError::Io(error) => Self::Io(error),
+            shacs_config::ConfigWriteError::Json(error) => {
+                Self::InvalidArguments(format!("invalid config JSON: {error}"))
+            }
+        }
+    }
+}
+
 impl From<ApiError> for CliError {
     fn from(error: ApiError) -> Self {
         Self::Api(error)
@@ -2666,10 +2711,20 @@ fn tool_result_is_error(result: &Value) -> bool {
 
 fn runtime_verbose_tool_event_callback() -> RuntimeToolEventCallback {
     Arc::new(move |event: &ToolEvent| {
-        if event.name == "permission_auto_approval" {
-            eprintln!("Permission auto approval {}", event.detail);
+        if let Some(line) = runtime_verbose_event_line(event) {
+            eprintln!("{line}");
         }
     })
+}
+
+fn runtime_verbose_event_line(event: &ToolEvent) -> Option<String> {
+    if event.name == "permission_auto_approval" {
+        return Some(format!("Permission auto approval {}", event.detail));
+    }
+    (event.status == ToolStatus::Waiting
+        && event.arguments.is_none()
+        && AUTO_MODE_VERBOSE_EVENTS.contains(&event.name.as_str()))
+    .then(|| format!("Auto mode event {}", event.name))
 }
 
 fn selected_skill_notification_callback(
@@ -2725,13 +2780,13 @@ fn auto_mode_block_notification_callback(
     reply_to: Option<String>,
 ) -> RuntimeToolEventCallback {
     Arc::new(move |event: &ToolEvent| {
-        if let Some(notification) = auto_mode_cli::block_notification(
-            event,
-            &channel,
-            &chat_id,
-            &routing_metadata,
-            reply_to.as_deref(),
-        ) {
+        let route = auto_mode_cli::NoticeRoute {
+            channel: &channel,
+            chat_id: &chat_id,
+            routing_metadata: &routing_metadata,
+            reply_to: reply_to.as_deref(),
+        };
+        if let Some(notification) = auto_mode_cli::event_notification(event, &route) {
             publish_runtime_notification(&bus, live_sink.as_ref(), notification);
         }
     })
@@ -2952,6 +3007,22 @@ enum RuntimeConfigAdmission {
     OwnerAcquire,
 }
 
+/// The config with `${NAME}` resolved, for commands that only read it:
+/// migrations apply in memory and nothing is written (Spec 048 PRD 050
+/// scopes 6 and 7).
+pub(crate) fn load_config_for_reading(
+    options: RuntimeConfigOptions,
+) -> Result<ConfigBundle, CliError> {
+    let config_path = options.config_path.unwrap_or_else(default_config_path);
+    guard_config_migration_admission(&config_path)?;
+    Ok(load_config(LoadOptions {
+        config_path: Some(config_path),
+        workspace_override: options.workspace_override,
+        resolve_env: options.resolve_env,
+        write_back_migrations: false,
+    })?)
+}
+
 fn load_runtime_owner_config(options: RuntimeConfigOptions) -> Result<ConfigBundle, CliError> {
     load_runtime_config_with_admission(options, &ProcessEnv, RuntimeConfigAdmission::OwnerAcquire)
 }
@@ -3111,18 +3182,81 @@ fn improvement_api_error(error: shacs_core::runtime::LocalImprovementBlock) -> A
     ApiError::invalid_request(error.to_string())
 }
 
+/// The provider client of a run of `bundle`, or the debug transport that
+/// replaces it in debug builds.
+fn bundle_provider_client(
+    bundle: &ConfigBundle,
+    provider_id: &str,
+    credential_runtime: Arc<ProviderCredentialRuntime>,
+) -> Arc<dyn ProviderClient> {
+    let defaults = &bundle.config.agents.defaults;
+    let debug_transport = debug_fake_provider_client();
+    let debug_resolves_credential = bundle
+        .config
+        .providers
+        .get(provider_id)
+        .and_then(|provider| provider.credential_source.as_ref())
+        .is_some();
+    match (debug_transport, debug_resolves_credential) {
+        (Some(transport), true) => Arc::new(
+            CredentialResolvingProviderClient::new(
+                defaults.provider.clone(),
+                defaults.model.clone(),
+                bundle.config.providers.clone(),
+                credential_runtime,
+            )
+            .with_transport_override(transport),
+        ),
+        (Some(transport), false) => transport,
+        (None, _) => Arc::new(CredentialResolvingProviderClient::new(
+            defaults.provider.clone(),
+            defaults.model.clone(),
+            bundle.config.providers.clone(),
+            credential_runtime,
+        )),
+    }
+}
+
+/// The client and model `ask` uses for `bundle`, without the rest of a run
+/// and without writing local sign-ins: an expired OAuth sign-in is refused
+/// rather than refreshed and saved.
+pub(crate) fn read_only_provider_client(
+    bundle: &ConfigBundle,
+) -> (Arc<dyn ProviderClient>, String) {
+    let defaults = &bundle.config.agents.defaults;
+    let provider_match = ProviderRegistry::new().match_provider(
+        &defaults.provider,
+        &defaults.model,
+        &bundle.config.providers,
+    );
+    let provider_id = provider_match.as_ref().map_or_else(
+        || defaults.provider.clone(),
+        |provider| provider.provider_id.clone(),
+    );
+    let model = provider_match.map_or_else(|| defaults.model.clone(), |provider| provider.model);
+    let credential_runtime = Arc::new(
+        local_provider_credential_runtime(bundle, spec030_fact_store_for_bundle(bundle))
+            .without_local_auth_writes(),
+    );
+    (
+        bundle_provider_client(bundle, &provider_id, credential_runtime),
+        model,
+    )
+}
+
 fn provider_credential_runtime(
     bundle: &ConfigBundle,
     facts: shacs_core::runtime::trusted_runtime::Spec030FactStore,
 ) -> Arc<ProviderCredentialRuntime> {
-    Arc::new(
-        ProviderCredentialRuntime::new(
-            bundle.context.auth_path(),
-            &bundle.context.workspace,
-            facts,
-        )
-        .with_oauth_refresher(Arc::new(CliOAuthCredentialRefresher)),
-    )
+    Arc::new(local_provider_credential_runtime(bundle, facts))
+}
+
+fn local_provider_credential_runtime(
+    bundle: &ConfigBundle,
+    facts: shacs_core::runtime::trusted_runtime::Spec030FactStore,
+) -> ProviderCredentialRuntime {
+    ProviderCredentialRuntime::new(bundle.context.auth_path(), &bundle.context.workspace, facts)
+        .with_oauth_refresher(Arc::new(CliOAuthCredentialRefresher))
 }
 
 #[cfg(test)]
@@ -3267,7 +3401,6 @@ fn save_onboard_config_to_path(config: &shacs_config::Config, path: &Path) -> Re
 fn onboard_config_defaults() -> Value {
     json!({
         "permissions": {
-            "mode": "default",
             "autoApproval": {
                 "enabled": false,
                 "requireDockerContainmentForExec": true,
@@ -3864,6 +3997,7 @@ fn agent_loop_permission_config_snapshot(
         PermissionActivationContext {
             user_local_auto_opt_in: false,
             containment_precondition_met: runtime_containment_precondition_met(containment),
+            interactive_run: false,
         },
     )
 }
@@ -3997,6 +4131,7 @@ fn permission_config_snapshot_from_config_path(
         PermissionActivationContext {
             user_local_auto_opt_in: false,
             containment_precondition_met,
+            interactive_run: false,
         },
     );
     Ok(snapshot)
@@ -4013,6 +4148,7 @@ fn permission_mode_source_name(source: PermissionModeSource) -> &'static str {
         PermissionModeSource::CliFlag => "cli_flag",
         PermissionModeSource::LocalApiRequest => "local_api_request",
         PermissionModeSource::SessionCommand => "session_command",
+        PermissionModeSource::InteractiveDefault => "interactive_default",
         PermissionModeSource::DefaultFallback => "default_fallback",
     }
 }
@@ -6990,6 +7126,13 @@ fn run_permissions_command(command: PermissionsCommand) -> Result<String, CliErr
             auto_mode_cli::auto_mode_defaults(label.as_deref())
         }
         PermissionsCommand::AutoModeConfig(options) => auto_mode_cli::auto_mode_config(options),
+        PermissionsCommand::AutoModeReset(options) => {
+            auto_mode_reset::reset(&options, &mut consent_prompt::StdPrompt)
+        }
+        PermissionsCommand::AutoModeCritique(options) => auto_mode_critique::critique(options),
+        PermissionsCommand::AutoModeSetup(options) => {
+            auto_mode_setup::setup(&options, &mut consent_prompt::StdPrompt)
+        }
     }
 }
 
@@ -7490,13 +7633,7 @@ pub(crate) fn read_config_value_for_patch(path: &Path) -> Result<Value, CliError
 }
 
 pub(crate) fn write_config_value_for_patch(path: &Path, value: &Value) -> Result<(), CliError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let text = serde_json::to_string_pretty(value)
-        .map_err(|error| CliError::InvalidArguments(format!("invalid config JSON: {error}")))?;
-    fs::write(path, format!("{text}\n"))?;
-    Ok(())
+    Ok(shacs_config::write_config_value_atomically(path, value)?)
 }
 
 fn plugin_gate_array(value: Option<Value>) -> Vec<String> {
@@ -10584,7 +10721,8 @@ pub fn ask(options: AskOptions) -> Result<String, CliError> {
         resolve_env: true,
     })?;
     guard_runtime_durable_recovery_admission(&bundle.context.data_dir)?;
-    let adapter = AgentLoopChatCompletionAdapter::from_bundle(bundle, options.allow_side_effects)?;
+    let adapter = AgentLoopChatCompletionAdapter::from_bundle(bundle, options.allow_side_effects)?
+        .with_runtime_verbose(options.verbose);
     complete_direct_message(&adapter, &options)
 }
 
@@ -10594,7 +10732,7 @@ fn complete_direct_message(
 ) -> Result<String, CliError> {
     let mut invocation = direct_message_invocation(adapter.configured_model(), options)?;
     invocation.session_key = cli_session_key(options.session.as_deref());
-    let mut config = adapter.loop_config();
+    let mut config = adapter.loop_config_for(run_permission_mode::RunKind::Interactive);
     config.permission_interactive = true;
     config.settings.temperature = invocation
         .temperature
@@ -10604,6 +10742,9 @@ fn complete_direct_message(
         .with_media(invocation.media_paths.clone())
         .with_session_key_override(invocation.session_key.clone());
     let (turn, outbound) = adapter.process_inbound_with_outbound(message, config, None, &[])?;
+    if options.verbose {
+        eprintln!("Turn finished: stop_reason={}", turn.stop_reason);
+    }
     let content = render_direct_turn_content(turn.final_content.unwrap_or_default(), outbound);
     Ok(render_agent_response(content, options.markdown, None))
 }
@@ -12516,7 +12657,7 @@ fn spawn_external_agent_turn(
         let result = match isolate_panic(|| {
             adapter.process_external_inbound_with_streaming(
                 message,
-                adapter.loop_config(),
+                adapter.loop_config_for(run_permission_mode::RunKind::Interactive),
                 &runtime_bus,
             )
         }) {
@@ -12840,14 +12981,13 @@ fn inbound_reply_to(inbound: &InboundMessage) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn effective_external_session_key(config: &AgentLoopConfig, message: &InboundMessage) -> String {
-    if message.session_key_override.is_some() {
-        message.session_key()
-    } else {
-        config
-            .unified_session_key
-            .clone()
-            .unwrap_or_else(|| message.session_key())
+fn effective_external_session_key(
+    unified_session_key: Option<&str>,
+    message: &InboundMessage,
+) -> String {
+    match (&message.session_key_override, unified_session_key) {
+        (None, Some(unified)) => unified.to_owned(),
+        _ => message.session_key(),
     }
 }
 
@@ -16426,8 +16566,9 @@ pub fn help_text() -> String {
         "  skills    List skills, inspect entries, and discover workflow recipes",
         "  plugins   List, inspect, doctor, enable, or disable plugin state and surfaces",
         "  hooks     List and inspect plugin hook metadata",
-        "  permissions List, inspect, or revoke remembered permission rules; print auto mode rules",
-        "            Actions: list, inspect <id>, revoke <id>, auto-mode defaults [--label <prefix>], auto-mode config",
+        "  permissions List, inspect, or revoke remembered permission rules; print, reset, review, or set up auto mode rules",
+        "            Actions: list, inspect <id>, revoke <id>, auto-mode defaults [--label <prefix>], auto-mode config,",
+        "                     auto-mode reset [--yes], auto-mode critique, auto-mode setup [--yes]",
         "  channels  List channel registry/config status",
         "  context   Inspect context files and dry-run inline @ references",
         "  ask       Send one message through the local AgentLoop",
@@ -16453,7 +16594,7 @@ pub fn help_text() -> String {
         "      --temperature <n> Override generation temperature for ask/agent",
         "      --max-tokens <n>  Override max output tokens for ask/agent",
         "      --markdown/--no-markdown  Accept nanobot direct CLI render flags",
-        "      --verbose         Print runtime preview logs for run/web and serve diagnostics",
+        "      --verbose         Print runtime preview logs for run/web/ask and serve diagnostics",
         "      --allow-remote    Permit non-loopback API binding",
         "      --allow-api-side-effects  Enable write/edit/exec tools in API turns",
         "      --session <id>    Use a CLI session key for ask/agent",
@@ -16463,7 +16604,7 @@ pub fn help_text() -> String {
         "      --keep-messages <n> Retain this many messages during session compact",
         "      --target-version <v> Record runtime update target version",
         "      --all             Include inactive skill diagnostics in skills list",
-        "  -y, --yes            Confirm irreversible session delete",
+        "  -y, --yes            Confirm irreversible session delete or permissions auto-mode reset/setup",
         "      --no-side-effects     Disable write/edit/exec/message/image tools for ask/agent/run",
         "      --allow-side-effects  Side-effect tools are on by default; required for run --allow-remote",
         "      --token-stdin     Read provider token from stdin for import-token/import-key commands",
@@ -17178,10 +17319,58 @@ fn parse_permissions_auto_mode(
         Some("config") => Ok(CliCommand::Permissions(PermissionsCommand::AutoModeConfig(
             parse_permissions_list_options(parser, global_config, "auto-mode config")?,
         ))),
+        Some("reset") => {
+            let options = parse_auto_mode_write_options(parser, global_config, "auto-mode reset")?;
+            if options.workspace_override.is_some() {
+                return Err(CliError::InvalidArguments(
+                    "unknown permissions auto-mode reset argument `--workspace`".to_owned(),
+                ));
+            }
+            Ok(CliCommand::Permissions(PermissionsCommand::AutoModeReset(
+                options,
+            )))
+        }
+        Some("critique") => Ok(CliCommand::Permissions(
+            PermissionsCommand::AutoModeCritique(parse_permissions_list_options(
+                parser,
+                global_config,
+                "auto-mode critique",
+            )?),
+        )),
+        Some("setup") => Ok(CliCommand::Permissions(PermissionsCommand::AutoModeSetup(
+            parse_auto_mode_write_options(parser, global_config, "auto-mode setup")?,
+        ))),
         _ => Err(CliError::InvalidArguments(
-            "permissions auto-mode requires `defaults` or `config`".to_owned(),
+            "permissions auto-mode requires `defaults`, `config`, `reset`, `critique` or `setup`"
+                .to_owned(),
         )),
     }
+}
+
+fn parse_auto_mode_write_options(
+    mut parser: ArgParser,
+    global_config: Option<PathBuf>,
+    action: &str,
+) -> Result<AutoModeWriteOptions, CliError> {
+    let mut options = AutoModeWriteOptions {
+        config_path: global_config,
+        ..AutoModeWriteOptions::default()
+    };
+    while let Some(arg) = parser.next() {
+        match arg.as_str() {
+            "--config" | "-c" => options.config_path = Some(take_path(&mut parser, &arg)?),
+            "--workspace" | "-w" => {
+                options.workspace_override = Some(take_path(&mut parser, &arg)?)
+            }
+            "--yes" | "-y" => options.yes = true,
+            other => {
+                return Err(CliError::InvalidArguments(format!(
+                    "unknown permissions {action} argument `{other}`"
+                )))
+            }
+        }
+    }
+    Ok(options)
 }
 
 fn parse_permissions_list_options(
@@ -18260,6 +18449,7 @@ fn parse_ask(
             "--no-side-effects" => options.allow_side_effects = false,
             "--markdown" => options.markdown = true,
             "--no-markdown" => options.markdown = false,
+            "--verbose" if !agent_alias => options.verbose = true,
             "--help" | "-h" => return Ok(CliCommand::Help),
             "--" => {
                 while let Some(value) = parser.next() {
@@ -18800,31 +18990,7 @@ impl AgentLoopChatCompletionAdapter {
             registry.find_by_name(&provider_id).is_some_and(|spec| {
                 provider_model_supports_native_image_input(spec.backend, &resolved_model)
             });
-        let debug_transport = debug_fake_provider_client();
-        let debug_resolves_credential = bundle
-            .config
-            .providers
-            .get(&provider_id)
-            .and_then(|provider| provider.credential_source.as_ref())
-            .is_some();
-        let client: Arc<dyn ProviderClient> = match (debug_transport, debug_resolves_credential) {
-            (Some(transport), true) => Arc::new(
-                CredentialResolvingProviderClient::new(
-                    defaults.provider.clone(),
-                    defaults.model.clone(),
-                    bundle.config.providers.clone(),
-                    credential_runtime,
-                )
-                .with_transport_override(transport),
-            ),
-            (Some(transport), false) => transport,
-            (None, _) => Arc::new(CredentialResolvingProviderClient::new(
-                defaults.provider.clone(),
-                defaults.model.clone(),
-                bundle.config.providers.clone(),
-                credential_runtime,
-            )),
-        };
+        let client = bundle_provider_client(&bundle, &provider_id, credential_runtime);
         Ok(Self {
             configured_model: defaults.model.clone(),
             provider_id,
@@ -18871,13 +19037,26 @@ impl AgentLoopChatCompletionAdapter {
     }
 
     fn execution_snapshot_source(&self) -> shacs_core::runtime::LiveExecutionSnapshotSource {
-        let mut source = shacs_core::runtime::LiveExecutionSnapshotSource::default();
-        if let Ok(bundle) = load_config(LoadOptions {
+        self.execution_snapshot_source_from(self.read_run_config().as_ref())
+    }
+
+    /// The config as a run reads it, or `None` when it cannot be read.
+    fn read_run_config(&self) -> Option<ConfigBundle> {
+        load_config(LoadOptions {
             config_path: Some(self.config_path.clone()),
             workspace_override: Some(self.workspace.clone()),
             resolve_env: false,
             write_back_migrations: false,
-        }) {
+        })
+        .ok()
+    }
+
+    fn execution_snapshot_source_from(
+        &self,
+        bundle: Option<&ConfigBundle>,
+    ) -> shacs_core::runtime::LiveExecutionSnapshotSource {
+        let mut source = shacs_core::runtime::LiveExecutionSnapshotSource::default();
+        if let Some(bundle) = bundle {
             source.config = shacs_core::runtime::ConfigSnapshotRef {
                 source_ref: format!(
                     "config:sha256:{:x}",
@@ -18891,9 +19070,9 @@ impl AgentLoopChatCompletionAdapter {
                 },
             };
             source.profiles = shacs_core::runtime::ProfileSelectionSnapshot {
-                provider: bundle.config.profiles.selection.provider,
-                trusted_runtime: bundle.config.profiles.selection.trusted_runtime,
-                context: bundle.config.profiles.selection.context,
+                provider: bundle.config.profiles.selection.provider.clone(),
+                trusted_runtime: bundle.config.profiles.selection.trusted_runtime.clone(),
+                context: bundle.config.profiles.selection.context.clone(),
             };
         }
         source.provider_id.clone_from(&self.provider_id);
@@ -18912,6 +19091,14 @@ impl AgentLoopChatCompletionAdapter {
     }
 
     fn loop_config(&self) -> AgentLoopConfig {
+        self.loop_config_for(run_permission_mode::RunKind::NonInteractive)
+    }
+
+    /// One run's loop config. It reads the config file once, and that read
+    /// makes the execution snapshot's config facts and every permission
+    /// input of the run (Spec 048 PRD 050 scope 2).
+    fn loop_config_for(&self, kind: run_permission_mode::RunKind) -> AgentLoopConfig {
+        let bundle = self.read_run_config();
         let mut config = AgentLoopConfig::new(&self.workspace, self.resolved_model.clone());
         if let Some(media_root) = self.media_dir.parent() {
             config.media_roots.push(media_root.to_path_buf());
@@ -18944,26 +19131,8 @@ impl AgentLoopChatCompletionAdapter {
             .context_block_limit
             .map(|value| value as usize);
         config.provider_id.clone_from(&self.provider_id);
-        let bundle = load_config(LoadOptions {
-            config_path: Some(self.config_path.clone()),
-            workspace_override: Some(self.workspace.clone()),
-            resolve_env: false,
-            write_back_migrations: false,
-        })
-        .ok();
-        config.extra_context_files = bundle
-            .as_ref()
-            .and_then(|bundle| {
-                bundle
-                    .config
-                    .resolve_profiles()
-                    .ok()
-                    .and_then(|profiles| profiles.context)
-                    .map(|profile| profile.value.files.iter().map(PathBuf::from).collect())
-            })
-            .unwrap_or_default();
         config.tool_search = self.tool_search;
-        config.execution_snapshot_source = self.execution_snapshot_source();
+        config.execution_snapshot_source = self.execution_snapshot_source_from(bundle.as_ref());
         config.history_options = SessionHistoryOptions {
             max_messages: self.defaults.max_messages as usize,
             max_tokens: replay_token_budget(
@@ -18972,29 +19141,10 @@ impl AgentLoopChatCompletionAdapter {
             ),
             include_timestamps: true,
         };
-        config.unified_session_key = self
-            .defaults
-            .unified_session
-            .then(|| "api:default".to_owned());
+        config.unified_session_key = self.unified_session_key();
         config.concurrent_tools = true;
         config.containment_snapshot = self.containment_snapshot.clone();
-        let permission_config_snapshot = self.current_permission_config_snapshot();
-        config.permission_mode_snapshot = runtime_permission_mode_snapshot_for_workspace(
-            &permission_config_snapshot,
-            &self.workspace,
-        );
-        config.permission_auto_approval = permission_config_snapshot.auto_approval;
-        let workspace_scope_ref = config
-            .permission_mode_snapshot
-            .scope_ref
-            .clone()
-            .unwrap_or_else(|| opaque_workspace_scope_ref(&self.workspace));
-        config.permission_ceiling_snapshot = Some(ceiling_for_origin(
-            config.permission_mode_snapshot.mode,
-            runtime_capability_ceiling_from_registry(&self.tools),
-            vec![workspace_scope_ref],
-            RuntimeBoundaryOrigin::UserTurn,
-        ));
+        self.apply_permission_inputs(&mut config, bundle.as_ref(), kind);
         #[cfg(not(test))]
         {
             config.permission_rule_input.containment = self.permission_rule_containment.clone();
@@ -19006,42 +19156,16 @@ impl AgentLoopChatCompletionAdapter {
                     self.containment_snapshot.as_ref(),
                 );
         }
-        config.permission_rule_input.protected_targets =
-            config.permission_auto_approval.protected_targets.clone();
         let config_context = shacs_config::config_context(
             Some(self.config_path.clone()),
             Some(self.workspace.clone()),
         );
-        let permissions_path = config_context.remembered_permissions_path();
-        let permissions_target = permissions_path.to_string_lossy().to_string();
-        if !config
-            .permission_rule_input
-            .protected_targets
-            .contains(&permissions_target)
-        {
-            config
-                .permission_rule_input
-                .protected_targets
-                .push(permissions_target);
-        }
         if let Ok(workspace_id) = config_context.workspace_permission_id() {
             config.project_permission_store = Some(ProjectPermissionStoreConfig {
-                store_path: permissions_path,
+                store_path: config_context.remembered_permissions_path(),
                 workspace_id,
             });
         }
-        let mut skill_roots = vec![adapter_user_skills_dir(&self.config_path)];
-        skill_roots.extend(self.plugin_skill_roots.iter().cloned());
-        config.permission_environment = Some(Arc::new(auto_mode_cli::permission_environment(
-            bundle.as_ref(),
-            auto_mode_cli::EnvironmentSources {
-                config_path: &self.config_path,
-                workspace: &self.workspace,
-                extra_skill_roots: &skill_roots,
-                extra_context_files: &config.extra_context_files,
-                protected_targets: &config.permission_rule_input.protected_targets,
-            },
-        )));
         let config_path = self.config_path.clone();
         let containment_precondition_met =
             permission_containment_precondition_met(self.containment_snapshot.as_ref());
@@ -19050,21 +19174,24 @@ impl AgentLoopChatCompletionAdapter {
             permission_mode_snapshot_from_config_path(&config_path, containment_precondition_met)
                 .map_err(|error| error.to_string())
         }));
+        let data_folder = self.data_folder().to_path_buf();
+        config.auto_mode_setup_hint_setter = Some(Arc::new(move |switch| {
+            auto_mode_markers::set_setup_hint(&data_folder, switch)
+                .map_err(|error| error.to_string())
+        }));
         config
     }
 
-    fn current_permission_config_snapshot(&self) -> PermissionConfigSnapshot {
-        permission_config_snapshot_from_config_path(
-            &self.config_path,
-            permission_containment_precondition_met(self.containment_snapshot.as_ref()),
-        )
-        .unwrap_or_else(|_| {
-            reload_failure_permission_config_snapshot(&self.permission_mode_snapshot)
-        })
+    fn unified_session_key(&self) -> Option<String> {
+        self.defaults
+            .unified_session
+            .then(|| "api:default".to_owned())
     }
 
+    /// The session a channel message goes to, without reading the config:
+    /// the turn's own read happens once when its loop config is made.
     fn external_effective_session_key(&self, message: &InboundMessage) -> String {
-        effective_external_session_key(&self.loop_config(), message)
+        effective_external_session_key(self.unified_session_key().as_deref(), message)
     }
 
     fn external_session_is_busy(&self, session_key: &str) -> bool {
@@ -19279,7 +19406,7 @@ impl AgentLoopChatCompletionAdapter {
                 })?;
                 let pending_inbound = inbound.clone();
                 let stream_id = format!("{chat_id}:{}", now_millis());
-                let mut config = self.loop_config();
+                let mut config = self.loop_config_for(run_permission_mode::RunKind::Interactive);
                 config.permission_interactive = true;
                 let result = self.process_websocket_inbound_with_streaming(
                     inbound, config, &chat_id, &stream_id, emit,
@@ -19421,7 +19548,8 @@ impl AgentLoopChatCompletionAdapter {
         inbound = self.normalize_external_inbound_media(inbound, &config)?;
         let channel = inbound.channel.clone();
         let chat_id = inbound.chat_id.clone();
-        let session_key = self.external_effective_session_key(&inbound);
+        let session_key =
+            effective_external_session_key(config.unified_session_key.as_deref(), &inbound);
         let priority_command = is_external_priority_command(&inbound);
         let routing_metadata = stream_routing_metadata_from_inbound(&inbound);
         let reply_to = inbound_reply_to(&inbound);
@@ -19784,6 +19912,23 @@ impl AgentLoopChatCompletionAdapter {
             routing_metadata.clone(),
             reply_to.clone(),
         );
+        if config.permission_interactive
+            && config.permission_mode_snapshot.source.as_deref()
+                == Some(permission_mode_source_name(
+                    PermissionModeSource::InteractiveDefault,
+                ))
+        {
+            self.send_default_on_notice(
+                &bus,
+                live_notification_sink.as_ref(),
+                &auto_mode_cli::NoticeRoute {
+                    channel: &message.channel,
+                    chat_id: &message.chat_id,
+                    routing_metadata: &routing_metadata,
+                    reply_to: reply_to.as_deref(),
+                },
+            );
+        }
         let subagent_runtime = match subagent_runtime {
             Some(runtime) => runtime.attach_bus(bus.clone()),
             None => {
@@ -19972,6 +20117,26 @@ impl AgentLoopChatCompletionAdapter {
             outbound.push(message);
         }
         Ok((result, outbound))
+    }
+
+    fn send_default_on_notice(
+        &self,
+        bus: &MessageBus,
+        live_sink: Option<&RuntimeNotificationSink>,
+        route: &auto_mode_cli::NoticeRoute<'_>,
+    ) {
+        match auto_mode_markers::claim_default_notice(self.data_folder()) {
+            Ok(true) => publish_runtime_notification(
+                bus,
+                live_sink,
+                auto_mode_cli::default_on_notification(route),
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "auto mode is on by default, but its notice was not sent: {}",
+                redact_string(&error.to_string())
+            ),
+        }
     }
 
     fn subagent_execution_config(&self, config: &AgentLoopConfig) -> SubagentExecutionConfig {
@@ -20745,7 +20910,8 @@ impl AgentLoopChatCompletionAdapter {
             return Ok(inbound);
         }
 
-        let session_key = effective_external_session_key(config, &inbound);
+        let session_key =
+            effective_external_session_key(config.unified_session_key.as_deref(), &inbound);
         let channel = inbound.channel.clone();
         let mut data_urls = Vec::new();
         let mut data_url_names = Vec::new();
@@ -24968,14 +25134,17 @@ mod tests {
         config.unified_session_key = Some("unified:default".to_owned());
         let message = InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "hello");
         assert_eq!(
-            effective_external_session_key(&config, &message),
+            effective_external_session_key(config.unified_session_key.as_deref(), &message),
             "unified:default"
         );
 
         let override_message = InboundMessage::new(TELEGRAM_CHANNEL, "u1", "chat-1", "hello")
             .with_session_key_override("telegram:chat-1");
         assert_eq!(
-            effective_external_session_key(&config, &override_message),
+            effective_external_session_key(
+                config.unified_session_key.as_deref(),
+                &override_message
+            ),
             "telegram:chat-1"
         );
         Ok(())
@@ -27379,7 +27548,7 @@ mod tests {
         let mut bundle = public_adapter_test_bundle(root.path(), true)?;
         let workspace = bundle.context.workspace.clone();
         let scope_ref = opaque_workspace_scope_ref_for_test(&workspace)?;
-        bundle.config.permissions.mode = PermissionMode::Default;
+        bundle.config.permissions.set_mode(PermissionMode::Default);
         save_config_to_path(&bundle.config, &bundle.context.config_path)?;
         let path_context = PathContext {
             workspace: Some(workspace.clone()),
@@ -27567,7 +27736,7 @@ mod tests {
         let mut config = Config::default();
         config.agents.defaults.provider = "openrouter".to_owned();
         config.agents.defaults.model = "openrouter/openai/gpt-4o-mini".to_owned();
-        config.permissions.mode = PermissionMode::Auto;
+        config.permissions.set_mode(PermissionMode::Auto);
         config.tools.exec.enable = exec_enabled;
         config.providers.insert(
             "openrouter".to_owned(),
@@ -28099,6 +28268,42 @@ mod tests {
         Ok(())
     }
 
+    /// Writes `permissions.mode: default` for tests of interactive turns that
+    /// are not about the mode a config without one starts in (Spec 048 PRD
+    /// 050 acceptance 10).
+    fn write_default_mode_config(data_folder: &Path) -> io::Result<()> {
+        fs::create_dir_all(data_folder)?;
+        fs::write(
+            data_folder.join("config.json"),
+            r#"{"permissions": {"mode": "default"}}"#,
+        )
+    }
+
+    #[test]
+    fn verbose_runs_write_auto_mode_events_but_not_a_tool_that_shares_a_name() {
+        // Given
+        let review = ToolEvent {
+            name: "auto_mode_report_review".to_owned(),
+            status: ToolStatus::Waiting,
+            detail: "auto mode review flagged the subagent's work · [Data Exfiltration]".to_owned(),
+            call_id: Some("child-1".to_owned()),
+            arguments: None,
+            result: Some(json!({"outcome": "flagged", "rule": "[Data Exfiltration]"})),
+        };
+        let tool = ToolEvent {
+            status: ToolStatus::Ok,
+            arguments: Some(json!({"text": "tool argument"})),
+            ..review.clone()
+        };
+
+        // When / Then
+        assert_eq!(
+            runtime_verbose_event_line(&review).as_deref(),
+            Some("Auto mode event auto_mode_report_review")
+        );
+        assert_eq!(runtime_verbose_event_line(&tool), None);
+    }
+
     #[test]
     fn onboard_creates_config_runtime_dirs_and_templates() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -28175,7 +28380,7 @@ mod tests {
         }
         assert_eq!(channels[WEBSOCKET_CHANNEL]["enabled"], json!(true));
         assert_eq!(channels[EMAIL_CHANNEL]["consentGranted"], json!(false));
-        assert_eq!(saved_json["permissions"]["mode"], json!("default"));
+        assert_eq!(saved_json["permissions"].get("mode"), None);
         assert_eq!(
             saved_json["permissions"]["autoApproval"]["enabled"],
             json!(false)
@@ -28247,7 +28452,7 @@ mod tests {
         assert_eq!(channels[EMAIL_CHANNEL]["smtp"]["port"], json!(587));
         assert!(channels.contains_key(WEBSOCKET_CHANNEL));
         assert!(channels.contains_key(WHATSAPP_CHANNEL));
-        assert_eq!(saved["permissions"]["mode"], json!("default"));
+        assert_eq!(saved["permissions"].get("mode"), None);
         assert_eq!(
             saved["permissions"]["autoApproval"]["enabled"],
             json!(false)
@@ -30499,6 +30704,7 @@ mod tests {
             PermissionActivationContext {
                 user_local_auto_opt_in: false,
                 containment_precondition_met: runtime_containment_precondition_met(&inspect),
+                interactive_run: false,
             },
         );
         let runtime_snapshot = runtime_permission_mode_snapshot(&snapshot);
@@ -30530,6 +30736,7 @@ mod tests {
             PermissionActivationContext {
                 user_local_auto_opt_in: false,
                 containment_precondition_met: runtime_containment_precondition_met(&inspect),
+                interactive_run: false,
             },
         );
         let runtime_snapshot = runtime_permission_mode_snapshot(&snapshot);
@@ -33436,7 +33643,7 @@ mod tests {
         assert!(help.contains("--token-stdin"));
         assert!(help.contains("--token-env <var>"));
         assert!(help.contains(
-            "--verbose         Print runtime preview logs for run/web and serve diagnostics"
+            "--verbose         Print runtime preview logs for run/web/ask and serve diagnostics"
         ));
     }
 
@@ -33939,6 +34146,7 @@ mod tests {
         let media_root = root.path().join("data").join("media");
         let media_dir = root.path().join("data").join("media").join("api");
         fs::create_dir_all(&workspace)?;
+        write_default_mode_config(root.path())?;
         let captured = Arc::new(Mutex::new(Vec::new()));
         let adapter = AgentLoopChatCompletionAdapter {
             configured_model: "openai/gpt-5".to_owned(),
@@ -34143,6 +34351,7 @@ mod tests {
         let workspace = root.path().join("workspace");
         let media_dir = root.path().join("data").join("media").join("api");
         fs::create_dir_all(&workspace)?;
+        write_default_mode_config(&root.path().join("data"))?;
         let captured = Arc::new(Mutex::new(Vec::new()));
         let adapter = AgentLoopChatCompletionAdapter {
             configured_model: "openai/gpt-5".to_owned(),
@@ -34510,6 +34719,7 @@ mod tests {
         let workspace = root.path().join("workspace");
         let media_dir = root.path().join("data").join("media").join("api");
         fs::create_dir_all(&workspace)?;
+        write_default_mode_config(root.path())?;
         let captured = Arc::new(Mutex::new(Vec::new()));
         let adapter = AgentLoopChatCompletionAdapter {
             configured_model: "openai/gpt-5".to_owned(),
@@ -35089,6 +35299,7 @@ mod tests {
         let workspace = root.path().join("workspace");
         let media_dir = root.path().join("data").join("media").join("api");
         fs::create_dir_all(&workspace)?;
+        write_default_mode_config(&root.path().join("data"))?;
         fs::create_dir_all(workspace.join("skills/weather"))?;
         fs::write(
             workspace.join("skills/weather/SKILL.md"),
@@ -36798,7 +37009,7 @@ mod tests {
     }
 
     /// An agent-loop chat adapter in `root` whose provider answers with `responses` in order.
-    fn scripted_agent_loop_adapter(
+    pub(crate) fn scripted_agent_loop_adapter(
         root: &Path,
         config: Value,
         tools: ToolRegistry,

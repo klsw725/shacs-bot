@@ -1,14 +1,23 @@
 //! Auto mode across a session (Spec 048 PRD 020): the block counts the
 //! session keeps, the system guidance, and the approval `/permission recent`
-//! adds.
+//! adds. PRD 050: the setup hint once a session keeps getting blocked.
 
 use super::AgentLoopConfig;
 use crate::runtime::auto_mode::retry_approval;
-use crate::runtime::{AutoModeBlockCounts, AutoModeBlocks, PermissionMode, PermissionedAction};
-use serde_json::{Map, Value};
+use crate::runtime::runner::invoke_tool_event_callback;
+use crate::runtime::{
+    AutoModeBlockCounts, AutoModeBlocks, PermissionMode, PermissionedAction, ToolEvent,
+    ToolEventCallback, ToolStatus,
+};
+use serde_json::{json, Map, Value};
 use shacs_session::Session;
 
 pub(super) const BLOCK_COUNTS_KEY: &str = "auto_mode_block_counts";
+pub(super) const SETUP_HINT_SHOWN_KEY: &str = "auto_mode_setup_hint_shown";
+/// The tool event the CLI sends on as the setup hint notice.
+pub const AUTO_MODE_SETUP_HINT_EVENT: &str = "auto_mode_setup_hint";
+const SETUP_HINT_BLOCKS: u32 = 3;
+const SETUP_HINT_TEXT: &str = "Auto mode has stopped several calls in this conversation. If it lacks context about the places you trust, run shacs-bot permissions auto-mode setup on the host. Send /permission setup-hint off to stop this notice.";
 /// The longest arguments `/permission recent` approves: the approval must
 /// reach the classifier whole (Spec 048 PRD 020 scope 6).
 pub(super) const MAX_RETRY_ARGUMENT_CHARS: usize = 3_000;
@@ -27,14 +36,52 @@ pub(super) fn blocks(session: &Session) -> AutoModeBlocks {
     AutoModeBlocks::new(stored_counts(session).unwrap_or_default())
 }
 
+/// Keeps the turn's counts, and points the user to `permissions auto-mode
+/// setup` once the session's blocks reach three. The session saves the mark
+/// under the turn lock, so a session shows the hint once.
 pub(super) fn store_blocks(
     config: &AgentLoopConfig,
     session: &mut Session,
     blocks: &AutoModeBlocks,
+    callback: Option<&ToolEventCallback>,
 ) {
-    if active(config) {
-        store_counts(session, blocks.counts());
+    if !active(config) {
+        return;
     }
+    let counts = blocks.counts();
+    store_counts(session, counts);
+    if !config.auto_mode_setup_hint
+        || counts.total < SETUP_HINT_BLOCKS
+        || session.metadata.contains_key(SETUP_HINT_SHOWN_KEY)
+    {
+        return;
+    }
+    session
+        .metadata
+        .insert(SETUP_HINT_SHOWN_KEY.to_owned(), Value::Bool(true));
+    if let Some(callback) = callback {
+        invoke_tool_event_callback(
+            callback,
+            &ToolEvent {
+                name: AUTO_MODE_SETUP_HINT_EVENT.to_owned(),
+                status: ToolStatus::Waiting,
+                detail: SETUP_HINT_TEXT.to_owned(),
+                call_id: None,
+                arguments: None,
+                result: Some(json!({"phase": "setup_hint"})),
+            },
+        );
+    }
+}
+
+/// Whether an event is the runtime's setup hint, not a tool that happens to
+/// share its name (Spec 048 PRD 050 scope 8).
+pub fn is_auto_mode_setup_hint(event: &ToolEvent) -> bool {
+    event.name == AUTO_MODE_SETUP_HINT_EVENT
+        && event.status == ToolStatus::Waiting
+        && event.arguments.is_none()
+        && event.call_id.is_none()
+        && event.result == Some(json!({"phase": "setup_hint"}))
 }
 
 /// The user approved a call, so the row of stopped calls starts over.

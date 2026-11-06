@@ -1,5 +1,6 @@
 use super::support::{
-    call, run, run_answered, Exec, Options, Outcome, Setup, TestResult, ALL_MODES, SECRET_TOKEN,
+    call, run, run_answered, Exec, Options, Outcome, Rules, Setup, TestResult, Verdict, ALL_MODES,
+    SECRET_TOKEN,
 };
 use serde_json::{json, Value};
 use shacs_core::runtime::{ApprovalDecisionKind, PermissionMode};
@@ -414,4 +415,70 @@ fn links_made_after_the_store_was_saved_again_stay_secret_in_every_mode() -> Tes
         }
     }
     finish(failures)
+}
+
+#[test]
+fn auto_mode_refuses_writes_to_the_runtime_markers_that_rules_and_the_classifier_allow(
+) -> TestResult {
+    // Given: allow rules for every write and a classifier that allows.
+    let setup = Setup::workspace_is_data()?;
+    let runtime = setup.data.join("runtime");
+    fs::create_dir_all(&runtime)?;
+    fs::write(runtime.join("auto-mode-setup-hint-off"), "")?;
+    fs::write(runtime.join("auto-mode-default-notice"), "")?;
+    let (registry, recorded) = setup.registry(Exec::Gated);
+    let rules = Rules::allow(&[
+        "edit",
+        "exec(touch *)",
+        "exec(rm *)",
+        "exec(mv *)",
+        "exec(echo *)",
+    ]);
+    let auto = setup.context(&Options::auto(true).rules(rules).verdict(Verdict::Allow));
+    let writes = [
+        (
+            "write_file",
+            json!({"path": "runtime/auto-mode-setup-hint-off", "content": "x"}),
+        ),
+        (
+            "edit_file",
+            json!({"path": "runtime/auto-mode-default-notice", "old_text": "", "new_text": "x"}),
+        ),
+        (
+            "exec",
+            json!({"command": "touch runtime/auto-mode-setup-hint-off"}),
+        ),
+        (
+            "exec",
+            json!({"command": "rm runtime/auto-mode-default-notice"}),
+        ),
+        (
+            "exec",
+            json!({"command": "echo x > runtime/auto-mode-setup-hint-off"}),
+        ),
+        ("exec", json!({"command": "mv runtime runtime-old"})),
+        ("exec", json!({"command": "rm runtime/auto-mode-*"})),
+        ("exec", json!({"command": "rm runtime/*"})),
+    ];
+    let default = setup.context(&Options::mode(PermissionMode::Default, true));
+
+    // When
+    let outcomes = writes
+        .iter()
+        .map(|(tool, arguments)| run(&registry, &auto, call(tool, arguments.clone())))
+        .collect::<Vec<_>>();
+    let in_default = run(&registry, &default, call(writes[0].0, writes[0].1.clone()));
+
+    // Then
+    for (outcome, (tool, arguments)) in outcomes.iter().zip(&writes) {
+        assert!(
+            outcome.refusal().is_some(),
+            "{tool} {arguments}: {outcome:?}"
+        );
+    }
+    assert!(recorded.launched().is_empty());
+    assert!(runtime.join("auto-mode-setup-hint-off").exists());
+    assert!(runtime.join("auto-mode-default-notice").exists());
+    assert!(in_default.question().is_some(), "{in_default:?}");
+    Ok(())
 }

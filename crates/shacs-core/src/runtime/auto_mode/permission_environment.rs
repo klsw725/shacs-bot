@@ -9,6 +9,7 @@ use super::protected_path::{ProtectedPaths, ProtectedPathsInput};
 use super::rule_match::{self, PathPair};
 use super::secret_file::SecretFiles;
 use super::secret_values::SecretValues;
+use super::user_only_file::UserOnlyFiles;
 use super::{real_path, shell_command};
 use std::path::{Path, PathBuf};
 
@@ -37,6 +38,7 @@ pub struct PermissionEnvironmentInput<'a> {
 pub struct PermissionEnvironment {
     pub user_rules: UserPermissionRules,
     pub(crate) secret_files: SecretFiles,
+    pub(crate) user_only_files: UserOnlyFiles,
     pub(crate) protected_paths: ProtectedPaths,
     pub(crate) critical_folders: CriticalFolders,
     pub(crate) home: PathBuf,
@@ -61,6 +63,7 @@ impl PermissionEnvironment {
         Self {
             user_rules: UserPermissionRules::parse(input.rules, input.mcp_servers),
             secret_files: SecretFiles::new(input.data_folder, input.config_file),
+            user_only_files: UserOnlyFiles::new(input.data_folder),
             protected_paths: ProtectedPaths::new(ProtectedPathsInput {
                 workspace: input.workspace,
                 data_folder: input.data_folder,
@@ -99,6 +102,12 @@ impl PermissionEnvironment {
             config_folder: &self.config_folder,
             workspace: &self.workspace,
         }
+    }
+
+    /// Whether a reader working for the user must leave `path` unread, as
+    /// folder scans do (Spec 048 PRD 050 scope 7).
+    pub fn withholds_read(&self, path: &Path) -> bool {
+        self.hidden_from_scans(path)
     }
 
     /// Whether folder scans leave `path` out: the auth store and the paths a

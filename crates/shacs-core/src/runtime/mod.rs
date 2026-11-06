@@ -13,6 +13,8 @@ mod automation_lifecycle;
 mod automation_payload;
 mod automation_production;
 mod classifier_evidence;
+#[cfg(unix)]
+mod confined_read;
 mod containment_permission;
 mod context;
 mod context_diagnostics;
@@ -199,15 +201,16 @@ pub use activation_store::{
     ActivationStoreError,
 };
 pub use agent_loop::{
-    AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError, AgentLoopOutcome,
-    AgentLoopRunSummary, AgentLoopTurnResult, ClockMs, PermissionModeSetter,
-    ProjectPermissionStoreConfig,
+    is_auto_mode_setup_hint, AgentLoop, AgentLoopCommandResult, AgentLoopConfig, AgentLoopError,
+    AgentLoopOutcome, AgentLoopRunSummary, AgentLoopTurnResult, AutoModeSetupHintSetter, ClockMs,
+    PermissionModeSetter, ProjectPermissionStoreConfig, AUTO_MODE_SETUP_HINT_EVENT,
 };
 pub use auto_mode::{
-    ApprovalExplanation, AutoAllow, AutoModeBlockCounts, AutoModeBlocks, AutoModeClassifier,
-    AutoModeEscalation, AutoModeSlots, ClassifierContextFiles, PermissionEnvironment,
-    PermissionEnvironmentInput, PermissionMaterials, RawRuleLists, RuleDiagnostic, RuleEffect,
-    RuleProblem, SecretValues, SlotOverrides, UserPermissionRules, DEFAULTS_MARKER,
+    auto_mode_marker_path, ApprovalExplanation, AutoAllow, AutoModeBlockCounts, AutoModeBlocks,
+    AutoModeClassifier, AutoModeEscalation, AutoModeSlots, ClassifierContextFiles,
+    PermissionEnvironment, PermissionEnvironmentInput, PermissionMaterials, RawRuleLists,
+    RuleDiagnostic, RuleEffect, RuleProblem, SecretValues, SlotOverrides, UserPermissionRules,
+    DEFAULTS_MARKER, DEFAULT_NOTICE_MARKER, SETUP_HINT_OFF_MARKER,
 };
 pub use autocompact::{AutoCompact, AutoCompactArchiveOutcome, RECENT_SUFFIX_MESSAGES};
 pub use automation::{
@@ -248,6 +251,8 @@ pub use classifier_evidence::{
     ClassifierTokenAccounting, ClassifierVerdictEvidence, RedactedDiagnosticRef,
     StaticPolicyPrecedence, CLASSIFIER_EVIDENCE_SCHEMA_V1,
 };
+#[cfg(unix)]
+pub use confined_read::{ConfinedEntry, ConfinedFolder, ConfinedSkip};
 pub use containment_permission::{
     containment_permission_proof_for_process_gate, evaluate_containment_permission,
     BlockedExternalSurface, BlockedExternalSurfaceReason, ContainmentBoundaryRef,
