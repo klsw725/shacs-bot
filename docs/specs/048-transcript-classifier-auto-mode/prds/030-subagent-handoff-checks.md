@@ -78,7 +78,7 @@ auto mode에서 하위 작업을 Claude Code처럼 세 자리에서 검사한다
 
 ## Non Scope
 
-- 도구 결과 검사(PRD 040). 기본 mode(비대화형 하위 작업의 `default`)와 설정 도구(PRD 050).
+- 도구 결과 검사(PRD 040). 기본 mode와 설정 도구(PRD 050).
 - 하위 작업의 mode 상속(011), 하위 작업 tool 목록, workflow의 계획·검증·종합 방식.
 - workflow 자식의 맡길 때·돌아올 때 검사.
 - 하위 작업 안의 막힘을 parent 세션의 막힘 수, 최근 거절 목록, 대화방 알림에 더하기.
