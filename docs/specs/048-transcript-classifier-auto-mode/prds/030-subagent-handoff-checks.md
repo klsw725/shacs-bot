@@ -1,6 +1,6 @@
 # PRD 030. 하위 작업 넘김 검사
 
-Status: Implemented, closure blocked
+Status: Complete (Scoped)
 
 Depends on: [PRD 000](000-decision-order-and-transcript-classifier.md)의 닫힌 결과(판정 표, classifier와 그 입력, `spawn`의 16번), [PRD 010](010-secret-file-split.md)의 닫힌 결과(`.env.json` 값 가리기, 값을 읽지 못한 turn의 판정 없음), [PRD 020](020-continue-after-block.md)의 닫힌 결과(16번 거절의 도구 결과, 막힘 수와 넘어감, 끝난 turn, 진행 표시와 diagnostics, 규칙 이름 확인). 뒤 번호 PRD에 의존하지 않는다.
 
@@ -205,11 +205,17 @@ PRD 030은 PRD 040·050 없이 닫힌다.
 - `git diff --exit-code crates/Cargo.lock`: 바뀌지 않음.
 - 변경한 package 시험(`.omo/evidence/spec048/prd030/package-tests.log`): `shacs-cli` 모두 통과, `shacs-core` lib 모두 통과, `shacs-core` 통합 시험은 `spec034_release_runner` 6개 중 5개 실패(`InvalidConfig`, 이 작업 전부터 같은 실패이며 짧은 경로 clone이 필요하다) 말고 모두 통과.
 - 구현 검토의 수정 뒤(PRD 020·040 수정과 함께, `.omo/evidence/spec048/oracle-fixes/package-tests.log`): `shacs-redaction`·`shacs-cli`·`shacs-core` lib 통과, `shacs-core` 통합 시험은 같은 `spec034_release_runner` 5개 말고 통과(`it` 587개). fmt(기본·Google 옵션)·clippy 통과, `Cargo.lock` 그대로.
-- 전체 workspace 시험은 사용자 승인 뒤에 돈다.
+- 전체 workspace 시험은 사용자 승인 뒤에 돈다(2026-11-06 통과, 아래 "종료 확인").
 
 ### Oracle 검토
 
 - 계획 검토(`bg_513690ec`)는 Oracle 쪽 인증 토큰 만료("Your authentication token has expired")로 답을 받지 못했고, 그래서 계획 검토 전에 구현했다.
 - 계획·구현 검토 1차(PRD 040과 함께, `bg_0c08968c`, 세션 `ses_e53b5d946ffecyCamGqKaY2tS2`): BLOCKED. PRD 030은 major 하나(bootstrap 파일의 022 redaction 누락)로, 위 "구현 검토에서 고친 것"으로 고쳤다. announcement 꼴 빼기, label 정리, 취소, durable 기록, workflow 요약 읽기에는 지적이 없었다.
 - 2차(PRD 040과 함께, `bg_9e0e9650`, 세션 `ses_e5350c59cffeg1QAVclJbqUSnY`): PASS(남은 지적 없음). 1차 결과를 읽을 수 없었던 다시 시도(`bg_28f5b681`) 뒤 새 세션으로 받았다.
-- 닫기에 남은 것: 사용자 승인 뒤 전체 workspace 시험.
+- 닫기에 남은 것: 사용자 승인 뒤 전체 workspace 시험(2026-11-06 통과, 아래 "종료 확인").
+
+## 종료 확인 (2026-11-06)
+
+- 전체 workspace 시험: 사용자 승인(2026-11-06)을 받아 PRD 010–040을 담은 커밋 `15787d6`을 짧은 경로의 clone(`/private/tmp/shacs-s48/clone`, 작업 트리 변경 없음)에 받아 `cargo test --manifest-path crates/Cargo.toml --workspace --locked --no-fail-fast`를 돌렸다. suite 210개, 3,645 passed / 0 failed / 8 ignored, exit 0이다(로컬 `.omo/evidence/spec048/closure/workspace-tests-prd040.log`).
+- 034 runner(`test = false`라 `--workspace`에 빠진다): 같은 clone에서 `cargo test --locked -p shacs-core --test spec034_release_runner --no-fail-fast`가 6 passed / 0 failed, exit 0이다(로컬 `spec034-runner-copy-prd040.log`).
+- 남은 제한은 위 "남은 제한"과 같다.

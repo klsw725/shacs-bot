@@ -1,6 +1,6 @@
 # PRD 040. 도구 결과 검사
 
-Status: Implemented, closure blocked
+Status: Complete (Scoped)
 
 Depends on: [PRD 000](000-decision-order-and-transcript-classifier.md)의 닫힌 결과(classifier와 그 provider 요청, `classifierModel`), [PRD 010](010-secret-file-split.md)의 닫힌 결과(`.env.json` 값 가리기, 값을 읽지 못한 turn의 판정 없음), [PRD 020](020-continue-after-block.md)의 닫힌 결과(실행하지 않은 호출의 결과, 진행 표시와 diagnostics), [PRD 030](030-subagent-handoff-checks.md)의 닫힌 결과(하위 작업 run의 classifier). 뒤 번호 PRD에 의존하지 않는다.
 
@@ -143,10 +143,16 @@ PRD 040은 PRD 050 없이 닫힌다.
 - `git diff --exit-code crates/Cargo.lock`: 바뀌지 않음.
 - 변경한 package 시험(`.omo/evidence/spec048/prd040/package-tests.log`): `shacs-redaction`·`shacs-cli`·`shacs-core` lib 모두 통과. `shacs-core` 통합 시험은 `spec034_release_runner` 6개 중 5개(`InvalidConfig`, 이전부터, 짧은 경로 clone에서는 통과)와 `it`의 `spec047_model_files` 하나(`Busy`: 시험끼리 memory model 설치 잠금이 겹침) 말고 통과했고, `it`을 다시 돌려 583개 모두 통과했다(`package-tests-it-rerun.log`).
 - 구현 검토의 수정 뒤(PRD 020·030 수정과 함께, `.omo/evidence/spec048/oracle-fixes/package-tests.log`): `shacs-redaction`·`shacs-cli`·`shacs-core` lib 통과, `shacs-core` 통합 시험은 `spec034_release_runner` 5개(`InvalidConfig`) 말고 통과(`it` 587개, `spec047_model_files`도 이번에는 통과). fmt(기본·Google 옵션)·clippy 통과, `Cargo.lock` 그대로.
-- 전체 workspace 시험은 사용자 승인 뒤에 돈다.
+- 전체 workspace 시험은 사용자 승인 뒤에 돈다(2026-11-06 통과, 아래 "종료 확인").
 
 ### Oracle 검토
 
 - 계획·구현 검토 1차(PRD 030과 함께, `bg_0c08968c`, 세션 `ses_e53b5d946ffecyCamGqKaY2tS2`): BLOCKED. major 하나(결과 글의 머리로 검사를 빼서 실제 tool 출력이 피할 수 있음)와 minor 하나(승인한 deferred 호출의 이름)를 위 "구현 검토에서 고친 것"으로 고쳤다. redaction 두 곳의 빠르게 한 수정은 Oracle이 바꾸기 전 분기와 비교해 출력을 바꾸는 문제를 찾지 못했다.
 - 2차(PRD 030과 함께, `bg_9e0e9650`, 세션 `ses_e5350c59cffeg1QAVclJbqUSnY`): PASS(남은 지적 없음). direct·deferred·승인 호출의 실행 provenance, 정규화 뒤 검사, 원래 event·실행 기록 유지를 확인받았다.
-- 닫기에 남은 것: 사용자 승인 뒤 전체 workspace 시험.
+- 닫기에 남은 것: 사용자 승인 뒤 전체 workspace 시험(2026-11-06 통과, 아래 "종료 확인").
+
+## 종료 확인 (2026-11-06)
+
+- 전체 workspace 시험: 사용자 승인(2026-11-06)을 받아 PRD 010–040을 담은 커밋 `15787d6`을 짧은 경로의 clone(`/private/tmp/shacs-s48/clone`, 작업 트리 변경 없음)에 받아 `cargo test --manifest-path crates/Cargo.toml --workspace --locked --no-fail-fast`를 돌렸다. suite 210개, 3,645 passed / 0 failed / 8 ignored, exit 0이다(로컬 `.omo/evidence/spec048/closure/workspace-tests-prd040.log`).
+- 034 runner(`test = false`라 `--workspace`에 빠진다): 같은 clone에서 `cargo test --locked -p shacs-core --test spec034_release_runner --no-fail-fast`가 6 passed / 0 failed, exit 0이다(로컬 `spec034-runner-copy-prd040.log`).
+- 남은 제한은 위 "남은 제한"과 같다.

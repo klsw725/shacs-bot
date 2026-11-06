@@ -1,6 +1,6 @@
 # PRD 010. 비밀 파일 분리
 
-Status: Implemented, closure blocked
+Status: Complete (Scoped)
 
 Depends on: [PRD 000](000-decision-order-and-transcript-classifier.md)의 닫힌 결과(비밀 파일 규칙, action 정규화, classifier 요청). 뒤 번호 PRD에 의존하지 않는다.
 
@@ -183,10 +183,16 @@ PRD 010은 PRD 020–050 없이 닫힌다.
 - 고친 기존 시험과 까닭: 모두 칸·인자 추가만이고 동작은 같다. `PermissionedAction.decision`(`Default::default()`), `PermissionedActionInput.permission_environment`(`None`), `PermissionEnvironmentInput`의 `env_file`·`env_file_current`, `AutoModeClassifier::new`와 `payload`·`system_message`의 가릴 값: `src/runtime/auto_mode/{auto_decision_tests,classifier_request_tests,permission_materials_tests}.rs`, `tests/{permission_action,permission_policy,plugin_runtime,spec030_classifier_baseline,tools}.rs`, `tests/it/{containment_permission_baseline,containment_process_gate,process_envelope,process_gate}.rs`, `tests/it/{remembered_permission_matcher_support,remembered_session_legacy_support,remembered_session_permission_support}/mod.rs`, `tests/it/spec048_auto_mode/{support,classifier}.rs`.
 - 값이 없는 dry-run 출력 예: 로컬 `.omo/evidence/spec048/prd010/dry-run-sample.json`(추적하지 않음).
 - Cargo 검증: Google 옵션을 붙인 `cargo fmt --all -- --check`, workspace `cargo clippy --all-targets -- -D warnings` 통과. `crates/Cargo.lock`은 바뀌지 않았다. `shacs-config`·`shacs-cli` package 시험 통과, `shacs-core` lib 454 passed, 통합 시험은 이 checkout의 `spec034_release_runner` 6개 중 5개(`InvalidConfig`, PRD 000 종료 기록과 같은 조건)를 빼고 통과했다(로컬 `.omo/evidence/spec048/prd010/package-tests.log`, 구현 검토 1차 뒤 다시 돌린 `package-tests-round2.log`).
-- 짧은 경로 clone 확인(2026-11-05): PRD 010과 020을 담은 커밋 `efcfc00`을 `/private/tmp/shacs-s48/clone`에 받아 `spec034_release_runner`를 돌렸고 6개 모두 통과했다(`.omo/evidence/spec048/closure/spec034-runner-copy-prd020.log`). 이 checkout의 `InvalidConfig`는 경로 길이 때문이다. 전체 workspace 시험은 사용자가 미뤄 아직 돌지 않았다.
+- 짧은 경로 clone 확인(2026-11-05): PRD 010과 020을 담은 커밋 `efcfc00`을 `/private/tmp/shacs-s48/clone`에 받아 `spec034_release_runner`를 돌렸고 6개 모두 통과했다(`.omo/evidence/spec048/closure/spec034-runner-copy-prd020.log`). 이 checkout의 `InvalidConfig`는 경로 길이 때문이다. 전체 workspace 시험은 사용자가 미뤄 아직 돌지 않았다(2026-11-06 통과, 아래 "종료 확인").
 - Oracle 독립 검토: 계획은 1–4차 BLOCKED(file tool 비밀 경로 거절, 031 뒤 낡은 계획, marker 순서, digest의 값, 값을 읽지 못한 turn, SPEC 모순, 판정에 쓰인 가린 인자, 승인 답의 environment, 남은 백업 정리 순서, `notebook_read`, 기억된 규칙과 세션 승인 cache) 뒤 5차 **PASS**. 구현은 1차 BLOCKED(marker를 지운 뒤 끊긴 되돌리기, `.env.json`이 깨진 뒤의 승인 시험) 뒤 2차 **PASS**. 기록은 로컬 `.omo/evidence/spec048/plan-review.md`와 `implementation.md`.
 - 남은 제한:
   - 통째로 redaction된 `exec` 명령은 비밀 파일을 읽더라도 묻지 않고 거절된다.
   - 8자보다 짧은 값과 모양을 바꾼 값은 가리지 못한다. 비밀 자리는 칸 이름으로 찾는다.
   - `processEnvDiffers`는 명령을 실행한 환경으로 본다. provider credential의 환경 변수 참조는 `.env.json`을 보지 않는다.
   - 전원이 꺼지는 경우의 순서는 파일 시스템이 fsync를 지키는 만큼만 같다.
+
+## 종료 확인 (2026-11-06)
+
+- 전체 workspace 시험: 사용자 승인(2026-11-06)을 받아 PRD 010–040을 담은 커밋 `15787d6`을 짧은 경로의 clone(`/private/tmp/shacs-s48/clone`, 작업 트리 변경 없음)에 받아 `cargo test --manifest-path crates/Cargo.toml --workspace --locked --no-fail-fast`를 돌렸다. suite 210개, 3,645 passed / 0 failed / 8 ignored, exit 0이다(로컬 `.omo/evidence/spec048/closure/workspace-tests-prd040.log`).
+- 034 runner(`test = false`라 `--workspace`에 빠진다): 같은 clone에서 `cargo test --locked -p shacs-core --test spec034_release_runner --no-fail-fast`가 6 passed / 0 failed, exit 0이다(로컬 `spec034-runner-copy-prd040.log`).
+- 남은 제한은 위 "남은 제한"과 같다.
