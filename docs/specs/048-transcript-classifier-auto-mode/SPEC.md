@@ -1,6 +1,6 @@
 # 048. transcript classifier auto mode 구현 명세
 
-Status: Open (implemented, closure blocked)
+Status: Complete (Scoped)
 
 Consumes: 004·020 tool 실행·file tool이 다룰 수 있는 폴더·deferred bridge 호출, 008 data 폴더 배치, 010 `exec` 안전 장치, 009·026 context assembly와 context file이 읽는 instruction 파일, 011 subagent 실행과 상속, 012 channel·cron·heartbeat·local API run의 대화형 여부, 013 승인 질문, 014 diagnostics, 022 permission mode·capability·static rule·보호 대상·승인 correlation·기억된 규칙·최근 거절, 025 plugin root 위치, 030 `tool:before` hook·trusted runtime profile·인증 저장소·process gate, 031 config schema·`${이름}` 해석·`runtime config-migrate`
 
@@ -256,7 +256,7 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 
 ## 남은 위험과 한계
 
-- classifier는 틀릴 수 있다. Claude Code는 실제 위험 동작의 17%를 놓쳤다고 밝혔고, 이 수치는 그쪽 model과 prompt 기준이다. 048의 classifier는 model과 prompt가 달라 측정값이 없고, 수용 조건 10의 묶음은 작은 표본이다. 신중한 사람의 검토를 대신하지 않으며 Docker 안에서 쓰는 것을 권한다.
+- classifier는 틀릴 수 있다. Claude Code는 실제 위험 동작의 17%를 놓쳤다고 밝혔고, 이 수치는 그쪽 model과 prompt 기준이다. 048의 classifier는 model과 prompt가 달라 측정값이 없고, 실제 model로 재려던 수용 조건 10의 작은 평가 묶음도 사용자 결정으로 돌리지 않았다(아래 "종료 증거"). 신중한 사람의 검토를 대신하지 않으며 Docker 안에서 쓰는 것을 권한다.
 - deny·ask 규칙과 비밀 파일 규칙은 file tool과, 명령 분석이 경로를 찾은 명령에만 걸린다. 파일 이름을 명령에 쓰지 않고 파일을 여는 프로그램(미리 만들어 둔 스크립트 등)은 막거나 묻지 못한다(Claude Code와 같다). auto mode에서는 그때 classifier가 마지막 방어선이다. 같은 컨테이너·사용자로 도는 명령은 OS 권한으로 그 파일을 읽을 수 있다.
 - 비밀 파일 읽기를 승인하면 그 내용이 AI provider로 가고 세션 기록과 tool 결과 파일에 남는다. auto가 아닌 mode에서도 지금은 거절되는 인증 저장소 읽기를 승인할 수 있게 된다.
 - auto mode에서는 보호 경로 쓰기, 비밀·설정·자기 수정 capability, Docker 안의 요약할 수 없는 명령이 classifier 판단에 맡겨진다. 022의 static deny와 요약 조건보다 약하다.
@@ -292,3 +292,10 @@ auto mode는 보안 경계나 권한 증명이 아니라, 묻는 횟수를 줄�
 수용 조건 11은 각 PRD가 자기 변경에 대해 확인한다. 번호 순서대로 구현한다.
 
 2026-11-06: PRD 000–040은 `Complete (Scoped)`이고 PRD 050은 구현했다. 이 스펙은 사용자 승인 뒤의 평가 실행(수용 조건 10)으로 PRD 050이 닫힐 때 닫는다.
+
+## 종료 증거 (2026-11-07)
+
+PRD [000](prds/000-decision-order-and-transcript-classifier.md)–[040](prds/040-tool-result-check.md)은 2026-11-06까지 `Complete (Scoped)`로 닫혔다(010–040은 그날 전체 workspace 시험 3,645 passed / 0 failed / 8 ignored와 함께). [050](prds/050-default-mode-and-setup-tools.md)은 독립 구현 검토 6차 PASS와 2026-11-07 전체 workspace 시험(3,680 passed / 0 failed / 8 ignored)과 함께 닫혔다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 출시 seal이 아니다. 실행 기록은 로컬 `.omo/evidence/spec048/`(추적하지 않음)에 있다.
+
+- 수용 조건 1–9와 11: 각 PRD의 시험과 구현 메모대로 통과했다(위 표의 자체 완료 표면).
+- 수용 조건 10: 사용자 결정(2026-11-07)으로 돌리지 않았다. 평가에만 쓸 credential을 정하지 못했다. 고정 평가 묶음과 driver는 `scripts/spec048_auto_mode_eval/`에 남아 있고, 나중에 돌리면 그 결과를 PRD 050 "종료 확인"에 더한다. 그래서 auto mode의 판정은 가짜 provider 시험으로만 확인했고 실제 model로 잰 값이 없다("남은 위험과 한계" 첫 줄).

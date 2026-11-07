@@ -1,6 +1,6 @@
 # PRD 050. 기본 mode와 설정 도구
 
-Status: Implemented, closure blocked
+Status: Complete (Scoped)
 
 Depends on: [PRD 000](000-decision-order-and-transcript-classifier.md)–[PRD 040](040-tool-result-check.md)의 닫힌 결과(판정 표, classifier와 그 설정, `.env.json`, 막힘 수, 하위 작업 검사, 도구 결과 검사). 뒤 번호 PRD가 없다.
 
@@ -276,6 +276,7 @@ PRD 050이 닫히면 Spec 048을 닫는다.
 - 표시 파일 보호는 명령 분석이 쓰기로 보는 명령(`rm`·`mv`·`touch`·리디렉션 등의 대상과 그 glob)과 코드 글의 이름까지다. `find … -delete`처럼 분석이 쓰기로 보지 않는 명령이나 반복문 안의 glob은 classifier가 본다.
 - `confined_read`가 본뜬 release runner의 `ConfinedSourceReader`도 `O_NONBLOCK` 없이 파일을 연다(FIFO에서 멈출 수 있다). 이 PRD는 release runner 코드를 바꾸지 않는다.
 - setup과 critique는 정해진 몫까지만 보낸다. 긴 instruction 파일이나 많은 규칙은 뒤가 빠진다(잘렸다고 요청에 적는다).
+- 평가 묶음은 돌리지 않았다(2026-11-07 사용자 결정, 아래 "종료 확인"). auto mode의 판정은 가짜 provider 시험으로만 확인했고, 실제 model로 잰 값이 없다.
 
 ## 구현 메모 및 검증 근거 (2026-11-06)
 
@@ -310,4 +311,11 @@ PRD 050이 닫히면 Spec 048을 닫는다.
   - 5차(`bg_a79336d2`, 세션 `ses_e4fe3e6c5ffeGzfX1sW3VKAGdB`): BLOCKED. 4차의 두 수정은 확인됐고 major 둘이 나왔다. `setup`이 config를 처음 읽은 뒤 `setup_with`에서 다시 읽어 그 바이트로 쓰기를 비교해, 두 읽기 사이의 바뀜을 놓칠 수 있었고, `critique`·`setup`이 풀지 않은 `classifierModel`(`${이름}`)을 그대로 model로 넘겼다. 고침: `setup`은 config를 한 번 읽고(`ReadConfig`) 그 바이트로 쓰기를 비교하며, 요청의 workspace·규칙·environment도 그 바이트에서 메모리로 만든다(`ReadConfig::bundle`). review provider의 model은 `${이름}`을 푼 config의 `classifierModel`이다. 시험: 처음 읽은 뒤 바뀐 config는 쓰지 않음, `${이름}` model이 풀림.
   - 6차(`bg_a3b68929`, 세션 `ses_e4fc26645ffeGhJfr2JIfqxT92`): **PASS**, 남은 지적 없음. 5차의 두 수정과 전체 변경(기본 mode, 한 번 읽기, 원자적 쓰기, `reset`·`critique`·`setup`, setup 안내, `ask --verbose`, 평가 driver)을 확인받았다. package 시험 2,646 passed / 0 failed / 8 ignored(로컬 `.omo/evidence/spec048/prd050/package-tests-round6.log`), driver 14 passed.
 - 전체 workspace 시험(2026-11-07, 사용자 승인): `cargo test --manifest-path crates/Cargo.toml --workspace -q` 3,680 passed / 0 failed / 8 ignored, exit 0(로컬 `.omo/evidence/spec048/prd050/full-workspace-test.log`).
-- 닫기에 남은 것: 사용자 승인 뒤의 평가 실행(수용 조건 9의 `report.json`과 판정).
+- 닫기에 남은 것: 사용자 승인 뒤의 평가 실행(수용 조건 9의 `report.json`과 판정). 2026-11-07 사용자 결정으로 돌리지 않고 닫았다(아래 "종료 확인").
+
+## 종료 확인 (2026-11-07)
+
+- 사용자 결정(2026-11-07): 평가 묶음을 돌리지 않고 이 PRD와 Spec 048을 닫는다. 평가에만 쓸 credential을 정하지 못했다(driver는 그 실행에만 쓸 API 키 하나를 받고, 이미 저장된 로그인이나 키는 쓰지 않는다).
+- 그래서 수용 조건 9의 마지막 항목(사용자 승인 뒤 한 번 돌린 `report.json`과 통과 판정)과 Closure Evidence 2는 채우지 않았다. 수용 조건 9의 나머지(`ask --verbose` 시험, `--approve` 없는 실행, `cases.json`, driver 단위 시험 14개)와 수용 조건 1–8, 10은 위 구현 메모의 시험과 기록대로 통과했다. 독립 구현 검토는 6차에서 PASS였고, 전체 workspace 시험은 3,680 passed / 0 failed / 8 ignored다.
+- 평가 driver(`scripts/spec048_auto_mode_eval/`)는 그대로 둔다. 나중에 돌리면 범위 9의 명령과 승인 절차를 따르고, 그 결과를 이 절에 더한다.
+- 현재 self-hosted 범위의 scoped 완료이며 전체 출시 seal이 아니다.
