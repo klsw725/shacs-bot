@@ -486,7 +486,34 @@ fn live_runtime_workflow_preserves_original_objective_in_verifier_prompt(
     let verifier_prompt = provider.request_messages_text(1)?;
     assert!(verifier_prompt.contains("Original objective: verify every claim"));
     assert!(verifier_prompt.contains("do not mutate session truth from child"));
+    assert!(verifier_prompt.contains("Answer with only this JSON object"));
 
+    Ok(())
+}
+
+#[test]
+fn live_runtime_workflow_reads_a_fenced_json_verdict_in_any_language(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = tempfile::tempdir()?;
+    let provider = QueueProvider::new(vec![
+        llm_text("claims extracted"),
+        llm_text("```json\n{\"verdict\": \"pass\", \"summary\": \"검증 결과: 적합합니다.\"}\n```"),
+    ]);
+    let runtime = SubagentRuntime::new();
+    let outcome = run_live_runtime_workflow(RuntimeWorkflowLiveInput {
+        plan: sample_plan(),
+        subagent_runtime: &runtime,
+        provider_client: &provider,
+        execution_config: SubagentExecutionConfig::new(workspace.path(), "test-model"),
+        admitted_at_ms: current_test_ms(),
+    })?;
+
+    assert_eq!(outcome.verification_gate, WorkflowVerificationGate::Passed);
+    assert_eq!(outcome.run.state, WorkflowRunState::Completed);
+    assert_eq!(
+        outcome.verifier_verdicts[0].summary,
+        "검증 결과: 적합합니다."
+    );
     Ok(())
 }
 

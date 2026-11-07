@@ -40,6 +40,7 @@ static NEXT_CHILD_ID: AtomicU64 = AtomicU64::new(1);
 /// scope 3).
 const AUTO_MODE_GUIDANCE: &str = "\n\n---\n\n# Auto Mode\n\nAuto mode is on: a classifier checks your tool calls, and no one can approve a refused call for you. Stay within the task you were given. If a call you need is refused, do not try to get around it; finish what you can and say in your final response what was refused.";
 static CHILD_ID_NAMESPACE: OnceLock<u128> = OnceLock::new();
+pub(crate) const WORKFLOW_ORIGIN_CHANNEL: &str = "workflow";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -811,7 +812,12 @@ impl SubagentRuntime {
             .tasks
             .get(&result.child_task_id)
             .map(|record| record.envelope.clone());
-        let message = should_publish_decision(&decision)
+        // A workflow reads its children's results itself. Announcing them would
+        // start a new turn in the parent conversation.
+        let workflow_child = expected
+            .as_ref()
+            .is_some_and(|envelope| envelope.origin_channel == WORKFLOW_ORIGIN_CHANNEL);
+        let message = (should_publish_decision(&decision) && !workflow_child)
             .then(|| self.synthetic_inbound_for_result(&result, &decision));
         if self
             .record_durable_result(&result, expected.as_ref(), &decision, message.as_ref())

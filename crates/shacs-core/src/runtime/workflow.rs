@@ -1,3 +1,4 @@
+use crate::runtime::subagent::WORKFLOW_ORIGIN_CHANNEL;
 use crate::runtime::{
     build_subagent_tool_registry, CancellationToken, ChildResultEnvelope, ChildResultStatus,
     SpawnEnvelope, SubagentExecutionConfig, SubagentRuntime,
@@ -688,6 +689,8 @@ fn run_live_runtime_workflow_inner(
         if let Some(model) = route.selected_model_hint {
             config.model = model;
         }
+        // Only children search the web; the verifier judges the report it is given.
+        config.enable_web = false;
         config.allowed_tools = Some(scoped_role_tool_names(
             &plan,
             WorkflowToolScopeRole::Verifier,
@@ -706,7 +709,7 @@ fn run_live_runtime_workflow_inner(
             .map(|result| result.summary.as_str())
             .unwrap_or("missing child result");
         let verifier_goal = format!(
-            "Original objective: {}\nConstraints: {}\n\nVerify workflow child `{}` with rubric: {}\n\nChild result:\n{}",
+            "Original objective: {}\nConstraints: {}\n\nVerify workflow child `{}` with rubric: {}\n\nChild result:\n{}\n\n{VERIFIER_VERDICT_FORMAT}",
             plan.context_policy.root_objective_snapshot,
             plan.constraints.join("; "),
             verifier.target_child_id,
@@ -1564,7 +1567,7 @@ fn workflow_child_spawn_envelope(
 ) -> SpawnEnvelope {
     let mut spawn = SpawnEnvelope::new(plan.origin_session_id.clone(), child_id, task_goal);
     spawn.parent_turn_id = plan.origin_turn_id.clone();
-    spawn.origin_channel = "workflow".to_owned();
+    spawn.origin_channel = WORKFLOW_ORIGIN_CHANNEL.to_owned();
     spawn.origin_chat_id = plan.workflow_id.clone();
     spawn.input_budget_snapshot = serde_json::to_value(&plan.budget_policy).unwrap_or_default();
     spawn.output_budget_snapshot = serde_json::json!({
@@ -1588,6 +1591,8 @@ fn add_budget_usage(usage: &mut WorkflowBudgetUsage, raw_usage: Option<&serde_js
         .unwrap_or(0);
     usage.known_tokens = usage.known_tokens.saturating_add(total_tokens);
 }
+
+const VERIFIER_VERDICT_FORMAT: &str = "Answer with only this JSON object and no other text: {\"verdict\": \"pass\" or \"fail\" or \"uncertain\", \"summary\": \"one sentence on why\"}. Keep the keys and the verdict word in English.";
 
 #[derive(Debug, Clone, PartialEq)]
 struct ParsedVerifierVerdict {
@@ -1637,7 +1642,9 @@ fn verifier_verdict_from_summary(summary: &str) -> ParsedVerifierVerdict {
 }
 
 fn structured_verifier_verdict(summary: &str) -> Option<ParsedVerifierVerdict> {
-    let value = serde_json::from_str::<serde_json::Value>(summary).ok()?;
+    // Models often wrap the requested JSON object in a code fence.
+    let object_text = summary.get(summary.find('{')?..=summary.rfind('}')?)?;
+    let value = serde_json::from_str::<serde_json::Value>(object_text).ok()?;
     let object = value.as_object()?;
     let raw_verdict = object
         .get("verdict")

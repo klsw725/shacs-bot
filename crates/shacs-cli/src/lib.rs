@@ -2414,10 +2414,12 @@ fn publish_runtime_notification(
     }
 }
 
-/// Whether a turn's reply is followed by the session's workflow status. Notifications and web
-/// watch replies are not, so a web watch summary stays the last message its sender sees.
-fn appends_workflow_projection(stop_reason: &str) -> bool {
-    !(stop_reason.starts_with("entrusted_notification") || stop_reason.starts_with("web_watch"))
+/// Whether a turn's reply is followed by the session's workflow status. Only a reply that ran a
+/// workflow carries its id, so the status of an earlier workflow never trails a later reply.
+fn appends_workflow_projection(outbound: &[OutboundMessage]) -> bool {
+    outbound
+        .iter()
+        .any(|message| message.metadata.contains_key("workflow_id"))
 }
 
 fn runtime_workflow_projection_message_from_session(
@@ -20098,7 +20100,7 @@ impl AgentLoopChatCompletionAdapter {
         while let Some(message) = outbound_bus.consume_outbound() {
             outbound.push(message);
         }
-        if !appends_workflow_projection(&result.stop_reason) {
+        if !appends_workflow_projection(&outbound) {
             return Ok((result, outbound));
         }
         if let Some(message) = loop_runtime
@@ -33079,16 +33081,86 @@ mod tests {
     }
 
     #[test]
-    fn a_web_watch_reply_is_not_followed_by_the_workflow_status() {
-        for stop_reason in [
-            "web_watch_summary",
-            "web_watch_stale_reply",
-            "web_watch_notification",
-            "entrusted_notification",
-        ] {
-            assert!(!appends_workflow_projection(stop_reason), "{stop_reason}");
-        }
-        assert!(appends_workflow_projection("completed"));
+    fn only_the_reply_of_a_workflow_turn_is_followed_by_the_workflow_status(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        let media_dir = root.path().join("data").join("media").join("api");
+        fs::create_dir_all(&workspace)?;
+        let adapter = AgentLoopChatCompletionAdapter {
+            configured_model: "openai/gpt-5".to_owned(),
+            provider_id: "openai".to_owned(),
+            defaults: AgentDefaults {
+                model: "openai/gpt-5".to_owned(),
+                max_tool_iterations: 1,
+                ..AgentDefaults::default()
+            },
+            resolved_model: "gpt-5".to_owned(),
+            native_image_input_supported: true,
+            client: Arc::new(FakeProviderClient {
+                captured: Arc::new(Mutex::new(Vec::new())),
+                response: LlmResponse {
+                    content: Some("ok".to_owned()),
+                    ..LlmResponse::default()
+                },
+            }),
+            retry_mode: ProviderRetryMode::Standard,
+            workspace,
+            config_path: root.path().join("data").join("config.json"),
+            media_dir,
+            tools: ToolRegistry::new(),
+            message_tool: None,
+            _mcp_runtime: None,
+            _mcp_reports: Vec::new(),
+            allow_side_effect_tools: false,
+            send_progress: false,
+            send_tool_hints: false,
+            send_max_retries: 0,
+            runtime_verbose: false,
+            session_turn_lock: SessionTurnLock::new(),
+            exec_timeout_seconds: 60,
+            exec_sandbox: None,
+            exec_path_append: None,
+            exec_allowed_env_keys: Vec::new(),
+            exec_env: BTreeMap::new(),
+            tool_search: ToolSearchConfig::default(),
+            containment_snapshot: None,
+            permission_mode_snapshot: PermissionModeSnapshot::default(),
+            plugin_runtime_snapshot: PluginRuntimeSnapshot::default(),
+            plugin_skill_roots: Vec::new(),
+        };
+        let is_workflow_status = |message: &OutboundMessage| {
+            message.metadata.get("kind") == Some(&json!("runtime_workflow"))
+        };
+
+        let (workflow_turn, workflow_outbound) = adapter.process_inbound_with_outbound(
+            InboundMessage::new(
+                "direct",
+                "user",
+                "chat-1",
+                "Please review this migration plan and verify each part:\n- inspect the data flow\n- compare the API assumptions\n- identify risks\n- produce a concise recommendation",
+            ),
+            adapter.loop_config(),
+            None,
+            &[],
+        )?;
+        assert!(
+            workflow_turn.stop_reason.starts_with("workflow_"),
+            "{workflow_turn:?}"
+        );
+        assert!(workflow_outbound.iter().any(is_workflow_status));
+
+        let (_reply_turn, reply_outbound) = adapter.process_inbound_with_outbound(
+            InboundMessage::new("direct", "user", "chat-1", "hello"),
+            adapter.loop_config(),
+            None,
+            &[],
+        )?;
+        assert!(
+            !reply_outbound.iter().any(is_workflow_status),
+            "the status of an earlier workflow must not trail a later reply"
+        );
+        Ok(())
     }
 
     #[test]

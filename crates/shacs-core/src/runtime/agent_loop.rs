@@ -3043,13 +3043,18 @@ impl<'a> AgentLoop<'a> {
                     &self.config.workspace,
                     session_key,
                 );
-                self.bus.publish_outbound(outbound_for(
+                let mut reply = outbound_for(
                     message,
                     session_key,
                     final_content.clone(),
                     Vec::new(),
                     stop_reason,
-                ));
+                );
+                reply.metadata.insert(
+                    "workflow_id".to_owned(),
+                    Value::String(outcome.run.workflow_id.clone()),
+                );
+                self.bus.publish_outbound(reply);
                 Ok(AgentLoopTurnResult {
                     session_key: session_key.to_owned(),
                     final_content: Some(final_content),
@@ -3092,6 +3097,7 @@ impl<'a> AgentLoop<'a> {
         config.fail_on_tool_error = self.config.fail_on_tool_error;
         config.allow_side_effect_tools = false;
         config.enable_exec = false;
+        config.enable_web = true;
         config.extra_context_files = self.config.extra_context_files.clone();
         // The workflow checks and combines its children's reports; a warning
         // before a verifier's report would break reading its verdict (Spec
@@ -4934,6 +4940,11 @@ fn workflow_request_from_message(
     if let Some(request) = workflow_request_from_metadata(&message.metadata)? {
         return Ok(Some((request.0, request.1, None)));
     }
+    // Only the owner's own request starts an automatic workflow. Subagent
+    // reports, scheduled runs and automation messages get the regular loop.
+    if !method::user_turn(message) {
+        return Ok(None);
+    }
     let Some((admission, plan, recipe_selection)) = compile_automatic_workflow_request(
         &message.content,
         session_key,
@@ -4979,7 +4990,7 @@ fn compile_automatic_workflow_request(
         requires_recurring_loop: false,
         risk_level: profile.risk_level,
         user_requested_workflow: profile.user_requested_workflow,
-        available_budget_tokens: Some(10_000),
+        available_budget_tokens: Some(AUTOMATIC_WORKFLOW_TOKEN_BUDGET),
         blocking_reasons: Vec::new(),
         missing_scope_questions: Vec::new(),
     };
@@ -5097,6 +5108,11 @@ fn recipe_evidence_resume_block_reason(
     }
 }
 
+/// Provider usage counts the prompt that every call sends again, including the
+/// pages a child has fetched, so a child's four calls and its verifier need far
+/// more than their 2,000-token answers.
+const AUTOMATIC_WORKFLOW_TOKEN_BUDGET: u64 = 120_000;
+
 #[derive(Debug, Clone, Copy)]
 struct AutomaticWorkflowProfile {
     objective_complexity: u8,
@@ -5113,9 +5129,14 @@ fn automatic_workflow_profile(content: &str) -> Option<AutomaticWorkflowProfile>
         return None;
     }
     let lower = normalized.to_ascii_lowercase();
+    // Whole words only, so "explanation" is not "plan". Splitting on every
+    // non-ASCII character keeps "plan" in a Korean "plan을".
+    let words: Vec<&str> = lower
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .collect();
     let user_requested_workflow = ["workflow", "plan", "parallel", "verify", "review", "audit"]
         .iter()
-        .any(|needle| lower.contains(needle));
+        .any(|keyword| words.contains(keyword));
     let estimated_item_count = estimated_workflow_item_count(normalized);
     let has_clear_complex_action = [
         "implement",
@@ -5131,10 +5152,10 @@ fn automatic_workflow_profile(content: &str) -> Option<AutomaticWorkflowProfile>
         "summarize",
     ]
     .iter()
-    .any(|needle| lower.contains(needle));
-    let requires_parallelism = estimated_item_count >= 4 || lower.contains("parallel");
-    let requires_large_context_partitioning = normalized.len() > 1_200 || estimated_item_count >= 8;
-    let objective_complexity = if requires_large_context_partitioning || estimated_item_count >= 8 {
+    .any(|keyword| words.contains(keyword));
+    let requires_parallelism = estimated_item_count >= 4 || words.contains(&"parallel");
+    let requires_large_context_partitioning = estimated_item_count >= 8;
+    let objective_complexity = if requires_large_context_partitioning {
         8
     } else if has_clear_complex_action && estimated_item_count >= 3 {
         6
@@ -5193,6 +5214,7 @@ fn compile_read_only_workflow_plan(
     }));
     let short_digest = digest.chars().take(12).collect::<String>();
     let workflow_id = format!("auto_workflow_{short_digest}");
+    let child_id = format!("{workflow_id}-child-1");
     WorkflowHarnessPlan {
         workflow_id: workflow_id.clone(),
         origin_session_id: session_key.to_owned(),
@@ -5209,7 +5231,7 @@ fn compile_read_only_workflow_plan(
             expected_output_schema: None,
         }],
         child_graph: vec![WorkflowChildSpec {
-            child_id: "child-1".to_owned(),
+            child_id: child_id.clone(),
             step_id: "read-only-analysis".to_owned(),
             goal: content.trim().to_owned(),
             tool_scope_ref: Some("auto-read-only".to_owned()),
@@ -5221,8 +5243,8 @@ fn compile_read_only_workflow_plan(
             verifier_required: true,
         }],
         verifier_graph: vec![WorkflowVerifierSpec {
-            verifier_id: "verifier-1".to_owned(),
-            target_child_id: "child-1".to_owned(),
+            verifier_id: format!("{workflow_id}-verifier-1"),
+            target_child_id: child_id,
             rubric: "The result addresses the user request, cites uncertainty, and does not rely on write-side effects.".to_owned(),
             independent_evidence_required: false,
         }],
@@ -5233,7 +5255,14 @@ fn compile_read_only_workflow_plan(
         },
         tool_scope_policy: WorkflowToolScopePolicy {
             scope_digest: format!("auto-read-only:{short_digest}"),
-            allowed_tools: vec!["read_file".to_owned(), "list_dir".to_owned(), "glob".to_owned(), "grep".to_owned()],
+            allowed_tools: vec![
+                "read_file".to_owned(),
+                "list_dir".to_owned(),
+                "glob".to_owned(),
+                "grep".to_owned(),
+                "web_search".to_owned(),
+                "web_fetch".to_owned(),
+            ],
             deferred_tool_search_allowed: true,
             quarantine: WorkflowQuarantinePolicy::ReadOnlyUntrusted,
         },
@@ -5256,7 +5285,7 @@ fn compile_read_only_workflow_plan(
             fallback_model_policy: "use runtime provider default".to_owned(),
         },
         budget_policy: WorkflowBudgetPolicy {
-            max_total_tokens: Some(10_000),
+            max_total_tokens: Some(AUTOMATIC_WORKFLOW_TOKEN_BUDGET),
             max_child_tokens: Some(2_000),
             max_verifier_tokens: Some(2_000),
             max_iterations: 4,
@@ -7442,10 +7471,12 @@ mod tests {
             responses: Mutex::new(VecDeque::from(vec![
                 LlmResponse {
                     content: Some("read-only analysis complete".to_owned()),
+                    usage: BTreeMap::from([("total_tokens".to_owned(), 5_441)]),
                     ..LlmResponse::default()
                 },
                 LlmResponse {
                     content: Some("pass".to_owned()),
+                    usage: BTreeMap::from([("total_tokens".to_owned(), 5_441)]),
                     ..LlmResponse::default()
                 },
             ])),
@@ -7467,15 +7498,158 @@ mod tests {
         )?;
 
         assert_eq!(outcome.stop_reason, "workflow_completed", "{outcome:?}");
-        assert_eq!(captured_requests.lock().expect("requests lock").len(), 2);
+        {
+            let requests = captured_requests.lock().expect("requests lock");
+            assert_eq!(requests.len(), 2);
+            let offers_web_search = |request: &ProviderRequest| {
+                request
+                    .tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "web_search")
+            };
+            assert!(
+                offers_web_search(&requests[0]),
+                "the child can search the web"
+            );
+            assert!(
+                !offers_web_search(&requests[1]),
+                "the verifier judges the report it is given"
+            );
+        }
         let session = loop_runtime
             .session_manager_mut()
             .get_or_create("direct:auto-workflow");
-        assert!(session.metadata.get("runtime_workflow").is_some());
+        assert_eq!(
+            session.metadata["runtime_workflow"]["budget_usage"]["known_tokens"],
+            json!(10_882),
+            "one call each for the child and the verifier, prompts included, fits the budget"
+        );
         assert!(session.metadata.get("runtime_checkpoint").is_some());
         assert!(session.metadata.get("pending_workflow").is_none());
         assert_eq!(session.messages.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn automatic_workflows_share_a_durable_store_without_reporting_children_to_the_conversation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let durable_events = tempfile::tempdir()?;
+        let checkpoints = tempfile::tempdir()?;
+        let client = CapturingProviderClient {
+            responses: Mutex::new(VecDeque::from(
+                ["first analysis", "pass", "second analysis", "pass"].map(|content| LlmResponse {
+                    content: Some(content.to_owned()),
+                    ..LlmResponse::default()
+                }),
+            )),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let tools = ToolRegistry::new();
+        let mut config = AgentLoopConfig::new(workspace.path(), "model");
+        config.durable_event_root = Some(durable_events.path().to_path_buf());
+        let mut loop_runtime = AgentLoop::new(
+            MessageBus::new(),
+            SessionManager::new(workspace.path())?,
+            ContextBuilder::new(workspace.path()),
+            &tools,
+            &client,
+            config,
+        );
+
+        for request in [
+            "Please review this migration plan and verify each part:\n- inspect the data flow\n- compare the API assumptions\n- identify risks\n- produce a concise recommendation",
+            "Please review this release plan and verify each part:\n- inspect the build steps\n- compare the rollback paths\n- identify risks\n- produce a concise recommendation",
+        ] {
+            let outcome = loop_runtime.process_direct(request, Some("direct:two-workflows"))?;
+            assert_eq!(outcome.stop_reason, "workflow_completed", "{outcome:?}");
+        }
+
+        let state = shacs_session::durable_replay::evaluate_durable_recovery(
+            durable_events.path(),
+            checkpoints.path(),
+        )
+        .state
+        .ok_or("missing durable replay state")?;
+        let work_kinds = state
+            .work
+            .items
+            .values()
+            .map(|item| item.work_kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            work_kinds,
+            vec!["subagent.child_run"; 4],
+            "each child and verifier ran once, and no result came back as a new turn"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_owners_own_request_starts_an_automatic_workflow(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let snapshot = PermissionModeSnapshot::default();
+        let request = "아동수당 투자 방법을 조사합니다.\n- 수령 계좌 확인\n- 증여세 확인\n- 계좌 개설 방법\n- ETF 적립 방법";
+        let starts_workflow = |message: &InboundMessage| {
+            workflow_request_from_message(message, "discord:1", workspace.path(), &snapshot)
+                .map(|request| request.is_some())
+        };
+        assert!(
+            starts_workflow(&InboundMessage::new("discord", "owner", "1", request))?,
+            "the owner's list starts a workflow"
+        );
+
+        let mut report = InboundMessage::new(
+            "system",
+            "subagent",
+            "discord:1",
+            format!("[Subagent 'research' failed]\n\nTask: {request}"),
+        );
+        report.metadata.insert(
+            "injected_event".to_owned(),
+            Value::String("subagent_result".to_owned()),
+        );
+        let scheduled = InboundMessage::new("automation", "system", "automation", request);
+        let mut routed = InboundMessage::new("discord", "automation", "1", request);
+        routed
+            .metadata
+            .insert("automation_route".to_owned(), json!("notify"));
+
+        for message in [report, scheduled, routed] {
+            assert!(
+                !starts_workflow(&message)?,
+                "a {} message from {} gets the regular loop",
+                message.channel,
+                message.sender_id
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_long_request_alone_does_not_start_an_automatic_workflow() {
+        let request =
+            "아동수당을 자녀 명의로 투자할 때 증여세와 계좌 개설 방법을 알려줘. ".repeat(30);
+        assert!(request.len() > 1_200, "longer than the old length trigger");
+
+        assert!(automatic_workflow_profile(&request).is_none());
+    }
+
+    #[test]
+    fn workflow_keywords_count_only_as_whole_words() {
+        let explanation = "Could you write a detailed explanation of how the memory search index is built and refreshed after each conversation, with a preview of the stored data?";
+        assert!(
+            automatic_workflow_profile(explanation).is_none(),
+            "\"plan\" in \"explanation\" and \"review\" in \"preview\" are not requests"
+        );
+
+        let request =
+            "이번 배포 plan을 review해 주세요. 각 단계의 위험과 되돌리는 방법도 함께 정리해 주세요.";
+        assert!(
+            automatic_workflow_profile(request).is_some(),
+            "a keyword next to a Korean particle still counts"
+        );
     }
 
     #[test]
@@ -7752,7 +7926,7 @@ mod tests {
         session.metadata["runtime_checkpoint"]["workflow_checkpoint_payload"] = json!({
             "checkpoint": session.metadata["runtime_checkpoint"]["workflow"].clone(),
             "completed_step_id": "read-only-analysis",
-            "completed_child_ids": ["child-1"],
+            "completed_child_ids": [plan.child_graph[0].child_id],
             "ready_step_ids": [],
             "pending_step_ids": [],
             "worktree_refs": [],
@@ -7815,7 +7989,7 @@ mod tests {
         plan.child_graph.push(sibling);
         let mut results = vec![
             shacs_workflow::WorkflowChildResult {
-                child_id: "child-1".to_owned(),
+                child_id: plan.child_graph[0].child_id.clone(),
                 step_id: "read-only-analysis".to_owned(),
                 status: WorkflowChildRunStatus::Completed,
                 summary: "completed".to_owned(),
@@ -7875,7 +8049,7 @@ mod tests {
         session.metadata["runtime_checkpoint"]["workflow_checkpoint_payload"] = json!({
             "checkpoint": session.metadata["runtime_checkpoint"]["workflow"].clone(),
             "completed_step_id": "read-only-analysis",
-            "completed_child_ids": ["child-1"],
+            "completed_child_ids": [plan.child_graph[0].child_id],
             "ready_step_ids": ["verify-analysis"],
             "pending_step_ids": [],
             "worktree_refs": [],
