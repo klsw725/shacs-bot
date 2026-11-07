@@ -44,6 +44,7 @@
 | [`046-sqlite-durable-event-store`](046-sqlite-durable-event-store/SPEC.md) | `Complete (Scoped)`: durable event store를 `events.log`에서 append만 허용하는 SQLite 파일로 바꾸되 `DurableEventStore` 공개 입구와 029 계약의 뜻을 유지했고(000), 자주 읽는 소비자와 work 상태를 만드는 경로가 필요한 행만 읽게 했다(010). 관계없는 행이 30만 개여도 enqueue·웹 감시 읽기·work 상태 갱신이 decode하는 행 수는 같다. 옛 `events.log`는 옮기지 않으며 남아 있으면 writable start를 막는다. 첫 open과 recovery admission은 지금처럼 전체를 읽는다. 두 PRD 독립 Oracle PASS([종료 증거](046-sqlite-durable-event-store/SPEC.md#종료-증거-2026-11-01)); 전체 출시 seal 아님 | 029, 031, 034, 036, 042 |
 | [`047-semantic-memory-search`](047-semantic-memory-search/SPEC.md) | `Complete (Scoped)`: 기억 파일에서 다시 만들 수 있는 SQLite 색인과 process 안에서 candle로 돌리는 local 임베딩 모델(기본 multilingual-e5-small 한국어판, revision·sha256 고정)을 두고, 그 의존성 때문에 034 release runner의 의존성 트리 한도를 작업 트리와 나눴다(000). 글자와 뜻을 RRF로 합친 결정적 `memory_search` tool, `memory search` CLI, config와 skill 안내를 더했다. 한국어 fixture 질문 35개의 상위 3개 적중률은 88.6%로, grep 기준선 54.3%보다 높다(010). 두 PRD 독립 Oracle PASS([종료 증거](047-semantic-memory-search/SPEC.md#종료-증거-2026-11-02)); 전체 출시 seal 아님. 외부 서버·클라우드 임베딩 없음 | 004, 005, 009, 010, 012, 018, 020, 031, 034, 046 |
 | [`048-transcript-classifier-auto-mode`](048-transcript-classifier-auto-mode/SPEC.md) | `Complete (Scoped)`: PRD 000–050 `Complete (Scoped)`. 수용 조건 10의 Docker 평가는 사용자 결정으로 돌리지 않음([종료 증거](048-transcript-classifier-auto-mode/SPEC.md#종료-증거-2026-11-07)); 전체 출시 seal 아님. `auto` mode를 Claude Code auto mode의 판정 구조와 동작에 맞춘다(다른 점은 SPEC에 적는다). 사용자 규칙(Claude Code 문법으로 적는 새 `permissions`의 allow·ask·deny 목록, 넓은 실행기 규칙은 멈춤) → workspace 안 읽기·수정은 바로 허용 → critical path 제거와 symlink를 따라간 보호 경로 쓰기는 묻기 → 나머지는 사용자 메시지와 도구 호출만 보는 2단계 classifier. 인증 저장소는 모든 mode에서 목록·검색에서 숨기고, 읽을 때마다 묻고, 쓰기는 거절하며, root·home·workspace·data 폴더를 통째로 지우는 명령도 모든 mode에서 묻는다(000). `config.json`의 비밀을 같은 비밀 파일인 `.env.json`으로 옮기는 migration(010). 막히면 어시스턴트가 이유를 받고 다른 방법을 찾으며 3번 연속·20번 누적에서만 묻는다(020). 하위 작업 넘김 검사(030), 도구 결과의 prompt injection 경고(040), 대화형 기본 mode `auto`와 `permissions auto-mode` 설정 도구(050). auto mode에서 022의 해당 기준을 대신하며 TRUST-MODEL-DECISION을 2026-11-04에 고쳤다 | 004, 008, 009, 010, 011, 012, 013, 014, 020, 022, 025, 026, 030, 031 |
+| [`049-container-browser-computer-use`](049-container-browser-computer-use/SPEC.md) | `Planned`: 공식 container 안 가상 모니터에 shacs-bot이 띄운 Chromium 하나를, 어시스턴트가 일반 function tool `browser`로 번호 붙인 요소 목록과 번호를 그린 캡처를 보며 조작한다. provider의 computer use 기능을 쓰지 않아 그림을 못 보는 model도 쓴다. 도구 결과 그림이 글로 바뀌던 문제를 고치고(000), container 브라우저와 SOCKS5 proxy 경계(010), `browser` tool(020), `browser_act` capability와 auto mode 연결(030), noVNC 보기 전용 화면(040). 로그인·화면 넘겨받기·042 웹 감시 연결은 후속 스펙 | 004, 009, 010, 014, 015, 020, 022, 023, 027, 030, 031, 034, 048 |
 
 ## 읽는 순서 권장
 
@@ -98,6 +99,7 @@
 46. `046-sqlite-durable-event-store`
 47. `047-semantic-memory-search`
 48. `048-transcript-classifier-auto-mode`
+49. `049-container-browser-computer-use`
 
 ## 운영 원칙
 
