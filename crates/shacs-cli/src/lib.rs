@@ -111,7 +111,8 @@ use shacs_core::runtime::{
     SessionHistoryOptions, SessionManager, SessionTurnCancelOutcome, SessionTurnLock,
     SkillTrustActionKind, SkillTrustPermissionDecision, StreamDeltaCoalescer,
     SubagentExecutionConfig, SubagentRuntime, SurfaceActionOutcomeKind, SurfaceActionRequestKind,
-    ToolEvent, ToolSearchConfig, ToolSearchMode, ToolStatus, HEARTBEAT_FILE_NAME,
+    ToolEvent, ToolImageSettings, ToolSearchConfig, ToolSearchMode, ToolStatus,
+    HEARTBEAT_FILE_NAME,
 };
 use shacs_core::tools::{
     McpRuntime, McpServerConnectionReport, McpServerSpec, McpStartupGate, MessageTool,
@@ -19102,6 +19103,10 @@ impl AgentLoopChatCompletionAdapter {
     fn loop_config_for(&self, kind: run_permission_mode::RunKind) -> AgentLoopConfig {
         let bundle = self.read_run_config();
         let mut config = AgentLoopConfig::new(&self.workspace, self.resolved_model.clone());
+        config.tool_images = Some(ToolImageSettings {
+            media_root: self.media_dir.clone(),
+            attach: self.native_image_input_supported,
+        });
         if let Some(media_root) = self.media_dir.parent() {
             config.media_roots.push(media_root.to_path_buf());
         }
@@ -20144,6 +20149,7 @@ impl AgentLoopChatCompletionAdapter {
     fn subagent_execution_config(&self, config: &AgentLoopConfig) -> SubagentExecutionConfig {
         let mut subagent =
             SubagentExecutionConfig::new(&self.workspace, self.resolved_model.clone());
+        subagent.tool_images = config.tool_images.clone();
         subagent.settings = config.settings.clone();
         subagent.retry_mode = config.retry_mode;
         subagent.containment_snapshot = config.containment_snapshot.clone();
@@ -27271,6 +27277,18 @@ mod tests {
         });
 
         let subagent = adapter.subagent_execution_config(&loop_config);
+        let parent_images = loop_config
+            .tool_images
+            .as_ref()
+            .ok_or("missing parent image settings")?;
+        let child_images = subagent
+            .tool_images
+            .as_ref()
+            .ok_or("missing child image settings")?;
+        assert_eq!(parent_images.media_root, adapter.media_dir);
+        assert_eq!(parent_images.attach, adapter.native_image_input_supported);
+        assert_eq!(child_images.media_root, parent_images.media_root);
+        assert_eq!(child_images.attach, parent_images.attach);
         assert_eq!(subagent.exec_timeout_seconds, 123);
         assert_eq!(subagent.exec_sandbox.as_deref(), Some("sandboxed"));
         assert_eq!(

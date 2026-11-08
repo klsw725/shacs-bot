@@ -17,7 +17,24 @@ fn session_manager_saves_loads_metadata_and_history() -> Result<(), Box<dyn Erro
     session.add_message("user", "hello", Map::new());
     let mut media_extra = Map::new();
     media_extra.insert("media".to_owned(), json!(["image.png"]));
+    media_extra.insert("images".to_owned(), json!(["not a tool image"]));
     session.add_message("assistant", "seen", media_extra);
+    session.add_message(
+        "assistant",
+        "",
+        Map::from_iter([(
+            "tool_calls".to_owned(),
+            json!([{"id": "image-call", "function": {"name": "web_fetch", "arguments": "{}"}}]),
+        )]),
+    );
+    session.add_message(
+        "tool",
+        "[image: tool-results/image.png]",
+        Map::from_iter([
+            ("tool_call_id".to_owned(), json!("image-call")),
+            ("images".to_owned(), json!(["tool-results/image.png"])),
+        ]),
+    );
     session.last_consolidated = 1;
     manager.save(&session)?;
 
@@ -30,7 +47,9 @@ fn session_manager_saves_loads_metadata_and_history() -> Result<(), Box<dyn Erro
 
     if loaded.metadata["keep"] != "value"
         || loaded.last_consolidated != 1
-        || history.len() != 2
+        || history.len() != 4
+        || history[1].get("images").is_some()
+        || history[3]["images"] != json!(["tool-results/image.png"])
         || !history[0]["content"]
             .as_str()
             .unwrap_or_default()

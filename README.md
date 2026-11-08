@@ -104,6 +104,8 @@ Codex OAuth 로그인을 이미지 생성 provider에도 사용할 수 있습니
 
 이 경로는 Codex 계정의 image-generation entitlement가 필요하며 공개 OpenAI Images API가 아닌 Codex backend 계약을 사용합니다. 자세한 인증 절차와 제한은 [`docs/USAGE.md`](docs/USAGE.md)를 참고하세요.
 
+`web_fetch`로 받은 그림과 MCP 도구가 돌려준 그림은 모델에 그림으로 전달합니다. 파일은 실행의 media 폴더 아래 `tool-results/`에 저장하고 대화 기록에는 글과 파일 참조만 남깁니다. 요청마다 최근 그림 3개만 붙이며, 그림 입력을 받지 않는 모델에는 참조 글만 보냅니다.
+
 어시스턴트는 `memory_search` 도구로 기억(`memory/MEMORY.md`, `memory/history.jsonl`)을 글자와 뜻으로 함께 찾습니다. 뜻 검색 모델은 이 컴퓨터 안에서 돌고 기억 내용은 밖으로 나가지 않으며, 모델을 한 번 설치(`shacs-bot memory model install`)하면 켜집니다. 설정과 결과 읽는 법은 [기억 검색](docs/USAGE.md#기억-검색)을 참고하세요.
 
 Spec 033 local goal owner는 CLI와 local API에서 같은 typed snapshot을 사용합니다:

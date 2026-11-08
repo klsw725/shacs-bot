@@ -321,7 +321,7 @@ fn refusals_empty_results_and_image_data_are_not_sent() -> TestResult {
     assert_eq!(payloads.len(), 1, "{payloads:?}");
     assert_eq!(
         payloads[0]["result"],
-        "(Image fetched from: https://example.com/a.png)"
+        "[image not kept: unsupported image type]\n(Image fetched from: https://example.com/a.png)"
     );
     let sent = serde_json::to_string(
         &provider

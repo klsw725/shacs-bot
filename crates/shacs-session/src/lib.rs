@@ -1212,6 +1212,7 @@ fn session_message_to_history(mut message: Value, include_timestamps: bool) -> O
     let object = message.as_object_mut()?;
     let role = object.get("role")?.clone();
     let role_name = role.as_str().unwrap_or_default();
+    let is_tool = role_name == "tool";
     let mut content = object
         .get("content")
         .cloned()
@@ -1254,6 +1255,11 @@ fn session_message_to_history(mut message: Value, include_timestamps: bool) -> O
     ] {
         if let Some(value) = object.get(key) {
             out.insert(key.to_owned(), value.clone());
+        }
+    }
+    if is_tool {
+        if let Some(images) = object.get("images") {
+            out.insert("images".to_owned(), images.clone());
         }
     }
     Some(Value::Object(out))

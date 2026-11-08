@@ -61,16 +61,22 @@ pub struct RuntimeToolMessage {
     pub tool_call_id: String,
     pub name: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 impl RuntimeToolMessage {
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut message = json!({
             "role": "tool",
             "tool_call_id": self.tool_call_id,
             "name": self.name,
             "content": self.content,
-        })
+        });
+        if !self.images.is_empty() {
+            message["images"] = json!(self.images);
+        }
+        message
     }
 }
 
@@ -363,6 +369,7 @@ impl<'a> RuntimeToolExecutor<'a> {
                     prepared.push(call);
                 }
                 Err(error) => errors.push(RuntimeToolMessage {
+                    images: Vec::new(),
                     tool_call_id: call.id,
                     name: call.name,
                     content: format!("{error}{ERROR_HINT}"),
@@ -686,6 +693,7 @@ impl PermissionEvaluation {
             None => return permission_block_message(tool_call_id, name, &self.decision),
         };
         RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: tool_call_id.to_owned(),
             name: name.to_owned(),
             content,
@@ -1402,6 +1410,7 @@ pub(crate) fn permission_block_message(
         PermissionPolicyDecisionKind::Deny => "Permission denied",
     };
     RuntimeToolMessage {
+        images: Vec::new(),
         tool_call_id: tool_call_id.to_owned(),
         name: name.to_owned(),
         content: format!(
@@ -1474,6 +1483,7 @@ fn flush_allowed_batch(
         };
         executed_call_ids.push(result.call.id.clone());
         messages.push(RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: result.call.id,
             name: result.call.name,
             content,

@@ -213,6 +213,7 @@ impl AgentHook for PluginRuntimeHookAgentHook {
 
 fn blocked_message(call: &RuntimeToolCall, hook_ref: &str, reason: &str) -> RuntimeToolMessage {
     RuntimeToolMessage {
+         images: Vec::new(),
         tool_call_id: call.id.clone(),
         name: call.name.clone(),
         content: format!(

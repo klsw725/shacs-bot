@@ -40,6 +40,7 @@ impl AgentHook for Quoting {
             .iter()
             .filter(|call| call.name == "image_generate")
             .map(|call| RuntimeToolMessage {
+                images: Vec::new(),
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: format!("Error: blocked by policy: {}", call.arguments["prompt"]),

@@ -38,13 +38,13 @@ use crate::runtime::{
     SessionRememberedPermissionRules, SessionTurnAcquireError, SessionTurnCancelOutcome,
     SessionTurnGuard, SessionTurnLock, SubagentExecutionConfig, SubagentOutcomeKind,
     SubagentRuntime, TokenConsolidationConfig, ToolEventCallback, ToolExecutionContext,
-    WorkflowAdmissionDecision, WorkflowAdmissionInput, WorkflowBudgetPolicy, WorkflowBudgetSlice,
-    WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowCheckpointPolicy, WorkflowChildResult,
-    WorkflowChildRunStatus, WorkflowChildSpec, WorkflowContextPolicy, WorkflowHarnessPlan,
-    WorkflowMergePolicy, WorkflowModelRoutingPolicy, WorkflowPattern, WorkflowPermissionPolicy,
-    WorkflowQuarantinePolicy, WorkflowRecipeReadiness, WorkflowResumeDecision,
-    WorkflowResumePolicy, WorkflowRunState, WorkflowStep, WorkflowStopCondition,
-    WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
+    ToolImageSettings, WorkflowAdmissionDecision, WorkflowAdmissionInput, WorkflowBudgetPolicy,
+    WorkflowBudgetSlice, WorkflowBudgetUsage, WorkflowCheckpointInput, WorkflowCheckpointPolicy,
+    WorkflowChildResult, WorkflowChildRunStatus, WorkflowChildSpec, WorkflowContextPolicy,
+    WorkflowHarnessPlan, WorkflowMergePolicy, WorkflowModelRoutingPolicy, WorkflowPattern,
+    WorkflowPermissionPolicy, WorkflowQuarantinePolicy, WorkflowRecipeReadiness,
+    WorkflowResumeDecision, WorkflowResumePolicy, WorkflowRunState, WorkflowStep,
+    WorkflowStopCondition, WorkflowToolScopePolicy, WorkflowVerifierSpec, WorkflowWorktreePolicy,
     DEFAULT_GOAL_TURN_BUDGET, GOAL_EVALUATOR_BOUNDARY_METADATA_KEY,
 };
 use crate::tools::{
@@ -271,6 +271,7 @@ enum PermissionApprovalReply {
 #[derive(Clone)]
 pub struct AgentLoopConfig {
     pub workspace: PathBuf,
+    pub tool_images: Option<ToolImageSettings>,
     pub media_roots: Vec<PathBuf>,
     pub model: String,
     pub settings: GenerationSettings,
@@ -327,6 +328,7 @@ impl AgentLoopConfig {
         Self {
             workspace: workspace.into(),
             media_roots: Vec::new(),
+            tool_images: None,
             model: model.into(),
             settings: GenerationSettings::default(),
             retry_mode: ProviderRetryMode::Standard,
@@ -1599,6 +1601,7 @@ impl<'a> AgentLoop<'a> {
                     append_session_message(
                         &mut session,
                         RuntimeToolMessage {
+                            images: Vec::new(),
                             tool_call_id: approval.tool_call.id,
                             name: approval.tool_call.name,
                             content: "Permission denied by user.".to_owned(),
@@ -1800,6 +1803,7 @@ impl<'a> AgentLoop<'a> {
             self.config.model.clone(),
         );
         spec.permission_classifier_client = Some(&provider_client);
+        spec.tool_images = self.config.tool_images.clone();
         spec.settings = self.config.settings.clone();
         spec.retry_mode = self.config.retry_mode;
         spec.max_iterations = self.config.max_iterations;
@@ -3082,6 +3086,7 @@ impl<'a> AgentLoop<'a> {
             .clone()
             .unwrap_or_else(|| self.config.model.clone());
         let mut config = SubagentExecutionConfig::new(self.config.workspace.clone(), model);
+        config.tool_images = self.config.tool_images.clone();
         config.settings = self.config.settings.clone();
         config.retry_mode = self.config.retry_mode;
         config.containment_snapshot = self.config.containment_snapshot.clone();
@@ -4432,6 +4437,7 @@ impl<'a> AgentLoop<'a> {
             self.config.model.clone(),
         );
         spec.fail_on_tool_error = self.config.fail_on_tool_error;
+        spec.tool_images = self.config.tool_images.clone();
         spec.max_tool_result_chars = self.config.max_tool_result_chars;
         spec.workspace = Some(self.config.workspace.clone());
         spec.session_key = Some(session_key.to_owned());
@@ -4480,14 +4486,14 @@ impl<'a> AgentLoop<'a> {
             .first()
             .map(|action| action.tool_name.clone());
         let mut fatal_error = None;
-        for raw_message in report.messages {
-            let event =
-                crate::runtime::runner::tool_event_for_message(&raw_message, None, None, None);
+        for mut raw_message in report.messages {
             let tool = tool.clone().unwrap_or_else(|| raw_message.name.clone());
             let returned =
                 crate::runtime::runner::tool_returned(&report.executed_call_ids, &raw_message);
             let (tool_message, fatal) =
-                crate::runtime::runner::finalize_tool_message(&spec, raw_message);
+                crate::runtime::runner::finalize_tool_message(&spec, &mut raw_message);
+            let event =
+                crate::runtime::runner::tool_event_for_message(&raw_message, None, None, None);
             crate::runtime::runner::emit_events(&spec, std::slice::from_ref(&event));
             if fatal_error.is_none() && fatal {
                 fatal_error = Some(tool_message.content.clone());

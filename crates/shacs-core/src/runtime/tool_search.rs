@@ -536,6 +536,7 @@ fn search_result(call: &BridgeToolCall, catalog: &DeferredToolCatalog) -> Bridge
         })
         .collect::<Vec<_>>();
     BridgeAction::Immediate(RuntimeToolMessage {
+        images: Vec::new(),
         tool_call_id: call.original_call_id.clone(),
         name: call.bridge_name.clone(),
         content: json!({
@@ -563,6 +564,7 @@ fn describe_result(
         return BridgeAction::Error(out_of_catalog_error(name, registry));
     };
     BridgeAction::Immediate(RuntimeToolMessage {
+        images: Vec::new(),
         tool_call_id: call.original_call_id.clone(),
         name: call.bridge_name.clone(),
         content: json!({
@@ -756,6 +758,7 @@ fn flush_executable_pending(
         };
         report.push_resolved_message(
             RuntimeToolMessage {
+                images: message.images,
                 tool_call_id: message.tool_call_id,
                 name: pending_call.bridge_call.bridge_name.clone(),
                 content: message.content,
@@ -921,6 +924,7 @@ fn out_of_catalog_error(name: &str, registry: &ToolRegistry) -> ToolCallScopeErr
 
 fn error_message(call: &BridgeToolCall, error: ToolCallScopeError) -> RuntimeToolMessage {
     RuntimeToolMessage {
+        images: Vec::new(),
         tool_call_id: call.original_call_id.clone(),
         name: call.bridge_name.clone(),
         content: format!("{error}{ERROR_HINT}"),

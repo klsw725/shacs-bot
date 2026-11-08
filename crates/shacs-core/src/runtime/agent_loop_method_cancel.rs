@@ -41,6 +41,7 @@ impl AgentLoop<'_> {
             append_session_message(
                 session,
                 RuntimeToolMessage {
+                    images: Vec::new(),
                     tool_call_id: approval.tool_call.id,
                     name: approval.tool_call.name,
                     content: "Permission approval Rejected: method_changed; tool not executed."

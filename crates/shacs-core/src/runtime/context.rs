@@ -730,7 +730,7 @@ fn value_to_text(value: Value) -> String {
     }
 }
 
-fn detect_image_mime(raw: &[u8]) -> Option<&'static str> {
+pub(super) fn detect_image_mime(raw: &[u8]) -> Option<&'static str> {
     if raw.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
     } else if raw.starts_with(b"\xff\xd8\xff") {

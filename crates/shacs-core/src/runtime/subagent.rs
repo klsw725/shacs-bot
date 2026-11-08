@@ -10,7 +10,7 @@ use crate::runtime::{
     PendingExecution, PermissionCeilingSnapshot, PermissionMode, PermissionModeSnapshot,
     PermissionRuleInput, ProviderInvocationClient, RuntimeCapabilityReport,
     RuntimeCapabilityStatus, RuntimeExecutionLedger, SessionRememberedPermissionRule,
-    SubagentOutcomeKind, ToolEvent, ToolExecutionContext, ToolStatus,
+    SubagentOutcomeKind, ToolEvent, ToolExecutionContext, ToolImageSettings, ToolStatus,
 };
 use crate::tools::{
     EditFileTool, ExecConfig, ExecTool, FileState, GlobTool, GrepTool, ListDirTool, PathContext,
@@ -381,6 +381,7 @@ impl Default for SubagentRuntimeConfig {
 
 #[derive(Debug, Clone)]
 pub struct SubagentExecutionConfig {
+    pub tool_images: Option<ToolImageSettings>,
     pub method_observation:
         Option<Arc<Mutex<crate::runtime::task_method_observe::MethodObservation>>>,
     pub workspace: PathBuf,
@@ -426,6 +427,7 @@ impl SubagentExecutionConfig {
     pub fn new(workspace: impl Into<PathBuf>, model: impl Into<String>) -> Self {
         Self {
             method_observation: None,
+            tool_images: None,
             workspace: workspace.into(),
             model: model.into(),
             settings: GenerationSettings::default(),
@@ -945,6 +947,7 @@ impl SubagentRuntime {
             .flatten();
         let mut spec =
             AgentRunSpec::new(messages, &registry, &provider_client, config.model.clone());
+        spec.tool_images = config.tool_images.clone();
         spec.auto_mode_classifier = classifier.as_ref().map(|child| child.classifier.clone());
         spec.settings = config.settings.clone();
         spec.retry_mode = config.retry_mode;
@@ -1496,7 +1499,10 @@ pub fn build_subagent_tool_registry(config: &SubagentExecutionConfig) -> ToolReg
     let path_context = PathContext {
         workspace: Some(config.workspace.clone()),
         allowed_dir,
-        media_dir: None,
+        media_dir: config
+            .tool_images
+            .as_ref()
+            .map(|settings| settings.media_root.clone()),
         extra_allowed_dirs: Vec::new(),
     };
     let file_state = Arc::new(Mutex::new(FileState::new()));

@@ -723,12 +723,22 @@ pub fn build_chat_completions_request(
     request: &ProviderRequest,
     config: &ProviderConfig,
 ) -> OpenAiCompatibleRequestParts {
+    let mut messages = request.messages.clone();
+    for message in &mut messages {
+        if let Some(object) = message.as_object_mut() {
+            object.remove("images");
+        }
+        if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+            for block in blocks {
+                if let Some(object) = block.as_object_mut() {
+                    object.remove("_meta");
+                }
+            }
+        }
+    }
     let mut body = Map::new();
     body.insert("model".to_owned(), Value::String(request.model.clone()));
-    body.insert(
-        "messages".to_owned(),
-        Value::Array(request.messages.clone()),
-    );
+    body.insert("messages".to_owned(), Value::Array(messages));
     body.insert(
         "max_tokens".to_owned(),
         Value::Number(Number::from(request.settings.max_tokens.max(1))),

@@ -114,6 +114,7 @@ pub(super) fn cancel(session: &mut Session) {
         append_session_message(
             session,
             RuntimeToolMessage {
+                images: Vec::new(),
                 tool_call_id: approval.tool_call.id,
                 name: approval.tool_call.name,
                 content: "Action decision cancelled; tool not executed.".to_owned(),

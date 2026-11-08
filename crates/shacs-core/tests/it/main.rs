@@ -6,6 +6,8 @@
 //! file as several modules). Add new integration tests here as modules instead
 //! of new `tests/*.rs` files, which each link a separate test binary.
 
+mod spec049_tool_images;
+
 #[path = "containment_external.rs"]
 pub mod containment_external;
 #[path = "containment_permission.rs"]

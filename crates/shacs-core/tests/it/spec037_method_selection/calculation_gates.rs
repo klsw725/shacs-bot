@@ -12,6 +12,7 @@ impl AgentHook for BlockExec {
             .iter()
             .filter(|call| call.name == "exec")
             .map(|call| RuntimeToolMessage {
+                 images: Vec::new(),
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: "Error: Tool `exec` blocked by plugin hook `policy` for event `tool:before`: not allowed".to_owned(),
@@ -76,6 +77,7 @@ impl AgentHook for BlockMarkedExec {
             .iter()
             .filter(|call| call.arguments.to_string().contains("blocked-attempt"))
             .map(|call| RuntimeToolMessage {
+                 images: Vec::new(),
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: "Error: Tool `exec` blocked by plugin hook `policy` for event `tool:before`: not allowed".to_owned(),
@@ -126,6 +128,7 @@ impl AgentHook for BlockWithResultLine {
         calls
             .iter()
             .map(|call| RuntimeToolMessage {
+                 images: Vec::new(),
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: format!(

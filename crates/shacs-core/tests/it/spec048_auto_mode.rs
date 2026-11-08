@@ -17,7 +17,7 @@ mod env_masking;
 #[path = "spec048_auto_mode/env_secret_files.rs"]
 mod env_secret_files;
 #[path = "spec048_auto_mode/harness.rs"]
-mod harness;
+pub(crate) mod harness;
 #[path = "spec048_auto_mode/loop_blocks.rs"]
 mod loop_blocks;
 #[path = "spec048_auto_mode/other_modes.rs"]
@@ -31,4 +31,4 @@ mod secret_files;
 #[path = "spec048_auto_mode/subagents.rs"]
 mod subagents;
 #[path = "spec048_auto_mode/support.rs"]
-mod support;
+pub(crate) mod support;

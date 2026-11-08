@@ -250,6 +250,12 @@ impl AgentHook for CompositeHook {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolImageSettings {
+    pub media_root: PathBuf,
+    pub attach: bool,
+}
+
 #[derive(Clone)]
 pub struct AgentRunSpec<'a> {
     pub initial_messages: Vec<Value>,
@@ -271,6 +277,7 @@ pub struct AgentRunSpec<'a> {
     pub concurrent_tools: bool,
     pub fail_on_tool_error: bool,
     pub workspace: Option<PathBuf>,
+    pub tool_images: Option<ToolImageSettings>,
     pub session_key: Option<String>,
     pub tool_search: ToolSearchConfig,
     pub context_window_tokens: Option<usize>,
@@ -321,6 +328,7 @@ impl<'a> AgentRunSpec<'a> {
             concurrent_tools: false,
             fail_on_tool_error: false,
             workspace: None,
+            tool_images: None,
             session_key: None,
             tool_search: ToolSearchConfig::default(),
             context_window_tokens: None,
@@ -734,8 +742,10 @@ impl AgentRunner {
                     .collect::<BTreeMap<_, _>>();
                 let mut fatal_outcome_content = None;
                 for raw_message in &report.messages {
+                    let mut raw_message = raw_message.clone();
+                    let (normalized, fatal) = finalize_tool_message(&spec, &mut raw_message);
                     let mut event = tool_event_for_message(
-                        raw_message,
+                        &raw_message,
                         executable_calls_by_id.get(&raw_message.tool_call_id),
                         current_catalog.as_ref(),
                         resolved_bridge_calls_by_id
@@ -747,7 +757,6 @@ impl AgentRunner {
                     if spec.auto_mode_blocks.did_not_run(&raw_message.tool_call_id) {
                         event.status = ToolStatus::Ok;
                     }
-                    let (normalized, fatal) = finalize_tool_message(&spec, raw_message.clone());
                     if fatal {
                         fatal_outcome_content = Some(normalized.content.clone());
                     }
@@ -758,7 +767,7 @@ impl AgentRunner {
                         .map_or(raw_message.name.as_str(), |resolved| {
                             resolved.underlying_name.as_str()
                         });
-                    let returned = tool_returned(&report.executed_call_ids, raw_message);
+                    let returned = tool_returned(&report.executed_call_ids, &raw_message);
                     let normalized = checked_tool_message(&spec, tool, normalized, returned);
                     completed_tool_results.push(normalized.to_json());
                     completed_tool_messages.push(normalized.clone());
@@ -3216,6 +3225,7 @@ fn append_skipped_tool_results(
             FATAL_SKIP_CONTENT
         };
         let skipped = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: call.id.clone(),
             name: call.name.clone(),
             content: content.to_owned(),
@@ -3255,6 +3265,7 @@ fn govern_messages_for_model(spec: &AgentRunSpec<'_>, messages: &[Value]) -> Vec
     governed = snip_history(spec, &governed);
     governed = drop_orphan_tool_results(&governed);
     governed = backfill_missing_tool_results(&governed);
+    governed = super::tool_images::attach(spec.tool_images.as_ref(), governed);
     inject_provider_context(spec, governed)
 }
 
@@ -3504,6 +3515,7 @@ fn apply_external_lookup_throttle(
                 let arguments = call.arguments.clone();
                 let observable_arguments = observable_tool_arguments(&name, &arguments);
                 messages.push(RuntimeToolMessage {
+                    images: Vec::new(),
                     tool_call_id: call_id.clone(),
                     name: name.clone(),
                     content,
@@ -3542,10 +3554,11 @@ fn external_lookup_signature(call: &RuntimeToolCall) -> Option<String> {
 
 pub(super) fn finalize_tool_message(
     spec: &AgentRunSpec<'_>,
-    raw_message: RuntimeToolMessage,
+    raw_message: &mut RuntimeToolMessage,
 ) -> (RuntimeToolMessage, bool) {
-    let fatal = fatal_tool_message(spec, &raw_message);
-    let outcome = tool_outcome_for_message(spec, &raw_message);
+    super::tool_images::persist(spec.tool_images.as_ref(), raw_message);
+    let fatal = fatal_tool_message(spec, raw_message);
+    let outcome = tool_outcome_for_message(spec, raw_message);
     // A `spawn` auto mode did not run started nothing, whatever its text says.
     let spawn_completed = matches!(outcome, ToolOutcomeKind::Completed)
         && !spec.auto_mode_blocks.did_not_run(&raw_message.tool_call_id);
@@ -3557,7 +3570,7 @@ pub(super) fn finalize_tool_message(
         normalized.artifact_ref,
     );
     if spawn_completed {
-        begin_spawned_subagent_execution(spec, &raw_message);
+        begin_spawned_subagent_execution(spec, raw_message);
     }
     (normalized.message, fatal)
 }
@@ -3948,6 +3961,7 @@ mod tests {
     #[test]
     fn tool_timeout_message_is_distinct_from_generic_failure() {
         let message = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: "call-timeout".to_owned(),
             name: "exec".to_owned(),
             content: "Error: command timed out after 60 seconds".to_owned(),
@@ -3957,6 +3971,7 @@ mod tests {
         assert!(is_tool_error_message(&message));
 
         let successful = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: "call-config".to_owned(),
             name: "exec".to_owned(),
             content: "Timeout configured successfully".to_owned(),
@@ -3964,36 +3979,43 @@ mod tests {
         assert!(!is_tool_timeout_message(&successful));
 
         let mcp_timeout = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: "mcp-timeout".to_owned(),
             name: "mcp_server_tool".to_owned(),
             content: "(MCP tool call timed out after 30s)".to_owned(),
         };
         let mcp_cancelled = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: "mcp-cancelled".to_owned(),
             name: "mcp_server_tool".to_owned(),
             content: "(MCP tool call was cancelled)".to_owned(),
         };
         let mcp_failed = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: "mcp-failed".to_owned(),
             name: "mcp_server_tool".to_owned(),
             content: "(MCP tool call failed after retry: transport)".to_owned(),
         };
         let mcp_failed_with_timeout_name = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: "mcp-failed-timeout-name".to_owned(),
             name: "mcp_server_tool".to_owned(),
             content: "(MCP tool call failed: TimeoutError)".to_owned(),
         };
         let resource_cancelled = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: "resource-cancelled".to_owned(),
             name: "mcp_server_resource".to_owned(),
             content: "(MCP resource read was cancelled)".to_owned(),
         };
         let prompt_failed = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: "prompt-failed".to_owned(),
             name: "mcp_server_prompt".to_owned(),
             content: "(MCP prompt call failed: protocol)".to_owned(),
         };
         let prompt_timeout = RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: "prompt-timeout".to_owned(),
             name: "mcp_server_prompt".to_owned(),
             content: "(MCP prompt call timed out after 30s)".to_owned(),

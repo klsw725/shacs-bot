@@ -102,6 +102,7 @@ impl AgentHook for AdmissionHook {
             return calls
                 .iter()
                 .map(|call| RuntimeToolMessage {
+                    images: Vec::new(),
                     tool_call_id: call.id.clone(),
                     name: call.name.clone(),
                     content: "Error: blocked by fixture hook".to_owned(),

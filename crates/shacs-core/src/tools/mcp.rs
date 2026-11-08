@@ -71,6 +71,7 @@ pub enum McpErrorKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum McpCallOutcome {
     Success(Vec<String>),
+    ImageContent(Vec<Value>),
     Error(McpErrorKind),
 }
 
@@ -964,7 +965,10 @@ impl Tool for McpToolWrapper {
                 self.capability.timeout_seconds,
             )
         });
-        format_tool_outcome(outcome, self.capability.timeout_seconds).into()
+        match outcome {
+            McpCallOutcome::ImageContent(parts) => ToolResult::Json(Value::Array(parts)),
+            outcome => format_tool_outcome(outcome, self.capability.timeout_seconds).into(),
+        }
     }
 }
 
@@ -1353,9 +1357,34 @@ fn result_outcome(method: &str, result: &Value) -> McpCallOutcome {
         McpCallOutcome::Error(McpErrorKind::Other {
             type_name: join_parts(parts),
         })
+    } else if method == "tools/call"
+        && result
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| content.iter().any(|part| image_data(part).is_some()))
+    {
+        let content = result["content"].as_array().into_iter().flatten();
+        McpCallOutcome::ImageContent(
+            content
+                .map(|part| {
+                    if let Some((data, mime)) = image_data(part) {
+                        json!({"type": "image_url", "image_url": {"url": format!("data:{mime};base64,{data}")}})
+                    } else {
+                        json!({"type": "text", "text": content_part_text(part)})
+                    }
+                })
+                .collect(),
+        )
     } else {
         McpCallOutcome::Success(parts)
     }
+}
+
+fn image_data(part: &Value) -> Option<(&str, &str)> {
+    if part.get("type").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    Some((part.get("data")?.as_str()?, part.get("mimeType")?.as_str()?))
 }
 
 fn parts_from_mcp_result(method: &str, result: &Value) -> Vec<String> {
@@ -1505,6 +1534,7 @@ fn retry_transient(mut operation: impl FnMut() -> McpCallOutcome) -> McpCallOutc
 
 fn format_tool_outcome(outcome: McpCallOutcome, timeout_seconds: u64) -> String {
     match outcome {
+        McpCallOutcome::ImageContent(parts) => Value::Array(parts).to_string(),
         McpCallOutcome::Success(parts) => join_parts(parts),
         McpCallOutcome::Error(McpErrorKind::Timeout) => {
             format!("(MCP tool call timed out after {timeout_seconds}s)")
@@ -1526,6 +1556,7 @@ fn format_tool_outcome(outcome: McpCallOutcome, timeout_seconds: u64) -> String 
 
 fn format_resource_outcome(outcome: McpCallOutcome, timeout_seconds: u64) -> String {
     match outcome {
+        McpCallOutcome::ImageContent(parts) => Value::Array(parts).to_string(),
         McpCallOutcome::Success(parts) => join_parts(parts),
         McpCallOutcome::Error(McpErrorKind::Timeout) => {
             format!("(MCP resource read timed out after {timeout_seconds}s)")
@@ -1547,6 +1578,7 @@ fn format_resource_outcome(outcome: McpCallOutcome, timeout_seconds: u64) -> Str
 
 fn format_prompt_outcome(outcome: McpCallOutcome, timeout_seconds: u64) -> String {
     match outcome {
+        McpCallOutcome::ImageContent(parts) => Value::Array(parts).to_string(),
         McpCallOutcome::Success(parts) => join_parts(parts),
         McpCallOutcome::Error(McpErrorKind::Timeout) => {
             format!("(MCP prompt call timed out after {timeout_seconds}s)")
@@ -1625,6 +1657,54 @@ mod tests {
         assert_eq!(
             format_tool_outcome(result_outcome("tools/call", &failed), 5),
             "(MCP tool call failed: Invalid date)"
+        );
+    }
+
+    #[test]
+    fn tool_images_preserve_content_parts_and_other_mcp_results_keep_their_text() {
+        let content = json!({"content": [
+            {"type": "text", "text": "caption"},
+            {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
+            {"type": "resource", "resource": {"uri": "file://note"}}
+        ]});
+        let McpCallOutcome::ImageContent(parts) = result_outcome("tools/call", &content) else {
+            panic!("successful image results must keep their parts");
+        };
+        assert_eq!(
+            parts,
+            vec![
+                json!({"type": "text", "text": "caption"}),
+                json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}}),
+                json!({"type": "text", "text": content["content"][2].to_string()}),
+            ]
+        );
+        assert_eq!(
+            result_outcome(
+                "tools/call",
+                &json!({"content": [{"type": "text", "text": "caption"}]})
+            ),
+            McpCallOutcome::Success(vec!["caption".to_owned()])
+        );
+        let mut error = content.clone();
+        error["isError"] = json!(true);
+        assert!(matches!(
+            result_outcome("tools/call", &error),
+            McpCallOutcome::Error(_)
+        ));
+        assert_eq!(
+            result_outcome("resources/read", &json!({"contents": [{"blob": "abcd"}]})),
+            McpCallOutcome::Success(vec!["[Binary resource: 4 bytes]".to_owned()])
+        );
+        assert_eq!(
+            result_outcome(
+                "prompts/get",
+                &json!({"messages": [{"content": content["content"]}]})
+            ),
+            McpCallOutcome::Success(vec![
+                "caption".to_owned(),
+                content["content"][1].to_string(),
+                content["content"][2].to_string()
+            ])
         );
     }
 

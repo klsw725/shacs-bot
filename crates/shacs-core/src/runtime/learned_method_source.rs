@@ -112,6 +112,7 @@ pub(super) fn outcome(tool: &str, result: Option<&str>) -> RunOutcome {
         || exit_code.is_some_and(|code| code != 0)
         || refused_by_cron(tool, head)
         || is_tool_unsuccessful_message(&RuntimeToolMessage {
+            images: Vec::new(),
             tool_call_id: String::new(),
             name: tool.to_owned(),
             content: head.to_owned(),

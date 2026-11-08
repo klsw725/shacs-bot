@@ -52,6 +52,7 @@ impl AgentHook for Policy {
             .iter()
             .filter(|call| call.arguments.to_string().contains("blue"))
             .map(|call| RuntimeToolMessage {
+                images: Vec::new(),
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: "Error: blocked by policy".to_owned(),

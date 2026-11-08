@@ -152,6 +152,7 @@ mod task_method_store;
 mod tool_before;
 mod tool_execution;
 mod tool_execution_provider;
+mod tool_images;
 mod tool_search;
 mod trajectory_store;
 mod trusted_javascript_tool_before;
@@ -536,7 +537,8 @@ pub use runner::{
     is_auto_mode_block_notice, AgentHook, AgentHookContext, AgentRunSpec, AgentRunner,
     CompositeHook, ExecutionSnapshotCallback, ExecutionSnapshotResolver, MidTurnInjectionCallback,
     NoopAgentHook, ProviderEventCallback, RetryWaitCallback, ToolEvent, ToolEventCallback,
-    ToolSearchConfig, ToolSearchMode, ToolSearchRuntimeInput, ToolStatus, AUTO_MODE_BLOCK_EVENT,
+    ToolImageSettings, ToolSearchConfig, ToolSearchMode, ToolSearchRuntimeInput, ToolStatus,
+    AUTO_MODE_BLOCK_EVENT,
 };
 pub use self_improvement::{
     runtime_improvement_apply_readiness, runtime_improvement_apply_record,
