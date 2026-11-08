@@ -36,7 +36,7 @@
 - **`Cargo.lock`은 프로그램이라면 버전 관리에 포함하는 쪽을 기본으로 본다**. manifest를 바꾸지 않았는데 lockfile만 덮어쓰지 말 것. 수동 편집도 금지.
 - **빌드 산출물은 Cargo 기본 위치를 따른다**. workspace target directory는 `crates/target/`이다. `target/`을 소스처럼 다루지 말고, 필요 이상으로 다른 언어 산출물과 섞지 말 것.
 - **재현성이 필요하면 toolchain을 명시할 것**. 최소 지원 버전은 `Cargo.toml`의 `rust-version`, 저장소 차원 고정이 필요하면 `rust-toolchain.toml`을 사용한다.
-- **`rust-version`은 21개 crate가 같은 값(지금 `1.88`)을 쓴다**. `Cargo.lock`의 의존성이 요구하는 가장 높은 `rust-version`과 `Dockerfile`의 `rust:<버전>` 이미지에 맞춘 값이니, 바꿀 때는 셋을 함께 바꾼다. clippy는 이 값을 기준으로 더 새 표준 라이브러리 기능을 막고(`incompatible_msrv`) 그 버전에서 쓸 수 있는 문법을 제안한다.
+- **`rust-version`은 21개 crate가 같은 값(지금 `1.94`)을 쓴다**. `Cargo.lock`의 의존성이 요구하는 가장 높은 Rust와 `Dockerfile`의 `rust:<버전>` 이미지에 맞춘 값이니, 바꿀 때는 셋을 함께 바꾼다. 의존성이 적어 둔 `rust-version`만 믿지 말 것. `candle-core`(Spec 047)는 값을 적지 않았지만 x86_64 코드가 1.94를 요구한다(AVX-512 intrinsic은 1.89, unsafe 없이 부르는 `__cpuid_count`는 1.94). arm64 빌드는 이 코드를 컴파일하지 않으므로, 버전을 바꿀 때는 x86_64의 `rust:<버전>-bookworm`에서 `--locked` 빌드로 확인한다. clippy는 이 값을 기준으로 더 새 표준 라이브러리 기능을 막고(`incompatible_msrv`) 그 버전에서 쓸 수 있는 문법을 제안한다.
 - **자동화/CI성 명령은 가능하면 `--locked`를 우선 고려**. 의도치 않은 lockfile 갱신을 막는다.
 
 ## 위반하면 일관성 깨지는 것
