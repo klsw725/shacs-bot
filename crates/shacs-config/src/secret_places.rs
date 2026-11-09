@@ -230,6 +230,17 @@ fn field(path: &[Segment]) -> String {
     field
 }
 
+/// The `.env.json` name a secret at the object field path `keys` moves to,
+/// as `runtime config-migrate` names it: `["channels", "discord", "token"]`
+/// gives `SHACS_CHANNELS_DISCORD_TOKEN`.
+pub fn secret_env_name(keys: &[&str]) -> String {
+    let path: Vec<Segment> = keys
+        .iter()
+        .map(|key| Segment::Key((*key).to_owned()))
+        .collect();
+    env_name(&path)
+}
+
 fn env_name(path: &[Segment]) -> String {
     let mut name = String::from(NAME_PREFIX);
     for segment in path {

@@ -48,3 +48,7 @@ pub mod spec047_memory_cli;
 pub mod spec048_ask_verbose;
 #[path = "spec048_secrets_migration_cli.rs"]
 pub mod spec048_secrets_migration_cli;
+#[path = "spec052_discord_connect.rs"]
+pub mod spec052_discord_connect;
+#[path = "spec052_provider_status.rs"]
+pub mod spec052_provider_status;

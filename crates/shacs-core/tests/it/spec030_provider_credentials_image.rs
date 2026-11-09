@@ -254,6 +254,59 @@ fn spec030_codex_runtime_override_removes_stale_config_auth_headers() -> Result<
     Ok(())
 }
 
+/// Spec 052 PRD 000 acceptance 3: the image path still picks its provider
+/// with `resolve_image_generation_provider` after the runtime's credential
+/// place search moved into its own step.
+#[test]
+fn spec052_auto_image_provider_uses_the_saved_codex_sign_in() -> Result<(), Box<dyn Error>> {
+    // Given
+    let root = tempfile::tempdir()?;
+    let auth_path = root.path().join("auth.json");
+    let mut auth = AuthStore::default();
+    auth.providers.insert(
+        "openai_codex".to_owned(),
+        ProviderAuth {
+            kind: "oauth".to_owned(),
+            access: "oauth-saved".to_owned(),
+            refresh: None,
+            expires: None,
+            account_id: None,
+        },
+    );
+    LocalAuthStore::new(&auth_path).save(&auth)?;
+    let (api_base, capture) = serve_image_responses(1, ImageResponse::Codex)?;
+    let runtime = Arc::new(ProviderCredentialRuntime::new(
+        auth_path,
+        root.path(),
+        Spec030FactStore::new(WorkspaceTrustObservation::Trusted),
+    ));
+    let client = CredentialResolvingImageGenerationClient::new(
+        ProviderCredentialClientConfig {
+            requested_provider: "auto".to_owned(),
+            model: "gpt-image-2".to_owned(),
+            providers: ProvidersConfig::from([(
+                "openai_codex".to_owned(),
+                ProviderConfig {
+                    api_base: Some(api_base),
+                    ..ProviderConfig::default()
+                },
+            )]),
+        },
+        runtime,
+    );
+
+    // When
+    let result = client.generate_image(ImageGenerationRequest::new("auto"))?;
+    let captured = capture.join().map_err(|_| "capture thread panicked")??;
+
+    // Then
+    let captured = captured.to_ascii_lowercase();
+    assert_eq!(result.images[0].bytes, b"hi");
+    assert_eq!(captured.matches("post /codex/responses ").count(), 1);
+    assert!(captured.contains("authorization: bearer oauth-saved"));
+    Ok(())
+}
+
 fn auth_store(access: &str) -> AuthStore {
     let mut auth = AuthStore::default();
     auth.providers

@@ -527,9 +527,10 @@ pub use process_gate::{
 };
 pub(crate) use provider_credentials::ProviderInvocationClient;
 pub use provider_credentials::{
-    CredentialResolvingImageGenerationClient, CredentialResolvingProviderClient,
-    OAuthCredentialRefresher, ProviderClientResolutionRequest, ProviderCredentialClientConfig,
-    ProviderCredentialInvocation, ProviderCredentialRuntime,
+    CredentialResolvingImageGenerationClient, CredentialResolvingProviderClient, CredentialSlot,
+    LocalAuthSkip, OAuthCredentialRefresher, PlannedProvider, ProviderClientResolutionRequest,
+    ProviderCredentialClientConfig, ProviderCredentialInvocation, ProviderCredentialPlan,
+    ProviderCredentialRuntime,
 };
 pub use replay::{run_local_replay, RuntimeReplayInput, RuntimeReplayOutcome};
 pub(crate) use runner::isolate_panic;

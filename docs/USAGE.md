@@ -324,14 +324,14 @@ Config 문자열 값은 load 시 `${이름}` 형태의 참조를 풉니다. 값�
 - 모양이 틀리면(JSON 아님, 객체 아님, 이름 형식, 글이 아닌 값, 같은 이름 두 번) `${이름}`을 푸는 config 읽기(runtime 시작 등)가 몇 번째 항목인지만 적은 오류로 실패합니다. 이름과 값은 출력하지 않습니다. `status`·`onboard`처럼 `${이름}`을 풀지 않는 명령은 이 파일을 읽지 않습니다.
 - 값은 process 환경 변수로 내보내지 않습니다. `exec`·skill·MCP에는 지금처럼 top-level `env`, `tools.exec.env`, `tools.mcpServers.<name>.env`에 적은 변수만 들어가고, 그 값에 `${이름}`을 쓸 수 있습니다.
 - provider의 `apiKeyRef`·`credentialSource.environment`(onboard wizard가 쓰는 환경 변수 참조)와 provider 기본 환경 변수(`OPENROUTER_API_KEY` 등)는 지금처럼 process 환경 변수에서만 찾습니다. `.env.json` 값을 provider key로 쓰려면 `apiKey`에 `${이름}`을 적으세요.
-- `onboard`와 `onboard --wizard`는 비밀 값을 받지 않습니다. onboard 뒤에는 비밀 값을 `.env.json`에 적고 config에 `${이름}`을 쓰거나, config에 값을 적은 뒤 아래처럼 `runtime config-migrate --apply`로 옮기세요.
+- `onboard`와 `onboard --wizard`는 비밀 값을 받지 않습니다. onboard 뒤에는 비밀 값을 `.env.json`에 적고 config에 `${이름}`을 쓰거나, config에 값을 적은 뒤 아래처럼 `runtime config-migrate --apply`로 옮기세요. Discord bot 토큰은 `channels connect discord --token-stdin`이 `.env.json`에 넣고 config에 `${이름}`을 남깁니다([Discord 연결](#discord-연결)).
 
 `runtime config-migrate`는 schema migration에 더해 config의 비밀 값을 `.env.json`으로 옮깁니다. 출력 JSON의 `secrets`에 옮길 칸(`moved`), 옮기지 않은 칸(`kept`), 멈춘 까닭(`conflicts`)이 칸 경로와 이름으로만 나오고 값은 나오지 않습니다.
 
 - 옮기는 칸: 이름이 비밀처럼 보이는 글 칸(`token`·`password`·`secret`·`apiKey`·`api_key`·`authorization`·`cookie` 등이 든 이름. 022 redaction과 같은 판정)과 top-level `env`, `tools.exec.env`, `tools.mcpServers.<name>.env`의 모든 값입니다. 빈 값, 이미 `${이름}` 하나뿐인 값, `apiKeyRef` 안은 건너뛰고, `Bearer ${TOKEN}`처럼 `${`가 섞인 값은 옮기지 않고 `kept`로 보입니다. 이름이 비밀처럼 보이지 않는 칸(주소 안의 비밀번호 등)은 옮기지 않으니 dry-run 결과를 확인하세요.
 - 이름은 칸의 경로로 만듭니다: `channels.discord.token` → `SHACS_CHANNELS_DISCORD_TOKEN`, `tools.exec.env.GITHUB_TOKEN` → `SHACS_TOOLS_EXEC_ENV_GITHUB_TOKEN`. config의 그 칸에는 `${이름}`이 남습니다.
 - 같은 이름이 config의 다른 칸, `.env.json`, 명령을 실행한 process 환경 변수(비어 있지 않은 값)에 다른 값으로 있으면 아무것도 바꾸지 않고 실패합니다. Docker에서 runtime을 돌린다면 같은 container 환경에서 실행하세요(`docker compose run --rm shacs-cli runtime config-migrate --apply`).
-- `--apply`는 진행 표시(`config.json.secrets-migration-in-progress`)와 백업을 먼저 쓰고 `.env.json`, `config.json` 순서로 씁니다. 그래서 중간에 끊겨도 config는 옮기기 전과 같은 값으로 풀립니다. 진행 표시가 남아 있으면 apply와 runtime 시작이 멈추고, `--recover`가 두 파일을 옮기기 전으로 되돌립니다. 진행 표시는 없는데 백업만 남았으면(끝난 apply나 되돌리기가 백업을 지우기 전에 끊김) `--recover`나 다음 apply가 백업만 지웁니다(`removedBackups`).
+- `--apply`는 진행 표시(`config.json.secrets-migration-in-progress`)와 백업을 먼저 쓰고 `.env.json`, `config.json` 순서로 씁니다. 그래서 중간에 끊겨도 config는 옮기기 전과 같은 값으로 풀립니다. 진행 표시가 남아 있으면 apply, runtime 시작, `onboard`·`onboard --wizard`, `channels connect discord`가 아무것도 바꾸지 않고 멈추며(오류 글 "config migration is interrupted; run runtime config-migrate --recover first"), `--recover`가 두 파일을 옮기기 전으로 되돌립니다. 031 schema migration의 진행 표시도 같습니다. 진행 표시는 없는데 백업만 남았으면(끝난 apply나 되돌리기가 백업을 지우기 전에 끊김) `--recover`나 다음 apply가 백업만 지웁니다(`removedBackups`).
 - 옮기기가 끝나면 되돌릴 백업이 없고, 이 판으로 옮긴 config는 이전 판이 읽지 못합니다. 이전 판으로 돌아가려면 `${이름}` 자리에 값을 다시 적어야 합니다.
 
 스킬의 `requires.env` 확인이나 `exec`/subagent 실행에 필요한 환경 변수는 top-level `env`에 직접 둘 수 있습니다. `tools.exec.env`도 계속 지원하며 같은 key가 있으면 더 구체적인 `tools.exec.env` 값이 우선합니다. 이 값은 exec 실행 환경과 subagent exec 실행 환경에 주입되고, MCP 서버별 환경 변수는 기존처럼 `tools.mcpServers.<name>.env`에 따로 둡니다. MCP `tools.mcpServers.<name>.enabledTools`는 기본값이 빈 배열인 default-deny opt-in입니다. MCP tools/resources/prompts를 노출하려면 `*`, raw capability name, 또는 `mcp_<server>_<kind>_<name>` 형태의 wrapped capability name을 명시하세요. MCP 도구가 결과에 `isError: true`를 붙여 스스로 실패를 알리면, 그 결과는 성공 내용이 아니라 `(MCP tool call failed: <도구가 보낸 글>)` 형식의 실패로 전달됩니다. 빈 문자열은 `requires.env`를 만족하지 않습니다. 비밀 값은 `.env.json`에 두고 config에는 `${이름}`을 쓰세요. Secret 값을 넣은 config 파일이나 `.env.json`은 커밋하거나 공유하지 마세요.
@@ -1367,7 +1367,7 @@ Headless 환경에서는 device flow를 사용합니다:
 shacs-bot provider codex login --headless
 ```
 
-Login에 성공하면 `auth.json`에 `access`, `refresh`, `expires`, optional `accountId`를 저장하고, provider를 `openai_codex`, model을 `gpt-5.4`로 선택합니다. Runtime startup은 refresh token이 있으면 만료된 Codex access token을 갱신하고, 갱신된 session을 다시 `auth.json`에 씁니다.
+Login에 성공하면 `auth.json`에 `access`, `refresh`, `expires`, optional `accountId`를 저장하고, provider를 `openai_codex`, model을 `gpt-5.4`로 선택합니다. Runtime은 provider를 부를 때마다 인증을 다시 읽고, refresh token이 있으면 만료된 Codex access token을 그때 갱신해 갱신된 session을 다시 `auth.json`에 씁니다.
 
 `gpt-5.4`는 ChatGPT account Codex의 보수적인 기본값입니다. `gpt-5.5` 같은 더 새로운 Codex model slug는 계정 rollout 또는 entitlement가 필요할 수 있습니다. `openai/gpt-5.5` 같은 provider-qualified id는 ChatGPT Codex backend로 보내기 전에 정규화됩니다.
 
@@ -1419,6 +1419,25 @@ shacs-bot provider import-key --provider openrouter --token-env OPENROUTER_API_K
 ```
 
 이 경로도 secret은 `auth.json`에만 저장하고 `config.json`에는 provider 설정만 남깁니다.
+
+### provider 인증 확인
+
+`provider status`는 runtime이 고를 provider와, 그 provider의 credential이 runtime이 실제로 읽을 자리에 있는지 보여 줍니다(Spec 052). runtime의 provider 고르기와 credential 자리 찾기를 그대로 쓰고, 네트워크를 쓰거나 credential command를 실행하거나 OAuth를 갱신하거나 파일을 쓰지 않습니다. 값이 맞는지는 보지 않으므로 틀린 key나 갱신하지 못하는 로그인은 지금처럼 첫 호출에서 오류가 납니다.
+
+```sh
+shacs-bot provider status
+```
+
+출력 첫 줄은 `provider: ready <provider>` 또는 `provider: missing <provider 또는 none>`입니다. `ready`면 `credential:` 줄에 쓸 자리(환경 변수 이름, `auth.json`의 key나 로그인, credential command, `providers.<id>.apiKey`)가, `missing`이면 `reason:` 줄에 까닭과 `next:` 줄에 할 일이 나옵니다. 두 경우 모두 종료 코드 0이고, config·`.env.json`·`auth.json`을 읽지 못하면 종료 코드 1입니다. 비밀 값은 출력하지 않습니다.
+
+- credential 자리 순서는 runtime과 같습니다: provider에 선언된 환경 변수(기본은 `ANTHROPIC_API_KEY`처럼 provider마다 정해진 이름) → `auth.json` → credential command → `providers.<id>.apiKey`. 환경 변수는 비어 있어도 그 자리를 차지합니다. 그래서 빈 환경 변수가 저장한 key를 가리면 `missing`과 그 이름을 보입니다.
+- 만료된 로그인은 refresh token이 있으면 `ready`(첫 호출에서 갱신)이고, 없으면 `missing`입니다.
+- config와 `auth.json`에 항목이 없는 provider는 환경 변수가 있어도 runtime이 고르지 않으므로 `missing none`입니다.
+- `auth.json`의 로그인이나 key가 그 provider의 credential 선언(`credentialSource`, `apiKeyRef`)을 바꾸기 전에 갱신된 것이면 runtime이 건너뜁니다. 다시 로그인해도 이 표시는 지워지지 않으므로, 이때는 선언을 되돌리라고 안내합니다.
+- 끊긴 config migration의 진행 표시가 있으면 판정은 그대로 보이고, 할 일로는 `runtime config-migrate --recover`만 안내합니다. 로그인과 key 가져오기는 그 표시를 보지 않고 파일을 쓰기 때문입니다.
+- 명령을 실행한 process의 환경 변수가 판정에 들어가므로 runtime과 같은 환경에서 실행하세요. Docker에서는 `docker compose run --rm shacs-cli provider status`로 실행하면 gateway와 같은 Compose 환경을 받고, 안내도 `docker compose run --rm shacs-cli …` 꼴로 나옵니다.
+
+Gateway(`run`, `runtime start`)는 provider 인증이 없어도 시작합니다. 이때 채널 plan 바로 뒤에 `provider: missing <provider> (<까닭>); next: <할 일>` 한 줄을 적습니다. `auth.json`을 읽지 못하면 `provider: not checked …` 한 줄을 적고 계속 돕니다.
 
 ## 로컬 OpenAI 호환 API
 
@@ -1525,6 +1544,24 @@ shacs-bot channels status --workspace /tmp/ws
 
 `channels list`는 built-in channel descriptor, config-enabled 상태, capability, worker boundary 개수를 보여줍니다. `channels status`는 configured channel plugin과 `channels.sendMemoryHints`, send retry count 같은 runtime default, channel restart hint projection, redacted supervision projection을 요약합니다. Delivery projection status는 `pending`, `sent_hint`, `failed_hint`, `unknown`, `dedupe_candidate`이며 session truth, remote ACK/read receipt, replay 방지, exactly-once delivery를 의미하지 않습니다. `sendMaxRetries`는 `ChannelManager`가 channel adapter로 메시지를 넘기는 dispatch/enqueue와 실제 transport send의 총 시도 횟수이며, 값은 최소 1회, 최대 10회로 제한됩니다. 이 명령들은 read-only diagnostics입니다. Runnable channel worker를 시작하려면 `run`을 사용하세요.
 
+### Discord 연결
+
+`channels connect discord`는 Discord bot 토큰을 `.env.json`의 `SHACS_CHANNELS_DISCORD_TOKEN`에 넣고, config의 `channels.discord`에는 토큰 대신 `token: "${SHACS_CHANNELS_DISCORD_TOKEN}"`와 `enabled: true`를 적습니다(`--allow-from`을 주면 `allowFrom`도). 그 밖의 칸은 그대로 둡니다(Spec 052). 토큰은 표준 입력으로만 받습니다. terminal에서 실행하면 입력이 화면에 보이지 않고, 입력을 마치거나 Ctrl+C로 끊어도 terminal의 입력 표시가 돌아옵니다.
+
+```sh
+shacs-bot channels connect discord --token-stdin --allow-from 123456789012345678
+printf '%s' "$DISCORD_TOKEN" | shacs-bot channels connect discord --token-stdin --allow-from 123456789012345678
+shacs-bot channels connect discord --status
+```
+
+- `--allow-from <id>`는 봇에게 말할 수 있는 Discord 사용자 ID이고 여러 번 줄 수 있습니다. 주면 `allowFrom`을 그 목록으로 바꾸고, 주지 않으면 지금 목록을 그대로 둡니다. 결과 목록이 비면 봇이 볼 수 있는 누구나 봇을 쓸 수 있다고 경고합니다.
+- 아래이면 아무것도 바꾸지 않고 멈춥니다(`--replace`를 줘도 같습니다): 끊긴 config migration의 진행 표시가 있음(`runtime config-migrate --recover`), `channels.discord.token`에 토큰 글자가 있음(먼저 `runtime config-migrate --apply`로 옮기세요), 다른 `${이름}`이나 손으로 고쳐야 할 값이 있음, `botToken`·`bot_token`에 값이 있음(runtime은 이 칸을 먼저 읽습니다), 명령을 실행한 환경에 `SHACS_CHANNELS_DISCORD_TOKEN`이 다른 값으로 있음.
+- `.env.json`에 그 이름이 다른 값으로 있으면 멈추고, `--replace`를 주면 그 값만 바꿉니다. 같은 토큰으로 다시 실행하면 아무것도 쓰지 않습니다(`unchanged`).
+- `.env.json`을 먼저, config를 나중에 쓰며, 둘 다 명령이 처음 읽은 내용과 같을 때만 바꿉니다. 그 사이 다른 것이 고쳤으면 실패하고 다시 실행하라고 알립니다. config를 쓰기 전에 끊기면 config는 그대로 읽히고, 같은 토큰으로 다시 실행하면 이어서 연결됩니다.
+- 출력과 오류에는 바꾼 칸과 이름만 나오고 토큰은 나오지 않습니다. gateway는 시작할 때 channel 설정을 읽으므로, 연결한 뒤 gateway를 다시 시작하세요.
+- `--status`는 아무것도 쓰지 않고 `discord: connected` 또는 `discord: not connected`와 그 까닭을 보입니다. `connected`는 `channels.discord.enabled`가 `true`이고 `botToken`·`bot_token`·`token`을 runtime처럼 풀었을 때 토큰이 있다는 뜻입니다. config의 다른 칸은 풀지 않습니다.
+- Docker에서는 `docker compose run --rm shacs-cli channels connect discord --token-stdin --allow-from <id>`로 실행해 숨긴 입력에 토큰을 넣거나, pipe로 넣을 때는 `-T`를 붙입니다(`printf '%s' "$DISCORD_TOKEN" | docker compose run --rm -T shacs-cli channels connect discord --token-stdin`). gateway와 같은 Compose 환경에서 확인해야 맞습니다.
+
 선택된 channel runtime을 시작합니다:
 
 ```sh
@@ -1604,12 +1641,16 @@ export SHACS_UID=$(id -u)
 export SHACS_GID=$(id -g)
 mkdir -p ~/.shacs-bot
 docker compose run --rm shacs-cli onboard   # first-time setup
-vim ~/.shacs-bot/config.json                # add API keys or provider config
+docker compose run --rm shacs-cli provider codex login --headless   # sign in with a ChatGPT account
+docker compose run --rm shacs-cli channels connect discord --token-stdin --allow-from YOUR_DISCORD_USER_ID
+vim ~/.shacs-bot/config.json                # other providers or channels
 docker compose run --rm shacs-cli runtime config-migrate --apply   # move secrets into .env.json
 docker compose up -d shacs-gateway          # start channel runtime
 ```
 
-`shacs-gateway`는 container 안에서 `shacs-bot run --websocket-host 0.0.0.0 --allow-remote --verbose --workspace /home/shacs/.shacs-bot/workspace --allow-side-effects`를 실행하고 host loopback의 WebSocket port `8765`에만 publish합니다. 기본 `docker compose up`은 이 단일 runtime owner만 시작합니다. `shacs-api`는 같은 data directory의 두 번째 owner가 되지 않도록 opt-in profile이며, gateway를 중지한 뒤 `docker compose up -d shacs-api`처럼 서비스 이름을 명시해 시작합니다. 이 Compose path는 Docker socket mount, `privileged: true`, host network를 기본값으로 쓰지 않습니다. Preview-only runtime logs는 `docker compose logs -f shacs-gateway`로 확인할 수 있습니다. Container가 실행 중일 때는 host에서 같은 `~/.shacs-bot`으로 shacs-bot 명령을 실행하지 마세요. durable event 저장소(SQLite WAL)는 같은 컴퓨터의 process끼리만 안전하게 함께 열 수 있고, host와 container가 공유 폴더로 같은 DB를 동시에 열면 이를 보장하지 않습니다. Provider 설정이 없거나 명시적으로 활성화한 선택 도구의 provider 인증이 빠져 있으면 runtime은 시작하지 않으므로, 먼저 `config.json` 또는 `auth.json` workflow로 provider를 설정하세요.
+끊긴 config migration의 진행 표시가 남아 있으면 `onboard`와 `channels connect discord`는 아무것도 바꾸지 않고 멈추고 `runtime config-migrate --recover`를 안내합니다. 먼저 `docker compose run --rm shacs-cli runtime config-migrate --recover`를 실행하세요.
+
+`shacs-gateway`는 container 안에서 `shacs-bot run --websocket-host 0.0.0.0 --allow-remote --verbose --workspace /home/shacs/.shacs-bot/workspace --allow-side-effects`를 실행하고 host loopback의 WebSocket port `8765`에만 publish합니다. 기본 `docker compose up`은 이 단일 runtime owner만 시작합니다. `shacs-api`는 같은 data directory의 두 번째 owner가 되지 않도록 opt-in profile이며, gateway를 중지한 뒤 `docker compose up -d shacs-api`처럼 서비스 이름을 명시해 시작합니다. 이 Compose path는 Docker socket mount, `privileged: true`, host network를 기본값으로 쓰지 않습니다. Preview-only runtime logs는 `docker compose logs -f shacs-gateway`로 확인할 수 있습니다. Container가 실행 중일 때는 host에서 같은 `~/.shacs-bot`으로 shacs-bot 명령을 실행하지 마세요. durable event 저장소(SQLite WAL)는 같은 컴퓨터의 process끼리만 안전하게 함께 열 수 있고, host와 container가 공유 폴더로 같은 DB를 동시에 열면 이를 보장하지 않습니다. Provider 인증이 없어도 gateway는 시작하고, 채널 plan 뒤에 `provider: missing …` 한 줄로 할 일을 알립니다. 그 사이에 온 메시지에는 AI model 호출 오류(provider 인증 필요)로 답하므로, `docker compose run --rm shacs-cli provider status`로 확인하고 provider를 설정하세요. 이미지 생성(`tools.imageGeneration`)을 켰는데 그 provider가 알 수 없는 이름이거나 이미지 생성을 지원하지 않으면 runtime은 채널 plan 전에 시작하지 못합니다. 알려진 provider에 인증만 없으면 시작하고, 그 도구를 부를 때 인증 오류가 납니다.
 
 Spec023의 공식 Compose smoke gate는 opt-in으로 실행합니다. 이 명령은 임시 Compose service와 data directory로 `runtime inspect`의 official-container runtime evidence를 확인하고, 별도로 기본 `docker-compose.yml`이 Docker socket, `privileged: true`, host network를 쓰지 않는지도 검사합니다:
 
@@ -1639,7 +1680,7 @@ docker compose logs -f shacs-gateway
 docker compose down
 ```
 
-Provider secret은 `.env.json`(config에는 `${이름}`), `auth.json` workflow, 또는 Compose가 넘기는 환경 변수로 제공하세요. Image 안에 secret을 bake하지 마세요. 기본 container UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. Docker containment는 permission mode나 side-effect gate를 없애는 근거가 아니며, unsafe privileged evidence가 보이면 permissive permission mode는 safe fallback으로 내려갑니다. Permission denied가 계속 나면 host에서 `sudo chown -R 1000:1000 ~/.shacs-bot`로 ownership을 맞추거나 Podman의 `--userns=keep-id` 같은 실행 user 전략을 사용하세요.
+Provider secret은 `.env.json`(config에는 `${이름}`), `auth.json` workflow, 또는 Compose가 넘기는 환경 변수로 제공하세요. 다만 공식 Compose는 `ANTHROPIC_API_KEY`·`OPENAI_API_KEY`·`OPENROUTER_API_KEY`·`GROQ_API_KEY`·`DEEPSEEK_API_KEY`·`GEMINI_API_KEY`·`HF_TOKEN`을 host에서 정하지 않으면 빈 값으로 넘깁니다. `${이름}`을 풀 때는 빈 값이 `.env.json`을 가리지 않지만, provider credential은 그 provider의 환경 변수를 `auth.json`과 config보다 먼저 보고 비어 있어도 씁니다. 그래서 그 provider의 key를 `auth.json`이나 config(`.env.json`으로 푼 값 포함)에 두어도 key 없이 요청합니다. Docker에서 이런 API key provider를 쓰려면 `docker-compose.yml` 옆 `.env`에 그 변수의 key를 적거나, ChatGPT 계정 로그인(`docker compose run --rm shacs-cli provider codex login --headless`)을 쓰세요. `provider status`가 이 경우를 `missing`과 변수 이름으로 알립니다. Image 안에 secret을 bake하지 마세요. 기본 container UID/GID는 nanobot과 같은 `1000:1000`이고, 위 예시처럼 `SHACS_UID`/`SHACS_GID`를 지정하면 host user 소유권에 맞춰 실행합니다. Docker containment는 permission mode나 side-effect gate를 없애는 근거가 아니며, unsafe privileged evidence가 보이면 permissive permission mode는 safe fallback으로 내려갑니다. Permission denied가 계속 나면 host에서 `sudo chown -R 1000:1000 ~/.shacs-bot`로 ownership을 맞추거나 Podman의 `--userns=keep-id` 같은 실행 user 전략을 사용하세요.
 
 ## 아직 남은 명령 범위
 

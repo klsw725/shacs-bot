@@ -1,70 +1,37 @@
 use super::{LocalAuthAccess, ProviderCredentialRuntime};
-use shacs_config::{
-    CredentialFamily, CredentialFingerprintStatus, CredentialResolutionInput, CredentialSource,
-    CredentialSourceDeclaration, CredentialStatus, CredentialStatusSnapshot, LocalAuthStore,
-    ProviderConfig, RawCredential, RefreshSerializationStatus, ResolvedCredential,
-};
+use shacs_config::{CredentialSourceDeclaration, LocalAuthStore, ResolvedCredential};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 impl ProviderCredentialRuntime {
-    pub(super) fn resolve_local(
+    /// The local OAuth credential at the place the slot search chose: read
+    /// again and, unless this runtime writes nothing, refreshed and saved
+    /// under the store's lock when expired.
+    pub(super) fn read_local_oauth(
         &self,
         provider_id: &str,
         declaration: &CredentialSourceDeclaration,
-    ) -> Result<Option<ResolvedCredential>, shacs_config::CredentialError> {
+    ) -> Result<ResolvedCredential, shacs_config::CredentialError> {
         let store = LocalAuthStore::new(self.auth_path());
-        let auth = store.load().map_err(|_| {
-            shacs_config::CredentialError::from_status(
-                CredentialStatusSnapshot {
-                    status: CredentialStatus::Missing,
-                    source: Some(CredentialSource::LocalAuthStore),
-                    fingerprint: CredentialFingerprintStatus::Unavailable,
-                    fingerprint_stale: false,
-                    refresh_serialization: RefreshSerializationStatus::Active,
-                },
-                "local auth store could not be read",
-            )
-        })?;
-        let Some(entry) = auth.providers.get(provider_id) else {
-            return Ok(None);
-        };
-        match declaration.family {
-            CredentialFamily::ApiKey if entry.kind == "apiKey" => declaration
-                .resolve(
-                    &ProviderConfig::default(),
-                    CredentialResolutionInput {
-                        local_auth: Some(RawCredential::api_key(&entry.access)),
-                        local_auth_fingerprint: auth.fingerprint(provider_id),
-                        ..CredentialResolutionInput::default()
-                    },
-                )
-                .map(Some),
-            CredentialFamily::OAuth
-                if entry.kind == "oauth" && self.local_auth_access == LocalAuthAccess::ReadOnly =>
-            {
-                store
-                    .read_oauth(provider_id, &declaration.fingerprint(), now_millis())
-                    .map(Some)
+        match self.local_auth_access {
+            LocalAuthAccess::ReadOnly => {
+                store.read_oauth(provider_id, &declaration.fingerprint(), now_millis())
             }
-            CredentialFamily::OAuth if entry.kind == "oauth" => store
-                .resolve_oauth(
-                    provider_id,
-                    &declaration.fingerprint(),
-                    now_millis(),
-                    |request| {
-                        self.oauth_refresher
-                            .as_ref()
-                            .ok_or_else(|| "OAuth refresher is unavailable".to_owned())?
-                            .refresh(provider_id, request)
-                    },
-                )
-                .map(Some),
-            CredentialFamily::ApiKey | CredentialFamily::OAuth => Ok(None),
+            LocalAuthAccess::RefreshAndSave => store.resolve_oauth(
+                provider_id,
+                &declaration.fingerprint(),
+                now_millis(),
+                |request| {
+                    self.oauth_refresher
+                        .as_ref()
+                        .ok_or_else(|| "OAuth refresher is unavailable".to_owned())?
+                        .refresh(provider_id, request)
+                },
+            ),
         }
     }
 }
 
-fn now_millis() -> u64 {
+pub(super) fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))

@@ -1,12 +1,13 @@
 use super::command::runtime_error;
+use super::provider_credential_plan::{CredentialChoice, CredentialSlot, SlotSearch};
 use super::{
     ProviderClientResolutionRequest, ProviderConfigResolutionRequest, ProviderCredentialInvocation,
     ProviderCredentialRuntime, ResolvedProviderConfig,
 };
 use shacs_config::{
     CredentialFamily, CredentialFingerprintStatus, CredentialResolutionInput, CredentialSource,
-    CredentialSourceDeclaration, CredentialStatus, CredentialStatusSnapshot, LocalAuthStore,
-    RawCredential, RefreshSerializationStatus, ResolvedCredential,
+    CredentialSourceDeclaration, CredentialStatus, CredentialStatusSnapshot, RawCredential,
+    RefreshSerializationStatus, ResolvedCredential,
 };
 use shacs_providers::{
     provider_client_from_config, ProviderConfig, ProviderError, ProviderRegistry,
@@ -32,10 +33,9 @@ impl ProviderCredentialRuntime {
         request: ProviderClientResolutionRequest<'_>,
         invocation: &ProviderCredentialInvocation,
     ) -> Result<ResolvedProviderClient, ProviderError> {
-        let selection = self.providers_for_selection(request.providers);
-        let provider_match = request
-            .registry
-            .match_provider(request.requested_provider, request.model, &selection)
+        let provider_match = self
+            .select_provider(&request)
+            .provider_match
             .ok_or_else(|| provider_not_found(request.registry, request.requested_provider))?;
         let resolved = self.resolve_provider_config_for_invocation(
             ProviderConfigResolutionRequest {
@@ -81,20 +81,7 @@ impl ProviderCredentialRuntime {
             .get(&provider_match.provider_id)
             .cloned()
             .unwrap_or_default();
-        let declaration = self
-            .declarations
-            .get(&provider_match.provider_id)
-            .cloned()
-            .unwrap_or_else(|| {
-                config.credential_declaration(
-                    if spec.is_oauth {
-                        CredentialFamily::OAuth
-                    } else {
-                        CredentialFamily::ApiKey
-                    },
-                    spec.env_key,
-                )
-            });
+        let declaration = self.declaration_for(&provider_match.provider_id, &config, &spec);
         let resolved = self.resolve_credential(
             &provider_match.provider_id,
             &config,
@@ -147,100 +134,152 @@ impl ProviderCredentialRuntime {
         declaration: &CredentialSourceDeclaration,
         invocation: &ProviderCredentialInvocation,
     ) -> Result<ResolvedCredential, shacs_config::CredentialError> {
+        self.resolve_credential_observed(provider_id, config, declaration, invocation, &|| {})
+    }
+
+    /// Chooses the place (Spec 052 PRD 000 scope 1) and reads the value only
+    /// there. A local OAuth credential found stale under the store's lock (it
+    /// changed after the place was chosen) is skipped like before, and the
+    /// search goes on after the auth store. `after_choice` runs between the
+    /// two steps, where a test changes the auth store.
+    pub(super) fn resolve_credential_observed(
+        &self,
+        provider_id: &str,
+        config: &ProviderConfig,
+        declaration: &CredentialSourceDeclaration,
+        invocation: &ProviderCredentialInvocation,
+        after_choice: &dyn Fn(),
+    ) -> Result<ResolvedCredential, shacs_config::CredentialError> {
+        let choice = self.choose_slot(
+            provider_id,
+            config,
+            declaration,
+            invocation.runtime_override.as_ref(),
+            SlotSearch::FromStart,
+        );
+        after_choice();
+        let local_oauth = matches!(choice.slot, Some(CredentialSlot::LocalOAuth { .. }));
+        match self.read_choice(provider_id, config, declaration, invocation, choice) {
+            Err(error) if local_oauth && error.status().fingerprint_stale => {
+                let rest = self.choose_slot(
+                    provider_id,
+                    config,
+                    declaration,
+                    None,
+                    SlotSearch::AfterLocalAuth,
+                );
+                self.read_choice(provider_id, config, declaration, invocation, rest)
+            }
+            result => result,
+        }
+    }
+
+    fn read_choice(
+        &self,
+        provider_id: &str,
+        config: &ProviderConfig,
+        declaration: &CredentialSourceDeclaration,
+        invocation: &ProviderCredentialInvocation,
+        choice: CredentialChoice,
+    ) -> Result<ResolvedCredential, shacs_config::CredentialError> {
         let mut no_literal = config.clone();
         no_literal.api_key = None;
-        let top = declaration.resolve(
-            &no_literal,
+        match choice.slot {
+            Some(CredentialSlot::RuntimeOverride) => declaration.resolve(
+                &no_literal,
+                CredentialResolutionInput {
+                    runtime_override: choice.value,
+                    ..CredentialResolutionInput::default()
+                },
+            ),
+            Some(CredentialSlot::Environment { .. }) => declaration.resolve(
+                &no_literal,
+                CredentialResolutionInput {
+                    environment: choice.value,
+                    ..CredentialResolutionInput::default()
+                },
+            ),
+            Some(CredentialSlot::LocalApiKey { .. }) => declaration.resolve(
+                &ProviderConfig::default(),
+                CredentialResolutionInput {
+                    local_auth: choice.value,
+                    local_auth_fingerprint: choice.local_fingerprint,
+                    ..CredentialResolutionInput::default()
+                },
+            ),
+            Some(CredentialSlot::LocalOAuth { .. }) => {
+                self.read_local_oauth(provider_id, declaration)
+            }
+            Some(CredentialSlot::LocalAuthUnreadable) => Err(local_auth_unreadable()),
+            Some(CredentialSlot::Command) => match declaration.command.as_deref() {
+                Some(command) => {
+                    self.read_command(provider_id, command, &no_literal, declaration, invocation)
+                }
+                None => declaration.resolve(config, CredentialResolutionInput::default()),
+            },
+            Some(CredentialSlot::ProviderLiteral) | None => {
+                declaration.resolve(config, CredentialResolutionInput::default())
+            }
+        }
+    }
+
+    fn read_command(
+        &self,
+        provider_id: &str,
+        command: &str,
+        no_literal: &ProviderConfig,
+        declaration: &CredentialSourceDeclaration,
+        invocation: &ProviderCredentialInvocation,
+    ) -> Result<ResolvedCredential, shacs_config::CredentialError> {
+        let input = self
+            .command_input(provider_id, command, &invocation.command_abort)
+            .map_err(|_| {
+                shacs_config::CredentialError::from_status(
+                    CredentialStatusSnapshot {
+                        status: CredentialStatus::Missing,
+                        source: Some(CredentialSource::Command),
+                        fingerprint: CredentialFingerprintStatus::Current,
+                        fingerprint_stale: false,
+                        refresh_serialization: RefreshSerializationStatus::Inactive,
+                    },
+                    "credential command execution failed",
+                )
+            })?;
+        let result = declaration.resolve(
+            no_literal,
             CredentialResolutionInput {
-                runtime_override: invocation
-                    .runtime_override
-                    .clone()
-                    .or_else(|| self.runtime_overrides.get(provider_id).cloned()),
-                environment: declaration.environment.as_ref().and_then(|name| {
-                    self.environment
-                        .get(name)
-                        .cloned()
-                        .or_else(|| std::env::var(name).ok())
-                        .map(|value| credential(declaration.family, value))
-                }),
+                command: input,
                 ..CredentialResolutionInput::default()
             },
         );
-        if let Ok(resolved) = top {
-            return Ok(resolved);
-        }
-        if declaration.local_auth {
-            match self.resolve_local(provider_id, declaration) {
-                Ok(Some(resolved)) => return Ok(resolved),
-                Ok(None) => {}
-                Err(error) if error.status().fingerprint_stale => {}
-                Err(error) => return Err(error),
+        if let Ok(resolved) = &result {
+            let raw = credential(declaration.family, resolved.transport().value().to_owned());
+            if let Ok(mut cache) = self.command_cache.lock() {
+                cache.insert(provider_id.to_owned(), raw);
             }
         }
-        if let Some(command) = declaration.command.as_deref() {
-            let input = self
-                .command_input(provider_id, command, &invocation.command_abort)
-                .map_err(|_| {
-                    shacs_config::CredentialError::from_status(
-                        CredentialStatusSnapshot {
-                            status: CredentialStatus::Missing,
-                            source: Some(CredentialSource::Command),
-                            fingerprint: CredentialFingerprintStatus::Current,
-                            fingerprint_stale: false,
-                            refresh_serialization: RefreshSerializationStatus::Inactive,
-                        },
-                        "credential command execution failed",
-                    )
-                })?;
-            let result = declaration.resolve(
-                &no_literal,
-                CredentialResolutionInput {
-                    command: input,
-                    ..CredentialResolutionInput::default()
-                },
-            );
-            if let Ok(resolved) = &result {
-                let raw = credential(declaration.family, resolved.transport().value().to_owned());
-                if let Ok(mut cache) = self.command_cache.lock() {
-                    cache.insert(provider_id.to_owned(), raw);
-                }
-            }
-            return result;
-        }
-        declaration.resolve(config, CredentialResolutionInput::default())
-    }
-
-    pub(crate) fn providers_for_selection(
-        &self,
-        providers: &shacs_providers::ProvidersConfig,
-    ) -> shacs_providers::ProvidersConfig {
-        let mut selection = providers.clone();
-        if let Ok(auth) = LocalAuthStore::new(self.auth_path()).load() {
-            for provider_id in auth.providers.keys() {
-                selection.entry(provider_id.clone()).or_default();
-            }
-        }
-        for provider_id in self
-            .runtime_overrides
-            .keys()
-            .chain(self.declarations.keys())
-        {
-            selection.entry(provider_id.clone()).or_default();
-        }
-        for config in selection.values_mut() {
-            if config.api_key.is_none() {
-                config.api_key = Some("credential-resolution-pending".to_owned());
-            }
-        }
-        selection
+        result
     }
 }
 
-fn credential(family: CredentialFamily, access: String) -> RawCredential {
+pub(super) fn credential(family: CredentialFamily, access: String) -> RawCredential {
     match family {
         CredentialFamily::ApiKey => RawCredential::api_key(access),
         CredentialFamily::OAuth => RawCredential::oauth(access, None, None),
     }
+}
+
+fn local_auth_unreadable() -> shacs_config::CredentialError {
+    shacs_config::CredentialError::from_status(
+        CredentialStatusSnapshot {
+            status: CredentialStatus::Missing,
+            source: Some(CredentialSource::LocalAuthStore),
+            fingerprint: CredentialFingerprintStatus::Unavailable,
+            fingerprint_stale: false,
+            refresh_serialization: RefreshSerializationStatus::Active,
+        },
+        "local auth store could not be read",
+    )
 }
 
 fn provider_not_found(registry: &ProviderRegistry, provider_id: &str) -> ProviderError {

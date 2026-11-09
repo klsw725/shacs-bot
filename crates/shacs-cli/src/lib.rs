@@ -10,12 +10,15 @@ mod automation_outcome;
 mod automation_producer;
 mod automation_worker;
 mod consent_prompt;
+mod discord_connect_cli;
 mod discord_outbound;
+mod hidden_input;
 mod improvement_cli;
 mod memory_cli;
 mod notification_delivery;
 mod observation_worker;
 mod onboard_wizard;
+mod provider_status_cli;
 mod review_provider;
 mod run_permission_mode;
 mod runtime_cleanup;
@@ -461,6 +464,7 @@ pub enum HooksCommand {
 pub enum ChannelsCommand {
     List(ChannelsListOptions),
     Status(ChannelsStatusOptions),
+    Connect(discord_connect_cli::DiscordConnectOptions),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -898,6 +902,7 @@ pub enum ProviderCommand {
     CodexLogin(CodexLoginOptions),
     CopilotImportToken(CopilotImportTokenOptions),
     ImportApiKey(ProviderApiKeyImportOptions),
+    Status(provider_status_cli::ProviderStatusOptions),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3337,11 +3342,15 @@ fn apply_api_key_auth_overlay(bundle: &mut ConfigBundle) -> Result<(), CliError>
 }
 
 pub fn onboard(options: OnboardOptions) -> Result<OnboardOutcome, CliError> {
+    let config_path = options
+        .config_path
+        .clone()
+        .unwrap_or_else(default_config_path);
+    guard_config_migration_admission(&config_path)?;
     if options.wizard {
         return onboard_wizard::run(options, io::stdin().lock(), io::stdout());
     }
 
-    let config_path = options.config_path.unwrap_or_else(default_config_path);
     let mut bundle = load_config_with_env(
         LoadOptions {
             config_path: Some(config_path.clone()),
@@ -7096,6 +7105,7 @@ fn run_channels_command(command: ChannelsCommand) -> Result<String, CliError> {
     match command {
         ChannelsCommand::List(options) => channels_list(options).map(format_channels_list),
         ChannelsCommand::Status(options) => channels_status(options).map(format_channels_status),
+        ChannelsCommand::Connect(options) => discord_connect_cli::run(options),
     }
 }
 
@@ -9880,6 +9890,7 @@ fn run_provider_command(command: ProviderCommand) -> Result<String, CliError> {
         ProviderCommand::ImportApiKey(options) => {
             import_provider_api_key(options).map(format_provider_api_key_import_outcome)
         }
+        ProviderCommand::Status(options) => provider_status_cli::run(options),
     }
 }
 
@@ -11003,6 +11014,9 @@ fn run_runtime_with_mode(options: RunOptions, mode: &str) -> Result<String, CliE
         .enable_all()
         .build()?;
     eprintln!("{plan}");
+    if let Some(line) = provider_status_cli::startup_line(&bundle) {
+        eprintln!("{line}");
+    }
     let shutdown_reason_store = Arc::new(Mutex::new(RuntimeShutdownReason::CtrlC));
     let shutdown_reason_writer = shutdown_reason_store.clone();
     let serve_result = if report.websocket.enabled {
@@ -16572,7 +16586,8 @@ pub fn help_text() -> String {
         "  permissions List, inspect, or revoke remembered permission rules; print, reset, review, or set up auto mode rules",
         "            Actions: list, inspect <id>, revoke <id>, auto-mode defaults [--label <prefix>], auto-mode config,",
         "                     auto-mode reset [--yes], auto-mode critique, auto-mode setup [--yes]",
-        "  channels  List channel registry/config status",
+        "  channels  List channel registry/config status; connect a channel",
+        "            connect discord --token-stdin [--allow-from <id>]... [--replace] | --status",
         "  context   Inspect context files and dry-run inline @ references",
         "  ask       Send one message through the local AgentLoop",
         "  run       Start selected channel runtime workers",
@@ -16581,7 +16596,8 @@ pub fn help_text() -> String {
         "  gateway   Report gateway preset boundary without starting channels",
         "  web       Start the Web UI, API, and WebSocket on one port",
         "  agent     Start an interactive REPL, or send one direct AgentLoop message with -m/--message",
-        "  provider  Manage provider auth; generic import-key, Codex login/import-token, and Copilot import-token are available",
+        "  provider  Manage provider auth; status, generic import-key, Codex login/import-token, and Copilot import-token are available",
+        "            status: whether the provider the runtime picks has a credential where the runtime reads it",
         "",
         "Options:",
         "  -c, --config <path>   Use an explicit config file",
@@ -17657,12 +17673,13 @@ fn parse_channels(
 ) -> Result<CliCommand, CliError> {
     let Some(action) = parser.next() else {
         return Err(CliError::InvalidArguments(
-            "channels requires `list` or `status`".to_owned(),
+            "channels requires `list`, `status` or `connect`".to_owned(),
         ));
     };
     match action.as_str() {
         "list" | "ls" => parse_channels_list(parser, global_config),
         "status" | "inspect" => parse_channels_status(parser, global_config),
+        "connect" => discord_connect_cli::parse(parser, global_config),
         "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(CliError::InvalidArguments(format!(
             "unknown channels subcommand `{other}`"
@@ -18204,6 +18221,7 @@ fn parse_provider(
             parse_provider_copilot(parser, global_config)
         }
         "import-key" => parse_provider_import_key(parser, global_config, None),
+        "status" => provider_status_cli::parse(parser, global_config),
         "login" => {
             let Some(provider) = parser.next() else {
                 return Err(CliError::InvalidArguments(
@@ -23173,7 +23191,7 @@ mod tests {
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
-        assert!(error.contains("channels requires `list` or `status`"));
+        assert!(error.contains("channels requires `list`, `status` or `connect`"));
         Ok(())
     }
 

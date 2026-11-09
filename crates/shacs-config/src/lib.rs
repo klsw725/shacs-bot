@@ -51,7 +51,9 @@ pub use remembered_permissions::{
 };
 pub use runtime_layout::*;
 pub use schema::*;
-pub use secret_places::{ConflictReason, KeptReason, KeptSecret, MovedSecret, SecretConflict};
+pub use secret_places::{
+    secret_env_name, ConflictReason, KeptReason, KeptSecret, MovedSecret, SecretConflict,
+};
 pub use secret_ref::{provider_secret_refs, ConfigSecretRef};
 pub use secrets_migration::{
     apply_secrets_migration, apply_secrets_migration_observed, dry_run_secrets_migration,
@@ -912,7 +914,7 @@ impl std::fmt::Display for ConfigError {
             ),
             Self::MigrationInterrupted { marker } => write!(
                 formatter,
-                "config migration is interrupted; recover marker {} first",
+                "config migration is interrupted; run `runtime config-migrate --recover` first (marker {})",
                 marker.display()
             ),
             Self::MigrationRecovery(error) => {

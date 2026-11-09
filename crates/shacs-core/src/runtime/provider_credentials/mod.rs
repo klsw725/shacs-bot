@@ -2,6 +2,7 @@ mod client;
 mod command;
 mod image;
 mod local;
+mod provider_credential_plan;
 mod resolve;
 
 use shacs_config::{CredentialSourceDeclaration, OAuthRefresh, OAuthRefreshRequest, RawCredential};
@@ -19,6 +20,9 @@ use crate::controlled_child::ControlledChildAbort;
 pub use client::CredentialResolvingProviderClient;
 pub(crate) use client::ProviderInvocationClient;
 pub use image::CredentialResolvingImageGenerationClient;
+pub use provider_credential_plan::{
+    CredentialSlot, LocalAuthSkip, PlannedProvider, ProviderCredentialPlan,
+};
 
 pub trait OAuthCredentialRefresher: Send + Sync {
     fn refresh(
