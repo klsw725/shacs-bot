@@ -1,6 +1,6 @@
 # PRD 020. 처음 설정 스크립트와 컨테이너 HOME
 
-Status: Planned
+Status: Complete (Scoped)
 
 Depends on: [PRD 000](000-provider-status-and-gateway-hint.md)(`provider status`, gateway 안내)과 [PRD 010](010-onboard-and-discord-connect.md)(migration 중의 `onboard`, `channels connect discord`)의 닫힌 결과. 뒤 번호 PRD에 의존하지 않는다.
 
@@ -144,5 +144,16 @@ PRD 020은 PRD 030, 040 없이 닫힌다.
 
   `provider`·`discord` 줄은 가짜 `docker`가 돌려준 글이다.
 - 검증: 스크립트 문법 `sh -n`·`bash --posix -n`·`dash -n`, smoke `bash -n`. Google 옵션을 붙인 `cargo fmt --all -- --check`, workspace `cargo clippy --all-targets -- -D warnings` 통과. 마지막 소스로 `shacs-cli` 543 passed / 0 failed / 3 ignored(로컬 `prd020/cli-tests.log`). `crates/Cargo.lock`은 바뀌지 않았다.
-- 실제 Docker 확인(수용 조건 9): 아직 돌리지 않았다. smoke는 지금 commit의 사본을 쓰므로 커밋한 뒤, 사용자 승인을 받아 UID가 1000이 아닌 일반 사용자로 돌린다.
+- 실제 Docker 확인(수용 조건 9): smoke는 commit의 사본을 쓰므로 커밋한 뒤에 돌렸다(아래 종료 확인).
 - Oracle 독립 검토: 계획 4차 **PASS**. 구현 3차 **PASS**(1차: `stty` 실패를 보지 않음, 사용자 ID 질문에서 입력이 끝나면 끝나지 않음, smoke의 정리 trap 순서와 사전 확인의 HOME, 시험의 `fcntl`·`kill` 결과. 2차: smoke의 HOME 쓰기 확인이 명령 실패를 버림).
+
+## 종료 확인 (2026-11-09)
+
+- 전체 workspace 시험: 사용자 승인(2026-11-09)을 받아 PRD 020·030·040을 담은 작업 트리에서 `cargo test --manifest-path crates/Cargo.toml --workspace --locked --no-fail-fast`를 돌렸다. suite 211개, 3,752 passed / 0 failed / 8 ignored, exit 0이다(로컬 `.omo/evidence/spec052/closure/workspace-tests-prd020-040.log`). 그 작업 트리를 `738061c feat(spec052): add the Docker setup script and fix data folder and provider key errors`로 커밋해 `origin/main`에 올렸다.
+- 실제 Docker 확인(수용 조건 9): 사용자 요청(2026-11-09)으로 서버 ka1rm31(Linux x86_64, 사용자 `shacs` UID 1001·GID 1001, Docker Compose v5.6.1)의 저장소에서 `738061c`를 pull한 뒤 `./docs/scripts/spec052-docker-setup-smoke.sh --yes`를 돌렸다. `Spec052 Docker setup smoke passed`, 종료 코드 0이다.
+  - 스크립트가 임시 HOME에 data 폴더를 만들고, worktree의 `.env`에 `SHACS_UID=1001`·`SHACS_GID=1001`을 적고, image를 만들고, `onboard`, `provider status`(`missing none`), `channels connect discord --status`(`not connected`), gateway 시작까지 했다. terminal이 아니므로 묻지 않고 할 일을 알렸다.
+  - smoke의 확인이 모두 통과했다: gateway running, data 폴더 파일이 모두 1001 소유, 1001로 돈 container가 HOME에 폴더를 만듦, `runtime inspect`의 official-container 증거, gateway 로그의 `provider: missing` 줄.
+  - 끝난 뒤 container, Compose network, worktree, 임시 폴더가 남지 않았다. 서버의 `~/.shacs-bot`(빈 폴더, 시각 그대로), 저장소의 `.env`(없음), 다른 container(`rt-trading-v4-1`·`rt-trading-v5-1`, 상태 그대로)는 바뀌지 않았다. `shacs-bot:local` image는 알린 대로 다시 만들어졌다.
+  - 기록: 로컬 `.omo/evidence/spec052/prd020/docker-smoke-ka1rm31.log`(1,190줄, 비밀 값 없음). 서버의 log는 옮긴 뒤 지웠다.
+- 수용 조건 1–11을 위 시험과 확인으로 맞췄고, 계획 4차·구현 3차 독립 검토가 PASS다. PRD 020은 `Complete (Scoped)`로 닫는다. 전체 출시 seal이 아니다.
+- 남은 제한은 위 "남은 제한"과 같다. 질문이 있는 실행(terminal에서 ChatGPT 로그인·Discord 연결)은 Cargo pty 시험으로만 확인했고 실제 Docker에서는 돌리지 않았다.

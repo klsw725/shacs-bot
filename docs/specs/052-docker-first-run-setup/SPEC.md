@@ -1,6 +1,6 @@
 # 052. Docker 처음 실행 준비 구현 명세
 
-Status: Planned
+Status: Complete (Scoped)
 
 Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실행, official-container 증거), 029 runtime 시작과 시작 출력, 003 provider 고르기(`ProviderRegistry`), 010 provider 인증 명령(`provider codex login`, `provider <id> import-key`)과 비밀 다루기, 030 credential 해석(자리 순서, 인증 저장소 읽기, fingerprint, 갱신), 031 config 읽기·쓰기와 credential 선언 저장, config migration marker, 048 `.env.json` 형식·`${이름}` 해석 순서·이름 규칙·충돌 규칙·바뀜 확인 쓰기·비밀 옮기기 marker
 
@@ -241,3 +241,12 @@ PRD 문서는 구현을 시작할 때 쓴다. 각 PRD는 앞 번호의 닫힌 �
 | 040 빈 provider 환경 변수와 다시 저장한 인증 | 소유 범위 9와 그 문서 | 000(자리 찾기 함수와 `provider status`) | 수용 조건 11, 10 |
 
 수용 조건 9와 10은 각 PRD가 자기 변경에 대해 확인한다.
+
+## 종료 증거 (2026-11-09)
+
+PRD [000](prds/000-provider-status-and-gateway-hint.md)·[010](prds/010-onboard-and-discord-connect.md)은 전체 workspace 시험(3,727 passed / 0 failed / 8 ignored)과 함께 `277a32f`로, PRD [020](prds/020-setup-script-and-container-home.md)·[030](prds/030-data-folder-permission-errors.md)·[040](prds/040-empty-provider-environment-and-saved-credentials.md)은 전체 workspace 시험(3,752 passed / 0 failed / 8 ignored)과 함께 `738061c`로 닫혔다. 모두 `Complete (Scoped)`이고, 계획과 구현을 각각 독립 검토(Oracle)가 PASS할 때까지 고쳤다. 이는 현재 self-hosted 지원 범위의 scoped 완료이며 전체 출시 seal이 아니다. 실행 기록은 로컬 `.omo/evidence/spec052/`(추적하지 않음)에 있다.
+
+- 수용 조건 1–5, 7, 8, 11: 각 PRD의 시험과 구현 메모대로 통과했다.
+- 수용 조건 6: 사용자 요청으로 UID 1001인 Linux 서버(ka1rm31)에서 opt-in smoke가 통과했다. `738061c`의 사본과 빈 임시 data 폴더로 스크립트가 terminal 없이 image를 만들고 gateway를 띄웠고, data 폴더 파일이 1001 소유였으며, container가 HOME에 썼고, `runtime inspect`의 official-container 증거와 시작 출력의 `provider: missing` 줄이 있었다. 끝난 뒤 만든 것이 남지 않았고 서버의 다른 container와 `~/.shacs-bot`은 그대로였다(PRD 020 종료 확인).
+- 수용 조건 9, 10: 각 PRD가 자기 문서와 검증으로 확인했다.
+- "확인한 것"의 Linux 서버 문제(1000번으로 돌아 `Permission denied`, root 소유로 생기는 data 폴더, 쓸 수 없는 HOME, provider 이야기가 없는 gateway, 빈 provider 환경 변수)는 스크립트·HOME 1777·시작 안내·권한 오류 글·빈 변수 규칙으로 다뤘다. 스크립트 없이 `docker compose up -d`만 하면 UID가 1000이 아닌 컴퓨터에서는 여전히 쓰지 못하고, 이제 까닭과 고치는 법을 알리고 멈춘다("남은 위험과 한계").

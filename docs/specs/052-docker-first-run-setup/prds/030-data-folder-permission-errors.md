@@ -1,6 +1,6 @@
 # PRD 030. 알아듣기 쉬운 권한 오류
 
-Status: Planned
+Status: Complete (Scoped)
 
 Depends on: [PRD 020](020-setup-script-and-container-home.md)의 결과(고치는 방법에 적는 `scripts/docker-setup.sh`와, 그 스크립트가 저장소 `.env`에 적는 `SHACS_UID`·`SHACS_GID`). [PRD 000](000-provider-status-and-gateway-hint.md)의 명령 꼴 판정(`CommandForm`, 023 official-container 증거)을 같이 쓴다. 뒤 번호 PRD에 의존하지 않는다. PRD 030의 종료 확인은 PRD 020이 닫힌 뒤에 한다.
 
@@ -153,3 +153,11 @@ data 폴더에 쓰는 명령이 시작할 때 그 폴더에 쓸 수 있는지 �
 - 검증: Google 옵션을 붙인 `cargo fmt --all -- --check`, workspace `cargo clippy --all-targets -- -D warnings` 통과. 마지막 소스로 `shacs-cli` 553 passed / 0 failed / 3 ignored(로컬 `prd030/cli-tests.log`, PRD 020 시험 포함). `crates/Cargo.lock`은 바뀌지 않았다.
 - Oracle 독립 검토: 계획 4차 **PASS**(1차: 실제 번호로 묻는 `access`, `/etc` 같은 폴더에 `chown -R`을 알림, 빠진 쓰는 명령, symlink, 시험 빈틈, 시험 등록·BDD·검증 순서. 2차: `tasks`의 goal action은 workspace를 씀, `'` 따옴표 시험. 3차: `--data-dir`만 준 `tasks`). 구현 3차 **PASS**(1차: 없는 폴더 행과 상대 config 시험, `getgroups` 경쟁, BDD 주석, USAGE의 `tasks`, unix 전용 module 등록. 2차: 0개로 센 뒤 늘어난 목록).
 - 종료 확인은 PRD 020이 닫힌 뒤에 한다(Depends on).
+
+## 종료 확인 (2026-11-09)
+
+- PRD 020이 같은 날 닫혔다(그 종료 확인).
+- 전체 workspace 시험: 사용자 승인(2026-11-09)을 받아 PRD 020·030·040을 담은 작업 트리에서 `cargo test --manifest-path crates/Cargo.toml --workspace --locked --no-fail-fast`를 돌렸다. suite 211개, 3,752 passed / 0 failed / 8 ignored, exit 0이다(로컬 `.omo/evidence/spec052/closure/workspace-tests-prd020-040.log`). 커밋 `738061c`.
+- PRD 020의 실제 Docker 확인(서버 ka1rm31, UID 1001)은 이 확인이 든 image로 돌았다. 쓸 수 있는 data 폴더에서 `onboard`, `provider status`, `channels connect discord --status`, gateway가 지금처럼 돌았다(Required Contract 2). 쓸 수 없는 폴더의 글은 Cargo 시험으로만 확인했다.
+- 수용 조건 1–9를 위 시험과 검증으로 맞췄고, 계획 4차·구현 3차 독립 검토가 PASS다. PRD 030은 `Complete (Scoped)`로 닫는다. 전체 출시 seal이 아니다.
+- 남은 제한은 위 "남은 제한"과 같다.

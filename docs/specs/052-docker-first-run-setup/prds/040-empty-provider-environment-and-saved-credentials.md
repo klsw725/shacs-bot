@@ -1,6 +1,6 @@
 # PRD 040. 빈 provider 환경 변수와 다시 저장한 인증
 
-Status: Planned
+Status: Complete (Scoped)
 
 Depends on: [PRD 000](000-provider-status-and-gateway-hint.md)의 닫힌 결과(runtime과 `provider status`·gateway 안내가 같이 쓰는 자리 찾기 함수 `ProviderCredentialRuntime::choose_slot`, 선언 함수 `declaration_for`, `provider status`의 판정). 뒤 번호 PRD에 의존하지 않는다.
 
@@ -119,3 +119,10 @@ Docker Compose가 넘기는 빈 provider 환경 변수(`ANTHROPIC_API_KEY=` 등)
 
 - 검증: Google 옵션을 붙인 `cargo fmt --all -- --check`, workspace `cargo clippy --all-targets -- -D warnings` 통과. 마지막 소스로 `shacs-core` 1,986 passed / 0 failed / 5 ignored(`prd040/core-tests.log`), `shacs-cli` 558 passed / 0 failed / 3 ignored(`prd040/cli-tests.log`, PRD 020·030 시험 포함). `ProviderCredentialRuntime`을 쓰는 다른 crate의 시험(`shacs-tui --test spec030_credential_resolution_surfaces`)도 통과. `crates/Cargo.lock`은 바뀌지 않았다. `shacs-config`는 바꾸지 않았다.
 - Oracle 독립 검토: 계획 3차 **PASS**(1차: 설정 전체를 풀면 상관없는 `${이름}`이 선언을 바꿈, `localAuth: false`면 다시 저장해도 소용없음, 새 시험 등록. 2차: 같은 단서를 목표·문서 범위에도). 구현 2차 **PASS**(1차: 실행 환경에 기대는 `${이름}` 시험, README·`.env.example`의 `localAuth: false` 단서, BDD 주석).
+
+## 종료 확인 (2026-11-09)
+
+- 전체 workspace 시험: 사용자 승인(2026-11-09)을 받아 PRD 020·030·040을 담은 작업 트리에서 `cargo test --manifest-path crates/Cargo.toml --workspace --locked --no-fail-fast`를 돌렸다. suite 211개, 3,752 passed / 0 failed / 8 ignored, exit 0이다(로컬 `.omo/evidence/spec052/closure/workspace-tests-prd020-040.log`). 커밋 `738061c`.
+- PRD 020의 실제 Docker 확인(서버 ka1rm31)에서 공식 Compose가 빈 provider 환경 변수를 넘기는 container의 `provider status`가 지금처럼 `missing none`(인증 없음)이었다. 빈 변수와 저장한 key가 함께 있는 실제 container 실행은 하지 않았고, 그 경우는 binary 시험과 가짜 Anthropic 서버로 보낸 요청으로 확인했다.
+- 수용 조건 1–7을 위 시험과 검증으로 맞췄고, 계획 3차·구현 2차 독립 검토가 PASS다. PRD 040은 `Complete (Scoped)`로 닫는다. 전체 출시 seal이 아니다.
+- 남은 제한은 위 "남은 제한"과 같다.
