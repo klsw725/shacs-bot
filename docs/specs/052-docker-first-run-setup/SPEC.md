@@ -14,7 +14,7 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 - data 폴더가 없으면 Docker가 mount하면서 `root:root`(755)로 만들고, 같은 오류가 난다.
 - 컨테이너를 1001번으로 돌리면 data 폴더에는 쓰지만 image의 HOME(`/home/shacs`, 1000 소유, 755)에는 쓰지 못한다. `~/.cache`·`~/.config`를 만들지 못하고, npm 캐시 자리(`~/.npm`)도 HOME 아래다.
 - config가 없어도 gateway(`run`)는 WebSocket만 켜고 뜬다. 외부 channel은 꺼짐으로 건너뛴다. gateway 출력은 provider 이야기를 하지 않는다.
-- 공식 Compose는 provider 환경 변수(`ANTHROPIC_API_KEY` 등)를 host에서 정하지 않으면 빈 값으로 넘긴다. 이때 runtime은 같은 provider의 key가 인증 저장소(`provider anthropic import-key`)나 config(`apiKey`, `.env.json`으로 푸는 `${이름}` 포함)에 있어도 빈 환경 변수를 먼저 써서 key 없이 요청했다. 빈 값이 없으면 둘 다 key를 보냈다(네트워크 없는 컨테이너 안의 가짜 provider 서버로 확인).
+- 공식 Compose는 provider 환경 변수(`ANTHROPIC_API_KEY` 등)를 host에서 정하지 않으면 빈 값으로 넘긴다. 이때 runtime은 같은 provider의 key가 인증 저장소(`provider anthropic import-key`)나 config(`apiKey`, `.env.json`으로 푸는 `${이름}` 포함)에 있어도 빈 환경 변수를 먼저 써서 key 없이 요청했다. 빈 값이 없으면 둘 다 key를 보냈다(네트워크 없는 컨테이너 안의 가짜 provider 서버로 확인). 소유 범위 9가 고친다.
 
 코드로 확인한 것:
 
@@ -30,7 +30,8 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 
 - 저장소를 받고 `./scripts/docker-setup.sh`를 한 번 실행해 몇 가지 질문(ChatGPT 계정 로그인, Discord 토큰과 자기 사용자 ID)에 답하면 봇이 뜬다. UID가 1000이 아닌 컴퓨터에서도 같다. 다시 실행하면 이미 된 것은 묻지 않고, 넣은 값은 그대로다. API key로 쓰는 provider는 USAGE의 손 설정을 따른다.
 - 스크립트 없이 Compose를 쓰다 data 폴더에 쓸 수 없으면, 그 폴더의 주인과 컨테이너가 도는 번호, 고치는 방법을 알리고 멈춘다.
-- `provider status`가 runtime이 쓸 provider와, 그 인증이 runtime이 실제로 쓸 자리에 있는지 알린다. Codex 로그인도 인증으로 보고, 빈 환경 변수가 key를 가리는 경우는 그 까닭을 알린다.
+- `provider status`가 runtime이 쓸 provider와, 그 인증이 runtime이 실제로 쓸 자리에 있는지 알린다. Codex 로그인도 인증으로 본다.
+- Docker가 넘기는 빈 provider 환경 변수는 인증 저장소와 config(`.env.json` 포함)에 둔 key를 가리지 않는다. 저장할 때와 달라진 선언 때문에 건너뛰던 인증도 다시 로그인하거나 key를 다시 가져오면 다시 쓰인다.
 - Discord 토큰은 CLI 명령 하나로 `.env.json`에 들어가고 `config.json`에는 `${이름}`만 남는다. Docker 밖에서도 같은 명령을 쓴다.
 - provider 인증이 없는 gateway는 지금처럼 꺼지지 않고, 할 일을 시작 출력에 알린다.
 
@@ -41,15 +42,15 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 1. **provider 인증 확인(`shacs-bot provider status`):**
    - provider는 runtime과 같은 코드로 고른다. 후보는 030 credential runtime이 모으는 것(config의 provider 항목과 인증 저장소의 항목)이고, 고르는 규칙은 003 `ProviderRegistry::match_provider`와 config의 `agents.defaults.provider`·`model`이다. config는 runtime처럼 `${이름}`을 풀어 읽는다. 그래서 config와 인증 저장소에 항목이 없고 환경 변수만 있는 provider는 runtime처럼 고르지 않는다.
    - 고른 provider의 credential은 runtime(030)과 같은 선언, 같은 자리 순서, 같은 자리 규칙으로 보고 runtime이 쓸 첫 자리를 찾는다.
-     - 선언된 환경 변수: process 환경에 그 이름이 있으면 이 자리다. 값이 비어 있어도 지금 runtime은 이 자리를 쓴다.
-     - 인증 저장소: 선언이 허용하고, 항목 종류(API key, OAuth)가 선언과 맞고, 항목에 선언 fingerprint가 없거나 지금 선언과 같으면 이 자리다. 지금 provider 로그인과 `import-key`는 fingerprint를 적지 않는다. fingerprint가 다르면 runtime처럼 이 자리를 건너뛴다.
+     - 선언된 환경 변수: process 환경에 그 이름이 있으면 이 자리다. 소유 범위 9 뒤에는 값이 빈 글이 아닐 때만 이 자리다(PRD 000은 빈 값도 이 자리로 본 그때 runtime을 그대로 따랐다).
+     - 인증 저장소: 선언이 허용하고, 항목 종류(API key, OAuth)가 선언과 맞고, 항목에 선언 fingerprint가 없거나 지금 선언과 같으면 이 자리다. PRD 000 때 provider 로그인과 `import-key`는 fingerprint를 적지 않는다(소유 범위 9 뒤에는 저장할 때의 선언 fingerprint를 적는다). fingerprint가 다르면 runtime처럼 이 자리를 건너뛴다.
      - credential command: 선언이 있으면 이 자리다.
      - config 값: `${이름}`을 푼 값이 비어 있지 않으면 이 자리다.
      - 요청마다 오는 runtime override는 보지 않는다.
-   - 같은 코드: 지금 runtime 해석(`ProviderCredentialRuntime`)은 자리를 고르는 중에 credential command를 실행하고 OAuth를 갱신한다. PRD 000은 provider 고르기와 runtime이 쓸 첫 자리 찾기를, config·선언·process 환경·인증 저장소 내용만 읽고 아무것도 실행·갱신·기록하지 않는 함수로 떼어 낸다. runtime 해석은 그 함수가 고른 자리에서 지금처럼 값을 얻고(command 실행, OAuth 갱신, 상태 기록), `provider status`와 소유 범위 2는 그 함수만 부른다. runtime이 고르는 provider와 자리, 그 결과는 바뀌지 않는다.
-   - 판정: runtime이 쓸 자리의 값이 비어 있지 않으면 `ready`다. credential command 자리면 실행하지 않아 값을 모르므로 `ready`로 보되 확인하지 않았다고 적는다. 그 자리의 값이 비어 있으면 `missing`이고 어느 자리인지 적는다. 고를 provider가 없거나 쓸 자리가 없으면 `missing`이다. 인증 저장소 항목을 fingerprint가 달라 건너뛰어 쓸 자리가 없으면, 그 provider의 credential 선언(`credentialSource`, `apiKeyRef`)이 저장할 때와 달라졌다고 적고 선언을 그때로 되돌리라고 알린다. 지금은 다시 로그인하거나 `import-key`해도 남은 fingerprint가 지워지지 않으므로 그것을 할 일로 알리지 않는다(남은 위험). 만료된 OAuth 항목은 갱신 token이 있으면 `ready`로 보고 첫 호출에서 갱신한다고 적는다. 갱신 token이 없으면 runtime이 쓰지 못하므로 `missing`이고 다시 로그인하라고 알린다.
+   - 같은 코드: 지금 runtime 해석(`ProviderCredentialRuntime`)은 자리를 고르는 중에 credential command를 실행하고 OAuth를 갱신한다. PRD 000은 provider 고르기와 runtime이 쓸 첫 자리 찾기를, config·선언·process 환경·인증 저장소 내용만 읽고 아무것도 실행·갱신·기록하지 않는 함수로 떼어 낸다. runtime 해석은 그 함수가 고른 자리에서 지금처럼 값을 얻고(command 실행, OAuth 갱신, 상태 기록), `provider status`와 소유 범위 2는 그 함수만 부른다. PRD 000에서 runtime이 고르는 provider와 자리, 그 결과는 바뀌지 않는다. 그 뒤 PRD 040이 소유 범위 9의 두 가지(빈 환경 변수, 저장할 때의 fingerprint)만 바꾼다.
+   - 판정: runtime이 쓸 자리의 값이 비어 있지 않으면 `ready`다. credential command 자리면 실행하지 않아 값을 모르므로 `ready`로 보되 확인하지 않았다고 적는다. 그 자리의 값이 비어 있으면 `missing`이고 어느 자리인지 적는다. 고를 provider가 없거나 쓸 자리가 없으면 `missing`이다. 인증 저장소 항목을 fingerprint가 달라 건너뛰어 쓸 자리가 없으면, 그 provider의 credential 선언(`credentialSource`, `apiKeyRef`)이 저장할 때와 달라졌다고 적고 선언을 그때로 되돌리라고 알린다. PRD 000에서는 다시 로그인하거나 `import-key`해도 남은 fingerprint가 지워지지 않아 그것을 할 일로 알리지 않는다. 소유 범위 9 뒤에는 다시 로그인하거나 가져오는 것도 할 일로 알린다. 만료된 OAuth 항목은 갱신 token이 있으면 `ready`로 보고 첫 호출에서 갱신한다고 적는다. 갱신 token이 없으면 runtime이 쓰지 못하므로 `missing`이고 다시 로그인하라고 알린다.
    - 값이 맞는지는 보지 않는다. 네트워크를 쓰지 않고, credential command를 실행하지 않고, OAuth를 갱신하지 않고, 아무 파일도 쓰지 않는다. 갱신이나 command가 실패하면 runtime이 첫 호출에서 지금처럼 인증이 필요하다는 오류를 낸다.
-   - 출력 첫 줄은 `provider: ready <provider>` 또는 `provider: missing <provider 또는 none>`이다. 다음 줄은 쓸 자리나 까닭이고, `missing`이면 할 일(로그인 명령, 또는 빈 환경 변수의 이름)이다. 두 결과 모두 종료 코드 0이다. config, `.env.json`, 인증 저장소를 읽지 못하면 지금 CLI처럼 오류를 보이고 종료 코드 1이다.
+   - 출력 첫 줄은 `provider: ready <provider>` 또는 `provider: missing <provider 또는 none>`이다. 다음 줄은 쓸 자리나 까닭이고, `missing`이면 할 일(로그인 명령, key 가져오기, 고칠 설정)이다. 두 결과 모두 종료 코드 0이다. config, `.env.json`, 인증 저장소를 읽지 못하면 지금 CLI처럼 오류를 보이고 종료 코드 1이다.
    - 031·048 marker가 있어도 판정은 같다. 읽기만 하고, 끊긴 어느 단계에서도 config가 풀리기 때문이다(소유 범위 4의 `--status`와 같다). 다만 marker가 있으면 할 일로는 `runtime config-migrate --recover`만 알린다. 로그인과 `import-key`는 marker를 보지 않고 config와 인증 저장소를 쓰므로, 끊긴 migration 중에 알리면 `--recover`가 되돌리지 못하게 된다. 읽기만 하므로 gateway가 돌고 있을 때도 실행할 수 있다.
    - process 환경이 판정에 들어가므로 runtime과 같은 환경에서 실행해야 맞는다. Docker에서는 gateway와 같은 Compose 환경을 받는 `shacs-cli` 서비스로 실행한다.
    - 비밀 값은 보이지 않는다.
@@ -88,7 +89,7 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
      1. ChatGPT 계정(Codex): `provider codex login --headless`. 이 명령은 지금처럼 Codex를 기본 provider와 model로 고른다.
      2. 건너뛰기: 나중에 할 명령을 알린다.
 
-     로그인 뒤 `provider status`를 다시 보고 아직 `missing`이면 그 줄을 알린다. API key provider는 USAGE의 손 설정을 가리킨다("남은 위험과 한계"의 빈 환경 변수).
+     로그인 뒤 `provider status`를 다시 보고 아직 `missing`이면 그 줄을 알린다. API key provider는 USAGE의 손 설정(Compose `.env`의 key, `provider <id> import-key`)을 가리킨다.
    - **Discord:** 소유 범위 4의 `channels connect discord --status`가 `connected`면 묻지 않는다. 아니면 연결할지 묻는다. 연결하면 토큰(숨긴 입력)과 답할 사용자 ID를 받아, 토큰은 `--token-stdin`의 stdin으로, ID는 `--allow-from`으로 넘긴다. 사용자 ID를 비우면 봇이 볼 수 있는 누구나 봇을 쓰고, gateway가 명령 실행·파일 쓰기 도구를 켠 채 돈다는 것을 알리고 다시 확인을 받는다. 확인하지 않으면 ID를 다시 묻는다. 연결하지 않기로 하면 나중에 할 명령을 알린다. 다른 channel은 USAGE의 손 설정을 가리킨다.
    - **시작:** gateway가 돌고 있는지 Compose로 먼저 본 뒤 `docker compose up -d shacs-gateway`를 한다. image가 바뀌었으면 `up -d`가 컨테이너를 새로 만든다. 돌고 있었고 이번 실행에서 로그인이나 Discord 연결이 성공했으면 `docker compose restart shacs-gateway`로 다시 띄운다. gateway는 config(기본 provider·model, channel 설정)를 시작할 때 읽고 channel worker도 그때 띄우기 때문이다(credential 값은 지금처럼 첫 호출에서 읽는다). 그다음 로그 보기(`docker compose logs -f shacs-gateway`)와 상태 확인(`provider status`, `runtime inspect`) 명령을 알린다.
    - **실패:** 폴더, 사용자 번호, image, `onboard`, 두 확인 명령(`provider status`, `--status`), `up -d`, `restart`가 실패하면 그 출력을 보이고 그 뒤 명령 없이 0이 아닌 종료 코드로 멈춘다. 로그인과 Discord 연결이 실패하면 그 출력을 보이고 다음 단계로 간다(gateway는 소유 범위 2의 안내와 함께 뜬다).
@@ -101,7 +102,13 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
    - 쓸 수 없으면 원시 I/O 오류 대신 폴더 경로, 그 주인의 UID:GID, 실행 중인 UID:GID, 고치는 방법을 알리고 실패로 끝난다. 폴더가 `root` 소유면 Docker가 없는 폴더를 만들면 그렇게 된다고 적는다.
    - 고치는 방법은 공식 container 안이면 `scripts/docker-setup.sh`와 `.env`의 `SHACS_UID`·`SHACS_GID`, 밖이면 `chown`이다.
    - 그 밖의 I/O 오류는 지금처럼 보인다.
-8. **문서:** README와 `docs/USAGE.md`의 Docker Compose 설명을 스크립트 중심으로 바꾸고, 지금의 손 순서는 "스크립트 없이" 절로 남긴다. `SHACS_UID`·`SHACS_GID`와 `.env`의 뜻, 폴더를 미리 만들지 않으면 생기는 문제, `provider status`, migration 중의 `onboard`, `channels connect discord`를 적는다. Docker에서 provider API key를 넣는 지금의 방법(Compose `.env`의 provider 환경 변수와 config의 provider 항목)과, 인증 저장소·`.env.json`에 둔 key가 빈 환경 변수에 가려진다는 것을 README와 USAGE의 Docker provider secret 문장에 맞게 적는다. USAGE의 "Provider 설정이 없거나 … runtime은 시작하지 않으므로" 문장 중 provider 설정이 없을 때의 부분은 확인한 동작(소유 범위 2)에 맞게 고친다. 선택 도구의 인증이 빠졌을 때의 부분은 그 동작을 확인해 맞게 적는다.
+8. **문서:** README와 `docs/USAGE.md`의 Docker Compose 설명을 스크립트 중심으로 바꾸고, 지금의 손 순서는 "스크립트 없이" 절로 남긴다. `SHACS_UID`·`SHACS_GID`와 `.env`의 뜻, 폴더를 미리 만들지 않으면 생기는 문제, `provider status`, migration 중의 `onboard`, `channels connect discord`를 적는다. Docker에서 provider API key를 넣는 방법(Compose `.env`의 provider 환경 변수, config의 provider 항목, `provider <id> import-key`)을 README와 USAGE의 Docker provider secret 문장에 맞게 적는다. 소유 범위 9 전에는 인증 저장소·`.env.json`에 둔 key가 빈 환경 변수에 가려진다고 적고(PRD 000), 소유 범위 9가 그 문장을 고친 동작으로 바꾼다(PRD 040). USAGE의 "Provider 설정이 없거나 … runtime은 시작하지 않으므로" 문장 중 provider 설정이 없을 때의 부분은 확인한 동작(소유 범위 2)에 맞게 고친다. 선택 도구의 인증이 빠졌을 때의 부분은 그 동작을 확인해 맞게 적는다.
+9. **빈 provider 환경 변수와 다시 저장한 인증(사용자 결정 2026-11-09):**
+   - runtime credential 해석(030)에서 선언된 환경 변수는 값이 빈 글이 아닐 때만 그 자리다. 빈 글이면 없는 것으로 보고 다음 자리(인증 저장소, credential command, config 값)로 간다. 048의 `${이름}` 풀기가 빈 process 값을 건너뛰는 것과 같은 뜻이다(공백만인 값은 둘 다 값으로 본다). 비어 있지 않은 값은 지금처럼 먼저 쓰인다.
+   - 이 규칙은 소유 범위 1의 자리 찾기 함수 하나에 둔다. 그래서 runtime, `provider status`, gateway 안내가 같이 바뀐다.
+   - 새 인증을 인증 저장소에 저장하는 provider 인증 명령(`provider codex login`, `provider codex import-token`, `provider copilot import-token`, `provider <id> import-key`)은 그 provider의 선언 fingerprint를 저장할 때의 지금 선언(runtime이 쓰는 같은 선언 함수로 정한 것)의 것으로 적는다. 남아 있던 다른 fingerprint도 이 값으로 바뀐다. 그래서 다시 로그인하거나 가져오면 새 인증이 쓰이고, 그 뒤 선언이 바뀌면 지금처럼 stale로 건너뛴다. 다른 provider의 fingerprint와 항목은 그대로다.
+   - `provider status`는 fingerprint가 달라 건너뛴 인증에 대해 선언을 되돌리거나 다시 로그인·가져오라고 알린다.
+   - 문서: README·USAGE·`.env.example`의 빈 환경 변수 경고를 고친 동작으로 바꾼다. 비어 있지 않은 provider 환경 변수는 여전히 저장한 key보다 먼저 쓰인다는 것과, 가져온 key도 이제 선언 fingerprint를 가진다는 것을 적는다.
 
 ## 기존 owner와의 경계
 
@@ -110,8 +117,8 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 | 015·023 | 공식 image, Compose, 처음부터 일반 사용자로 실행, official-container 증거 | image 구성(052는 HOME 권한만 바꾼다), Compose 안전 속성(그대로 지킨다), containment 판정 |
 | 029 | runtime 시작과 시작 출력 | runtime lifecycle, owner lease |
 | 003 | provider 고르기(`ProviderRegistry`, `agents.defaults`) | 고르는 규칙 |
-| 010 | provider 인증 명령, 비밀 다루기 | 인증 명령의 동작 |
-| 030 | credential 해석(자리 순서, 인증 저장소 읽기, fingerprint, 갱신, 상태) | 해석 규칙과 인증 저장소 형식 |
+| 010 | provider 인증 명령, 비밀 다루기 | 인증 명령의 동작(아래 "앞선 스펙에서 바꾸는 것" 말고) |
+| 030 | credential 해석(자리 순서, 인증 저장소 읽기, fingerprint, 갱신, 상태) | 해석 규칙과 인증 저장소 형식(아래 "앞선 스펙에서 바꾸는 것" 말고) |
 | 031 | config 읽기·쓰기, credential 선언 저장, config migration marker | config schema, migration |
 | 048 | `.env.json` 형식, `${이름}` 해석 순서, 이름 규칙, 충돌 규칙, 바뀜 확인 쓰기(`write_config_value_if_unchanged`), 비밀 옮기기 marker | 아래 "앞선 스펙에서 바꾸는 것" 말고 그 규칙 |
 | 049 | 없음 | 브라우저 image 구성. 049는 브라우저 임시 폴더를 이미 HOME이 아닌 `/tmp`에 둔다. 052는 049를 기다리지 않는다 |
@@ -123,12 +130,14 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 | 스펙 | 지금 계약(위치) | 바뀐 뒤 | PRD |
 |---|---|---|---|
 | 048 | SPEC 소유 범위 3의 마지막 항목과 PRD 010 범위 11: `onboard`와 `onboard --wizard`는 비밀 값을 받지 않는다. 사용자는 비밀 값을 `.env.json`에 직접 적고 config에 `${이름}`을 쓰거나, config에 적은 뒤 `runtime config-migrate`로 옮긴다. PRD 010 Non Scope: "비밀 값을 받아 `.env.json`에 쓰는 새 명령" | 세 번째 길을 더한다. `channels connect discord`가 Discord 토큰을 받아 048 이름 규칙·충돌 규칙과 바뀜 확인 쓰기(0600 임시 파일, 원자적 교체)로 `.env.json`에 쓰고 config에는 `${이름}`을 남긴다(소유 범위 4). 048 Non Scope의 새 명령은 이 명령 하나이고 Discord 토큰만 받는다. `onboard`와 wizard는 그대로 비밀 값을 받지 않는다 | 010 |
+| 030 | SPEC 반드시 지킬 것 6과 PRD 003 범위 1·6: credential 해석은 runtime override, environment, local auth store, provider config의 precedence를 결정적으로 적용하고, environment·literal·command 값을 푼다. 빈 환경 변수에 대한 말은 없고, 구현은 선언된 환경 변수의 이름만 있으면 값이 비어도 environment 자리로 썼다 | environment 자리는 값이 빈 글이 아닐 때만이다(048 `${이름}` 풀기와 같은 뜻). 빈 글이면 없는 것으로 보고 local auth store, command, provider config 순서로 간다. 순서와 비어 있지 않은 값의 우선은 그대로다(소유 범위 9) | 040 |
+| 030, 010 | 030 PRD 003 범위 4: source fingerprint와 stale detection. 구현은 OAuth 갱신 때만 fingerprint를 적는다. 010 SPEC "현재 구현" 5번의 Codex·Copilot token import·login 처리와 그 뒤 더해진 `provider <id> import-key`(`import_provider_api_key`)는 인증 저장소의 provider 항목만 바꾸고 fingerprint를 적거나 지우지 않는다. 그래서 갱신 뒤 선언을 바꾼 provider는 다시 로그인해도 인증이 건너뛰어진다 | 이 명령들이 새 인증을 저장할 때 그 provider의 fingerprint를 그때 선언의 것으로 적는다. 가져온 API key도 fingerprint를 가지게 되어, 그 뒤 선언이 바뀌면 다른 인증처럼 stale로 건너뛴다. 갱신 때 적고 다르면 건너뛰는 stale detection은 그대로다(소유 범위 9) | 040 |
 
 아래는 바꾸지 않는다.
 
 - 023의 Packaging containment layer 요구(runtime이 일반 사용자로 돈다, data mount를 좁힌다, Docker socket·`privileged`·nested daemon이 없다). 023 SPEC이 적은 `useradd --create-home --uid 1000`은 현 상태의 근거이고, 소유 범위 6의 HOME 권한은 그 사용자와 `USER shacs`를 바꾸지 않는다.
 - `runtime inspect` readiness의 `provider_auth` 판정.
-- 030 credential 해석. PRD 000이 자리 찾기를 함수로 떼어 내도 runtime이 고르는 provider와 자리, 그 결과는 같다. 빈 환경 변수를 먼저 쓰는 지금 동작도 그대로이고, `provider status`는 그 동작을 그대로 보인다.
+- 030 credential 해석의 나머지(자리 순서, 인증 저장소 규칙, OAuth 갱신, 상태 기록). PRD 000이 자리 찾기를 함수로 떼어 내도 runtime이 고르는 provider와 자리, 그 결과는 같다. 위 표의 두 줄만 PRD 040이 바꾸고, `provider status`는 같은 함수라 그 바뀐 동작을 그대로 보인다.
 - 031·048 marker의 뜻과 `--recover`. 052는 `onboard`도 그 marker에서 멈추게 할 뿐이다(소유 범위 3).
 
 ## 반드시 지킬 것
@@ -146,7 +155,7 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 
 1. provider 확인(Cargo):
    - 아래는 `ready`다. config가 Codex를 고르고 인증 저장소에 `provider codex login`이 만든 꼴(fingerprint 없음)의 Codex OAuth 항목만 있는 경우(만료됐고 갱신 token이 있는 항목 포함). 기본 config(provider `auto`, model `anthropic/…`)에 `import-key`가 만든 꼴(fingerprint 없음)의 Anthropic API key 항목만 있고 `ANTHROPIC_API_KEY`가 process 환경에 없는 경우. 인증 저장소 항목의 fingerprint가 지금 선언과 같은 경우. config에 `anthropic` 항목이 있고 `ANTHROPIC_API_KEY`가 비어 있지 않은 경우. config의 `apiKey`가 `.env.json`으로 풀리고 `ANTHROPIC_API_KEY`가 없는 경우. credential command가 선언된 경우(실행하지 않았다고 적는다).
-   - 아래는 `missing`이고 까닭과 할 일을 보인다. 인증이 하나도 없는 경우. config와 인증 저장소에 항목 없이 `ANTHROPIC_API_KEY`만 있는 경우. config가 고른 provider가 아닌 다른 provider에만 인증이 있는 경우. 인증 저장소에 Anthropic key가 있지만 `ANTHROPIC_API_KEY`가 빈 값으로 있는 경우(빈 환경 변수라고 적는다). 인증 저장소 항목만 있고 그 fingerprint가 지금 선언과 다른 경우(선언을 되돌리라고 적고 로그인은 알리지 않는다). 만료됐고 갱신 token이 없는 Codex OAuth 항목만 있는 경우(다시 로그인).
+   - 아래는 `missing`이고 까닭과 할 일을 보인다. 인증이 하나도 없는 경우. config와 인증 저장소에 항목 없이 `ANTHROPIC_API_KEY`만 있는 경우. config가 고른 provider가 아닌 다른 provider에만 인증이 있는 경우. 인증 저장소에 Anthropic key가 있지만 `ANTHROPIC_API_KEY`가 빈 값으로 있는 경우(빈 환경 변수라고 적는다. PRD 000 때 동작이고, 소유 범위 9 뒤에는 수용 조건 11대로 `ready`다). 인증 저장소 항목만 있고 그 fingerprint가 지금 선언과 다른 경우(선언을 되돌리라고 적는다. PRD 000에서는 로그인을 알리지 않고, 소유 범위 9 뒤에는 다시 로그인·가져오기도 알린다). 만료됐고 갱신 token이 없는 Codex OAuth 항목만 있는 경우(다시 로그인).
    - 같은 경우 표로 runtime의 provider·credential 해석(030)을 돌리면, `ready`인 경우 같은 provider와 같은 자리의 값을 쓰고(command와 만료된 OAuth는 시험용 command·갱신기의 값), `missing`인 경우 provider를 고르지 못하거나 해석이 실패하거나 빈 값을 쓴다.
    - 확인 전후 config, `.env.json`, 인증 저장소가 byte 단위로 같고, 네트워크, credential command, OAuth 갱신이 불리지 않는다. 031·048 marker가 있어도 첫 줄은 같고, 할 일은 `runtime config-migrate --recover`뿐이며 로그인·`import-key` 안내가 없다.
    - 두 결과 모두 종료 코드 0이고, 읽을 수 없는 config와 인증 저장소는 종료 코드 1이다. 출력에 비밀 값이 없다.
@@ -189,8 +198,14 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
    - 쓸 수 없는 임시 data 폴더에서 소유 범위 7의 명령이 폴더 경로, 주인과 실행 UID:GID, 고치는 방법을 담은 글로 실패하고, 원시 `Permission denied (os error 13)`만 남기지 않는다. data 폴더가 없고 그 부모에 쓸 수 없을 때도 같다.
    - official-container 증거가 있을 때와 없을 때 고치는 방법이 다르다. 주인이 `root`인 경우의 글은 주인 번호를 넣어 만든 시험으로 확인한다.
    - 쓸 수 있는 폴더에서는 지금과 같이 돈다.
-9. 문서가 소유 범위 8과 맞다.
+9. 문서가 소유 범위 8과 맞다(소유 범위 9의 문서 포함).
 10. fmt, workspace clippy `-D warnings`, 변경한 package 테스트가 통과한다. 전체 workspace 테스트는 사용자 승인을 받아 실행한다.
+11. 빈 환경 변수와 다시 저장한 인증(Cargo):
+   - 수용 조건 1의 같은 경우 표에서, 인증 저장소의 Anthropic key와 빈 `ANTHROPIC_API_KEY`는 `ready`이고 runtime이 저장한 key를 쓴다. config `apiKey`(`.env.json`으로 푼 값)와 빈 환경 변수도 `ready`이고 runtime이 그 값을 쓴다. 비어 있지 않은 환경 변수는 지금처럼 저장한 key보다 먼저 쓰이고, 공백만인 값은 지금처럼 그 자리이며 `provider status`가 비었다고 알린다. 나머지 경우의 결과는 수용 조건 1과 같다.
+   - binary에서 빈 `ANTHROPIC_API_KEY`와 `import-key`로 저장한 key가 있으면 `provider status`가 `ready`이고, 같은 상태로 띄운 gateway 시작 출력에 `provider: missing` 줄이 없다.
+   - 네트워크 없는 로컬 가짜 Anthropic 서버로 보낸 runtime 요청에, 빈 `ANTHROPIC_API_KEY`가 있어도 저장한 key가 `x-api-key`로 실린다("확인한 것"의 재현).
+   - `provider codex login`의 저장(시험 token), `provider codex import-token`, `provider copilot import-token`, `provider <id> import-key`가 그 provider의 fingerprint를 그때 선언의 것으로 적고, 다른 provider의 fingerprint와 항목은 그대로다. fingerprint가 다른 인증만 있던 provider를 다시 가져오면 `provider status`가 `ready`이고 runtime이 새 인증을 쓴다. 그 뒤 선언을 바꾸면 그 인증은 다시 stale로 건너뛴다.
+   - fingerprint가 달라 건너뛴 인증의 `provider status` 안내에 선언 되돌리기와 다시 로그인·가져오기가 함께 있다.
 
 위 조건은 052의 단독 종료 기준이다. 수용 조건 6은 사용자가 돌리지 않기로 결정할 수 있다. 그러면 그 PRD의 종료 확인에 결정과 이유, 확인하지 못한 것을 적고 scoped로 닫는다(048 수용 조건 10과 같다).
 
@@ -198,10 +213,11 @@ Consumes: 015·023 공식 image와 Compose(처음부터 일반 사용자로 실�
 
 - 스크립트 없이 `docker compose up -d`만 하면, UID가 1000이 아닌 컴퓨터에서는 지금처럼 쓰기에 실패한다. 이제는 까닭과 고치는 방법을 알리고 멈출 뿐, 저절로 맞추지는 않는다. 설정 없이 바로 뜨는 방식(Hermes Agent)은 이 스펙의 범위가 아니다.
 - Compose를 스크립트보다 먼저 돌려 Docker가 data 폴더를 `root`로 만들었으면, 사용자가 `sudo`로 주인을 고치거나 지워야 한다. 스크립트는 그 명령을 알릴 뿐 하지 않는다.
-- 공식 Compose는 `ANTHROPIC_API_KEY`·`OPENAI_API_KEY`·`OPENROUTER_API_KEY`·`GROQ_API_KEY`·`DEEPSEEK_API_KEY`·`GEMINI_API_KEY`를 host에서 정하지 않으면 빈 값으로 넘긴다. 그러면 runtime은 그 provider의 key를 인증 저장소나 config(`.env.json` 포함)에 두어도 빈 환경 변수를 먼저 써서 key 없이 요청한다. 그래서 스크립트는 API key provider를 설정하지 않고, Docker에서는 Compose `.env`에 key를 적는 방법을 안내한다. `provider status`는 이 경우를 `missing`과 그 까닭으로 보인다. 고치려면 030 credential 해석을 바꿔야 하므로 이 스펙의 범위가 아니다.
+- 공식 Compose는 `ANTHROPIC_API_KEY`·`OPENAI_API_KEY`·`OPENROUTER_API_KEY`·`GROQ_API_KEY`·`DEEPSEEK_API_KEY`·`GEMINI_API_KEY`·`HF_TOKEN`을 host에서 정하지 않으면 빈 값으로 넘긴다. PRD 040 전에는 runtime이 그 빈 값을 먼저 써서, 인증 저장소나 config(`.env.json` 포함)의 key가 있어도 key 없이 요청한다(`provider status`는 `missing`과 그 까닭). PRD 040 뒤에는 빈 값이 저장한 key를 가리지 않는다. 다만 host에서 비어 있지 않은 값(공백만인 값 포함)을 내보내면 그 값이 저장한 key보다 먼저 쓰인다(030 순서 그대로). 스크립트의 provider 선택지는 그대로 ChatGPT 로그인뿐이고 API key provider는 USAGE의 손 설정을 따른다.
+- PRD 040 뒤에는 빈 provider 환경 변수로 뒤 자리의 인증을 막을 수 없다. 그렇게 막던 실행(CI 등)은 인증 저장소의 key나 로그인, credential command, config 값(`.env.json`으로 푼 값 포함)을 쓰게 된다. `credentialSource`의 `localAuth: false`는 인증 저장소만 막는다. 모두 막으려면 그 provider의 저장한 인증, credential command, config `apiKey`(`${이름}` 포함)를 지운다.
 - config와 인증 저장소에 항목이 없는 provider는 환경 변수가 있어도 runtime이 고르지 않는다(지금 그대로). `provider status`도 `missing`이다.
 - `provider status`는 인증이 있는지만 본다. key가 틀렸거나, credential command가 값을 내지 못하거나, OAuth를 갱신하지 못하면 첫 메시지에서 지금처럼 오류가 난다.
-- 인증 저장소의 fingerprint는 지금 OAuth 갱신 때만 적힌다. 그 뒤 사용자가 그 provider의 credential 선언을 바꾸면 runtime은 저장된 로그인을 건너뛰고, 다시 로그인하거나 `import-key`해도 provider 항목만 바뀌고 남은 fingerprint는 지워지지 않아 계속 건너뛴다(지금 그대로). `provider status`는 이 경우를 `missing`과 선언을 되돌리라는 안내로 보이고, 스크립트는 이 경우에도 로그인을 고를 수 있게 둔다(로그인 뒤 다시 본 `provider status`가 그 안내를 보인다). 처음 실행에서는 fingerprint가 없어 생기지 않는다. 로그인이 남은 fingerprint를 지우게 하려면 010·030의 인증 저장을 바꿔야 하므로 이 스펙의 범위가 아니다.
+- 인증 저장소의 fingerprint는 PRD 040 전에는 OAuth 갱신 때만 적히고, 뒤에는 로그인·가져오기 때도 적힌다. 적힌 뒤 사용자가 그 provider의 credential 선언을 바꾸면 runtime은 저장된 인증을 건너뛴다. PRD 040 전에 저장해 fingerprint가 없는 인증은 그대로 fingerprint가 없어(030 규칙대로 지금 선언의 것으로 본다), 다시 로그인하거나 가져올 때까지 선언이 바뀌어도 건너뛰지 않는다. PRD 040 전에는 다시 로그인하거나 `import-key`해도 남은 fingerprint가 지워지지 않아 계속 건너뛰고, `provider status`는 선언을 되돌리라고만 알린다. PRD 040 뒤에는 다시 로그인하거나 가져오면 그 provider의 fingerprint가 그때 선언의 것으로 바뀌어 새 인증이 쓰인다. 가져온 API key도 fingerprint를 가지므로, 가져온 뒤 `apiKeyRef`·`credentialSource`(환경 변수 이름 등)를 바꾸면 그 key는 건너뛰어지고 `provider status`가 선언을 되돌리거나 다시 가져오라고 알린다. 처음 실행에서는 생기지 않는다.
 - `channels connect discord`의 바뀜 확인은 교체 직전의 다시 읽기까지만 본다. 그 뒤 교체까지의 짧은 틈에 다른 프로그램이 `.env.json`이나 config를 쓰면 그 쓰기는 덮일 수 있다(잠금이 없다. 048 PRD 050과 같다).
 - `runtime inspect` readiness의 `provider_auth`는 지금처럼 API key만 보아 Codex 로그인을 `blocked`로 보인다. 052는 그 판정을 바꾸지 않는다.
 - 스크립트의 provider 선택지는 ChatGPT 계정(Codex) 로그인뿐이다.
@@ -222,5 +238,6 @@ PRD 문서는 구현을 시작할 때 쓴다. 각 PRD는 앞 번호의 닫힌 �
 | 010 migration 중의 `onboard`와 Discord 연결 | 소유 범위 3, 4와 그 문서 | 없음 | 수용 조건 3, 4, 10 |
 | 020 처음 설정 스크립트와 컨테이너 HOME | 소유 범위 5, 6과 Docker 설명 문서 | 000, 010 | 수용 조건 5, 6, 7, 10 |
 | 030 권한 오류 | 소유 범위 7과 그 문서 | 020(고치는 방법에 스크립트를 적는다) | 수용 조건 8, 10 |
+| 040 빈 provider 환경 변수와 다시 저장한 인증 | 소유 범위 9와 그 문서 | 000(자리 찾기 함수와 `provider status`) | 수용 조건 11, 10 |
 
 수용 조건 9와 10은 각 PRD가 자기 변경에 대해 확인한다.
